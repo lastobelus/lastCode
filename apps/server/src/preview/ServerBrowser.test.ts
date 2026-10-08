@@ -866,43 +866,94 @@ it.live("the owner can close a tab while an agent action waits on its dialog", (
   ).pipe(Effect.provide(layer)),
 );
 
-it.live("a popup becomes the agent's own tab and keeps its opener page", () =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      const { broker, tabId } = yield* ready;
-      const opener = contexts[0]!.page;
-      const popup = makeContext();
-      opener.emit("popup", popup.page);
-      const manager = yield* Manager.PreviewManager;
-      let sessions = (yield* manager.list({ threadId: scope.thread.threadId })).sessions;
-      while (sessions.length < 2) {
-        yield* Effect.sleep("5 millis");
-        sessions = (yield* manager.list({ threadId: scope.thread.threadId })).sessions;
-      }
-      const popupTab = sessions.find((session) => session.tabId !== tabId)!;
-      const opened = sessions.find((session) => session.tabId === tabId)!;
-      expect(popupTab).toMatchObject({ automationOwner: opened.automationOwner, reveal: false });
-      const status = yield* broker.invoke<PreviewAutomationStatus>({
-        scope,
-        tabId,
-        operation: "status",
-        input: {},
-      });
-      expect(status.tabs).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({ tabId }),
-          expect.objectContaining({ tabId: popupTab.tabId, openerTabId: tabId }),
-        ]),
-      );
-      expect(opener.goto).not.toHaveBeenCalled();
-      expect(opener.close).not.toHaveBeenCalled();
-      // The page the popup script holds is the tab, so closing it ends the tab.
-      yield* Effect.promise(() => popup.page.close());
-      while ((yield* manager.list({ threadId: scope.thread.threadId })).sessions.length > 1) {
-        yield* Effect.sleep("5 millis");
-      }
-    }),
-  ).pipe(Effect.provide(layer)),
+it.live.each([false, true])(
+  "a popup keeps its agent, profile, and opener page (native: %s)",
+  (native) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        if (native) {
+          profileCatalogue = {
+            desktopHostId: "local",
+            profiles: [
+              { id: "work", name: "Work", kind: "persistent" },
+              { id: "personal", name: "Personal", kind: "persistent" },
+            ],
+            defaultProfileId: "work",
+          };
+          desktopRendersNext = true;
+        }
+        const { broker, tabId } = yield* ready;
+        const opener = native ? desktopConnections[0]!.context.page : contexts[0]!.page;
+        const popup = makeContext();
+        const manager = yield* Manager.PreviewManager;
+        const events = yield* manager.subscribeEvents;
+        opener.emit("popup", popup.page);
+        const openedEvent = Option.getOrThrow(
+          yield* Stream.fromSubscription(events).pipe(
+            Stream.filter((event) => event.type === "opened" && event.tabId !== tabId),
+            Stream.runHead,
+          ),
+        );
+        const sessions = (yield* manager.list({ threadId: scope.thread.threadId })).sessions;
+        const popupTab = sessions.find((session) => session.tabId === openedEvent.tabId)!;
+        expect(popupTab).toMatchObject({
+          automationOwner: sessions.find((session) => session.tabId === tabId)!.automationOwner,
+          reveal: false,
+          backingPage: native ? "desktop" : "server",
+          ...(native ? { profileId: "work", desktopHostId: "local" } : {}),
+        });
+        expect(
+          yield* broker.invoke({
+            scope,
+            tabId: popupTab.tabId,
+            operation: "evaluate",
+            input: { expression: "window.opener !== null" },
+          }),
+        ).toBe("evaluated");
+        expect(popup.sessions[0]!.send).toHaveBeenCalledWith(
+          "Runtime.evaluate",
+          expect.objectContaining({ expression: "window.opener !== null" }),
+        );
+        const foreign = yield* broker
+          .invoke({
+            scope: asSession("agent-b"),
+            tabId: popupTab.tabId,
+            operation: "evaluate",
+            input: { expression: "foreign()" },
+          })
+          .pipe(Effect.flip);
+        expect(foreign).toMatchObject({
+          _tag: "PreviewAutomationControlInterruptedError",
+          reason: "agentMismatch",
+        });
+        expect(contexts).toHaveLength(native ? 0 : 1);
+        expect(desktopConnections).toHaveLength(native ? 1 : 0);
+        const status = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          tabId,
+          operation: "status",
+          input: {},
+        });
+        expect(status.tabs).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ tabId }),
+            expect.objectContaining({ tabId: popupTab.tabId, openerTabId: tabId }),
+          ]),
+        );
+        expect(opener.goto).not.toHaveBeenCalled();
+        expect(opener.close).not.toHaveBeenCalled();
+        expect(popup.page.goto).not.toHaveBeenCalled();
+        // The page the popup script holds is the tab, so closing it ends the tab.
+        const closing = yield* manager.subscribeEvents;
+        yield* Effect.promise(() => popup.page.close());
+        yield* Stream.fromSubscription(closing).pipe(
+          Stream.filter((event) => event.type === "closed" && event.tabId === popupTab.tabId),
+          Stream.runHead,
+        );
+        expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toHaveLength(1);
+        expect(opener.close).not.toHaveBeenCalled();
+      }),
+    ).pipe(Effect.provide(layer)),
 );
 
 it.live("closing a tab while a viewer is still opening it does not leave its page behind", () =>

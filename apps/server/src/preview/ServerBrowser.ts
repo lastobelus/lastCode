@@ -724,7 +724,7 @@ const make = Effect.gen(function* () {
       adopted === undefined && (await desktopRenders(snapshot))
         ? await connectDesktop(snapshot)
         : null;
-    if (snapshot.backingPage === "desktop" && desktop === null) {
+    if (adopted === undefined && snapshot.backingPage === "desktop" && desktop === null) {
       throw new ServerBrowserPage.ServerBrowserOperationError(
         "PreviewAutomationRemoteUnavailableError",
         "The selected desktop browser did not attach. Keep that desktop connected and retry; the requested profile was not opened in another browser.",
