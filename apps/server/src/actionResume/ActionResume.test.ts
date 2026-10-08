@@ -1056,7 +1056,7 @@ it.effect.each(["failed", "running", "archive-race"] as const)(
         assert.equal(saved.outcome, outcome === "failed" ? "failed" : "process_lost");
         assert.equal(saved.delivery, outcome === "failed" ? "disposed" : "available");
         assert.equal(
-          h.commands.some((command) => command.threadId === blockedId),
+          h.commands.some((command) => "threadId" in command && command.threadId === blockedId),
           raceArchive,
         );
         assert.equal(h.otherThreads.get(blockedId)?.archivePending?.status, "stopping");

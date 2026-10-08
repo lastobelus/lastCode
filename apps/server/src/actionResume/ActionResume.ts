@@ -1113,7 +1113,7 @@ const make = Effect.gen(function* () {
         }
       }).pipe(
         // The hold can begin after the shell read; its admission refusal is transient.
-        Effect.catchTag("OrchestratorThreadArchivingError", () => Effect.void),
+        Effect.catchTags({ OrchestratorThreadArchivingError: () => Effect.void }),
       );
     }
   });
