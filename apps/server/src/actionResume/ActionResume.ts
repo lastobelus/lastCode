@@ -282,10 +282,14 @@ const make = Effect.gen(function* () {
   const runs = yield* ActionRunStore.ActionRunStore;
   const admission = yield* UpdateDrainAdmission.UpdateDrainAdmission;
   const latestByThreadId = new Map<string, ActionResumeState>();
+  const pendingShellPublications = new Set<string>();
   const registry = {
     getLatest: (threadId: string) => latestByThreadId.get(threadId) ?? null,
     record: (state: ActionResumeState) => latestByThreadId.set(state.threadId, state),
-    clear: (threadId: string) => latestByThreadId.delete(threadId),
+    clear: (threadId: string) => {
+      latestByThreadId.delete(threadId);
+      pendingShellPublications.delete(threadId);
+    },
     listLatest: () => [...latestByThreadId.values()],
     countRunning: () =>
       [...latestByThreadId.values()].filter((state) => state.outcome === "running").length,
@@ -306,6 +310,7 @@ const make = Effect.gen(function* () {
   );
 
   const publishState = Effect.fn("ActionResume.publishState")(function* (state: ActionResumeState) {
+    pendingShellPublications.add(state.threadId);
     yield* threads.dispatch({
       type: "thread.metadata.update",
       commandId: CommandId.make(
@@ -314,6 +319,7 @@ const make = Effect.gen(function* () {
       threadId: state.threadId,
       actionResume: state,
     });
+    pendingShellPublications.delete(state.threadId);
   });
 
   const persistState = Effect.fn("ActionResume.persistState")(function* (
@@ -474,7 +480,12 @@ const make = Effect.gen(function* () {
     const state = registry.getLatest(threadId);
     if (state === null) return;
     if (state.delivery !== "pending") {
-      if (state.outcome === "running" || state.delivery === "armed") return;
+      if (
+        !pendingShellPublications.has(threadId) ||
+        state.outcome === "running" ||
+        state.delivery === "armed"
+      )
+        return;
       // A restart settlement can reach the ledger before an archive refuses its
       // shell update. Restore its controls after the hold without delivering it.
       const shell = yield* threads.getThreadShell(threadId);
@@ -482,11 +493,15 @@ const make = Effect.gen(function* () {
         shell !== null &&
         shell.deletedAt === null &&
         shell.archivedAt === null &&
-        shell.archivePending?.status !== "stopping" &&
-        (shell.actionResume?.runId !== state.runId ||
-          shell.actionResume.revision !== state.revision)
-      )
-        yield* publishState(state);
+        shell.archivePending?.status !== "stopping"
+      ) {
+        if (
+          shell.actionResume?.runId !== state.runId ||
+          shell.actionResume.revision !== state.revision
+        )
+          yield* publishState(state);
+        else pendingShellPublications.delete(threadId);
+      }
       return;
     }
     if (yield* deliveryAlreadyAccepted(state)) {
@@ -1053,6 +1068,7 @@ const make = Effect.gen(function* () {
         yield* threads.ensureLegacyTranscript(state.threadId);
         const shell = yield* threads.getThreadShell(state.threadId);
         if (shell === null) {
+          pendingShellPublications.add(state.threadId);
           // A missing shell during cutover is not proof that its retained result was deleted.
           if (state.outcome === "running" || state.delivery === "pending") {
             const interrupted = {
@@ -1085,6 +1101,7 @@ const make = Effect.gen(function* () {
           shell.archivePending?.status === "stopping" &&
           shell.actionResume?.runId !== state.runId
         ) {
+          pendingShellPublications.add(state.threadId);
           // An interrupted launch may have reached the ledger but not admission.
           // Keep it ledger-only until the hold ends; refusing shell publication
           // must not prevent the shared event listener from starting after restart.
