@@ -19,6 +19,8 @@ const [scratch, wsModulePath] = process.argv.slice(2);
 NodeAssert.ok(scratch && wsModulePath, "isolated fixture arguments required");
 app.setPath("userData", NodePath.join(scratch, "user-data"));
 app.on("window-all-closed", () => {});
+// Force a real child target for the cross-site frame relay regression.
+app.commandLine.appendSwitch("site-per-process");
 const require = NodeModule.createRequire(NodePath.join(scratch, "main.cjs"));
 const { wsServer: WebSocketServer } = require(wsModulePath);
 const tabs = [
@@ -52,7 +54,15 @@ async function main() {
   let failCapture = false;
   let finishFailedCapture;
   let renderScale = 1;
-  const fixtureServer = NodeHttp.createServer((_request, response) => {
+  const resumedChildSessions = new Set();
+  const fixtureServer = NodeHttp.createServer((request, response) => {
+    if (request.url === "/child-frame") {
+      response.writeHead(200, { "content-type": "text/html" });
+      response.end(
+        '<!doctype html><title>Child frame</title><script>parent.postMessage("child-frame-ran", "*")</script>',
+      );
+      return;
+    }
     response.writeHead(200, { "content-type": "text/html" });
     response.end(
       `<!doctype html><title>Isolated browser surface</title><style>html,body{margin:0;background:#ffcc66;color:#000}button{margin:20px}</style><h1>Native surface fixture</h1><button id="choose" onclick="document.querySelector('#upload').click()">Choose fixture file</button><input id="upload" type="file"><pre id="uploaded"></pre><script>document.querySelector('#upload').addEventListener('change', async event => { const file=event.target.files[0]; document.querySelector('#uploaded').textContent=file.name+':'+await file.text(); });</script>`,
@@ -112,6 +122,8 @@ async function main() {
       on: guest.debugger.on.bind(guest.debugger),
       off: guest.debugger.off.bind(guest.debugger),
       sendCommand: (method, ...args) => {
+        if (method === "Runtime.runIfWaitingForDebugger" && typeof args[1] === "string")
+          resumedChildSessions.add(args[1]);
         if (failCapture && tab === tabs[0] && method === "Page.captureScreenshot")
           return new Promise((resolve) => {
             finishFailedCapture = resolve;
@@ -190,6 +202,30 @@ async function main() {
       pages.push({ page, cdp: await page.context().newCDPSession(page) });
     }
     const { page, cdp } = pages[0];
+    const childOrigin = `http://localhost:${fixtureServer.address().port}`;
+    await page.evaluate((origin) => {
+      window.childFrameRan = false;
+      const frame = document.createElement("iframe");
+      frame.hidden = true;
+      window.addEventListener("message", (event) => {
+        if (
+          event.source === frame.contentWindow &&
+          event.origin === origin &&
+          event.data === "child-frame-ran"
+        )
+          window.childFrameRan = true;
+      });
+      frame.src = `${origin}/child-frame`;
+      document.body.append(frame);
+    }, childOrigin);
+    await page.waitForFunction(() => window.childFrameRan === true, null, { timeout: 5000 });
+    NodeAssert.ok(
+      resumedChildSessions.size > 0,
+      "cross-site child resumed through the native CDP relay",
+    );
+    results.push(
+      "cross-site iframe runs after child-session resume through production native CDP relay",
+    );
     const acquired = await surface(tabs[0], "acquire", "snapshot-lease");
     NodeAssert.deepEqual(acquired.viewport, { width: 390, height: 844 });
     NodeAssert.equal(hostWindow.isVisible(), false);
