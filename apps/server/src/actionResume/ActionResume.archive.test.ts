@@ -82,7 +82,10 @@ const project = {
   updatedAt: "2026-10-01T00:00:00.000Z",
 } satisfies OrchestrationProjectShell;
 
-const makeHarness = Effect.fn("ActionArchiveTest.makeHarness")(function* (raceDelivery: boolean) {
+const makeHarness = Effect.fn("ActionArchiveTest.makeHarness")(function* (
+  raceDelivery: boolean,
+  raceLaunch = false,
+) {
   const database = SqlitePersistence.layerMemory;
   const replay = ProviderReplayHarness.layerWithRegistry(
     { name: "action-archive" },
@@ -102,11 +105,22 @@ const makeHarness = Effect.fn("ActionArchiveTest.makeHarness")(function* (raceDe
   const runs = ActionRunStore.layer.pipe(Layer.provide(database));
   const attempted = yield* Deferred.make<void>();
   let raced = false;
+  let archiveAtOpen: Effect.Effect<void> = Effect.void;
   const actionThreads = Layer.effect(
     ThreadManagement.ThreadManagementService,
     Effect.gen(function* () {
       const delegate = yield* ThreadManagement.ThreadManagementService;
       const orchestrator = yield* Orchestrator.OrchestratorV2;
+      if (raceLaunch)
+        archiveAtOpen = orchestrator
+          .dispatch({
+            type: "thread.archive",
+            threadId,
+            commandId: archiveId,
+            childDisposition: "stop_and_archive",
+            expectedChildThreadIds: [childId],
+          })
+          .pipe(Effect.asVoid, Effect.orDie);
       return ThreadManagement.ThreadManagementService.of({
         ...delegate,
         dispatch: (command) =>
@@ -136,6 +150,8 @@ const makeHarness = Effect.fn("ActionArchiveTest.makeHarness")(function* (raceDe
     }),
   ).pipe(Layer.provide(Layer.merge(threads, replay)));
   let listener: ((event: TerminalEvent) => Effect.Effect<void>) | undefined;
+  let terminalWrites = 0;
+  let terminalCloses = 0;
   const terminal = Layer.mock(TerminalManager.TerminalManager)({
     subscribe: (next) =>
       Effect.sync(() => {
@@ -145,12 +161,22 @@ const makeHarness = Effect.fn("ActionArchiveTest.makeHarness")(function* (raceDe
         };
       }),
     open: () =>
-      Effect.succeed({
-        status: "running",
-        shellFamily: "posix",
-      } as TerminalManager.OpenTerminalSessionSnapshot),
-    write: () => Effect.void,
-    close: () => Effect.void,
+      Effect.suspend(() => archiveAtOpen).pipe(
+        Effect.andThen(
+          Effect.succeed({
+            status: "running",
+            shellFamily: "posix",
+          } as TerminalManager.OpenTerminalSessionSnapshot),
+        ),
+      ),
+    write: () =>
+      Effect.sync(() => {
+        terminalWrites += 1;
+      }),
+    close: () =>
+      Effect.sync(() => {
+        terminalCloses += 1;
+      }),
     history: () => Effect.succeed("retained Action output"),
   });
   const actions = ActionResume.layer.pipe(
@@ -173,10 +199,96 @@ const makeHarness = Effect.fn("ActionArchiveTest.makeHarness")(function* (raceDe
   return {
     layer: Layer.mergeAll(replay, threads, receipts, runs, actions),
     attempted,
+    terminalWrites: () => terminalWrites,
+    terminalCloses: () => terminalCloses,
     emit: (event: TerminalEvent) =>
       Effect.suspend(() => listener?.(event) ?? Effect.die("Action terminal is not subscribed")),
   };
 });
+
+it.effect.each([false, true])(
+  "refuses a new Action and closes its unused terminal during archive stopping (launch race: %s)",
+  (raceLaunch) =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness(false, raceLaunch);
+      yield* Effect.gen(function* () {
+        const threads = yield* ThreadManagement.ThreadManagementService;
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const actions = yield* ActionResume.ActionResume;
+        const runs = yield* ActionRunStore.ActionRunStore;
+        yield* threads.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("action-archive:create"),
+          threadId,
+          projectId,
+          title: "Action archive",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdBy: "user",
+          creationSource: "web",
+        });
+        yield* threads.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("action-archive:busy"),
+          threadId,
+          messageId: MessageId.make("action-archive:busy"),
+          text: "Keep this turn prepared",
+          attachments: [],
+          modelSelection,
+          dispatchMode: { type: "defer_start" },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        const sink = yield* EventSink.EventSinkV2;
+        const now = yield* DateTime.now;
+        const root = (yield* threads.getThreadRecords(threadId, [])).thread;
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("action-archive:child-created"),
+              type: "thread.created",
+              threadId: childId,
+              occurredAt: now,
+              payload: {
+                ...root,
+                id: childId,
+                title: "Owned child",
+                lineage: {
+                  parentThreadId: threadId,
+                  rootThreadId: threadId,
+                  relationshipToParent: "subagent",
+                },
+              },
+            },
+          ],
+        });
+        if (!raceLaunch)
+          yield* orchestrator.dispatch({
+            type: "thread.archive",
+            threadId,
+            commandId: archiveId,
+            childDisposition: "stop_and_archive",
+            expectedChildThreadIds: [childId],
+          });
+        const error = yield* Effect.flip(
+          actions.runProjectActionAndResume({ threadId, providerInstanceId: instanceId }, "qa"),
+        );
+        assert.equal(error._tag, "ActionResumeError");
+        assert.equal(error.reason, "launch_failed");
+        assert.equal(harness.terminalWrites(), 0);
+        assert.equal(harness.terminalCloses(), 1);
+        const shell = (yield* threads.getThreadRecords(threadId, [])).thread;
+        assert.equal(shell.archivePending?.status, "stopping");
+        assert.isNull(shell.actionResume ?? null);
+        const retained = (yield* runs.listLatest).find((state) => state.threadId === threadId);
+        assert.equal(retained?.outcome, "failed");
+        assert.equal(retained?.delivery, "disposed");
+      }).pipe(Effect.provide(harness.layer));
+    }),
+);
 
 it.effect.each([false, true])(
   "retains one Action result across archive stopping (delivery race: %s)",

@@ -787,7 +787,7 @@ const make = Effect.gen(function* () {
         runId,
         outcome: "failed",
         deliver: false,
-      });
+      }).pipe(Effect.ignoreCause({ log: true }));
       yield* terminals
         .close({ threadId: invocation.threadId, terminalId, deleteHistory: true })
         .pipe(Effect.ignoreCause({ log: true }));
@@ -1027,69 +1027,94 @@ const make = Effect.gen(function* () {
     initialStates: ReadonlyArray<ActionResumeState>,
   ) {
     for (const initial of initialStates) {
-      const state = registry.getLatest(initial.threadId);
-      if (state === null || state.runId !== initial.runId) continue;
-      yield* threads.ensureLegacyTranscript(state.threadId);
-      const shell = yield* threads.getThreadShell(state.threadId);
-      if (shell === null) {
-        // A missing shell during cutover is not proof that its retained result was deleted.
-        if (state.outcome === "running" || state.delivery === "pending") {
-          const interrupted = {
-            ...state,
-            outcome: state.outcome === "running" ? ("process_lost" as const) : state.outcome,
-            delivery: "available" as const,
-            finishedAt: state.finishedAt ?? (yield* nowIso),
-            revision: (state.revision ?? 0) + 1,
-          };
-          yield* runs.save(interrupted);
-          registry.record(interrupted);
+      yield* Effect.gen(function* () {
+        const state = registry.getLatest(initial.threadId);
+        if (state === null || state.runId !== initial.runId) return;
+        yield* threads.ensureLegacyTranscript(state.threadId);
+        const shell = yield* threads.getThreadShell(state.threadId);
+        if (shell === null) {
+          // A missing shell during cutover is not proof that its retained result was deleted.
+          if (state.outcome === "running" || state.delivery === "pending") {
+            const interrupted = {
+              ...state,
+              outcome: state.outcome === "running" ? ("process_lost" as const) : state.outcome,
+              delivery: "available" as const,
+              finishedAt: state.finishedAt ?? (yield* nowIso),
+              revision: (state.revision ?? 0) + 1,
+            };
+            yield* runs.save(interrupted);
+            registry.record(interrupted);
+          }
+          return;
         }
-        continue;
-      }
-      if (shell.deletedAt !== null) {
-        if (state.outcome === "running")
-          yield* finishUnlocked({
-            threadId: state.threadId,
-            runId: state.runId,
-            outcome: "cancelled_by_archive",
-            deliver: false,
-            publishShell: false,
+        if (shell.deletedAt !== null) {
+          if (state.outcome === "running")
+            yield* finishUnlocked({
+              threadId: state.threadId,
+              runId: state.runId,
+              outcome: "cancelled_by_archive",
+              deliver: false,
+              publishShell: false,
+            });
+          else if (state.delivery === "pending" || state.delivery === "available")
+            yield* persistState({ ...state, delivery: "disposed" }, undefined, false);
+          registry.clear(state.threadId);
+          return;
+        }
+        if (
+          shell.archivePending?.status === "stopping" &&
+          shell.actionResume?.runId !== state.runId
+        ) {
+          // An interrupted launch may have reached the ledger but not admission.
+          // Keep it ledger-only until the hold ends; refusing shell publication
+          // must not prevent the shared event listener from starting after restart.
+          if (state.outcome === "running")
+            yield* persistState(
+              {
+                ...state,
+                outcome: "process_lost",
+                delivery: "available",
+                finishedAt: state.finishedAt ?? (yield* nowIso),
+              },
+              undefined,
+              false,
+            );
+          return;
+        }
+        if (shell.archivedAt !== null) {
+          yield* persistState({
+            ...state,
+            outcome: state.outcome === "running" ? "cancelled_by_archive" : state.outcome,
+            delivery: "disposed",
           });
-        else if (state.delivery === "pending" || state.delivery === "available")
-          yield* persistState({ ...state, delivery: "disposed" }, undefined, false);
-        registry.clear(state.threadId);
-        continue;
-      }
-      if (shell.archivedAt !== null) {
-        yield* persistState({
-          ...state,
-          outcome: state.outcome === "running" ? "cancelled_by_archive" : state.outcome,
-          delivery: "disposed",
-        });
-      } else if (
-        (state.delivery === "pending" ||
-          state.delivery === "available" ||
-          state.delivery === "armed") &&
-        (yield* deliveryAlreadyAccepted(state))
-      ) {
-        yield* persistState({ ...state, delivery: "delivered" });
-      } else if (state.outcome === "running") {
-        const finishedAt = yield* nowIso;
-        yield* persistState({
-          ...state,
-          outcome: "process_lost",
-          delivery: "available",
-          finishedAt,
-        });
-      } else if (state.delivery === "pending" && shell.archivePending?.status !== "stopping") {
-        // A stopping archive keeps the completed result's delivery intent across restart.
-        yield* persistState({ ...state, delivery: "available" });
-      } else if (
-        shell.actionResume?.runId !== state.runId ||
-        shell.actionResume.revision !== state.revision
-      ) {
-        yield* persistState(state);
-      }
+        } else if (
+          (state.delivery === "pending" ||
+            state.delivery === "available" ||
+            state.delivery === "armed") &&
+          (yield* deliveryAlreadyAccepted(state))
+        ) {
+          yield* persistState({ ...state, delivery: "delivered" });
+        } else if (state.outcome === "running") {
+          const finishedAt = yield* nowIso;
+          yield* persistState({
+            ...state,
+            outcome: "process_lost",
+            delivery: "available",
+            finishedAt,
+          });
+        } else if (state.delivery === "pending" && shell.archivePending?.status !== "stopping") {
+          // A stopping archive keeps the completed result's delivery intent across restart.
+          yield* persistState({ ...state, delivery: "available" });
+        } else if (
+          shell.actionResume?.runId !== state.runId ||
+          shell.actionResume.revision !== state.revision
+        ) {
+          yield* persistState(state);
+        }
+      }).pipe(
+        // The hold can begin after the shell read; its admission refusal is transient.
+        Effect.catchTag("OrchestratorThreadArchivingError", () => Effect.void),
+      );
     }
   });
 
