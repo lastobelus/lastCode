@@ -107,6 +107,7 @@ interface HarnessOptions {
   readonly fetchRemote?: GitWorkflow.GitWorkflowService["Service"]["fetchRemote"];
   readonly hasCommit?: GitWorkflow.GitWorkflowService["Service"]["hasCommit"];
   readonly renameBranch?: GitWorkflow.GitWorkflowService["Service"]["renameBranch"];
+  readonly removeWorktree?: GitWorkflow.GitWorkflowService["Service"]["removeWorktree"];
   readonly runSetup?: ProjectSetupScriptRunner.ProjectSetupScriptRunner["Service"]["runForThread"];
   readonly generateTitle?: TextGeneration.TextGeneration["Service"]["generateThreadTitle"];
   readonly generateBranchName?: TextGeneration.TextGeneration["Service"]["generateBranchName"];
@@ -136,8 +137,9 @@ function makeHarness(options: HarnessOptions = {}) {
     options.renameBranch ?? ((input) => Effect.succeed({ branch: input.newBranch })),
   );
   const removeWorktree = vi.fn(
-    (_input: Parameters<GitWorkflow.GitWorkflowService["Service"]["removeWorktree"]>[0]) =>
-      Effect.void,
+    options.removeWorktree ??
+      ((_input: Parameters<GitWorkflow.GitWorkflowService["Service"]["removeWorktree"]>[0]) =>
+        Effect.void),
   );
   const runSetup = vi.fn(
     options.runSetup ?? (() => Effect.succeed({ status: "no-script" as const })),
@@ -2216,6 +2218,49 @@ it.effect("cancels tracked setup before provider work is released", () =>
       const projection = yield* threads.getThreadProjection(launched.threadId);
       assert.equal(projection.runs[0]?.status, "failed");
       assert.isNull(projection.thread.worktreePath);
+      assert.isEmpty(yield* outbox.listByCommandId(CommandId.make(`${input.commandId}:release`)));
+    }).pipe(Effect.provide(harness.layer));
+  }),
+);
+
+it.effect("stops an in-flight branch rename before removing a cancelled setup worktree", () =>
+  Effect.gen(function* () {
+    const setupEntered = yield* Deferred.make<void>();
+    const renameEntered = yield* Deferred.make<void>();
+    const renameStopped = yield* Deferred.make<void>();
+    const harness = makeHarness({
+      runSetup: () => Deferred.succeed(setupEntered, undefined).pipe(Effect.andThen(Effect.never)),
+      renameBranch: () =>
+        Deferred.succeed(renameEntered, undefined).pipe(
+          Effect.andThen(Effect.never),
+          Effect.onInterrupt(() => Deferred.succeed(renameStopped, undefined)),
+        ),
+      removeWorktree: () =>
+        Effect.gen(function* () {
+          assert.isTrue(yield* Deferred.isDone(renameStopped));
+        }),
+    });
+    yield* Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const tracker = yield* WorktreeSetupTracker.WorktreeSetupTracker;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const input = launchInput({
+        command: "launch:cancel-renaming",
+        thread: "thread:cancel-renaming",
+        message: "Start",
+        workspace: { type: "worktree", baseRef: "main" },
+      });
+      const launched = yield* launches.launch(input);
+      yield* Deferred.await(setupEntered);
+      yield* Deferred.await(renameEntered);
+      assert.isTrue(yield* tracker.cancel(launched.threadId));
+      assert.isTrue(yield* Deferred.isDone(renameStopped));
+      const projection = yield* threads.getThreadProjection(launched.threadId);
+      assert.equal(projection.runs[0]?.status, "failed");
+      assert.isNull(projection.thread.worktreePath);
+      assert.isNull(projection.thread.branch);
+      assert.equal(harness.removeWorktree.mock.calls.length, 1);
       assert.isEmpty(yield* outbox.listByCommandId(CommandId.make(`${input.commandId}:release`)));
     }).pipe(Effect.provide(harness.layer));
   }),
