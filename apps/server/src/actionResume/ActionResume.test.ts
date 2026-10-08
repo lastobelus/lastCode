@@ -1143,7 +1143,12 @@ it.effect.each([
           threadId: blockedId,
           type: "thread.metadata-updated" as const,
           occurredAt: now,
-          payload: reopened,
+          payload: {
+            ...thread,
+            id: blockedId,
+            archivePending: reopened.archivePending,
+            actionResume: reopened.actionResume,
+          },
         };
         if (raceRetry) {
           // A second hold wins the retry's shell-read/publication race. A later
@@ -1179,7 +1184,10 @@ it.effect.each([
         ).length;
         h.state.latest = { ...h.state.latest!, revision: -1 };
         h.state.metadataReceipt = yield* Deferred.make<void>();
-        yield* PubSub.publish(h.events, { ...ended, payload: h.otherThreads.get(blockedId)! });
+        yield* PubSub.publish(h.events, {
+          ...ended,
+          payload: { ...ended.payload, actionResume: h.otherThreads.get(blockedId)!.actionResume },
+        });
         yield* PubSub.publish(h.events, ended);
         yield* PubSub.publish(h.events, {
           ...ended,
@@ -1245,7 +1253,13 @@ it.effect.each(["archived", "deleted"] as const)(
           threadId: blockedId,
           type: "thread.metadata-updated",
           occurredAt: now,
-          payload: closedShell,
+          payload: {
+            ...thread,
+            id: blockedId,
+            archivePending: null,
+            archivedAt: closedShell.archivedAt,
+            deletedAt: closedShell.deletedAt,
+          },
         });
         yield* PubSub.publish(h.events, {
           id: EventId.make("event:closed-result:barrier"),
