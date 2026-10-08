@@ -1484,7 +1484,7 @@ describe("resolveThreadStatusPill", () => {
       });
       if (status === "failed")
         expect(displayed?.description).toContain(
-          "some work may have stopped. Choose Archive again to retry.",
+          "some work may have stopped. Choose Archive again to retry, or dismiss to keep these threads as they are.",
         );
     },
   );
