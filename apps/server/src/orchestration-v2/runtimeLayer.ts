@@ -151,9 +151,10 @@ const layerProviderSessionManagerProvided = ProviderSessionManager.layer.pipe(
 );
 
 // Share the admission lock between orchestration and maintenance RPCs.
-const layerUpdateDrainAdmission = UpdateDrainAdmission.layer.pipe(
+export const layerUpdateDrainAdmission = UpdateDrainAdmission.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
+      EffectOutbox.layer,
       ProjectionStore.layer,
       layerProviderSessionManagerProvided,
       UpdateDrain.layer.pipe(Layer.provide(UpdateDrainRepositoryPersistence.layer)),
@@ -304,7 +305,8 @@ const layerWorktreeCleanupWorkerProvided = Layer.effectDiscard(
   Effect.flatMap(WorktreeCleanupService.WorktreeCleanupService, (service) => service.start()),
 ).pipe(Layer.provideMerge(layerWorktreeCleanupProvided));
 export const layerProjectSetupScriptRunner = ProjectSetupScriptRunner.layer.pipe(
-  Layer.provide(Layer.merge(layerProjectService, layerUpdateDrainAdmission)),
+  Layer.provide(layerProjectService),
+  Layer.provide(layerUpdateDrainAdmission),
 );
 const layerManagedProjectFoldersProvided = ManagedProjectFolders.layer.pipe(
   Layer.provide(layerProjectService),

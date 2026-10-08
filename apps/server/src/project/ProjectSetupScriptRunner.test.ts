@@ -13,6 +13,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 
+import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -94,6 +95,7 @@ function makeHarness(
               Layer.provide(UpdateDrainRepositoryPersistence.layer),
               Layer.provide(SqlitePersistence.layerMemory),
             ),
+            Layer.mock(EffectOutbox.EffectOutboxV2)({ pendingCleanup: Effect.succeed([]) }),
             Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({}),
             Layer.mock(ProjectionStore.ProjectionStoreV2)({
               getShellSnapshot: () =>

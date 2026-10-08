@@ -12837,6 +12837,31 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     return yield* execute;
   });
 
+  const admitNewExecution = (
+    command: OrchestrationV2ServerCommand,
+    kind: Parameters<UpdateDrainAdmission.UpdateDrainAdmissionShape["admit"]>[0],
+    dispatch: Effect.Effect<OrchestratorV2DispatchResult, OrchestratorV2Error>,
+  ) =>
+    Effect.gen(function* () {
+      // Replay still uses normal receipt validation under its command locks.
+      // Fresh intake takes admission first, then rechecks the receipt while locked.
+      const receipt = yield* commandReceipts
+        .getByCommandId(command.commandId)
+        .pipe(mapDispatchError(command));
+      if (Option.isSome(receipt)) return yield* dispatch;
+      return yield* updateDrainAdmission.admit(kind, dispatch).pipe(
+        Effect.mapError((cause) =>
+          cause._tag === "UpdateDrainAdmissionError" || cause._tag === "UpdateDrainError"
+            ? new OrchestratorDispatchError({
+                commandId: command.commandId,
+                commandType: command.type,
+                cause,
+              })
+            : cause,
+        ),
+      );
+    });
+
   const dispatchWithReceipt = (
     command: OrchestrationV2ServerCommand,
   ): Effect.Effect<OrchestratorV2DispatchResult, OrchestratorV2Error> => {
@@ -12874,41 +12899,50 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       command.type === "thread.unarchive" ||
       command.type === "thread.delete"
     ) {
-      return threadDispatch
-        .withPersistenceLock(
-          Effect.gen(function* () {
-            const family = yield* ownedThreadFamily(command);
-            const root = yield* projectionStore
-              .getThreadShell(command.threadId)
-              .pipe(mapDispatchError(command));
-            const ids = [
-              ...new Set([
-                ...family,
-                ...(root?.archivedWith == null ? [] : [root.archivedWith.threadId]),
-                ...(getThreadArchivePlan(root?.archivePending)?.archiveThreadIds ?? []),
-                ...(getThreadArchivePlan(root?.archivePending)?.promoteThreadIds ?? []),
-                ...(root?.lineage.parentThreadId == null ? [] : [root.lineage.parentThreadId]),
-              ]),
-            ].toSorted();
-            const decide = Effect.gen(function* () {
-              const currentFamily = yield* ownedThreadFamily(command);
-              // Creation holds its parent lock. If a child arrived while locks were
-              // acquired, release and collect the expanded family before deciding.
-              if (currentFamily.some((id) => !ids.includes(id))) return null;
-              return yield* dispatchWithReceiptEffect(command);
-            });
-            return yield* ids.reduceRight(
-              (effect, id) => threadDispatch.withLock(id, effect),
-              decide,
-            );
-          }),
-        )
-        .pipe(
-          Effect.flatMap(
-            (result): Effect.Effect<OrchestratorV2DispatchResult, OrchestratorV2Error> =>
-              result === null ? dispatchWithReceipt(command) : Effect.succeed(result),
-          ),
-        );
+      const dispatchFamily = (): Effect.Effect<OrchestratorV2DispatchResult, OrchestratorV2Error> =>
+        threadDispatch
+          .withPersistenceLock(
+            Effect.gen(function* () {
+              const family = yield* ownedThreadFamily(command);
+              const root = yield* projectionStore
+                .getThreadShell(command.threadId)
+                .pipe(mapDispatchError(command));
+              const ids = [
+                ...new Set([
+                  ...family,
+                  ...(root?.archivedWith == null ? [] : [root.archivedWith.threadId]),
+                  ...(getThreadArchivePlan(root?.archivePending)?.archiveThreadIds ?? []),
+                  ...(getThreadArchivePlan(root?.archivePending)?.promoteThreadIds ?? []),
+                  ...(root?.lineage.parentThreadId == null ? [] : [root.lineage.parentThreadId]),
+                ]),
+              ].toSorted();
+              const decide = Effect.gen(function* () {
+                const currentFamily = yield* ownedThreadFamily(command);
+                // Creation holds its parent lock. If a child arrived while locks were
+                // acquired, release and collect the expanded family before deciding.
+                if (currentFamily.some((id) => !ids.includes(id))) return null;
+                return yield* dispatchWithReceiptEffect(command);
+              });
+              return yield* ids.reduceRight(
+                (effect, id) => threadDispatch.withLock(id, effect),
+                decide,
+              );
+            }),
+          )
+          .pipe(
+            Effect.flatMap(
+              (result): Effect.Effect<OrchestratorV2DispatchResult, OrchestratorV2Error> =>
+                result === null ? dispatchFamily() : Effect.succeed(result),
+            ),
+          );
+      const dispatch = dispatchFamily();
+      if (command.type !== "thread.archive" && command.type !== "thread.delete") return dispatch;
+      // Admission precedes persistence/family locks and holds through durable effects.
+      return admitNewExecution(
+        command,
+        command.type === "thread.archive" ? "thread-archive" : "thread-delete",
+        dispatch,
+      );
     }
     if (command.type === "subagent.promote.complete") {
       const operation = Effect.gen(function* () {
@@ -12961,32 +12995,23 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       commandThreadId(command),
       dispatchWithReceiptEffect(command),
     );
-    if (command.type === "message.dispatch" || command.type === "delegated_task.request") {
-      return Effect.gen(function* () {
-        // Replays stay available during drain. Recheck under the thread lock
-        // after admission because another request may commit while we wait.
-        const receipt = yield* commandReceipts
-          .getByCommandId(command.commandId)
-          .pipe(mapDispatchError(command));
-        if (Option.isSome(receipt)) return yield* dispatch;
-        // Admission precedes thread locking: other admitted work can update
-        // metadata without waiting behind a turn that is waiting for intake.
-        return yield* updateDrainAdmission.admit("thread-turn", dispatch).pipe(
-          Effect.mapError((cause) =>
-            cause._tag === "UpdateDrainAdmissionError" || cause._tag === "UpdateDrainError"
-              ? new OrchestratorDispatchError({
-                  commandId: command.commandId,
-                  commandType: command.type,
-                  cause,
-                })
-              : cause,
-          ),
-        );
-      });
-    }
-    return command.type.startsWith("thread.worktree-cleanup.")
+    if (command.type === "message.dispatch" || command.type === "delegated_task.request")
+      return admitNewExecution(command, "thread-turn", dispatch);
+    const operation = command.type.startsWith("thread.worktree-cleanup.")
       ? threadDispatch.withPersistenceLock(dispatch)
       : dispatch;
+    if (command.type === "thread.settle" || command.type === "thread.auto-settle")
+      return admitNewExecution(command, "thread-settle", operation);
+    if (
+      command.type === "provider-session.detach" ||
+      command.type === "thread.worktree-cleanup.retry" ||
+      command.type === "thread.runtime-mode.set" ||
+      command.type === "thread.model-selection.set" ||
+      command.type === "provider.switch" ||
+      (command.type === "thread.metadata.update" && command.worktreePath !== undefined)
+    )
+      return admitNewExecution(command, "thread-teardown", operation);
+    return operation;
   };
 
   const handleTerminalRun = (stored: OrchestrationV2StoredEvent) =>

@@ -173,7 +173,7 @@ export interface ProviderSessionManagerV2Shape {
   ) => Effect.Effect<Option.Option<ProviderAdapterV2SessionRuntime>, ProviderSessionManagerV2Error>;
   /** Includes unfinished runtime shutdown without extending its idle lifetime. */
   readonly isLive: (providerSessionId: ProviderSessionId) => Effect.Effect<boolean>;
-  /** Live execution and unfinished teardown, without extending idle runtime lifetime. */
+  /** Live execution, event ingestion, and unfinished teardown, without extending idle lifetime. */
   readonly pendingExecution: Effect.Effect<
     ReadonlyArray<{
       readonly providerSessionId: ProviderSessionId;
@@ -424,6 +424,10 @@ export const layerWithOptions = (
       // cannot drop cleanup for threads only the earlier session served.
       const releaseRecordRetries = yield* FiberSet.make();
       const nextSubscriberId = yield* Ref.make(0);
+      // Runtime removal ends queues, but buffered events can still commit cleanup.
+      // Only the actual reader's close releases this evidence, including old
+      // readers retained after a replacement with the same session id.
+      const eventReaders = new Map<string, Set<number>>();
       const sessionOpen = yield* KeyedLock.make<ProviderSessionId>();
       // Orders a thread's attach against a detach unloading it on the same session.
       const threadAttachment = yield* KeyedLock.make<string>();
@@ -1498,6 +1502,7 @@ export const layerWithOptions = (
         );
 
       const makeEventSubscription = (
+        providerSessionId: ProviderSessionId,
         subscribers: Ref.Ref<
           ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
         >,
@@ -1507,25 +1512,29 @@ export const layerWithOptions = (
         Effect.gen(function* () {
           const queue = yield* Queue.unbounded<ProviderSessionEventSignal, Cause.Done>();
           const subscriberId = yield* Ref.getAndUpdate(nextSubscriberId, (value) => value + 1);
+          const key = sessionKey(providerSessionId);
+          const readers = eventReaders.get(key) ?? new Set<number>();
+          readers.add(subscriberId);
+          eventReaders.set(key, readers);
           yield* Ref.update(subscribers, (current) => {
             const updated = new Map(current);
             updated.set(subscriberId, queue);
             return updated;
           });
-          const close = Ref.modify(subscribers, (current) => {
-            if (!current.has(subscriberId)) {
-              return [false, current] as const;
-            }
-            const updated = new Map(current);
-            updated.delete(subscriberId);
-            return [true, updated] as const;
-          }).pipe(
-            Effect.flatMap((removed) =>
-              removed
-                ? Queue.clear(queue).pipe(Effect.andThen(Queue.end(queue)), Effect.asVoid)
-                : Effect.void,
-            ),
-          );
+          let closed = false;
+          const close = Effect.gen(function* () {
+            if (closed) return;
+            closed = true;
+            yield* Ref.update(subscribers, (current) => {
+              const updated = new Map(current);
+              updated.delete(subscriberId);
+              return updated;
+            });
+            yield* Queue.clear(queue);
+            yield* Queue.end(queue);
+            readers.delete(subscriberId);
+            if (readers.size === 0 && eventReaders.get(key) === readers) eventReaders.delete(key);
+          }).pipe(Effect.uninterruptible);
           const events = Stream.fromQueue(queue).pipe(
             Stream.mapEffect((signal) =>
               signal.type === "event"
@@ -1558,7 +1567,7 @@ export const layerWithOptions = (
                     }),
                 }),
           } satisfies ProviderAdapterV2EventSubscription;
-        });
+        }).pipe(Effect.uninterruptible);
 
       const decorateRuntime = (
         runtime: ProviderAdapterV2SessionRuntime,
@@ -1568,6 +1577,7 @@ export const layerWithOptions = (
       ): ProviderAdapterV2SessionRuntime => {
         const providerSessionId = runtime.providerSessionId;
         const subscribeEvents = makeEventSubscription(
+          providerSessionId,
           eventSubscribers,
           runtime.publishEventsBarrier,
           runtime.driver,
@@ -1581,6 +1591,7 @@ export const layerWithOptions = (
               if (current?.runtime !== runtime) yield* subscription.close;
             }),
           ),
+          Effect.uninterruptible,
         );
         const inspectTurn = runtime.inspectTurn;
         // Every provider's turn operations pass through here, so this is where they are
@@ -2378,6 +2389,12 @@ export const layerWithOptions = (
                 status: "running",
               });
           }
+          for (const [key, readers] of eventReaders)
+            if (readers.size > 0)
+              blockers.set(key, {
+                providerSessionId: ProviderSessionId.make(key),
+                status: "running",
+              });
           for (const [key, closing] of closingSessionScopes)
             if (closing.size > 0)
               blockers.set(key, {

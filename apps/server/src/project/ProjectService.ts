@@ -32,6 +32,7 @@ import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import { planThreadDeletion } from "../orchestration-v2/ThreadDeletion.ts";
 import * as ProjectEnrichmentService from "./ProjectEnrichmentService.ts";
+import { UpdateDrainAdmission } from "../updateDrain/UpdateDrainAdmission.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 
 export interface ProjectCreateInput extends ProjectCreatePayload {
@@ -153,6 +154,7 @@ export class ProjectService extends Context.Service<
 
 export const make = Effect.gen(function* () {
   const projects = yield* ProjectStore.ProjectStoreV2;
+  const admission = yield* UpdateDrainAdmission;
   const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
   const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
   const threadProjections = yield* ProjectionStore.ProjectionStoreV2;
@@ -526,7 +528,7 @@ export const make = Effect.gen(function* () {
 
   const deleteProject: ProjectService["Service"]["delete"] = Effect.fn("ProjectService.delete")(
     function* (input) {
-      return yield* threadCommands.withPersistenceLock(
+      const operation = threadCommands.withPersistenceLock(
         Effect.gen(function* () {
           const { projectId } = input;
           // A deleted row still reaches commit, so a retried command id replays its
@@ -543,6 +545,21 @@ export const make = Effect.gen(function* () {
           yield* projectEnrichment.invalidate([existing.value.workspaceRoot]);
           return yield* readCommitted(projectId);
         }),
+      );
+      // Completed receipt replay has no child cleanup to admit. Fresh cascades
+      // take admission before persistence and child locks, just like thread.delete.
+      const existing = yield* readRow(input.projectId, { includeDeleted: true });
+      if (Option.isSome(existing) && existing.value.deletedAt !== null) return yield* operation;
+      return yield* admission.admit("thread-delete", operation).pipe(
+        Effect.mapError((cause) =>
+          cause._tag === "UpdateDrainAdmissionError" || cause._tag === "UpdateDrainError"
+            ? new ProjectOperationError({
+                operation: "delete-thread",
+                projectId: input.projectId,
+                cause,
+              })
+            : cause,
+        ),
       );
     },
   );

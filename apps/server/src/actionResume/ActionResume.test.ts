@@ -46,6 +46,7 @@ import {
 import { parseActionResumeFollowUp } from "@t3tools/shared/actionResume";
 
 import * as CommandReceipts from "../orchestration-v2/CommandReceiptStore.ts";
+import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
@@ -280,6 +281,7 @@ const makeHarness = Effect.gen(function* () {
           ),
         }),
         Layer.mock(ProjectionStore.ProjectionStoreV2)({}),
+        Layer.mock(EffectOutbox.EffectOutboxV2)({ pendingCleanup: Effect.succeed([]) }),
         Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({}),
         Layer.mock(TerminalManager.TerminalManager)({}),
       ),

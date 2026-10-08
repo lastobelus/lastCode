@@ -62,6 +62,10 @@ export const UpdateDrainBlocker = Schema.Union([
     status: Schema.Literals(["running", "stopping"]),
   }),
   Schema.Struct({
+    type: Schema.Literal("thread-cleanup"),
+    threadId: ThreadId,
+  }),
+  Schema.Struct({
     type: Schema.Literal("provider-teardown"),
     threadId: ThreadId,
   }),

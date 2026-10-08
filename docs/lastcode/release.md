@@ -594,19 +594,34 @@ the daemon never builds merely because it found a new nightly or revision.
 
 An active remote update drain closes only entry points that can create new
 execution: turn starts (including provider bootstrap or resume), terminal
-creation and restart, terminal writes, and interrupted Action resume. Existing
-read-only terminal attachment, terminal close, turn interruption, approvals,
-and user-input responses remain available so current work can settle.
+creation and restart, terminal writes, interrupted Action resume, and new
+archive or deletion requests (including forced project deletion), cleanup retries,
+explicit provider detach, and worktree/runtime/provider/model changes that can
+start teardown. Manual and automatic settlement take the same admission lock
+and remain available while draining, but cannot initiate cleanup after activation
+is claimed.
+Existing read-only terminal attachment, terminal close, turn interruption,
+approvals, and user-input responses remain available so current work can settle.
 
 Drain status reports only current execution blockers: starting or running
 thread work, background agent work, and starting terminals or terminals with a
 running subprocess. It also reports `provider-runtime` for native turns or
-background work still running, or provider sessions still stopping, and
-`provider-teardown` while a thread's archive teardown is stopping. Activation
+background work still running, event readers still consuming buffered provider
+events, or provider sessions still stopping, and
+`provider-teardown` while a thread's archive teardown is stopping, and
+`thread-cleanup` for queued/running provider or terminal cleanup and queued/deleting
+worktree cleanup, including deleted threads and pending retry backoff. Failed
+cleanup history alone is not execution. Activation
 remains blocked until the underlying work or teardown settles, even if the
 thread run is already cancelled or an archive-failure banner is dismissed.
-Idle resident provider sessions do not block activation.
+Idle resident provider sessions without active event readers do not block activation. Offline project commands
+hold the existing kernel server-owner lease through their database scope; deletion
+also checks the durable drain intent. Offline deletion is unavailable where that
+lease is unsupported, and live status or activation claims require the server.
+A recorded server that is still alive never falls back to offline mutation after
+a connection failure.
 
 When that list is empty, the activation claim is committed under the same
-server-lifetime admission lock. The claim survives a server restart and keeps
-admission closed for the future activation helper.
+server-lifetime admission lock used to commit new archive and deletion
+requests. The claim survives a server restart and keeps admission closed for
+the future activation helper.

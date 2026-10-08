@@ -1,5 +1,6 @@
 import {
   CommandId,
+  type ProviderSessionId,
   ThreadId,
   TurnId,
   UpdateDrainAdmissionError,
@@ -17,6 +18,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Semaphore from "effect/Semaphore";
 
+import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
 import { TerminalManager } from "../terminal/Manager.ts";
@@ -24,6 +26,10 @@ import { UpdateDrain } from "./UpdateDrain.ts";
 
 const UpdateDrainAdmissionKind = [
   "thread-turn",
+  "thread-archive",
+  "thread-delete",
+  "thread-teardown",
+  "thread-settle",
   "terminal-open",
   "terminal-restart",
   "terminal-write",
@@ -66,18 +72,24 @@ function internalError(_cause: unknown) {
 }
 
 export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(function* () {
-  const drain = yield* UpdateDrain;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const terminals = yield* TerminalManager;
+  const outbox = yield* EffectOutbox.EffectOutboxV2;
   const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
-  const mutex = yield* Semaphore.make(1);
-
   const currentBlockers = Effect.fn("UpdateDrainAdmission.currentBlockers")(function* () {
-    const [shell, terminalState, runtimeWork] = yield* Effect.all([
-      projections.getShellSnapshot().pipe(Effect.mapError(internalError)),
-      terminals.refreshMetadata,
-      providerSessions.pendingExecution.pipe(Effect.mapError(internalError)),
-    ]);
+    // Readers can commit cleanup after native turns become idle; cleanup can
+    // then transfer to a runtime finalizer. Keep both runtime snapshots around
+    // the outbox read so neither handoff disappears between these reads.
+    const shell = yield* projections.getShellSnapshot().pipe(Effect.mapError(internalError));
+    const firstRuntimeWork = yield* providerSessions.pendingExecution.pipe(
+      Effect.mapError(internalError),
+    );
+    const cleanup = yield* outbox.pendingCleanup.pipe(Effect.mapError(internalError));
+    const secondRuntimeWork = yield* providerSessions.pendingExecution.pipe(
+      Effect.mapError(internalError),
+    );
+    const terminalState = yield* terminals.refreshMetadata.pipe(Effect.mapError(internalError));
+    const cleanupThreads = new Set(cleanup.map((pending) => pending.threadId));
     const blockers: UpdateDrainBlocker[] = [];
 
     // V2 commits the accepted run before provider start, so preparing and queued
@@ -89,6 +101,11 @@ export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(fu
       // even after the failed archive banner is dismissed.
       if (thread.archivePending?.status === "stopping")
         blockers.push({ type: "provider-teardown", threadId: thread.id });
+      if (
+        thread.worktreeCleanup?.status === "queued" ||
+        thread.worktreeCleanup?.status === "deleting"
+      )
+        cleanupThreads.add(thread.id);
       if (thread.deletedAt != null) continue;
       const status = thread.activityRunStatus ?? thread.status;
       if (["preparing", "queued", "starting", "running", "waiting"].includes(status)) {
@@ -110,6 +127,8 @@ export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(fu
       }
     }
 
+    for (const threadId of cleanupThreads) blockers.push({ type: "thread-cleanup", threadId });
+
     for (const terminal of terminalState) {
       if (terminal.status !== "starting" && !terminal.hasRunningSubprocess) continue;
       blockers.push({
@@ -121,7 +140,13 @@ export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(fu
       });
     }
 
-    for (const pending of runtimeWork) blockers.push({ type: "provider-runtime", ...pending });
+    const runtimeWork = new Map<ProviderSessionId, (typeof firstRuntimeWork)[number]>();
+    for (const pending of [...firstRuntimeWork, ...secondRuntimeWork]) {
+      if (runtimeWork.get(pending.providerSessionId)?.status !== "stopping")
+        runtimeWork.set(pending.providerSessionId, pending);
+    }
+    for (const pending of runtimeWork.values())
+      blockers.push({ type: "provider-runtime", ...pending });
 
     return blockers.sort((left, right) => {
       const leftOwner = left.type === "provider-runtime" ? left.providerSessionId : left.threadId;
@@ -138,6 +163,15 @@ export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(fu
     });
   });
 
+  return yield* makeAdmission(currentBlockers());
+});
+
+const makeAdmission = Effect.fn("UpdateDrainAdmission.makeAdmission")(function* (
+  currentBlockers: Effect.Effect<ReadonlyArray<UpdateDrainBlocker>, UpdateDrainError>,
+) {
+  const drain = yield* UpdateDrain;
+  const mutex = yield* Semaphore.make(1);
+
   const statusUnlocked = Effect.fn("UpdateDrainAdmission.statusUnlocked")(function* () {
     const durable = yield* drain.status;
     if (durable.intent === null || durable.intent.status === "cancelled") {
@@ -150,7 +184,7 @@ export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(fu
     return {
       ...durable,
       admission: "closed" as const,
-      blockers: yield* currentBlockers(),
+      blockers: yield* currentBlockers,
     } satisfies UpdateDrainStatus;
   });
 
@@ -162,7 +196,7 @@ export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(fu
       Effect.gen(function* () {
         const durable = yield* drain.status;
         if (durable.intent?.status === "draining" && durable.intent.requestId === input.requestId) {
-          const blockers = yield* currentBlockers();
+          const blockers = yield* currentBlockers;
           if (blockers.length > 0) {
             return yield* new UpdateDrainError({
               reason: "not_quiescent",
@@ -184,7 +218,13 @@ export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(fu
     mutex.withPermits(1)(
       Effect.gen(function* () {
         const durable = yield* drain.status;
-        if (durable.intent !== null && durable.intent.status !== "cancelled") {
+        // Settlement finishes admitted work (including automatic queued wakes).
+        // It may drain under this lock, but cannot start cleanup after activation.
+        if (
+          durable.intent !== null &&
+          durable.intent.status !== "cancelled" &&
+          !(kind === "thread-settle" && durable.intent.status === "draining")
+        ) {
           return yield* new UpdateDrainAdmissionError({
             reason: "update_draining",
             requestId: durable.intent.requestId,
@@ -216,3 +256,21 @@ export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(fu
 });
 
 export const layer = Layer.effect(UpdateDrainAdmission, makeUpdateDrainAdmission());
+
+/** Only for a caller holding exclusive offline server ownership for the whole operation. */
+export const makeOfflineAdmission = Effect.gen(function* () {
+  const unavailable = Effect.fail(
+    new UpdateDrainError({
+      reason: "internal_error",
+      message: "Live execution status and activation claims are unavailable in offline mode.",
+    }),
+  );
+  const admission = yield* makeAdmission(unavailable);
+  return UpdateDrainAdmission.of({
+    ...admission,
+    status: unavailable,
+    claimActivation: () => unavailable,
+  });
+});
+
+export const layerOffline = Layer.effect(UpdateDrainAdmission, makeOfflineAdmission);

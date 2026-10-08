@@ -3421,6 +3421,11 @@ it.effect("keeps completed runs completed when pull request refresh fails", () =
 
 function captureRootRunTermination(input: {
   readonly key: string;
+  readonly shouldStartProviderTurn?: () => Effect.Effect<
+    boolean,
+    ProjectionStore.ProjectionStoreV2Error
+  >;
+  readonly normalize?: ProviderEventIngestor.ProviderEventIngestorV2Shape["normalize"];
   readonly shouldFinalizeRun: () => Effect.Effect<boolean, ProjectionStore.ProjectionStoreV2Error>;
   readonly rejectTerminalWrite?: boolean;
   readonly hasUnpairedRunInterruptRequest?: () => Effect.Effect<boolean, never>;
@@ -3436,6 +3441,9 @@ function captureRootRunTermination(input: {
   readonly isShuttingDown?: ProviderAdapterV2SessionRuntime["isShuttingDown"];
   readonly providerDriver?: ProviderDriverKind;
   readonly subscribeEvents?: ProviderAdapterV2SessionRuntime["subscribeEvents"];
+  readonly loadInheritedBackgroundTurnItems?: () => Effect.Effect<
+    ReadonlyArray<{ readonly id: TurnItemId; readonly runId: RunId }>
+  >;
   readonly hasPendingBackgroundWorkForThread?: ProviderAdapterV2SessionRuntime["hasPendingBackgroundWorkForThread"];
   readonly persistedBackgroundEvents?: ReadonlyArray<ProviderAdapterV2Event>;
   readonly failRecordingEvent?: (event: ProviderAdapterV2Event) => boolean;
@@ -3626,7 +3634,7 @@ function captureRootRunTermination(input: {
                   ),
                 ),
               ),
-            normalize: () => Effect.succeed([]),
+            normalize: input.normalize ?? (() => Effect.succeed([])),
           }),
           ServerSettings.layerTest(),
           Layer.succeed(RunFinalizationService.RunFinalizationObserver, {
@@ -3718,6 +3726,12 @@ function captureRootRunTermination(input: {
         attemptId: ids.attemptId,
         providerTurnOrdinal: 1,
         shouldFinalizeRun: input.shouldFinalizeRun,
+        ...(input.shouldStartProviderTurn === undefined
+          ? {}
+          : { shouldStartProviderTurn: input.shouldStartProviderTurn }),
+        ...(input.loadInheritedBackgroundTurnItems === undefined
+          ? {}
+          : { loadInheritedBackgroundTurnItems: input.loadInheritedBackgroundTurnItems }),
         ...(input.hasUnpairedRunInterruptRequest === undefined
           ? {}
           : {
@@ -3775,6 +3789,7 @@ function bufferRecoveryTestSubscription(subscription: ProviderAdapterV2EventSubs
       Stream.runForEach((event) => Queue.offer(queue, { event })),
       Effect.catchCause((cause) => Queue.offer(queue, { cause })),
       Effect.andThen(Queue.end(queue)),
+      Effect.interruptible,
       Effect.forkDetach,
     );
     return {
@@ -5759,5 +5774,125 @@ it.effect(
         ["run:waiting"],
       );
       assert.equal(result.effects.length, 1);
+    }),
+);
+
+it.effect.each([
+  "inherited-interruption",
+  "registration-error",
+  "registration-interruption",
+  "start-interruption",
+  "start-error",
+  "start-refused",
+] as const)("releases startup reader ownership on %s", (phase) =>
+  Effect.gen(function* () {
+    const closed = yield* Ref.make(false);
+    const ownershipChecks = yield* Ref.make(0);
+    const entered = yield* Deferred.make<void>();
+    const hold = Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never));
+    const operation = captureRootRunTermination({
+      key: `reader-startup-${phase}`,
+      shouldFinalizeRun: () => Effect.succeed(true),
+      subscribeEvents: Effect.succeed({ events: Stream.never, close: Ref.set(closed, true) }),
+      ...(phase === "inherited-interruption"
+        ? { loadInheritedBackgroundTurnItems: () => hold }
+        : {}),
+      ...(phase.startsWith("registration")
+        ? {
+            inspectTurn: () => Effect.succeed({ status: "unknown" as const }),
+            recovery: {
+              register: () =>
+                phase === "registration-error" ? Effect.die("registration failed") : hold,
+            },
+          }
+        : {}),
+      ...(phase === "start-refused"
+        ? {
+            shouldStartProviderTurn: () =>
+              Ref.modify(ownershipChecks, (checks) => [checks === 0, checks + 1] as const),
+          }
+        : {}),
+      ...(phase.startsWith("start")
+        ? {
+            startTurn: () => (phase === "start-error" ? Effect.die("provider start failed") : hold),
+          }
+        : {}),
+    });
+    if (phase.endsWith("interruption")) {
+      const starting = yield* operation.pipe(Effect.forkChild);
+      yield* Deferred.await(entered);
+      yield* Fiber.interrupt(starting);
+    } else {
+      const result = yield* Effect.exit(operation);
+      assert.equal(
+        result._tag,
+        phase === "start-error" || phase === "start-refused" ? "Success" : "Failure",
+      );
+    }
+    assert.isTrue(
+      yield* Ref.get(closed),
+      "an acquired reader must release even before its consumer starts",
+    );
+  }),
+);
+
+it.effect.each(["error", "interruption"] as const)(
+  "releases a resumed reader when recovery normalization ends with %s",
+  (ending) =>
+    Effect.gen(function* () {
+      const key = `resumed-reader-${ending}`;
+      const ids = backgroundScenarioIds(key);
+      const entered = yield* Deferred.make<void>();
+      const closed = yield* Ref.make<ReadonlySet<number>>(new Set());
+      let count = 0;
+      let registration:
+        | Parameters<ThreadRecoveryService.ThreadRecoveryService["Service"]["register"]>[0]
+        | undefined;
+      yield* captureRootRunTermination({
+        key,
+        shouldFinalizeRun: () => Effect.succeed(true),
+        inspectTurn: () => Effect.succeed({ status: "unknown" as const }),
+        subscribeEvents: Effect.sync(() => {
+          const reader = ++count;
+          return {
+            events:
+              reader === 1
+                ? Stream.fail(
+                    new ProviderAdapterEventStreamError({
+                      driver,
+                      providerSessionId: ProviderSessionId.make(key),
+                      cause: "reader stopped",
+                    }),
+                  )
+                : Stream.never,
+            close: Ref.update(closed, (current) => new Set(current).add(reader)),
+          };
+        }),
+        normalize: () =>
+          ending === "error"
+            ? Effect.die("normalization failed")
+            : Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)),
+        recovery: {
+          register: (value) =>
+            Effect.sync(() => {
+              registration = value;
+            }),
+          suspect: () => Effect.void,
+        },
+        afterIngestion: Effect.gen(function* () {
+          const recovering = registration!.finalize(rootTerminalEvent(ids, "completed"), [], {
+            runtimeReleased: false,
+          });
+          if (ending === "error") assert.equal((yield* Effect.exit(recovering))._tag, "Failure");
+          else {
+            const fiber = yield* recovering.pipe(Effect.forkChild);
+            yield* Deferred.await(entered);
+            yield* Fiber.interrupt(fiber);
+          }
+          assert.isTrue((yield* Ref.get(closed)).has(2));
+        }),
+      });
+      assert.equal(count, 2);
+      assert.deepEqual([...(yield* Ref.get(closed))], [1, 2]);
     }),
 );
