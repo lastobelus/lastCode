@@ -10,7 +10,7 @@ export { resolveUserMessagePresentation };
 /** Shared preview semantics for chat, mobile, and the minimap. */
 export function resolveIncomingMessagePreview(
   message: Parameters<typeof resolveUserMessagePresentation>[0] & {
-    readonly incomingSummary?: OrchestrationV2IncomingMessageSummary;
+    readonly incomingSummary?: OrchestrationV2IncomingMessageSummary | undefined;
   },
 ) {
   const { text } = resolveUserMessagePresentation(message);
