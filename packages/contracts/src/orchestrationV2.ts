@@ -365,6 +365,10 @@ export type OrchestrationV2LimitRecoveryUpdate = typeof OrchestrationV2LimitReco
 
 export const OrchestrationV2AppThread = Schema.Struct({
   ...OrchestrationV2CreationFields,
+  /** Immutable creator conversation, separate from fork/subagent ownership and sidebar placement. */
+  creatorThreadId: Schema.optional(ThreadId),
+  /** Sidebar placement only; changing it never changes creator history or delegated ownership. */
+  creatorGrouping: Schema.optional(Schema.Literals(["grouped", "independent"])),
   id: ThreadId,
   projectId: ProjectId,
   title: TrimmedNonEmptyString,
@@ -1834,6 +1838,8 @@ export type OrchestrationV2LatestVisibleMessageSummary =
 
 export const OrchestrationV2ThreadShell = Schema.Struct({
   ...OrchestrationV2CreationFields,
+  creatorThreadId: Schema.optional(ThreadId),
+  creatorGrouping: OrchestrationV2AppThread.fields.creatorGrouping,
   id: ThreadId,
   projectId: ProjectId,
   title: Schema.String,
@@ -2611,6 +2617,7 @@ export const OrchestrationV2Command = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("thread.create"),
     ...OrchestrationV2CreationFields,
+    creatorThreadId: Schema.optional(ThreadId),
     commandId: CommandId,
     threadId: ThreadId,
     projectId: ProjectId,
@@ -2769,6 +2776,7 @@ export const OrchestrationV2Command = Schema.Union([
     limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecoveryUpdate)),
     /** Link (object) or unlink (null) a pull request (#8160); absent leaves it unchanged. */
     linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
+    creatorGrouping: OrchestrationV2AppThread.fields.creatorGrouping,
   }),
   Schema.Struct({
     type: Schema.Literal("thread.pull-request.link"),
