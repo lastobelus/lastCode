@@ -338,6 +338,29 @@ describe("buildThreadFeed", () => {
     expect(messageEntry?.message.sourceThreadId).toBe(threadId);
   });
 
+  it.each([
+    { status: "pending" as const },
+    { status: "ready" as const, text: "Checks passed; review the result." },
+    { status: "failed" as const },
+  ])("preserves an incoming $status summary alongside the original message", (incomingSummary) => {
+    const originalText = "Run checks\nKeep the complete original instructions available.";
+    const feed = buildThreadFeed([
+      projected(
+        {
+          ...userMessage(),
+          text: originalText,
+          createdBy: "agent",
+          incomingSummary,
+        },
+        0,
+      ),
+    ]);
+    const messageEntry = feed.find((entry) => entry.type === "message");
+
+    expect(messageEntry?.message.incomingSummary).toEqual(incomingSummary);
+    expect(messageEntry?.message.text).toBe(originalText);
+  });
+
   it("anchors feedback before later committed turns", () => {
     const laterUser = {
       ...userMessage("2026-08-29T00:00:05.000Z"),

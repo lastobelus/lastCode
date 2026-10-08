@@ -60,6 +60,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
+import { planIncomingMessageSummaries } from "./IncomingMessageSummary.ts";
 import {
   derivePendingBackgroundWork,
   pendingBackgroundTurnItems,
@@ -449,6 +450,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "thread.pull-request-watch.sync":
     case "thread.pull-request.sync":
     case "thread.title.regeneration.complete":
+    case "message.incoming-summary.complete":
     case "thread.runtime-mode.set":
     case "thread.interaction-mode.set":
     case "thread.model-selection.set":
@@ -10962,6 +10964,48 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }
       | undefined;
     switch (command.type) {
+      case "message.incoming-summary.complete": {
+        const projection = yield* projectionStore
+          .getThreadRecords(command.threadId, ["messages", "turnItems"], {
+            messageIds: [command.messageId],
+            turnItemMessageIds: [command.messageId],
+          })
+          .pipe(mapDispatchError(command));
+        const message = projection.messages[0];
+        if (
+          projection.thread.deletedAt !== null ||
+          message?.incomingSummary?.status !== "pending" ||
+          message.text !== command.sourceText
+        )
+          break;
+        const now = yield* DateTime.now;
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "message.updated",
+          threadId: command.threadId,
+          ...(message.runId === null ? {} : { runId: message.runId }),
+          ...(message.nodeId === null ? {} : { nodeId: message.nodeId }),
+          occurredAt: now,
+          payload: { ...message, incomingSummary: command.summary },
+        });
+        const item = projection.turnItems.find((item) => item.type === "user_message");
+        if (item?.type === "user_message") {
+          yield* emit(
+            events,
+            command,
+          )({
+            type: "turn-item.updated",
+            threadId: command.threadId,
+            ...(item.runId === null ? {} : { runId: item.runId }),
+            ...(item.nodeId === null ? {} : { nodeId: item.nodeId }),
+            occurredAt: now,
+            payload: { ...item, incomingSummary: command.summary },
+          });
+        }
+        break;
+      }
       case "subagent.promote.request":
       case "subagent.promote.cancel":
       case "subagent.promote.advance":
@@ -11462,6 +11506,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     // A fresh attempt supersedes the old recovery incident for every provider,
     // including providers without a recovery probe. Queued placeholders do not.
     const plannedEvents = yield* Ref.get(events);
+    const incomingSummaries = yield* planIncomingMessageSummaries({
+      events: plannedEvents,
+      commandId: command.commandId,
+    }).pipe(Effect.provideService(ProjectionStoreV2, projectionStore), mapDispatchError(command));
+    yield* Ref.set(events, incomingSummaries.events);
+    yield* Ref.update(effects, (current) => [...current, ...incomingSummaries.effects]);
     const startingRuns = plannedEvents.filter(
       (event) =>
         (event.type === "run.created" || event.type === "run.updated") &&
@@ -11609,6 +11659,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           // its expected outcome, not a failure.
           planned.events.length > 0 ||
           command.type === "thread.background-work.settle" ||
+          command.type === "message.incoming-summary.complete" ||
           command.type === "thread.stop"
             ? Effect.succeed(planned)
             : Effect.fail(

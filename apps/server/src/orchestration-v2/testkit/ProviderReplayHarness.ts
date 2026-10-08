@@ -30,6 +30,7 @@ import * as CommandReceiptStore from "../CommandReceiptStore.ts";
 import * as ContextHandoffService from "../ContextHandoffService.ts";
 import * as EffectOutbox from "../EffectOutbox.ts";
 import * as EffectWorker from "../EffectWorker.ts";
+import * as IncomingMessageSummaryService from "../IncomingMessageSummaryService.ts";
 import * as SubagentPromotionService from "../SubagentPromotionService.ts";
 import * as EventSink from "../EventSink.ts";
 import * as EventStore from "../EventStore.ts";
@@ -509,6 +510,9 @@ export function layerWithRegistry<Error>(
         layerProviderTurnStartServiceProvided,
         layerRuntimeRequestServiceProvided,
         layerThreadTitleRegenerationTest,
+        Layer.mock(IncomingMessageSummaryService.IncomingMessageSummaryService)({
+          execute: () => Effect.void,
+        }),
         layerServerSettings,
         layerThreadManagementProvided,
         subagentPromotionProvided,

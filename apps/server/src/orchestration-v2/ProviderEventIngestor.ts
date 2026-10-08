@@ -34,6 +34,7 @@ import * as IdAllocator from "./IdAllocator.ts";
 import { ProviderAdapterV2Event } from "./ProviderAdapter.ts";
 import { makeProviderFailureTurnItem } from "./ProviderFailure.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
+import { planIncomingMessageSummaries } from "./IncomingMessageSummary.ts";
 
 export class ProviderEventNormalizeError extends Schema.TaggedError<ProviderEventNormalizeError>()(
   "ProviderEventNormalizeError",
@@ -606,13 +607,29 @@ export const layer: Layer.Layer<
       normalize,
       ingestNormalized: (input) =>
         Effect.gen(function* () {
-          const events = yield* normalize(input);
+          const normalizedEvents = yield* normalize(input);
+          const summaries = yield* planIncomingMessageSummaries({
+            events: normalizedEvents,
+            commandId:
+              input.commandId ?? CommandId.make(`command:incoming-preview:${input.rawEventId}`),
+          }).pipe(
+            Effect.provideService(ProjectionStore.ProjectionStoreV2, projections),
+            Effect.mapError(
+              (cause) =>
+                new ProviderEventPublishError({
+                  providerSessionId: input.providerSessionId,
+                  eventCount: normalizedEvents.length,
+                  cause,
+                }),
+            ),
+          );
+          const events = summaries.events;
           if (events.length === 0) {
             return [];
           }
           // A native child can become inactive before its provider identity
           // arrives. Later turns need fresh cleanup even after an earlier unload.
-          const effects: Array<PendingOrchestrationEffectV2> = [];
+          const effects: Array<PendingOrchestrationEffectV2> = [...summaries.effects];
           const incoming = input.event;
           if (
             incoming.type === "provider_thread.updated" ||
@@ -776,7 +793,15 @@ export const layer: Layer.Layer<
                 ? threadCommands.withLock(input.event.providerThread.appThreadId, ingest)
                 : input.event.type === "provider_turn.updated"
                   ? threadCommands.withLock(input.event.threadId ?? input.threadId, ingest)
-                  : ingest,
+                  : input.event.type === "message.updated" ||
+                      input.event.type === "turn_item.updated"
+                    ? threadCommands.withLock(
+                        input.event.type === "message.updated"
+                          ? input.event.message.threadId
+                          : input.event.turnItem.threadId,
+                        ingest,
+                      )
+                    : ingest,
         ),
     });
   }),

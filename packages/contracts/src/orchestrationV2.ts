@@ -1159,7 +1159,16 @@ export const OrchestrationV2Notification = Schema.Struct({
 });
 export type OrchestrationV2Notification = typeof OrchestrationV2Notification.Type;
 
+export const OrchestrationV2IncomingMessageSummary = Schema.Union([
+  Schema.Struct({ status: Schema.Literal("pending") }),
+  Schema.Struct({ status: Schema.Literal("ready"), text: TrimmedNonEmptyString }),
+  Schema.Struct({ status: Schema.Literal("failed") }),
+]);
+export type OrchestrationV2IncomingMessageSummary =
+  typeof OrchestrationV2IncomingMessageSummary.Type;
+
 export const OrchestrationV2ConversationMessage = Schema.Struct({
+  incomingSummary: Schema.optional(OrchestrationV2IncomingMessageSummary),
   notification: Schema.optional(OrchestrationV2Notification),
   ...OrchestrationV2CreationFields,
   scheduledTaskId: Schema.optional(ScheduledTaskId),
@@ -1426,6 +1435,7 @@ export const OrchestrationV2TurnItem = Schema.Union([
     ...OrchestrationV2TurnItemBaseFields,
     ...OrchestrationV2CreationFields,
     type: Schema.Literal("user_message"),
+    incomingSummary: Schema.optional(OrchestrationV2IncomingMessageSummary),
     messageId: MessageId,
     scheduledTaskId: Schema.optional(ScheduledTaskId),
     senderThreadId: Schema.optional(ThreadId),
@@ -2235,6 +2245,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     ...OrchestrationV2TurnItemJsonBaseFields,
     ...OrchestrationV2CreationFields,
     type: Schema.Literal("user_message"),
+    incomingSummary: Schema.optional(OrchestrationV2IncomingMessageSummary),
     messageId: MessageId,
     scheduledTaskId: Schema.optional(ScheduledTaskId),
     senderThreadId: Schema.optional(ThreadId),
@@ -3224,6 +3235,18 @@ export type OrchestrationV2Command = typeof OrchestrationV2Command.Type;
  * send them.
  */
 const OrchestrationV2InternalCommand = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("message.incoming-summary.complete"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    messageId: MessageId,
+    sourceText: Schema.String,
+    summary: Schema.Union([
+      Schema.Struct({ status: Schema.Literal("ready"), text: TrimmedNonEmptyString }),
+      Schema.Struct({ status: Schema.Literal("failed") }),
+    ]),
+  }),
+
   Schema.Struct({
     type: Schema.Literal("subagent.promote.advance"),
     commandId: CommandId,
