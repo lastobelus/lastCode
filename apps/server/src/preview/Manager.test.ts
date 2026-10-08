@@ -73,9 +73,22 @@ it.layer(PreviewManagerTestLayer)("PreviewManager", (it) => {
         desktopHostId: "remote-desktop",
         profileId: "work",
       });
+      const popup = yield* manager.open({
+        threadId: input.threadId,
+        runtime: "server",
+        desktopHostId: "remote-desktop",
+        profileId: "work",
+        desktopPopup: { popupId: "native-child" },
+      });
       expect(local).toMatchObject({ backingPage: "desktop", desktopHostId: "local" });
       expect(remote).toMatchObject({
         backingPage: "desktop",
+        desktopHostId: "remote-desktop",
+        profileId: "work",
+      });
+      expect(popup).toMatchObject({
+        backingPage: "desktop-popup",
+        desktopPopupId: "native-child",
         desktopHostId: "remote-desktop",
         profileId: "work",
       });
@@ -83,8 +96,13 @@ it.layer(PreviewManagerTestLayer)("PreviewManager", (it) => {
       expect(opened.map((event) => ("snapshot" in event ? event.snapshot : null))).toEqual([
         local,
         remote,
+        popup,
       ]);
-      expect((yield* manager.list({ threadId: input.threadId })).sessions).toEqual([local, remote]);
+      expect((yield* manager.list({ threadId: input.threadId })).sessions).toEqual([
+        local,
+        remote,
+        popup,
+      ]);
     }),
   );
 

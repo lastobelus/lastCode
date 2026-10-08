@@ -202,6 +202,28 @@ const releasedDesktopTabs: Array<string> = [];
 const desktopConnections: Array<{ endpoint: string; context: ReturnType<typeof makeContext> }> = [];
 const presentedDesktopTabs = new Set<string>();
 const desktopPresentations = new NodeEvents.EventEmitter();
+const desktopPopupEvents = new NodeEvents.EventEmitter();
+let nativePopupCreatedSeen: PromiseWithResolvers<void> | null = null;
+let nativePopupClosedSeen: PromiseWithResolvers<void> | null = null;
+const popupBindings: Array<{
+  threadId: string;
+  tabId: string;
+  desktopHostId?: string | undefined;
+  popupId: string;
+  openerTabId: string;
+}> = [];
+const popupClosures: Array<{ threadId: string; tabId: string; popupId: string }> = [];
+const nativePopupEvents = <T>(name: string) =>
+  Stream.callback<T>((queue) =>
+    Effect.acquireRelease(
+      Effect.sync(() => {
+        const listener = (event: T) => Queue.offerUnsafe(queue, event);
+        desktopPopupEvents.on(name, listener);
+        return listener;
+      }),
+      (listener) => Effect.sync(() => desktopPopupEvents.off(name, listener)),
+    ),
+  );
 let nativeRenderingGate: PromiseWithResolvers<void> | null = null;
 let nativeRenderingEntered: PromiseWithResolvers<void> | null = null;
 let nativePresentationProcessed: PromiseWithResolvers<void> | null = null;
@@ -269,6 +291,21 @@ const dependencies = Layer.mergeAll(
     ),
     isAttached: (key) => Effect.sync(() => desktopRenders(key.tabId)),
     isPresented: (key) => presentedDesktopTabs.has(key.tabId),
+    popups: nativePopupEvents<DesktopChannel.DesktopTabKey & { popupId: string; url: string }>(
+      "created",
+    ).pipe(Stream.tap(() => Effect.sync(() => nativePopupCreatedSeen?.resolve()))),
+    closedPopups: nativePopupEvents<DesktopChannel.DesktopTabKey & { popupId: string }>(
+      "closed",
+    ).pipe(Stream.tap(() => Effect.sync(() => nativePopupClosedSeen?.resolve()))),
+    bindPopup: (key, input) =>
+      Effect.sync(() => {
+        popupBindings.push({ ...key, ...input });
+        desktopTabs.add(key.tabId);
+      }),
+    closePopup: (key, popupId) =>
+      Effect.sync(() => {
+        popupClosures.push({ threadId: key.threadId, tabId: key.tabId, popupId });
+      }),
     presentations: Stream.callback<{ threadId: string; tabId: string; desktopHostId: string }>(
       (queue) =>
         Effect.acquireRelease(
@@ -377,6 +414,10 @@ beforeEach(() => {
   remoteUrlAvailable = true;
   releasedDesktopTabs.length = 0;
   desktopConnections.length = 0;
+  popupBindings.length = 0;
+  popupClosures.length = 0;
+  nativePopupCreatedSeen = null;
+  nativePopupClosedSeen = null;
 });
 
 it.live("readiness none responds immediately but takeover input waits for navigation commit", () =>
@@ -887,7 +928,15 @@ it.live.each([false, true])(
         const popup = makeContext();
         const manager = yield* Manager.PreviewManager;
         const events = yield* manager.subscribeEvents;
-        opener.emit("popup", popup.page);
+        const popupSource = {
+          threadId: scope.thread.threadId,
+          tabId,
+          desktopHostId: "local",
+          popupId: "popup-native",
+          url: "https://signin.example.test/",
+        };
+        if (native) desktopPopupEvents.emit("created", popupSource);
+        else opener.emit("popup", popup.page);
         const openedEvent = Option.getOrThrow(
           yield* Stream.fromSubscription(events).pipe(
             Stream.filter((event) => event.type === "opened" && event.tabId !== tabId),
@@ -895,11 +944,12 @@ it.live.each([false, true])(
           ),
         );
         const sessions = (yield* manager.list({ threadId: scope.thread.threadId })).sessions;
-        const popupTab = sessions.find((session) => session.tabId === openedEvent.tabId)!;
+        if (openedEvent.type !== "opened") throw new Error("Expected popup opening");
+        const popupTab = openedEvent.snapshot;
         expect(popupTab).toMatchObject({
           automationOwner: sessions.find((session) => session.tabId === tabId)!.automationOwner,
           reveal: false,
-          backingPage: native ? "desktop" : "server",
+          backingPage: native ? "desktop-popup" : "server",
           ...(native ? { profileId: "work", desktopHostId: "local" } : {}),
         });
         expect(
@@ -910,12 +960,13 @@ it.live.each([false, true])(
             input: { expression: "window.opener !== null" },
           }),
         ).toBe("evaluated");
-        expect(popup.sessions[0]!.send).toHaveBeenCalledWith(
+        const actualPopup = native ? desktopConnections[1]!.context : popup;
+        expect(actualPopup.sessions[0]!.send).toHaveBeenCalledWith(
           "Runtime.evaluate",
           expect.objectContaining({ expression: "window.opener !== null" }),
         );
         const foreign = yield* broker
-          .invoke({
+          .invoke<void>({
             scope: asSession("agent-b"),
             tabId: popupTab.tabId,
             operation: "evaluate",
@@ -927,7 +978,59 @@ it.live.each([false, true])(
           reason: "agentMismatch",
         });
         expect(contexts).toHaveLength(native ? 0 : 1);
-        expect(desktopConnections).toHaveLength(native ? 1 : 0);
+        expect(desktopConnections).toHaveLength(native ? 2 : 0);
+        if (native) {
+          expect(popupBindings).toEqual([
+            {
+              threadId: scope.thread.threadId,
+              tabId: popupTab.tabId,
+              desktopHostId: "local",
+              popupId: "popup-native",
+              openerTabId: tabId,
+            },
+          ]);
+          expect(popupTab.desktopPopupId).toBe("popup-native");
+          presentedDesktopTabs.add(popupTab.tabId);
+          const shown = yield* broker.invoke<PreviewAutomationStatus>({
+            scope,
+            tabId: popupTab.tabId,
+            operation: "status",
+            input: {},
+          });
+          expect(shown).toMatchObject({ visible: true, nativePresented: true, streamViewers: 0 });
+          presentedDesktopTabs.delete(popupTab.tabId);
+          const hidden = yield* broker.invoke<PreviewAutomationStatus>({
+            scope,
+            tabId: popupTab.tabId,
+            operation: "status",
+            input: {},
+          });
+          expect(hidden).toMatchObject({ visible: false, nativePresented: false });
+          const viewer = yield* (yield* ServerBrowser.ServerBrowser).attachViewer(
+            viewerInput(popupTab.tabId, false),
+          );
+          desktopDetaches.emit("detach", {
+            threadId: scope.thread.threadId,
+            tabId: popupTab.tabId,
+          });
+          let ending = yield* Queue.take(viewer.output);
+          while (ending._tag !== "reconnect") ending = yield* Queue.take(viewer.output);
+          presentedDesktopTabs.add(popupTab.tabId);
+          yield* (yield* ServerBrowser.ServerBrowser).attachViewer(
+            viewerInput(popupTab.tabId, false),
+          );
+          const reconnected = yield* broker.invoke<PreviewAutomationStatus>({
+            scope,
+            tabId: popupTab.tabId,
+            operation: "status",
+            input: {},
+          });
+          expect(reconnected.nativePresented).toBe(true);
+          expect(popupBindings).toHaveLength(1);
+          expect(desktopConnections).toHaveLength(3);
+          // A repeated announcement must not create a second server tab or root relay.
+          desktopPopupEvents.emit("created", popupSource);
+        }
         const status = yield* broker.invoke<PreviewAutomationStatus>({
           scope,
           tabId,
@@ -942,18 +1045,84 @@ it.live.each([false, true])(
         );
         expect(opener.goto).not.toHaveBeenCalled();
         expect(opener.close).not.toHaveBeenCalled();
-        expect(popup.page.goto).not.toHaveBeenCalled();
+        expect(actualPopup.page.goto).not.toHaveBeenCalled();
         // The page the popup script holds is the tab, so closing it ends the tab.
         const closing = yield* manager.subscribeEvents;
-        yield* Effect.promise(() => popup.page.close());
+        if (native) desktopPopupEvents.emit("closed", popupSource);
+        else yield* Effect.promise(() => popup.page.close());
         yield* Stream.fromSubscription(closing).pipe(
           Stream.filter((event) => event.type === "closed" && event.tabId === popupTab.tabId),
           Stream.runHead,
         );
+        const afterPopupClose = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          tabId,
+          operation: "status",
+          input: {},
+        });
+        expect(afterPopupClose.tabs).toEqual([expect.objectContaining({ tabId })]);
         expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toHaveLength(1);
         expect(opener.close).not.toHaveBeenCalled();
+        if (native)
+          expect(popupClosures).toEqual([
+            { threadId: scope.thread.threadId, tabId, popupId: "popup-native" },
+          ]);
       }),
     ).pipe(Effect.provide(layer)),
+);
+
+it.live("a native popup closed during opener reconnect never creates a phantom tab", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      desktopRendersNext = true;
+      const { browser, broker, tabId } = yield* ready;
+      yield* broker.invoke<void>({
+        scope,
+        tabId,
+        operation: "setColorScheme",
+        input: { colorScheme: "dark" },
+      });
+      const viewer = yield* browser.attachViewer(viewerInput(tabId, false));
+      desktopDetaches.emit("detach", { threadId: scope.thread.threadId, tabId });
+      let ending = yield* Queue.take(viewer.output);
+      while (ending._tag !== "reconnect") ending = yield* Queue.take(viewer.output);
+      nativeRenderingGate = Promise.withResolvers<void>();
+      nativeRenderingEntered = Promise.withResolvers<void>();
+      yield* Effect.addFinalizer(() => Effect.sync(() => nativeRenderingGate?.resolve()));
+      const connecting = yield* Effect.scoped(browser.attachViewer(viewerInput(tabId, false))).pipe(
+        Effect.forkScoped,
+      );
+      yield* Effect.promise(() => nativeRenderingEntered!.promise);
+      const source = {
+        threadId: scope.thread.threadId,
+        tabId,
+        desktopHostId: "local",
+        popupId: "closed-before-source",
+        url: "https://signin.example.test/",
+      };
+      nativePopupCreatedSeen = Promise.withResolvers<void>();
+      desktopPopupEvents.emit("created", source);
+      yield* Effect.promise(() => nativePopupCreatedSeen!.promise);
+      nativePopupClosedSeen = Promise.withResolvers<void>();
+      desktopPopupEvents.emit("closed", source);
+      yield* Effect.promise(() => nativePopupClosedSeen!.promise);
+      nativeRenderingGate.resolve();
+      yield* Fiber.join(connecting);
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(status.tabs).toEqual([expect.objectContaining({ tabId })]);
+      expect(popupBindings).toEqual([]);
+      expect(popupClosures).toEqual([
+        { threadId: scope.thread.threadId, tabId, popupId: source.popupId },
+      ]);
+      const manager = yield* Manager.PreviewManager;
+      expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toHaveLength(1);
+    }),
+  ).pipe(Effect.provide(layer)),
 );
 
 it.live("closing a tab while a viewer is still opening it does not leave its page behind", () =>

@@ -56,6 +56,10 @@ async function main() {
   const sockets = new Map();
   const browsers = [];
   const attachments = new Map(tabs.map((tab) => [tab.tabId, Promise.withResolvers()]));
+  const relayTabs = new Map(tabs.map((tab) => [tab.tabId, tab]));
+  const popupCreated = Promise.withResolvers();
+  const popupClosed = Promise.withResolvers();
+  let nativePopup;
   const presentationEvents = [];
   const results = [];
   let nextRequest = 0;
@@ -68,6 +72,13 @@ async function main() {
       response.writeHead(200, { "content-type": "text/html" });
       response.end(
         '<!doctype html><title>Child frame</title><script>parent.postMessage("child-frame-ran", "*")</script>',
+      );
+      return;
+    }
+    if (request.url === "/popup") {
+      response.writeHead(200, { "content-type": "text/html" });
+      response.end(
+        '<!doctype html><title>Actual native popup</title><style>html,body{margin:0;background:#55aa77}</style><h1>Actual child window</h1><script>window.popupMarker="actual-native-child"</script>',
       );
       return;
     }
@@ -116,6 +127,8 @@ async function main() {
         Effect.sync(() => {
           const event = JSON.parse(new TextDecoder().decode(line));
           if (event.type === "attached") attachments.get(event.tabId)?.resolve(event);
+          if (event.type === "popupCreated") popupCreated.resolve(event);
+          if (event.type === "popupClosed") popupClosed.resolve(event);
           if (event.type === "presentation") presentationEvents.push(event);
           if (event.type === "surfaceReady") pending.get(event.requestId)?.resolve(event);
           if (event.type === "cdp") sockets.get(event.tabId)?.send(event.message);
@@ -146,6 +159,20 @@ async function main() {
       },
     };
     nativeGuests.set(tab.tabId, guest);
+    guest.setWindowOpenHandler(() => ({
+      action: "allow",
+      overrideBrowserWindowOptions: {
+        show: false,
+        width: 640,
+        height: 480,
+        webPreferences: { backgroundThrottling: true },
+      },
+    }));
+    guest.on("did-create-window", (window) => {
+      nativePopup = window;
+      window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+      host.registerPopup(key(tab), window);
+    });
     NodeAssert.equal(guest.hostWebContents?.id, hostWindow.webContents.id);
     // Exercise the real host's pending selected-slot report before native attachment.
     host.setPresentation({ runtimeTabId, presented: true }, hostWindow.webContents.id);
@@ -156,7 +183,7 @@ async function main() {
     host.surfaceResponse(response, event.sender.id),
   );
   relayServer.on("connection", (socket, request) => {
-    const tab = tabs.find((candidate) => `/${candidate.tabId}` === request.url);
+    const tab = relayTabs.get(request.url?.slice(1));
     if (!tab) {
       socket.close();
       return;
@@ -410,11 +437,95 @@ async function main() {
     results.push(
       "native stalled-capture deadline, same/other-tab evaluation, subsequent image capture",
     );
+    // A real window.open child is bound as its own root relay, keeping its
+    // actual backing WebContents and opener instead of creating a second guest.
+    const liveContentsBeforePopup = webContents.getAllWebContents().length;
+    const liveWindowsBeforePopup = BrowserWindow.getAllWindows().length;
+    await page.evaluate((origin) => {
+      window.popupHandle = window.open(
+        `${origin}/popup`,
+        "native-popup-fixture",
+        "width=640,height=480",
+      );
+    }, fixtureOrigin);
+    const popupEvent = await popupCreated.promise;
+    NodeAssert.equal(popupEvent.threadId, key(tabs[0]).threadId);
+    NodeAssert.equal(popupEvent.tabId, tabs[0].tabId);
+    NodeAssert.ok(nativePopup && !nativePopup.isDestroyed());
+    NodeAssert.equal(nativePopup.isVisible(), false);
+    NodeAssert.equal(nativePopup.isFocused(), false);
+    NodeAssert.equal(webContents.getAllWebContents().length, liveContentsBeforePopup + 1);
+    NodeAssert.equal(BrowserWindow.getAllWindows().length, liveWindowsBeforePopup + 1);
+    const popupContentsId = nativePopup.webContents.id;
+    const popupTab = { tabId: "tab-native-popup" };
+    relayTabs.set(popupTab.tabId, popupTab);
+    attachments.set(popupTab.tabId, Promise.withResolvers());
+    await send({
+      type: "bindPopup",
+      ...key(popupTab),
+      openerTabId: tabs[0].tabId,
+      popupId: popupEvent.popupId,
+    });
+    const boundPopup = await attachments.get(popupTab.tabId).promise;
+    NodeAssert.equal(boundPopup.supportsNativeSurface, true);
+    NodeAssert.notEqual(boundPopup.presented, true);
+    const popupBrowser = await chromium.connectOverCDP(
+      `ws://127.0.0.1:${relayPort}/${popupTab.tabId}`,
+      { timeout: 10000 },
+    );
+    browsers.push(popupBrowser);
+    NodeAssert.equal(popupBrowser.contexts().length, 1);
+    NodeAssert.equal(popupBrowser.contexts()[0].pages().length, 1);
+    const popupPage = popupBrowser.contexts()[0].pages()[0];
+    await popupPage.waitForFunction(() => window.popupMarker === "actual-native-child");
+    NodeAssert.equal(await popupPage.evaluate(() => window.opener !== null), true);
+    await popupPage.evaluate(() => {
+      window.opener.popupRoundTrip = "child-wrote-through-opener";
+      window.popupBackingIdentity = "written-through-child-cdp";
+    });
+    NodeAssert.equal(
+      await page.evaluate(() => window.popupRoundTrip),
+      "child-wrote-through-opener",
+    );
+    NodeAssert.equal(
+      await nativePopup.webContents.executeJavaScript("window.popupBackingIdentity"),
+      "written-through-child-cdp",
+    );
+    await nativePopup.webContents.executeJavaScript(
+      'window.popupBackingIdentity="written-through-native-child"',
+    );
+    NodeAssert.equal(
+      await popupPage.evaluate(() => window.popupBackingIdentity),
+      "written-through-native-child",
+    );
+    const popupAcquired = await surface(popupTab, "acquire", "popup-capture");
+    const [popupWidth, popupHeight] = nativePopup.getContentSize();
+    NodeAssert.deepEqual(popupAcquired.viewport, { width: popupWidth, height: popupHeight });
+    NodeAssert.equal(nativePopup.webContents.getBackgroundThrottling(), false);
+    NodeAssert.equal(nativePopup.isVisible(), false);
+    NodeAssert.equal(nativePopup.isFocused(), false);
+    const popupCdp = await popupPage.context().newCDPSession(popupPage);
+    const popupSnapshot = await takeSnapshot(popupPage, popupCdp, true);
+    NodeAssert.ok(popupSnapshot.visibleText.includes("Actual child window"));
+    NodeAssert.ok(popupSnapshot.screenshot);
+    NodeAssert.equal(
+      nativeImage.createFromBuffer(Buffer.from(popupSnapshot.screenshot.data, "base64")).isEmpty(),
+      false,
+    );
+    NodeAssert.equal(webContents.getAllWebContents().length, liveContentsBeforePopup + 1);
+    NodeAssert.equal(nativePopup.webContents.id, popupContentsId);
+    await send({ type: "release", ...key(popupTab) });
+    NodeAssert.equal(nativePopup.webContents.getBackgroundThrottling(), true);
+    NodeAssert.equal(nativePopup.isDestroyed(), false);
+    await popupBrowser.close();
+    results.push(
+      "real hidden window.open child retains JS opener and same native WebContents; bound root CDP evaluates and captures it without a second guest or presentation",
+    );
     NodeAssert.equal(hostWindow.isVisible(), false);
     NodeAssert.equal(hostWindow.isFocused(), false);
     // Re-announcement samples production registry state after all rendering leases.
     // It resets relay sessions, so perform it after the final CDP operation.
-    for (const tab of tabs) attachments.set(tab.tabId, Promise.withResolvers());
+    for (const tab of relayTabs.values()) attachments.set(tab.tabId, Promise.withResolvers());
     await send({ type: "announce" });
     const reattached = await Promise.all([...attachments.values()].map((entry) => entry.promise));
     NodeAssert.ok(reattached.every((event) => event.presented !== true));
@@ -427,17 +538,38 @@ async function main() {
     results.push(
       "hidden capture and stream leases never mark native presentation true or replace the backing page",
     );
+    const reconnectedPopupBrowser = await chromium.connectOverCDP(
+      `ws://127.0.0.1:${relayPort}/${popupTab.tabId}`,
+      { timeout: 10000 },
+    );
+    browsers.push(reconnectedPopupBrowser);
+    const reconnectedPopup = reconnectedPopupBrowser.contexts()[0].pages()[0];
+    NodeAssert.equal(
+      await reconnectedPopup.evaluate(() => window.popupBackingIdentity),
+      "written-through-native-child",
+    );
+    NodeAssert.equal(await reconnectedPopup.evaluate(() => window.opener !== null), true);
+    NodeAssert.equal(nativePopup.webContents.id, popupContentsId);
+    NodeAssert.equal(nativePopup.isVisible(), false);
+    await send({ type: "closePopup", ...key(tabs[0]), popupId: popupEvent.popupId });
+    NodeAssert.equal((await popupClosed.promise).popupId, popupEvent.popupId);
+    NodeAssert.equal(nativePopup.isDestroyed(), true);
+    NodeAssert.equal(webContents.getAllWebContents().length, liveContentsBeforePopup);
+    results.push(
+      "native popup survives release and reconnect, preserves opener, and closes its actual child window",
+    );
     const report = {
       passed: true,
       results,
       scope:
-        "production native host/CDP relay, actual hidden-window presentation registry, surface helpers, ServerBrowserPage; fixture bridge bypasses DesktopBrowserChannel and orchestration broker; no React hydration, visible-window transitions, OS-minimized-window, Windows, or WSL proof",
+        "production native host/CDP relay, actual hidden-window presentation registry and window.open popup binding, surface helpers, ServerBrowserPage; fixture bridge bypasses DesktopBrowserChannel and orchestration broker; no React hydration, visible-window transitions, OS-minimized-window, Windows, or WSL proof",
     };
     await NodeFSP.writeFile(NodePath.join(scratch, "result.json"), JSON.stringify(report, null, 2));
     console.log(JSON.stringify(report));
   } finally {
     clearTimeout(startupTimer);
     for (const tab of tabs) host.detach(key(tab));
+    if (nativePopup && !nativePopup.isDestroyed()) nativePopup.destroy();
     for (const browser of browsers) await browser.close().catch(() => undefined);
     for (const socket of sockets.values()) socket.terminate();
     relayServer.close();

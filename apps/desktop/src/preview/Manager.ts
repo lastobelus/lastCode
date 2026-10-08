@@ -1506,6 +1506,15 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       window.webContents.on("before-input-event", (_event, input) => {
         syncMenuShortcuts(window.webContents, input);
       });
+      runFork(
+        SynchronizedRef.get(tabsRef).pipe(
+          Effect.map((tabs) => {
+            const tab = tabs.get(tabId);
+            if (tab?.webContentsId === wc.id && tab.serverTab)
+              browserHost.registerPopup(tab.serverTab, window);
+          }),
+        ),
+      );
     };
     const beforeInput = (event: Electron.Event, input: Electron.Input): void => {
       syncMenuShortcuts(wc, input);

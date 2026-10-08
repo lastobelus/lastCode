@@ -33,6 +33,40 @@ beforeEach(() => {
 });
 
 describe("authoritative server page selection", () => {
+  it("preserves older remote tabs only for the explicit matching desktop owner", () => {
+    for (const environmentId of [primary, remote]) {
+      const owner = `host-${environmentId}`;
+      expect(
+        rendersServerTabNatively(environmentId, primary, {
+          runtime: "server",
+          desktopHostId: owner,
+        }),
+      ).toBe(true);
+      for (const desktopHostId of [undefined, "local", "another-desktop"]) {
+        expect(
+          rendersServerTabNatively(environmentId, primary, {
+            runtime: "server",
+            desktopHostId,
+          }),
+        ).toBe(false);
+      }
+      expect(
+        rendersServerTabNatively(environmentId, primary, {
+          runtime: "server",
+          desktopHostId: owner,
+          backingPage: "server",
+        }),
+      ).toBe(false);
+    }
+    state.electron = false;
+    expect(
+      rendersServerTabNatively(remote, primary, {
+        runtime: "server",
+        desktopHostId: "host-remote",
+      }),
+    ).toBe(false);
+  });
+
   it("streams headless tabs even in the desktop's primary environment", () => {
     expect(
       rendersServerTabNatively(primary, primary, {
@@ -54,6 +88,20 @@ describe("authoritative server page selection", () => {
         backingPage: "desktop",
       }),
     ).toBe(false);
+  });
+
+  it("streams existing native popups without creating another guest", () => {
+    for (const [environment, host] of [
+      [primary, "local"],
+      [remote, "host-remote"],
+    ] as const)
+      expect(
+        rendersServerTabNatively(environment, primary, {
+          runtime: "server",
+          backingPage: "desktop-popup",
+          desktopHostId: host,
+        }),
+      ).toBe(false);
   });
 
   it("renders only the selected remote desktop, including WSL primary via RPC", () => {

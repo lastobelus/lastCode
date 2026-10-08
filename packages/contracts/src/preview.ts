@@ -212,7 +212,9 @@ export const PreviewSessionSnapshot = Schema.Struct({
   profileId: Schema.optional(BrowserProfileId),
   runtime: Schema.optional(PreviewRuntime),
   /** Server-selected page owner, fixed before the tab is published. Only server-runtime tabs set it. */
-  backingPage: Schema.optional(Schema.Literals(["desktop", "server"])),
+  backingPage: Schema.optional(Schema.Literals(["desktop", "desktop-popup", "server"])),
+  /** Existing native popup identity; this tab streams its window instead of creating a guest. */
+  desktopPopupId: Schema.optional(Schema.String),
   /** Desktop cookie jar selected for this tab; never fall back to another browser. */
   desktopHostId: Schema.optional(Schema.String),
   /** Authenticated provider session owning an isolated server tab. */

@@ -459,6 +459,22 @@ const make = Effect.gen(function* () {
   const closedPendingTabs = new Set<string>();
   /** Popup pages waiting for the tab their `opened` event creates. */
   const adoptedPages = new Map<string, { readonly page: Page; readonly openerTabId: string }>();
+  const nativePopups = new Map<
+    string,
+    {
+      readonly source: DesktopBrowserChannel.DesktopTabKey;
+      readonly popupId: string;
+      snapshot: PreviewSessionSnapshot | null;
+      closed: boolean;
+      bound: boolean;
+    }
+  >();
+  const popupKey = (source: DesktopBrowserChannel.DesktopTabKey, popupId: string) =>
+    JSON.stringify([source.desktopHostId ?? "local", source.threadId, source.tabId, popupId]);
+  const nativePopupForTab = (threadId: string, tabId: string) =>
+    [...nativePopups.values()].find(
+      (popup) => popup.snapshot?.threadId === threadId && popup.snapshot.tabId === tabId,
+    );
   /** Sessions the manager closed, so their tabs end for good. Pruned once dropped. */
   const closedSessions = new Set<string>();
   let hostConnectionId: string | null = null;
@@ -673,7 +689,7 @@ const make = Effect.gen(function* () {
 
   /** Wait only for the page owner chosen before the session was published. */
   const desktopRenders = (snapshot: PreviewSessionSnapshot) =>
-    snapshot.backingPage === "desktop"
+    snapshot.backingPage === "desktop" || snapshot.backingPage === "desktop-popup"
       ? Effect.runPromise(
           desktopChannel.awaitAttached(
             {
@@ -720,11 +736,34 @@ const make = Effect.gen(function* () {
   const createTab = async (snapshot: PreviewSessionSnapshot): Promise<ServerTab> => {
     const adopted = adoptedPages.get(tabKey(snapshot.threadId, snapshot.tabId));
     adoptedPages.delete(tabKey(snapshot.threadId, snapshot.tabId));
+    const nativePopup = nativePopupForTab(snapshot.threadId, snapshot.tabId);
+    if (snapshot.backingPage === "desktop-popup") {
+      if (!nativePopup || nativePopup.closed || nativePopup.popupId !== snapshot.desktopPopupId)
+        throw new Error("The native popup binding is unavailable.");
+      // A bound child survives channel reconnects and re-announces its server
+      // key. Binding is only needed for the initial window announcement.
+      if (!nativePopup.bound)
+        await Effect.runPromise(
+          desktopChannel.bindPopup(
+            {
+              threadId: snapshot.threadId,
+              tabId: snapshot.tabId,
+              desktopHostId: snapshot.desktopHostId,
+            },
+            { popupId: nativePopup.popupId, openerTabId: nativePopup.source.tabId },
+          ),
+        );
+    }
     const desktop =
       adopted === undefined && (await desktopRenders(snapshot))
         ? await connectDesktop(snapshot)
         : null;
-    if (adopted === undefined && snapshot.backingPage === "desktop" && desktop === null) {
+    if (nativePopup && desktop) nativePopup.bound = true;
+    if (
+      adopted === undefined &&
+      (snapshot.backingPage === "desktop" || snapshot.backingPage === "desktop-popup") &&
+      desktop === null
+    ) {
       throw new ServerBrowserPage.ServerBrowserOperationError(
         "PreviewAutomationRemoteUnavailableError",
         "The selected desktop browser did not attach. Keep that desktop connected and retry; the requested profile was not opened in another browser.",
@@ -770,7 +809,7 @@ const make = Effect.gen(function* () {
       desktopHostId: snapshot.desktopHostId,
       nativePresented: false,
       revealRequested: snapshot.reveal === true,
-      openerTabId: adopted?.openerTabId,
+      openerTabId: adopted?.openerTabId ?? nativePopup?.source.tabId,
       downloads: [],
       fileChooser: null,
       dialog: null,
@@ -848,10 +887,12 @@ const make = Effect.gen(function* () {
     page.on("download", (download) => void saveDownload(tab, download));
     page.on("filechooser", (chooser) => void offerFileChooser(tab, chooser));
     // Popups become tabs and keep `window.opener`, so sign-in popups can report back.
-    page.on("popup", (popup) => void adoptPopup(tab, popup));
+    // Electron announces its actual child window separately; its one-page relay
+    // cannot synthesize a Playwright popup without losing native identity.
+    if (!desktop) page.on("popup", (popup) => void adoptPopup(tab, popup));
     // Playwright cannot reload a crashed page, so it must leave the tab list.
     const key = tabKey(tab.threadId, tab.tabId);
-    if (closedPendingTabs.delete(key)) {
+    if (closedPendingTabs.delete(key) || nativePopup?.closed) {
       await control.close().catch(constVoid);
       if (desktop) await desktop.close().catch(constVoid);
       else await page.close().catch(constVoid);
@@ -1116,6 +1157,65 @@ const make = Effect.gen(function* () {
     });
   };
 
+  const openNativePopup = async (
+    source: DesktopBrowserChannel.DesktopTabKey & {
+      readonly popupId: string;
+      readonly url: string;
+    },
+  ) => {
+    const id = popupKey(source, source.popupId);
+    if (nativePopups.has(id)) return;
+    // Child windows can close while their source is still setting up.
+    // Record their lifecycle before awaiting the source page.
+    const popup = {
+      source,
+      popupId: source.popupId,
+      snapshot: null as PreviewSessionSnapshot | null,
+      closed: false,
+      bound: false,
+    };
+    nativePopups.set(id, popup);
+    const opener =
+      tabs.get(tabKey(source.threadId, source.tabId)) ??
+      (await pendingTabs.get(tabKey(source.threadId, source.tabId))?.catch(() => undefined));
+    if (
+      !opener?.desktop ||
+      popup.closed ||
+      opener.closing ||
+      (opener.desktopHostId ?? "local") !== (source.desktopHostId ?? "local") ||
+      (opener.control.agentId !== null && atTabLimit(opener.control.agentId))
+    ) {
+      nativePopups.delete(id);
+      await Effect.runPromise(desktopChannel.closePopup(source, source.popupId));
+      return;
+    }
+    try {
+      const snapshot = await Effect.runPromise(
+        manager.open({
+          threadId: opener.threadId,
+          ...(/^https?:/i.test(source.url) ? { url: source.url } : {}),
+          runtime: "server",
+          desktopHostId: source.desktopHostId ?? "local",
+          desktopPopup: { popupId: source.popupId },
+          ...(opener.profileId === undefined ? {} : { profileId: opener.profileId }),
+          ...(opener.control.agentId === null
+            ? {}
+            : { automationOwner: opener.control.agentId, reveal: false }),
+          beforePublish: (snapshot) => {
+            popup.snapshot = snapshot;
+          },
+        }),
+      );
+      if (popup.closed)
+        await Effect.runPromise(
+          manager.close({ threadId: opener.threadId, tabId: snapshot.tabId }),
+        );
+    } catch {
+      nativePopups.delete(id);
+      await Effect.runPromise(desktopChannel.closePopup(source, source.popupId));
+    }
+  };
+
   const ensureTab = (snapshot: PreviewSessionSnapshot): Promise<ServerTab> => {
     const key = tabKey(snapshot.threadId, snapshot.tabId);
     const pending = pendingTabs.get(key);
@@ -1124,6 +1224,12 @@ const make = Effect.gen(function* () {
     if (existing) return Promise.resolve(existing);
     const opening = createTab(snapshot)
       .catch((cause: unknown) => {
+        if (snapshot.backingPage === "desktop-popup")
+          runFork(
+            manager
+              .close({ threadId: ThreadId.make(snapshot.threadId), tabId: snapshot.tabId })
+              .pipe(Effect.ignore),
+          );
         runFork(
           Effect.logWarning(
             isHostSetupError(cause) ? cause.message : "server preview tab failed to start",
@@ -2331,6 +2437,13 @@ const make = Effect.gen(function* () {
       }
       const key = tabKey(event.threadId, event.tabId);
       const tab = tabs.get(key);
+      if (event.type === "closed") {
+        const popup = nativePopupForTab(event.threadId, event.tabId);
+        if (popup) {
+          nativePopups.delete(popupKey(popup.source, popup.popupId));
+          await Effect.runPromise(desktopChannel.closePopup(popup.source, popup.popupId));
+        }
+      }
       if (event.type === "closed" && !tab && pendingTabs.has(key)) closedPendingTabs.add(key);
       if (!tab) return;
       if (event.type === "closed") {
@@ -2731,6 +2844,27 @@ const make = Effect.gen(function* () {
     });
 
   yield* manager.events.pipe(Stream.runForEach(mirrorManagerEvent), Effect.forkScoped);
+  yield* desktopChannel.popups.pipe(
+    Stream.runForEach((popup) => Effect.promise(() => openNativePopup(popup))),
+    Effect.forkScoped,
+  );
+  yield* desktopChannel.closedPopups.pipe(
+    Stream.runForEach((event) =>
+      Effect.gen(function* () {
+        const popup = nativePopups.get(popupKey(event, event.popupId));
+        if (!popup) return;
+        popup.closed = true;
+        if (popup.snapshot)
+          yield* manager
+            .close({
+              threadId: ThreadId.make(popup.snapshot.threadId),
+              tabId: popup.snapshot.tabId,
+            })
+            .pipe(Effect.ignore);
+      }),
+    ),
+    Effect.forkScoped,
+  );
   // Whoever runs the server learns the fix before anyone opens a tab.
   if (
     !PreviewBrowserHost.sandboxDisabled(yield* HostProcessEnvironment) &&

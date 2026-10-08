@@ -135,6 +135,54 @@ it.effect(
 );
 
 it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
+  it.effect("routes popup bindings only through the attached source's authenticated owner", () =>
+    Effect.gen(function* () {
+      const channel = yield* remoteChannel;
+      const owner = yield* connectHost(channel, "socket-a", "host-a");
+      const other = yield* connectHost(channel, "socket-b", "host-b");
+      const announcements = yield* channel.popups.pipe(Stream.toQueue({ capacity: "unbounded" }));
+      const popup = {
+        type: "popupCreated" as const,
+        ...key,
+        popupId: "child-1",
+        url: "https://signin.example.test/",
+      };
+      yield* channel.receiveEvent("socket-a", "host-a", popup);
+      expect(yield* Queue.size(announcements)).toBe(0);
+      yield* channel.receiveEvent("socket-a", "host-a", { type: "attached", ...key });
+      const rejected = yield* channel.receiveEvent("socket-b", "host-a", popup).pipe(Effect.flip);
+      expect(rejected.reason).toBe("host-unavailable");
+      yield* channel.receiveEvent("socket-a", "host-a", popup);
+      expect(yield* Queue.take(announcements)).toEqual({
+        ...key,
+        desktopHostId: "host-a",
+        popupId: "child-1",
+        url: popup.url,
+      });
+      const child = { threadId: key.threadId, tabId: "child-tab", desktopHostId: "host-a" };
+      yield* channel.bindPopup(child, { popupId: "child-1", openerTabId: key.tabId });
+      expect(yield* Queue.take(owner.commands)).toEqual({
+        type: "bindPopup",
+        threadId: key.threadId,
+        tabId: "child-tab",
+        popupId: "child-1",
+        openerTabId: key.tabId,
+      });
+      expect(yield* Queue.size(other.commands)).toBe(0);
+      yield* channel.receiveEvent("socket-a", "host-a", {
+        type: "attached",
+        threadId: key.threadId,
+        tabId: child.tabId,
+        presented: true,
+        supportsNativeSurface: true,
+      });
+      expect(channel.isPresented(child)).toBe(true);
+      yield* Fiber.interrupt(owner.fiber);
+      expect(channel.isPresented(child)).toBe(false);
+      expect(yield* channel.isAttached(child)).toBe(false);
+    }).pipe(Effect.scoped),
+  );
+
   it.effect.each([undefined, false])(
     "rejects missing native surface support (%s) immediately without dispatching or disconnecting",
     (supportsNativeSurface) =>

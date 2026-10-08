@@ -95,6 +95,15 @@ export class DesktopBrowserChannel extends Context.Service<
     /** Synchronous registry lookup so presentation and tab registration cannot interleave. */
     readonly isPresented: (key: DesktopTabKey) => boolean;
     readonly presentations: Stream.Stream<DesktopTabKey>;
+    readonly popups: Stream.Stream<
+      DesktopTabKey & { readonly popupId: string; readonly url: string }
+    >;
+    readonly closedPopups: Stream.Stream<DesktopTabKey & { readonly popupId: string }>;
+    readonly bindPopup: (
+      key: DesktopTabKey,
+      input: { readonly popupId: string; readonly openerTabId: string },
+    ) => Effect.Effect<void, DesktopBrowserTransportError>;
+    readonly closePopup: (key: DesktopTabKey, popupId: string) => Effect.Effect<void>;
     /** Keeps a native guest paintable until the matching lease is released. */
     readonly surface: (
       key: DesktopTabKey,
@@ -132,6 +141,15 @@ const make = Effect.gen(function* () {
     DesktopTabKey & { supportsNativeSurface: boolean; presented: boolean }
   >();
   const presentations = yield* PubSub.unbounded<DesktopTabKey>();
+  const popups = yield* PubSub.unbounded<
+    DesktopTabKey & { readonly popupId: string; readonly url: string }
+  >();
+  const closedPopups = yield* PubSub.unbounded<DesktopTabKey & { readonly popupId: string }>();
+  const popupAnnouncements = new Map<
+    string,
+    DesktopTabKey & { readonly popupId: string; readonly url: string }
+  >();
+  const popupIdOf = (key: DesktopTabKey, popupId: string) => JSON.stringify([keyOf(key), popupId]);
   const profileRequests = new Map<string, Deferred.Deferred<PreviewAutomationProfiles | null>>();
   /** CDP frames from the desktop, per tab, for the endpoint connected to it. */
   const inbound = new Map<string, Queue.Queue<string>>();
@@ -220,6 +238,16 @@ const make = Effect.gen(function* () {
       ).pipe(Effect.asVoid);
     }
     switch (event.type) {
+      case "popupCreated": {
+        // Only a live source attachment can introduce a native child window.
+        if (!attachedTabs.has(id)) return Effect.void;
+        const popup = { ...key, popupId: event.popupId, url: event.url };
+        popupAnnouncements.set(popupIdOf(key, event.popupId), popup);
+        return PubSub.publish(popups, popup).pipe(Effect.asVoid);
+      }
+      case "popupClosed":
+        popupAnnouncements.delete(popupIdOf(key, event.popupId));
+        return PubSub.publish(closedPopups, { ...key, popupId: event.popupId }).pipe(Effect.asVoid);
       case "presentation": {
         const tab = attachedTabs.get(id);
         if (!tab || tab.presented === event.presented) return Effect.void;
@@ -319,6 +347,8 @@ const make = Effect.gen(function* () {
 
   const releaseHost = (desktopHostId: string) =>
     Effect.gen(function* () {
+      for (const [id, popup] of popupAnnouncements)
+        if (popup.desktopHostId === desktopHostId) popupAnnouncements.delete(id);
       for (const key of [...attachedTabs.values()]) {
         if (key.desktopHostId === desktopHostId) {
           yield* handleEvent(desktopHostId, {
@@ -472,6 +502,30 @@ const make = Effect.gen(function* () {
           yield* Queue.offer(queue, { type: "announce" });
           return Stream.fromQueue(queue);
         }),
+      ),
+    popups: Stream.unwrap(
+      Effect.gen(function* () {
+        // Retain announcements received while browser services are starting.
+        // Subscribe first; duplicate snapshot/events are idempotent at adoption.
+        const subscription = yield* PubSub.subscribe(popups);
+        const existing = [...popupAnnouncements.values()];
+        return Stream.concat(Stream.fromIterable(existing), Stream.fromSubscription(subscription));
+      }),
+    ),
+    closedPopups: Stream.fromPubSub(closedPopups),
+    bindPopup: (key, input) =>
+      Effect.suspend(() =>
+        popupAnnouncements.has(popupIdOf({ ...key, tabId: input.openerTabId }, input.popupId))
+          ? command(
+              { type: "bindPopup", threadId: key.threadId, tabId: key.tabId, ...input },
+              key.desktopHostId,
+            )
+          : Effect.fail(new DesktopBrowserTransportError({ reason: "guest-unavailable" })),
+      ),
+    closePopup: (key, popupId) =>
+      command(
+        { type: "closePopup", threadId: key.threadId, tabId: key.tabId, popupId },
+        key.desktopHostId,
       ),
     receiveEvent: (owner, desktopHostId, event) =>
       Effect.suspend(() => {

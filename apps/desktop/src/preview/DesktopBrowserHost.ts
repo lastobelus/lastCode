@@ -26,6 +26,7 @@ import * as Clock from "effect/Clock";
 import * as NodePath from "node:path";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
+import * as NodeCrypto from "node:crypto";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -86,6 +87,7 @@ interface AttachedTab {
   readonly key: DesktopBrowserTabKey;
   readonly debuggee: DesktopBrowserTabDebugger;
   readonly runtimeTabId: string;
+  readonly popup: NativePopup | undefined;
   readonly surfaceLeases: Map<string, number | null>;
   readonly renderingLeases: Map<string, () => void>;
   relay: CdpRelayConnection | null;
@@ -101,6 +103,15 @@ interface AttachedTab {
     params: unknown,
     sessionId: string,
   ) => void;
+}
+
+interface NativePopup {
+  readonly id: string;
+  readonly source: DesktopBrowserTabKey;
+  readonly window: Electron.BrowserWindow;
+  readonly contents: Electron.WebContents;
+  readonly release: () => void;
+  boundKey: DesktopBrowserTabKey | undefined;
 }
 
 export class DesktopBrowserHost extends Context.Service<
@@ -127,6 +138,8 @@ export class DesktopBrowserHost extends Context.Service<
       debuggee: DesktopBrowserTabDebugger,
       runtimeTabId: string,
     ) => void;
+    /** Registers only the actual child window delivered by Electron's did-create-window. */
+    readonly registerPopup: (source: DesktopBrowserTabKey, window: Electron.BrowserWindow) => void;
     readonly surfaceResponse: (response: DesktopBrowserSurfaceResponse, senderId: number) => void;
     readonly setPresentation: (
       input: { readonly runtimeTabId: string; readonly presented: boolean },
@@ -212,6 +225,7 @@ export const make = Effect.gen(function* () {
     );
   };
   const tabs = new Map<string, AttachedTab>();
+  const popups = new Map<string, NativePopup>();
   const presentedSlots = new Map<string, number>();
   const emit = (event: DesktopBrowserEventType, desktopHostId = "local") =>
     runFork(PubSub.publish(outbox, { desktopHostId, event }));
@@ -235,10 +249,9 @@ export const make = Effect.gen(function* () {
       presentedSlots.get(runtimeTabId) === senderId) ||
     windowVisible(pictureInPictureWindows.get(runtimeTabId)?.window);
   const updatePresentation = (tab: AttachedTab) => {
-    const presented = nativePresented(
-      tab.runtimeTabId,
-      tab.debuggee.webContents.hostWebContents?.id,
-    );
+    const presented = tab.popup
+      ? windowVisible(tab.popup.window)
+      : nativePresented(tab.runtimeTabId, tab.debuggee.webContents.hostWebContents?.id);
     if (tab.presented === presented) return;
     tab.presented = presented;
     emit(
@@ -264,6 +277,11 @@ export const make = Effect.gen(function* () {
     Effect.sync(() => {
       releaseMainWindow?.();
       for (const entry of pictureInPictureWindows.values()) entry.release();
+      for (const popup of popups.values()) {
+        if (popup.boundKey) detach(popup.boundKey);
+        popup.release();
+      }
+      popups.clear();
     }),
   );
   const unthrottledContents = new Map<
@@ -306,10 +324,10 @@ export const make = Effect.gen(function* () {
   const acquireRendering = (tab: AttachedTab) => {
     const guest = tab.debuggee.webContents;
     const host = guest.hostWebContents;
-    if (!host || host.isDestroyed() || guest.isDestroyed()) return null;
+    if (guest.isDestroyed() || (!tab.popup && (!host || host.isDestroyed()))) return null;
     const releases: Array<() => void> = [];
     try {
-      for (const contents of new Set([host, guest]))
+      for (const contents of new Set(tab.popup ? [guest] : [host!, guest]))
         releases.push(acquireUnthrottledContents(contents));
       return () => {
         for (const release of releases.toReversed()) release();
@@ -336,6 +354,7 @@ export const make = Effect.gen(function* () {
     }
   >();
   const sendSurface = (tab: AttachedTab, request: DesktopBrowserSurfaceRequest) => {
+    if (tab.popup) return false;
     const host = tab.debuggee.webContents.hostWebContents;
     if (!host || host.isDestroyed()) return false;
     try {
@@ -534,6 +553,7 @@ export const make = Effect.gen(function* () {
     key: DesktopBrowserTabKey,
     debuggee: DesktopBrowserTabDebugger,
     runtimeTabId: string,
+    popup?: NativePopup,
   ) => {
     const id = keyOf(key);
     if (tabs.get(id)?.debuggee.webContents === debuggee.webContents) return;
@@ -542,10 +562,13 @@ export const make = Effect.gen(function* () {
       key,
       debuggee,
       runtimeTabId,
+      popup,
       surfaceLeases: new Map(),
       renderingLeases: new Map(),
       relay: null,
-      presented: nativePresented(runtimeTabId, debuggee.webContents.hostWebContents?.id),
+      presented: popup
+        ? windowVisible(popup.window)
+        : nativePresented(runtimeTabId, debuggee.webContents.hostWebContents?.id),
       downloadDirectory: null,
       pendingDownloadGuid: null,
       remoteDownloadDirectory: null,
@@ -594,6 +617,65 @@ export const make = Effect.gen(function* () {
     );
   };
 
+  const registerPopup = (source: DesktopBrowserTabKey, window: Electron.BrowserWindow) => {
+    if (!tabs.has(keyOf(source)) || window.isDestroyed()) return;
+    const contents = window.webContents;
+    if (contents.isDestroyed()) return;
+    if ([...popups.values()].some((popup) => popup.contents === contents)) return;
+    const debuggee = contents.debugger;
+    // Do not take over a debugger owned by DevTools or another controller.
+    if (debuggee.isAttached()) return;
+    try {
+      debuggee.attach("1.3");
+    } catch {
+      return;
+    }
+    const id = NodeCrypto.randomUUID();
+    const cleanup = () => {
+      if (popups.get(id) !== popup) return;
+      popups.delete(id);
+      emit(
+        { type: "popupClosed", threadId: source.threadId, tabId: source.tabId, popupId: id },
+        source.desktopHostId,
+      );
+      if (popup.boundKey) detach(popup.boundKey);
+      popup.release();
+    };
+    const changed = () => {
+      const tab = popup.boundKey ? tabs.get(keyOf(popup.boundKey)) : undefined;
+      if (tab) updatePresentation(tab);
+    };
+    const stopObserving = observeWindow(window, changed);
+    const popup: NativePopup = {
+      id,
+      source: { ...source },
+      window,
+      contents,
+      boundKey: undefined,
+      release: () => {
+        stopObserving();
+        window.off("closed", cleanup);
+        contents.off("destroyed", cleanup);
+        debuggee.off("detach", cleanup);
+        if (!contents.isDestroyed() && debuggee.isAttached()) debuggee.detach();
+      },
+    };
+    popups.set(id, popup);
+    window.on("closed", cleanup);
+    contents.on("destroyed", cleanup);
+    debuggee.on("detach", cleanup);
+    emit(
+      {
+        type: "popupCreated",
+        threadId: source.threadId,
+        tabId: source.tabId,
+        popupId: id,
+        url: contents.getURL(),
+      },
+      source.desktopHostId,
+    );
+  };
+
   const handleCommand = (command: DesktopBrowserCommand, desktopHostId = "local") =>
     Effect.suspend(() => {
       if (command.type === "resolveUrl") return Effect.void;
@@ -637,6 +719,39 @@ export const make = Effect.gen(function* () {
           Effect.asVoid,
         );
       }
+      if (command.type === "bindPopup" || command.type === "closePopup") {
+        const popup = popups.get(command.popupId);
+        const source = {
+          threadId: command.threadId,
+          tabId: command.type === "bindPopup" ? command.openerTabId : command.tabId,
+          desktopHostId,
+        };
+        if (
+          !popup ||
+          keyOf(popup.source) !== keyOf(source) ||
+          popup.window.isDestroyed() ||
+          popup.contents.isDestroyed() ||
+          !popup.contents.debugger.isAttached()
+        )
+          return Effect.void;
+        if (command.type === "closePopup") {
+          popup.window.close();
+          return Effect.void;
+        }
+        const key = { threadId: command.threadId, tabId: command.tabId, desktopHostId };
+        if (keyOf(key) === keyOf(source)) return Effect.void;
+        if (popup.boundKey && keyOf(popup.boundKey) !== keyOf(key)) return Effect.void;
+        const existing = tabs.get(keyOf(key));
+        if (existing && existing.popup !== popup) return Effect.void;
+        popup.boundKey = key;
+        attach(
+          key,
+          { webContents: popup.contents, debugger: popup.contents.debugger },
+          `popup:${popup.id}`,
+          popup,
+        );
+        return Effect.void;
+      }
       const tab = tabs.get(keyOf({ ...command, desktopHostId }));
       if (command.type === "surface") {
         if (!tab) {
@@ -679,6 +794,35 @@ export const make = Effect.gen(function* () {
             command.leaseId,
             command.timeoutMs === undefined ? null : now() + command.timeoutMs,
           );
+        }
+        if (tab.popup) {
+          let viewport: DesktopBrowserSurfaceResponse["viewport"] = null;
+          try {
+            const [width, height] = tab.popup.window.getContentSize();
+            if (
+              !tab.popup.window.isDestroyed() &&
+              width !== undefined &&
+              height !== undefined &&
+              width > 0 &&
+              height > 0
+            )
+              viewport = { width, height };
+          } catch {
+            // The popup can close between the command and sampling its bounds.
+          }
+          if (viewport === null) releaseSurfaceLease(tab, command.leaseId);
+          emit(
+            {
+              type: "surfaceReady",
+              threadId: command.threadId,
+              tabId: command.tabId,
+              requestId: command.requestId,
+              viewport,
+              ...(viewport === null ? { reason: "guest-unavailable" as const } : {}),
+            },
+            desktopHostId,
+          );
+          return Effect.void;
         }
         // Renderer request IDs belong to this process, avoiding collisions between backends.
         const requestId = `surface:${++nextSurfaceRequest}`;
@@ -730,24 +874,39 @@ export const make = Effect.gen(function* () {
   // Read when a backend starts, not when the host is built.
   const announceAll = (desktopHostId: string) =>
     Effect.suspend(() =>
-      Effect.forEach(
-        [...tabs.values()].filter((tab) => (tab.key.desktopHostId ?? "local") === desktopHostId),
-        (tab) => {
-          clearSurfaceLeases(tab);
-          tab.relay = null;
-          return PubSub.publish(outbox, {
+      Effect.gen(function* () {
+        yield* Effect.forEach(
+          [...tabs.values()].filter((tab) => (tab.key.desktopHostId ?? "local") === desktopHostId),
+          (tab) => {
+            clearSurfaceLeases(tab);
+            tab.relay = null;
+            return PubSub.publish(outbox, {
+              desktopHostId,
+              event: {
+                type: "attached",
+                threadId: tab.key.threadId,
+                tabId: tab.key.tabId,
+                supportsNativeSurface: true,
+                ...(tab.presented ? { presented: true } : {}),
+              },
+            });
+          },
+          { discard: true },
+        );
+        for (const popup of popups.values()) {
+          if ((popup.source.desktopHostId ?? "local") !== desktopHostId || popup.boundKey) continue;
+          yield* PubSub.publish(outbox, {
             desktopHostId,
             event: {
-              type: "attached",
-              threadId: tab.key.threadId,
-              tabId: tab.key.tabId,
-              supportsNativeSurface: true,
-              ...(tab.presented ? { presented: true } : {}),
+              type: "popupCreated",
+              threadId: popup.source.threadId,
+              tabId: popup.source.tabId,
+              popupId: popup.id,
+              url: popup.contents.getURL(),
             },
           });
-        },
-        { discard: true },
-      ),
+        }
+      }),
     );
 
   return DesktopBrowserHost.of({
@@ -773,9 +932,10 @@ export const make = Effect.gen(function* () {
       return Option.isSome(decoded) ? handleCommand(decoded.value) : Effect.void;
     },
     attach,
+    registerPopup,
     setPresentation: (input, senderId) => {
       const tab = [...tabs.values()].find((tab) => tab.runtimeTabId === input.runtimeTabId);
-      if (tab && tab.debuggee.webContents.hostWebContents?.id !== senderId) return;
+      if (tab && (tab.popup || tab.debuggee.webContents.hostWebContents?.id !== senderId)) return;
       // Registration and relay attachment are asynchronous. Retain the slot
       // state so an attach cannot lose a presentation reported before it.
       if (input.presented) presentedSlots.set(input.runtimeTabId, senderId);

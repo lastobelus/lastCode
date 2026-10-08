@@ -58,6 +58,8 @@ export class PreviewManager extends Context.Service<
     readonly open: (
       input: PreviewOpenInput & {
         readonly automationOwner?: string;
+        /** Trusted native creation, unavailable on public open inputs. */
+        readonly desktopPopup?: { readonly popupId: string };
         /** Runs before the `opened` event publishes, so subscribers find state keyed by the tab. */
         readonly beforePublish?: (snapshot: PreviewSessionSnapshot) => void;
       },
@@ -287,7 +289,15 @@ export const make = Effect.gen(function* PreviewManagerMake() {
         ...(desktopHostId === undefined ? {} : { desktopHostId }),
         ...(runtime === "server"
           ? {
-              backingPage: desktopHostId === undefined ? ("server" as const) : ("desktop" as const),
+              backingPage:
+                desktopHostId === undefined
+                  ? ("server" as const)
+                  : input.desktopPopup === undefined
+                    ? ("desktop" as const)
+                    : ("desktop-popup" as const),
+              ...(desktopHostId === undefined || input.desktopPopup === undefined
+                ? {}
+                : { desktopPopupId: input.desktopPopup.popupId }),
             }
           : {}),
         ...(runtime === "server" && input.automationOwner !== undefined

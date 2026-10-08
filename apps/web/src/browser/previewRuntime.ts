@@ -52,10 +52,17 @@ export function rendersServerTabNatively(
     | null
     | undefined,
 ): boolean {
+  // Older remote servers already pin native tabs to this desktop but do not
+  // report a backing page. Preserve only that explicit owner-matched route.
+  const legacyOwnedTab =
+    snapshot?.backingPage === undefined &&
+    snapshot?.desktopHostId !== undefined &&
+    snapshot.desktopHostId !== "local" &&
+    snapshot.desktopHostId === getDesktopBrowserHostId(environmentId);
   return (
     isElectron &&
     snapshot?.runtime === "server" &&
-    snapshot.backingPage === "desktop" &&
+    (snapshot.backingPage === "desktop" || legacyOwnedTab) &&
     (snapshot.desktopHostId === "local"
       ? primaryEnvironmentId !== null && environmentId === primaryEnvironmentId
       : snapshot.desktopHostId === getDesktopBrowserHostId(environmentId))

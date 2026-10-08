@@ -57,6 +57,14 @@ export const DESKTOP_BROWSER_DOWNLOAD_MAX_BYTES = 64 * 1024 * 1024;
 export const DESKTOP_BROWSER_DOWNLOAD_CHUNK_BYTES = 192 * 1024;
 
 export const DesktopBrowserEvent = Schema.Union([
+  /** An actual child window opened by this source tab, awaiting a server tab identity. */
+  Schema.Struct({
+    type: Schema.Literal("popupCreated"),
+    ...TabKey,
+    popupId: TrimmedNonEmptyString,
+    url: Schema.String,
+  }),
+  Schema.Struct({ type: Schema.Literal("popupClosed"), ...TabKey, popupId: TrimmedNonEmptyString }),
   Schema.Struct({ type: Schema.Literal("surfaceReady"), ...TabKey, ...SurfaceResponse }),
   Schema.Struct({
     type: Schema.Literal("resolvedUrl"),
@@ -94,6 +102,14 @@ export type DesktopBrowserEvent = typeof DesktopBrowserEvent.Type;
 
 /** Server -> desktop. */
 export const DesktopBrowserCommand = Schema.Union([
+  /** Bind the existing child window; never create another page for it. */
+  Schema.Struct({
+    type: Schema.Literal("bindPopup"),
+    ...TabKey,
+    openerTabId: TrimmedNonEmptyString,
+    popupId: TrimmedNonEmptyString,
+  }),
+  Schema.Struct({ type: Schema.Literal("closePopup"), ...TabKey, popupId: TrimmedNonEmptyString }),
   Schema.Struct(SurfaceRequest),
   Schema.Struct({
     type: Schema.Literal("resolveUrl"),
