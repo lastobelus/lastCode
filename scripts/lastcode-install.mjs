@@ -190,10 +190,11 @@ function run(command, args, options = {}) {
     stdio: options.inherit ? "inherit" : ["ignore", "pipe", "pipe"],
   });
   if (result.error) throw result.error;
-  if (result.status !== 0) {
+  if (result.status !== 0 && !options.allowedExitCodes?.includes(result.status)) {
     const detail = options.inherit ? "" : result.stderr.trim() || result.stdout.trim();
     throw new Error(detail || `${command} failed with exit code ${result.status}.`);
   }
+  if (options.rejectStderr && result.stderr.trim()) throw new Error(result.stderr.trim());
   if (options.inherit) return "";
   return (options.output === "stderr" ? result.stderr : result.stdout).trim();
 }
@@ -466,9 +467,61 @@ async function readHandoffCommand(stream = process.stdin) {
   throw new Error("Install handoff closed before COMMIT or CANCEL.");
 }
 
+// Check path references as well as open bundle files: a bundled server may run
+// without a GUI, and a desktop/helper can open resources after startup.
+export function appBundleIsInUse(targetPath, options = {}) {
+  const runCommand = options.runCommand ?? run;
+  const resolved = NodePath.resolve(targetPath);
+  const paths = [resolved];
+  if (NodeFS.existsSync(resolved)) paths.push(NodeFS.realpathSync(resolved));
+  const processes = runCommand("/bin/ps", ["-ww", "-axo", "pid=,command="], {
+    rejectStderr: true,
+    timeoutMs: 10_000,
+  });
+  if (!processes.trim()) throw new Error("Could not inspect running processes for bundle use.");
+  for (const line of processes.split("\n")) {
+    if (!/^\s*\d+\s+\S/u.test(line)) throw new Error("Invalid process inspection output.");
+    if (paths.some((path) => line.includes(`${path}/`) || line.trimEnd().endsWith(path))) {
+      return true;
+    }
+  }
+  if (!NodeFS.existsSync(resolved)) return false;
+  const files = runCommand("/usr/sbin/lsof", ["-nP", "-Fpn", "+D", resolved], {
+    allowedExitCodes: [1],
+    rejectStderr: true,
+    timeoutMs: 30_000,
+  });
+  if (files && !/^p\d+$/mu.test(files)) throw new Error("Invalid bundle file inspection output.");
+  return Boolean(files);
+}
+
+// Never stop a running app or server. A busy bundle stays installed until a
+// later attempt; the final inspection narrows (but cannot eliminate) launch races.
+export async function installDmgIfIdle(dmgPath, options = {}) {
+  const targetPath = options.targetPath ?? DEFAULT_APP_PATH;
+  if (appBundleIsInUse(targetPath, options)) {
+    return { status: "deferred", reason: "bundle-in-use" };
+  }
+  const prepared = await prepareDmgInstall(dmgPath, options);
+  try {
+    const replaced = await replacePreparedApp(prepared, {
+      ...options,
+      launch: false,
+      idleOnly: true,
+    });
+    if (!replaced) return { status: "deferred", reason: "bundle-in-use" };
+    return { status: "installed", version: prepared.version };
+  } finally {
+    cleanupPreparedInstall(prepared, options);
+  }
+}
+
 export async function prepareDmgInstall(dmgPath, options = {}) {
   // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone installed script has no Effect runtime.
-  if (process.platform !== "darwin") throw new Error("lastcode-install only supports macOS.");
+  if (process.platform !== "darwin" && options.allowNonDarwin !== true) {
+    throw new Error("lastcode-install only supports macOS.");
+  }
+  const runCommand = options.runCommand ?? run;
   const resolvedDmg = NodePath.resolve(dmgPath);
   if (!NodeFS.statSync(resolvedDmg, { throwIfNoEntry: false })?.isFile()) {
     throw new Error(`DMG not found: ${resolvedDmg}`);
@@ -502,10 +555,17 @@ export async function prepareDmgInstall(dmgPath, options = {}) {
       }
     }
     console.log(`Mounting ${NodePath.basename(resolvedDmg)}…`);
-    run("hdiutil", ["attach", "-nobrowse", "-readonly", "-mountpoint", mountPoint, resolvedDmg]);
+    runCommand("hdiutil", [
+      "attach",
+      "-nobrowse",
+      "-readonly",
+      "-mountpoint",
+      mountPoint,
+      resolvedDmg,
+    ]);
     prepared.attached = true;
     const sourceApp = NodePath.join(mountPoint, "LastCode.app");
-    const version = validateAppBundle(sourceApp);
+    const version = validateAppBundle(sourceApp, { ...options, runCommand });
     if (options.expectedVersion && version !== options.expectedVersion) {
       throw new Error(`Expected LastCode ${options.expectedVersion}, found ${version} in the DMG.`);
     }
@@ -514,24 +574,28 @@ export async function prepareDmgInstall(dmgPath, options = {}) {
     NodeFS.rmSync(staging, { force: true, recursive: true });
     NodeFS.rmSync(backup, { force: true, recursive: true });
     console.log(`Preparing LastCode ${version}…`);
-    run("ditto", [sourceApp, staging]);
-    const stagedVersion = validateAppBundle(staging);
+    runCommand("ditto", [sourceApp, staging]);
+    const stagedVersion = validateAppBundle(staging, { ...options, runCommand });
     if (stagedVersion !== version) {
       throw new Error(`Staged LastCode version changed from ${version} to ${stagedVersion}.`);
     }
-    run("hdiutil", ["detach", mountPoint]);
+    runCommand("hdiutil", ["detach", mountPoint]);
     prepared.attached = false;
     NodeFS.rmSync(mountPoint, { force: true, recursive: true });
     return prepared;
   } catch (error) {
-    if (prepared) cleanupPreparedInstall(prepared);
+    if (prepared) cleanupPreparedInstall(prepared, options);
     else releaseInstallLock();
     throw error;
   }
 }
 
 export async function replacePreparedApp(prepared, options = {}) {
-  const launch = options.launchApp ?? ((appPath) => launchApp(appPath, options));
+  const launch =
+    options.launch === false
+      ? undefined
+      : (options.launchApp ?? ((appPath) => launchApp(appPath, options)));
+  let replacementMoved = false;
   const needsPermissionReset =
     (prepared.targetPath === DEFAULT_APP_PATH || options.resetScreenRecordingPermission) &&
     shouldResetScreenRecordingPermission(prepared.targetPath, prepared.staging, options);
@@ -543,52 +607,62 @@ export async function replacePreparedApp(prepared, options = {}) {
   );
   const previousMarker =
     needsPermissionReset && NodeFS.existsSync(marker) ? NodeFS.readFileSync(marker) : null;
-  if (needsPermissionReset) {
-    NodeFS.mkdirSync(NodePath.dirname(marker), { recursive: true });
-    NodeFS.writeFileSync(marker, "pending\n", { mode: 0o600 });
-  }
+  // The caller can hold its eligibility lock through inspection, swap, and rollback.
+  const releaseEligibility = await options.beforeReplace?.(prepared);
   try {
-    if (NodeFS.existsSync(prepared.targetPath)) {
-      NodeFS.renameSync(prepared.targetPath, prepared.backup);
-      prepared.oldAppMoved = true;
-    }
-    NodeFS.renameSync(prepared.staging, prepared.targetPath);
-    await launch(prepared.targetPath);
-  } catch (error) {
+    if (options.idleOnly && appBundleIsInUse(prepared.targetPath, options)) return false;
     if (needsPermissionReset) {
-      if (previousMarker) NodeFS.writeFileSync(marker, previousMarker);
-      else NodeFS.rmSync(marker, { force: true });
+      NodeFS.mkdirSync(NodePath.dirname(marker), { recursive: true });
+      NodeFS.writeFileSync(marker, "pending\n", { mode: 0o600 });
     }
-    NodeFS.rmSync(prepared.targetPath, { force: true, recursive: true });
-    if (prepared.oldAppMoved) {
-      NodeFS.renameSync(prepared.backup, prepared.targetPath);
-      prepared.oldAppMoved = false;
+    try {
+      if (NodeFS.existsSync(prepared.targetPath)) {
+        NodeFS.renameSync(prepared.targetPath, prepared.backup);
+        prepared.oldAppMoved = true;
+      }
+      NodeFS.renameSync(prepared.staging, prepared.targetPath);
+      replacementMoved = true;
+      await launch?.(prepared.targetPath);
+    } catch (error) {
+      if (needsPermissionReset) {
+        if (previousMarker) NodeFS.writeFileSync(marker, previousMarker);
+        else NodeFS.rmSync(marker, { force: true });
+      }
+      if (replacementMoved) NodeFS.rmSync(prepared.targetPath, { force: true, recursive: true });
+      if (prepared.oldAppMoved) {
+        NodeFS.renameSync(prepared.backup, prepared.targetPath);
+        prepared.oldAppMoved = false;
+        try {
+          await launch?.(prepared.targetPath);
+        } catch (relaunchError) {
+          console.error(
+            `Warning: restored the previous LastCode app but could not relaunch it: ${relaunchError.message}`,
+          );
+        }
+      }
+      throw error;
+    }
+    if (needsPermissionReset) {
       try {
-        await launch(prepared.targetPath);
-      } catch (relaunchError) {
+        (options.resetScreenRecordingPermission ?? resetScreenRecordingPermission)();
+        console.log("LastCode Screen Recording permission was reset for the replacement app.");
+      } catch (error) {
         console.error(
-          `Warning: restored the previous LastCode app but could not relaunch it: ${relaunchError.message}`,
+          `Warning: could not reset LastCode Screen Recording permission: ${error.message}. Remove any existing LastCode entry in System Settings before adding this build.`,
         );
       }
+      NodeFS.writeFileSync(marker, "ready\n", { mode: 0o600 });
     }
-    throw error;
+    NodeFS.rmSync(prepared.backup, { force: true, recursive: true });
+    prepared.oldAppMoved = false;
+    return true;
+  } finally {
+    releaseEligibility?.();
   }
-  if (needsPermissionReset) {
-    try {
-      (options.resetScreenRecordingPermission ?? resetScreenRecordingPermission)();
-      console.log("LastCode Screen Recording permission was reset for the replacement app.");
-    } catch (error) {
-      console.error(
-        `Warning: could not reset LastCode Screen Recording permission: ${error.message}. Remove any existing LastCode entry in System Settings before adding this build.`,
-      );
-    }
-    NodeFS.writeFileSync(marker, "ready\n", { mode: 0o600 });
-  }
-  NodeFS.rmSync(prepared.backup, { force: true, recursive: true });
-  prepared.oldAppMoved = false;
 }
 
-export function cleanupPreparedInstall(prepared) {
+export function cleanupPreparedInstall(prepared, options = {}) {
+  const runCommand = options.runCommand ?? run;
   NodeFS.rmSync(prepared.staging, { force: true, recursive: true });
   if (
     prepared.oldAppMoved &&
@@ -600,7 +674,7 @@ export function cleanupPreparedInstall(prepared) {
   }
   if (prepared.attached) {
     try {
-      run("hdiutil", ["detach", prepared.mountPoint]);
+      runCommand("hdiutil", ["detach", prepared.mountPoint]);
     } catch (error) {
       console.error(`Warning: could not detach ${prepared.mountPoint}: ${error.message}`);
     }
