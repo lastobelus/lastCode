@@ -1996,7 +1996,7 @@ function renderFeedEntry(
                 accessibilityLabel={
                   incomingPreview.isIncoming ? "Copy original message" : "Copy message"
                 }
-                text={incomingPreview.isIncoming ? message.text : presentation.text}
+                text={presentation.text}
                 onCopy={
                   message.context
                     ? () =>
