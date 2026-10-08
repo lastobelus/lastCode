@@ -126,7 +126,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         backgroundPriority: false,
       });
       assert.deepEqual((yield* service.getSettings).lastcodeLocalCi, persisted.lastcodeLocalCi);
-    }).pipe(Effect.provide(makeServerSettingsLayer())),
+    }).pipe(Effect.provide(layerServerSettings())),
   );
 
   it.effect("migrates saved token delivery to paragraph buffering without resetting settings", () =>

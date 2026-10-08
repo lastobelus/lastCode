@@ -1,3 +1,5 @@
+import * as ThreadRecovery from "../../../orchestration-v2/ThreadRecoveryService.ts";
+import * as ThreadRecoveryRepair from "../../../orchestration-v2/ThreadRecoveryRepairService.ts";
 import {
   type CommandId,
   type RuntimeRequestId,
@@ -8,10 +10,12 @@ import {
   type OrchestrationV2Command,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Struct from "effect/Struct";
 import { modelSelectionCommandType } from "@t3tools/shared/model";
 
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import {
+  assertFullAccess,
   dispatchFailure,
   newCommandId,
   readCaller,
@@ -70,12 +74,62 @@ const readQuestion = Effect.fn("mcp.readQuestion")(function* (input: {
     });
   return { ...context, request, item };
 });
+
+/** Failed participants inspect, retry, and dismiss the original archive owner's attempt. */
+const readArchiveThread = Effect.fn("mcp.readArchiveThread")(function* (threadId?: ThreadId) {
+  const context = yield* readThread(threadId);
+  const thread = context.projection.thread;
+  const failedArchive =
+    thread.archivePending?.status === "failed" ? thread.archivePending : undefined;
+  const ownerContext =
+    failedArchive !== undefined && failedArchive.threadId !== thread.id
+      ? yield* readThread(failedArchive.threadId)
+      : context;
+  return { ...ownerContext, observedArchiveCommandId: failedArchive?.commandId };
+});
 /** A tool that changes `threadId`, or the caller's own thread when it is omitted. */
 const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A, E, R>(
   handle: (params: P) => Effect.Effect<A, E, R>,
 ) => McpToolAccess.writesThreads((params: P) => [params.threadId], handle);
 
 export const layer = McpToolAccess.toLayer(ThreadToolkit, {
+  t3_thread_recover: writesThread((input) =>
+    Effect.gen(function* () {
+      yield* readThread(input.threadId);
+      const service = yield* ThreadRecovery.ThreadRecoveryService;
+      yield* service
+        .recover(input)
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new OrchestratorMcpFailure({ code: "orchestration_error", message: cause.message }),
+          ),
+        );
+      return { ok: true as const };
+    }),
+  ),
+  t3_thread_repair: writesThread((input) =>
+    Effect.gen(function* () {
+      yield* readCaller().pipe(
+        Effect.tap((caller) =>
+          assertFullAccess(
+            caller,
+            "Starting a repair agent requires a live full-access/default thread or a full-access client.",
+          ),
+        ),
+      );
+      yield* readThread(input.threadId);
+      const service = yield* ThreadRecoveryRepair.ThreadRecoveryRepairService;
+      return yield* service
+        .launch(input)
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new OrchestratorMcpFailure({ code: "orchestration_error", message: cause.message }),
+          ),
+        );
+    }),
+  ),
   run_scheduled_task_now: McpToolAccess.writesEnvironment((input) =>
     Effect.gen(function* () {
       const scheduler = yield* ScheduledTasks.ScheduledTaskService;
@@ -154,6 +208,30 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         return { sequence: result.sequence, targetThreadId: input.targetThreadId };
       }),
   ),
+  t3_subagent_promote: writesThread((input) =>
+    dispatch(input.threadId, ({ commandId, threadId }) => ({
+      type: "subagent.promote.request",
+      commandId,
+      threadId,
+      targetThreadId: ThreadId.make(`${commandId}:interactive`),
+      createdBy: "agent",
+      creationSource: "mcp",
+    })),
+  ),
+  t3_subagent_promotion_cancel: writesThread((input) =>
+    dispatch(input.threadId, ({ commandId, threadId }) => ({
+      type: "subagent.promote.cancel",
+      commandId,
+      threadId,
+      requestId: input.requestId,
+    })),
+  ),
+  t3_subagent_promotion_status: McpToolAccess.reads((input) =>
+    Effect.gen(function* () {
+      const { projection } = yield* readThread(input.threadId);
+      return { promotion: projection.thread.subagentPromotion ?? null };
+    }),
+  ),
   t3_thread_transfers: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const { projection } = yield* readThread(input.threadId, ["contextTransfers"]);
@@ -167,6 +245,15 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
           }),
         ),
       };
+    }),
+  ),
+  t3_thread_archive_family: McpToolAccess.reads((input) =>
+    Effect.gen(function* () {
+      const { threads, projection } = yield* readArchiveThread(input.threadId);
+      const family = yield* threads
+        .getThreadArchiveFamily(projection.thread.id)
+        .pipe(Effect.mapError(unavailable));
+      return Struct.omit(family, ["threads"]);
     }),
   ),
   t3_thread_configuration: McpToolAccess.reads((input) =>
@@ -292,10 +379,38 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
   ),
   t3_thread_organize: writesThread((input) =>
     Effect.gen(function* () {
-      const { threads, projection } = yield* readThread(input.threadId);
+      const { threads, projection, observedArchiveCommandId } = yield* input.action === "archive" ||
+      (input.action === "unarchive" && input.expectedArchiveCommandId !== undefined)
+        ? readArchiveThread(input.threadId)
+        : readThread(input.threadId).pipe(
+            Effect.map((context) => ({ ...context, observedArchiveCommandId: undefined })),
+          );
+      const expectedArchiveCommandId = input.expectedArchiveCommandId ?? observedArchiveCommandId;
       const common = { commandId: yield* newCommandId(), threadId: projection.thread.id };
       let command: OrchestrationV2Command;
       switch (input.action) {
+        case "archive":
+          command = {
+            ...common,
+            type: "thread.archive",
+            ...(input.childDisposition === undefined
+              ? {}
+              : { childDisposition: input.childDisposition }),
+            ...(input.expectedChildThreadIds === undefined
+              ? {}
+              : { expectedChildThreadIds: input.expectedChildThreadIds }),
+            ...(expectedArchiveCommandId === undefined ? {} : { expectedArchiveCommandId }),
+          };
+          break;
+        case "unarchive":
+          command = {
+            ...common,
+            type: "thread.unarchive",
+            ...(input.expectedArchiveCommandId === undefined
+              ? {}
+              : { expectedArchiveCommandId: input.expectedArchiveCommandId }),
+          };
+          break;
         case "snooze":
           if (input.snoozedUntil === undefined) {
             return yield* new OrchestratorMcpFailure({

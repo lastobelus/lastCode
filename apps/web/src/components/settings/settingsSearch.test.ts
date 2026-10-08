@@ -45,6 +45,23 @@ const ITEMS: ReadonlyArray<SettingsSearchItem> = [
 ];
 
 describe("searchSettings", () => {
+  it.each(["incoming messages", "neutral fill", "outline"])(
+    "finds incoming message appearance for %s",
+    (query) => {
+      expect(searchSettings(query).map((item) => item.id)).toContain("incoming-message-style");
+    },
+  );
+
+  it("keeps the fill color search destination available when its row is hidden", () => {
+    expect(searchSettings("message color")).toContainEqual(
+      expect.objectContaining({
+        id: "incoming-message-fill-color",
+        to: "/settings/lastcode",
+        targetId: "incoming-message-style",
+      }),
+    );
+  });
+
   it.each(["quick ci mode", "github only", "always local"])(
     "finds the environment Quick CI mode for %s",
     (query) => {
@@ -571,6 +588,13 @@ describe("settings sidebar scope", () => {
   it("routes legacy sidebar scaling to LastCode settings", () => {
     expect(searchSettings("scale legacy sidebar")[0]).toMatchObject({
       id: "scale-legacy-sidebar",
+      to: "/settings/lastcode",
+    });
+  });
+
+  it("routes scrollbar sizing to LastCode settings", () => {
+    expect(searchSettings("scrollbar margin")[0]).toMatchObject({
+      id: "larger-scrollbars",
       to: "/settings/lastcode",
     });
   });

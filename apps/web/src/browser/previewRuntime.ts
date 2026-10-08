@@ -1,3 +1,5 @@
+import { appAtomRegistry } from "~/rpc/atomRegistry";
+import { getDesktopBrowserHostId } from "./desktopBrowserTransport";
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId, PreviewRuntime, PreviewSessionSnapshot } from "@t3tools/contracts";
 
@@ -8,6 +10,14 @@ import {
   readEnvironmentSupportsServerBrowser,
   useEnvironmentSupportsServerBrowser,
 } from "~/state/entities";
+
+/** Pin native profile opens to this desktop's host for the environment. */
+export function desktopBrowserHostFor(environmentId: EnvironmentId): string | undefined {
+  if (!isElectron) return undefined;
+  return appAtomRegistry.get(primaryEnvironmentIdAtom) === environmentId
+    ? "local"
+    : getDesktopBrowserHostId(environmentId);
+}
 
 export function previewRuntimeFor(environmentId: EnvironmentId): PreviewRuntime | undefined {
   return readEnvironmentSupportsServerBrowser(environmentId) ? "server" : undefined;
@@ -31,19 +41,20 @@ export function usePreviewAvailable(environmentId: EnvironmentId | null): boolea
 export function rendersServerTabNatively(
   environmentId: EnvironmentId,
   primaryEnvironmentId: EnvironmentId | null,
-  snapshot: Pick<PreviewSessionSnapshot, "runtime"> | null | undefined,
+  snapshot: Pick<PreviewSessionSnapshot, "runtime" | "desktopHostId"> | null | undefined,
 ): boolean {
   return (
     isElectron &&
     snapshot?.runtime === "server" &&
-    primaryEnvironmentId !== null &&
-    environmentId === primaryEnvironmentId
+    (snapshot.desktopHostId && snapshot.desktopHostId !== "local"
+      ? snapshot.desktopHostId === getDesktopBrowserHostId(environmentId)
+      : primaryEnvironmentId !== null && environmentId === primaryEnvironmentId)
   );
 }
 
 export function useRendersServerTabNatively(
   environmentId: EnvironmentId,
-  snapshot: Pick<PreviewSessionSnapshot, "runtime"> | null | undefined,
+  snapshot: Pick<PreviewSessionSnapshot, "runtime" | "desktopHostId"> | null | undefined,
 ): boolean {
   return rendersServerTabNatively(environmentId, useAtomValue(primaryEnvironmentIdAtom), snapshot);
 }

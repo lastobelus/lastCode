@@ -82,6 +82,7 @@ import {
   DispatchModeLimit,
   type DispatchModeRefusal,
 } from "../orchestration-v2/DispatchModeLimit.ts";
+import { DelegatedTaskCancellation } from "../orchestration-v2/DelegatedTaskCancellation.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import { isSnoozed } from "../orchestration-v2/ThreadSettlementService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
@@ -705,6 +706,14 @@ function threadDetail(
     runtimeMode: projection.thread.runtimeMode,
     interactionMode: projection.thread.interactionMode,
     linkedPullRequest: projection.thread.linkedPullRequest ?? null,
+    ...(projection.thread.recovery === undefined
+      ? {}
+      : {
+          recovery: {
+            ...projection.thread.recovery,
+            updatedAt: DateTime.formatIso(projection.thread.recovery.updatedAt),
+          },
+        }),
     titleRegeneration:
       projection.thread.titleRegeneration === undefined ||
       projection.thread.titleRegeneration === null
@@ -1971,14 +1980,30 @@ const make = Effect.gen(function* () {
         const current = yield* readTask(scope, input.taskId);
         const key = yield* requestKey(input.clientRequestId);
         const parentProjection = yield* loadProjection(scope.thread.threadId);
+        const parentTask = parentProjection.subagents.find(
+          (task) => task.id === input.taskId && task.origin === "app_owned",
+        );
+        const releasedTaskFailure = () =>
+          failure(
+            "task_not_cancellable",
+            "This task's child is now independent. Stop it from its own thread.",
+          );
+        if (parentTask?.ownershipReleased === true) return yield* releasedTaskFailure();
         // Cancelling stops the child and every task under it, each a write to a
         // thread its user may have raised above the parent's modes since it was
         // delegated. All of them are checked before anything is stopped.
-        const assertStoppable = (threadId: ThreadId): Effect.Effect<void, OrchestratorMcpFailure> =>
+        const assertStoppable = (
+          threadId: ThreadId,
+          isRoot = false,
+        ): Effect.Effect<void, OrchestratorMcpFailure> =>
           Effect.gen(function* () {
             const shell = yield* threadManagement
               .getThreadShell(threadId)
               .pipe(Effect.mapError(threadManagementFailure));
+            if (shell?.lineage.independent === true) {
+              if (isRoot) return yield* releasedTaskFailure();
+              return;
+            }
             // A deleted thread takes no stop, but the tasks under it still do.
             if (shell !== null && shell.deletedAt === null) {
               yield* resolveRuntimeMode(parentProjection.thread.runtimeMode, shell.runtimeMode);
@@ -1991,15 +2016,16 @@ const make = Effect.gen(function* () {
               .getThreadRecords(threadId, ["subagents"])
               .pipe(Effect.mapError(threadManagementFailure));
             for (const task of subagents) {
-              if (task.origin === "app_owned" && task.childThreadId !== null) {
+              if (
+                task.origin === "app_owned" &&
+                task.childThreadId !== null &&
+                task.ownershipReleased !== true
+              ) {
                 yield* assertStoppable(task.childThreadId);
               }
             }
           });
-        yield* assertStoppable(current.childThreadId);
-        const parentTask = parentProjection.subagents.find(
-          (task) => task.id === input.taskId && task.origin === "app_owned",
-        );
+        yield* assertStoppable(current.childThreadId, true);
         const disposeCompletionDelivery =
           parentTask?.completionDelivery?.state === "disposed"
             ? Effect.void
@@ -2060,6 +2086,13 @@ const make = Effect.gen(function* () {
         // caught again under that thread's lock, which leaves it running.
         const refused = yield* Ref.make<DispatchModeRefusal | undefined>(undefined);
         const stopWithinLimit = stopChild.pipe(
+          Effect.provideService(DelegatedTaskCancellation, [
+            {
+              parentThreadId: scope.thread.threadId,
+              taskId: input.taskId,
+              childThreadId: current.childThreadId,
+            },
+          ]),
           Effect.provideService(DispatchModeLimit, {
             runtimeMode: parentProjection.thread.runtimeMode,
             interactionMode: parentProjection.thread.interactionMode,

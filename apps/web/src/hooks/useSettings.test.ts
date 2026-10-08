@@ -46,6 +46,45 @@ describe("client settings hydration", () => {
   const onboardingCompletedAt = "2026-09-05T12:00:00.000Z";
   const complete = (current: ClientSettings) => ({ ...current, onboardingCompletedAt });
 
+  it("saves message appearance through hydration and reload without losing sibling preferences", async () => {
+    const savedAppearance = {
+      ...savedSettings,
+      incomingMessageStyle: "outline" as const,
+      incomingMessageFillColor: "#223344",
+    };
+    let finishRead!: (settings: ClientSettings) => void;
+    persistenceMocks.getClientSettings.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishRead = resolve;
+        }),
+    );
+
+    const hydration = ensureClientSettingsHydrated();
+    const styleChange = updateClientSettings({ incomingMessageStyle: "neutral" });
+    finishRead(savedAppearance);
+    await Promise.all([hydration, styleChange]);
+    await updateClientSettings({ incomingMessageFillColor: "#445566" });
+
+    const expected = {
+      ...savedAppearance,
+      incomingMessageStyle: "neutral" as const,
+      incomingMessageFillColor: "#445566",
+    };
+    expect(persistenceMocks.setClientSettings).toHaveBeenLastCalledWith(expected);
+
+    __resetClientSettingsPersistenceForTests();
+    persistenceMocks.getClientSettings.mockResolvedValue(expected);
+    await ensureClientSettingsHydrated();
+    expect(getClientSettings()).toEqual(expected);
+
+    await updateClientSettings({ incomingMessageFillColor: null });
+    expect(persistenceMocks.setClientSettings).toHaveBeenLastCalledWith({
+      ...expected,
+      incomingMessageFillColor: null,
+    });
+  });
+
   it("rejects completion after a failed read and preserves saved preferences on retry", async () => {
     const failure = new Error("storage unavailable");
     vi.spyOn(console, "error").mockImplementation(() => undefined);

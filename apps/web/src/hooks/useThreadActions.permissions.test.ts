@@ -10,6 +10,7 @@ import {
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { makeThreadFixture } from "../test-fixtures";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -66,31 +67,63 @@ vi.mock("../state/use-atom-command", () => ({
     },
 }));
 vi.mock("../state/use-atom-query-runner", () => ({
-  useAtomQueryRunner: () => async (environmentId: string) =>
-    state.sessionLookupFails
-      ? AsyncResult.failure(Cause.fail(new Error("Session lookup failed")))
-      : AsyncResult.success({
-          authenticated: true,
-          scopes: [...(state.scopes.get(environmentId) ?? [])],
-          auth: { serverUpdateScope: "environment:maintain" },
-        }),
+  useAtomQueryRunner: (family: unknown) =>
+    family === "archive-family"
+      ? async ({
+          environmentId,
+          input,
+        }: {
+          environmentId: EnvironmentId;
+          input: { threadId: ThreadId };
+        }) =>
+          AsyncResult.success({
+            childThreadIds: [],
+            promotableChildThreadIds: [],
+            keptThreadIds: [],
+            activeChildThreadIds: [],
+            protectedChildThreadIds: [],
+            nativeStopCount: 0,
+            requiresConfirmation: false,
+            canPromote: false,
+            canStopAndArchive: true,
+            children: [],
+            activeChildren: [],
+            promotableChildren: [],
+            protectedChildren: [],
+            threads: state.threads
+              .filter(
+                (thread) => thread.environmentId === environmentId && thread.id === input.threadId,
+              )
+              .map((thread) => makeThreadFixture({ ...thread, runtime: null })),
+          })
+      : async (environmentId: string) =>
+          state.sessionLookupFails
+            ? AsyncResult.failure(Cause.fail(new Error("Session lookup failed")))
+            : AsyncResult.success({
+                authenticated: true,
+                scopes: [...(state.scopes.get(environmentId) ?? [])],
+                auth: { serverUpdateScope: "environment:maintain" },
+              }),
 }));
 vi.mock("../state/threads", () => ({
-  threadEnvironment: Object.fromEntries(
-    [
-      "archive",
-      "unarchive",
-      "delete",
-      "settle",
-      "unsettle",
-      "pin",
-      "unpin",
-      "reorderPin",
-      "snooze",
-      "unsnooze",
-      "stopSession",
-    ].map((action) => [action, action]),
-  ),
+  threadEnvironment: {
+    archiveFamilyAtom: "archive-family",
+    ...Object.fromEntries(
+      [
+        "archive",
+        "unarchive",
+        "delete",
+        "settle",
+        "unsettle",
+        "pin",
+        "unpin",
+        "reorderPin",
+        "snooze",
+        "unsnooze",
+        "stopSession",
+      ].map((action) => [action, action]),
+    ),
+  },
 }));
 vi.mock("../state/vcs", () => ({
   vcsEnvironment: { removeWorktree: "removeWorktree", refreshStatus: "refreshStatus" },
@@ -99,6 +132,7 @@ vi.mock("../state/entities", () => ({
   readEnvironmentSupportsPinning: () => true,
   readEnvironmentSupportsPinReorder: () => true,
   readEnvironmentSupportsSettlement: () => true,
+  readEnvironmentSupportsArchiveFamilies: () => true,
   readEnvironmentSupportsSnooze: () => true,
   readEnvironmentSupportsWorktreeCleanup: () => false,
   readThreadShell: (ref: ScopedThreadRef) =>

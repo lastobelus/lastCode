@@ -143,9 +143,9 @@ environments. Policies are off by default and run on the server at startup, when
 hourly. Offline machines keep their existing policies.
 
 Select a project to set **Automatic worktree cleanup** to **Inherit**, **Off**, or **Custom**.
-Inherit follows each machine's rules; Off keeps that project's worktrees until you remove them
-manually. Custom applies separate worktree rules to the selected project or checkout. Browser
-captures and log retention remain machine-wide.
+Inherit follows each machine's rules; Off disables automatic worktree deletion and dependency
+removal for that project. Custom applies separate worktree rules to the selected project or checkout.
+Browser captures and log retention remain machine-wide.
 
 Worktrees can be removed after a chosen number of inactive days, after merging, or when they
 have no commits beyond the default branch. Only T3-managed worktrees are eligible. Active
@@ -159,6 +159,15 @@ Enable **Delete worktrees with deleted threads** to remove safe worktrees after 
 thread is deleted, including archived threads and worktrees left by earlier deletions. The
 server waits for sessions and terminals to stop and retries skipped worktrees after restart.
 Existing prompts for deleting a worktree manually remain available when this policy is off.
+
+Enable **Remove inactive worktree dependencies** to reclaim recognized npm or pnpm
+`node_modules` installations after a chosen number of inactive days, while keeping the
+worktree and its source, notes, and research files. Active agents, sessions, terminals, and
+previews prevent cleanup. Other generated folders and vendored sources are kept. Reinstall
+the project's dependencies before continuing work. This rule is off by default and follows
+the project's Inherit, Off, or Custom policy. Dependency cleanup is available on macOS and
+Linux and skips a worktree when process activity cannot be checked reliably. On mobile, open
+**Settings → Maintenance** to configure dependency cleanup for an environment or a selected project.
 
 Browser captures and rotated logs have separate retention periods. Expired capture links stop
 working. Current logs, message attachments, and browser profiles are kept.
@@ -211,7 +220,6 @@ output line.
 
 To delegate the workflow design and one-time setup, see
 [use an agent to add resumable Project Actions](./resumable-project-actions-for-agents.md).
-
 
 ## Keep the default branch current
 

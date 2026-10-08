@@ -1,3 +1,6 @@
+import { ThreadRecoveryInput, ThreadRecoveryResult, ThreadRepairResult } from "@t3tools/contracts";
+import * as ThreadRecovery from "../../../orchestration-v2/ThreadRecoveryService.ts";
+import * as ThreadRecoveryRepair from "../../../orchestration-v2/ThreadRecoveryRepairService.ts";
 import {
   ScheduledTaskId,
   ScheduledTask,
@@ -5,6 +8,8 @@ import {
   OrchestrationSearchThreadsResult,
   OrchestrationV2ThreadForkSourcePoint,
   OrchestrationV2ContextTransfer,
+  OrchestrationV2SubagentPromotion,
+  CommandId,
   TrimmedNonEmptyString,
   ModelSelection,
   RuntimeMode,
@@ -12,8 +17,10 @@ import {
   RuntimeRequestId,
   ProviderUserInputAnswers,
   IsoDateTime,
+  ThreadArchiveChildDisposition,
   OrchestratorMcpFailure,
   OrchestrationV2DispatchCommandResult,
+  OrchestrationV2ThreadArchiveFamily,
   ThreadId,
   RunId,
   NonNegativeInt,
@@ -21,6 +28,7 @@ import {
 } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Schema from "effect/Schema";
+import * as Struct from "effect/Struct";
 import { Tool, Toolkit } from "effect/ai";
 
 import * as ThreadSearch from "../../../orchestration-v2/ThreadSearch.ts";
@@ -30,7 +38,7 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
 const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
   description:
-    "Pin, snooze, settle, archive, or mark a thread unread. Omit threadId for this thread. snooze requires snoozedUntil. Existing thread lifecycle rules apply; this does not schedule a future action.",
+    "Pin, snooze, settle, archive, restore, or mark a thread unread. Omit threadId for this thread. snooze requires snoozedUntil. Before archiving, use t3_thread_archive_family to inspect the owned descendants and available choices. Archiving a thread with subagents requires an explicit childDisposition and its returned childThreadIds as expectedChildThreadIds. archive_if_idle refuses if the family has work needing attention; stop_and_archive confirms stopping the family; promote keeps app-owned branches separately and stops native subagents remaining with the archived owner. archive with expectedArchiveCommandId retries only that exact failed attempt. unarchive restores an archived thread; with expectedArchiveCommandId it instead dismisses that exact failed archive on an active family, without stopping or restarting work. Failed participants resolve to the original owner and archive retries retain the observed failed attempt. This does not schedule a future action.",
   parameters: Schema.Struct({
     threadId: Schema.optional(ThreadId),
     action: Schema.Literals([
@@ -45,6 +53,9 @@ const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
       "mark_unread",
     ]),
     snoozedUntil: Schema.optional(IsoDateTime),
+    childDisposition: Schema.optional(ThreadArchiveChildDisposition),
+    expectedChildThreadIds: Schema.optional(Schema.Array(ThreadId)),
+    expectedArchiveCommandId: Schema.optional(CommandId),
   }),
   success: OrchestrationV2DispatchCommandResult,
   failure: OrchestratorMcpFailure,
@@ -171,6 +182,16 @@ const PendingRequestRespondTool = Tool.make("t3_pending_request_respond", {
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, true);
 
+const ThreadArchiveFamilyTool = Tool.make("t3_thread_archive_family", {
+  ...commandTool,
+  description:
+    "Read a thread's recursive owned archive family IDs and available Stop/Keep choices without changing anything. Omit threadId for this thread. Includes nested and provider-native subagents; excludes forks and independently retained branches. Use t3_thread_read for individual thread details. To archive with t3_thread_organize, choose childDisposition and pass the returned childThreadIds as expectedChildThreadIds. The server rechecks them on submission; if the family changes, inspect it again before choosing.",
+  parameters: Schema.Struct({ threadId: Schema.optional(ThreadId) }),
+  success: OrchestrationV2ThreadArchiveFamily.mapFields(Struct.omit(["threads"])),
+})
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false);
+
 const ThreadConfigurationTool = Tool.make("t3_thread_configuration", {
   ...commandTool,
   description:
@@ -218,6 +239,27 @@ const ThreadMergeBackTool = Tool.make("t3_thread_merge_back", {
   }),
   success: transferResult,
 }).annotate(Tool.Destructive, true);
+const SubagentPromoteTool = Tool.make("t3_subagent_promote", {
+  ...commandTool,
+  description:
+    "Request an interactive native fork of a provider-owned subagent by threadId in this environment. A running subagent is allowed to finish first. Repeated requests reuse the existing promotion; a failed request retries it. Acceptance is not completion: use t3_subagent_promotion_status to read the destination and progress. The original subagent remains read-only, and its parent receives a handoff after the native fork succeeds.",
+  parameters: Schema.Struct({ threadId: ThreadId }),
+}).annotate(Tool.Destructive, true);
+const SubagentPromotionCancelTool = Tool.make("t3_subagent_promotion_cancel", {
+  ...commandTool,
+  description:
+    "Cancel a subagent promotion while it is waiting for the subagent to finish. Pass the requestId from t3_subagent_promotion_status. This does not stop the subagent; a native fork already in progress cannot be cancelled.",
+  parameters: Schema.Struct({ threadId: ThreadId, requestId: CommandId }),
+}).annotate(Tool.Destructive, true);
+const SubagentPromotionStatusTool = Tool.make("t3_subagent_promotion_status", {
+  ...commandTool,
+  description:
+    "Read durable subagent promotion progress for threadId in this environment. Null means no promotion was requested. The destination is usable only when status is promoted; use t3_thread_send on that interactive thread for further work.",
+  parameters: Schema.Struct({ threadId: ThreadId }),
+  success: Schema.Struct({ promotion: Schema.NullOr(OrchestrationV2SubagentPromotion) }),
+})
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false);
 const ThreadTransfersTool = Tool.make("t3_thread_transfers", {
   ...commandTool,
   description: "Read context transfer status for a thread. Omit threadId for this thread.",
@@ -267,12 +309,36 @@ const ScheduledTaskRunTool = Tool.make("run_scheduled_task_now", {
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, true);
 
+const ThreadRecoverTool = Tool.make("t3_thread_recover", {
+  ...commandTool,
+  description:
+    "Check and reconcile a detected stale run using bounded deterministic recovery. Requires exact incident IDs from t3_thread_read. Does not restart completed work or launch an agent.",
+  parameters: ThreadRecoveryInput,
+  success: ThreadRecoveryResult,
+  dependencies: [...commandTool.dependencies, ThreadRecovery.ThreadRecoveryService],
+}).annotate(Tool.Destructive, true);
+const ThreadRepairTool = Tool.make("t3_thread_repair", {
+  ...commandTool,
+  description:
+    "Only after explicit user authorization: open an ordinary repair-agent thread for an incident whose deterministic recovery failed. Uses project default provider/model. Repeated calls return the same repair thread; never use automatically.",
+  parameters: ThreadRecoveryInput,
+  success: ThreadRepairResult,
+  dependencies: [...commandTool.dependencies, ThreadRecoveryRepair.ThreadRecoveryRepairService],
+})
+  .annotate(Tool.Destructive, true)
+  .annotate(Tool.OpenWorld, true);
 export const ThreadToolkit = Toolkit.make(
+  ThreadRecoverTool,
+  ThreadRepairTool,
   ScheduledTaskRunTool,
   ThreadSearchTool,
   ThreadForkTool,
+  SubagentPromoteTool,
+  SubagentPromotionCancelTool,
+  SubagentPromotionStatusTool,
   ThreadMergeBackTool,
   ThreadTransfersTool,
+  ThreadArchiveFamilyTool,
   ThreadConfigurationTool,
   ThreadConfigureTool,
   PendingRequestListTool,

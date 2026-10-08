@@ -1,5 +1,6 @@
 import {
   AuthOrchestrationReadScope,
+  AuthOrchestrationOperateScope,
   EnvironmentHttpApi,
   ThreadId,
   TurnItemId,
@@ -31,8 +32,11 @@ import {
 } from "./threadHistoryPaging.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ProjectStore from "./ProjectStore.ts";
+import * as ThreadMessageIntake from "./ThreadMessageIntake.ts";
+import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
 import { buildActiveShellSnapshot } from "./ShellStream.ts";
 import { projectThreadProjectionForWire } from "./WireProjection.ts";
+import * as ThreadWait from "../threadTools/ThreadWait.ts";
 
 function isThreadNotFound(error: unknown): boolean {
   return (
@@ -73,6 +77,12 @@ export const layer = HttpApiBuilder.group(
     const applicationEvents = yield* OrchestrationEventStore.OrchestrationEventStore;
     const projectStore = yield* ProjectStore.ProjectStoreV2;
     const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
+    const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
+    const threadWait = yield* ThreadWait.ThreadWait;
+    const intakeContext =
+      yield* Effect.context<
+        Effect.Services<ReturnType<typeof ThreadMessageIntake.dispatchCommand>>
+      >();
 
     const enrichProjectShells = Effect.fn("http.orchestration.enrichProjectShells")(
       (projects: ReadonlyArray<OrchestrationProjectShell>) =>
@@ -169,6 +179,42 @@ export const layer = HttpApiBuilder.group(
     );
 
     return handlers
+      .handle(
+        "dispatch",
+        Effect.fn("environment.orchestration.dispatch")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          yield* requireEnvironmentScope(AuthOrchestrationOperateScope);
+          const result = yield* startup
+            .enqueueCommand(
+              ThreadMessageIntake.dispatchCommand(
+                ThreadManagementService.withCreationProvenance(args.payload, {
+                  createdBy: "user",
+                  creationSource:
+                    "creationSource" in args.payload ? args.payload.creationSource : "server",
+                }),
+              ).pipe(Effect.provide(intakeContext)),
+            )
+            .pipe(Effect.catch((cause) => failEnvironmentInternal("internal_error", cause)));
+          return { sequence: result.sequence };
+        }),
+      )
+      .handle(
+        "waitThread",
+        Effect.fn("environment.orchestration.waitThread")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          yield* requireEnvironmentScope(AuthOrchestrationReadScope);
+          return yield* threadWait.wait(args.payload.waitHandle, args.payload.timeoutMs).pipe(
+            Effect.catchTags({
+              ThreadWaitEnvironmentMismatchError: () =>
+                failEnvironmentInvalidRequest("wrong_environment"),
+              ThreadWaitThreadNotFoundError: () => failEnvironmentNotFound("thread_not_found"),
+              ThreadWaitCorrelationNotFoundError: () =>
+                failEnvironmentNotFound("correlation_not_found"),
+              ThreadWaitInternalError: (cause) => failEnvironmentInternal("internal_error", cause),
+            }),
+          );
+        }),
+      )
       .handle(
         "shellSnapshot",
         Effect.fn("environment.orchestration.shellSnapshot")(function* (args) {

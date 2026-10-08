@@ -1,3 +1,5 @@
+import { configuredPreviewEnvironmentUrl } from "@t3tools/client-runtime/preview-hosting";
+import { environmentCatalog } from "../connection/catalog";
 import { useAtomValue } from "@effect/atom-react";
 import { createEnvironmentSessionAtoms } from "@t3tools/client-runtime/state/session";
 import {
@@ -100,4 +102,14 @@ export function useEnvironmentSessionState(environmentId: EnvironmentId) {
     hasError: result._tag === "Failure",
     isPending: result.waiting,
   };
+}
+
+export function readConfiguredPreviewEnvironmentUrl(environmentId: EnvironmentId) {
+  const connection = readPreparedConnection(environmentId);
+  return connection === null
+    ? null
+    : configuredPreviewEnvironmentUrl(
+        connection,
+        appAtomRegistry.get(environmentCatalog.catalogValueAtom).entries.get(environmentId),
+      );
 }

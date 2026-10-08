@@ -6,15 +6,22 @@ import type {
   OrchestrationV2StoredEvent,
   OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
-import { ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import {
+  OrchestrationV2ShellStreamItem as ShellItemSchema,
+  ProjectId,
+  ProviderInstanceId,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
 import {
   archivedShellStreamItemFromThreadShell,
+  attachRelatedThreadShellItems,
   buildActiveShellSnapshot,
   coalesceShellApplicationEvents,
   coalesceStoredThreadEvents,
@@ -25,7 +32,16 @@ import {
   shellStreamItemsFromInitialSnapshot,
   shellStreamItemsFromResumeSnapshot,
   skipUnchangedThreadShells,
+  toShellApplicationEvent,
 } from "./ShellStream.ts";
+import { applyShellStreamEvent } from "../../../../packages/client-runtime/src/state/shellReducer.ts";
+import {
+  v2ShellSnapshot,
+  v2ThreadShell,
+} from "../../../../packages/client-runtime/src/state/orchestrationV2TestFixtures.ts";
+
+const encodeShellItem = Schema.encodeSync(ShellItemSchema);
+const decodeShellItem = Schema.decodeSync(ShellItemSchema);
 
 function project(sequence: number, id: string): ApplicationStoredEvent {
   return {
@@ -80,6 +96,56 @@ describe("buildActiveShellSnapshot", () => {
 });
 
 describe("coalesceShellApplicationEvents", () => {
+  it("retains both native refresh targets without retaining the transcript payload", () => {
+    expect(
+      toShellApplicationEvent(
+        storedThreadEvent(7, "parent", {
+          type: "subagent.updated",
+          payload: {
+            origin: "provider_native",
+            childThreadId: ThreadId.make("native-child"),
+            transcript: "x".repeat(1024 * 1024),
+          },
+        }),
+      ),
+    ).toEqual({ ...thread(7, "parent"), relatedThreadId: "native-child" });
+  });
+  it.each([
+    { origin: "app_owned", childThreadId: "app-child" },
+    { origin: "provider_native", childThreadId: null },
+    { origin: "provider_native", childThreadId: "parent" },
+  ])("retains only the parent target for $origin / $childThreadId", (payload) => {
+    expect(
+      toShellApplicationEvent(
+        storedThreadEvent(7, "parent", { type: "subagent.updated", payload }),
+      ),
+    ).toEqual(thread(7, "parent"));
+  });
+  it("coalesces native targets independently without losing newer child or parent events", () => {
+    const native = (sequence: number) =>
+      toShellApplicationEvent(
+        storedThreadEvent(sequence, "parent", {
+          type: "subagent.updated",
+          payload: { origin: "provider_native", childThreadId: "native-child" },
+        }),
+      );
+    expect(coalesceShellApplicationEvents([native(7), thread(8, "native-child")])).toEqual([
+      thread(7, "parent"),
+      thread(8, "native-child"),
+    ]);
+    expect(coalesceShellApplicationEvents([native(7), thread(8, "parent")])).toEqual([
+      thread(7, "native-child"),
+      thread(8, "parent"),
+    ]);
+    expect(coalesceShellApplicationEvents([native(7), native(8)])).toEqual([
+      thread(8, "parent"),
+      thread(8, "native-child"),
+    ]);
+    expect(coalesceShellApplicationEvents([thread(6, "native-child"), native(7)])).toEqual([
+      thread(7, "parent"),
+      thread(7, "native-child"),
+    ]);
+  });
   it("keeps the newest event per aggregate and preserves sequence order", () => {
     expect(
       coalesceShellApplicationEvents([
@@ -90,6 +156,92 @@ describe("coalesceShellApplicationEvents", () => {
         project(6, "project-a"),
       ]).map((event) => event.sequence),
     ).toEqual([4, 5, 6]);
+  });
+});
+
+describe("atomic native shell refresh", () => {
+  const parentId = ThreadId.make("parent");
+  const childId = ThreadId.make("native-child");
+  const parent = {
+    ...v2ThreadShell,
+    id: parentId,
+    updatedAt: DateTime.makeUnsafe("2026-06-20T00:00:01.000Z"),
+    pendingBackgroundTasks: [],
+    providerInstanceHistory: [],
+  };
+  const child = {
+    ...v2ThreadShell,
+    id: childId,
+    status: "running" as const,
+    pendingBackgroundTasks: [],
+    providerInstanceHistory: [],
+  };
+  const sibling = { ...v2ThreadShell, id: ThreadId.make("unrelated") };
+  const native = toShellApplicationEvent(
+    storedThreadEvent(7, parentId, {
+      type: "subagent.updated",
+      payload: { origin: "provider_native", childThreadId: childId },
+    }),
+  );
+  const refresh = (shells: ReadonlyMap<ThreadId, OrchestrationV2ThreadShell>) =>
+    attachRelatedThreadShellItems(
+      coalesceShellApplicationEvents([thread(6, childId), native]).map((stored) => {
+        if ("aggregateKind" in stored) throw new Error("Expected thread refresh");
+        return shellStreamItemFromThreadShell({
+          stored,
+          shell: shells.get(stored.event.threadId) ?? null,
+        });
+      }),
+    );
+  const initial: OrchestrationV2ShellSnapshot = {
+    ...v2ShellSnapshot,
+    threads: [
+      { ...parent, updatedAt: v2ThreadShell.updatedAt },
+      { ...child, status: "idle" as const },
+      sibling,
+    ],
+  };
+  it("applies both shells at one sequence while retaining unrelated rows and replay idempotence", () => {
+    const items = refresh(
+      new Map<ThreadId, OrchestrationV2ThreadShell>([
+        [parentId, parent],
+        [childId, child],
+      ]),
+    );
+    expect(items).toHaveLength(1);
+    expect(items[0]?.kind === "thread.updated" && items[0].thread.id).toBe(parentId);
+    const decoded = items.map((item) => decodeShellItem(encodeShellItem(item)));
+    const next = decoded.reduce((snapshot, item) => {
+      if (item.kind === "snapshot" || item.kind === "synchronized")
+        throw new Error("Expected delta");
+      return applyShellStreamEvent(snapshot, item);
+    }, initial);
+    expect(next.threads).toEqual([parent, child, sibling]);
+    expect(next.projects).toBe(initial.projects);
+    expect(next.snapshotSequence).toBe(7);
+    expect(items.reduce(applyShellStreamEvent, next)).toBe(next);
+  });
+  it.each([null, { ...child, archivedAt: v2ThreadShell.createdAt }])(
+    "refreshes the parent and removes a missing or archived native child: %j",
+    (unavailableChild) => {
+      const shells = new Map<ThreadId, OrchestrationV2ThreadShell>([[parentId, parent]]);
+      if (unavailableChild) shells.set(childId, unavailableChild);
+      const next = refresh(shells).reduce(applyShellStreamEvent, initial);
+      expect(next.threads).toEqual([parent, sibling]);
+      expect(next.snapshotSequence).toBe(7);
+    },
+  );
+  it("removes an archived parent and still updates its stranded child atomically", () => {
+    const items = refresh(
+      new Map<ThreadId, OrchestrationV2ThreadShell>([
+        [parentId, { ...parent, archivedAt: parent.createdAt }],
+        [childId, child],
+      ]),
+    );
+    expect(items[0]?.kind).toBe("thread.removed");
+    const next = items.reduce(applyShellStreamEvent, initial);
+    expect(next.threads).toEqual([child, sibling]);
+    expect(next.snapshotSequence).toBe(7);
   });
 });
 
@@ -118,6 +270,21 @@ describe("coalesceStoredThreadEvents", () => {
 });
 
 describe("shellStreamItemFromThreadShell", () => {
+  it("puts archived cleanup tombstones in active recovery without changing archivedAt", () => {
+    const shell = shellFixture({
+      archivedAt: "2026-07-30T00:00:00.000Z" as never,
+      deletedAt: "2026-07-31T00:00:00.000Z" as never,
+      worktreeCleanup: {
+        status: "deleting",
+        repositoryRoot: "/example/repository",
+        worktreePath: "/example/worktree",
+        startedAt: "2026-07-31T00:00:00.000Z",
+      },
+    });
+    expect(
+      shellStreamItemFromThreadShell({ stored: storedThreadEvent(4, "thread-a"), shell }),
+    ).toEqual({ kind: "thread.updated", sequence: 4, location: "active", thread: shell });
+  });
   it("emits an active thread update when the shell is not archived", () => {
     const shell = shellFixture({ archivedAt: null });
     expect(
@@ -178,6 +345,28 @@ describe("shellStreamItemFromThreadShell", () => {
 });
 
 describe("archivedShellStreamItemFromThreadShell", () => {
+  it("removes archived tombstones on deletion and on a coalesced cleanup failure", () => {
+    const shell = shellFixture({
+      archivedAt: "2026-07-30T00:00:00.000Z" as never,
+      deletedAt: "2026-07-31T00:00:00.000Z" as never,
+      worktreeCleanup: {
+        status: "failed",
+        repositoryRoot: "/example/repository",
+        worktreePath: "/example/worktree",
+        startedAt: "2026-07-31T00:00:00.000Z",
+        failedAt: "2026-07-31T00:00:01.000Z",
+        error: "Busy worktree",
+      },
+    });
+    for (const type of ["thread.deleted", "thread.metadata-updated"]) {
+      expect(
+        archivedShellStreamItemFromThreadShell({
+          stored: storedThreadEvent(4, "thread-a", { type, payload: shell }),
+          shell,
+        }),
+      ).toEqual({ kind: "thread.removed", sequence: 4, threadId: "thread-a" });
+    }
+  });
   it("emits an update for an archived shell", () => {
     const shell = shellFixture({ archivedAt: "2026-07-30T00:00:00.000Z" as never });
     expect(
@@ -584,5 +773,32 @@ describe("skipUnchangedThreadShells", () => {
       ]);
       expect(sent).toEqual([1, 2, 3]);
     }),
+  );
+  it.effect(
+    "forwards related changes despite an unchanged parent and updates the child cache",
+    () =>
+      Effect.gen(function* () {
+        const sent = yield* run([
+          updated(1, shell("parent")),
+          updated(2, shell("child")),
+          {
+            kind: "thread.updated",
+            sequence: 3,
+            location: "active",
+            thread: shell("parent"),
+            relatedThreads: [shell("child", { status: "idle" })],
+          },
+          updated(4, shell("child", { status: "idle" })),
+          {
+            kind: "thread.updated",
+            sequence: 5,
+            location: "active",
+            thread: shell("parent"),
+            relatedRemovedThreadIds: [ThreadId.make("child")],
+          },
+          updated(6, shell("child", { status: "idle" })),
+        ]);
+        expect(sent).toEqual([1, 2, 3, 5, 6]);
+      }),
   );
 });

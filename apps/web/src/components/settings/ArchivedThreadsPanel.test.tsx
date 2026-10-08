@@ -4,6 +4,7 @@ import { act } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import {
   ProjectId,
+  CommandId,
   ThreadId,
   ProviderInstanceId,
   type OrchestrationV2ThreadShell,
@@ -284,6 +285,49 @@ describe("ArchivedThreadsPanel", () => {
     });
     vi.unstubAllGlobals();
   });
+
+  it.each([true, false])(
+    "restores a surviving family when its owner exists=%s",
+    async (ownerExists) => {
+      const family: (typeof state.archive.snapshots)[number] = snapshot(
+        envA,
+        [{ id: "project-a", title: "Alpha" }],
+        [
+          { id: "parent", projectId: "project-a", title: "Family parent" },
+          { id: "child", projectId: "project-a", title: "Family child" },
+          { id: "separate", projectId: "project-a", title: "Earlier archive" },
+        ],
+      );
+      const cohort = {
+        threadId: ThreadId.make("parent"),
+        commandId: CommandId.make("family-archive"),
+      };
+      family.snapshot.threads[0] = { ...family.snapshot.threads[0]!, archivedWith: cohort };
+      family.snapshot.threads[1] = { ...family.snapshot.threads[1]!, archivedWith: cohort };
+      if (!ownerExists)
+        family.snapshot.threads = family.snapshot.threads.filter(
+          (thread) => thread.id !== "parent",
+        );
+      state.archive.snapshots = [family];
+      state.unarchiveThread.mockResolvedValue(AsyncResult.success(undefined));
+      const renderer = renderPanel();
+      expect(text(renderer)).toBe(
+        ownerExists ? "Earlier archive Family parent Family child" : "Earlier archive Family child",
+      );
+      const childRow = renderer.root.findAll(
+        (node) => node.props["data-testid"] === "settings-row",
+      )[ownerExists ? 2 : 1]!;
+      const restore = childRow.findAllByType("button")[0]!;
+      await act(async () => {
+        restore.props.onClick();
+      });
+      expect(state.unarchiveThread).toHaveBeenCalledWith({
+        environmentId: envA,
+        threadId: ownerExists ? "parent" : "child",
+      });
+      expect(state.archive.refresh).toHaveBeenCalledOnce();
+    },
+  );
 
   it.each([
     {

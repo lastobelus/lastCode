@@ -23,6 +23,8 @@ import {
   ProviderInstanceId,
   OrchestrationV2ThreadProjectionJson,
   ScheduledTaskId,
+  RunId,
+  RunAttemptId,
   type ServerProvider,
   ThreadId,
   UpdateDrainRequestId,
@@ -59,6 +61,9 @@ import * as IdAllocator from "./IdAllocator.ts";
 import type { ProviderAdapterV2Shape } from "./ProviderAdapter.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ThreadLaunch from "./ThreadLaunchService.ts";
+import * as ThreadRecoveryRepair from "./ThreadRecoveryRepairService.ts";
+import * as ThreadRecovery from "./ThreadRecoveryService.ts";
+import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 import * as ThreadTitleRegeneration from "./ThreadTitleRegenerationService.ts";
 import * as Orchestrator from "./Orchestrator.ts";
@@ -110,6 +115,7 @@ interface HarnessOptions {
   readonly fetchRemote?: GitWorkflow.GitWorkflowService["Service"]["fetchRemote"];
   readonly hasCommit?: GitWorkflow.GitWorkflowService["Service"]["hasCommit"];
   readonly renameBranch?: GitWorkflow.GitWorkflowService["Service"]["renameBranch"];
+  readonly removeWorktree?: GitWorkflow.GitWorkflowService["Service"]["removeWorktree"];
   readonly runSetup?: ProjectSetupScriptRunner.ProjectSetupScriptRunner["Service"]["runForThread"];
   readonly generateTitle?: TextGeneration.TextGeneration["Service"]["generateThreadTitle"];
   readonly generateBranchName?: TextGeneration.TextGeneration["Service"]["generateBranchName"];
@@ -164,8 +170,9 @@ function makeHarness(options: HarnessOptions = {}) {
     options.renameBranch ?? ((input) => Effect.succeed({ branch: input.newBranch })),
   );
   const removeWorktree = vi.fn(
-    (_input: Parameters<GitWorkflow.GitWorkflowService["Service"]["removeWorktree"]>[0]) =>
-      Effect.void,
+    options.removeWorktree ??
+      ((_input: Parameters<GitWorkflow.GitWorkflowService["Service"]["removeWorktree"]>[0]) =>
+        Effect.void),
   );
   const runSetup = vi.fn(
     options.runSetup ?? (() => Effect.succeed({ status: "no-script" as const })),
@@ -185,6 +192,7 @@ function makeHarness(options: HarnessOptions = {}) {
       bootstrap: () => Effect.die("unused"),
       update: () => Effect.die("unused"),
       delete: () => Effect.die("unused"),
+      reconcileScripts: () => Effect.die("unused reconcileScripts"),
       getById: (id) =>
         Effect.succeed(
           id === projectId
@@ -266,7 +274,9 @@ function makeHarness(options: HarnessOptions = {}) {
       layerLaunchOrchestrator,
       layerThreadManagement,
       layerTitleRegeneration,
+      layerProjectedProjects,
       layerOutbox,
+      layerReceipts,
       layerDatabase,
       layerExternalServices,
     ),
@@ -2542,6 +2552,49 @@ it.effect("cancels tracked setup before provider work is released", () =>
   }),
 );
 
+it.effect("stops an in-flight branch rename before removing a cancelled setup worktree", () =>
+  Effect.gen(function* () {
+    const setupEntered = yield* Deferred.make<void>();
+    const renameEntered = yield* Deferred.make<void>();
+    const renameStopped = yield* Deferred.make<void>();
+    const harness = makeHarness({
+      runSetup: () => Deferred.succeed(setupEntered, undefined).pipe(Effect.andThen(Effect.never)),
+      renameBranch: () =>
+        Deferred.succeed(renameEntered, undefined).pipe(
+          Effect.andThen(Effect.never),
+          Effect.onInterrupt(() => Deferred.succeed(renameStopped, undefined)),
+        ),
+      removeWorktree: () =>
+        Effect.gen(function* () {
+          assert.isTrue(yield* Deferred.isDone(renameStopped));
+        }),
+    });
+    yield* Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const tracker = yield* WorktreeSetupTracker.WorktreeSetupTracker;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const input = launchInput({
+        command: "launch:cancel-renaming",
+        thread: "thread:cancel-renaming",
+        message: "Start",
+        workspace: { type: "worktree", baseRef: "main" },
+      });
+      const launched = yield* launches.launch(input);
+      yield* Deferred.await(setupEntered);
+      yield* Deferred.await(renameEntered);
+      assert.isTrue(yield* tracker.cancel(launched.threadId));
+      assert.isTrue(yield* Deferred.isDone(renameStopped));
+      const projection = yield* threads.getThreadProjection(launched.threadId);
+      assert.equal(projection.runs[0]?.status, "failed");
+      assert.isNull(projection.thread.worktreePath);
+      assert.isNull(projection.thread.branch);
+      assert.equal(harness.removeWorktree.mock.calls.length, 1);
+      assert.isEmpty(yield* outbox.listByCommandId(CommandId.make(`${input.commandId}:release`)));
+    }).pipe(Effect.provide(harness.layer));
+  }),
+);
+
 it.effect.each([0, 1])("releases an async setup before its completion with exit %s", (exitCode) =>
   Effect.gen(function* () {
     const completion = yield* Deferred.make<{ exitCode: number | null; durationMs: number }>();
@@ -2633,6 +2686,96 @@ it.effect(
         (yield* threads.getThreadShell(launched.threadId))?.creatorThreadId,
         creator.threadId,
       );
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
+
+it.effect(
+  "launches a user-requested repair through real orchestration and retains its incident link",
+  () => {
+    const harness = makeHarness({ runSetup: () => Effect.never });
+    return Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const source = yield* launches.launch(
+        launchInput({ command: "repair-source-create", thread: "repair-source" }),
+      );
+      const incident = {
+        threadId: source.threadId,
+        runId: RunId.make("failed-run"),
+        attemptId: RunAttemptId.make("failed-attempt"),
+      };
+      let repairThreadId: ThreadId | undefined;
+      const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+      const repair = ThreadRecoveryRepair.layer.pipe(
+        Layer.provide(ProjectionStore.layer),
+        Layer.provide(
+          Layer.mock(ThreadManagement.ThreadManagementService)({
+            dispatch: threads.dispatch,
+            getThreadShell: (id) =>
+              threads.getThreadShell(id).pipe(
+                Effect.map((shell) =>
+                  shell === null || id !== source.threadId
+                    ? shell
+                    : {
+                        ...shell,
+                        recovery: {
+                          runId: incident.runId,
+                          attemptId: incident.attemptId,
+                          status: "failed" as const,
+                          detail: "The provider completion could not be saved.",
+                          updatedAt: shell.updatedAt,
+                          ...(repairThreadId === undefined ? {} : { repairThreadId }),
+                        },
+                      },
+                ),
+              ),
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(ThreadRecovery.ThreadRecoveryService)({
+            withRepairableIncident: (identity, effect) =>
+              effect((id) =>
+                Effect.gen(function* () {
+                  repairThreadId = id;
+                  yield* receipts.insertIfAbsent({
+                    commandId: ThreadRecovery.repairAcceptanceCommandId(id),
+                    threadId: id,
+                    commandType: "thread.recovery-repair.accept",
+                    acceptedAt: source.projection.thread.createdAt,
+                    resultSequence: 1,
+                    status: "accepted",
+                    error: null,
+                  });
+                }).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ThreadRecovery.ThreadRecoveryError({
+                        threadId: identity.threadId,
+                        cause,
+                      }),
+                  ),
+                ),
+              ),
+          }),
+        ),
+      );
+      const result = yield* Effect.gen(function* () {
+        const service = yield* ThreadRecoveryRepair.ThreadRecoveryRepairService;
+        const first = yield* service.launch(incident);
+        assert.deepStrictEqual(yield* service.launch(incident), first);
+        return first;
+      }).pipe(Effect.provide(repair));
+      const projection = yield* threads.getThreadProjection(result.threadId);
+      assert.equal(projection.thread.createdBy, "user");
+      assert.isUndefined(projection.thread.creatorThreadId);
+      assert.isNull(projection.thread.lineage.parentThreadId);
+      assert.equal(repairThreadId, result.threadId);
+      assert.lengthOf(projection.messages, 1);
+      assert.include(projection.messages[0]!.text, `Target thread: ${source.threadId}`);
+      assert.include(projection.messages[0]!.text, `Target run: ${incident.runId}`);
+      assert.include(projection.messages[0]!.text, `Target attempt: ${incident.attemptId}`);
+      assert.lengthOf(projection.runs, 1);
     }).pipe(Effect.provide(harness.layer));
   },
 );
