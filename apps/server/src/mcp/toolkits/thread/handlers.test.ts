@@ -195,6 +195,49 @@ it.effect.each([false, true])(
     }).pipe(Effect.provide(testLayer)),
 );
 
+it.effect("does not offer archive choices for a protected family owner", () =>
+  Effect.gen(function* () {
+    const { store, now } = yield* seedFamily();
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const { thread: root } = yield* threads.getThreadRecords(rootId, []);
+    yield* store.apply({
+      id: EventId.make("archive-family:protect-owner"),
+      type: "thread.metadata-updated",
+      threadId: rootId,
+      occurredAt: now,
+      payload: { ...root, persistent: true },
+    });
+    const family = yield* decodeFamily(
+      (yield* invoke("t3_thread_archive_family", {})).structuredContent,
+    );
+    expect(family.childThreadIds).toHaveLength(3);
+    expect(family.promotableChildThreadIds).toEqual([appId]);
+    expect(family.protectedChildThreadIds).toEqual([]);
+    expect(family.canPromote).toBe(false);
+    expect(family.canStopAndArchive).toBe(false);
+    for (const childDisposition of ["archive_if_idle", "stop_and_archive", "promote"])
+      expect(
+        declaredFailure(
+          yield* invoke(
+            "t3_thread_organize",
+            {
+              threadId: rootId,
+              action: "archive",
+              childDisposition,
+              expectedChildThreadIds: family.childThreadIds,
+            },
+            clientScope,
+          ),
+        ),
+      ).toMatchObject({ code: "orchestration_error" });
+    for (const id of [rootId, ...family.childThreadIds]) {
+      const shell = yield* threads.getThreadShell(id);
+      expect(shell?.archivedAt).toBeNull();
+      expect(shell?.lineage.independent).not.toBe(true);
+    }
+  }).pipe(Effect.provide(testLayer)),
+);
+
 it.effect("requires fresh family inspection when a nested child is added", () =>
   Effect.gen(function* () {
     const { store, now, child } = yield* seedFamily();

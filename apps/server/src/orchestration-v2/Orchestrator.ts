@@ -11058,9 +11058,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             activeChildren.length > 0 ||
             family.protectedChildren.length > 0),
         canPromote:
+          owner?.persistent !== true &&
           family.promotableChildren.length > 0 &&
           family.protectedChildren.every((thread) => family.keptThreadIds.has(thread.id)),
-        canStopAndArchive: family.protectedChildren.length === 0,
+        canStopAndArchive: owner?.persistent !== true && family.protectedChildren.length === 0,
       };
     }).pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })));
 
