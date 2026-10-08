@@ -1271,7 +1271,28 @@ export const StorageCleanupSettings = Schema.Struct({
 });
 export type StorageCleanupSettings = typeof StorageCleanupSettings.Type;
 
+const LocalCiMaxConcurrentRuns = Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 4 }));
+const LocalCiPackageConcurrency = Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 8 }));
+const LocalCiCompilerThreads = Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 16 }));
+export const LastCodeQuickCiMode = Schema.Literals(["auto", "local", "github"]);
+export type LastCodeQuickCiMode = typeof LastCodeQuickCiMode.Type;
+
+export const LastCodeLocalCiSettings = Schema.Struct({
+  quickCiMode: LastCodeQuickCiMode.pipe(
+    Schema.withDecodingDefault(Effect.succeed("auto" as const)),
+  ),
+  maxConcurrentRuns: LocalCiMaxConcurrentRuns.pipe(Schema.withDecodingDefault(Effect.succeed(1))),
+  packageConcurrency: LocalCiPackageConcurrency.pipe(Schema.withDecodingDefault(Effect.succeed(1))),
+  compilerThreads: LocalCiCompilerThreads.pipe(Schema.withDecodingDefault(Effect.succeed(2))),
+  backgroundPriority: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+});
+export type LastCodeLocalCiSettings = typeof LastCodeLocalCiSettings.Type;
+export const DEFAULT_LASTCODE_LOCAL_CI_SETTINGS = Schema.decodeSync(LastCodeLocalCiSettings)({});
+
 export const ServerSettings = Schema.Struct({
+  lastcodeLocalCi: LastCodeLocalCiSettings.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_LASTCODE_LOCAL_CI_SETTINGS)),
+  ),
   worktreeCleanup: WorktreeCleanup.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   storageCleanup: StorageCleanupSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(StorageCleanupSettings)({}))),
@@ -1673,6 +1694,15 @@ const OpenCodeSettingsPatch = Schema.Struct({
 });
 
 export const ServerSettingsPatch = Schema.Struct({
+  lastcodeLocalCi: Schema.optionalKey(
+    Schema.Struct({
+      quickCiMode: Schema.optionalKey(LastCodeQuickCiMode),
+      maxConcurrentRuns: Schema.optionalKey(LocalCiMaxConcurrentRuns),
+      packageConcurrency: Schema.optionalKey(LocalCiPackageConcurrency),
+      compilerThreads: Schema.optionalKey(LocalCiCompilerThreads),
+      backgroundPriority: Schema.optionalKey(Schema.Boolean),
+    }),
+  ),
   worktreeCleanup: Schema.optionalKey(
     Schema.NullOr(
       Schema.Union([
