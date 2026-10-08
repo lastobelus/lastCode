@@ -301,7 +301,10 @@ const makeHarness = Effect.gen(function* () {
       ensureLegacyTranscript: () => Effect.void,
       getThreadRecords: (_id, collections) =>
         Effect.gen(function* () {
-          if (state.recordsReceipt !== null && collections.includes("runtimeRequests"))
+          if (
+            state.recordsReceipt !== null &&
+            collections.some((collection) => collection === "runtimeRequests")
+          )
             yield* Deferred.succeed(state.recordsReceipt, undefined);
           return projection();
         }),
@@ -1185,8 +1188,8 @@ it.effect.each([
           },
         };
         if (raceRetry) {
-          // A second hold wins the retry's shell-read/publication race. A later
-          // thread's publication proves the shared listener still processes events.
+          // A second hold wins the retry's shell-read/publication race. The
+          // pending-result barrier proves this event was processed before inspection.
           h.archiveOnOtherMetadata.add(blockedId);
           yield* PubSub.publish(h.events, ended);
           yield* h.pendingResultBarrier;
