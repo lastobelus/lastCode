@@ -26,6 +26,7 @@ vi.mock("~/state/entities", () => ({
   readThreadShell: () => ({ projectId: "project", worktreePath: "/workspace" }),
   readProjects: () => [],
   readEnvironmentSupportsServerBrowser: () => true,
+  readEnvironmentHasLocalDesktopBrowser: () => true,
 }));
 vi.mock("~/state/session", async (importOriginal) => ({
   ...(await importOriginal<typeof import("~/state/session")>()),
@@ -230,6 +231,7 @@ describe("opening a saved handoff", () => {
     const healthy: PreviewSessionSnapshot = {
       ...snapshot(authoredUrl),
       runtime: "server",
+      backingPage: "desktop",
       desktopHostId: "another-desktop",
       navStatus: { _tag: "Success", url: authoredUrl, title: "Unsaved form" },
     };
@@ -261,6 +263,7 @@ describe("opening a saved handoff", () => {
       applyPreviewServerSnapshot(ref, {
         ...snapshot(authoredUrl),
         runtime: "server",
+        backingPage: "desktop",
         desktopHostId: "another-desktop",
         navStatus:
           reason === "restarted"
@@ -292,6 +295,7 @@ describe("opening a saved handoff", () => {
     applyPreviewServerSnapshot(ref, {
       ...snapshot(url),
       runtime: "server",
+      backingPage: "desktop",
       desktopHostId: "local",
       navStatus: { _tag: "LoadFailed", url, title: "", code: -102, description: "Stopped" },
     });
@@ -304,6 +308,29 @@ describe("opening a saved handoff", () => {
     expect(ops.navigatePreview).not.toHaveBeenCalled();
     expect(ops.openPreview).not.toHaveBeenCalled();
   });
+  it.each(["server", undefined] as const)(
+    "keeps a failed handoff on its streamed channel with backing page %s",
+    async (backingPage) => {
+      const ops = operations();
+      const url = "http://localhost:8123/form";
+      native.bridge = { navigate: vi.fn(async () => undefined) };
+      const entry = recordHandoff(ref, { kind: "url", url });
+      applyPreviewServerSnapshot(ref, {
+        ...snapshot(url),
+        runtime: "server",
+        ...(backingPage === undefined ? {} : { backingPage }),
+        desktopHostId: "local",
+        navStatus: { _tag: "LoadFailed", url, title: "", code: -102, description: "Stopped" },
+      });
+      await openHandoff(ref, entry, ops);
+      expect(refresh.request).toHaveBeenCalledExactlyOnceWith(ref, "tab", url);
+      expect(native.bridge.navigate).not.toHaveBeenCalled();
+      expect(ops.navigatePreview).not.toHaveBeenCalled();
+      expect(ops.openPreview).not.toHaveBeenCalled();
+      expect(panel().activeSurfaceId).toBe("browser:tab");
+      expect(panel().surfaces).toHaveLength(1);
+    },
+  );
   it("reuses and titles an origin URL normalized by the browser", async () => {
     const ops = operations();
     const entry = recordHandoff(ref, { kind: "url", url: "https://example.com" });
@@ -346,12 +373,15 @@ describe("opening a saved handoff", () => {
       const ops = operations();
       const authoredUrl = "http://localhost:8123/page?q=1#x";
       const destinationUrl = "http://environment.example:8123/page?q=1#x";
+      const recoveredSnapshot = (url: string): PreviewSessionSnapshot => ({
+        ...snapshot(url),
+        runtime: "server",
+        backingPage: client === "desktop" ? "desktop" : "server",
+        ...(client === "desktop" ? { desktopHostId: "local" } : {}),
+      });
       hosting.prepare.mockResolvedValue({ url: destinationUrl, managed: true, restored: true });
       ops.openPreview.mockImplementation(async ({ input }) =>
-        AsyncResult.success(snapshot(input.url ?? "")),
-      );
-      ops.navigatePreview.mockImplementation(async ({ input }) =>
-        AsyncResult.success(snapshot(input.url)),
+        AsyncResult.success(recoveredSnapshot(input.url ?? "")),
       );
       if (client === "desktop") native.bridge = { navigate: vi.fn(async () => undefined) };
       const entry = recordHandoff(ref, { kind: "url", url: authoredUrl });
@@ -362,7 +392,7 @@ describe("opening a saved handoff", () => {
         url: destinationUrl,
       });
       applyPreviewServerSnapshot(ref, {
-        ...snapshot(destinationUrl),
+        ...recoveredSnapshot(destinationUrl),
         navStatus: {
           _tag: "LoadFailed",
           url: destinationUrl,
@@ -372,21 +402,25 @@ describe("opening a saved handoff", () => {
         },
       });
       await openHandoff(ref, entry, ops);
-      expect(hosting.prepare).toHaveBeenCalledTimes(4);
+      expect(hosting.prepare).toHaveBeenCalledTimes(client === "desktop" ? 4 : 3);
       expect(ops.openPreview).toHaveBeenCalledTimes(1);
       expect(panel().activeSurfaceId).toBe("browser:tab");
       expect(panel().surfaces).toHaveLength(1);
       if (client === "desktop") {
+        expect(ops.openPreview).toHaveBeenCalledWith(
+          expect.objectContaining({
+            input: expect.objectContaining({ runtime: "server", desktopHostId: "local" }),
+          }),
+        );
         expect(native.bridge?.navigate).toHaveBeenCalledWith(
           JSON.stringify([ref.environmentId, ref.threadId, null, "tab"]),
           destinationUrl,
         );
         expect(ops.navigatePreview).not.toHaveBeenCalled();
+        expect(refresh.request).not.toHaveBeenCalled();
       } else {
-        expect(ops.navigatePreview).toHaveBeenCalledWith({
-          environmentId: ref.environmentId,
-          input: { threadId: ref.threadId, tabId: "tab", url: destinationUrl },
-        });
+        expect(refresh.request).toHaveBeenCalledExactlyOnceWith(ref, "tab", authoredUrl);
+        expect(ops.navigatePreview).not.toHaveBeenCalled();
       }
       expect(readThreadHandoffs(ref)).toHaveLength(1);
       expect(readThreadHandoffs(ref)[0]?.target).toEqual(entry.target);

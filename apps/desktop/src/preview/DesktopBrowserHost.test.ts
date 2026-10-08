@@ -18,7 +18,48 @@ const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decodeCdpReply = Schema.decodeUnknownSync(
   Schema.fromJsonString(Schema.Struct({ id: Schema.Number })),
 );
+const decodeCdpTargetsReply = Schema.decodeUnknownSync(
+  Schema.fromJsonString(
+    Schema.Struct({
+      id: Schema.Number,
+      result: Schema.Struct({
+        targetInfos: Schema.Array(Schema.Struct({ targetId: Schema.String, url: Schema.String })),
+      }),
+    }),
+  ),
+);
 const key = { threadId: "thread-1", tabId: "tab-1" };
+
+const makePresentationWindow = (initialVisible = true) => {
+  const events = new NodeEvents.EventEmitter();
+  let visible = initialVisible;
+  let minimized = false;
+  const window = Object.assign(events, {
+    isDestroyed: () => false,
+    isVisible: () => visible,
+    isMinimized: () => minimized,
+    webContents: { id: 77 },
+  });
+  return {
+    window: window as unknown as Electron.BrowserWindow,
+    show: () => {
+      visible = true;
+      events.emit("show");
+    },
+    hide: () => {
+      visible = false;
+      events.emit("hide");
+    },
+    minimize: () => {
+      minimized = true;
+      events.emit("minimize");
+    },
+    restore: () => {
+      minimized = false;
+      events.emit("restore");
+    },
+  };
+};
 
 /** A tab's webContents and debugger, with the debugger's commands left pending until released. */
 const makeRenderingContents = (initial = true) => {
@@ -80,6 +121,235 @@ const makeDebuggee = () => {
   };
 };
 
+const makePopup = (initialVisible = true, initiallyAttached = false) => {
+  const events = new NodeEvents.EventEmitter();
+  const debuggee = new NodeEvents.EventEmitter();
+  let attached = initiallyAttached;
+  let attachCount = 0;
+  let closeCount = 0;
+  let destroyed = false;
+  let visible = initialVisible;
+  let minimized = false;
+  const rendering = makeRenderingContents();
+  const debuggerApi = Object.assign(debuggee, {
+    isAttached: () => attached,
+    attach: () => {
+      attachCount += 1;
+      attached = true;
+    },
+    detach: () => {
+      attached = false;
+      debuggee.emit("detach", {}, "target_closed");
+    },
+    sendCommand: async (method: string) =>
+      method === "Target.getTargetInfo" ? { targetInfo: { targetId: "CHILD" } } : {},
+  });
+  const contents = Object.assign(new NodeEvents.EventEmitter(), {
+    ...rendering,
+    isDestroyed: () => destroyed,
+    debugger: debuggerApi,
+    getURL: () => "https://popup.example/",
+    getTitle: () => "Child page",
+    getUserAgent: () => "Electron",
+  });
+  const window = Object.assign(events, {
+    webContents: contents,
+    isDestroyed: () => destroyed,
+    isVisible: () => visible,
+    isMinimized: () => minimized,
+    getContentSize: () => [640, 480],
+    close: () => {
+      closeCount += 1;
+      destroyed = true;
+      events.emit("closed");
+    },
+  });
+  return {
+    window: window as unknown as Electron.BrowserWindow,
+    contents,
+    attachCount: () => attachCount,
+    closeCount: () => closeCount,
+    show: () => {
+      visible = true;
+      events.emit("show");
+    },
+    hide: () => {
+      visible = false;
+      events.emit("hide");
+    },
+    minimize: () => {
+      minimized = true;
+      events.emit("minimize");
+    },
+    restore: () => {
+      minimized = false;
+      events.emit("restore");
+    },
+  };
+};
+
+it.effect.each(["window", "unload"] as const)(
+  "reports a canceled native popup close and leaves its window live (%s)",
+  (veto) =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      const events = yield* Queue.unbounded<{
+        desktopHostId: string;
+        event: DesktopBrowserEvent;
+      }>();
+      yield* host.remoteEvents.pipe(
+        Stream.runForEach((event) => Queue.offer(events, event)),
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      const source = { ...key, desktopHostId: "remote-a" };
+      host.attach(source, makeDebuggee().tab, "source-runtime");
+      yield* Queue.take(events);
+      const popup = makePopup(false);
+      host.registerPopup(source, popup.window);
+      const created = (yield* Queue.take(events)).event;
+      if (created.type !== "popupCreated") throw new Error("Expected native popup.");
+      const actualClose = popup.window.close;
+      popup.window.close = () => {
+        if (veto === "unload")
+          popup.contents.emit("will-prevent-unload", { defaultPrevented: false });
+        else popup.window.emit("close", { defaultPrevented: true });
+      };
+      const close = {
+        type: "closePopup" as const,
+        requestId: "close-veto",
+        ...key,
+        popupId: created.popupId,
+      };
+      yield* host.handleRemoteCommand({ desktopHostId: "remote-a", command: close });
+      expect((yield* Queue.take(events)).event).toEqual({
+        type: "popupCloseCanceled",
+        requestId: close.requestId,
+        ...key,
+        popupId: created.popupId,
+      });
+      expect(popup.window.isDestroyed()).toBe(false);
+      popup.window.close = actualClose;
+      yield* host.handleRemoteCommand({
+        desktopHostId: "remote-a",
+        command: { ...close, requestId: "close-final" },
+      });
+      expect((yield* Queue.take(events)).event).toEqual({
+        type: "popupClosed",
+        ...key,
+        popupId: created.popupId,
+      });
+      expect(popup.window.isDestroyed()).toBe(true);
+    }),
+);
+
+it.effect(
+  "replays a lost close cancellation after reconnect without closing the user's retained window",
+  () =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      const events = yield* Queue.unbounded<{
+        desktopHostId: string;
+        event: DesktopBrowserEvent;
+      }>();
+      yield* host.remoteEvents.pipe(
+        Stream.runForEach((event) => Queue.offer(events, event)),
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      const source = { ...key, desktopHostId: "remote-a" };
+      host.attach(source, makeDebuggee().tab, "source-runtime");
+      yield* Queue.take(events);
+      const popup = makePopup(false);
+      host.registerPopup(source, popup.window);
+      const created = (yield* Queue.take(events)).event;
+      if (created.type !== "popupCreated") throw new Error("Expected native popup.");
+      const close = {
+        type: "closePopup" as const,
+        requestId: "close-kept-window",
+        ...key,
+        popupId: created.popupId,
+      };
+      const actualClose = popup.window.close;
+      let closeCalls = 0;
+      popup.window.close = () => {
+        closeCalls += 1;
+      };
+      yield* host.handleRemoteCommand({ desktopHostId: "remote-a", command: close });
+      yield* host.handleRemoteCommand({ desktopHostId: "remote-a", command: close });
+      expect(closeCalls).toBe(1);
+      yield* host.handleRemoteCommand({
+        desktopHostId: "remote-a",
+        command: { type: "disconnect" },
+      });
+      popup.contents.emit("will-prevent-unload", { defaultPrevented: false });
+      // This event never reaches the disconnected server.
+      expect((yield* Queue.take(events)).event).toEqual({
+        type: "popupCloseCanceled",
+        ...key,
+        popupId: created.popupId,
+        requestId: close.requestId,
+      });
+      popup.window.close = () => {
+        closeCalls += 1;
+        actualClose();
+      };
+      yield* host.handleRemoteCommand({ desktopHostId: "remote-a", command: { type: "announce" } });
+      expect((yield* Queue.take(events)).event).toMatchObject({ type: "attached", ...key });
+      expect((yield* Queue.take(events)).event).toEqual(created);
+      yield* host.handleRemoteCommand({
+        desktopHostId: "remote-a",
+        command: {
+          type: "probePopup",
+          ...key,
+          popupId: created.popupId,
+          requestId: "kept-window-presence",
+        },
+      });
+      expect((yield* Queue.take(events)).event).toEqual({
+        type: "popupPresence",
+        ...key,
+        popupId: created.popupId,
+        requestId: "kept-window-presence",
+        present: true,
+      });
+      for (const foreign of [
+        { desktopHostId: "remote-b", tabId: key.tabId, threadId: key.threadId },
+        { desktopHostId: "remote-a", tabId: "foreign-tab", threadId: key.threadId },
+        { desktopHostId: "remote-a", tabId: key.tabId, threadId: "foreign-thread" },
+      ]) {
+        const { desktopHostId, ...foreignKey } = foreign;
+        yield* host.handleRemoteCommand({ desktopHostId, command: { ...close, ...foreignKey } });
+        yield* host.handleRemoteCommand({
+          desktopHostId,
+          command: { ...close, ...foreignKey, requestId: "foreign-new-close" },
+        });
+      }
+      yield* host.handleRemoteCommand({ desktopHostId: "remote-a", command: close });
+      expect((yield* Queue.take(events)).event).toEqual({
+        type: "popupCloseCanceled",
+        ...key,
+        popupId: created.popupId,
+        requestId: close.requestId,
+      });
+      expect(closeCalls).toBe(1);
+      expect(popup.window.isDestroyed()).toBe(false);
+      yield* host.handleRemoteCommand({
+        desktopHostId: "remote-a",
+        command: { ...close, requestId: "deliberate-fresh-close" },
+      });
+      expect((yield* Queue.take(events)).event).toEqual({
+        type: "popupClosed",
+        ...key,
+        popupId: created.popupId,
+      });
+      expect(closeCalls).toBe(2);
+      expect(popup.window.isDestroyed()).toBe(true);
+    }),
+);
+
 /** Reads `count` events from one backend's subscription. */
 const takeEvents = (host: DesktopBrowserHost.DesktopBrowserHost["Service"], count: number) =>
   host.events.pipe(
@@ -89,6 +359,622 @@ const takeEvents = (host: DesktopBrowserHost.DesktopBrowserHost["Service"], coun
   );
 
 describe("DesktopBrowserHost", () => {
+  it.effect.each(["unbound", "bound"] as const)(
+    "probes an actual hidden %s popup before its reconnect announcement without changing it",
+    (binding) =>
+      Effect.gen(function* () {
+        const host = yield* DesktopBrowserHost.make.pipe(
+          Effect.provide(DesktopClientSettings.layerTest()),
+        );
+        const events = yield* Queue.unbounded<{
+          desktopHostId: string;
+          event: DesktopBrowserEvent;
+        }>();
+        yield* host.remoteEvents.pipe(
+          Stream.runForEach((event) => Queue.offer(events, event)),
+          Effect.forkScoped({ startImmediately: true }),
+        );
+        const source = { ...key, desktopHostId: "remote-a" };
+        host.attach(source, makeDebuggee().tab, "source-runtime");
+        yield* Queue.take(events);
+        const popup = makePopup(false);
+        host.registerPopup(source, popup.window);
+        const created = (yield* Queue.take(events)).event;
+        if (created.type !== "popupCreated") throw new Error("Expected native popup.");
+        if (binding === "bound") {
+          yield* host.handleRemoteCommand({
+            desktopHostId: "remote-a",
+            command: {
+              type: "bindPopup",
+              threadId: key.threadId,
+              tabId: "child-tab",
+              openerTabId: key.tabId,
+              popupId: created.popupId,
+            },
+          });
+          yield* Queue.take(events);
+        }
+        yield* host.handleRemoteCommand({
+          desktopHostId: "remote-a",
+          command: { type: "disconnect" },
+        });
+        const probe = {
+          type: "probePopup" as const,
+          ...key,
+          popupId: created.popupId,
+          requestId: "before-announcement",
+        };
+        for (const foreign of [
+          { desktopHostId: "remote-b", tabId: key.tabId, threadId: key.threadId },
+          { desktopHostId: "remote-a", tabId: "foreign-tab", threadId: key.threadId },
+          { desktopHostId: "remote-a", tabId: key.tabId, threadId: "foreign-thread" },
+        ]) {
+          const { desktopHostId, ...foreignKey } = foreign;
+          yield* host.handleRemoteCommand({
+            desktopHostId,
+            command: { ...probe, ...foreignKey, requestId: "foreign-probe" },
+          });
+        }
+        yield* host.handleRemoteCommand({ desktopHostId: "remote-a", command: probe });
+        expect(yield* Queue.take(events)).toEqual({
+          desktopHostId: "remote-a",
+          event: {
+            type: "popupPresence",
+            ...key,
+            popupId: created.popupId,
+            requestId: probe.requestId,
+            present: true,
+          },
+        });
+        expect(popup.window.isDestroyed()).toBe(false);
+        expect(popup.window.isVisible()).toBe(false);
+        expect(popup.closeCount()).toBe(0);
+        expect(popup.attachCount()).toBe(1);
+        yield* host.handleRemoteCommand({
+          desktopHostId: "remote-a",
+          command: { type: "announce" },
+        });
+        expect((yield* Queue.take(events)).event).toMatchObject({ type: "attached", ...key });
+        if (binding === "bound")
+          expect((yield* Queue.take(events)).event).toMatchObject({
+            type: "attached",
+            tabId: "child-tab",
+          });
+        expect((yield* Queue.take(events)).event).toEqual({
+          ...created,
+          ...(binding === "bound" ? { boundTabId: "child-tab" } : {}),
+        });
+        yield* host.handleRemoteCommand({
+          desktopHostId: "remote-a",
+          command: { ...probe, requestId: "after-announcement" },
+        });
+        expect((yield* Queue.take(events)).event).toMatchObject({
+          type: "popupPresence",
+          requestId: "after-announcement",
+          present: true,
+        });
+        expect(popup.closeCount()).toBe(0);
+        expect(popup.attachCount()).toBe(1);
+      }),
+  );
+
+  it.effect.each(["closed", "withdrawn"] as const)(
+    "probes a %s popup as absent without closing or reattaching any window",
+    (withdrawal) =>
+      Effect.gen(function* () {
+        const host = yield* DesktopBrowserHost.make.pipe(
+          Effect.provide(DesktopClientSettings.layerTest()),
+        );
+        const events = yield* Queue.unbounded<{
+          desktopHostId: string;
+          event: DesktopBrowserEvent;
+        }>();
+        yield* host.remoteEvents.pipe(
+          Stream.runForEach((event) => Queue.offer(events, event)),
+          Effect.forkScoped({ startImmediately: true }),
+        );
+        host.attach({ ...key, desktopHostId: "remote-a" }, makeDebuggee().tab, "source-runtime");
+        yield* Queue.take(events);
+        const popup = makePopup(false);
+        host.registerPopup({ ...key, desktopHostId: "remote-a" }, popup.window);
+        const created = (yield* Queue.take(events)).event;
+        if (created.type !== "popupCreated") throw new Error("Expected native popup.");
+        yield* host.handleRemoteCommand({
+          desktopHostId: "remote-a",
+          command: { type: "disconnect" },
+        });
+        if (withdrawal === "closed") popup.window.close();
+        else popup.contents.debugger.detach();
+        // The ordinary native close/withdrawal notification was lost offline.
+        expect((yield* Queue.take(events)).event).toMatchObject({ type: "popupClosed" });
+        const closesBeforeProbe = popup.closeCount();
+        for (const popupId of [created.popupId, "unknown-popup"]) {
+          const requestId = `presence:${popupId}`;
+          yield* host.handleRemoteCommand({
+            desktopHostId: "remote-a",
+            command: { type: "probePopup", ...key, popupId, requestId },
+          });
+          expect((yield* Queue.take(events)).event).toEqual({
+            type: "popupPresence",
+            ...key,
+            popupId,
+            requestId,
+            present: false,
+          });
+        }
+        expect(popup.closeCount()).toBe(closesBeforeProbe);
+        expect(popup.attachCount()).toBe(1);
+        expect(popup.window.isDestroyed()).toBe(withdrawal === "closed");
+      }),
+  );
+
+  it.effect("withdraws a popup whose debugger is lost without closing its native window", () =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      const remoteKey = { ...key, desktopHostId: "remote-a" };
+      const events = yield* Queue.unbounded<{
+        desktopHostId: string;
+        event: DesktopBrowserEvent;
+      }>();
+      yield* host.remoteEvents.pipe(
+        Stream.runForEach((event) => Queue.offer(events, event)),
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      host.attach(remoteKey, makeDebuggee().tab, "runtime-a");
+      yield* Queue.take(events);
+      const popup = makePopup(false);
+      host.registerPopup(remoteKey, popup.window);
+      const created = (yield* Queue.take(events)).event;
+      if (created.type !== "popupCreated") throw new Error("Missing popup registration.");
+      const boundKey = { threadId: key.threadId, tabId: "child-tab" };
+      yield* host.handleRemoteCommand({
+        desktopHostId: "remote-a",
+        command: {
+          type: "bindPopup",
+          ...boundKey,
+          openerTabId: key.tabId,
+          popupId: created.popupId,
+        },
+      });
+      yield* Queue.take(events);
+      yield* host.handleRemoteCommand({
+        desktopHostId: "remote-a",
+        command: {
+          type: "surface",
+          ...boundKey,
+          requestId: "capture",
+          leaseId: "capture",
+          action: "acquire",
+        },
+      });
+      yield* Queue.take(events);
+      popup.contents.debugger.detach();
+      expect((yield* Queue.take(events)).event).toEqual({
+        type: "popupClosed",
+        ...key,
+        popupId: created.popupId,
+      });
+      expect((yield* Queue.take(events)).event).toEqual({ type: "detached", ...boundKey });
+      expect(popup.window.isDestroyed()).toBe(false);
+      expect(popup.contents.throttleChanges).toEqual([false, true]);
+      yield* host.handleRemoteCommand({ desktopHostId: "remote-a", command: { type: "announce" } });
+      expect((yield* Queue.take(events)).event).toMatchObject({ type: "attached", ...key });
+      yield* host.handleRemoteCommand({
+        desktopHostId: "remote-a",
+        command: {
+          type: "surface",
+          ...boundKey,
+          requestId: "after-detach",
+          leaseId: "capture",
+          action: "acquire",
+        },
+      });
+      expect((yield* Queue.take(events)).event).toMatchObject({
+        type: "surfaceReady",
+        requestId: "after-detach",
+        viewport: null,
+        reason: "guest-unavailable",
+      });
+    }),
+  );
+
+  it.effect(
+    "binds an actual popup once, samples its own visibility, and retains it across reconnect",
+    () =>
+      Effect.gen(function* () {
+        const host = yield* DesktopBrowserHost.make.pipe(
+          Effect.provide(DesktopClientSettings.layerTest()),
+        );
+        const events = yield* Queue.unbounded<{
+          desktopHostId: string;
+          event: typeof DesktopBrowserEvent.Type;
+        }>();
+        yield* host.remoteEvents.pipe(
+          Stream.runForEach((event) => Queue.offer(events, event)),
+          Effect.forkScoped({ startImmediately: true }),
+        );
+        const remoteKey = { ...key, desktopHostId: "remote-a" };
+        host.attach(remoteKey, makeDebuggee().tab, "runtime-a");
+        yield* Queue.take(events);
+        const popup = makePopup(false);
+        host.registerPopup(remoteKey, popup.window);
+        const created = (yield* Queue.take(events)).event;
+        expect(created).toMatchObject({
+          type: "popupCreated",
+          ...key,
+          url: "https://popup.example/",
+        });
+        if (created.type !== "popupCreated") throw new Error("Missing popup registration.");
+        host.registerPopup(remoteKey, popup.window);
+        expect(popup.attachCount()).toBe(1);
+        const boundKey = { threadId: key.threadId, tabId: "child-tab" };
+        const bind = {
+          type: "bindPopup" as const,
+          ...boundKey,
+          openerTabId: key.tabId,
+          popupId: created.popupId,
+        };
+        yield* host.handleRemoteCommand({ desktopHostId: "remote-a", command: bind });
+        expect((yield* Queue.take(events)).event).toEqual({
+          type: "attached",
+          ...boundKey,
+          supportsNativeSurface: true,
+        });
+        yield* host.handleRemoteCommand({ desktopHostId: "remote-a", command: bind });
+        expect(popup.attachCount()).toBe(1);
+        yield* host.handleRemoteCommand({
+          desktopHostId: "remote-a",
+          command: {
+            type: "cdp",
+            ...boundKey,
+            message: encodeJson({ id: 1, method: "Target.getTargets" }),
+          },
+        });
+        const reply = (yield* Queue.take(events)).event;
+        expect(reply.type).toBe("cdp");
+        if (reply.type !== "cdp") throw new Error("Missing popup CDP response.");
+        expect(decodeCdpTargetsReply(reply.message)).toEqual({
+          id: 1,
+          result: { targetInfos: [{ targetId: "CHILD", url: "https://popup.example/" }] },
+        });
+        host.setMainWindow(makePresentationWindow().window);
+        host.setPresentation({ runtimeTabId: `popup:${created.popupId}`, presented: true }, 77);
+        yield* host.handleRemoteCommand({
+          desktopHostId: "remote-a",
+          command: {
+            type: "surface",
+            ...boundKey,
+            requestId: "capture",
+            leaseId: "capture",
+            action: "acquire",
+          },
+        });
+        expect((yield* Queue.take(events)).event).toEqual({
+          type: "surfaceReady",
+          ...boundKey,
+          requestId: "capture",
+          viewport: { width: 640, height: 480 },
+        });
+        expect(popup.contents.throttleChanges).toEqual([false]);
+        yield* host.handleRemoteCommand({
+          desktopHostId: "remote-a",
+          command: {
+            type: "surface",
+            ...boundKey,
+            requestId: "capture-2",
+            leaseId: "capture-2",
+            action: "acquire",
+          },
+        });
+        expect((yield* Queue.take(events)).event).toMatchObject({
+          type: "surfaceReady",
+          requestId: "capture-2",
+        });
+        yield* host.handleRemoteCommand({
+          desktopHostId: "remote-a",
+          command: {
+            type: "surface",
+            ...boundKey,
+            requestId: "release-1",
+            leaseId: "capture",
+            action: "release",
+          },
+        });
+        expect((yield* Queue.take(events)).event).toMatchObject({
+          type: "surfaceReady",
+          requestId: "release-1",
+        });
+        expect(popup.contents.throttleChanges).toEqual([false]);
+        popup.show();
+        expect((yield* Queue.take(events)).event).toMatchObject({
+          ...boundKey,
+          type: "presentation",
+          presented: true,
+        });
+        popup.hide();
+        expect((yield* Queue.take(events)).event).toMatchObject({ ...boundKey, presented: false });
+        popup.show();
+        expect((yield* Queue.take(events)).event).toMatchObject({ presented: true });
+        popup.minimize();
+        expect((yield* Queue.take(events)).event).toMatchObject({ presented: false });
+        popup.restore();
+        expect((yield* Queue.take(events)).event).toMatchObject({ presented: true });
+        yield* host.handleRemoteCommand({
+          desktopHostId: "remote-a",
+          command: { type: "release", ...boundKey },
+        });
+        expect(popup.contents.throttleChanges).toEqual([false, true]);
+        expect(popup.window.isDestroyed()).toBe(false);
+        yield* host.handleRemoteCommand({
+          desktopHostId: "remote-a",
+          command: {
+            type: "surface",
+            ...boundKey,
+            requestId: "disconnect-capture",
+            leaseId: "disconnect",
+            action: "acquire",
+          },
+        });
+        yield* Queue.take(events);
+        yield* host.handleRemoteCommand({
+          desktopHostId: "remote-a",
+          command: { type: "disconnect" },
+        });
+        expect(popup.contents.throttleChanges).toEqual([false, true, false, true]);
+        yield* host.handleRemoteCommand({
+          desktopHostId: "remote-a",
+          command: { type: "announce" },
+        });
+        const announcements = [
+          (yield* Queue.take(events)).event,
+          (yield* Queue.take(events)).event,
+        ];
+        expect(announcements).toContainEqual({
+          type: "attached",
+          ...boundKey,
+          supportsNativeSurface: true,
+          presented: true,
+        });
+        expect((yield* Queue.take(events)).event).toEqual({
+          ...created,
+          boundTabId: boundKey.tabId,
+        });
+        expect(popup.attachCount()).toBe(1);
+        yield* host.handleRemoteCommand({
+          desktopHostId: "remote-a",
+          command: {
+            type: "closePopup",
+            requestId: "close-popup",
+            ...key,
+            popupId: created.popupId,
+          },
+        });
+        expect((yield* Queue.take(events)).event).toEqual({
+          type: "presentation",
+          ...boundKey,
+          presented: false,
+        });
+        expect((yield* Queue.take(events)).event).toEqual({
+          type: "popupClosed",
+          ...key,
+          popupId: created.popupId,
+        });
+        expect((yield* Queue.take(events)).event).toEqual({ type: "detached", ...boundKey });
+      }),
+  );
+
+  it.effect(
+    "rejects foreign popup owners and existing debugger attachments, and reannounces unbound children",
+    () =>
+      Effect.gen(function* () {
+        const host = yield* DesktopBrowserHost.make.pipe(
+          Effect.provide(DesktopClientSettings.layerTest()),
+        );
+        const remoteKey = { ...key, desktopHostId: "remote-a" };
+        const events = yield* Queue.unbounded<{
+          desktopHostId: string;
+          event: typeof DesktopBrowserEvent.Type;
+        }>();
+        yield* host.remoteEvents.pipe(
+          Stream.runForEach((event) => Queue.offer(events, event)),
+          Effect.forkScoped({ startImmediately: true }),
+        );
+        host.attach(remoteKey, makeDebuggee().tab, "runtime-a");
+        yield* Queue.take(events);
+        const taken = makePopup(true, true);
+        host.registerPopup(remoteKey, taken.window);
+        expect(taken.attachCount()).toBe(0);
+        const popup = makePopup();
+        host.registerPopup(remoteKey, popup.window);
+        const created = (yield* Queue.take(events)).event;
+        if (created.type !== "popupCreated") throw new Error("Missing popup registration.");
+        for (const owner of ["remote-b", "remote-a"]) {
+          yield* host.handleRemoteCommand({
+            desktopHostId: owner,
+            command: {
+              type: "bindPopup",
+              threadId: key.threadId,
+              tabId: "child-tab",
+              openerTabId: owner === "remote-a" ? "wrong-tab" : key.tabId,
+              popupId: created.popupId,
+            },
+          });
+          yield* host.handleRemoteCommand({
+            desktopHostId: owner,
+            command: {
+              type: "closePopup",
+              requestId: "close-foreign",
+              threadId: key.threadId,
+              tabId: owner === "remote-a" ? "wrong-tab" : key.tabId,
+              popupId: created.popupId,
+            },
+          });
+        }
+        expect(popup.window.isDestroyed()).toBe(false);
+        yield* host.handleRemoteCommand({
+          desktopHostId: "remote-a",
+          command: { type: "announce" },
+        });
+        expect((yield* Queue.take(events)).event.type).toBe("attached");
+        expect((yield* Queue.take(events)).event).toEqual(created);
+        yield* host.handleRemoteCommand({
+          desktopHostId: "remote-a",
+          command: {
+            type: "closePopup",
+            requestId: "close-popup",
+            ...key,
+            popupId: created.popupId,
+          },
+        });
+        expect((yield* Queue.take(events)).event).toEqual({
+          type: "popupClosed",
+          ...key,
+          popupId: created.popupId,
+        });
+        expect(popup.window.isDestroyed()).toBe(true);
+        // Its first close acknowledgement may have been sent while disconnected.
+        // A retry confirms absence without recreating a window or debugger.
+        yield* host.handleRemoteCommand({
+          desktopHostId: "remote-a",
+          command: {
+            type: "closePopup",
+            requestId: "close-popup",
+            ...key,
+            popupId: created.popupId,
+          },
+        });
+        expect((yield* Queue.take(events)).event).toEqual({
+          type: "popupClosed",
+          ...key,
+          popupId: created.popupId,
+        });
+        expect(popup.attachCount()).toBe(1);
+      }),
+  );
+
+  it.effect(
+    "reports visible slots across late attachment and reconnect without treating capture as visible",
+    () =>
+      Effect.gen(function* () {
+        const host = yield* DesktopBrowserHost.make.pipe(
+          Effect.provide(DesktopClientSettings.layerTest()),
+        );
+        const events = yield* Queue.unbounded<{
+          desktopHostId: string;
+          event: typeof DesktopBrowserEvent.Type;
+        }>();
+        yield* host.remoteEvents.pipe(
+          Stream.runForEach((event) => Queue.offer(events, event)),
+          Effect.forkScoped({ startImmediately: true }),
+        );
+        const debuggee = makeDebuggee();
+        const remoteKey = { ...key, desktopHostId: "remote-a" };
+        host.setMainWindow(makePresentationWindow().window);
+        host.setPresentation({ runtimeTabId: "runtime-a", presented: true }, 77);
+        host.attach(remoteKey, debuggee.tab, "runtime-a");
+        expect((yield* Queue.take(events)).event).toMatchObject({
+          type: "attached",
+          presented: true,
+        });
+        host.setPresentation({ runtimeTabId: "runtime-a", presented: false }, 78);
+        yield* host.handleRemoteCommand({
+          desktopHostId: "remote-a",
+          command: { type: "announce" },
+        });
+        expect((yield* Queue.take(events)).event).toMatchObject({
+          type: "attached",
+          presented: true,
+        });
+        host.setPresentation({ runtimeTabId: "runtime-a", presented: false }, 77);
+        expect((yield* Queue.take(events)).event).toEqual({
+          type: "presentation",
+          ...key,
+          presented: false,
+        });
+        yield* host.handleRemoteCommand({
+          desktopHostId: "remote-a",
+          command: {
+            type: "surface",
+            ...key,
+            requestId: "capture",
+            leaseId: "qa",
+            action: "acquire",
+          },
+        });
+        host.surfaceResponse(
+          {
+            requestId: debuggee.surfaceRequests[0]!.requestId,
+            viewport: { width: 1280, height: 800 },
+          },
+          77,
+        );
+        expect((yield* Queue.take(events)).event.type).toBe("surfaceReady");
+        yield* host.handleRemoteCommand({
+          desktopHostId: "remote-a",
+          command: { type: "announce" },
+        });
+        expect((yield* Queue.take(events)).event).toEqual({
+          type: "attached",
+          ...key,
+          supportsNativeSurface: true,
+        });
+      }),
+  );
+
+  it.effect(
+    "native window hide/show controls PiP and main-slot visibility without closing either",
+    () =>
+      Effect.gen(function* () {
+        const host = yield* DesktopBrowserHost.make.pipe(
+          Effect.provide(DesktopClientSettings.layerTest()),
+        );
+        const events = yield* Queue.unbounded<{
+          desktopHostId: string;
+          event: typeof DesktopBrowserEvent.Type;
+        }>();
+        yield* host.remoteEvents.pipe(
+          Stream.runForEach((event) => Queue.offer(events, event)),
+          Effect.forkScoped({ startImmediately: true }),
+        );
+        const main = makePresentationWindow(false);
+        const pip = makePresentationWindow(false);
+        host.setMainWindow(main.window);
+        host.attach({ ...key, desktopHostId: "remote-a" }, makeDebuggee().tab, "runtime-a");
+        expect((yield* Queue.take(events)).event).toMatchObject({ type: "attached" });
+        host.setPictureInPictureWindow("runtime-a", pip.window);
+        pip.show();
+        expect((yield* Queue.take(events)).event).toMatchObject({
+          type: "presentation",
+          presented: true,
+        });
+        // macOS Hide hides the windows while keeping the PiP session open.
+        pip.hide();
+        expect((yield* Queue.take(events)).event).toMatchObject({
+          type: "presentation",
+          presented: false,
+        });
+        pip.show();
+        expect((yield* Queue.take(events)).event).toMatchObject({ presented: true });
+        main.show();
+        pip.hide();
+        // An open main window with no selected Browser slot is still invisible.
+        expect((yield* Queue.take(events)).event).toMatchObject({ presented: false });
+        host.setPresentation({ runtimeTabId: "runtime-a", presented: true }, 77);
+        expect((yield* Queue.take(events)).event).toMatchObject({ presented: true });
+        main.hide();
+        expect((yield* Queue.take(events)).event).toMatchObject({ presented: false });
+        main.show();
+        expect((yield* Queue.take(events)).event).toMatchObject({ presented: true });
+        main.minimize();
+        expect((yield* Queue.take(events)).event).toMatchObject({ presented: false });
+        main.restore();
+        expect((yield* Queue.take(events)).event).toMatchObject({ presented: true });
+        host.setPictureInPictureWindow("runtime-a", null);
+      }),
+  );
+
   it.effect("announces tabs already attached to a backend that starts later", () =>
     Effect.gen(function* () {
       const host = yield* DesktopBrowserHost.make.pipe(

@@ -45,11 +45,40 @@ export type DesktopBrowserSurfaceRequest = typeof DesktopBrowserSurfaceRequest.T
 export const DesktopBrowserSurfaceResponse = Schema.Struct(SurfaceResponse);
 export type DesktopBrowserSurfaceResponse = typeof DesktopBrowserSurfaceResponse.Type;
 
+/** Selected renderer Browser slot; the native host checks actual window visibility. */
+export const DesktopBrowserPresentationInput = Schema.Struct({
+  runtimeTabId: Schema.String,
+  presented: Schema.Boolean,
+});
+export type DesktopBrowserPresentationInput = typeof DesktopBrowserPresentationInput.Type;
+
 /** Desktop -> server. */
 export const DESKTOP_BROWSER_DOWNLOAD_MAX_BYTES = 64 * 1024 * 1024;
 export const DESKTOP_BROWSER_DOWNLOAD_CHUNK_BYTES = 192 * 1024;
 
 export const DesktopBrowserEvent = Schema.Union([
+  /** An actual child window opened by this source tab, awaiting a server tab identity. */
+  Schema.Struct({
+    type: Schema.Literal("popupCreated"),
+    ...TabKey,
+    popupId: TrimmedNonEmptyString,
+    boundTabId: Schema.optionalKey(TrimmedNonEmptyString),
+    url: Schema.String,
+  }),
+  Schema.Struct({ type: Schema.Literal("popupClosed"), ...TabKey, popupId: TrimmedNonEmptyString }),
+  Schema.Struct({
+    type: Schema.Literal("popupPresence"),
+    ...TabKey,
+    popupId: TrimmedNonEmptyString,
+    requestId: TrimmedNonEmptyString,
+    present: Schema.Boolean,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("popupCloseCanceled"),
+    ...TabKey,
+    popupId: TrimmedNonEmptyString,
+    requestId: TrimmedNonEmptyString,
+  }),
   Schema.Struct({ type: Schema.Literal("surfaceReady"), ...TabKey, ...SurfaceResponse }),
   Schema.Struct({
     type: Schema.Literal("resolvedUrl"),
@@ -75,7 +104,9 @@ export const DesktopBrowserEvent = Schema.Union([
     ...TabKey,
     /** Advertised by native hosts that acknowledge rendering leases. */
     supportsNativeSurface: Schema.optionalKey(Schema.Boolean),
+    presented: Schema.optionalKey(Schema.Boolean),
   }),
+  Schema.Struct({ type: Schema.Literal("presentation"), ...TabKey, presented: Schema.Boolean }),
   /** Its `<webview>` went away: closed, crashed, swapped, or devtools took the debugger. */
   Schema.Struct({ type: Schema.Literal("detached"), ...TabKey }),
   /** One CDP message from the tab's relay. */
@@ -85,6 +116,27 @@ export type DesktopBrowserEvent = typeof DesktopBrowserEvent.Type;
 
 /** Server -> desktop. */
 export const DesktopBrowserCommand = Schema.Union([
+  /** Checks one existing native identity without changing or closing its window. */
+  Schema.Struct({
+    type: Schema.Literal("probePopup"),
+    ...TabKey,
+    popupId: TrimmedNonEmptyString,
+    requestId: TrimmedNonEmptyString,
+  }),
+  /** Bind the existing child window; never create another page for it. */
+  Schema.Struct({
+    type: Schema.Literal("bindPopup"),
+    ...TabKey,
+    openerTabId: TrimmedNonEmptyString,
+    popupId: TrimmedNonEmptyString,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("closePopup"),
+    ...TabKey,
+    popupId: TrimmedNonEmptyString,
+    /** Retained across transport retries; a new deliberate close uses a new ID. */
+    requestId: TrimmedNonEmptyString,
+  }),
   Schema.Struct(SurfaceRequest),
   Schema.Struct({
     type: Schema.Literal("resolveUrl"),
@@ -118,10 +170,13 @@ export class DesktopBrowserTransportError extends Schema.TaggedError<DesktopBrow
       "layout-timeout",
       "guest-unavailable",
       "surface-unsupported",
+      "close-canceled",
     ]),
   },
 ) {
   override get message(): string {
+    if (this.reason === "close-canceled")
+      return "The native browser window canceled the close request.";
     if (this.reason === "surface-unsupported")
       return "This desktop app does not support the browser rendering protocol required by this server. Update the desktop app to a compatible release to run browser automation.";
     if (this.reason === "layout-timeout")

@@ -1,7 +1,9 @@
 // Run explicitly: node apps/desktop/scripts/browser-surface.smoke.mjs
 // --build-only prepares isolated artifacts without launching Electron.
+// --existing-electron uses the installed dependency without repairing or downloading a runtime.
 import * as NodeAssert from "node:assert/strict";
 import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeModule from "node:module";
 import * as NodeOS from "node:os";
@@ -51,6 +53,22 @@ async function bundle(entry, format, output, native = false) {
     );
   await NodeFSP.writeFile(NodePath.join(scratch, output), code);
 }
+async function existingElectronRuntime() {
+  const desktopRequire = NodeModule.createRequire(NodePath.join(desktopDirectory, "package.json"));
+  // Resolving package metadata never evaluates Electron's entrypoint, which can download a runtime.
+  const electronDirectory = NodePath.dirname(desktopRequire.resolve("electron/package.json"));
+  const executablePath = (
+    await NodeFSP.readFile(NodePath.join(electronDirectory, "path.txt"), "utf8")
+  ).trim();
+  NodeAssert.ok(executablePath, "Existing Electron path.txt must identify an executable");
+  const executable = NodePath.join(electronDirectory, "dist", executablePath);
+  NodeAssert.ok(
+    (await NodeFSP.stat(executable)).isFile(),
+    "Existing Electron executable must be a file",
+  );
+  await NodeFSP.access(executable, NodeFS.constants.X_OK);
+  return executable;
+}
 await bundle("browser-surface.fixture.mjs", "cjs", "main.cjs", true);
 await bundle("browser-surface.preload.mjs", "cjs", "preload.cjs", true);
 await bundle("browser-surface.renderer.mjs", "iife", "renderer.js");
@@ -71,8 +89,11 @@ if (!process.argv.includes("--build-only")) {
   delete environment.ELECTRON_RUN_AS_NODE;
   delete environment.VITE_DEV_SERVER_URL;
   delete environment.T3CODE_HOME;
+  const electronRuntime = process.argv.includes("--existing-electron")
+    ? await existingElectronRuntime()
+    : ensureElectronRuntime();
   const child = NodeChildProcess.spawnSync(
-    ensureElectronRuntime(),
+    electronRuntime,
     [manifest.main, scratch, wsModulePath],
     {
       encoding: "utf8",

@@ -1506,6 +1506,15 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       window.webContents.on("before-input-event", (_event, input) => {
         syncMenuShortcuts(window.webContents, input);
       });
+      runFork(
+        SynchronizedRef.get(tabsRef).pipe(
+          Effect.map((tabs) => {
+            const tab = tabs.get(tabId);
+            if (tab?.webContentsId === wc.id && tab.serverTab)
+              browserHost.registerPopup(tab.serverTab, window);
+          }),
+        ),
+      );
     };
     const beforeInput = (event: Electron.Event, input: Electron.Input): void => {
       syncMenuShortcuts(wc, input);
@@ -1627,6 +1636,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         }
         yield* Ref.set(mainWindowRef, Option.some(window));
         currentMainWindow = window;
+        browserHost.setMainWindow(window);
         frameCaptureWindowOpen = true;
         window.once("closed", () => {
           if (currentMainWindow !== window) return;
@@ -2743,6 +2753,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       ] as const;
     });
     if (!removed) return;
+    browserHost.setPictureInPictureWindow(tabId, null);
     yield* Deferred.interrupt(expectedSession.ready);
     yield* Scope.close(expectedSession.initializationScope, Exit.void).pipe(Effect.ignore);
     yield* Ref.update(pictureInPictureAspectRatiosRef, (aspectRatios) =>
@@ -2925,6 +2936,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
             copy.set(tabId, session);
           }),
         );
+        browserHost.setPictureInPictureWindow(tabId, pictureInPictureWindow);
         return { kind: "created" as const, session };
       }),
     );

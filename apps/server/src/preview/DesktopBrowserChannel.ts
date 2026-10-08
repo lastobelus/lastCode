@@ -91,7 +91,29 @@ export class DesktopBrowserChannel extends Context.Service<
     readonly awaitAttached: (key: DesktopTabKey, timeout: Duration.Input) => Effect.Effect<boolean>;
     /** Desktop tabs as they detach. */
     readonly detached: Stream.Stream<DesktopTabKey>;
+    /** Authenticated host registrations, including hosts already connected at subscription. */
+    readonly connectedHosts: Stream.Stream<string>;
     readonly isAttached: (key: DesktopTabKey) => Effect.Effect<boolean>;
+    /** Synchronous registry lookup so presentation and tab registration cannot interleave. */
+    readonly isPresented: (key: DesktopTabKey) => boolean;
+    readonly presentations: Stream.Stream<DesktopTabKey>;
+    readonly popups: Stream.Stream<
+      DesktopTabKey & { readonly popupId: string; readonly url: string }
+    >;
+    readonly closedPopups: Stream.Stream<DesktopTabKey & { readonly popupId: string }>;
+    /** Checks the native registry without changing the window or requiring its announcement. */
+    readonly probePopup: (
+      key: DesktopTabKey,
+      popupId: string,
+    ) => Effect.Effect<boolean, DesktopBrowserTransportError>;
+    readonly bindPopup: (
+      key: DesktopTabKey,
+      input: { readonly popupId: string; readonly openerTabId: string },
+    ) => Effect.Effect<void, DesktopBrowserTransportError>;
+    readonly closePopup: (
+      key: DesktopTabKey,
+      popupId: string,
+    ) => Effect.Effect<void, DesktopBrowserTransportError>;
     /** Keeps a native guest paintable until the matching lease is released. */
     readonly surface: (
       key: DesktopTabKey,
@@ -124,7 +146,40 @@ const make = Effect.gen(function* () {
   const inputFd = config.desktopBrowserFd;
   const controlFd = config.desktopBrowserControlFd;
   const changes = yield* PubSub.unbounded<{ key: DesktopTabKey; attached: boolean }>();
-  const attachedTabs = new Map<string, DesktopTabKey & { supportsNativeSurface: boolean }>();
+  const attachedTabs = new Map<
+    string,
+    DesktopTabKey & { supportsNativeSurface: boolean; presented: boolean }
+  >();
+  const presentations = yield* PubSub.unbounded<DesktopTabKey>();
+  const connectedHosts = yield* PubSub.unbounded<string>();
+  const popups = yield* PubSub.unbounded<
+    DesktopTabKey & { readonly popupId: string; readonly url: string }
+  >();
+  const closedPopups = yield* PubSub.unbounded<DesktopTabKey & { readonly popupId: string }>();
+  const popupAnnouncements = new Map<
+    string,
+    DesktopTabKey & { readonly popupId: string; readonly url: string }
+  >();
+  const popupIdOf = (key: DesktopTabKey, popupId: string) => JSON.stringify([keyOf(key), popupId]);
+  // Native vetoes survive a dropped connection. A transport retry is the same close attempt.
+  const popupCloseAttempts = new Map<string, string>();
+  const canceledPopupCloses = new Set<string>();
+  const popupProbeRequests = new Map<
+    string,
+    {
+      readonly key: DesktopTabKey;
+      readonly popupId: string;
+      readonly deferred: Deferred.Deferred<boolean, DesktopBrowserTransportError>;
+    }
+  >();
+  const popupCloseRequests = new Map<
+    string,
+    {
+      readonly key: DesktopTabKey;
+      readonly requestId: string;
+      readonly deferred: Deferred.Deferred<void, DesktopBrowserTransportError>;
+    }
+  >();
   const profileRequests = new Map<string, Deferred.Deferred<PreviewAutomationProfiles | null>>();
   /** CDP frames from the desktop, per tab, for the endpoint connected to it. */
   const inbound = new Map<string, Queue.Queue<string>>();
@@ -213,6 +268,68 @@ const make = Effect.gen(function* () {
       ).pipe(Effect.asVoid);
     }
     switch (event.type) {
+      case "popupPresence": {
+        const pending = popupProbeRequests.get(event.requestId);
+        if (!pending || keyOf(pending.key) !== id || pending.popupId !== event.popupId)
+          return Effect.void;
+        popupProbeRequests.delete(event.requestId);
+        if (!event.present) {
+          const popupKey = popupIdOf(key, event.popupId);
+          popupCloseAttempts.delete(popupKey);
+          canceledPopupCloses.delete(popupKey);
+          popupAnnouncements.delete(popupKey);
+          const closing = popupCloseRequests.get(popupKey);
+          popupCloseRequests.delete(popupKey);
+          return (closing ? Deferred.succeed(closing.deferred, undefined) : Effect.void).pipe(
+            Effect.andThen(Deferred.succeed(pending.deferred, false)),
+            Effect.asVoid,
+          );
+        }
+        return Deferred.succeed(pending.deferred, true).pipe(Effect.asVoid);
+      }
+      case "popupCreated": {
+        // A bound child outlives its source window and may re-announce on reconnect.
+        if (
+          !attachedTabs.has(id) &&
+          !(event.boundTabId && attachedTabs.has(keyOf({ ...key, tabId: event.boundTabId })))
+        )
+          return Effect.void;
+        const popup = { ...key, popupId: event.popupId, url: event.url };
+        popupAnnouncements.set(popupIdOf(key, event.popupId), popup);
+        return PubSub.publish(popups, popup).pipe(Effect.asVoid);
+      }
+      case "popupCloseCanceled": {
+        const id = popupIdOf(key, event.popupId);
+        if (popupCloseAttempts.get(id) !== event.requestId) return Effect.void;
+        popupCloseAttempts.delete(id);
+        const pending = popupCloseRequests.get(id);
+        if (pending) popupCloseRequests.delete(id);
+        else canceledPopupCloses.add(id);
+        return pending
+          ? Deferred.fail(
+              pending.deferred,
+              new DesktopBrowserTransportError({ reason: "close-canceled" }),
+            ).pipe(Effect.asVoid)
+          : Effect.void;
+      }
+      case "popupClosed": {
+        const id = popupIdOf(key, event.popupId);
+        popupAnnouncements.delete(id);
+        popupCloseAttempts.delete(id);
+        canceledPopupCloses.delete(id);
+        const pending = popupCloseRequests.get(id);
+        popupCloseRequests.delete(id);
+        return (pending ? Deferred.succeed(pending.deferred, undefined) : Effect.void).pipe(
+          Effect.andThen(PubSub.publish(closedPopups, { ...key, popupId: event.popupId })),
+          Effect.asVoid,
+        );
+      }
+      case "presentation": {
+        const tab = attachedTabs.get(id);
+        if (!tab || tab.presented === event.presented) return Effect.void;
+        tab.presented = event.presented;
+        return PubSub.publish(presentations, key).pipe(Effect.asVoid);
+      }
       case "download": {
         const directory = downloadDirectories.get(id);
         const offsets = downloadOffsets.get(id) ?? new Map<string, number>();
@@ -279,9 +396,11 @@ const make = Effect.gen(function* () {
         attachedTabs.set(id, {
           ...key,
           supportsNativeSurface: event.supportsNativeSurface === true,
+          presented: event.presented === true,
         });
         return pending.pipe(
           Effect.andThen(PubSub.publish(changes, { key, attached: true })),
+          Effect.andThen(PubSub.publish(presentations, key)),
           Effect.asVoid,
         );
       }
@@ -295,6 +414,7 @@ const make = Effect.gen(function* () {
         return failSurfaceRequests(id).pipe(
           Effect.andThen(queue ? Queue.shutdown(queue) : Effect.void),
           Effect.andThen(PubSub.publish(changes, { key, attached: false })),
+          Effect.andThen(PubSub.publish(presentations, key)),
           Effect.asVoid,
         );
       }
@@ -303,6 +423,25 @@ const make = Effect.gen(function* () {
 
   const releaseHost = (desktopHostId: string) =>
     Effect.gen(function* () {
+      for (const [requestId, pending] of popupProbeRequests)
+        if (pending.key.desktopHostId === desktopHostId) {
+          popupProbeRequests.delete(requestId);
+          yield* Deferred.fail(
+            pending.deferred,
+            new DesktopBrowserTransportError({ reason: "host-unavailable" }),
+          );
+        }
+      for (const [id, pending] of popupCloseRequests)
+        if (pending.key.desktopHostId === desktopHostId) {
+          // A replacement connection must never join its predecessor's failed acknowledgment.
+          popupCloseRequests.delete(id);
+          yield* Deferred.fail(
+            pending.deferred,
+            new DesktopBrowserTransportError({ reason: "host-unavailable" }),
+          );
+        }
+      for (const [id, popup] of popupAnnouncements)
+        if (popup.desktopHostId === desktopHostId) popupAnnouncements.delete(id);
       for (const key of [...attachedTabs.values()]) {
         if (key.desktopHostId === desktopHostId) {
           yield* handleEvent(desktopHostId, {
@@ -454,9 +593,98 @@ const make = Effect.gen(function* () {
             }),
           );
           yield* Queue.offer(queue, { type: "announce" });
+          yield* PubSub.publish(connectedHosts, desktopHostId);
           return Stream.fromQueue(queue);
         }),
       ),
+    connectedHosts: Stream.unwrap(
+      Effect.gen(function* () {
+        const subscription = yield* PubSub.subscribe(connectedHosts);
+        return Stream.concat(
+          Stream.fromIterable([...hosts.keys()]),
+          Stream.fromSubscription(subscription),
+        );
+      }),
+    ),
+    popups: Stream.unwrap(
+      Effect.gen(function* () {
+        // Retain announcements received while browser services are starting.
+        // Subscribe first; duplicate snapshot/events are idempotent at adoption.
+        const subscription = yield* PubSub.subscribe(popups);
+        const existing = [...popupAnnouncements.values()];
+        return Stream.concat(Stream.fromIterable(existing), Stream.fromSubscription(subscription));
+      }),
+    ),
+    closedPopups: Stream.fromPubSub(closedPopups),
+    probePopup: (key, popupId) =>
+      Effect.gen(function* () {
+        const desktopHostId = key.desktopHostId ?? "local";
+        if (desktopHostId === "local" ? !localAvailable : !hosts.has(desktopHostId))
+          return yield* new DesktopBrowserTransportError({ reason: "host-unavailable" });
+        const requestId = NodeCrypto.randomUUID();
+        const deferred = yield* Deferred.make<boolean, DesktopBrowserTransportError>();
+        popupProbeRequests.set(requestId, { key, popupId, deferred });
+        return yield* command(
+          { type: "probePopup", threadId: key.threadId, tabId: key.tabId, popupId, requestId },
+          desktopHostId,
+        ).pipe(
+          Effect.andThen(Deferred.await(deferred)),
+          Effect.timeoutOrElse({
+            duration: "5 seconds",
+            orElse: () =>
+              Effect.fail(new DesktopBrowserTransportError({ reason: "host-unavailable" })),
+          }),
+          Effect.ensuring(Effect.sync(() => popupProbeRequests.delete(requestId))),
+        );
+      }),
+    bindPopup: (key, input) =>
+      Effect.suspend(() =>
+        popupAnnouncements.has(popupIdOf({ ...key, tabId: input.openerTabId }, input.popupId))
+          ? command(
+              { type: "bindPopup", threadId: key.threadId, tabId: key.tabId, ...input },
+              key.desktopHostId,
+            )
+          : Effect.fail(new DesktopBrowserTransportError({ reason: "guest-unavailable" })),
+      ),
+    closePopup: (key, popupId) =>
+      Effect.gen(function* () {
+        const desktopHostId = key.desktopHostId ?? "local";
+        const id = popupIdOf(key, popupId);
+        if (canceledPopupCloses.delete(id))
+          return yield* new DesktopBrowserTransportError({ reason: "close-canceled" });
+        const requestId = popupCloseAttempts.get(id) ?? NodeCrypto.randomUUID();
+        popupCloseAttempts.set(id, requestId);
+        if (desktopHostId === "local" ? !localAvailable : !hosts.has(desktopHostId))
+          return yield* new DesktopBrowserTransportError({ reason: "host-unavailable" });
+        const pending = popupCloseRequests.get(id);
+        if (pending) return yield* Deferred.await(pending.deferred);
+        const deferred = yield* Deferred.make<void, DesktopBrowserTransportError>();
+        const request = { key, requestId, deferred };
+        popupCloseRequests.set(id, request);
+        return yield* command(
+          { type: "closePopup", threadId: key.threadId, tabId: key.tabId, popupId, requestId },
+          desktopHostId,
+        ).pipe(
+          Effect.andThen(Deferred.await(deferred)),
+          Effect.timeoutOrElse({
+            duration: "10 seconds",
+            orElse: () =>
+              Effect.fail(new DesktopBrowserTransportError({ reason: "host-unavailable" })),
+          }),
+          Effect.ensuring(
+            Effect.sync(() => {
+              if (popupCloseRequests.get(id) === request) popupCloseRequests.delete(id);
+            }).pipe(
+              Effect.andThen(
+                Deferred.fail(
+                  deferred,
+                  new DesktopBrowserTransportError({ reason: "host-unavailable" }),
+                ),
+              ),
+            ),
+          ),
+        );
+      }),
     receiveEvent: (owner, desktopHostId, event) =>
       Effect.suspend(() => {
         const host = hosts.get(desktopHostId);
@@ -556,6 +784,8 @@ const make = Effect.gen(function* () {
       Stream.map((change) => change.key),
     ),
     isAttached: (key) => Effect.sync(() => attachedTabs.has(keyOf(key))),
+    isPresented: (key) => attachedTabs.get(keyOf(key))?.presented === true,
+    presentations: Stream.fromPubSub(presentations),
     surface: (key, input, timeoutMs = 2_500) =>
       Effect.gen(function* () {
         const attached = attachedTabs.get(keyOf(key));

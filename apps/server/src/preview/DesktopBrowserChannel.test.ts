@@ -88,7 +88,436 @@ const connectHost = (
     return { commands, fiber };
   });
 
+it.effect(
+  "presentation follows the current native guest and clears when its host disconnects",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const channel = yield* remoteChannel;
+        const host = yield* connectHost(channel, "owner-a", "host-a");
+        const tab = { ...key, desktopHostId: "host-a" };
+        yield* channel.receiveEvent("owner-a", "host-a", {
+          type: "presentation",
+          ...key,
+          presented: true,
+        });
+        expect(channel.isPresented(tab)).toBe(false);
+        yield* channel.receiveEvent("owner-a", "host-a", { type: "attached", ...key });
+        expect(channel.isPresented(tab)).toBe(false);
+        yield* channel.receiveEvent("owner-a", "host-a", {
+          type: "presentation",
+          ...key,
+          presented: true,
+        });
+        expect(channel.isPresented(tab)).toBe(true);
+        const rejected = yield* channel
+          .receiveEvent("other-owner", "host-a", { type: "presentation", ...key, presented: false })
+          .pipe(Effect.flip);
+        expect(rejected.reason).toBe("host-unavailable");
+        expect(channel.isPresented(tab)).toBe(true);
+        // A replacement announcement must not inherit its predecessor's visibility.
+        yield* channel.receiveEvent("owner-a", "host-a", { type: "attached", ...key });
+        expect(channel.isPresented(tab)).toBe(false);
+        yield* channel.receiveEvent("owner-a", "host-a", {
+          type: "attached",
+          ...key,
+          presented: true,
+        });
+        expect(channel.isPresented(tab)).toBe(true);
+        yield* Fiber.interrupt(host.fiber);
+        expect(channel.isPresented(tab)).toBe(false);
+        expect(yield* channel.isAttached(tab)).toBe(false);
+        // A reconnect starts without any prior guest or presentation.
+        yield* connectHost(channel, "owner-b", "host-a");
+        expect(channel.isPresented(tab)).toBe(false);
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+);
+
 it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
+  it.effect.each([false, true])(
+    "correlates native popup presence without closing a window (%s)",
+    (present) =>
+      Effect.gen(function* () {
+        const channel = yield* remoteChannel;
+        const host = yield* connectHost(channel, "socket-a", "host-a");
+        yield* connectHost(channel, "socket-b", "host-b");
+        const source = { ...key, desktopHostId: "host-a" };
+        let completed = false;
+        const probe = yield* channel.probePopup(source, "child-1").pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              completed = true;
+            }),
+          ),
+          Effect.forkScoped,
+        );
+        const command = yield* Queue.take(host.commands);
+        if (command.type !== "probePopup") throw new Error("Expected native presence probe");
+        const response = {
+          type: "popupPresence" as const,
+          ...key,
+          popupId: command.popupId,
+          requestId: command.requestId,
+          present,
+        };
+        yield* channel.receiveEvent("socket-b", "host-b", response);
+        yield* channel.receiveEvent("socket-a", "host-a", { ...response, tabId: "other-source" });
+        yield* channel.receiveEvent("socket-a", "host-a", { ...response, popupId: "other-popup" });
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          ...response,
+          requestId: "other-request",
+        });
+        expect(completed).toBe(false);
+        const rejected = yield* channel
+          .receiveEvent("socket-b", "host-a", response)
+          .pipe(Effect.flip);
+        expect(rejected.reason).toBe("host-unavailable");
+        yield* channel.receiveEvent("socket-a", "host-a", response);
+        expect(yield* Fiber.join(probe)).toBe(present);
+        expect(yield* Queue.size(host.commands)).toBe(0);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    "presence confirmation completes a pending close whose destruction event was lost",
+    () =>
+      Effect.gen(function* () {
+        const channel = yield* remoteChannel;
+        const host = yield* connectHost(channel, "socket-a", "host-a");
+        const source = { ...key, desktopHostId: "host-a" };
+        const closing = yield* channel.closePopup(source, "gone-offline").pipe(Effect.forkScoped);
+        yield* Queue.take(host.commands);
+        const checking = yield* channel.probePopup(source, "gone-offline").pipe(Effect.forkScoped);
+        const probe = yield* Queue.take(host.commands);
+        if (probe.type !== "probePopup") throw new Error("Expected native presence probe");
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          type: "popupPresence",
+          ...key,
+          popupId: "gone-offline",
+          requestId: probe.requestId,
+          present: false,
+        });
+        expect(yield* Fiber.join(checking)).toBe(false);
+        yield* Fiber.join(closing);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect.each(["disconnect", "timeout"] as const)(
+    "unavailable popup probes preserve an unknown result (%s)",
+    (reason) =>
+      Effect.gen(function* () {
+        const channel = yield* remoteChannel;
+        const host = yield* connectHost(channel, "socket-a", "host-a");
+        const source = { ...key, desktopHostId: "host-a" };
+        const checking = yield* channel
+          .probePopup(source, "child-1")
+          .pipe(Effect.flip, Effect.forkScoped);
+        const original = yield* Queue.take(host.commands);
+        if (original.type !== "probePopup") throw new Error("Expected native presence probe");
+        if (reason === "disconnect") yield* Fiber.interrupt(host.fiber);
+        else yield* TestClock.adjust("5 seconds");
+        expect((yield* Fiber.join(checking)).reason).toBe("host-unavailable");
+        const next =
+          reason === "disconnect" ? yield* connectHost(channel, "socket-c", "host-a") : host;
+        const owner = reason === "disconnect" ? "socket-c" : "socket-a";
+        const retry = yield* channel.probePopup(source, "child-1").pipe(Effect.forkScoped);
+        const command = yield* Queue.take(next.commands);
+        if (command.type !== "probePopup") throw new Error("Expected retry presence probe");
+        expect(command.requestId).not.toBe(original.requestId);
+        yield* channel.receiveEvent(owner, "host-a", {
+          type: "popupPresence",
+          ...key,
+          popupId: "child-1",
+          requestId: original.requestId,
+          present: false,
+        });
+        yield* channel.receiveEvent(owner, "host-a", {
+          type: "popupPresence",
+          ...key,
+          popupId: "child-1",
+          requestId: command.requestId,
+          present: true,
+        });
+        expect(yield* Fiber.join(retry)).toBe(true);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect.each([false, true])(
+    "a lost native veto retires the same attempt after reconnect (retry already waiting: %s)",
+    (waiting) =>
+      Effect.gen(function* () {
+        const channel = yield* remoteChannel;
+        const source = { ...key, desktopHostId: "host-a" };
+        const first = yield* connectHost(channel, "socket-a", "host-a");
+        const original = yield* channel
+          .closePopup(source, "child-1")
+          .pipe(Effect.flip, Effect.forkScoped);
+        const command = yield* Queue.take(first.commands);
+        if (command.type !== "closePopup") throw new Error("Expected native close request");
+        // The host received the command and vetoed closing; its cancellation was lost offline.
+        yield* Fiber.interrupt(first.fiber);
+        expect((yield* Fiber.join(original)).reason).toBe("host-unavailable");
+        const next = yield* connectHost(channel, "socket-b", "host-a");
+        const cancellation = {
+          type: "popupCloseCanceled" as const,
+          ...key,
+          popupId: "child-1",
+          requestId: command.requestId,
+        };
+        if (!waiting) yield* channel.receiveEvent("socket-b", "host-a", cancellation);
+        const retry = yield* channel
+          .closePopup(source, "child-1")
+          .pipe(Effect.flip, Effect.forkScoped);
+        if (waiting) {
+          expect(yield* Queue.take(next.commands)).toEqual(command);
+          yield* channel.receiveEvent("socket-b", "host-a", cancellation);
+        }
+        expect((yield* Fiber.join(retry)).reason).toBe("close-canceled");
+        expect(yield* Queue.size(next.commands)).toBe(0);
+        let completed = false;
+        const deliberate = yield* channel.closePopup(source, "child-1").pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              completed = true;
+            }),
+          ),
+          Effect.forkScoped,
+        );
+        const newCommand = yield* Queue.take(next.commands);
+        if (newCommand.type !== "closePopup") throw new Error("Expected deliberate close request");
+        expect(newCommand.requestId).not.toBe(command.requestId);
+        // A duplicate/stale veto must not cancel the new deliberate attempt.
+        yield* channel.receiveEvent("socket-b", "host-a", cancellation);
+        expect(completed).toBe(false);
+        yield* channel.receiveEvent("socket-b", "host-a", {
+          type: "popupClosed",
+          ...key,
+          popupId: "child-1",
+        });
+        yield* Fiber.join(deliberate);
+        expect(completed).toBe(true);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect("a timed-out transport retry preserves its native close attempt", () =>
+    Effect.gen(function* () {
+      const channel = yield* remoteChannel;
+      const host = yield* connectHost(channel, "socket-a", "host-a");
+      const source = { ...key, desktopHostId: "host-a" };
+      const first = yield* channel
+        .closePopup(source, "child-1")
+        .pipe(Effect.flip, Effect.forkScoped);
+      const command = yield* Queue.take(host.commands);
+      if (command.type !== "closePopup") throw new Error("Expected close request");
+      yield* TestClock.adjust("10 seconds");
+      expect((yield* Fiber.join(first)).reason).toBe("host-unavailable");
+      const retry = yield* channel
+        .closePopup(source, "child-1")
+        .pipe(Effect.flip, Effect.forkScoped);
+      expect(yield* Queue.take(host.commands)).toEqual(command);
+      yield* channel.receiveEvent("socket-a", "host-a", {
+        type: "popupCloseCanceled",
+        ...key,
+        popupId: "child-1",
+        requestId: command.requestId,
+      });
+      expect((yield* Fiber.join(retry)).reason).toBe("close-canceled");
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    "host reconnect notifications include authenticated hosts without any popup replay",
+    () =>
+      Effect.gen(function* () {
+        const channel = yield* remoteChannel;
+        const first = yield* connectHost(channel, "socket-a", "host-a");
+        const connected = yield* channel.connectedHosts.pipe(
+          Stream.toQueue({ capacity: "unbounded" }),
+        );
+        expect(yield* Queue.take(connected)).toBe("host-a");
+        const interruptedClose = yield* channel
+          .closePopup({ ...key, desktopHostId: "host-a" }, "gone-offline")
+          .pipe(Effect.flip, Effect.forkScoped);
+        const firstCommand = yield* Queue.take(first.commands);
+        yield* Fiber.interrupt(first.fiber);
+        // Reconnect before joining the old failed close and retry the same native identity.
+        const next = yield* connectHost(channel, "socket-b", "host-a");
+        expect(yield* Queue.take(connected)).toBe("host-a");
+        const closing = yield* channel
+          .closePopup({ ...key, desktopHostId: "host-a" }, "gone-offline")
+          .pipe(Effect.forkScoped);
+        expect(yield* Queue.take(next.commands)).toEqual({
+          type: "closePopup",
+          ...key,
+          popupId: "gone-offline",
+          requestId: firstCommand.type === "closePopup" ? firstCommand.requestId : "unexpected",
+        });
+        yield* channel.receiveEvent("socket-b", "host-a", {
+          type: "popupClosed",
+          ...key,
+          popupId: "gone-offline",
+        });
+        yield* Fiber.join(closing);
+        expect((yield* Fiber.join(interruptedClose)).reason).toBe("host-unavailable");
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect("native close waits for destruction from the matching authenticated host", () =>
+    Effect.gen(function* () {
+      const channel = yield* remoteChannel;
+      const host = yield* connectHost(channel, "socket-a", "host-a");
+      yield* connectHost(channel, "socket-b", "host-b");
+      const source = { ...key, desktopHostId: "host-a" };
+      let completed = false;
+      const closing = yield* channel.closePopup(source, "child-1").pipe(
+        Effect.tap(() =>
+          Effect.sync(() => {
+            completed = true;
+          }),
+        ),
+        Effect.forkScoped,
+      );
+      expect(yield* Queue.take(host.commands)).toEqual({
+        type: "closePopup",
+        ...key,
+        popupId: "child-1",
+        requestId: expect.any(String),
+      });
+      expect(completed).toBe(false);
+      // Another authenticated desktop's matching strings are a different window.
+      yield* channel.receiveEvent("socket-b", "host-b", {
+        type: "popupClosed",
+        ...key,
+        popupId: "child-1",
+      });
+      expect(completed).toBe(false);
+      const rejected = yield* channel
+        .receiveEvent("socket-b", "host-a", {
+          type: "popupClosed",
+          ...key,
+          popupId: "child-1",
+        })
+        .pipe(Effect.flip);
+      expect(rejected.reason).toBe("host-unavailable");
+      yield* channel.receiveEvent("socket-a", "host-a", {
+        type: "popupClosed",
+        ...key,
+        popupId: "child-1",
+      });
+      yield* Fiber.join(closing);
+      expect(completed).toBe(true);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect.each(["canceled", "disconnected"] as const)(
+    "native close reports a %s window instead of confirming destruction",
+    (failure) =>
+      Effect.gen(function* () {
+        const channel = yield* remoteChannel;
+        const host = yield* connectHost(channel, "socket-a", "host-a");
+        const closing = yield* channel
+          .closePopup({ ...key, desktopHostId: "host-a" }, "child-1")
+          .pipe(Effect.flip, Effect.forkScoped);
+        const command = yield* Queue.take(host.commands);
+        if (command.type !== "closePopup") throw new Error("Expected native close request");
+        if (failure === "canceled")
+          yield* channel.receiveEvent("socket-a", "host-a", {
+            type: "popupCloseCanceled",
+            ...key,
+            popupId: "child-1",
+            requestId: command.requestId,
+          });
+        else yield* Fiber.interrupt(host.fiber);
+        expect((yield* Fiber.join(closing)).reason).toBe(
+          failure === "canceled" ? "close-canceled" : "host-unavailable",
+        );
+        if (failure === "disconnected") {
+          const unavailable = yield* channel
+            .closePopup({ ...key, desktopHostId: "host-a" }, "child-1")
+            .pipe(Effect.flip);
+          expect(unavailable.reason).toBe("host-unavailable");
+        }
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect("routes popup bindings only through the attached source's authenticated owner", () =>
+    Effect.gen(function* () {
+      const channel = yield* remoteChannel;
+      const owner = yield* connectHost(channel, "socket-a", "host-a");
+      const other = yield* connectHost(channel, "socket-b", "host-b");
+      const announcements = yield* channel.popups.pipe(Stream.toQueue({ capacity: "unbounded" }));
+      const popup = {
+        type: "popupCreated" as const,
+        ...key,
+        popupId: "child-1",
+        url: "https://signin.example.test/",
+      };
+      yield* channel.receiveEvent("socket-a", "host-a", popup);
+      expect(yield* Queue.size(announcements)).toBe(0);
+      yield* channel.receiveEvent("socket-a", "host-a", { type: "attached", ...key });
+      const rejected = yield* channel.receiveEvent("socket-b", "host-a", popup).pipe(Effect.flip);
+      expect(rejected.reason).toBe("host-unavailable");
+      yield* channel.receiveEvent("socket-a", "host-a", popup);
+      expect(yield* Queue.take(announcements)).toEqual({
+        ...key,
+        desktopHostId: "host-a",
+        popupId: "child-1",
+        url: popup.url,
+      });
+      const child = { threadId: key.threadId, tabId: "child-tab", desktopHostId: "host-a" };
+      yield* channel.bindPopup(child, { popupId: "child-1", openerTabId: key.tabId });
+      expect(yield* Queue.take(owner.commands)).toEqual({
+        type: "bindPopup",
+        threadId: key.threadId,
+        tabId: "child-tab",
+        popupId: "child-1",
+        openerTabId: key.tabId,
+      });
+      expect(yield* Queue.size(other.commands)).toBe(0);
+      yield* channel.receiveEvent("socket-a", "host-a", {
+        type: "attached",
+        threadId: key.threadId,
+        tabId: child.tabId,
+        presented: true,
+        supportsNativeSurface: true,
+      });
+      expect(channel.isPresented(child)).toBe(true);
+      yield* Fiber.interrupt(owner.fiber);
+      expect(channel.isPresented(child)).toBe(false);
+      expect(yield* channel.isAttached(child)).toBe(false);
+      const reconnected = yield* connectHost(channel, "socket-c", "host-a");
+      yield* channel.receiveEvent("socket-c", "host-a", {
+        type: "attached",
+        threadId: key.threadId,
+        tabId: child.tabId,
+      });
+      // The bound window can survive after its original opener has closed.
+      yield* channel.receiveEvent("socket-c", "host-a", { ...popup, boundTabId: child.tabId });
+      expect(yield* Queue.take(announcements)).toEqual({
+        ...key,
+        desktopHostId: "host-a",
+        popupId: "child-1",
+        url: popup.url,
+      });
+      const closing = yield* channel
+        .closePopup({ ...key, desktopHostId: "host-a" }, popup.popupId)
+        .pipe(Effect.forkScoped);
+      expect(yield* Queue.take(reconnected.commands)).toEqual({
+        type: "closePopup",
+        ...key,
+        popupId: "child-1",
+        requestId: expect.any(String),
+      });
+      yield* channel.receiveEvent("socket-c", "host-a", {
+        type: "popupClosed",
+        ...key,
+        popupId: "child-1",
+      });
+      yield* Fiber.join(closing);
+    }).pipe(Effect.scoped),
+  );
+
   it.effect.each([undefined, false])(
     "rejects missing native surface support (%s) immediately without dispatching or disconnecting",
     (supportsNativeSurface) =>

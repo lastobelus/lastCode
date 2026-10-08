@@ -251,6 +251,16 @@ export function HostedBrowserWebview(props: {
   }, [clientSettingsHydrated, config, initialSrc, runtimeTabId, webviewGeneration]);
 
   const active = presentation.visible && presentation.rect !== null;
+  useEffect(() => {
+    const bridge = window.desktopBridge?.preview;
+    if (!serverDriven || !clientSettingsHydrated || !config || !bridge) return;
+    // Main owns actual window visibility, including picture-in-picture.
+    // The renderer only identifies the selected Browser slot.
+    void bridge.browserPresentation({ runtimeTabId, presented: active }).catch(() => undefined);
+    return () => {
+      void bridge.browserPresentation({ runtimeTabId, presented: false }).catch(() => undefined);
+    };
+  }, [active, clientSettingsHydrated, config, runtimeTabId, serverDriven]);
   const lastRect = presentation.rect;
   const normalizedZoomFactor = Number.isFinite(zoomFactor) && zoomFactor > 0 ? zoomFactor : 1;
   const viewportWidth = viewport._tag === "fill" ? null : viewport.width;

@@ -202,7 +202,10 @@ it.effect("fails before the server can construct persistence or listen", () => {
           Layer.mergeAll(
             ServerConfig.layer(config),
             NodeServices.layer,
-            Layer.mock(DesktopBrowserChannel.DesktopBrowserChannel)({ available: false }),
+            Layer.mock(DesktopBrowserChannel.DesktopBrowserChannel)({
+              available: false,
+              isPresented: () => false,
+            }),
           ),
         ),
         Effect.flip,

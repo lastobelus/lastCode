@@ -19,6 +19,7 @@ import { connectionAtomRuntime } from "~/connection/runtime";
 import { useConnectedEnvironmentIds, usePrimaryEnvironmentId } from "~/state/environments";
 import { previewEnvironment } from "~/state/preview";
 import { useEnvironmentScope } from "~/state/session";
+import { useEnvironmentHasLocalDesktopBrowser } from "~/state/entities";
 import { useAtomCommand } from "~/state/use-atom-command";
 import {
   applyPreviewServerEvent,
@@ -128,6 +129,7 @@ function AuthorizedEnvironmentRelay({ environmentId }: { environmentId: Environm
 export function DesktopCdpRelay() {
   const environments = useConnectedEnvironmentIds();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const hasLocalDesktopBrowser = useEnvironmentHasLocalDesktopBrowser(primaryEnvironmentId);
   if (!window.desktopBridge?.preview) return null;
   return (
     <>
@@ -139,7 +141,7 @@ export function DesktopCdpRelay() {
         />
       ))}
       {environments
-        .filter((id) => id !== primaryEnvironmentId)
+        .filter((id) => id !== primaryEnvironmentId || hasLocalDesktopBrowser === false)
         .map((environmentId) => (
           <AuthorizedEnvironmentRelay key={environmentId} environmentId={environmentId} />
         ))}

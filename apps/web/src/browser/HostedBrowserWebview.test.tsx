@@ -150,6 +150,38 @@ beforeEach(() => {
 });
 
 describe("Electron browser hosting outside the selected thread", () => {
+  it("never creates a native guest for a headless tab, including after a reconnect", async () => {
+    mocks.getClientSettings.mockResolvedValue(DEFAULT_CLIENT_SETTINGS);
+    await act(async () => {
+      await ensureClientSettingsHydrated();
+      renderer = create(
+        <AppAtomRegistryProvider>
+          <ElectronBrowserHost />
+        </AppAtomRegistryProvider>,
+      );
+    });
+    const snapshot: PreviewListResult["sessions"][number] = {
+      threadId: "headless-thread",
+      tabId: "headless-tab",
+      runtime: "server",
+      backingPage: "server",
+      navStatus: { _tag: "Idle" },
+      canGoBack: false,
+      canGoForward: false,
+      updatedAt: "2026-10-07T00:00:00.000Z",
+    };
+    for (const serverEpoch of ["headless-server", "reconnected-server"]) {
+      await act(() => {
+        appAtomRegistry.set(
+          previewList,
+          AsyncResult.success({ serverEpoch, revision: 1, sessions: [snapshot] }),
+        );
+      });
+    }
+    expect(mocks.createTab).not.toHaveBeenCalled();
+    expect(mocks.registerWebview).not.toHaveBeenCalled();
+  });
+
   it("applies primary events once and ignores retired lists while remote epochs advance", async () => {
     const local = {
       environmentId: EnvironmentId.make("desktop-primary"),
@@ -192,6 +224,8 @@ describe("Electron browser hosting outside the selected thread", () => {
         threadId: local.threadId,
         tabId: "selected-tab",
         runtime: "server",
+        backingPage: "desktop",
+        desktopHostId: "local",
         navStatus: { _tag: "Idle" },
         canGoBack: false,
         canGoForward: false,
@@ -282,6 +316,8 @@ describe("Electron browser hosting outside the selected thread", () => {
       threadId: threadRef.threadId,
       tabId: "before-restart",
       runtime: "server",
+      backingPage: "desktop",
+      desktopHostId: "local",
       navStatus: { _tag: "Idle" },
       canGoBack: false,
       canGoForward: false,
@@ -314,7 +350,11 @@ describe("Electron browser hosting outside the selected thread", () => {
     expect(mocks.createTab).toHaveBeenLastCalledWith(
       previewRuntimeTabId(threadRef, "server-after", freshSnapshot.tabId),
       expect.objectContaining({
-        serverTab: { threadId: threadRef.threadId, tabId: freshSnapshot.tabId },
+        serverTab: {
+          threadId: threadRef.threadId,
+          tabId: freshSnapshot.tabId,
+          desktopHostId: "local",
+        },
       }),
     );
   });
@@ -347,6 +387,8 @@ describe("Electron browser hosting outside the selected thread", () => {
           threadId: threadRef.threadId,
           tabId: "existing-tab",
           runtime: "server",
+          backingPage: "desktop",
+          desktopHostId: "local",
           navStatus: { _tag: "Idle" },
           canGoBack: false,
           canGoForward: false,
@@ -361,7 +403,7 @@ describe("Electron browser hosting outside the selected thread", () => {
     expect(mocks.createTab).toHaveBeenCalledExactlyOnceWith(
       runtimeTabId,
       expect.objectContaining({
-        serverTab: { threadId: threadRef.threadId, tabId: "existing-tab" },
+        serverTab: { threadId: threadRef.threadId, tabId: "existing-tab", desktopHostId: "local" },
       }),
     );
     expect(mocks.registerWebview).toHaveBeenCalledExactlyOnceWith(runtimeTabId, 43);
@@ -413,6 +455,8 @@ describe("Electron browser hosting outside the selected thread", () => {
         threadId: threadRef.threadId,
         tabId: "background-tab",
         runtime: "server",
+        backingPage: "desktop",
+        desktopHostId: "local",
         navStatus: { _tag: "Idle" },
         canGoBack: false,
         canGoForward: false,
@@ -429,7 +473,7 @@ describe("Electron browser hosting outside the selected thread", () => {
     expect(mocks.createTab).toHaveBeenCalledExactlyOnceWith(runtimeTabId, {
       zoomFactor: DEFAULT_CLIENT_SETTINGS.browserDefaultZoomFactor,
       colorScheme: DEFAULT_CLIENT_SETTINGS.browserDefaultAppearance,
-      serverTab: { threadId: threadRef.threadId, tabId: opened.tabId },
+      serverTab: { threadId: threadRef.threadId, tabId: opened.tabId, desktopHostId: "local" },
     });
     expect(mocks.registerWebview).toHaveBeenCalledExactlyOnceWith(runtimeTabId, 42);
 
@@ -494,7 +538,9 @@ describe("Electron browser hosting outside the selected thread", () => {
     }
     expect(mocks.createTab).toHaveBeenLastCalledWith(
       previewRuntimeTabId(threadRef, "restarted-primary-server", opened.tabId),
-      expect.objectContaining({ serverTab: { threadId: threadRef.threadId, tabId: opened.tabId } }),
+      expect.objectContaining({
+        serverTab: { threadId: threadRef.threadId, tabId: opened.tabId, desktopHostId: "local" },
+      }),
     );
     expect(mocks.registerWebview).toHaveBeenCalledTimes(4);
     await act(() => {
@@ -533,6 +579,59 @@ afterEach(async () => {
 });
 
 describe("HostedBrowserWebview settings hydration", () => {
+  it("reports the visible native slot independently of a hidden capture lease", async () => {
+    mocks.getClientSettings.mockResolvedValue(DEFAULT_CLIENT_SETTINGS);
+    const browserPresentation = vi.fn(async () => undefined);
+    vi.stubGlobal("desktopBridge", {
+      preview: {
+        browserPresentation,
+        onBrowserSurfaceRequest: () => () => undefined,
+        browserSurfaceResponse: async () => undefined,
+      },
+    });
+    const runtimeTabId = "native-presentation";
+    const owner = Symbol("browser-slot");
+    useBrowserSurfaceStore.getState().claim(runtimeTabId, owner, false);
+    useBrowserSurfaceStore.getState().acquireActivity(runtimeTabId);
+    await act(async () => {
+      await ensureClientSettingsHydrated();
+      renderer = create(
+        <HostedBrowserWebview
+          threadRef={{
+            environmentId: EnvironmentId.make("desktop-primary"),
+            threadId: ThreadId.make("native-thread"),
+          }}
+          tabId="native-tab"
+          runtimeTabId={runtimeTabId}
+          initialUrl={null}
+          profileId="default"
+          viewport={FILL_PREVIEW_VIEWPORT}
+          pictureInPicture={false}
+          zoomFactor={1}
+          serverDriven
+          desktopHostId="local"
+        />,
+        {
+          createNodeMock: (element) =>
+            element.type === "webview"
+              ? Object.assign(new EventTarget(), { getWebContentsId: () => 46 })
+              : { scrollLeft: 0, scrollTop: 0, scrollTo: () => undefined },
+        },
+      );
+    });
+    expect(browserPresentation).toHaveBeenLastCalledWith({ runtimeTabId, presented: false });
+    await act(() => {
+      useBrowserSurfaceStore
+        .getState()
+        .present(runtimeTabId, owner, { x: 0, y: 0, width: 800, height: 600 }, true, 0, 30);
+    });
+    expect(browserPresentation).toHaveBeenLastCalledWith({ runtimeTabId, presented: true });
+    await act(() => {
+      useBrowserSurfaceStore.getState().release(runtimeTabId, owner);
+    });
+    expect(browserPresentation).toHaveBeenLastCalledWith({ runtimeTabId, presented: false });
+  });
+
   it("starts a retained background tab only after a settings read succeeds on retry", async () => {
     const firstRead = deferred<ClientSettings | null>();
     const retryRead = deferred<ClientSettings | null>();
