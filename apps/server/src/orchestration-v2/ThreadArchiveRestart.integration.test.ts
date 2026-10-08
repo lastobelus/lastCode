@@ -130,6 +130,24 @@ const createFamily = Effect.gen(function* () {
       occurredAt: yield* DateTime.now,
       payload: { ...providerThread, providerSessionId },
     });
+    yield* projections.apply({
+      id: EventId.make(`restart-session:${threadId}`),
+      type: "provider-session.attached",
+      threadId,
+      occurredAt: yield* DateTime.now,
+      payload: {
+        id: providerSessionId,
+        driver: ProviderDriverKind.make("codex"),
+        providerInstanceId: instanceId,
+        status: "ready",
+        cwd: ".",
+        model: modelSelection.model,
+        capabilities: CodexProviderCapabilitiesV2,
+        createdAt: yield* DateTime.now,
+        updatedAt: yield* DateTime.now,
+        lastError: null,
+      },
+    });
   }
   return childId;
 });
@@ -233,11 +251,30 @@ it.effect(
                 assert.isNotNull(projection.thread.archivedAt);
                 assert.equal(projection.thread.archivedWith?.commandId, staged.command.commandId);
                 assert.isNull(projection.thread.archivePending);
+                assert.isEmpty(projection.providerSessions);
                 assert.lengthOf(projection.runs, 1);
                 assert.equal(projection.runs[0]?.status, "cancelled");
               }
             } finally {
               shutdown.mockRestore();
+            }
+          }).pipe(Effect.provide(runtimeLayer(dbPath, workspace))),
+        );
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const orchestrator = yield* Orchestrator.OrchestratorV2;
+            for (const id of [parentId, staged.childId])
+              assert.isEmpty((yield* orchestrator.getThreadProjection(id)).providerSessions);
+            yield* orchestrator.dispatch({
+              type: "thread.unarchive",
+              commandId: CommandId.make("restart-restore-detached-family"),
+              threadId: parentId,
+            });
+            for (const id of [parentId, staged.childId]) {
+              const projection = yield* orchestrator.getThreadProjection(id);
+              assert.isNull(projection.thread.archivedAt);
+              assert.isEmpty(projection.providerSessions);
+              assert.equal(projection.runs[0]?.status, "cancelled");
             }
           }).pipe(Effect.provide(runtimeLayer(dbPath, workspace))),
         );
@@ -314,6 +351,7 @@ it.effect.each([
             assert.isNull(root.archivedAt);
             assert.equal(root.archivePending?.status, "failed");
             assert.include(root.archivePending?.error, "Permissions changed while stopping");
+            assert.isEmpty((yield* orchestrator.getThreadProjection(parentId)).providerSessions);
             const failed = yield* orchestrator
               .streamStoredEventsFrom({ threadId: parentId, afterSequence: staged.sequence })
               .pipe(
