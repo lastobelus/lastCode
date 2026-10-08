@@ -18,6 +18,7 @@ import * as Layer from "effect/Layer";
 import * as Semaphore from "effect/Semaphore";
 
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
 import { TerminalManager } from "../terminal/Manager.ts";
 import { UpdateDrain } from "./UpdateDrain.ts";
 
@@ -68,12 +69,14 @@ export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(fu
   const drain = yield* UpdateDrain;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const terminals = yield* TerminalManager;
+  const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
   const mutex = yield* Semaphore.make(1);
 
   const currentBlockers = Effect.fn("UpdateDrainAdmission.currentBlockers")(function* () {
-    const [shell, terminalState] = yield* Effect.all([
+    const [shell, terminalState, runtimeWork] = yield* Effect.all([
       projections.getShellSnapshot().pipe(Effect.mapError(internalError)),
       terminals.refreshMetadata,
+      providerSessions.pendingExecution.pipe(Effect.mapError(internalError)),
     ]);
     const blockers: UpdateDrainBlocker[] = [];
 
@@ -81,6 +84,11 @@ export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(fu
     // work are already durable blockers. Restart recovery owns interruption of
     // old runs; admission must not discard a still-live run on its own.
     for (const thread of [...shell.threads, ...shell.archivedThreads]) {
+      // Archive cancels projected runs before provider shutdown. Keep the hold
+      // until completion, and retain failed/unfinished runtime close evidence
+      // even after the failed archive banner is dismissed.
+      if (thread.archivePending?.status === "stopping")
+        blockers.push({ type: "provider-teardown", threadId: thread.id });
       if (thread.deletedAt != null) continue;
       const status = thread.activityRunStatus ?? thread.status;
       if (["preparing", "queued", "starting", "running", "waiting"].includes(status)) {
@@ -113,8 +121,13 @@ export const makeUpdateDrainAdmission = Effect.fn("makeUpdateDrainAdmission")(fu
       });
     }
 
+    for (const pending of runtimeWork) blockers.push({ type: "provider-runtime", ...pending });
+
     return blockers.sort((left, right) => {
-      const threadOrder = left.threadId.localeCompare(right.threadId);
+      const leftOwner = left.type === "provider-runtime" ? left.providerSessionId : left.threadId;
+      const rightOwner =
+        right.type === "provider-runtime" ? right.providerSessionId : right.threadId;
+      const threadOrder = leftOwner.localeCompare(rightOwner);
       if (threadOrder !== 0) return threadOrder;
       const typeOrder = left.type.localeCompare(right.type);
       if (typeOrder !== 0) return typeOrder;

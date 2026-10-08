@@ -14,6 +14,7 @@ import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as UpdateDrainRepositoryPersistence from "../persistence/UpdateDrainRepository.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
@@ -93,6 +94,7 @@ function makeHarness(
               Layer.provide(UpdateDrainRepositoryPersistence.layer),
               Layer.provide(SqlitePersistence.layerMemory),
             ),
+            Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({}),
             Layer.mock(ProjectionStore.ProjectionStoreV2)({
               getShellSnapshot: () =>
                 Effect.succeed({

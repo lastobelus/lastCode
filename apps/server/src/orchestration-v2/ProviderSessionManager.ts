@@ -173,6 +173,14 @@ export interface ProviderSessionManagerV2Shape {
   ) => Effect.Effect<Option.Option<ProviderAdapterV2SessionRuntime>, ProviderSessionManagerV2Error>;
   /** Includes unfinished runtime shutdown without extending its idle lifetime. */
   readonly isLive: (providerSessionId: ProviderSessionId) => Effect.Effect<boolean>;
+  /** Live execution and unfinished teardown, without extending idle runtime lifetime. */
+  readonly pendingExecution: Effect.Effect<
+    ReadonlyArray<{
+      readonly providerSessionId: ProviderSessionId;
+      readonly status: "running" | "stopping";
+    }>,
+    ProviderSessionManagerV2Error
+  >;
   /** Invalidates workspace protection even when ownership persistence fails. */
   readonly ownershipRevision: Effect.Effect<number>;
   readonly close: (
@@ -2348,6 +2356,45 @@ export const layerWithOptions = (
               return current.has(key) || (closingSessionScopes.get(key)?.size ?? 0) > 0;
             }),
           ),
+        pendingExecution: Effect.gen(function* () {
+          const blockers = new Map<
+            string,
+            { providerSessionId: ProviderSessionId; status: "running" | "stopping" }
+          >();
+          for (const [key, entry] of yield* Ref.get(sessions)) {
+            const busy =
+              entry.busyTurns.size > 0 ||
+              (entry.runtime.hasPendingBackgroundWork !== undefined &&
+                (yield* withActivityError(
+                  entry.runtime.providerSessionId,
+                  entry.runtime.hasPendingBackgroundWork,
+                )));
+            // A passive adapter probe may yield while this runtime is replaced or
+            // closed. Only its current runtime owns the observed background work.
+            const current = (yield* Ref.get(sessions)).get(key);
+            if (current?.runtime === entry.runtime && (busy || current.busyTurns.size > 0))
+              blockers.set(key, {
+                providerSessionId: entry.runtime.providerSessionId,
+                status: "running",
+              });
+          }
+          for (const [key, closing] of closingSessionScopes)
+            if (closing.size > 0)
+              blockers.set(key, {
+                providerSessionId: ProviderSessionId.make(key),
+                status: "stopping",
+              });
+          const current = yield* Ref.get(sessions);
+          for (const pending of pendingThreadUnloads.values()) {
+            const providerSessionId = pending.entry.runtime.providerSessionId;
+            const key = sessionKey(providerSessionId);
+            if (current.get(key)?.runtime === pending.entry.runtime)
+              blockers.set(key, { providerSessionId, status: "stopping" });
+          }
+          return [...blockers.values()].toSorted((left, right) =>
+            left.providerSessionId.localeCompare(right.providerSessionId),
+          );
+        }),
         get: (providerSessionId) =>
           Effect.gen(function* () {
             const entry = (yield* Ref.get(sessions)).get(sessionKey(providerSessionId));

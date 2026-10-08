@@ -1,5 +1,6 @@
 import {
   CommandId,
+  ProviderSessionId,
   ThreadId,
   RunId,
   TurnId,
@@ -16,6 +17,7 @@ import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as UpdateDrainRepositoryPersistence from "../persistence/UpdateDrainRepository.ts";
 import { TerminalManager } from "../terminal/Manager.ts";
@@ -71,15 +73,27 @@ const durableLayer = updateDrainLayer.pipe(
 const makeHarness = Effect.fn("UpdateDrainAdmissionTest.makeHarness")(function* () {
   const shell = yield* Ref.make<OrchestrationV2ThreadShellSnapshot>(emptyShell());
   const terminals = yield* Ref.make<ReadonlyArray<TerminalSummary>>([]);
+  const runtimeWork = yield* Ref.make<
+    ReadonlyArray<{
+      providerSessionId: ProviderSessionId;
+      status: "running" | "stopping";
+    }>
+  >([]);
   const dependencies = Layer.mergeAll(
     durableLayer,
-    Layer.mock(ProjectionStore.ProjectionStoreV2)({ getShellSnapshot: () => Ref.get(shell) }),
+    Layer.mock(ProjectionStore.ProjectionStoreV2)({
+      getShellSnapshot: () => Ref.get(shell),
+      getThreadRecords: () => Effect.die("Drain must not scan per-thread provider history"),
+    }),
+    Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+      pendingExecution: Ref.get(runtimeWork),
+    }),
     Layer.mock(TerminalManager)({
       metadata: Effect.succeed([]),
       refreshMetadata: Ref.get(terminals),
     }),
   );
-  return { shell, terminals, dependencies } as const;
+  return { shell, terminals, runtimeWork, dependencies } as const;
 });
 
 it.effect("orders work admission before closing the drain", () =>
@@ -125,6 +139,106 @@ it.effect("orders work admission before closing the drain", () =>
         "work-admitted",
         "drain-closed",
       ]);
+    }).pipe(Effect.provide(harness.dependencies));
+  }),
+);
+
+it.effect("holds activation until a family archive settles even after its runs are cancelled", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeHarness();
+    const shell = busyShell();
+    yield* Ref.set(harness.shell, {
+      ...shell,
+      threads: shell.threads.map((thread) => ({
+        ...thread,
+        status: "cancelled" as const,
+        activeRunId: null,
+        pendingBackgroundTasks: [],
+        archivePending: {
+          threadId,
+          commandId: CommandId.make("archive-for-update"),
+          status: "stopping" as const,
+        },
+      })),
+    });
+    yield* Effect.gen(function* () {
+      const admission = yield* makeUpdateDrainAdmission();
+      yield* admission.dispatch({
+        type: "update-drain.start",
+        commandId: CommandId.make("start-archive-update"),
+        requestId,
+        targetVersion,
+        createdAt: now,
+      });
+      assert.deepEqual((yield* admission.status).blockers, [
+        { type: "provider-teardown", threadId },
+      ]);
+      assert.equal(
+        (yield* Effect.result(admission.claimActivation({ requestId })))._tag,
+        "Failure",
+      );
+      yield* Ref.update(harness.shell, (shell) => ({
+        ...shell,
+        threads: shell.threads.map((thread) => ({ ...thread, archivePending: null })),
+      }));
+      assert.equal(
+        (yield* admission.claimActivation({ requestId })).commandType,
+        "update-drain.claim",
+      );
+    }).pipe(Effect.provide(harness.dependencies));
+  }),
+);
+
+it.effect("retains provider execution blockers after a failed archive is dismissed", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeHarness();
+    const providerSessionId = ProviderSessionId.make("failed-family-session");
+    const shell = busyShell();
+    yield* Ref.set(harness.shell, {
+      ...shell,
+      threads: shell.threads.map((thread) => ({
+        ...thread,
+        status: "cancelled" as const,
+        activeRunId: null,
+        pendingBackgroundTasks: [],
+        archivePending: {
+          threadId,
+          commandId: CommandId.make("failed-archive"),
+          status: "failed" as const,
+          error: "Controlled stop failure",
+        },
+      })),
+    });
+    yield* Ref.set(harness.runtimeWork, [{ providerSessionId, status: "running" }]);
+    yield* Effect.gen(function* () {
+      const admission = yield* makeUpdateDrainAdmission();
+      yield* admission.dispatch({
+        type: "update-drain.start",
+        commandId: CommandId.make("start-failed-archive-update"),
+        requestId,
+        targetVersion,
+        createdAt: now,
+      });
+      const expected = [{ type: "provider-runtime", providerSessionId, status: "running" }];
+      assert.deepEqual((yield* admission.status).blockers, expected);
+      assert.equal(
+        (yield* Effect.result(admission.claimActivation({ requestId })))._tag,
+        "Failure",
+      );
+      yield* Ref.update(harness.shell, (shell) => ({
+        ...shell,
+        threads: shell.threads.map((thread) => ({ ...thread, archivePending: null })),
+      }));
+      assert.deepEqual((yield* admission.status).blockers, expected);
+      assert.equal(
+        (yield* Effect.result(admission.claimActivation({ requestId })))._tag,
+        "Failure",
+      );
+      yield* Ref.set(harness.runtimeWork, []);
+      assert.equal(
+        (yield* admission.claimActivation({ requestId })).commandType,
+        "update-drain.claim",
+      );
     }).pipe(Effect.provide(harness.dependencies));
   }),
 );

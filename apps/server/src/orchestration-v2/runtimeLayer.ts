@@ -94,15 +94,6 @@ const layerEventSinkProvided = layerEventSink;
 const layerProjectionMaintenanceProvided = ProjectionMaintenance.layer.pipe(
   Layer.provide(layerStores),
 );
-// Share the admission lock between orchestration and maintenance RPCs.
-const layerUpdateDrainAdmission = UpdateDrainAdmission.layer.pipe(
-  Layer.provide(
-    Layer.merge(
-      ProjectionStore.layer,
-      UpdateDrain.layer.pipe(Layer.provide(UpdateDrainRepositoryPersistence.layer)),
-    ),
-  ),
-);
 const layerThreadWaitProvided = ThreadWait.layer.pipe(
   Layer.provide(Layer.merge(ProjectionStore.layer, layerEventSinkProvided)),
 );
@@ -159,6 +150,16 @@ const layerProviderSessionManagerProvided = ProviderSessionManager.layer.pipe(
   ),
 );
 
+// Share the admission lock between orchestration and maintenance RPCs.
+const layerUpdateDrainAdmission = UpdateDrainAdmission.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      ProjectionStore.layer,
+      layerProviderSessionManagerProvided,
+      UpdateDrain.layer.pipe(Layer.provide(UpdateDrainRepositoryPersistence.layer)),
+    ),
+  ),
+);
 const layerProviderAuthServiceProvided = ProviderAuthService.layer.pipe(
   Layer.provide(Layer.merge(ProjectionStore.layer, layerProviderSessionManagerProvided)),
 );

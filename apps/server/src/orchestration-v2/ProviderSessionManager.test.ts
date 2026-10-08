@@ -3,6 +3,9 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   EnvironmentId,
+  CommandId,
+  UpdateDrainRequestId,
+  UpdateDrainTargetVersion,
   type ModelSelection,
   type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
@@ -42,6 +45,10 @@ import * as ProjectService from "../project/ProjectService.ts";
 import * as McpProviderSession from "../mcp/McpProviderSession.ts";
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as UpdateDrainRepository from "../persistence/UpdateDrainRepository.ts";
+import * as UpdateDrain from "../updateDrain/UpdateDrain.ts";
+import * as UpdateDrainAdmission from "../updateDrain/UpdateDrainAdmission.ts";
+import { TerminalManager } from "../terminal/Manager.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as EventSink from "./EventSink.ts";
@@ -209,11 +216,42 @@ it.effect.each(["completion", "timeout"] as const)(
           events: [yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now })],
         });
         yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+        const requestId = UpdateDrainRequestId.make(`teardown-update-${outcome}`);
+        const admission = yield* UpdateDrainAdmission.makeUpdateDrainAdmission().pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              UpdateDrain.layer.pipe(
+                Layer.provide(UpdateDrainRepository.layer),
+                Layer.provide(layerTestDatabase),
+              ),
+              Layer.mock(TerminalManager)({ refreshMetadata: Effect.succeed([]) }),
+            ),
+          ),
+        );
+        yield* admission.dispatch({
+          type: "update-drain.start",
+          commandId: CommandId.make(`teardown-update-start-${outcome}`),
+          requestId,
+          targetVersion: UpdateDrainTargetVersion.make("1.2.3"),
+          createdAt: DateTime.formatIso(now),
+        });
+        // A live idle provider is reusable state, not an execution blocker.
+        assert.deepEqual((yield* admission.status).blockers, []);
         const outboxDetach = yield* manager
           .detach({ threadId, providerSessionId })
           .pipe(Effect.forkChild);
         yield* Deferred.await(closeEntered);
         assert.isTrue(Option.isNone(yield* manager.get(providerSessionId)));
+        assert.deepEqual(yield* manager.pendingExecution, [
+          { providerSessionId, status: "stopping" },
+        ]);
+        assert.deepEqual((yield* admission.status).blockers, [
+          { type: "provider-runtime", providerSessionId, status: "stopping" },
+        ]);
+        assert.equal(
+          (yield* Effect.result(admission.claimActivation({ requestId })))._tag,
+          "Failure",
+        );
         const teardownDone = yield* Ref.make(false);
         const teardown = yield* manager.teardownThread({ threadId, providerSessionId }).pipe(
           Effect.tap(() => Ref.set(teardownDone, true)),
@@ -229,6 +267,14 @@ it.effect.each(["completion", "timeout"] as const)(
           yield* Fiber.join(outboxDetach);
           yield* TestClock.adjust("30 seconds");
           assert.equal((yield* Fiber.join(teardown))._tag, "Failure");
+          assert.isTrue(yield* manager.isLive(providerSessionId));
+          assert.deepEqual((yield* admission.status).blockers, [
+            { type: "provider-runtime", providerSessionId, status: "stopping" },
+          ]);
+          assert.equal(
+            (yield* Effect.result(admission.claimActivation({ requestId })))._tag,
+            "Failure",
+          );
           assert.equal((yield* Ref.get(state)).closeCount, 0);
           assert.lengthOf((yield* projections.getThreadProjection(threadId)).providerSessions, 1);
         }
@@ -238,6 +284,12 @@ it.effect.each(["completion", "timeout"] as const)(
         yield* manager.teardownThread({ threadId, providerSessionId });
         assert.equal((yield* Ref.get(state)).closeCount, 1);
         assert.isEmpty((yield* projections.getThreadProjection(threadId)).providerSessions);
+        assert.deepEqual(yield* manager.pendingExecution, []);
+        assert.deepEqual((yield* admission.status).blockers, []);
+        assert.equal(
+          (yield* admission.claimActivation({ requestId })).commandType,
+          "update-drain.claim",
+        );
       }).pipe(
         Effect.provide(
           layerTest({
@@ -486,6 +538,7 @@ it.effect(
         assert.strictEqual(Option.getOrThrow(yield* manager.get(providerSessionId)), runtime);
         assert.equal((yield* Ref.get(state)).closeCount, 0);
         assert.isEmpty((yield* projections.getThreadProjection(first)).providerSessions);
+        assert.deepEqual(yield* manager.pendingExecution, []);
         assert.equal(
           (yield* projections.getThreadProjection(second)).providerSessions[0]?.status,
           "ready",
@@ -555,6 +608,219 @@ it.effect("confirmed teardown survives a later persistence failure and a runtime
   }),
 );
 
+it.effect(
+  "update activation remains blocked after interrupt fails before detach records teardown",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      yield* Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("update-early-stop-failure");
+        const providerSessionId = ids.derive.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+        });
+        const providerThread = makeProviderThread({
+          idAllocator: ids,
+          threadId,
+          providerSessionId,
+          now,
+        });
+        const providerTurnId = ids.derive.providerTurn({
+          driver: CODEX_DRIVER,
+          nativeTurnId: "early-stop-turn",
+        });
+        const runId = ids.derive.run({ threadId, ordinal: 1 });
+        yield* sink.write({
+          events: [
+            yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now }),
+            {
+              id: yield* ids.allocate.event({ threadId }),
+              type: "provider-thread.updated",
+              threadId,
+              occurredAt: now,
+              payload: providerThread,
+            },
+            {
+              id: yield* ids.allocate.event({ threadId }),
+              type: "provider-turn.updated",
+              threadId,
+              occurredAt: now,
+              payload: {
+                id: providerTurnId,
+                providerThreadId: providerThread.id,
+                nodeId: NodeId.make("early-stop-node"),
+                runAttemptId: null,
+                nativeTurnRef: null,
+                ordinal: 1,
+                status: "running",
+                startedAt: now,
+                completedAt: null,
+              },
+            },
+          ],
+        });
+        const runtime = yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const admission = yield* UpdateDrainAdmission.makeUpdateDrainAdmission().pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              UpdateDrain.layer.pipe(
+                Layer.provide(UpdateDrainRepository.layer),
+                Layer.provide(layerTestDatabase),
+              ),
+              Layer.mock(TerminalManager)({ refreshMetadata: Effect.succeed([]) }),
+            ),
+          ),
+        );
+        const requestId = UpdateDrainRequestId.make("update-after-early-stop");
+        yield* admission.dispatch({
+          type: "update-drain.start",
+          commandId: CommandId.make("start-early-stop-update"),
+          requestId,
+          targetVersion: UpdateDrainTargetVersion.make("1.2.3"),
+          createdAt: DateTime.formatIso(now),
+        });
+        assert.deepEqual((yield* admission.status).blockers, []);
+        yield* runtime.startTurn({
+          appThread: yield* store.getThread(threadId),
+          threadId,
+          runId,
+          runOrdinal: 1,
+          providerTurnOrdinal: 1,
+          attemptId: ids.derive.runAttempt({ runId, attemptOrdinal: 1 }),
+          rootNodeId: ids.derive.rootNode({ runId }),
+          providerThread,
+          message: {
+            createdBy: "user",
+            creationSource: "web",
+            messageId: yield* ids.allocate.message({ threadId, ordinal: 1 }),
+            text: "Run until stopped",
+            attachments: [],
+          },
+          modelSelection,
+          runtimePolicy,
+        });
+        const stopping = yield* manager
+          .teardownThread({ threadId, providerSessionId })
+          .pipe(Effect.result, Effect.forkChild);
+        yield* Deferred.await(entered);
+        yield* Deferred.succeed(release, undefined);
+        assert.equal((yield* Fiber.join(stopping))._tag, "Failure");
+        // No durable run or archive banner remains, and interruption failed before
+        // detach populated its teardown maps. The actual root turn is still busy.
+        assert.equal((yield* store.getThreadShell(threadId))?.status, "idle");
+        assert.deepEqual((yield* admission.status).blockers, [
+          { type: "provider-runtime", providerSessionId, status: "running" },
+        ]);
+        assert.equal(
+          (yield* Effect.result(admission.claimActivation({ requestId })))._tag,
+          "Failure",
+        );
+        yield* manager.close(providerSessionId);
+        assert.deepEqual(yield* manager.pendingExecution, []);
+        assert.equal(
+          (yield* admission.claimActivation({ requestId })).commandType,
+          "update-drain.claim",
+        );
+      }).pipe(
+        Effect.ensuring(Deferred.succeed(release, undefined)),
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60_000,
+            beforeInterrupt: Deferred.succeed(entered, undefined).pipe(
+              Effect.andThen(Deferred.await(release)),
+              Effect.andThen(Effect.die("Controlled interrupt failure")),
+            ),
+          }),
+        ),
+      );
+    }),
+);
+
+it.effect(
+  "update activation checks native background work and fails closed when its probe fails",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const background = yield* Ref.make<"idle" | "busy" | "failure">("idle");
+      yield* Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("update-native-background");
+        const providerSessionId = ids.derive.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+        });
+        yield* sink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now })],
+        });
+        yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+        const admission = yield* UpdateDrainAdmission.makeUpdateDrainAdmission().pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              UpdateDrain.layer.pipe(
+                Layer.provide(UpdateDrainRepository.layer),
+                Layer.provide(layerTestDatabase),
+              ),
+              Layer.mock(TerminalManager)({ refreshMetadata: Effect.succeed([]) }),
+            ),
+          ),
+        );
+        const requestId = UpdateDrainRequestId.make("update-native-background");
+        yield* admission.dispatch({
+          type: "update-drain.start",
+          commandId: CommandId.make("start-native-background-update"),
+          requestId,
+          targetVersion: UpdateDrainTargetVersion.make("1.2.3"),
+          createdAt: DateTime.formatIso(now),
+        });
+        assert.deepEqual((yield* admission.status).blockers, []);
+        yield* Ref.set(background, "busy");
+        assert.deepEqual((yield* admission.status).blockers, [
+          { type: "provider-runtime", providerSessionId, status: "running" },
+        ]);
+        assert.equal(
+          (yield* Effect.result(admission.claimActivation({ requestId })))._tag,
+          "Failure",
+        );
+        yield* Ref.set(background, "failure");
+        const failed = yield* admission.claimActivation({ requestId }).pipe(Effect.flip);
+        assert.equal(failed.reason, "internal_error");
+        yield* Ref.set(background, "idle");
+        assert.equal(
+          (yield* admission.claimActivation({ requestId })).commandType,
+          "update-drain.claim",
+        );
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60_000,
+            hasPendingBackgroundWork: Ref.get(background).pipe(
+              Effect.flatMap((state) =>
+                state === "failure"
+                  ? Effect.die("Controlled background probe failure")
+                  : Effect.succeed(state === "busy"),
+              ),
+            ),
+          }),
+        ),
+      );
+    }),
+);
+
 function unimplemented(detail: string) {
   return Effect.fail(
     new ProviderAdapterProtocolError({
@@ -579,6 +845,7 @@ function makeProviderAdapter(
     readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
     readonly hangSessionScopeClose?: boolean;
     readonly startTurn?: Effect.Effect<void>;
+    readonly beforeInterrupt?: Effect.Effect<void>;
     readonly beforeUnload?: Effect.Effect<void>;
     /** Registers the process's closeCount finalizer before `beforeOpen` runs. */
     readonly spawnBeforeOpen?: boolean;
@@ -691,10 +958,14 @@ function makeProviderAdapter(
           startTurn: () => options.startTurn ?? Effect.void,
           steerTurn: () => Effect.void,
           interruptTurn: () =>
-            Ref.update(state, (current) => ({
-              ...current,
-              interruptCount: current.interruptCount + 1,
-            })),
+            (options.beforeInterrupt ?? Effect.void).pipe(
+              Effect.andThen(
+                Ref.update(state, (current) => ({
+                  ...current,
+                  interruptCount: current.interruptCount + 1,
+                })),
+              ),
+            ),
           unloadThread: ({ providerThread }) =>
             (options.beforeUnload ?? Effect.void).pipe(
               Effect.andThen(
@@ -740,6 +1011,7 @@ function layerTest(input: {
   readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
   readonly hangSessionScopeClose?: boolean;
   readonly startTurn?: Effect.Effect<void>;
+  readonly beforeInterrupt?: Effect.Effect<void>;
   readonly beforeUnload?: Effect.Effect<void>;
   readonly spawnBeforeOpen?: boolean;
   readonly scopeCloseReached?: Deferred.Deferred<void>;
@@ -773,6 +1045,7 @@ function layerTest(input: {
         ? {}
         : { hangSessionScopeClose: input.hangSessionScopeClose }),
       ...(input.startTurn === undefined ? {} : { startTurn: input.startTurn }),
+      ...(input.beforeInterrupt === undefined ? {} : { beforeInterrupt: input.beforeInterrupt }),
       ...(input.beforeUnload === undefined ? {} : { beforeUnload: input.beforeUnload }),
       ...(input.spawnBeforeOpen === undefined ? {} : { spawnBeforeOpen: input.spawnBeforeOpen }),
       ...(input.scopeCloseReached === undefined
