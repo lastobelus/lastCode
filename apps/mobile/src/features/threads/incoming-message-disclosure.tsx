@@ -46,7 +46,7 @@ export function IncomingMessageDisclosure(props: {
           {props.preview.previewText}
         </Text>
         {props.attachmentCount > 0 ? (
-          <SymbolView name="paperclip" size={13} tintColorClassName="accent-icon-muted" />
+          <SymbolView name="doc" size={13} tintColorClassName="accent-icon-muted" />
         ) : null}
         <SymbolView
           name={expanded ? "chevron.up" : "chevron.down"}
