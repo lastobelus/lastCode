@@ -118,7 +118,8 @@ it.effect(
           assert.notInclude(String(error.cause), "stopping before it is archived");
         } else {
           const error = yield* Effect.flip(orchestrator.dispatch(rename(state)));
-          assert.include(String(error.cause), "stopping before it is archived");
+          assert.equal(error._tag, "OrchestratorThreadArchivingError");
+          assert.include(error.message, "stopping before it is archived");
           assert.equal((yield* projections.getThread(threadId)).title, thread.title);
         }
       }

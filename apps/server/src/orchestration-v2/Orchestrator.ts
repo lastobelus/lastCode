@@ -163,6 +163,16 @@ export class OrchestratorCommandRejectedError extends Schema.TaggedError<Orchest
   }
 }
 
+/** A temporary admission hold must not consume a durable command identity. */
+export class OrchestratorThreadArchivingError extends Schema.TaggedError<OrchestratorThreadArchivingError>()(
+  "OrchestratorThreadArchivingError",
+  { commandId: CommandId, commandType: Schema.String, threadId: ThreadId },
+) {
+  override get message(): string {
+    return "This conversation is stopping before it is archived. Wait for the archive to finish.";
+  }
+}
+
 export class OrchestratorProjectionError extends Schema.TaggedError<OrchestratorProjectionError>()(
   "OrchestratorProjectionError",
   {
@@ -267,6 +277,7 @@ export function canReplayCommandReceipt(
 export const OrchestratorV2Error = Schema.Union([
   OrchestratorDispatchError,
   OrchestratorCommandRejectedError,
+  OrchestratorThreadArchivingError,
   OrchestratorProjectionError,
   OrchestratorDomainEventStreamError,
   OrchestratorProviderAdapterError,
@@ -11903,6 +11914,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       command.type === "thread.archive.complete" ||
       command.type === "thread.archive.fail" ||
       command.type === "thread.background-work.settle" ||
+      // These completions only settle retained metadata; they start no provider work.
+      command.type === "message.incoming-summary.complete" ||
       (command.type === "message.dispatch" && command.usageLimitContinuationOfRunId !== undefined);
     if (!allowedWhileArchiving && command.type !== "thread.create") {
       const current = yield* projectionStore
@@ -11915,11 +11928,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         current?.archivePending?.status === "stopping" &&
         (current.deletedAt === null || current.worktreeCleanup != null)
       ) {
-        return yield* new OrchestratorDispatchError({
+        return yield* new OrchestratorThreadArchivingError({
           commandId: command.commandId,
           commandType: command.type,
-          cause:
-            "This conversation is stopping before it is archived. Wait for the archive to finish.",
+          threadId: current.id,
         });
       }
     }
@@ -12693,8 +12705,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ),
         Effect.catch((cause) =>
           Effect.gen(function* () {
-            // A mode refusal records nothing, so lowering the mode can retry this command.
-            if (cause._tag === "OrchestratorThreadAboveModeLimitError") return yield* cause;
+            // Temporary admission holds leave the exact command identity retryable.
+            if (
+              cause._tag === "OrchestratorThreadAboveModeLimitError" ||
+              cause._tag === "OrchestratorThreadArchivingError"
+            )
+              return yield* cause;
             const rejectedAt = yield* DateTime.now;
             const receipt = yield* eventSink
               .commitRejectedCommand({

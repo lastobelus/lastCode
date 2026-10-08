@@ -1403,14 +1403,20 @@ it.effect.each([
         expectedArchiveCommandId: observed.commandId,
       };
       const refusal = yield* threads.dispatch(retry).pipe(Effect.flip);
-      assert.equal(refusal._tag, "OrchestratorDispatchError");
-      if (refusal._tag === "OrchestratorDispatchError")
+      if (state === "stopping") {
+        assert.equal(refusal._tag, "OrchestratorThreadArchivingError");
         assert.equal(
-          refusal.cause,
-          state === "stopping"
-            ? "This conversation is stopping before it is archived. Wait for the archive to finish."
-            : "This failed archive changed. Review the conversation before retrying it.",
+          refusal.message,
+          "This conversation is stopping before it is archived. Wait for the archive to finish.",
         );
+      } else {
+        assert.equal(refusal._tag, "OrchestratorDispatchError");
+        if (refusal._tag === "OrchestratorDispatchError")
+          assert.equal(
+            refusal.cause,
+            "This failed archive changed. Review the conversation before retrying it.",
+          );
+      }
       assert.equal((yield* orchestrator.getShellSnapshot()).snapshotSequence, sequence);
       assert.isEmpty(yield* outbox.listByCommandId(retry.commandId));
       assert.deepEqual(
@@ -1573,7 +1579,10 @@ it.effect.each([
           }
         : dismissArchive(state === "direct-child" ? child : parent, command.commandId);
     const refusal = yield* orchestrator.dispatch(dismissal).pipe(Effect.flip);
-    assert.equal(refusal._tag, "OrchestratorDispatchError");
+    assert.equal(
+      refusal._tag,
+      state === "stopping" ? "OrchestratorThreadArchivingError" : "OrchestratorDispatchError",
+    );
     assert.equal((yield* orchestrator.getShellSnapshot()).snapshotSequence, sequence);
     assert.isEmpty(yield* outbox.listByCommandId(dismissal.commandId));
     for (const previous of before)
