@@ -17,6 +17,7 @@ type BrowserEventInput = typeof DesktopBrowserEventInput.Type;
 
 const state = vi.hoisted(() => ({
   allowed: false,
+  localDesktopBrowser: true as boolean | undefined,
   permissionListeners: new Set<() => void>(),
   browserListeners: new Set<(input: BrowserEventInput) => void>(),
   streams: [] as Stream.Stream<unknown>[],
@@ -36,6 +37,9 @@ vi.mock("~/state/environments", () => ({
   useConnectedEnvironmentIds: () => [primary, remote],
   usePrimaryEnvironmentId: () => primary,
 }));
+vi.mock("~/state/entities", () => ({
+  useEnvironmentHasLocalDesktopBrowser: () => state.localDesktopBrowser,
+}));
 vi.mock("~/state/session", async () => {
   const { useSyncExternalStore } = await import("react");
   return {
@@ -45,7 +49,10 @@ vi.mock("~/state/session", async () => {
           state.permissionListeners.add(listener);
           return () => state.permissionListeners.delete(listener);
         },
-        () => environmentId === remote && scope === AuthPreviewOperateScope && state.allowed,
+        () =>
+          (environmentId === remote || !state.localDesktopBrowser) &&
+          scope === AuthPreviewOperateScope &&
+          state.allowed,
       ),
   };
 });
@@ -106,6 +113,7 @@ let renderer: ReactTestRenderer | undefined;
 
 beforeEach(() => {
   state.allowed = false;
+  state.localDesktopBrowser = true;
   state.streams = [];
   state.browserCommand.mockClear();
   state.sendEvent.mockClear();
@@ -127,6 +135,41 @@ beforeEach(() => {
     },
   });
 });
+
+it.effect("relays a primary environment only when its local desktop IPC is unavailable", () =>
+  Effect.gen(function* () {
+    state.allowed = true;
+    state.localDesktopBrowser = false;
+    const { DesktopCdpRelay } = yield* Effect.promise(() => import("./DesktopCdpRelay"));
+    yield* Effect.promise(() =>
+      act(async () => {
+        renderer = create(createElement(DesktopCdpRelay));
+      }),
+    );
+    yield* Effect.all(state.streams.map(Stream.runDrain));
+    expect(state.browserCommand.mock.calls.map(([input]) => input)).toEqual([
+      expect.objectContaining({ desktopHostId: "host-primary" }),
+      expect.objectContaining({ desktopHostId: "host-remote" }),
+    ]);
+  }),
+);
+
+it.effect("does not guess a primary relay channel before capabilities arrive", () =>
+  Effect.gen(function* () {
+    state.allowed = true;
+    state.localDesktopBrowser = undefined;
+    const { DesktopCdpRelay } = yield* Effect.promise(() => import("./DesktopCdpRelay"));
+    yield* Effect.promise(() =>
+      act(async () => {
+        renderer = create(createElement(DesktopCdpRelay));
+      }),
+    );
+    yield* Effect.all(state.streams.map(Stream.runDrain));
+    expect(state.browserCommand).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ desktopHostId: "host-remote" }),
+    );
+  }),
+);
 
 it.effect(
   "lets the root host apply primary preview events while preserving remote state and handoffs",

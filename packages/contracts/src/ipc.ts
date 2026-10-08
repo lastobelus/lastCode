@@ -3,6 +3,7 @@ import type {
   DesktopBrowserEvent,
   DesktopBrowserSurfaceRequest,
   DesktopBrowserSurfaceResponse,
+  DesktopBrowserPresentationInput,
 } from "./desktopBrowser.ts";
 import * as Schema from "effect/Schema";
 
@@ -1401,6 +1402,7 @@ export const DESKTOP_PREVIEW_RECORDING_CAPTURE_TRIGGER = "__t3DesktopPreviewReco
 export interface DesktopPreviewBridge {
   onBrowserSurfaceRequest: (listener: (input: DesktopBrowserSurfaceRequest) => void) => () => void;
   browserSurfaceResponse: (input: DesktopBrowserSurfaceResponse) => Promise<void>;
+  browserPresentation: (input: DesktopBrowserPresentationInput) => Promise<void>;
   browserCommand: (input: {
     readonly desktopHostId: string;
     readonly command: DesktopBrowserCommand;

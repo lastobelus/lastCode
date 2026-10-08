@@ -45,6 +45,13 @@ export type DesktopBrowserSurfaceRequest = typeof DesktopBrowserSurfaceRequest.T
 export const DesktopBrowserSurfaceResponse = Schema.Struct(SurfaceResponse);
 export type DesktopBrowserSurfaceResponse = typeof DesktopBrowserSurfaceResponse.Type;
 
+/** A user-visible native slot or picture-in-picture window, excluding capture leases. */
+export const DesktopBrowserPresentationInput = Schema.Struct({
+  runtimeTabId: Schema.String,
+  presented: Schema.Boolean,
+});
+export type DesktopBrowserPresentationInput = typeof DesktopBrowserPresentationInput.Type;
+
 /** Desktop -> server. */
 export const DESKTOP_BROWSER_DOWNLOAD_MAX_BYTES = 64 * 1024 * 1024;
 export const DESKTOP_BROWSER_DOWNLOAD_CHUNK_BYTES = 192 * 1024;
@@ -75,7 +82,9 @@ export const DesktopBrowserEvent = Schema.Union([
     ...TabKey,
     /** Advertised by native hosts that acknowledge rendering leases. */
     supportsNativeSurface: Schema.optionalKey(Schema.Boolean),
+    presented: Schema.optionalKey(Schema.Boolean),
   }),
+  Schema.Struct({ type: Schema.Literal("presentation"), ...TabKey, presented: Schema.Boolean }),
   /** Its `<webview>` went away: closed, crashed, swapped, or devtools took the debugger. */
   Schema.Struct({ type: Schema.Literal("detached"), ...TabKey }),
   /** One CDP message from the tab's relay. */

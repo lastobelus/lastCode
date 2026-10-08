@@ -49,6 +49,72 @@ const PreviewManagerTestLayer = PreviewManager.layer.pipe(
 );
 
 it.layer(PreviewManagerTestLayer)("PreviewManager", (it) => {
+  it.effect("publishes one authoritative backing page before subscribers can attach", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const manager = yield* PreviewManager.make.pipe(
+        Effect.provideService(ServerConfig.ServerConfig, {
+          ...config,
+          desktopBrowserFd: 4,
+          desktopBrowserControlFd: 5,
+        }),
+      );
+      const events = yield* manager.subscribeEvents;
+      // Extra client properties cannot override the server's choice.
+      const input = {
+        threadId: freshThreadId(),
+        runtime: "server" as const,
+        backingPage: "server",
+      };
+      const local = yield* manager.open(input);
+      const remote = yield* manager.open({
+        threadId: input.threadId,
+        runtime: "server",
+        desktopHostId: "remote-desktop",
+        profileId: "work",
+      });
+      expect(local).toMatchObject({ backingPage: "desktop", desktopHostId: "local" });
+      expect(remote).toMatchObject({
+        backingPage: "desktop",
+        desktopHostId: "remote-desktop",
+        profileId: "work",
+      });
+      const opened = yield* PubSub.takeUpTo(events, DRAIN_LIMIT);
+      expect(opened.map((event) => ("snapshot" in event ? event.snapshot : null))).toEqual([
+        local,
+        remote,
+      ]);
+      expect((yield* manager.list({ threadId: input.threadId })).sessions).toEqual([local, remote]);
+    }),
+  );
+
+  it.effect(
+    "chooses headless without both local IPC descriptors and preserves explicit hosts",
+    () =>
+      Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        for (const desktopBrowserFd of [undefined, 4]) {
+          const manager = yield* PreviewManager.make.pipe(
+            Effect.provideService(ServerConfig.ServerConfig, {
+              ...config,
+              desktopBrowserFd,
+              desktopBrowserControlFd: undefined,
+            }),
+          );
+          const threadId = freshThreadId();
+          const server = yield* manager.open({ threadId, runtime: "server" });
+          expect(server.backingPage).toBe("server");
+          expect(server.desktopHostId).toBeUndefined();
+          const pinned = yield* manager.open({
+            threadId,
+            runtime: "server",
+            desktopHostId: "local",
+          });
+          expect(pinned).toMatchObject({ backingPage: "desktop", desktopHostId: "local" });
+        }
+      }),
+  );
+
   it.effect("lists all environment tabs when the thread filter is omitted", () =>
     Effect.gen(function* () {
       const manager = yield* PreviewManager.PreviewManager;

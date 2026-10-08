@@ -170,6 +170,7 @@ let clipboardBinding: ClipboardBinding | null = null;
 let contextFailure: Error | null = null;
 /** Server tabs the fake desktop renders, and the endpoints the server connected to. */
 let desktopRendersNext = false;
+let localDesktopAvailable = false;
 let remoteUrlAvailable = true;
 let remoteUrlGate: ReturnType<typeof Promise.withResolvers<void>> | null = null;
 let remoteUrlEntered: ReturnType<typeof Promise.withResolvers<void>> | null = null;
@@ -195,6 +196,8 @@ const desktopRenders = (tabId: string) => {
 };
 const releasedDesktopTabs: Array<string> = [];
 const desktopConnections: Array<{ endpoint: string; context: ReturnType<typeof makeContext> }> = [];
+const presentedDesktopTabs = new Set<string>();
+const desktopPresentations = new NodeEvents.EventEmitter();
 let surfaceFailure: DesktopBrowserTransportError | null = null;
 const surfaceCalls: Array<{
   tabId: string;
@@ -258,6 +261,19 @@ const dependencies = Layer.mergeAll(
       ),
     ),
     isAttached: (key) => Effect.sync(() => desktopRenders(key.tabId)),
+    isPresented: (key) => Effect.sync(() => presentedDesktopTabs.has(key.tabId)),
+    presentations: Stream.callback<{ threadId: string; tabId: string; desktopHostId: string }>(
+      (queue) =>
+        Effect.acquireRelease(
+          Effect.sync(() => {
+            const listener = (key: { threadId: string; tabId: string; desktopHostId: string }) =>
+              Queue.offerUnsafe(queue, key);
+            desktopPresentations.on("presentation", listener);
+            return listener;
+          }),
+          (listener) => Effect.sync(() => desktopPresentations.off("presentation", listener)),
+        ),
+    ),
     surface: (key, input) =>
       Effect.sync(() => {
         surfaceCalls.push({ tabId: key.tabId, ...input });
@@ -280,7 +296,23 @@ const dependencies = Layer.mergeAll(
     pointer: () => Effect.void,
   }),
 ).pipe(
-  Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-server-browser-" })),
+  Layer.provideMerge(
+    Layer.effect(
+      ServerConfig.ServerConfig,
+      Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        return {
+          ...config,
+          get desktopBrowserFd() {
+            return desktopRendersNext || localDesktopAvailable ? 4 : undefined;
+          },
+          get desktopBrowserControlFd() {
+            return desktopRendersNext || localDesktopAvailable ? 5 : undefined;
+          },
+        };
+      }),
+    ).pipe(Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-server-browser-" }))),
+  ),
   Layer.provideMerge(NodeServices.layer),
 );
 const layer = ServerBrowser.layer.pipe(Layer.provideMerge(dependencies));
@@ -328,7 +360,9 @@ beforeEach(() => {
   contextGate = null;
   contextFailure = null;
   desktopTabs.clear();
+  presentedDesktopTabs.clear();
   desktopRendersNext = false;
+  localDesktopAvailable = false;
   profileCatalogue = null;
   remoteUrlAvailable = true;
   releasedDesktopTabs.length = 0;
@@ -1674,6 +1708,116 @@ it.live("never substitutes a headless page when the selected desktop does not at
       expect(desktopConnections).toHaveLength(0);
     }),
   ).pipe(Effect.provide(layer)),
+);
+
+it.live("catalogue timeout and late desktop attachment keep the original native page choice", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const browser = yield* ServerBrowser.ServerBrowser;
+      const manager = yield* Manager.PreviewManager;
+      const broker = yield* Broker.PreviewAutomationBroker;
+      yield* Effect.yieldNow;
+      localDesktopAvailable = true;
+      profileCatalogue = null;
+      yield* broker
+        .invoke<void>({ scope, operation: "open", input: { reuseExistingTab: false, show: false } })
+        .pipe(Effect.flip);
+      const { sessions } = yield* manager.list({ threadId: scope.thread.threadId });
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0]).toMatchObject({ backingPage: "desktop", desktopHostId: "local" });
+      expect(contexts).toHaveLength(0);
+      expect(desktopConnections).toHaveLength(0);
+      desktopTabs.add(sessions[0]!.tabId);
+      yield* browser.attachViewer(viewerInput(sessions[0]!.tabId, false));
+      expect(desktopConnections).toHaveLength(1);
+      expect(contexts).toHaveLength(0);
+      expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions[0]).toMatchObject({
+        backingPage: "desktop",
+        desktopHostId: "local",
+      });
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("a headless page never becomes a native page when a desktop attaches later", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { browser, broker, tabId } = yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      expect(
+        (yield* manager.list({ threadId: scope.thread.threadId })).sessions[0]?.backingPage,
+      ).toBe("server");
+      localDesktopAvailable = true;
+      desktopTabs.add(tabId);
+      yield* browser.attachViewer(viewerInput(tabId, false));
+      yield* broker.invoke<void>({
+        scope,
+        tabId,
+        operation: "open",
+        input: { url: "https://headless.example/test", show: false },
+      });
+      expect(contexts).toHaveLength(1);
+      expect(contexts[0]!.page.goto).toHaveBeenCalledWith(
+        "https://headless.example/test",
+        expect.anything(),
+      );
+      expect(desktopConnections).toHaveLength(0);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live(
+  "visibility distinguishes native presentation, streamed viewers, and a pending reveal",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        desktopRendersNext = true;
+        const { browser, broker, tabId } = yield* ready;
+        const status = () =>
+          broker.invoke<PreviewAutomationStatus>({ scope, tabId, operation: "status", input: {} });
+        const revealed = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          tabId,
+          operation: "open",
+          input: { open: true },
+        });
+        expect(revealed).toMatchObject({
+          available: true,
+          visible: false,
+          nativePresented: false,
+          streamViewers: 0,
+          revealRequested: true,
+        });
+        while (desktopPresentations.listenerCount("presentation") === 0) yield* Effect.yieldNow;
+        presentedDesktopTabs.add(tabId);
+        desktopPresentations.emit("presentation", {
+          threadId: scope.thread.threadId,
+          tabId,
+          desktopHostId: "local",
+        });
+        yield* Effect.yieldNow;
+        expect(yield* status()).toMatchObject({
+          visible: true,
+          nativePresented: true,
+          streamViewers: 0,
+          revealRequested: false,
+        });
+        presentedDesktopTabs.delete(tabId);
+        desktopPresentations.emit("presentation", {
+          threadId: scope.thread.threadId,
+          tabId,
+          desktopHostId: "local",
+        });
+        yield* Effect.yieldNow;
+        expect(yield* status()).toMatchObject({ visible: false, nativePresented: false });
+        yield* browser.attachViewer(viewerInput(tabId, false));
+        expect(yield* status()).toMatchObject({
+          visible: true,
+          nativePresented: false,
+          streamViewers: 1,
+        });
+      }),
+    ).pipe(Effect.provide(layer)),
 );
 
 it.live(

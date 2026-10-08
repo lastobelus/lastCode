@@ -89,7 +89,7 @@ const SCREENCAST_MOTION_FRAMES = 4;
 const SCREENCAST_MOTION_WINDOW_MS = 300;
 const SCREENCAST_MOTION_QUALITY = 50;
 const HOST_RECONNECT_DELAY = "1 second";
-/** How long a new tab waits for the desktop app to mount it before running headless. */
+/** How long a desktop-backed tab waits for its selected native host to attach. */
 const DESKTOP_ATTACH_TIMEOUT = "10 seconds";
 const VIEWER_OUTPUT_LIMIT = 64;
 const RECORDING_SCREENCAST = { format: "jpeg", quality: 90, everyNthFrame: 1 } as const;
@@ -299,6 +299,8 @@ interface ServerTab {
   readonly desktop: { readonly close: () => Promise<void> } | null;
   readonly profileId: string | undefined;
   readonly desktopHostId: string | undefined;
+  nativePresented: boolean;
+  revealRequested: boolean;
   /** Set when a page in another tab opened this one with `window.open` or a link. */
   readonly openerTabId: string | undefined;
   /** Finished downloads, newest last; files live until the tab closes. */
@@ -566,7 +568,7 @@ const make = Effect.gen(function* () {
             liveTabs: [...tabs.values()].map((tab) => ({
               threadId: tab.threadId,
               tabId: tab.tabId,
-              visible: tab.viewers.size > 0,
+              visible: tab.nativePresented || tab.viewers.size > 0,
             })),
           }),
         ),
@@ -669,12 +671,9 @@ const make = Effect.gen(function* () {
     }
   };
 
-  /**
-   * With a desktop app attached, every tab of this server renders there, so a
-   * new tab waits for its `<webview>` instead of launching headless.
-   */
+  /** Wait only for the page owner chosen before the session was published. */
   const desktopRenders = (snapshot: PreviewSessionSnapshot) =>
-    desktopChannel.available
+    snapshot.backingPage === "desktop"
       ? Effect.runPromise(
           desktopChannel.awaitAttached(
             {
@@ -725,7 +724,7 @@ const make = Effect.gen(function* () {
       adopted === undefined && (await desktopRenders(snapshot))
         ? await connectDesktop(snapshot)
         : null;
-    if (snapshot.desktopHostId !== undefined && desktop === null) {
+    if (snapshot.backingPage === "desktop" && desktop === null) {
       throw new ServerBrowserPage.ServerBrowserOperationError(
         "PreviewAutomationRemoteUnavailableError",
         "The selected desktop browser did not attach. Keep that desktop connected and retry; the requested profile was not opened in another browser.",
@@ -769,6 +768,16 @@ const make = Effect.gen(function* () {
       desktop: desktop === null ? null : { close: desktop.close },
       profileId: snapshot.profileId,
       desktopHostId: snapshot.desktopHostId,
+      nativePresented:
+        desktop !== null &&
+        (await Effect.runPromise(
+          desktopChannel.isPresented({
+            threadId: snapshot.threadId,
+            tabId: snapshot.tabId,
+            desktopHostId: snapshot.desktopHostId,
+          }),
+        )),
+      revealRequested: snapshot.reveal === true,
       openerTabId: adopted?.openerTabId,
       downloads: [],
       fileChooser: null,
@@ -1180,6 +1189,9 @@ const make = Effect.gen(function* () {
       return {
         available: false,
         visible: false,
+        nativePresented: false,
+        streamViewers: 0,
+        revealRequested: false,
         tabId: null,
         url: null,
         title: null,
@@ -1188,6 +1200,9 @@ const make = Effect.gen(function* () {
     }
     const url = tab.page.url();
     const viewport = tab.page.viewportSize();
+    // A reveal response only confirms the request. Presentation comes from
+    // the actual native slot or an attached streamed viewer.
+    if (tab.nativePresented || tab.viewers.size > 0) tab.revealRequested = false;
     const catalogue =
       tab.desktopHostId === undefined || agentSessionId === undefined
         ? null
@@ -1201,7 +1216,10 @@ const make = Effect.gen(function* () {
           ? (catalogue?.profiles.find((profile) => profile.id === tab.profileId)?.name ?? null)
           : null,
       available: true,
-      visible: tab.viewers.size > 0,
+      visible: tab.nativePresented || tab.viewers.size > 0,
+      nativePresented: tab.nativePresented,
+      streamViewers: tab.viewers.size,
+      revealRequested: tab.revealRequested,
       tabId: tab.tabId,
       url: url === "about:blank" ? null : url,
       title: null,
@@ -1868,6 +1886,7 @@ const make = Effect.gen(function* () {
                 );
               const reveal = open.open ?? open.show;
               if (reveal !== false) {
+                tab.revealRequested = true;
                 await Effect.runPromise(
                   manager.requestReveal({
                     threadId: tab.threadId,
@@ -2722,6 +2741,18 @@ const make = Effect.gen(function* () {
         const tab = tabs.get(tabKey(key.threadId, key.tabId));
         if (tab?.desktop && (tab.desktopHostId ?? "local") === (key.desktopHostId ?? "local"))
           dropTab(tab, false);
+      }),
+    ),
+    Effect.forkScoped,
+  );
+  yield* desktopChannel.presentations.pipe(
+    Stream.runForEach((key) =>
+      Effect.gen(function* () {
+        const tab = tabs.get(tabKey(key.threadId, key.tabId));
+        if (!tab?.desktop || tab.desktopHostId !== key.desktopHostId) return;
+        tab.nativePresented = yield* desktopChannel.isPresented(key);
+        if (tab.nativePresented) tab.revealRequested = false;
+        reportLiveTabs();
       }),
     ),
     Effect.forkScoped,

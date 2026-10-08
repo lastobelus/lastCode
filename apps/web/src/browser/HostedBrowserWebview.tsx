@@ -251,6 +251,24 @@ export function HostedBrowserWebview(props: {
   }, [clientSettingsHydrated, config, initialSrc, runtimeTabId, webviewGeneration]);
 
   const active = presentation.visible && presentation.rect !== null;
+  useEffect(() => {
+    const bridge = window.desktopBridge?.preview;
+    if (!serverDriven || !clientSettingsHydrated || !config || !bridge) return;
+    const reportPresentation = () => {
+      void bridge
+        .browserPresentation({
+          runtimeTabId,
+          presented: pictureInPicture || (active && document.visibilityState !== "hidden"),
+        })
+        .catch(() => undefined);
+    };
+    reportPresentation();
+    document.addEventListener("visibilitychange", reportPresentation);
+    return () => {
+      document.removeEventListener("visibilitychange", reportPresentation);
+      void bridge.browserPresentation({ runtimeTabId, presented: false }).catch(() => undefined);
+    };
+  }, [active, clientSettingsHydrated, config, pictureInPicture, runtimeTabId, serverDriven]);
   const lastRect = presentation.rect;
   const normalizedZoomFactor = Number.isFinite(zoomFactor) && zoomFactor > 0 ? zoomFactor : 1;
   const viewportWidth = viewport._tag === "fill" ? null : viewport.width;

@@ -89,6 +89,7 @@ interface AttachedTab {
   readonly surfaceLeases: Map<string, number | null>;
   readonly renderingLeases: Map<string, () => void>;
   relay: CdpRelayConnection | null;
+  presented: boolean;
   /** Where the server wants this tab's downloads; null keeps Electron's own handling. */
   downloadDirectory: string | null;
   /** The guid CDP gave the download that is about to start. */
@@ -127,6 +128,10 @@ export class DesktopBrowserHost extends Context.Service<
       runtimeTabId: string,
     ) => void;
     readonly surfaceResponse: (response: DesktopBrowserSurfaceResponse, senderId: number) => void;
+    readonly setPresentation: (
+      input: { readonly runtimeTabId: string; readonly presented: boolean },
+      senderId: number,
+    ) => void;
     /** Shares the preview manager's base policy with temporary automation rendering leases. */
     readonly setBackgroundThrottling: (contents: Electron.WebContents, enabled: boolean) => void;
     /** Withdraws it: closed, swapped, crashed, or devtools needs the debugger. */
@@ -202,6 +207,7 @@ export const make = Effect.gen(function* () {
     );
   };
   const tabs = new Map<string, AttachedTab>();
+  const presentedSlots = new Map<string, number>();
   const emit = (event: DesktopBrowserEventType, desktopHostId = "local") =>
     runFork(PubSub.publish(outbox, { desktopHostId, event }));
   const unthrottledContents = new Map<
@@ -483,6 +489,10 @@ export const make = Effect.gen(function* () {
       surfaceLeases: new Map(),
       renderingLeases: new Map(),
       relay: null,
+      presented:
+        debuggee.webContents.hostWebContents !== null &&
+        debuggee.webContents.hostWebContents !== undefined &&
+        presentedSlots.get(runtimeTabId) === debuggee.webContents.hostWebContents.id,
       downloadDirectory: null,
       pendingDownloadGuid: null,
       remoteDownloadDirectory: null,
@@ -520,7 +530,13 @@ export const make = Effect.gen(function* () {
     tabs.set(id, tab);
     debuggee.debugger.on("message", tab.onMessage);
     emit(
-      { type: "attached", threadId: key.threadId, tabId: key.tabId, supportsNativeSurface: true },
+      {
+        type: "attached",
+        threadId: key.threadId,
+        tabId: key.tabId,
+        supportsNativeSurface: true,
+        ...(tab.presented ? { presented: true } : {}),
+      },
       key.desktopHostId,
     );
   };
@@ -673,6 +689,7 @@ export const make = Effect.gen(function* () {
               threadId: tab.key.threadId,
               tabId: tab.key.tabId,
               supportsNativeSurface: true,
+              ...(tab.presented ? { presented: true } : {}),
             },
           });
         },
@@ -703,6 +720,27 @@ export const make = Effect.gen(function* () {
       return Option.isSome(decoded) ? handleCommand(decoded.value) : Effect.void;
     },
     attach,
+    setPresentation: (input, senderId) => {
+      const tab = [...tabs.values()].find((tab) => tab.runtimeTabId === input.runtimeTabId);
+      if (tab && tab.debuggee.webContents.hostWebContents?.id !== senderId) return;
+      // Registration and relay attachment are asynchronous. Retain the slot
+      // state so an attach cannot lose a presentation reported before it.
+      if (input.presented) presentedSlots.set(input.runtimeTabId, senderId);
+      else if (presentedSlots.get(input.runtimeTabId) === senderId)
+        presentedSlots.delete(input.runtimeTabId);
+      if (!tab) return;
+      if (tab.presented === input.presented) return;
+      tab.presented = input.presented;
+      emit(
+        {
+          type: "presentation",
+          threadId: tab.key.threadId,
+          tabId: tab.key.tabId,
+          presented: tab.presented,
+        },
+        tab.key.desktopHostId,
+      );
+    },
     surfaceResponse,
     setBackgroundThrottling,
     detach,

@@ -89,6 +89,74 @@ const takeEvents = (host: DesktopBrowserHost.DesktopBrowserHost["Service"], coun
   );
 
 describe("DesktopBrowserHost", () => {
+  it.effect(
+    "reports visible slots across late attachment and reconnect without treating capture as visible",
+    () =>
+      Effect.gen(function* () {
+        const host = yield* DesktopBrowserHost.make.pipe(
+          Effect.provide(DesktopClientSettings.layerTest()),
+        );
+        const events = yield* Queue.unbounded<{
+          desktopHostId: string;
+          event: typeof DesktopBrowserEvent.Type;
+        }>();
+        yield* host.remoteEvents.pipe(
+          Stream.runForEach((event) => Queue.offer(events, event)),
+          Effect.forkScoped({ startImmediately: true }),
+        );
+        const debuggee = makeDebuggee();
+        const remoteKey = { ...key, desktopHostId: "remote-a" };
+        host.setPresentation({ runtimeTabId: "runtime-a", presented: true }, 77);
+        host.attach(remoteKey, debuggee.tab, "runtime-a");
+        expect((yield* Queue.take(events)).event).toMatchObject({
+          type: "attached",
+          presented: true,
+        });
+        host.setPresentation({ runtimeTabId: "runtime-a", presented: false }, 78);
+        yield* host.handleRemoteCommand({
+          desktopHostId: "remote-a",
+          command: { type: "announce" },
+        });
+        expect((yield* Queue.take(events)).event).toMatchObject({
+          type: "attached",
+          presented: true,
+        });
+        host.setPresentation({ runtimeTabId: "runtime-a", presented: false }, 77);
+        expect((yield* Queue.take(events)).event).toEqual({
+          type: "presentation",
+          ...key,
+          presented: false,
+        });
+        yield* host.handleRemoteCommand({
+          desktopHostId: "remote-a",
+          command: {
+            type: "surface",
+            ...key,
+            requestId: "capture",
+            leaseId: "qa",
+            action: "acquire",
+          },
+        });
+        host.surfaceResponse(
+          {
+            requestId: debuggee.surfaceRequests[0]!.requestId,
+            viewport: { width: 1280, height: 800 },
+          },
+          77,
+        );
+        expect((yield* Queue.take(events)).event.type).toBe("surfaceReady");
+        yield* host.handleRemoteCommand({
+          desktopHostId: "remote-a",
+          command: { type: "announce" },
+        });
+        expect((yield* Queue.take(events)).event).toEqual({
+          type: "attached",
+          ...key,
+          supportsNativeSurface: true,
+        });
+      }),
+  );
+
   it.effect("announces tabs already attached to a backend that starts later", () =>
     Effect.gen(function* () {
       const host = yield* DesktopBrowserHost.make.pipe(

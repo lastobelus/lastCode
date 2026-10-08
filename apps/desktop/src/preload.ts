@@ -319,6 +319,8 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   preview: {
     browserSurfaceResponse: (response) =>
       ipcRenderer.invoke(IpcChannels.DESKTOP_BROWSER_SURFACE_RESPONSE_CHANNEL, response),
+    browserPresentation: (input) =>
+      ipcRenderer.invoke(IpcChannels.DESKTOP_BROWSER_PRESENTATION_CHANNEL, input),
     onBrowserSurfaceRequest: (listener) => {
       const wrappedListener = (
         _event: Electron.IpcRendererEvent,

@@ -261,6 +261,15 @@ export const make = Effect.gen(function* PreviewManagerMake() {
   const open: PreviewManager["Service"]["open"] = Effect.fn("PreviewManager.open")(
     function* (input) {
       const runtime = input.runtime;
+      // Choose before publishing: renderers and automation must create the same page.
+      // An unavailable selected desktop fails attachment; it never becomes a headless tab.
+      const desktopHostId =
+        input.desktopHostId ??
+        (runtime === "server" &&
+        serverConfig.desktopBrowserFd !== undefined &&
+        serverConfig.desktopBrowserControlFd !== undefined
+          ? "local"
+          : undefined);
       // Persisted client surfaces must not bind to a different tab after a server restart.
       const tabId = `${newPreviewTabId()}${runtime === "server" ? `_${serverEpoch}` : ""}`;
       const updatedAt = yield* currentIsoTimestamp;
@@ -275,7 +284,12 @@ export const make = Effect.gen(function* PreviewManagerMake() {
         viewport: input.viewport ?? FILL_PREVIEW_VIEWPORT,
         ...(input.profileId === undefined ? {} : { profileId: input.profileId }),
         ...(runtime === undefined ? {} : { runtime }),
-        ...(input.desktopHostId === undefined ? {} : { desktopHostId: input.desktopHostId }),
+        ...(desktopHostId === undefined ? {} : { desktopHostId }),
+        ...(runtime === "server"
+          ? {
+              backingPage: desktopHostId === undefined ? ("server" as const) : ("desktop" as const),
+            }
+          : {}),
         ...(runtime === "server" && input.automationOwner !== undefined
           ? { automationOwner: input.automationOwner }
           : {}),

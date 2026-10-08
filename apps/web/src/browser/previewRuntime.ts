@@ -8,15 +8,21 @@ import { isPreviewSupportedInRuntime } from "~/previewStateStore";
 import { primaryEnvironmentIdAtom } from "~/state/primaryEnvironment";
 import {
   readEnvironmentSupportsServerBrowser,
+  readEnvironmentHasLocalDesktopBrowser,
   useEnvironmentSupportsServerBrowser,
 } from "~/state/entities";
 
 /** Pin native profile opens to this desktop's host for the environment. */
 export function desktopBrowserHostFor(environmentId: EnvironmentId): string | undefined {
   if (!isElectron) return undefined;
-  return appAtomRegistry.get(primaryEnvironmentIdAtom) === environmentId
+  if (appAtomRegistry.get(primaryEnvironmentIdAtom) !== environmentId)
+    return getDesktopBrowserHostId(environmentId);
+  const localDesktopBrowser = readEnvironmentHasLocalDesktopBrowser(environmentId);
+  return localDesktopBrowser === true
     ? "local"
-    : getDesktopBrowserHostId(environmentId);
+    : localDesktopBrowser === false
+      ? getDesktopBrowserHostId(environmentId)
+      : undefined;
 }
 
 export function previewRuntimeFor(environmentId: EnvironmentId): PreviewRuntime | undefined {
@@ -41,20 +47,27 @@ export function usePreviewAvailable(environmentId: EnvironmentId | null): boolea
 export function rendersServerTabNatively(
   environmentId: EnvironmentId,
   primaryEnvironmentId: EnvironmentId | null,
-  snapshot: Pick<PreviewSessionSnapshot, "runtime" | "desktopHostId"> | null | undefined,
+  snapshot:
+    | Pick<PreviewSessionSnapshot, "runtime" | "desktopHostId" | "backingPage">
+    | null
+    | undefined,
 ): boolean {
   return (
     isElectron &&
     snapshot?.runtime === "server" &&
-    (snapshot.desktopHostId && snapshot.desktopHostId !== "local"
-      ? snapshot.desktopHostId === getDesktopBrowserHostId(environmentId)
-      : primaryEnvironmentId !== null && environmentId === primaryEnvironmentId)
+    snapshot.backingPage === "desktop" &&
+    (snapshot.desktopHostId === "local"
+      ? primaryEnvironmentId !== null && environmentId === primaryEnvironmentId
+      : snapshot.desktopHostId === getDesktopBrowserHostId(environmentId))
   );
 }
 
 export function useRendersServerTabNatively(
   environmentId: EnvironmentId,
-  snapshot: Pick<PreviewSessionSnapshot, "runtime" | "desktopHostId"> | null | undefined,
+  snapshot:
+    | Pick<PreviewSessionSnapshot, "runtime" | "desktopHostId" | "backingPage">
+    | null
+    | undefined,
 ): boolean {
   return rendersServerTabNatively(environmentId, useAtomValue(primaryEnvironmentIdAtom), snapshot);
 }
