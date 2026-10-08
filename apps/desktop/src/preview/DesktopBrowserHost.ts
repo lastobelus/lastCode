@@ -112,6 +112,7 @@ interface NativePopup {
   readonly contents: Electron.WebContents;
   readonly release: () => void;
   boundKey: DesktopBrowserTabKey | undefined;
+  closing: boolean;
 }
 
 export class DesktopBrowserHost extends Context.Service<
@@ -645,6 +646,25 @@ export const make = Effect.gen(function* () {
       const tab = popup.boundKey ? tabs.get(keyOf(popup.boundKey)) : undefined;
       if (tab) updatePresentation(tab);
     };
+    const canceled = () => {
+      if (!popup.closing || popups.get(id) !== popup) return;
+      popup.closing = false;
+      emit(
+        { type: "popupCloseCanceled", threadId: source.threadId, tabId: source.tabId, popupId: id },
+        source.desktopHostId,
+      );
+    };
+    const windowClosing = (event: Electron.Event) => {
+      queueMicrotask(() => {
+        if (event.defaultPrevented) canceled();
+      });
+    };
+    const unloadPrevented = (event: Electron.Event) => {
+      queueMicrotask(() => {
+        // Electron reverses preventDefault here: it permits the unload.
+        if (!event.defaultPrevented) canceled();
+      });
+    };
     const stopObserving = observeWindow(window, changed);
     const popup: NativePopup = {
       id,
@@ -652,17 +672,22 @@ export const make = Effect.gen(function* () {
       window,
       contents,
       boundKey: undefined,
+      closing: false,
       release: () => {
         stopObserving();
         window.off("closed", cleanup);
+        window.off("close", windowClosing);
         contents.off("destroyed", cleanup);
+        contents.off("will-prevent-unload", unloadPrevented);
         debuggee.off("detach", cleanup);
         if (!contents.isDestroyed() && debuggee.isAttached()) debuggee.detach();
       },
     };
     popups.set(id, popup);
     window.on("closed", cleanup);
+    window.on("close", windowClosing);
     contents.on("destroyed", cleanup);
+    contents.on("will-prevent-unload", unloadPrevented);
     debuggee.on("detach", cleanup);
     emit(
       {
@@ -726,6 +751,20 @@ export const make = Effect.gen(function* () {
           tabId: command.type === "bindPopup" ? command.openerTabId : command.tabId,
           desktopHostId,
         };
+        if (!popup && command.type === "closePopup") {
+          // A close acknowledgement can be lost while the owner is offline.
+          // Repeated close confirms the registration is already withdrawn.
+          emit(
+            {
+              type: "popupClosed",
+              threadId: source.threadId,
+              tabId: source.tabId,
+              popupId: command.popupId,
+            },
+            desktopHostId,
+          );
+          return Effect.void;
+        }
         if (
           !popup ||
           keyOf(popup.source) !== keyOf(source) ||
@@ -735,7 +774,22 @@ export const make = Effect.gen(function* () {
         )
           return Effect.void;
         if (command.type === "closePopup") {
-          popup.window.close();
+          if (popup.closing) return Effect.void;
+          popup.closing = true;
+          try {
+            popup.window.close();
+          } catch {
+            popup.closing = false;
+            emit(
+              {
+                type: "popupCloseCanceled",
+                threadId: source.threadId,
+                tabId: source.tabId,
+                popupId: popup.id,
+              },
+              desktopHostId,
+            );
+          }
           return Effect.void;
         }
         const key = { threadId: command.threadId, tabId: command.tabId, desktopHostId };
@@ -894,7 +948,7 @@ export const make = Effect.gen(function* () {
           { discard: true },
         );
         for (const popup of popups.values()) {
-          if ((popup.source.desktopHostId ?? "local") !== desktopHostId || popup.boundKey) continue;
+          if ((popup.source.desktopHostId ?? "local") !== desktopHostId) continue;
           yield* PubSub.publish(outbox, {
             desktopHostId,
             event: {
@@ -902,6 +956,7 @@ export const make = Effect.gen(function* () {
               threadId: popup.source.threadId,
               tabId: popup.source.tabId,
               popupId: popup.id,
+              ...(popup.boundKey === undefined ? {} : { boundTabId: popup.boundKey.tabId }),
               url: popup.contents.getURL(),
             },
           });

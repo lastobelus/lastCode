@@ -16,6 +16,8 @@ async function main() {
   for (const tab of await bridge.configuration()) {
     const wrapper = document.createElement("div");
     const guest = document.createElement("webview");
+    // Match the production hosted browser's popup permission.
+    guest.setAttribute("allowpopups", "true");
     wrapper.style.position = "fixed";
     wrapper.style.overflow = "hidden";
     guest.style.position = "absolute";

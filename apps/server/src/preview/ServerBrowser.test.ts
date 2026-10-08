@@ -63,6 +63,7 @@ vi.mock("./ServerBrowserContexts.ts", () => ({
     }
     async connectDesktopPage(endpoint: string) {
       const context = makeContext();
+      await desktopPageSetup?.(context, endpoint);
       context.page.emulateMedia.mockImplementation(async () => {
         nativeRenderingEntered?.resolve();
         await nativeRenderingGate?.promise;
@@ -122,13 +123,17 @@ function makeContext(onClose?: (context: BrowserContext) => void) {
     reload: vi.fn(async () => {}),
     emulateMedia: vi.fn(async () => {}),
     waitForLoadState: vi.fn(async () => {}),
-    evaluate: vi.fn(async () => ({
-      url,
-      title: "test page",
-      loading: false,
-      visibleText: "delete",
-      interactiveElements: [],
-    })),
+    evaluate: vi.fn(async (expression?: unknown) =>
+      expression === "document.readyState"
+        ? "complete"
+        : {
+            url,
+            title: "test page",
+            loading: false,
+            visibleText: "delete",
+            interactiveElements: [],
+          },
+    ),
     ariaSnapshot: vi.fn(async () => '- button "delete" [ref=e1]'),
     locator: vi.fn(() => {
       throw new Error("Unexpected locator action");
@@ -200,11 +205,22 @@ const desktopRenders = (tabId: string) => {
 };
 const releasedDesktopTabs: Array<string> = [];
 const desktopConnections: Array<{ endpoint: string; context: ReturnType<typeof makeContext> }> = [];
+let desktopPageSetup:
+  | ((context: ReturnType<typeof makeContext>, endpoint: string) => Promise<void>)
+  | null = null;
 const presentedDesktopTabs = new Set<string>();
 const desktopPresentations = new NodeEvents.EventEmitter();
 const desktopPopupEvents = new NodeEvents.EventEmitter();
 let nativePopupCreatedSeen: PromiseWithResolvers<void> | null = null;
 let nativePopupClosedSeen: PromiseWithResolvers<void> | null = null;
+let nativePopupCloseAttempted: PromiseWithResolvers<void> | null = null;
+let desktopPopupHostConnected = true;
+let nativePopupCloseFailure: "close-canceled" | null = null;
+let nativeCloseProcessed: PromiseWithResolvers<void> | null = null;
+let nativeNavigationReported: {
+  status: "Success" | "Loading" | "LoadFailed";
+  completed: PromiseWithResolvers<void>;
+} | null = null;
 const popupBindings: Array<{
   threadId: string;
   tabId: string;
@@ -276,6 +292,7 @@ const dependencies = Layer.mergeAll(
           : null;
       }),
     subscribeCommands: () => Stream.empty,
+    connectedHosts: nativePopupEvents<string>("host-connected"),
     receiveEvent: () => Effect.void,
     awaitAttached: (key) => Effect.sync(() => desktopRenders(key.tabId)),
     detached: Stream.callback<{ threadId: string; tabId: string }>((queue) =>
@@ -303,8 +320,15 @@ const dependencies = Layer.mergeAll(
         desktopTabs.add(key.tabId);
       }),
     closePopup: (key, popupId) =>
-      Effect.sync(() => {
+      Effect.suspend(() => {
+        nativePopupCloseAttempted?.resolve();
+        if (!desktopPopupHostConnected)
+          return Effect.fail(new DesktopBrowserTransportError({ reason: "host-unavailable" }));
         popupClosures.push({ threadId: key.threadId, tabId: key.tabId, popupId });
+        if (nativePopupCloseFailure)
+          return Effect.fail(new DesktopBrowserTransportError({ reason: nativePopupCloseFailure }));
+        desktopPopupEvents.emit("closed", { ...key, popupId });
+        return Effect.void;
       }),
     presentations: Stream.callback<{ threadId: string; tabId: string; desktopHostId: string }>(
       (queue) =>
@@ -359,7 +383,29 @@ const dependencies = Layer.mergeAll(
   ),
   Layer.provideMerge(NodeServices.layer),
 );
-const layer = ServerBrowser.layer.pipe(Layer.provideMerge(dependencies));
+const observedManager = Layer.effect(
+  Manager.PreviewManager,
+  Effect.gen(function* () {
+    const manager = yield* Manager.PreviewManager;
+    return {
+      ...manager,
+      reportStatus: (input: Parameters<typeof manager.reportStatus>[0]) =>
+        manager.reportStatus(input).pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              if (input.navStatus._tag === nativeNavigationReported?.status)
+                nativeNavigationReported.completed.resolve();
+            }),
+          ),
+        ),
+      nativeClosedConfirmed: (input: Parameters<typeof manager.nativeClosedConfirmed>[0]) =>
+        manager
+          .nativeClosedConfirmed(input)
+          .pipe(Effect.tap(() => Effect.sync(() => nativeCloseProcessed?.resolve()))),
+    };
+  }),
+).pipe(Layer.provideMerge(dependencies));
+const layer = ServerBrowser.layer.pipe(Layer.provideMerge(observedManager));
 const ready = Effect.gen(function* () {
   const browser = yield* ServerBrowser.ServerBrowser;
   const broker = yield* Broker.PreviewAutomationBroker;
@@ -414,10 +460,16 @@ beforeEach(() => {
   remoteUrlAvailable = true;
   releasedDesktopTabs.length = 0;
   desktopConnections.length = 0;
+  desktopPageSetup = null;
   popupBindings.length = 0;
   popupClosures.length = 0;
   nativePopupCreatedSeen = null;
   nativePopupClosedSeen = null;
+  nativePopupCloseAttempted = null;
+  desktopPopupHostConnected = true;
+  nativePopupCloseFailure = null;
+  nativeCloseProcessed = null;
+  nativeNavigationReported = null;
 });
 
 it.live("readiness none responds immediately but takeover input waits for navigation commit", () =>
@@ -1063,10 +1115,311 @@ it.live.each([false, true])(
         expect(afterPopupClose.tabs).toEqual([expect.objectContaining({ tabId })]);
         expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toHaveLength(1);
         expect(opener.close).not.toHaveBeenCalled();
-        if (native)
-          expect(popupClosures).toEqual([
-            { threadId: scope.thread.threadId, tabId, popupId: "popup-native" },
-          ]);
+        if (native) expect(popupClosures).toEqual([]);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live("an unbound native popup reconnects its retained opener without a pending tab", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      profileCatalogue = {
+        desktopHostId: "host-a",
+        profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+        defaultProfileId: "work",
+      };
+      desktopRendersNext = true;
+      const { browser, broker, tabId } = yield* ready;
+      const viewer = yield* browser.attachViewer(viewerInput(tabId, false));
+      desktopDetaches.emit("detach", {
+        threadId: scope.thread.threadId,
+        tabId,
+        desktopHostId: "host-a",
+      });
+      let ending = yield* Queue.take(viewer.output);
+      while (ending._tag !== "reconnect") ending = yield* Queue.take(viewer.output);
+      const manager = yield* Manager.PreviewManager;
+      const events = yield* manager.subscribeEvents;
+      desktopPopupEvents.emit("created", {
+        threadId: scope.thread.threadId,
+        tabId,
+        desktopHostId: "host-a",
+        popupId: "unbound-after-disconnect",
+        url: "https://signin.example.test/",
+      });
+      const event = Option.getOrThrow(
+        yield* Stream.fromSubscription(events).pipe(
+          Stream.filter((event) => event.type === "opened" && event.tabId !== tabId),
+          Stream.runHead,
+        ),
+      );
+      if (event.type !== "opened") throw new Error("Expected native popup opening");
+      expect(event.snapshot).toMatchObject({
+        backingPage: "desktop-popup",
+        desktopHostId: "host-a",
+        profileId: "work",
+        automationOwner: `${scope.environmentId}\u0000agent-a`,
+      });
+      yield* broker.invoke({
+        scope,
+        tabId: event.tabId,
+        operation: "evaluate",
+        input: { expression: "window.opener !== null" },
+      });
+      expect(desktopConnections).toHaveLength(3);
+      expect(contexts).toEqual([]);
+      expect(popupClosures).toEqual([]);
+      expect(popupBindings).toEqual([
+        expect.objectContaining({ desktopHostId: "host-a", openerTabId: tabId }),
+      ]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("failed native popup closes retain their session and retry after reconnect", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      desktopRendersNext = true;
+      const { broker, tabId } = yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      const events = yield* manager.subscribeEvents;
+      const source = {
+        threadId: scope.thread.threadId,
+        tabId,
+        desktopHostId: "local",
+        popupId: "close-after-reconnect",
+        url: "https://signin.example.test/",
+      };
+      desktopPopupEvents.emit("created", source);
+      const event = Option.getOrThrow(
+        yield* Stream.fromSubscription(events).pipe(
+          Stream.filter((event) => event.type === "opened" && event.tabId !== tabId),
+          Stream.runHead,
+        ),
+      );
+      if (event.type !== "opened") throw new Error("Expected native popup opening");
+      yield* broker.invoke({
+        scope,
+        tabId: event.tabId,
+        operation: "evaluate",
+        input: { expression: "window.opener !== null" },
+      });
+      desktopPopupHostConnected = false;
+      nativePopupCloseAttempted = Promise.withResolvers<void>();
+      const disconnected = yield* manager
+        .close({ threadId: scope.thread.threadId, tabId: event.tabId })
+        .pipe(Effect.flip);
+      expect(disconnected).toMatchObject({
+        _tag: "PreviewNativeCloseError",
+        reason: "unavailable",
+      });
+      yield* Effect.promise(() => nativePopupCloseAttempted!.promise);
+      expect(popupClosures).toEqual([]);
+      expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toHaveLength(2);
+      // The same authenticated source announces its still-living window on reconnect.
+      desktopPopupHostConnected = true;
+      nativePopupCloseFailure = "close-canceled";
+      nativePopupCloseAttempted = Promise.withResolvers<void>();
+      desktopPopupEvents.emit("created", source);
+      yield* Effect.promise(() => nativePopupCloseAttempted!.promise);
+      expect(popupClosures).toEqual([
+        { threadId: scope.thread.threadId, tabId, popupId: source.popupId },
+      ]);
+      // A canceled close is reported to its caller and leaves the agent able to use the popup.
+      desktopConnections[1]!.context.page.emit("dialog", {
+        type: () => "beforeunload",
+        message: () => "Leave this page?",
+        defaultValue: () => "",
+      });
+      const canceled = yield* broker
+        .invoke<void>({ scope, tabId: event.tabId, operation: "close", input: {} })
+        .pipe(Effect.flip);
+      expect(canceled._tag).toBe("PreviewAutomationExecutionError");
+      const retainedStatus = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId: event.tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(retainedStatus.dialog).toBeNull();
+      expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toHaveLength(2);
+      expect(
+        yield* broker.invoke({
+          scope,
+          tabId: event.tabId,
+          operation: "evaluate",
+          input: { expression: "stillOpen()" },
+        }),
+      ).toBe("evaluated");
+      // The eventual actual close removes the session rather than creating another tab.
+      nativePopupCloseFailure = null;
+      const closing = yield* manager.subscribeEvents;
+      nativeCloseProcessed = Promise.withResolvers<void>();
+      nativePopupCloseAttempted = Promise.withResolvers<void>();
+      yield* manager.close({ threadId: scope.thread.threadId, tabId: event.tabId });
+      yield* Stream.fromSubscription(closing).pipe(
+        Stream.filter((closed) => closed.type === "closed" && closed.tabId === event.tabId),
+        Stream.runHead,
+      );
+      yield* Effect.promise(() => nativeCloseProcessed!.promise);
+      expect(popupClosures).toHaveLength(3);
+      expect(popupBindings).toHaveLength(1);
+      expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toHaveLength(1);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("host reconnect resolves a pending popup close without a live popup announcement", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      desktopRendersNext = true;
+      const { broker, tabId } = yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      const events = yield* manager.subscribeEvents;
+      const source = {
+        threadId: scope.thread.threadId,
+        tabId,
+        desktopHostId: "local",
+        popupId: "gone-while-offline",
+        url: "https://signin.example.test/",
+      };
+      desktopPopupEvents.emit("created", source);
+      const event = Option.getOrThrow(
+        yield* Stream.fromSubscription(events).pipe(
+          Stream.filter((event) => event.type === "opened" && event.tabId !== tabId),
+          Stream.runHead,
+        ),
+      );
+      yield* broker.invoke<void>({
+        scope,
+        tabId: event.tabId,
+        operation: "evaluate",
+        input: { expression: "popupReady()" },
+      });
+      desktopPopupHostConnected = false;
+      const unavailable = yield* manager
+        .close({ threadId: scope.thread.threadId, tabId: event.tabId })
+        .pipe(Effect.flip);
+      expect(unavailable._tag).toBe("PreviewNativeCloseError");
+      expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toHaveLength(2);
+      // The window closed offline. Reconnect sends no popupCreated or attached child.
+      desktopTabs.delete(event.tabId);
+      desktopPopupHostConnected = true;
+      nativeCloseProcessed = Promise.withResolvers<void>();
+      desktopPopupEvents.emit("host-connected", "local");
+      yield* Effect.promise(() => nativeCloseProcessed!.promise);
+      expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toHaveLength(1);
+      expect(popupBindings).toHaveLength(1);
+      expect(popupClosures).toEqual([
+        { threadId: scope.thread.threadId, tabId, popupId: source.popupId },
+      ]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("a native popup loaded before attachment publishes its current navigation", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      desktopRendersNext = true;
+      const { tabId } = yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      const events = yield* manager.subscribeEvents;
+      const url = "https://signin.example.test/completed";
+      desktopPageSetup = async (context) => {
+        await context.page.goto(url);
+      };
+      desktopPopupEvents.emit("created", {
+        threadId: scope.thread.threadId,
+        tabId,
+        desktopHostId: "local",
+        popupId: "already-loaded",
+        url,
+      });
+      const loaded = Option.getOrThrow(
+        yield* Stream.fromSubscription(events).pipe(
+          Stream.filter(
+            (event) =>
+              event.type === "navigated" &&
+              event.tabId !== tabId &&
+              event.snapshot.navStatus._tag === "Success",
+          ),
+          Stream.runHead,
+        ),
+      );
+      if (loaded.type !== "navigated") throw new Error("Expected current navigation");
+      expect(loaded.snapshot.navStatus).toEqual({ _tag: "Success", url, title: "test page" });
+      expect(desktopConnections[1]!.context.page.goto).toHaveBeenCalledTimes(1);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live.each(["Loading", "LoadFailed"] as const)(
+  "sampling an attached popup does not overwrite intervening %s navigation",
+  (nextStatus) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        desktopRendersNext = true;
+        const { tabId } = yield* ready;
+        const manager = yield* Manager.PreviewManager;
+        const events = yield* manager.subscribeEvents;
+        const titleEntered = Promise.withResolvers<void>();
+        const titleRelease = Promise.withResolvers<string>();
+        yield* Effect.addFinalizer(() => Effect.sync(() => titleRelease.resolve("test page")));
+        const url = "https://signin.example.test/";
+        desktopPageSetup = async (context) => {
+          await context.page.goto(url);
+          context.page.title.mockImplementation(async () => {
+            titleEntered.resolve();
+            return titleRelease.promise;
+          });
+        };
+        desktopPopupEvents.emit("created", {
+          threadId: scope.thread.threadId,
+          tabId,
+          desktopHostId: "local",
+          popupId: "navigation-during-sample",
+          url,
+        });
+        yield* Effect.promise(() => titleEntered.promise);
+        const page = desktopConnections[1]!.context.page;
+        nativeNavigationReported = { status: nextStatus, completed: Promise.withResolvers<void>() };
+        const request = {
+          isNavigationRequest: () => true,
+          frame: () => page,
+          url: () => url,
+          method: () => "GET",
+          failure: () => ({ errorText: "net::ERR_CONNECTION_REFUSED" }),
+        };
+        page.emit(nextStatus === "Loading" ? "request" : "requestfailed", request);
+        titleRelease.resolve("stale title");
+        const changed = Option.getOrThrow(
+          yield* Stream.fromSubscription(events).pipe(
+            Stream.filter(
+              (event) =>
+                event.tabId !== tabId &&
+                (nextStatus === "LoadFailed"
+                  ? event.type === "failed"
+                  : event.type === "navigated" && event.snapshot.navStatus._tag === nextStatus),
+            ),
+            Stream.runHead,
+          ),
+        );
+        yield* Effect.promise(() => nativeNavigationReported!.completed.promise);
+        expect(changed.type).toBe(nextStatus === "LoadFailed" ? "failed" : "navigated");
+        const session = (yield* manager.list({ threadId: scope.thread.threadId })).sessions.find(
+          (session) => session.tabId !== tabId,
+        );
+        expect(session?.navStatus._tag).toBe(nextStatus);
+        // The error page's subsequent load must keep the failed status too.
+        if (nextStatus === "LoadFailed") {
+          page.emit("load");
+          yield* Effect.promise(() => page.title.mock.results.at(-1)!.value);
+          expect(
+            (yield* manager.list({ threadId: scope.thread.threadId })).sessions.find(
+              (session) => session.tabId !== tabId,
+            )?.navStatus._tag,
+          ).toBe("LoadFailed");
+        }
       }),
     ).pipe(Effect.provide(layer)),
 );
@@ -1116,9 +1469,7 @@ it.live("a native popup closed during opener reconnect never creates a phantom t
       });
       expect(status.tabs).toEqual([expect.objectContaining({ tabId })]);
       expect(popupBindings).toEqual([]);
-      expect(popupClosures).toEqual([
-        { threadId: scope.thread.threadId, tabId, popupId: source.popupId },
-      ]);
+      expect(popupClosures).toEqual([]);
       const manager = yield* Manager.PreviewManager;
       expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toHaveLength(1);
     }),

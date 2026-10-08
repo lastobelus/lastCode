@@ -1,9 +1,11 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
-import { type PreviewEvent, ThreadId } from "@t3tools/contracts";
+import { type PreviewEvent, PreviewNativeCloseError, ThreadId } from "@t3tools/contracts";
 import { PreviewUrlNormalizationError } from "@t3tools/shared/preview";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
 import * as FileSystem from "effect/FileSystem";
@@ -49,6 +51,139 @@ const PreviewManagerTestLayer = PreviewManager.layer.pipe(
 );
 
 it.layer(PreviewManagerTestLayer)("PreviewManager", (it) => {
+  it.effect(
+    "bulk close removes ordinary and confirmed tabs while retaining failed native tabs",
+    () =>
+      Effect.gen(function* () {
+        const manager = yield* PreviewManager.PreviewManager;
+        const threadId = freshThreadId();
+        // Put a failed guard before the eligible tabs to exercise cleanup's bulk close.
+        const failed = yield* manager.open({
+          threadId,
+          runtime: "server",
+          desktopHostId: "host-a",
+          automationOwner: "agent-a",
+          desktopPopup: {
+            popupId: "failed-native",
+            close: () =>
+              Effect.fail(
+                new PreviewNativeCloseError({ tabId: "failed-native", reason: "unavailable" }),
+              ),
+          },
+        });
+        const ordinary = yield* manager.open({ threadId, runtime: "server" });
+        let confirmed = false;
+        const successful = yield* manager.open({
+          threadId,
+          runtime: "server",
+          desktopHostId: "host-a",
+          desktopPopup: {
+            popupId: "confirmed-native",
+            close: () =>
+              Effect.sync(() => {
+                confirmed = true;
+              }),
+          },
+        });
+        const events = yield* collectEvents;
+        const failure = yield* manager.close({ threadId }).pipe(Effect.flip);
+        expect(failure).toMatchObject({ _tag: "PreviewNativeCloseError", reason: "unavailable" });
+        expect(confirmed).toBe(true);
+        expect((yield* manager.list({ threadId })).sessions).toEqual([failed]);
+        expect((yield* events.drain).map((event) => event.tabId)).toEqual([
+          ordinary.tabId,
+          successful.tabId,
+        ]);
+      }),
+  );
+
+  it.effect(
+    "native close preserves current state while acknowledgment waits outside the lock",
+    () =>
+      Effect.gen(function* () {
+        const manager = yield* PreviewManager.PreviewManager;
+        const threadId = freshThreadId();
+        const requested = yield* Deferred.make<void>();
+        const confirmed = yield* Deferred.make<void>();
+        const popup = yield* manager.open({
+          threadId,
+          runtime: "server",
+          desktopHostId: "host-a",
+          automationOwner: "agent-a",
+          desktopPopup: {
+            popupId: "child-1",
+            close: () =>
+              Deferred.succeed(requested, undefined).pipe(
+                Effect.andThen(Deferred.await(confirmed)),
+              ),
+          },
+        });
+        const closing = yield* manager
+          .close({ threadId, tabId: popup.tabId })
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(requested);
+        yield* manager.reportStatus({
+          threadId,
+          tabId: popup.tabId,
+          serverControlled: true,
+          navStatus: {
+            _tag: "Success",
+            url: "https://signin.example.test/",
+            title: "Updated while waiting",
+          },
+          canGoBack: false,
+          canGoForward: false,
+        });
+        const retained = (yield* manager.list({ threadId })).sessions[0];
+        expect(retained).toMatchObject({
+          automationOwner: "agent-a",
+          navStatus: { title: "Updated while waiting" },
+        });
+        yield* Deferred.succeed(confirmed, undefined);
+        yield* Fiber.join(closing);
+        expect((yield* manager.list({ threadId })).sessions).toEqual([]);
+      }),
+  );
+
+  it.effect("canceled and unavailable native closes preserve their authoritative session", () =>
+    Effect.gen(function* () {
+      const manager = yield* PreviewManager.PreviewManager;
+      for (const reason of ["canceled", "unavailable"] as const) {
+        const threadId = freshThreadId();
+        const popup = yield* manager.open({
+          threadId,
+          runtime: "server",
+          desktopHostId: "host-a",
+          automationOwner: "agent-a",
+          desktopPopup: {
+            popupId: "child-1",
+            close: () => Effect.fail(new PreviewNativeCloseError({ tabId: "child-1", reason })),
+          },
+        });
+        const events = yield* collectEvents;
+        const error = yield* manager.close({ threadId, tabId: popup.tabId }).pipe(Effect.flip);
+        expect(error).toMatchObject({ _tag: "PreviewNativeCloseError", reason });
+        expect((yield* manager.list({ threadId })).sessions).toEqual([popup]);
+        expect(yield* events.drain).toEqual([]);
+        yield* manager.nativeClosedConfirmed({ threadId, tabId: popup.tabId });
+        expect((yield* manager.list({ threadId })).sessions).toEqual([]);
+        expect(yield* events.drain).toEqual([
+          expect.objectContaining({ type: "closed", tabId: popup.tabId }),
+        ]);
+      }
+      const threadId = freshThreadId();
+      const unknown = yield* manager.open({
+        threadId,
+        runtime: "server",
+        desktopHostId: "host-a",
+        desktopPopup: { popupId: "no-guard" },
+      });
+      const failure = yield* manager.close({ threadId, tabId: unknown.tabId }).pipe(Effect.flip);
+      expect(failure).toMatchObject({ _tag: "PreviewNativeCloseError", reason: "unavailable" });
+      expect((yield* manager.list({ threadId })).sessions).toEqual([unknown]);
+    }),
+  );
+
   it.effect("publishes one authoritative backing page before subscribers can attach", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;

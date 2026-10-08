@@ -29,6 +29,7 @@ import {
   type PreviewAutomationWaitForInput,
   DesktopBrowserTransportError,
   PreviewClearProfileError,
+  PreviewNativeCloseError,
   type PreviewEvent,
   type PreviewNavStatus,
   type PreviewSessionSnapshot,
@@ -316,6 +317,8 @@ interface ServerTab {
   colorScheme: PreviewAppearancePreference;
   zoomFactor: number;
   loading: boolean;
+  navigationSequence: number;
+  navigationFailed: boolean;
   closing: boolean;
   recording: Recording | null;
   initialNavigation: Promise<void> | null;
@@ -466,6 +469,7 @@ const make = Effect.gen(function* () {
       readonly popupId: string;
       snapshot: PreviewSessionSnapshot | null;
       closed: boolean;
+      closeRequested: boolean;
       bound: boolean;
     }
   >();
@@ -539,10 +543,12 @@ const make = Effect.gen(function* () {
   };
 
   const report = (tab: ServerTab, navStatus: PreviewNavStatus) => {
+    const sequence = ++tab.navigationSequence;
     void tab.cdp
       .send("Page.getNavigationHistory")
       .catch(() => null)
       .then((history) => {
+        if (tab.closing || tab.navigationSequence !== sequence) return;
         const index = history?.currentIndex ?? 0;
         const count = history?.entries.length ?? 0;
         runFork(
@@ -560,13 +566,26 @@ const make = Effect.gen(function* () {
       });
   };
 
-  const reportLoaded = async (tab: ServerTab) => {
+  const reportLoaded = async (tab: ServerTab, sampleCurrentNavigation = false) => {
+    const sequence = tab.navigationSequence;
     const url = tab.page.url();
     // Chromium's error page loads after `requestfailed` and must not clear LoadFailed.
     if (url === "about:blank" || url.startsWith("chrome-error://")) return;
+    if (
+      sampleCurrentNavigation &&
+      (await tab.page.evaluate("document.readyState").catch(() => null)) !== "complete"
+    )
+      return;
     const title = (await tab.page.title().catch(() => "")).slice(0, 512);
     // A navigation that started while reading the title owns the status now.
-    if (tab.loading || tab.page.url() !== url) return;
+    if (
+      tab.closing ||
+      tab.loading ||
+      tab.navigationFailed ||
+      tab.navigationSequence !== sequence ||
+      tab.page.url() !== url
+    )
+      return;
     report(tab, { _tag: "Success", url: url.slice(0, 2048), title });
   };
 
@@ -817,6 +836,8 @@ const make = Effect.gen(function* () {
       colorScheme: "system",
       zoomFactor: 1,
       loading: false,
+      navigationSequence: 0,
+      navigationFailed: snapshot.navStatus._tag === "LoadFailed",
       closing: false,
       recording: null,
       recordingStart: null,
@@ -833,6 +854,7 @@ const make = Effect.gen(function* () {
     page.on("request", (request) => {
       if (!isMainNavigation(request)) return;
       tab.loading = true;
+      tab.navigationFailed = false;
       report(tab, { _tag: "Loading", url: request.url().slice(0, 2048), title: "" });
     });
     page.on("load", () => {
@@ -855,6 +877,7 @@ const make = Effect.gen(function* () {
       });
       if (!isMainNavigation(request) || errorText.includes("ERR_ABORTED")) return;
       tab.loading = false;
+      tab.navigationFailed = true;
       const { code, description } = ServerBrowserPage.parseNetError(errorText);
       report(tab, {
         _tag: "LoadFailed",
@@ -912,6 +935,8 @@ const make = Effect.gen(function* () {
       });
     tabs.set(key, tab);
     reportLiveTabs();
+    // Native/adopted pages may have finished before their listeners were installed.
+    if (adopted || desktop) void reportLoaded(tab, true);
     // A popup is already loading its own URL, and the desktop loads its tab's.
     if (!adopted && !desktop && snapshot.navStatus._tag === "Loading") {
       tab.initialNavigation = page
@@ -1164,7 +1189,22 @@ const make = Effect.gen(function* () {
     },
   ) => {
     const id = popupKey(source, source.popupId);
-    if (nativePopups.has(id)) return;
+    const existing = nativePopups.get(id);
+    if (existing) {
+      if (existing.closeRequested) {
+        await Effect.runPromise(
+          existing.snapshot
+            ? manager
+                .close({
+                  threadId: ThreadId.make(existing.snapshot.threadId),
+                  tabId: existing.snapshot.tabId,
+                })
+                .pipe(Effect.ignore)
+            : desktopChannel.closePopup(existing.source, existing.popupId).pipe(Effect.ignore),
+        ).catch(constVoid);
+      }
+      return;
+    }
     // Child windows can close while their source is still setting up.
     // Record their lifecycle before awaiting the source page.
     const popup = {
@@ -1172,12 +1212,26 @@ const make = Effect.gen(function* () {
       popupId: source.popupId,
       snapshot: null as PreviewSessionSnapshot | null,
       closed: false,
+      closeRequested: false,
       bound: false,
     };
     nativePopups.set(id, popup);
-    const opener =
+    let opener =
       tabs.get(tabKey(source.threadId, source.tabId)) ??
       (await pendingTabs.get(tabKey(source.threadId, source.tabId))?.catch(() => undefined));
+    if (!opener && !popup.closed) {
+      const { sessions } = await Effect.runPromise(
+        manager.list({ threadId: ThreadId.make(source.threadId) }),
+      );
+      const snapshot = sessions.find(
+        (session) =>
+          session.tabId === source.tabId &&
+          session.runtime === "server" &&
+          (session.backingPage === "desktop" || session.backingPage === "desktop-popup") &&
+          (session.desktopHostId ?? "local") === (source.desktopHostId ?? "local"),
+      );
+      if (snapshot) opener = await ensureTab(snapshot).catch(() => undefined);
+    }
     if (
       !opener?.desktop ||
       popup.closed ||
@@ -1185,8 +1239,10 @@ const make = Effect.gen(function* () {
       (opener.desktopHostId ?? "local") !== (source.desktopHostId ?? "local") ||
       (opener.control.agentId !== null && atTabLimit(opener.control.agentId))
     ) {
-      nativePopups.delete(id);
-      await Effect.runPromise(desktopChannel.closePopup(source, source.popupId));
+      popup.closeRequested = true;
+      if (!popup.closed)
+        await Effect.runPromise(desktopChannel.closePopup(source, source.popupId)).catch(constVoid);
+      if (popup.closed) nativePopups.delete(id);
       return;
     }
     try {
@@ -1196,7 +1252,35 @@ const make = Effect.gen(function* () {
           ...(/^https?:/i.test(source.url) ? { url: source.url } : {}),
           runtime: "server",
           desktopHostId: source.desktopHostId ?? "local",
-          desktopPopup: { popupId: source.popupId },
+          desktopPopup: {
+            popupId: source.popupId,
+            close: () =>
+              Effect.suspend(() => {
+                popup.closeRequested = true;
+                return desktopChannel.closePopup(source, source.popupId).pipe(
+                  Effect.tapError((error) =>
+                    Effect.sync(() => {
+                      if (error.reason !== "close-canceled") return;
+                      popup.closeRequested = false;
+                      const tab = popup.snapshot
+                        ? tabs.get(tabKey(popup.snapshot.threadId, popup.snapshot.tabId))
+                        : undefined;
+                      if (tab?.dialog?.type() === "beforeunload") {
+                        tab.dialog = null;
+                        broadcastControl(tab);
+                      }
+                    }),
+                  ),
+                  Effect.mapError(
+                    (error) =>
+                      new PreviewNativeCloseError({
+                        tabId: popup.snapshot!.tabId,
+                        reason: error.reason === "close-canceled" ? "canceled" : "unavailable",
+                      }),
+                  ),
+                );
+              }),
+          },
           ...(opener.profileId === undefined ? {} : { profileId: opener.profileId }),
           ...(opener.control.agentId === null
             ? {}
@@ -1208,11 +1292,13 @@ const make = Effect.gen(function* () {
       );
       if (popup.closed)
         await Effect.runPromise(
-          manager.close({ threadId: opener.threadId, tabId: snapshot.tabId }),
+          manager.nativeClosedConfirmed({ threadId: opener.threadId, tabId: snapshot.tabId }),
         );
     } catch {
-      nativePopups.delete(id);
-      await Effect.runPromise(desktopChannel.closePopup(source, source.popupId));
+      popup.closeRequested = true;
+      if (!popup.closed)
+        await Effect.runPromise(desktopChannel.closePopup(source, source.popupId)).catch(constVoid);
+      if (popup.closed) nativePopups.delete(id);
     }
   };
 
@@ -1278,8 +1364,11 @@ const make = Effect.gen(function* () {
   const closeIdleAgentTabs = () => {
     const cutoff = Date.now() - AGENT_TAB_IDLE_MS;
     for (const tab of tabs.values()) {
-      if (tab.control.agentId !== null && tab.viewers.size === 0 && tab.usedAt < cutoff)
-        dropTab(tab, true);
+      if (tab.control.agentId !== null && tab.viewers.size === 0 && tab.usedAt < cutoff) {
+        if (nativePopupForTab(tab.threadId, tab.tabId))
+          runFork(manager.close({ threadId: tab.threadId, tabId: tab.tabId }).pipe(Effect.ignore));
+        else dropTab(tab, true);
+      }
     }
   };
 
@@ -2071,8 +2160,8 @@ const make = Effect.gen(function* () {
     if (request.operation === "close") {
       if (tab.control.controller !== null)
         throw new BrowserControlInterrupted("A human controls this tab.", "humanControl");
-      void tab.control.close().catch(constVoid);
       await Effect.runPromise(manager.close({ threadId: tab.threadId, tabId: tab.tabId }));
+      void tab.control.close().catch(constVoid);
       dropTab(tab, false);
       return {};
     }
@@ -2440,8 +2529,7 @@ const make = Effect.gen(function* () {
       if (event.type === "closed") {
         const popup = nativePopupForTab(event.threadId, event.tabId);
         if (popup) {
-          nativePopups.delete(popupKey(popup.source, popup.popupId));
-          await Effect.runPromise(desktopChannel.closePopup(popup.source, popup.popupId));
+          popup.closeRequested = true;
         }
       }
       if (event.type === "closed" && !tab && pendingTabs.has(key)) closedPendingTabs.add(key);
@@ -2844,6 +2932,27 @@ const make = Effect.gen(function* () {
     });
 
   yield* manager.events.pipe(Stream.runForEach(mirrorManagerEvent), Effect.forkScoped);
+  yield* desktopChannel.connectedHosts.pipe(
+    Stream.runForEach((desktopHostId) =>
+      Effect.forEach(
+        [...nativePopups.values()].filter(
+          (popup) =>
+            popup.closeRequested && (popup.source.desktopHostId ?? "local") === desktopHostId,
+        ),
+        (popup) =>
+          popup.snapshot
+            ? manager
+                .close({
+                  threadId: ThreadId.make(popup.snapshot.threadId),
+                  tabId: popup.snapshot.tabId,
+                })
+                .pipe(Effect.ignore)
+            : desktopChannel.closePopup(popup.source, popup.popupId).pipe(Effect.ignore),
+        { discard: true },
+      ),
+    ),
+    Effect.forkScoped,
+  );
   yield* desktopChannel.popups.pipe(
     Stream.runForEach((popup) => Effect.promise(() => openNativePopup(popup))),
     Effect.forkScoped,
@@ -2854,9 +2963,10 @@ const make = Effect.gen(function* () {
         const popup = nativePopups.get(popupKey(event, event.popupId));
         if (!popup) return;
         popup.closed = true;
+        nativePopups.delete(popupKey(event, event.popupId));
         if (popup.snapshot)
           yield* manager
-            .close({
+            .nativeClosedConfirmed({
               threadId: ThreadId.make(popup.snapshot.threadId),
               tabId: popup.snapshot.tabId,
             })

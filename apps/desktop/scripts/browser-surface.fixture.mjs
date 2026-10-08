@@ -59,9 +59,37 @@ async function main() {
   const relayTabs = new Map(tabs.map((tab) => [tab.tabId, tab]));
   const popupCreated = Promise.withResolvers();
   const popupClosed = Promise.withResolvers();
+  const popupCloseCanceled = Promise.withResolvers();
   let nativePopup;
   const presentationEvents = [];
   const results = [];
+  const milestone = async (name, operation, timeoutMs = 5000) => {
+    const progress = async (state) => {
+      const record = JSON.stringify({ milestone: name, state });
+      console.log(record);
+      await NodeFSP.appendFile(NodePath.join(scratch, "milestones.ndjson"), `${record}\n`);
+    };
+    await progress("started");
+    let timer;
+    try {
+      const result = await Promise.race([
+        operation(),
+        new Promise((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`Fixture milestone timed out: ${name}`)),
+            timeoutMs,
+          );
+        }),
+      ]);
+      await progress("passed");
+      return result;
+    } catch (cause) {
+      await progress("failed");
+      throw cause;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
   let nextRequest = 0;
   let failCapture = false;
   let finishFailedCapture;
@@ -129,6 +157,7 @@ async function main() {
           if (event.type === "attached") attachments.get(event.tabId)?.resolve(event);
           if (event.type === "popupCreated") popupCreated.resolve(event);
           if (event.type === "popupClosed") popupClosed.resolve(event);
+          if (event.type === "popupCloseCanceled") popupCloseCanceled.resolve(event);
           if (event.type === "presentation") presentationEvents.push(event);
           if (event.type === "surfaceReady") pending.get(event.requestId)?.resolve(event);
           if (event.type === "cdp") sockets.get(event.tabId)?.send(event.message);
@@ -441,14 +470,16 @@ async function main() {
     // actual backing WebContents and opener instead of creating a second guest.
     const liveContentsBeforePopup = webContents.getAllWebContents().length;
     const liveWindowsBeforePopup = BrowserWindow.getAllWindows().length;
-    await page.evaluate((origin) => {
-      window.popupHandle = window.open(
-        `${origin}/popup`,
-        "native-popup-fixture",
-        "width=640,height=480",
-      );
-    }, fixtureOrigin);
-    const popupEvent = await popupCreated.promise;
+    await milestone("source window.open", () =>
+      page.evaluate((origin) => {
+        window.popupHandle = window.open(
+          `${origin}/popup`,
+          "native-popup-fixture",
+          "width=640,height=480",
+        );
+      }, fixtureOrigin),
+    );
+    const popupEvent = await milestone("native popup created", () => popupCreated.promise);
     NodeAssert.equal(popupEvent.threadId, key(tabs[0]).threadId);
     NodeAssert.equal(popupEvent.tabId, tabs[0].tabId);
     NodeAssert.ok(nativePopup && !nativePopup.isDestroyed());
@@ -466,7 +497,10 @@ async function main() {
       openerTabId: tabs[0].tabId,
       popupId: popupEvent.popupId,
     });
-    const boundPopup = await attachments.get(popupTab.tabId).promise;
+    const boundPopup = await milestone(
+      "native popup bound",
+      () => attachments.get(popupTab.tabId).promise,
+    );
     NodeAssert.equal(boundPopup.supportsNativeSurface, true);
     NodeAssert.notEqual(boundPopup.presented, true);
     const popupBrowser = await chromium.connectOverCDP(
@@ -477,25 +511,42 @@ async function main() {
     NodeAssert.equal(popupBrowser.contexts().length, 1);
     NodeAssert.equal(popupBrowser.contexts()[0].pages().length, 1);
     const popupPage = popupBrowser.contexts()[0].pages()[0];
-    await popupPage.waitForFunction(() => window.popupMarker === "actual-native-child");
-    NodeAssert.equal(await popupPage.evaluate(() => window.opener !== null), true);
-    await popupPage.evaluate(() => {
-      window.opener.popupRoundTrip = "child-wrote-through-opener";
-      window.popupBackingIdentity = "written-through-child-cdp";
-    });
+    await milestone("child page loaded", () =>
+      popupPage.waitForFunction(() => window.popupMarker === "actual-native-child", undefined, {
+        timeout: 5000,
+      }),
+    );
     NodeAssert.equal(
-      await page.evaluate(() => window.popupRoundTrip),
+      await milestone("child opener read", () => popupPage.evaluate(() => window.opener !== null)),
+      true,
+    );
+    await milestone("child writes opener", () =>
+      popupPage.evaluate(() => {
+        window.opener.popupRoundTrip = "child-wrote-through-opener";
+        window.popupBackingIdentity = "written-through-child-cdp";
+      }),
+    );
+    NodeAssert.equal(
+      await milestone("source reads opener write", () =>
+        page.evaluate(() => window.popupRoundTrip),
+      ),
       "child-wrote-through-opener",
     );
     NodeAssert.equal(
-      await nativePopup.webContents.executeJavaScript("window.popupBackingIdentity"),
+      await milestone("native child reads CDP write", () =>
+        nativePopup.webContents.executeJavaScript("window.popupBackingIdentity"),
+      ),
       "written-through-child-cdp",
     );
-    await nativePopup.webContents.executeJavaScript(
-      'window.popupBackingIdentity="written-through-native-child"',
+    await milestone("native child writes identity", () =>
+      nativePopup.webContents.executeJavaScript(
+        'window.popupBackingIdentity="written-through-native-child"',
+      ),
     );
     NodeAssert.equal(
-      await popupPage.evaluate(() => window.popupBackingIdentity),
+      await milestone("child CDP reads native write", () =>
+        popupPage.evaluate(() => window.popupBackingIdentity),
+      ),
       "written-through-native-child",
     );
     const popupAcquired = await surface(popupTab, "acquire", "popup-capture");
@@ -504,8 +555,14 @@ async function main() {
     NodeAssert.equal(nativePopup.webContents.getBackgroundThrottling(), false);
     NodeAssert.equal(nativePopup.isVisible(), false);
     NodeAssert.equal(nativePopup.isFocused(), false);
-    const popupCdp = await popupPage.context().newCDPSession(popupPage);
-    const popupSnapshot = await takeSnapshot(popupPage, popupCdp, true);
+    const popupCdp = await milestone("child additional CDP session", () =>
+      popupPage.context().newCDPSession(popupPage),
+    );
+    const popupSnapshot = await milestone(
+      "child capture",
+      () => takeSnapshot(popupPage, popupCdp, true),
+      7000,
+    );
     NodeAssert.ok(popupSnapshot.visibleText.includes("Actual child window"));
     NodeAssert.ok(popupSnapshot.screenshot);
     NodeAssert.equal(
@@ -517,7 +574,7 @@ async function main() {
     await send({ type: "release", ...key(popupTab) });
     NodeAssert.equal(nativePopup.webContents.getBackgroundThrottling(), true);
     NodeAssert.equal(nativePopup.isDestroyed(), false);
-    await popupBrowser.close();
+    await milestone("child relay release", () => popupBrowser.close());
     results.push(
       "real hidden window.open child retains JS opener and same native WebContents; bound root CDP evaluates and captures it without a second guest or presentation",
     );
@@ -527,7 +584,9 @@ async function main() {
     // It resets relay sessions, so perform it after the final CDP operation.
     for (const tab of relayTabs.values()) attachments.set(tab.tabId, Promise.withResolvers());
     await send({ type: "announce" });
-    const reattached = await Promise.all([...attachments.values()].map((entry) => entry.promise));
+    const reattached = await milestone("native re-announcement", () =>
+      Promise.all([...attachments.values()].map((entry) => entry.promise)),
+    );
     NodeAssert.ok(reattached.every((event) => event.presented !== true));
     NodeAssert.ok(presentationEvents.every((event) => event.presented === false));
     NodeAssert.equal(nativeGuests.get(tabs[0].tabId).id, nativeGuestId);
@@ -544,19 +603,52 @@ async function main() {
     );
     browsers.push(reconnectedPopupBrowser);
     const reconnectedPopup = reconnectedPopupBrowser.contexts()[0].pages()[0];
+    const beforeUnloadDialog = Promise.withResolvers();
+    // Production records dialogs; Electron owns the native unload veto. Without
+    // this observer Playwright tries to dismiss an already-canceled native dialog.
+    reconnectedPopup.on("dialog", (dialog) => {
+      if (dialog.type() === "beforeunload") beforeUnloadDialog.resolve();
+    });
     NodeAssert.equal(
-      await reconnectedPopup.evaluate(() => window.popupBackingIdentity),
+      await milestone("reconnected child identity", () =>
+        reconnectedPopup.evaluate(() => window.popupBackingIdentity),
+      ),
       "written-through-native-child",
     );
-    NodeAssert.equal(await reconnectedPopup.evaluate(() => window.opener !== null), true);
+    NodeAssert.equal(
+      await milestone("reconnected child opener", () =>
+        reconnectedPopup.evaluate(() => window.opener !== null),
+      ),
+      true,
+    );
     NodeAssert.equal(nativePopup.webContents.id, popupContentsId);
     NodeAssert.equal(nativePopup.isVisible(), false);
+    await milestone("child registers unload veto", () =>
+      nativePopup.webContents.executeJavaScript(
+        'window.onbeforeunload = event => { event.returnValue="stay"; return "stay"; }; void 0',
+      ),
+    );
     await send({ type: "closePopup", ...key(tabs[0]), popupId: popupEvent.popupId });
-    NodeAssert.equal((await popupClosed.promise).popupId, popupEvent.popupId);
+    NodeAssert.equal(
+      (await milestone("native close cancellation", () => popupCloseCanceled.promise)).popupId,
+      popupEvent.popupId,
+    );
+    await milestone("native beforeunload dialog observed", () => beforeUnloadDialog.promise);
+    NodeAssert.equal(nativePopup.isDestroyed(), false);
+    NodeAssert.equal(nativePopup.isVisible(), false);
+    NodeAssert.equal(nativePopup.webContents.id, popupContentsId);
+    await milestone("child removes unload veto", () =>
+      nativePopup.webContents.executeJavaScript("window.onbeforeunload = null"),
+    );
+    await send({ type: "closePopup", ...key(tabs[0]), popupId: popupEvent.popupId });
+    NodeAssert.equal(
+      (await milestone("native popup closed", () => popupClosed.promise)).popupId,
+      popupEvent.popupId,
+    );
     NodeAssert.equal(nativePopup.isDestroyed(), true);
     NodeAssert.equal(webContents.getAllWebContents().length, liveContentsBeforePopup);
     results.push(
-      "native popup survives release and reconnect, preserves opener, and closes its actual child window",
+      "native popup survives release and reconnect, preserves opener, reports beforeunload cancellation while retaining its hidden child, then closes its actual window",
     );
     const report = {
       passed: true,
@@ -570,7 +662,8 @@ async function main() {
     clearTimeout(startupTimer);
     for (const tab of tabs) host.detach(key(tab));
     if (nativePopup && !nativePopup.isDestroyed()) nativePopup.destroy();
-    for (const browser of browsers) await browser.close().catch(() => undefined);
+    for (const browser of browsers)
+      await milestone("cleanup browser", () => browser.close(), 1500).catch(() => undefined);
     for (const socket of sockets.values()) socket.terminate();
     relayServer.close();
     fixtureServer.close();

@@ -135,6 +135,117 @@ it.effect(
 );
 
 it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
+  it.effect(
+    "host reconnect notifications include authenticated hosts without any popup replay",
+    () =>
+      Effect.gen(function* () {
+        const channel = yield* remoteChannel;
+        const first = yield* connectHost(channel, "socket-a", "host-a");
+        const connected = yield* channel.connectedHosts.pipe(
+          Stream.toQueue({ capacity: "unbounded" }),
+        );
+        expect(yield* Queue.take(connected)).toBe("host-a");
+        const interruptedClose = yield* channel
+          .closePopup({ ...key, desktopHostId: "host-a" }, "gone-offline")
+          .pipe(Effect.flip, Effect.forkScoped);
+        yield* Queue.take(first.commands);
+        yield* Fiber.interrupt(first.fiber);
+        // Reconnect before joining the old failed close and retry the same native identity.
+        const next = yield* connectHost(channel, "socket-b", "host-a");
+        expect(yield* Queue.take(connected)).toBe("host-a");
+        const closing = yield* channel
+          .closePopup({ ...key, desktopHostId: "host-a" }, "gone-offline")
+          .pipe(Effect.forkScoped);
+        expect(yield* Queue.take(next.commands)).toEqual({
+          type: "closePopup",
+          ...key,
+          popupId: "gone-offline",
+        });
+        yield* channel.receiveEvent("socket-b", "host-a", {
+          type: "popupClosed",
+          ...key,
+          popupId: "gone-offline",
+        });
+        yield* Fiber.join(closing);
+        expect((yield* Fiber.join(interruptedClose)).reason).toBe("host-unavailable");
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect("native close waits for destruction from the matching authenticated host", () =>
+    Effect.gen(function* () {
+      const channel = yield* remoteChannel;
+      const host = yield* connectHost(channel, "socket-a", "host-a");
+      yield* connectHost(channel, "socket-b", "host-b");
+      const source = { ...key, desktopHostId: "host-a" };
+      let completed = false;
+      const closing = yield* channel.closePopup(source, "child-1").pipe(
+        Effect.tap(() =>
+          Effect.sync(() => {
+            completed = true;
+          }),
+        ),
+        Effect.forkScoped,
+      );
+      expect(yield* Queue.take(host.commands)).toEqual({
+        type: "closePopup",
+        ...key,
+        popupId: "child-1",
+      });
+      expect(completed).toBe(false);
+      // Another authenticated desktop's matching strings are a different window.
+      yield* channel.receiveEvent("socket-b", "host-b", {
+        type: "popupClosed",
+        ...key,
+        popupId: "child-1",
+      });
+      expect(completed).toBe(false);
+      const rejected = yield* channel
+        .receiveEvent("socket-b", "host-a", {
+          type: "popupClosed",
+          ...key,
+          popupId: "child-1",
+        })
+        .pipe(Effect.flip);
+      expect(rejected.reason).toBe("host-unavailable");
+      yield* channel.receiveEvent("socket-a", "host-a", {
+        type: "popupClosed",
+        ...key,
+        popupId: "child-1",
+      });
+      yield* Fiber.join(closing);
+      expect(completed).toBe(true);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect.each(["canceled", "disconnected"] as const)(
+    "native close reports a %s window instead of confirming destruction",
+    (failure) =>
+      Effect.gen(function* () {
+        const channel = yield* remoteChannel;
+        const host = yield* connectHost(channel, "socket-a", "host-a");
+        const closing = yield* channel
+          .closePopup({ ...key, desktopHostId: "host-a" }, "child-1")
+          .pipe(Effect.flip, Effect.forkScoped);
+        yield* Queue.take(host.commands);
+        if (failure === "canceled")
+          yield* channel.receiveEvent("socket-a", "host-a", {
+            type: "popupCloseCanceled",
+            ...key,
+            popupId: "child-1",
+          });
+        else yield* Fiber.interrupt(host.fiber);
+        expect((yield* Fiber.join(closing)).reason).toBe(
+          failure === "canceled" ? "close-canceled" : "host-unavailable",
+        );
+        if (failure === "disconnected") {
+          const unavailable = yield* channel
+            .closePopup({ ...key, desktopHostId: "host-a" }, "child-1")
+            .pipe(Effect.flip);
+          expect(unavailable.reason).toBe("host-unavailable");
+        }
+      }).pipe(Effect.scoped),
+  );
+
   it.effect("routes popup bindings only through the attached source's authenticated owner", () =>
     Effect.gen(function* () {
       const channel = yield* remoteChannel;
@@ -180,6 +291,34 @@ it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
       yield* Fiber.interrupt(owner.fiber);
       expect(channel.isPresented(child)).toBe(false);
       expect(yield* channel.isAttached(child)).toBe(false);
+      const reconnected = yield* connectHost(channel, "socket-c", "host-a");
+      yield* channel.receiveEvent("socket-c", "host-a", {
+        type: "attached",
+        threadId: key.threadId,
+        tabId: child.tabId,
+      });
+      // The bound window can survive after its original opener has closed.
+      yield* channel.receiveEvent("socket-c", "host-a", { ...popup, boundTabId: child.tabId });
+      expect(yield* Queue.take(announcements)).toEqual({
+        ...key,
+        desktopHostId: "host-a",
+        popupId: "child-1",
+        url: popup.url,
+      });
+      const closing = yield* channel
+        .closePopup({ ...key, desktopHostId: "host-a" }, popup.popupId)
+        .pipe(Effect.forkScoped);
+      expect(yield* Queue.take(reconnected.commands)).toEqual({
+        type: "closePopup",
+        ...key,
+        popupId: "child-1",
+      });
+      yield* channel.receiveEvent("socket-c", "host-a", {
+        type: "popupClosed",
+        ...key,
+        popupId: "child-1",
+      });
+      yield* Fiber.join(closing);
     }).pipe(Effect.scoped),
   );
 

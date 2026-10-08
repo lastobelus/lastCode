@@ -15,6 +15,7 @@ import {
   type PreviewEvent,
   type PreviewError,
   PreviewInvalidUrlError,
+  PreviewNativeCloseError,
   type PreviewListInput,
   type PreviewListResult,
   type PreviewNavigateInput,
@@ -59,7 +60,11 @@ export class PreviewManager extends Context.Service<
       input: PreviewOpenInput & {
         readonly automationOwner?: string;
         /** Trusted native creation, unavailable on public open inputs. */
-        readonly desktopPopup?: { readonly popupId: string };
+        readonly desktopPopup?: {
+          readonly popupId: string;
+          /** Waits for the actual native close before discarding its ownership/session. */
+          readonly close?: () => Effect.Effect<void, PreviewError>;
+        };
         /** Runs before the `opened` event publishes, so subscribers find state keyed by the tab. */
         readonly beforePublish?: (snapshot: PreviewSessionSnapshot) => void;
       },
@@ -89,6 +94,10 @@ export class PreviewManager extends Context.Service<
     ) => Effect.Effect<PreviewSessionSnapshot, PreviewError>;
     readonly refresh: (input: PreviewRefreshInput) => Effect.Effect<void, PreviewError>;
     readonly close: (input: PreviewCloseInput) => Effect.Effect<void, PreviewError>;
+    /** Trusted native destruction notification; never exposed on public close inputs. */
+    readonly nativeClosedConfirmed: (
+      input: PreviewCloseInput & { readonly tabId: string },
+    ) => Effect.Effect<void>;
     readonly list: (input: PreviewListInput) => Effect.Effect<PreviewListResult>;
     readonly events: Stream.Stream<PreviewEvent>;
     readonly subscribeEvents: Effect.Effect<PubSub.Subscription<PreviewEvent>, never, Scope.Scope>;
@@ -198,6 +207,7 @@ export const make = Effect.gen(function* PreviewManagerMake() {
   const recoveryClaimsLoadError = loadedRecoveryClaims.loadError;
   const recoveryClaimsRef = yield* SynchronizedRef.make(loadedRecoveryClaims.claims);
   const stateRef = yield* SynchronizedRef.make<ManagerState>(initialState);
+  const nativeCloseGuards = new Map<string, () => Effect.Effect<void, PreviewError>>();
   // Unbounded PubSub is fine here — events are tiny and we don't want to
   // block publishers if a subscriber is slow. WS clients backpressure on
   // their own queues downstream.
@@ -316,6 +326,8 @@ export const make = Effect.gen(function* PreviewManagerMake() {
             snapshot,
           });
           input.beforePublish?.(snapshot);
+          if (snapshot.backingPage === "desktop-popup" && input.desktopPopup?.close)
+            nativeCloseGuards.set(compositeKey(input.threadId, tabId), input.desktopPopup.close);
           yield* PubSub.publish(eventsPubSub, {
             type: "opened",
             threadId: input.threadId,
@@ -569,17 +581,15 @@ export const make = Effect.gen(function* PreviewManagerMake() {
     },
   );
 
-  const close: PreviewManager["Service"]["close"] = Effect.fn("PreviewManager.close")(
-    function* (input) {
+  const commitClosed = (targetKeys: ReadonlySet<string>) =>
+    Effect.gen(function* () {
       const createdAt = yield* currentIsoTimestamp;
       yield* SynchronizedRef.modifyEffect(stateRef, (state) => {
         const eventsToEmit: PreviewEvent[] = [];
         const sessions = new Map(state.sessions);
-        const targets = input.tabId
-          ? [state.sessions.get(compositeKey(input.threadId, input.tabId))].filter(
-              (entry): entry is PreviewSessionState => entry !== undefined,
-            )
-          : sessionsForThread(state, input.threadId);
+        const targets = [...state.sessions.values()].filter((session) =>
+          targetKeys.has(compositeKey(session.threadId, session.tabId)),
+        );
         let revision = state.revision;
         for (const target of targets) {
           revision += 1;
@@ -603,6 +613,46 @@ export const make = Effect.gen(function* PreviewManagerMake() {
           [undefined, { sessions, revision }] as const,
         );
       });
+      for (const key of targetKeys) nativeCloseGuards.delete(key);
+    });
+
+  const close: PreviewManager["Service"]["close"] = Effect.fn("PreviewManager.close")(
+    function* (input) {
+      const state = yield* SynchronizedRef.get(stateRef);
+      const targets = sessionsForThread(state, input.threadId).filter(
+        (session) => input.tabId === undefined || session.tabId === input.tabId,
+      );
+      yield* commitClosed(
+        new Set(
+          targets
+            .filter((target) => target.snapshot.backingPage !== "desktop-popup")
+            .map((target) => compositeKey(target.threadId, target.tabId)),
+        ),
+      );
+      let firstFailure: PreviewError | undefined;
+      // Native acknowledgment can re-enter the manager. Never await it under the state lock.
+      for (const target of targets) {
+        if (target.snapshot.backingPage !== "desktop-popup") continue;
+        const guard = nativeCloseGuards.get(compositeKey(target.threadId, target.tabId));
+        if (!guard) {
+          const current = yield* SynchronizedRef.get(stateRef);
+          if (!current.sessions.has(compositeKey(target.threadId, target.tabId))) continue;
+          firstFailure ??= new PreviewNativeCloseError({
+            tabId: target.tabId,
+            reason: "unavailable",
+          });
+          continue;
+        }
+        const result = yield* guard().pipe(
+          Effect.match({
+            onSuccess: () => ({ ok: true as const }),
+            onFailure: (error) => ({ ok: false as const, error }),
+          }),
+        );
+        if (result.ok) yield* commitClosed(new Set([compositeKey(target.threadId, target.tabId)]));
+        else firstFailure ??= result.error;
+      }
+      if (firstFailure) return yield* Effect.fail(firstFailure);
     },
   );
 
@@ -664,6 +714,8 @@ export const make = Effect.gen(function* PreviewManagerMake() {
     adjust,
     refresh,
     close,
+    nativeClosedConfirmed: (input) =>
+      commitClosed(new Set([compositeKey(input.threadId, input.tabId)])),
     list,
     events,
     subscribeEvents: PubSub.subscribe(eventsPubSub),

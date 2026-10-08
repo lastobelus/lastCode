@@ -62,9 +62,15 @@ export const DesktopBrowserEvent = Schema.Union([
     type: Schema.Literal("popupCreated"),
     ...TabKey,
     popupId: TrimmedNonEmptyString,
+    boundTabId: Schema.optionalKey(TrimmedNonEmptyString),
     url: Schema.String,
   }),
   Schema.Struct({ type: Schema.Literal("popupClosed"), ...TabKey, popupId: TrimmedNonEmptyString }),
+  Schema.Struct({
+    type: Schema.Literal("popupCloseCanceled"),
+    ...TabKey,
+    popupId: TrimmedNonEmptyString,
+  }),
   Schema.Struct({ type: Schema.Literal("surfaceReady"), ...TabKey, ...SurfaceResponse }),
   Schema.Struct({
     type: Schema.Literal("resolvedUrl"),
@@ -143,10 +149,13 @@ export class DesktopBrowserTransportError extends Schema.TaggedError<DesktopBrow
       "layout-timeout",
       "guest-unavailable",
       "surface-unsupported",
+      "close-canceled",
     ]),
   },
 ) {
   override get message(): string {
+    if (this.reason === "close-canceled")
+      return "The native browser window canceled the close request.";
     if (this.reason === "surface-unsupported")
       return "This desktop app does not support the browser rendering protocol required by this server. Update the desktop app to a compatible release to run browser automation.";
     if (this.reason === "layout-timeout")

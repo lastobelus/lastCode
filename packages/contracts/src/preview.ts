@@ -473,10 +473,22 @@ export class PreviewClearProfileError extends Schema.TaggedError<PreviewClearPro
   }
 }
 
+export class PreviewNativeCloseError extends Schema.TaggedError<PreviewNativeCloseError>()(
+  "PreviewNativeCloseError",
+  { tabId: Schema.String, reason: Schema.Literals(["unavailable", "canceled"]) },
+) {
+  override get message() {
+    return this.reason === "canceled"
+      ? "The native browser window canceled closing. The tab remains open."
+      : "The native browser window has not confirmed closing. The tab remains available until it does.";
+  }
+}
+
 export const PreviewError = Schema.Union([
   PreviewSessionLookupError,
   PreviewInvalidUrlError,
   PreviewControlRequiredError,
   PreviewRecoveryStorageError,
+  PreviewNativeCloseError,
 ]);
 export type PreviewError = typeof PreviewError.Type;
