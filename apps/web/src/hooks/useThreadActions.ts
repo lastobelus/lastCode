@@ -87,14 +87,26 @@ export function normalizeArchiveSelectedEntries<
     target: ScopedThreadRef,
   ) => Pick<EnvironmentThreadShell, "id" | "archivePending"> | null,
 ) {
-  const owners = new Map<string, T>();
+  const owners = new Map<string, T & { expectedArchiveCommandId?: CommandId }>();
   for (const entry of selected) {
     const thread = readThread(entry.threadRef);
     const threadRef = thread
       ? scopeThreadRef(entry.threadRef.environmentId, archiveRetryThreadId(thread))
       : entry.threadRef;
     const threadKey = scopedThreadKey(threadRef);
-    if (!owners.has(threadKey)) owners.set(threadKey, { ...entry, threadKey, threadRef });
+    const expectedArchiveCommandId =
+      thread?.archivePending?.status === "failed" ? thread.archivePending.commandId : undefined;
+    const existing = owners.get(threadKey);
+    if (
+      !existing ||
+      (existing.expectedArchiveCommandId === undefined && expectedArchiveCommandId !== undefined)
+    )
+      owners.set(threadKey, {
+        ...(existing ?? entry),
+        threadKey,
+        threadRef,
+        ...(expectedArchiveCommandId === undefined ? {} : { expectedArchiveCommandId }),
+      });
   }
   return [...owners.values()];
 }
@@ -513,6 +525,7 @@ export function useThreadActions() {
       opts: {
         onArchived?: () => void;
         confirmed?: boolean;
+        expectedArchiveCommandId?: CommandId;
         familyChoice?: {
           childDisposition: ThreadArchiveChildDisposition;
           expectedChildThreadIds: readonly ThreadId[];
@@ -531,7 +544,12 @@ export function useThreadActions() {
           ? { thread: opts.familyOwner, threadRef: target }
           : resolveThreadTarget(target);
       if (!resolved) return AsyncResult.success(undefined);
-      const retry = resolved.thread.archivePending?.status === "failed";
+      const expectedArchiveCommandId =
+        opts.expectedArchiveCommandId ??
+        (resolved.thread.archivePending?.status === "failed"
+          ? resolved.thread.archivePending.commandId
+          : undefined);
+      const retry = expectedArchiveCommandId !== undefined;
       const threadRef = scopeThreadRef(target.environmentId, archiveRetryThreadId(resolved.thread));
       let thread = resolved.thread;
       const familyChoice = retry && !opts.familyOwner ? undefined : opts.familyChoice;
@@ -582,6 +600,7 @@ export function useThreadActions() {
           environmentId: threadRef.environmentId,
           input: {
             threadId: threadRef.threadId,
+            ...(expectedArchiveCommandId === undefined ? {} : { expectedArchiveCommandId }),
             ...(familyChoice ??
               (family !== null
                 ? {
@@ -695,13 +714,14 @@ export function useThreadActions() {
           ),
           followupFailures: [],
         };
+      const normalizedEntries = normalizeArchiveSelectedEntries(selected, readThreadShell);
       const families: Array<
-        (typeof selected)[number] & {
+        (typeof normalizedEntries)[number] & {
           family: ArchiveFamily;
           owner: EnvironmentThreadShell;
         }
       > = [];
-      for (const entry of normalizeArchiveSelectedEntries(selected, readThreadShell)) {
+      for (const entry of normalizedEntries) {
         const result = await loadArchiveFamily({
           environmentId: entry.threadRef.environmentId,
           input: { threadId: entry.threadRef.threadId },
@@ -781,9 +801,10 @@ export function useThreadActions() {
         const attempt = await archiveSelectedThreadEntries({
           entries,
           archive: (entry, onArchived) => {
-            const { threadRef, family, owner } = entry;
+            const { threadRef, family, owner, expectedArchiveCommandId } = entry;
             return archiveThread(threadRef, {
               confirmed: true,
+              ...(expectedArchiveCommandId === undefined ? {} : { expectedArchiveCommandId }),
               familyChoice: {
                 childDisposition: choice,
                 expectedChildThreadIds: family.childThreadIds,

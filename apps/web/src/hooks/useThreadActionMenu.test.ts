@@ -26,6 +26,7 @@ const state = vi.hoisted(() => ({
   runtime: null as ThreadRuntimeSummary | null,
   archivePendingStatus: null as "stopping" | "failed" | null,
   dismissalRequests: [] as unknown[][],
+  archiveRequests: [] as unknown[][],
   persistent: false,
   show: vi.fn<
     (
@@ -167,7 +168,8 @@ vi.mock("./useThreadActions", () => ({
         "deleteThread",
       ].map((action) => [
         action,
-        async () => {
+        async (...args: unknown[]) => {
+          if (action === "archiveThread") state.archiveRequests.push(args);
           recordEffect(action === "markThreadUnread" ? "mark-unread" : action);
           return AsyncResult.success(undefined);
         },
@@ -197,6 +199,7 @@ beforeEach(() => {
   state.runtime = null;
   state.archivePendingStatus = null;
   state.dismissalRequests = [];
+  state.archiveRequests = [];
   state.persistent = false;
   state.show.mockReset().mockResolvedValue(null);
 });
@@ -262,6 +265,22 @@ describe("thread menu permissions", () => {
 });
 
 describe("thread menu archive retries", () => {
+  it("preserves the displayed retry attempt when the failure is dismissed while the native menu is open", async () => {
+    state.granted.add("secondary");
+    state.archivePendingStatus = "failed";
+    const choice = deferred<ThreadActionMenuId | null>();
+    state.show.mockReturnValue(choice.promise);
+    createMenu().openMenu(position);
+    state.archivePendingStatus = null;
+    choice.resolve("archive");
+    await state.completed.promise;
+    expect(state.archiveRequests).toEqual([
+      [
+        { environmentId: "secondary", threadId: "thread" },
+        expect.objectContaining({ expectedArchiveCommandId: "observed-failure" }),
+      ],
+    ]);
+  });
   it("dismisses the original owner's observed failure even if state changes while the menu is open", async () => {
     state.granted.add("secondary");
     state.archivePendingStatus = "failed";

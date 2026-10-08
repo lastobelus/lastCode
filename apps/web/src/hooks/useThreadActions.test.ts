@@ -17,36 +17,45 @@ import { makeThreadFixture } from "../test-fixtures";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 
 describe("archive retry selections", () => {
-  it("deduplicates a selected owner and failed child before querying and choosing the owner family", () => {
-    const owner = makeThreadFixture({
-      id: ThreadId.make("archive-owner"),
-      environmentId: EnvironmentId.make("environment-test"),
-    });
-    const pending = {
-      threadId: owner.id,
-      commandId: CommandId.make("archive-request"),
-      childDisposition: "promote" as const,
-      childThreadIds: [],
-      archiveThreadIds: [],
-      promoteThreadIds: [],
-      status: "failed" as const,
-    };
-    const child = { ...owner, id: ThreadId.make("failed-child"), archivePending: pending };
-    const ownerRef = scopeThreadRef(owner.environmentId, owner.id);
-    const childRef = scopeThreadRef(child.environmentId, child.id);
-    const normalized = normalizeArchiveSelectedEntries(
-      [
-        { threadKey: scopedThreadKey(childRef), threadRef: childRef },
-        { threadKey: scopedThreadKey(ownerRef), threadRef: ownerRef },
-      ],
-      (ref) => (ref.threadId === child.id ? child : owner),
-    );
-    expect(normalized).toEqual([{ threadKey: scopedThreadKey(ownerRef), threadRef: ownerRef }]);
-    // The owner key dispatches the family operation; its disposition decides
-    // whether the original child row leaves the selection.
-    expect(normalized.map((entry) => entry.threadKey)).not.toContain(scopedThreadKey(childRef));
-    expect(child.archivePending.childDisposition).toBe("promote");
-  });
+  it.each([false, true])(
+    "retains the failed attempt when deduplicating its owner (owner first=%s)",
+    (ownerFirst) => {
+      const owner = makeThreadFixture({
+        id: ThreadId.make("archive-owner"),
+        environmentId: EnvironmentId.make("environment-test"),
+      });
+      const pending = {
+        threadId: owner.id,
+        commandId: CommandId.make("archive-request"),
+        childDisposition: "promote" as const,
+        childThreadIds: [],
+        archiveThreadIds: [],
+        promoteThreadIds: [],
+        status: "failed" as const,
+      };
+      const child = { ...owner, id: ThreadId.make("failed-child"), archivePending: pending };
+      const ownerRef = scopeThreadRef(owner.environmentId, owner.id);
+      const childRef = scopeThreadRef(child.environmentId, child.id);
+      const normalized = normalizeArchiveSelectedEntries(
+        (ownerFirst ? [ownerRef, childRef] : [childRef, ownerRef]).map((threadRef) => ({
+          threadKey: scopedThreadKey(threadRef),
+          threadRef,
+        })),
+        (ref) => (ref.threadId === child.id ? child : owner),
+      );
+      expect(normalized).toEqual([
+        {
+          threadKey: scopedThreadKey(ownerRef),
+          threadRef: ownerRef,
+          expectedArchiveCommandId: pending.commandId,
+        },
+      ]);
+      // The owner key dispatches the family operation; its disposition decides
+      // whether the original child row leaves the selection.
+      expect(normalized.map((entry) => entry.threadKey)).not.toContain(scopedThreadKey(childRef));
+      expect(child.archivePending.childDisposition).toBe("promote");
+    },
+  );
   it("keeps same-id retry owners in different environments separate", () => {
     const first = scopeThreadRef(EnvironmentId.make("first-environment"), ThreadId.make("owner"));
     const second = scopeThreadRef(EnvironmentId.make("second-environment"), first.threadId);

@@ -5106,6 +5106,9 @@ export default function Sidebar() {
           case "archive": {
             let didArchive = false;
             const result = await archiveThread(threadRef, {
+              ...(thread.archivePending?.status === "failed"
+                ? { expectedArchiveCommandId: thread.archivePending.commandId }
+                : {}),
               onArchived: () => {
                 didArchive = true;
               },

@@ -3,6 +3,7 @@ import type { resolveThreadArchiveFamily } from "./threadArchive";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import {
   AuthOrchestrationOperateScope,
+  CommandId,
   EnvironmentId,
   ProjectId,
   ProviderInstanceId,
@@ -34,6 +35,7 @@ const state = vi.hoisted(() => ({
     buttons?: { text: string; onPress?: () => void }[];
   }[],
   afterRequest: undefined as (() => void) | undefined,
+  afterAlert: undefined as (() => void) | undefined,
 }));
 
 vi.mock("react", () => ({
@@ -45,6 +47,7 @@ vi.mock("react-native", () => ({
     alert: (title: string, message: string, buttons?: { text: string; onPress?: () => void }[]) => {
       state.alerts.push({ title, buttons });
       state.alertMessages.push(message);
+      state.afterAlert?.();
     },
   },
 }));
@@ -244,6 +247,7 @@ beforeEach(() => {
   state.dialogs = [];
   state.alerts = [];
   state.afterRequest = undefined;
+  state.afterAlert = undefined;
 });
 
 afterEach(() => vi.unstubAllEnvs());
@@ -387,6 +391,57 @@ describe("archive family reads", () => {
       }),
     ]);
   });
+
+  it.each(["dismissed", "replaced"] as const)(
+    "preserves the displayed failure when fresh mobile shells are %s",
+    async (change) => {
+      const owner = makeThread({ id: ThreadId.make("owner") });
+      const pending = {
+        threadId: owner.id,
+        commandId: CommandId.make("observed-failure"),
+        status: "failed" as const,
+      };
+      const displayedChild = makeThread({
+        id: ThreadId.make("failed-child"),
+        archivePending: pending,
+        lineage: {
+          rootThreadId: owner.id,
+          parentThreadId: owner.id,
+          relationshipToParent: "subagent",
+        },
+      });
+      const latestChild = {
+        ...displayedChild,
+        archivePending:
+          change === "dismissed"
+            ? null
+            : { ...pending, commandId: CommandId.make("newer-failure") },
+      };
+      state.shells = [owner, latestChild];
+      state.archiveFamily = makeArchiveDecision([owner, latestChild], [latestChild]);
+      state.archiveMutationError = new Error("This failed archive changed.");
+      const rejected = new Promise<void>((resolve) => {
+        state.afterAlert = resolve;
+      });
+      useThreadListActions().archiveThread(displayedChild);
+      await rejected;
+      expect(state.archiveFamilyReads).toEqual([
+        { environmentId: owner.environmentId, input: { threadId: owner.id } },
+      ]);
+      expect(state.requests).toEqual([
+        expect.objectContaining({
+          action: "archive",
+          input: {
+            threadId: owner.id,
+            childDisposition: "archive_if_idle",
+            expectedChildThreadIds: [latestChild.id],
+            expectedArchiveCommandId: pending.commandId,
+          },
+        }),
+      ]);
+      expect(state.alertMessages).toEqual(["This failed archive changed."]);
+    },
+  );
 
   it("reports newly active family rejection without resubmitting stop consent", async () => {
     const root = makeThread();

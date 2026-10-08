@@ -2818,6 +2818,8 @@ export const OrchestrationV2Command = Schema.Union([
     threadId: ThreadId,
     childDisposition: Schema.optional(ThreadArchiveChildDisposition),
     expectedChildThreadIds: Schema.optional(Schema.Array(ThreadId)),
+    /** Retries only this failed archive attempt on its original owner. */
+    expectedArchiveCommandId: Schema.optional(CommandId),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.unarchive"),

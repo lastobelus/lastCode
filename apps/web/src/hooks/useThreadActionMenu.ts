@@ -369,6 +369,9 @@ export function useThreadActionMenu(input: {
           case "archive": {
             let didArchive = false;
             const result = await archiveThread(threadRef, {
+              ...(thread.archivePending?.status === "failed"
+                ? { expectedArchiveCommandId: thread.archivePending.commandId }
+                : {}),
               onArchived: () => {
                 didArchive = true;
               },

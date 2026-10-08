@@ -79,9 +79,13 @@ const readQuestion = Effect.fn("mcp.readQuestion")(function* (input: {
 const readArchiveThread = Effect.fn("mcp.readArchiveThread")(function* (threadId?: ThreadId) {
   const context = yield* readThread(threadId);
   const thread = context.projection.thread;
-  return thread.archivePending?.status === "failed" && thread.archivePending.threadId !== thread.id
-    ? yield* readThread(thread.archivePending.threadId)
-    : context;
+  const failedArchive =
+    thread.archivePending?.status === "failed" ? thread.archivePending : undefined;
+  const ownerContext =
+    failedArchive !== undefined && failedArchive.threadId !== thread.id
+      ? yield* readThread(failedArchive.threadId)
+      : context;
+  return { ...ownerContext, observedArchiveCommandId: failedArchive?.commandId };
 });
 /** A tool that changes `threadId`, or the caller's own thread when it is omitted. */
 const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A, E, R>(
@@ -375,10 +379,13 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
   ),
   t3_thread_organize: writesThread((input) =>
     Effect.gen(function* () {
-      const { threads, projection } = yield* input.action === "archive" ||
+      const { threads, projection, observedArchiveCommandId } = yield* input.action === "archive" ||
       (input.action === "unarchive" && input.expectedArchiveCommandId !== undefined)
         ? readArchiveThread(input.threadId)
-        : readThread(input.threadId);
+        : readThread(input.threadId).pipe(
+            Effect.map((context) => ({ ...context, observedArchiveCommandId: undefined })),
+          );
+      const expectedArchiveCommandId = input.expectedArchiveCommandId ?? observedArchiveCommandId;
       const common = { commandId: yield* newCommandId(), threadId: projection.thread.id };
       let command: OrchestrationV2Command;
       switch (input.action) {
@@ -392,6 +399,7 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
             ...(input.expectedChildThreadIds === undefined
               ? {}
               : { expectedChildThreadIds: input.expectedChildThreadIds }),
+            ...(expectedArchiveCommandId === undefined ? {} : { expectedArchiveCommandId }),
           };
           break;
         case "unarchive":

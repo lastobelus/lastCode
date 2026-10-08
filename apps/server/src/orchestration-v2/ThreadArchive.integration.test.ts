@@ -1226,6 +1226,156 @@ it.effect("dismisses a failed archive without changing execution or replaying sh
   }).pipe(Effect.provide(testLayer)),
 );
 
+it.effect.each([
+  "dismissed",
+  "restored",
+  "newer-failed",
+  "stopping",
+  "compact-owner",
+  "different-owner",
+  "direct-child",
+  "deleted",
+] as const)(
+  "refuses a retry of an observed failure after %s without changing the family",
+  (state) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const { parent, child, grandchild } = yield* family;
+      const command = archive(parent, [child, grandchild]);
+      yield* failArchive(command);
+      const observed = (yield* orchestrator.getThreadProjection(child)).thread.archivePending!;
+      const owner = (yield* orchestrator.getThreadProjection(observed.threadId)).thread;
+      assert.equal(observed.commandId, owner.archivePending?.commandId);
+      assert.equal(observed.status, "failed");
+      if (state === "dismissed")
+        yield* threads.dispatch(dismissArchive(parent, observed.commandId));
+      if (state === "restored") {
+        const completed = { ...command, commandId: CommandId.make("completed-before-stale-retry") };
+        yield* orchestrator.dispatch(completed);
+        yield* orchestrator.dispatch({
+          type: "thread.archive.complete",
+          commandId: CommandId.make(`${completed.commandId}:complete`),
+          threadId: parent,
+          requestId: completed.commandId,
+        });
+        yield* settleArchiveResults(completed);
+        yield* threads.dispatch({
+          type: "thread.unarchive",
+          commandId: CommandId.make("restore-before-stale-retry"),
+          threadId: parent,
+        });
+      }
+      if (state === "newer-failed")
+        yield* failArchive({
+          ...command,
+          commandId: CommandId.make("failure-after-observed-attempt"),
+        });
+      if (
+        state === "stopping" ||
+        state === "compact-owner" ||
+        state === "different-owner" ||
+        state === "deleted"
+      ) {
+        yield* projections.apply({
+          id: EventId.make(`retry-changed-owner:${state}`),
+          type: "thread.metadata-updated",
+          threadId: parent,
+          occurredAt: yield* DateTime.now,
+          payload: {
+            ...owner,
+            ...(state === "deleted" ? { deletedAt: yield* DateTime.now } : {}),
+            archivePending:
+              state === "compact-owner"
+                ? { threadId: parent, commandId: observed.commandId, status: "failed" }
+                : {
+                    ...getThreadArchivePlan(owner.archivePending)!,
+                    ...(state === "stopping" ? { status: "stopping" as const } : {}),
+                    ...(state === "different-owner" ? { threadId: child } : {}),
+                  },
+          },
+        });
+      }
+      const before = yield* Effect.forEach([parent, child, grandchild], (id) =>
+        orchestrator.getThreadProjection(id),
+      );
+      const archiveCommandIds = [
+        command.commandId,
+        CommandId.make("completed-before-stale-retry"),
+        CommandId.make("failure-after-observed-attempt"),
+      ];
+      const effectsBefore = yield* Effect.forEach(archiveCommandIds, (id) =>
+        outbox.listByCommandId(id),
+      );
+      const sequence = (yield* orchestrator.getShellSnapshot()).snapshotSequence;
+      const retry = {
+        ...command,
+        commandId: CommandId.make(`stale-retry:${state}`),
+        threadId: state === "direct-child" ? child : observed.threadId,
+        expectedArchiveCommandId: observed.commandId,
+      };
+      const refusal = yield* threads.dispatch(retry).pipe(Effect.flip);
+      assert.equal(refusal._tag, "OrchestratorDispatchError");
+      if (refusal._tag === "OrchestratorDispatchError")
+        assert.equal(
+          refusal.cause,
+          state === "stopping"
+            ? "This conversation is stopping before it is archived. Wait for the archive to finish."
+            : "This failed archive changed. Review the conversation before retrying it.",
+        );
+      assert.equal((yield* orchestrator.getShellSnapshot()).snapshotSequence, sequence);
+      assert.isEmpty(yield* outbox.listByCommandId(retry.commandId));
+      assert.deepEqual(
+        yield* Effect.forEach(archiveCommandIds, (id) => outbox.listByCommandId(id)),
+        effectsBefore,
+      );
+      for (const previous of before)
+        assert.deepEqual(yield* orchestrator.getThreadProjection(previous.thread.id), previous);
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("retries the matching failed archive attempt on its original owner", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    const { parent, child, grandchild } = yield* family;
+    const command = archive(parent, [child, grandchild]);
+    yield* failArchive(command);
+    const observed = (yield* orchestrator.getThreadProjection(child)).thread.archivePending!;
+    const retry = {
+      ...command,
+      commandId: CommandId.make("retry-matching-failed-archive"),
+      threadId: observed.threadId,
+      expectedArchiveCommandId: observed.commandId,
+    };
+    yield* orchestrator.dispatch(retry);
+    for (const id of [parent, child, grandchild]) {
+      const current = (yield* orchestrator.getThreadProjection(id)).thread;
+      assert.equal(current.archivePending?.commandId, retry.commandId);
+      assert.equal(current.archivePending?.status, "stopping");
+      assert.isNull(current.archivedAt);
+    }
+    assert.lengthOf(yield* outbox.listByCommandId(retry.commandId), 1);
+    yield* threads.executeArchive({ threadId: parent, requestId: retry.commandId }).pipe(
+      Effect.provide(
+        Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+          teardownThread: () => Effect.void,
+        }),
+      ),
+    );
+    for (const id of [parent, child, grandchild]) {
+      const current = (yield* orchestrator.getThreadProjection(id)).thread;
+      assert.isNotNull(current.archivedAt);
+      assert.isNull(current.archivePending);
+      assert.equal(current.archivedWith?.threadId, parent);
+      assert.equal(current.archivedWith?.commandId, retry.commandId);
+    }
+  }).pipe(Effect.provide(testLayer)),
+);
+
 it.effect.each(["different-owner", "newer-attempt", "archived", "deleted", "independent"] as const)(
   "dismissal preserves a descendant with %s metadata",
   (state) =>

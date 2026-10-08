@@ -282,7 +282,7 @@ describe("V2 environment commands", () => {
     }).pipe(Effect.provide(layerTestCrypto)),
   );
 
-  it.effect("forwards the explicit archive decision and reviewed child set", () =>
+  it.effect("forwards the explicit archive decision, reviewed child set and failed attempt", () =>
     Effect.gen(function* () {
       const commands: OrchestrationV2Command[] = [];
       const supervisor = yield* makeSupervisor({ commands, projects: [] });
@@ -291,6 +291,7 @@ describe("V2 environment commands", () => {
         threadId: ThreadId.make("parent"),
         childDisposition: "promote",
         expectedChildThreadIds: [ThreadId.make("child")],
+        expectedArchiveCommandId: CommandId.make("failed-attempt"),
       }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
       expect(commands).toEqual([
         {
@@ -299,6 +300,7 @@ describe("V2 environment commands", () => {
           threadId: "parent",
           childDisposition: "promote",
           expectedChildThreadIds: ["child"],
+          expectedArchiveCommandId: "failed-attempt",
         },
       ]);
     }).pipe(Effect.provide(layerTestCrypto)),

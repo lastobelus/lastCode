@@ -733,17 +733,24 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const handleMoveUp = useCallback(() => onMoveThread?.(thread, "up"), [onMoveThread, thread]);
   const handleMoveDown = useCallback(() => onMoveThread?.(thread, "down"), [onMoveThread, thread]);
   const handleArchive = useCallback((): void => onArchiveThread(thread), [onArchiveThread, thread]);
-  const handleDismissArchiveFailure = useCallback(
+  const handleFailedArchiveAction = useCallback(
     async (actionId: string) => {
+      const retry = actionId.startsWith("retry-archive-failure:");
       const pending = thread.archivePending;
       if (
         pending?.status !== "failed" ||
-        actionId !== threadListV2ArchiveFailureActionId(pending)
+        actionId !== threadListV2ArchiveFailureActionId(pending, retry ? "retry" : "dismiss")
       ) {
         Alert.alert(
-          "Couldn't dismiss archive failure",
-          "This failed archive changed. Review the conversation before dismissing it.",
+          retry ? "Could not archive thread" : "Couldn't dismiss archive failure",
+          retry
+            ? "This failed archive changed. Review the conversation before retrying it."
+            : "This failed archive changed. Review the conversation before dismissing it.",
         );
+        return;
+      }
+      if (retry) {
+        handleArchive();
         return;
       }
       const result = await unarchiveThread({
@@ -758,7 +765,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         );
       }
     },
-    [unarchiveThread, thread.environmentId, thread.archivePending],
+    [handleArchive, unarchiveThread, thread.environmentId, thread.archivePending],
   );
   const handlePersistence = useCallback(
     async (persistent: boolean) => {
@@ -1101,8 +1108,11 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       if (nativeEvent.event === "move-up") handleMoveUp();
       if (nativeEvent.event === "move-down") handleMoveDown();
       if (nativeEvent.event === "archive") handleArchive();
-      if (nativeEvent.event.startsWith("dismiss-archive-failure:"))
-        void handleDismissArchiveFailure(nativeEvent.event);
+      if (
+        nativeEvent.event.startsWith("dismiss-archive-failure:") ||
+        nativeEvent.event.startsWith("retry-archive-failure:")
+      )
+        void handleFailedArchiveAction(nativeEvent.event);
       if (nativeEvent.event === "rename") handleRename();
       if (nativeEvent.event === "regenerate-title") handleRegenerateTitle();
       if (nativeEvent.event === "copy-thread-id") {
@@ -1134,7 +1144,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       onNewThreadOnBranch,
       thread,
       handleArchive,
-      handleDismissArchiveFailure,
+      handleFailedArchiveAction,
       handleCancelAction,
       handleStopThreadProcesses,
       handleKeepWorktree,

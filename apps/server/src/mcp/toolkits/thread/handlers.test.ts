@@ -8,6 +8,7 @@ import {
   ProviderInstanceId,
   ThreadId,
   type OrchestrationV2AppThread,
+  type OrchestrationV2ServerCommand,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -399,6 +400,122 @@ it.effect.each(["owner", "participant", "stale", "archived", "limited", "read-on
         expect(shell?.archivePending ?? null).toBeNull();
       }
     }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect.each(["dismissed", "newer-failed", "stopping", "explicit-stale"] as const)(
+  "retains the participant's observed attempt when MCP retry sees %s on its owner",
+  (state) =>
+    Effect.gen(function* () {
+      const { store, now } = yield* seedFamily();
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const attempt = CommandId.make("archive-family:observed-failure");
+      const newerAttempt = CommandId.make("archive-family:newer-failure");
+      const participants = [rootId, appId, nestedId, nativeId];
+      for (const id of participants) {
+        const { thread } = yield* threads.getThreadRecords(id, []);
+        const failed = { threadId: rootId, commandId: attempt, status: "failed" as const };
+        yield* store.apply({
+          id: EventId.make(`retry-observed:${id}`),
+          type: "thread.metadata-updated",
+          threadId: id,
+          occurredAt: now,
+          payload: {
+            ...thread,
+            archivePending:
+              id === rootId
+                ? {
+                    ...failed,
+                    childDisposition: "stop_and_archive",
+                    childThreadIds: participants.slice(1),
+                    archiveThreadIds: participants,
+                    promoteThreadIds: [],
+                  }
+                : failed,
+          },
+        });
+      }
+      let before = yield* Effect.forEach(participants, (id) => threads.getThreadRecords(id, []));
+      let changed = false;
+      let dispatched: OrchestrationV2ServerCommand | undefined;
+      const retryThreads = ThreadManagement.ThreadManagementService.of({
+        ...threads,
+        getProjectThreadRecords: (input, fields, filter) =>
+          Effect.gen(function* () {
+            // The participant was already read. Another client changes the
+            // owner before normalization finishes and archive is dispatched.
+            if (input.threadId === rootId && !changed && state !== "explicit-stale") {
+              changed = true;
+              if (state === "dismissed")
+                yield* threads.dispatch({
+                  type: "thread.unarchive",
+                  commandId: CommandId.make("archive-family:dismiss-before-retry"),
+                  threadId: rootId,
+                  expectedArchiveCommandId: attempt,
+                });
+              else {
+                const { thread } = yield* threads.getThreadRecords(rootId, []);
+                const plan = thread.archivePending;
+                expect(plan !== null && plan !== undefined && "childThreadIds" in plan).toBe(true);
+                yield* store.apply({
+                  id: EventId.make(`retry-owner-changed:${state}`),
+                  type: "thread.metadata-updated",
+                  threadId: rootId,
+                  occurredAt: now,
+                  payload: {
+                    ...thread,
+                    archivePending: {
+                      ...plan!,
+                      commandId: state === "newer-failed" ? newerAttempt : attempt,
+                      status: state === "stopping" ? "stopping" : "failed",
+                    },
+                  },
+                });
+              }
+              before = yield* Effect.forEach(participants, (id) =>
+                threads.getThreadRecords(id, []),
+              );
+            }
+            return yield* threads.getProjectThreadRecords(input, fields, filter);
+          }).pipe(Effect.orDie),
+        dispatch: (command) => {
+          dispatched = command;
+          return threads.dispatch(command);
+        },
+      });
+      const retryLayer = McpHttpServer.layerThreadToolkit.pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provide(Layer.succeed(ThreadManagement.ThreadManagementService, retryThreads)),
+        Layer.provide(NodeCrypto.layer),
+      );
+      const result = yield* invoke(
+        "t3_thread_organize",
+        {
+          threadId: appId,
+          action: "archive",
+          childDisposition: "stop_and_archive",
+          expectedChildThreadIds: participants.slice(1),
+          ...(state === "explicit-stale" ? { expectedArchiveCommandId: newerAttempt } : {}),
+        },
+        clientScope,
+      ).pipe(Effect.provide(retryLayer));
+      expect(result.isError).toBe(true);
+      expect(declaredFailure(result)).toMatchObject({
+        code: "orchestration_error",
+        message:
+          state === "stopping"
+            ? "This conversation is stopping before it is archived. Wait for the archive to finish."
+            : "This failed archive changed. Review the conversation before retrying it.",
+      });
+      expect(dispatched).toMatchObject({
+        type: "thread.archive",
+        threadId: rootId,
+        expectedArchiveCommandId: state === "explicit-stale" ? newerAttempt : attempt,
+      });
+      for (const previous of before)
+        expect((yield* threads.getThreadRecords(previous.thread.id, [])).thread).toEqual(
+          previous.thread,
+        );
+    }).pipe(Effect.provide(threadsLayer)),
 );
 
 it.effect("requires fresh family inspection when a nested child is added", () =>

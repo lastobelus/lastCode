@@ -340,16 +340,16 @@ describe("ordinary thread archive menus", () => {
         },
       },
     );
-    expect(items.filter((item) => item.id === "archive")).toEqual([
+    expect(items.filter((item) => item.title === "Retry archive")).toEqual([
       {
-        id: "archive",
+        id: 'retry-archive-failure:["owner","failed-attempt"]',
         title: "Retry archive",
         image: "archivebox",
         attributes: { disabled: false },
       },
     ]);
     expect(items.map((item) => item.id)).toEqual([
-      "archive",
+      'retry-archive-failure:["owner","failed-attempt"]',
       'dismiss-archive-failure:["owner","failed-attempt"]',
       "delete",
     ]);
@@ -368,24 +368,28 @@ describe("ordinary thread archive menus", () => {
     expect(items.some((item) => item.id?.startsWith("dismiss-archive-failure:"))).toBe(false);
   });
 
-  it("keeps an old native selection distinct from a newer failed archive", () => {
-    const ids = ["attempt-one", "attempt-two"].map((commandId) => {
-      const items = withThreadListV2ArchiveAction([], {
-        archiveFamiliesSupported: true,
-        archivePending: {
-          status: "failed",
-          threadId: ThreadId.make("owner"),
-          commandId: CommandId.make(commandId),
-        },
+  it.each(["Dismiss archive failure", "Retry archive"] as const)(
+    "keeps an old %s native selection distinct from a newer failed archive",
+    (title) => {
+      const ids = ["attempt-one", "attempt-two"].map((commandId) => {
+        const items = withThreadListV2ArchiveAction([], {
+          archiveFamiliesSupported: true,
+          archivePending: {
+            status: "failed",
+            threadId: ThreadId.make("owner"),
+            commandId: CommandId.make(commandId),
+          },
+        });
+        return items.find((item) => item.title === title)?.id;
       });
-      return items.find((item) => item.title === "Dismiss archive failure")?.id;
-    });
-    expect(ids).toEqual([
-      'dismiss-archive-failure:["owner","attempt-one"]',
-      'dismiss-archive-failure:["owner","attempt-two"]',
-    ]);
-    expect(ids[0]).not.toBe(ids[1]);
-  });
+      const action = title === "Retry archive" ? "retry" : "dismiss";
+      expect(ids).toEqual([
+        `${action}-archive-failure:["owner","attempt-one"]`,
+        `${action}-archive-failure:["owner","attempt-two"]`,
+      ]);
+      expect(ids[0]).not.toBe(ids[1]);
+    },
+  );
 
   it.each([undefined, "failed"] as const)(
     "keeps ordinary and retry archive protected by persistence (%s)",
@@ -411,7 +415,7 @@ describe("ordinary thread archive menus", () => {
         persistent: true,
         supported: true,
       });
-      expect(items.find((item) => item.id === "archive")).toMatchObject({
+      expect(items.find((item) => item.image === "archivebox")).toMatchObject({
         title: `${archivePendingStatus === "failed" ? "Retry archive" : "Archive"} (disable persistence first)`,
         attributes: { disabled: true },
       });

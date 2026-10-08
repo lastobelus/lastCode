@@ -93,6 +93,18 @@ const decodeOrchestrationV2SubscribeThreadInput = Schema.decodeUnknownSync(
 );
 
 describe("orchestration V2 contracts", () => {
+  it("retains a failed-attempt precondition across archive command decoding", () => {
+    const archive = {
+      type: "thread.archive",
+      commandId: "retry-archive",
+      threadId: "archive-owner",
+      childDisposition: "stop_and_archive",
+      expectedChildThreadIds: ["archive-participant"],
+      expectedArchiveCommandId: "observed-failed-archive",
+    };
+    expect(decodeOrchestrationV2Command(archive)).toEqual(archive);
+  });
+
   it("carries command failure metadata through runtime and JSON schemas without output text", () => {
     const base = {
       id: "command-item",

@@ -1,12 +1,10 @@
 import type { ThreadMoveDestination } from "../threads/threadOrder";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
-import {
-  archiveRetryThreadId,
-  THREAD_ARCHIVE_UPDATE_REQUIRED_MESSAGE,
-} from "@t3tools/client-runtime/state/thread-archive";
+import { THREAD_ARCHIVE_UPDATE_REQUIRED_MESSAGE } from "@t3tools/client-runtime/state/thread-archive";
 import { canSnooze, effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
 import {
   AuthOrchestrationOperateScope,
+  type CommandId,
   type ThreadArchiveChildDisposition,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -159,6 +157,7 @@ function useThreadActionExecutor(
           threadId: EnvironmentThreadShell["id"];
           childDisposition: ThreadArchiveChildDisposition;
           expectedChildThreadIds: readonly EnvironmentThreadShell["id"][];
+          expectedArchiveCommandId?: CommandId;
         } = {
           threadId: thread.id,
           childDisposition: "archive_if_idle",
@@ -173,13 +172,18 @@ function useThreadActionExecutor(
             return false;
           }
           const shells = appAtomRegistry.get(environmentThreadShells.threadShellsAtom);
+          const observedFailure =
+            thread.archivePending?.status === "failed" ? thread.archivePending : undefined;
           thread =
             shells.find(
               (candidate) =>
                 candidate.id === thread.id && candidate.environmentId === thread.environmentId,
             ) ?? thread;
-          const retry = thread.archivePending?.status === "failed";
-          const archiveThreadId = archiveRetryThreadId(thread);
+          const failedAttempt =
+            observedFailure ??
+            (thread.archivePending?.status === "failed" ? thread.archivePending : undefined);
+          const retry = failedAttempt !== undefined;
+          const archiveThreadId = failedAttempt?.threadId ?? thread.id;
           const familyResult = await loadArchiveFamily({
             environmentId: thread.environmentId,
             input: { threadId: archiveThreadId },
@@ -246,6 +250,9 @@ function useThreadActionExecutor(
           if (childDisposition === null) return false;
           archiveInput = {
             threadId: thread.id,
+            ...(failedAttempt === undefined
+              ? {}
+              : { expectedArchiveCommandId: failedAttempt.commandId }),
             childDisposition,
             expectedChildThreadIds: family.childThreadIds,
           };

@@ -141,8 +141,11 @@ type ArchiveAttempt = Pick<
 >;
 
 /** Bind a native menu selection to the failed attempt displayed when it opened. */
-export function threadListV2ArchiveFailureActionId(attempt: ArchiveAttempt) {
-  return `dismiss-archive-failure:${JSON.stringify([attempt.threadId, attempt.commandId])}`;
+export function threadListV2ArchiveFailureActionId(
+  attempt: ArchiveAttempt,
+  action: "dismiss" | "retry" = "dismiss",
+) {
+  return `${action}-archive-failure:${JSON.stringify([attempt.threadId, attempt.commandId])}`;
 }
 
 /** Archive stays available beside settlement; the handler reads the authoritative family. */
@@ -154,7 +157,10 @@ export function withThreadListV2ArchiveAction(
   },
 ): MenuAction[] {
   const archive: MenuAction = {
-    id: "archive",
+    id:
+      input.archivePending?.status === "failed"
+        ? threadListV2ArchiveFailureActionId(input.archivePending, "retry")
+        : "archive",
     title: !input.archiveFamiliesSupported
       ? "Archive (update server first)"
       : input.archivePending?.status === "failed"

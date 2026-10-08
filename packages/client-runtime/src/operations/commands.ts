@@ -106,6 +106,7 @@ export interface SetThreadAttentionInput extends ThreadCommandInput {
 export interface ArchiveThreadInput extends ThreadCommandInput {
   readonly childDisposition?: ThreadArchiveChildDisposition;
   readonly expectedChildThreadIds?: ReadonlyArray<ThreadId>;
+  readonly expectedArchiveCommandId?: CommandId;
 }
 export type UnarchiveThreadInput = ThreadCommandInput & {
   readonly expectedArchiveCommandId?: CommandId;
@@ -548,6 +549,9 @@ export const archiveThread = Effect.fn("EnvironmentCommands.archiveThread")(func
     ...(input.expectedChildThreadIds === undefined
       ? {}
       : { expectedChildThreadIds: input.expectedChildThreadIds }),
+    ...(input.expectedArchiveCommandId === undefined
+      ? {}
+      : { expectedArchiveCommandId: input.expectedArchiveCommandId }),
   });
 });
 

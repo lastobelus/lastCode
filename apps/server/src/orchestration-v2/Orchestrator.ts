@@ -12176,6 +12176,20 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
             ),
           );
+        if (command.expectedArchiveCommandId !== undefined) {
+          const failedArchive = getThreadArchivePlan(root.archivePending);
+          if (
+            root.deletedAt !== null ||
+            failedArchive?.status !== "failed" ||
+            failedArchive.threadId !== root.id ||
+            failedArchive.commandId !== command.expectedArchiveCommandId
+          )
+            return yield* new OrchestratorDispatchError({
+              commandId: command.commandId,
+              commandType: command.type,
+              cause: "This failed archive changed. Review the conversation before retrying it.",
+            });
+        }
         if (root.deletedAt !== null)
           return yield* new OrchestratorDispatchError({
             commandId: command.commandId,

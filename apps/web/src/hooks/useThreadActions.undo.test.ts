@@ -402,7 +402,12 @@ describe("stranded archive retry navigation", () => {
       await useThreadActions().archiveThread({ ...target, threadId: childId });
       expect(commands.archive).toHaveBeenCalledExactlyOnceWith({
         environmentId: target.environmentId,
-        input: { threadId: ownerId, childDisposition: choice, expectedChildThreadIds },
+        input: {
+          threadId: ownerId,
+          childDisposition: choice,
+          expectedChildThreadIds,
+          expectedArchiveCommandId: pending.commandId,
+        },
       });
       expect(newThread).toHaveBeenCalledTimes(leaves ? 1 : 0);
       await currentUndo()();
@@ -410,6 +415,66 @@ describe("stranded archive retry navigation", () => {
         environmentId: target.environmentId,
         input: { threadId: ownerId },
       });
+    },
+  );
+
+  it.each([false, true])(
+    "does not turn a dismissed child retry into a fresh family archive (bulk=%s)",
+    async (bulk) => {
+      const pending = {
+        threadId: target.threadId,
+        commandId: CommandId.make("observed-failure"),
+        status: "failed" as const,
+      };
+      const owner = makeThreadFixture({
+        id: target.threadId,
+        environmentId: target.environmentId,
+        archivePending: pending,
+      });
+      const child = makeThreadFixture({
+        id: ThreadId.make("failed-child"),
+        environmentId: owner.environmentId,
+        archivePending: pending,
+        lineage: {
+          rootThreadId: owner.id,
+          parentThreadId: owner.id,
+          relationshipToParent: "subagent",
+        },
+      });
+      familyState.threads = [owner, child];
+      archiveFamilyQuery.mockImplementation(async () => {
+        // Another client dismisses after the local retry target is captured.
+        familyState.threads = [owner, child].map((thread) => ({ ...thread, archivePending: null }));
+        return { _tag: "Success", value: familyState.threads };
+      });
+      commands.archive.mockImplementation(async ({ input }) =>
+        input.expectedArchiveCommandId === undefined
+          ? { _tag: "Success", value: undefined }
+          : { _tag: "Failure", cause: Cause.fail(new Error("This failed archive changed.")) },
+      );
+      const childRef = { ...target, threadId: child.id };
+      const actions = useThreadActions();
+      const result = bulk
+        ? (
+            await actions.archiveThreads([
+              { threadRef: childRef, threadKey: `${target.environmentId}:${child.id}` },
+            ])
+          )?.mutationFailure
+        : await actions.archiveThread(childRef);
+      expect(result?._tag).toBe("Failure");
+      expect(commands.archive).toHaveBeenCalledExactlyOnceWith({
+        environmentId: target.environmentId,
+        input: {
+          threadId: owner.id,
+          childDisposition: "archive_if_idle",
+          expectedChildThreadIds: [child.id],
+          expectedArchiveCommandId: pending.commandId,
+        },
+      });
+      expect(archiveDialog).not.toHaveBeenCalled();
+      expect(archiveConfirm).not.toHaveBeenCalled();
+      expect(useThreadUndoNotice.getState().notice).toBeNull();
+      expect(newThread).not.toHaveBeenCalled();
     },
   );
 });
@@ -685,6 +750,7 @@ describe("archive family confirmation", () => {
         threadId: owner.id,
         childDisposition: "archive_if_idle",
         expectedChildThreadIds: [],
+        expectedArchiveCommandId: owner.archivePending.commandId,
       },
     });
   });
