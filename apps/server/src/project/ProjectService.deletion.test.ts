@@ -7,6 +7,7 @@ import {
   ProjectId,
   ProviderInstanceId,
   ThreadId,
+  UpdateDrainAdmissionError,
   UpdateDrainRequestId,
   UpdateDrainTargetVersion,
 } from "@t3tools/contracts";
@@ -16,6 +17,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import { TestClock } from "effect/testing";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -44,6 +46,8 @@ import * as ProjectEnrichmentService from "./ProjectEnrichmentService.ts";
 import * as ProjectFaviconResolver from "./ProjectFaviconResolver.ts";
 import * as ProjectService from "./ProjectService.ts";
 import * as RepositoryIdentityResolver from "./RepositoryIdentityResolver.ts";
+
+const isUpdateDrainAdmissionError = Schema.is(UpdateDrainAdmissionError);
 
 const layerEventPersistence = EventSink.layer.pipe(
   Layer.provideMerge(Layer.merge(EventStore.layer, ProjectionStore.layer)),
@@ -599,4 +603,177 @@ it.effect(
         ),
       );
     }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect("replays a forced project delete queued behind its commit and a closing drain", () =>
+  Effect.gen(function* () {
+    const projectId = ProjectId.make("project:duplicate-delete");
+    const otherProjectId = ProjectId.make("project:duplicate-other");
+    const activeProjectId = ProjectId.make("project:duplicate-active");
+    const threadId = ThreadId.make("thread:duplicate-delete");
+    const activeThreadId = ThreadId.make("thread:duplicate-active");
+    for (const id of [projectId, otherProjectId, activeProjectId]) yield* seedProject(id);
+    const entered = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    const admissionRequests = yield* Queue.unbounded<void>();
+    const drainRequests = yield* Queue.unbounded<void>();
+    yield* Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const sink = yield* EventSink.EventSinkV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const admission = yield* UpdateDrainAdmission.makeUpdateDrainAdmission();
+      const commandId = CommandId.make("project-delete:duplicate");
+      const wrappedAdmission = UpdateDrainAdmission.UpdateDrainAdmission.of({
+        ...admission,
+        admit: (kind, effect) =>
+          Queue.offer(admissionRequests, undefined).pipe(
+            Effect.andThen(admission.admit(kind, effect)),
+          ),
+        dispatch: (command) =>
+          Queue.offer(drainRequests, undefined).pipe(Effect.andThen(admission.dispatch(command))),
+      });
+      const gatedSink = EventSink.EventSinkV2.of({
+        ...sink,
+        commitProjectCommand: (input) =>
+          input.commandId === commandId
+            ? Deferred.succeed(entered, undefined).pipe(
+                Effect.andThen(Deferred.await(release)),
+                Effect.andThen(sink.commitProjectCommand(input)),
+              )
+            : sink.commitProjectCommand(input),
+      });
+      const service = yield* ProjectService.make.pipe(
+        Effect.provideService(UpdateDrainAdmission.UpdateDrainAdmission, wrappedAdmission),
+        Effect.provideService(EventSink.EventSinkV2, gatedSink),
+      );
+      // A second deleted project exercises the existing receipt identity guard.
+      yield* service.delete({
+        commandId: CommandId.make("project-delete:other"),
+        projectId: otherProjectId,
+      });
+      yield* Queue.take(admissionRequests);
+      yield* sink.write({
+        events: [
+          nativeThreadCreated(projectId, threadId),
+          nativeThreadCreated(activeProjectId, activeThreadId),
+        ],
+      });
+      const input = { commandId, projectId, force: true };
+      const original = yield* service
+        .delete(input)
+        .pipe(Effect.forkChild({ startImmediately: true }));
+      yield* Deferred.await(entered);
+      yield* Queue.take(admissionRequests);
+      const cleanupBefore = yield* outbox.listByCommandId(
+        CommandId.make(`${commandId}:delete-thread:${threadId}`),
+      );
+      assert.lengthOf(cleanupBefore, 1);
+      const draining = yield* wrappedAdmission
+        .dispatch({
+          type: "update-drain.start",
+          commandId: CommandId.make("project-delete:drain"),
+          requestId: UpdateDrainRequestId.make("project-delete:request"),
+          targetVersion: UpdateDrainTargetVersion.make("1.2.3"),
+          createdAt: DateTime.formatIso(yield* DateTime.now),
+        })
+        .pipe(Effect.forkChild({ startImmediately: true }));
+      yield* Queue.take(drainRequests);
+      const duplicate = yield* service
+        .delete(input)
+        .pipe(Effect.forkChild({ startImmediately: true }));
+      // This marker is offered only after the duplicate read the still-active row.
+      yield* Queue.take(admissionRequests);
+      yield* Deferred.succeed(release, undefined);
+      const deleted = yield* Fiber.join(original);
+      yield* Fiber.join(draining);
+      assert.deepEqual(yield* Fiber.join(duplicate), deleted);
+      assert.isNotNull(deleted.deletedAt);
+      assert.equal((yield* admission.status).intent?.status, "draining");
+      const events = yield* sql<{
+        event_id: string;
+        sequence: number;
+        command_id: string;
+        event_type: string;
+      }>`
+        SELECT event_id, sequence, command_id, event_type FROM orchestration_events
+        WHERE stream_id IN (${projectId}, ${threadId}) AND event_type IN ('project.deleted', 'thread.deleted')
+        ORDER BY sequence
+      `;
+      assert.deepEqual(
+        events.map((event) => [event.command_id, event.event_type]),
+        [
+          [`${commandId}:delete-thread:${threadId}`, "thread.deleted"],
+          [commandId, "project.deleted"],
+        ],
+      );
+      const receipts = yield* sql<{
+        command_id: string;
+        stream_id: string;
+        command_type: string;
+        status: string;
+        result_sequence: number;
+      }>`
+        SELECT command_id, aggregate_id AS stream_id, command_type, status, result_sequence FROM orchestration_command_receipts
+        WHERE command_id IN (${commandId}, ${`${commandId}:delete-thread:${threadId}`})
+        ORDER BY result_sequence
+      `;
+      assert.deepEqual(
+        receipts.map((receipt) => [
+          receipt.command_id,
+          receipt.stream_id,
+          receipt.command_type,
+          receipt.status,
+          receipt.result_sequence,
+        ]),
+        [
+          [
+            `${commandId}:delete-thread:${threadId}`,
+            threadId,
+            "thread.delete",
+            "accepted",
+            events[0]!.sequence,
+          ],
+          [commandId, projectId, "project.delete", "accepted", events[1]!.sequence],
+        ],
+      );
+      assert.deepEqual(
+        yield* outbox.listByCommandId(CommandId.make(`${commandId}:delete-thread:${threadId}`)),
+        cleanupBefore,
+      );
+      const conflict = yield* service
+        .delete({ ...input, projectId: otherProjectId })
+        .pipe(Effect.flip);
+      assert.equal(conflict._tag, "ProjectOperationError");
+      if (conflict._tag === "ProjectOperationError")
+        assert.equal(conflict.operation, "dispatch-project-command");
+      const fresh = yield* service
+        .delete({ ...input, commandId: CommandId.make("project-delete:fresh") })
+        .pipe(Effect.flip);
+      assert.equal(fresh._tag, "ProjectNotFoundError");
+      const activeBefore = yield* projections.getThreadProjection(activeThreadId);
+      const activeFailure = yield* service
+        .delete({ ...input, projectId: activeProjectId })
+        .pipe(Effect.flip);
+      assert.equal(activeFailure._tag, "ProjectOperationError");
+      if (activeFailure._tag === "ProjectOperationError")
+        assert.isTrue(isUpdateDrainAdmissionError(activeFailure.cause));
+      assert.deepEqual(yield* projections.getThreadProjection(activeThreadId), activeBefore);
+      assert.isNull(Option.getOrThrow(yield* service.getById(activeProjectId)).deletedAt);
+      assert.deepEqual(yield* outbox.pendingCleanup, [{ threadId }]);
+    }).pipe(
+      Effect.ensuring(Deferred.succeed(release, undefined)),
+      Effect.provide(
+        Layer.mergeAll(
+          layerServices,
+          EffectOutbox.layer,
+          UpdateDrain.layer.pipe(Layer.provide(UpdateDrainRepository.layer)),
+          Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+            pendingExecution: Effect.succeed([]),
+          }),
+          Layer.mock(TerminalManager)({ refreshMetadata: Effect.succeed([]) }),
+        ),
+      ),
+    );
+  }).pipe(Effect.provide(layerDatabase)),
 );

@@ -551,6 +551,17 @@ export const make = Effect.gen(function* () {
       const existing = yield* readRow(input.projectId, { includeDeleted: true });
       if (Option.isSome(existing) && existing.value.deletedAt !== null) return yield* operation;
       return yield* admission.admit("thread-delete", operation).pipe(
+        Effect.catchTags({
+          UpdateDrainAdmissionError: (cause) =>
+            Effect.gen(function* () {
+              // An original delete may have committed while this duplicate waited
+              // behind it and the drain. Commit validates the replay under its locks.
+              const recorded = yield* readRow(input.projectId, { includeDeleted: true });
+              if (Option.isSome(recorded) && recorded.value.deletedAt !== null)
+                return yield* operation;
+              return yield* cause;
+            }),
+        }),
         Effect.mapError((cause) =>
           cause._tag === "UpdateDrainAdmissionError" || cause._tag === "UpdateDrainError"
             ? new ProjectOperationError({
