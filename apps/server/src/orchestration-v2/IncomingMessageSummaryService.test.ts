@@ -31,6 +31,8 @@ import * as EventSink from "./EventSink.ts";
 import { makeSubagentConversationArtifacts } from "./SubagentProjection.ts";
 import { planIncomingMessageSummaries } from "./IncomingMessageSummary.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import * as Orchestrator from "./Orchestrator.ts";
+import * as CommandReceipts from "./CommandReceiptStore.ts";
 import * as IncomingMessageSummary from "./IncomingMessageSummaryService.ts";
 import type { ProviderAdapterV2Shape } from "./ProviderAdapter.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
@@ -119,7 +121,17 @@ function makeHarness(
       ),
     ),
   );
-  return { layer: Layer.mergeAll(orchestrator, threads, summary, outbox, database), generate };
+  return {
+    layer: Layer.mergeAll(
+      orchestrator,
+      threads,
+      summary,
+      outbox,
+      database,
+      CommandReceipts.layer.pipe(Layer.provide(database)),
+    ),
+    generate,
+  };
 }
 
 const createThread = Effect.gen(function* () {
@@ -661,6 +673,99 @@ describe("IncomingMessageSummaryService", () => {
       assert.equal(Option.isSome(primary) ? primary.value.id : undefined, "primary-cleanup");
     }).pipe(Effect.provide(harness.layer));
   });
+
+  it.effect.each(["complete", "fail"] as const)(
+    "settles a summary during archive stopping and preserves it after %s",
+    (outcome) => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const threads = yield* ThreadManagement.ThreadManagementService;
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const receipts = yield* CommandReceipts.CommandReceiptStoreV2;
+        const service = yield* IncomingMessageSummary.IncomingMessageSummaryService;
+        yield* createThread;
+        yield* dispatchMessage();
+        const childId = ThreadId.make("summary-archive:child");
+        const root = (yield* threads.getThreadRecords(threadId, [])).thread;
+        const now = yield* DateTime.now;
+        const sink = yield* EventSink.EventSinkV2;
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("summary-archive:child-created"),
+              type: "thread.created",
+              threadId: childId,
+              occurredAt: now,
+              payload: {
+                ...root,
+                id: childId,
+                title: "Owned child",
+                lineage: {
+                  parentThreadId: threadId,
+                  rootThreadId: threadId,
+                  relationshipToParent: "subagent",
+                },
+              },
+            },
+          ],
+        });
+        const archiveId = CommandId.make(`summary-archive:${outcome}`);
+        yield* orchestrator.dispatch({
+          type: "thread.archive",
+          threadId,
+          commandId: archiveId,
+          childDisposition: "stop_and_archive",
+          expectedChildThreadIds: [childId],
+        });
+        assert.equal(
+          (yield* threads.getThreadRecords(threadId, [])).thread.archivePending?.status,
+          "stopping",
+        );
+        yield* service.execute({ threadId, messageId, attemptCount: 1 });
+        const expected = {
+          status: "ready",
+          text: "Review build changes; preserve release workflow",
+        } as const;
+        const during = yield* threads.getThreadProjection(threadId);
+        assert.deepEqual(during.messages[0]?.incomingSummary, expected);
+        assert.equal(during.messages[0]?.text, original);
+        const completionId = CommandId.make(`incoming-message-summary:${messageId}:complete`);
+        const receipt = yield* receipts.getByCommandId(completionId);
+        assert.equal(Option.isSome(receipt) ? receipt.value.status : undefined, "accepted");
+        if (outcome === "complete") {
+          yield* threads.executeArchive({ threadId, requestId: archiveId });
+          yield* threads.dispatch({
+            type: "thread.unarchive",
+            threadId,
+            commandId: CommandId.make("summary-restore"),
+          });
+        } else {
+          yield* orchestrator.dispatch({
+            type: "thread.archive.fail",
+            threadId,
+            commandId: CommandId.make(`${archiveId}:failed`),
+            requestId: archiveId,
+            error: "Controlled stop failure",
+          });
+          yield* threads.dispatch({
+            type: "thread.unarchive",
+            threadId,
+            commandId: CommandId.make("summary-dismiss"),
+            expectedArchiveCommandId: archiveId,
+          });
+        }
+        yield* service.execute({ threadId, messageId, attemptCount: 2 });
+        const after = yield* threads.getThreadProjection(threadId);
+        assert.deepEqual(after.messages[0]?.incomingSummary, expected);
+        const item = after.turnItems.find((item) => item.type === "user_message");
+        assert.deepEqual(
+          item?.type === "user_message" ? item.incomingSummary : undefined,
+          expected,
+        );
+        assert.equal(harness.generate.mock.calls.length, 1);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
 
   it.effect("ignores a stale completion for a different original message", () => {
     const harness = makeHarness();

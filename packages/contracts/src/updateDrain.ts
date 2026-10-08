@@ -5,6 +5,7 @@ import {
   EventId,
   IsoDateTime,
   NonNegativeInt,
+  ProviderSessionId,
   ThreadId,
   TurnId,
   TrimmedNonEmptyString,
@@ -54,6 +55,19 @@ export const UpdateDrainBlocker = Schema.Union([
     terminalId: TrimmedNonEmptyString,
     label: Schema.String,
     status: Schema.Literals(["starting", "running"]),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("provider-runtime"),
+    providerSessionId: ProviderSessionId,
+    status: Schema.Literals(["running", "stopping"]),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread-cleanup"),
+    threadId: ThreadId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("provider-teardown"),
+    threadId: ThreadId,
   }),
 ]);
 export type UpdateDrainBlocker = typeof UpdateDrainBlocker.Type;

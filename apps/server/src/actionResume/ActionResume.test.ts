@@ -46,10 +46,12 @@ import {
 import { parseActionResumeFollowUp } from "@t3tools/shared/actionResume";
 
 import * as CommandReceipts from "../orchestration-v2/CommandReceiptStore.ts";
+import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
 import * as UpdateDrain from "../updateDrain/UpdateDrain.ts";
 import * as UpdateDrainAdmission from "../updateDrain/UpdateDrainAdmission.ts";
 import * as ServerActivation from "../serverActivation.ts";
@@ -185,6 +187,9 @@ const makeHarness = Effect.gen(function* () {
   const opened: TerminalOpenInput[] = [];
   const written: TerminalWriteInput[] = [];
   const closed: string[] = [];
+  const otherThreads = new Map<ThreadId, OrchestrationV2ThreadShell>();
+  const archiveOnOtherMetadata = new Set<ThreadId>();
+  const shellReads: ThreadId[] = [];
   let listener: ((event: TerminalEvent) => Effect.Effect<void>) | undefined;
   const state = {
     busy: false,
@@ -193,6 +198,7 @@ const makeHarness = Effect.gen(function* () {
     deleted: false,
     drainClosed: false,
     metadataReceipt: null as Deferred.Deferred<void> | null,
+    recordsReceipt: null as Deferred.Deferred<void> | null,
     launchResolved: null as Deferred.Deferred<void> | null,
     pauseDelivery: null as {
       entered: Deferred.Deferred<void>;
@@ -200,6 +206,7 @@ const makeHarness = Effect.gen(function* () {
     } | null,
     request: null as OrchestrationV2RuntimeRequest["kind"] | null,
     archived: false,
+    archivePending: null as OrchestrationV2AppThread["archivePending"],
     failWrite: false,
     failDelivery: false,
     missingHistory: false,
@@ -209,6 +216,7 @@ const makeHarness = Effect.gen(function* () {
   const appThread = () => ({
     ...thread,
     archivedAt: state.archived ? now : null,
+    archivePending: state.archivePending,
     actionResume: state.latest,
     deletedAt: state.deleted ? now : null,
   });
@@ -273,18 +281,33 @@ const makeHarness = Effect.gen(function* () {
           ),
         }),
         Layer.mock(ProjectionStore.ProjectionStoreV2)({}),
+        Layer.mock(EffectOutbox.EffectOutboxV2)({ pendingCleanup: Effect.succeed([]) }),
+        Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({}),
         Layer.mock(TerminalManager.TerminalManager)({}),
       ),
     ),
   );
   const dependencies = Layer.mergeAll(
     Layer.mock(ThreadManagement.ThreadManagementService)({
-      getThreadShell: () =>
-        Effect.succeed(
-          state.missingShell ? null : { ...shell, ...appThread(), activeRunId: state.callerRunId },
-        ),
+      getThreadShell: (id) =>
+        Effect.sync(() => {
+          shellReads.push(id);
+          return id !== threadId
+            ? (otherThreads.get(id) ?? null)
+            : state.missingShell
+              ? null
+              : { ...shell, ...appThread(), activeRunId: state.callerRunId };
+        }),
       ensureLegacyTranscript: () => Effect.void,
-      getThreadRecords: () => Effect.succeed(projection()),
+      getThreadRecords: (_id, collections) =>
+        Effect.gen(function* () {
+          if (
+            state.recordsReceipt !== null &&
+            collections.some((collection) => collection === "runtimeRequests")
+          )
+            yield* Deferred.succeed(state.recordsReceipt, undefined);
+          return projection();
+        }),
       dispatch: (command) => {
         const apply = Effect.gen(function* () {
           if (command.type === "message.dispatch" && state.failDelivery)
@@ -295,8 +318,26 @@ const makeHarness = Effect.gen(function* () {
             });
           commands.push(command);
           if (command.type === "thread.metadata.update" && command.actionResume !== undefined) {
+            const other = otherThreads.get(command.threadId);
+            if (other && archiveOnOtherMetadata.delete(command.threadId))
+              otherThreads.set(command.threadId, {
+                ...other,
+                archivePending: {
+                  threadId: command.threadId,
+                  commandId: CommandId.make("archive-refused-action:hold"),
+                  status: "stopping",
+                },
+              });
+            if (otherThreads.get(command.threadId)?.archivePending?.status === "stopping")
+              return yield* new Orchestrator.OrchestratorThreadArchivingError({
+                commandId: command.commandId,
+                commandType: command.type,
+                threadId: command.threadId,
+              });
             if (state.deleted) return yield* Effect.die("deleted shell must not receive metadata");
-            state.latest = command.actionResume;
+            if (other)
+              otherThreads.set(command.threadId, { ...other, actionResume: command.actionResume });
+            else state.latest = command.actionResume;
             if (state.metadataReceipt !== null)
               yield* Deferred.succeed(state.metadataReceipt, undefined);
           }
@@ -420,6 +461,9 @@ const makeHarness = Effect.gen(function* () {
     opened,
     written,
     closed,
+    otherThreads,
+    archiveOnOtherMetadata,
+    shellReads,
     state,
     layer: ActionResume.layer.pipe(
       Layer.provideMerge(dependencies),
@@ -427,6 +471,20 @@ const makeHarness = Effect.gen(function* () {
     ),
     emit: (event: TerminalEvent) =>
       Effect.suspend(() => listener?.(event) ?? Effect.die("not subscribed")),
+    pendingResultBarrier: Effect.gen(function* () {
+      // A busy, pending result checks admission after preceding queued events.
+      const receipt = yield* Deferred.make<void>();
+      state.recordsReceipt = receipt;
+      yield* PubSub.publish(events, {
+        id: EventId.make("event:pending-result-barrier"),
+        threadId,
+        type: "thread.unsettled",
+        occurredAt: now,
+        payload: thread,
+      });
+      yield* Deferred.await(receipt);
+      state.recordsReceipt = null;
+    }),
     followUps: () => commands.filter((command) => command.type === "message.dispatch"),
   };
 });
@@ -644,6 +702,68 @@ it.effect("recovers running and pending states only after explicit resume", () =
       assert.equal(h.followUps().length, 1);
     }).pipe(Effect.provide(Layer.fresh(h.layer)));
   }).pipe(Effect.provide(StoreTestLayer)),
+);
+
+it.effect.each(["failed", "dismissed"] as const)(
+  "retries a retained archive-held result after startup when the hold is %s",
+  (ending) =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness;
+      const archive = {
+        threadId,
+        commandId: CommandId.make("archive:startup"),
+        status: "stopping" as const,
+      };
+      const run = retained(`archive-startup-${ending}`, {
+        outcome: "succeeded",
+        delivery: "pending",
+        revision: 1,
+      });
+      h.state.archivePending = archive;
+      // The Action was admitted before archive; its last completion revision
+      // reached the ledger but had not yet been published at restart.
+      h.state.latest = { ...run, revision: 0 };
+      h.state.metadataReceipt = yield* Deferred.make<void>();
+      yield* h.store.save(run, "retained before restart");
+      yield* Effect.gen(function* () {
+        const actions = yield* ActionResume.ActionResume;
+        yield* Deferred.await(h.state.metadataReceipt!);
+        assert.equal(h.state.latest?.delivery, "pending");
+        assert.equal(h.followUps().length, 0);
+        const deliveryId = CommandId.make(`server:action-resume:${run.runId}:delivery`);
+        assert.isTrue(Option.isNone(yield* h.receipts.getByCommandId(deliveryId)));
+
+        // The durable hold predates this listener; no archive-start event is published.
+        h.state.archivePending =
+          ending === "failed" ? { ...archive, status: "failed", error: "teardown failed" } : null;
+        h.state.metadataReceipt = yield* Deferred.make<void>();
+        yield* PubSub.publish(h.events, {
+          id: EventId.make(`event:archive-${ending}`),
+          threadId,
+          type: "thread.metadata-updated",
+          occurredAt: now,
+          payload: {
+            ...thread,
+            archivePending: h.state.archivePending,
+            actionResume: h.state.latest,
+          },
+        });
+        yield* Deferred.await(h.state.metadataReceipt!);
+        assert.equal(h.state.latest?.delivery, "delivered");
+        assert.equal(h.followUps().length, 1);
+        assert.equal(h.followUps()[0]?.messageId, `action-resume:${run.runId}:follow-up`);
+        assert.equal(
+          Option.getOrThrow(yield* h.receipts.getByCommandId(deliveryId)).status,
+          "accepted",
+        );
+        yield* actions.retryPendingFollowUps;
+        assert.equal(h.followUps().length, 1);
+        assert.equal(
+          (yield* actions.inspectActionRun(invocation, run.runId)).outputTail,
+          "retained before restart",
+        );
+      }).pipe(Effect.provide(h.layer));
+    }).pipe(Effect.provide(StoreTestLayer)),
 );
 
 it.effect.each(["running", "pending"] as const)(
@@ -918,6 +1038,345 @@ it.effect(
         yield* actions.retryPendingFollowUps;
         assert.equal(h.followUps().length, 0);
         assert.equal((yield* Effect.result(actions.resumeInterrupted(threadId)))._tag, "Failure");
+      }).pipe(Effect.provide(h.layer));
+    }).pipe(Effect.provide(StoreTestLayer)),
+);
+
+it.effect.each(["failed", "running", "archive-race"] as const)(
+  "reconciles an unadmitted %s launch at restart and delivers another thread's result",
+  (scenario) =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness;
+      const outcome = scenario === "running" ? "running" : "failed";
+      const raceArchive = scenario === "archive-race";
+      const blockedId = ThreadId.make("archive-refused-action");
+      const blocked = retained("unadmitted", {
+        threadId: blockedId,
+        outcome,
+        delivery: outcome === "failed" ? "disposed" : "armed",
+      });
+      h.otherThreads.set(blockedId, {
+        ...shell,
+        id: blockedId,
+        actionResume:
+          outcome === "failed"
+            ? null
+            : retained("previous", {
+                threadId: blockedId,
+                outcome: "succeeded",
+                delivery: "delivered",
+              }),
+        archivePending: raceArchive
+          ? null
+          : {
+              threadId: blockedId,
+              commandId: CommandId.make("archive-refused-action:hold"),
+              status: "stopping",
+            },
+      });
+      if (raceArchive) h.archiveOnOtherMetadata.add(blockedId);
+      yield* h.store.save(blocked);
+      yield* h.store.save(retained("earlier", { outcome: "succeeded", delivery: "delivered" }));
+      h.state.metadataReceipt = yield* Deferred.make<void>();
+      yield* Effect.gen(function* () {
+        const actions = yield* ActionResume.ActionResume;
+        // This later shell publication proves reconciliation passed the held run.
+        yield* Deferred.await(h.state.metadataReceipt!);
+        const saved = Option.getOrThrow(yield* h.store.get(blockedId, blocked.runId)).state;
+        assert.equal(saved.outcome, outcome === "failed" ? "failed" : "process_lost");
+        assert.equal(saved.delivery, outcome === "failed" ? "disposed" : "available");
+        assert.equal(
+          h.commands.some((command) => "threadId" in command && command.threadId === blockedId),
+          raceArchive,
+        );
+        assert.equal(h.otherThreads.get(blockedId)?.archivePending?.status, "stopping");
+        const run = yield* actions.runProjectActionAndResume(invocation, "qa");
+        h.state.busy = true;
+        yield* h.emit({
+          type: "exited",
+          threadId,
+          terminalId: run.terminalId,
+          exitCode: 0,
+          exitSignal: null,
+        });
+        assert.lengthOf(h.followUps(), 0);
+        h.state.busy = false;
+        yield* PubSub.publish(h.events, {
+          id: EventId.make("event:action-after-refused-restart"),
+          threadId,
+          type: "thread.unsettled",
+          occurredAt: now,
+          payload: thread,
+        });
+        yield* Deferred.await(h.delivered);
+        assert.lengthOf(h.followUps(), 1);
+      }).pipe(Effect.provide(h.layer));
+    }).pipe(Effect.provide(StoreTestLayer)),
+);
+
+it.effect.each([
+  { outcome: "running", ending: "failed", raceRetry: false },
+  { outcome: "running", ending: "dismissed", raceRetry: true },
+  { outcome: "failed", ending: "failed", raceRetry: false },
+  { outcome: "failed", ending: "dismissed", raceRetry: false },
+] as const)(
+  "republishes a refused $outcome startup result after archive is $ending",
+  ({ outcome, ending, raceRetry }) =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness;
+      const blockedId = ThreadId.make("archive-refused-result");
+      const run = retained("unpublished-result", {
+        threadId: blockedId,
+        outcome,
+        delivery: outcome === "running" ? "armed" : "disposed",
+      });
+      h.otherThreads.set(blockedId, {
+        ...shell,
+        id: blockedId,
+        actionResume: retained("stale-running", {
+          threadId: blockedId,
+          outcome: "running",
+          delivery: "armed",
+        }),
+      });
+      h.archiveOnOtherMetadata.add(blockedId);
+      yield* h.store.save(run, "interrupted output");
+      yield* h.store.save(
+        retained("startup-barrier", { outcome: "succeeded", delivery: "delivered" }),
+      );
+      h.state.metadataReceipt = yield* Deferred.make<void>();
+      yield* Effect.gen(function* () {
+        const actions = yield* ActionResume.ActionResume;
+        yield* Deferred.await(h.state.metadataReceipt!);
+        const saved = Option.getOrThrow(yield* h.store.get(blockedId, run.runId)).state;
+        const heldShell = h.otherThreads.get(blockedId)!;
+        assert.equal(heldShell.archivePending?.status, "stopping");
+        assert.equal(heldShell.actionResume?.outcome, "running");
+        assert.equal(saved.outcome, outcome === "running" ? "process_lost" : "failed");
+        const barrierRun = yield* actions.runProjectActionAndResume(invocation, "qa");
+        h.state.busy = true;
+        yield* h.emit({
+          type: "exited",
+          threadId,
+          terminalId: barrierRun.terminalId,
+          exitCode: 0,
+          exitSignal: null,
+        });
+
+        const reopened = {
+          ...heldShell,
+          archivePending:
+            ending === "failed"
+              ? {
+                  ...heldShell.archivePending!,
+                  status: "failed" as const,
+                  error: "teardown failed",
+                }
+              : null,
+        };
+        h.otherThreads.set(blockedId, reopened);
+        const ended = {
+          id: EventId.make(`event:unpublished-result:${ending}`),
+          threadId: blockedId,
+          type: "thread.metadata-updated" as const,
+          occurredAt: now,
+          payload: {
+            ...thread,
+            id: blockedId,
+            archivePending: reopened.archivePending,
+            actionResume: reopened.actionResume,
+          },
+        };
+        if (raceRetry) {
+          // A second hold wins the retry's shell-read/publication race. The
+          // pending-result barrier proves this event was processed before inspection.
+          h.archiveOnOtherMetadata.add(blockedId);
+          yield* PubSub.publish(h.events, ended);
+          yield* h.pendingResultBarrier;
+          assert.equal(h.otherThreads.get(blockedId)?.archivePending?.status, "stopping");
+          assert.equal(h.otherThreads.get(blockedId)?.actionResume?.outcome, "running");
+          h.otherThreads.set(blockedId, reopened);
+        }
+        h.state.metadataReceipt = yield* Deferred.make<void>();
+        yield* PubSub.publish(h.events, ended);
+        yield* Deferred.await(h.state.metadataReceipt!);
+        assert.deepEqual(h.otherThreads.get(blockedId)?.actionResume, saved);
+        assert.deepEqual(Option.getOrThrow(yield* h.store.get(blockedId, run.runId)).state, saved);
+        assert.equal(h.followUps().length, 0);
+        assert.equal(h.opened.length, 1);
+        assert.equal(h.written.length, 1);
+
+        // The publication's own metadata event and a duplicate archive-ending
+        // event must not write again or start an available result automatically.
+        const publicationCount = h.commands.filter(
+          (command) => command.type === "thread.metadata.update" && command.threadId === blockedId,
+        ).length;
+        const shellReadCount = h.shellReads.filter((id) => id === blockedId).length;
+        yield* PubSub.publish(h.events, {
+          ...ended,
+          payload: { ...ended.payload, actionResume: h.otherThreads.get(blockedId)!.actionResume },
+        });
+        yield* PubSub.publish(h.events, ended);
+        yield* h.pendingResultBarrier;
+        assert.equal(
+          h.commands.filter(
+            (command) =>
+              command.type === "thread.metadata.update" && command.threadId === blockedId,
+          ).length,
+          publicationCount,
+        );
+        assert.equal(h.shellReads.filter((id) => id === blockedId).length, shellReadCount);
+        assert.equal(h.followUps().length, 0);
+        yield* actions.retryPendingFollowUps;
+        assert.equal(h.followUps().length, 0);
+      }).pipe(Effect.provide(h.layer));
+    }).pipe(Effect.provide(StoreTestLayer)),
+);
+
+it.effect.each(["archived", "deleted"] as const)(
+  "does not republish a retained interrupted result after its thread is %s",
+  (ending) =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness;
+      const blockedId = ThreadId.make("archive-closed-result");
+      const run = retained("closed-result", {
+        threadId: blockedId,
+        outcome: "process_lost",
+        delivery: "available",
+      });
+      const heldShell = {
+        ...shell,
+        id: blockedId,
+        archivePending: {
+          threadId: blockedId,
+          commandId: CommandId.make("archive:closed-result"),
+          status: "stopping" as const,
+        },
+      };
+      h.otherThreads.set(blockedId, heldShell);
+      yield* h.store.save(run);
+      yield* h.store.save(
+        retained("startup-barrier", { outcome: "succeeded", delivery: "delivered" }),
+      );
+      h.state.metadataReceipt = yield* Deferred.make<void>();
+      yield* Effect.gen(function* () {
+        const actions = yield* ActionResume.ActionResume;
+        yield* Deferred.await(h.state.metadataReceipt!);
+        const barrierRun = yield* actions.runProjectActionAndResume(invocation, "qa");
+        h.state.busy = true;
+        yield* h.emit({
+          type: "exited",
+          threadId,
+          terminalId: barrierRun.terminalId,
+          exitCode: 0,
+          exitSignal: null,
+        });
+        const closedShell = {
+          ...heldShell,
+          archivePending: null,
+          archivedAt: ending === "archived" ? now : null,
+          deletedAt: ending === "deleted" ? now : null,
+        };
+        h.otherThreads.set(blockedId, closedShell);
+        yield* PubSub.publish(h.events, {
+          id: EventId.make(`event:closed-result:${ending}`),
+          threadId: blockedId,
+          type: "thread.metadata-updated",
+          occurredAt: now,
+          payload: {
+            ...thread,
+            id: blockedId,
+            archivePending: null,
+            archivedAt: closedShell.archivedAt,
+            deletedAt: closedShell.deletedAt,
+          },
+        });
+        yield* h.pendingResultBarrier;
+        assert.equal(h.otherThreads.get(blockedId)?.actionResume, null);
+        assert.isFalse(
+          h.commands.some((command) => "threadId" in command && command.threadId === blockedId),
+        );
+        assert.equal(h.followUps().length, 0);
+      }).pipe(Effect.provide(h.layer));
+    }).pipe(Effect.provide(StoreTestLayer)),
+);
+
+it.effect.each([
+  { delivery: "delivered", projection: "published" },
+  { delivery: "disposed", projection: "published" },
+  { delivery: "available", projection: "published" },
+  { delivery: "delivered", projection: "missing-then-published" },
+  { delivery: "disposed", projection: "missing-then-published" },
+  { delivery: "available", projection: "missing-then-published" },
+  { delivery: "available", projection: "missing-then-matched" },
+] as const)(
+  "stops reading $delivery shells once the $projection projection is synchronized",
+  ({ delivery, projection }) =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness;
+      const settledId = ThreadId.make("settled-action");
+      const run = retained("settled-result", {
+        threadId: settledId,
+        outcome:
+          delivery === "available"
+            ? "process_lost"
+            : delivery === "disposed"
+              ? "failed"
+              : "succeeded",
+        delivery,
+      });
+      if (projection === "published")
+        h.otherThreads.set(settledId, { ...shell, id: settledId, actionResume: run });
+      yield* h.store.save(run);
+      yield* h.store.save(
+        retained("startup-barrier", { outcome: "succeeded", delivery: "delivered" }),
+      );
+      h.state.metadataReceipt = yield* Deferred.make<void>();
+      yield* Effect.gen(function* () {
+        const actions = yield* ActionResume.ActionResume;
+        yield* Deferred.await(h.state.metadataReceipt!);
+        const barrierRun = yield* actions.runProjectActionAndResume(invocation, "qa");
+        h.state.busy = true;
+        yield* h.emit({
+          type: "exited",
+          threadId,
+          terminalId: barrierRun.terminalId,
+          exitCode: 0,
+          exitSignal: null,
+        });
+        if (projection !== "published")
+          h.otherThreads.set(settledId, {
+            ...shell,
+            id: settledId,
+            actionResume: projection === "missing-then-matched" ? run : null,
+          });
+        const event = {
+          id: EventId.make("event:settled-result:materialized"),
+          threadId: settledId,
+          type: "thread.metadata-updated" as const,
+          occurredAt: now,
+          payload: { ...thread, id: settledId, actionResume: run },
+        };
+        const before = h.shellReads.filter((id) => id === settledId).length;
+        yield* PubSub.publish(h.events, event);
+        yield* h.pendingResultBarrier;
+        const synchronized = h.shellReads.filter((id) => id === settledId).length;
+        assert.equal(synchronized, before + (projection === "published" ? 0 : 1));
+        assert.deepEqual(h.otherThreads.get(settledId)?.actionResume, run);
+        assert.equal(
+          h.commands.filter(
+            (command) =>
+              command.type === "thread.metadata.update" && command.threadId === settledId,
+          ).length,
+          projection === "missing-then-published" ? 1 : 0,
+        );
+        yield* PubSub.publish(h.events, event);
+        yield* PubSub.publish(h.events, { ...event, type: "thread.unsettled" });
+        yield* PubSub.publish(h.events, event);
+        yield* h.pendingResultBarrier;
+        assert.equal(h.shellReads.filter((id) => id === settledId).length, synchronized);
+        assert.equal(h.followUps().length, 0);
+        assert.deepEqual(Option.getOrThrow(yield* h.store.get(settledId, run.runId)).state, run);
       }).pipe(Effect.provide(h.layer));
     }).pipe(Effect.provide(StoreTestLayer)),
 );

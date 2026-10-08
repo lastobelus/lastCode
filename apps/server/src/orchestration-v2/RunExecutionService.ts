@@ -833,7 +833,7 @@ export const layer: Layer.Layer<
 
     return RunExecutionServiceV2.of({
       startRootRun: (input) =>
-        Effect.gen(function* () {
+        guardEventReaderStartup(function* (startup) {
           // Startup failure and stream shutdown can report the same attempt.
           const refreshAfterTurn = yield* Effect.cached(
             finalizationObserver.refreshAfterTurn(input.appThread.projectId).pipe(
@@ -970,10 +970,12 @@ export const layer: Layer.Layer<
             attemptId: input.attempt.id,
             providerThreadId: input.providerThread.id,
           };
+          // The accepted run is already projected before this reader is acquired,
+          // and provider start happens only after the consumer owns its lifetime.
           const eventSubscription =
             input.session.subscribeEvents === undefined
               ? { events: input.session.events, close: Effect.void }
-              : yield* input.session.subscribeEvents;
+              : yield* startup.acquire(input.session.subscribeEvents);
           const inheritedBackgroundTurnItems = yield* (
             input.loadInheritedBackgroundTurnItems?.() ?? Effect.succeed([])
           ).pipe(
@@ -1056,7 +1058,10 @@ export const layer: Layer.Layer<
                   ownedProviderThreadIds.add(subagent.providerThreadId);
                 open = withLinkedChildThreadId(open, subagent.childThreadId);
                 if (!isSettledSubagentStatus(subagent.status))
-                  open = { ...open, subagents: new Map(open.subagents).set(subagent.id, subagent) };
+                  open = {
+                    ...open,
+                    subagents: new Map(open.subagents).set(subagent.id, subagent),
+                  };
               }
               for (const item of source.turnItems) {
                 if (item.threadId !== input.run.threadId || item.runId !== input.run.id) continue;
@@ -1640,13 +1645,16 @@ export const layer: Layer.Layer<
                 ),
               ),
               finalize: (terminal, receipt, { runtimeReleased }) =>
-                Effect.gen(function* () {
+                guardEventReaderStartup(function* (recoveredStartup) {
                   // Subscribe before probing/finalizing so work that ends
-                  // during recovery is buffered for the retained drain.
+                  // during recovery is buffered for the retained drain. Recovery
+                  // rechecks the running run under its command lock before this
+                  // callback, so the earlier shell snapshot already blocks any
+                  // reader acquired after admission's first runtime snapshot.
                   const resumedSubscription = !runtimeReleased
                     ? input.session.subscribeEvents === undefined
                       ? { events: input.session.events, close: Effect.void }
-                      : yield* input.session.subscribeEvents
+                      : yield* recoveredStartup.acquire(input.session.subscribeEvents)
                     : undefined;
                   const terminalEvents = yield* providerEventIngestor
                     .normalize({
@@ -1675,7 +1683,7 @@ export const layer: Layer.Layer<
                     yield* Ref.set(drainObserved, "unobserved");
                     yield* Ref.set(drainRequested, false);
                     yield* Ref.set(consumerStopped, false);
-                    yield* consumeProviderEvents(resumedSubscription).pipe(Effect.forkDetach);
+                    yield* recoveredStartup.fork(consumeProviderEvents(resumedSubscription));
                     // Recovery holds the source command lock. Queue the drain
                     // separately, without waiting for its ingestion under that
                     // same lock, and always start the buffered reader first.
@@ -1927,9 +1935,7 @@ export const layer: Layer.Layer<
               ),
               Effect.ensuring(eventSubscription.close),
             );
-          const providerEventFiber = yield* consumeProviderEvents(eventSubscription).pipe(
-            Effect.forkDetach,
-          );
+          yield* startup.fork(consumeProviderEvents(eventSubscription));
 
           // A failed read fails the start below, so the run is recorded as
           // failed instead of staying active with no provider turn.
@@ -1938,7 +1944,7 @@ export const layer: Layer.Layer<
               ? Exit.succeed(true)
               : yield* Effect.exit(input.shouldStartProviderTurn());
           if (Exit.isSuccess(shouldStart) && !shouldStart.value) {
-            yield* Fiber.interrupt(providerEventFiber);
+            yield* startup.stop;
             return;
           }
 
@@ -1988,7 +1994,7 @@ export const layer: Layer.Layer<
                 runId: input.run.id,
                 cause,
               }).pipe(
-                Effect.andThen(Fiber.interrupt(providerEventFiber)),
+                Effect.andThen(startup.stop),
                 Effect.andThen(Ref.get(latestProviderThread)),
                 Effect.flatMap((providerThread) =>
                   Ref.get(latestTurnItemOrdinal).pipe(
@@ -2039,6 +2045,54 @@ export const layer: Layer.Layer<
     } satisfies RunExecutionServiceV2Shape);
   }),
 );
+
+// Acquisition and consumer handoff must install their failure cleanup before
+// becoming interruptible. Successful startup transfers ownership to the reader;
+// failed startup joins its interruption before releasing ingestion evidence.
+function guardEventReaderStartup<Y extends Effect.Effect<unknown, unknown, unknown>, A>(
+  start: (guard: {
+    stop: Effect.Effect<void>;
+    acquire: <E, R>(
+      subscription: Effect.Effect<ProviderAdapterV2EventSubscription, E, R>,
+    ) => Effect.Effect<ProviderAdapterV2EventSubscription, E, R>;
+    fork: <E, R>(
+      consumer: Effect.Effect<void, E, R>,
+    ) => Effect.Effect<Fiber.Fiber<void, E>, never, R>;
+  }) => Generator<Y, A, never>,
+) {
+  return Effect.suspend(() => {
+    let close: Effect.Effect<void> = Effect.void;
+    let interrupt: Effect.Effect<void> = Effect.void;
+    // A fiber interrupted before its first evaluation never installs its own
+    // ensuring(close), so startup must also close explicitly after joining it.
+    const stop = Effect.suspend(() => interrupt.pipe(Effect.andThen(close)));
+    return Effect.gen(() =>
+      start({
+        stop,
+        acquire: (subscription) =>
+          subscription.pipe(
+            Effect.tap((reader) =>
+              Effect.sync(() => {
+                close = reader.close;
+              }),
+            ),
+            Effect.uninterruptible,
+          ),
+        fork: (consumer) =>
+          consumer.pipe(
+            Effect.interruptible,
+            Effect.forkDetach,
+            Effect.tap((fiber) =>
+              Effect.sync(() => {
+                interrupt = Fiber.interrupt(fiber);
+              }),
+            ),
+            Effect.uninterruptible,
+          ),
+      }),
+    ).pipe(Effect.onError(() => stop));
+  });
+}
 
 export function makeInterruptResultTurnItem(input: {
   readonly idAllocator: IdAllocator.IdAllocatorV2Shape;

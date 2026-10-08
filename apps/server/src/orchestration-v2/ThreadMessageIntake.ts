@@ -31,6 +31,7 @@ function dispatchWasNotAccepted(
     case "OrchestratorCommandIdConflictError":
     case "OrchestratorSubagentThreadReadOnlyError":
     case "OrchestratorThreadAboveModeLimitError":
+    case "OrchestratorThreadArchivingError":
       return true;
     case "OrchestratorDispatchError":
       // Admission fails before dispatch starts. Other dispatch errors can occur

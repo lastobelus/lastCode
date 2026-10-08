@@ -1451,3 +1451,19 @@ describe("latestProviderTurnForAttempt", () => {
     expect(latestProviderTurnForAttempt(turns, null)).toBeUndefined();
   });
 });
+
+const decodeClientWorkspaceCompletion = Schema.decodeUnknownExit(OrchestrationV2Command);
+
+it("keeps accepted workspace completions outside client dispatch commands", () => {
+  const completion = {
+    type: "thread.workspace.complete",
+    commandId: "workspace-completion",
+    threadId: "workspace-thread",
+    requestId: "accepted-preparation",
+    runId: "preparing-run",
+    expectedWorktreePath: null,
+    worktreePath: "/repo-worktree",
+    branch: "feature/workspace",
+  };
+  expect(decodeClientWorkspaceCompletion(completion)._tag).toBe("Failure");
+});

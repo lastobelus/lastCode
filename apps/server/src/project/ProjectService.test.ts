@@ -27,6 +27,7 @@ import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as RuntimeLayer from "../orchestration-v2/runtimeLayer.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as UpdateDrainAdmissionTestkit from "../updateDrain/UpdateDrainAdmission.testkit.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import * as ProjectEnrichmentService from "./ProjectEnrichmentService.ts";
 import * as ProjectFaviconResolver from "./ProjectFaviconResolver.ts";
@@ -64,6 +65,7 @@ const layerTestFor = (
   >,
 ) =>
   RuntimeLayer.layerProjectService.pipe(
+    Layer.provide(UpdateDrainAdmissionTestkit.layerOpen),
     Layer.provideMerge(ProjectEnrichmentService.layer),
     Layer.provideMerge(layerWorkspacePaths),
     Layer.provideMerge(projectMetadataLayer),
@@ -76,6 +78,7 @@ const layerTest = layerTestFor(layerMetadata);
 
 /** Every dependency of ProjectService.make, so a test can swap one of them. */
 const layerProjectServiceDependencies = Layer.mergeAll(
+  UpdateDrainAdmissionTestkit.layerOpen,
   RuntimeLayer.layerEventSink,
   ProjectStore.layer,
   ProjectionStore.layer,

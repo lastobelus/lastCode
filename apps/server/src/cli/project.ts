@@ -47,7 +47,12 @@ import * as T3ProjectFileLoader from "../project/T3ProjectFileLoader.ts";
 import {
   clearPersistedServerRuntimeState,
   readPersistedServerRuntimeState,
+  isProcessAlive,
 } from "../serverRuntimeState.ts";
+import * as ServerOwnerLease from "../serverOwnerLease.ts";
+import * as UpdateDrain from "../updateDrain/UpdateDrain.ts";
+import * as UpdateDrainAdmission from "../updateDrain/UpdateDrainAdmission.ts";
+import * as UpdateDrainRepository from "../persistence/UpdateDrainRepository.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { type CliAuthLocationFlags, projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
 
@@ -230,6 +235,11 @@ const projectCommandUuid = Crypto.Crypto.pipe(
 );
 
 const layerProjectCliRuntime = RuntimeLayer.layerProjectService.pipe(
+  Layer.provide(
+    UpdateDrainAdmission.layerOffline.pipe(
+      Layer.provide(UpdateDrain.layer.pipe(Layer.provide(UpdateDrainRepository.layer))),
+    ),
+  ),
   Layer.provideMerge(ProjectEnrichmentService.layer),
   Layer.provideMerge(RepositoryIdentityResolver.layer),
   Layer.provideMerge(
@@ -376,6 +386,11 @@ const getOfflineSnapshot = Effect.fn("getOfflineSnapshot")(function* () {
   return yield* projects.snapshot;
 });
 
+export class ProjectOfflineOwnershipError extends Schema.TaggedError<ProjectOfflineOwnershipError>()(
+  "ProjectOfflineOwnershipError",
+  { message: Schema.String },
+) {}
+
 const tryResolveLiveProjectExecutionMode = Effect.fn("tryResolveLiveProjectExecutionMode")(
   function* (
     environmentAuth: EnvironmentAuth.EnvironmentAuth["Service"],
@@ -403,7 +418,8 @@ const tryResolveLiveProjectExecutionMode = Effect.fn("tryResolveLiveProjectExecu
       origin: runtimeState.value.origin,
       cause: attempted.failure,
     });
-    yield* clearPersistedServerRuntimeState(config.serverRuntimeStatePath);
+    if (isProcessAlive(runtimeState.value.pid)) return yield* attempted.failure;
+    // Stale state is cleared only after acquiring offline ownership below.
     return Option.none<{ readonly origin: string }>();
   },
 );
@@ -430,12 +446,19 @@ const runProjectMutation = Effect.fn("runProjectMutation")(function* (
   const config = yield* resolveCliAuthConfig(flags, logLevel);
   const minimumLogLevel = config.logLevel;
 
-  return yield* Effect.gen(function* () {
-    const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
-    const liveMode = yield* tryResolveLiveProjectExecutionMode(environmentAuth, config);
-
-    if (Option.isSome(liveMode)) {
-      return yield* withProjectCliSessionToken(environmentAuth, (token) =>
+  const authLayer = EnvironmentAuth.layerRuntime.pipe(
+    Layer.provideMerge(FetchHttpClient.layer),
+    Layer.provide(ServerConfig.layer(config)),
+    Layer.provide(Layer.succeed(References.MinimumLogLevel, minimumLogLevel)),
+  );
+  // Avoid opening the offline database before kernel ownership is acquired.
+  const runtimeState = yield* readPersistedServerRuntimeState(config.serverRuntimeStatePath);
+  if (Option.isSome(runtimeState) && isProcessAlive(runtimeState.value.pid)) {
+    const handled = yield* Effect.gen(function* () {
+      const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
+      const liveMode = yield* tryResolveLiveProjectExecutionMode(environmentAuth, config);
+      if (Option.isNone(liveMode)) return false;
+      yield* withProjectCliSessionToken(environmentAuth, (token) =>
         Effect.gen(function* () {
           const snapshot = yield* fetchLiveOrchestrationSnapshot(liveMode.value.origin, token);
           const output = yield* run({
@@ -447,32 +470,49 @@ const runProjectMutation = Effect.fn("runProjectMutation")(function* (
           yield* Console.log(output);
         }),
       );
-    }
+      return true;
+    }).pipe(Effect.provide(Layer.mergeAll(authLayer, WorkspacePaths.layer)));
+    if (handled) return;
+  }
 
-    const layerOfflineRuntime = layerProjectCliRuntime.pipe(
-      Layer.provide(ServerConfig.layer(config)),
-      Layer.provide(Layer.succeed(References.MinimumLogLevel, minimumLogLevel)),
-    );
-
-    return yield* Effect.gen(function* () {
-      const snapshot = yield* getOfflineSnapshot();
-      const projects = yield* ProjectService.ProjectService;
-      const output = yield* run({
-        snapshot,
-        dispatch: (command) => projectMutationOperation(projects, command).pipe(Effect.asVoid),
-        mode: "offline",
-      });
-      yield* Console.log(output);
-    }).pipe(Effect.provide(layerOfflineRuntime));
-  }).pipe(
-    Effect.provide(
-      Layer.mergeAll(EnvironmentAuth.layerRuntime, WorkspacePaths.layer).pipe(
-        Layer.provideMerge(FetchHttpClient.layer),
-        Layer.provide(ServerConfig.layer(config)),
-        Layer.provide(Layer.succeed(References.MinimumLogLevel, minimumLogLevel)),
-      ),
-    ),
-  );
+  return yield* Effect.acquireUseRelease(
+    ServerOwnerLease.acquireServerOwnerLease(config.stateDir),
+    (lease) =>
+      Effect.gen(function* () {
+        const current = yield* readPersistedServerRuntimeState(config.serverRuntimeStatePath);
+        if (Option.isSome(current)) {
+          if (isProcessAlive(current.value.pid))
+            return yield* new ProjectOfflineOwnershipError({
+              message: "The recorded server is still running; reconnect before changing projects.",
+            });
+          yield* clearPersistedServerRuntimeState(config.serverRuntimeStatePath);
+        }
+        const layerOfflineRuntime = layerProjectCliRuntime.pipe(
+          Layer.provide(ServerConfig.layer(config)),
+          Layer.provide(Layer.succeed(References.MinimumLogLevel, minimumLogLevel)),
+        );
+        // The lease outlives construction, commands, and release of this layer's SQL scope.
+        yield* Effect.gen(function* () {
+          const snapshot = yield* getOfflineSnapshot();
+          const projects = yield* ProjectService.ProjectService;
+          const output = yield* run({
+            snapshot,
+            dispatch: (command) =>
+              command.type === "project.delete" && lease.endpoint === "unmanaged"
+                ? Effect.fail(
+                    new ProjectOfflineOwnershipError({
+                      message:
+                        "Offline project deletion requires exclusive server ownership, which is unavailable on this platform. Connect to the running server to delete the project.",
+                    }),
+                  )
+                : projectMutationOperation(projects, command).pipe(Effect.asVoid),
+            mode: "offline",
+          });
+          yield* Console.log(output);
+        }).pipe(Effect.provide(layerOfflineRuntime));
+      }),
+    (lease) => lease.release,
+  ).pipe(Effect.provide(Layer.mergeAll(FetchHttpClient.layer, WorkspacePaths.layer)));
 });
 
 const projectAddCommand = Command.make("add", {

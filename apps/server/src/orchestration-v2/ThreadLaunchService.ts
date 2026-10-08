@@ -235,6 +235,7 @@ const make = Effect.gen(function* () {
     input: PreparationInput,
     threadId: ThreadId,
     runId: RunId | null,
+    requestId: CommandId,
   ) {
     const project = yield* projects.getById(input.projectId).pipe(
       Effect.mapError(mapError(input, "resolve-project", threadId)),
@@ -246,6 +247,13 @@ const make = Effect.gen(function* () {
         }),
       ),
     );
+
+    const initialThread = yield* threads
+      .getThreadShell(threadId)
+      .pipe(Effect.mapError(mapError(input, "update-thread", threadId)));
+    if (initialThread === null)
+      return yield* mapError(input, "update-thread", threadId)("Thread no longer exists.");
+    const expectedWorktreePath = initialThread.worktreePath;
 
     const reused = input.reusedWorktree;
     const tracked = input.workspaceStrategy.type === "worktree" || reused !== undefined;
@@ -417,9 +425,12 @@ const make = Effect.gen(function* () {
       if (reused === undefined) {
         yield* threads
           .dispatch({
-            type: "thread.metadata.update",
+            type: "thread.workspace.complete",
             commandId: CommandId.make(`${input.commandId}:workspace`),
             threadId,
+            requestId,
+            runId,
+            expectedWorktreePath,
             branch,
             worktreePath,
           })
@@ -451,9 +462,12 @@ const make = Effect.gen(function* () {
           ),
           Effect.flatMap((renamed) =>
             threads.dispatch({
-              type: "thread.metadata.update",
+              type: "thread.workspace.complete",
               commandId: CommandId.make(`${input.commandId}:branch-rename`),
               threadId,
+              requestId,
+              runId,
+              expectedWorktreePath: worktreeCwd,
               branch: renamed.branch,
               worktreePath: worktreeCwd,
             }),
@@ -595,9 +609,12 @@ const make = Effect.gen(function* () {
                 Effect.andThen(
                   threads
                     .dispatch({
-                      type: "thread.metadata.update",
+                      type: "thread.workspace.complete",
                       commandId: CommandId.make(`${input.commandId}:cancel-workspace`),
                       threadId,
+                      requestId,
+                      runId,
+                      expectedWorktreePath: removedPath,
                       worktreePath: null,
                       branch: null,
                     })
@@ -673,8 +690,9 @@ const make = Effect.gen(function* () {
     input: PreparationInput,
     threadId: ThreadId,
     runId: RunId | null,
+    requestId: CommandId,
   ) {
-    yield* prepareInBackground(input, threadId, runId).pipe(
+    yield* prepareInBackground(input, threadId, runId, requestId).pipe(
       Effect.onError((cause) =>
         failPreparedRun(
           input,
@@ -900,6 +918,9 @@ const make = Effect.gen(function* () {
                   { ...input, workspaceStrategy: preparationStrategy },
                   threadId,
                   runId,
+                  runId === null
+                    ? input.commandId
+                    : CommandId.make(`${input.commandId}:initial-message`),
                 );
               } else {
                 yield* releasePreparation(input.commandId);
@@ -985,6 +1006,7 @@ const make = Effect.gen(function* () {
       },
       input.threadId,
       run.id,
+      input.commandId,
     );
   };
 

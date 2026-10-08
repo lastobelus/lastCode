@@ -28,6 +28,7 @@ import * as ServerConfig from "../config.ts";
 import {
   OrchestratorCommandPreviouslyRejectedError,
   OrchestratorDispatchError,
+  OrchestratorThreadArchivingError,
 } from "./Orchestrator.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import { dispatchCommand } from "./ThreadMessageIntake.ts";
@@ -334,6 +335,11 @@ it.effect.each([
     message: "Update intake is closed.",
   }),
   new UpdateDrainError({ reason: "internal_error", message: "Cannot read update admission." }),
+  new OrchestratorThreadArchivingError({
+    commandId: CommandId.make("message-draining"),
+    commandType: "message.dispatch",
+    threadId: ThreadId.make("thread-draining"),
+  }),
 ])("releases claimed copies when intake fails with $_tag", (cause) =>
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;
@@ -359,11 +365,13 @@ it.effect.each([
         Layer.mock(ThreadManagementService.ThreadManagementService)({
           dispatch: (command) =>
             Effect.fail(
-              new OrchestratorDispatchError({
-                commandId: command.commandId,
-                commandType: command.type,
-                cause,
-              }),
+              cause._tag === "OrchestratorThreadArchivingError"
+                ? cause
+                : new OrchestratorDispatchError({
+                    commandId: command.commandId,
+                    commandType: command.type,
+                    cause,
+                  }),
             ),
         }),
       ),
