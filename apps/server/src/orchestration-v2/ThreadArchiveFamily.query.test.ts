@@ -121,6 +121,10 @@ it.effect.each([false, true])(
         });
       }
       const result = yield* service.getThreadArchiveFamily(rootId);
+      assert.deepEqual(
+        result.threads.map(({ id }) => id).toSorted(),
+        [rootId, appId, nestedId, nativeId].toSorted(),
+      );
       assert.deepEqual(result.childThreadIds, [appId, nestedId, nativeId]);
       assert.deepEqual(result.promotableChildThreadIds, [appId]);
       assert.deepEqual(result.keptThreadIds, [appId, nestedId]);
@@ -213,7 +217,7 @@ it.effect.each([
   }).pipe(Effect.provide(testLayer)),
 );
 it.effect.each(["archived", "deleted"] as const)(
-  "includes a live descendant through its %s owner without unrelated families",
+  "returns the archived owner and live descendants through %s ancestors",
   (state) =>
     Effect.gen(function* () {
       const store = yield* ProjectionStore.ProjectionStoreV2;
@@ -224,7 +228,7 @@ it.effect.each(["archived", "deleted"] as const)(
       const intermediateId = ThreadId.make("archive-query:intermediate");
       const childId = ThreadId.make("archive-query:child");
       for (const thread of [
-        root,
+        { ...root, archivedAt: now },
         {
           ...root,
           id: intermediateId,
@@ -266,10 +270,7 @@ it.effect.each(["archived", "deleted"] as const)(
         });
       }
       const family = yield* threads.getThreadArchiveFamily(rootId);
-      assert.deepEqual(
-        family.threads.map(({ id }) => id).toSorted(),
-        [rootId, intermediateId, childId].toSorted(),
-      );
+      assert.deepEqual(family.threads.map(({ id }) => id).toSorted(), [rootId, childId].toSorted());
       assert.deepEqual(family.childThreadIds, [childId]);
       assert.deepEqual(family.activeChildThreadIds, [childId]);
       assert.deepEqual(family.promotableChildThreadIds, []);
@@ -278,11 +279,7 @@ it.effect.each(["archived", "deleted"] as const)(
       assert.isFalse(family.canPromote);
       assert.isTrue(family.canStopAndArchive);
       assert.equal(family.threads.find(({ id }) => id === childId)?.attention?.kind, "question");
-      assert.isNotNull(
-        family.threads.find(({ id }) => id === intermediateId)?.[
-          state === "archived" ? "archivedAt" : "deletedAt"
-        ],
-      );
+      assert.isNotNull(family.threads.find(({ id }) => id === rootId)?.archivedAt);
       assert.isTrue(
         Exit.isFailure(
           yield* Effect.exit(threads.getThreadArchiveFamily(ThreadId.make("missing"))),

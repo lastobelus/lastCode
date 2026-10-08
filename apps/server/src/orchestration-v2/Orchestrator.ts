@@ -11045,7 +11045,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const ownerNeedsConfirmation =
         owner !== undefined && (yield* archiveThreadNeedsConfirmation(owner));
       return {
-        threads,
+        threads: owner === undefined ? family.children : [owner, ...family.children],
         childThreadIds: family.children.map((thread) => thread.id),
         activeChildThreadIds: activeChildren.map((thread) => thread.id),
         promotableChildThreadIds: family.promotableChildren.map((thread) => thread.id),
