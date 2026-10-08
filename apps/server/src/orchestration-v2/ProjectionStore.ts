@@ -73,6 +73,7 @@ import type * as Statement from "effect/sql/Statement";
 
 import { MCP_APP_OUTPUT_KEY } from "@t3tools/shared/mcpApp";
 import { threadHtmlRenderAttachmentIds } from "../attachmentStore.ts";
+import { isGroupedCreatorThread } from "./CreatorGrouping.ts";
 import {
   isThreadHistoryUserTurn,
   isThreadHistoryTurnStart,
@@ -145,6 +146,7 @@ export type ProjectionStoreV2Error = typeof ProjectionStoreV2Error.Type;
 
 export type ProjectionRecoveryKind =
   | "thread-families"
+  | "creator-grouping"
   | "subagent-promotions"
   | "queued-runs"
   | "runtime"
@@ -372,6 +374,9 @@ export interface ProjectionStoreV2Shape {
   readonly getOwnedThreadIds: (
     threadId: ThreadId,
   ) => Effect.Effect<ReadonlyArray<ThreadId>, ProjectionStoreV2Error>;
+  readonly getGroupedCreatorThreadIds: (
+    creatorThreadIds: ReadonlyArray<ThreadId>,
+  ) => Effect.Effect<ReadonlyArray<ThreadId>, ProjectionStoreV2Error>;
   readonly getThread: (
     threadId: ThreadId,
   ) => Effect.Effect<OrchestrationV2AppThread, ProjectionStoreV2Error>;
@@ -525,6 +530,7 @@ function needsRecovery(
   if (projection.thread.deletedAt !== null) return false;
   switch (kind) {
     case "thread-families":
+    case "creator-grouping":
       return false;
     case "subagent-promotions":
       return projection.thread.subagentPromotion?.status === "waiting";
@@ -3600,6 +3606,21 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       function* (kind: ProjectionRecoveryKind) {
         const candidates = (() => {
           switch (kind) {
+            case "creator-grouping":
+              return sql`
+                SELECT child.thread_id
+                FROM orchestration_v2_projection_threads AS child
+                LEFT JOIN orchestration_v2_projection_threads AS creator
+                  ON creator.thread_id = CAST(json_extract(child.payload_json, '$.creatorThreadId') AS TEXT)
+                WHERE child.deleted_at IS NULL
+                  AND json_extract(child.payload_json, '$.createdBy') = 'agent'
+                  AND json_extract(child.payload_json, '$.creatorThreadId') IS NOT NULL
+                  AND json_extract(child.payload_json, '$.creatorGrouping') = 'grouped'
+                  AND json_extract(child.payload_json, '$.lineage.parentThreadId') IS NULL
+                  AND json_extract(child.payload_json, '$.lineage.relationshipToParent') IS NULL
+                  AND json_extract(child.payload_json, '$.forkedFrom') IS NULL
+                  AND (creator.thread_id IS NULL OR creator.archived_at IS NOT NULL OR creator.deleted_at IS NOT NULL)
+              `;
             case "thread-families":
               return sql`
                 SELECT DISTINCT parent.thread_id
@@ -4327,6 +4348,26 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         Effect.map((rows) => rows.map((row) => ThreadId.make(row.thread_id))),
         Effect.mapError((cause) => new ProjectionStoreReadError({ threadId, cause })),
       );
+
+    const getGroupedCreatorThreadIds = Effect.fn("ProjectionStore.getGroupedCreatorThreadIds")(
+      function* (creatorThreadIds: ReadonlyArray<ThreadId>) {
+        if (creatorThreadIds.length === 0) return [];
+        const rows = yield* sql<{ readonly thread_id: string }>`
+          SELECT thread_id FROM orchestration_v2_projection_threads
+          WHERE CAST(json_extract(payload_json, '$.creatorThreadId') AS TEXT) IN ${sql.in(creatorThreadIds)}
+            AND deleted_at IS NULL
+            AND json_extract(payload_json, '$.createdBy') = 'agent'
+            AND json_extract(payload_json, '$.creatorThreadId') IS NOT NULL
+            AND json_extract(payload_json, '$.creatorGrouping') = 'grouped'
+            AND json_extract(payload_json, '$.lineage.parentThreadId') IS NULL
+            AND json_extract(payload_json, '$.lineage.relationshipToParent') IS NULL
+            AND json_extract(payload_json, '$.forkedFrom') IS NULL
+          ORDER BY thread_id ASC
+        `;
+        return rows.map((row) => ThreadId.make(row.thread_id));
+      },
+      Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
+    );
 
     const getThread: ProjectionStoreV2Shape["getThread"] = (threadId) =>
       Effect.gen(function* () {
@@ -5885,6 +5926,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getThreadShell,
       getWorktreeCleanupThreads,
       getOwnedThreadIds,
+      getGroupedCreatorThreadIds,
       getPersistentThreads,
       getThread,
       getSettlementCandidates,
@@ -6024,6 +6066,19 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
             return [...ids];
           }),
         ),
+      getGroupedCreatorThreadIds: (creatorThreadIds) =>
+        Ref.get(replayState).pipe(
+          Effect.map((state) => {
+            const creators = new Set(creatorThreadIds);
+            return [...state.projections.values()]
+              .filter(
+                ({ thread }) =>
+                  isGroupedCreatorThread(thread) && creators.has(thread.creatorThreadId!),
+              )
+              .map(({ thread }) => thread.id)
+              .toSorted();
+          }),
+        ),
       getThread: (threadId) =>
         Effect.gen(function* () {
           const projection = (yield* Ref.get(replayState)).projections.get(threadId);
@@ -6135,8 +6190,15 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
         Effect.gen(function* () {
           const projections = (yield* Ref.get(replayState)).projections;
           return [...projections.values()]
-            .filter((projection) =>
-              kind === "thread-families"
+            .filter((projection) => {
+              if (kind === "creator-grouping") {
+                if (!isGroupedCreatorThread(projection.thread)) return false;
+                const creator = projections.get(projection.thread.creatorThreadId!)?.thread;
+                return (
+                  creator === undefined || creator.archivedAt !== null || creator.deletedAt !== null
+                );
+              }
+              return kind === "thread-families"
                 ? [...projections.values()].some(
                     ({ thread: child }) =>
                       child.lineage.parentThreadId === projection.thread.id &&
@@ -6146,8 +6208,8 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                       (projection.thread.deletedAt !== null ||
                         (projection.thread.archivedAt !== null && child.archivedAt === null)),
                   )
-                : needsRecovery(projection, kind),
-            )
+                : needsRecovery(projection, kind);
+            })
             .toSorted(
               (left, right) =>
                 DateTime.toEpochMillis(left.thread.updatedAt) -

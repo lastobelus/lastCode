@@ -15,10 +15,19 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 
 import * as EventSink from "../orchestration-v2/EventSink.ts";
+import {
+  isGroupedCreatorThread,
+  releaseCreatorGrouping,
+} from "../orchestration-v2/CreatorGrouping.ts";
+import {
+  DispatchModeLimit,
+  exceededDispatchModeLimit,
+} from "../orchestration-v2/DispatchModeLimit.ts";
 import * as IdAllocator from "../orchestration-v2/IdAllocator.ts";
 import * as LegacyV1ThreadImporter from "../orchestration-v2/legacy/LegacyV1ThreadImporter.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
@@ -421,50 +430,110 @@ export const make = Effect.gen(function* () {
     input: ProjectDeleteInput,
     threadId: ThreadId,
   ) {
-    yield* legacyImporter.ensureTranscript(threadId);
-    const projection = yield* threadProjections.getThreadRecords(threadId, [
-      "runs",
-      "attempts",
-      "nodes",
-      "runtimeRequests",
-      "subagents",
-      "providerSessions",
-      "providerThreads",
-    ]);
-    if (projection.thread.deletedAt !== null || projection.thread.projectId !== input.projectId) {
-      return;
-    }
-    const command = {
-      type: "thread.delete" as const,
-      commandId: CommandId.make(`${input.commandId}:delete-thread:${threadId}`),
-      threadId,
-    };
-    const now = yield* DateTime.now;
-    const plan = yield* planThreadDeletion({
-      command,
-      projection,
-      attachmentIds: yield* threadProjections.getThreadAttachmentIds(threadId),
-      now,
-      idAllocator,
-    });
-    const committed = yield* eventSink.commitCommand({
-      commandId: command.commandId,
-      commandType: command.type,
-      threadId,
-      acceptedAt: now,
-      events: plan.events,
-      effects: plan.effects,
-    });
-    if (
-      committed.receipt.threadId !== command.threadId ||
-      committed.receipt.commandType !== command.type
-    ) {
-      return yield* Effect.fail("The thread deletion command ID belongs to a different command.");
-    }
-    if (committed.receipt.status === "rejected") {
-      return yield* Effect.fail(
-        committed.receipt.error ?? "Thread deletion was previously rejected.",
+    // Project deletion already holds persistence. Take the creator and every
+    // ordinary grouped conversation in the same order as thread lifecycle commands.
+    while (true) {
+      const groupedIds = yield* threadProjections.getGroupedCreatorThreadIds([threadId]);
+      const ids = [...new Set([threadId, ...groupedIds])].toSorted();
+      const completed = yield* ids.reduceRight(
+        (effect, id) => threadCommands.withLock(id, effect),
+        Effect.gen(function* () {
+          yield* legacyImporter.ensureTranscript(threadId);
+          const projection = yield* threadProjections.getThreadRecords(threadId, [
+            "runs",
+            "attempts",
+            "nodes",
+            "runtimeRequests",
+            "subagents",
+            "providerSessions",
+            "providerThreads",
+          ]);
+          if (
+            projection.thread.deletedAt !== null ||
+            projection.thread.projectId !== input.projectId
+          )
+            return true;
+          const currentGroupedIds = yield* threadProjections.getGroupedCreatorThreadIds([threadId]);
+          // A creator-linked conversation can arrive while these locks are acquired.
+          // Release the locks and collect again before planning any changes.
+          if (currentGroupedIds.some((id) => !ids.includes(id))) return false;
+          const grouped = (yield* Effect.forEach(currentGroupedIds, (id) =>
+            threadProjections.getThread(id),
+          )).filter(
+            (thread) =>
+              thread.id !== threadId &&
+              thread.creatorThreadId === threadId &&
+              isGroupedCreatorThread(thread),
+          );
+          const limit = yield* DispatchModeLimit;
+          if (limit !== undefined) {
+            for (const thread of [projection.thread, ...grouped]) {
+              const mode = exceededDispatchModeLimit(limit, thread);
+              if (mode === undefined) continue;
+              if (limit.refused !== undefined)
+                yield* Ref.set(limit.refused, {
+                  threadId: thread.id,
+                  mode,
+                  runtimeMode: thread.runtimeMode,
+                  interactionMode: thread.interactionMode,
+                });
+              return yield* Effect.fail(
+                `Thread '${thread.id}' exceeds the permitted ${mode} mode for project deletion.`,
+              );
+            }
+          }
+          const command = {
+            type: "thread.delete" as const,
+            commandId: CommandId.make(`${input.commandId}:delete-thread:${threadId}`),
+            threadId,
+          };
+          const now = yield* DateTime.now;
+          const plan = yield* planThreadDeletion({
+            command,
+            projection,
+            attachmentIds: yield* threadProjections.getThreadAttachmentIds(threadId),
+            now,
+            idAllocator,
+          });
+          const releases = yield* Effect.forEach(grouped, (thread) =>
+            Effect.gen(function* () {
+              return {
+                id: yield* idAllocator.allocate.event({
+                  threadId: thread.id,
+                  commandId: command.commandId,
+                }),
+                type: "thread.metadata-updated" as const,
+                threadId: thread.id,
+                occurredAt: now,
+                payload: releaseCreatorGrouping(thread, now),
+              };
+            }),
+          );
+          const committed = yield* eventSink.commitCommand({
+            commandId: command.commandId,
+            commandType: command.type,
+            threadId,
+            acceptedAt: now,
+            events: [...plan.events, ...releases],
+            effects: plan.effects,
+          });
+          if (
+            committed.receipt.threadId !== command.threadId ||
+            committed.receipt.commandType !== command.type
+          ) {
+            return yield* Effect.fail(
+              "The thread deletion command ID belongs to a different command.",
+            );
+          }
+          if (committed.receipt.status === "rejected") {
+            return yield* Effect.fail(
+              committed.receipt.error ?? "Thread deletion was previously rejected.",
+            );
+          }
+          return true;
+        }),
       );
+      if (completed) return;
     }
   });
 
@@ -514,14 +583,11 @@ export const make = Effect.gen(function* () {
     yield* Effect.forEach(
       projectThreads,
       (thread) =>
-        threadCommands
-          .withLock(thread.id, deleteChildThread(input, thread.id))
-          .pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProjectOperationError({ operation: "delete-thread", projectId, cause }),
-            ),
+        deleteChildThread(input, thread.id).pipe(
+          Effect.mapError(
+            (cause) => new ProjectOperationError({ operation: "delete-thread", projectId, cause }),
           ),
+        ),
       { concurrency: 1, discard: true },
     );
   });

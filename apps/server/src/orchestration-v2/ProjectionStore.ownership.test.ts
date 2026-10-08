@@ -1,6 +1,7 @@
 import { assert, it } from "@effect/vitest";
 import {
   EventId,
+  NodeId,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
@@ -24,6 +25,7 @@ const seedThread = Effect.fn("ownership.seedThread")(function* (
     archived?: boolean;
     deleted?: boolean;
     creatorId?: string;
+    overrides?: Partial<OrchestrationV2AppThread>;
   } = {},
 ) {
   const projections = yield* ProjectionStore.ProjectionStoreV2;
@@ -61,6 +63,7 @@ const seedThread = Effect.fn("ownership.seedThread")(function* (
     settledAt: null,
     lastVisitedAt: null,
     deletedAt: options.deleted === true ? now : null,
+    ...options.overrides,
   };
   yield* projections.apply({
     id: EventId.make(`create:${threadId}`),
@@ -106,6 +109,77 @@ it.effect.each(storageCases)(
         ["promoted", "promoted-leaf"].toSorted(),
       );
       assert.deepEqual((yield* projections.getThread(promoted.id)).lineage, promoted.lineage);
+    }).pipe(Effect.provide(layer)),
+);
+
+it.effect.each(storageCases)(
+  "$name: finds ordinary grouped conversations and repairs unavailable creator placement",
+  ({ layer }) =>
+    Effect.gen(function* () {
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      yield* seedThread("creator:active");
+      yield* seedThread("creator:archived", { archived: true });
+      yield* seedThread("creator:deleted", { deleted: true });
+      for (const creator of ["active", "archived", "deleted", "missing"]) {
+        yield* seedThread(`grouped:${creator}`, { creatorId: `creator:${creator}` });
+      }
+      yield* seedThread("grouped:archived-child", {
+        creatorId: "creator:archived",
+        archived: true,
+      });
+      yield* seedThread("excluded:deleted-child", {
+        creatorId: "creator:archived",
+        deleted: true,
+      });
+      yield* seedThread("excluded:independent", {
+        creatorId: "creator:archived",
+        overrides: { creatorGrouping: "independent" },
+      });
+      yield* seedThread("excluded:user", {
+        creatorId: "creator:archived",
+        overrides: { createdBy: "user" },
+      });
+      yield* seedThread("excluded:subagent", {
+        creatorId: "creator:archived",
+        parentId: "creator:archived",
+      });
+      yield* seedThread("excluded:fork", {
+        creatorId: "creator:archived",
+        parentId: "creator:archived",
+        relationship: "fork",
+      });
+      yield* seedThread("excluded:fork-origin", {
+        creatorId: "creator:archived",
+        overrides: { forkedFrom: { type: "node", nodeId: NodeId.make("source:node") } },
+      });
+      yield* seedThread("excluded:unknown-creator");
+      assert.deepEqual(yield* projections.getGroupedCreatorThreadIds([]), []);
+      assert.deepEqual(
+        yield* projections.getGroupedCreatorThreadIds([
+          ThreadId.make("creator:active"),
+          ThreadId.make("creator:archived"),
+          ThreadId.make("creator:archived"),
+        ]),
+        ["grouped:active", "grouped:archived", "grouped:archived-child"].map((id) =>
+          ThreadId.make(id),
+        ),
+      );
+      assert.deepEqual((yield* projections.getRecoveryThreadIds("creator-grouping")).toSorted(), [
+        "grouped:archived",
+        "grouped:archived-child",
+        "grouped:deleted",
+        "grouped:missing",
+      ]);
+      const thread = yield* projections.getThread(ThreadId.make("grouped:missing"));
+      yield* projections.apply({
+        id: EventId.make("release:missing"),
+        type: "thread.metadata-updated",
+        threadId: thread.id,
+        occurredAt: thread.updatedAt,
+        payload: { ...thread, creatorGrouping: "independent" },
+      });
+      assert.notInclude(yield* projections.getRecoveryThreadIds("creator-grouping"), thread.id);
+      assert.equal((yield* projections.getThread(thread.id)).creatorThreadId, "creator:missing");
     }).pipe(Effect.provide(layer)),
 );
 

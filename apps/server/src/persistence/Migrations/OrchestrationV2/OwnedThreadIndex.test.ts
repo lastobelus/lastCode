@@ -11,7 +11,10 @@ it.effect("upgrades existing v2 databases and indexes every step of owned-thread
     const sql = yield* SqlClient.SqlClient;
     yield* runMigrations();
     yield* runLastCodeMigrations({ toMigrationInclusive: 12 });
-    assert.deepEqual(yield* runDatabaseMigrations(), [[13, "OrchestrationV2OwnedThreadIndex"]]);
+    assert.deepEqual(yield* runDatabaseMigrations(), [
+      [13, "OrchestrationV2OwnedThreadIndex"],
+      [14, "OrchestrationV2GroupedCreatorThreadIndex"],
+    ]);
     assert.deepEqual(yield* runDatabaseMigrations(), []);
     const plan = yield* sql<{ readonly detail: string }>`
       EXPLAIN QUERY PLAN
