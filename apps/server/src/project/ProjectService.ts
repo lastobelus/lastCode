@@ -6,6 +6,7 @@ import {
   type ProjectCreatePayload,
   type ProjectUpdatePayload,
   type ProjectSnapshot,
+  type ProjectScript,
   type ThreadId,
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
@@ -31,6 +32,7 @@ import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import { planThreadDeletion } from "../orchestration-v2/ThreadDeletion.ts";
 import * as ProjectEnrichmentService from "./ProjectEnrichmentService.ts";
+import { UpdateDrainAdmission } from "../updateDrain/UpdateDrainAdmission.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 
 export interface ProjectCreateInput extends ProjectCreatePayload {
@@ -120,6 +122,12 @@ export class ProjectService extends Context.Service<
       ProjectServiceError
     >;
     readonly update: (input: ProjectUpdateInput) => Effect.Effect<Project, ProjectServiceError>;
+    readonly reconcileScripts: (input: {
+      readonly commandId: CommandId;
+      readonly projectId: ProjectId;
+      readonly expectedScripts: ReadonlyArray<ProjectScript>;
+      readonly scripts: ReadonlyArray<ProjectScript>;
+    }) => Effect.Effect<Project, ProjectServiceError>;
     readonly delete: (input: ProjectDeleteInput) => Effect.Effect<Project, ProjectServiceError>;
     readonly getById: (
       projectId: ProjectId,
@@ -146,6 +154,7 @@ export class ProjectService extends Context.Service<
 
 export const make = Effect.gen(function* () {
   const projects = yield* ProjectStore.ProjectStoreV2;
+  const admission = yield* UpdateDrainAdmission;
   const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
   const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
   const threadProjections = yield* ProjectionStore.ProjectionStoreV2;
@@ -223,7 +232,7 @@ export const make = Effect.gen(function* () {
     const { projectId } = command;
     const dispatchError = (cause: unknown) =>
       new ProjectOperationError({ operation: "dispatch-project-command", projectId, cause });
-    const workspaceRoot = command.type === "project.delete" ? undefined : command.workspaceRoot;
+    const workspaceRoot = "workspaceRoot" in command ? command.workspaceRoot : undefined;
     const planAndCommit = Effect.gen(function* () {
       const project = Option.getOrUndefined(yield* readRow(projectId, { includeDeleted: true }));
       const workspaceOwner =
@@ -392,6 +401,13 @@ export const make = Effect.gen(function* () {
     },
   );
 
+  const reconcileScripts: ProjectService["Service"]["reconcileScripts"] = Effect.fn(
+    "ProjectService.reconcileScripts",
+  )(function* (input) {
+    yield* commit({ type: "project.scripts.reconcile", ...input });
+    return yield* readCommitted(input.projectId);
+  });
+
   const bootstrap: ProjectService["Service"]["bootstrap"] = Effect.fn("ProjectService.bootstrap")(
     function* (input) {
       const existing = yield* getByWorkspaceRoot(input.workspaceRoot);
@@ -456,6 +472,11 @@ export const make = Effect.gen(function* () {
     input: ProjectDeleteInput,
   ) {
     const { projectId } = input;
+    yield* legacyImporter.reconcileShells.pipe(
+      Effect.mapError(
+        (cause) => new ProjectOperationError({ operation: "list-threads", projectId, cause }),
+      ),
+    );
     // The V2 shell is the only record of which threads are live.
     const snapshot = yield* threadProjections
       .getShellSnapshot()
@@ -470,6 +491,24 @@ export const make = Effect.gen(function* () {
     if (projectThreads.length > 0 && input.force !== true) {
       return yield* new ProjectNotEmptyError({ projectId });
     }
+    const persistent = projectThreads.find((thread) => thread.persistent === true);
+    if (persistent !== undefined)
+      return yield* new ProjectOperationError({
+        operation: "delete-thread",
+        projectId,
+        cause: `Persistent thread '${persistent.id}' must be released before deleting its project.`,
+      });
+    const unfinishedCleanup = (yield* threadProjections.getWorktreeCleanupThreads.pipe(
+      Effect.mapError(
+        (cause) => new ProjectOperationError({ operation: "list-threads", projectId, cause }),
+      ),
+    )).find((thread) => thread.projectId === projectId);
+    if (unfinishedCleanup !== undefined)
+      return yield* new ProjectOperationError({
+        operation: "delete-thread",
+        projectId,
+        cause: `Thread '${unfinishedCleanup.id}' has unfinished worktree cleanup. Retry or abandon it before deleting the project.`,
+      });
     // Delete children durably before the project so a failed cascade can be retried.
     yield* Effect.forEach(
       projectThreads,
@@ -488,20 +527,50 @@ export const make = Effect.gen(function* () {
 
   const deleteProject: ProjectService["Service"]["delete"] = Effect.fn("ProjectService.delete")(
     function* (input) {
-      const { projectId } = input;
-      // A deleted row still reaches commit, so a retried command id replays its
-      // receipt and any other command id is rejected as not found.
-      const existing = yield* readRow(projectId, { includeDeleted: true });
-      if (Option.isNone(existing)) {
-        return yield* new ProjectNotFoundError({ projectId });
-      }
+      const operation = threadCommands.withPersistenceLock(
+        Effect.gen(function* () {
+          const { projectId } = input;
+          // A deleted row still reaches commit, so a retried command id replays its
+          // receipt and any other command id is rejected as not found.
+          const existing = yield* readRow(projectId, { includeDeleted: true });
+          if (Option.isNone(existing)) {
+            return yield* new ProjectNotFoundError({ projectId });
+          }
 
-      if (existing.value.deletedAt === null) {
-        yield* deleteChildThreads(input);
-      }
-      yield* commit({ type: "project.delete", commandId: input.commandId, projectId });
-      yield* projectEnrichment.invalidate([existing.value.workspaceRoot]);
-      return yield* readCommitted(projectId);
+          if (existing.value.deletedAt === null) {
+            yield* deleteChildThreads(input);
+          }
+          yield* commit({ type: "project.delete", commandId: input.commandId, projectId });
+          yield* projectEnrichment.invalidate([existing.value.workspaceRoot]);
+          return yield* readCommitted(projectId);
+        }),
+      );
+      // Completed receipt replay has no child cleanup to admit. Fresh cascades
+      // take admission before persistence and child locks, just like thread.delete.
+      const existing = yield* readRow(input.projectId, { includeDeleted: true });
+      if (Option.isSome(existing) && existing.value.deletedAt !== null) return yield* operation;
+      return yield* admission.admit("thread-delete", operation).pipe(
+        Effect.catchTags({
+          UpdateDrainAdmissionError: (cause) =>
+            Effect.gen(function* () {
+              // An original delete may have committed while this duplicate waited
+              // behind it and the drain. Commit validates the replay under its locks.
+              const recorded = yield* readRow(input.projectId, { includeDeleted: true });
+              if (Option.isSome(recorded) && recorded.value.deletedAt !== null)
+                return yield* operation;
+              return yield* cause;
+            }),
+        }),
+        Effect.mapError((cause) =>
+          cause._tag === "UpdateDrainAdmissionError" || cause._tag === "UpdateDrainError"
+            ? new ProjectOperationError({
+                operation: "delete-thread",
+                projectId: input.projectId,
+                cause,
+              })
+            : cause,
+        ),
+      );
     },
   );
 
@@ -558,6 +627,7 @@ export const make = Effect.gen(function* () {
     create,
     bootstrap,
     update,
+    reconcileScripts,
     delete: deleteProject,
     getById,
     getByWorkspaceRoot,
