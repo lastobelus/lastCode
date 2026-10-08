@@ -3283,6 +3283,17 @@ export type OrchestrationV2Command = typeof OrchestrationV2Command.Type;
  * send them.
  */
 const OrchestrationV2InternalCommand = Schema.Union([
+  /** Records the workspace result of an accepted launch or preparation retry. */
+  Schema.Struct({
+    type: Schema.Literal("thread.workspace.complete"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    requestId: CommandId,
+    runId: Schema.NullOr(RunId),
+    expectedWorktreePath: Schema.NullOr(TrimmedNonEmptyString),
+    worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+    branch: Schema.NullOr(TrimmedNonEmptyString),
+  }),
   Schema.Struct({
     type: Schema.Literal("message.incoming-summary.complete"),
     commandId: CommandId,

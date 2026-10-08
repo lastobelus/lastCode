@@ -500,6 +500,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "thread.active.reorder":
     case "thread.visit":
     case "thread.mark-unread":
+    case "thread.workspace.complete":
     case "thread.metadata.update":
     case "thread.pull-request.link":
     case "thread.pull-request.unlink":
@@ -12314,6 +12315,91 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "notification.delivery.accept":
         yield* dispatchNotificationAccepted(command, events);
         break;
+      case "thread.workspace.complete": {
+        const source = yield* commandReceipts
+          .getByCommandId(command.requestId)
+          .pipe(mapDispatchError(command));
+        if (
+          Option.isNone(source) ||
+          source.value.status !== "accepted" ||
+          source.value.threadId !== command.threadId
+        )
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "Workspace completion has no accepted preparation request for this thread.",
+          });
+        const thread = yield* projectionStore
+          .getThread(command.threadId)
+          .pipe(mapDispatchError(command));
+        if (command.runId !== null) {
+          const shell = yield* projectionStore
+            .getThreadShell(command.threadId)
+            .pipe(mapDispatchError(command));
+          const sourceEvents = yield* eventSink
+            .readByCommandId({ commandId: command.requestId })
+            .pipe(Stream.runCollect, mapDispatchError(command));
+          const { runs } = yield* projectionStore
+            .getThreadRecords(command.threadId, ["runs"], { runIds: [command.runId] })
+            .pipe(mapDispatchError(command));
+          const run = runs.find((candidate) => candidate.id === command.runId);
+          if (
+            !["message.dispatch", "prepared-run.retry"].includes(source.value.commandType) ||
+            !sourceEvents.some(
+              (stored) =>
+                (stored.event.type === "run.created" || stored.event.type === "run.updated") &&
+                stored.event.payload.id === command.runId,
+            ) ||
+            run?.workspacePreparation === undefined ||
+            (command.worktreePath !== thread.worktreePath &&
+              (command.worktreePath !== null
+                ? run.status !== "preparing" || shell?.activeRunId !== run.id
+                : !["preparing", "cancelled", "failed"].includes(run.status) ||
+                  (shell?.activeRunId !== null && shell?.activeRunId !== run.id)))
+          )
+            return yield* new OrchestratorDispatchError({
+              commandId: command.commandId,
+              commandType: command.type,
+              cause: "Workspace completion no longer owns this preparation run.",
+            });
+        } else {
+          if (!["thread.create", "thread.metadata.update"].includes(source.value.commandType))
+            return yield* new OrchestratorDispatchError({
+              commandId: command.commandId,
+              commandType: command.type,
+              cause: "Workspace completion has no accepted empty-thread launch.",
+            });
+          if (command.worktreePath !== null && command.worktreePath !== thread.worktreePath) {
+            const { runs } = yield* projectionStore
+              .getThreadRecords(command.threadId, ["runs"])
+              .pipe(mapDispatchError(command));
+            if (
+              runs.length > 0 ||
+              (yield* projectionStore
+                .getMessageCount(command.threadId)
+                .pipe(mapDispatchError(command))) > 0
+            )
+              return yield* new OrchestratorDispatchError({
+                commandId: command.commandId,
+                commandType: command.type,
+                cause: "Workspace completion cannot rebind a launch that is no longer empty.",
+              });
+          }
+        }
+        yield* dispatchThreadMutation(
+          {
+            type: "thread.metadata.update",
+            commandId: command.commandId,
+            threadId: command.threadId,
+            branch: command.branch,
+            worktreePath: command.worktreePath,
+            expectedWorktreePath: command.expectedWorktreePath,
+          },
+          events,
+          effects,
+        );
+        break;
+      }
       case "prepared-run.release":
         yield* dispatchPreparedRunRelease(command, events, effects);
         break;
@@ -12528,6 +12614,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
   const dispatchWithReceiptEffect = Effect.fn("orchestrationV2.dispatch.withReceipt")(function* (
     command: OrchestrationV2ServerCommand,
+    metadataOnlyRefusal?: OrchestratorDispatchError,
   ): Effect.fn.Return<OrchestratorV2DispatchResult, OrchestratorV2Error> {
     yield* Effect.annotateCurrentSpan({
       "orchestration_v2.command_id": command.commandId,
@@ -12756,6 +12843,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ),
       );
 
+      // A late workspace completion may record an already-finished rename or
+      // removal after activation, but cannot transfer new work to the outbox.
+      // Keep this temporary refusal outside permanent rejection recording.
+      if (
+        metadataOnlyRefusal !== undefined &&
+        (plan.effects.length > 0 ||
+          plan.cancelUnsettledEffects !== undefined ||
+          (command.type === "thread.workspace.complete" &&
+            command.worktreePath !== null &&
+            command.worktreePath !== command.expectedWorktreePath))
+      )
+        return yield* metadataOnlyRefusal;
+
       if (plan.events.length === 0) {
         // A settle that ended nothing still records its receipt: a replayed Stop
         // effect then finds it instead of settling work that appeared since.
@@ -12841,6 +12941,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     command: OrchestrationV2ServerCommand,
     kind: Parameters<UpdateDrainAdmission.UpdateDrainAdmissionShape["admit"]>[0],
     dispatch: Effect.Effect<OrchestratorV2DispatchResult, OrchestratorV2Error>,
+    completeMetadata?: (
+      refusal: OrchestratorDispatchError,
+    ) => Effect.Effect<OrchestratorV2DispatchResult, OrchestratorV2Error>,
   ) =>
     Effect.gen(function* () {
       // Replay still uses normal receipt validation under its command locks.
@@ -12850,6 +12953,26 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         .pipe(mapDispatchError(command));
       if (Option.isSome(receipt)) return yield* dispatch;
       return yield* updateDrainAdmission.admit(kind, dispatch).pipe(
+        Effect.catchTags({
+          UpdateDrainAdmissionError: (cause) =>
+            Effect.gen(function* () {
+              // Intake may have queued behind an original commit and then a drain.
+              // Its newly committed receipt must replay through the normal locks.
+              const recorded = yield* commandReceipts
+                .getByCommandId(command.commandId)
+                .pipe(mapDispatchError(command));
+              if (Option.isSome(recorded)) return yield* dispatch;
+              if (completeMetadata !== undefined)
+                return yield* completeMetadata(
+                  new OrchestratorDispatchError({
+                    commandId: command.commandId,
+                    commandType: command.type,
+                    cause,
+                  }),
+                );
+              return yield* cause;
+            }),
+        }),
         Effect.mapError((cause) =>
           cause._tag === "UpdateDrainAdmissionError" || cause._tag === "UpdateDrainError"
             ? new OrchestratorDispatchError({
@@ -13000,6 +13123,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const operation = command.type.startsWith("thread.worktree-cleanup.")
       ? threadDispatch.withPersistenceLock(dispatch)
       : dispatch;
+    if (command.type === "thread.workspace.complete")
+      return admitNewExecution(command, "thread-settle", operation, (refusal) =>
+        threadDispatch.withLock(command.threadId, dispatchWithReceiptEffect(command, refusal)),
+      );
     if (command.type === "thread.settle" || command.type === "thread.auto-settle")
       return admitNewExecution(command, "thread-settle", operation);
     if (
