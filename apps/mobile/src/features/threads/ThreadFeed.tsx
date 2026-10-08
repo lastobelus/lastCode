@@ -1878,16 +1878,12 @@ function renderFeedEntry(
       );
       const messageContent = (
         <>
-          {message.text.trim().length > 0 ? (
+          {renderedText.trim().length > 0 ? (
             <MarkdownImageAvailableWidthContext
               value={props.userBubbleMaxWidth - USER_BUBBLE_HORIZONTAL_PADDING * 2}
             >
               <UserMessageContent
-                text={
-                  incomingPreview.isIncoming
-                    ? renderAssistantCitationsAsText(message.text)
-                    : renderedText
-                }
+                text={renderedText}
                 environmentId={props.environmentId}
                 context={message.context}
                 markdownStyles={styles}
