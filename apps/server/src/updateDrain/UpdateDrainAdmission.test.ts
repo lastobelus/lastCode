@@ -219,7 +219,9 @@ it.effect("retains provider execution blockers after a failed archive is dismiss
         targetVersion,
         createdAt: now,
       });
-      const expected = [{ type: "provider-runtime", providerSessionId, status: "running" }];
+      const expected = [
+        { type: "provider-runtime", providerSessionId, status: "running" },
+      ] as const;
       assert.deepEqual((yield* admission.status).blockers, expected);
       assert.equal(
         (yield* Effect.result(admission.claimActivation({ requestId })))._tag,
