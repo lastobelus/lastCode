@@ -5951,7 +5951,7 @@ it.effect.each(["identity", "turn"] as const)(
         );
         const published = yield* Deferred.make<void>();
         yield* runtime.publishEventsBarrier!({
-          observe: Effect.void,
+          observe: Effect.succeed("unknown"),
           after: () => Deferred.succeed(published, undefined),
         });
         yield* Deferred.await(published);

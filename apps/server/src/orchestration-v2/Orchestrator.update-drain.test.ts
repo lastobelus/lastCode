@@ -279,8 +279,8 @@ it.effect("commits an admitted archive before drain and prevents activation unti
       assert.deepEqual(
         (yield* admission.status).blockers,
         [
-          { type: "thread-cleanup", threadId },
-          { type: "thread-cleanup", threadId: childId },
+          { type: "thread-cleanup" as const, threadId },
+          { type: "thread-cleanup" as const, threadId: childId },
         ].toSorted((a, b) => a.threadId.localeCompare(b.threadId)),
       );
       assert.equal(

@@ -495,7 +495,10 @@ it.effect(
         Effect.sync(() => (admitted += 1)),
       );
       assert.equal(admitted, 1);
-      for (const operation of [admission.status, admission.claimActivation({ requestId })]) {
+      for (const operation of [
+        admission.status.pipe(Effect.asVoid),
+        admission.claimActivation({ requestId }).pipe(Effect.asVoid),
+      ]) {
         const error = yield* operation.pipe(Effect.flip);
         assert.equal(error.reason, "internal_error");
         assert.include(error.message, "unavailable in offline mode");

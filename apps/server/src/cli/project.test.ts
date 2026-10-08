@@ -15,6 +15,7 @@ import {
   EventId,
   ProviderInstanceId,
   ThreadId,
+  UpdateDrainAdmissionError,
   UpdateDrainRequestId,
   UpdateDrainTargetVersion,
   type OrchestrationV2AppThread,
@@ -27,6 +28,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as References from "effect/References";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { Command } from "effect/cli";
 
@@ -51,6 +53,9 @@ import {
   ProjectLiveServerRequestError,
   projectCommandErrorFromLiveServerRequest,
 } from "./project.ts";
+
+const isProjectOperationError = Schema.is(ProjectService.ProjectOperationError);
+const isUpdateDrainAdmissionError = Schema.is(UpdateDrainAdmissionError);
 
 const layerCliRuntime = Layer.mergeAll(
   NodeServices.layer,
@@ -671,9 +676,9 @@ it.layer(NodeServices.layer)("offline ownership and drain admission", (it) => {
           baseDir,
         ]).pipe(Effect.flip);
         if ((yield* HostProcessPlatform) === "darwin") {
-          assert.instanceOf(error, ProjectService.ProjectOperationError);
-          if (error instanceof ProjectService.ProjectOperationError)
-            assert.equal((error.cause as { _tag: string })._tag, "UpdateDrainAdmissionError");
+          assert.isTrue(isProjectOperationError(error));
+          if (isProjectOperationError(error))
+            assert.isTrue(isUpdateDrainAdmissionError(error.cause));
         } else assert.include(error.message, "exclusive server ownership");
         assert.deepEqual(yield* readProjects(baseDir), before);
       }),
