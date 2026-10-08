@@ -146,7 +146,7 @@ describe("resolveThreadListV2Status", () => {
       });
       if (status === "failed")
         expect(resolveThreadStatus(thread)?.description).toContain(
-          "some work may have stopped. Choose Archive again to retry.",
+          "some work may have stopped. Choose Archive again to retry, or dismiss to keep these threads as they are.",
         );
       expect(resolveThreadListV2Status({ ...thread, archivePending: null })).toBe("approval");
     },
@@ -333,7 +333,11 @@ describe("ordinary thread archive menus", () => {
       ],
       {
         archiveFamiliesSupported: true,
-        archivePendingStatus: "failed",
+        archivePending: {
+          status: "failed",
+          threadId: ThreadId.make("owner"),
+          commandId: CommandId.make("failed-attempt"),
+        },
       },
     );
     expect(items.filter((item) => item.id === "archive")).toEqual([
@@ -344,14 +348,43 @@ describe("ordinary thread archive menus", () => {
         attributes: { disabled: false },
       },
     ]);
+    expect(items.map((item) => item.id)).toEqual([
+      "archive",
+      'dismiss-archive-failure:["owner","failed-attempt"]',
+      "delete",
+    ]);
   });
 
   it("does not allow another Archive while shutdown is pending", () => {
     const items = withThreadListV2ArchiveAction([], {
       archiveFamiliesSupported: true,
-      archivePendingStatus: "stopping",
+      archivePending: {
+        status: "stopping",
+        threadId: ThreadId.make("owner"),
+        commandId: CommandId.make("failed-attempt"),
+      },
     });
     expect(items[0]).toMatchObject({ title: "Archiving…", attributes: { disabled: true } });
+    expect(items.some((item) => item.id?.startsWith("dismiss-archive-failure:"))).toBe(false);
+  });
+
+  it("keeps an old native selection distinct from a newer failed archive", () => {
+    const ids = ["attempt-one", "attempt-two"].map((commandId) => {
+      const items = withThreadListV2ArchiveAction([], {
+        archiveFamiliesSupported: true,
+        archivePending: {
+          status: "failed",
+          threadId: ThreadId.make("owner"),
+          commandId: CommandId.make(commandId),
+        },
+      });
+      return items.find((item) => item.title === "Dismiss archive failure")?.id;
+    });
+    expect(ids).toEqual([
+      'dismiss-archive-failure:["owner","attempt-one"]',
+      'dismiss-archive-failure:["owner","attempt-two"]',
+    ]);
+    expect(ids[0]).not.toBe(ids[1]);
   });
 
   it.each([undefined, "failed"] as const)(
@@ -365,7 +398,14 @@ describe("ordinary thread archive menus", () => {
           ],
           {
             archiveFamiliesSupported: true,
-            archivePendingStatus,
+            archivePending:
+              archivePendingStatus === undefined
+                ? null
+                : {
+                    status: archivePendingStatus,
+                    threadId: ThreadId.make("owner"),
+                    commandId: CommandId.make("failed-attempt"),
+                  },
           },
         ),
         persistent: true,

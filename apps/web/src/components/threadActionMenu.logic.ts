@@ -37,6 +37,7 @@ export type ThreadActionMenuId =
   | "handoffs-heading"
   | "handoffs-empty"
   | "archive"
+  | "dismiss-archive-failure"
   | "delete";
 
 export type DraftActionMenuId =
@@ -92,6 +93,7 @@ export interface ThreadActionMenuState {
   } | null;
   readonly isPinned: boolean;
   readonly isPersistent: boolean;
+  readonly archiveFailed?: boolean;
   readonly isSettled: boolean;
   /** False while the user has turned automatic settlement off for this thread. */
   readonly autoSettleEnabled: boolean;
@@ -317,6 +319,9 @@ export function buildThreadActionMenuItems(
       disabled: state.isPersistent,
       separatorBefore: true,
     },
+    ...(state.archiveFailed
+      ? [{ id: "dismiss-archive-failure" as const, label: "Dismiss archive failure" }]
+      : []),
     {
       id: "delete",
       label: state.isPersistent ? "Delete (disable persistence first)" : "Delete",

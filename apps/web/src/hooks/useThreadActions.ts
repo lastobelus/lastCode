@@ -15,6 +15,7 @@ import {
 import {
   AuthOrchestrationOperateScope,
   AuthSourceControlWriteScope,
+  type CommandId,
   EnvironmentAuthorizationError,
   EnvironmentId,
   type ScopedThreadRef,
@@ -474,11 +475,20 @@ export function useThreadActions() {
   }, [router]);
 
   const unarchiveThread = useCallback(
-    async (target: ScopedThreadRef, opts: { navigate?: boolean } = {}) => {
-      ThreadUndo.invalidate("archive", scopedThreadKey(target));
+    async (
+      target: ScopedThreadRef,
+      opts: { navigate?: boolean; expectedArchiveCommandId?: CommandId } = {},
+    ) => {
+      if (opts.expectedArchiveCommandId === undefined)
+        ThreadUndo.invalidate("archive", scopedThreadKey(target));
       const result = await unarchiveThreadMutation({
         environmentId: target.environmentId,
-        input: { threadId: target.threadId },
+        input: {
+          threadId: target.threadId,
+          ...(opts.expectedArchiveCommandId === undefined
+            ? {}
+            : { expectedArchiveCommandId: opts.expectedArchiveCommandId }),
+        },
       });
       if (result._tag === "Failure") {
         return result;

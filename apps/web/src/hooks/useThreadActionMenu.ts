@@ -1,4 +1,4 @@
-import { scopeProjectRef } from "@t3tools/client-runtime/environment";
+import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { requestCustomSnooze } from "../components/CustomSnoozeDialog";
 import {
   type AtomCommandResult,
@@ -110,6 +110,7 @@ export function useThreadActionMenu(input: {
     setThreadAutoSettle,
     setThreadPersistence,
     archiveThread,
+    unarchiveThread,
     deleteThread,
     markThreadUnread,
   } = useThreadActions();
@@ -182,6 +183,7 @@ export function useThreadActionMenu(input: {
           projectFilter: null,
           isPinned: thread.pinnedAt != null,
           isPersistent: thread.persistent === true,
+          archiveFailed: thread.archivePending?.status === "failed",
           isSettled: supports.settlement && thread.settledOverride === "settled",
           autoSettleEnabled: thread.autoSettleDisabledAt == null,
           isSnoozed: supports.snooze && effectiveSnoozed(thread, { now: now.toISOString() }),
@@ -354,6 +356,16 @@ export function useThreadActionMenu(input: {
           case "copy-thread-id":
             copyThreadIdToClipboard(thread.id, { threadId: thread.id });
             return;
+          case "dismiss-archive-failure": {
+            const pending = thread.archivePending;
+            if (pending?.status !== "failed") return;
+            await reportFailure("Couldn't dismiss archive failure", () =>
+              unarchiveThread(scopeThreadRef(thread.environmentId, pending.threadId), {
+                expectedArchiveCommandId: pending.commandId,
+              }),
+            );
+            return;
+          }
           case "archive": {
             let didArchive = false;
             const result = await archiveThread(threadRef, {
@@ -402,6 +414,7 @@ export function useThreadActionMenu(input: {
     },
     [
       archiveThread,
+      unarchiveThread,
       closeTerminal,
       stopThreadProcesses,
       hasStoppableProcesses,

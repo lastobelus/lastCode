@@ -135,33 +135,56 @@ export function resolveThreadListV2SnoozeMenuSelection(input: {
   return { _tag: "expired" };
 }
 
+type ArchiveAttempt = Pick<
+  NonNullable<EnvironmentThreadShell["archivePending"]>,
+  "threadId" | "commandId" | "status"
+>;
+
+/** Bind a native menu selection to the failed attempt displayed when it opened. */
+export function threadListV2ArchiveFailureActionId(attempt: ArchiveAttempt) {
+  return `dismiss-archive-failure:${JSON.stringify([attempt.threadId, attempt.commandId])}`;
+}
+
 /** Archive stays available beside settlement; the handler reads the authoritative family. */
 export function withThreadListV2ArchiveAction(
   actions: ReadonlyArray<MenuAction>,
   input: {
     readonly archiveFamiliesSupported: boolean;
-    readonly archivePendingStatus?: "stopping" | "failed";
+    readonly archivePending?: ArchiveAttempt | null;
   },
 ): MenuAction[] {
   const archive: MenuAction = {
     id: "archive",
     title: !input.archiveFamiliesSupported
       ? "Archive (update server first)"
-      : input.archivePendingStatus === "failed"
+      : input.archivePending?.status === "failed"
         ? "Retry archive"
-        : input.archivePendingStatus === "stopping"
+        : input.archivePending?.status === "stopping"
           ? "Archiving…"
           : "Archive",
     image: "archivebox",
     attributes: {
-      disabled: !input.archiveFamiliesSupported || input.archivePendingStatus === "stopping",
+      disabled: !input.archiveFamiliesSupported || input.archivePending?.status === "stopping",
     },
   };
+  const archiveActions = [
+    archive,
+    ...(input.archivePending?.status === "failed"
+      ? [
+          {
+            id: threadListV2ArchiveFailureActionId(input.archivePending),
+            title: "Dismiss archive failure",
+            image: "xmark.circle",
+            attributes: { disabled: !input.archiveFamiliesSupported },
+          },
+        ]
+      : []),
+  ];
   if (actions.some((action) => action.id === "archive"))
-    return actions.map((action) => (action.id === "archive" ? archive : action));
+    return actions.flatMap((action) => (action.id === "archive" ? archiveActions : [action]));
   const deleteIndex = actions.findIndex((action) => action.id === "delete");
   const insertionIndex = deleteIndex < 0 ? actions.length : deleteIndex;
-  return [...actions.slice(0, insertionIndex), archive, ...actions.slice(insertionIndex)];
+  return [...actions.slice(0, insertionIndex), ...archiveActions, ...actions.slice(insertionIndex)];
 }
 
 export function resolveThreadListV2SwipeActions(input: {

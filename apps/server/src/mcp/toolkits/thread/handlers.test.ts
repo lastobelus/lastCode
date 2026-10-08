@@ -304,6 +304,103 @@ it.effect.each([false, true])(
     }).pipe(Effect.provide(testLayer)),
 );
 
+it.effect.each(["owner", "participant", "stale", "archived", "limited", "read-only"] as const)(
+  "dismisses only the observed failed archive through MCP (%s)",
+  (state) =>
+    Effect.gen(function* () {
+      const { store, now } = yield* seedFamily();
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const archiveCommandId = CommandId.make("archive-family:dismiss-attempt");
+      const participants = [rootId, appId, nestedId, nativeId];
+      for (const id of participants) {
+        const { thread } = yield* threads.getThreadRecords(id, []);
+        const failed = { threadId: rootId, commandId: archiveCommandId, status: "failed" as const };
+        yield* store.apply({
+          id: EventId.make(`dismiss-failed:${id}`),
+          type: "thread.metadata-updated",
+          threadId: id,
+          occurredAt: now,
+          payload: {
+            ...thread,
+            ...(state === "limited" && id === rootId
+              ? { runtimeMode: "approval-required" as const }
+              : {}),
+            ...(state === "archived" && id === rootId
+              ? { archivedAt: now, archivedWith: { threadId: rootId, commandId: archiveCommandId } }
+              : {}),
+            archivePending:
+              id === rootId
+                ? {
+                    ...failed,
+                    childDisposition: "stop_and_archive",
+                    childThreadIds: participants.slice(1),
+                    archiveThreadIds: participants,
+                    promoteThreadIds: [],
+                  }
+                : failed,
+          },
+        });
+      }
+      const before = yield* Effect.forEach(participants, (id) => threads.getThreadRecords(id, []));
+      const invocation =
+        state === "limited" || state === "read-only"
+          ? {
+              ...clientScope,
+              client: {
+                ...clientScope.client!,
+                access:
+                  state === "limited" ? ("approval-required" as const) : ("read-only" as const),
+              },
+            }
+          : clientScope;
+      const result = yield* invoke(
+        "t3_thread_organize",
+        {
+          threadId:
+            state === "owner" || state === "limited" || state === "read-only" ? rootId : appId,
+          action: "unarchive",
+          expectedArchiveCommandId:
+            state === "stale" ? CommandId.make("older-attempt") : archiveCommandId,
+        },
+        invocation,
+      );
+      if (state === "owner" || state === "participant") {
+        expect(result.isError, JSON.stringify(result.content)).toBe(false);
+        for (const previous of before) {
+          const current = (yield* threads.getThreadRecords(previous.thread.id, [])).thread;
+          expect(current).toEqual({
+            ...previous.thread,
+            archivePending: null,
+            updatedAt: current.updatedAt,
+          });
+        }
+      } else {
+        expect(result.isError).toBe(true);
+        expect(declaredFailure(result)).toMatchObject({
+          code:
+            state === "read-only"
+              ? "capability_denied"
+              : state === "limited"
+                ? "runtime_mode_escalation_denied"
+                : "orchestration_error",
+        });
+        if (state === "archived")
+          expect(declaredFailure(result).message).toBe(
+            "This thread family is already archived. Restore it from Settings > Archived threads.",
+          );
+        for (const previous of before)
+          expect((yield* threads.getThreadRecords(previous.thread.id, [])).thread).toEqual(
+            previous.thread,
+          );
+      }
+      for (const id of [forkId, independentId]) {
+        const shell = yield* threads.getThreadShell(id);
+        expect(shell?.archivedAt).toBeNull();
+        expect(shell?.archivePending ?? null).toBeNull();
+      }
+    }).pipe(Effect.provide(testLayer)),
+);
+
 it.effect("requires fresh family inspection when a nested child is added", () =>
   Effect.gen(function* () {
     const { store, now, child } = yield* seedFamily();

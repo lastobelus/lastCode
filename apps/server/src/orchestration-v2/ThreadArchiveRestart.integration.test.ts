@@ -282,6 +282,78 @@ it.effect(
     ).pipe(Effect.provide(NodeServices.layer)),
 );
 
+it.effect("keeps a dismissed failure clear after SQLite reopen and archive effect recovery", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { workspace, dbPath } = yield* temporaryDatabase;
+      const staged = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const childId = yield* createFamily;
+          const command = archiveCommand(childId, "stop_and_archive");
+          yield* orchestrator.dispatch(command);
+          const effectId = yield* claimArchiveBeforeProcessLoss(command.commandId);
+          yield* orchestrator.dispatch({
+            type: "thread.archive.fail",
+            commandId: CommandId.make(`${command.commandId}:failed`),
+            threadId: parentId,
+            requestId: command.commandId,
+            error: "Isolated shutdown failure before dismissal",
+          });
+          const before = yield* Effect.forEach([parentId, childId], (id) =>
+            orchestrator.getThreadProjection(id),
+          );
+          const dismissal = {
+            type: "thread.unarchive" as const,
+            commandId: CommandId.make("restart-dismiss-failure"),
+            threadId: parentId,
+            expectedArchiveCommandId: command.commandId,
+          };
+          yield* orchestrator.dispatch(dismissal);
+          assert.isEmpty(
+            yield* (yield* EffectOutbox.EffectOutboxV2).listByCommandId(dismissal.commandId),
+          );
+          for (const previous of before) {
+            const current = yield* orchestrator.getThreadProjection(previous.thread.id);
+            assert.isNull(current.thread.archivePending);
+            assert.deepEqual({ ...current, thread: previous.thread }, previous);
+          }
+          return { childId, command, effectId };
+        }).pipe(Effect.provide(runtimeLayer(dbPath, workspace))),
+      );
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const outbox = yield* EffectOutbox.EffectOutboxV2;
+          for (const id of [parentId, staged.childId]) {
+            const thread = (yield* orchestrator.getThreadProjection(id)).thread;
+            assert.isNull(thread.archivePending);
+            assert.isNull(thread.archivedAt);
+          }
+          yield* (yield* ProviderRuntimeRecoveryService.ProviderRuntimeRecoveryService).recover;
+          yield* orchestrator.recoverDelegatedTasks;
+          yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain();
+          assert.equal(Option.getOrThrow(yield* outbox.get(staged.effectId)).status, "succeeded");
+          for (const id of [parentId, staged.childId]) {
+            const projection = yield* orchestrator.getThreadProjection(id);
+            assert.isNull(projection.thread.archivePending);
+            assert.isNull(projection.thread.archivedAt);
+            assert.lengthOf(projection.runs, 1);
+            assert.equal(projection.runs[0]?.status, "cancelled");
+            assert.isUndefined(projection.thread.lineage.independent);
+          }
+          const originalFailure = yield* (yield* ThreadManagementService.ThreadManagementService)
+            .dispatch(staged.command)
+            .pipe(Effect.flip);
+          assert.equal(originalFailure._tag, "OrchestratorDispatchError");
+          if (originalFailure._tag === "OrchestratorDispatchError")
+            assert.equal(originalFailure.cause, "Isolated shutdown failure before dismissal");
+        }).pipe(Effect.provide(runtimeLayer(dbPath, workspace))),
+      );
+    }),
+  ).pipe(Effect.provide(NodeServices.layer)),
+);
+
 it.effect.each([
   { runtimeMode: "approval-required", interactionMode: "default", mode: "runtime" },
   { runtimeMode: "full-access", interactionMode: "plan", mode: "interaction" },

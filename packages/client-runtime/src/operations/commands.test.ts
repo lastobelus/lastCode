@@ -47,6 +47,7 @@ import {
   retryThreadWorktreeCleanup,
   abandonThreadWorktreeCleanup,
   archiveThread,
+  unarchiveThread,
   cancelQueuedRun,
   createProject,
   dismissThreadUserInput,
@@ -298,6 +299,29 @@ describe("V2 environment commands", () => {
           threadId: "parent",
           childDisposition: "promote",
           expectedChildThreadIds: ["child"],
+        },
+      ]);
+    }).pipe(Effect.provide(layerTestCrypto)),
+  );
+
+  it.effect("preserves the observed failed archive attempt without changing ordinary Restore", () =>
+    Effect.gen(function* () {
+      const commands: OrchestrationV2Command[] = [];
+      const supervisor = yield* makeSupervisor({ commands, projects: [] });
+      for (const expectedArchiveCommandId of [undefined, CommandId.make("failed-attempt")]) {
+        yield* unarchiveThread({
+          commandId: CommandId.make(expectedArchiveCommandId ?? "restore"),
+          threadId: ThreadId.make("owner"),
+          ...(expectedArchiveCommandId === undefined ? {} : { expectedArchiveCommandId }),
+        }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+      }
+      expect(commands).toEqual([
+        { type: "thread.unarchive", commandId: "restore", threadId: "owner" },
+        {
+          type: "thread.unarchive",
+          commandId: "failed-attempt",
+          threadId: "owner",
+          expectedArchiveCommandId: "failed-attempt",
         },
       ]);
     }).pipe(Effect.provide(layerTestCrypto)),

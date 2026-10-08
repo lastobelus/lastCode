@@ -107,7 +107,9 @@ export interface ArchiveThreadInput extends ThreadCommandInput {
   readonly childDisposition?: ThreadArchiveChildDisposition;
   readonly expectedChildThreadIds?: ReadonlyArray<ThreadId>;
 }
-export type UnarchiveThreadInput = ThreadCommandInput;
+export type UnarchiveThreadInput = ThreadCommandInput & {
+  readonly expectedArchiveCommandId?: CommandId;
+};
 export type SettleThreadInput = ThreadCommandInput;
 
 export interface UnsettleThreadInput extends ThreadCommandInput {
@@ -552,7 +554,14 @@ export const archiveThread = Effect.fn("EnvironmentCommands.archiveThread")(func
 export const unarchiveThread = Effect.fn("EnvironmentCommands.unarchiveThread")(function* (
   input: UnarchiveThreadInput,
 ) {
-  return yield* simpleThreadCommand("thread.unarchive", input);
+  return yield* dispatch({
+    type: "thread.unarchive",
+    commandId: yield* allocateCommandId(input),
+    threadId: input.threadId,
+    ...(input.expectedArchiveCommandId === undefined
+      ? {}
+      : { expectedArchiveCommandId: input.expectedArchiveCommandId }),
+  });
 });
 
 export const settleThread = Effect.fn("EnvironmentCommands.settleThread")(function* (

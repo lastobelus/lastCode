@@ -75,7 +75,7 @@ const readQuestion = Effect.fn("mcp.readQuestion")(function* (input: {
   return { ...context, request, item };
 });
 
-/** Failed participants inspect and retry the original archive owner. */
+/** Failed participants inspect, retry, and dismiss the original archive owner's attempt. */
 const readArchiveThread = Effect.fn("mcp.readArchiveThread")(function* (threadId?: ThreadId) {
   const context = yield* readThread(threadId);
   const thread = context.projection.thread;
@@ -375,7 +375,8 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
   ),
   t3_thread_organize: writesThread((input) =>
     Effect.gen(function* () {
-      const { threads, projection } = yield* input.action === "archive"
+      const { threads, projection } = yield* input.action === "archive" ||
+      (input.action === "unarchive" && input.expectedArchiveCommandId !== undefined)
         ? readArchiveThread(input.threadId)
         : readThread(input.threadId);
       const common = { commandId: yield* newCommandId(), threadId: projection.thread.id };
@@ -391,6 +392,15 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
             ...(input.expectedChildThreadIds === undefined
               ? {}
               : { expectedChildThreadIds: input.expectedChildThreadIds }),
+          };
+          break;
+        case "unarchive":
+          command = {
+            ...common,
+            type: "thread.unarchive",
+            ...(input.expectedArchiveCommandId === undefined
+              ? {}
+              : { expectedArchiveCommandId: input.expectedArchiveCommandId }),
           };
           break;
         case "snooze":

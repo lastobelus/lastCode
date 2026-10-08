@@ -356,6 +356,17 @@ describe("buildThreadActionMenuItems", () => {
     expect(archiveItem?.disabled).toBe(false);
   });
 
+  it.each([false, true])(
+    "failure dismissal requires task permission (granted=%s)",
+    (canOperate) => {
+      const items = buildThreadActionMenuItems({ ...baseState, archiveFailed: true, canOperate });
+      const dismissal = items.find((item) => item.id === "dismiss-archive-failure");
+      expect(dismissal?.label).toBe("Dismiss archive failure");
+      expect(dismissal?.disabled === true).toBe(!canOperate);
+      expect(ids(baseState)).not.toContain("dismiss-archive-failure");
+    },
+  );
+
   it("replaces the mark action and blocks archive and delete for the persistent thread", () => {
     const items = buildThreadActionMenuItems({ ...baseState, isPersistent: true });
     expect(items).toContainEqual(

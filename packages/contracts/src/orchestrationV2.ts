@@ -2823,6 +2823,8 @@ export const OrchestrationV2Command = Schema.Union([
     type: Schema.Literal("thread.unarchive"),
     commandId: CommandId,
     threadId: ThreadId,
+    /** Dismisses this failed archive attempt on its active owner instead of restoring. */
+    expectedArchiveCommandId: Schema.optional(CommandId),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.delete"),

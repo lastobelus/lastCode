@@ -25,6 +25,7 @@ import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import { DispatchModeLimit } from "./DispatchModeLimit.ts";
 import { DelegatedTaskCancellation } from "./DelegatedTaskCancellation.ts";
 import * as EventSink from "./EventSink.ts";
+import * as EffectOutbox from "./EffectOutbox.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import type { ProviderAdapterV2Shape } from "./ProviderAdapter.ts";
@@ -52,6 +53,7 @@ const testLayer = ThreadManagementService.layer.pipe(
     Layer.mergeAll(
       database,
       ProjectionStore.layer.pipe(Layer.provide(database)),
+      EffectOutbox.layer.pipe(Layer.provide(database)),
       ProviderReplayHarness.layerWithRegistry(
         { name: "thread-stop" },
         ProviderAdapterRegistry.layerFromAdapters([adapter]),
@@ -164,6 +166,36 @@ const archiveModeLimits = [
   { runtimeMode: "approval-required", interactionMode: "default", mode: "runtime" },
   { runtimeMode: "full-access", interactionMode: "plan", mode: "interaction" },
 ] as const;
+
+const settleArchiveResults = Effect.fnUntraced(function* (command: ReturnType<typeof archive>) {
+  const orchestrator = yield* Orchestrator.OrchestratorV2;
+  // Publish nested completion results before their owners, using the real
+  // service under its locks rather than racing its terminal-event subscriber.
+  for (const id of command.expectedChildThreadIds.toReversed()) {
+    const run = (yield* orchestrator.getThreadProjection(id)).runs.at(-1);
+    if (run !== undefined) yield* orchestrator.recoverDelegatedTask(id, run.id);
+  }
+});
+
+const failArchive = Effect.fnUntraced(function* (command: ReturnType<typeof archive>) {
+  const orchestrator = yield* Orchestrator.OrchestratorV2;
+  yield* orchestrator.dispatch(command);
+  yield* orchestrator.dispatch({
+    type: "thread.archive.fail",
+    commandId: CommandId.make(`${command.commandId}:failed`),
+    threadId: command.threadId,
+    requestId: command.commandId,
+    error: "Isolated shutdown failed",
+  });
+  yield* settleArchiveResults(command);
+});
+
+const dismissArchive = (threadId: ThreadId, expectedArchiveCommandId: CommandId) => ({
+  type: "thread.unarchive" as const,
+  commandId: CommandId.make(`dismiss:${threadId}`),
+  threadId,
+  expectedArchiveCommandId,
+});
 
 /** An idle snapshot from real delegated history, with a nested runless native mirror. */
 const idleArchiveFamily = Effect.gen(function* () {
@@ -1114,14 +1146,275 @@ it.effect("archive RPC stays pending and returns a visible failure when shutdown
         }),
       ),
     );
-    assert.equal((yield* Fiber.join(waiting))._tag, "Failure");
     for (const id of [parent, child, grandchild]) {
       const projection = yield* orchestrator.getThreadProjection(id);
       assert.isNull(projection.thread.archivedAt);
       assert.equal(projection.thread.archivePending?.status, "failed");
       assert.isTrue(projection.runs.every((run) => run.status === "cancelled"));
     }
+    yield* threads.dispatch(dismissArchive(parent, command.commandId));
+    assert.equal((yield* Fiber.join(waiting))._tag, "Failure");
+    const replayedFailure = yield* threads.dispatch(command).pipe(Effect.flip);
+    assert.equal(replayedFailure._tag, "OrchestratorDispatchError");
   }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("dismisses a failed archive without changing execution or replaying shutdown", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    const { parent, child, grandchild } = yield* family;
+    const command = archive(parent, [child, grandchild]);
+    yield* failArchive(command);
+    // Work may resume after failure. Dismissing its notice must leave it alone.
+    yield* send(child, "continued work", "start_immediately");
+    const before = yield* Effect.forEach([parent, child, grandchild], (id) =>
+      orchestrator.getThreadProjection(id),
+    );
+    const dismissal = dismissArchive(parent, command.commandId);
+    const result = yield* threads.dispatch(dismissal);
+    assert.deepEqual(
+      result.storedEvents.map((stored) => stored.event.threadId).toSorted(),
+      [parent, child, grandchild].toSorted(),
+    );
+    assert.isTrue(
+      result.storedEvents.every((stored) => stored.event.type === "thread.metadata-updated"),
+    );
+    assert.isEmpty(yield* outbox.listByCommandId(dismissal.commandId));
+    for (const previous of before) {
+      const current = yield* orchestrator.getThreadProjection(previous.thread.id);
+      assert.deepEqual(current.thread, {
+        ...previous.thread,
+        archivePending: null,
+        updatedAt: current.thread.updatedAt,
+      });
+      assert.deepEqual({ ...current, thread: previous.thread }, previous);
+    }
+    yield* threads.executeArchive({ threadId: parent, requestId: command.commandId }).pipe(
+      Effect.provide(
+        Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+          teardownThread: () => Effect.die("A dismissed archive must not shut down providers"),
+        }),
+      ),
+    );
+    for (const type of ["thread.archive.complete", "thread.archive.fail"] as const) {
+      const stale = yield* orchestrator.dispatch({
+        type,
+        commandId: CommandId.make(`${command.commandId}:late:${type}`),
+        threadId: parent,
+        requestId: command.commandId,
+        error: "Late shutdown failure",
+      });
+      assert.isEmpty(
+        yield* outbox.listByCommandId(CommandId.make(`${command.commandId}:late:${type}`)),
+      );
+      assert.isTrue(
+        stale.storedEvents.every((stored) => stored.event.type === "thread.metadata-updated"),
+      );
+    }
+    for (const previous of before) {
+      const current = yield* orchestrator.getThreadProjection(previous.thread.id);
+      assert.isNull(current.thread.archivedAt);
+      assert.isNull(current.thread.archivePending);
+      assert.deepEqual({ ...current, thread: previous.thread }, previous);
+    }
+    const original = yield* threads.dispatch(command).pipe(Effect.flip);
+    assert.equal(original._tag, "OrchestratorDispatchError");
+    if (original._tag === "OrchestratorDispatchError")
+      assert.equal(original.cause, "Isolated shutdown failed");
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect.each(["different-owner", "newer-attempt", "archived", "deleted", "independent"] as const)(
+  "dismissal preserves a descendant with %s metadata",
+  (state) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const { parent, child, grandchild } = yield* family;
+      const command = archive(parent, [child, grandchild]);
+      yield* failArchive(command);
+      const previous = (yield* orchestrator.getThreadProjection(grandchild)).thread;
+      const now = yield* DateTime.now;
+      const retained = {
+        ...previous,
+        ...(state === "different-owner"
+          ? { archivePending: { ...previous.archivePending!, threadId: grandchild } }
+          : state === "newer-attempt"
+            ? {
+                archivePending: {
+                  ...previous.archivePending!,
+                  commandId: CommandId.make("newer-archive"),
+                },
+              }
+            : state === "archived"
+              ? {
+                  archivedAt: now,
+                  archivedWith: {
+                    threadId: grandchild,
+                    commandId: CommandId.make("separate-cohort"),
+                  },
+                }
+              : state === "deleted"
+                ? { deletedAt: now }
+                : { lineage: { ...previous.lineage, independent: true } }),
+      };
+      yield* projections.apply({
+        id: EventId.make(`dismissal-retained:${state}`),
+        type: "thread.metadata-updated",
+        threadId: grandchild,
+        occurredAt: now,
+        payload: retained,
+      });
+      yield* orchestrator.dispatch(dismissArchive(parent, command.commandId));
+      for (const id of [parent, child])
+        assert.isNull((yield* orchestrator.getThreadProjection(id)).thread.archivePending);
+      assert.deepEqual((yield* orchestrator.getThreadProjection(grandchild)).thread, retained);
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect.each([
+  "active",
+  "stopping",
+  "newer-failed",
+  "completed",
+  "deleted",
+  "direct-child",
+  "compact-owner",
+  "restore-active",
+] as const)("refuses dismissal against %s without changing the family", (state) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    const { parent, child, grandchild } = yield* family;
+    const command = archive(parent, [child, grandchild]);
+    if (state === "stopping" || state === "completed") {
+      yield* orchestrator.dispatch(command);
+      if (state === "completed") {
+        yield* orchestrator.dispatch({
+          type: "thread.archive.complete",
+          commandId: CommandId.make(`${command.commandId}:complete`),
+          threadId: parent,
+          requestId: command.commandId,
+        });
+        yield* settleArchiveResults(command);
+      }
+    } else if (state !== "active") yield* failArchive(command);
+    if (state === "newer-failed")
+      yield* failArchive({ ...command, commandId: CommandId.make("newer-failed-archive") });
+    if (state === "deleted" || state === "compact-owner") {
+      const thread = (yield* orchestrator.getThreadProjection(parent)).thread;
+      yield* projections.apply({
+        id: EventId.make(`dismissal-refused:${state}`),
+        type: "thread.metadata-updated",
+        threadId: parent,
+        occurredAt: yield* DateTime.now,
+        payload:
+          state === "deleted"
+            ? { ...thread, deletedAt: yield* DateTime.now }
+            : {
+                ...thread,
+                archivePending: {
+                  threadId: parent,
+                  commandId: command.commandId,
+                  status: "failed",
+                },
+              },
+      });
+    }
+    const before = yield* Effect.forEach([parent, child, grandchild], (id) =>
+      orchestrator.getThreadProjection(id),
+    );
+    const sequence = (yield* orchestrator.getShellSnapshot()).snapshotSequence;
+    const dismissal =
+      state === "restore-active"
+        ? {
+            type: "thread.unarchive" as const,
+            commandId: CommandId.make("restore-active"),
+            threadId: parent,
+          }
+        : dismissArchive(state === "direct-child" ? child : parent, command.commandId);
+    const refusal = yield* orchestrator.dispatch(dismissal).pipe(Effect.flip);
+    assert.equal(refusal._tag, "OrchestratorDispatchError");
+    assert.equal((yield* orchestrator.getShellSnapshot()).snapshotSequence, sequence);
+    assert.isEmpty(yield* outbox.listByCommandId(dismissal.commandId));
+    for (const previous of before)
+      assert.deepEqual(yield* orchestrator.getThreadProjection(previous.thread.id), previous);
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect.each(
+  archiveModeLimits.flatMap((limit) => [false, true].map((unrelated) => ({ ...limit, unrelated }))),
+)(
+  "dismissal respects the $mode ceiling only for changed participants (unrelated=$unrelated)",
+  (limit) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const { parent, child, grandchild } = yield* family;
+      const command = archive(parent, [child, grandchild]);
+      yield* failArchive(command);
+      for (const id of [parent, child]) {
+        const thread = (yield* orchestrator.getThreadProjection(id)).thread;
+        yield* projections.apply({
+          id: EventId.make(`dismissal-limited:${id}`),
+          type: "thread.metadata-updated",
+          threadId: id,
+          occurredAt: yield* DateTime.now,
+          payload: {
+            ...thread,
+            runtimeMode: limit.runtimeMode,
+            interactionMode: limit.interactionMode,
+          },
+        });
+      }
+      const nested = (yield* orchestrator.getThreadProjection(grandchild)).thread;
+      if (limit.unrelated)
+        yield* projections.apply({
+          id: EventId.make("dismissal-unrelated-limit"),
+          type: "thread.metadata-updated",
+          threadId: grandchild,
+          occurredAt: yield* DateTime.now,
+          payload: {
+            ...nested,
+            archivePending: { ...nested.archivePending!, threadId: grandchild },
+          },
+        });
+      const dismissal = dismissArchive(parent, command.commandId);
+      if (!limit.unrelated) {
+        const before = yield* Effect.forEach([parent, child, grandchild], (id) =>
+          orchestrator.getThreadProjection(id),
+        );
+        const sequence = (yield* orchestrator.getShellSnapshot()).snapshotSequence;
+        const refusal = yield* orchestrator
+          .dispatch(dismissal)
+          .pipe(Effect.provideService(DispatchModeLimit, limit), Effect.flip);
+        assert.equal(refusal._tag, "OrchestratorThreadAboveModeLimitError");
+        assert.equal((yield* orchestrator.getShellSnapshot()).snapshotSequence, sequence);
+        for (const previous of before)
+          assert.deepEqual(yield* orchestrator.getThreadProjection(previous.thread.id), previous);
+        yield* projections.apply({
+          id: EventId.make("dismissal-lower-limit"),
+          type: "thread.metadata-updated",
+          threadId: grandchild,
+          occurredAt: yield* DateTime.now,
+          payload: {
+            ...nested,
+            runtimeMode: limit.runtimeMode,
+            interactionMode: limit.interactionMode,
+          },
+        });
+      }
+      yield* orchestrator.dispatch(dismissal).pipe(Effect.provideService(DispatchModeLimit, limit));
+      for (const id of [parent, child])
+        assert.isNull((yield* orchestrator.getThreadProjection(id)).thread.archivePending);
+      assert.equal(
+        (yield* orchestrator.getThreadProjection(grandchild)).thread.archivePending == null,
+        !limit.unrelated,
+      );
+    }).pipe(Effect.provide(testLayer)),
 );
 
 it.effect("shows runless native task activity and requires archiving its runtime owner", () =>

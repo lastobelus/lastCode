@@ -62,6 +62,7 @@ import {
   resolveThreadListV2ProviderDrivers,
   resolveThreadListV2SwipeActions,
   withThreadListV2ArchiveAction,
+  threadListV2ArchiveFailureActionId,
   type ThreadListV2Status,
 } from "./threadListV2";
 import { QueuedMessageIcon } from "./queued-message-icon";
@@ -605,6 +606,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const abandonWorktreeCleanup = useAtomCommand(threadEnvironment.abandonWorktreeCleanup, {
     reportFailure: false,
   });
+  const unarchiveThread = useAtomCommand(threadEnvironment.unarchive, { reportFailure: false });
   const setThreadPersistence = useAtomCommand(threadEnvironment.setPersistence, {
     reportFailure: false,
   });
@@ -731,6 +733,33 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const handleMoveUp = useCallback(() => onMoveThread?.(thread, "up"), [onMoveThread, thread]);
   const handleMoveDown = useCallback(() => onMoveThread?.(thread, "down"), [onMoveThread, thread]);
   const handleArchive = useCallback((): void => onArchiveThread(thread), [onArchiveThread, thread]);
+  const handleDismissArchiveFailure = useCallback(
+    async (actionId: string) => {
+      const pending = thread.archivePending;
+      if (
+        pending?.status !== "failed" ||
+        actionId !== threadListV2ArchiveFailureActionId(pending)
+      ) {
+        Alert.alert(
+          "Couldn't dismiss archive failure",
+          "This failed archive changed. Review the conversation before dismissing it.",
+        );
+        return;
+      }
+      const result = await unarchiveThread({
+        environmentId: thread.environmentId,
+        input: { threadId: pending.threadId, expectedArchiveCommandId: pending.commandId },
+      });
+      if (result._tag === "Failure") {
+        const error = Cause.squash(result.cause);
+        Alert.alert(
+          "Couldn't dismiss archive failure",
+          error instanceof Error ? error.message : "An error occurred.",
+        );
+      }
+    },
+    [unarchiveThread, thread.environmentId, thread.archivePending],
+  );
   const handlePersistence = useCallback(
     async (persistent: boolean) => {
       const result = await setThreadPersistence({
@@ -970,7 +999,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
                 ]
               : actions),
           ],
-          { archiveFamiliesSupported, archivePendingStatus: thread.archivePending?.status },
+          { archiveFamiliesSupported, archivePending: thread.archivePending },
         ),
         persistent: thread.persistent === true,
         supported: props.persistenceSupported,
@@ -980,7 +1009,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       hasManagedProcesses,
       props.persistenceSupported,
       thread.persistent,
-      thread.archivePending?.status,
+      thread.archivePending,
     ],
   );
   const snoozableCardMenuActions = useMemo<MenuAction[]>(
@@ -1072,6 +1101,8 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       if (nativeEvent.event === "move-up") handleMoveUp();
       if (nativeEvent.event === "move-down") handleMoveDown();
       if (nativeEvent.event === "archive") handleArchive();
+      if (nativeEvent.event.startsWith("dismiss-archive-failure:"))
+        void handleDismissArchiveFailure(nativeEvent.event);
       if (nativeEvent.event === "rename") handleRename();
       if (nativeEvent.event === "regenerate-title") handleRegenerateTitle();
       if (nativeEvent.event === "copy-thread-id") {
@@ -1103,6 +1134,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       onNewThreadOnBranch,
       thread,
       handleArchive,
+      handleDismissArchiveFailure,
       handleCancelAction,
       handleStopThreadProcesses,
       handleKeepWorktree,

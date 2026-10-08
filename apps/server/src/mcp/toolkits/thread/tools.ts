@@ -38,7 +38,7 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
 const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
   description:
-    "Pin, snooze, settle, archive, or mark a thread unread. Omit threadId for this thread. snooze requires snoozedUntil. Before archiving, use t3_thread_archive_family to inspect the owned descendants and available choices. Archiving a thread with subagents requires an explicit childDisposition and its returned childThreadIds as expectedChildThreadIds. archive_if_idle refuses if the family has work needing attention; stop_and_archive confirms stopping the family; promote keeps app-owned branches separately and stops native subagents remaining with the archived owner. This does not schedule a future action.",
+    "Pin, snooze, settle, archive, restore, or mark a thread unread. Omit threadId for this thread. snooze requires snoozedUntil. Before archiving, use t3_thread_archive_family to inspect the owned descendants and available choices. Archiving a thread with subagents requires an explicit childDisposition and its returned childThreadIds as expectedChildThreadIds. archive_if_idle refuses if the family has work needing attention; stop_and_archive confirms stopping the family; promote keeps app-owned branches separately and stops native subagents remaining with the archived owner. unarchive restores an archived thread; with expectedArchiveCommandId it instead dismisses that exact failed archive on an active family, without stopping or restarting work. Failed participants resolve to the original owner. This does not schedule a future action.",
   parameters: Schema.Struct({
     threadId: Schema.optional(ThreadId),
     action: Schema.Literals([
@@ -55,6 +55,7 @@ const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
     snoozedUntil: Schema.optional(IsoDateTime),
     childDisposition: Schema.optional(ThreadArchiveChildDisposition),
     expectedChildThreadIds: Schema.optional(Schema.Array(ThreadId)),
+    expectedArchiveCommandId: Schema.optional(CommandId),
   }),
   success: OrchestrationV2DispatchCommandResult,
   failure: OrchestratorMcpFailure,

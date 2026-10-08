@@ -1894,6 +1894,7 @@ interface SidebarProjectItemProps {
   handleNewThread: ReturnType<typeof useNewThreadHandler>;
   archiveThread: ReturnType<typeof useThreadActions>["archiveThread"];
   archiveThreads: ReturnType<typeof useThreadActions>["archiveThreads"];
+  unarchiveThread: ReturnType<typeof useThreadActions>["unarchiveThread"];
   deleteThread: ReturnType<typeof useThreadActions>["deleteThread"];
   setThreadPersistence: ReturnType<typeof useThreadActions>["setThreadPersistence"];
   markThreadUnread: ReturnType<typeof useThreadActions>["markThreadUnread"];
@@ -1923,6 +1924,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     handleNewThread,
     archiveThread,
     archiveThreads,
+    unarchiveThread,
     deleteThread,
     markThreadUnread,
     setThreadPersistence,
@@ -3278,6 +3280,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             ...(handoffs.length > handoffDescriptors.length
               ? [{ id: "handoff-show-all", label: "Show all…" }]
               : []),
+            ...(thread.archivePending?.status === "failed"
+              ? [{ id: "dismiss-archive-failure", label: "Dismiss archive failure" }]
+              : []),
             {
               id: "delete",
               separatorBefore: true,
@@ -3296,6 +3301,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             "mark-persistent",
             "disable-persistence",
             "stop-thread-processes",
+            "dismiss-archive-failure",
             "delete",
           ].includes(item.id)
             ? { ...item, disabled: item.disabled || !canOperateThread }
@@ -3329,11 +3335,32 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
           "mark-persistent",
           "disable-persistence",
           "stop-thread-processes",
+          "dismiss-archive-failure",
           "delete",
         ].includes(clicked) &&
         !checkTaskPermission(threadRef.environmentId)
       )
         return;
+
+      if (clicked === "dismiss-archive-failure") {
+        const pending = thread.archivePending;
+        if (pending?.status !== "failed") return;
+        const result = await unarchiveThread(
+          scopeThreadRef(thread.environmentId, pending.threadId),
+          { expectedArchiveCommandId: pending.commandId },
+        );
+        if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+          const error = squashAtomCommandFailure(result);
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Couldn't dismiss archive failure",
+              description: error instanceof Error ? error.message : "An error occurred.",
+            }),
+          );
+        }
+        return;
+      }
 
       if (clicked === "creator-independent" || clicked === "creator-grouped") {
         if (!creatorGroupingEligible) return;
@@ -3523,6 +3550,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       stopThreadProcesses,
       updateThreadMetadata,
       navigateToThread,
+      unarchiveThread,
     ],
   );
 
@@ -4151,6 +4179,7 @@ interface SidebarProjectsContentProps {
   handleNewThread: ReturnType<typeof useNewThreadHandler>;
   archiveThread: ReturnType<typeof useThreadActions>["archiveThread"];
   archiveThreads: ReturnType<typeof useThreadActions>["archiveThreads"];
+  unarchiveThread: ReturnType<typeof useThreadActions>["unarchiveThread"];
   deleteThread: ReturnType<typeof useThreadActions>["deleteThread"];
   setThreadPersistence: ReturnType<typeof useThreadActions>["setThreadPersistence"];
   markThreadUnread: ReturnType<typeof useThreadActions>["markThreadUnread"];
@@ -4298,6 +4327,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     handleNewThread,
     archiveThread,
     archiveThreads,
+    unarchiveThread,
     deleteThread,
     markThreadUnread,
     setThreadPersistence,
@@ -4467,6 +4497,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                         handleNewThread={handleNewThread}
                         archiveThread={archiveThread}
                         archiveThreads={archiveThreads}
+                        unarchiveThread={unarchiveThread}
                         deleteThread={deleteThread}
                         setThreadPersistence={setThreadPersistence}
                         markThreadUnread={markThreadUnread}
@@ -4513,6 +4544,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                 handleNewThread={handleNewThread}
                 archiveThread={archiveThread}
                 archiveThreads={archiveThreads}
+                unarchiveThread={unarchiveThread}
                 deleteThread={deleteThread}
                 setThreadPersistence={setThreadPersistence}
                 markThreadUnread={markThreadUnread}
@@ -4574,8 +4606,14 @@ export default function LegacySidebar() {
   );
   const updateSettings = useUpdateClientSettings();
   const handleNewThread = useNewThreadHandler();
-  const { archiveThread, archiveThreads, deleteThread, markThreadUnread, setThreadPersistence } =
-    useThreadActions();
+  const {
+    archiveThread,
+    archiveThreads,
+    unarchiveThread,
+    deleteThread,
+    markThreadUnread,
+    setThreadPersistence,
+  } = useThreadActions();
   const { isMobile, setOpenMobile } = useSidebar();
   const routeTarget = useParams({
     strict: false,
@@ -5253,6 +5291,7 @@ export default function LegacySidebar() {
         handleNewThread={handleNewThread}
         archiveThread={archiveThread}
         archiveThreads={archiveThreads}
+        unarchiveThread={unarchiveThread}
         deleteThread={deleteThread}
         setThreadPersistence={setThreadPersistence}
         markThreadUnread={markThreadUnread}

@@ -56,6 +56,6 @@ export function presentThreadArchive(thread: Pick<EnvironmentThreadShell, "archi
   return {
     status: "archive-failed" as const,
     label: "Archive failed" as const,
-    description: `${pending.error ? `${pending.error} ` : ""}Conversations remain visible; some work may have stopped. Choose Archive again to retry.`,
+    description: `${pending.error ? `${pending.error} ` : ""}Conversations remain visible; some work may have stopped. Choose Archive again to retry, or dismiss to keep these threads as they are.`,
   };
 }

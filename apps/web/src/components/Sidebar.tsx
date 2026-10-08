@@ -2577,6 +2577,7 @@ export default function Sidebar() {
     reorderActiveThread,
     markThreadUnread,
     archiveThread,
+    unarchiveThread,
     deleteThread,
     setThreadPersistence,
   } = useThreadActions();
@@ -4871,6 +4872,7 @@ export default function Sidebar() {
                   : null,
                 isPinned,
                 isPersistent: thread.persistent === true,
+                archiveFailed: thread.archivePending?.status === "failed",
                 isSettled,
                 autoSettleEnabled: thread.autoSettleDisabledAt == null,
                 isSnoozed,
@@ -5082,6 +5084,25 @@ export default function Sidebar() {
           case "copy-thread-id":
             copyThreadIdToClipboard(thread.id, { threadId: thread.id });
             return;
+          case "dismiss-archive-failure": {
+            const pending = thread.archivePending;
+            if (pending?.status !== "failed") return;
+            const result = await unarchiveThread(
+              scopeThreadRef(thread.environmentId, pending.threadId),
+              { expectedArchiveCommandId: pending.commandId },
+            );
+            if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+              const error = squashAtomCommandFailure(result);
+              toastManager.add(
+                stackedThreadToast({
+                  type: "error",
+                  title: "Couldn't dismiss archive failure",
+                  description: error instanceof Error ? error.message : "An error occurred.",
+                }),
+              );
+            }
+            return;
+          }
           case "archive": {
             let didArchive = false;
             const result = await archiveThread(threadRef, {
@@ -5138,6 +5159,7 @@ export default function Sidebar() {
     },
     [
       archiveThread,
+      unarchiveThread,
       closeTerminal,
       stopThreadProcesses,
       attemptPin,

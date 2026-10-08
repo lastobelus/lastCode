@@ -11726,6 +11726,51 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const root = yield* projectionStore.getThread(command.threadId).pipe(mapDispatchError(command));
     const cohort = root.archivedWith;
     const failedArchive = getThreadArchivePlan(root.archivePending);
+    if (command.expectedArchiveCommandId !== undefined) {
+      if (
+        root.archivedAt !== null ||
+        root.deletedAt !== null ||
+        failedArchive?.status !== "failed" ||
+        failedArchive.threadId !== root.id ||
+        failedArchive.commandId !== command.expectedArchiveCommandId
+      )
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause:
+            root.archivedAt !== null
+              ? "This thread family is already archived. Restore it from Settings > Archived threads."
+              : "This failed archive changed. Review the conversation before dismissing it.",
+        });
+      const now = yield* DateTime.now;
+      const participants = [
+        root,
+        ...(yield* archiveFamilyShells(command)).filter((thread) => thread.id !== root.id),
+      ];
+      for (const participant of participants) {
+        if (
+          participant.archivedAt !== null ||
+          participant.deletedAt !== null ||
+          participant.archivePending?.status !== "failed" ||
+          participant.archivePending.threadId !== root.id ||
+          participant.archivePending.commandId !== failedArchive.commandId
+        )
+          continue;
+        const thread = yield* projectionStore
+          .getThread(participant.id)
+          .pipe(mapDispatchError(command));
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "thread.metadata-updated",
+          threadId: thread.id,
+          occurredAt: now,
+          payload: { ...thread, archivePending: null, updatedAt: now },
+        });
+      }
+      return;
+    }
     if (
       root.lineage.relationshipToParent === "subagent" &&
       root.lineage.independent !== true &&
