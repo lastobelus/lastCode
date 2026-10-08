@@ -725,7 +725,7 @@ describe("IncomingMessageSummaryService", () => {
         const expected = {
           status: "ready",
           text: "Review build changes; preserve release workflow",
-        };
+        } as const;
         const during = yield* threads.getThreadProjection(threadId);
         assert.deepEqual(during.messages[0]?.incomingSummary, expected);
         assert.equal(during.messages[0]?.text, original);
