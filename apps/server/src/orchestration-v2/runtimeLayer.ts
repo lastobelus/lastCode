@@ -32,6 +32,7 @@ import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderContinuationRequests from "./ProviderContinuationRequests.ts";
 import * as ProviderContinuationService from "./ProviderContinuationService.ts";
 import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationService.ts";
+import * as IncomingMessageSummaryService from "./IncomingMessageSummaryService.ts";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
@@ -361,6 +362,9 @@ const layerThreadTitleRegenerationProvided = ThreadTitleRegenerationService.laye
     Layer.mergeAll(layerThreadManagementProvided, ProjectStore.layer, TextGeneration.layer),
   ),
 );
+const layerIncomingMessageSummaryProvided = IncomingMessageSummaryService.layer.pipe(
+  Layer.provide(Layer.mergeAll(layerThreadManagementProvided, TextGeneration.layer)),
+);
 const layerSubagentPromotionProvided = SubagentPromotionService.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -382,6 +386,7 @@ const layerEffectExecutorProvided = EffectWorker.layerExecutor.pipe(
       layerProviderTurnStartServiceProvided,
       layerRuntimeRequestServiceProvided,
       layerThreadTitleRegenerationProvided,
+      layerIncomingMessageSummaryProvided,
       layerThreadManagementProvided,
       layerSubagentPromotionProvided,
     ),

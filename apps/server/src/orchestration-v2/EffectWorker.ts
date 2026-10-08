@@ -26,6 +26,7 @@ import * as ProviderTurnControlService from "./ProviderTurnControlService.ts";
 import * as ProviderTurnStartService from "./ProviderTurnStartService.ts";
 import * as RuntimeRequestService from "./RuntimeRequestService.ts";
 import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationService.ts";
+import * as IncomingMessageSummaryService from "./IncomingMessageSummaryService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as SubagentPromotionService from "./SubagentPromotionService.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -90,6 +91,7 @@ export const layerExecutor: Layer.Layer<
   | ProviderTurnStartService.ProviderTurnStartServiceV2
   | RuntimeRequestService.RuntimeRequestServiceV2
   | ThreadTitleRegenerationService.ThreadTitleRegenerationService
+  | IncomingMessageSummaryService.IncomingMessageSummaryService
   | ThreadManagementService.ThreadManagementService
   | SubagentPromotionService.SubagentPromotionService
   | ServerSettings.ServerSettingsService
@@ -105,6 +107,8 @@ export const layerExecutor: Layer.Layer<
     const runtimeRequests = yield* RuntimeRequestService.RuntimeRequestServiceV2;
     const threadTitleRegeneration =
       yield* ThreadTitleRegenerationService.ThreadTitleRegenerationService;
+    const incomingMessageSummary =
+      yield* IncomingMessageSummaryService.IncomingMessageSummaryService;
     const threads = yield* ThreadManagementService.ThreadManagementService;
     const subagentPromotion = yield* SubagentPromotionService.SubagentPromotionService;
     const settings = yield* ServerSettings.ServerSettingsService;
@@ -112,6 +116,23 @@ export const layerExecutor: Layer.Layer<
       execute: (effect, options) => {
         const willRetry = options?.willRetry ?? false;
         switch (effect.request.type) {
+          case "incoming-message.summarize":
+            return incomingMessageSummary
+              .execute({
+                threadId: effect.threadId,
+                messageId: effect.request.messageId,
+                attemptCount: effect.attemptCount,
+              })
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationEffectExecutionError({
+                      effectId: effect.id,
+                      effectType: effect.request.type,
+                      cause,
+                    }),
+                ),
+              );
           case "subagent.promote":
             return subagentPromotion
               .execute({
@@ -548,8 +569,14 @@ const isOrchestrationEffectWorkerError = Schema.is(OrchestrationEffectWorkerErro
 
 export interface OrchestrationEffectWorkerV2Shape {
   readonly awaitWork: Effect.Effect<void>;
+  readonly awaitIncomingSummaryWork: Effect.Effect<void>;
   readonly runOnce: Effect.Effect<boolean, OrchestrationEffectWorkerError>;
   readonly runRecoveryOnce: Effect.Effect<boolean, OrchestrationEffectWorkerError>;
+  readonly runIncomingSummaryOnce: Effect.Effect<boolean, OrchestrationEffectWorkerError>;
+  readonly nextIncomingSummaryClaimableAt: Effect.Effect<
+    Option.Option<DateTime.Utc>,
+    OrchestrationEffectWorkerError
+  >;
   readonly nextClaimableAt: Effect.Effect<
     Option.Option<DateTime.Utc>,
     OrchestrationEffectWorkerError
@@ -673,10 +700,18 @@ export const layerWithOptions = (
           ? requeueClaim(effect, cause)
           : terminalizeClaim(effect, cause);
 
-      const runOnce = (excludeRestartContinuations = false) =>
+      const runOnce = (
+        excludeRestartContinuations = false,
+        incomingSummaryLane?: "only" | "exclude",
+      ) =>
         Effect.gen(function* () {
           const claimExit = yield* Effect.exit(
-            outbox.claimNext({ workerId, leaseDurationMs, excludeRestartContinuations }),
+            outbox.claimNext({
+              workerId,
+              leaseDurationMs,
+              excludeRestartContinuations,
+              ...(incomingSummaryLane === undefined ? {} : { incomingSummaryLane }),
+            }),
           );
           yield* increment(orchestrationEffectClaimsTotal, {
             result: Exit.isFailure(claimExit)
@@ -793,8 +828,15 @@ export const layerWithOptions = (
 
       return OrchestrationEffectWorkerV2.of({
         awaitWork: outbox.awaitAvailable,
-        runOnce: runOnce(),
-        runRecoveryOnce: runOnce(true),
+        awaitIncomingSummaryWork: outbox.awaitIncomingSummaryAvailable,
+        runOnce: runOnce(false, "exclude"),
+        runRecoveryOnce: runOnce(true, "exclude"),
+        runIncomingSummaryOnce: runOnce(false, "only"),
+        nextIncomingSummaryClaimableAt: outbox.nextIncomingSummaryClaimableAt.pipe(
+          Effect.mapError(
+            (cause) => new OrchestrationEffectWorkerError({ operation: "next-claimable", cause }),
+          ),
+        ),
         nextClaimableAt: outbox.nextClaimableAt.pipe(
           Effect.mapError(
             (cause) =>
@@ -859,54 +901,61 @@ export const runDaemonWithOptions = (options: OrchestrationEffectDaemonOptions =
       // Post-commit notifications are the low-latency path. `availableAt` is the
       // durable retry schedule, and the long liveness poll only recovers from a
       // missed in-process notification or work inserted by another process.
-      const runWorker = Effect.gen(function* () {
-        while (true) {
-          yield* reconcileThreadHealth;
-          const outcome = yield* worker.runOnce.pipe(
-            Effect.map((worked) => (worked ? ("worked" as const) : ("idle" as const))),
-            Effect.catchCause((cause) =>
-              Effect.logWarning("Orchestration effect worker failed", cause).pipe(
-                Effect.as("failed" as const),
+      const runWorker = (incomingSummaryLane = false) =>
+        Effect.gen(function* () {
+          while (true) {
+            yield* reconcileThreadHealth;
+            const outcome = yield* (
+              incomingSummaryLane ? worker.runIncomingSummaryOnce : worker.runOnce
+            ).pipe(
+              Effect.map((worked) => (worked ? ("worked" as const) : ("idle" as const))),
+              Effect.catchCause((cause) =>
+                Effect.logWarning("Orchestration effect worker failed", cause).pipe(
+                  Effect.as("failed" as const),
+                ),
               ),
-            ),
-          );
-          if (outcome === "worked") {
-            yield* Effect.yieldNow;
-            continue;
-          }
-          if (outcome === "failed") {
-            // A due row can remain visible when a claim UPDATE fails. Do not
-            // feed that past deadline back into the scheduler and retry at the
-            // one-millisecond floor; let transient database failures cool off.
-            yield* Effect.sleep(Duration.millis(Math.min(1_000, livenessPollIntervalMs)));
-            continue;
-          }
+            );
+            if (outcome === "worked") {
+              yield* Effect.yieldNow;
+              continue;
+            }
+            if (outcome === "failed") {
+              // A due row can remain visible when a claim UPDATE fails. Do not
+              // feed that past deadline back into the scheduler and retry at the
+              // one-millisecond floor; let transient database failures cool off.
+              yield* Effect.sleep(Duration.millis(Math.min(1_000, livenessPollIntervalMs)));
+              continue;
+            }
 
-          const nextClaimableAt = yield* worker.nextClaimableAt.pipe(
-            Effect.catchCause((cause) =>
-              Effect.logWarning(
-                "Failed to read the next orchestration effect deadline",
-                cause,
-              ).pipe(Effect.as(Option.none<DateTime.Utc>())),
-            ),
-          );
-          const now = DateTime.toEpochMillis(yield* DateTime.now);
-          const sleepMs = Option.match(nextClaimableAt, {
-            onNone: () => livenessPollIntervalMs,
-            onSome: (availableAt) => {
-              const untilAvailable = DateTime.toEpochMillis(availableAt) - now;
-              return Math.min(livenessPollIntervalMs, untilAvailable > 0 ? untilAvailable : 25);
-            },
-          });
-          yield* Effect.raceFirst(
-            worker.awaitWork.pipe(Effect.as("notified" as const)),
-            Effect.sleep(Duration.millis(sleepMs)).pipe(Effect.as("scheduled" as const)),
-          );
-        }
-      });
+            const nextClaimableAt = yield* (
+              incomingSummaryLane ? worker.nextIncomingSummaryClaimableAt : worker.nextClaimableAt
+            ).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning(
+                  "Failed to read the next orchestration effect deadline",
+                  cause,
+                ).pipe(Effect.as(Option.none<DateTime.Utc>())),
+              ),
+            );
+            const now = DateTime.toEpochMillis(yield* DateTime.now);
+            const sleepMs = Option.match(nextClaimableAt, {
+              onNone: () => livenessPollIntervalMs,
+              onSome: (availableAt) => {
+                const untilAvailable = DateTime.toEpochMillis(availableAt) - now;
+                return Math.min(livenessPollIntervalMs, untilAvailable > 0 ? untilAvailable : 25);
+              },
+            });
+            yield* Effect.raceFirst(
+              (incomingSummaryLane ? worker.awaitIncomingSummaryWork : worker.awaitWork).pipe(
+                Effect.as("notified" as const),
+              ),
+              Effect.sleep(Duration.millis(sleepMs)).pipe(Effect.as("scheduled" as const)),
+            );
+          }
+        });
 
       return yield* Effect.all(
-        Array.from({ length: concurrency }, () => runWorker),
+        [...Array.from({ length: concurrency }, () => runWorker()), runWorker(true)],
         {
           concurrency: "unbounded",
           discard: true,

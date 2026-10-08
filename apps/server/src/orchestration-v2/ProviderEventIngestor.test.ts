@@ -14,6 +14,7 @@ import {
   type OrchestrationV2TurnItem,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderSessionId,
   PlanId,
   RunAttemptId,
   RunId,
@@ -36,6 +37,8 @@ import * as IdAllocator from "./IdAllocator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
+import * as EffectOutbox from "./EffectOutbox.ts";
+import { makeSubagentConversationArtifacts } from "./SubagentProjection.ts";
 import { makeProviderFailure } from "./ProviderFailure.ts";
 import {
   makeProviderEventRoutingState,
@@ -54,6 +57,7 @@ const layerTestEventSink = EventSink.layer.pipe(
 );
 
 const layerTest = Layer.mergeAll(
+  EffectOutbox.layer.pipe(Layer.provide(layerTestDatabase)),
   layerTestStores,
   layerTestEventSink,
   IdAllocator.layer,
@@ -136,6 +140,84 @@ function threadCreatedEvent(
 }
 
 const layer = it.layer(layerTest);
+
+layer("incoming native prompts", (it) => {
+  it.effect(
+    "enqueues one preview and copies a completed result to a later native timeline item",
+    () =>
+      Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const now = yield* DateTime.now;
+        const threadEvent = yield* threadCreatedEvent(now);
+        yield* sink.write({ events: [threadEvent] });
+        const artifacts = makeSubagentConversationArtifacts({
+          messageId: MessageId.make("native-prompt-preview"),
+          turnItemId: TurnItemId.make("native-item-preview"),
+          threadId: threadEvent.threadId,
+          senderThreadId: ThreadId.make("sending-parent-thread"),
+          rootNodeId: NodeId.make("native-root-node"),
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          role: "user",
+          text: "Review build changes and preserve the existing release workflow.\nDo not publish a release yet.",
+          ordinal: 1,
+          now,
+        });
+        const input = {
+          providerSessionId: ProviderSessionId.make("native-session"),
+          providerInstanceId: modelSelection.instanceId,
+          threadId: threadEvent.threadId,
+        };
+        const commandId = CommandId.make("native-preview-command");
+        const stored = yield* ingestor.ingestNormalized({
+          ...input,
+          commandId,
+          event: { type: "message.updated", driver: CODEX_DRIVER, message: artifacts.message },
+        });
+        const messageEvent = stored[0]?.event;
+        assert.equal(messageEvent?.type, "message.updated");
+        if (messageEvent?.type !== "message.updated") return;
+        assert.deepEqual(messageEvent.payload.incomingSummary, { status: "pending" });
+        assert.equal((yield* outbox.listByCommandId(commandId)).length, 1);
+        const ready = {
+          status: "ready" as const,
+          text: "Review build changes; do not release yet",
+        };
+        yield* sink.write({
+          events: [
+            {
+              ...messageEvent,
+              id: `completed:${messageEvent.id}` as typeof messageEvent.id,
+              payload: { ...messageEvent.payload, incomingSummary: ready },
+            },
+          ],
+        });
+        yield* ingestor.ingestNormalized({
+          ...input,
+          event: { type: "turn_item.updated", driver: CODEX_DRIVER, turnItem: artifacts.turnItem },
+        });
+        const records = yield* projections.getThreadRecords(threadEvent.threadId, ["turnItems"], {
+          turnItemMessageIds: [artifacts.message.id],
+        });
+        const item = records.turnItems[0];
+        assert.equal(item?.id, artifacts.turnItem.id);
+        assert.deepEqual(item?.type === "user_message" ? item.incomingSummary : undefined, ready);
+        yield* ingestor.ingestNormalized({
+          ...input,
+          commandId: CommandId.make("native-preview-update"),
+          event: { type: "message.updated", driver: CODEX_DRIVER, message: artifacts.message },
+        });
+        assert.equal(
+          (yield* outbox.listByCommandId(CommandId.make("native-preview-update"))).length,
+          0,
+        );
+      }),
+  );
+});
 
 it.effect("records accepted billed turn usage once without billing the context window", () => {
   const recorded: Array<Readonly<Record<string, unknown>>> = [];

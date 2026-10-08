@@ -148,6 +148,22 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["width margin resize handle pane drag thumb"],
   },
   {
+    id: "incoming-message-style",
+    title: "Incoming message style",
+    to: "/settings/lastcode",
+    searchTerms: ["agent assistant messages neutral fill outline bubble background appearance"],
+  },
+  {
+    id: "incoming-message-fill-color",
+    title: "Incoming message fill color",
+    to: "/settings/lastcode",
+    // The color row is hidden for Outline, so always land on the style control.
+    targetId: "incoming-message-style",
+    searchTerms: [
+      "agent assistant messages neutral background color automatic experimental picker",
+    ],
+  },
+  {
     id: "handoffs-menu-limit",
     title: "Handoffs shown in menus",
     to: "/settings/lastcode",

@@ -29,6 +29,7 @@ import * as ProviderTurnControlService from "./ProviderTurnControlService.ts";
 import * as ProviderTurnStartService from "./ProviderTurnStartService.ts";
 import * as RuntimeRequestService from "./RuntimeRequestService.ts";
 import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationService.ts";
+import * as IncomingMessageSummaryService from "./IncomingMessageSummaryService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as SubagentPromotionService from "./SubagentPromotionService.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -88,6 +89,9 @@ function layerExecutorFor(input: {
 }) {
   const record = (event: string) => Ref.update(input.events, (events) => [...events, event]);
   const layerDependencies = Layer.mergeAll(
+    Layer.mock(IncomingMessageSummaryService.IncomingMessageSummaryService)({
+      execute: () => Effect.void,
+    }),
     Layer.mock(SubagentPromotionService.SubagentPromotionService)({ execute: () => Effect.void }),
     Layer.succeed(
       ProviderTurnControlService.ProviderTurnControlServiceV2,
@@ -767,6 +771,9 @@ it.effect("uses durable deadlines, notifications, and a slow liveness poll", () 
         if (count === 3) yield* Ref.set(nextClaimableAt, Option.none());
         return false;
       }),
+      awaitIncomingSummaryWork: Effect.never,
+      runIncomingSummaryOnce: Effect.succeed(false),
+      nextIncomingSummaryClaimableAt: Effect.succeed(Option.none()),
       nextClaimableAt: Ref.get(nextClaimableAt),
       drain: () => Effect.succeed(0),
     });
@@ -813,6 +820,9 @@ it.effect("shares thread health checks across worker lanes without blocking effe
       awaitWork: Effect.never,
       runRecoveryOnce: Effect.succeed(false),
       runOnce: Ref.update(attempts, (count) => count + 1).pipe(Effect.as(false)),
+      awaitIncomingSummaryWork: Effect.never,
+      runIncomingSummaryOnce: Effect.succeed(false),
+      nextIncomingSummaryClaimableAt: Effect.succeed(Option.none()),
       nextClaimableAt: Effect.succeed(Option.none()),
       drain: () => Effect.succeed(0),
     });
@@ -852,6 +862,9 @@ it.effect("does not hot-loop when a claim fails", () =>
           }),
         ),
       ),
+      awaitIncomingSummaryWork: Effect.never,
+      runIncomingSummaryOnce: Effect.succeed(false),
+      nextIncomingSummaryClaimableAt: Effect.succeed(Option.none()),
       nextClaimableAt: Effect.succeed(Option.some(now)),
       drain: () => Effect.succeed(0),
     });
@@ -880,6 +893,9 @@ it.effect("backs off briefly when a due deadline loses a claim race", () =>
       awaitWork: Effect.never,
       runRecoveryOnce: Effect.succeed(false),
       runOnce: Ref.update(attempts, (count) => count + 1).pipe(Effect.as(false)),
+      awaitIncomingSummaryWork: Effect.never,
+      runIncomingSummaryOnce: Effect.succeed(false),
+      nextIncomingSummaryClaimableAt: Effect.succeed(Option.none()),
       nextClaimableAt: Effect.succeed(Option.some(now)),
       drain: () => Effect.succeed(0),
     });

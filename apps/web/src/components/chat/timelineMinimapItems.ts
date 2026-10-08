@@ -1,4 +1,5 @@
 import type { MessageId } from "@t3tools/contracts";
+import { resolveIncomingMessagePreview } from "@t3tools/client-runtime/user-message";
 import type { MessagesTimelineRow } from "./MessagesTimeline.logic";
 
 export interface TimelineMinimapItem {
@@ -7,6 +8,8 @@ export interface TimelineMinimapItem {
   readonly rowIndex: number;
   readonly userText: string | null;
   readonly assistantText: string | null;
+  readonly isIncoming: boolean;
+  readonly summaryPending: boolean;
 }
 
 /** Keep full source text untouched until a minimap preview is opened. */
@@ -20,12 +23,15 @@ export function deriveTimelineMinimapItems(
       continue;
     }
 
+    const incoming = resolveIncomingMessagePreview(row.message);
     items.push({
       id: row.id,
       messageId: row.message.id,
       rowIndex: index,
-      userText: row.message.text,
+      userText: incoming.isIncoming ? incoming.previewText : row.message.text,
       assistantText: resolveFinalAssistantTextForTurn(rows, index),
+      isIncoming: incoming.isIncoming,
+      summaryPending: incoming.pending,
     });
   }
   return items;
@@ -63,7 +69,7 @@ export function resolveTimelineMinimapPreview(
     ? null
     : {
         ...item,
-        userText: compactMinimapPreview(item.userText),
+        userText: item.isIncoming ? item.userText : compactMinimapPreview(item.userText),
         assistantText: compactMinimapPreview(item.assistantText),
       };
 }

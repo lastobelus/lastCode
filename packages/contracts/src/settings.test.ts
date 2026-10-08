@@ -448,6 +448,47 @@ describe("ClientSettings chat width", () => {
   });
 });
 
+describe("ClientSettings incoming message appearance", () => {
+  it("uses neutral theme fill when existing settings have no appearance choice", () => {
+    expect(decodeClientSettings({ timestampFormat: "12-hour" })).toMatchObject({
+      incomingMessageStyle: "neutral",
+      incomingMessageFillColor: null,
+      timestampFormat: "12-hour",
+    });
+    expect(decodeClientSettingsPatch({})).not.toHaveProperty("incomingMessageStyle");
+    expect(decodeClientSettingsPatch({})).not.toHaveProperty("incomingMessageFillColor");
+  });
+
+  it.each(["neutral", "outline"])("round-trips the %s style with a saved fill", (style) => {
+    const preference = { incomingMessageStyle: style, incomingMessageFillColor: "#a1B2c3" };
+    expect(encodeClientSettings(decodeClientSettings(preference))).toMatchObject(preference);
+    expect(decodeClientSettingsPatch(preference)).toEqual(preference);
+  });
+
+  it("accepts an explicit reset to automatic theme fill", () => {
+    expect(decodeClientSettingsPatch({ incomingMessageFillColor: null })).toEqual({
+      incomingMessageFillColor: null,
+    });
+    expect(
+      encodeClientSettings(decodeClientSettings({ incomingMessageFillColor: null }))
+        .incomingMessageFillColor,
+    ).toBeNull();
+  });
+
+  it("rejects unsupported styles", () => {
+    expect(() => decodeClientSettings({ incomingMessageStyle: "filled" })).toThrow();
+    expect(() => decodeClientSettingsPatch({ incomingMessageStyle: "filled" })).toThrow();
+  });
+
+  it.each(["", "red", "#abc", "#aabbccdd", "#gggggg", "rgb(0,0,0)"])(
+    "rejects invalid fill color %s",
+    (incomingMessageFillColor) => {
+      expect(() => decodeClientSettings({ incomingMessageFillColor })).toThrow();
+      expect(() => decodeClientSettingsPatch({ incomingMessageFillColor })).toThrow();
+    },
+  );
+});
+
 describe("ClientSettings load balancing", () => {
   it("requires opt-in when settings are new or omit load balancing", () => {
     expect(decodeClientSettings({}).loadBalancingEnabled).toBe(false);
