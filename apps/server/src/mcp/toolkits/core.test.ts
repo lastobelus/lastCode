@@ -24,6 +24,7 @@ import {
   OrchestratorCommandRejectedError,
   OrchestratorDispatchError,
   OrchestratorProjectionError,
+  OrchestratorThreadArchivingError,
 } from "../../orchestration-v2/Orchestrator.ts";
 
 import * as ServerConfig from "../../config.ts";
@@ -222,6 +223,17 @@ it("bounds public command rejections and redacts internal dispatch causes", () =
       new OrchestratorCommandRejectedError({ ...command, cause: "Run is not queued." }),
     ).message,
   ).toBe("Run is not queued.");
+  expect(
+    dispatchFailure(
+      new OrchestratorThreadArchivingError({
+        ...command,
+        threadId: ThreadId.make("mcp-archive-hold"),
+      }),
+    ),
+  ).toMatchObject({
+    code: "orchestration_error",
+    message: "This conversation is stopping before it is archived. Wait for the archive to finish.",
+  });
   for (const cause of [
     undefined,
     "",
