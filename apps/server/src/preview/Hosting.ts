@@ -142,6 +142,15 @@ export class PreviewHosting extends Context.Service<
       PreviewHostingRecoverResult,
       PreviewHostingError | TerminalManager.TerminalError | HostingAuth.PreviewHostingAuthError
     >;
+    /** Prepare a local navigation using only this thread's saved listener recipe. */
+    readonly prepareNavigation: (input: {
+      readonly threadId: string;
+      readonly url: string;
+      readonly browserUrl?: string;
+    }) => Effect.Effect<
+      { readonly managed: boolean; readonly bootstrapToken?: string },
+      PreviewHostingError | TerminalManager.TerminalError | HostingAuth.PreviewHostingAuthError
+    >;
     readonly list: (
       threadId?: string,
     ) => Effect.Effect<ReadonlyArray<PreviewHostingLease>, PreviewHostingError>;
@@ -1215,7 +1224,39 @@ const make = Effect.gen(function* () {
     };
   });
 
+  const prepareNavigation: PreviewHosting["Service"]["prepareNavigation"] = Effect.fn(
+    "PreviewHosting.prepareNavigation",
+  )(function* (input) {
+    const normalized = normalizeLocalHttpUrl(input.url);
+    if (normalized === null) return { managed: false };
+    const target = new URL(normalized);
+    if (target.username !== "" || target.password !== "") return { managed: false };
+    // Only the saved origin is verified; another loopback alias may serve a different listener.
+    const candidates = (yield* list(input.threadId)).filter(
+      (lease) => new URL(lease.url).origin === target.origin,
+    );
+    // One owned listener may serve several paths; never guess between saved recipes.
+    if (candidates.length !== 1) return { managed: false };
+    const owned = candidates[0]!;
+    const recovered = yield* recover({
+      threadId: input.threadId,
+      leaseId: PreviewHostingLeaseId.make(owned.id),
+      url: owned.url,
+    });
+    if (recovered === null)
+      return yield* new PreviewHostingError({ operation: "validate", statePath });
+    const bootstrapToken = yield* HostingAuth.prepareBrowserCredential({
+      ...recovered,
+      browserUrl: input.browserUrl,
+    }).pipe(Effect.provideService(HttpClient.HttpClient, httpClient));
+    return {
+      managed: true,
+      ...(bootstrapToken === undefined ? {} : { bootstrapToken }),
+    };
+  });
+
   return PreviewHosting.of({
+    prepareNavigation,
     launch,
     recover,
     recoverForBrowser,
