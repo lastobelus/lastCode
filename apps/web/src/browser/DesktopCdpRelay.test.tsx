@@ -4,6 +4,7 @@ import {
   WS_METHODS,
   type AuthEnvironmentScope,
   DesktopBrowserEventInput,
+  type DesktopPreviewBridge,
   type PreviewEvent,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -21,7 +22,7 @@ const state = vi.hoisted(() => ({
   permissionListeners: new Set<() => void>(),
   browserListeners: new Set<(input: BrowserEventInput) => void>(),
   streams: [] as Stream.Stream<unknown>[],
-  browserCommand: vi.fn(async () => undefined),
+  browserCommand: vi.fn<DesktopPreviewBridge["browserCommand"]>(async () => undefined),
   sendEvent: vi.fn(async () => undefined),
   previewEvents: [] as PreviewEvent[],
   applyPreviewEvent: vi.fn(),

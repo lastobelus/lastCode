@@ -604,6 +604,7 @@ describe("HostedBrowserWebview settings hydration", () => {
           tabId="native-tab"
           runtimeTabId={runtimeTabId}
           initialUrl={null}
+          profileId="default"
           viewport={FILL_PREVIEW_VIEWPORT}
           pictureInPicture={false}
           zoomFactor={1}
