@@ -133,7 +133,7 @@ const fixture = Effect.fn("fixture")(function* (
   const service = yield* DeviceService.makeWithHosts(
     new Map([[host.id, host]]),
     undefined,
-    undefined,
+    () => Effect.succeed("/test/agent-device.json"),
     installTool,
   ).pipe(
     Effect.provide(NodeCrypto.layer),
@@ -300,6 +300,47 @@ describe("device setup consent", () => {
       const state = yield* service.state;
       expect(state.devices.map((device) => device.id)).toEqual(["emulator-5554"]);
       expect(state.bootingDevices).toEqual([]);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("starts agent helpers for authorized project access when global access is off", () =>
+    Effect.gen(function* () {
+      const { service, agentStarts, settings } = yield* fixture();
+      yield* service.configure({ enabled: true });
+      expect((yield* Ref.get(settings)).enableAgentDeviceAccess).toBe(false);
+      expect(yield* service.agentReadinessIfSupported()).toBeNull();
+      expect(yield* service.agentReadinessIfSupported(LOCAL_DEVICE_HOST_ID, true)).not.toBeNull();
+      const target = yield* service.agentTarget({
+        threadId: ThreadId.make("project-enabled-thread"),
+        hostId: LOCAL_DEVICE_HOST_ID,
+        deviceId: DeviceId.make("Pixel_API_35"),
+        agentAccessEnabled: true,
+      });
+      expect(target.slice(0, 2)).toEqual(["--config", "/test/agent-device.json"]);
+      expect(target[2]).toBe("--session");
+      expect(agentStarts).toEqual(["start", "start"]);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("withholds agent helpers for denied project access even when global access is on", () =>
+    Effect.gen(function* () {
+      const { service, agentStarts, settings } = yield* fixture();
+      yield* Ref.update(settings, (current) => ({
+        ...current,
+        enableDeviceSupport: true,
+        enableAgentDeviceAccess: true,
+      }));
+      expect(yield* service.agentReadinessIfSupported(LOCAL_DEVICE_HOST_ID, false)).toBeNull();
+      const result = yield* service
+        .agentTarget({
+          threadId: ThreadId.make("project-denied-thread"),
+          hostId: LOCAL_DEVICE_HOST_ID,
+          deviceId: DeviceId.make("Pixel_API_35"),
+          agentAccessEnabled: false,
+        })
+        .pipe(Effect.result);
+      expect(result._tag).toBe("Failure");
+      expect(agentStarts).toEqual([]);
     }).pipe(Effect.scoped),
   );
 

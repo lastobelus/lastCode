@@ -164,6 +164,7 @@ const handlers = {
         threadId: scope.thread.threadId,
         hostId: target.hostId,
         deviceId: target.id,
+        agentAccessEnabled: true,
       });
       const session = yield* devices.open({
         threadId: scope.thread.threadId,

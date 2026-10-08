@@ -119,6 +119,8 @@ export class DeviceService extends Context.Service<
       threadId: ThreadId;
       hostId: DeviceHostId;
       deviceId: DeviceId;
+      /** Project access already authorized by the caller; omitted uses the global setting. */
+      agentAccessEnabled?: boolean;
     }) => Effect.Effect<ReadonlyArray<string>, DeviceError>;
     readonly state: Effect.Effect<DeviceServiceState>;
     readonly subscribe: Effect.Effect<PubSub.Subscription<DeviceServiceState>, never, Scope.Scope>;
@@ -152,6 +154,7 @@ export class DeviceService extends Context.Service<
     ) => Effect.Effect<DeviceReadiness | null, DeviceError>;
     readonly agentReadinessIfSupported: (
       hostId?: DeviceHostId,
+      agentAccessEnabled?: boolean,
     ) => Effect.Effect<DeviceAgentReadiness | null, DeviceError>;
     readonly currentReadiness: (hostId?: DeviceHostId) => Effect.Effect<DeviceReadiness | null>;
     readonly sessionsForThread: (threadId: ThreadId) => Effect.Effect<ReadonlyArray<DeviceSession>>;
@@ -313,9 +316,10 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
   });
 
   const agentReadinessIfSupported: DeviceService["Service"]["agentReadinessIfSupported"] =
-    Effect.fn("DeviceService.agentReadinessIfSupported")(function* (hostId) {
+    Effect.fn("DeviceService.agentReadinessIfSupported")(function* (hostId, agentAccessEnabled) {
       const deviceSettings = yield* readDeviceSettings;
-      if (!deviceSettings.enabled || !deviceSettings.agentAccessEnabled) return null;
+      if (!deviceSettings.enabled || !(agentAccessEnabled ?? deviceSettings.agentAccessEnabled))
+        return null;
       const host = yield* resolveHost(hostId);
       const summary = yield* host.summary;
       if (summary.kind === "local" && !summary.platforms.some((platform) => platform.available))
@@ -928,7 +932,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
       agentTarget: (input) =>
         Effect.gen(function* () {
           const host = yield* resolveHost(input.hostId);
-          const ready = yield* agentReadinessIfSupported(input.hostId);
+          const ready = yield* agentReadinessIfSupported(input.hostId, input.agentAccessEnabled);
           if (!ready)
             return yield* new DeviceHostUnavailableError({
               hostId: input.hostId,
