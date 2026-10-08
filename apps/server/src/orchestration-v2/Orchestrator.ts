@@ -140,6 +140,11 @@ import {
   ThreadForkServiceV2,
 } from "./ThreadForkService.ts";
 import { planThreadDeletion, threadTerminalSessionTargets } from "./ThreadDeletion.ts";
+import {
+  isCreatorGroupingReleaseCommand,
+  isGroupedCreatorThread,
+  releaseCreatorGrouping,
+} from "./CreatorGrouping.ts";
 
 export class OrchestratorDispatchError extends Schema.TaggedError<OrchestratorDispatchError>()(
   "OrchestratorDispatchError",
@@ -2294,6 +2299,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           "An existing conversation's creator history cannot be replaced by another creation request.",
       });
     }
+    let creatorGrouping: OrchestrationV2AppThread["creatorGrouping"];
     if (command.creatorThreadId !== undefined) {
       const creatorThreadId = command.creatorThreadId;
       if (command.createdBy !== "agent" || command.creatorThreadId === command.threadId) {
@@ -2304,13 +2310,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             "A creator must be a different conversation that created this thread through an agent.",
         });
       }
-      yield* projectionStore
+      const creator = yield* projectionStore
         .getThread(command.creatorThreadId)
         .pipe(
           Effect.mapError(
             (cause) => new OrchestratorProjectionError({ threadId: creatorThreadId, cause }),
           ),
         );
+      creatorGrouping =
+        creator.archivedAt !== null ||
+        creator.deletedAt !== null ||
+        creator.archivePending?.status === "stopping"
+          ? "independent"
+          : "grouped";
     }
     const now = yield* DateTime.now;
     const emitEvent = emit(events, command);
@@ -2319,7 +2331,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       creationSource: command.creationSource,
       ...(command.creatorThreadId === undefined
         ? {}
-        : { creatorThreadId: command.creatorThreadId, creatorGrouping: "grouped" }),
+        : { creatorThreadId: command.creatorThreadId, creatorGrouping }),
       id: command.threadId,
       projectId: command.projectId,
       title: command.title,
@@ -2788,6 +2800,22 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         cause:
           "Creator grouping is available only for ordinary agent-created conversations with a known creator.",
       });
+    }
+    if (command.type === "thread.metadata.update" && command.creatorGrouping === "grouped") {
+      const creator = yield* projectionStore
+        .getThreadShell(thread.creatorThreadId!)
+        .pipe(mapDispatchError(command));
+      if (
+        creator === null ||
+        creator.archivedAt !== null ||
+        creator.deletedAt !== null ||
+        creator.archivePending?.status === "stopping"
+      )
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "This conversation cannot be grouped under an unavailable or archiving creator.",
+        });
     }
     if (
       command.type === "thread.pull-request.watch" &&
@@ -3374,6 +3402,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             ...(command.creatorGrouping === undefined
               ? {}
               : { creatorGrouping: command.creatorGrouping }),
+            ...(command.creatorGrouping === "independent" &&
+            thread.creatorGrouping !== "independent"
+              ? { pinnedAt: null, pinOrderKey: null, activeOrderKey: null }
+              : {}),
             updatedAt: now,
           };
         }
@@ -11420,6 +11452,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (!familyIds.has(thread.id)) continue;
       yield* refuseAboveDispatchModeLimit(command, thread.id, thread);
     }
+    for (const id of yield* projectionStore
+      .getGroupedCreatorThreadIds(archiveIds)
+      .pipe(mapDispatchError(command))) {
+      const thread = yield* projectionStore.getThread(id).pipe(mapDispatchError(command));
+      yield* refuseAboveDispatchModeLimit(command, id, thread);
+    }
     const context = yield* projectionStore
       .getThreadProviderContext(command.threadId)
       .pipe(mapDispatchError(command));
@@ -11910,6 +11948,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     });
 
     const allowedWhileArchiving =
+      isCreatorGroupingReleaseCommand(command) ||
       command.type === "thread.stop" ||
       command.type === "thread.visit" ||
       command.type === "thread.archive.complete" ||
@@ -12746,6 +12785,44 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const participantLimit = completionLimit ?? limit;
     const execute = Effect.gen(function* () {
       const plan = yield* dispatchOnce(command).pipe(
+        Effect.flatMap((planned) =>
+          Effect.gen(function* () {
+            const inactiveCreators = planned.events
+              .filter(
+                (event) => event.type === "thread.archived" || event.type === "thread.deleted",
+              )
+              .map((event) => event.threadId);
+            if (inactiveCreators.length === 0) return planned;
+            const childIds = yield* projectionStore
+              .getGroupedCreatorThreadIds(inactiveCreators)
+              .pipe(mapDispatchError(command));
+            const events = [...planned.events];
+            const plannedThreads = new Map<ThreadId, OrchestrationV2AppThread>();
+            for (const event of planned.events)
+              if (
+                event.type === "thread.metadata-updated" ||
+                event.type === "thread.archived" ||
+                event.type === "thread.deleted"
+              )
+                plannedThreads.set(event.threadId, event.payload);
+            const now = yield* DateTime.now;
+            for (const id of childIds) {
+              const thread =
+                plannedThreads.get(id) ??
+                (yield* projectionStore.getThread(id).pipe(mapDispatchError(command)));
+              if (!isGroupedCreatorThread(thread)) continue;
+              events.push(
+                yield* makeEvent(command, {
+                  type: "thread.metadata-updated",
+                  threadId: id,
+                  occurredAt: now,
+                  payload: releaseCreatorGrouping(thread, now),
+                }),
+              );
+            }
+            return { ...planned, events };
+          }),
+        ),
         Effect.tap((planned) =>
           Effect.gen(function* () {
             if (
@@ -12762,13 +12839,28 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               ...planned.events.map((event) => event.threadId),
               ...planned.effects.map((effect) => effect.threadId),
             ]);
+            const effectOwners = new Set(planned.effects.map((effect) => effect.threadId));
+            const otherMutationOwners = new Set(
+              planned.events
+                .filter(
+                  (event) =>
+                    event.type !== "thread.metadata-updated" ||
+                    event.payload.creatorGrouping !== "independent",
+                )
+                .map((event) => event.threadId),
+            );
             for (const threadId of participants) {
               const thread = yield* projectionStore
                 .getThread(threadId)
                 .pipe(mapDispatchError(command));
+              const releasesPlacementOnly =
+                isGroupedCreatorThread(thread) &&
+                !effectOwners.has(threadId) &&
+                !otherMutationOwners.has(threadId);
               if (
                 command.type !== "thread.archive.complete" &&
-                thread.archivePending?.status === "stopping"
+                thread.archivePending?.status === "stopping" &&
+                !releasesPlacementOnly
               )
                 return yield* new OrchestratorDispatchError({
                   commandId: command.commandId,
@@ -13030,9 +13122,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               const root = yield* projectionStore
                 .getThreadShell(command.threadId)
                 .pipe(mapDispatchError(command));
+              const creatorIds = [
+                ...family,
+                ...(getThreadArchivePlan(root?.archivePending)?.archiveThreadIds ?? []),
+              ];
+              const groupedChildren = yield* projectionStore
+                .getGroupedCreatorThreadIds(creatorIds)
+                .pipe(mapDispatchError(command));
               const ids = [
                 ...new Set([
                   ...family,
+                  ...groupedChildren,
                   ...(root?.archivedWith == null ? [] : [root.archivedWith.threadId]),
                   ...(getThreadArchivePlan(root?.archivePending)?.archiveThreadIds ?? []),
                   ...(getThreadArchivePlan(root?.archivePending)?.promoteThreadIds ?? []),
@@ -13044,6 +13144,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 // Creation holds its parent lock. If a child arrived while locks were
                 // acquired, release and collect the expanded family before deciding.
                 if (currentFamily.some((id) => !ids.includes(id))) return null;
+                const currentGroupedChildren = yield* projectionStore
+                  .getGroupedCreatorThreadIds([...currentFamily, ...creatorIds])
+                  .pipe(mapDispatchError(command));
+                if (currentGroupedChildren.some((id) => !ids.includes(id))) return null;
                 return yield* dispatchWithReceiptEffect(command);
               });
               return yield* ids.reduceRight(
@@ -13066,6 +13170,29 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         command.type === "thread.archive" ? "thread-archive" : "thread-delete",
         dispatch,
       );
+    }
+    if (
+      (command.type === "thread.create" && command.creatorThreadId !== undefined) ||
+      (command.type === "thread.metadata.update" && command.creatorGrouping !== undefined)
+    ) {
+      const operation = Effect.gen(function* () {
+        const creatorId =
+          command.type === "thread.create"
+            ? command.creatorThreadId
+            : (yield* projectionStore
+                .getThreadShell(command.threadId)
+                .pipe(mapDispatchError(command)))?.creatorThreadId;
+        const ids = [
+          ...new Set([command.threadId, ...(creatorId === undefined ? [] : [creatorId])]),
+        ].toSorted();
+        return yield* ids.reduceRight(
+          (effect, id) => threadDispatch.withLock(id, effect),
+          dispatchWithReceiptEffect(command),
+        );
+      });
+      return command.type === "thread.metadata.update" && command.worktreePath !== undefined
+        ? admitNewExecution(command, "thread-teardown", operation)
+        : operation;
     }
     if (command.type === "subagent.promote.complete") {
       const operation = Effect.gen(function* () {
@@ -13261,6 +13388,47 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           Effect.logWarning("Failed to repair stranded subagents", { threadId: root.id, cause }),
         ),
       );
+    }
+    const groupedOrphans = yield* projectionStore
+      .getRecoveryThreadIds("creator-grouping")
+      .pipe(Effect.orDie);
+    for (const threadId of groupedOrphans) {
+      const shell = yield* projectionStore.getThreadShell(threadId).pipe(Effect.orDie);
+      if (shell?.creatorThreadId === undefined) continue;
+      const creatorId = shell.creatorThreadId;
+      const command = {
+        type: "thread.metadata.update" as const,
+        commandId: CommandId.make(
+          `repair-creator-grouping:${threadId}:${DateTime.formatIso(repairTime)}`,
+        ),
+        threadId,
+        creatorGrouping: "independent" as const,
+      };
+      yield* [threadId, creatorId]
+        .toSorted()
+        .reduceRight(
+          (effect, id) => threadDispatch.withLock(id, effect),
+          Effect.gen(function* () {
+            const thread = yield* projectionStore
+              .getThread(threadId)
+              .pipe(mapDispatchError(command));
+            if (!isGroupedCreatorThread(thread) || thread.creatorThreadId !== creatorId) return;
+            const creator = yield* projectionStore
+              .getThreadShell(creatorId)
+              .pipe(mapDispatchError(command));
+            if (creator !== null && creator.archivedAt === null && creator.deletedAt === null)
+              return;
+            yield* dispatchWithReceiptEffect(command);
+          }),
+        )
+        .pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning("Failed to release an orphaned interactive conversation", {
+              threadId,
+              cause,
+            }),
+          ),
+        );
     }
     const waitingPromotions = yield* projectionStore
       .getRecoveryThreadIds("subagent-promotions")

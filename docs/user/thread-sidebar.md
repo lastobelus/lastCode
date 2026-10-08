@@ -81,7 +81,9 @@ asks how to handle them. **Stop and archive** stops and archives the whole owned
 family, including nested subagents. **Keep running separately** makes delegated
 conversations independent and preserves their work and pending requests. Provider
 subagents that depend on an archived owner's session must stop with that owner.
-Forks and conversations merely grouped under their creator are unaffected.
+Forks keep their placement. Ordinary conversations grouped under their creator
+become top-level when that creator is archived or deleted, preserving their work
+and creator history. Restoring the creator leaves those conversations independent.
 
 Persistent subagents must be kept separately or have their protection removed
 before the family can be archived. If stopping fails, the family remains visible;
