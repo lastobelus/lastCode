@@ -50,6 +50,7 @@ import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
 import * as UpdateDrain from "../updateDrain/UpdateDrain.ts";
 import * as UpdateDrainAdmission from "../updateDrain/UpdateDrainAdmission.ts";
 import * as ServerActivation from "../serverActivation.ts";
@@ -200,6 +201,7 @@ const makeHarness = Effect.gen(function* () {
     } | null,
     request: null as OrchestrationV2RuntimeRequest["kind"] | null,
     archived: false,
+    archivePending: null as OrchestrationV2AppThread["archivePending"],
     failWrite: false,
     failDelivery: false,
     missingHistory: false,
@@ -209,6 +211,7 @@ const makeHarness = Effect.gen(function* () {
   const appThread = () => ({
     ...thread,
     archivedAt: state.archived ? now : null,
+    archivePending: state.archivePending,
     actionResume: state.latest,
     deletedAt: state.deleted ? now : null,
   });
@@ -273,6 +276,7 @@ const makeHarness = Effect.gen(function* () {
           ),
         }),
         Layer.mock(ProjectionStore.ProjectionStoreV2)({}),
+        Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({}),
         Layer.mock(TerminalManager.TerminalManager)({}),
       ),
     ),
@@ -644,6 +648,64 @@ it.effect("recovers running and pending states only after explicit resume", () =
       assert.equal(h.followUps().length, 1);
     }).pipe(Effect.provide(Layer.fresh(h.layer)));
   }).pipe(Effect.provide(StoreTestLayer)),
+);
+
+it.effect.each(["failed", "dismissed"] as const)(
+  "retries a retained archive-held result after startup when the hold is %s",
+  (ending) =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness;
+      const archive = {
+        threadId,
+        commandId: CommandId.make("archive:startup"),
+        status: "stopping" as const,
+      };
+      const run = retained(`archive-startup-${ending}`, {
+        outcome: "succeeded",
+        delivery: "pending",
+      });
+      h.state.archivePending = archive;
+      h.state.metadataReceipt = yield* Deferred.make<void>();
+      yield* h.store.save(run, "retained before restart");
+      yield* Effect.gen(function* () {
+        const actions = yield* ActionResume.ActionResume;
+        yield* Deferred.await(h.state.metadataReceipt!);
+        assert.equal(h.state.latest?.delivery, "pending");
+        assert.equal(h.followUps().length, 0);
+        const deliveryId = CommandId.make(`server:action-resume:${run.runId}:delivery`);
+        assert.isTrue(Option.isNone(yield* h.receipts.getByCommandId(deliveryId)));
+
+        // The durable hold predates this listener; no archive-start event is published.
+        h.state.archivePending =
+          ending === "failed" ? { ...archive, status: "failed", error: "teardown failed" } : null;
+        h.state.metadataReceipt = yield* Deferred.make<void>();
+        yield* PubSub.publish(h.events, {
+          id: EventId.make(`event:archive-${ending}`),
+          threadId,
+          type: "thread.metadata-updated",
+          occurredAt: now,
+          payload: {
+            ...thread,
+            archivePending: h.state.archivePending,
+            actionResume: h.state.latest,
+          },
+        });
+        yield* Deferred.await(h.state.metadataReceipt!);
+        assert.equal(h.state.latest?.delivery, "delivered");
+        assert.equal(h.followUps().length, 1);
+        assert.equal(h.followUps()[0]?.messageId, `action-resume:${run.runId}:follow-up`);
+        assert.equal(
+          Option.getOrThrow(yield* h.receipts.getByCommandId(deliveryId)).status,
+          "accepted",
+        );
+        yield* actions.retryPendingFollowUps;
+        assert.equal(h.followUps().length, 1);
+        assert.equal(
+          (yield* actions.inspectActionRun(invocation, run.runId)).outputTail,
+          "retained before restart",
+        );
+      }).pipe(Effect.provide(h.layer));
+    }).pipe(Effect.provide(StoreTestLayer)),
 );
 
 it.effect.each(["running", "pending"] as const)(

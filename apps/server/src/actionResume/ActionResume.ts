@@ -438,7 +438,12 @@ const make = Effect.gen(function* () {
   ) {
     const projection = yield* threads.getThreadRecords(threadId, ["runs", "runtimeRequests"]);
     const thread = projection.thread;
-    if (thread.archivedAt !== null || thread.deletedAt !== null) return null;
+    if (
+      thread.archivedAt !== null ||
+      thread.deletedAt !== null ||
+      thread.archivePending?.status === "stopping"
+    )
+      return null;
     const busy =
       projection.runs.some(ThreadManagement.isActiveRun) ||
       projection.runtimeRequests.some((request) => request.status === "pending");
@@ -1076,7 +1081,8 @@ const make = Effect.gen(function* () {
           delivery: "available",
           finishedAt,
         });
-      } else if (state.delivery === "pending") {
+      } else if (state.delivery === "pending" && shell.archivePending?.status !== "stopping") {
+        // A stopping archive keeps the completed result's delivery intent across restart.
         yield* persistState({ ...state, delivery: "available" });
       } else if (
         shell.actionResume?.runId !== state.runId ||
@@ -1098,8 +1104,14 @@ const make = Effect.gen(function* () {
         const threadId = event.threadId;
         if (event.type === "thread.archived") return cancel(threadId, "cancelled_by_archive");
         if (event.type === "thread.deleted") return disposeDeleted(threadId);
-        // Lifecycle metadata updates must not feed themselves back into delivery.
-        if (event.type === "thread.metadata-updated") return Effect.void;
+        // Archive failure/dismissal is metadata-only. Retry pending results as
+        // soon as that hold ends, even if this subscriber missed its start.
+        // Publishing delivered Action metadata is a no-op in deliverPending.
+        if (
+          event.type === "thread.metadata-updated" &&
+          event.payload.archivePending?.status === "stopping"
+        )
+          return Effect.void;
         return deliverPending(threadId);
       });
     }),

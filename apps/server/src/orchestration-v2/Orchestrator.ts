@@ -11916,6 +11916,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       command.type === "thread.background-work.settle" ||
       // These completions only settle retained metadata; they start no provider work.
       command.type === "message.incoming-summary.complete" ||
+      (command.type === "thread.metadata.update" &&
+        command.actionResume !== undefined &&
+        Object.keys(command).every((key) =>
+          ["type", "commandId", "threadId", "actionResume"].includes(key),
+        )) ||
       (command.type === "message.dispatch" && command.usageLimitContinuationOfRunId !== undefined);
     if (!allowedWhileArchiving && command.type !== "thread.create") {
       const current = yield* projectionStore
