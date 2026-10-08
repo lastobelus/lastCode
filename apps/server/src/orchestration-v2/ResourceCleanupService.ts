@@ -1,3 +1,4 @@
+import { ThreadId } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -7,6 +8,7 @@ import * as Schema from "effect/Schema";
 import { resolveAttachmentPathById } from "../attachmentStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as PreviewHosting from "../preview/Hosting.ts";
+import * as PreviewManager from "../preview/Manager.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 
 export class ResourceCleanupError extends Schema.TaggedError<ResourceCleanupError>()(
@@ -40,14 +42,31 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const terminals = yield* TerminalManager.TerminalManager;
     const previews = yield* PreviewHosting.PreviewHosting;
+    const browser = yield* PreviewManager.PreviewManager;
     const fileSystem = yield* FileSystem.FileSystem;
     const config = yield* ServerConfig.ServerConfig;
     return {
       cleanupTerminals: (threadId: string) =>
         Effect.gen(function* () {
+          const browserResult = yield* Effect.result(
+            browser.close({ threadId: ThreadId.make(threadId) }),
+          );
           const preview = yield* Effect.result(previews.removeThread(threadId));
-          // Deleted threads must lose ordinary terminals even when preview state needs retry.
+          // Attempt every deleted-thread resource even when another resource needs retry.
           const terminal = yield* Effect.result(terminals.close({ threadId, deleteHistory: true }));
+          if (browserResult._tag === "Failure") {
+            return yield* Effect.fail(
+              new ResourceCleanupError({
+                operation: "preview",
+                threadId,
+                cause: {
+                  browser: browserResult.failure,
+                  ...(preview._tag === "Failure" ? { preview: preview.failure } : {}),
+                  ...(terminal._tag === "Failure" ? { terminal: terminal.failure } : {}),
+                },
+              }),
+            );
+          }
           if (preview._tag === "Failure") {
             return yield* Effect.fail(
               new ResourceCleanupError({
