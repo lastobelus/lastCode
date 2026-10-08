@@ -146,6 +146,65 @@ it.layer(NodeServices.layer)("Muse text generation", (it) => {
     }),
   );
 
+  it.effect("summarizes incoming messages using an isolated restrictive host", () =>
+    Effect.gen(function* () {
+      const test = fixture(finish('{"text":" Review the pending changes "}'));
+      const service = yield* test.make;
+      const message = 'Review "pending changes".\nDo not install or restart.';
+      expect(yield* service.generateIncomingMessageSummary({ ...titleInput, message })).toEqual({
+        text: "Review the pending changes",
+      });
+      expect(test.createHost).toHaveBeenCalledWith(
+        expect.objectContaining({ readOnly: true, sessionLogging: true }),
+      );
+      expect(test.createHost).not.toHaveBeenCalledWith(
+        expect.objectContaining({ cwd: titleInput.cwd }),
+      );
+      expect(test.host.connection.command).toHaveBeenCalledWith(
+        "turn/start",
+        expect.objectContaining({
+          input: [
+            {
+              type: "text",
+              text: expect.stringContaining(
+                `Incoming message (JSON string): ${JSON.stringify(message)}`,
+              ),
+            },
+          ],
+        }),
+        { commandId: "turn-1" },
+      );
+      expect(test.host.close).toHaveBeenCalledOnce();
+    }),
+  );
+
+  it.effect("rejects invalid incoming previews and oversized requests", () =>
+    Effect.gen(function* () {
+      for (const text of ["", "First line\nSecond line", "x".repeat(91)]) {
+        const test = fixture(finish(JSON.stringify({ text })));
+        const service = yield* test.make;
+        expect(
+          yield* service.generateIncomingMessageSummary(titleInput).pipe(Effect.flip),
+        ).toMatchObject({
+          _tag: "TextGenerationError",
+          operation: "generateIncomingMessageSummary",
+        });
+        expect(test.host.close).toHaveBeenCalledOnce();
+      }
+      const test = fixture();
+      const service = yield* test.make;
+      expect(
+        yield* service
+          .generateIncomingMessageSummary({ ...titleInput, message: "x".repeat(24_001) })
+          .pipe(Effect.flip),
+      ).toMatchObject({
+        _tag: "TextGenerationError",
+        operation: "generateIncomingMessageSummary",
+      });
+      expect(test.createHost).not.toHaveBeenCalled();
+    }),
+  );
+
   it.effect("uses low effort by default and normalizes stale efforts against the model", () =>
     Effect.gen(function* () {
       for (const { saved, variants, expected } of [

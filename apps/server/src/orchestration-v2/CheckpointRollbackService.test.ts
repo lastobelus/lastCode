@@ -21,7 +21,6 @@ import { isCheckpointRestoreIsolated } from "./CheckpointRestoreSafety.ts";
 import * as CheckpointService from "./CheckpointService.ts";
 import * as CheckpointRollbackService from "./CheckpointRollbackService.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
-import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "./IdAllocator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -359,14 +358,13 @@ it.effect.each([
   const scopeId = CheckpointScopeId.make("rewind-scope");
   const calls: string[] = [];
   let lockedThreads = Effect.succeed<ReadonlyArray<ThreadId>>([]);
-  const layerThreadCommands = Layer.effect(
-    ThreadCommandExecutor.ThreadCommandExecutor,
-    Effect.tap(KeyedLock.make<ThreadId>(), (lock) =>
-      Effect.sync(() => {
-        lockedThreads = lock.activeKeys;
-      }),
-    ),
-  );
+  const layerThreadCommands = Layer.unwrap(
+    Effect.gen(function* () {
+      const executor = yield* ThreadCommandExecutor.ThreadCommandExecutor;
+      lockedThreads = executor.activeKeys;
+      return Layer.succeed(ThreadCommandExecutor.ThreadCommandExecutor, executor);
+    }),
+  ).pipe(Layer.provide(ThreadCommandExecutor.layer));
   const providerThread = {
     id: providerThreadId,
     providerSessionId,

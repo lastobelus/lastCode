@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./userMessage": {
+      "types": "./src/userMessage.ts",
+      "import": "./src/userMessage.ts"
+    },
     "./threadAnnotation": {
       "types": "./src/threadAnnotation.ts",
       "import": "./src/threadAnnotation.ts"

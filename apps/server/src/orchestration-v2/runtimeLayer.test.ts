@@ -1,4 +1,5 @@
 import { limitRecoveryCommand } from "./UsageLimitRecoveryWorker.ts";
+import * as UpdateDrainAdmissionTestkit from "../updateDrain/UpdateDrainAdmission.testkit.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
@@ -272,6 +273,7 @@ const layerTest = Layer.mergeAll(
   ThreadCommandExecutor.layer,
 ).pipe(
   Layer.provide(McpSessionRegistryTestkit.layer),
+  Layer.provide(UpdateDrainAdmissionTestkit.layerOpen),
   Layer.provide(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
@@ -284,6 +286,7 @@ const layerTest = Layer.mergeAll(
 
 const layerLegacyImportTest = RuntimeLayer.layer.pipe(
   Layer.provide(McpSessionRegistryTestkit.layer),
+  Layer.provide(UpdateDrainAdmissionTestkit.layerOpen),
   Layer.provideMerge(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
@@ -323,6 +326,7 @@ const layerProjectDeletionTest = Layer.mergeAll(
     }),
   ),
   Layer.provide(McpSessionRegistryTestkit.layer),
+  Layer.provide(UpdateDrainAdmissionTestkit.layerOpen),
   Layer.provide(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
@@ -467,6 +471,7 @@ const layerSharedApplicationDataPlaneTest = Layer.mergeAll(
     }),
   ),
   Layer.provide(McpSessionRegistryTestkit.layer),
+  Layer.provide(UpdateDrainAdmissionTestkit.layerOpen),
   Layer.provideMerge(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
@@ -476,7 +481,7 @@ const layerSharedApplicationDataPlaneTest = Layer.mergeAll(
   Layer.provide(layerPlatformTest),
 );
 
-it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
+it.layer(layerTest)("RuntimeLayer.layer", (it) => {
   it.effect("emits model updates separately from provider switches", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -2021,7 +2026,7 @@ it.layer(layerLegacyImportTest)("OrchestrationV2 legacy import", (it) => {
   );
 });
 
-it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
+it.layer(layerTest)("RuntimeLayer.layer lifecycle", (it) => {
   it.effect("applies lifecycle commands idempotently and emits archive/removal shell deltas", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -2909,6 +2914,25 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
             });
           });
         for (const threadId of threadIds) yield* watchFrom(threadId);
+        // Released ownership keeps a conversation's existing watch independent.
+        const promotedId = threadIds[1]!;
+        const promoted = yield* orchestrator.getThreadProjection(promotedId);
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        yield* projections.apply({
+          id: EventId.make("pr-watch-promoted-lineage"),
+          type: "thread.metadata-updated",
+          threadId: promotedId,
+          occurredAt: DateTime.makeUnsafe("2026-10-02T12:00:00.000Z"),
+          payload: {
+            ...promoted.thread,
+            lineage: {
+              rootThreadId: threadIds[0]!,
+              parentThreadId: threadIds[0]!,
+              relationshipToParent: "subagent",
+              independent: true,
+            },
+          },
+        });
         const rateLimited = new PullRequestOperationError({
           operation: "getChangeRequest",
           detail: "github requests are paused until the rate limit resets",
@@ -3964,11 +3988,43 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       assert.isDefined(activeRun);
       assert.isDefined(queuedRun);
 
+      const refusal = yield* orchestrator
+        .dispatch({
+          type: "thread.archive",
+          commandId: CommandId.make("runtime-layer-archive-queued-refuse-active"),
+          threadId,
+        })
+        .pipe(Effect.flip);
+      assert.equal(refusal._tag, "OrchestratorDispatchError");
+      assert.include(String(refusal.cause), "unfinished work");
+      const afterRefusal = yield* orchestrator.getThreadProjection(threadId);
+      assert.isNull(afterRefusal.thread.archivedAt);
+      assert.isNull(afterRefusal.thread.archivePending ?? null);
+      assert.equal(afterRefusal.runs.find((run) => run.id === activeRun.id)?.status, "starting");
+      assert.equal(afterRefusal.runs.find((run) => run.id === queuedRun.id)?.status, "queued");
+
+      yield* orchestrator.dispatch({
+        type: "run.interrupt",
+        commandId: CommandId.make("runtime-layer-archive-queued-stop-active"),
+        threadId,
+        runId: activeRun.id,
+        holdQueue: true,
+      });
+      yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain();
+      const stopped = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(stopped.runs.find((run) => run.id === activeRun.id)?.status, "interrupted");
+      assert.equal(stopped.runs.find((run) => run.id === queuedRun.id)?.status, "queued");
+      assert.isTrue(stopped.runs.find((run) => run.id === queuedRun.id)?.queueHeld);
+
       yield* orchestrator.dispatch({
         type: "thread.archive",
         commandId: CommandId.make("runtime-layer-archive-queued-archive"),
         threadId,
       });
+      const stopping = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(stopping.runs.find((run) => run.id === activeRun.id)?.status, "interrupted");
+      assert.equal(stopping.runs.find((run) => run.id === queuedRun.id)?.status, "cancelled");
+      yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain();
 
       const archived = yield* orchestrator.getThreadProjection(threadId);
       assert.isNotNull(archived.thread.archivedAt);

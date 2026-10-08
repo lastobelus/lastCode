@@ -11,6 +11,9 @@ import {
   resolveProviderInstanceEnabled,
   ServerSettings,
   ServerSettingsPatch,
+  DEFAULT_HANDOFFS_MENU_LIMIT,
+  MAX_HANDOFFS_MENU_LIMIT,
+  MIN_HANDOFFS_MENU_LIMIT,
 } from "./settings.ts";
 
 const decodeClientSettings = Schema.decodeUnknownSync(ClientSettingsSchema);
@@ -112,6 +115,7 @@ describe("storage cleanup settings", () => {
       worktreeAfterDays: null,
       worktreeOnMerge: false,
       worktreeOnDelete: false,
+      worktreeDependenciesAfterDays: null,
       worktreeUnchanged: false,
       browserArtifactsAfterDays: null,
       logsAfterDays: null,
@@ -125,6 +129,25 @@ describe("storage cleanup settings", () => {
     expect(decodeServerSettingsPatch({ storageCleanup: { worktreeAfterDays: null } })).toEqual({
       storageCleanup: { worktreeAfterDays: null },
     });
+  });
+
+  it("accepts dependency retention and keeps it off in saved older custom rules", () => {
+    expect(
+      decodeServerSettingsPatch({ storageCleanup: { worktreeDependenciesAfterDays: 14 } }),
+    ).toEqual({ storageCleanup: { worktreeDependenciesAfterDays: 14 } });
+    expect(
+      decodeServerSettings({
+        worktreeCleanup: {
+          mode: "custom",
+          rules: {
+            worktreeAfterDays: null,
+            worktreeOnMerge: false,
+            worktreeOnDelete: false,
+            worktreeUnchanged: false,
+          },
+        },
+      }).worktreeCleanup,
+    ).toMatchObject({ mode: "custom", rules: { worktreeDependenciesAfterDays: null } });
   });
 
   it("accepts partial custom patches but requires complete stored project rules", () => {
@@ -145,6 +168,9 @@ describe("storage cleanup settings", () => {
   it.each([0, -1, 1.5, 3651])("rejects invalid retention %s", (days) => {
     expect(() =>
       decodeServerSettingsPatch({ storageCleanup: { browserArtifactsAfterDays: days } }),
+    ).toThrow();
+    expect(() =>
+      decodeServerSettingsPatch({ storageCleanup: { worktreeDependenciesAfterDays: days } }),
     ).toThrow();
   });
 });
@@ -191,6 +217,25 @@ describe("ServerSettings default permissions", () => {
   });
 });
 
+describe("handoffs menu setting", () => {
+  it("defaults to seven and accepts the inclusive bounds", () => {
+    expect(decodeClientSettings({}).handoffsMenuLimit).toBe(DEFAULT_HANDOFFS_MENU_LIMIT);
+    expect(
+      decodeClientSettings({ handoffsMenuLimit: MIN_HANDOFFS_MENU_LIMIT }).handoffsMenuLimit,
+    ).toBe(1);
+    expect(
+      decodeClientSettings({ handoffsMenuLimit: MAX_HANDOFFS_MENU_LIMIT }).handoffsMenuLimit,
+    ).toBe(50);
+    expect(decodeClientSettingsPatch({ handoffsMenuLimit: 12 }).handoffsMenuLimit).toBe(12);
+  });
+
+  it("rejects non-integers and values outside the bounds", () => {
+    for (const value of [0, 51, 1.5, "7"]) {
+      expect(() => decodeClientSettings({ handoffsMenuLimit: value })).toThrow();
+      expect(() => decodeClientSettingsPatch({ handoffsMenuLimit: value })).toThrow();
+    }
+  });
+});
 describe("ServerSettings usage price overrides", () => {
   const prices = { inputCostPerMillionTokens: 2, outputCostPerMillionTokens: 8 };
 
@@ -403,6 +448,47 @@ describe("ClientSettings chat width", () => {
   });
 });
 
+describe("ClientSettings incoming message appearance", () => {
+  it("uses neutral theme fill when existing settings have no appearance choice", () => {
+    expect(decodeClientSettings({ timestampFormat: "12-hour" })).toMatchObject({
+      incomingMessageStyle: "neutral",
+      incomingMessageFillColor: null,
+      timestampFormat: "12-hour",
+    });
+    expect(decodeClientSettingsPatch({})).not.toHaveProperty("incomingMessageStyle");
+    expect(decodeClientSettingsPatch({})).not.toHaveProperty("incomingMessageFillColor");
+  });
+
+  it.each(["neutral", "outline"])("round-trips the %s style with a saved fill", (style) => {
+    const preference = { incomingMessageStyle: style, incomingMessageFillColor: "#a1B2c3" };
+    expect(encodeClientSettings(decodeClientSettings(preference))).toMatchObject(preference);
+    expect(decodeClientSettingsPatch(preference)).toEqual(preference);
+  });
+
+  it("accepts an explicit reset to automatic theme fill", () => {
+    expect(decodeClientSettingsPatch({ incomingMessageFillColor: null })).toEqual({
+      incomingMessageFillColor: null,
+    });
+    expect(
+      encodeClientSettings(decodeClientSettings({ incomingMessageFillColor: null }))
+        .incomingMessageFillColor,
+    ).toBeNull();
+  });
+
+  it("rejects unsupported styles", () => {
+    expect(() => decodeClientSettings({ incomingMessageStyle: "filled" })).toThrow();
+    expect(() => decodeClientSettingsPatch({ incomingMessageStyle: "filled" })).toThrow();
+  });
+
+  it.each(["", "red", "#abc", "#aabbccdd", "#gggggg", "rgb(0,0,0)"])(
+    "rejects invalid fill color %s",
+    (incomingMessageFillColor) => {
+      expect(() => decodeClientSettings({ incomingMessageFillColor })).toThrow();
+      expect(() => decodeClientSettingsPatch({ incomingMessageFillColor })).toThrow();
+    },
+  );
+});
+
 describe("ClientSettings load balancing", () => {
   it("requires opt-in when settings are new or omit load balancing", () => {
     expect(decodeClientSettings({}).loadBalancingEnabled).toBe(false);
@@ -534,6 +620,26 @@ describe("ClientSettings proactive panels", () => {
     expect(decodeClientSettingsPatch({ proactivePanelsEnabled: true }).proactivePanelsEnabled).toBe(
       true,
     );
+  });
+});
+
+describe("ClientSettings larger scrollbars", () => {
+  it("is opt-in with defaults that clear the pane resize target", () => {
+    const settings = decodeClientSettings({});
+
+    expect(settings.largerScrollbarsEnabled).toBe(false);
+    expect(settings.scrollbarWidth).toBe(10);
+    expect(settings.scrollbarMargin).toBe(4);
+  });
+
+  it.each([
+    ["scrollbarWidth", 1, 12],
+    ["scrollbarMargin", 0, 6],
+  ] as const)("accepts the inclusive %s range", (key, minimum, maximum) => {
+    expect(decodeClientSettingsPatch({ [key]: minimum })).toEqual({ [key]: minimum });
+    expect(decodeClientSettingsPatch({ [key]: maximum })).toEqual({ [key]: maximum });
+    expect(() => decodeClientSettingsPatch({ [key]: minimum - 1 })).toThrow();
+    expect(() => decodeClientSettingsPatch({ [key]: maximum + 1 })).toThrow();
   });
 });
 

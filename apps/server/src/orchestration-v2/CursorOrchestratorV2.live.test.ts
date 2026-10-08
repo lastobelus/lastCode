@@ -1,4 +1,5 @@
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as UpdateDrainAdmissionTestkit from "../updateDrain/UpdateDrainAdmission.testkit.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
@@ -109,6 +110,7 @@ const layerProviderInstanceRegistry = ProviderInstanceRegistryHydration.layer.pi
 const layerLive = RuntimeLayer.layer.pipe(
   Layer.provide(ProviderTurnStartServiceTestkit.layer),
   Layer.provide(McpSessionRegistryTestkit.layer),
+  Layer.provide(UpdateDrainAdmissionTestkit.layerOpen),
   Layer.provide(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStore),
   Layer.provide(layerServerConfig),

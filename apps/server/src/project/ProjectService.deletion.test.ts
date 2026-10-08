@@ -3,9 +3,13 @@ import { assert, it } from "@effect/vitest";
 import {
   CommandId,
   EventId,
+  MessageId,
+  NodeId,
   type OrchestrationV2AppThread,
   ProjectId,
   ProviderInstanceId,
+  RunId,
+  RuntimeRequestId,
   ThreadId,
   UpdateDrainAdmissionError,
   UpdateDrainRequestId,
@@ -18,6 +22,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import { TestClock } from "effect/testing";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -32,6 +37,10 @@ import * as UpdateDrainRepository from "../persistence/UpdateDrainRepository.ts"
 import { OrchestrationEffectRequestV2 } from "../orchestration-v2/EffectOutbox.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as EventStore from "../orchestration-v2/EventStore.ts";
+import {
+  DispatchModeLimit,
+  type DispatchModeRefusal,
+} from "../orchestration-v2/DispatchModeLimit.ts";
 import * as IdAllocator from "../orchestration-v2/IdAllocator.ts";
 import * as LegacyV1ThreadImporter from "../orchestration-v2/legacy/LegacyV1ThreadImporter.ts";
 import * as ProjectionMaintenance from "../orchestration-v2/ProjectionMaintenance.ts";
@@ -137,20 +146,46 @@ function nativeThreadCreated(projectId: ProjectId, threadId: ThreadId) {
   };
 }
 
+function creatorGroupedThreadCreated(
+  projectId: ProjectId,
+  threadId: ThreadId,
+  creatorThreadId: ThreadId,
+  overrides: Partial<OrchestrationV2AppThread> = {},
+) {
+  const event = nativeThreadCreated(projectId, threadId);
+  return {
+    ...event,
+    payload: {
+      ...event.payload,
+      createdBy: "agent" as const,
+      creationSource: "mcp" as const,
+      creatorThreadId,
+      creatorGrouping: "grouped" as const,
+      ...overrides,
+    },
+  };
+}
+
 it.effect("retries a partial project deletion without repeating child events or cleanup", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     const projectId = ProjectId.make("project:partial-deletion");
+    const survivorProjectId = ProjectId.make("project:partial-survivors");
     const threadIds = [ThreadId.make("thread:delete-a"), ThreadId.make("thread:delete-b")] as const;
+    const survivorId = (creatorId: ThreadId) => ThreadId.make(`ordinary-survivor:${creatorId}`);
     const commandId = CommandId.make("command:partial-project-delete");
     yield* seedProject(projectId);
+    yield* seedProject(survivorProjectId);
     yield* TestClock.setTime(Date.parse("2026-09-04T12:00:00.000Z"));
 
     yield* Effect.gen(function* () {
       const eventSink = yield* EventSink.EventSinkV2;
       const projections = yield* ProjectionStore.ProjectionStoreV2;
       yield* eventSink.write({
-        events: threadIds.map((threadId) => nativeThreadCreated(projectId, threadId)),
+        events: threadIds.flatMap((threadId) => [
+          nativeThreadCreated(projectId, threadId),
+          creatorGroupedThreadCreated(survivorProjectId, survivorId(threadId), threadId),
+        ]),
       });
       const attempts: ThreadId[] = [];
       const failingEventSink = EventSink.EventSinkV2.of({
@@ -184,6 +219,14 @@ it.effect("retries a partial project deletion without repeating child events or 
       assert.isTrue(Option.isSome(yield* service.getById(projectId)));
       assert.isNotNull((yield* projections.getThreadProjection(firstThreadId)).thread.deletedAt);
       assert.isNull((yield* projections.getThreadProjection(failedThreadId)).thread.deletedAt);
+      assert.equal(
+        (yield* projections.getThread(survivorId(firstThreadId))).creatorGrouping,
+        "independent",
+      );
+      assert.equal(
+        (yield* projections.getThread(survivorId(failedThreadId))).creatorGrouping,
+        "grouped",
+      );
 
       const readDeletions = sql<{
         readonly sequence: number;
@@ -208,6 +251,20 @@ it.effect("retries a partial project deletion without repeating child events or 
         WHERE thread_id IN (${threadIds[0]}, ${threadIds[1]})
         ORDER BY effect_id ASC
       `;
+      const readReleases = sql<{
+        readonly sequence: number;
+        readonly stream_id: string;
+        readonly command_id: string;
+      }>`
+        SELECT sequence, stream_id, command_id FROM orchestration_events
+        WHERE event_type = 'thread.metadata-updated'
+          AND stream_id IN (${survivorId(threadIds[0])}, ${survivorId(threadIds[1])})
+        ORDER BY sequence ASC
+      `;
+      const partialReleases = yield* readReleases;
+      assert.lengthOf(partialReleases, 1);
+      assert.equal(partialReleases[0]?.stream_id, survivorId(firstThreadId));
+      assert.equal(partialReleases[0]?.command_id, `${commandId}:delete-thread:${firstThreadId}`);
       const partialEvents = yield* readDeletions;
       const partialCleanup = yield* readCleanup;
       assert.lengthOf(partialEvents, 1);
@@ -223,7 +280,15 @@ it.effect("retries a partial project deletion without repeating child events or 
       assert.deepEqual(attempts, [firstThreadId, failedThreadId, failedThreadId]);
       for (const threadId of threadIds) {
         assert.isNotNull((yield* projections.getThreadProjection(threadId)).thread.deletedAt);
+        const survivor = yield* projections.getThread(survivorId(threadId));
+        assert.isNull(survivor.deletedAt);
+        assert.equal(survivor.creatorGrouping, "independent");
       }
+      const finalReleases = yield* readReleases;
+      assert.lengthOf(finalReleases, 2);
+      assert.deepEqual(finalReleases[0], partialReleases[0]);
+      yield* service.delete(input);
+      assert.deepEqual(yield* readReleases, finalReleases);
       const finalEvents = yield* readDeletions;
       assert.deepEqual(
         finalEvents.map((event) => [event.stream_id, event.event_type]),
@@ -247,7 +312,7 @@ it.effect("retries a partial project deletion without repeating child events or 
           finalCleanup.filter((effect) => effect.thread_id === threadId),
           [
             {
-              effect_id: `effect:${expectedCommandId}:terminal.cleanup`,
+              effect_id: `effect:${expectedCommandId}:terminal.cleanup:${threadId}`,
               thread_id: threadId,
               command_id: expectedCommandId,
               effect_type: "terminal.cleanup",
@@ -257,6 +322,277 @@ it.effect("retries a partial project deletion without repeating child events or 
       }
     }).pipe(Effect.provide(layerServices));
   }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect("releases cross-project creator grouping while preserving ongoing ordinary work", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const projectId = ProjectId.make("project:creator-delete");
+    const survivorProjectId = ProjectId.make("project:ordinary-survivors");
+    const creatorId = ThreadId.make("thread:deleted-creator");
+    const ordinaryId = ThreadId.make("thread:ongoing-ordinary");
+    const archivedId = ThreadId.make("thread:archived-ordinary");
+    const commandId = CommandId.make("command:delete-creator-project");
+    yield* seedProject(projectId);
+    yield* seedProject(survivorProjectId);
+    yield* TestClock.setTime(Date.parse("2026-09-04T12:00:00.000Z"));
+    yield* Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const eventStore = yield* EventStore.EventStoreV2;
+      const service = yield* ProjectService.make;
+      const now = yield* DateTime.now;
+      const runId = RunId.make("run:ongoing-ordinary");
+      const nodeId = NodeId.make("node:ordinary-user-input");
+      const requestId = RuntimeRequestId.make("request:ordinary-user-input");
+      const continuationCommand = CommandId.make("command:ordinary-continuation");
+      yield* sink.writeWithEffects({
+        commandId: continuationCommand,
+        events: [
+          nativeThreadCreated(projectId, creatorId),
+          creatorGroupedThreadCreated(survivorProjectId, ordinaryId, creatorId, {
+            persistent: true,
+            pinnedAt: now,
+            pinOrderKey: "a0",
+            activeOrderKey: "a1",
+          }),
+          creatorGroupedThreadCreated(survivorProjectId, archivedId, creatorId, {
+            archivedAt: now,
+            archivedWith: {
+              threadId: archivedId,
+              commandId: CommandId.make("command:ordinary-own-archive"),
+            },
+          }),
+          {
+            id: EventId.make("event:ordinary-run"),
+            type: "run.updated",
+            threadId: ordinaryId,
+            runId,
+            occurredAt: now,
+            payload: {
+              id: runId,
+              threadId: ordinaryId,
+              ordinal: 1,
+              providerInstanceId: ProviderInstanceId.make("codex"),
+              modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "model" },
+              providerThreadId: null,
+              userMessageId: MessageId.make("message:ordinary-user"),
+              rootNodeId: null,
+              activeAttemptId: null,
+              status: "running",
+              requestedAt: now,
+              startedAt: now,
+              completedAt: null,
+              checkpointId: null,
+              contextHandoffId: null,
+            },
+          },
+          {
+            id: EventId.make("event:ordinary-user-input-node"),
+            type: "node.updated",
+            threadId: ordinaryId,
+            nodeId,
+            occurredAt: now,
+            payload: {
+              id: nodeId,
+              threadId: ordinaryId,
+              runId: null,
+              parentNodeId: null,
+              rootNodeId: nodeId,
+              kind: "user_input_request",
+              status: "waiting",
+              countsForRun: false,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: null,
+              runtimeRequestId: requestId,
+              checkpointScopeId: null,
+              startedAt: now,
+              completedAt: null,
+            },
+          },
+          {
+            id: EventId.make("event:ordinary-user-input-request"),
+            type: "runtime-request.updated",
+            threadId: ordinaryId,
+            nodeId,
+            occurredAt: now,
+            payload: {
+              id: requestId,
+              nodeId,
+              providerTurnId: null,
+              nativeRequestRef: null,
+              kind: "user_input",
+              status: "pending",
+              responseCapability: { type: "message" },
+              createdAt: now,
+              resolvedAt: null,
+            },
+          },
+        ],
+        effects: [
+          {
+            id: "effect:ordinary-continuation",
+            commandId: continuationCommand,
+            threadId: ordinaryId,
+            request: { type: "provider-runtime.continue", sourceRunId: runId },
+          },
+        ],
+      });
+      const originals = yield* Effect.forEach([ordinaryId, archivedId], (id) =>
+        projections.getThreadProjection(id),
+      );
+      const readSurvivorEffects = sql<{
+        readonly effect_id: string;
+        readonly status: string;
+        readonly effect_type: string;
+      }>`
+        SELECT effect_id, status, effect_type FROM orchestration_v2_effect_outbox
+        WHERE thread_id IN (${ordinaryId}, ${archivedId})
+        ORDER BY effect_id
+      `;
+      const effectsBefore = yield* readSurvivorEffects;
+      const deleted = yield* service.delete({ commandId, projectId, force: true });
+      assert.isNotNull(deleted.deletedAt);
+      for (const original of originals) {
+        const released = yield* projections.getThreadProjection(original.thread.id);
+        assert.deepEqual(released, {
+          ...original,
+          thread: {
+            ...original.thread,
+            creatorGrouping: "independent",
+            pinnedAt: null,
+            pinOrderKey: null,
+            activeOrderKey: null,
+            updatedAt: now,
+          },
+          updatedAt: now,
+        });
+      }
+      assert.deepEqual(yield* readSurvivorEffects, effectsBefore);
+      assert.isTrue(Option.isSome(yield* service.getById(survivorProjectId)));
+      const deletionCommand = `${commandId}:delete-thread:${creatorId}`;
+      const events = yield* sql<{ readonly stream_id: string; readonly event_type: string }>`
+        SELECT stream_id, event_type FROM orchestration_events
+        WHERE command_id = ${deletionCommand}
+        ORDER BY sequence
+      `;
+      assert.deepEqual(
+        events.map((event) => [event.stream_id, event.event_type]),
+        [
+          [creatorId, "thread.deleted"],
+          ...[ordinaryId, archivedId].toSorted().map((id) => [id, "thread.metadata-updated"]),
+        ],
+      );
+      const cleanup = yield* sql<{ readonly thread_id: string; readonly effect_type: string }>`
+        SELECT thread_id, effect_type FROM orchestration_v2_effect_outbox
+        WHERE command_id = ${deletionCommand}
+      `;
+      assert.deepEqual(cleanup, [{ thread_id: creatorId, effect_type: "terminal.cleanup" }]);
+      const beforeRetry = yield* eventStore.latestSequence();
+      const refused = yield* Ref.make<DispatchModeRefusal | undefined>(undefined);
+      assert.deepEqual(
+        yield* service.delete({ commandId, projectId, force: true }).pipe(
+          Effect.provideService(DispatchModeLimit, {
+            runtimeMode: "approval-required",
+            interactionMode: "plan",
+            refused,
+          }),
+        ),
+        deleted,
+      );
+      assert.isUndefined(yield* Ref.get(refused));
+      assert.equal(yield* eventStore.latestSequence(), beforeRetry);
+      assert.deepEqual(yield* readSurvivorEffects, effectsBefore);
+    }).pipe(Effect.provide(layerServices));
+  }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect.each(["runtime", "interaction"] as const)(
+  "checks the %s ceiling of actual creator-grouped release targets before deleting a project",
+  (mode) =>
+    Effect.gen(function* () {
+      const projectId = ProjectId.make(`project:limited-creator-delete:${mode}`);
+      const survivorProjectId = ProjectId.make(`project:limited-survivors:${mode}`);
+      const creatorId = ThreadId.make(`thread:limited-creator:${mode}`);
+      const ordinaryId = ThreadId.make(`thread:broader-ordinary:${mode}`);
+      const independentId = ThreadId.make(`thread:broader-independent:${mode}`);
+      const commandId = CommandId.make(`command:limited-project-delete:${mode}`);
+      yield* seedProject(projectId);
+      yield* seedProject(survivorProjectId);
+      yield* Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const eventStore = yield* EventStore.EventStoreV2;
+        const service = yield* ProjectService.make;
+        const creatorEvent = nativeThreadCreated(projectId, creatorId);
+        yield* sink.write({
+          events: [
+            {
+              ...creatorEvent,
+              payload: {
+                ...creatorEvent.payload,
+                runtimeMode: "approval-required",
+                interactionMode: "plan",
+              },
+            },
+            creatorGroupedThreadCreated(survivorProjectId, ordinaryId, creatorId, {
+              runtimeMode: mode === "runtime" ? "full-access" : "approval-required",
+              interactionMode: mode === "interaction" ? "default" : "plan",
+            }),
+            creatorGroupedThreadCreated(survivorProjectId, independentId, creatorId, {
+              creatorGrouping: "independent",
+              persistent: true,
+            }),
+          ],
+        });
+        const creatorBefore = yield* store.getThread(creatorId);
+        const ordinaryBefore = yield* store.getThread(ordinaryId);
+        const independentBefore = yield* store.getThread(independentId);
+        const sequenceBefore = yield* eventStore.latestSequence();
+        const refused = yield* Ref.make<DispatchModeRefusal | undefined>(undefined);
+        const limit = {
+          runtimeMode: "approval-required",
+          interactionMode: "plan",
+          refused,
+        } as const;
+        const failure = yield* service
+          .delete({ commandId, projectId, force: true })
+          .pipe(Effect.provideService(DispatchModeLimit, limit), Effect.flip);
+        assert.equal(failure._tag, "ProjectOperationError");
+        assert.deepEqual(yield* Ref.get(refused), {
+          threadId: ordinaryId,
+          mode,
+          runtimeMode: ordinaryBefore.runtimeMode,
+          interactionMode: ordinaryBefore.interactionMode,
+        });
+        assert.equal(yield* eventStore.latestSequence(), sequenceBefore);
+        assert.deepEqual(yield* store.getThread(creatorId), creatorBefore);
+        assert.deepEqual(yield* store.getThread(ordinaryId), ordinaryBefore);
+        assert.deepEqual(yield* store.getThread(independentId), independentBefore);
+        assert.isTrue(Option.isSome(yield* service.getById(projectId)));
+        const independentOrdinary = { ...ordinaryBefore, creatorGrouping: "independent" as const };
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make(`event:detach-broader-ordinary:${mode}`),
+              type: "thread.metadata-updated",
+              threadId: ordinaryId,
+              occurredAt: yield* DateTime.now,
+              payload: independentOrdinary,
+            },
+          ],
+        });
+        yield* Ref.set(refused, undefined);
+        const deleted = yield* service
+          .delete({ commandId, projectId, force: true })
+          .pipe(Effect.provideService(DispatchModeLimit, limit));
+        assert.isNotNull(deleted.deletedAt);
+        assert.isUndefined(yield* Ref.get(refused));
+        assert.deepEqual(yield* store.getThread(ordinaryId), independentOrdinary);
+        assert.deepEqual(yield* store.getThread(independentId), independentBefore);
+      }).pipe(Effect.provide(layerServices));
+    }).pipe(Effect.provide(layerDatabase)),
 );
 
 it.effect(
@@ -473,6 +809,7 @@ it.effect("deletes a project without force once its imported threads were delete
           "runtimeRequests",
           "subagents",
           "providerSessions",
+          "providerThreads",
         ]),
         attachmentIds: [],
         now,
