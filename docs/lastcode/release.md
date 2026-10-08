@@ -600,6 +600,13 @@ and user-input responses remain available so current work can settle.
 
 Drain status reports only current execution blockers: starting or running
 thread work, background agent work, and starting terminals or terminals with a
-running subprocess. When that list is empty, the activation claim is committed
-under the same server-lifetime admission lock. The claim survives a server
-restart and keeps admission closed for the future activation helper.
+running subprocess. It also reports `provider-runtime` for native turns or
+background work still running, or provider sessions still stopping, and
+`provider-teardown` while a thread's archive teardown is stopping. Activation
+remains blocked until the underlying work or teardown settles, even if the
+thread run is already cancelled or an archive-failure banner is dismissed.
+Idle resident provider sessions do not block activation.
+
+When that list is empty, the activation claim is committed under the same
+server-lifetime admission lock. The claim survives a server restart and keeps
+admission closed for the future activation helper.
