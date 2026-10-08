@@ -11,6 +11,7 @@ import {
   ThreadId,
   TurnItemId,
   TextGenerationError,
+  type ServerProvider,
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as DateTime from "effect/DateTime";
@@ -18,6 +19,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import type { ProviderInstance } from "../provider/ProviderDriver.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
@@ -55,7 +57,7 @@ function makeHarness(
     getCapabilities: () => Effect.succeed(CodexProviderCapabilitiesV2),
     planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" as const }),
     openSession: () => Effect.die("Provider turns are disabled in incoming preview tests"),
-  } as ProviderAdapterV2Shape;
+  } satisfies ProviderAdapterV2Shape;
   const orchestrator = ProviderReplayHarness.layerWithRegistry(
     { name: "incoming-message-preview" },
     ProviderAdapterRegistry.layerFromAdapters([adapter]),
@@ -67,24 +69,50 @@ function makeHarness(
     options.generate ??
       (() => Effect.succeed({ text: "Review build changes; preserve release workflow" })),
   );
+  const textGeneration = TextGeneration.TextGeneration.of({
+    generateIncomingMessageSummary: generate,
+    generateCommitMessage: () => Effect.die("Commit messages are not used in preview tests"),
+    generatePrContent: () => Effect.die("PR content is not used in preview tests"),
+    generateBranchName: () => Effect.die("Branch names are not used in preview tests"),
+    generateThreadTitle: () => Effect.die("Thread titles are not used in preview tests"),
+  });
+  const snapshot = {
+    instanceId: modelSelection.instanceId,
+    driver: adapter.driver,
+    enabled: true,
+    installed: true,
+    version: "1.0.0",
+    status: "ready",
+    auth: { status: "authenticated" },
+    checkedAt: "2026-10-01T00:00:00.000Z",
+    models: [{ slug: "gpt-6-luna", name: "GPT Luna", isCustom: false, capabilities: null }],
+    slashCommands: [],
+    skills: [],
+  } satisfies ServerProvider;
   const instance = {
     instanceId: modelSelection.instanceId,
-    driverKind: "codex",
+    driverKind: adapter.driver,
+    continuationIdentity: {
+      driverKind: adapter.driver,
+      continuationKey: `codex:instance:${modelSelection.instanceId}`,
+    },
+    displayName: undefined,
     enabled: true,
     snapshot: {
-      getSnapshot: Effect.succeed({
-        installed: true,
-        status: "ready",
-        auth: { status: "authenticated" },
-        models: [{ slug: "gpt-6-luna", isCustom: false }],
-      }),
+      resolveMaintenance: () => Effect.die("Provider maintenance is not used in preview tests"),
+      getSnapshot: Effect.succeed(snapshot),
+      refresh: Effect.succeed(snapshot),
+      streamChanges: Stream.empty,
+      applyUsageLimits: () => Effect.void,
     },
-  } as ProviderInstance;
+    orchestrationAdapter: adapter,
+    textGeneration,
+  } satisfies ProviderInstance;
   const summary = IncomingMessageSummary.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
         threads,
-        Layer.mock(TextGeneration.TextGeneration)({ generateIncomingMessageSummary: generate }),
+        Layer.succeed(TextGeneration.TextGeneration, textGeneration),
         Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)({
           listInstances: Effect.succeed(options.available === false ? [] : [instance]),
         }),
@@ -200,7 +228,7 @@ describe("IncomingMessageSummaryService", () => {
         assert.equal(child.messages.length, 1);
         assert.equal(message.text, task);
         assert.equal(item?.type === "user_message" ? item.text : undefined, task);
-        const expectedPending = expectedCalls === 1 ? { status: "pending" } : undefined;
+        const expectedPending = expectedCalls === 1 ? { status: "pending" as const } : undefined;
         assert.deepEqual(message.incomingSummary, expectedPending);
         assert.deepEqual(
           item?.type === "user_message" ? item.incomingSummary : undefined,
@@ -238,7 +266,7 @@ describe("IncomingMessageSummaryService", () => {
         const completedItem = completed.turnItems.find((item) => item.type === "user_message");
         const expectedSummary =
           expectedCalls === 1
-            ? { status: "ready", text: "Review build changes; preserve release workflow" }
+            ? { status: "ready" as const, text: "Review build changes; preserve release workflow" }
             : undefined;
         assert.deepEqual(completed.messages[0]?.incomingSummary, expectedSummary);
         assert.deepEqual(
@@ -366,6 +394,9 @@ describe("IncomingMessageSummaryService", () => {
           ordinal: 1,
           now,
         });
+        if (artifacts.turnItem.type !== "user_message") {
+          return yield* Effect.die("Expected a user message timeline fixture");
+        }
         const planned = yield* planIncomingMessageSummaries({
           commandId,
           events: [
@@ -485,7 +516,7 @@ describe("IncomingMessageSummaryService", () => {
         yield* service.execute({ threadId, messageId, attemptCount: 1 });
         const after = yield* threads.getThreadProjection(threadId);
         const expected = {
-          status: "ready",
+          status: "ready" as const,
           text: "Review build changes; preserve release workflow",
         };
         assert.deepEqual(after.messages[0]?.incomingSummary, expected);

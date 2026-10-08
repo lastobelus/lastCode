@@ -9,7 +9,7 @@ export function resolveUserMessagePresentation(message: {
   readonly role: string;
   readonly text: string;
   readonly createdBy?: OrchestrationV2Actor;
-  readonly scheduledTaskId?: ScheduledTaskId;
+  readonly scheduledTaskId?: ScheduledTaskId | undefined;
   readonly notification?: unknown;
 }) {
   if (message.role !== "user") {
