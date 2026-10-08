@@ -17,6 +17,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as UpdateDrainRepository from "../persistence/UpdateDrainRepository.ts";
@@ -65,6 +66,8 @@ const makeHarness = Effect.gen(function* () {
   const database = SqlitePersistence.layerMemory;
   const projections = ProjectionStore.layer.pipe(Layer.provide(database));
   const archiveRequested = yield* Deferred.make<void>();
+  const admissionRequests = yield* Queue.unbounded<void>();
+  const drainRequests = yield* Queue.unbounded<void>();
   const control = { archiveGate: null as Gate | null, snapshotGate: null as Gate | null };
   const admissionLayer = Layer.effect(
     UpdateDrainAdmission.UpdateDrainAdmission,
@@ -91,9 +94,13 @@ const makeHarness = Effect.gen(function* () {
       );
       return UpdateDrainAdmission.UpdateDrainAdmission.of({
         ...admission,
+        dispatch: (command) =>
+          Queue.offer(drainRequests, undefined).pipe(Effect.andThen(admission.dispatch(command))),
         admit: (kind, effect) =>
           (kind === "thread-archive" || kind === "thread-delete"
-            ? Deferred.succeed(archiveRequested, undefined)
+            ? Deferred.succeed(archiveRequested, undefined).pipe(
+                Effect.andThen(Queue.offer(admissionRequests, undefined)),
+              )
             : Effect.void
           ).pipe(
             Effect.andThen(
@@ -147,6 +154,8 @@ const makeHarness = Effect.gen(function* () {
   return {
     control,
     archiveRequested,
+    admissionRequests,
+    drainRequests,
     layer: Layer.mergeAll(
       replay,
       admissionLayer,
@@ -668,6 +677,129 @@ it.effect("allows activation with failed worktree history and refuses a fresh re
       assert.isEmpty((yield* admission.status).blockers);
       yield* admission.claimActivation({ requestId });
       assert.equal((yield* orchestrator.dispatch(retry).pipe(Effect.result))._tag, "Failure");
+    }).pipe(Effect.provide(harness.layer));
+  }),
+);
+
+it.effect.each(["archive", "delete"] as const)(
+  "replays a duplicate %s queued behind its commit and a closing drain",
+  (kind) =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness;
+      const gate = yield* makeGate;
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        yield* seedFamily;
+        const command = teardownCommand(kind);
+        harness.control.archiveGate = gate;
+        const original = yield* orchestrator.dispatch(command).pipe(Effect.forkChild);
+        yield* Deferred.await(gate.entered);
+        yield* Queue.take(harness.admissionRequests);
+        const draining = yield* startDrain.pipe(Effect.forkChild);
+        yield* Queue.take(harness.drainRequests);
+        const duplicate = yield* orchestrator.dispatch(command).pipe(Effect.forkChild);
+        yield* Queue.take(harness.admissionRequests);
+        yield* Deferred.succeed(gate.release, undefined);
+        const accepted = yield* Fiber.join(original);
+        yield* Fiber.join(draining);
+        const replayed = yield* Fiber.join(duplicate);
+        assert.equal(replayed.sequence, accepted.sequence);
+        assert.deepEqual(
+          replayed.storedEvents.map((stored) => [stored.sequence, stored.event.id]),
+          accepted.storedEvents.map((stored) => [stored.sequence, stored.event.id]),
+        );
+        assert.equal((yield* orchestrator.getShellSnapshot()).snapshotSequence, accepted.sequence);
+        const effects = yield* outbox.listByCommandId(command.commandId);
+        assert.equal(new Set(effects.map((effect) => effect.id)).size, effects.length);
+        const conflict = { ...command, threadId: childId };
+        assert.equal(
+          (yield* orchestrator.dispatch(conflict).pipe(Effect.flip))._tag,
+          "OrchestratorCommandIdConflictError",
+        );
+      }).pipe(
+        Effect.ensuring(Deferred.succeed(gate.release, undefined)),
+        Effect.provide(harness.layer),
+      );
+    }),
+);
+
+it.effect("refuses an accepted workspace cleanup after claim when it would detach a provider", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeHarness;
+    yield* Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const admission = yield* UpdateDrainAdmission.UpdateDrainAdmission;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const receipts = yield* CommandReceipts.CommandReceiptStoreV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const sink = yield* EventSink.EventSinkV2;
+      yield* seedFamily;
+      const binding = {
+        type: "thread.metadata.update" as const,
+        commandId: CommandId.make("workspace:binding"),
+        threadId,
+        worktreePath: "/worktree",
+        branch: "feature",
+      };
+      const acceptedBinding = yield* orchestrator.dispatch(binding);
+      for (const _effect of yield* outbox.listByCommandId(binding.commandId)) {
+        const next = Option.getOrThrow(
+          yield* outbox.claimNext({ workerId: "workspace-cleanup", leaseDurationMs: 60000 }),
+        );
+        yield* outbox.succeed({ effectId: next.id, workerId: "workspace-cleanup" });
+      }
+      const { providerThreads } = yield* projections.getThreadRecords(threadId, [
+        "providerThreads",
+      ]);
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("workspace:idle-provider-rebound"),
+            type: "provider-thread.updated",
+            threadId,
+            occurredAt: yield* DateTime.now,
+            payload: { ...providerThreads[0]!, status: "idle" },
+          },
+          {
+            id: EventId.make("workspace:idle-session-attached"),
+            type: "provider-session.attached",
+            threadId,
+            occurredAt: yield* DateTime.now,
+            payload: {
+              id: providerThreads[0]!.providerSessionId,
+              driver: ProviderDriverKind.make("codex"),
+              providerInstanceId: instanceId,
+              status: "ready",
+              cwd: "/worktree",
+              model: modelSelection.model,
+              capabilities: CodexProviderCapabilitiesV2,
+              createdAt: yield* DateTime.now,
+              updatedAt: yield* DateTime.now,
+              lastError: null,
+            },
+          },
+        ],
+      });
+      yield* startDrain;
+      yield* admission.claimActivation({ requestId });
+      const completion = {
+        type: "thread.workspace.complete" as const,
+        commandId: CommandId.make("workspace:late-cleanup"),
+        requestId: CommandId.make("archive-update:create"),
+        threadId,
+        runId: null,
+        expectedWorktreePath: "/worktree",
+        worktreePath: null,
+        branch: null,
+      };
+      assert.equal((yield* orchestrator.dispatch(completion).pipe(Effect.result))._tag, "Failure");
+      assert.equal((yield* projections.getThread(threadId)).worktreePath, "/worktree");
+      assert.isTrue(Option.isNone(yield* receipts.getByCommandId(completion.commandId)));
+      assert.deepEqual(yield* outbox.listByCommandId(completion.commandId), []);
+      assert.equal((yield* admission.status).intent?.status, "claimed");
+      // A normal replay retains its existing receipt after claim.
+      assert.equal((yield* orchestrator.dispatch(binding)).sequence, acceptedBinding.sequence);
     }).pipe(Effect.provide(harness.layer));
   }),
 );
