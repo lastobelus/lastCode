@@ -1620,7 +1620,11 @@ export const createCodexAdapterV2 = (
     return makeCodexAdapterV2({
       instanceId,
       settings,
-      environment: mergeProviderInstanceEnvironment(environment, hostEnvironment),
+      environment: mergeProviderInstanceEnvironment(
+        environment,
+        hostEnvironment,
+        serverConfig.settingsPath,
+      ),
       clientFactory,
       crypto,
       fileSystem,
@@ -1656,7 +1660,11 @@ const layer: Layer.Layer<
     return makeCodexAdapterV2({
       instanceId: CODEX_DEFAULT_INSTANCE_ID,
       settings: DEFAULT_CODEX_SETTINGS,
-      environment: hostEnvironment,
+      environment: mergeProviderInstanceEnvironment(
+        undefined,
+        hostEnvironment,
+        serverConfig.settingsPath,
+      ),
       clientFactory,
       crypto,
       fileSystem,
@@ -1724,7 +1732,11 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
           providerSessionId: input.providerSessionId,
           runtimePolicy: input.runtimePolicy,
           settings: resolvedRuntime?.config ?? adapterOptions.settings,
-          environment: resolvedRuntime?.environment ?? adapterOptions.environment,
+          environment: mergeProviderInstanceEnvironment(
+            undefined,
+            resolvedRuntime?.environment ?? adapterOptions.environment,
+            serverConfig.settingsPath,
+          ),
         });
         const additionalContextByThread = yield* Ref.make(
           new Map<
