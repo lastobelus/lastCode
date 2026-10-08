@@ -67,6 +67,13 @@ export const DesktopBrowserEvent = Schema.Union([
   }),
   Schema.Struct({ type: Schema.Literal("popupClosed"), ...TabKey, popupId: TrimmedNonEmptyString }),
   Schema.Struct({
+    type: Schema.Literal("popupPresence"),
+    ...TabKey,
+    popupId: TrimmedNonEmptyString,
+    requestId: TrimmedNonEmptyString,
+    present: Schema.Boolean,
+  }),
+  Schema.Struct({
     type: Schema.Literal("popupCloseCanceled"),
     ...TabKey,
     popupId: TrimmedNonEmptyString,
@@ -109,6 +116,13 @@ export type DesktopBrowserEvent = typeof DesktopBrowserEvent.Type;
 
 /** Server -> desktop. */
 export const DesktopBrowserCommand = Schema.Union([
+  /** Checks one existing native identity without changing or closing its window. */
+  Schema.Struct({
+    type: Schema.Literal("probePopup"),
+    ...TabKey,
+    popupId: TrimmedNonEmptyString,
+    requestId: TrimmedNonEmptyString,
+  }),
   /** Bind the existing child window; never create another page for it. */
   Schema.Struct({
     type: Schema.Literal("bindPopup"),

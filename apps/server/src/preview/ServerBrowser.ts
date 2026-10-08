@@ -479,6 +479,19 @@ const make = Effect.gen(function* () {
     [...nativePopups.values()].find(
       (popup) => popup.snapshot?.threadId === threadId && popup.snapshot.tabId === tabId,
     );
+  const confirmNativePopupClosed = (id: string, popup = nativePopups.get(id)) =>
+    Effect.gen(function* () {
+      if (!popup || nativePopups.get(id) !== popup) return;
+      popup.closed = true;
+      nativePopups.delete(id);
+      if (popup.snapshot)
+        yield* manager
+          .nativeClosedConfirmed({
+            threadId: ThreadId.make(popup.snapshot.threadId),
+            tabId: popup.snapshot.tabId,
+          })
+          .pipe(Effect.ignore);
+    });
   /** Sessions the manager closed, so their tabs end for good. Pruned once dropped. */
   const closedSessions = new Set<string>();
   let hostConnectionId: string | null = null;
@@ -1265,6 +1278,8 @@ const make = Effect.gen(function* () {
                       const tab = popup.snapshot
                         ? tabs.get(tabKey(popup.snapshot.threadId, popup.snapshot.tabId))
                         : undefined;
+                      // @effect-diagnostics-next-line globalDateInEffect:off -- Idle cutoff and page activity share this imperative Date.now clock domain.
+                      if (tab) tab.usedAt = Date.now();
                       if (tab?.dialog?.type() === "beforeunload") {
                         tab.dialog = null;
                         broadcastControl(tab);
@@ -2936,18 +2951,26 @@ const make = Effect.gen(function* () {
     Stream.runForEach((desktopHostId) =>
       Effect.forEach(
         [...nativePopups.values()].filter(
-          (popup) =>
-            popup.closeRequested && (popup.source.desktopHostId ?? "local") === desktopHostId,
+          (popup) => (popup.source.desktopHostId ?? "local") === desktopHostId,
         ),
         (popup) =>
-          popup.snapshot
-            ? manager
-                .close({
-                  threadId: ThreadId.make(popup.snapshot.threadId),
-                  tabId: popup.snapshot.tabId,
-                })
-                .pipe(Effect.ignore)
-            : desktopChannel.closePopup(popup.source, popup.popupId).pipe(Effect.ignore),
+          Effect.gen(function* () {
+            const id = popupKey(popup.source, popup.popupId);
+            const presence = yield* desktopChannel
+              .probePopup(popup.source, popup.popupId)
+              .pipe(Effect.option);
+            if (nativePopups.get(id) !== popup || Option.isNone(presence)) return;
+            if (!presence.value) return yield* confirmNativePopupClosed(id, popup);
+            if (!popup.closeRequested) return;
+            yield* popup.snapshot
+              ? manager
+                  .close({
+                    threadId: ThreadId.make(popup.snapshot.threadId),
+                    tabId: popup.snapshot.tabId,
+                  })
+                  .pipe(Effect.ignore)
+              : desktopChannel.closePopup(popup.source, popup.popupId).pipe(Effect.ignore);
+          }),
         { discard: true },
       ),
     ),
@@ -2958,21 +2981,7 @@ const make = Effect.gen(function* () {
     Effect.forkScoped,
   );
   yield* desktopChannel.closedPopups.pipe(
-    Stream.runForEach((event) =>
-      Effect.gen(function* () {
-        const popup = nativePopups.get(popupKey(event, event.popupId));
-        if (!popup) return;
-        popup.closed = true;
-        nativePopups.delete(popupKey(event, event.popupId));
-        if (popup.snapshot)
-          yield* manager
-            .nativeClosedConfirmed({
-              threadId: ThreadId.make(popup.snapshot.threadId),
-              tabId: popup.snapshot.tabId,
-            })
-            .pipe(Effect.ignore);
-      }),
-    ),
+    Stream.runForEach((event) => confirmNativePopupClosed(popupKey(event, event.popupId))),
     Effect.forkScoped,
   );
   // Whoever runs the server learns the fix before anyone opens a tab.

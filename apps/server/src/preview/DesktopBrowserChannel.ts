@@ -101,6 +101,11 @@ export class DesktopBrowserChannel extends Context.Service<
       DesktopTabKey & { readonly popupId: string; readonly url: string }
     >;
     readonly closedPopups: Stream.Stream<DesktopTabKey & { readonly popupId: string }>;
+    /** Checks the native registry without changing the window or requiring its announcement. */
+    readonly probePopup: (
+      key: DesktopTabKey,
+      popupId: string,
+    ) => Effect.Effect<boolean, DesktopBrowserTransportError>;
     readonly bindPopup: (
       key: DesktopTabKey,
       input: { readonly popupId: string; readonly openerTabId: string },
@@ -159,6 +164,14 @@ const make = Effect.gen(function* () {
   // Native vetoes survive a dropped connection. A transport retry is the same close attempt.
   const popupCloseAttempts = new Map<string, string>();
   const canceledPopupCloses = new Set<string>();
+  const popupProbeRequests = new Map<
+    string,
+    {
+      readonly key: DesktopTabKey;
+      readonly popupId: string;
+      readonly deferred: Deferred.Deferred<boolean, DesktopBrowserTransportError>;
+    }
+  >();
   const popupCloseRequests = new Map<
     string,
     {
@@ -255,6 +268,25 @@ const make = Effect.gen(function* () {
       ).pipe(Effect.asVoid);
     }
     switch (event.type) {
+      case "popupPresence": {
+        const pending = popupProbeRequests.get(event.requestId);
+        if (!pending || keyOf(pending.key) !== id || pending.popupId !== event.popupId)
+          return Effect.void;
+        popupProbeRequests.delete(event.requestId);
+        if (!event.present) {
+          const popupKey = popupIdOf(key, event.popupId);
+          popupCloseAttempts.delete(popupKey);
+          canceledPopupCloses.delete(popupKey);
+          popupAnnouncements.delete(popupKey);
+          const closing = popupCloseRequests.get(popupKey);
+          popupCloseRequests.delete(popupKey);
+          return (closing ? Deferred.succeed(closing.deferred, undefined) : Effect.void).pipe(
+            Effect.andThen(Deferred.succeed(pending.deferred, false)),
+            Effect.asVoid,
+          );
+        }
+        return Deferred.succeed(pending.deferred, true).pipe(Effect.asVoid);
+      }
       case "popupCreated": {
         // A bound child outlives its source window and may re-announce on reconnect.
         if (
@@ -391,6 +423,14 @@ const make = Effect.gen(function* () {
 
   const releaseHost = (desktopHostId: string) =>
     Effect.gen(function* () {
+      for (const [requestId, pending] of popupProbeRequests)
+        if (pending.key.desktopHostId === desktopHostId) {
+          popupProbeRequests.delete(requestId);
+          yield* Deferred.fail(
+            pending.deferred,
+            new DesktopBrowserTransportError({ reason: "host-unavailable" }),
+          );
+        }
       for (const [id, pending] of popupCloseRequests)
         if (pending.key.desktopHostId === desktopHostId) {
           // A replacement connection must never join its predecessor's failed acknowledgment.
@@ -576,6 +616,27 @@ const make = Effect.gen(function* () {
       }),
     ),
     closedPopups: Stream.fromPubSub(closedPopups),
+    probePopup: (key, popupId) =>
+      Effect.gen(function* () {
+        const desktopHostId = key.desktopHostId ?? "local";
+        if (desktopHostId === "local" ? !localAvailable : !hosts.has(desktopHostId))
+          return yield* new DesktopBrowserTransportError({ reason: "host-unavailable" });
+        const requestId = NodeCrypto.randomUUID();
+        const deferred = yield* Deferred.make<boolean, DesktopBrowserTransportError>();
+        popupProbeRequests.set(requestId, { key, popupId, deferred });
+        return yield* command(
+          { type: "probePopup", threadId: key.threadId, tabId: key.tabId, popupId, requestId },
+          desktopHostId,
+        ).pipe(
+          Effect.andThen(Deferred.await(deferred)),
+          Effect.timeoutOrElse({
+            duration: "5 seconds",
+            orElse: () =>
+              Effect.fail(new DesktopBrowserTransportError({ reason: "host-unavailable" })),
+          }),
+          Effect.ensuring(Effect.sync(() => popupProbeRequests.delete(requestId))),
+        );
+      }),
     bindPopup: (key, input) =>
       Effect.suspend(() =>
         popupAnnouncements.has(popupIdOf({ ...key, tabId: input.openerTabId }, input.popupId))

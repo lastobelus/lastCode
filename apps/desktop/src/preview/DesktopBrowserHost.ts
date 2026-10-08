@@ -759,6 +759,27 @@ export const make = Effect.gen(function* () {
           Effect.asVoid,
         );
       }
+      if (command.type === "probePopup") {
+        const popup = popups.get(command.popupId);
+        const source = { threadId: command.threadId, tabId: command.tabId, desktopHostId };
+        if (popup && keyOf(popup.source) !== keyOf(source)) return Effect.void;
+        emit(
+          {
+            type: "popupPresence",
+            threadId: command.threadId,
+            tabId: command.tabId,
+            popupId: command.popupId,
+            requestId: command.requestId,
+            present:
+              popup !== undefined &&
+              !popup.window.isDestroyed() &&
+              !popup.contents.isDestroyed() &&
+              popup.contents.debugger.isAttached(),
+          },
+          desktopHostId,
+        );
+        return Effect.void;
+      }
       if (command.type === "bindPopup" || command.type === "closePopup") {
         const popup = popups.get(command.popupId);
         const source = {

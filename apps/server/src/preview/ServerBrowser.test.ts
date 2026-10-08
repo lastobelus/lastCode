@@ -220,6 +220,12 @@ let desktopPopupHostConnected = true;
 let nativePopupCloseFailure: "close-canceled" | null = null;
 let nativeCloseChannel: DesktopChannel.DesktopBrowserChannel["Service"] | null = null;
 let nativeCloseRejected: PromiseWithResolvers<void> | null = null;
+const nativePopupPresence = new Map<string, boolean>();
+let nativePopupProbeUnavailable = false;
+let nativePopupProbeEntered: PromiseWithResolvers<void> | null = null;
+let nativePopupProbeGate: PromiseWithResolvers<void> | null = null;
+let nativePopupProbeProcessed: PromiseWithResolvers<void> | null = null;
+const nativePopupProbes: Array<DesktopChannel.DesktopTabKey & { popupId: string }> = [];
 let nativeCloseProcessed: PromiseWithResolvers<void> | null = null;
 let nativeNavigationReported: {
   status: "Success" | "Loading" | "LoadFailed";
@@ -318,6 +324,23 @@ const dependencies = Layer.mergeAll(
     closedPopups: nativePopupEvents<DesktopChannel.DesktopTabKey & { popupId: string }>(
       "closed",
     ).pipe(Stream.tap(() => Effect.sync(() => nativePopupClosedSeen?.resolve()))),
+    probePopup: (key, popupId) =>
+      Effect.suspend(() => {
+        nativePopupProbes.push({ ...key, popupId });
+        if (nativeCloseChannel) return nativeCloseChannel.probePopup(key, popupId);
+        return Effect.promise(async () => {
+          nativePopupProbeEntered?.resolve();
+          await nativePopupProbeGate?.promise;
+          return nativePopupPresence.get(popupId) ?? true;
+        }).pipe(
+          Effect.flatMap((present) =>
+            nativePopupProbeUnavailable
+              ? Effect.fail(new DesktopBrowserTransportError({ reason: "host-unavailable" }))
+              : Effect.succeed(present),
+          ),
+          Effect.ensuring(Effect.sync(() => nativePopupProbeProcessed?.resolve())),
+        );
+      }),
     bindPopup: (key, input) =>
       Effect.sync(() => {
         popupBindings.push({ ...key, ...input });
@@ -479,6 +502,12 @@ beforeEach(() => {
   nativePopupCloseFailure = null;
   nativeCloseChannel = null;
   nativeCloseRejected = null;
+  nativePopupPresence.clear();
+  nativePopupProbeUnavailable = false;
+  nativePopupProbeEntered = null;
+  nativePopupProbeGate = null;
+  nativePopupProbeProcessed = null;
+  nativePopupProbes.length = 0;
   nativeCloseProcessed = null;
   nativeNavigationReported = null;
 });
@@ -1344,6 +1373,14 @@ it.live("a native veto lost offline clears pending close intent without replacin
       const reconnected = yield* connect("socket-b");
       nativeCloseRejected = Promise.withResolvers<void>();
       desktopPopupEvents.emit("host-connected", "host-a");
+      const probe = yield* Queue.take(reconnected.commands);
+      if (probe.type !== "probePopup") throw new Error("Expected native presence probe");
+      yield* channel.receiveEvent("socket-b", "host-a", {
+        type: "popupPresence",
+        ...source,
+        requestId: probe.requestId,
+        present: true,
+      });
       expect(yield* Queue.take(reconnected.commands)).toEqual(original);
       yield* channel.receiveEvent("socket-b", "host-a", {
         type: "popupCloseCanceled",
@@ -1400,6 +1437,98 @@ it.live("a native veto lost offline clears pending close intent without replacin
   ).pipe(Effect.provide(layer)),
 );
 
+it.live.each(["absent", "present", "unavailable"] as const)(
+  "reconnect reconciles a retained unannounced popup without closing other identities (%s)",
+  (presence) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        profileCatalogue = {
+          desktopHostId: "host-a",
+          profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+          defaultProfileId: "work",
+        };
+        desktopRendersNext = true;
+        const { broker, tabId } = yield* ready;
+        const manager = yield* Manager.PreviewManager;
+        const events = yield* manager.subscribeEvents;
+        const source = {
+          threadId: scope.thread.threadId,
+          tabId,
+          desktopHostId: "host-a",
+          popupId: "ordinary-offline-close",
+          url: "https://signin.example.test/",
+        };
+        desktopPopupEvents.emit("created", source);
+        const opened = Option.getOrThrow(
+          yield* Stream.fromSubscription(events).pipe(
+            Stream.filter((event) => event.type === "opened" && event.tabId !== tabId),
+            Stream.runHead,
+          ),
+        );
+        if (opened.type !== "opened") throw new Error("Expected native popup");
+        yield* broker.invoke<void>({
+          scope,
+          tabId: opened.tabId,
+          operation: "evaluate",
+          input: { expression: "ready()" },
+        });
+        // No close was requested. The native window may have disappeared offline without an event.
+        nativePopupPresence.set(source.popupId, presence !== "absent");
+        nativePopupProbeUnavailable = presence === "unavailable";
+        nativePopupProbeEntered = Promise.withResolvers<void>();
+        nativePopupProbeProcessed = Promise.withResolvers<void>();
+        nativePopupProbeGate = Promise.withResolvers<void>();
+        yield* Effect.addFinalizer(() => Effect.sync(() => nativePopupProbeGate?.resolve()));
+        desktopPopupEvents.emit("host-connected", "other-host");
+        desktopPopupEvents.emit("host-connected", "host-a");
+        yield* Effect.promise(() => nativePopupProbeEntered!.promise);
+        expect(nativePopupProbes).toEqual([
+          expect.objectContaining({
+            threadId: source.threadId,
+            tabId: source.tabId,
+            desktopHostId: source.desktopHostId,
+            popupId: source.popupId,
+          }),
+        ]);
+        // A distinct popup announced during this probe is outside its captured identity.
+        desktopPopupEvents.emit("created", { ...source, popupId: "new-during-probe" });
+        const fresh = Option.getOrThrow(
+          yield* Stream.fromSubscription(events).pipe(
+            Stream.filter(
+              (event) =>
+                event.type === "opened" && event.tabId !== tabId && event.tabId !== opened.tabId,
+            ),
+            Stream.runHead,
+          ),
+        );
+        if (fresh.type !== "opened") throw new Error("Expected newly announced popup");
+        yield* broker.invoke<void>({
+          scope,
+          tabId: fresh.tabId,
+          operation: "evaluate",
+          input: { expression: "ready()" },
+        });
+        nativeCloseProcessed = Promise.withResolvers<void>();
+        nativePopupProbeGate.resolve();
+        yield* Effect.promise(() =>
+          presence === "absent"
+            ? nativeCloseProcessed!.promise
+            : nativePopupProbeProcessed!.promise,
+        );
+        const sessions = (yield* manager.list({ threadId: scope.thread.threadId })).sessions;
+        expect(sessions.some((session) => session.tabId === opened.tabId)).toBe(
+          presence !== "absent",
+        );
+        expect(sessions.find((session) => session.tabId === fresh.tabId)).toMatchObject({
+          profileId: "work",
+          automationOwner: opened.snapshot.automationOwner,
+        });
+        expect(popupClosures).toEqual([]);
+        expect(nativePopupProbes).toHaveLength(1);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
 it.live("host reconnect resolves a pending popup close without a live popup announcement", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -1435,15 +1564,14 @@ it.live("host reconnect resolves a pending popup close without a live popup anno
       expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toHaveLength(2);
       // The window closed offline. Reconnect sends no popupCreated or attached child.
       desktopTabs.delete(event.tabId);
+      nativePopupPresence.set(source.popupId, false);
       desktopPopupHostConnected = true;
       nativeCloseProcessed = Promise.withResolvers<void>();
       desktopPopupEvents.emit("host-connected", "local");
       yield* Effect.promise(() => nativeCloseProcessed!.promise);
       expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toHaveLength(1);
       expect(popupBindings).toHaveLength(1);
-      expect(popupClosures).toEqual([
-        { threadId: scope.thread.threadId, tabId, popupId: source.popupId },
-      ]);
+      expect(popupClosures).toEqual([]);
     }),
   ).pipe(Effect.provide(layer)),
 );
@@ -1799,6 +1927,70 @@ it.live("control updates replace a stalled viewer backlog in the order they happ
       );
       expect(controls[0]).toBe("you");
       expect(controls.at(-1)).not.toBe("you");
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.effect("a native idle-close veto resets the deadline without blocking deliberate closure", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const initial = 1_000_000;
+      const clock = vi.spyOn(Date, "now").mockReturnValue(initial);
+      yield* Effect.addFinalizer(() => Effect.sync(() => clock.mockRestore()));
+      desktopRendersNext = true;
+      const { browser, broker, tabId } = yield* ready;
+      // Watching the opener leaves just the popup eligible for idle closure.
+      yield* browser.attachViewer(viewerInput(tabId, false));
+      const manager = yield* Manager.PreviewManager;
+      const events = yield* manager.subscribeEvents;
+      const source = {
+        threadId: scope.thread.threadId,
+        tabId,
+        desktopHostId: "local",
+        popupId: "idle-veto",
+        url: "https://signin.example.test/",
+      };
+      desktopPopupEvents.emit("created", source);
+      const popup = Option.getOrThrow(
+        yield* Stream.fromSubscription(events).pipe(
+          Stream.filter((event) => event.type === "opened" && event.tabId !== tabId),
+          Stream.runHead,
+        ),
+      );
+      yield* broker.invoke<void>({
+        scope,
+        tabId: popup.tabId,
+        operation: "evaluate",
+        input: { expression: "ready()" },
+      });
+      nativePopupCloseFailure = "close-canceled";
+      nativeCloseRejected = Promise.withResolvers<void>();
+      const expired = initial + 31 * 60_000;
+      clock.mockReturnValue(expired);
+      yield* TestClock.adjust("1 minute");
+      yield* Effect.promise(() => nativeCloseRejected!.promise);
+      expect(popupClosures).toHaveLength(1);
+      for (let minute = 1; minute <= 3; minute += 1) {
+        clock.mockReturnValue(expired + minute * 60_000);
+        yield* TestClock.adjust("1 minute");
+      }
+      expect(popupClosures).toHaveLength(1);
+      expect(
+        yield* broker.invoke({
+          scope,
+          tabId: popup.tabId,
+          operation: "evaluate",
+          input: { expression: "stillOpen()" },
+        }),
+      ).toBe("evaluated");
+      nativePopupCloseFailure = null;
+      yield* broker.invoke<void>({ scope, tabId: popup.tabId, operation: "close", input: {} });
+      expect(popupClosures).toHaveLength(2);
+      expect(
+        (yield* manager.list({ threadId: scope.thread.threadId })).sessions.some(
+          (session) => session.tabId === popup.tabId,
+        ),
+      ).toBe(false);
     }),
   ).pipe(Effect.provide(layer)),
 );
