@@ -305,6 +305,17 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const publishState = Effect.fn("ActionResume.publishState")(function* (state: ActionResumeState) {
+    yield* threads.dispatch({
+      type: "thread.metadata.update",
+      commandId: CommandId.make(
+        `server:action-resume:${state.runId}:${state.revision}:${state.outcome}:${state.delivery}`,
+      ),
+      threadId: state.threadId,
+      actionResume: state,
+    });
+  });
+
   const persistState = Effect.fn("ActionResume.persistState")(function* (
     input: ActionResumeState,
     outputTail?: string,
@@ -320,14 +331,7 @@ const make = Effect.gen(function* () {
     yield* runs.save(state, outputTail);
     registry.record(state);
     if (!publishShell) return state;
-    yield* threads.dispatch({
-      type: "thread.metadata.update",
-      commandId: CommandId.make(
-        `server:action-resume:${state.runId}:${state.revision}:${state.outcome}:${state.delivery}`,
-      ),
-      threadId: state.threadId,
-      actionResume: state,
-    });
+    yield* publishState(state);
     return state;
   });
 
@@ -468,7 +472,23 @@ const make = Effect.gen(function* () {
     threadId: ThreadId,
   ) {
     const state = registry.getLatest(threadId);
-    if (state === null || state.delivery !== "pending") return;
+    if (state === null) return;
+    if (state.delivery !== "pending") {
+      if (state.outcome === "running" || state.delivery === "armed") return;
+      // A restart settlement can reach the ledger before an archive refuses its
+      // shell update. Restore its controls after the hold without delivering it.
+      const shell = yield* threads.getThreadShell(threadId);
+      if (
+        shell !== null &&
+        shell.deletedAt === null &&
+        shell.archivedAt === null &&
+        shell.archivePending?.status !== "stopping" &&
+        (shell.actionResume?.runId !== state.runId ||
+          shell.actionResume.revision !== state.revision)
+      )
+        yield* publishState(state);
+      return;
+    }
     if (yield* deliveryAlreadyAccepted(state)) {
       yield* persistState({ ...state, delivery: "delivered" });
       outputCaptureByRunId.delete(state.runId);
