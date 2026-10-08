@@ -533,11 +533,40 @@ it.layer(NodeServices.layer)("project lookup with unavailable workspaces", (it) 
       const aliasProject = added.find((entry) => entry.workspaceRoot === aliasPath);
       assert.isDefined(aliasProject);
       assert.notEqual(aliasProject?.id, project.id);
-      yield* runCli(["project", "remove", `${aliasPath}${NodePath.sep}.`, "--base-dir", baseDir]);
-      assert.deepEqual(
-        (yield* readProjects(baseDir)).projects.map((entry) => entry.id),
-        [project.id],
+      yield* runCli([
+        "project",
+        "rename",
+        `${aliasPath}${NodePath.sep}.`,
+        "Normalized alias",
+        "--base-dir",
+        baseDir,
+      ]);
+      const beforeRemoval = yield* readProjects(baseDir);
+      assert.equal(
+        beforeRemoval.projects.find((entry) => entry.id === project.id)?.title,
+        "Normalized",
       );
+      assert.equal(
+        beforeRemoval.projects.find((entry) => entry.id === aliasProject?.id)?.title,
+        "Normalized alias",
+      );
+      const removal = runCli([
+        "project",
+        "remove",
+        `${aliasPath}${NodePath.sep}.`,
+        "--base-dir",
+        baseDir,
+      ]);
+      if ((yield* HostProcessPlatform) === "darwin") {
+        yield* removal;
+        assert.deepEqual(
+          (yield* readProjects(baseDir)).projects.map((entry) => entry.id),
+          [project.id],
+        );
+      } else {
+        assert.include((yield* removal.pipe(Effect.flip)).message, "exclusive server ownership");
+        assert.deepEqual(yield* readProjects(baseDir), beforeRemoval);
+      }
       assert.isTrue(NodeFS.existsSync(workspaceRoot));
     }),
   );
