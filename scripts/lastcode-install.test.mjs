@@ -8,6 +8,10 @@ import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import {
   acquireInstallLock,
+  appBundleIsInUse,
+  installDmgIfIdle,
+  prepareDmgInstall,
+  cleanupPreparedInstall,
   cleanLaunchEnvironment,
   discoverDmgs,
   installCommand,
@@ -45,6 +49,245 @@ function temporaryDirectory() {
 const itMacOnly = process.platform === "darwin" ? it : it.skip;
 
 describe("LastCode userland install command", () => {
+  function idleFixture() {
+    const root = temporaryDirectory();
+    const targetPath = NodePath.join(root, "LastCode.app");
+    const dmgPath = NodePath.join(root, "LastCode.dmg");
+    NodeFS.mkdirSync(targetPath);
+    NodeFS.writeFileSync(NodePath.join(targetPath, "version"), "old");
+    NodeFS.writeFileSync(dmgPath, "fixture dmg");
+    const commands = [];
+    let processReads = 0;
+    const state = { busyOnSecondRead: false, architecture: "x86_64", signature: "adhoc" };
+    const runCommand = (command, args) => {
+      commands.push(command);
+      if (command === "/bin/ps") {
+        processReads += 1;
+        return state.busyOnSecondRead && processReads === 2
+          ? `42 ${targetPath}/Contents/MacOS/LastCode`
+          : "1 /sbin/launchd";
+      }
+      if (command === "/usr/sbin/lsof") return "";
+      if (command === "hdiutil") {
+        if (args[0] === "attach") NodeFS.mkdirSync(NodePath.join(args[4], "LastCode.app"));
+        return "";
+      }
+      if (command === "ditto") {
+        NodeFS.cpSync(args[0], args[1], { recursive: true });
+        NodeFS.writeFileSync(NodePath.join(args[1], "version"), "new");
+        return "";
+      }
+      if (command === "/usr/libexec/PlistBuddy") {
+        if (args[1] === "Print:CFBundleIdentifier") return "codes.lastobelus.lastcode";
+        if (args[1] === "Print:CFBundleShortVersionString") return "1.2.3-nightly.1";
+        if (args[1] === "Print:CFBundleExecutable") return "LastCode";
+      }
+      if (command === "codesign") {
+        return args[0] === "-d" ? `Signature=${state.signature}\nTeamIdentifier=not set` : "";
+      }
+      if (command === "lipo") return state.architecture;
+      throw new Error(`Unexpected command ${command}`);
+    };
+    return {
+      targetPath,
+      dmgPath,
+      commands,
+      state,
+      options: {
+        targetPath,
+        lockDirectory: root,
+        runCommand,
+        allowNonDarwin: true,
+        expectedArchitecture: "x86_64",
+        signaturePolicy: "adhoc",
+        expectedVersion: "1.2.3-nightly.1",
+      },
+    };
+  }
+
+  it.each([
+    "/Contents/MacOS/LastCode",
+    "/Contents/Frameworks/LastCode Helper.app/Contents/MacOS/LastCode Helper",
+    "/Contents/Resources/server.asar/apps/server/dist/bin.mjs",
+  ])("detects a running bundle path: %s", (suffix) => {
+    expect(
+      appBundleIsInUse("/Applications/LastCode.app", {
+        runCommand: () => `42 /Applications/LastCode.app${suffix}`,
+      }),
+    ).toBe(true);
+  });
+
+  it("detects open bundle files and fails closed on inspection errors", () => {
+    const fixture = idleFixture();
+    expect(
+      appBundleIsInUse(fixture.targetPath, {
+        runCommand: (command) => (command === "/bin/ps" ? "1 /sbin/launchd" : "p42\nnfixture file"),
+      }),
+    ).toBe(true);
+    expect(() =>
+      appBundleIsInUse(fixture.targetPath, {
+        runCommand: () => {
+          throw new Error("inspection denied");
+        },
+      }),
+    ).toThrow("inspection denied");
+    expect(() => appBundleIsInUse(fixture.targetPath, { runCommand: () => "" })).toThrow(
+      "Could not inspect",
+    );
+  });
+
+  it("installs an idle fixture without quitting or launching", async () => {
+    const fixture = idleFixture();
+    await expect(installDmgIfIdle(fixture.dmgPath, fixture.options)).resolves.toEqual({
+      status: "installed",
+      version: "1.2.3-nightly.1",
+    });
+    expect(NodeFS.readFileSync(NodePath.join(fixture.targetPath, "version"), "utf8")).toBe("new");
+    expect(fixture.commands).not.toContain("open");
+    expect(fixture.commands).not.toContain("osascript");
+    expect(fixture.commands.filter((command) => command === "/bin/ps")).toHaveLength(2);
+  });
+
+  it("defers before preparing a busy bundle", async () => {
+    const fixture = idleFixture();
+    await expect(
+      installDmgIfIdle(fixture.dmgPath, {
+        ...fixture.options,
+        runCommand: () => `42 ${fixture.targetPath}/Contents/MacOS/LastCode`,
+      }),
+    ).resolves.toEqual({ status: "deferred", reason: "bundle-in-use" });
+    expect(fixture.commands).toEqual([]);
+    expect(NodeFS.readFileSync(NodePath.join(fixture.targetPath, "version"), "utf8")).toBe("old");
+  });
+
+  it("defers if the bundle becomes busy during preparation and releases the lock", async () => {
+    const fixture = idleFixture();
+    fixture.state.busyOnSecondRead = true;
+    await expect(installDmgIfIdle(fixture.dmgPath, fixture.options)).resolves.toEqual({
+      status: "deferred",
+      reason: "bundle-in-use",
+    });
+    expect(NodeFS.readFileSync(NodePath.join(fixture.targetPath, "version"), "utf8")).toBe("old");
+    const release = acquireInstallLock(fixture.options.lockDirectory);
+    release();
+    expect(NodeFS.existsSync(temporaryAppPaths(fixture.targetPath).staging)).toBe(false);
+  });
+
+  it("revalidates eligibility before the final inspection and leaves the old bundle on rejection", async () => {
+    const fixture = idleFixture();
+    await expect(
+      installDmgIfIdle(fixture.dmgPath, {
+        ...fixture.options,
+        beforeReplace: () => {
+          throw new Error("version ceiling lowered");
+        },
+      }),
+    ).rejects.toThrow("version ceiling lowered");
+    expect(fixture.commands.filter((command) => command === "/bin/ps")).toHaveLength(1);
+    expect(NodeFS.readFileSync(NodePath.join(fixture.targetPath, "version"), "utf8")).toBe("old");
+  });
+
+  it.each(["success", "busy", "inspection-error", "rename-error"])(
+    "holds and releases the eligibility lock across %s",
+    async (scenario) => {
+      const fixture = idleFixture();
+      let locked = false;
+      let releaseCount = 0;
+      let processReads = 0;
+      let prepared;
+      fixture.state.busyOnSecondRead = scenario === "busy";
+      const runCommand = (command, args, options) => {
+        if (command === "/bin/ps" && ++processReads === 2) {
+          expect(locked).toBe(true);
+          if (scenario === "inspection-error") throw new Error("inspection denied");
+        }
+        if (command === "/usr/sbin/lsof" && processReads === 2) expect(locked).toBe(true);
+        return fixture.options.runCommand(command, args, options);
+      };
+      const installation = installDmgIfIdle(fixture.dmgPath, {
+        ...fixture.options,
+        runCommand,
+        beforeReplace: (value) => {
+          prepared = value;
+          locked = true;
+          if (scenario === "rename-error") NodeFS.rmSync(prepared.staging, { recursive: true });
+          return () => {
+            expect(locked).toBe(true);
+            expect(NodeFS.readFileSync(NodePath.join(fixture.targetPath, "version"), "utf8")).toBe(
+              scenario === "success" ? "new" : "old",
+            );
+            expect(prepared.oldAppMoved).toBe(false);
+            locked = false;
+            releaseCount += 1;
+          };
+        },
+      });
+      if (scenario.endsWith("error")) await expect(installation).rejects.toThrow();
+      else
+        await expect(installation).resolves.toMatchObject({
+          status: scenario === "busy" ? "deferred" : "installed",
+        });
+      expect(locked).toBe(false);
+      expect(releaseCount).toBe(1);
+    },
+  );
+
+  it.each(["architecture", "signature"])("enforces preparation %s checks", async (field) => {
+    const fixture = idleFixture();
+    fixture.state[field] = field === "architecture" ? "arm64" : "certificate";
+    await expect(prepareDmgInstall(fixture.dmgPath, fixture.options)).rejects.toThrow("Expected");
+    expect(fixture.commands).not.toContain("ditto");
+    expect(NodeFS.readFileSync(NodePath.join(fixture.targetPath, "version"), "utf8")).toBe("old");
+  });
+
+  it("leaves the installed bundle untouched if final process inspection fails", async () => {
+    const fixture = idleFixture();
+    let processReads = 0;
+    const runCommand = (command, args, options) => {
+      if (command === "/bin/ps" && ++processReads === 2) throw new Error("inspection denied");
+      return fixture.options.runCommand(command, args, options);
+    };
+    await expect(
+      installDmgIfIdle(fixture.dmgPath, { ...fixture.options, runCommand }),
+    ).rejects.toThrow("inspection denied");
+    expect(NodeFS.readFileSync(NodePath.join(fixture.targetPath, "version"), "utf8")).toBe("old");
+    expect(NodeFS.existsSync(temporaryAppPaths(fixture.targetPath).staging)).toBe(false);
+    const release = acquireInstallLock(fixture.options.lockDirectory);
+    release();
+  });
+
+  it("preserves the untouched target when the first rename fails", async () => {
+    const fixture = idleFixture();
+    const prepared = await prepareDmgInstall(fixture.dmgPath, fixture.options);
+    NodeFS.mkdirSync(prepared.backup);
+    NodeFS.writeFileSync(NodePath.join(prepared.backup, "occupied"), "block rename");
+    try {
+      await expect(replacePreparedApp(prepared, { launch: false })).rejects.toThrow();
+      expect(NodeFS.readFileSync(NodePath.join(fixture.targetPath, "version"), "utf8")).toBe("old");
+    } finally {
+      cleanupPreparedInstall(prepared, fixture.options);
+    }
+  });
+
+  it("rolls back a failed staging rename without launching", async () => {
+    const fixture = idleFixture();
+    const prepared = await prepareDmgInstall(fixture.dmgPath, fixture.options);
+    NodeFS.rmSync(prepared.staging, { recursive: true });
+    try {
+      await expect(
+        replacePreparedApp(prepared, {
+          launch: false,
+          launchApp: () => {
+            throw new Error("must not launch");
+          },
+        }),
+      ).rejects.toThrow("ENOENT");
+      expect(NodeFS.readFileSync(NodePath.join(fixture.targetPath, "version"), "utf8")).toBe("old");
+    } finally {
+      cleanupPreparedInstall(prepared, fixture.options);
+    }
+  });
+
   it("parses an optional DMG or artifacts directory", () => {
     expect(parseOptions([])).toMatchObject({ dmgPath: undefined, install: false });
     expect(parseOptions(["/tmp/LastCode.dmg"]).dmgPath).toBe("/tmp/LastCode.dmg");
