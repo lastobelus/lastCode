@@ -10,6 +10,8 @@ export interface TimelineMinimapItem {
   readonly assistantText: string | null;
   readonly isIncoming: boolean;
   readonly summaryPending: boolean;
+  readonly isSummary: boolean;
+  readonly isShortOriginal: boolean;
 }
 
 /** Keep full source text untouched until a minimap preview is opened. */
@@ -32,9 +34,15 @@ export function deriveTimelineMinimapItems(
       assistantText: resolveFinalAssistantTextForTurn(rows, index),
       isIncoming: incoming.isIncoming,
       summaryPending: incoming.pending,
+      isSummary: incoming.isSummary,
+      isShortOriginal: incoming.isIncoming && !incoming.canExpand,
     });
   }
   return items;
+}
+
+export function timelineMinimapPreviewUsesFullText(item: TimelineMinimapItem): boolean {
+  return item.isIncoming && !item.summaryPending && (item.isSummary || item.isShortOriginal);
 }
 
 function resolveFinalAssistantTextForTurn(

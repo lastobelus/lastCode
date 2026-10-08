@@ -3,6 +3,7 @@ import {
   type MessageId,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2IncomingMessageSummary,
+  type ThreadId,
 } from "@t3tools/contracts";
 import {
   isIncomingUserMessage,
@@ -22,20 +23,25 @@ export const planIncomingMessageSummaries = Effect.fn("planIncomingMessageSummar
     const projections = yield* ProjectionStore.ProjectionStoreV2;
     const summaries = new Map<MessageId, OrchestrationV2IncomingMessageSummary>();
     const effects: Array<PendingOrchestrationEffectV2> = [];
+    const createdThreadIds = new Set<ThreadId>();
     const finalMessages = new Map<
       MessageId,
       Extract<OrchestrationV2DomainEvent, { type: "message.updated" }>
     >();
     for (const event of input.events) {
+      if (event.type === "thread.created") createdThreadIds.add(event.threadId);
       if (event.type !== "message.updated" || !isIncomingUserMessage(event.payload)) continue;
       finalMessages.set(event.payload.id, event);
     }
     for (const event of finalMessages.values()) {
       const message = event.payload;
-      const existing = yield* projections.getThreadRecords(event.threadId, ["messages"], {
-        messageIds: [message.id],
-      });
-      const previous = existing.messages[0];
+      // Delegation creates the child and its first message in one commit, so
+      // that child's projection does not exist while this batch is planned.
+      const previous = createdThreadIds.has(event.threadId)
+        ? undefined
+        : (yield* projections.getThreadRecords(event.threadId, ["messages"], {
+            messageIds: [message.id],
+          })).messages[0];
       if (previous !== undefined) {
         // A preview describes one immutable body. Editing that body keeps the
         // current original visible and never schedules a second generation.
@@ -67,7 +73,8 @@ export const planIncomingMessageSummaries = Effect.fn("planIncomingMessageSummar
         event.type !== "turn-item.updated" ||
         event.payload.type !== "user_message" ||
         !isIncomingUserMessage({ ...event.payload, role: "user" }) ||
-        summaries.has(event.payload.messageId)
+        summaries.has(event.payload.messageId) ||
+        createdThreadIds.has(event.threadId)
       )
         continue;
       const existing = yield* projections.getThreadRecords(event.threadId, ["messages"], {

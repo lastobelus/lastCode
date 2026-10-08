@@ -153,6 +153,104 @@ const queueIncomingMessage = Effect.gen(function* () {
 });
 
 describe("IncomingMessageSummaryService", () => {
+  it.effect.each([
+    ["short", "Review the build", 0],
+    ["long", original, 1],
+  ] as const)(
+    "commits a newly delegated child and its %s first message atomically",
+    ([_name, task, expectedCalls]) => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const threads = yield* ThreadManagement.ThreadManagementService;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const service = yield* IncomingMessageSummary.IncomingMessageSummaryService;
+        yield* createThread;
+        yield* threads.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("command:start-delegating-parent"),
+          threadId,
+          messageId: MessageId.make("message:delegating-parent"),
+          text: "Delegate the build review",
+          attachments: [],
+          dispatchMode: { type: "start_immediately" },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        const parentRun = (yield* threads.getThreadProjection(threadId)).runs[0]!;
+        const delegation = {
+          type: "delegated_task.request" as const,
+          commandId,
+          parentThreadId: threadId,
+          parentRunId: parentRun.id,
+          parentNodeId: parentRun.rootNodeId!,
+          task,
+          modelSelection,
+          runtimeMode: "full-access" as const,
+          interactionMode: "default" as const,
+          createdBy: "agent" as const,
+          creationSource: "mcp" as const,
+        };
+        const committed = yield* threads.dispatch(delegation);
+        const parent = yield* threads.getThreadProjection(threadId);
+        assert.equal(parent.subagents.length, 1);
+        const childThreadId = parent.subagents[0]!.childThreadId!;
+        const child = yield* threads.getThreadProjection(childThreadId);
+        const message = child.messages[0]!;
+        const item = child.turnItems.find((item) => item.type === "user_message");
+        assert.equal(child.messages.length, 1);
+        assert.equal(message.text, task);
+        assert.equal(item?.type === "user_message" ? item.text : undefined, task);
+        const expectedPending = expectedCalls === 1 ? { status: "pending" } : undefined;
+        assert.deepEqual(message.incomingSummary, expectedPending);
+        assert.deepEqual(
+          item?.type === "user_message" ? item.incomingSummary : undefined,
+          expectedPending,
+        );
+        assert.equal(
+          committed.storedEvents.some(
+            ({ event }) => event.type === "thread.created" && event.threadId === childThreadId,
+          ),
+          true,
+        );
+        assert.equal(
+          committed.storedEvents.some(
+            ({ event }) => event.type === "message.updated" && event.payload.id === message.id,
+          ),
+          true,
+        );
+        const summaryEffects = (yield* outbox.listByCommandId(commandId)).filter(
+          (effect) => effect.request.type === "incoming-message.summarize",
+        );
+        assert.equal(summaryEffects.length, expectedCalls);
+        if (expectedCalls === 1) {
+          assert.equal(summaryEffects[0]?.threadId, childThreadId);
+        }
+        yield* threads.dispatch(delegation);
+        assert.equal((yield* threads.getThreadProjection(threadId)).subagents.length, 1);
+        assert.equal(
+          (yield* outbox.listByCommandId(commandId)).filter(
+            (effect) => effect.request.type === "incoming-message.summarize",
+          ).length,
+          expectedCalls,
+        );
+        yield* service.execute({ threadId: childThreadId, messageId: message.id, attemptCount: 1 });
+        const completed = yield* threads.getThreadProjection(childThreadId);
+        const completedItem = completed.turnItems.find((item) => item.type === "user_message");
+        const expectedSummary =
+          expectedCalls === 1
+            ? { status: "ready", text: "Review build changes; preserve release workflow" }
+            : undefined;
+        assert.deepEqual(completed.messages[0]?.incomingSummary, expectedSummary);
+        assert.deepEqual(
+          completedItem?.type === "user_message" ? completedItem.incomingSummary : undefined,
+          expectedSummary,
+        );
+        assert.equal(completed.messages[0]?.text, task);
+        assert.equal(harness.generate.mock.calls.length, expectedCalls);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
   it.effect("invalidates an edited body while generation runs and ignores the old completion", () =>
     Effect.gen(function* () {
       const started = yield* Deferred.make<void>();

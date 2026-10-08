@@ -2,7 +2,11 @@ import { describe, expect, it } from "vite-plus/test";
 import { MessageId, ScheduledTaskId } from "@t3tools/contracts";
 import { resolveIncomingMessagePreview } from "@t3tools/client-runtime/user-message";
 import type { MessagesTimelineRow } from "./MessagesTimeline.logic";
-import { deriveTimelineMinimapItems, resolveTimelineMinimapPreview } from "./timelineMinimapItems";
+import {
+  deriveTimelineMinimapItems,
+  resolveTimelineMinimapPreview,
+  timelineMinimapPreviewUsesFullText,
+} from "./timelineMinimapItems";
 import type { ChatMessage } from "../../types";
 
 function rows(
@@ -143,5 +147,38 @@ describe("timeline minimap previews", () => {
     expect(items[0]?.userText).toBe('{"request":"Human JSON"}');
     expect(resolveTimelineMinimapPreview(items[1]!)?.userText).toBe("First line");
     expect(items[1]?.summaryPending).toBe(false);
+  });
+
+  it("wraps ready summaries and short originals while raw fallback previews stay bounded", () => {
+    const raw = JSON.stringify({ request: "Inspect status. ".repeat(40) });
+    const source = rows([
+      ["user", raw],
+      ["user", raw],
+      ["user", raw],
+      ["user", "Done."],
+      ["user", "First line\nLong original continues here."],
+    ]);
+    const states = [
+      undefined,
+      { status: "failed" as const },
+      { status: "ready" as const, text: "Inspect status and continue authorized work." },
+      undefined,
+      { status: "pending" as const },
+    ];
+    for (const [index, row] of source.entries()) {
+      if (row.kind !== "message") continue;
+      row.message = { ...row.message, createdBy: "agent", incomingSummary: states[index] };
+    }
+    const items = deriveTimelineMinimapItems(source);
+    expect(items.map(timelineMinimapPreviewUsesFullText)).toEqual([
+      false,
+      false,
+      true,
+      true,
+      false,
+    ]);
+    expect(items.map((item) => item.isSummary)).toEqual([false, false, true, false, false]);
+    expect(items[2]?.userText).toBe("Inspect status and continue authorized work.");
+    expect(items[0]?.userText).toBe(raw);
   });
 });

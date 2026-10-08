@@ -26,6 +26,7 @@ import {
 import {
   deriveTimelineMinimapItems,
   resolveTimelineMinimapPreview,
+  timelineMinimapPreviewUsesFullText,
   type TimelineMinimapItem,
 } from "./timelineMinimapItems";
 import {
@@ -1863,7 +1864,7 @@ function TimelineMinimap({
                     className={cn(
                       "block max-w-full text-sm font-medium leading-5",
                       activeItem.summaryPending && "flex items-center gap-1.5",
-                      activeItem.isIncoming && !activeItem.summaryPending
+                      timelineMinimapPreviewUsesFullText(activeItem)
                         ? "whitespace-normal wrap-anywhere"
                         : "overflow-hidden text-ellipsis whitespace-nowrap",
                     )}
@@ -2587,6 +2588,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
             surface={incomingMessageStyle}
             fillColor={incomingMessageFillColor}
             attachments={attachments}
+            attachmentCount={row.message.attachments?.length ?? 0}
             renderOriginal={() => (
               <div onCopyCapture={onBodyCopyCapture}>
                 <IncomingMessageOriginalBody
