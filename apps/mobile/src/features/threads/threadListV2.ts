@@ -1,4 +1,9 @@
+import type { MenuAction } from "@react-native-menu/menu";
 import { threadRecoveryStatusLabel } from "@t3tools/client-runtime/state/thread-recovery";
+import {
+  getArchiveRecoveryRows,
+  presentThreadArchive,
+} from "@t3tools/client-runtime/state/thread-archive";
 import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 import { threadPullRequestSearchTerms } from "@t3tools/shared/threadPullRequests";
 import {
@@ -83,6 +88,8 @@ export function resolveThreadListV2ProviderDrivers(
  * monitors); commands left running, such as a dev server, read as ready.
  */
 export type ThreadListV2Status =
+  | "archiving"
+  | "archive-failed"
   | "approval"
   | "input"
   | "question"
@@ -128,19 +135,84 @@ export function resolveThreadListV2SnoozeMenuSelection(input: {
   return { _tag: "expired" };
 }
 
+type ArchiveAttempt = Pick<
+  NonNullable<EnvironmentThreadShell["archivePending"]>,
+  "threadId" | "commandId" | "status"
+>;
+
+/** Bind a native menu selection to the failed attempt displayed when it opened. */
+export function threadListV2ArchiveFailureActionId(
+  attempt: ArchiveAttempt,
+  action: "dismiss" | "retry" = "dismiss",
+) {
+  return `${action}-archive-failure:${JSON.stringify([attempt.threadId, attempt.commandId])}`;
+}
+
+/** Archive stays available beside settlement; the handler reads the authoritative family. */
+export function withThreadListV2ArchiveAction(
+  actions: ReadonlyArray<MenuAction>,
+  input: {
+    readonly archiveFamiliesSupported: boolean;
+    readonly archivePending?: ArchiveAttempt | null;
+  },
+): MenuAction[] {
+  const archive: MenuAction = {
+    id:
+      input.archivePending?.status === "failed"
+        ? threadListV2ArchiveFailureActionId(input.archivePending, "retry")
+        : "archive",
+    title: !input.archiveFamiliesSupported
+      ? "Archive (update server first)"
+      : input.archivePending?.status === "failed"
+        ? "Retry archive"
+        : input.archivePending?.status === "stopping"
+          ? "Archiving…"
+          : "Archive",
+    image: "archivebox",
+    attributes: {
+      disabled: !input.archiveFamiliesSupported || input.archivePending?.status === "stopping",
+    },
+  };
+  const archiveActions = [
+    archive,
+    ...(input.archivePending?.status === "failed"
+      ? [
+          {
+            id: threadListV2ArchiveFailureActionId(input.archivePending),
+            title: "Dismiss archive failure",
+            image: "xmark.circle",
+            attributes: { disabled: !input.archiveFamiliesSupported },
+          },
+        ]
+      : []),
+  ];
+  if (actions.some((action) => action.id === "archive"))
+    return actions.flatMap((action) => (action.id === "archive" ? archiveActions : [action]));
+  const deleteIndex = actions.findIndex((action) => action.id === "delete");
+  const insertionIndex = deleteIndex < 0 ? actions.length : deleteIndex;
+  return [...actions.slice(0, insertionIndex), ...archiveActions, ...actions.slice(insertionIndex)];
+}
+
 export function resolveThreadListV2SwipeActions(input: {
   readonly variant: "card" | "slim";
   readonly settlementSupported: boolean;
+  readonly archiveFamiliesSupported: boolean;
+  readonly persistent: boolean;
+  readonly archivePendingStatus?: "stopping" | "failed";
   readonly snoozeSupported: boolean;
   readonly snoozable: boolean;
   /** Row is on the snoozed shelf. */
   readonly snoozed?: boolean;
 }): {
   readonly primary: Exclude<ThreadListV2SwipeAction, "snooze">;
-  readonly secondary: "snooze" | null;
+  readonly secondary: "snooze" | "archive" | null;
 } {
+  const canArchive =
+    input.archiveFamiliesSupported &&
+    !input.persistent &&
+    input.archivePendingStatus !== "stopping";
   if (input.snoozed === true) {
-    return { primary: "unsnooze", secondary: null };
+    return { primary: "unsnooze", secondary: canArchive ? "archive" : null };
   }
   const primary = input.settlementSupported
     ? input.variant === "slim"
@@ -149,7 +221,12 @@ export function resolveThreadListV2SwipeActions(input: {
     : "archive";
   return {
     primary,
-    secondary: input.snoozeSupported && input.snoozable ? "snooze" : null,
+    secondary:
+      input.snoozeSupported && input.snoozable
+        ? "snooze"
+        : primary !== "archive" && canArchive
+          ? "archive"
+          : null,
   };
 }
 
@@ -219,8 +296,11 @@ export function resolveThreadListV2Status(
     | "hasPendingUserInput"
     | "runtime"
     | "recovery"
+    | "archivePending"
   >,
 ): ThreadListV2Status {
+  const archive = presentThreadArchive(thread);
+  if (archive) return archive.status;
   const recoveryLabel = threadRecoveryStatusLabel(thread.recovery);
   if (recoveryLabel) return recoveryLabel === "Needs repair" ? "needs-repair" : "not-responding";
   if (thread.hasPendingApprovals) {
@@ -277,9 +357,14 @@ export function getThreadListV2OrderedSection(input: {
   readonly snoozeEnvironmentIds?: ReadonlySet<EnvironmentId>;
   readonly queuedThreadKeys?: ReadonlySet<string>;
 }): EnvironmentThreadShell[] {
+  const archiveRecoveryRows = getArchiveRecoveryRows(input.threads);
   const threads = input.threads.filter((thread) => {
     if (threadShellIsCleanupRecovery(thread)) return input.section === "active";
-    if (!threadShellIsVisible(thread) || thread.lineage.relationshipToParent === "subagent")
+    if (archiveRecoveryRows.has(thread)) return input.section === "active";
+    if (
+      !threadShellIsVisible(thread) ||
+      (thread.lineage.relationshipToParent === "subagent" && thread.lineage.independent !== true)
+    )
       return false;
     if (
       (input.settlementEnvironmentIds?.has(thread.environmentId) ?? true) &&
@@ -716,10 +801,14 @@ export function buildThreadListV2Items(input: {
   const settled: EnvironmentThreadShell[] = [];
   const snoozed: EnvironmentThreadShell[] = [];
   let nextSnoozeWakeAt: string | null = null;
+  const archiveRecoveryRows = getArchiveRecoveryRows(input.threads);
   for (const thread of input.threads) {
     if (
       !threadShellIsVisible(thread) ||
-      (!threadShellIsCleanupRecovery(thread) && thread.lineage.relationshipToParent === "subagent")
+      (!threadShellIsCleanupRecovery(thread) &&
+        !archiveRecoveryRows.has(thread) &&
+        thread.lineage.relationshipToParent === "subagent" &&
+        thread.lineage.independent !== true)
     ) {
       continue;
     }
@@ -745,8 +834,8 @@ export function buildThreadListV2Items(input: {
     }
     const supportsSettlement = input.settlementEnvironmentIds?.has(thread.environmentId) ?? true;
     const supportsSnooze = input.snoozeEnvironmentIds?.has(thread.environmentId) ?? true;
-    // Cleanup is deleted-thread recovery state and stays in the active block.
-    if (thread.worktreeCleanup != null) {
+    // Unfinished cleanup and archive recovery stay reachable in the active block.
+    if (thread.worktreeCleanup != null || archiveRecoveryRows.has(thread)) {
       active.push(thread);
       continue;
     }

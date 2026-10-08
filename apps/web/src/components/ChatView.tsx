@@ -2209,7 +2209,8 @@ export default function ChatView(props: ChatViewProps) {
       : null;
   }, [isServerThread, serverProjection, serverRuntime?.lastErrorClass]);
   const parentSubagentThreadId =
-    activeThread?.lineage.relationshipToParent === "subagent"
+    activeThread?.lineage.relationshipToParent === "subagent" &&
+    activeThread.lineage.independent !== true
       ? activeThread.lineage.parentThreadId
       : null;
   const parentSubagentEnvironmentId = activeThread?.environmentId ?? null;

@@ -541,6 +541,7 @@ function needsRecovery(
       const parentThreadId = projection.thread.lineage.parentThreadId;
       return (
         projection.thread.lineage.relationshipToParent === "subagent" &&
+        projection.thread.lineage.independent !== true &&
         parentThreadId !== null &&
         projection.thread.forkedFrom?.type === "node" &&
         ["completed", "interrupted", "failed", "cancelled", "rolled_back"].includes(
@@ -953,6 +954,7 @@ type ShellThreadRow = {
   readonly forked_from_run_source_thread_id: string | null;
   readonly latest_run_id: string | null;
   readonly latest_run_status: string | null;
+  readonly native_subagent_status: string | null;
   readonly latest_run_requested_at: string | null;
   readonly latest_run_started_at: string | null;
   readonly latest_run_completed_at: string | null;
@@ -1522,6 +1524,8 @@ export function threadShellFromProjection(
     createdAt: projection.thread.createdAt,
     updatedAt: projection.updatedAt,
     archivedAt: projection.thread.archivedAt,
+    archivedWith: projection.thread.archivedWith,
+    archivePending: projection.thread.archivePending,
     settledOverride: projection.thread.settledOverride,
     settledAt: projection.thread.settledAt,
     unsettledAt: projection.thread.unsettledAt ?? null,
@@ -1633,6 +1637,36 @@ function shellStatusFromStoredRunStatus(status: string | null): OrchestrationV2S
     default:
       return "failed";
   }
+}
+
+function shellStatusFromNativeSubagentStatus(
+  status: string | null | undefined,
+): OrchestrationV2ShellThreadStatus {
+  return status === "idle" || status == null
+    ? "idle"
+    : shellStatusFromStoredRunStatus(status === "pending" ? "starting" : status);
+}
+
+function shellFromReplayProjection(
+  projection: OrchestrationV2ThreadProjection,
+  projections: ReadonlyMap<ThreadId, OrchestrationV2ThreadProjection>,
+): OrchestrationV2ThreadShell {
+  const shell = threadShellFromProjection(projection);
+  const { thread } = projection;
+  if (
+    shell.latestRunId !== null ||
+    thread.creationSource !== "provider" ||
+    thread.lineage.relationshipToParent !== "subagent" ||
+    thread.lineage.independent === true ||
+    thread.lineage.parentThreadId === null
+  )
+    return shell;
+  const task = projections
+    .get(thread.lineage.parentThreadId)
+    ?.subagents.find(
+      (task) => task.origin === "provider_native" && task.childThreadId === thread.id,
+    );
+  return { ...shell, status: shellStatusFromNativeSubagentStatus(task?.status) };
 }
 
 function itemCountThroughRun(input: {
@@ -1791,6 +1825,8 @@ function shellFromState(input: {
     createdAt: input.state.thread.createdAt,
     updatedAt: input.state.updatedAt,
     archivedAt: input.state.thread.archivedAt,
+    archivedWith: input.state.thread.archivedWith,
+    archivePending: input.state.thread.archivePending,
     settledOverride: input.state.thread.settledOverride,
     settledAt: input.state.thread.settledAt,
     unsettledAt: input.state.thread.unsettledAt ?? null,
@@ -3570,6 +3606,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 JOIN orchestration_v2_projection_threads AS child
                   ON parent.thread_id = CAST(json_extract(child.payload_json, '$.lineage.parentThreadId') AS TEXT)
                 WHERE json_extract(child.payload_json, '$.lineage.relationshipToParent') = 'subagent'
+                  AND json_extract(child.payload_json, '$.lineage.independent') IS NOT 1
                   AND child.deleted_at IS NULL
                   AND (parent.deleted_at IS NOT NULL OR (parent.archived_at IS NOT NULL AND child.archived_at IS NULL))
               `;
@@ -3603,6 +3640,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 SELECT child.thread_id FROM orchestration_v2_projection_threads AS child
                 WHERE CASE WHEN json_valid(child.payload_json) THEN
                   json_extract(child.payload_json, '$.lineage.relationshipToParent') = 'subagent'
+                  AND json_extract(child.payload_json, '$.lineage.independent') IS NOT 1
                   AND json_extract(child.payload_json, '$.lineage.parentThreadId') IS NOT NULL
                   AND json_extract(child.payload_json, '$.forkedFrom.type') = 'node'
                   AND (
@@ -4281,6 +4319,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           SELECT child.thread_id FROM orchestration_v2_projection_threads AS child
           JOIN family ON CAST(json_extract(child.payload_json, '$.lineage.parentThreadId') AS TEXT) = family.thread_id
           WHERE json_extract(child.payload_json, '$.lineage.relationshipToParent') = 'subagent'
+            AND json_extract(child.payload_json, '$.lineage.independent') IS NOT 1
         )
         SELECT thread_id FROM family
       `.pipe(
@@ -5067,6 +5106,18 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               END AS forked_from_run_source_thread_id,
               presented.run_id AS latest_run_id,
               presented.status AS latest_run_status,
+              (
+                SELECT subagent.status
+                FROM orchestration_v2_projection_subagents subagent
+                WHERE subagent.child_thread_id = t.thread_id
+                  AND subagent.thread_id = json_extract(t.payload_json, '$.lineage.parentThreadId')
+                  AND subagent.origin = 'provider_native'
+                  AND json_extract(t.payload_json, '$.creationSource') = 'provider'
+                  AND json_extract(t.payload_json, '$.lineage.relationshipToParent') = 'subagent'
+                  AND json_extract(t.payload_json, '$.lineage.independent') IS NOT 1
+                ORDER BY subagent.updated_at DESC, subagent.subagent_id DESC
+                LIMIT 1
+              ) AS native_subagent_status,
               presented.requested_at AS latest_run_requested_at,
               json_extract(presented.payload_json, '$.startedAt') AS latest_run_started_at,
               presented.completed_at AS latest_run_completed_at,
@@ -5548,7 +5599,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             ? null
             : yield* decodeTurnItemPayload(row.terminal_failure_payload_json);
         let latestRunId = row.latest_run_id === null ? null : RunId.make(row.latest_run_id);
-        let latestRunStatus = shellStatusFromStoredRunStatus(row.latest_run_status);
+        let latestRunStatus =
+          row.latest_run_id === null
+            ? shellStatusFromNativeSubagentStatus(row.native_subagent_status)
+            : shellStatusFromStoredRunStatus(row.latest_run_status);
         let latestRunRequestedAt =
           row.latest_run_requested_at === null
             ? null
@@ -5912,7 +5966,9 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
           const shells = yield* Effect.forEach(
             selectedThreadIds.toSorted((left, right) => String(left).localeCompare(String(right))),
             (threadId) =>
-              service.getThreadProjection(threadId).pipe(Effect.map(threadShellFromProjection)),
+              service
+                .getThreadProjection(threadId)
+                .pipe(Effect.map((projection) => shellFromReplayProjection(projection, existing))),
           );
           const visible = shells.filter(
             (thread) => thread.deletedAt === null || thread.worktreeCleanup != null,
@@ -5932,7 +5988,7 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
           }
           const shell = yield* service
             .getThreadProjection(threadId)
-            .pipe(Effect.map(threadShellFromProjection));
+            .pipe(Effect.map((projection) => shellFromReplayProjection(projection, existing)));
           return shell.deletedAt === null || shell.worktreeCleanup != null ? shell : null;
         }),
       getWorktreeCleanupThreads: Ref.get(replayState).pipe(
@@ -5957,7 +6013,8 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
               for (const { thread } of state.projections.values()) {
                 if (
                   thread.lineage.parentThreadId === id &&
-                  thread.lineage.relationshipToParent === "subagent"
+                  thread.lineage.relationshipToParent === "subagent" &&
+                  thread.lineage.independent !== true
                 )
                   ids.add(thread.id);
               }
@@ -6082,6 +6139,7 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                     ({ thread: child }) =>
                       child.lineage.parentThreadId === projection.thread.id &&
                       child.lineage.relationshipToParent === "subagent" &&
+                      child.lineage.independent !== true &&
                       child.deletedAt === null &&
                       (projection.thread.deletedAt !== null ||
                         (projection.thread.archivedAt !== null && child.archivedAt === null)),

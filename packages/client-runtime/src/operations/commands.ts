@@ -24,6 +24,7 @@ import {
   type RuntimeRequestId,
   ThreadId,
   type ThreadEnvMode,
+  type ThreadArchiveChildDisposition,
   type UploadChatAttachment,
 } from "@t3tools/contracts";
 import { modelSelectionCommandType } from "@t3tools/shared/model";
@@ -102,8 +103,14 @@ export interface UpsertThreadAnnotationInput extends ThreadCommandInput {
 export interface SetThreadAttentionInput extends ThreadCommandInput {
   readonly attention: import("@t3tools/contracts").ThreadAttention;
 }
-export type ArchiveThreadInput = ThreadCommandInput;
-export type UnarchiveThreadInput = ThreadCommandInput;
+export interface ArchiveThreadInput extends ThreadCommandInput {
+  readonly childDisposition?: ThreadArchiveChildDisposition;
+  readonly expectedChildThreadIds?: ReadonlyArray<ThreadId>;
+  readonly expectedArchiveCommandId?: CommandId;
+}
+export type UnarchiveThreadInput = ThreadCommandInput & {
+  readonly expectedArchiveCommandId?: CommandId;
+};
 export type SettleThreadInput = ThreadCommandInput;
 
 export interface UnsettleThreadInput extends ThreadCommandInput {
@@ -534,13 +541,31 @@ export const setThreadAttention = Effect.fn("EnvironmentCommands.setThreadAttent
 export const archiveThread = Effect.fn("EnvironmentCommands.archiveThread")(function* (
   input: ArchiveThreadInput,
 ) {
-  return yield* simpleThreadCommand("thread.archive", input);
+  return yield* dispatch({
+    type: "thread.archive",
+    commandId: yield* allocateCommandId(input),
+    threadId: input.threadId,
+    ...(input.childDisposition === undefined ? {} : { childDisposition: input.childDisposition }),
+    ...(input.expectedChildThreadIds === undefined
+      ? {}
+      : { expectedChildThreadIds: input.expectedChildThreadIds }),
+    ...(input.expectedArchiveCommandId === undefined
+      ? {}
+      : { expectedArchiveCommandId: input.expectedArchiveCommandId }),
+  });
 });
 
 export const unarchiveThread = Effect.fn("EnvironmentCommands.unarchiveThread")(function* (
   input: UnarchiveThreadInput,
 ) {
-  return yield* simpleThreadCommand("thread.unarchive", input);
+  return yield* dispatch({
+    type: "thread.unarchive",
+    commandId: yield* allocateCommandId(input),
+    threadId: input.threadId,
+    ...(input.expectedArchiveCommandId === undefined
+      ? {}
+      : { expectedArchiveCommandId: input.expectedArchiveCommandId }),
+  });
 });
 
 export const settleThread = Effect.fn("EnvironmentCommands.settleThread")(function* (

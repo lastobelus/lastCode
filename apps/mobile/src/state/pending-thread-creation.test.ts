@@ -169,7 +169,12 @@ describe("pendingThreadCreationShell", () => {
       branch: "main",
       worktreePath: null,
       latestRun: null,
-      runtime: null,
+      runtime: {
+        status: "preparing",
+        activeRunId: null,
+        providerInstanceId: creation.modelSelection!.instanceId,
+        updatedAt: creation.createdAt,
+      },
       latestUserMessageAt: creation.createdAt,
     });
   });

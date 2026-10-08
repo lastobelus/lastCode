@@ -1,4 +1,4 @@
-import { scopeProjectRef } from "@t3tools/client-runtime/environment";
+import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { requestCustomSnooze } from "../components/CustomSnoozeDialog";
 import {
   type AtomCommandResult,
@@ -51,7 +51,6 @@ import {
   selectProjectGroupingSettings,
 } from "../logicalProject";
 import { buildPhysicalToLogicalProjectKeyMap } from "../sidebarProjectGrouping";
-import { threadRuntimeCanArchive } from "@t3tools/client-runtime/state/models";
 import { useCopyToClipboard } from "./useCopyToClipboard";
 import { useNewThreadHandler } from "./useHandleNewThread";
 import { useClientSettings } from "./useSettings";
@@ -111,6 +110,7 @@ export function useThreadActionMenu(input: {
     setThreadAutoSettle,
     setThreadPersistence,
     archiveThread,
+    unarchiveThread,
     deleteThread,
     markThreadUnread,
   } = useThreadActions();
@@ -131,7 +131,6 @@ export function useThreadActionMenu(input: {
     supportsProcessControls && (runningTerminalIds.length > 0 || previews.length > 0);
   const handleNewThread = useNewThreadHandler();
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
-  const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
   const timestampFormat = useClientSettings((s) => s.timestampFormat);
   const handoffsMenuLimit = useClientSettings((s) => s.handoffsMenuLimit);
   const handoffs = useThreadHandoffs(threadRef);
@@ -184,12 +183,12 @@ export function useThreadActionMenu(input: {
           projectFilter: null,
           isPinned: thread.pinnedAt != null,
           isPersistent: thread.persistent === true,
+          archiveFailed: thread.archivePending?.status === "failed",
           isSettled: supports.settlement && thread.settledOverride === "settled",
           autoSettleEnabled: thread.autoSettleDisabledAt == null,
           isSnoozed: supports.snooze && effectiveSnoozed(thread, { now: now.toISOString() }),
           canSnoozeNow: canSnooze(thread, { now: now.toISOString() }),
           isRegeneratingTitle,
-          isRunning: !threadRuntimeCanArchive(thread.runtime),
           hasRunningAction: thread.actionResume?.outcome === "running",
           hasStoppableProcesses,
           supports,
@@ -357,15 +356,22 @@ export function useThreadActionMenu(input: {
           case "copy-thread-id":
             copyThreadIdToClipboard(thread.id, { threadId: thread.id });
             return;
+          case "dismiss-archive-failure": {
+            const pending = thread.archivePending;
+            if (pending?.status !== "failed") return;
+            await reportFailure("Couldn't dismiss archive failure", () =>
+              unarchiveThread(scopeThreadRef(thread.environmentId, pending.threadId), {
+                expectedArchiveCommandId: pending.commandId,
+              }),
+            );
+            return;
+          }
           case "archive": {
-            if (confirmThreadArchive) {
-              const confirmed = await settlePromise(() =>
-                api.dialogs.confirm(`Archive thread "${thread.title}"?`),
-              );
-              if (confirmed._tag === "Failure" || !confirmed.value) return;
-            }
             let didArchive = false;
             const result = await archiveThread(threadRef, {
+              ...(thread.archivePending?.status === "failed"
+                ? { expectedArchiveCommandId: thread.archivePending.commandId }
+                : {}),
               onArchived: () => {
                 didArchive = true;
               },
@@ -384,7 +390,7 @@ export function useThreadActionMenu(input: {
                 api.dialogs.confirm(
                   [
                     `Delete thread "${thread.title}"?`,
-                    "This permanently clears conversation history for this thread.",
+                    "This also deletes any of its subagents, including archived ones; other forks and independent threads are kept. This cannot be undone.",
                   ].join("\n"),
                   { variant: "destructive" },
                 ),
@@ -411,10 +417,10 @@ export function useThreadActionMenu(input: {
     },
     [
       archiveThread,
+      unarchiveThread,
       closeTerminal,
       stopThreadProcesses,
       hasStoppableProcesses,
-      confirmThreadArchive,
       confirmThreadDelete,
       confirmAndUnpinThread,
       copyBranchToClipboard,

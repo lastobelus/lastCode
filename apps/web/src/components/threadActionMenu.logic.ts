@@ -37,6 +37,7 @@ export type ThreadActionMenuId =
   | "handoffs-heading"
   | "handoffs-empty"
   | "archive"
+  | "dismiss-archive-failure"
   | "delete";
 
 export type DraftActionMenuId =
@@ -92,14 +93,13 @@ export interface ThreadActionMenuState {
   } | null;
   readonly isPinned: boolean;
   readonly isPersistent: boolean;
+  readonly archiveFailed?: boolean;
   readonly isSettled: boolean;
   /** False while the user has turned automatic settlement off for this thread. */
   readonly autoSettleEnabled: boolean;
   readonly isSnoozed: boolean;
   readonly canSnoozeNow: boolean;
   readonly isRegeneratingTitle: boolean;
-  /** Archive rejects a thread with an attached provider, so disable it here rather than let the action fail. */
-  readonly isRunning: boolean;
   readonly hasRunningAction: boolean;
   readonly hasStoppableProcesses: boolean;
   readonly supports: {
@@ -311,14 +311,17 @@ export function buildThreadActionMenuItems(
     // conversation under Settings > Archived threads — distinct from Settle
     // (stays visible in the Settled shelf) and Delete (clears history for
     // good), so it sits beside Delete without borrowing its destructive
-    // styling.
+    // styling. Eligibility is checked after the handler reads the owned family.
     {
       id: "archive",
       label: state.isPersistent ? "Archive thread (disable persistence first)" : "Archive thread",
       icon: "archive",
-      disabled: state.isRunning || state.isPersistent,
+      disabled: state.isPersistent,
       separatorBefore: true,
     },
+    ...(state.archiveFailed
+      ? [{ id: "dismiss-archive-failure" as const, label: "Dismiss archive failure" }]
+      : []),
     {
       id: "delete",
       label: state.isPersistent ? "Delete (disable persistence first)" : "Delete",

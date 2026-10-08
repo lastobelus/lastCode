@@ -17,10 +17,13 @@ import {
   ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
   type ChatAttachment,
   CommandId,
+  EventId,
   hasOpenActionableDashboardItems,
   isActionableDashboardItem,
   THREAD_DASHBOARD_MAX_ITEMS,
   isProviderNativeSubagentThread,
+  getOwnedThreadFamily,
+  getThreadArchivePlan,
   MessageId,
   TurnItemId,
   type ModelSelection,
@@ -29,6 +32,7 @@ import {
   type OrchestrationV2ServerCommand,
   type ThreadPullRequestLink,
   type ThreadPullRequestWatch,
+  type ThreadArchiveChildDisposition,
   OrchestrationV2AppThread,
   type OrchestrationV2ContextHandoff,
   type OrchestrationV2ContextSourcePoint,
@@ -44,6 +48,7 @@ import {
   type OrchestrationV2Run,
   type OrchestrationV2RunAttempt,
   type OrchestrationV2ThreadShell,
+  type OrchestrationV2ThreadArchiveFamily,
   type OrchestrationV2ThreadShellSnapshot,
   type OrchestrationV2StoredEvent,
   type OrchestrationV2Subagent,
@@ -101,6 +106,7 @@ import type { OrchestrationEffectRequestV2, PendingOrchestrationEffectV2 } from 
 import { IdAllocatorV2 } from "./IdAllocator.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import { DispatchModeLimit, exceededDispatchModeLimit } from "./DispatchModeLimit.ts";
+import { DelegatedTaskCancellation } from "./DelegatedTaskCancellation.ts";
 import {
   applyToProjection,
   emptyProjection,
@@ -339,6 +345,9 @@ export interface OrchestratorV2Shape {
   readonly getThreadShell: (
     threadId: ThreadId,
   ) => Effect.Effect<OrchestrationV2ThreadShell | null, OrchestratorV2Error>;
+  readonly getThreadArchiveFamily: (
+    threadId: ThreadId,
+  ) => Effect.Effect<OrchestrationV2ThreadArchiveFamily, OrchestratorV2Error>;
   readonly getThreadEventSequence: (
     threadId: ThreadId,
   ) => Effect.Effect<number, OrchestratorV2Error>;
@@ -413,6 +422,42 @@ function isGoalCommand(message: {
 
 const threadPullRequestLinksEqual = Schema.toEquivalence(Schema.NullOr(ThreadLinkedPullRequest));
 
+function hasUnfinishedArchiveWork(
+  projection: Pick<
+    OrchestrationV2ThreadProjection,
+    "thread" | "runs" | "runtimeRequests" | "providerThreads" | "providerTurns"
+  >,
+) {
+  const ownedProviderThreadIds = new Set(
+    projection.providerThreads
+      .filter((thread) => thread.appThreadId === projection.thread.id)
+      .map((thread) => thread.id),
+  );
+  return (
+    projection.runs.some((run) =>
+      ["preparing", "starting", "running", "waiting"].includes(run.status),
+    ) ||
+    projection.runtimeRequests.some((request) => request.status === "pending") ||
+    projection.providerTurns.some(
+      (turn) => turn.status === "running" && ownedProviderThreadIds.has(turn.providerThreadId),
+    )
+  );
+}
+
+function archiveShellNeedsConfirmation(thread: OrchestrationV2ThreadShell) {
+  return (
+    ["preparing", "queued", "starting", "running", "waiting", "failed"].includes(thread.status) ||
+    thread.activityRunStatus != null ||
+    thread.pendingRuntimeRequest !== null ||
+    thread.hasActionableProposedPlan ||
+    thread.attention != null ||
+    (thread.pendingBackgroundTasks?.length ?? 0) > 0 ||
+    (thread.recovery != null && thread.recovery.status !== "recovered") ||
+    thread.actionResume?.outcome === "running" ||
+    thread.archivePending != null
+  );
+}
+
 function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
   switch (command.type) {
     case "thread.worktree-cleanup.retry":
@@ -427,6 +472,8 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "thread.dashboard-item.upsert":
     case "thread.dashboard-item.remove":
     case "thread.create":
+    case "thread.archive.complete":
+    case "thread.archive.fail":
     case "thread.archive":
     case "thread.unarchive":
     case "thread.delete":
@@ -2758,7 +2805,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     if (
       command.type === "thread.pull-request.watch" &&
       command.watching &&
-      thread.lineage.relationshipToParent === "subagent"
+      thread.lineage.relationshipToParent === "subagent" &&
+      thread.lineage.independent !== true
     ) {
       return yield* new OrchestratorDispatchError({
         commandId: command.commandId,
@@ -3108,12 +3156,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             ...thread,
             archivedAt: thread.archivedAt ?? now,
             archivedWith: archiveOwner ?? { threadId: thread.id, commandId: command.commandId },
+            archivePending: null,
             titleRegeneration: null,
             pullRequests: thread.pullRequests?.map((link) => withPullRequestWatch(link, undefined)),
             updatedAt: now,
           };
         case "thread.unarchive":
-          return { ...thread, archivedAt: null, archivedWith: null, updatedAt: now };
+          return {
+            ...thread,
+            archivedAt: null,
+            archivedWith: null,
+            archivePending: null,
+            updatedAt: now,
+          };
         case "thread.settle": {
           // Settling is "I'm done with this": it clears a pin the same way it
           // parks the thread (mirrors the v1 decider's settle/pin exclusion).
@@ -3598,20 +3653,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ],
         { turnItemTypes: [], messageRoles: ["user"] },
       );
-      const ownedProviderThreadIds = new Set(
-        projection.providerThreads
-          .filter((providerThread) => providerThread.appThreadId === command.threadId)
-          .map((providerThread) => providerThread.id),
-      );
-      if (
-        projection.runs.some((run) =>
-          ["preparing", "starting", "running", "waiting"].includes(run.status),
-        ) ||
-        projection.runtimeRequests.some((request) => request.status === "pending") ||
-        projection.providerTurns.some(
-          (turn) => turn.status === "running" && ownedProviderThreadIds.has(turn.providerThreadId),
-        )
-      ) {
+      if (hasUnfinishedArchiveWork(projection)) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
@@ -5291,6 +5333,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           recovery.runId !== run.id ||
           recovery.resetAt !== failure.resetAt ||
           Date.parse(recovery.resetAt) > DateTime.toEpochMillis(now) ||
+          projection.thread.archivePending?.status === "stopping" ||
           projection.thread.archivedAt !== null ||
           projection.thread.deletedAt !== null ||
           projection.thread.settledOverride === "settled" ||
@@ -9742,6 +9785,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           reason: `Run ${run.id} was interrupted before its provider turn started.`,
         } satisfies {
           readonly effectTypes: ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
+          readonly threadIds?: ReadonlyArray<ThreadId>;
           readonly reason: string;
         };
       }
@@ -10138,15 +10182,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     });
 
   /**
-   * Parent thread of an app-owned delegated child, or undefined when the
-   * thread is not one. Thread lineage and fork origin are immutable, so this
-   * is safe to read without holding either thread's dispatch lock.
+   * Looks up the parent of an app-owned child that still belongs to its task.
+   * Ownership can change after this unlocked read; finalization rechecks it
+   * under the parent's dispatch lock.
    */
   const appOwnedSubagentParentThreadId = (childThreadId: ThreadId) =>
     Effect.gen(function* () {
       const childThread = yield* projectionStore.getThread(childThreadId);
       const lineage = childThread.lineage;
       return lineage.relationshipToParent === "subagent" &&
+        lineage.independent !== true &&
         lineage.parentThreadId !== null &&
         childThread.forkedFrom?.type === "node"
         ? lineage.parentThreadId
@@ -10199,6 +10244,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     readonly now: DateTime.Utc;
   }) {
     const taskDelivery = input.updatedTask.completionDelivery;
+    if (input.task.ownershipReleased === true)
+      return {
+        task: {
+          ...input.updatedTask,
+          completionDelivery: { state: "disposed" as const, observedByRunId: null },
+        },
+        parentRun: undefined,
+        message: undefined,
+        offer: false,
+      };
     // delivered ownership has already settled through a completed wake run.
     // A later wake-policy upgrade must not re-claim the task or offer again.
     if (
@@ -10405,6 +10460,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const forkedFrom = childControls.thread.forkedFrom;
       if (
         childControls.thread.lineage.relationshipToParent !== "subagent" ||
+        childControls.thread.lineage.independent === true ||
         childControls.thread.lineage.parentThreadId === null ||
         forkedFrom?.type !== "node"
       ) {
@@ -10464,7 +10520,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           candidate.origin === "app_owned" &&
           candidate.childThreadId === childThreadId,
       );
-      if (task === undefined) {
+      if (task === undefined || task.ownershipReleased === true) {
         return;
       }
       const existingResultTransfer = parentProjection.contextTransfers.find(
@@ -10936,6 +10992,891 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const ownedThreadFamily = (command: OrchestrationV2ServerCommand) =>
     projectionStore.getOwnedThreadIds(commandThreadId(command)).pipe(mapDispatchError(command));
 
+  const readArchiveFamilyShells = (threadId: ThreadId) =>
+    projectionStore.getOwnedThreadIds(threadId).pipe(
+      Effect.flatMap((ids) =>
+        Effect.forEach(ids, (id) =>
+          projectionStore.getThreadShell(id).pipe(
+            Effect.flatMap((shell) =>
+              shell === null
+                ? projectionStore.getThreadRecords(id, []).pipe(
+                    Effect.map(({ thread }) =>
+                      threadShellFromProjection(
+                        emptyProjection({
+                          id: EventId.make(`archive-family-read:${id}`),
+                          type: "thread.created",
+                          threadId: id,
+                          occurredAt: thread.updatedAt,
+                          payload: thread,
+                        }),
+                      ),
+                    ),
+                  )
+                : Effect.succeed(shell),
+            ),
+          ),
+        ),
+      ),
+      Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })),
+    );
+
+  const archiveFamilyShells = (command: OrchestrationV2ServerCommand) =>
+    readArchiveFamilyShells(commandThreadId(command)).pipe(mapDispatchError(command));
+
+  const archiveThreadNeedsConfirmation = Effect.fnUntraced(function* (
+    thread: OrchestrationV2ThreadShell,
+  ) {
+    if (archiveShellNeedsConfirmation(thread)) return true;
+    const controls = yield* projectionStore.getThreadRecords(thread.id, [
+      "runs",
+      "runtimeRequests",
+      "providerThreads",
+      "providerTurns",
+    ]);
+    return hasUnfinishedArchiveWork(controls);
+  });
+
+  const getThreadArchiveFamily = (threadId: ThreadId) =>
+    Effect.gen(function* () {
+      const threads = yield* readArchiveFamilyShells(threadId);
+      const family = getOwnedThreadFamily(threads, threadId);
+      const activeChildren = yield* Effect.filter(family.children, archiveThreadNeedsConfirmation);
+      const owner = threads.find((thread) => thread.id === threadId);
+      const ownerNeedsConfirmation =
+        owner !== undefined && (yield* archiveThreadNeedsConfirmation(owner));
+      return {
+        threads: owner === undefined ? family.children : [owner, ...family.children],
+        childThreadIds: family.children.map((thread) => thread.id),
+        activeChildThreadIds: activeChildren.map((thread) => thread.id),
+        promotableChildThreadIds: family.promotableChildren.map((thread) => thread.id),
+        keptThreadIds: [...family.keptThreadIds],
+        protectedChildThreadIds: family.protectedChildren.map((thread) => thread.id),
+        nativeStopCount: family.children.filter(
+          (thread) => thread.creationSource === "provider" && !family.keptThreadIds.has(thread.id),
+        ).length,
+        requiresConfirmation:
+          family.children.length > 0 &&
+          (ownerNeedsConfirmation ||
+            activeChildren.length > 0 ||
+            family.protectedChildren.length > 0),
+        canPromote:
+          owner?.persistent !== true &&
+          family.promotableChildren.length > 0 &&
+          family.protectedChildren.every((thread) => family.keptThreadIds.has(thread.id)),
+        canStopAndArchive: owner?.persistent !== true && family.protectedChildren.length === 0,
+      };
+    }).pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })));
+
+  // An already archived intermediate owner retains its own restore cohort.
+  const archiveOwnerFor = Effect.fnUntraced(function* (
+    command: OrchestrationV2ServerCommand,
+    thread: OrchestrationV2AppThread,
+    family: ReadonlyMap<ThreadId, OrchestrationV2AppThread>,
+    owner: NonNullable<OrchestrationV2AppThread["archivedWith"]>,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ) {
+    const visited = new Set<ThreadId>();
+    let ancestorId = thread.lineage.parentThreadId;
+    while (ancestorId !== null && ancestorId !== owner.threadId && !visited.has(ancestorId)) {
+      visited.add(ancestorId);
+      const ancestor = family.get(ancestorId);
+      if (ancestor === undefined) break;
+      if (ancestor.archivedAt !== null) {
+        const archivedWith = ancestor.archivedWith ?? {
+          threadId: ancestor.id,
+          commandId: owner.commandId,
+        };
+        if (ancestor.archivedWith == null) {
+          const now = yield* DateTime.now;
+          yield* emit(
+            events,
+            command,
+          )({
+            type: "thread.metadata-updated",
+            threadId: ancestor.id,
+            occurredAt: now,
+            payload: { ...ancestor, archivedWith, updatedAt: now },
+          });
+        }
+        return archivedWith;
+      }
+      ancestorId = ancestor.lineage.parentThreadId;
+    }
+    return owner;
+  });
+
+  const planArchivedFamilyRepair = Effect.fnUntraced(function* (
+    command: Extract<OrchestrationV2Command, { readonly type: "thread.archive" }>,
+    root: OrchestrationV2AppThread,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+  ) {
+    const threads = yield* Effect.forEach(yield* ownedThreadFamily(command), (id) =>
+      projectionStore.getThread(id).pipe(mapDispatchError(command)),
+    );
+    const participants = threads.filter(
+      (thread) => thread.id !== root.id && thread.deletedAt === null && thread.archivedAt === null,
+    );
+    if (participants.length === 0) return;
+    const owner = root.archivedWith ?? { threadId: root.id, commandId: command.commandId };
+    yield* dispatchThreadMutation(command, events, effects, owner);
+    const family = new Map(threads.map((thread) => [thread.id, thread]));
+    for (const child of participants) {
+      const childOwner = yield* archiveOwnerFor(command, child, family, owner, events);
+      yield* dispatchThreadMutation(
+        { ...command, threadId: child.id },
+        events,
+        effects,
+        childOwner,
+      );
+    }
+  });
+
+  const repairArchivedFamily = Effect.fnUntraced(function* (
+    command: Extract<OrchestrationV2Command, { readonly type: "thread.archive" }>,
+    root: OrchestrationV2AppThread,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+  ) {
+    if (command.childDisposition !== undefined || command.expectedChildThreadIds !== undefined) {
+      yield* dispatchArchiveFamilyRequest(command, events, effects, true);
+      return;
+    }
+    // Preserve the ordinary repair's protection and unfinished-work guards.
+    // Its plan remains uncommitted until provider shutdown is known to be safe.
+    const plannedEvents = yield* Ref.make<Array<OrchestrationV2DomainEvent>>([]);
+    const plannedEffects = yield* Ref.make<Array<PendingOrchestrationEffectV2>>([]);
+    yield* planArchivedFamilyRepair(command, root, plannedEvents, plannedEffects);
+    const family = getOwnedThreadFamily(yield* archiveFamilyShells(command), root.id);
+    const contexts = yield* Effect.forEach(family.children, (child) =>
+      projectionStore
+        .getThreadRecords(child.id, ["providerSessions", "providerThreads"])
+        .pipe(mapDispatchError(command)),
+    );
+    const needsShutdown = contexts.some(
+      (context) =>
+        context.providerSessions.length > 0 ||
+        context.providerThreads.some(
+          (thread) => thread.appThreadId === context.thread.id && thread.providerSessionId !== null,
+        ),
+    );
+    if (needsShutdown) {
+      yield* dispatchArchiveFamilyRequest(
+        {
+          ...command,
+          childDisposition: command.childDisposition ?? "stop_and_archive",
+          expectedChildThreadIds:
+            command.expectedChildThreadIds ?? family.children.map((child) => child.id),
+        },
+        events,
+        effects,
+        true,
+      );
+    } else {
+      const acceptedEvents = yield* Ref.get(plannedEvents);
+      const acceptedEffects = yield* Ref.get(plannedEffects);
+      yield* Ref.update(events, (current) => [...current, ...acceptedEvents]);
+      yield* Ref.update(effects, (current) => [...current, ...acceptedEffects]);
+    }
+  });
+
+  const sameThreadIds = (left: ReadonlyArray<ThreadId>, right: ReadonlyArray<ThreadId>) => {
+    if (left.length !== right.length || new Set(left).size !== left.length) return false;
+    const rightIds = new Set(right);
+    return rightIds.size === right.length && left.every((id) => rightIds.has(id));
+  };
+
+  const archiveParticipants = (
+    threads: ReadonlyArray<OrchestrationV2ThreadShell>,
+    rootId: ThreadId,
+    disposition: ThreadArchiveChildDisposition,
+  ) => {
+    const family = getOwnedThreadFamily(threads, rootId);
+    const retained = disposition === "promote" ? family.keptThreadIds : new Set<ThreadId>();
+    return {
+      family,
+      archiveIds: [
+        rootId,
+        ...family.children.filter((child) => !retained.has(child.id)).map((child) => child.id),
+      ],
+      promoteIds:
+        disposition === "promote" ? family.promotableChildren.map((child) => child.id) : [],
+    };
+  };
+
+  const cancelArchiveWork = Effect.fnUntraced(function* (
+    command: OrchestrationV2ServerCommand,
+    threadId: ThreadId,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    now: DateTime.Utc,
+  ) {
+    const projection = yield* getProjectionWithPendingEvents(threadId, events);
+    const emitEvent = emit(events, command);
+    const activeItems = yield* projectionStore
+      .getThreadRecords(threadId, ["turnItems"], {
+        turnItemStatuses: ["pending", "running", "waiting"],
+      })
+      .pipe(mapDispatchError(command));
+    const backgroundRunIds = new Set(
+      pendingBackgroundTurnItems({
+        turnItems: activeItems.turnItems,
+        runs: projection.runs,
+      }).flatMap((item) => (item.runId === null ? [] : [item.runId])),
+    );
+    for (const providerThread of projection.providerThreads) {
+      if (
+        providerThread.appThreadId !== threadId ||
+        (providerThread.pendingBackgroundTasks?.length ?? 0) === 0
+      )
+        continue;
+      const ownerRun = projection.runs.findLast(
+        (run) => run.status !== "queued" && run.providerThreadId === providerThread.id,
+      );
+      if (ownerRun !== undefined) backgroundRunIds.add(ownerRun.id);
+    }
+    for (const run of projection.runs) {
+      const unfinished = ["preparing", "starting", "running", "waiting"].includes(run.status);
+      if (
+        unfinished ||
+        backgroundRunIds.has(run.id) ||
+        (run.status === "cancelled" &&
+          (yield* awaitsRestartContinuation(run).pipe(mapDispatchError(command))))
+      )
+        yield* markStoppedRun({
+          command: {
+            type: "thread.stop",
+            commandId: command.commandId,
+            threadId,
+            reason: "Thread archived.",
+          },
+          events,
+          thread: projection.thread,
+          run,
+          now,
+        });
+      if (run.status !== "queued" && !unfinished) continue;
+      yield* emitEvent({
+        type: "run.updated",
+        threadId,
+        runId: run.id,
+        occurredAt: now,
+        payload: {
+          ...run,
+          status: "cancelled",
+          queuePosition: null,
+          queueHeld: true,
+          completedAt: now,
+        },
+      });
+    }
+    for (const attempt of projection.attempts) {
+      if (!["pending", "running"].includes(attempt.status)) continue;
+      yield* emitEvent({
+        type: "run-attempt.updated",
+        threadId,
+        runId: attempt.runId,
+        occurredAt: now,
+        payload: { ...attempt, status: "cancelled", completedAt: now },
+      });
+    }
+    for (const node of projection.nodes) {
+      if (!["pending", "running", "waiting"].includes(node.status)) continue;
+      yield* emitEvent({
+        type: "node.updated",
+        threadId,
+        nodeId: node.id,
+        occurredAt: now,
+        payload: { ...node, status: "cancelled", completedAt: now },
+      });
+    }
+    for (const request of projection.runtimeRequests) {
+      if (request.status !== "pending") continue;
+      yield* emitEvent({
+        type: "runtime-request.updated",
+        threadId,
+        nodeId: request.nodeId,
+        occurredAt: now,
+        payload: { ...request, status: "cancelled", resolvedAt: now },
+      });
+    }
+    for (const item of activeItems.turnItems) {
+      if (!["pending", "running", "waiting"].includes(item.status)) continue;
+      yield* emitEvent({
+        type: "turn-item.updated",
+        threadId,
+        occurredAt: now,
+        payload: { ...item, status: "cancelled", completedAt: now, updatedAt: now },
+      });
+    }
+    yield* disposeAllDelegatedCompletionCohorts({
+      command: command as OrchestrationV2Command,
+      events,
+      projection: yield* getProjectionWithPendingEvents(threadId, events),
+      now,
+    });
+  });
+
+  const dispatchArchiveFamilyRequest = Effect.fnUntraced(function* (
+    command: Extract<OrchestrationV2Command, { readonly type: "thread.archive" }>,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+    archivedRepair = false,
+  ) {
+    const shells = yield* archiveFamilyShells(command);
+    const root = yield* projectionStore.getThread(command.threadId).pipe(mapDispatchError(command));
+    const { family, archiveIds, promoteIds } = archiveParticipants(
+      shells,
+      command.threadId,
+      command.childDisposition ?? "stop_and_archive",
+    );
+    const archiveIdSet = new Set(archiveIds);
+    const changingIds = new Set([...archiveIds, ...promoteIds]);
+    const familyIds = new Set([root.id, ...family.children.map((child) => child.id)]);
+    const reject = (cause: string) =>
+      new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause,
+      });
+    if (
+      root.creationSource === "provider" &&
+      root.lineage.relationshipToParent === "subagent" &&
+      root.lineage.independent !== true &&
+      root.lineage.parentThreadId !== null
+    ) {
+      const nativeShell = shells.find((thread) => thread.id === root.id);
+      const ownerShell = yield* projectionStore
+        .getThreadShell(root.lineage.parentThreadId)
+        .pipe(mapDispatchError(command));
+      const ownerContext = yield* projectionStore
+        .getThreadProviderContext(root.lineage.parentThreadId)
+        .pipe(mapDispatchError(command));
+      const activeStatuses = ["preparing", "starting", "running", "waiting"];
+      if (
+        activeStatuses.includes(nativeShell?.status ?? "idle") ||
+        activeStatuses.includes(ownerShell?.activityRunStatus ?? ownerShell?.status ?? "idle") ||
+        ownerContext.providerSessions.some((session) => activeStatuses.includes(session.status))
+      )
+        return yield* reject(
+          "Archive the parent thread to stop and archive this running native subagent.",
+        );
+    }
+    if (root.deletedAt !== null || (root.archivedAt !== null && !archivedRepair))
+      return yield* reject("This conversation is no longer available to archive.");
+    if (
+      family.children.length > 0 &&
+      (command.childDisposition === undefined || command.expectedChildThreadIds === undefined)
+    )
+      return yield* reject(
+        "Choose whether to stop and archive the subagents or keep them separately before archiving.",
+      );
+    if (
+      command.expectedChildThreadIds !== undefined &&
+      !sameThreadIds(
+        command.expectedChildThreadIds,
+        family.children.map((child) => child.id),
+      )
+    )
+      return yield* reject("The subagents changed. Review the archive choices again.");
+    if (
+      root.persistent === true ||
+      shells.some((thread) => archiveIdSet.has(thread.id) && thread.persistent === true)
+    )
+      return yield* reject(
+        "A protected conversation cannot be archived. Keep its subagents separately or remove their protection first.",
+      );
+    if (
+      shells.some(
+        (thread) => changingIds.has(thread.id) && thread.archivePending?.status === "stopping",
+      )
+    )
+      return yield* reject("A conversation in this family is already being archived.");
+    // An idle snapshot is not consent to stop work that appeared before this
+    // command. Recheck under the family locks before recording any shutdown.
+    if (command.childDisposition === "archive_if_idle" && family.children.length > 0) {
+      for (const thread of shells) {
+        if (!familyIds.has(thread.id)) continue;
+        if (yield* archiveThreadNeedsConfirmation(thread).pipe(mapDispatchError(command)))
+          return yield* reject(
+            "This family now has work that needs attention. Review the archive choices again.",
+          );
+      }
+    }
+    // Shutdown and ownership release complete after this command. Check every
+    // target while the requesting caller's limit is in scope, before stopping.
+    for (const thread of shells) {
+      if (!familyIds.has(thread.id)) continue;
+      yield* refuseAboveDispatchModeLimit(command, thread.id, thread);
+    }
+    const context = yield* projectionStore
+      .getThreadProviderContext(command.threadId)
+      .pipe(mapDispatchError(command));
+    const controls = yield* projectionStore
+      .getThreadRecords(command.threadId, [
+        "runs",
+        "runtimeRequests",
+        "providerThreads",
+        "providerTurns",
+      ])
+      .pipe(mapDispatchError(command));
+    const unfinished = hasUnfinishedArchiveWork(controls);
+    if (family.children.length === 0 && unfinished)
+      return yield* reject("This conversation has unfinished work. Stop it before archiving.");
+    if (
+      !archivedRepair &&
+      family.children.length === 0 &&
+      context.providerSessions.length === 0 &&
+      !controls.providerThreads.some(
+        (providerThread) =>
+          providerThread.appThreadId === command.threadId &&
+          providerThread.providerSessionId !== null,
+      ) &&
+      !unfinished
+    ) {
+      yield* dispatchThreadMutation(command, events, effects);
+      return;
+    }
+    const now = yield* DateTime.now;
+    const modeLimit = yield* DispatchModeLimit;
+    const pending = {
+      threadId: command.threadId,
+      commandId: command.commandId,
+      childDisposition: command.childDisposition ?? "stop_and_archive",
+      childThreadIds: family.children.map((child) => child.id),
+      archiveThreadIds: archiveIds,
+      promoteThreadIds: promoteIds,
+      ...(modeLimit === undefined
+        ? {}
+        : {
+            modeLimit: {
+              runtimeMode: modeLimit.runtimeMode,
+              interactionMode: modeLimit.interactionMode,
+            },
+          }),
+      status: "stopping" as const,
+    };
+    for (const id of archiveIds) {
+      const thread = yield* projectionStore.getThread(id).pipe(mapDispatchError(command));
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "thread.metadata-updated",
+        threadId: id,
+        occurredAt: now,
+        payload: {
+          ...thread,
+          archivePending:
+            id === command.threadId
+              ? pending
+              : {
+                  threadId: pending.threadId,
+                  commandId: pending.commandId,
+                  status: pending.status,
+                },
+          subagentPromotion: null,
+          titleRegeneration: null,
+          pullRequests: thread.pullRequests?.map((link) => withPullRequestWatch(link, undefined)),
+          updatedAt: now,
+        },
+      });
+      yield* cancelArchiveWork(command, id, events, now);
+    }
+    yield* Ref.update(effects, (current) => [
+      ...current,
+      {
+        id: `effect:${command.commandId}:thread.archive`,
+        commandId: command.commandId,
+        threadId: command.threadId,
+        request: { type: "thread.archive", requestId: command.commandId },
+      } satisfies PendingOrchestrationEffectV2,
+    ]);
+  });
+
+  const dispatchArchiveFamilyResult = Effect.fnUntraced(function* (
+    command: Extract<
+      OrchestrationV2InternalCommand,
+      { readonly type: "thread.archive.complete" | "thread.archive.fail" }
+    >,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+  ) {
+    const root = yield* projectionStore.getThread(command.threadId).pipe(mapDispatchError(command));
+    const pending = getThreadArchivePlan(root.archivePending);
+    const now = yield* DateTime.now;
+    if (pending?.commandId !== command.requestId || pending.status !== "stopping") {
+      yield* emit(
+        events,
+        command,
+      )({ type: "thread.metadata-updated", threadId: root.id, occurredAt: now, payload: root });
+      return;
+    }
+    if (command.type === "thread.archive.complete") {
+      const current = archiveParticipants(
+        yield* archiveFamilyShells(command),
+        root.id,
+        pending.childDisposition,
+      );
+      // Retained branches may keep delegating during shutdown. Consent still
+      // covers them as long as neither the stopped set nor promoted roots change.
+      if (
+        !sameThreadIds(current.archiveIds, pending.archiveThreadIds) ||
+        !sameThreadIds(current.promoteIds, pending.promoteThreadIds)
+      )
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "The subagents changed while stopping. Review the archive choices again.",
+        });
+      if (pending.modeLimit !== undefined) {
+        for (const id of new Set([
+          root.id,
+          ...pending.childThreadIds,
+          ...current.family.children.map((child) => child.id),
+        ])) {
+          const participant = yield* projectionStore.getThread(id).pipe(mapDispatchError(command));
+          yield* refuseAboveDispatchModeLimit(command, id, participant).pipe(
+            Effect.provideService(DispatchModeLimit, pending.modeLimit),
+          );
+        }
+      }
+    }
+    const resultIds =
+      command.type === "thread.archive.fail"
+        ? [
+            ...new Set([
+              ...pending.archiveThreadIds,
+              ...(yield* archiveFamilyShells(command))
+                .filter((thread) => thread.archivePending?.commandId === command.requestId)
+                .map((thread) => thread.id),
+            ]),
+          ]
+        : pending.archiveThreadIds;
+    const familyThreads = new Map(
+      (yield* Effect.forEach(yield* ownedThreadFamily(command), (id) =>
+        projectionStore.getThread(id).pipe(mapDispatchError(command)),
+      )).map((thread) => [thread.id, thread]),
+    );
+    for (const id of resultIds) {
+      const thread = yield* projectionStore.getThread(id).pipe(mapDispatchError(command));
+      if (thread.archivePending?.commandId !== command.requestId) continue;
+      if (command.type === "thread.archive.fail") {
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "thread.metadata-updated",
+          threadId: id,
+          occurredAt: now,
+          payload: {
+            ...thread,
+            archivePending: { ...thread.archivePending, status: "failed", error: command.error },
+            updatedAt: now,
+          },
+        });
+        continue;
+      }
+      yield* cancelArchiveWork(command, id, events, now);
+      const afterCancel = yield* getProjectionWithPendingEvents(id, events);
+      for (const task of afterCancel.subagents) {
+        if (task.childThreadId !== null && pending.promoteThreadIds.includes(task.childThreadId))
+          continue;
+        if (!["pending", "running", "waiting"].includes(task.status)) continue;
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "subagent.updated",
+          threadId: id,
+          nodeId: task.id,
+          occurredAt: now,
+          payload: { ...task, status: "cancelled", completedAt: now, updatedAt: now },
+        });
+      }
+      for (const providerThread of afterCancel.providerThreads)
+        if (
+          providerThread.appThreadId === id &&
+          (providerThread.pendingBackgroundTasks?.length ?? 0) > 0
+        )
+          yield* emit(
+            events,
+            command,
+          )({
+            type: "provider-thread.updated",
+            threadId: id,
+            occurredAt: now,
+            payload: { ...providerThread, pendingBackgroundTasks: [], updatedAt: now },
+          });
+      for (const turn of afterCancel.providerTurns)
+        if (turn.status === "running" || turn.status === "pending")
+          yield* emit(
+            events,
+            command,
+          )({
+            type: "provider-turn.updated",
+            threadId: id,
+            occurredAt: now,
+            payload: { ...turn, status: "cancelled", completedAt: now },
+          });
+      const current = (yield* getProjectionWithPendingEvents(id, events)).thread;
+      const archivedWith = yield* archiveOwnerFor(
+        command,
+        current,
+        familyThreads,
+        root.archivedWith ?? { threadId: root.id, commandId: command.requestId },
+        events,
+      );
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "thread.archived",
+        threadId: id,
+        occurredAt: now,
+        payload: {
+          ...current,
+          archivedAt: current.archivedAt ?? now,
+          archivedWith,
+          archivePending: null,
+          updatedAt: now,
+        },
+      });
+      yield* Ref.update(effects, (existing) => [
+        ...existing,
+        {
+          id: `effect:${command.commandId}:${id}:terminal.archive-cleanup`,
+          commandId: command.commandId,
+          threadId: id,
+          request: { type: "terminal.archive-cleanup" },
+        } satisfies PendingOrchestrationEffectV2,
+      ]);
+    }
+    if (command.type === "thread.archive.complete") {
+      const archivedIds = new Set(pending.archiveThreadIds);
+      const promotedIds = new Set(pending.promoteThreadIds);
+      for (const id of promotedIds) {
+        const thread = yield* projectionStore.getThread(id).pipe(mapDispatchError(command));
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "thread.metadata-updated",
+          threadId: id,
+          occurredAt: now,
+          payload: {
+            ...thread,
+            lineage: { ...thread.lineage, independent: true },
+            // Independent roots must not reuse their former parent's sidebar slot.
+            pinnedAt: null,
+            pinOrderKey: null,
+            activeOrderKey: null,
+            ...(thread.archivePending?.status === "failed" &&
+            thread.archivePending.threadId === root.id
+              ? { archivePending: null }
+              : {}),
+            updatedAt: now,
+          },
+        });
+        const parent = yield* getProjectionWithPendingEvents(root.id, events);
+        for (const task of parent.subagents.filter(
+          (task) => task.origin === "app_owned" && task.childThreadId === id,
+        ))
+          yield* emit(
+            events,
+            command,
+          )({
+            type: "subagent.updated",
+            threadId: root.id,
+            nodeId: task.id,
+            occurredAt: now,
+            payload: {
+              ...task,
+              ownershipReleased: true,
+              completionDelivery: { state: "disposed", observedByRunId: null },
+              updatedAt: now,
+            },
+          });
+      }
+      // A failed stop can mark the whole branch. Releasing that branch also
+      // releases its obsolete retry owner, without clearing a separate failure.
+      for (const thread of familyThreads.values()) {
+        if (
+          archivedIds.has(thread.id) ||
+          promotedIds.has(thread.id) ||
+          thread.archivedAt !== null ||
+          thread.deletedAt !== null ||
+          thread.archivePending?.status !== "failed" ||
+          thread.archivePending.threadId !== root.id
+        )
+          continue;
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "thread.metadata-updated",
+          threadId: thread.id,
+          occurredAt: now,
+          payload: { ...thread, archivePending: null, updatedAt: now },
+        });
+      }
+    }
+  });
+
+  const dispatchUnarchiveFamily = Effect.fnUntraced(function* (
+    command: Extract<OrchestrationV2Command, { readonly type: "thread.unarchive" }>,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+  ) {
+    const root = yield* projectionStore.getThread(command.threadId).pipe(mapDispatchError(command));
+    const cohort = root.archivedWith;
+    const failedArchive = getThreadArchivePlan(root.archivePending);
+    if (command.expectedArchiveCommandId !== undefined) {
+      if (
+        root.archivedAt !== null ||
+        root.deletedAt !== null ||
+        failedArchive?.status !== "failed" ||
+        failedArchive.threadId !== root.id ||
+        failedArchive.commandId !== command.expectedArchiveCommandId
+      )
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause:
+            root.archivedAt !== null
+              ? "This thread family is already archived. Restore it from Settings > Archived threads."
+              : "This failed archive changed. Review the conversation before dismissing it.",
+        });
+      const now = yield* DateTime.now;
+      const participants = [
+        root,
+        ...(yield* archiveFamilyShells(command)).filter((thread) => thread.id !== root.id),
+      ];
+      for (const participant of participants) {
+        if (
+          participant.archivedAt !== null ||
+          participant.deletedAt !== null ||
+          participant.archivePending?.status !== "failed" ||
+          participant.archivePending.threadId !== root.id ||
+          participant.archivePending.commandId !== failedArchive.commandId
+        )
+          continue;
+        const thread = yield* projectionStore
+          .getThread(participant.id)
+          .pipe(mapDispatchError(command));
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "thread.metadata-updated",
+          threadId: thread.id,
+          occurredAt: now,
+          payload: { ...thread, archivePending: null, updatedAt: now },
+        });
+      }
+      return;
+    }
+    if (
+      root.lineage.relationshipToParent === "subagent" &&
+      root.lineage.independent !== true &&
+      root.lineage.parentThreadId !== null
+    ) {
+      const owner = yield* projectionStore
+        .getThreadShell(root.lineage.parentThreadId)
+        .pipe(mapDispatchError(command));
+      if (owner?.archivedAt != null && owner.deletedAt === null)
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Restore the parent thread to reopen this family",
+        });
+    }
+    let releaseOwnership = false;
+    if (cohort !== undefined && cohort !== null && cohort.threadId !== root.id) {
+      const parent = yield* projectionStore
+        .getThreadShell(cohort.threadId)
+        .pipe(mapDispatchError(command));
+      releaseOwnership = parent === null || parent.deletedAt !== null;
+      if (!releaseOwnership && parent?.archivedAt != null)
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Restore the parent thread to reopen this family",
+        });
+    }
+    yield* dispatchThreadMutation(command, events, effects);
+    if (failedArchive?.status === "failed" && failedArchive.threadId === root.id) {
+      const now = yield* DateTime.now;
+      // A failed repair leaves live participants outside the original restore cohort.
+      for (const child of yield* archiveFamilyShells(command)) {
+        if (
+          child.id === root.id ||
+          child.archivedAt !== null ||
+          child.deletedAt !== null ||
+          child.archivePending?.status !== "failed" ||
+          child.archivePending.threadId !== root.id ||
+          child.archivePending.commandId !== failedArchive.commandId
+        )
+          continue;
+        const thread = yield* projectionStore.getThread(child.id).pipe(mapDispatchError(command));
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "thread.metadata-updated",
+          threadId: child.id,
+          occurredAt: now,
+          payload: { ...thread, archivePending: null, updatedAt: now },
+        });
+      }
+    }
+    if (cohort == null || (!releaseOwnership && cohort.threadId !== root.id)) return;
+    const shells = yield* archiveFamilyShells(command);
+    const survivingBranch = releaseOwnership
+      ? new Set(
+          getOwnedThreadFamily(
+            shells
+              .filter(
+                (thread) =>
+                  thread.archivedWith?.threadId === cohort.threadId &&
+                  thread.archivedWith.commandId === cohort.commandId,
+              )
+              .map((thread) => ({ ...thread, archivedAt: null })),
+            root.id,
+          ).children.map((thread) => thread.id),
+        )
+      : null;
+    if (releaseOwnership) {
+      const restored = (yield* getProjectionWithPendingEvents(root.id, events)).thread;
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "thread.metadata-updated",
+        threadId: root.id,
+        occurredAt: restored.updatedAt,
+        payload: {
+          ...restored,
+          lineage: { ...restored.lineage, independent: true },
+          pinnedAt: null,
+          pinOrderKey: null,
+          activeOrderKey: null,
+        },
+      });
+    }
+    for (const child of shells) {
+      if (
+        child.id === root.id ||
+        child.archivedAt === null ||
+        child.deletedAt !== null ||
+        child.archivedWith?.threadId !== cohort.threadId ||
+        child.archivedWith.commandId !== cohort.commandId ||
+        (survivingBranch !== null && !survivingBranch.has(child.id))
+      )
+        continue;
+      yield* dispatchThreadMutation({ ...command, threadId: child.id }, events, effects);
+    }
+  });
+
   const dispatchOnce = Effect.fn("orchestrationV2.dispatch.once")(function* (
     command: OrchestrationV2ServerCommand,
   ): Effect.fn.Return<
@@ -10944,6 +11885,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       readonly effects: ReadonlyArray<PendingOrchestrationEffectV2>;
       readonly cancelUnsettledEffects?: {
         readonly effectTypes: ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
+        readonly threadIds?: ReadonlyArray<ThreadId>;
         readonly reason: string;
       };
     },
@@ -10955,11 +11897,39 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       "orchestration_v2.thread_id": commandThreadId(command),
     });
 
+    const allowedWhileArchiving =
+      command.type === "thread.stop" ||
+      command.type === "thread.visit" ||
+      command.type === "thread.archive.complete" ||
+      command.type === "thread.archive.fail" ||
+      command.type === "thread.background-work.settle" ||
+      (command.type === "message.dispatch" && command.usageLimitContinuationOfRunId !== undefined);
+    if (!allowedWhileArchiving && command.type !== "thread.create") {
+      const current = yield* projectionStore
+        .getThread(commandThreadId(command))
+        .pipe(
+          Effect.catchTags({ ProjectionStoreThreadNotFoundError: () => Effect.succeed(null) }),
+          mapDispatchError(command),
+        );
+      if (
+        current?.archivePending?.status === "stopping" &&
+        (current.deletedAt === null || current.worktreeCleanup != null)
+      ) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause:
+            "This conversation is stopping before it is archived. Wait for the archive to finish.",
+        });
+      }
+    }
+
     const events = yield* Ref.make<Array<OrchestrationV2DomainEvent>>([]);
     const effects = yield* Ref.make<Array<PendingOrchestrationEffectV2>>([]);
     let cancelUnsettledEffects:
       | {
           readonly effectTypes: ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
+          readonly threadIds?: ReadonlyArray<ThreadId>;
           readonly reason: string;
         }
       | undefined;
@@ -11208,9 +12178,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }
         return { events: [...familyEvents, ...(yield* Ref.get(events))], effects: familyEffects };
       }
-      case "thread.archive":
-      case "thread.unarchive": {
-        const family = yield* ownedThreadFamily(command);
+      case "thread.archive": {
         const root = yield* projectionStore
           .getThread(command.threadId)
           .pipe(
@@ -11218,97 +12186,60 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
             ),
           );
-        if (command.type === "thread.unarchive") {
-          const ownerIds = new Set([
-            ...(root.lineage.relationshipToParent === "subagent" &&
-            root.lineage.parentThreadId !== null
-              ? [root.lineage.parentThreadId]
-              : []),
-            ...(root.archivedWith != null && root.archivedWith.threadId !== root.id
-              ? [root.archivedWith.threadId]
-              : []),
-          ]);
-          for (const ownerId of ownerIds) {
-            const owner = yield* projectionStore.getThread(ownerId).pipe(
-              Effect.catchTags({
-                ProjectionStoreThreadNotFoundError: () => Effect.succeed(null),
-              }),
-              mapDispatchError(command),
-            );
-            if (owner !== null && owner.deletedAt === null && owner.archivedAt !== null) {
-              return yield* new OrchestratorDispatchError({
-                commandId: command.commandId,
-                commandType: command.type,
-                cause: "Restore the archived owner before restoring its subagents.",
-              });
-            }
-          }
+        if (command.expectedArchiveCommandId !== undefined) {
+          const failedArchive = getThreadArchivePlan(root.archivePending);
+          if (
+            root.deletedAt !== null ||
+            failedArchive?.status !== "failed" ||
+            failedArchive.threadId !== root.id ||
+            failedArchive.commandId !== command.expectedArchiveCommandId
+          )
+            return yield* new OrchestratorDispatchError({
+              commandId: command.commandId,
+              commandType: command.type,
+              cause: "This failed archive changed. Review the conversation before retrying it.",
+            });
         }
-        const owner =
-          root.archivedAt !== null && root.archivedWith != null
-            ? root.archivedWith
-            : { threadId: command.threadId, commandId: command.commandId };
-        const descendants = yield* Effect.forEach(
-          family.filter((id) => id !== root.id),
-          (id) => projectionStore.getThread(id).pipe(mapDispatchError(command)),
+        if (root.deletedAt !== null)
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "This conversation is no longer available to archive.",
+          });
+        if (root.archivedAt !== null) {
+          yield* repairArchivedFamily(command, root, events, effects);
+        } else yield* dispatchArchiveFamilyRequest(command, events, effects);
+        const pending = (yield* Ref.get(events)).find(
+          (event) =>
+            event.type === "thread.metadata-updated" && event.threadId === command.threadId,
         );
-        const participants = descendants.filter(
-          (child) =>
-            child.deletedAt === null &&
-            (command.type === "thread.archive"
-              ? child.archivedAt === null
-              : child.archivedAt !== null &&
-                root.archivedWith != null &&
-                child.archivedWith?.commandId === root.archivedWith.commandId &&
-                child.archivedWith.threadId === root.archivedWith.threadId),
-        );
-        // A repeated archive repairs children stranded by older single-thread archives.
-        const repairing =
-          command.type === "thread.archive" && root.archivedAt !== null && participants.length > 0;
-        yield* dispatchThreadMutation(command, events, effects, repairing ? owner : undefined);
-        const familyThreads = new Map([root, ...descendants].map((thread) => [thread.id, thread]));
-        for (const child of participants) {
-          let childOwner = owner;
-          if (command.type === "thread.archive") {
-            const visited = new Set<ThreadId>();
-            let ancestorId = child.lineage.parentThreadId;
-            while (ancestorId !== null && ancestorId !== root.id && !visited.has(ancestorId)) {
-              visited.add(ancestorId);
-              const ancestor = familyThreads.get(ancestorId);
-              if (ancestor === undefined) break;
-              if (ancestor.archivedAt !== null) {
-                childOwner = ancestor.archivedWith ?? {
-                  threadId: ancestor.id,
-                  commandId: command.commandId,
-                };
-                if (ancestor.archivedWith == null) {
-                  const now = yield* DateTime.now;
-                  const updated = { ...ancestor, archivedWith: childOwner, updatedAt: now };
-                  familyThreads.set(ancestor.id, updated);
-                  yield* emit(
-                    events,
-                    command,
-                  )({
-                    type: "thread.metadata-updated",
-                    threadId: ancestor.id,
-                    occurredAt: now,
-                    payload: updated,
-                  });
-                }
-                break;
-              }
-              ancestorId = ancestor.lineage.parentThreadId;
-            }
-          }
-          yield* dispatchThreadMutation(
-            { ...command, threadId: child.id },
-            events,
-            effects,
-            command.type === "thread.archive" ? childOwner : undefined,
-          );
+        if (
+          pending?.type === "thread.metadata-updated" &&
+          getThreadArchivePlan(pending.payload.archivePending)?.status === "stopping"
+        ) {
+          cancelUnsettledEffects = {
+            threadIds: getThreadArchivePlan(pending.payload.archivePending)!.archiveThreadIds,
+            effectTypes: [
+              "provider-turn.start",
+              "provider-turn.restart",
+              "provider-runtime.continue",
+              "subagent.promote",
+              "provider-turn.steer",
+              "runtime-request.respond",
+              "thread-title.generate",
+            ],
+            reason: "Thread family is stopping before archive.",
+          };
         }
         break;
       }
+      case "thread.archive.complete":
+      case "thread.archive.fail":
+        yield* dispatchArchiveFamilyResult(command, events, effects);
+        break;
+      case "thread.unarchive":
+        yield* dispatchUnarchiveFamily(command, events, effects);
+        break;
       case "thread.settle":
       case "thread.unsettle":
       case "thread.snooze":
@@ -11552,6 +12483,27 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     };
   });
 
+  const delegatedCancellationLineage = Effect.fnUntraced(function* (
+    command: Extract<OrchestrationV2ServerCommand, { readonly type: "thread.stop" }>,
+    threadIds: ReadonlyArray<ThreadId>,
+  ) {
+    const threads = new Map<ThreadId, OrchestrationV2AppThread>();
+    for (const start of threadIds) {
+      let id: ThreadId | null = start;
+      while (id !== null && !threads.has(id)) {
+        const thread: OrchestrationV2AppThread = yield* projectionStore
+          .getThread(id)
+          .pipe(mapDispatchError(command));
+        threads.set(id, thread);
+        id =
+          thread.lineage.relationshipToParent === "subagent" && thread.lineage.independent !== true
+            ? thread.lineage.parentThreadId
+            : null;
+      }
+    }
+    return threads;
+  });
+
   const dispatchWithReceiptEffect = Effect.fn("orchestrationV2.dispatch.withReceipt")(function* (
     command: OrchestrationV2ServerCommand,
   ): Effect.fn.Return<OrchestratorV2DispatchResult, OrchestratorV2Error> {
@@ -11560,6 +12512,54 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       "orchestration_v2.command_type": command.type,
       "orchestration_v2.thread_id": commandThreadId(command),
     });
+
+    if (command.type === "thread.stop") {
+      // Promotion takes these same parent/child locks. Retained task IDs can
+      // read provenance, but cannot stop work after its ownership is released.
+      const ownership = yield* DelegatedTaskCancellation;
+      for (const edge of ownership) {
+        const child = yield* projectionStore
+          .getThread(edge.childThreadId)
+          .pipe(mapDispatchError(command));
+        const parent = yield* projectionStore
+          .getThreadRecords(edge.parentThreadId, ["subagents"])
+          .pipe(mapDispatchError(command));
+        const task = parent.subagents.find((candidate) => candidate.id === edge.taskId);
+        if (
+          child.lineage.independent === true ||
+          child.lineage.relationshipToParent !== "subagent" ||
+          child.lineage.parentThreadId !== edge.parentThreadId ||
+          task?.origin !== "app_owned" ||
+          task.childThreadId !== edge.childThreadId ||
+          task.ownershipReleased === true
+        )
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause:
+              "This task is now an independent thread and cannot be cancelled by its former parent.",
+          });
+      }
+      if (ownership.length > 0) {
+        const lineage = yield* delegatedCancellationLineage(command, [
+          command.threadId,
+          ...ownership.flatMap((edge) => [edge.parentThreadId, edge.childThreadId]),
+        ]);
+        const ids = new Set(lineage.keys());
+        if (
+          [...lineage.values()].some((thread) => {
+            const plan = getThreadArchivePlan(thread.archivePending);
+            return plan?.status === "stopping" && plan.promoteThreadIds.some((id) => ids.has(id));
+          })
+        )
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause:
+              "This child work is being kept separately. Wait for the archive to finish before cancelling it through its parent.",
+          });
+      }
+    }
 
     const existingReceipt = yield* commandReceipts.getByCommandId(command.commandId).pipe(
       Effect.mapError(
@@ -11627,15 +12627,23 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (shell !== null) yield* refuseAboveDispatchModeLimit(command, threadId, shell);
     }
 
+    const completionLimit =
+      command.type === "thread.archive.complete"
+        ? getThreadArchivePlan(
+            (yield* projectionStore.getThread(command.threadId).pipe(mapDispatchError(command)))
+              .archivePending,
+          )?.modeLimit
+        : undefined;
+    const participantLimit = completionLimit ?? limit;
     const execute = Effect.gen(function* () {
       const plan = yield* dispatchOnce(command).pipe(
         Effect.tap((planned) =>
           Effect.gen(function* () {
             if (
-              limit === undefined ||
-              (command.type !== "thread.archive" &&
-                command.type !== "thread.unarchive" &&
-                command.type !== "thread.delete")
+              command.type !== "thread.archive.complete" &&
+              command.type !== "thread.archive" &&
+              command.type !== "thread.unarchive" &&
+              command.type !== "thread.delete"
             )
               return;
             // The family locks cover every planned mutation and cleanup owner.
@@ -11649,18 +12657,31 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               const thread = yield* projectionStore
                 .getThread(threadId)
                 .pipe(mapDispatchError(command));
-              yield* refuseAboveDispatchModeLimit(command, threadId, thread);
+              if (
+                command.type !== "thread.archive.complete" &&
+                thread.archivePending?.status === "stopping"
+              )
+                return yield* new OrchestratorDispatchError({
+                  commandId: command.commandId,
+                  commandType: command.type,
+                  cause:
+                    "A conversation in this family is still stopping before archive. Wait for its archive to finish.",
+                });
+              if (participantLimit !== undefined)
+                yield* refuseAboveDispatchModeLimit(command, threadId, thread).pipe(
+                  Effect.provideService(DispatchModeLimit, participantLimit),
+                );
             }
           }),
         ),
         Effect.flatMap((planned) =>
-          // A settle that finds the provider already ended everything, or a
-          // stop that finds nothing running, has nothing to record. That is
-          // its expected outcome, not a failure.
+          // Repeating an archive, settling ended work, or stopping an idle
+          // thread can succeed without another lifecycle event.
           planned.events.length > 0 ||
           command.type === "thread.background-work.settle" ||
           command.type === "message.incoming-summary.complete" ||
-          command.type === "thread.stop"
+          command.type === "thread.stop" ||
+          command.type === "thread.archive"
             ? Effect.succeed(planned)
             : Effect.fail(
                 new OrchestratorDispatchError({
@@ -11790,9 +12811,40 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     return yield* execute;
   });
 
-  const dispatchWithReceipt = (command: OrchestrationV2ServerCommand) => {
+  const dispatchWithReceipt = (
+    command: OrchestrationV2ServerCommand,
+  ): Effect.Effect<OrchestratorV2DispatchResult, OrchestratorV2Error> => {
+    if (command.type === "thread.stop")
+      return Effect.gen(function* () {
+        const ownership = yield* DelegatedTaskCancellation;
+        const participants = [
+          ...new Set([
+            command.threadId,
+            ...ownership.flatMap((edge) => [edge.parentThreadId, edge.childThreadId]),
+          ]),
+        ];
+        const lineage =
+          ownership.length === 0
+            ? null
+            : yield* delegatedCancellationLineage(command, participants);
+        const ids = [...new Set([...participants, ...(lineage?.keys() ?? [])])].toSorted();
+        const decide = Effect.gen(function* () {
+          if (ownership.length > 0) {
+            const current = yield* delegatedCancellationLineage(command, participants);
+            if ([...current.keys()].some((id) => !ids.includes(id))) return null;
+          }
+          return yield* dispatchWithReceiptEffect(command);
+        });
+        const result = yield* ids.reduceRight(
+          (effect, id) => threadDispatch.withLock(id, effect),
+          decide,
+        );
+        return result === null ? yield* dispatchWithReceipt(command) : result;
+      });
     if (
       command.type === "thread.archive" ||
+      command.type === "thread.archive.complete" ||
+      command.type === "thread.archive.fail" ||
       command.type === "thread.unarchive" ||
       command.type === "thread.delete"
     ) {
@@ -11806,6 +12858,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             const ids = [
               ...new Set([
                 ...family,
+                ...(root?.archivedWith == null ? [] : [root.archivedWith.threadId]),
+                ...(getThreadArchivePlan(root?.archivePending)?.archiveThreadIds ?? []),
+                ...(getThreadArchivePlan(root?.archivePending)?.promoteThreadIds ?? []),
                 ...(root?.lineage.parentThreadId == null ? [] : [root.lineage.parentThreadId]),
               ]),
             ].toSorted();
@@ -12216,6 +13271,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       projectionStore
         .getThreadShell(threadId)
         .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause }))),
+    getThreadArchiveFamily,
     getThreadEventSequence: (threadId) =>
       eventSink
         .latestSequence({ threadId })
@@ -12349,6 +13405,13 @@ const layerUnavailable: Layer.Layer<OrchestratorV2> = Layer.succeed(
         }),
       ),
     getThreadEventSequence: (threadId) =>
+      Effect.fail(
+        new OrchestratorProjectionError({
+          threadId,
+          cause: "Orchestration V2 live runtime is not configured.",
+        }),
+      ),
+    getThreadArchiveFamily: (threadId) =>
       Effect.fail(
         new OrchestratorProjectionError({
           threadId,

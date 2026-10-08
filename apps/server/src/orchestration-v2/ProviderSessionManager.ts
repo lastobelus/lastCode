@@ -2048,7 +2048,16 @@ export const layerWithOptions = (
                 });
               }
               const detachedEntry =
-                Option.getOrUndefined(detached) ?? pendingThreadUnloads.get(unloadKey)?.entry;
+                Option.getOrUndefined(detached) ??
+                pendingThreadUnloads.get(unloadKey)?.entry ??
+                // Native subagent mirrors share their parent's runtime without
+                // attaching independently. Terminal cleanup still owns their
+                // native threads and must unload them before confirming Stop.
+                (input.revokeMcpCredential === true &&
+                currentEntry?.supportsMultipleProviderThreads === true &&
+                detachedProviderThreads.length > 0
+                  ? currentEntry
+                  : undefined);
               if (detachedEntry === undefined) return;
               detachedProviderThreads =
                 pendingThreadUnloads.get(unloadKey)?.providerThreads ?? detachedProviderThreads;
@@ -2420,6 +2429,38 @@ export const layerWithOptions = (
                       concurrency: "unbounded",
                       discard: true,
                     }).pipe(Effect.timeout(RELEASE_SCOPE_CLOSE_TIMEOUT_MS));
+              }),
+            ),
+            Effect.andThen(
+              Effect.gen(function* () {
+                // Persist each confirmed shutdown, even if a later participant fails.
+                // A retry after process loss may have a binding but no live runtime.
+                const { providerSessions } = yield* projectionStore.getThreadRecords(
+                  input.threadId,
+                  ["providerSessions"],
+                );
+                const session = providerSessions.find(
+                  (session) => session.id === input.providerSessionId,
+                );
+                if (session === undefined) return;
+                const now = yield* DateTime.now;
+                yield* eventSink.write({
+                  events: [
+                    {
+                      id: yield* idAllocator.allocate.event(input),
+                      type: "provider-session.detached",
+                      threadId: input.threadId,
+                      driver: session.driver,
+                      providerInstanceId: session.providerInstanceId,
+                      occurredAt: now,
+                      payload: {
+                        providerSessionId: input.providerSessionId,
+                        detachedAt: now,
+                        reason: input.detail ?? "Thread shut down.",
+                      },
+                    },
+                  ],
+                });
               }),
             ),
             Effect.catchCause((cause) =>

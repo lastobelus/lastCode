@@ -11,6 +11,7 @@ import {
   ProviderThreadId,
   RunId,
   ThreadId,
+  getOwnedThreadFamily,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -29,6 +30,8 @@ import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
+import * as ThreadManagementService from "./ThreadManagementService.ts";
+import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 
 const instanceId = ProviderInstanceId.make("codex");
 let fixtureNumber = 0;
@@ -48,12 +51,13 @@ const BaseTestLayer = Layer.mergeAll(
   EffectOutbox.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
   ProjectionStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
 );
-const TestLayer = Layer.merge(
+const LifecycleTestLayer = Layer.merge(
   BaseTestLayer,
   ProviderEventIngestor.layer.pipe(
     Layer.provide(Layer.mergeAll(BaseTestLayer, IdAllocator.layer, ThreadCommandExecutor.layer)),
   ),
 );
+const TestLayer = ThreadManagementService.layer.pipe(Layer.provideMerge(LifecycleTestLayer));
 const seed = Effect.fn("ThreadFamilyLifecycle.seed")(function* () {
   const number = ++fixtureNumber;
   const rootId = ThreadId.make(`family-root:${number}`);
@@ -64,6 +68,8 @@ const seed = Effect.fn("ThreadFamilyLifecycle.seed")(function* () {
   const orchestrator = yield* Orchestrator.OrchestratorV2;
   const store = yield* ProjectionStore.ProjectionStoreV2;
   const sink = yield* EventSink.EventSinkV2;
+  const threads = yield* ThreadManagementService.ThreadManagementService;
+  const teardowns: Array<{ threadId: ThreadId; providerSessionId: ProviderSessionId }> = [];
   const now = yield* DateTime.now;
   yield* orchestrator.dispatch({
     type: "thread.create",
@@ -110,11 +116,65 @@ const seed = Effect.fn("ThreadFamilyLifecycle.seed")(function* () {
       ],
     });
   }
-  const command = (
+  const command = Effect.fnUntraced(function* (
     type: "thread.archive" | "thread.unarchive" | "thread.delete",
     id: string,
     threadId = rootId,
-  ) => orchestrator.dispatch({ type, commandId: CommandId.make(`${id}:${rootId}`), threadId });
+  ) {
+    const commandId = CommandId.make(`${id}:${rootId}`);
+    const family =
+      type === "thread.archive"
+        ? getOwnedThreadFamily(
+            yield* Effect.forEach(yield* store.getOwnedThreadIds(threadId), (id) =>
+              store.getThread(id),
+            ),
+            threadId,
+          )
+        : undefined;
+    const requested = yield* orchestrator.dispatch({
+      type,
+      commandId,
+      threadId,
+      ...(family === undefined
+        ? {}
+        : {
+            childDisposition: "stop_and_archive" as const,
+            expectedChildThreadIds: family.children.map((child) => child.id),
+          }),
+    });
+    if (
+      type !== "thread.archive" ||
+      (yield* store.getThread(threadId)).archivePending?.status !== "stopping"
+    )
+      return { ...requested, effectCommandIds: [commandId] };
+    assert.isNull((yield* store.getThread(threadId)).archivedAt);
+    // The harness has no worker. Drive real strict shutdown with a test
+    // teardown so both phases run without opening a provider or touching live state.
+    yield* threads.executeArchive({ threadId, requestId: commandId }).pipe(
+      Effect.provide(
+        Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+          teardownThread: (input) =>
+            Effect.sync(() => {
+              teardowns.push(input);
+            }),
+        }),
+      ),
+    );
+    const completionId = CommandId.make(`${commandId}:complete`);
+    // Replaying the completed command reads its persisted events without
+    // repeating archive work, allowing callers to inspect both phases together.
+    const completed = yield* orchestrator.dispatch({
+      type: "thread.archive.complete",
+      commandId: completionId,
+      threadId,
+      requestId: commandId,
+    });
+    return {
+      ...completed,
+      storedEvents: [...requested.storedEvents, ...completed.storedEvents],
+      effectCommandIds: [commandId, completionId],
+    };
+  });
   return {
     orchestrator,
     store,
@@ -122,6 +182,7 @@ const seed = Effect.fn("ThreadFamilyLifecycle.seed")(function* () {
     root,
     now,
     command,
+    teardowns,
     rootId,
     nativeId,
     nestedId,
@@ -258,7 +319,7 @@ it.layer(TestLayer)("thread family lifecycle", (it) => {
   );
 
   it.effect.each(["preparing", "starting", "running", "waiting"] as const)(
-    "rejects family archive atomically while a child is %s",
+    "rejects archive without family consent atomically while a child is %s",
     (status) =>
       Effect.gen(function* () {
         const h = yield* seed();
@@ -290,9 +351,19 @@ it.layer(TestLayer)("thread family lifecycle", (it) => {
             },
           ],
         });
-        assert.isTrue(
-          Exit.isFailure(yield* Effect.exit(h.command("thread.archive", "unfinished-family"))),
+        const refused = yield* Effect.flip(
+          h.orchestrator.dispatch({
+            type: "thread.archive",
+            commandId: CommandId.make(`unfinished-family:${h.rootId}`),
+            threadId: h.rootId,
+          }),
         );
+        assert.equal(refused._tag, "OrchestratorDispatchError");
+        if (refused._tag === "OrchestratorDispatchError")
+          assert.equal(
+            refused.cause,
+            "Choose whether to stop and archive the subagents or keep them separately before archiving.",
+          );
         for (const id of [h.rootId, h.nativeId, h.nestedId])
           assert.isNull((yield* h.store.getThread(id)).archivedAt);
         assert.deepEqual(
@@ -419,17 +490,27 @@ it.layer(TestLayer)("thread family lifecycle", (it) => {
             ],
           });
         }
-        yield* h.command(type, "shared-cleanup");
-        const effects = yield* (yield* EffectOutbox.EffectOutboxV2).listByCommandId(
-          CommandId.make(`shared-cleanup:${h.rootId}`),
-        );
-        assert.deepEqual(
-          effects
-            .filter((effect) => effect.request.type === "provider-session.detach")
-            .map((effect) => effect.threadId)
-            .toSorted(),
-          [h.rootId, h.nestedId].toSorted(),
-        );
+        const result = yield* h.command(type, "shared-cleanup");
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const effects = (yield* Effect.forEach(result.effectCommandIds, (id) =>
+          outbox.listByCommandId(id),
+        )).flat();
+        if (type === "thread.archive") {
+          assert.deepEqual(
+            h.teardowns.toSorted((a, b) => a.threadId.localeCompare(b.threadId)),
+            [h.rootId, h.nestedId]
+              .toSorted()
+              .map((threadId) => ({ threadId, providerSessionId: sessionId })),
+          );
+        } else {
+          assert.deepEqual(
+            effects
+              .filter((effect) => effect.request.type === "provider-session.detach")
+              .map((effect) => effect.threadId)
+              .toSorted(),
+            [h.rootId, h.nestedId].toSorted(),
+          );
+        }
       }),
   );
 
@@ -460,7 +541,9 @@ it.layer(TestLayer)("thread family lifecycle", (it) => {
           original.archivedWith,
         );
         const outbox = yield* EffectOutbox.EffectOutboxV2;
-        const effects = yield* outbox.listByCommandId(CommandId.make(`archive-family:${rootId}`));
+        const effects = (yield* Effect.forEach(result.effectCommandIds, (id) =>
+          outbox.listByCommandId(id),
+        )).flat();
         assert.deepEqual(
           effects
             .filter((e) => e.request.type === "terminal.archive-cleanup")

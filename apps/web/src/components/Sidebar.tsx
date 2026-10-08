@@ -1,5 +1,9 @@
 import { type EnvironmentId } from "@t3tools/contracts";
 import {
+  getArchiveRecoveryRows,
+  presentThreadArchive,
+} from "@t3tools/client-runtime/state/thread-archive";
+import {
   ConnectedSidebarEnvironmentIcon,
   useSidebarProviderBadgePreferences,
   type SidebarProviderBadgePreferences,
@@ -48,7 +52,6 @@ import {
 } from "@t3tools/client-runtime/state/thread-search";
 import {
   resolveThreadProviderStack,
-  threadRuntimeCanArchive,
   type EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/models";
 import {
@@ -1199,6 +1202,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // switching sidebars must not light up every historical thread as unread.
   const isUnread = hasUnseenCompletion({ ...thread, lastVisitedAt });
   const status = resolveSidebarThreadStatus(thread);
+  const archiveStatus = presentThreadArchive(thread);
   // A woken thread reappears at its original position (the sort is
   // deliberately static), so the pill has to carry the weight. Snoozing is
   // an explicit act, so the pill clears only when the user re-engages:
@@ -1226,6 +1230,14 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // mobile Live Activity/widgets (amber approval, indigo input, sky working)
   // so a thread reads the same color everywhere it surfaces.
   const topStatus = (() => {
+    if (archiveStatus)
+      return {
+        label: archiveStatus.label,
+        icon:
+          archiveStatus.status === "archive-failed" ? ("failed" as const) : ("waiting" as const),
+        className:
+          archiveStatus.status === "archive-failed" ? "text-warning" : "text-muted-foreground",
+      };
     if (status === "cleanup-deleting" || status === "cleanup-queued")
       return {
         label: status === "cleanup-queued" ? "Deleting (Queued)" : "Deleting",
@@ -1270,6 +1282,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     return isUnread ? { label: "Done", icon: "done" as const, className: "text-success" } : null;
   })();
   const actionIsPrimary =
+    archiveStatus === null &&
     actionPresentation !== null &&
     (thread.runtime === null ||
       ["idle", "completed", "cancelled", "interrupted", "rolled_back"].includes(
@@ -1507,9 +1520,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     props.snoozeSupported &&
     canSnooze(thread, { now: new Date().toISOString() });
   const showHoverActions =
-    (canOperateThread && cleanup === null && props.settlementSupported) ||
-    showSnoozeButton ||
-    hasUnsentDraft;
+    archiveStatus === null &&
+    ((canOperateThread && cleanup === null && props.settlementSupported) ||
+      showSnoozeButton ||
+      hasUnsentDraft);
   // If the thread becomes blocked while the popover is open, the button
   // unmounts without firing onOpenChange(false). Deriving the flag keeps a
   // stale true from permanently hiding the status label / pinning the
@@ -1608,7 +1622,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
 
   const accessibility = resolveSidebarRowAccessibility({
     title: thread.title,
-    statusLabel: topStatus?.label ?? null,
+    statusLabel: archiveStatus
+      ? `${archiveStatus.label}. ${archiveStatus.description}`
+      : (topStatus?.label ?? null),
     projectDisplayName: props.projectDisplayName,
     isActive: props.isActive,
   });
@@ -1850,12 +1866,24 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                   className={cn(
                     "inline-flex justify-end tabular-nums text-secondary-label transition-opacity",
                     !isWoke &&
+                      archiveStatus === null &&
                       canOperateThread &&
                       cleanup === null &&
                       "group-any-hover/sidebar-row:opacity-0",
                   )}
                 >
-                  {variantAction === "unsnooze" && props.snoozeWakeLabelText !== null ? (
+                  {archiveStatus ? (
+                    <Tooltip>
+                      <TooltipTrigger
+                        render={
+                          <span role="status" className={cn("text-xs", topStatus?.className)} />
+                        }
+                      >
+                        {archiveStatus.label}
+                      </TooltipTrigger>
+                      <TooltipPopup side="top">{archiveStatus.description}</TooltipPopup>
+                    </Tooltip>
+                  ) : variantAction === "unsnooze" && props.snoozeWakeLabelText !== null ? (
                     // Snoozed rows show when they come BACK, not when they were
                     // last touched — the return ticket is the row's whole story.
                     <span className="text-xs text-info-foreground tabular-nums">
@@ -1888,7 +1916,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                     </span>
                   )}
                 </span>
-                {variantAction === "unsnooze" ? (
+                {archiveStatus ? null : variantAction === "unsnooze" ? (
                   !canOperateThread || cleanup !== null || !props.snoozeSupported ? null : (
                     <button
                       type="button"
@@ -2035,7 +2063,23 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                     )}
                   >
                     {topStatus ? (
-                      actionIsPrimary && actionResume !== null && actionPresentation !== null ? (
+                      archiveStatus ? (
+                        <Tooltip>
+                          <TooltipTrigger
+                            render={
+                              <span
+                                role="status"
+                                className={cn("inline-flex font-medium", topStatus.className)}
+                              />
+                            }
+                          >
+                            {archiveStatus.label}
+                          </TooltipTrigger>
+                          <TooltipPopup side="top">{archiveStatus.description}</TooltipPopup>
+                        </Tooltip>
+                      ) : actionIsPrimary &&
+                        actionResume !== null &&
+                        actionPresentation !== null ? (
                         <Popover>
                           <PopoverTrigger
                             render={
@@ -2273,7 +2317,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                   />
                 ) : null}
                 {props.providerBadgePreferences.enabled ||
-                (thread.lineage.relationshipToParent !== "subagent" &&
+                ((thread.lineage.relationshipToParent !== "subagent" ||
+                  thread.lineage.independent === true) &&
                   showV2ThreadCardEnvironmentIcon(!isRemote, props.showLocalEnvironmentIcon)) ? (
                   <span className="inline-flex shrink-0 items-center">
                     <ConnectedSidebarEnvironmentIcon
@@ -2510,7 +2555,6 @@ export default function Sidebar() {
   const { isMobile, setOpenMobile } = useSidebar();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
-  const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
   const sidebarProjectSortOrder = useClientSettings((s) => s.sidebarProjectSortOrder);
   const timestampFormat = useClientSettings((s) => s.timestampFormat);
   const workingShelfEnabled = useClientSettings((s) => s.sidebarWorkingShelfEnabled);
@@ -2533,6 +2577,7 @@ export default function Sidebar() {
     reorderActiveThread,
     markThreadUnread,
     archiveThread,
+    unarchiveThread,
     deleteThread,
     setThreadPersistence,
   } = useThreadActions();
@@ -2952,6 +2997,7 @@ export default function Sidebar() {
     // Subagent child threads live in the parent's Agents surface, not the
     // sidebar roster (v2 models them as real threads with lineage).
     const visible = filterSidebarV2VisibleThreads(threads, scopedProjectKeys);
+    const archiveRecoveryRows = getArchiveRecoveryRows(threads);
     inboxReturns.observe(workingShelfEnabled ? threads : null);
     const pinned: EnvironmentThreadShell[] = [];
     const active: EnvironmentThreadShell[] = [];
@@ -2966,7 +3012,7 @@ export default function Sidebar() {
     const activeReorderable = new Set<string>();
     for (const thread of visible) {
       const capabilities = serverConfigs.get(thread.environmentId)?.environment.capabilities;
-      if (thread.worktreeCleanup != null) {
+      if (thread.worktreeCleanup != null || archiveRecoveryRows.has(thread)) {
         active.push(thread);
         continue;
       }
@@ -4636,7 +4682,7 @@ export default function Sidebar() {
           api.dialogs.confirm(
             [
               `Delete ${count} thread${count === 1 ? "" : "s"}?`,
-              "This permanently clears conversation history for these threads.",
+              `This also deletes any of ${count === 1 ? "its" : "their"} subagents, including archived ones; unselected forks and independent threads are kept. This cannot be undone.`,
             ].join("\n"),
             { variant: "destructive" },
           ),
@@ -4826,12 +4872,12 @@ export default function Sidebar() {
                   : null,
                 isPinned,
                 isPersistent: thread.persistent === true,
+                archiveFailed: thread.archivePending?.status === "failed",
                 isSettled,
                 autoSettleEnabled: thread.autoSettleDisabledAt == null,
                 isSnoozed,
                 canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
                 isRegeneratingTitle,
-                isRunning: !threadRuntimeCanArchive(thread.runtime),
                 hasRunningAction: thread.actionResume?.outcome === "running",
                 hasStoppableProcesses,
                 supports: {
@@ -5038,15 +5084,31 @@ export default function Sidebar() {
           case "copy-thread-id":
             copyThreadIdToClipboard(thread.id, { threadId: thread.id });
             return;
-          case "archive": {
-            if (confirmThreadArchive) {
-              const confirmed = await settlePromise(() =>
-                api.dialogs.confirm(`Archive thread "${thread.title}"?`),
+          case "dismiss-archive-failure": {
+            const pending = thread.archivePending;
+            if (pending?.status !== "failed") return;
+            const result = await unarchiveThread(
+              scopeThreadRef(thread.environmentId, pending.threadId),
+              { expectedArchiveCommandId: pending.commandId },
+            );
+            if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+              const error = squashAtomCommandFailure(result);
+              toastManager.add(
+                stackedThreadToast({
+                  type: "error",
+                  title: "Couldn't dismiss archive failure",
+                  description: error instanceof Error ? error.message : "An error occurred.",
+                }),
               );
-              if (confirmed._tag === "Failure" || !confirmed.value) return;
             }
+            return;
+          }
+          case "archive": {
             let didArchive = false;
             const result = await archiveThread(threadRef, {
+              ...(thread.archivePending?.status === "failed"
+                ? { expectedArchiveCommandId: thread.archivePending.commandId }
+                : {}),
               onArchived: () => {
                 didArchive = true;
               },
@@ -5072,7 +5134,7 @@ export default function Sidebar() {
                 api.dialogs.confirm(
                   [
                     `Delete thread "${thread.title}"?`,
-                    "This permanently clears conversation history for this thread.",
+                    "This also deletes any of its subagents, including archived ones; other forks and independent threads are kept. This cannot be undone.",
                   ].join("\n"),
                   { variant: "destructive" },
                 ),
@@ -5100,6 +5162,7 @@ export default function Sidebar() {
     },
     [
       archiveThread,
+      unarchiveThread,
       closeTerminal,
       stopThreadProcesses,
       attemptPin,
@@ -5108,7 +5171,6 @@ export default function Sidebar() {
       attemptUnpin,
       attemptUnsettle,
       attemptUnsnooze,
-      confirmThreadArchive,
       confirmThreadDelete,
       copyBranchToClipboard,
       copyPathToClipboard,

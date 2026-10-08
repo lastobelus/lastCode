@@ -198,6 +198,7 @@ it.effect.each(["completion", "timeout"] as const)(
         const sink = yield* EventSink.EventSinkV2;
         const ids = yield* IdAllocator.IdAllocatorV2;
         const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
         const now = yield* DateTime.now;
         const threadId = ThreadId.make(`teardown-${outcome}`);
         const providerSessionId = yield* ids.allocate.providerSession({
@@ -229,12 +230,14 @@ it.effect.each(["completion", "timeout"] as const)(
           yield* TestClock.adjust("30 seconds");
           assert.equal((yield* Fiber.join(teardown))._tag, "Failure");
           assert.equal((yield* Ref.get(state)).closeCount, 0);
+          assert.lengthOf((yield* projections.getThreadProjection(threadId)).providerSessions, 1);
         }
         yield* Deferred.succeed(allowClose, undefined);
         yield* Fiber.join(outboxDetach);
         if (outcome === "completion") assert.equal((yield* Fiber.join(teardown))._tag, "Success");
         yield* manager.teardownThread({ threadId, providerSessionId });
         assert.equal((yield* Ref.get(state)).closeCount, 1);
+        assert.isEmpty((yield* projections.getThreadProjection(threadId)).providerSessions);
       }).pipe(
         Effect.provide(
           layerTest({
@@ -439,6 +442,7 @@ it.effect(
         const now = yield* DateTime.now;
         const first = ThreadId.make("shared-teardown-first");
         const second = ThreadId.make("shared-teardown-other");
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
         const providerSessionId = ids.derive.providerSession({
           providerInstanceId: modelSelection.instanceId,
         });
@@ -475,13 +479,80 @@ it.effect(
         );
         assert.strictEqual(Option.getOrThrow(yield* manager.get(providerSessionId)), runtime);
         assert.equal((yield* Ref.get(state)).closeCount, 0);
+        assert.lengthOf((yield* projections.getThreadProjection(first)).providerSessions, 1);
         failUnload = false;
         yield* manager.teardownThread({ threadId: first, providerSessionId });
         assert.deepStrictEqual((yield* Ref.get(state)).unloadedNativeThreadIds, ["native-thread"]);
         assert.strictEqual(Option.getOrThrow(yield* manager.get(providerSessionId)), runtime);
         assert.equal((yield* Ref.get(state)).closeCount, 0);
+        assert.isEmpty((yield* projections.getThreadProjection(first)).providerSessions);
+        assert.equal(
+          (yield* projections.getThreadProjection(second)).providerSessions[0]?.status,
+          "ready",
+        );
       }).pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 60_000, beforeUnload })));
     }),
+);
+
+it.effect("confirmed teardown survives a later persistence failure and a runtime-free retry", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    let failDetachWrite = false;
+    const failingSink = Layer.effect(
+      EventSink.EventSinkV2,
+      Effect.gen(function* () {
+        const delegate = yield* EventSink.EventSinkV2;
+        return EventSink.EventSinkV2.of({
+          ...delegate,
+          write: (input) =>
+            failDetachWrite &&
+            input.events.some((event) => event.type === "provider-session.detached")
+              ? Effect.fail(new EventSink.EventSinkWriteError({ eventCount: input.events.length }))
+              : delegate.write(input),
+        });
+      }),
+    ).pipe(Layer.provide(layerTestEventSink));
+    yield* Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const first = ThreadId.make("durable-teardown-first");
+      const second = ThreadId.make("durable-teardown-second");
+      const providerSessionId = ids.derive.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+      });
+      for (const threadId of [first, second])
+        yield* sink.write({
+          events: [
+            yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now }),
+            {
+              id: yield* ids.allocate.event({ threadId }),
+              type: "provider-session.attached",
+              threadId,
+              occurredAt: now,
+              payload: makeProviderSession({ providerSessionId, now }),
+            },
+          ],
+        });
+      yield* manager.teardownThread({ threadId: first, providerSessionId });
+      failDetachWrite = true;
+      const failure = yield* manager
+        .teardownThread({ threadId: second, providerSessionId })
+        .pipe(Effect.flip);
+      assert.instanceOf(failure, ProviderSessionManager.ProviderSessionReleaseError);
+      assert.isEmpty((yield* projections.getThreadProjection(first)).providerSessions);
+      assert.lengthOf((yield* projections.getThreadProjection(second)).providerSessions, 1);
+      failDetachWrite = false;
+      yield* manager.teardownThread({ threadId: second, providerSessionId });
+      yield* manager.teardownThread({ threadId: first, providerSessionId });
+      assert.isEmpty((yield* projections.getThreadProjection(second)).providerSessions);
+      assert.equal((yield* Ref.get(state)).openCount, 0);
+    }).pipe(
+      Effect.provide(layerTest({ state, idleTimeoutMs: 60_000, eventSinkLayer: failingSink })),
+    );
+  }),
 );
 
 function unimplemented(detail: string) {
@@ -4783,6 +4854,76 @@ it.effect(
       });
 
       yield* effect.pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 1000 })));
+    }),
+);
+
+it.effect(
+  "terminal teardown unloads a native child that never attached to its shared runtime",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const now = yield* DateTime.now;
+        const parentId = ThreadId.make("native-mirror-parent");
+        const childId = ThreadId.make("native-mirror-child");
+        const sessionId = ids.derive.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+        });
+        const childEvent = yield* makeThreadCreatedEvent({
+          idAllocator: ids,
+          threadId: childId,
+          now,
+        });
+        const childProviderThread = makeProviderThread({
+          idAllocator: ids,
+          threadId: childId,
+          providerSessionId: sessionId,
+          now,
+        });
+        yield* eventSink.write({
+          events: [
+            yield* makeThreadCreatedEvent({ idAllocator: ids, threadId: parentId, now }),
+            {
+              ...childEvent,
+              payload: {
+                ...childEvent.payload,
+                creationSource: "provider",
+                lineage: {
+                  parentThreadId: parentId,
+                  relationshipToParent: "subagent",
+                  rootThreadId: parentId,
+                },
+              },
+            },
+            {
+              id: yield* ids.allocate.event({ threadId: childId }),
+              type: "provider-thread.updated",
+              threadId: childId,
+              occurredAt: now,
+              payload: childProviderThread,
+            },
+          ],
+        });
+        yield* manager.open({
+          threadId: parentId,
+          providerSessionId: sessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* manager.teardownThread({ threadId: childId, providerSessionId: sessionId });
+        assert.deepEqual((yield* Ref.get(state)).unloadedNativeThreadIds, ["native-thread"]);
+        assert.isTrue(Option.isSome(yield* manager.get(sessionId)));
+        assert.equal((yield* Ref.get(state)).closeCount, 0);
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        assert.isEmpty((yield* projections.getThreadProjection(childId)).providerSessions);
+        assert.equal(
+          (yield* projections.getThreadProjection(parentId)).providerSessions[0]?.status,
+          "ready",
+        );
+      }).pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 60_000 })));
     }),
 );
 

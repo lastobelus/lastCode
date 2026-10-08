@@ -10,6 +10,7 @@ import {
   type OrchestrationV2Command,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Struct from "effect/Struct";
 import { modelSelectionCommandType } from "@t3tools/shared/model";
 
 import * as McpToolAccess from "../../McpToolAccess.ts";
@@ -72,6 +73,19 @@ const readQuestion = Effect.fn("mcp.readQuestion")(function* (input: {
       message: "The pending user-input request was not found.",
     });
   return { ...context, request, item };
+});
+
+/** Failed participants inspect, retry, and dismiss the original archive owner's attempt. */
+const readArchiveThread = Effect.fn("mcp.readArchiveThread")(function* (threadId?: ThreadId) {
+  const context = yield* readThread(threadId);
+  const thread = context.projection.thread;
+  const failedArchive =
+    thread.archivePending?.status === "failed" ? thread.archivePending : undefined;
+  const ownerContext =
+    failedArchive !== undefined && failedArchive.threadId !== thread.id
+      ? yield* readThread(failedArchive.threadId)
+      : context;
+  return { ...ownerContext, observedArchiveCommandId: failedArchive?.commandId };
 });
 /** A tool that changes `threadId`, or the caller's own thread when it is omitted. */
 const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A, E, R>(
@@ -233,6 +247,15 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       };
     }),
   ),
+  t3_thread_archive_family: McpToolAccess.reads((input) =>
+    Effect.gen(function* () {
+      const { threads, projection } = yield* readArchiveThread(input.threadId);
+      const family = yield* threads
+        .getThreadArchiveFamily(projection.thread.id)
+        .pipe(Effect.mapError(unavailable));
+      return Struct.omit(family, ["threads"]);
+    }),
+  ),
   t3_thread_configuration: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const {
@@ -356,10 +379,38 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
   ),
   t3_thread_organize: writesThread((input) =>
     Effect.gen(function* () {
-      const { threads, projection } = yield* readThread(input.threadId);
+      const { threads, projection, observedArchiveCommandId } = yield* input.action === "archive" ||
+      (input.action === "unarchive" && input.expectedArchiveCommandId !== undefined)
+        ? readArchiveThread(input.threadId)
+        : readThread(input.threadId).pipe(
+            Effect.map((context) => ({ ...context, observedArchiveCommandId: undefined })),
+          );
+      const expectedArchiveCommandId = input.expectedArchiveCommandId ?? observedArchiveCommandId;
       const common = { commandId: yield* newCommandId(), threadId: projection.thread.id };
       let command: OrchestrationV2Command;
       switch (input.action) {
+        case "archive":
+          command = {
+            ...common,
+            type: "thread.archive",
+            ...(input.childDisposition === undefined
+              ? {}
+              : { childDisposition: input.childDisposition }),
+            ...(input.expectedChildThreadIds === undefined
+              ? {}
+              : { expectedChildThreadIds: input.expectedChildThreadIds }),
+            ...(expectedArchiveCommandId === undefined ? {} : { expectedArchiveCommandId }),
+          };
+          break;
+        case "unarchive":
+          command = {
+            ...common,
+            type: "thread.unarchive",
+            ...(input.expectedArchiveCommandId === undefined
+              ? {}
+              : { expectedArchiveCommandId: input.expectedArchiveCommandId }),
+          };
+          break;
         case "snooze":
           if (input.snoozedUntil === undefined) {
             return yield* new OrchestratorMcpFailure({

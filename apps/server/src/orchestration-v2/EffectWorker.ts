@@ -133,6 +133,23 @@ export const layerExecutor: Layer.Layer<
                     }),
                 ),
               );
+          case "thread.archive":
+            return threads
+              .executeArchive({ threadId: effect.threadId, requestId: effect.request.requestId })
+              .pipe(
+                Effect.provideService(
+                  ProviderSessionManager.ProviderSessionManagerV2,
+                  providerSessions,
+                ),
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationEffectExecutionError({
+                      effectId: effect.id,
+                      effectType: effect.request.type,
+                      cause,
+                    }),
+                ),
+              );
           case "subagent.promote":
             return subagentPromotion
               .execute({

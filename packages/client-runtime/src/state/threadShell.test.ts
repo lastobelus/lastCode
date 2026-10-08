@@ -96,6 +96,31 @@ describe("v2 thread shell lists", () => {
     }
   });
 
+  it("exposes native activity without an app run or provider thread", () => {
+    const { registry, threads, snapshotAtom } = makeHarness();
+    const native = {
+      ...v2ThreadShell,
+      creationSource: "provider" as const,
+      latestRunId: null,
+      activeRunId: null,
+      activeProviderThreadId: null,
+      activityRunStatus: null,
+      pendingBackgroundTasks: [],
+      status: "running" as const,
+    };
+    registry.set(snapshotAtom(environmentId), { ...v2ShellSnapshot, threads: [native] });
+    const dispose = registry.mount(threads.threadShellsAtom);
+    try {
+      const presented = registry.get(threads.threadShellsAtom)[0];
+      expect(presented?.runtime?.status).toBe("running");
+      expect(presented?.runtime?.activeRunId).toBeNull();
+      expect(presented?.latestRun).toBeNull();
+    } finally {
+      dispose();
+      registry.dispose();
+    }
+  });
+
   it.each(["ordinary", "subagent"] as const)(
     "omits copied parent annotations from %s shells and retains independent live note changes",
     (kind) => {
@@ -314,6 +339,74 @@ describe("v2 thread shell lists", () => {
     dispose();
     registry.dispose();
   });
+
+  it.each(["stopping", "failed"] as const)(
+    "keeps a stranded native %s archive repair in navigation until its owner returns",
+    (status) => {
+      const { registry, threads, snapshotAtom } = makeHarness();
+      const owner = {
+        ...v2ThreadShell,
+        archivedAt: DateTime.makeUnsafe("2026-10-07T00:00:00.000Z"),
+      };
+      const child = {
+        ...v2ThreadShell,
+        id: ThreadId.make("stranded-native"),
+        creationSource: "provider" as const,
+        lineage: {
+          rootThreadId: owner.id,
+          parentThreadId: owner.id,
+          relationshipToParent: "subagent" as const,
+        },
+        archivePending: {
+          threadId: owner.id,
+          commandId: CommandId.make("repair-archive"),
+          childDisposition: "stop_and_archive" as const,
+          childThreadIds: [],
+          archiveThreadIds: [],
+          promoteThreadIds: [],
+          status,
+        },
+      };
+      const dispose = registry.mount(threads.navigationThreadShellsAtom);
+      try {
+        registry.set(snapshotAtom(environmentId), { ...v2ShellSnapshot, threads: [owner, child] });
+        expect(registry.get(threads.navigationThreadShellsAtom).map((thread) => thread.id)).toEqual(
+          [child.id],
+        );
+        registry.set(snapshotAtom(environmentId), { ...v2ShellSnapshot, threads: [child] });
+        expect(registry.get(threads.navigationThreadShellsAtom).map((thread) => thread.id)).toEqual(
+          [child.id],
+        );
+        registry.set(snapshotAtom(environmentId), {
+          ...v2ShellSnapshot,
+          threads: [v2ThreadShell, child],
+        });
+        expect(registry.get(threads.navigationThreadShellsAtom).map((thread) => thread.id)).toEqual(
+          [owner.id],
+        );
+        expect(registry.get(threads.threadShellsAtom)[1]?.lineage.independent).toBeUndefined();
+        const nestedOwner = {
+          ...child,
+          archivePending: { ...child.archivePending, threadId: child.id },
+        };
+        const nestedChild = {
+          ...nestedOwner,
+          id: ThreadId.make("nested-participant"),
+          lineage: { ...child.lineage, parentThreadId: nestedOwner.id },
+        };
+        registry.set(snapshotAtom(environmentId), {
+          ...v2ShellSnapshot,
+          threads: [v2ThreadShell, nestedOwner, nestedChild],
+        });
+        expect(registry.get(threads.navigationThreadShellsAtom).map((thread) => thread.id)).toEqual(
+          [owner.id, nestedOwner.id],
+        );
+      } finally {
+        dispose();
+        registry.dispose();
+      }
+    },
+  );
 
   it("retains archived subagent cleanup recovery until the cleanup settles", () => {
     const { registry, threads, snapshotAtom } = makeHarness();

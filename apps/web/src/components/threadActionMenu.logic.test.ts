@@ -20,7 +20,6 @@ const baseState: ThreadActionMenuState = {
   isSnoozed: false,
   canSnoozeNow: true,
   isRegeneratingTitle: false,
-  isRunning: false,
   hasRunningAction: false,
   hasStoppableProcesses: false,
   supports: {
@@ -352,12 +351,21 @@ describe("buildThreadActionMenuItems", () => {
     ).toContain("archive");
   });
 
-  it("disables archive while the thread is running", () => {
-    const archiveItem = buildThreadActionMenuItems({ ...baseState, isRunning: true }).find(
-      (item) => item.id === "archive",
-    );
-    expect(archiveItem?.disabled).toBe(true);
+  it("offers archive so the handler can read the authoritative family", () => {
+    const archiveItem = buildThreadActionMenuItems(baseState).find((item) => item.id === "archive");
+    expect(archiveItem?.disabled).toBe(false);
   });
+
+  it.each([false, true])(
+    "failure dismissal requires task permission (granted=%s)",
+    (canOperate) => {
+      const items = buildThreadActionMenuItems({ ...baseState, archiveFailed: true, canOperate });
+      const dismissal = items.find((item) => item.id === "dismiss-archive-failure");
+      expect(dismissal?.label).toBe("Dismiss archive failure");
+      expect(dismissal?.disabled === true).toBe(!canOperate);
+      expect(ids(baseState)).not.toContain("dismiss-archive-failure");
+    },
+  );
 
   it("replaces the mark action and blocks archive and delete for the persistent thread", () => {
     const items = buildThreadActionMenuItems({ ...baseState, isPersistent: true });

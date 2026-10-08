@@ -100,7 +100,8 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
         ) : null}
         {props.environmentLabel ? (
           <div className="flex min-w-0 items-center gap-2">
-            {props.thread.lineage.relationshipToParent !== "subagent" ? (
+            {props.thread.lineage.relationshipToParent !== "subagent" ||
+            props.thread.lineage.independent === true ? (
               <ConnectedEnvironmentIcon
                 environmentId={props.thread.environmentId}
                 context="hover"

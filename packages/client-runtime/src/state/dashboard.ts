@@ -48,7 +48,7 @@ export function buildProjectDashboard(
     if (
       thread.archivedAt !== null ||
       thread.deletedAt !== null ||
-      thread.lineage.relationshipToParent === "subagent" ||
+      (thread.lineage.relationshipToParent === "subagent" && thread.lineage.independent !== true) ||
       (scope !== undefined &&
         (thread.projectId !== scope.projectId || thread.environmentId !== scope.environmentId))
     )

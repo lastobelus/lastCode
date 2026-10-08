@@ -2914,6 +2914,25 @@ it.layer(layerTest)("RuntimeLayer.layer lifecycle", (it) => {
             });
           });
         for (const threadId of threadIds) yield* watchFrom(threadId);
+        // Released ownership keeps a conversation's existing watch independent.
+        const promotedId = threadIds[1]!;
+        const promoted = yield* orchestrator.getThreadProjection(promotedId);
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        yield* projections.apply({
+          id: EventId.make("pr-watch-promoted-lineage"),
+          type: "thread.metadata-updated",
+          threadId: promotedId,
+          occurredAt: DateTime.makeUnsafe("2026-10-02T12:00:00.000Z"),
+          payload: {
+            ...promoted.thread,
+            lineage: {
+              rootThreadId: threadIds[0]!,
+              parentThreadId: threadIds[0]!,
+              relationshipToParent: "subagent",
+              independent: true,
+            },
+          },
+        });
         const rateLimited = new PullRequestOperationError({
           operation: "getChangeRequest",
           detail: "github requests are paused until the rate limit resets",
@@ -3901,28 +3920,43 @@ it.layer(layerTest)("RuntimeLayer.layer lifecycle", (it) => {
       assert.isDefined(activeRun);
       assert.isDefined(queuedRun);
 
-      const unfinishedArchive = yield* orchestrator
+      const refusal = yield* orchestrator
         .dispatch({
           type: "thread.archive",
-          commandId: CommandId.make("runtime-layer-archive-queued-unfinished"),
+          commandId: CommandId.make("runtime-layer-archive-queued-refuse-active"),
           threadId,
         })
         .pipe(Effect.flip);
-      assert.equal(unfinishedArchive._tag, "OrchestratorDispatchError");
-      assert.isNull((yield* orchestrator.getThreadProjection(threadId)).thread.archivedAt);
+      assert.equal(refusal._tag, "OrchestratorDispatchError");
+      assert.include(String(refusal.cause), "unfinished work");
+      const afterRefusal = yield* orchestrator.getThreadProjection(threadId);
+      assert.isNull(afterRefusal.thread.archivedAt);
+      assert.isNull(afterRefusal.thread.archivePending ?? null);
+      assert.equal(afterRefusal.runs.find((run) => run.id === activeRun.id)?.status, "starting");
+      assert.equal(afterRefusal.runs.find((run) => run.id === queuedRun.id)?.status, "queued");
+
       yield* orchestrator.dispatch({
         type: "run.interrupt",
-        commandId: CommandId.make("runtime-layer-archive-queued-stop"),
+        commandId: CommandId.make("runtime-layer-archive-queued-stop-active"),
         threadId,
         runId: activeRun.id,
         holdQueue: true,
       });
+      yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain();
+      const stopped = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(stopped.runs.find((run) => run.id === activeRun.id)?.status, "interrupted");
+      assert.equal(stopped.runs.find((run) => run.id === queuedRun.id)?.status, "queued");
+      assert.isTrue(stopped.runs.find((run) => run.id === queuedRun.id)?.queueHeld);
 
       yield* orchestrator.dispatch({
         type: "thread.archive",
         commandId: CommandId.make("runtime-layer-archive-queued-archive"),
         threadId,
       });
+      const stopping = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(stopping.runs.find((run) => run.id === activeRun.id)?.status, "interrupted");
+      assert.equal(stopping.runs.find((run) => run.id === queuedRun.id)?.status, "cancelled");
+      yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain();
 
       const archived = yield* orchestrator.getThreadProjection(threadId);
       assert.isNotNull(archived.thread.archivedAt);

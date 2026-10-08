@@ -23,6 +23,7 @@ const RPC_AGGREGATES = {
   [ORCHESTRATION_V2_WS_METHODS.searchThreads]: "orchestration",
   [ORCHESTRATION_V2_WS_METHODS.getArchivedShellSnapshot]: "orchestration",
   [ORCHESTRATION_V2_WS_METHODS.getThreadProjection]: "orchestrationV2",
+  [ORCHESTRATION_V2_WS_METHODS.getThreadArchiveFamily]: "orchestrationV2",
   [ORCHESTRATION_V2_WS_METHODS.launchThread]: "orchestration",
   [ORCHESTRATION_V2_WS_METHODS.recoverThread]: "orchestration",
   [ORCHESTRATION_V2_WS_METHODS.repairThread]: "orchestration",

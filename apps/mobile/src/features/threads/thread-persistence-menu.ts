@@ -43,7 +43,10 @@ export function buildThreadPersistenceMenuItems(input: {
   readonly supported: boolean;
 }): MenuAction[] {
   const protectedActions = input.actions.map((action) =>
-    input.persistent && (action.id === "archive" || action.id === "delete")
+    input.persistent &&
+    (action.id === "archive" ||
+      action.id?.startsWith("retry-archive-failure:") ||
+      action.id === "delete")
       ? {
           ...action,
           title: `${action.title} (disable persistence first)`,

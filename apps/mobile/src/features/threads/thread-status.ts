@@ -1,4 +1,5 @@
 import { threadRecoveryStatusLabel } from "@t3tools/client-runtime/state/thread-recovery";
+import { presentThreadArchive } from "@t3tools/client-runtime/state/thread-archive";
 import type { StatusTone } from "../../components/StatusPill";
 import {
   threadRuntimeIsActive,
@@ -9,6 +10,8 @@ import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 
 export type ThreadStatusKind =
+  | "archiving"
+  | "archive-failed"
   | "pending-approval"
   | "awaiting-input"
   | "question"
@@ -24,6 +27,7 @@ export type ThreadStatusKind =
   | "plan-ready";
 
 export interface ThreadStatusPresentation extends StatusTone {
+  readonly description?: string;
   readonly kind: ThreadStatusKind;
   /** Whether the indicator represents in-flight activity. */
   readonly pulse: boolean;
@@ -57,6 +61,17 @@ function isLatestRunSettled(
 export function resolveThreadStatus(
   thread: EnvironmentThreadShell,
 ): ThreadStatusPresentation | null {
+  const archive = presentThreadArchive(thread);
+  if (archive)
+    return {
+      kind: archive.status,
+      label: archive.label,
+      description: archive.description,
+      pillClassName: archive.status === "archive-failed" ? "bg-warning" : "bg-muted",
+      textClassName:
+        archive.status === "archive-failed" ? "text-warning-foreground" : "text-muted-foreground",
+      pulse: false,
+    };
   if (thread.worktreeCleanup?.status === "failed") {
     return {
       kind: "cleanup-failed",
