@@ -46,6 +46,8 @@ import {
   writeAgentDeviceConfig,
 } from "./AgentDeviceTarget.ts";
 import * as Context from "effect/Context";
+import * as DeviceAgentAccess from "./DeviceAgentAccess.ts";
+import { HttpServer } from "effect/http";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -180,6 +182,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
   configureAgent: (
     hostId: DeviceHostId,
     ready: DeviceHost.DeviceHostAgentReady,
+    target: { threadId: ThreadId; deviceId: DeviceId; session: string },
   ) => Effect.Effect<string, DeviceError> = (hostId) =>
     Effect.fail(
       new DeviceHostUnavailableError({
@@ -321,6 +324,9 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
       if (!deviceSettings.enabled || !(agentAccessEnabled ?? deviceSettings.agentAccessEnabled))
         return null;
       const host = yield* resolveHost(hostId);
+      const current = yield* host.current;
+      if (current?.agentDevice)
+        return { hostId: host.id, ...current, agentDevice: current.agentDevice };
       const summary = yield* host.summary;
       if (summary.kind === "local" && !summary.platforms.some((platform) => platform.available))
         return null;
@@ -557,8 +563,6 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
             );
           if (!nextEnabled) {
             yield* Effect.forEach(hosts.values(), (host) => host.stop, { discard: true });
-          } else if (input.agentAccessEnabled === false) {
-            yield* Effect.forEach(hosts.values(), (host) => host.stopAgent, { discard: true });
           }
           yield* publish((state) => ({
             ...state,
@@ -939,6 +943,11 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
               reason:
                 "Agent device access requires enabled device support, agent access, and an available simulator platform on this host.",
             });
+          const session = yield* agentDeviceSession(
+            input.threadId,
+            input.hostId,
+            input.deviceId,
+          ).pipe(Effect.provideService(Crypto.Crypto, crypto));
           const configPath = yield* lifecycleLock.withPermit(
             Effect.gen(function* () {
               if (hosts.get(host.id) !== host)
@@ -946,14 +955,13 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
                   hostId: host.id,
                   reason: "Host configuration changed. Retry the operation.",
                 });
-              return yield* configureAgent(input.hostId, ready);
+              return yield* configureAgent(input.hostId, ready, {
+                threadId: input.threadId,
+                deviceId: input.deviceId,
+                session,
+              });
             }),
           );
-          const session = yield* agentDeviceSession(
-            input.threadId,
-            input.hostId,
-            input.deviceId,
-          ).pipe(Effect.provideService(Crypto.Crypto, crypto));
           return ["--config", configPath, "--session", session];
         }),
       state: SynchronizedRef.get(stateRef).pipe(Effect.map(({ state }) => state)),
@@ -1009,10 +1017,32 @@ export const make = Effect.gen(function* () {
     agentDeviceConfigPath(config.stateDir, hostId, path).pipe(
       Effect.provideService(Crypto.Crypto, crypto),
     );
-  const configureAgent = (hostId: DeviceHostId, ready: DeviceHost.DeviceHostAgentReady) =>
+  const access = yield* DeviceAgentAccess.DeviceAgentAccess;
+  const server = yield* HttpServer.HttpServer;
+  const configureAgent = (
+    hostId: DeviceHostId,
+    ready: DeviceHost.DeviceHostAgentReady,
+    target: { threadId: ThreadId; deviceId: DeviceId; session: string },
+  ) =>
     Effect.gen(function* () {
-      const file = yield* configPath(hostId);
-      yield* writeAgentDeviceConfig(file, ready.agentDevice);
+      const address = server.address;
+      if (typeof address === "string" || !("port" in address))
+        return yield* new DeviceHostUnavailableError({
+          hostId,
+          reason: "Agent device access requires an HTTP listener.",
+        });
+      const origin = new URL(HttpServer.formatAddress(address));
+      if (origin.hostname === "0.0.0.0") origin.hostname = "127.0.0.1";
+      if (origin.hostname === "[::]") origin.hostname = "[::1]";
+      const file = yield* agentDeviceConfigPath(config.stateDir, hostId, path, target).pipe(
+        Effect.provideService(Crypto.Crypto, crypto),
+      );
+      const token = yield* access.issue({ ...target, hostId });
+      yield* writeAgentDeviceConfig(file, {
+        ...ready.agentDevice,
+        baseUrl: `${origin.origin}${DeviceAgentAccess.AGENT_DEVICE_ROUTE_PREFIX}`,
+        token,
+      });
       return file;
     }).pipe(
       Effect.provideService(FileSystem.FileSystem, fs),
@@ -1112,18 +1142,7 @@ export const make = Effect.gen(function* () {
             const hostScope = yield* Scope.fork(scope);
             const instance = yield* SshDeviceHost.make(
               host,
-              (ready) =>
-                configureAgent(host.id, ready).pipe(
-                  Effect.asVoid,
-                  Effect.mapError(
-                    (error) =>
-                      new DeviceHost.DeviceHostError({
-                        hostId: host.id,
-                        step: "configuring agent access",
-                        cause: error,
-                      }),
-                  ),
-                ),
+              () => Effect.void,
               (status, detail) =>
                 service
                   .setHostStatus(host.id, { status, ...(detail ? { detail } : {}) })

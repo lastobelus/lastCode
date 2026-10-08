@@ -67,7 +67,7 @@ export function agentDeviceQuickStart(
   ].join("\n");
 }
 
-const requireDeviceAccess = McpInvocationContext.requireThreadMcpCapability("device").pipe(
+const requireDeviceAccess = McpInvocationContext.requireCurrentThreadDeviceAccess.pipe(
   Effect.mapError(
     () =>
       new DeviceToolUnavailableError({

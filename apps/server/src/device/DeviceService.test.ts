@@ -69,6 +69,7 @@ const fixture = Effect.fn("fixture")(function* (
   runtimeFailure?: NodeRuntimeUnavailableError | DeviceHost.DeviceHostError,
   inspectError = false,
   installTool?: Parameters<typeof DeviceService.makeWithHosts>[3],
+  agentIsAlreadyRunning = false,
 ) {
   const settings = yield* Ref.make(DEFAULT_SERVER_SETTINGS);
   const starts: string[] = [];
@@ -122,7 +123,14 @@ const fixture = Effect.fn("fixture")(function* (
           agentDevice: { baseUrl: "http://agent.test", token: "test", entryPath: "/agent" },
         };
       }),
-    current: Effect.succeed(null),
+    current: Effect.succeed(
+      agentIsAlreadyRunning
+        ? {
+            ...ready,
+            agentDevice: { baseUrl: "http://agent.test", token: "test", entryPath: "/agent" },
+          }
+        : null,
+    ),
     stopAgent: Effect.sync(() => {
       agentStops.push("stop");
     }),
@@ -357,7 +365,9 @@ describe("device setup consent", () => {
       expect((yield* service.state).agentAccessEnabled).toBe(true);
 
       yield* service.configure({ agentAccessEnabled: false, onboardingCompleted: true });
-      expect(agentStops).toEqual(["stop"]);
+      expect(agentStops).toEqual([]);
+      expect(yield* service.agentReadinessIfSupported()).toBeNull();
+      expect(yield* service.agentReadinessIfSupported(LOCAL_DEVICE_HOST_ID, true)).not.toBeNull();
       expect((yield* service.state).onboardingCompleted).toBe(true);
       expect((yield* Ref.get(settings)).deviceOnboardingCompleted).toBe(true);
     }).pipe(Effect.scoped),
@@ -778,5 +788,29 @@ it.effect("failed manual installation leaves lifecycle state unchanged and can b
     expect(attempts).toBe(2);
     expect(starts).toEqual([]);
     expect(agentStarts).toEqual([]);
+  }).pipe(Effect.scoped),
+);
+
+it.effect("reads an already running daemon without startup phases or state broadcasts", () =>
+  Effect.gen(function* () {
+    const { service, settings, agentStarts } = yield* fixture(
+      Effect.void,
+      undefined,
+      false,
+      undefined,
+      false,
+      undefined,
+      true,
+    );
+    yield* Ref.update(settings, (current) => ({ ...current, enableDeviceSupport: true }));
+    const revision = (yield* service.state).revision;
+    expect(
+      (yield* service.agentReadinessIfSupported(LOCAL_DEVICE_HOST_ID, true))?.agentDevice.baseUrl,
+    ).toBe("http://agent.test");
+    expect(
+      (yield* service.agentReadinessIfSupported(LOCAL_DEVICE_HOST_ID, true))?.agentDevice.baseUrl,
+    ).toBe("http://agent.test");
+    expect(agentStarts).toEqual([]);
+    expect((yield* service.state).revision).toBe(revision);
   }).pipe(Effect.scoped),
 );
