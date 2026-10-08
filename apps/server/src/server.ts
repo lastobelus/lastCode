@@ -64,6 +64,8 @@ import * as OrchestratorMcpService from "./mcp/OrchestratorMcpService.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import * as DeviceHubProxy from "./device/DeviceHubProxy.ts";
+import * as DeviceAgentAccess from "./device/DeviceAgentAccess.ts";
+import * as AgentDeviceProxy from "./device/AgentDeviceProxy.ts";
 import * as PreviewManager from "./preview/Manager.ts";
 import * as PortScanner from "./preview/PortScanner.ts";
 import * as ServerBrowser from "./preview/ServerBrowser.ts";
@@ -408,7 +410,14 @@ const layerPreview = Layer.empty.pipe(
   Layer.provideMerge(layerPortScanner),
 );
 
+const layerDeviceAgentAccess = DeviceAgentAccess.layer.pipe(
+  Layer.provide(ProjectionStoreV2.layer),
+  Layer.provide(ProjectStore.layer),
+  Layer.provide(layerServerSettings),
+);
+
 const layerDevice = DeviceService.layer.pipe(
+  Layer.provideMerge(layerDeviceAgentAccess),
   Layer.provide(layerServerSettings),
   Layer.provide(ProcessRunner.layer),
   Layer.provide(NetService.layer),
@@ -699,6 +708,7 @@ const layerMakeRoutes = Layer.mergeAll(
     ServerHttp.layerAssetRoute,
     ServerHttp.layerAttachmentUploadRoute,
     DeviceHubProxy.layer,
+    AgentDeviceProxy.layer,
     ServerBrowserStream.routeLayer,
     ServerHttp.layerStaticAndDevRoute,
     Ws.layer.pipe(

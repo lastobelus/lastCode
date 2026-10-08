@@ -23,6 +23,7 @@ import {
   PullRequestOperationError,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
   RunId,
@@ -50,6 +51,8 @@ import * as ProjectEnrichmentService from "../project/ProjectEnrichmentService.t
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as EnvironmentPause from "../environment/EnvironmentPause.ts";
+import * as McpProviderSession from "@t3tools/provider-core/server/mcpSession";
+import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
 import { TerminalManager } from "../terminal/Manager.ts";
 import * as McpSessionRegistryTestkit from "../mcp/McpSessionRegistry.testkit.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
@@ -70,9 +73,10 @@ import * as PullRequestWatchReactor from "./PullRequestWatchReactor.ts";
 import { PullRequestProviderError } from "../pullRequest/PullRequestProvider.ts";
 import * as PullRequestService from "../pullRequest/PullRequestService.ts";
 import * as ProjectStore from "./ProjectStore.ts";
-import type {
-  ProviderAdapterV2SessionRuntime,
-  ProviderAdapterV2Shape,
+import {
+  ProviderAdapterOpenSessionError,
+  type ProviderAdapterV2SessionRuntime,
+  type ProviderAdapterV2Shape,
 } from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as RuntimeLayer from "./runtimeLayer.ts";
@@ -798,6 +802,126 @@ const layerSharedApplicationDataPlaneTest = Layer.mergeAll(
   Layer.provide(layerGitWorkflowTest),
   Layer.provide(layerPlatformTest),
 );
+
+const layerDeviceAccessTest = Layer.mergeAll(
+  RuntimeLayer.layer,
+  RuntimeLayer.layerEventSink,
+  ProjectStore.layer,
+).pipe(
+  // Production constructs the shared manager through update admission first.
+  Layer.provideMerge(RuntimeLayer.layerUpdateDrainAdmission),
+  Layer.provide(
+    Layer.effect(
+      McpSessionRegistry.McpSessionRegistry,
+      Effect.gen(function* () {
+        const registry = yield* McpSessionRegistry.McpSessionRegistry;
+        return McpSessionRegistry.McpSessionRegistry.of({
+          ...registry,
+          issue: (input) =>
+            registry.issue(input).pipe(
+              Effect.map(({ config }) => ({
+                config: {
+                  ...config,
+                  ...(input.capabilities === undefined ? {} : { capabilities: input.capabilities }),
+                },
+              })),
+            ),
+        });
+      }),
+    ).pipe(Layer.provide(McpSessionRegistryTestkit.layer)),
+  ),
+  Layer.provide(Layer.mock(TerminalManager)({ refreshMetadata: Effect.succeed([]) })),
+  Layer.provide(SqlitePersistence.layerMemory),
+  Layer.provide(layerCheckpointStoreTest),
+  Layer.provide(layerServerConfig),
+  Layer.provide(
+    ServerSettings.layerTest({
+      enableAgentDeviceAccess: false,
+      projectSettingsOverrides: {
+        [ProjectId.make("device-access-allowed")]: { enableAgentDeviceAccess: true },
+        [ProjectId.make("device-access-denied")]: { enableAgentDeviceAccess: false },
+        [ProjectId.make("device-access-missing")]: { enableAgentDeviceAccess: true },
+      },
+    }),
+  ),
+  Layer.provide(layerTestProviderInstanceRegistry),
+  Layer.provide(layerGitWorkflowTest),
+  Layer.provide(layerProjectServiceTest),
+  Layer.provide(layerPlatformTest),
+);
+
+it.layer(layerDeviceAccessTest)("production manager device access", (it) => {
+  it.effect(
+    "passes only an existing project's device grant to the provider after update admission constructs it",
+    () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const captured = new Map<ThreadId, boolean>();
+        const openSpy = vi.spyOn(orchestrationAdapter, "openSession").mockImplementation((input) =>
+          Effect.sync(() => {
+            captured.set(
+              input.threadId,
+              McpProviderSession.readMcpProviderSession(input.threadId)?.capabilities?.has(
+                "device",
+              ) ?? false,
+            );
+          }).pipe(
+            Effect.andThen(
+              Effect.fail(
+                new ProviderAdapterOpenSessionError({
+                  driver,
+                  providerSessionId: input.providerSessionId,
+                }),
+              ),
+            ),
+          ),
+        );
+        yield* Effect.gen(function* () {
+          for (const scenario of ["allowed", "denied", "missing"] as const) {
+            const projectId = ProjectId.make(`device-access-${scenario}`);
+            const threadId = ThreadId.make(`device-access-thread-${scenario}`);
+            if (scenario !== "missing")
+              yield* seedProject({
+                projectId,
+                title: "Device access",
+                workspaceRoot: process.cwd(),
+                defaultModelSelection: modelSelection,
+                createdAt: DateTime.formatIso(yield* DateTime.now),
+              });
+            yield* orchestrator.dispatch({
+              type: "thread.create",
+              commandId: CommandId.make(`device-access-create-${scenario}`),
+              createdBy: "user",
+              creationSource: "web",
+              threadId,
+              projectId,
+              title: "Device access",
+              modelSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: null,
+            });
+            // The fake adapter stops at startup, after observing its actual credential.
+            yield* manager
+              .open({
+                threadId,
+                providerSessionId: ProviderSessionId.make(`device-access-session-${scenario}`),
+                modelSelection,
+                runtimePolicy: {
+                  runtimeMode: "full-access",
+                  interactionMode: "default",
+                  cwd: process.cwd(),
+                },
+              })
+              .pipe(Effect.flip);
+            assert.equal(captured.get(threadId), scenario === "allowed");
+          }
+        }).pipe(Effect.ensuring(Effect.sync(() => openSpy.mockRestore())));
+      }),
+  );
+});
 
 it.layer(layerTest)("RuntimeLayer.layer", (it) => {
   it.effect("emits model updates separately from provider switches", () =>

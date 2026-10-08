@@ -21,9 +21,16 @@ const key = Effect.fn("AgentDeviceTarget.key")(function* (value: string) {
   return Hex.encode(digest).slice(0, 24);
 });
 
-/** A stable file per host lets forwarded endpoints change without retargeting other commands. */
-export const agentDeviceConfigPath = (stateDir: string, hostId: string, path: Path.Path) =>
-  key(hostId).pipe(Effect.map((hash) => path.join(stateDir, "device", "hosts", `${hash}.json`)));
+/** A thread-specific file keeps issued commands from sharing another thread's credential. */
+export const agentDeviceConfigPath = (
+  stateDir: string,
+  hostId: string,
+  path: Path.Path,
+  target?: { readonly threadId: string; readonly deviceId: string },
+) =>
+  key(
+    target === undefined ? hostId : JSON.stringify([target.threadId, hostId, target.deviceId]),
+  ).pipe(Effect.map((hash) => path.join(stateDir, "device", "hosts", `${hash}.json`)));
 
 export const agentDeviceSession = (threadId: string, hostId: string, deviceId: string) =>
   key(JSON.stringify([threadId, hostId, deviceId])).pipe(Effect.map((hash) => `t3-${hash}`));

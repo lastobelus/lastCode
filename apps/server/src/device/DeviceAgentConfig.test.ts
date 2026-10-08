@@ -1,0 +1,145 @@
+// @effect-diagnostics nodeBuiltinImport:off - uses an isolated ephemeral HTTP listener to verify the issued CLI endpoint.
+import * as NodeHttp from "node:http";
+import { expect, it } from "@effect/vitest";
+import { DeviceId, ProjectId, ThreadId, DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts";
+import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NetService from "@t3tools/shared/Net";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
+import { HttpClient, HttpClientResponse, HttpServer } from "effect/http";
+import * as ServerConfig from "../config.ts";
+import * as ProcessRunner from "../processRunner.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import * as DeviceAgentAccess from "./DeviceAgentAccess.ts";
+import * as DeviceService from "./DeviceService.ts";
+import * as DeviceHost from "./DeviceHost.ts";
+
+const decodeConfig = Schema.decodeUnknownSync(
+  Schema.fromJsonString(
+    Schema.Struct({ daemonBaseUrl: Schema.String, daemonAuthToken: Schema.String }),
+  ),
+);
+const projectId = ProjectId.make("project-1");
+const settings = Layer.mock(ServerSettings.ServerSettingsService)({
+  getSettings: Effect.succeed({
+    ...DEFAULT_SERVER_SETTINGS,
+    enableDeviceSupport: true,
+    enableAgentDeviceAccess: false,
+    projectSettingsOverrides: { [projectId]: { enableAgentDeviceAccess: true } },
+  }),
+  subscribeChanges: Effect.succeed(Stream.empty),
+});
+const access = DeviceAgentAccess.layer.pipe(
+  Layer.provide(
+    Layer.mock(ProjectionStore.ProjectionStoreV2)({
+      getThreadShell: () =>
+        Effect.succeed({ projectId, deletedAt: null } as NonNullable<
+          Effect.Success<ReturnType<ProjectionStore.ProjectionStoreV2["Service"]["getThreadShell"]>>
+        >),
+    }),
+  ),
+  Layer.provide(
+    Layer.mock(ProjectStore.ProjectStoreV2)({
+      get: () => Effect.succeed(Option.some({ deletedAt: null } as ProjectStore.ProjectRow)),
+    }),
+  ),
+  Layer.provide(settings),
+);
+const host = Layer.mock(DeviceHost.DeviceHost)({
+  id: "local",
+  summary: Effect.succeed({
+    id: "local",
+    kind: "local",
+    label: "Test server",
+    platforms: [{ platform: "ios", available: true }],
+    hubInstalled: true,
+    agentDeviceInstalled: true,
+  }),
+  current: Effect.succeed(null),
+  ensureAgentReady: () =>
+    Effect.succeed({
+      hub: { origin: "http://hub.example" },
+      nodePath: process.execPath,
+      run: () => Effect.succeed({ code: 0, stdout: "", stderr: "" }),
+      helpers: { serveSimAxSettings: null, serveSimCli: null },
+      agentDevice: {
+        baseUrl: "http://daemon.example",
+        token: "raw-daemon-token",
+        entryPath: "/tool/cli.js",
+      },
+    }),
+});
+const layer = (hostname: string) =>
+  Layer.effect(DeviceService.DeviceService, DeviceService.make).pipe(
+    Layer.provideMerge(access),
+    Layer.provide(host),
+    Layer.provide(settings),
+    Layer.provide(ProcessRunner.layer),
+    Layer.provide(NetService.layer),
+    Layer.provideMerge(
+      NodeHttpServer.layer(() => NodeHttp.createServer(), { host: hostname, port: 0 }),
+    ),
+    Layer.provideMerge(
+      Layer.succeed(
+        HttpClient.HttpClient,
+        HttpClient.make((request) =>
+          Effect.succeed(HttpClientResponse.fromWeb(request, new Response("ok"))),
+        ),
+      ),
+    ),
+    Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-device-agent-config-" })),
+    Layer.provideMerge(NodeServices.layer),
+  );
+
+it.effect.each(["127.0.0.1", "::1"])(
+  "issues isolated thread/device proxy configs using the actual %s HTTP listener",
+  (hostname) =>
+    Effect.gen(function* () {
+      const devices = yield* DeviceService.DeviceService;
+      const access = yield* DeviceAgentAccess.DeviceAgentAccess;
+      const server = yield* HttpServer.HttpServer;
+      const fs = yield* FileSystem.FileSystem;
+      const args = yield* devices.agentTarget({
+        threadId: ThreadId.make("thread-1"),
+        hostId: "local",
+        deviceId: DeviceId.make("device-1"),
+        agentAccessEnabled: true,
+      });
+      const config = decodeConfig(yield* fs.readFileString(args[1]!));
+      expect(typeof server.address).toBe("object");
+      if (typeof server.address === "string" || !("port" in server.address))
+        throw new Error("Expected HTTP listener");
+      expect(server.address.port).toBeGreaterThan(0);
+      expect(config.daemonBaseUrl).toBe(
+        `http://${hostname === "::1" ? "[::1]" : hostname}:${server.address.port}/api/agent-device`,
+      );
+      expect(config.daemonAuthToken).not.toBe("raw-daemon-token");
+      expect(yield* access.authorize(config.daemonAuthToken)).toMatchObject({
+        threadId: "thread-1",
+        hostId: "local",
+        deviceId: "device-1",
+        session: args[3],
+      });
+      const otherThread = yield* devices.agentTarget({
+        threadId: ThreadId.make("thread-2"),
+        hostId: "local",
+        deviceId: DeviceId.make("device-1"),
+        agentAccessEnabled: true,
+      });
+      const otherDevice = yield* devices.agentTarget({
+        threadId: ThreadId.make("thread-1"),
+        hostId: "local",
+        deviceId: DeviceId.make("device-2"),
+        agentAccessEnabled: true,
+      });
+      expect(new Set([args[1], otherThread[1], otherDevice[1]]).size).toBe(3);
+      expect(decodeConfig(yield* fs.readFileString(args[1]!))).toEqual(config);
+    }).pipe(Effect.provide(layer(hostname)), Effect.scoped),
+);

@@ -69,6 +69,7 @@ const fixture = Effect.fn("fixture")(function* (
   runtimeFailure?: NodeRuntimeUnavailableError | DeviceHost.DeviceHostError,
   inspectError = false,
   installTool?: Parameters<typeof DeviceService.makeWithHosts>[3],
+  agentIsAlreadyRunning = false,
 ) {
   const settings = yield* Ref.make(DEFAULT_SERVER_SETTINGS);
   const starts: string[] = [];
@@ -122,7 +123,14 @@ const fixture = Effect.fn("fixture")(function* (
           agentDevice: { baseUrl: "http://agent.test", token: "test", entryPath: "/agent" },
         };
       }),
-    current: Effect.succeed(null),
+    current: Effect.succeed(
+      agentIsAlreadyRunning
+        ? {
+            ...ready,
+            agentDevice: { baseUrl: "http://agent.test", token: "test", entryPath: "/agent" },
+          }
+        : null,
+    ),
     stopAgent: Effect.sync(() => {
       agentStops.push("stop");
     }),
@@ -133,7 +141,7 @@ const fixture = Effect.fn("fixture")(function* (
   const service = yield* DeviceService.makeWithHosts(
     new Map([[host.id, host]]),
     undefined,
-    undefined,
+    () => Effect.succeed("/test/agent-device.json"),
     installTool,
   ).pipe(
     Effect.provide(NodeCrypto.layer),
@@ -303,6 +311,47 @@ describe("device setup consent", () => {
     }).pipe(Effect.scoped),
   );
 
+  it.effect("starts agent helpers for authorized project access when global access is off", () =>
+    Effect.gen(function* () {
+      const { service, agentStarts, settings } = yield* fixture();
+      yield* service.configure({ enabled: true });
+      expect((yield* Ref.get(settings)).enableAgentDeviceAccess).toBe(false);
+      expect(yield* service.agentReadinessIfSupported()).toBeNull();
+      expect(yield* service.agentReadinessIfSupported(LOCAL_DEVICE_HOST_ID, true)).not.toBeNull();
+      const target = yield* service.agentTarget({
+        threadId: ThreadId.make("project-enabled-thread"),
+        hostId: LOCAL_DEVICE_HOST_ID,
+        deviceId: DeviceId.make("Pixel_API_35"),
+        agentAccessEnabled: true,
+      });
+      expect(target.slice(0, 2)).toEqual(["--config", "/test/agent-device.json"]);
+      expect(target[2]).toBe("--session");
+      expect(agentStarts).toEqual(["start", "start"]);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("withholds agent helpers for denied project access even when global access is on", () =>
+    Effect.gen(function* () {
+      const { service, agentStarts, settings } = yield* fixture();
+      yield* Ref.update(settings, (current) => ({
+        ...current,
+        enableDeviceSupport: true,
+        enableAgentDeviceAccess: true,
+      }));
+      expect(yield* service.agentReadinessIfSupported(LOCAL_DEVICE_HOST_ID, false)).toBeNull();
+      const result = yield* service
+        .agentTarget({
+          threadId: ThreadId.make("project-denied-thread"),
+          hostId: LOCAL_DEVICE_HOST_ID,
+          deviceId: DeviceId.make("Pixel_API_35"),
+          agentAccessEnabled: false,
+        })
+        .pipe(Effect.result);
+      expect(result._tag).toBe("Failure");
+      expect(agentStarts).toEqual([]);
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("installs agent support only after the separate agent permission", () =>
     Effect.gen(function* () {
       const { service, agentStarts, agentStops, settings } = yield* fixture();
@@ -316,7 +365,9 @@ describe("device setup consent", () => {
       expect((yield* service.state).agentAccessEnabled).toBe(true);
 
       yield* service.configure({ agentAccessEnabled: false, onboardingCompleted: true });
-      expect(agentStops).toEqual(["stop"]);
+      expect(agentStops).toEqual([]);
+      expect(yield* service.agentReadinessIfSupported()).toBeNull();
+      expect(yield* service.agentReadinessIfSupported(LOCAL_DEVICE_HOST_ID, true)).not.toBeNull();
       expect((yield* service.state).onboardingCompleted).toBe(true);
       expect((yield* Ref.get(settings)).deviceOnboardingCompleted).toBe(true);
     }).pipe(Effect.scoped),
@@ -737,5 +788,29 @@ it.effect("failed manual installation leaves lifecycle state unchanged and can b
     expect(attempts).toBe(2);
     expect(starts).toEqual([]);
     expect(agentStarts).toEqual([]);
+  }).pipe(Effect.scoped),
+);
+
+it.effect("reads an already running daemon without startup phases or state broadcasts", () =>
+  Effect.gen(function* () {
+    const { service, settings, agentStarts } = yield* fixture(
+      Effect.void,
+      undefined,
+      false,
+      undefined,
+      false,
+      undefined,
+      true,
+    );
+    yield* Ref.update(settings, (current) => ({ ...current, enableDeviceSupport: true }));
+    const revision = (yield* service.state).revision;
+    expect(
+      (yield* service.agentReadinessIfSupported(LOCAL_DEVICE_HOST_ID, true))?.agentDevice.baseUrl,
+    ).toBe("http://agent.test");
+    expect(
+      (yield* service.agentReadinessIfSupported(LOCAL_DEVICE_HOST_ID, true))?.agentDevice.baseUrl,
+    ).toBe("http://agent.test");
+    expect(agentStarts).toEqual([]);
+    expect((yield* service.state).revision).toBe(revision);
   }).pipe(Effect.scoped),
 );
