@@ -918,6 +918,18 @@ it.effect(
       const separateThread = (yield* orchestrator.getThreadProjection(separate)).thread;
       const now = yield* DateTime.now;
       yield* projections.apply({
+        id: EventId.make("legacy-inherited-placement"),
+        type: "thread.metadata-updated",
+        threadId: child,
+        occurredAt: now,
+        payload: {
+          ...(yield* orchestrator.getThreadProjection(child)).thread,
+          pinnedAt: now,
+          pinOrderKey: "m",
+          activeOrderKey: "m",
+        },
+      });
+      yield* projections.apply({
         id: EventId.make("separate-descendant-lineage"),
         type: "thread.metadata-updated",
         threadId: separate,
@@ -970,6 +982,9 @@ it.effect(
       assert.isTrue(restoredChild.lineage.independent);
       assert.equal(restoredChild.lineage.parentThreadId, parent);
       assert.equal(restoredChild.lineage.rootThreadId, parent);
+      assert.isNull(restoredChild.pinnedAt);
+      assert.isNull(restoredChild.pinOrderKey);
+      assert.isNull(restoredChild.activeOrderKey);
       for (const id of [child, grandchild]) {
         const projection = yield* orchestrator.getThreadProjection(id);
         assert.isNull(projection.thread.archivedAt);
@@ -984,6 +999,77 @@ it.effect(
       assert.isUndefined(
         (yield* orchestrator.getThreadProjection(grandchild)).thread.lineage.independent,
       );
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect.each([false, true])(
+  "promotion gives independent roots fresh sidebar placement with pinned parent=%s",
+  (pinned) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const parent = ThreadId.make("placement-parent");
+      yield* createWatchingThread(parent, 1);
+      yield* orchestrator.dispatch({
+        type: "thread.active.reorder",
+        commandId: CommandId.make("place-parent"),
+        threadId: parent,
+        orderKey: "m",
+      });
+      if (pinned)
+        yield* orchestrator.dispatch({
+          type: "thread.pin",
+          commandId: CommandId.make("pin-parent"),
+          threadId: parent,
+          orderKey: "m",
+        });
+      yield* send(parent, "work", "start_immediately");
+      const child = yield* delegate(parent, "placement-child");
+      const sibling = yield* delegate(parent, "placement-sibling");
+      const grandchild = yield* delegate(child, "placement-grandchild");
+      const originalOwner = (yield* orchestrator.getThreadProjection(parent)).thread;
+      const originalChildren = yield* Effect.forEach([child, sibling], (id) =>
+        orchestrator.getThreadProjection(id),
+      );
+      for (const { thread } of originalChildren) {
+        assert.equal(thread.activeOrderKey, "m");
+        assert.deepEqual(thread.pinnedAt, originalOwner.pinnedAt);
+        assert.equal(thread.pinOrderKey, originalOwner.pinOrderKey);
+      }
+      const command = archive(parent, [child, sibling, grandchild], "promote");
+      yield* orchestrator.dispatch(command);
+      for (const { thread } of originalChildren)
+        assert.deepEqual((yield* orchestrator.getThreadProjection(thread.id)).thread, thread);
+      yield* threads.executeArchive({ threadId: parent, requestId: command.commandId });
+      for (const before of originalChildren) {
+        const kept = yield* orchestrator.getThreadProjection(before.thread.id);
+        assert.isTrue(kept.thread.lineage.independent);
+        assert.isNull(kept.thread.pinnedAt);
+        assert.isNull(kept.thread.pinOrderKey);
+        assert.isNull(kept.thread.activeOrderKey);
+        assert.equal(kept.thread.lineage.parentThreadId, parent);
+        assert.deepEqual(kept.thread.forkedFrom, before.thread.forkedFrom);
+        assert.deepEqual(kept.runs, before.runs);
+      }
+      assert.isUndefined(
+        (yield* orchestrator.getThreadProjection(grandchild)).thread.lineage.independent,
+      );
+      yield* orchestrator.dispatch({
+        type: "thread.unarchive",
+        commandId: CommandId.make("restore-placement-parent"),
+        threadId: parent,
+      });
+      const restored = (yield* orchestrator.getThreadProjection(parent)).thread;
+      assert.deepEqual(restored.pinnedAt, originalOwner.pinnedAt);
+      assert.equal(restored.pinOrderKey, originalOwner.pinOrderKey);
+      assert.equal(restored.activeOrderKey, originalOwner.activeOrderKey);
+      for (const id of [child, sibling]) {
+        const kept = (yield* orchestrator.getThreadProjection(id)).thread;
+        assert.isTrue(kept.lineage.independent);
+        assert.isNull(kept.pinnedAt);
+        assert.isNull(kept.pinOrderKey);
+        assert.isNull(kept.activeOrderKey);
+      }
     }).pipe(Effect.provide(testLayer)),
 );
 

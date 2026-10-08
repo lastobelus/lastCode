@@ -11666,6 +11666,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           payload: {
             ...thread,
             lineage: { ...thread.lineage, independent: true },
+            // Independent roots must not reuse their former parent's sidebar slot.
+            pinnedAt: null,
+            pinOrderKey: null,
+            activeOrderKey: null,
             ...(thread.archivePending?.status === "failed" &&
             thread.archivePending.threadId === root.id
               ? { archivePending: null }
@@ -11850,7 +11854,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         type: "thread.metadata-updated",
         threadId: root.id,
         occurredAt: restored.updatedAt,
-        payload: { ...restored, lineage: { ...restored.lineage, independent: true } },
+        payload: {
+          ...restored,
+          lineage: { ...restored.lineage, independent: true },
+          pinnedAt: null,
+          pinOrderKey: null,
+          activeOrderKey: null,
+        },
       });
     }
     for (const child of shells) {
