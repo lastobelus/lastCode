@@ -78,9 +78,9 @@ const assistantSegments = (text: string, cwd?: string) =>
 it("searches displayed prose and file-chip labels without hidden paths", () => {
   expect(
     assistantSegments("[important description](/tmp/actual.ts). `/tmp/inline-example.ts:42`"),
-  ).toEqual(["important description actual.ts. inline-example.ts · L42"]);
+  ).toEqual(["important description (actual.ts). inline-example.ts · L42"]);
   expect(assistantSegments("[label](src/main.ts#L3C2)", "/workspace/repo")).toEqual([
-    "label main.ts · L3:C2",
+    "label (main.ts · L3:C2)",
   ]);
   expect(assistantSegments("[label](src/main.ts#L3C2)")).toEqual(["label"]);
 });
@@ -91,13 +91,28 @@ it("includes the same parent suffixes for duplicate filenames as the renderer", 
       "[first](src/main.ts) and `/workspace/repo/tests/main.ts:2`",
       "/workspace/repo",
     ),
-  ).toEqual(["first main.ts · repo/src and main.ts · repo/tests · L2"]);
+  ).toEqual(["first (main.ts · repo/src) and main.ts · repo/tests · L2"]);
   expect(
     assistantSegments(
       "[first](src/main.ts) and `/workspace/repo/src/main.ts:2`",
       "/workspace/repo",
     ),
-  ).toEqual(["first main.ts and main.ts · L2"]);
+  ).toEqual(["first (main.ts) and main.ts · L2"]);
+});
+
+it("indexes file-label punctuation and visible prose without image alt text", () => {
+  expect(assistantSegments("[![diagram](https://example.com/a.png)](/tmp/file.ts)")).toEqual([
+    " (file.ts)",
+  ]);
+  expect(
+    assistantSegments("[See ![hidden alt](https://example.com/a.png) now](/tmp/file.ts)"),
+  ).toEqual(["See  now (file.ts)"]);
+  expect(assistantSegments("[first\nsecond](/tmp/file.ts)")).toEqual([
+    "first second (file.ts)",
+  ]);
+  expect(assistantSegments("[first<br>second](/tmp/file.ts)")).toEqual([
+    "first\nsecond (file.ts)",
+  ]);
 });
 
 it("keeps fence paths literal and indexes file-chip labels in user messages", () => {
