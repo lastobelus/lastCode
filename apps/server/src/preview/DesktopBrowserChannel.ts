@@ -156,10 +156,14 @@ const make = Effect.gen(function* () {
     DesktopTabKey & { readonly popupId: string; readonly url: string }
   >();
   const popupIdOf = (key: DesktopTabKey, popupId: string) => JSON.stringify([keyOf(key), popupId]);
+  // Native vetoes survive a dropped connection. A transport retry is the same close attempt.
+  const popupCloseAttempts = new Map<string, string>();
+  const canceledPopupCloses = new Set<string>();
   const popupCloseRequests = new Map<
     string,
     {
       readonly key: DesktopTabKey;
+      readonly requestId: string;
       readonly deferred: Deferred.Deferred<void, DesktopBrowserTransportError>;
     }
   >();
@@ -263,7 +267,12 @@ const make = Effect.gen(function* () {
         return PubSub.publish(popups, popup).pipe(Effect.asVoid);
       }
       case "popupCloseCanceled": {
-        const pending = popupCloseRequests.get(popupIdOf(key, event.popupId));
+        const id = popupIdOf(key, event.popupId);
+        if (popupCloseAttempts.get(id) !== event.requestId) return Effect.void;
+        popupCloseAttempts.delete(id);
+        const pending = popupCloseRequests.get(id);
+        if (pending) popupCloseRequests.delete(id);
+        else canceledPopupCloses.add(id);
         return pending
           ? Deferred.fail(
               pending.deferred,
@@ -272,8 +281,12 @@ const make = Effect.gen(function* () {
           : Effect.void;
       }
       case "popupClosed": {
-        popupAnnouncements.delete(popupIdOf(key, event.popupId));
-        const pending = popupCloseRequests.get(popupIdOf(key, event.popupId));
+        const id = popupIdOf(key, event.popupId);
+        popupAnnouncements.delete(id);
+        popupCloseAttempts.delete(id);
+        canceledPopupCloses.delete(id);
+        const pending = popupCloseRequests.get(id);
+        popupCloseRequests.delete(id);
         return (pending ? Deferred.succeed(pending.deferred, undefined) : Effect.void).pipe(
           Effect.andThen(PubSub.publish(closedPopups, { ...key, popupId: event.popupId })),
           Effect.asVoid,
@@ -575,16 +588,20 @@ const make = Effect.gen(function* () {
     closePopup: (key, popupId) =>
       Effect.gen(function* () {
         const desktopHostId = key.desktopHostId ?? "local";
+        const id = popupIdOf(key, popupId);
+        if (canceledPopupCloses.delete(id))
+          return yield* new DesktopBrowserTransportError({ reason: "close-canceled" });
+        const requestId = popupCloseAttempts.get(id) ?? NodeCrypto.randomUUID();
+        popupCloseAttempts.set(id, requestId);
         if (desktopHostId === "local" ? !localAvailable : !hosts.has(desktopHostId))
           return yield* new DesktopBrowserTransportError({ reason: "host-unavailable" });
-        const id = popupIdOf(key, popupId);
         const pending = popupCloseRequests.get(id);
         if (pending) return yield* Deferred.await(pending.deferred);
         const deferred = yield* Deferred.make<void, DesktopBrowserTransportError>();
-        const request = { key, deferred };
+        const request = { key, requestId, deferred };
         popupCloseRequests.set(id, request);
         return yield* command(
-          { type: "closePopup", threadId: key.threadId, tabId: key.tabId, popupId },
+          { type: "closePopup", threadId: key.threadId, tabId: key.tabId, popupId, requestId },
           desktopHostId,
         ).pipe(
           Effect.andThen(Deferred.await(deferred)),

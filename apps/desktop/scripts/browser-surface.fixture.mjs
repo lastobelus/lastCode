@@ -628,11 +628,18 @@ async function main() {
         'window.onbeforeunload = event => { event.returnValue="stay"; return "stay"; }; void 0',
       ),
     );
-    await send({ type: "closePopup", ...key(tabs[0]), popupId: popupEvent.popupId });
-    NodeAssert.equal(
-      (await milestone("native close cancellation", () => popupCloseCanceled.promise)).popupId,
-      popupEvent.popupId,
+    await send({
+      type: "closePopup",
+      requestId: "fixture-close-veto",
+      ...key(tabs[0]),
+      popupId: popupEvent.popupId,
+    });
+    const canceledClose = await milestone(
+      "native close cancellation",
+      () => popupCloseCanceled.promise,
     );
+    NodeAssert.equal(canceledClose.popupId, popupEvent.popupId);
+    NodeAssert.equal(canceledClose.requestId, "fixture-close-veto");
     await milestone("native beforeunload dialog observed", () => beforeUnloadDialog.promise);
     NodeAssert.equal(nativePopup.isDestroyed(), false);
     NodeAssert.equal(nativePopup.isVisible(), false);
@@ -640,7 +647,12 @@ async function main() {
     await milestone("child removes unload veto", () =>
       nativePopup.webContents.executeJavaScript("window.onbeforeunload = null"),
     );
-    await send({ type: "closePopup", ...key(tabs[0]), popupId: popupEvent.popupId });
+    await send({
+      type: "closePopup",
+      requestId: "fixture-close-final",
+      ...key(tabs[0]),
+      popupId: popupEvent.popupId,
+    });
     NodeAssert.equal(
       (await milestone("native popup closed", () => popupClosed.promise)).popupId,
       popupEvent.popupId,

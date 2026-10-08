@@ -112,7 +112,7 @@ interface NativePopup {
   readonly contents: Electron.WebContents;
   readonly release: () => void;
   boundKey: DesktopBrowserTabKey | undefined;
-  closing: boolean;
+  closeRequest: { readonly requestId: string; canceled: boolean } | undefined;
 }
 
 export class DesktopBrowserHost extends Context.Service<
@@ -646,23 +646,38 @@ export const make = Effect.gen(function* () {
       const tab = popup.boundKey ? tabs.get(keyOf(popup.boundKey)) : undefined;
       if (tab) updatePresentation(tab);
     };
-    const canceled = () => {
-      if (!popup.closing || popups.get(id) !== popup) return;
-      popup.closing = false;
+    const canceled = (requestId: string | undefined) => {
+      const request = popup.closeRequest;
+      if (
+        !request ||
+        request.requestId !== requestId ||
+        request.canceled ||
+        popups.get(id) !== popup
+      )
+        return;
+      request.canceled = true;
       emit(
-        { type: "popupCloseCanceled", threadId: source.threadId, tabId: source.tabId, popupId: id },
+        {
+          type: "popupCloseCanceled",
+          threadId: source.threadId,
+          tabId: source.tabId,
+          popupId: id,
+          requestId: request.requestId,
+        },
         source.desktopHostId,
       );
     };
     const windowClosing = (event: Electron.Event) => {
+      const requestId = popup.closeRequest?.requestId;
       queueMicrotask(() => {
-        if (event.defaultPrevented) canceled();
+        if (event.defaultPrevented) canceled(requestId);
       });
     };
     const unloadPrevented = (event: Electron.Event) => {
+      const requestId = popup.closeRequest?.requestId;
       queueMicrotask(() => {
         // Electron reverses preventDefault here: it permits the unload.
-        if (!event.defaultPrevented) canceled();
+        if (!event.defaultPrevented) canceled(requestId);
       });
     };
     const stopObserving = observeWindow(window, changed);
@@ -672,7 +687,7 @@ export const make = Effect.gen(function* () {
       window,
       contents,
       boundKey: undefined,
-      closing: false,
+      closeRequest: undefined,
       release: () => {
         stopObserving();
         window.off("closed", cleanup);
@@ -774,18 +789,35 @@ export const make = Effect.gen(function* () {
         )
           return Effect.void;
         if (command.type === "closePopup") {
-          if (popup.closing) return Effect.void;
-          popup.closing = true;
+          if (popup.closeRequest?.requestId === command.requestId) {
+            if (popup.closeRequest.canceled)
+              emit(
+                {
+                  type: "popupCloseCanceled",
+                  threadId: source.threadId,
+                  tabId: source.tabId,
+                  popupId: popup.id,
+                  requestId: command.requestId,
+                },
+                desktopHostId,
+              );
+            return Effect.void;
+          }
+          if (popup.closeRequest && !popup.closeRequest.canceled) return Effect.void;
+          // A retry replays its outcome; only a fresh request can ask the user again.
+          const request = { requestId: command.requestId, canceled: false };
+          popup.closeRequest = request;
           try {
             popup.window.close();
           } catch {
-            popup.closing = false;
+            request.canceled = true;
             emit(
               {
                 type: "popupCloseCanceled",
                 threadId: source.threadId,
                 tabId: source.tabId,
                 popupId: popup.id,
+                requestId: command.requestId,
               },
               desktopHostId,
             );

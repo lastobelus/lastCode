@@ -213,21 +213,120 @@ it.effect.each(["window", "unload"] as const)(
           popup.contents.emit("will-prevent-unload", { defaultPrevented: false });
         else popup.window.emit("close", { defaultPrevented: true });
       };
-      const close = { type: "closePopup" as const, ...key, popupId: created.popupId };
+      const close = {
+        type: "closePopup" as const,
+        requestId: "close-veto",
+        ...key,
+        popupId: created.popupId,
+      };
       yield* host.handleRemoteCommand({ desktopHostId: "remote-a", command: close });
       expect((yield* Queue.take(events)).event).toEqual({
         type: "popupCloseCanceled",
+        requestId: close.requestId,
         ...key,
         popupId: created.popupId,
       });
       expect(popup.window.isDestroyed()).toBe(false);
       popup.window.close = actualClose;
-      yield* host.handleRemoteCommand({ desktopHostId: "remote-a", command: close });
+      yield* host.handleRemoteCommand({
+        desktopHostId: "remote-a",
+        command: { ...close, requestId: "close-final" },
+      });
       expect((yield* Queue.take(events)).event).toEqual({
         type: "popupClosed",
         ...key,
         popupId: created.popupId,
       });
+      expect(popup.window.isDestroyed()).toBe(true);
+    }),
+);
+
+it.effect(
+  "replays a lost close cancellation after reconnect without closing the user's retained window",
+  () =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      const events = yield* Queue.unbounded<{
+        desktopHostId: string;
+        event: DesktopBrowserEvent;
+      }>();
+      yield* host.remoteEvents.pipe(
+        Stream.runForEach((event) => Queue.offer(events, event)),
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      const source = { ...key, desktopHostId: "remote-a" };
+      host.attach(source, makeDebuggee().tab, "source-runtime");
+      yield* Queue.take(events);
+      const popup = makePopup(false);
+      host.registerPopup(source, popup.window);
+      const created = (yield* Queue.take(events)).event;
+      if (created.type !== "popupCreated") throw new Error("Expected native popup.");
+      const close = {
+        type: "closePopup" as const,
+        requestId: "close-kept-window",
+        ...key,
+        popupId: created.popupId,
+      };
+      const actualClose = popup.window.close;
+      let closeCalls = 0;
+      popup.window.close = () => {
+        closeCalls += 1;
+      };
+      yield* host.handleRemoteCommand({ desktopHostId: "remote-a", command: close });
+      yield* host.handleRemoteCommand({ desktopHostId: "remote-a", command: close });
+      expect(closeCalls).toBe(1);
+      yield* host.handleRemoteCommand({
+        desktopHostId: "remote-a",
+        command: { type: "disconnect" },
+      });
+      popup.contents.emit("will-prevent-unload", { defaultPrevented: false });
+      // This event never reaches the disconnected server.
+      expect((yield* Queue.take(events)).event).toEqual({
+        type: "popupCloseCanceled",
+        ...key,
+        popupId: created.popupId,
+        requestId: close.requestId,
+      });
+      popup.window.close = () => {
+        closeCalls += 1;
+        actualClose();
+      };
+      yield* host.handleRemoteCommand({ desktopHostId: "remote-a", command: { type: "announce" } });
+      expect((yield* Queue.take(events)).event).toMatchObject({ type: "attached", ...key });
+      expect((yield* Queue.take(events)).event).toEqual(created);
+      for (const foreign of [
+        { desktopHostId: "remote-b", tabId: key.tabId, threadId: key.threadId },
+        { desktopHostId: "remote-a", tabId: "foreign-tab", threadId: key.threadId },
+        { desktopHostId: "remote-a", tabId: key.tabId, threadId: "foreign-thread" },
+      ]) {
+        const { desktopHostId, ...foreignKey } = foreign;
+        yield* host.handleRemoteCommand({ desktopHostId, command: { ...close, ...foreignKey } });
+        yield* host.handleRemoteCommand({
+          desktopHostId,
+          command: { ...close, ...foreignKey, requestId: "foreign-new-close" },
+        });
+      }
+      yield* host.handleRemoteCommand({ desktopHostId: "remote-a", command: close });
+      expect((yield* Queue.take(events)).event).toEqual({
+        type: "popupCloseCanceled",
+        ...key,
+        popupId: created.popupId,
+        requestId: close.requestId,
+      });
+      expect(closeCalls).toBe(1);
+      expect(popup.window.isDestroyed()).toBe(false);
+      yield* host.handleRemoteCommand({
+        desktopHostId: "remote-a",
+        command: { ...close, requestId: "deliberate-fresh-close" },
+      });
+      expect((yield* Queue.take(events)).event).toEqual({
+        type: "popupClosed",
+        ...key,
+        popupId: created.popupId,
+      });
+      expect(closeCalls).toBe(2);
       expect(popup.window.isDestroyed()).toBe(true);
     }),
 );
@@ -477,7 +576,12 @@ describe("DesktopBrowserHost", () => {
         expect(popup.attachCount()).toBe(1);
         yield* host.handleRemoteCommand({
           desktopHostId: "remote-a",
-          command: { type: "closePopup", ...key, popupId: created.popupId },
+          command: {
+            type: "closePopup",
+            requestId: "close-popup",
+            ...key,
+            popupId: created.popupId,
+          },
         });
         expect((yield* Queue.take(events)).event).toEqual({
           type: "presentation",
@@ -533,6 +637,7 @@ describe("DesktopBrowserHost", () => {
             desktopHostId: owner,
             command: {
               type: "closePopup",
+              requestId: "close-foreign",
               threadId: key.threadId,
               tabId: owner === "remote-a" ? "wrong-tab" : key.tabId,
               popupId: created.popupId,
@@ -548,7 +653,12 @@ describe("DesktopBrowserHost", () => {
         expect((yield* Queue.take(events)).event).toEqual(created);
         yield* host.handleRemoteCommand({
           desktopHostId: "remote-a",
-          command: { type: "closePopup", ...key, popupId: created.popupId },
+          command: {
+            type: "closePopup",
+            requestId: "close-popup",
+            ...key,
+            popupId: created.popupId,
+          },
         });
         expect((yield* Queue.take(events)).event).toEqual({
           type: "popupClosed",
@@ -560,7 +670,12 @@ describe("DesktopBrowserHost", () => {
         // A retry confirms absence without recreating a window or debugger.
         yield* host.handleRemoteCommand({
           desktopHostId: "remote-a",
-          command: { type: "closePopup", ...key, popupId: created.popupId },
+          command: {
+            type: "closePopup",
+            requestId: "close-popup",
+            ...key,
+            popupId: created.popupId,
+          },
         });
         expect((yield* Queue.take(events)).event).toEqual({
           type: "popupClosed",

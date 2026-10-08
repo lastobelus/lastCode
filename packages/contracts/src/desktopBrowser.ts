@@ -70,6 +70,7 @@ export const DesktopBrowserEvent = Schema.Union([
     type: Schema.Literal("popupCloseCanceled"),
     ...TabKey,
     popupId: TrimmedNonEmptyString,
+    requestId: TrimmedNonEmptyString,
   }),
   Schema.Struct({ type: Schema.Literal("surfaceReady"), ...TabKey, ...SurfaceResponse }),
   Schema.Struct({
@@ -115,7 +116,13 @@ export const DesktopBrowserCommand = Schema.Union([
     openerTabId: TrimmedNonEmptyString,
     popupId: TrimmedNonEmptyString,
   }),
-  Schema.Struct({ type: Schema.Literal("closePopup"), ...TabKey, popupId: TrimmedNonEmptyString }),
+  Schema.Struct({
+    type: Schema.Literal("closePopup"),
+    ...TabKey,
+    popupId: TrimmedNonEmptyString,
+    /** Retained across transport retries; a new deliberate close uses a new ID. */
+    requestId: TrimmedNonEmptyString,
+  }),
   Schema.Struct(SurfaceRequest),
   Schema.Struct({
     type: Schema.Literal("resolveUrl"),

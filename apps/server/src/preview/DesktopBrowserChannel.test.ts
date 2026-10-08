@@ -135,6 +135,89 @@ it.effect(
 );
 
 it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
+  it.effect.each([false, true])(
+    "a lost native veto retires the same attempt after reconnect (retry already waiting: %s)",
+    (waiting) =>
+      Effect.gen(function* () {
+        const channel = yield* remoteChannel;
+        const source = { ...key, desktopHostId: "host-a" };
+        const first = yield* connectHost(channel, "socket-a", "host-a");
+        const original = yield* channel
+          .closePopup(source, "child-1")
+          .pipe(Effect.flip, Effect.forkScoped);
+        const command = yield* Queue.take(first.commands);
+        if (command.type !== "closePopup") throw new Error("Expected native close request");
+        // The host received the command and vetoed closing; its cancellation was lost offline.
+        yield* Fiber.interrupt(first.fiber);
+        expect((yield* Fiber.join(original)).reason).toBe("host-unavailable");
+        const next = yield* connectHost(channel, "socket-b", "host-a");
+        const cancellation = {
+          type: "popupCloseCanceled" as const,
+          ...key,
+          popupId: "child-1",
+          requestId: command.requestId,
+        };
+        if (!waiting) yield* channel.receiveEvent("socket-b", "host-a", cancellation);
+        const retry = yield* channel
+          .closePopup(source, "child-1")
+          .pipe(Effect.flip, Effect.forkScoped);
+        if (waiting) {
+          expect(yield* Queue.take(next.commands)).toEqual(command);
+          yield* channel.receiveEvent("socket-b", "host-a", cancellation);
+        }
+        expect((yield* Fiber.join(retry)).reason).toBe("close-canceled");
+        expect(yield* Queue.size(next.commands)).toBe(0);
+        let completed = false;
+        const deliberate = yield* channel.closePopup(source, "child-1").pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              completed = true;
+            }),
+          ),
+          Effect.forkScoped,
+        );
+        const newCommand = yield* Queue.take(next.commands);
+        if (newCommand.type !== "closePopup") throw new Error("Expected deliberate close request");
+        expect(newCommand.requestId).not.toBe(command.requestId);
+        // A duplicate/stale veto must not cancel the new deliberate attempt.
+        yield* channel.receiveEvent("socket-b", "host-a", cancellation);
+        expect(completed).toBe(false);
+        yield* channel.receiveEvent("socket-b", "host-a", {
+          type: "popupClosed",
+          ...key,
+          popupId: "child-1",
+        });
+        yield* Fiber.join(deliberate);
+        expect(completed).toBe(true);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect("a timed-out transport retry preserves its native close attempt", () =>
+    Effect.gen(function* () {
+      const channel = yield* remoteChannel;
+      const host = yield* connectHost(channel, "socket-a", "host-a");
+      const source = { ...key, desktopHostId: "host-a" };
+      const first = yield* channel
+        .closePopup(source, "child-1")
+        .pipe(Effect.flip, Effect.forkScoped);
+      const command = yield* Queue.take(host.commands);
+      if (command.type !== "closePopup") throw new Error("Expected close request");
+      yield* TestClock.adjust("10 seconds");
+      expect((yield* Fiber.join(first)).reason).toBe("host-unavailable");
+      const retry = yield* channel
+        .closePopup(source, "child-1")
+        .pipe(Effect.flip, Effect.forkScoped);
+      expect(yield* Queue.take(host.commands)).toEqual(command);
+      yield* channel.receiveEvent("socket-a", "host-a", {
+        type: "popupCloseCanceled",
+        ...key,
+        popupId: "child-1",
+        requestId: command.requestId,
+      });
+      expect((yield* Fiber.join(retry)).reason).toBe("close-canceled");
+    }).pipe(Effect.scoped),
+  );
+
   it.effect(
     "host reconnect notifications include authenticated hosts without any popup replay",
     () =>
@@ -148,7 +231,7 @@ it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
         const interruptedClose = yield* channel
           .closePopup({ ...key, desktopHostId: "host-a" }, "gone-offline")
           .pipe(Effect.flip, Effect.forkScoped);
-        yield* Queue.take(first.commands);
+        const firstCommand = yield* Queue.take(first.commands);
         yield* Fiber.interrupt(first.fiber);
         // Reconnect before joining the old failed close and retry the same native identity.
         const next = yield* connectHost(channel, "socket-b", "host-a");
@@ -160,6 +243,7 @@ it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
           type: "closePopup",
           ...key,
           popupId: "gone-offline",
+          requestId: firstCommand.type === "closePopup" ? firstCommand.requestId : "unexpected",
         });
         yield* channel.receiveEvent("socket-b", "host-a", {
           type: "popupClosed",
@@ -190,6 +274,7 @@ it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
         type: "closePopup",
         ...key,
         popupId: "child-1",
+        requestId: expect.any(String),
       });
       expect(completed).toBe(false);
       // Another authenticated desktop's matching strings are a different window.
@@ -226,12 +311,14 @@ it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
         const closing = yield* channel
           .closePopup({ ...key, desktopHostId: "host-a" }, "child-1")
           .pipe(Effect.flip, Effect.forkScoped);
-        yield* Queue.take(host.commands);
+        const command = yield* Queue.take(host.commands);
+        if (command.type !== "closePopup") throw new Error("Expected native close request");
         if (failure === "canceled")
           yield* channel.receiveEvent("socket-a", "host-a", {
             type: "popupCloseCanceled",
             ...key,
             popupId: "child-1",
+            requestId: command.requestId,
           });
         else yield* Fiber.interrupt(host.fiber);
         expect((yield* Fiber.join(closing)).reason).toBe(
@@ -312,6 +399,7 @@ it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
         type: "closePopup",
         ...key,
         popupId: "child-1",
+        requestId: expect.any(String),
       });
       yield* channel.receiveEvent("socket-c", "host-a", {
         type: "popupClosed",
