@@ -132,6 +132,11 @@ export class DesktopBrowserHost extends Context.Service<
       input: { readonly runtimeTabId: string; readonly presented: boolean },
       senderId: number,
     ) => void;
+    readonly setMainWindow: (window: Electron.BrowserWindow) => void;
+    readonly setPictureInPictureWindow: (
+      runtimeTabId: string,
+      window: Electron.BrowserWindow | null,
+    ) => void;
     /** Shares the preview manager's base policy with temporary automation rendering leases. */
     readonly setBackgroundThrottling: (contents: Electron.WebContents, enabled: boolean) => void;
     /** Withdraws it: closed, swapped, crashed, or devtools needs the debugger. */
@@ -210,6 +215,50 @@ export const make = Effect.gen(function* () {
   const presentedSlots = new Map<string, number>();
   const emit = (event: DesktopBrowserEventType, desktopHostId = "local") =>
     runFork(PubSub.publish(outbox, { desktopHostId, event }));
+  let mainWindow: Electron.BrowserWindow | null = null;
+  let releaseMainWindow: (() => void) | undefined;
+  const pictureInPictureWindows = new Map<
+    string,
+    { window: Electron.BrowserWindow; release: () => void }
+  >();
+  const windowVisible = (window: Electron.BrowserWindow | null | undefined) =>
+    window !== null &&
+    window !== undefined &&
+    !window.isDestroyed() &&
+    window.isVisible() &&
+    !window.isMinimized();
+  const nativePresented = (runtimeTabId: string, senderId: number | undefined) =>
+    (senderId !== undefined &&
+      mainWindow !== null &&
+      windowVisible(mainWindow) &&
+      mainWindow.webContents.id === senderId &&
+      presentedSlots.get(runtimeTabId) === senderId) ||
+    windowVisible(pictureInPictureWindows.get(runtimeTabId)?.window);
+  const updatePresentation = (tab: AttachedTab) => {
+    const presented = nativePresented(
+      tab.runtimeTabId,
+      tab.debuggee.webContents.hostWebContents?.id,
+    );
+    if (tab.presented === presented) return;
+    tab.presented = presented;
+    emit(
+      { type: "presentation", threadId: tab.key.threadId, tabId: tab.key.tabId, presented },
+      tab.key.desktopHostId,
+    );
+  };
+  const observeWindow = (window: Electron.BrowserWindow, changed: () => void) => {
+    const events = ["show", "hide", "minimize", "restore", "closed"] as const;
+    for (const event of events) window.on(event, changed);
+    return () => {
+      for (const event of events) window.off(event, changed);
+    };
+  };
+  yield* Effect.addFinalizer(() =>
+    Effect.sync(() => {
+      releaseMainWindow?.();
+      for (const entry of pictureInPictureWindows.values()) entry.release();
+    }),
+  );
   const unthrottledContents = new Map<
     Electron.WebContents,
     { references: number; restore: boolean }
@@ -489,10 +538,7 @@ export const make = Effect.gen(function* () {
       surfaceLeases: new Map(),
       renderingLeases: new Map(),
       relay: null,
-      presented:
-        debuggee.webContents.hostWebContents !== null &&
-        debuggee.webContents.hostWebContents !== undefined &&
-        presentedSlots.get(runtimeTabId) === debuggee.webContents.hostWebContents.id,
+      presented: nativePresented(runtimeTabId, debuggee.webContents.hostWebContents?.id),
       downloadDirectory: null,
       pendingDownloadGuid: null,
       remoteDownloadDirectory: null,
@@ -729,17 +775,33 @@ export const make = Effect.gen(function* () {
       else if (presentedSlots.get(input.runtimeTabId) === senderId)
         presentedSlots.delete(input.runtimeTabId);
       if (!tab) return;
-      if (tab.presented === input.presented) return;
-      tab.presented = input.presented;
-      emit(
-        {
-          type: "presentation",
-          threadId: tab.key.threadId,
-          tabId: tab.key.tabId,
-          presented: tab.presented,
-        },
-        tab.key.desktopHostId,
-      );
+      updatePresentation(tab);
+    },
+    setMainWindow: (window) => {
+      if (mainWindow === window) return;
+      releaseMainWindow?.();
+      mainWindow = window;
+      const changed = () => {
+        for (const tab of tabs.values()) updatePresentation(tab);
+      };
+      releaseMainWindow = observeWindow(window, changed);
+      changed();
+    },
+    setPictureInPictureWindow: (runtimeTabId, window) => {
+      const previous = pictureInPictureWindows.get(runtimeTabId);
+      if (previous?.window === window) return;
+      previous?.release();
+      pictureInPictureWindows.delete(runtimeTabId);
+      const changed = () => {
+        const tab = [...tabs.values()].find((tab) => tab.runtimeTabId === runtimeTabId);
+        if (tab) updatePresentation(tab);
+      };
+      if (window)
+        pictureInPictureWindows.set(runtimeTabId, {
+          window,
+          release: observeWindow(window, changed),
+        });
+      changed();
     },
     surfaceResponse,
     setBackgroundThrottling,

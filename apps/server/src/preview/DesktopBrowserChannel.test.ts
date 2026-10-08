@@ -101,35 +101,35 @@ it.effect(
           ...key,
           presented: true,
         });
-        expect(yield* channel.isPresented(tab)).toBe(false);
+        expect(channel.isPresented(tab)).toBe(false);
         yield* channel.receiveEvent("owner-a", "host-a", { type: "attached", ...key });
-        expect(yield* channel.isPresented(tab)).toBe(false);
+        expect(channel.isPresented(tab)).toBe(false);
         yield* channel.receiveEvent("owner-a", "host-a", {
           type: "presentation",
           ...key,
           presented: true,
         });
-        expect(yield* channel.isPresented(tab)).toBe(true);
+        expect(channel.isPresented(tab)).toBe(true);
         const rejected = yield* channel
           .receiveEvent("other-owner", "host-a", { type: "presentation", ...key, presented: false })
           .pipe(Effect.flip);
         expect(rejected.reason).toBe("host-unavailable");
-        expect(yield* channel.isPresented(tab)).toBe(true);
+        expect(channel.isPresented(tab)).toBe(true);
         // A replacement announcement must not inherit its predecessor's visibility.
         yield* channel.receiveEvent("owner-a", "host-a", { type: "attached", ...key });
-        expect(yield* channel.isPresented(tab)).toBe(false);
+        expect(channel.isPresented(tab)).toBe(false);
         yield* channel.receiveEvent("owner-a", "host-a", {
           type: "attached",
           ...key,
           presented: true,
         });
-        expect(yield* channel.isPresented(tab)).toBe(true);
+        expect(channel.isPresented(tab)).toBe(true);
         yield* Fiber.interrupt(host.fiber);
-        expect(yield* channel.isPresented(tab)).toBe(false);
+        expect(channel.isPresented(tab)).toBe(false);
         expect(yield* channel.isAttached(tab)).toBe(false);
         // A reconnect starts without any prior guest or presentation.
         yield* connectHost(channel, "owner-b", "host-a");
-        expect(yield* channel.isPresented(tab)).toBe(false);
+        expect(channel.isPresented(tab)).toBe(false);
       }),
     ).pipe(Effect.provide(NodeServices.layer)),
 );

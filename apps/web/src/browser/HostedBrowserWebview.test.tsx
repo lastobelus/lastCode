@@ -589,8 +589,6 @@ describe("HostedBrowserWebview settings hydration", () => {
         browserSurfaceResponse: async () => undefined,
       },
     });
-    const documentEvents = Object.assign(new EventTarget(), { visibilityState: "visible" });
-    vi.stubGlobal("document", documentEvents);
     const runtimeTabId = "native-presentation";
     const owner = Symbol("browser-slot");
     useBrowserSurfaceStore.getState().claim(runtimeTabId, owner, false);
@@ -628,13 +626,6 @@ describe("HostedBrowserWebview settings hydration", () => {
     });
     expect(browserPresentation).toHaveBeenLastCalledWith({ runtimeTabId, presented: true });
     await act(() => {
-      documentEvents.visibilityState = "hidden";
-      documentEvents.dispatchEvent(new Event("visibilitychange"));
-    });
-    expect(browserPresentation).toHaveBeenLastCalledWith({ runtimeTabId, presented: false });
-    await act(() => {
-      documentEvents.visibilityState = "visible";
-      documentEvents.dispatchEvent(new Event("visibilitychange"));
       useBrowserSurfaceStore.getState().release(runtimeTabId, owner);
     });
     expect(browserPresentation).toHaveBeenLastCalledWith({ runtimeTabId, presented: false });

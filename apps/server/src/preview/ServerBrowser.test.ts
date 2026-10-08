@@ -63,6 +63,10 @@ vi.mock("./ServerBrowserContexts.ts", () => ({
     }
     async connectDesktopPage(endpoint: string) {
       const context = makeContext();
+      context.page.emulateMedia.mockImplementation(async () => {
+        nativeRenderingEntered?.resolve();
+        await nativeRenderingGate?.promise;
+      });
       desktopConnections.push({ endpoint, context });
       return { browser: { close: async () => {} }, page: context.page as unknown as Page };
     }
@@ -198,6 +202,9 @@ const releasedDesktopTabs: Array<string> = [];
 const desktopConnections: Array<{ endpoint: string; context: ReturnType<typeof makeContext> }> = [];
 const presentedDesktopTabs = new Set<string>();
 const desktopPresentations = new NodeEvents.EventEmitter();
+let nativeRenderingGate: PromiseWithResolvers<void> | null = null;
+let nativeRenderingEntered: PromiseWithResolvers<void> | null = null;
+let nativePresentationProcessed: PromiseWithResolvers<void> | null = null;
 let surfaceFailure: DesktopBrowserTransportError | null = null;
 const surfaceCalls: Array<{
   tabId: string;
@@ -261,7 +268,7 @@ const dependencies = Layer.mergeAll(
       ),
     ),
     isAttached: (key) => Effect.sync(() => desktopRenders(key.tabId)),
-    isPresented: (key) => Effect.sync(() => presentedDesktopTabs.has(key.tabId)),
+    isPresented: (key) => presentedDesktopTabs.has(key.tabId),
     presentations: Stream.callback<{ threadId: string; tabId: string; desktopHostId: string }>(
       (queue) =>
         Effect.acquireRelease(
@@ -273,7 +280,7 @@ const dependencies = Layer.mergeAll(
           }),
           (listener) => Effect.sync(() => desktopPresentations.off("presentation", listener)),
         ),
-    ),
+    ).pipe(Stream.tap(() => Effect.sync(() => nativePresentationProcessed?.resolve()))),
     surface: (key, input) =>
       Effect.sync(() => {
         surfaceCalls.push({ tabId: key.tabId, ...input });
@@ -361,6 +368,9 @@ beforeEach(() => {
   contextFailure = null;
   desktopTabs.clear();
   presentedDesktopTabs.clear();
+  nativeRenderingGate = null;
+  nativeRenderingEntered = null;
+  nativePresentationProcessed = null;
   desktopRendersNext = false;
   localDesktopAvailable = false;
   profileCatalogue = null;
@@ -1606,6 +1616,61 @@ it.live("a desktop page the desktop takes back reconnects instead of closing", (
       expect(desktopConnections).toHaveLength(2);
     }),
   ).pipe(Effect.provide(layer)),
+);
+
+it.live.each([true, false])(
+  "reconciles native presentation changed during reconnect setup (initially presented: %s)",
+  (initiallyPresented) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        desktopRendersNext = true;
+        const { browser, broker, tabId } = yield* ready;
+        yield* broker.invoke({
+          scope,
+          tabId,
+          operation: "setColorScheme",
+          input: { colorScheme: "dark" },
+        });
+        const viewer = yield* browser.attachViewer(viewerInput(tabId, false));
+        while (desktopDetaches.listenerCount("detach") === 0) yield* Effect.yieldNow;
+        desktopDetaches.emit("detach", { threadId: scope.thread.threadId, tabId });
+        let end = yield* Queue.take(viewer.output);
+        while (end._tag !== "reconnect") end = yield* Queue.take(viewer.output);
+        if (initiallyPresented) presentedDesktopTabs.add(tabId);
+        nativeRenderingGate = Promise.withResolvers<void>();
+        nativeRenderingEntered = Promise.withResolvers<void>();
+        const connecting = yield* Effect.scoped(
+          browser.attachViewer(viewerInput(tabId, false)),
+        ).pipe(Effect.forkScoped);
+        yield* Effect.promise(() => nativeRenderingEntered!.promise);
+        // The new tab is not registered while emulateMedia is pending. Wait
+        // until its presentation update has actually reached the subscriber.
+        nativePresentationProcessed = Promise.withResolvers<void>();
+        if (initiallyPresented) presentedDesktopTabs.delete(tabId);
+        else presentedDesktopTabs.add(tabId);
+        desktopPresentations.emit("presentation", {
+          threadId: scope.thread.threadId,
+          tabId,
+          desktopHostId: "local",
+        });
+        yield* Effect.promise(() => nativePresentationProcessed!.promise);
+        nativeRenderingGate.resolve();
+        yield* Fiber.join(connecting);
+        const status = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          tabId,
+          operation: "status",
+          input: {},
+        });
+        expect(status).toMatchObject({
+          nativePresented: !initiallyPresented,
+          visible: !initiallyPresented,
+          streamViewers: 0,
+        });
+        expect(desktopConnections).toHaveLength(2);
+        expect(contexts).toHaveLength(0);
+      }),
+    ).pipe(Effect.provide(layer)),
 );
 
 it.live(

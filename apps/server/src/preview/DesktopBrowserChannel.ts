@@ -92,7 +92,8 @@ export class DesktopBrowserChannel extends Context.Service<
     /** Desktop tabs as they detach. */
     readonly detached: Stream.Stream<DesktopTabKey>;
     readonly isAttached: (key: DesktopTabKey) => Effect.Effect<boolean>;
-    readonly isPresented: (key: DesktopTabKey) => Effect.Effect<boolean>;
+    /** Synchronous registry lookup so presentation and tab registration cannot interleave. */
+    readonly isPresented: (key: DesktopTabKey) => boolean;
     readonly presentations: Stream.Stream<DesktopTabKey>;
     /** Keeps a native guest paintable until the matching lease is released. */
     readonly surface: (
@@ -571,7 +572,7 @@ const make = Effect.gen(function* () {
       Stream.map((change) => change.key),
     ),
     isAttached: (key) => Effect.sync(() => attachedTabs.has(keyOf(key))),
-    isPresented: (key) => Effect.sync(() => attachedTabs.get(keyOf(key))?.presented === true),
+    isPresented: (key) => attachedTabs.get(keyOf(key))?.presented === true,
     presentations: Stream.fromPubSub(presentations),
     surface: (key, input, timeoutMs = 2_500) =>
       Effect.gen(function* () {

@@ -768,15 +768,7 @@ const make = Effect.gen(function* () {
       desktop: desktop === null ? null : { close: desktop.close },
       profileId: snapshot.profileId,
       desktopHostId: snapshot.desktopHostId,
-      nativePresented:
-        desktop !== null &&
-        (await Effect.runPromise(
-          desktopChannel.isPresented({
-            threadId: snapshot.threadId,
-            tabId: snapshot.tabId,
-            desktopHostId: snapshot.desktopHostId,
-          }),
-        )),
+      nativePresented: false,
       revealRequested: snapshot.reveal === true,
       openerTabId: adopted?.openerTabId,
       downloads: [],
@@ -868,6 +860,15 @@ const make = Effect.gen(function* () {
     }
     page.on("close", () => dropTab(tab, true));
     page.on("crash", () => dropTab(tab, true));
+    // Sample after all asynchronous setup, in the same tick that registers
+    // the tab. The presentation subscriber handles every later change.
+    tab.nativePresented =
+      desktop !== null &&
+      desktopChannel.isPresented({
+        threadId: tab.threadId,
+        tabId: tab.tabId,
+        desktopHostId: tab.desktopHostId,
+      });
     tabs.set(key, tab);
     reportLiveTabs();
     // A popup is already loading its own URL, and the desktop loads its tab's.
@@ -1200,6 +1201,12 @@ const make = Effect.gen(function* () {
     }
     const url = tab.page.url();
     const viewport = tab.page.viewportSize();
+    if (tab.desktop)
+      tab.nativePresented = desktopChannel.isPresented({
+        threadId: tab.threadId,
+        tabId: tab.tabId,
+        desktopHostId: tab.desktopHostId,
+      });
     // A reveal response only confirms the request. Presentation comes from
     // the actual native slot or an attached streamed viewer.
     if (tab.nativePresented || tab.viewers.size > 0) tab.revealRequested = false;
@@ -2747,10 +2754,10 @@ const make = Effect.gen(function* () {
   );
   yield* desktopChannel.presentations.pipe(
     Stream.runForEach((key) =>
-      Effect.gen(function* () {
+      Effect.sync(() => {
         const tab = tabs.get(tabKey(key.threadId, key.tabId));
         if (!tab?.desktop || tab.desktopHostId !== key.desktopHostId) return;
-        tab.nativePresented = yield* desktopChannel.isPresented(key);
+        tab.nativePresented = desktopChannel.isPresented(key);
         if (tab.nativePresented) tab.revealRequested = false;
         reportLiveTabs();
       }),

@@ -20,6 +20,37 @@ const decodeCdpReply = Schema.decodeUnknownSync(
 );
 const key = { threadId: "thread-1", tabId: "tab-1" };
 
+const makePresentationWindow = (initialVisible = true) => {
+  const events = new NodeEvents.EventEmitter();
+  let visible = initialVisible;
+  let minimized = false;
+  const window = Object.assign(events, {
+    isDestroyed: () => false,
+    isVisible: () => visible,
+    isMinimized: () => minimized,
+    webContents: { id: 77 },
+  });
+  return {
+    window: window as unknown as Electron.BrowserWindow,
+    show: () => {
+      visible = true;
+      events.emit("show");
+    },
+    hide: () => {
+      visible = false;
+      events.emit("hide");
+    },
+    minimize: () => {
+      minimized = true;
+      events.emit("minimize");
+    },
+    restore: () => {
+      minimized = false;
+      events.emit("restore");
+    },
+  };
+};
+
 /** A tab's webContents and debugger, with the debugger's commands left pending until released. */
 const makeRenderingContents = (initial = true) => {
   let throttled = initial;
@@ -106,6 +137,7 @@ describe("DesktopBrowserHost", () => {
         );
         const debuggee = makeDebuggee();
         const remoteKey = { ...key, desktopHostId: "remote-a" };
+        host.setMainWindow(makePresentationWindow().window);
         host.setPresentation({ runtimeTabId: "runtime-a", presented: true }, 77);
         host.attach(remoteKey, debuggee.tab, "runtime-a");
         expect((yield* Queue.take(events)).event).toMatchObject({
@@ -154,6 +186,58 @@ describe("DesktopBrowserHost", () => {
           ...key,
           supportsNativeSurface: true,
         });
+      }),
+  );
+
+  it.effect(
+    "native window hide/show controls PiP and main-slot visibility without closing either",
+    () =>
+      Effect.gen(function* () {
+        const host = yield* DesktopBrowserHost.make.pipe(
+          Effect.provide(DesktopClientSettings.layerTest()),
+        );
+        const events = yield* Queue.unbounded<{
+          desktopHostId: string;
+          event: typeof DesktopBrowserEvent.Type;
+        }>();
+        yield* host.remoteEvents.pipe(
+          Stream.runForEach((event) => Queue.offer(events, event)),
+          Effect.forkScoped({ startImmediately: true }),
+        );
+        const main = makePresentationWindow(false);
+        const pip = makePresentationWindow(false);
+        host.setMainWindow(main.window);
+        host.attach({ ...key, desktopHostId: "remote-a" }, makeDebuggee().tab, "runtime-a");
+        expect((yield* Queue.take(events)).event).toMatchObject({ type: "attached" });
+        host.setPictureInPictureWindow("runtime-a", pip.window);
+        pip.show();
+        expect((yield* Queue.take(events)).event).toMatchObject({
+          type: "presentation",
+          presented: true,
+        });
+        // macOS Hide hides the windows while keeping the PiP session open.
+        pip.hide();
+        expect((yield* Queue.take(events)).event).toMatchObject({
+          type: "presentation",
+          presented: false,
+        });
+        pip.show();
+        expect((yield* Queue.take(events)).event).toMatchObject({ presented: true });
+        main.show();
+        pip.hide();
+        // An open main window with no selected Browser slot is still invisible.
+        expect((yield* Queue.take(events)).event).toMatchObject({ presented: false });
+        host.setPresentation({ runtimeTabId: "runtime-a", presented: true }, 77);
+        expect((yield* Queue.take(events)).event).toMatchObject({ presented: true });
+        main.hide();
+        expect((yield* Queue.take(events)).event).toMatchObject({ presented: false });
+        main.show();
+        expect((yield* Queue.take(events)).event).toMatchObject({ presented: true });
+        main.minimize();
+        expect((yield* Queue.take(events)).event).toMatchObject({ presented: false });
+        main.restore();
+        expect((yield* Queue.take(events)).event).toMatchObject({ presented: true });
+        host.setPictureInPictureWindow("runtime-a", null);
       }),
   );
 

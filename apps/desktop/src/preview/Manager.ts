@@ -1627,6 +1627,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         }
         yield* Ref.set(mainWindowRef, Option.some(window));
         currentMainWindow = window;
+        browserHost.setMainWindow(window);
         frameCaptureWindowOpen = true;
         window.once("closed", () => {
           if (currentMainWindow !== window) return;
@@ -2743,6 +2744,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       ] as const;
     });
     if (!removed) return;
+    browserHost.setPictureInPictureWindow(tabId, null);
     yield* Deferred.interrupt(expectedSession.ready);
     yield* Scope.close(expectedSession.initializationScope, Exit.void).pipe(Effect.ignore);
     yield* Ref.update(pictureInPictureAspectRatiosRef, (aspectRatios) =>
@@ -2925,6 +2927,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
             copy.set(tabId, session);
           }),
         );
+        browserHost.setPictureInPictureWindow(tabId, pictureInPictureWindow);
         return { kind: "created" as const, session };
       }),
     );

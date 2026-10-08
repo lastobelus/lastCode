@@ -45,7 +45,7 @@ export type DesktopBrowserSurfaceRequest = typeof DesktopBrowserSurfaceRequest.T
 export const DesktopBrowserSurfaceResponse = Schema.Struct(SurfaceResponse);
 export type DesktopBrowserSurfaceResponse = typeof DesktopBrowserSurfaceResponse.Type;
 
-/** A user-visible native slot or picture-in-picture window, excluding capture leases. */
+/** Selected renderer Browser slot; the native host checks actual window visibility. */
 export const DesktopBrowserPresentationInput = Schema.Struct({
   runtimeTabId: Schema.String,
   presented: Schema.Boolean,
