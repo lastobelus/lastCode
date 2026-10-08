@@ -9,4 +9,4 @@ Rebase the PR, examining upstream changes carefully to determine:
 
 - Is this PR still needed?
 - Can/should it be refactored to use new upstream code?
-- Does it remain valid when the v2 orchestrator is merged?
+- Does it remain valid with the current v2 orchestrator?
