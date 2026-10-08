@@ -752,6 +752,8 @@ it.effect("refuses an accepted workspace cleanup after claim when it would detac
       const { providerThreads } = yield* projections.getThreadRecords(threadId, [
         "providerThreads",
       ]);
+      const providerSessionId = providerThreads[0]!.providerSessionId;
+      if (providerSessionId === null) assert.fail("Seeded provider thread has no session.");
       yield* sink.write({
         events: [
           {
@@ -767,7 +769,7 @@ it.effect("refuses an accepted workspace cleanup after claim when it would detac
             threadId,
             occurredAt: yield* DateTime.now,
             payload: {
-              id: providerThreads[0]!.providerSessionId,
+              id: providerSessionId,
               driver: ProviderDriverKind.make("codex"),
               providerInstanceId: instanceId,
               status: "ready",

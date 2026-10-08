@@ -125,25 +125,23 @@ interface HarnessOptions {
 
 function makeHarness(options: HarnessOptions = {}) {
   const layerDatabase = SqlitePersistence.layerMemory;
-  const admissionLayer = options.withUpdateDrain
-    ? UpdateDrainAdmission.layer.pipe(
-        Layer.provide(
-          Layer.mergeAll(
-            ProjectionStore.layer.pipe(Layer.provide(layerDatabase)),
-            EffectOutbox.layer.pipe(Layer.provide(layerDatabase)),
-            UpdateDrain.layer.pipe(
-              Layer.provide(UpdateDrainRepository.layer),
-              Layer.provide(layerDatabase),
-            ),
-            Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
-              pendingExecution: Effect.succeed([]),
-            }),
-            Layer.mock(TerminalManager.TerminalManager)({ refreshMetadata: Effect.succeed([]) }),
-          ),
+  const admissionLayer = UpdateDrainAdmission.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        ProjectionStore.layer.pipe(Layer.provide(layerDatabase)),
+        EffectOutbox.layer.pipe(Layer.provide(layerDatabase)),
+        UpdateDrain.layer.pipe(
+          Layer.provide(UpdateDrainRepository.layer),
+          Layer.provide(layerDatabase),
         ),
-        Layer.orDie,
-      )
-    : Layer.empty;
+        Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+          pendingExecution: Effect.succeed([]),
+        }),
+        Layer.mock(TerminalManager.TerminalManager)({ refreshMetadata: Effect.succeed([]) }),
+      ),
+    ),
+    Layer.orDie,
+  );
   const layerRegistry = ProviderAdapterRegistry.layerFromAdapters([adapter]);
   const layerOrchestrator = ProviderReplayHarness.layerWithRegistry(
     { name: "thread-launch" },
@@ -281,8 +279,8 @@ function makeHarness(options: HarnessOptions = {}) {
       layerReceipts,
       layerDatabase,
       layerExternalServices,
-      admissionLayer,
     ),
+    admissionLayer,
     createWorktree,
     removeWorktree,
     renameBranch,
@@ -414,7 +412,10 @@ it.effect(
             yield* receipts.getByCommandId(CommandId.make(`${input.commandId}:workspace`)),
           ),
         );
-      }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)), Effect.provide(harness.layer));
+      }).pipe(
+        Effect.ensuring(Deferred.succeed(release, undefined)),
+        Effect.provide(Layer.merge(harness.layer, harness.admissionLayer)),
+      );
     }),
 );
 
@@ -466,7 +467,10 @@ it.effect(
         assert.equal((yield* threads.getThreadProjection(input.threadId)).thread.branch, "renamed");
         assert.deepEqual(yield* outbox.listByCommandId(renamedId), []);
         assert.equal(harness.renameBranch.mock.calls[0]?.[0]?.newBranch, "renamed");
-      }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)), Effect.provide(harness.layer));
+      }).pipe(
+        Effect.ensuring(Deferred.succeed(release, undefined)),
+        Effect.provide(Layer.merge(harness.layer, harness.admissionLayer)),
+      );
     }),
 );
 
@@ -566,7 +570,10 @@ it.effect.each(["source", "run", "workspace", "cancel", "archive", "deleted"] as
         }
         assert.isNull((yield* threads.getThreadProjection(input.threadId)).thread.worktreePath);
         yield* Deferred.succeed(release, undefined);
-      }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)), Effect.provide(harness.layer));
+      }).pipe(
+        Effect.ensuring(Deferred.succeed(release, undefined)),
+        Effect.provide(Layer.merge(harness.layer, harness.admissionLayer)),
+      );
     }),
 );
 
@@ -614,7 +621,10 @@ it.effect(
         assert.isTrue(Option.isNone(yield* receipts.getByCommandId(completionId)));
         assert.deepEqual(yield* outbox.listByCommandId(completionId), []);
         assert.equal(harness.removeWorktree.mock.calls[0]?.[0]?.path, "/repo-worktrees/abandoned");
-      }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)), Effect.provide(harness.layer));
+      }).pipe(
+        Effect.ensuring(Deferred.succeed(release, undefined)),
+        Effect.provide(Layer.merge(harness.layer, harness.admissionLayer)),
+      );
     }),
 );
 
