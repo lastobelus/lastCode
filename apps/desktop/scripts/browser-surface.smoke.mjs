@@ -1,5 +1,6 @@
 // Run explicitly: node apps/desktop/scripts/browser-surface.smoke.mjs
 // --build-only prepares isolated artifacts without launching Electron.
+// --existing-electron uses the installed dependency without repairing or downloading a runtime.
 import * as NodeAssert from "node:assert/strict";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFSP from "node:fs/promises";
@@ -71,8 +72,11 @@ if (!process.argv.includes("--build-only")) {
   delete environment.ELECTRON_RUN_AS_NODE;
   delete environment.VITE_DEV_SERVER_URL;
   delete environment.T3CODE_HOME;
+  const electronRuntime = process.argv.includes("--existing-electron")
+    ? NodeModule.createRequire(NodePath.join(desktopDirectory, "package.json"))("electron")
+    : ensureElectronRuntime();
   const child = NodeChildProcess.spawnSync(
-    ensureElectronRuntime(),
+    electronRuntime,
     [manifest.main, scratch, wsModulePath],
     {
       encoding: "utf8",

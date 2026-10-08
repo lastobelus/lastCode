@@ -7,7 +7,9 @@ import * as NodePath from "node:path";
 import { app, BrowserWindow, ipcMain, nativeImage, webContents } from "electron";
 import { chromium } from "playwright-core";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
+import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
 import * as DesktopBrowserHost from "../src/preview/DesktopBrowserHost.ts";
@@ -41,14 +43,20 @@ const viewport = { _tag: "freeform", width: 390, height: 844 };
 async function main() {
   await app.whenReady();
   app.dock?.hide();
+  const scope = await Effect.runPromise(Scope.make());
   const host = await Effect.runPromise(
-    DesktopBrowserHost.make.pipe(Effect.provide(DesktopClientSettings.layerTest())),
+    DesktopBrowserHost.make.pipe(
+      Effect.provide(DesktopClientSettings.layerTest()),
+      Effect.provideService(Scope.Scope, scope),
+    ),
   );
   const rendererReady = Promise.withResolvers();
   const nativeGuests = new Map();
   const pending = new Map();
   const sockets = new Map();
   const browsers = [];
+  const attachments = new Map(tabs.map((tab) => [tab.tabId, Promise.withResolvers()]));
+  const presentationEvents = [];
   const results = [];
   let nextRequest = 0;
   let failCapture = false;
@@ -87,6 +95,10 @@ async function main() {
       preload: NodePath.join(scratch, "preload.cjs"),
     },
   });
+  host.setMainWindow(hostWindow);
+  // A registered PiP window is not presented when Electron has never shown it.
+  const hiddenPictureInPicture = new BrowserWindow({ show: false, width: 390, height: 844 });
+  host.setPictureInPictureWindow(tabs[0].runtimeTabId, hiddenPictureInPicture);
   hostWindow.webContents.on("console-message", (_event, ...details) =>
     console.error("fixture renderer:", ...details),
   );
@@ -103,6 +115,8 @@ async function main() {
       Stream.runForEach((line) =>
         Effect.sync(() => {
           const event = JSON.parse(new TextDecoder().decode(line));
+          if (event.type === "attached") attachments.get(event.tabId)?.resolve(event);
+          if (event.type === "presentation") presentationEvents.push(event);
           if (event.type === "surfaceReady") pending.get(event.requestId)?.resolve(event);
           if (event.type === "cdp") sockets.get(event.tabId)?.send(event.message);
         }),
@@ -132,6 +146,9 @@ async function main() {
       },
     };
     nativeGuests.set(tab.tabId, guest);
+    NodeAssert.equal(guest.hostWebContents?.id, hostWindow.webContents.id);
+    // Exercise the real host's pending selected-slot report before native attachment.
+    host.setPresentation({ runtimeTabId, presented: true }, hostWindow.webContents.id);
     host.attach(key(tab), { webContents: guest, debugger: debuggerProxy }, runtimeTabId);
   });
   ipcMain.handle("surface-smoke:ready", () => rendererReady.resolve());
@@ -190,6 +207,13 @@ async function main() {
   try {
     await hostWindow.loadFile(NodePath.join(scratch, "index.html"));
     await rendererReady.promise;
+    const attached = await Promise.all([...attachments.values()].map((entry) => entry.promise));
+    NodeAssert.ok(attached.every((event) => event.presented !== true));
+    NodeAssert.equal(hiddenPictureInPicture.isVisible(), false);
+    NodeAssert.equal(hiddenPictureInPicture.isFocused(), false);
+    results.push(
+      "selected slots and registered hidden PiP window announce native presentation false",
+    );
     clearTimeout(startupTimer);
     hostWindow.webContents.setBackgroundThrottling(true);
     const pages = [];
@@ -226,6 +250,23 @@ async function main() {
     results.push(
       "cross-site iframe runs after child-session resume through production native CDP relay",
     );
+    const nativeGuest = nativeGuests.get(tabs[0].tabId);
+    const nativeGuestId = nativeGuest.id;
+    await page.evaluate(() => {
+      window.backingPageIdentity = "written-through-cdp";
+    });
+    NodeAssert.equal(
+      await nativeGuest.executeJavaScript("window.backingPageIdentity"),
+      "written-through-cdp",
+    );
+    await nativeGuest.executeJavaScript('window.backingPageIdentity = "written-through-native"');
+    NodeAssert.equal(
+      await page.evaluate(() => window.backingPageIdentity),
+      "written-through-native",
+    );
+    NodeAssert.equal(browsers[0].contexts().length, 1);
+    NodeAssert.equal(browsers[0].contexts()[0].pages().length, 1);
+    results.push("CDP and native WebContents mutate the same single backing page");
     const acquired = await surface(tabs[0], "acquire", "snapshot-lease");
     NodeAssert.deepEqual(acquired.viewport, { width: 390, height: 844 });
     NodeAssert.equal(hostWindow.isVisible(), false);
@@ -371,11 +412,26 @@ async function main() {
     );
     NodeAssert.equal(hostWindow.isVisible(), false);
     NodeAssert.equal(hostWindow.isFocused(), false);
+    // Re-announcement samples production registry state after all rendering leases.
+    // It resets relay sessions, so perform it after the final CDP operation.
+    for (const tab of tabs) attachments.set(tab.tabId, Promise.withResolvers());
+    await send({ type: "announce" });
+    const reattached = await Promise.all([...attachments.values()].map((entry) => entry.promise));
+    NodeAssert.ok(reattached.every((event) => event.presented !== true));
+    NodeAssert.ok(presentationEvents.every((event) => event.presented === false));
+    NodeAssert.equal(nativeGuests.get(tabs[0].tabId).id, nativeGuestId);
+    NodeAssert.equal(
+      await nativeGuest.executeJavaScript("window.backingPageIdentity"),
+      "written-through-native",
+    );
+    results.push(
+      "hidden capture and stream leases never mark native presentation true or replace the backing page",
+    );
     const report = {
       passed: true,
       results,
       scope:
-        "production native host/CDP relay, surface helpers, ServerBrowserPage; fixture bridge bypasses DesktopBrowserChannel and orchestration broker; no React hydration or OS-minimized-window proof",
+        "production native host/CDP relay, actual hidden-window presentation registry, surface helpers, ServerBrowserPage; fixture bridge bypasses DesktopBrowserChannel and orchestration broker; no React hydration, visible-window transitions, OS-minimized-window, Windows, or WSL proof",
     };
     await NodeFSP.writeFile(NodePath.join(scratch, "result.json"), JSON.stringify(report, null, 2));
     console.log(JSON.stringify(report));
@@ -387,7 +443,9 @@ async function main() {
     relayServer.close();
     fixtureServer.close();
     await Effect.runPromise(Fiber.interrupt(events));
+    hiddenPictureInPicture.destroy();
     hostWindow.destroy();
+    await Effect.runPromise(Scope.close(scope, Exit.succeed(undefined)));
   }
 }
 void main().then(
