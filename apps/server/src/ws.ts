@@ -1991,7 +1991,7 @@ const layerCoreWsRpc = (
         [ORCHESTRATION_V2_WS_METHODS.getArchivedShellSnapshot]: (_input) =>
           getOrchestrationV2ArchivedShellSnapshot,
         [ORCHESTRATION_V2_WS_METHODS.getThreadArchiveFamily]: (input) =>
-          sql.withTransaction(threadManagement.getThreadArchiveFamily(input.threadId)).pipe(
+          threadManagement.getThreadArchiveFamily(input.threadId).pipe(
             Effect.mapError(
               (cause) =>
                 new OrchestrationV2GetThreadProjectionError({

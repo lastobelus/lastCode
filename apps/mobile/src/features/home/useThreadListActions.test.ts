@@ -87,7 +87,8 @@ vi.mock("../../state/atom-registry", () => ({
                     environment: {
                       capabilities: {
                         threadSettlement: true,
-                        threadArchiveFamilies: state.archiveSupport,
+                        threadArchiveFamilies: true,
+                        threadArchiveFamiliesV2: state.archiveSupport,
                         threadSnooze: true,
                         threadPinning: true,
                         threadPinReorder: true,
@@ -206,12 +207,16 @@ function makeArchiveDecision(
     promotableChildThreadIds: [],
     keptThreadIds: [],
     activeChildThreadIds: [],
+    activeThreadIds: [],
+    unreadThreadIds: [],
     protectedChildThreadIds: [],
     nativeStopCount: 0,
     requiresConfirmation: false,
     canPromote: false,
     canStopAndArchive: true,
     activeChildren: [],
+    activeThreads: [],
+    unreadThreads: [],
     promotableChildren: [],
     protectedChildren: [],
     ...options,
@@ -263,8 +268,7 @@ describe("archive family reads", () => {
   };
 
   it.each([
-    ["Stop and archive", "stop_and_archive"],
-    ["Keep running separately", "promote"],
+    ["Stop active threads & archive", "stop_and_archive"],
     ["Cancel", null],
   ])(
     "asks before stopping a working owner with idle children: %s",
@@ -280,6 +284,8 @@ describe("archive family reads", () => {
       });
       state.shells = [root];
       state.archiveFamily = makeArchiveDecision([root, child], [child], {
+        activeThreadIds: [root.id],
+        activeThreads: [root],
         requiresConfirmation: true,
         canPromote: true,
       });
@@ -287,7 +293,11 @@ describe("archive family reads", () => {
       await vi.waitFor(() => expect(state.alerts[0]?.buttons).toBeDefined());
       expect(state.archiveFamilyReads).toHaveLength(1);
       expect(state.requests).toEqual([]);
-      expect(state.alertMessages[0]).toContain("This thread is still working");
+      expect(state.alertMessages[0]).toContain("Thread · Working");
+      expect(state.alerts[0]?.buttons?.map(({ text }) => text)).toEqual([
+        "Cancel",
+        "Stop active threads & archive",
+      ]);
       state.alerts[0]!.buttons!.find((button) => button.text === buttonText)!.onPress!();
       await archiving;
       expect(state.requests).toEqual(
@@ -308,8 +318,7 @@ describe("archive family reads", () => {
   );
 
   it.each([
-    ["Stop and archive", "stop_and_archive"],
-    ["Keep running separately", "promote"],
+    ["Stop active threads & archive", "stop_and_archive"],
     ["Cancel", null],
   ])(
     "uses the authoritative working owner despite locally idle state: %s",
@@ -326,6 +335,8 @@ describe("archive family reads", () => {
       });
       state.shells = [local];
       state.archiveFamily = makeArchiveDecision([owner, child], [child], {
+        activeThreadIds: [owner.id],
+        activeThreads: [owner],
         requiresConfirmation: true,
         canPromote: true,
       });
@@ -473,9 +484,11 @@ describe("archive family reads", () => {
 
   it("refreshes membership and asks for new consent after a failed native archive", async () => {
     const root = makeThread();
-    const first = makeThread({ id: ThreadId.make("first-child") });
-    const added = makeThread({ id: ThreadId.make("added-child") });
+    const first = makeThread({ id: ThreadId.make("first-child"), title: "First child" });
+    const added = makeThread({ id: ThreadId.make("added-child"), title: "Added child" });
     state.archiveFamily = makeArchiveDecision([root, first], [first], {
+      activeThreadIds: [first.id],
+      activeThreads: [first],
       requiresConfirmation: true,
     });
     state.archiveMutationError = new Error("The family changed. Review the archive choices again.");
@@ -485,7 +498,8 @@ describe("archive family reads", () => {
     expect(
       state.alerts[0]!.buttons!.some((button) => button.text === "Keep running separately"),
     ).toBe(false);
-    state.alerts[0]!.buttons!.find((button) => button.text === "Stop and archive")!.onPress!();
+    state.alerts[0]!.buttons!.find((button) => button.text === "Stop active threads & archive")!
+      .onPress!();
     await vi.waitFor(() => expect(state.alerts[1]?.title).toBe("Could not archive thread"));
     expect(state.requests[0]?.input).toEqual({
       threadId: root.id,
@@ -495,6 +509,8 @@ describe("archive family reads", () => {
 
     state.archiveMutationError = undefined;
     state.archiveFamily = makeArchiveDecision([root, first, added], [first, added], {
+      activeThreadIds: [first.id, added.id],
+      activeThreads: [first, added],
       requiresConfirmation: true,
       canPromote: true,
     });
@@ -502,53 +518,79 @@ describe("archive family reads", () => {
     await vi.waitFor(() => expect(state.alerts[2]?.buttons).toBeDefined());
     expect(state.archiveFamilyReads).toHaveLength(2);
     expect(state.requests).toHaveLength(1);
-    state.alerts[2]!.buttons!.find((button) => button.text === "Keep running separately")!
+    expect(state.alertMessages[2]).toContain("Added child · Working");
+    expect(state.alerts[2]?.buttons?.map(({ text }) => text)).toEqual([
+      "Cancel",
+      "Stop active threads & archive",
+    ]);
+    state.alerts[2]!.buttons!.find((button) => button.text === "Stop active threads & archive")!
       .onPress!();
     await vi.waitFor(() => expect(state.requests).toHaveLength(2));
     expect(state.requests[1]?.input).toEqual({
       threadId: root.id,
-      childDisposition: "promote",
+      childDisposition: "stop_and_archive",
       expectedChildThreadIds: [first.id, added.id],
     });
   });
 
-  it.each(["question", "failed"] as const)(
-    "offers explicit choices for owner %s with idle children",
-    async (attention) => {
-      const root = makeThread({
-        hasPendingUserInput: attention === "question",
-        runtime: attention === "failed" ? { ...workingRuntime, status: "failed" } : null,
-      });
-      const child = makeThread({
-        id: ThreadId.make("idle-child"),
-        lineage: {
-          rootThreadId: root.id,
-          parentThreadId: root.id,
-          relationshipToParent: "subagent",
+  it("reviews an unread owner without consenting to stop newly active work", async () => {
+    const root = makeThread();
+    const child = makeThread({
+      id: ThreadId.make("idle-child"),
+      lineage: {
+        rootThreadId: root.id,
+        parentThreadId: root.id,
+        relationshipToParent: "subagent",
+      },
+    });
+    state.shells = [root];
+    state.archiveFamily = makeArchiveDecision([root, child], [child], {
+      unreadThreadIds: [root.id],
+      unreadThreads: [root],
+      requiresConfirmation: true,
+      canPromote: true,
+    });
+    const archiving = useThreadListActions().archiveThread(root);
+    await vi.waitFor(() => expect(state.alerts[0]?.buttons).toBeDefined());
+    expect(state.requests).toEqual([]);
+    expect(state.alertMessages[0]).toContain("Thread · Unread");
+    expect(state.alerts[0]?.buttons?.map(({ text }) => text)).toEqual([
+      "Cancel",
+      "Archive unread threads",
+    ]);
+    state.alerts[0]!.buttons!.find((button) => button.text === "Archive unread threads")!
+      .onPress!();
+    await archiving;
+    expect(state.requests).toEqual([
+      expect.objectContaining({
+        action: "archive",
+        input: {
+          threadId: root.id,
+          childDisposition: "archive_after_review",
+          expectedChildThreadIds: [child.id],
         },
-      });
-      state.shells = [root];
-      state.archiveFamily = makeArchiveDecision([root, child], [child], {
-        requiresConfirmation: true,
-        canPromote: true,
-      });
-      const archiving = useThreadListActions().archiveThread(root);
-      await vi.waitFor(() => expect(state.alerts[0]?.buttons).toBeDefined());
-      expect(state.requests).toEqual([]);
-      state.alerts[0]!.buttons!.find((button) => button.text === "Stop and archive")!.onPress!();
-      await archiving;
-      expect(state.requests).toEqual([
-        expect.objectContaining({
-          action: "archive",
-          input: {
-            threadId: root.id,
-            childDisposition: "stop_and_archive",
-            expectedChildThreadIds: [child.id],
-          },
-        }),
-      ]);
-    },
-  );
+      }),
+    ]);
+  });
+
+  it("offers only Close for protected family members despite promotion availability", async () => {
+    const root = makeThread();
+    const protectedChild = makeThread({ id: ThreadId.make("persistent-child"), persistent: true });
+    state.archiveFamily = makeArchiveDecision([root, protectedChild], [protectedChild], {
+      protectedChildThreadIds: [protectedChild.id],
+      protectedChildren: [protectedChild],
+      requiresConfirmation: true,
+      canStopAndArchive: false,
+      canPromote: true,
+    });
+    useThreadListActions().archiveThread(root);
+    await vi.waitFor(() => expect(state.alerts[0]?.buttons).toBeDefined());
+    expect(state.requests).toEqual([]);
+    expect(state.alerts[0]?.buttons?.map(({ text }) => text)).toEqual(["Close"]);
+    expect(state.alertMessages[0]).toMatch(/persistent|protected/i);
+    state.alerts[0]!.buttons![0]!.onPress!();
+    expect(state.requests).toEqual([]);
+  });
 
   it.each(["missing", "persistent"] as const)(
     "blocks archive when the authoritative owner is %s",
@@ -567,7 +609,7 @@ describe("archive family reads", () => {
   );
 
   it.each(["none", "fork", "independent"] as const)(
-    "blocks working standalone archive after the family read: %s",
+    "confirms working standalone archive after the family read: %s",
     async (kind) => {
       const root = makeThread({ runtime: workingRuntime });
       const unrelated = makeThread({
@@ -580,17 +622,37 @@ describe("archive family reads", () => {
         },
       });
       state.shells = [root];
-      state.archiveFamily = makeArchiveDecision(kind === "none" ? [root] : [root, unrelated]);
-      await useThreadListActions().archiveThread(root);
+      state.archiveFamily = makeArchiveDecision(kind === "none" ? [root] : [root, unrelated], [], {
+        activeThreadIds: [root.id],
+        activeThreads: [root],
+        requiresConfirmation: true,
+      });
+      const archiving = useThreadListActions().archiveThread(root);
+      await vi.waitFor(() => expect(state.alerts[0]?.buttons).toBeDefined());
       expect(state.archiveFamilyReads).toHaveLength(1);
       expect(state.requests).toEqual([]);
-      expect(state.alertMessages[0]).toContain("Interrupt it first");
-      expect(state.alerts[0]?.buttons).toBeUndefined();
+      expect(state.alertMessages[0]).toContain("Thread · Working");
+      expect(state.alerts[0]?.buttons?.map(({ text }) => text)).toEqual([
+        "Cancel",
+        "Stop active threads & archive",
+      ]);
+      state.alerts[0]!.buttons![1]!.onPress!();
+      await archiving;
+      expect(state.requests).toEqual([
+        expect.objectContaining({
+          action: "archive",
+          input: {
+            threadId: root.id,
+            childDisposition: "stop_and_archive",
+            expectedChildThreadIds: [],
+          },
+        }),
+      ]);
     },
   );
 
   it.each([undefined, false])(
-    "requires a server update before querying unsupported archive families (%s)",
+    "requires a server update before querying legacy-only archive families (V2=%s)",
     async (support) => {
       state.archiveSupport = support;
       await useThreadListActions().archiveThread(makeThread());
@@ -618,6 +680,8 @@ describe("archive family reads", () => {
     });
     state.shells = [root, descendant];
     state.archiveFamily = makeArchiveDecision([root, intermediate, descendant], [descendant], {
+      activeThreadIds: [descendant.id],
+      activeThreads: [descendant],
       requiresConfirmation: true,
       activeChildren: [descendant],
       activeChildThreadIds: [descendant.id],
@@ -625,7 +689,8 @@ describe("archive family reads", () => {
     const archiving = useThreadListActions().archiveThread(root);
     await vi.waitFor(() => expect(state.alerts[0]?.buttons).toBeDefined());
     expect(state.requests).toEqual([]);
-    state.alerts[0]!.buttons!.find((button) => button.text === "Stop and archive")!.onPress!();
+    state.alerts[0]!.buttons!.find((button) => button.text === "Stop active threads & archive")!
+      .onPress!();
     await archiving;
     expect(state.archiveFamilyReads).toEqual([
       { environmentId: root.environmentId, input: { threadId: root.id } },

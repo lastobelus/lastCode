@@ -53,6 +53,8 @@ export class ThreadRecoveryService extends Context.Service<
     readonly suspect: (input: ThreadRecoveryIdentity) => Effect.Effect<void, ThreadRecoveryError>;
     readonly completed: (input: ThreadRecoveryIdentity) => Effect.Effect<void>;
     readonly recover: (input: ThreadRecoveryIdentity) => Effect.Effect<void, ThreadRecoveryError>;
+    /** Archive inspection repairs proven terminal attempts without turning unknown evidence into a failure. */
+    readonly verify: (input: ThreadRecoveryIdentity) => Effect.Effect<void, ThreadRecoveryError>;
     readonly reconcile: Effect.Effect<void>;
     readonly withRepairableIncident: <A, E, R>(
       input: ThreadRecoveryIdentity,
@@ -161,12 +163,12 @@ const make = Effect.gen(function* () {
     yield* write(input, "failed", detail);
     pendingFailures.delete(incidentKey(input));
   });
-  const recover = (input: ThreadRecoveryIdentity, manual: boolean) =>
+  const recover = (input: ThreadRecoveryIdentity, manual: boolean, reportFailure = true) =>
     lock.withLock(
       input.threadId,
       Effect.gen(function* () {
         const pendingFailure = pendingFailures.get(incidentKey(input));
-        if (pendingFailure !== undefined) {
+        if (reportFailure && pendingFailure !== undefined) {
           yield* markFailed(input, pendingFailure);
           return;
         }
@@ -190,6 +192,7 @@ const make = Effect.gen(function* () {
         )
           return;
         if (inspection.status === "unknown") {
+          if (!reportFailure) return;
           yield* markFailed(
             input,
             "The provider's turn state could not be confirmed. No work was interrupted or restarted.",
@@ -222,6 +225,7 @@ const make = Effect.gen(function* () {
               (inspection.status !== "released" || turn.status === "running"),
           )
         ) {
+          if (!reportFailure) return;
           yield* markFailed(
             input,
             "The saved provider-turn record is missing or does not match this attempt. Automatic recovery cannot safely restore its history. Open a repair thread to investigate.",
@@ -294,13 +298,15 @@ const make = Effect.gen(function* () {
           matches(registeredAfterFinalization, input)
         )
           registrations.delete(input.threadId);
+        pendingFailures.delete(incidentKey(input));
       }).pipe(
         Effect.catchCause((cause) =>
           Effect.gen(function* () {
-            yield* markFailed(
-              input,
-              "Automatic recovery could not finish. Open a repair thread to investigate without repeating the original work.",
-            ).pipe(Effect.ignore);
+            if (reportFailure)
+              yield* markFailed(
+                input,
+                "Automatic recovery could not finish. Open a repair thread to investigate without repeating the original work.",
+              ).pipe(Effect.ignore);
             return yield* new ThreadRecoveryError({ threadId: input.threadId, cause });
           }),
         ),
@@ -427,6 +433,7 @@ const make = Effect.gen(function* () {
           Effect.mapError((cause) => new ThreadRecoveryError({ threadId: input.threadId, cause })),
         ),
     recover: (input) => recover(input, true),
+    verify: (input) => recover(input, true, false),
     reconcile: Effect.suspend(() =>
       Effect.forEach(
         [...registrations.values()],

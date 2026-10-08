@@ -81,6 +81,101 @@ const storageCases = [
 ] as const;
 
 it.effect.each(storageCases)(
+  "$name: bounds created conversation families to the creator's project without restricting delegated edges",
+  ({ layer }) =>
+    Effect.gen(function* () {
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const foreign = { projectId: ProjectId.make("other-ownership-project") };
+      yield* seedThread("project-family:root", { archived: true });
+      yield* seedThread("project-family:same", { creatorId: "project-family:root" });
+      yield* seedThread("project-family:foreign", {
+        creatorId: "project-family:root",
+        overrides: foreign,
+      });
+      yield* seedThread("project-family:foreign-descendant", {
+        parentId: "project-family:foreign",
+      });
+      yield* seedThread("project-family:foreign-delegated", {
+        parentId: "project-family:root",
+        overrides: foreign,
+      });
+      yield* seedThread("project-family:delegated-same", {
+        creatorId: "project-family:foreign-delegated",
+        overrides: foreign,
+      });
+      yield* seedThread("project-family:delegated-other", {
+        creatorId: "project-family:foreign-delegated",
+      });
+      assert.sameMembers(
+        [...(yield* projections.getArchiveFamilyThreadIds(ThreadId.make("project-family:root")))],
+        [
+          "project-family:root",
+          "project-family:same",
+          "project-family:foreign-delegated",
+          "project-family:delegated-same",
+        ],
+      );
+      yield* seedThread("project-family:foreign-only-owner", { archived: true });
+      yield* seedThread("project-family:foreign-only-group", {
+        creatorId: "project-family:foreign-only-owner",
+        overrides: foreign,
+      });
+      yield* seedThread("project-family:foreign-owned-owner", { archived: true });
+      yield* seedThread("project-family:foreign-owned-child", {
+        parentId: "project-family:foreign-owned-owner",
+        overrides: foreign,
+      });
+      assert.sameMembers(
+        [...(yield* projections.getRecoveryThreadIds("thread-families"))],
+        ["project-family:root", "project-family:foreign-owned-owner"],
+      );
+    }).pipe(Effect.provide(layer)),
+);
+
+it.effect.each(storageCases)(
+  "$name: indexes recursive mixed archive families without broadening delegated ownership",
+  ({ layer }) =>
+    Effect.gen(function* () {
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      yield* seedThread("archive:root");
+      yield* seedThread("archive:conversation", { creatorId: "archive:root" });
+      yield* seedThread("archive:delegated", { parentId: "archive:conversation" });
+      yield* seedThread("archive:nested", { creatorId: "archive:delegated" });
+      yield* seedThread("archive:hidden", { parentId: "archive:nested", archived: true });
+      yield* seedThread("archive:native", {
+        parentId: "archive:hidden",
+        overrides: { creationSource: "provider" },
+      });
+      yield* seedThread("excluded:separate", {
+        creatorId: "archive:root",
+        overrides: { creatorGrouping: "independent" },
+      });
+      yield* seedThread("excluded:separate-child", { parentId: "excluded:separate" });
+      yield* seedThread("excluded:fork", {
+        parentId: "archive:conversation",
+        relationship: "fork",
+      });
+      yield* seedThread("excluded:fork-child", { creatorId: "excluded:fork" });
+      yield* seedThread("excluded:promoted", { parentId: "archive:root", independent: true });
+      yield* seedThread("excluded:promoted-child", { creatorId: "excluded:promoted" });
+      assert.deepEqual(
+        (yield* projections.getArchiveFamilyThreadIds(ThreadId.make("archive:root"))).toSorted(),
+        [
+          "archive:root",
+          "archive:conversation",
+          "archive:delegated",
+          "archive:nested",
+          "archive:hidden",
+          "archive:native",
+        ].toSorted(),
+      );
+      assert.deepEqual(yield* projections.getOwnedThreadIds(ThreadId.make("archive:root")), [
+        ThreadId.make("archive:root"),
+      ]);
+    }).pipe(Effect.provide(layer)),
+);
+
+it.effect.each(storageCases)(
   "$name: cuts promoted subtrees while traversing archived and deleted owned intermediates",
   ({ layer }) =>
     Effect.gen(function* () {
@@ -165,8 +260,6 @@ it.effect.each(storageCases)(
         ),
       );
       assert.deepEqual((yield* projections.getRecoveryThreadIds("creator-grouping")).toSorted(), [
-        "grouped:archived",
-        "grouped:archived-child",
         "grouped:deleted",
         "grouped:missing",
       ]);
@@ -209,7 +302,12 @@ it.effect.each(storageCases)(
 
       assert.deepEqual(
         (yield* projections.getRecoveryThreadIds("thread-families")).toSorted(),
-        ["owned-owner:archived", "owned-owner:deleted", "independent-owner"].toSorted(),
+        [
+          "owned-owner:archived",
+          "owned-owner:deleted",
+          "independent-owner",
+          "released-owner:archived",
+        ].toSorted(),
       );
     }).pipe(Effect.provide(layer)),
 );

@@ -1,48 +1,8 @@
-import { CommandId, EnvironmentId, ProviderInstanceId, RunId, ThreadId } from "@t3tools/contracts";
+import { CommandId, EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import type { ThreadRuntimeSummary } from "@t3tools/client-runtime/state/models";
-import {
-  resolveThreadArchiveFamily,
-  threadCanArchive,
-  threadUnarchiveTargetId,
-} from "./threadArchive";
+import { resolveThreadArchiveFamily, threadUnarchiveTargetId } from "./threadArchive";
 import { makeThreadShellFixture } from "../../test-fixtures";
-
-function runtime(
-  status: ThreadRuntimeSummary["status"],
-  activeRunId: ThreadRuntimeSummary["activeRunId"],
-): ThreadRuntimeSummary {
-  return {
-    status,
-    activeRunId,
-    providerInstanceId: ProviderInstanceId.make("codex"),
-    providerName: "codex",
-    lastError: null,
-    updatedAt: "2026-07-28T10:00:00.000Z",
-  };
-}
-
-describe("threadCanArchive", () => {
-  it("blocks provider-active work", () => {
-    const activeRunId = RunId.make("run-live");
-    expect(threadCanArchive(runtime("preparing", activeRunId))).toBe(false);
-    expect(threadCanArchive(runtime("starting", activeRunId))).toBe(false);
-    expect(threadCanArchive(runtime("running", activeRunId))).toBe(false);
-  });
-
-  it("only allows queued work when no provider run remains active", () => {
-    const activeRunId = RunId.make("run-live");
-    expect(threadCanArchive(runtime("queued", null))).toBe(true);
-    expect(threadCanArchive(runtime("queued", activeRunId))).toBe(false);
-  });
-
-  it("allows post-provider waiting work despite a retained active run id", () => {
-    const staleActiveRunId = RunId.make("run-finished");
-    expect(threadCanArchive(runtime("waiting", null))).toBe(true);
-    expect(threadCanArchive(runtime("waiting", staleActiveRunId))).toBe(true);
-  });
-});
 
 describe("thread family archive confirmation", () => {
   const root = makeThreadShellFixture({ id: ThreadId.make("root"), title: "Parent" });
@@ -64,33 +24,52 @@ describe("thread family archive confirmation", () => {
     promotableChildThreadIds: [],
     keptThreadIds: [],
     activeChildThreadIds: [],
+    activeThreadIds: [],
+    unreadThreadIds: [],
     protectedChildThreadIds: [],
     nativeStopCount: 0,
     requiresConfirmation: false,
     canPromote: false,
     canStopAndArchive: true,
     activeChildren: [],
+    activeThreads: [],
+    unreadThreads: [],
     promotableChildren: [],
     protectedChildren: [],
     ...options,
   });
 
-  it("formats the server's attention preview and available choices", () => {
+  it("lists an active owner and unread descendants from the server's decision", () => {
     const first = child("first");
-    const nested = { ...child("nested", first.id), hasPendingApprovals: true };
+    const nested = child("nested", first.id);
     const family = resolveThreadArchiveFamily(
       decision([first, nested], {
-        activeChildren: [nested],
+        activeThreadIds: [root.id],
+        unreadThreadIds: [nested.id],
+        activeThreads: [root],
+        unreadThreads: [nested],
         requiresConfirmation: true,
         canPromote: true,
       }),
-      root,
     );
     expect(family.requiresConfirmation).toBe(true);
-    expect(family.canKeepSeparately).toBe(true);
-    expect(family.message).toContain("1 subagent is still working or needs your attention");
-    expect(family.message).toContain("nested · Needs Approval");
-    expect(family.message).toContain("Stopped work won't restart; promoted threads stay separate.");
+    expect(family.confirmLabel).toBe("Stop active threads & archive");
+    expect(family.message).toContain("Parent · Working");
+    expect(family.message).toContain("nested · Unread");
+    expect(family.message).not.toContain("first ·");
+    expect(family.message).not.toContain("Keep running separately");
+  });
+
+  it("uses the unread label for a standalone owner", () => {
+    const family = resolveThreadArchiveFamily(
+      decision([], {
+        unreadThreadIds: [root.id],
+        unreadThreads: [root],
+        requiresConfirmation: true,
+      }),
+    );
+    expect(family.confirmLabel).toBe("Archive unread threads");
+    expect(family.message).toContain("Parent · Unread");
   });
 
   it("restores a cascade through its archived owner while preserving individually archived children", () => {
@@ -136,45 +115,33 @@ describe("thread family archive confirmation", () => {
   });
 
   it.each([true, false])(
-    "formats server-supplied persistent protection choices: %s",
+    "explains protected children without offering a separate archive choice: %s",
     (canPromote) => {
       const protectedChild = { ...child("persistent"), persistent: true };
       const family = resolveThreadArchiveFamily(
         decision([protectedChild], {
           protectedChildren: [protectedChild],
+          protectedChildThreadIds: [protectedChild.id],
           requiresConfirmation: true,
           canStopAndArchive: false,
           canPromote,
         }),
-        root,
       );
       expect(family.canStopAndArchive).toBe(false);
-      expect(family.canKeepSeparately).toBe(canPromote);
-      expect(family.message).toContain(
-        canPromote
-          ? "Keep running separately preserves them"
-          : "Remove their persistent protection",
-      );
+      expect(family.message).toMatch(/persistent|protected/i);
+      expect(family.message).not.toContain("Keep running separately");
     },
   );
 
-  it("notes native subagents that will stop, and bounds the child preview", () => {
-    const children = Array.from({ length: 5 }, (_, index) => ({
-      ...child(`child-${index}`),
-      hasPendingUserInput: true,
-    }));
-    const native = children[0]!;
-    children[0] = { ...native, source: { ...native.source, creationSource: "provider" } };
+  it("lists every attention member instead of truncating the confirmation", () => {
+    const children = Array.from({ length: 5 }, (_, index) => child(`child-${index}`));
     const family = resolveThreadArchiveFamily(
       decision(children, {
-        activeChildren: children,
-        nativeStopCount: 1,
+        unreadThreadIds: children.map(({ id }) => id),
+        unreadThreads: children,
         requiresConfirmation: true,
       }),
-      root,
     );
-    expect(family.message).toContain("1 provider subagent cannot run on their own");
-    expect(family.message).toContain("+2 more");
-    expect(family.message).not.toContain("child-3");
+    for (const { title } of children) expect(family.message).toContain(`${title} · Unread`);
   });
 });

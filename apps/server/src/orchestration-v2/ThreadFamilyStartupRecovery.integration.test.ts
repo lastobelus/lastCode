@@ -371,9 +371,124 @@ it.layer(TestLayer)("inactive family startup recovery", (it) => {
   );
 });
 
+it.layer(TestLayer)("unread archived family startup recovery", (it) => {
+  it.effect.each(["delegated", "native", "grouped", "mixed"] as const)(
+    "keeps original archive consent bounded when repairing %s unread replies",
+    (kind) =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const events = yield* EventStore.EventStoreV2;
+        const owner = ThreadId.make(`unread-repair:${kind}:owner`);
+        const child = ThreadId.make(`unread-repair:${kind}:child`);
+        const delegated = ThreadId.make(`unread-repair:${kind}:delegated`);
+        const now = yield* DateTime.now;
+        const original = {
+          threadId: owner,
+          commandId: CommandId.make(`unread-repair:${kind}:original-consent`),
+        };
+        yield* seedHistoricalThread(owner, { archivedAt: now, archivedWith: original });
+        const grouped = kind === "grouped" || kind === "mixed";
+        yield* seedHistoricalThread(
+          child,
+          grouped
+            ? {
+                creatorThreadId: owner,
+                creatorGrouping: "grouped",
+              }
+            : {
+                creationSource: kind === "native" ? "provider" : "mcp",
+                lineage: {
+                  parentThreadId: owner,
+                  rootThreadId: owner,
+                  relationshipToParent: "subagent",
+                },
+              },
+        );
+        const children = [child];
+        if (kind === "mixed") {
+          yield* seedHistoricalThread(delegated, {
+            lineage: {
+              parentThreadId: owner,
+              rootThreadId: owner,
+              relationshipToParent: "subagent",
+            },
+          });
+          children.push(delegated);
+        }
+        yield* sink.write({
+          events: children.map((threadId) => ({
+            id: EventId.make(`unread-repair:reply:${threadId}`),
+            type: "message.updated" as const,
+            threadId,
+            occurredAt: now,
+            payload: {
+              id: MessageId.make(`unread-repair:reply:${threadId}`),
+              threadId,
+              runId: null,
+              nodeId: null,
+              role: "assistant" as const,
+              text: "Finished response that has never been opened",
+              attachments: [],
+              streaming: false,
+              createdBy: "agent" as const,
+              creationSource: "provider" as const,
+              createdAt: now,
+              updatedAt: now,
+            },
+          })),
+        });
+        const before = yield* Effect.forEach(children, (id) => store.getThreadProjection(id));
+        assert.sameMembers(
+          [...(yield* orchestrator.getThreadArchiveFamily(owner)).unreadThreadIds],
+          children,
+        );
+        yield* orchestrator.recoverDelegatedTasks;
+        if (grouped) {
+          for (const original of before)
+            assert.deepEqual(yield* store.getThreadProjection(original.thread.id), original);
+          assert.equal((yield* store.getThread(child)).creatorGrouping, "grouped");
+          assert.isTrue((yield* orchestrator.getThreadArchiveFamily(owner)).requiresConfirmation);
+        } else {
+          const repaired = yield* store.getThread(child);
+          assert.isNotNull(repaired.archivedAt);
+          assert.deepEqual(repaired.archivedWith, original);
+          assert.isNull(repaired.lastVisitedAt);
+          assert.deepEqual((yield* store.getThreadProjection(child)).messages, before[0]!.messages);
+        }
+        const sequence = yield* events.latestSequence();
+        yield* orchestrator.recoverDelegatedTasks;
+        assert.equal(yield* events.latestSequence(), sequence);
+      }),
+  );
+});
+
 it.layer(TestLayer)("creator grouping startup recovery", (it) => {
+  it.effect("leaves foreign-project created conversations untouched behind archived creators", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const events = yield* EventStore.EventStoreV2;
+      const owner = ThreadId.make("foreign-creator:owner");
+      const child = ThreadId.make("foreign-creator:conversation");
+      yield* seedHistoricalThread(owner, { archivedAt: yield* DateTime.now });
+      yield* seedHistoricalThread(child, {
+        projectId: ProjectId.make("foreign-creator-project"),
+        creatorThreadId: owner,
+        creatorGrouping: "grouped",
+      });
+      const before = yield* store.getThreadProjection(child);
+      const sequence = yield* events.latestSequence();
+      assert.notInclude(yield* store.getRecoveryThreadIds("thread-families"), owner);
+      yield* orchestrator.recoverDelegatedTasks;
+      assert.equal(yield* events.latestSequence(), sequence);
+      assert.deepEqual(yield* store.getThreadProjection(child), before);
+    }),
+  );
+
   it.effect.each(["archived", "deleted", "missing"] as const)(
-    "releases ordinary conversations with a historical %s creator without cancelling resumable work",
+    "handles a historical %s creator without cancelling resumable work",
     (creatorState) =>
       Effect.gen(function* () {
         const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -511,6 +626,25 @@ it.layer(TestLayer)("creator grouping startup recovery", (it) => {
         const repairs = yield* events
           .read({ afterSequence: beforeSequence })
           .pipe(Stream.runCollect);
+        if (creatorState === "archived") {
+          assert.deepEqual(repairs, []);
+          for (const original of originals)
+            assert.deepEqual(yield* store.getThreadProjection(original.thread.id), original);
+          assert.deepEqual(yield* outbox.listByCommandId(checkpointCommand), checkpointBefore);
+          assert.equal((yield* store.getThread(ordinaryId)).creatorGrouping, "grouped");
+          yield* orchestrator.dispatch({
+            type: "thread.unarchive",
+            commandId: CommandId.make(`restore-creator:${creatorId}`),
+            threadId: creatorId,
+          });
+          assert.equal((yield* store.getThread(ordinaryId)).creatorGrouping, "grouped");
+          assert.equal((yield* store.getThread(ordinaryId)).archivedAt, null);
+          assert.equal(
+            (yield* store.getThread(archivedId)).archivedWith?.commandId,
+            `own-archive:${archivedId}`,
+          );
+          return;
+        }
         assert.equal(repairs.length, 2);
         assert.deepEqual(
           repairs.map((stored) => stored.event.threadId).toSorted(),
@@ -545,13 +679,7 @@ it.layer(TestLayer)("creator grouping startup recovery", (it) => {
         yield* recovery.recover;
         yield* orchestrator.recoverDelegatedTasks;
         assert.equal(yield* events.latestSequence(), repairedSequence);
-        if (creatorState === "archived") {
-          yield* orchestrator.dispatch({
-            type: "thread.unarchive",
-            commandId: CommandId.make(`restore-creator:${creatorId}`),
-            threadId: creatorId,
-          });
-        } else if (creatorState === "missing") {
+        if (creatorState === "missing") {
           yield* orchestrator.dispatch({
             type: "thread.create",
             commandId: CommandId.make(`restore-missing-creator:${creatorId}`),
@@ -580,7 +708,7 @@ it.layer(TestLayer)("creator grouping startup recovery", (it) => {
   );
 
   it.effect.each(["fail", "complete"] as const)(
-    "repairs creator placement while an ordinary archive is stopping before %s",
+    "preserves an ordinary pending archive before %s while handling its unavailable creator",
     (result) =>
       Effect.gen(function* () {
         const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -677,26 +805,33 @@ it.layer(TestLayer)("creator grouping startup recovery", (it) => {
         yield* (yield* Recovery.ProviderRuntimeRecoveryService).recover;
         yield* orchestrator.recoverDelegatedTasks;
         const repaired = yield* store.getThreadProjection(ordinaryId);
-        assert.deepEqual(repaired, {
-          ...original,
-          thread: {
-            ...original.thread,
-            creatorGrouping: "independent",
-            pinnedAt: null,
-            pinOrderKey: null,
-            activeOrderKey: null,
-            updatedAt: repaired.thread.updatedAt,
-          },
-          updatedAt: repaired.updatedAt,
-        });
+        assert.deepEqual(
+          repaired,
+          result === "complete"
+            ? original
+            : {
+                ...original,
+                thread: {
+                  ...original.thread,
+                  creatorGrouping: "independent",
+                  pinnedAt: null,
+                  pinOrderKey: null,
+                  activeOrderKey: null,
+                  updatedAt: repaired.thread.updatedAt,
+                },
+                updatedAt: repaired.updatedAt,
+              },
+        );
         assert.deepEqual(yield* outbox.listByCommandId(requestId), pendingEffects);
         const repairs = yield* events
           .read({ afterSequence: beforeSequence })
           .pipe(Stream.runCollect);
-        assert.equal(repairs.length, 1);
-        assert.equal(repairs[0]?.event.type, "thread.metadata-updated");
-        assert.equal(repairs[0]?.event.threadId, ordinaryId);
-        assert.isNotNull(repairs[0]?.commandId);
+        assert.equal(repairs.length, result === "complete" ? 0 : 1);
+        if (result === "fail") {
+          assert.equal(repairs[0]?.event.type, "thread.metadata-updated");
+          assert.equal(repairs[0]?.event.threadId, ordinaryId);
+          assert.isNotNull(repairs[0]?.commandId);
+        }
         const repairedSequence = yield* events.latestSequence();
         yield* orchestrator.recoverDelegatedTasks;
         assert.equal(yield* events.latestSequence(), repairedSequence);
@@ -725,7 +860,12 @@ it.layer(TestLayer)("creator grouping startup recovery", (it) => {
           const archived = yield* store.getThread(ordinaryId);
           assert.isNotNull(archived.archivedAt);
           assert.isNull(archived.archivePending);
-          assert.equal(archived.creatorGrouping, "independent");
+          assert.equal(archived.creatorGrouping, "grouped");
+          yield* orchestrator.dispatch({
+            type: "thread.unarchive",
+            commandId: CommandId.make(`restore-pending-creator:${result}`),
+            threadId: creatorId,
+          });
           yield* orchestrator.dispatch({
             type: "thread.unarchive",
             commandId: CommandId.make(`restore-pending-ordinary:${result}`),
@@ -733,7 +873,7 @@ it.layer(TestLayer)("creator grouping startup recovery", (it) => {
           });
           const restored = yield* store.getThread(ordinaryId);
           assert.isNull(restored.archivedAt);
-          assert.equal(restored.creatorGrouping, "independent");
+          assert.equal(restored.creatorGrouping, "grouped");
           assert.equal(restored.creatorThreadId, creatorId);
         }
       }),

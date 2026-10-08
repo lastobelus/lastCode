@@ -7,7 +7,6 @@ import {
 import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { canSnooze, threadWokeAt } from "@t3tools/client-runtime/state/thread-settled";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
-import { threadRuntimeCanArchive } from "@t3tools/client-runtime/state/models";
 import {
   archiveRetryThreadId,
   THREAD_ARCHIVE_UPDATE_REQUIRED_MESSAGE,
@@ -111,32 +110,11 @@ export function normalizeArchiveSelectedEntries<
   return [...owners.values()];
 }
 
-export class ThreadArchiveBlockedError extends Schema.TaggedError<ThreadArchiveBlockedError>()(
-  "ThreadArchiveBlockedError",
-  {
-    environmentId: EnvironmentId,
-    threadId: ThreadId,
-  },
-) {
-  override get message(): string {
-    return "Cannot archive while the provider is active.";
-  }
-}
-
-function archiveThreadPreflightError(
-  thread: EnvironmentThreadShell,
-  childCount: number,
-  retry: boolean,
-) {
+function archiveThreadPreflightError(thread: EnvironmentThreadShell) {
   if (thread.persistent === true)
     return new Error(
       "This thread is persistent. Remove its persistent protection before archiving it.",
     );
-  if (!retry && !threadRuntimeCanArchive(thread.runtime) && childCount === 0)
-    return new ThreadArchiveBlockedError({
-      environmentId: thread.environmentId,
-      threadId: thread.id,
-    });
   return null;
 }
 
@@ -555,8 +533,6 @@ export function useThreadActions() {
       const familyChoice = retry && !opts.familyOwner ? undefined : opts.familyChoice;
 
       const currentRouteThreadRef = getCurrentRouteThreadRef();
-      let archivedChildDisposition: ThreadArchiveChildDisposition =
-        familyChoice?.childDisposition ?? "archive_if_idle";
       let action: ReturnType<typeof ThreadUndo.begin> | undefined;
       // Bulk actions already read every family before gathering one shared choice.
       const familyResult = familyChoice
@@ -583,17 +559,11 @@ export function useThreadActions() {
         thread = owner;
       }
       const family = familyResult === null ? (opts.familySnapshot ?? null) : familyResult.value;
-      const preflightError = archiveThreadPreflightError(
-        thread,
-        family?.childThreadIds.length ?? 0,
-        retry,
-      );
+      const preflightError = archiveThreadPreflightError(thread);
       if (preflightError) return AsyncResult.failure(Cause.fail(preflightError));
 
       const expectedChildThreadIds = family?.childThreadIds ?? [];
       const mutate = (childDisposition?: ThreadArchiveChildDisposition) => {
-        archivedChildDisposition =
-          familyChoice?.childDisposition ?? childDisposition ?? "archive_if_idle";
         action?.finish();
         action = ThreadUndo.begin("archive", scopedThreadKey(threadRef));
         return archiveThreadMutation({
@@ -615,12 +585,7 @@ export function useThreadActions() {
       if (!familyChoice && family?.requiresConfirmation) {
         const choice = await requestThreadArchiveDialog({
           title: `Archive "${thread.title}"?`,
-          children: family.children,
-          activeChildren: family.activeChildren,
-          canPromote: family.canPromote,
-          canStopAndArchive: family.canStopAndArchive,
-          nativeCount: family.nativeStopCount,
-          protectedCount: family.protectedChildThreadIds.length,
+          family,
           submit: async (selected) => {
             archiveResult = await mutate(selected);
             if (archiveResult._tag === "Success") return null;
@@ -638,7 +603,7 @@ export function useThreadActions() {
       } else {
         if (!opts.confirmed && !familyChoice && confirmThreadArchive) {
           const confirmed = await readLocalApi()?.dialogs.confirm(
-            `Archive thread "${thread.title}"${family !== null && family.children.length > 0 ? ` and its ${family.children.length} subagents` : ""}?`,
+            `Archive thread "${thread.title}"${family !== null && family.children.length > 0 ? ` and its ${family.children.length} child threads` : ""}?`,
           );
           if (!confirmed) {
             action?.finish();
@@ -659,10 +624,8 @@ export function useThreadActions() {
         currentRouteThreadRef !== null &&
         currentRouteThreadRef.environmentId === threadRef.environmentId &&
         (currentRouteThreadRef.threadId === threadRef.threadId ||
-          ((currentRouteThreadRef.threadId === target.threadId ||
-            (family?.childThreadIds.includes(currentRouteThreadRef.threadId) ?? false)) &&
-            (archivedChildDisposition !== "promote" ||
-              !family?.keptThreadIds.includes(currentRouteThreadRef.threadId))));
+          currentRouteThreadRef.threadId === target.threadId ||
+          (family?.childThreadIds.includes(currentRouteThreadRef.threadId) ?? false));
       const wokeAt = threadWokeAt(thread, { now: new Date().toISOString() });
       if (wokeAt !== null) {
         markThreadVisited(scopedThreadKey(threadRef), wokeAt);
@@ -764,12 +727,8 @@ export function useThreadActions() {
               other.family.childThreadIds.includes(entry.threadRef.threadId),
           ),
       );
-      for (const { owner, family } of entries) {
-        const error = archiveThreadPreflightError(
-          owner,
-          family.childThreadIds.length,
-          owner.archivePending?.status === "failed",
-        );
+      for (const { owner } of entries) {
+        const error = archiveThreadPreflightError(owner);
         if (error)
           return {
             archivedThreadKeys: [],
@@ -820,7 +779,6 @@ export function useThreadActions() {
           const entry = entriesByKey.get(threadKey);
           if (!entry) continue;
           for (const threadId of [entry.owner.id, ...entry.family.childThreadIds]) {
-            if (choice === "promote" && entry.family.keptThreadIds.includes(threadId)) continue;
             completedParticipantKeys.add(
               scopedThreadKey(scopeThreadRef(entry.threadRef.environmentId, threadId)),
             );
@@ -837,24 +795,27 @@ export function useThreadActions() {
         const error = squashAtomCommandFailure(outcome.mutationFailure);
         return error instanceof Error ? error.message : "The archive did not complete.";
       };
-      const activeChildren = entries.flatMap(({ family }) => family.activeChildren);
-      const protectedCount = entries.reduce(
-        (count, { family }) => count + family.protectedChildThreadIds.length,
-        0,
-      );
       if (entries.some(({ family }) => family.requiresConfirmation)) {
         const choice = await requestThreadArchiveDialog({
           title: `Archive ${entries.length} threads?`,
-          children,
-          activeChildren,
-          protectedCount,
-          canPromote:
-            entries.some(({ family }) => family.canPromote) &&
-            entries.every(
-              ({ family }) => family.protectedChildThreadIds.length === 0 || family.canPromote,
+          family: {
+            threads: [
+              ...new Map(
+                entries.flatMap(({ family }) =>
+                  family.threads.map(
+                    (thread) => [`${thread.environmentId}:${thread.id}`, thread] as const,
+                  ),
+                ),
+              ).values(),
+            ],
+            children,
+            activeThreadIds: entries.flatMap(({ family }) => family.activeThreadIds),
+            unreadThreadIds: entries.flatMap(({ family }) => family.unreadThreadIds),
+            protectedChildThreadIds: entries.flatMap(
+              ({ family }) => family.protectedChildThreadIds,
             ),
-          canStopAndArchive: entries.every(({ family }) => family.canStopAndArchive),
-          nativeCount: entries.reduce((count, { family }) => count + family.nativeStopCount, 0),
+            canStopAndArchive: entries.every(({ family }) => family.canStopAndArchive),
+          },
           submit: perform,
         });
         // Completed participants still leave selection even if the remaining operation was cancelled.

@@ -96,16 +96,14 @@ viewing. Discarding an unsent draft from the sidebar works the same way: Undo br
 back its text and attachments. `mod+z` triggers the most recent Undo when no text field is focused; see
 [Keybindings](./keybindings.md#commands-with-special-behavior).
 
-When a thread has subagents that are working or need your attention, archiving
-asks how to handle them. **Stop and archive** stops and archives the whole owned
-family, including nested subagents. **Keep running separately** makes delegated
-conversations independent and preserves their work and pending requests. Provider
-subagents that depend on an archived owner's session must stop with that owner.
-Forks keep their placement. Ordinary conversations grouped under their creator
-become top-level when that creator is archived or deleted, preserving their work
-and creator history. Restoring the creator leaves those conversations independent.
+Archiving includes grouped interactive children and subagents, recursively.
+If any family member is working or has unread replies, a confirmation lists it.
+**Stop active threads & archive** stops unfinished work, cancels pending approvals
+and queued messages, and archives the family. **Archive unread threads** preserves
+replies in archived history. Cancel to inspect children or make eligible threads
+independent before archiving again. Forks and independent threads stay separate.
 
-Persistent subagents must be kept separately or have their protection removed
+Persistent children must be made independent or have their protection removed
 before the family can be archived. If stopping fails, the family remains visible;
 some work may already have stopped. Undo or restoring the archived family brings
 its conversations back without restarting work. Promoted conversations remain
@@ -367,11 +365,9 @@ retry and the normal snooze choices.
 On web and desktop, use **Agents** to follow work delegated to subagents.
 Stop on a thread also stops the subagents it delegated to.
 
-Archiving a thread also archives its subagents. Restoring the parent restores the
-subagents archived with it; deleting the parent deletes its subagents too.
-Stop unfinished work before archiving a thread on its own. For a family, choose
-whether to stop the subagents or keep eligible branches separately when prompted.
-Restore the parent before restoring subagents archived with it. Independent
+Archiving a thread also archives its grouped children. Restoring the parent restores
+children archived with it, without restarting stopped work. Deleting the parent
+deletes its subagents too. Restore the parent before restoring children archived with it. Independent
 conversations stay separate.
 
 Subagent threads started by the agent can't take messages; message the parent

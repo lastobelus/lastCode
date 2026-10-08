@@ -645,7 +645,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const archiveFamiliesSupported = useAtomValue(
     environmentServerConfigsAtom,
     (configs) =>
-      configs.get(thread.environmentId)?.environment.capabilities.threadArchiveFamilies === true,
+      configs.get(thread.environmentId)?.environment.capabilities.threadArchiveFamiliesV2 === true,
   );
   const hasManagedProcesses = supportsProcessControls && (hasRunningSubprocess || hasPreviewLease);
 

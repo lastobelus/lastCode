@@ -155,44 +155,7 @@ it.effect("an idle stranded child repair returns success under the original arch
   }).pipe(Effect.provide(testLayer)),
 );
 
-it.effect("explicit promotion preserves a protected idle child of an archived owner", () =>
-  Effect.gen(function* () {
-    const original = yield* addStrandedChild(false);
-    const threads = yield* ThreadManagementService.ThreadManagementService;
-    const orchestrator = yield* Orchestrator.OrchestratorV2;
-    const projections = yield* ProjectionStore.ProjectionStoreV2;
-    const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
-    const child = (yield* threads.getThreadRecords(childId, [])).thread;
-    yield* projections.apply({
-      id: EventId.make("service-archive:protect-stranded-child"),
-      type: "thread.metadata-updated",
-      threadId: childId,
-      occurredAt: yield* DateTime.now,
-      payload: { ...child, persistent: true },
-    });
-    const command = {
-      type: "thread.archive" as const,
-      threadId: rootId,
-      commandId: CommandId.make("service-archive:promote-idle-child"),
-      childDisposition: "promote" as const,
-      expectedChildThreadIds: [childId],
-    };
-    yield* orchestrator.dispatch(command);
-    const observing = yield* threads.dispatch(command).pipe(Effect.forkChild);
-    yield* worker.drain();
-    yield* Fiber.join(observing);
-    const kept = (yield* threads.getThreadRecords(childId, [])).thread;
-    assert.isNull(kept.archivedAt);
-    assert.isTrue(kept.persistent);
-    assert.isTrue(kept.lineage.independent);
-    assert.equal(kept.lineage.parentThreadId, rootId);
-    const root = (yield* threads.getThreadRecords(rootId, [])).thread;
-    assert.deepEqual(root.archivedAt, original.archivedAt);
-    assert.deepEqual(root.archivedWith, original.archivedWith);
-  }).pipe(Effect.provide(testLayer)),
-);
-
-it.effect.each(["stop_and_archive", "promote"] as const)(
+it.effect.each(["stop_and_archive", "archive_after_review"] as const)(
   "archived-owner repair rejects stale explicit %s participants before any mutation",
   (childDisposition) =>
     Effect.gen(function* () {
@@ -210,7 +173,7 @@ it.effect.each(["stop_and_archive", "promote"] as const)(
         })
         .pipe(Effect.flip);
       assert.equal(refused._tag, "OrchestratorDispatchError");
-      assert.include(String(refused.cause), "subagents changed");
+      assert.include(String(refused.cause), "conversation family changed");
       assert.equal((yield* orchestrator.getShellSnapshot()).snapshotSequence, sequence);
       const child = (yield* threads.getThreadRecords(childId, [])).thread;
       const root = (yield* threads.getThreadRecords(rootId, [])).thread;

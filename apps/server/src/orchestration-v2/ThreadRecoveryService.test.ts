@@ -324,6 +324,72 @@ it.effect("does not recover active or unknown turns automatically", () => {
     assert.equal(test.thread.recovery?.status, "failed");
   }).pipe(Effect.provide(test.layer));
 });
+it.effect("archive verification leaves active and unknown turns untouched", () => {
+  const test = harness();
+  return Effect.gen(function* () {
+    const service = yield* test.register;
+    yield* service.verify(identity);
+    test.inspect({ status: "unknown" });
+    yield* service.verify(identity);
+    assert.equal(test.finalizations, 0);
+    assert.deepEqual(test.statuses, []);
+    assert.equal(test.run.status, "running");
+  }).pipe(Effect.provide(test.layer));
+});
+it.effect("archive verification settles a proven terminal attempt once", () => {
+  const test = harness();
+  test.inspect(terminal);
+  return Effect.gen(function* () {
+    const service = yield* test.register;
+    yield* service.verify(identity);
+    yield* service.verify(identity);
+    assert.equal(test.finalizations, 1);
+    assert.equal(test.run.status, "completed");
+  }).pipe(Effect.provide(test.layer));
+});
+it.effect("failed archive inspection does not write a recovery failure", () => {
+  const test = harness();
+  test.beforeInspect(Effect.die("inspection unavailable"));
+  return Effect.gen(function* () {
+    const service = yield* test.register;
+    const result = yield* Effect.exit(service.verify(identity));
+    assert.isTrue(Exit.isFailure(result));
+    assert.deepEqual(test.statuses, []);
+    assert.equal(test.run.status, "running");
+    test.beforeInspect(Effect.void);
+    test.inspect(terminal);
+    yield* service.verify(identity);
+    assert.equal(test.finalizations, 1);
+  }).pipe(Effect.provide(test.layer));
+});
+it.effect("archive verification leaves unmatched terminal evidence active", () => {
+  const test = harness();
+  test.inspect(terminal);
+  test.omitProviderTurn();
+  return Effect.gen(function* () {
+    const service = yield* test.register;
+    yield* service.verify(identity);
+    assert.deepEqual(test.statuses, []);
+    assert.equal(test.finalizations, 0);
+    assert.equal(test.run.status, "running");
+  }).pipe(Effect.provide(test.layer));
+});
+it.effect(
+  "archive verification accepts new terminal evidence after an earlier unknown failure",
+  () => {
+    const test = harness();
+    test.inspect({ status: "unknown" });
+    return Effect.gen(function* () {
+      const service = yield* test.register;
+      yield* service.recover(identity);
+      assert.equal(test.thread.recovery?.status, "failed");
+      test.inspect(terminal);
+      yield* service.verify(identity);
+      assert.equal(test.finalizations, 1);
+      assert.equal(test.run.status, "completed");
+    }).pipe(Effect.provide(test.layer));
+  },
+);
 it.effect("cancels the exact released attempt once and preserves queued runs", () => {
   const test = harness();
   test.inspect(released);

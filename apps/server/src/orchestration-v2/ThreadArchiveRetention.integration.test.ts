@@ -140,7 +140,7 @@ const finishRun = (threadId: ThreadId, label: string) =>
 const requestArchive = (
   label: string,
   childIds: ReadonlyArray<ThreadId>,
-  childDisposition: "stop_and_archive" | "promote",
+  childDisposition: "stop_and_archive",
 ) => ({
   type: "thread.archive" as const,
   commandId: CommandId.make(`retention-archive:${label}`),
@@ -149,108 +149,112 @@ const requestArchive = (
   expectedChildThreadIds: childIds,
 });
 
-it.effect(
-  "promotion and a later owner archive preserve the independent child's provider roster",
-  () =>
-    Effect.gen(function* () {
-      const orchestrator = yield* Orchestrator.OrchestratorV2;
-      const projections = yield* ProjectionStore.ProjectionStoreV2;
-      const threads = yield* ThreadManagementService.ThreadManagementService;
-      const childId = yield* createFamily;
-      yield* finishRun(parentId, "parent");
-      yield* finishRun(childId, "child-result");
-      const parent = yield* orchestrator.getThreadProjection(parentId);
-      const child = yield* orchestrator.getThreadProjection(childId);
-      const now = yield* DateTime.now;
-      yield* projections.apply({
-        id: EventId.make("retention-completed-task-provider-reference"),
-        type: "subagent.updated",
-        threadId: parentId,
-        occurredAt: now,
-        payload: {
-          ...parent.subagents[0]!,
-          status: "completed",
-          result: "Published child result",
-          providerThreadId: child.providerThreads[0]!.id,
-          completedAt: now,
-        },
-      });
-      yield* send(childId, "independent-background-follow-up");
-      yield* finishRun(childId, "follow-up");
-      const childProviderThread = (yield* orchestrator.getThreadProjection(childId))
-        .providerThreads[0]!;
-      const roster = [{ taskId: "retained-background-command", kind: "command" as const }];
-      yield* projections.apply({
-        id: EventId.make("retention-child-background-roster"),
-        type: "provider-thread.updated",
-        threadId: childId,
-        occurredAt: now,
-        payload: { ...childProviderThread, pendingBackgroundTasks: roster },
-      });
-      const rootProviderThread = parent.providerThreads[0]!;
-      yield* projections.apply({
-        id: EventId.make("retention-root-shutdown-binding"),
-        type: "provider-thread.updated",
-        threadId: parentId,
-        occurredAt: now,
-        payload: {
-          ...rootProviderThread,
-          providerSessionId: ProviderSessionId.make("retention-unloaded-session"),
-        },
-      });
-      const historicalRecords = yield* projections.getThreadRecords(parentId, ["providerThreads"]);
-      assert.isTrue(historicalRecords.providerThreads.some((row) => row.appThreadId === childId));
-      const promoted = requestArchive("promote", [childId], "promote");
-      yield* orchestrator.dispatch(promoted);
-      yield* threads.executeArchive({ threadId: parentId, requestId: promoted.commandId });
-      assert.isTrue((yield* orchestrator.getThreadProjection(childId)).thread.lineage.independent);
-      assert.deepEqual(
-        (yield* orchestrator.getThreadProjection(childId)).providerThreads[0]
-          ?.pendingBackgroundTasks,
-        roster,
-      );
-      yield* orchestrator.dispatch({
-        type: "thread.unarchive",
-        commandId: CommandId.make("retention-reopen-parent"),
-        threadId: parentId,
-      });
-      const beforeChild = yield* orchestrator.getThreadProjection(childId);
-      const reopenedParent = (yield* orchestrator.getThreadProjection(parentId)).thread;
-      yield* projections.apply({
-        id: EventId.make("retention-lower-former-owner-mode"),
-        type: "thread.metadata-updated",
-        threadId: parentId,
-        occurredAt: yield* DateTime.now,
-        payload: { ...reopenedParent, runtimeMode: "approval-required" },
-      });
-      const archived = requestArchive("former-owner", [], "stop_and_archive");
-      const requested = yield* orchestrator.dispatch(archived).pipe(
-        Effect.provideService(DispatchModeLimit, {
-          runtimeMode: "approval-required",
-          interactionMode: "default",
-        }),
-      );
-      assert.isFalse(requested.storedEvents.some((stored) => stored.event.threadId === childId));
-      yield* threads.executeArchive({ threadId: parentId, requestId: archived.commandId });
-      const archivedParent = yield* orchestrator.getThreadProjection(parentId);
-      assert.isNotNull(archivedParent.thread.archivedAt);
-      const completion = yield* (yield* EventSink.EventSinkV2)
-        .readByCommandId({ commandId: CommandId.make(`${archived.commandId}:complete`) })
-        .pipe(Stream.runCollect);
-      assert.isFalse(
-        completion.some(
-          ({ event }) =>
-            event.type === "provider-thread.updated" &&
-            event.payload.appThreadId !== event.threadId,
-        ),
-      );
-      assert.isFalse(completion.some(({ event }) => event.threadId === childId));
-      assert.deepEqual(
-        (yield* orchestrator.getThreadProjection(childId)).providerThreads,
-        beforeChild.providerThreads,
-      );
-      assert.deepEqual((yield* orchestrator.getThreadProjection(childId)).runs, beforeChild.runs);
-    }).pipe(Effect.provide(testLayer)),
+it.effect("archiving a former owner preserves an independent child's provider roster", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    const childId = yield* createFamily;
+    yield* finishRun(parentId, "parent");
+    yield* finishRun(childId, "child-result");
+    const parent = yield* orchestrator.getThreadProjection(parentId);
+    const child = yield* orchestrator.getThreadProjection(childId);
+    const now = yield* DateTime.now;
+    yield* projections.apply({
+      id: EventId.make("retention-completed-task-provider-reference"),
+      type: "subagent.updated",
+      threadId: parentId,
+      occurredAt: now,
+      payload: {
+        ...parent.subagents[0]!,
+        status: "completed",
+        result: "Published child result",
+        providerThreadId: child.providerThreads[0]!.id,
+        completedAt: now,
+      },
+    });
+    yield* send(childId, "independent-background-follow-up");
+    yield* finishRun(childId, "follow-up");
+    const childProviderThread = (yield* orchestrator.getThreadProjection(childId))
+      .providerThreads[0]!;
+    const roster = [{ taskId: "retained-background-command", kind: "command" as const }];
+    yield* projections.apply({
+      id: EventId.make("retention-child-background-roster"),
+      type: "provider-thread.updated",
+      threadId: childId,
+      occurredAt: now,
+      payload: { ...childProviderThread, pendingBackgroundTasks: roster },
+    });
+    const rootProviderThread = parent.providerThreads[0]!;
+    yield* projections.apply({
+      id: EventId.make("retention-root-shutdown-binding"),
+      type: "provider-thread.updated",
+      threadId: parentId,
+      occurredAt: now,
+      payload: {
+        ...rootProviderThread,
+        providerSessionId: ProviderSessionId.make("retention-unloaded-session"),
+      },
+    });
+    const historicalRecords = yield* projections.getThreadRecords(parentId, ["providerThreads"]);
+    assert.isTrue(historicalRecords.providerThreads.some((row) => row.appThreadId === childId));
+    // Existing independently retained history is outside the archive family.
+    yield* projections.apply({
+      id: EventId.make("retention-independent-lineage"),
+      type: "thread.metadata-updated",
+      threadId: childId,
+      occurredAt: now,
+      payload: { ...child.thread, lineage: { ...child.thread.lineage, independent: true } },
+    });
+    const archivedOwner = requestArchive("independent-owner", [], "stop_and_archive");
+    yield* orchestrator.dispatch(archivedOwner);
+    yield* threads.executeArchive({ threadId: parentId, requestId: archivedOwner.commandId });
+    assert.isTrue((yield* orchestrator.getThreadProjection(childId)).thread.lineage.independent);
+    assert.deepEqual(
+      (yield* orchestrator.getThreadProjection(childId)).providerThreads[0]?.pendingBackgroundTasks,
+      roster,
+    );
+    yield* orchestrator.dispatch({
+      type: "thread.unarchive",
+      commandId: CommandId.make("retention-reopen-parent"),
+      threadId: parentId,
+    });
+    const beforeChild = yield* orchestrator.getThreadProjection(childId);
+    const reopenedParent = (yield* orchestrator.getThreadProjection(parentId)).thread;
+    yield* projections.apply({
+      id: EventId.make("retention-lower-former-owner-mode"),
+      type: "thread.metadata-updated",
+      threadId: parentId,
+      occurredAt: yield* DateTime.now,
+      payload: { ...reopenedParent, runtimeMode: "approval-required" },
+    });
+    const archived = requestArchive("former-owner", [], "stop_and_archive");
+    const requested = yield* orchestrator.dispatch(archived).pipe(
+      Effect.provideService(DispatchModeLimit, {
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+      }),
+    );
+    assert.isFalse(requested.storedEvents.some((stored) => stored.event.threadId === childId));
+    yield* threads.executeArchive({ threadId: parentId, requestId: archived.commandId });
+    const archivedParent = yield* orchestrator.getThreadProjection(parentId);
+    assert.isNotNull(archivedParent.thread.archivedAt);
+    const completion = yield* (yield* EventSink.EventSinkV2)
+      .readByCommandId({ commandId: CommandId.make(`${archived.commandId}:complete`) })
+      .pipe(Stream.runCollect);
+    assert.isFalse(
+      completion.some(
+        ({ event }) =>
+          event.type === "provider-thread.updated" && event.payload.appThreadId !== event.threadId,
+      ),
+    );
+    assert.isFalse(completion.some(({ event }) => event.threadId === childId));
+    assert.deepEqual(
+      (yield* orchestrator.getThreadProjection(childId)).providerThreads,
+      beforeChild.providerThreads,
+    );
+    assert.deepEqual((yield* orchestrator.getThreadProjection(childId)).runs, beforeChild.runs);
+  }).pipe(Effect.provide(testLayer)),
 );
 
 it.effect.each([false, true])(

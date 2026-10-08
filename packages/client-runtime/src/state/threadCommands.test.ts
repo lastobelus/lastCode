@@ -91,6 +91,8 @@ const makeHarness = Effect.fn("TestThreadCommands.makeHarness")(function* (
   decision: Omit<OrchestrationV2ThreadArchiveFamily, "threads"> = {
     childThreadIds: [],
     activeChildThreadIds: [],
+    activeThreadIds: [],
+    unreadThreadIds: [],
     promotableChildThreadIds: [],
     keptThreadIds: [],
     protectedChildThreadIds: [],
@@ -188,6 +190,8 @@ it.effect("reads a scoped complete family without replacing the active shell sna
     const h = yield* makeHarness(shells, undefined, {
       childThreadIds: [liveChildId],
       activeChildThreadIds: [liveChildId],
+      activeThreadIds: [liveChildId],
+      unreadThreadIds: [root.id],
       promotableChildThreadIds: [],
       keptThreadIds: [],
       protectedChildThreadIds: [liveChildId],
@@ -213,6 +217,8 @@ it.effect("reads a scoped complete family without replacing the active shell sna
     );
     expect(result.value.children.map(({ id }) => id)).toEqual([liveChildId]);
     expect(result.value.activeChildren[0]?.runtime?.status).toBe("running");
+    expect(result.value.activeThreads.map(({ id }) => id)).toEqual([liveChildId]);
+    expect(result.value.unreadThreads.map(({ id }) => id)).toEqual([root.id]);
     expect(result.value.protectedChildren.map(({ id }) => id)).toEqual([liveChildId]);
     expect(result.value.promotableChildren).toEqual([]);
     expect(result.value.requiresConfirmation).toBe(true);

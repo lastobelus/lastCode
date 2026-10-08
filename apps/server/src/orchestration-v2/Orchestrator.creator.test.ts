@@ -266,7 +266,7 @@ it.effect("does not infer historical creators and rejects invalid attribution or
   }).pipe(Effect.provide(testLayer)),
 );
 
-it.effect.each(["thread.archive", "thread.delete"] as const)(
+it.effect.each(["thread.delete"] as const)(
   "%s releases interactive children without stopping their work or losing provenance",
   (action) =>
     Effect.gen(function* () {
@@ -345,54 +345,51 @@ it.effect.each(["thread.archive", "thread.delete"] as const)(
       assert.isFalse(receipt.storedEvents.some((stored) => stored.event.threadId === independent));
       const replay = yield* orchestrator.dispatch({ type: action, commandId, threadId: creator });
       assert.equal(replay.sequence, receipt.sequence);
-      if (action === "thread.archive") {
-        yield* orchestrator.dispatch({
-          type: "thread.unarchive",
-          commandId: CommandId.make("restore-creator"),
-          threadId: creator,
-        });
-        assert.equal((yield* store.getThread(child)).creatorGrouping, "independent");
-      }
     }).pipe(Effect.provide(testLayer)),
 );
 
-it.effect("deferred archive releases interactive children only after successful completion", () =>
-  Effect.gen(function* () {
-    const orchestrator = yield* Orchestrator.OrchestratorV2;
-    const store = yield* ProjectionStore.ProjectionStoreV2;
-    const project = ProjectId.make("creator:project");
-    const creator = ThreadId.make("creator:origin");
-    const child = ThreadId.make("creator:interactive");
-    yield* orchestrator.dispatch(create(creator, project));
-    yield* createOrdinary(child, creator, project);
-    yield* attachIdleProvider(creator);
-    const request = {
-      type: "thread.archive" as const,
-      commandId: CommandId.make("archive-request"),
-      threadId: creator,
-    };
-    yield* orchestrator.dispatch(request);
-    assert.equal((yield* store.getThread(creator)).archivePending?.status, "stopping");
-    assert.equal((yield* store.getThread(child)).creatorGrouping, "grouped");
-    yield* orchestrator.dispatch({
-      type: "thread.archive.fail",
-      commandId: CommandId.make("archive-failed"),
-      threadId: creator,
-      requestId: request.commandId,
-      error: "Disposable stop failed",
-    });
-    assert.equal((yield* store.getThread(child)).creatorGrouping, "grouped");
-    const retry = { ...request, commandId: CommandId.make("archive-retry") };
-    yield* orchestrator.dispatch(retry);
-    yield* orchestrator.dispatch({
-      type: "thread.archive.complete",
-      commandId: CommandId.make("archive-complete"),
-      threadId: creator,
-      requestId: retry.commandId,
-    });
-    assert.isNotNull((yield* store.getThread(creator)).archivedAt);
-    assert.equal((yield* store.getThread(child)).creatorGrouping, "independent");
-  }).pipe(Effect.provide(testLayer)),
+it.effect(
+  "deferred archive keeps grouping and archives interactive children only after successful completion",
+  () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const project = ProjectId.make("creator:project");
+      const creator = ThreadId.make("creator:origin");
+      const child = ThreadId.make("creator:interactive");
+      yield* orchestrator.dispatch(create(creator, project));
+      yield* createOrdinary(child, creator, project);
+      yield* attachIdleProvider(creator);
+      const request = {
+        type: "thread.archive" as const,
+        commandId: CommandId.make("archive-request"),
+        threadId: creator,
+        childDisposition: "stop_and_archive" as const,
+        expectedChildThreadIds: [child],
+      };
+      yield* orchestrator.dispatch(request);
+      assert.equal((yield* store.getThread(creator)).archivePending?.status, "stopping");
+      assert.equal((yield* store.getThread(child)).creatorGrouping, "grouped");
+      yield* orchestrator.dispatch({
+        type: "thread.archive.fail",
+        commandId: CommandId.make("archive-failed"),
+        threadId: creator,
+        requestId: request.commandId,
+        error: "Disposable stop failed",
+      });
+      assert.equal((yield* store.getThread(child)).creatorGrouping, "grouped");
+      const retry = { ...request, commandId: CommandId.make("archive-retry") };
+      yield* orchestrator.dispatch(retry);
+      yield* orchestrator.dispatch({
+        type: "thread.archive.complete",
+        commandId: CommandId.make("archive-complete"),
+        threadId: creator,
+        requestId: retry.commandId,
+      });
+      assert.isNotNull((yield* store.getThread(creator)).archivedAt);
+      assert.equal((yield* store.getThread(child)).creatorGrouping, "grouped");
+      assert.isNotNull((yield* store.getThread(child)).archivedAt);
+    }).pipe(Effect.provide(testLayer)),
 );
 
 it.effect.each(["archived", "deleted", "stopping"] as const)(
@@ -449,6 +446,9 @@ it.effect.each(["archive", "delete", "deferred-archive"] as const)(
           type: action === "delete" ? "thread.delete" : "thread.archive",
           commandId: CommandId.make(`limited:${action}`),
           threadId: creator,
+          ...(action === "delete"
+            ? {}
+            : { childDisposition: "stop_and_archive" as const, expectedChildThreadIds: [child] }),
         })
         .pipe(
           Effect.provideService(DispatchModeLimit, {
@@ -465,55 +465,8 @@ it.effect.each(["archive", "delete", "deferred-archive"] as const)(
     }).pipe(Effect.provide(testLayer)),
 );
 
-it.effect("deferred archive rechecks the saved permission ceiling before interactive release", () =>
-  Effect.gen(function* () {
-    const orchestrator = yield* Orchestrator.OrchestratorV2;
-    const store = yield* ProjectionStore.ProjectionStoreV2;
-    const project = ProjectId.make("creator:project");
-    const creator = ThreadId.make("creator:origin");
-    const child = ThreadId.make("creator:interactive");
-    yield* orchestrator.dispatch({ ...create(creator, project), runtimeMode: "approval-required" });
-    yield* createOrdinary(child, creator, project);
-    yield* orchestrator.dispatch({
-      type: "thread.runtime-mode.set",
-      commandId: CommandId.make("lower-interactive-mode"),
-      threadId: child,
-      runtimeMode: "approval-required",
-    });
-    yield* attachIdleProvider(creator);
-    const request = {
-      type: "thread.archive" as const,
-      commandId: CommandId.make("limited-archive-request"),
-      threadId: creator,
-    };
-    yield* orchestrator.dispatch(request).pipe(
-      Effect.provideService(DispatchModeLimit, {
-        runtimeMode: "approval-required",
-        interactionMode: "default",
-      }),
-    );
-    yield* orchestrator.dispatch({
-      type: "thread.runtime-mode.set",
-      commandId: CommandId.make("raise-interactive-mode"),
-      threadId: child,
-      runtimeMode: "full-access",
-    });
-    const refused = yield* orchestrator
-      .dispatch({
-        type: "thread.archive.complete",
-        commandId: CommandId.make("limited-archive-complete"),
-        threadId: creator,
-        requestId: request.commandId,
-      })
-      .pipe(Effect.flip);
-    assert.equal(refused._tag, "OrchestratorThreadAboveModeLimitError");
-    assert.isNull((yield* store.getThread(creator)).archivedAt);
-    assert.equal((yield* store.getThread(child)).creatorGrouping, "grouped");
-  }).pipe(Effect.provide(testLayer)),
-);
-
 it.effect(
-  "archiving a creator releases placement without disturbing its child's own pending archive",
+  "deferred archive rechecks the saved permission ceiling before archiving grouped children",
   () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -521,55 +474,127 @@ it.effect(
       const project = ProjectId.make("creator:project");
       const creator = ThreadId.make("creator:origin");
       const child = ThreadId.make("creator:interactive");
-      yield* orchestrator.dispatch(create(creator, project));
+      yield* orchestrator.dispatch({
+        ...create(creator, project),
+        runtimeMode: "approval-required",
+      });
       yield* createOrdinary(child, creator, project);
-      yield* attachIdleProvider(child);
+      yield* orchestrator.dispatch({
+        type: "thread.runtime-mode.set",
+        commandId: CommandId.make("lower-interactive-mode"),
+        threadId: child,
+        runtimeMode: "approval-required",
+      });
+      yield* attachIdleProvider(creator);
       const request = {
         type: "thread.archive" as const,
-        commandId: CommandId.make("child-own-archive"),
-        threadId: child,
-      };
-      yield* orchestrator.dispatch(request);
-      const pending = (yield* store.getThread(child)).archivePending;
-      assert.equal(pending?.status, "stopping");
-      yield* orchestrator.dispatch({
-        type: "thread.archive",
-        commandId: CommandId.make("creator-archive"),
+        commandId: CommandId.make("limited-archive-request"),
         threadId: creator,
-      });
-      assert.equal((yield* store.getThread(child)).creatorGrouping, "independent");
-      assert.deepEqual((yield* store.getThread(child)).archivePending, pending);
-      yield* orchestrator.dispatch({
-        type: "thread.archive.complete",
-        commandId: CommandId.make("child-own-archive-complete"),
+        childDisposition: "stop_and_archive" as const,
+        expectedChildThreadIds: [child],
+      };
+      yield* orchestrator.dispatch(request).pipe(
+        Effect.provideService(DispatchModeLimit, {
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+        }),
+      );
+      const existing = yield* store.getThread(child);
+      yield* store.apply({
+        type: "thread.metadata-updated",
+        id: EventId.make("raise-interactive-mode"),
         threadId: child,
-        requestId: request.commandId,
+        occurredAt: yield* DateTime.now,
+        payload: { ...existing, runtimeMode: "full-access" },
       });
-      assert.equal((yield* store.getThread(child)).creatorGrouping, "independent");
-      assert.isNotNull((yield* store.getThread(child)).archivedAt);
+      const refused = yield* orchestrator
+        .dispatch({
+          type: "thread.archive.complete",
+          commandId: CommandId.make("limited-archive-complete"),
+          threadId: creator,
+          requestId: request.commandId,
+        })
+        .pipe(Effect.flip);
+      assert.equal(refused._tag, "OrchestratorThreadAboveModeLimitError");
+      assert.isNull((yield* store.getThread(creator)).archivedAt);
+      assert.equal((yield* store.getThread(child)).creatorGrouping, "grouped");
     }).pipe(Effect.provide(testLayer)),
 );
 
-it.effect("concurrent archive and interactive creation cannot leave a grouped orphan", () =>
+it.effect("archiving a creator waits for its grouped child's own pending archive", () =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const store = yield* ProjectionStore.ProjectionStoreV2;
     const project = ProjectId.make("creator:project");
-    const creator = ThreadId.make("creator:z-origin");
-    const child = ThreadId.make("creator:a-interactive");
+    const creator = ThreadId.make("creator:origin");
+    const child = ThreadId.make("creator:interactive");
     yield* orchestrator.dispatch(create(creator, project));
-    yield* Effect.all(
-      [
-        createOrdinary(child, creator, project),
-        orchestrator.dispatch({
-          type: "thread.archive",
-          commandId: CommandId.make("concurrent-archive"),
-          threadId: creator,
-        }),
-      ],
-      { concurrency: "unbounded" },
-    );
-    assert.isNotNull((yield* store.getThread(creator)).archivedAt);
-    assert.equal((yield* store.getThread(child)).creatorGrouping, "independent");
+    yield* createOrdinary(child, creator, project);
+    yield* attachIdleProvider(child);
+    const request = {
+      type: "thread.archive" as const,
+      commandId: CommandId.make("child-own-archive"),
+      threadId: child,
+    };
+    yield* orchestrator.dispatch(request);
+    const pending = (yield* store.getThread(child)).archivePending;
+    assert.equal(pending?.status, "stopping");
+    const refused = yield* orchestrator
+      .dispatch({
+        type: "thread.archive",
+        commandId: CommandId.make("creator-archive"),
+        threadId: creator,
+        childDisposition: "stop_and_archive",
+        expectedChildThreadIds: [child],
+      })
+      .pipe(Effect.flip);
+    assert.equal(refused._tag, "OrchestratorDispatchError");
+    assert.equal((yield* store.getThread(child)).creatorGrouping, "grouped");
+    assert.deepEqual((yield* store.getThread(child)).archivePending, pending);
+    yield* orchestrator.dispatch({
+      type: "thread.archive.complete",
+      commandId: CommandId.make("child-own-archive-complete"),
+      threadId: child,
+      requestId: request.commandId,
+    });
+    assert.equal((yield* store.getThread(child)).creatorGrouping, "grouped");
+    assert.isNotNull((yield* store.getThread(child)).archivedAt);
   }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect(
+  "concurrent archive and interactive creation cannot hide an unconfirmed conversation",
+  () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const project = ProjectId.make("creator:project");
+      const creator = ThreadId.make("creator:z-origin");
+      const child = ThreadId.make("creator:a-interactive");
+      yield* orchestrator.dispatch(create(creator, project));
+      const results = yield* Effect.all(
+        [
+          createOrdinary(child, creator, project).pipe(Effect.exit),
+          orchestrator
+            .dispatch({
+              type: "thread.archive",
+              commandId: CommandId.make("concurrent-archive"),
+              threadId: creator,
+            })
+            .pipe(Effect.exit),
+        ],
+        { concurrency: "unbounded" },
+      );
+      assert.equal(results[0]?._tag, "Success");
+      const root = yield* store.getThread(creator);
+      const conversation = yield* store.getThread(child);
+      if (root.archivedAt === null) {
+        assert.equal(results[1]?._tag, "Failure");
+        assert.equal(conversation.creatorGrouping, "grouped");
+      } else {
+        assert.equal(results[1]?._tag, "Success");
+        assert.equal(conversation.creatorGrouping, "independent");
+      }
+      assert.isNull(conversation.archivedAt);
+    }).pipe(Effect.provide(testLayer)),
 );

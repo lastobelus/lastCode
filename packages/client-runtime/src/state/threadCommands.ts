@@ -554,6 +554,8 @@ export function createThreadEnvironmentAtoms<R, E>(
             threads,
             children: select(family.childThreadIds),
             activeChildren: select(family.activeChildThreadIds),
+            activeThreads: select(family.activeThreadIds),
+            unreadThreads: select(family.unreadThreadIds),
             promotableChildren: select(family.promotableChildThreadIds),
             protectedChildren: select(family.protectedChildThreadIds),
           };
