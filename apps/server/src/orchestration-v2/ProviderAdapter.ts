@@ -292,6 +292,7 @@ export class ProviderAdapterSteerRunError extends Schema.TaggedError<ProviderAda
     driver: ProviderDriverKind,
     providerThreadId: ProviderThreadId,
     providerTurnId: ProviderTurnId,
+    deliveryRejected: Schema.optional(Schema.Boolean),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {

@@ -471,6 +471,7 @@ const layerOrchestrationV2Runtime = RuntimeLayer.layerProduction.pipe(
       Layer.provide(ProjectionStoreV2.layer),
       Layer.provide(layerPullRequestService),
       Layer.provide(RuntimeLayer.layerProjectService),
+      Layer.provide(RuntimeLayer.layerUpdateDrainAdmission),
     ),
   ),
 );

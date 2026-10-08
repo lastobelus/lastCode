@@ -1,6 +1,7 @@
 import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as Layer from "effect/Layer";
+import * as Effect from "effect/Effect";
 import * as OrchestrationCommandReceipts from "../persistence/OrchestrationCommandReceipts.ts";
 import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
 import * as McpAppModelContext from "../mcpApps/McpAppModelContext.ts";
@@ -51,6 +52,7 @@ import * as ThreadForkService from "./ThreadForkService.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
+import * as WorktreeCleanupService from "./WorktreeCleanupService.ts";
 
 /** The shared application event log and its command receipts. */
 export const layerEventInfrastructure = Layer.mergeAll(
@@ -84,6 +86,10 @@ const layerEventSinkProvided = layerEventSink;
 const layerProjectionMaintenanceProvided = ProjectionMaintenance.layer.pipe(
   Layer.provide(layerStores),
 );
+const layerThreadWaitProvided = ThreadWait.layer.pipe(
+  Layer.provide(Layer.merge(ProjectionStore.layer, layerEventSinkProvided)),
+);
+
 const layerLegacyV1ThreadImporterProvided = LegacyV1ThreadImporter.layer.pipe(
   Layer.provide(layerEventSinkProvided),
 );
@@ -136,6 +142,17 @@ const layerProviderSessionManagerProvided = ProviderSessionManager.layer.pipe(
   ),
 );
 
+// Share the admission lock between orchestration and maintenance RPCs.
+export const layerUpdateDrainAdmission = UpdateDrainAdmission.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      EffectOutbox.layer,
+      ProjectionStore.layer,
+      layerProviderSessionManagerProvided,
+      UpdateDrain.layer.pipe(Layer.provide(UpdateDrainRepositoryPersistence.layer)),
+    ),
+  ),
+);
 const layerProviderAuthServiceProvided = ProviderAuthService.layer.pipe(
   Layer.provide(Layer.merge(ProjectionStore.layer, layerProviderSessionManagerProvided)),
 );
@@ -241,8 +258,17 @@ const layerAgentSessionImporterProvided = AgentSessionImporter.layer.pipe(
 const layerThreadManagementProvided = ThreadManagementService.layerWithLegacyImporter.pipe(
   Layer.provide(Layer.merge(layerOrchestratorProvided, layerLegacyV1ThreadImporterProvided)),
 );
+const layerWorktreeCleanupProvided = WorktreeCleanupService.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(layerThreadManagementProvided, ProjectionStore.layer, ProjectStore.layer, layerProviderSessionManagerProvided, layerLegacyV1ThreadImporterProvided, layerEventInfrastructure),
+  ),
+);
+const layerWorktreeCleanupWorkerProvided = Layer.effectDiscard(
+  Effect.flatMap(WorktreeCleanupService.WorktreeCleanupService, (service) => service.start()),
+).pipe(Layer.provideMerge(layerWorktreeCleanupProvided));
 export const layerProjectSetupScriptRunner = ProjectSetupScriptRunner.layer.pipe(
   Layer.provide(layerProjectService),
+  Layer.provide(layerUpdateDrainAdmission),
 );
 const layerManagedProjectFoldersProvided = ManagedProjectFolders.layer.pipe(
   Layer.provide(layerProjectService),
@@ -341,6 +367,7 @@ export const layer = Layer.mergeAll(
 );
 
 export const layerProduction = Layer.mergeAll(
+  layerWorktreeCleanupWorkerProvided,
   layer.pipe(Layer.provide(layerProjectService)),
   layerProjectService,
   layerManagedProjectFoldersProvided,
