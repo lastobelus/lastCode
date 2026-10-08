@@ -11916,11 +11916,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       command.type === "thread.background-work.settle" ||
       // These completions only settle retained metadata; they start no provider work.
       command.type === "message.incoming-summary.complete" ||
-      (command.type === "thread.metadata.update" &&
-        command.actionResume !== undefined &&
-        Object.keys(command).every((key) =>
-          ["type", "commandId", "threadId", "actionResume"].includes(key),
-        )) ||
       (command.type === "message.dispatch" && command.usageLimitContinuationOfRunId !== undefined);
     if (!allowedWhileArchiving && command.type !== "thread.create") {
       const current = yield* projectionStore
@@ -11931,7 +11926,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         );
       if (
         current?.archivePending?.status === "stopping" &&
-        (current.deletedAt === null || current.worktreeCleanup != null)
+        (current.deletedAt === null || current.worktreeCleanup != null) &&
+        // Only settle an Action already admitted before the hold. Publishing the
+        // initial state admits a new terminal command, so it must remain blocked.
+        !(
+          command.type === "thread.metadata.update" &&
+          command.actionResume != null &&
+          current.actionResume?.runId === command.actionResume.runId &&
+          Object.keys(command).every((key) =>
+            ["type", "commandId", "threadId", "actionResume"].includes(key),
+          )
+        )
       ) {
         return yield* new OrchestratorThreadArchivingError({
           commandId: command.commandId,
