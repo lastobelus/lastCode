@@ -1,6 +1,7 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { expect, it } from "@effect/vitest";
 import {
+  CommandId,
   EnvironmentId,
   EventId,
   ProjectId,
@@ -236,6 +237,71 @@ it.effect("does not offer archive choices for a protected family owner", () =>
       expect(shell?.lineage.independent).not.toBe(true);
     }
   }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect.each([false, true])(
+  "failed participants inspect and retry the full family (archived owner=%s)",
+  (archivedOwner) =>
+    Effect.gen(function* () {
+      const { store, now } = yield* seedFamily();
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const oldCommandId = CommandId.make("archive-family:failed-operation");
+      const participants = [rootId, appId, nestedId, nativeId];
+      for (const id of participants) {
+        const { thread } = yield* threads.getThreadRecords(id, []);
+        const failed = { threadId: rootId, commandId: oldCommandId, status: "failed" as const };
+        yield* store.apply({
+          id: EventId.make(`failed-archive:${id}`),
+          type: "thread.metadata-updated",
+          threadId: id,
+          occurredAt: now,
+          payload: {
+            ...thread,
+            ...(id === appId ? { runtimeMode: "approval-required" as const } : {}),
+            ...(id === rootId && archivedOwner
+              ? { archivedAt: now, archivedWith: { threadId: rootId, commandId: oldCommandId } }
+              : {}),
+            archivePending:
+              id === rootId
+                ? {
+                    ...failed,
+                    childDisposition: "stop_and_archive",
+                    childThreadIds: participants.slice(1),
+                    archiveThreadIds: participants,
+                    promoteThreadIds: [],
+                  }
+                : failed,
+          },
+        });
+      }
+      const family = yield* decodeFamily(
+        (yield* invoke("t3_thread_archive_family", { threadId: appId }, clientScope))
+          .structuredContent,
+      );
+      expect(family.childThreadIds.toSorted()).toEqual([appId, nestedId, nativeId].toSorted());
+      const retry = {
+        threadId: appId,
+        action: "archive",
+        childDisposition: "stop_and_archive",
+        expectedChildThreadIds: family.childThreadIds,
+      };
+      const limited = {
+        ...clientScope,
+        client: { ...clientScope.client!, access: "approval-required" as const },
+      };
+      expect((yield* invoke("t3_thread_organize", retry, limited)).isError).toBe(true);
+      expect((yield* threads.getThreadShell(rootId))?.archivePending?.commandId).toBe(oldCommandId);
+      const accepted = yield* invoke("t3_thread_organize", retry, clientScope);
+      expect(accepted.isError, JSON.stringify(accepted.content)).toBe(false);
+      for (const id of participants) {
+        const shell = yield* threads.getThreadShell(id);
+        expect(shell?.archivedAt).not.toBeNull();
+        expect(shell?.archivePending).toBeNull();
+        expect(shell?.archivedWith?.threadId).toBe(rootId);
+      }
+      for (const id of [forkId, independentId])
+        expect((yield* threads.getThreadShell(id))?.archivedAt).toBeNull();
+    }).pipe(Effect.provide(testLayer)),
 );
 
 it.effect("requires fresh family inspection when a nested child is added", () =>
