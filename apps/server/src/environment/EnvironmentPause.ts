@@ -114,8 +114,10 @@ const make = Effect.gen(function* () {
       ),
     );
     const pendingIds = new Set(pending.map(({ threadId }) => threadId));
-    return [...shell.threads, ...shell.archivedThreads].filter(
+    // Archived work still blocks quiet in status, but cannot accept messages.
+    return shell.threads.filter(
       (thread) =>
+        thread.archivedAt == null &&
         thread.deletedAt == null &&
         !isProviderNativeSubagentThread(thread) &&
         (activeThread(thread, deferred, automationPaused) || pendingIds.has(thread.id)),

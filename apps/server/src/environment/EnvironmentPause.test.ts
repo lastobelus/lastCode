@@ -383,6 +383,58 @@ const restart = (h: Effect.Success<typeof harness>) =>
     return { store, pause };
   });
 
+it.effect.each(["archive-pending", "provider-running"] as const)(
+  "waits for archived %s work without enrolling it as a pause recipient",
+  (scenario) =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      const archived = {
+        ...thread(b, scenario === "provider-running" ? "running" : "idle"),
+        archivedAt: now,
+      };
+      yield* Ref.set(h.snapshot, { ...shell([thread(a)]), archivedThreads: [archived] });
+      yield* Ref.set(h.failures, new Set([b]));
+      if (scenario === "archive-pending") yield* Ref.set(h.pending, [{ threadId: b }]);
+      const started = yield* h.pause.start;
+      assert.deepEqual(
+        started.session?.targets.map((target) => target.threadId),
+        [a],
+      );
+      assert.deepEqual(
+        (yield* Ref.get(h.calls)).map((call) => call.threadId),
+        [a],
+      );
+      yield* Ref.set(h.snapshot, { ...shell([thread(a, "idle")]), archivedThreads: [archived] });
+      const waiting = yield* h.pause.retry;
+      assert.isFalse(waiting.quiet);
+      assert.equal(waiting.activeThreadCount, 1);
+      assert.deepEqual(
+        waiting.session?.targets.map((target) => target.threadId),
+        [a],
+      );
+      assert.deepEqual(
+        (yield* Ref.get(h.calls)).map((call) => call.threadId),
+        [a],
+      );
+      yield* Ref.set(h.pending, []);
+      yield* Ref.set(h.snapshot, {
+        ...shell([thread(a, "idle")]),
+        archivedThreads: [{ ...thread(b, "idle"), archivedAt: now }],
+      });
+      const quiet = yield* h.pause.status;
+      assert.isTrue(quiet.quiet);
+      assert.equal(quiet.activeThreadCount, 0);
+      assert.isNull((yield* h.pause.resume).session);
+      assert.deepEqual(
+        (yield* Ref.get(h.calls)).map(({ threadId, text }) => ({ threadId, text })),
+        [
+          { threadId: a, text: "pause to go offline" },
+          { threadId: a, text: "resume" },
+        ],
+      );
+    }).pipe(Effect.provide(testLayer)),
+);
+
 const testLayer = Store.layer.pipe(
   Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "environment-pause-test-" })),
   Layer.provideMerge(NodeServices.layer),
