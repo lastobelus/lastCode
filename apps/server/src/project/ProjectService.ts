@@ -103,6 +103,7 @@ export class ProjectOperationError extends Schema.TaggedError<ProjectOperationEr
       "list-projects",
       "list-threads",
       "delete-thread",
+      "delete-project-settings",
       "dispatch-project-command",
     ]),
     projectId: Schema.optional(ProjectId),
@@ -111,6 +112,8 @@ export class ProjectOperationError extends Schema.TaggedError<ProjectOperationEr
   },
 ) {
   override get message(): string {
+    if (this.operation === "delete-project-settings")
+      return `Project deletion committed, but settings cleanup failed${this.projectId === undefined ? "" : ` for ${this.projectId}`}. Retry using the original command ID to finish cleanup.`;
     return `Project operation '${this.operation}' failed${this.projectId === undefined ? "" : ` for ${this.projectId}`}.`;
   }
 }
@@ -138,7 +141,10 @@ export class ProjectService extends Context.Service<
       readonly expectedScripts: ReadonlyArray<ProjectScript>;
       readonly scripts: ReadonlyArray<ProjectScript>;
     }) => Effect.Effect<Project, ProjectServiceError>;
-    readonly delete: (input: ProjectDeleteInput) => Effect.Effect<Project, ProjectServiceError>;
+    readonly delete: (
+      input: ProjectDeleteInput,
+      onCommitted?: Effect.Effect<void>,
+    ) => Effect.Effect<Project, ProjectServiceError>;
     readonly getById: (
       projectId: ProjectId,
       options?: { readonly includeDeleted?: boolean },
@@ -595,33 +601,43 @@ export const make = Effect.gen(function* () {
   });
 
   const deleteProject: ProjectService["Service"]["delete"] = Effect.fn("ProjectService.delete")(
-    function* (input) {
-      const operation = threadCommands.withPersistenceLock(
-        Effect.gen(function* () {
-          const { projectId } = input;
-          // A deleted row still reaches commit, so a retried command id replays its
-          // receipt and any other command id is rejected as not found.
-          const existing = yield* readRow(projectId, { includeDeleted: true });
-          if (Option.isNone(existing)) {
-            return yield* new ProjectNotFoundError({ projectId });
-          }
+    function* (input, onCommitted = Effect.void) {
+      const operation = Effect.gen(function* () {
+        const { projectId } = input;
+        const workspaceRoot = yield* threadCommands.withPersistenceLock(
+          Effect.gen(function* () {
+            // A deleted row still reaches commit, so a retried command id replays its
+            // receipt and any other command id is rejected as not found.
+            const existing = yield* readRow(projectId, { includeDeleted: true });
+            if (Option.isNone(existing)) {
+              return yield* new ProjectNotFoundError({ projectId });
+            }
 
-          if (existing.value.deletedAt === null) {
-            yield* deleteChildThreads(input);
-          }
-          yield* commit({ type: "project.delete", commandId: input.commandId, projectId });
-          // Terminal deletion removes grants; receipt replay retries interrupted cleanup.
-          yield* settings
-            .updateSettings({ projectSettingsOverrides: { [projectId]: null } })
-            .pipe(
-              Effect.catch((cause) =>
-                Effect.logError("Deleted project settings cleanup failed", { projectId, cause }),
-              ),
-            );
-          yield* projectEnrichment.invalidate([existing.value.workspaceRoot]);
-          return yield* readCommitted(projectId);
-        }),
-      );
+            if (existing.value.deletedAt === null) {
+              yield* deleteChildThreads(input);
+            }
+            yield* commit({ type: "project.delete", commandId: input.commandId, projectId });
+            return existing.value.workspaceRoot;
+          }),
+        );
+        // Clone creation acquires persistence while holding the tracker lock.
+        // Release persistence before caller-owned cleanup takes that lock.
+        yield* onCommitted;
+        yield* projectEnrichment.invalidate([workspaceRoot]);
+        // Terminal deletion removes grants; receipt replay retries interrupted cleanup.
+        yield* settings.updateSettings({ projectSettingsOverrides: { [projectId]: null } }).pipe(
+          Effect.retry({ times: 2 }),
+          Effect.mapError(
+            (cause) =>
+              new ProjectOperationError({
+                operation: "delete-project-settings",
+                projectId,
+                cause,
+              }),
+          ),
+        );
+        return yield* readCommitted(projectId);
+      });
       // Completed receipt replay has no child cleanup to admit. Fresh cascades
       // take admission before persistence and child locks, just like thread.delete.
       const existing = yield* readRow(input.projectId, { includeDeleted: true });

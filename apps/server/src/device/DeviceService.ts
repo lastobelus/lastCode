@@ -425,7 +425,10 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
       ),
     );
 
-  const fetchDevices = Effect.fn("DeviceService.fetchDevices")(function* (ready: DeviceReadiness) {
+  const fetchDevices = Effect.fn("DeviceService.fetchDevices")(function* (
+    ready: DeviceReadiness,
+    includeAvailableAvds = true,
+  ) {
     const list = yield* hubJson(
       HttpClientRequest.get(`${ready.hub.origin}/api/devices`),
       HubDeviceList,
@@ -442,7 +445,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
     });
     const devices = [...list.simulators, ...list.emulators].map(toSummary);
     const host = yield* resolveHost(ready.hostId);
-    if ((yield* host.platformAvailability("android")).available) {
+    if (includeAvailableAvds && (yield* host.platformAvailability("android")).available) {
       const avds = yield* ready.run("emulator", ["-list-avds"]);
       if (avds.code !== 0) {
         return yield* new DeviceOperationError({
@@ -473,7 +476,10 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
   });
 
   const refreshLocks = new WeakMap<DeviceHost.DeviceHost["Service"], Semaphore.Semaphore>();
-  const refresh = Effect.fn("DeviceService.refresh")(function* (ready: DeviceReadiness) {
+  const refresh = Effect.fn("DeviceService.refresh")(function* (
+    ready: DeviceReadiness,
+    includeAvailableAvds = true,
+  ) {
     const host = hosts.get(ready.hostId);
     if (!host) return (yield* SynchronizedRef.get(stateRef)).state;
     let refreshLock = refreshLocks.get(host);
@@ -486,13 +492,33 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
     return yield* refreshLock.withPermit(
       Effect.gen(function* () {
         if (hosts.get(ready.hostId) !== host) return (yield* SynchronizedRef.get(stateRef)).state;
-        const { devices, detail } = yield* fetchDevices(ready);
+        const { devices: discovered, detail } = yield* fetchDevices(ready, includeAvailableAvds);
         const hostSummaries = yield* Effect.forEach(hosts.values(), (host) => host.summary);
         return yield* lifecycleLock.withPermit(
           Effect.gen(function* () {
             if (!(yield* readDeviceSettings).enabled || hosts.get(ready.hostId) !== host)
               return (yield* SynchronizedRef.get(stateRef)).state;
             const { state } = yield* SynchronizedRef.get(stateRef);
+            // Command preflight observes live runtimes over the existing hub
+            // connection. Keep known unbooted AVDs until explicit discovery,
+            // without probing SSH or listing available AVDs for every command.
+            const devices = includeAvailableAvds
+              ? discovered
+              : [
+                  ...discovered,
+                  ...state.devices.filter(
+                    (previous) =>
+                      previous.hostId === ready.hostId &&
+                      previous.platform === "android" &&
+                      !previous.physical &&
+                      !previous.booted &&
+                      !discovered.some(
+                        (current) =>
+                          current.id === previous.id ||
+                          (current.platform === "android" && current.name === previous.name),
+                      ),
+                  ),
+                ];
             const retired = state.devices.filter((previous) => {
               if (previous.hostId !== ready.hostId || !previous.booted) return false;
               const current = devices.find((device) => device.id === previous.id);
@@ -1056,7 +1082,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
           reason: "Agent CLI installation is unavailable in this device service.",
         }),
       ),
-      refreshAgentDevice: (ready) => refresh(ready).pipe(Effect.asVoid),
+      refreshAgentDevice: (ready) => refresh(ready, false).pipe(Effect.asVoid),
       completeOpen: (openedSession) =>
         Effect.sync(() => {
           rollbackSessions.delete(openedSession);
