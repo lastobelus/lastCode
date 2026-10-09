@@ -314,12 +314,11 @@ export function ThreadAnnotationNavigationTrigger({
       aria-controls={undefined}
       onFocusCapture={(event) => {
         props.onFocusCapture?.(event);
-        // Pointer focus must not pin the card when clicking the already-active thread.
+        // Only keyboard focus on the row opens its card; nested controls retain their trigger.
         if (
           annotationActive &&
           props.id &&
-          event.currentTarget.contains(event.target) &&
-          event.target.getAttribute("aria-hidden") !== "true" &&
+          event.target === event.currentTarget &&
           event.target.matches(":focus-visible")
         ) {
           props.handle?.open(props.id);

@@ -293,6 +293,7 @@ describe("ThreadAnnotationHoverPopover", () => {
     await act(() => button("Show annotation").click());
     await act(() => button("Edit").focus());
     expect(popup()).not.toBeNull();
+    await act(() => button("Show annotation").focus());
     await act(() => button("Show annotation").click());
     expect(popup()).toBeNull();
   });
