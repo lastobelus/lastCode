@@ -17,6 +17,7 @@ export interface LegacySidebarFamilyRow {
   descendantsStatus: ThreadStatusPill | null;
   expanded: boolean;
   selectedDescendant: boolean;
+  collapseNavigatesToParent: boolean;
   descendantStatusCounts: Map<string, number>;
   createdThreadStatusCounts: Map<string, number>;
   creatorGroupingWarning: string | null;
@@ -34,6 +35,7 @@ export type LegacySidebarFamilyItem =
       depth: number;
       expanded: boolean;
       selectedDescendant: boolean;
+      collapseNavigatesToParent: boolean;
       count: number;
       status: ThreadStatusPill | null;
     };
@@ -112,7 +114,7 @@ export function legacySidebarFamilySummary(row: LegacySidebarFamilyRow): string 
 }
 
 /** Projects sorted visible shells into owned subagent and display-only creator families.
- * Root preview limits never split a family, and a selected child always reveals its ancestors.
+ * Root preview limits never split a family; collapsed families retain the selected ancestor path.
  * Creator grouping only changes display placement; it never changes the conversation lineage.
  * Unavailable parents/creators and cycles leave the child reachable as an identified root.
  */
@@ -223,6 +225,12 @@ export function projectLegacySidebarFamilies(input: {
     selectedRoot = cursor;
     cursor = parentByKey.get(cursor) ?? null;
   }
+  const activeThread = input.activeThreadKey ? byKey.get(input.activeThreadKey) : undefined;
+  const activeThreadIsSubagent =
+    activeThread !== undefined && isSidebarSubagentThread(activeThread);
+  const isExpanded = (key: string, selectedDescendant: boolean) =>
+    input.collapsedByKey[key] === false ||
+    (input.collapsedByKey[key] !== true && selectedDescendant);
 
   const allRows: LegacySidebarFamilyRow[] = [];
   const stack = roots.toReversed().map((key) => ({ key, depth: 0 }));
@@ -238,8 +246,9 @@ export function projectLegacySidebarFamilies(input: {
       unavailableParentLabel: unavailableByKey.get(key) ?? null,
       descendantCount: 0,
       descendantsStatus: null,
-      expanded: input.collapsedByKey[key] === false || selectedDescendant,
+      expanded: isExpanded(key, selectedDescendant),
       selectedDescendant,
+      collapseNavigatesToParent: selectedDescendant && activeThreadIsSubagent,
       descendantStatusCounts: new Map(),
       createdThreadStatusCounts: new Map(),
       creatorGroupingWarning: creatorGroupingWarningByKey.get(key) ?? null,
@@ -313,8 +322,10 @@ export function projectLegacySidebarFamilies(input: {
       continue;
     }
     if (!input.projectExpanded && !selectedPath.has(row.key)) continue;
-    if (collapsedDepth !== null && row.depth > collapsedDepth) continue;
-    collapsedDepth = null;
+    if (collapsedDepth !== null) {
+      if (row.depth <= collapsedDepth) collapsedDepth = null;
+      else if (!selectedPath.has(row.key)) continue;
+    }
     if (row.parentKey && isSidebarSubagentThread(row.thread)) {
       const groupKey = legacySidebarSubagentGroupKey(row.parentKey);
       let group = subagentGroups.get(groupKey);
@@ -329,8 +340,9 @@ export function projectLegacySidebarFamilies(input: {
           parentKey: row.parentKey,
           parentTitle: byKey.get(row.parentKey)!.title,
           depth: row.depth,
-          expanded: input.collapsedByKey[groupKey] === false || selectedDescendant,
+          expanded: isExpanded(groupKey, selectedDescendant),
           selectedDescendant,
+          collapseNavigatesToParent: selectedDescendant && activeThreadIsSubagent,
           count: subagents.length,
           status: resolveProjectStatusIndicator(
             subagents.flatMap((key) => [
@@ -343,13 +355,13 @@ export function projectLegacySidebarFamilies(input: {
         subagentGroups.set(groupKey, group);
       }
       if (!group.expanded) {
-        collapsedDepth = row.depth;
-        continue;
+        collapsedDepth ??= row.depth - 1;
+        if (!selectedPath.has(row.key)) continue;
       }
     }
     renderedRows.push(row);
     renderedItems.push({ type: "thread", row });
-    if (!row.expanded) collapsedDepth = row.depth;
+    if (!row.expanded) collapsedDepth ??= row.depth;
   }
   if (typedGroups) {
     const shownGroups = new Set<string>();

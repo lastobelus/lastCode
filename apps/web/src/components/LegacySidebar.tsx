@@ -1128,9 +1128,12 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                 <button
                   type="button"
                   data-thread-selection-safe
-                  aria-label={`${family.expanded ? "Collapse" : "Expand"} children of ${thread.title}`}
+                  aria-label={
+                    family.expanded && family.collapseNavigatesToParent
+                      ? `Collapse children and return to ${thread.title}`
+                      : `${family.expanded ? "Collapse" : "Expand"} children of ${thread.title}`
+                  }
                   aria-expanded={family.expanded}
-                  aria-disabled={family.selectedDescendant || undefined}
                   className={cn(
                     "relative z-30 inline-flex size-4 shrink-0 items-center justify-center rounded-sm outline-hidden focus-visible:ring-1 focus-visible:ring-ring",
                     typedGroups &&
@@ -1143,7 +1146,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                   onKeyDown={(event) => event.stopPropagation()}
                   onClick={(event) => {
                     event.stopPropagation();
-                    if (!family.selectedDescendant) setFamilyCollapsed(threadKey, family.expanded);
+                    setFamilyCollapsed(threadKey, family.expanded);
+                    if (family.expanded && family.collapseNavigatesToParent) {
+                      void navigateToThread(threadRef);
+                    }
                   }}
                 />
               }
@@ -1154,8 +1160,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               />
             </TooltipTrigger>
             <TooltipPopup side="top">
-              {family.selectedDescendant
-                ? "The selected child keeps this path open"
+              {family.expanded && family.selectedDescendant
+                ? family.collapseNavigatesToParent
+                  ? "Collapse children and return to this thread"
+                  : "Collapse children; keep the selected conversation visible"
                 : legacySidebarFamilySummary(family)}
             </TooltipPopup>
           </Tooltip>
@@ -1759,12 +1767,20 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
                 <LegacySidebarFamilyGuides depth={item.depth} />
                 <button
                   type="button"
-                  aria-label={`${item.expanded ? "Collapse" : "Expand"} subagents of ${item.parentTitle}${!item.expanded && item.status ? ` · ${item.status.label}` : ""}`}
+                  aria-label={
+                    item.expanded && item.collapseNavigatesToParent
+                      ? `Collapse subagents and return to ${item.parentTitle}`
+                      : `${item.expanded ? "Collapse" : "Expand"} subagents of ${item.parentTitle}${!item.expanded && item.status ? ` · ${item.status.label}` : ""}`
+                  }
                   aria-expanded={item.expanded}
                   className="flex h-8 w-full items-center gap-1 rounded-md pr-2 text-3xs text-sidebar-muted-foreground uppercase hover:bg-sidebar-row-hover focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
                   style={{ paddingLeft: 12 + Math.min(item.depth, 6) * 12 }}
                   onClick={() => {
-                    if (!item.selectedDescendant) setFamilyCollapsed(item.key, item.expanded);
+                    setFamilyCollapsed(item.key, item.expanded);
+                    if (item.expanded && item.collapseNavigatesToParent) {
+                      const parentRef = parseScopedThreadKey(item.parentKey);
+                      if (parentRef) void navigateToThread(parentRef);
+                    }
                   }}
                 >
                   <ChevronRightIcon
