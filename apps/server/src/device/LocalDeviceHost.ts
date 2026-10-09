@@ -497,6 +497,27 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
     return yield* decodeDaemonFile(raw);
   });
 
+  const readRecoveredDaemonFile = Effect.fn("LocalDeviceHost.readRecoveredDaemonFile")(
+    function* () {
+      const fail = (cause: unknown) =>
+        new DeviceHost.DeviceHostError({
+          hostId,
+          step: "invalidating recovered agent access",
+          cause,
+        });
+      const raw = yield* fs.readFileString(daemonFilePath()).pipe(
+        Effect.asSome,
+        Effect.catchIf(
+          (error) => error.reason._tag === "NotFound",
+          () => Effect.succeed(Option.none<string>()),
+        ),
+        Effect.mapError(fail),
+      );
+      if (Option.isNone(raw)) return raw;
+      return yield* decodeDaemonFile(raw.value).pipe(Effect.asSome, Effect.mapError(fail));
+    },
+  );
+
   /**
    * agent-device auto-starts its daemon on any command. A trivial `devices`
    * call in HTTP mode is the documented way to bring it up; its output is the
@@ -511,7 +532,7 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
   > {
     const stateDir = agentDeviceStateDir(path, config.stateDir);
     yield* fs.makeDirectory(stateDir, { recursive: true }).pipe(Effect.ignore);
-    const existing = yield* readDaemonFile().pipe(Effect.option);
+    const existing = yield* readRecoveredDaemonFile();
     const daemonEnvironment: NodeJS.ProcessEnv = {
       ...hostEnvironment,
       AGENT_DEVICE_STATE_DIR: stateDir,
@@ -582,7 +603,7 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
   const stopAgentDeviceDaemon = Effect.fn("LocalDeviceHost.stopAgentDeviceDaemon")(function* (
     agentTool: { readonly entryPath: string; readonly nodePath: string } | null,
   ) {
-    const existing = yield* readDaemonFile().pipe(Effect.option);
+    const existing = yield* readRecoveredDaemonFile();
     if (existing._tag === "None") return;
     const daemonIsDead = Effect.sync(() => {
       const pid = existing.value.pid;
