@@ -108,6 +108,7 @@ function layerProviderHost(input: {
         cwd: process.cwd(),
         baseDir: "/t3",
         stateDir: "/t3/userdata",
+        settingsPath: "/t3/userdata/settings.json",
         providerStatusCacheDir: "/t3/caches",
         attachmentsDir: "/t3/userdata/attachments",
       },

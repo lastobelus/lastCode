@@ -3741,11 +3741,16 @@ export const OpenCodeAdapterV2Driver: ProviderAdapterDriver<
   create: Effect.fn("OpenCodeAdapterV2Driver.create")(
     function* (input: ProviderAdapterDriverCreateInput<OpenCodeSettings>) {
       const hostEnvironment = yield* HostProcessEnvironment;
+      const host = yield* ProviderHost.ProviderHost;
       const providerEventLoggers = yield* ProviderEventLoggers.ProviderEventLoggers;
       return yield* makeOpenCodeAdapterV2({
         instanceId: input.instanceId,
         settings: { ...input.config, enabled: input.enabled },
-        environment: mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
+        environment: mergeProviderInstanceEnvironment(
+          input.environment,
+          hostEnvironment,
+          host.paths.settingsPath,
+        ),
         ...(providerEventLoggers.native === undefined
           ? {}
           : { nativeEventLogger: providerEventLoggers.native }),
@@ -3771,11 +3776,16 @@ const layer: Layer.Layer<ProviderAdapter.ProviderAdapterV2, never, OpenCodeAdapt
     ProviderAdapter.ProviderAdapterV2,
     Effect.gen(function* () {
       const hostEnvironment = yield* HostProcessEnvironment;
+      const host = yield* ProviderHost.ProviderHost;
       const providerEventLoggers = yield* ProviderEventLoggers.ProviderEventLoggers;
       return yield* makeOpenCodeAdapterV2({
         instanceId: OPENCODE_DEFAULT_INSTANCE_ID,
         settings: DEFAULT_OPENCODE_SETTINGS,
-        environment: hostEnvironment,
+        environment: mergeProviderInstanceEnvironment(
+          undefined,
+          hostEnvironment,
+          host.paths.settingsPath,
+        ),
         ...(providerEventLoggers.native === undefined
           ? {}
           : { nativeEventLogger: providerEventLoggers.native }),
