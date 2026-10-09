@@ -15,6 +15,7 @@ import {
   AuthRelayWriteScope,
   AuthTerminalReadScope,
   AuthTerminalOperateScope,
+  ORCHESTRATION_V2_WS_METHODS,
   WS_METHODS,
   WsRpcGroup,
 } from "@t3tools/contracts";
@@ -549,5 +550,34 @@ it.effect("allows only tagged thread file reads with orchestration read permissi
       ),
     ).toMatchObject({ requiredPermission: AuthFilesystemReadScope });
     expect(handled).toBe(1);
+  }).pipe(Effect.scoped),
+);
+
+it.effect("blocks archive-family activity repair under a read-only token", () =>
+  Effect.gen(function* () {
+    const method = ORCHESTRATION_V2_WS_METHODS.getThreadArchiveFamily;
+    const group = WsRpcGroup.omit(
+      ...[...WsRpcGroup.requests.keys()].filter(
+        (tag): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, typeof method> => tag !== method,
+      ),
+    );
+    let inspected = false;
+    const client = yield* RpcTest.makeClient(group).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          group.toLayerHandler(method, () =>
+            Effect.sync(() => {
+              inspected = true;
+              throw new Error("Unauthorized archive inspection ran.");
+            }),
+          ),
+          RpcAuthorization.layer([AuthOrchestrationReadScope]),
+        ),
+      ),
+    );
+    expect(
+      yield* client[method]({ threadId: ThreadId.make("archive-owner") }).pipe(Effect.flip),
+    ).toMatchObject({ requiredPermission: AuthOrchestrationOperateScope });
+    expect(inspected).toBe(false);
   }).pipe(Effect.scoped),
 );

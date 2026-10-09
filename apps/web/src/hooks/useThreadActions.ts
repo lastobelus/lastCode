@@ -419,9 +419,8 @@ export function useThreadActions() {
   const loadSessionState = useAtomQueryRunner(environmentSession.sessionStateAtom, {
     reportFailure: false,
   });
-  const loadArchiveFamily = useAtomQueryRunner(threadEnvironment.archiveFamilyAtom, {
+  const loadArchiveFamily = useAtomCommand(threadEnvironment.loadArchiveFamily, {
     reportFailure: false,
-    refresh: true,
   });
   type ArchiveFamily = Extract<
     Awaited<ReturnType<typeof loadArchiveFamily>>,

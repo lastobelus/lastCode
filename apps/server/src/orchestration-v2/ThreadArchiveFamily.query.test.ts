@@ -1,6 +1,8 @@
 import { assert, it } from "@effect/vitest";
 import {
+  CommandId,
   EventId,
+  MessageId,
   ProjectId,
   ProviderInstanceId,
   RunAttemptId,
@@ -57,7 +59,7 @@ const makeThread = (rootId: ThreadId, now: DateTime.Utc): OrchestrationV2AppThre
 });
 
 it.effect.each([false, true])(
-  "offers protected app branches but refuses a protected native owner=%s",
+  "includes protected recursive participants and refuses archive (protected native=%s)",
   (protectedNative) =>
     Effect.gen(function* () {
       const store = yield* ProjectionStore.ProjectionStoreV2;
@@ -65,6 +67,7 @@ it.effect.each([false, true])(
       const now = yield* DateTime.now;
       const rootId = ThreadId.make("choices:root");
       const appId = ThreadId.make("choices:app");
+      const interactiveId = ThreadId.make("choices:interactive");
       const nestedId = ThreadId.make("choices:nested-native");
       const nativeId = ThreadId.make("choices:native");
       const root = makeThread(rootId, now);
@@ -72,10 +75,18 @@ it.effect.each([false, true])(
         root,
         {
           ...root,
+          id: interactiveId,
+          createdBy: "agent" as const,
+          creationSource: "mcp" as const,
+          creatorThreadId: rootId,
+          creatorGrouping: "grouped" as const,
+        },
+        {
+          ...root,
           id: appId,
           lineage: {
             ...root.lineage,
-            parentThreadId: rootId,
+            parentThreadId: interactiveId,
             relationshipToParent: "subagent" as const,
           },
         },
@@ -111,6 +122,21 @@ it.effect.each([false, true])(
             relationshipToParent: "fork" as const,
           },
         },
+        {
+          ...root,
+          id: ThreadId.make("choices:independent"),
+          createdBy: "agent" as const,
+          creatorThreadId: rootId,
+          creatorGrouping: "independent" as const,
+        },
+        {
+          ...root,
+          id: ThreadId.make("choices:foreign"),
+          projectId: ProjectId.make("choices:other-project"),
+          createdBy: "agent" as const,
+          creatorThreadId: rootId,
+          creatorGrouping: "grouped" as const,
+        },
       ]) {
         yield* store.apply({
           id: EventId.make(`create:${thread.id}`),
@@ -123,20 +149,38 @@ it.effect.each([false, true])(
       const result = yield* service.getThreadArchiveFamily(rootId);
       assert.deepEqual(
         result.threads.map(({ id }) => id).toSorted(),
-        [rootId, appId, nestedId, nativeId].toSorted(),
+        [rootId, interactiveId, appId, nestedId, nativeId].toSorted(),
       );
-      assert.deepEqual(result.childThreadIds, [appId, nestedId, nativeId]);
-      assert.deepEqual(result.promotableChildThreadIds, [appId]);
-      assert.deepEqual(result.keptThreadIds, [appId, nestedId]);
-      assert.deepEqual(
-        result.protectedChildThreadIds,
+      assert.sameMembers([...result.childThreadIds], [interactiveId, appId, nestedId, nativeId]);
+      assert.deepEqual(result.promotableChildThreadIds, []);
+      assert.deepEqual(result.keptThreadIds, []);
+      assert.sameMembers(
+        [...result.protectedChildThreadIds],
         protectedNative ? [nestedId, nativeId] : [nestedId],
       );
+      assert.deepEqual(result.activeThreadIds, []);
+      assert.deepEqual(result.unreadThreadIds, []);
       assert.deepEqual(result.activeChildThreadIds, []);
-      assert.equal(result.nativeStopCount, 1);
+      assert.equal(result.nativeStopCount, 2);
       assert.isTrue(result.requiresConfirmation);
-      assert.equal(result.canPromote, !protectedNative);
+      assert.isFalse(result.canPromote);
       assert.isFalse(result.canStopAndArchive);
+      const refused = yield* service
+        .dispatch({
+          type: "thread.archive",
+          commandId: CommandId.make("choices:protected-archive"),
+          threadId: rootId,
+          childDisposition: "stop_and_archive",
+          expectedChildThreadIds: result.childThreadIds,
+        })
+        .pipe(Effect.flip);
+      assert.equal(refused._tag, "OrchestratorDispatchError");
+      assert.include(String(refused.cause), "protected conversation");
+      for (const { id } of result.threads) {
+        const thread = yield* store.getThread(id);
+        assert.isNull(thread.archivedAt);
+        assert.isNull(thread.archivePending ?? null);
+      }
     }).pipe(Effect.provide(testLayer)),
 );
 
@@ -150,6 +194,9 @@ it.effect.each([
   "running-action",
   "finished-action",
   "owner-attention",
+  "unknown-running",
+  "queued-work",
+  "owner-work",
 ] as const)("decides consent from durable %s state without an active provider", (state) =>
   Effect.gen(function* () {
     const store = yield* ProjectionStore.ProjectionStoreV2;
@@ -205,14 +252,54 @@ it.effect.each([
         occurredAt: now,
         payload: thread,
       });
+    if (["unknown-running", "queued-work", "owner-work"].includes(state)) {
+      const threadId = state === "owner-work" ? rootId : childId;
+      const runId = RunId.make(`consent:${state}:run`);
+      yield* store.apply({
+        id: EventId.make(`consent:${state}:run`),
+        type: "run.updated",
+        threadId,
+        runId,
+        occurredAt: now,
+        payload: {
+          id: runId,
+          threadId,
+          ordinal: 1,
+          providerInstanceId: instanceId,
+          modelSelection: root.modelSelection,
+          providerThreadId: null,
+          userMessageId: MessageId.make(`consent:${state}:input`),
+          rootNodeId: null,
+          activeAttemptId: state === "queued-work" ? null : RunAttemptId.make("unknown-attempt"),
+          status: state === "queued-work" ? "queued" : "running",
+          requestedAt: now,
+          startedAt: state === "queued-work" ? null : now,
+          completedAt: null,
+          checkpointId: null,
+          contextHandoffId: null,
+        },
+      });
+    }
     const result = yield* service.getThreadArchiveFamily(rootId);
-    const needsConsent = !["none", "recovered", "finished-action"].includes(state);
+    const needsConsent = [
+      "running-action",
+      "unknown-running",
+      "queued-work",
+      "owner-work",
+    ].includes(state);
     assert.equal(result.requiresConfirmation, needsConsent);
     assert.deepEqual(
-      result.activeChildThreadIds,
-      needsConsent && state !== "owner-attention" ? [childId] : [],
+      result.activeThreadIds,
+      needsConsent ? [state === "owner-work" ? rootId : childId] : [],
     );
-    assert.isTrue(result.canPromote);
+    assert.deepEqual(result.unreadThreadIds, []);
+    assert.deepEqual(
+      result.activeChildThreadIds,
+      needsConsent && state !== "owner-work" ? [childId] : [],
+    );
+    assert.isFalse(result.canPromote);
+    assert.deepEqual(result.promotableChildThreadIds, []);
+    assert.deepEqual(result.keptThreadIds, []);
     assert.isTrue(result.canStopAndArchive);
   }).pipe(Effect.provide(testLayer)),
 );
@@ -272,10 +359,12 @@ it.effect.each(["archived", "deleted"] as const)(
       const family = yield* threads.getThreadArchiveFamily(rootId);
       assert.deepEqual(family.threads.map(({ id }) => id).toSorted(), [rootId, childId].toSorted());
       assert.deepEqual(family.childThreadIds, [childId]);
-      assert.deepEqual(family.activeChildThreadIds, [childId]);
+      assert.deepEqual(family.activeThreadIds, []);
+      assert.deepEqual(family.activeChildThreadIds, []);
+      assert.deepEqual(family.unreadThreadIds, []);
       assert.deepEqual(family.promotableChildThreadIds, []);
       assert.deepEqual(family.keptThreadIds, []);
-      assert.isTrue(family.requiresConfirmation);
+      assert.isFalse(family.requiresConfirmation);
       assert.isFalse(family.canPromote);
       assert.isTrue(family.canStopAndArchive);
       assert.equal(family.threads.find(({ id }) => id === childId)?.attention?.kind, "question");
@@ -285,5 +374,81 @@ it.effect.each(["archived", "deleted"] as const)(
           yield* Effect.exit(threads.getThreadArchiveFamily(ThreadId.make("missing"))),
         ),
       );
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect.each([
+  { target: "owner", visit: "never" },
+  { target: "owner", visit: "before" },
+  { target: "owner", visit: "after" },
+  { target: "child", visit: "never" },
+  { target: "child", visit: "before" },
+  { target: "child", visit: "after" },
+] as const)(
+  "uses the latest reply and visit for $target unread state (visit=$visit)",
+  ({ target, visit }) =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const service = yield* ThreadManagementService.ThreadManagementService;
+      const repliedAt = DateTime.makeUnsafe("2026-10-01T10:00:00Z");
+      const metadataAt = DateTime.makeUnsafe("2026-10-01T12:00:00Z");
+      const visitedAt =
+        visit === "never"
+          ? null
+          : DateTime.makeUnsafe(
+              visit === "before" ? "2026-10-01T09:00:00Z" : "2026-10-01T11:00:00Z",
+            );
+      const rootId = ThreadId.make("reply-query:owner");
+      const childId = ThreadId.make("reply-query:child");
+      const replyThreadId = target === "owner" ? rootId : childId;
+      const root = makeThread(rootId, repliedAt);
+      for (const thread of [
+        root,
+        {
+          ...root,
+          id: childId,
+          createdBy: "agent" as const,
+          creationSource: "mcp" as const,
+          creatorThreadId: rootId,
+          creatorGrouping: "grouped" as const,
+        },
+      ])
+        yield* store.apply({
+          id: EventId.make(`reply-query:create:${thread.id}`),
+          type: "thread.created",
+          threadId: thread.id,
+          occurredAt: repliedAt,
+          payload: {
+            ...thread,
+            updatedAt: metadataAt,
+            ...(thread.id === replyThreadId ? { lastVisitedAt: visitedAt } : {}),
+          },
+        });
+      yield* store.apply({
+        id: EventId.make("reply-query:response"),
+        type: "message.updated",
+        threadId: replyThreadId,
+        occurredAt: repliedAt,
+        payload: {
+          id: MessageId.make("reply-query:response"),
+          threadId: replyThreadId,
+          runId: null,
+          nodeId: null,
+          role: "assistant",
+          text: "Finished response",
+          attachments: [],
+          streaming: false,
+          createdBy: "agent",
+          creationSource: "provider",
+          createdAt: repliedAt,
+          updatedAt: repliedAt,
+        },
+      });
+      const result = yield* service.getThreadArchiveFamily(rootId);
+      assert.deepEqual(result.childThreadIds, [childId]);
+      assert.deepEqual(result.activeThreadIds, []);
+      assert.deepEqual(result.unreadThreadIds, visit === "after" ? [] : [replyThreadId]);
+      assert.equal(result.requiresConfirmation, visit !== "after");
+      assert.isTrue(result.canStopAndArchive);
     }).pipe(Effect.provide(testLayer)),
 );

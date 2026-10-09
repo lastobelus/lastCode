@@ -1,6 +1,6 @@
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import { buildThreadArchiveConfirmation } from "@t3tools/client-runtime/state/thread-archive";
-import type { AsyncResult, Atom } from "effect/reactivity";
+import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import type { threadEnvironment } from "../../state/threads";
 
 /** Restore a cascaded archive through its owner; provenance alone does not imply a shared archive. */
@@ -23,8 +23,9 @@ export function threadUnarchiveTargetId(
 }
 
 type ArchiveFamilyResult =
-  ReturnType<typeof threadEnvironment.archiveFamilyAtom> extends Atom.Atom<
-    AsyncResult.AsyncResult<infer Value, infer _Error>
+  Awaited<ReturnType<typeof threadEnvironment.loadArchiveFamily.run>> extends AtomCommandResult<
+    infer Value,
+    infer _Error
   >
     ? Value
     : never;

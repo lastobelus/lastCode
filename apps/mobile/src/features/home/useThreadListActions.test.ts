@@ -101,29 +101,31 @@ vi.mock("../../state/atom-registry", () => ({
   },
 }));
 vi.mock("../../state/use-atom-command", () => ({
-  useAtomCommand: (command: unknown) => command,
-}));
-vi.mock("../../state/use-atom-query-runner", () => ({
-  useAtomQueryRunner:
-    () => async (request: { environmentId: string; input: { threadId: string } }) => {
-      state.archiveFamilyReads.push(request);
-      return state.archiveFamilyError === undefined
-        ? AsyncResult.success(
-            state.archiveFamily ??
-              makeArchiveDecision([
-                state.shells.find(
-                  (thread) =>
-                    thread.id === request.input.threadId &&
-                    thread.environmentId === request.environmentId,
-                ) ??
-                  makeThread({
-                    id: ThreadId.make(request.input.threadId),
-                    environmentId: EnvironmentId.make(request.environmentId),
-                  }),
-              ]),
-          )
-        : AsyncResult.failure(Cause.fail(state.archiveFamilyError));
-    },
+  useAtomCommand: (command: unknown) =>
+    command === "archive-family"
+      ? async (request: { environmentId: string; input: { threadId: string } }) => {
+          state.archiveFamilyReads.push(request);
+          if (!state.scopes.get(request.environmentId)?.has(AuthOrchestrationOperateScope)) {
+            return AsyncResult.failure(Cause.fail(new Error("Thread operation denied")));
+          }
+          return state.archiveFamilyError === undefined
+            ? AsyncResult.success(
+                state.archiveFamily ??
+                  makeArchiveDecision([
+                    state.shells.find(
+                      (thread) =>
+                        thread.id === request.input.threadId &&
+                        thread.environmentId === request.environmentId,
+                    ) ??
+                      makeThread({
+                        id: ThreadId.make(request.input.threadId),
+                        environmentId: EnvironmentId.make(request.environmentId),
+                      }),
+                  ]),
+              )
+            : AsyncResult.failure(Cause.fail(state.archiveFamilyError));
+        }
+      : command,
 }));
 // Stubbed at the direct dependency: the real outbox pulls the Expo file-system
 // storage into a test that only reads which threads are queued.
@@ -147,36 +149,39 @@ vi.mock("../../state/thread-order", () => ({
 }));
 vi.mock("../../state/threads", () => ({
   environmentThreadShells: { threadShellsAtom: "thread-shells" },
-  threadEnvironment: Object.fromEntries(
-    [
-      "archive",
-      "unarchive",
-      "delete",
-      "settle",
-      "unsettle",
-      "snooze",
-      "unsnooze",
-      "pin",
-      "unpin",
-      "reorderPin",
-      "updateMetadata",
-    ].map((action) => [
-      action,
-      async (request: {
-        environmentId: string;
-        input: { threadId: string; orderKey?: string };
-      }) => {
-        state.requests.push({ action, ...request });
-        if (!state.scopes.get(request.environmentId)?.has(AuthOrchestrationOperateScope)) {
-          return AsyncResult.failure(Cause.fail(new Error("Thread operation denied")));
-        }
-        state.afterRequest?.();
-        if (action === "archive" && state.archiveMutationError)
-          return AsyncResult.failure(Cause.fail(state.archiveMutationError));
-        return AsyncResult.success(undefined);
-      },
-    ]),
-  ),
+  threadEnvironment: {
+    loadArchiveFamily: "archive-family",
+    ...Object.fromEntries(
+      [
+        "archive",
+        "unarchive",
+        "delete",
+        "settle",
+        "unsettle",
+        "snooze",
+        "unsnooze",
+        "pin",
+        "unpin",
+        "reorderPin",
+        "updateMetadata",
+      ].map((action) => [
+        action,
+        async (request: {
+          environmentId: string;
+          input: { threadId: string; orderKey?: string };
+        }) => {
+          state.requests.push({ action, ...request });
+          if (!state.scopes.get(request.environmentId)?.has(AuthOrchestrationOperateScope)) {
+            return AsyncResult.failure(Cause.fail(new Error("Thread operation denied")));
+          }
+          state.afterRequest?.();
+          if (action === "archive" && state.archiveMutationError)
+            return AsyncResult.failure(Cause.fail(state.archiveMutationError));
+          return AsyncResult.success(undefined);
+        },
+      ]),
+    ),
+  },
 }));
 
 import { useArchivedThreadListActions, useThreadListActions } from "./useThreadListActions";

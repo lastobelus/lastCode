@@ -26,7 +26,7 @@ const familyState = vi.hoisted(() => ({
 }));
 const newThread = vi.hoisted(() => vi.fn());
 const archiveDialog = vi.hoisted(() => vi.fn());
-const archiveFamilyQuery = vi.hoisted(() => vi.fn());
+const archiveFamilyLoad = vi.hoisted(() => vi.fn());
 vi.mock("../components/ThreadArchiveDialog", () => ({ requestThreadArchiveDialog: archiveDialog }));
 
 const commands = vi.hoisted(() => ({
@@ -44,15 +44,7 @@ const router = vi.hoisted(() => ({
   state: { matches: [{ params: {} as Record<string, string> }] },
 }));
 vi.mock("../state/use-atom-query-runner", () => ({
-  useAtomQueryRunner: (family: unknown) =>
-    family === threadEnvironment.archiveFamilyAtom
-      ? async (target: { environmentId: EnvironmentId; input: { threadId: ThreadId } }) => {
-          const result = await archiveFamilyQuery(target);
-          return result._tag === "Success" && Array.isArray(result.value)
-            ? { ...result, value: archiveDecisionFixture(result.value, target) }
-            : result;
-        }
-      : vi.fn(),
+  useAtomQueryRunner: () => vi.fn(),
 }));
 vi.mock("../state/session", async (original) => ({
   ...(await original<typeof import("../state/session")>()),
@@ -99,6 +91,13 @@ vi.mock("../state/entities", async (original) => ({
 vi.mock("../state/use-atom-command", () => ({
   useAtomCommand: (command: unknown) => {
     switch (command) {
+      case threadEnvironment.loadArchiveFamily:
+        return async (target: { environmentId: EnvironmentId; input: { threadId: ThreadId } }) => {
+          const result = await archiveFamilyLoad(target);
+          return result._tag === "Success" && Array.isArray(result.value)
+            ? { ...result, value: archiveDecisionFixture(result.value, target) }
+            : result;
+        };
       case threadEnvironment.pin:
         return commands.pin;
       case threadEnvironment.unpin:
@@ -121,7 +120,7 @@ vi.mock("../state/use-atom-command", () => ({
   },
 }));
 
-// Simulated server decisions for fixtures; the hook receives the authoritative query object.
+// Simulated server decisions for fixtures; the hook receives the authoritative command result.
 function archiveDecisionFixture(
   threads: ReturnType<typeof makeThreadFixture>[],
   target: { environmentId: EnvironmentId; input: { threadId: ThreadId } },
@@ -192,7 +191,7 @@ beforeEach(() => {
   familyState.unsupportedEnvironments.clear();
   newThread.mockReset().mockResolvedValue(undefined);
   archiveDialog.mockReset();
-  archiveFamilyQuery.mockReset().mockImplementation(async ({ environmentId, input }) => ({
+  archiveFamilyLoad.mockReset().mockImplementation(async ({ environmentId, input }) => ({
     _tag: "Success",
     value: [
       familyState.threads.find(
@@ -314,7 +313,7 @@ describe("archive support under server version skew", () => {
       expect(Cause.squash(failure.cause)).toMatchObject({
         message: THREAD_ARCHIVE_UPDATE_REQUIRED_MESSAGE,
       });
-      expect(archiveFamilyQuery).not.toHaveBeenCalled();
+      expect(archiveFamilyLoad).not.toHaveBeenCalled();
       expect(commands.archive).not.toHaveBeenCalled();
       expect(archiveDialog).not.toHaveBeenCalled();
     },
@@ -328,7 +327,7 @@ describe("archive support under server version skew", () => {
       { threadRef: other, threadKey: "older-environment:thread" },
     ]);
     expect(outcome?.mutationFailure?._tag).toBe("Failure");
-    expect(archiveFamilyQuery).not.toHaveBeenCalled();
+    expect(archiveFamilyLoad).not.toHaveBeenCalled();
     expect(commands.archive).not.toHaveBeenCalled();
   });
 });
@@ -398,7 +397,7 @@ describe("stranded archive retry navigation", () => {
             }),
           ]
         : [];
-      archiveFamilyQuery.mockResolvedValue({ _tag: "Success", value: [owner, ...branch, child] });
+      archiveFamilyLoad.mockResolvedValue({ _tag: "Success", value: [owner, ...branch, child] });
       router.state.matches[0]!.params = {
         environmentId: target.environmentId,
         threadId: route === "child" ? childId : ownerId,
@@ -450,7 +449,7 @@ describe("stranded archive retry navigation", () => {
         },
       });
       familyState.threads = [owner, child];
-      archiveFamilyQuery.mockImplementation(async () => {
+      archiveFamilyLoad.mockImplementation(async () => {
         // Another client dismisses after the local retry target is captured.
         familyState.threads = [owner, child].map((thread) => ({ ...thread, archivePending: null }));
         return { _tag: "Success", value: familyState.threads };
@@ -529,7 +528,7 @@ describe("archive family confirmation", () => {
       const owner = { ...workingRoot(), title: "Authoritative title" };
       const child = childOf(owner);
       familyState.threads = [{ ...owner, runtime: null, title: "Stale title" }];
-      archiveFamilyQuery.mockResolvedValue({ _tag: "Success", value: [owner, child] });
+      archiveFamilyLoad.mockResolvedValue({ _tag: "Success", value: [owner, child] });
       archiveDialog.mockImplementation(async (request) => {
         if (!bulk) expect(request.title).toContain(owner.title);
         expect(
@@ -544,7 +543,7 @@ describe("archive family confirmation", () => {
         return "stop_and_archive";
       });
       await archive(bulk);
-      expect(archiveFamilyQuery).toHaveBeenCalledOnce();
+      expect(archiveFamilyLoad).toHaveBeenCalledOnce();
       expect(archiveDialog).toHaveBeenCalledOnce();
       expect(commands.archive).toHaveBeenCalledExactlyOnceWith({
         environmentId: target.environmentId,
@@ -562,7 +561,7 @@ describe("archive family confirmation", () => {
     async (bulk) => {
       const owner = makeThreadFixture({ id: target.threadId, environmentId: target.environmentId });
       const child = { ...childOf(owner), hasPendingUserInput: true };
-      archiveFamilyQuery.mockResolvedValue({
+      archiveFamilyLoad.mockResolvedValue({
         _tag: "Success",
         value: {
           ...archiveDecisionFixture([owner, child], {
@@ -593,7 +592,7 @@ describe("archive family confirmation", () => {
     const owner = makeThreadFixture({ id: target.threadId, environmentId: target.environmentId });
     const child = childOf(owner);
     familyState.threads = [owner, child];
-    archiveFamilyQuery.mockResolvedValue({
+    archiveFamilyLoad.mockResolvedValue({
       _tag: "Success",
       value: {
         ...archiveDecisionFixture([owner, child], {
@@ -631,7 +630,7 @@ describe("archive family confirmation", () => {
         },
       };
       familyState.threads = [owner];
-      archiveFamilyQuery.mockResolvedValue({
+      archiveFamilyLoad.mockResolvedValue({
         _tag: "Success",
         value: kind === "none" ? [owner] : [owner, unrelated],
       });
@@ -661,12 +660,12 @@ describe("archive family confirmation", () => {
       environmentId: target.environmentId,
     });
     familyState.threads = [{ ...owner, runtime: null }, eligible];
-    archiveFamilyQuery.mockImplementation(async ({ input }) => ({
+    archiveFamilyLoad.mockImplementation(async ({ input }) => ({
       _tag: "Success",
       value: input.threadId === owner.id ? [owner] : [eligible],
     }));
     archiveDialog.mockImplementation(async (request) => {
-      expect(archiveFamilyQuery).toHaveBeenCalledTimes(2);
+      expect(archiveFamilyLoad).toHaveBeenCalledTimes(2);
       expect(request.family.activeThreadIds).toEqual([owner.id]);
       expect(commands.archive).not.toHaveBeenCalled();
       expect(await request.submit("stop_and_archive")).toBeNull();
@@ -703,7 +702,7 @@ describe("archive family confirmation", () => {
     const outcome = await useThreadActions().archiveThreads(selected);
     expect(outcome?.mutationFailure).toBeNull();
     expect(outcome?.archivedThreadKeys).toEqual(selected.map(({ threadKey }) => threadKey));
-    expect(archiveFamilyQuery).toHaveBeenCalledTimes(2);
+    expect(archiveFamilyLoad).toHaveBeenCalledTimes(2);
     expect(archiveDialog).toHaveBeenCalledOnce();
     expect(commands.archive).toHaveBeenCalledExactlyOnceWith({
       environmentId: target.environmentId,
@@ -751,7 +750,7 @@ describe("archive family confirmation", () => {
   it("archives the authoritative idle owner despite locally running state", async () => {
     const local = workingRoot();
     familyState.threads = [local];
-    archiveFamilyQuery.mockResolvedValue({ _tag: "Success", value: [{ ...local, runtime: null }] });
+    archiveFamilyLoad.mockResolvedValue({ _tag: "Success", value: [{ ...local, runtime: null }] });
     expect((await archive(false))?._tag).toBe("Success");
     expect(archiveDialog).not.toHaveBeenCalled();
     expect(commands.archive).toHaveBeenCalledExactlyOnceWith({
@@ -772,7 +771,7 @@ describe("archive family confirmation", () => {
   ] as const)("blocks archive when the authoritative owner is %s (bulk=%s)", async (kind, bulk) => {
     const owner = makeThreadFixture({ id: target.threadId, environmentId: target.environmentId });
     familyState.threads = [owner];
-    archiveFamilyQuery.mockResolvedValue({
+    archiveFamilyLoad.mockResolvedValue({
       _tag: "Success",
       value: kind === "missing" ? [] : [{ ...owner, persistent: true }],
     });
@@ -915,7 +914,7 @@ describe("archive family confirmation", () => {
     if (result?._tag !== "Failure") throw new Error("Expected shutdown failure");
     expect(Cause.squash(result.cause)).toBe(error);
     expect(useThreadUndoNotice.getState().notice).toBeNull();
-    expect(archiveFamilyQuery).toHaveBeenCalledOnce();
+    expect(archiveFamilyLoad).toHaveBeenCalledOnce();
     expect(commands.archive).toHaveBeenCalledOnce();
   });
 
@@ -950,7 +949,7 @@ describe("archive family confirmation", () => {
     expect(commands.archive).toHaveBeenCalledOnce();
     expect((await archive(false))?._tag).toBe("Success");
     expect(archiveDialog).toHaveBeenCalledTimes(2);
-    expect(archiveFamilyQuery).toHaveBeenCalledTimes(2);
+    expect(archiveFamilyLoad).toHaveBeenCalledTimes(2);
     expect(commands.archive).toHaveBeenLastCalledWith({
       environmentId: target.environmentId,
       input: {
@@ -968,7 +967,7 @@ describe("archive family confirmation", () => {
       const inactiveOwner = { ...child, archivedAt: "2026-01-01T00:00:00.000Z" };
       const liveNested = { ...nested, hasPendingApprovals: true };
       familyState.threads = [liveNested];
-      archiveFamilyQuery.mockResolvedValue({
+      archiveFamilyLoad.mockResolvedValue({
         _tag: "Success",
         value: [owner, inactiveOwner, liveNested],
       });
@@ -992,7 +991,7 @@ describe("archive family confirmation", () => {
   );
 
   it.each([false, true])("blocks mutations when the family read fails (bulk=%s)", async (bulk) => {
-    archiveFamilyQuery.mockResolvedValue({
+    archiveFamilyLoad.mockResolvedValue({
       _tag: "Failure",
       cause: Cause.fail(new Error("Family unavailable")),
     });
@@ -1002,7 +1001,7 @@ describe("archive family confirmation", () => {
   });
 
   it("reads every bulk family before dispatching any participant", async () => {
-    archiveFamilyQuery
+    archiveFamilyLoad
       .mockResolvedValueOnce({
         _tag: "Success",
         value: [makeThreadFixture({ id: target.threadId, environmentId: target.environmentId })],
@@ -1016,7 +1015,7 @@ describe("archive family confirmation", () => {
       { threadRef: { ...target, threadId: ThreadId.make("second") }, threadKey: "undo-env:second" },
     ]);
     expect(outcome?.mutationFailure?._tag).toBe("Failure");
-    expect(archiveFamilyQuery).toHaveBeenCalledTimes(2);
+    expect(archiveFamilyLoad).toHaveBeenCalledTimes(2);
     expect(commands.archive).not.toHaveBeenCalled();
     expect(archiveDialog).not.toHaveBeenCalled();
   });
@@ -1063,7 +1062,7 @@ describe("bulk archive progress", () => {
       };
     }
     familyState.threads = [...roots, ...children];
-    archiveFamilyQuery.mockImplementation(async ({ input }) => ({
+    archiveFamilyLoad.mockImplementation(async ({ input }) => ({
       _tag: "Success",
       value: familyState.threads.filter(
         (thread) => thread.id === input.threadId || thread.lineage.rootThreadId === input.threadId,
@@ -1121,7 +1120,7 @@ describe("bulk archive progress", () => {
     });
     archiveDialog
       .mockImplementationOnce(async (request) => {
-        expect(archiveFamilyQuery).toHaveBeenCalledTimes(3);
+        expect(archiveFamilyLoad).toHaveBeenCalledTimes(3);
         expect(commands.archive).not.toHaveBeenCalled();
         expect(await request.submit("stop_and_archive")).toBe("Second family shutdown failed");
         return null;
@@ -1146,7 +1145,7 @@ describe("bulk archive progress", () => {
     });
     expect(commands.archive).toHaveBeenCalledTimes(2);
     expect(archiveDialog).toHaveBeenCalledOnce();
-    expect(archiveFamilyQuery).toHaveBeenCalledTimes(3);
+    expect(archiveFamilyLoad).toHaveBeenCalledTimes(3);
 
     const retried = await actions.archiveThreads([roots[1]!]);
     expect(retried?.archivedThreadKeys).toEqual([roots[1]!.threadKey]);
@@ -1169,7 +1168,7 @@ describe("bulk archive progress", () => {
       },
     ]);
     expect(archiveDialog).toHaveBeenCalledTimes(2);
-    expect(archiveFamilyQuery).toHaveBeenCalledTimes(4);
+    expect(archiveFamilyLoad).toHaveBeenCalledTimes(4);
   });
 
   it("leaves the open descendant after bulk archive and restores its family with Undo", async () => {
@@ -1238,7 +1237,7 @@ describe("bulk archive progress", () => {
       expect(commands.archive.mock.calls[0]![0].input.expectedArchiveCommandId).toBe(
         "failed-archive",
       );
-      expect(archiveFamilyQuery).toHaveBeenCalledTimes(2);
+      expect(archiveFamilyLoad).toHaveBeenCalledTimes(2);
     },
   );
 

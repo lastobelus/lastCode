@@ -23,7 +23,6 @@ import { readEnvironmentScope } from "../../state/session";
 import { environmentThreadShells, threadEnvironment } from "../../state/threads";
 import { queuedThreadKeysAtom } from "../../state/use-thread-outbox";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { useAtomQueryRunner } from "../../state/use-atom-query-runner";
 import {
   beginPendingThreadOrder,
   getPendingThreadOrder,
@@ -128,9 +127,8 @@ function useThreadActionExecutor(
   archivedThreads?: readonly EnvironmentThreadShell[],
 ) {
   const archiveMutation = useAtomCommand(threadEnvironment.archive, { reportFailure: false });
-  const loadArchiveFamily = useAtomQueryRunner(threadEnvironment.archiveFamilyAtom, {
+  const loadArchiveFamily = useAtomCommand(threadEnvironment.loadArchiveFamily, {
     reportFailure: false,
-    refresh: true,
   });
   const unarchiveMutation = useAtomCommand(threadEnvironment.unarchive, { reportFailure: false });
   const deleteMutation = useAtomCommand(threadEnvironment.delete, { reportFailure: false });

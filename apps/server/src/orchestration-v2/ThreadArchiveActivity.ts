@@ -22,7 +22,7 @@ export function withVerifiedArchiveActivity(
               if (run.status !== "running" || run.activeAttemptId === null) continue;
               yield* recovery
                 .verify({ threadId: id, runId: run.id, attemptId: run.activeAttemptId })
-                .pipe(Effect.ignore);
+                .pipe(Effect.catchTags({ ThreadRecoveryError: () => Effect.void }));
             }
           }),
         { concurrency: 4, discard: true },

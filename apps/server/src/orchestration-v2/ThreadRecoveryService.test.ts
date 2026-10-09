@@ -18,6 +18,8 @@ import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as Ref from "effect/Ref";
+import { DispatchModeLimit, type DispatchModeRefusal } from "./DispatchModeLimit.ts";
 import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -54,7 +56,11 @@ const released: ProviderAdapterV2TurnInspection = {
 };
 
 function harness() {
-  let thread = { id: identity.threadId } as OrchestrationV2AppThread;
+  let thread = {
+    id: identity.threadId,
+    runtimeMode: "full-access",
+    interactionMode: "default",
+  } as OrchestrationV2AppThread;
   let run = {
     id: identity.runId,
     activeAttemptId: identity.attemptId,
@@ -204,6 +210,9 @@ function harness() {
     get laterRuns() {
       return laterRuns;
     },
+    setModes(modes: Pick<OrchestrationV2AppThread, "runtimeMode" | "interactionMode">) {
+      thread = { ...thread, ...modes };
+    },
     inspect(value: ProviderAdapterV2TurnInspection) {
       inspection = value;
     },
@@ -345,6 +354,92 @@ it.effect("archive verification settles a proven terminal attempt once", () => {
     yield* service.verify(identity);
     assert.equal(test.finalizations, 1);
     assert.equal(test.run.status, "completed");
+  }).pipe(Effect.provide(test.layer));
+});
+it.effect.each(
+  [
+    {
+      mode: "runtime" as const,
+      allowed: { runtimeMode: "approval-required" as const, interactionMode: "default" as const },
+    },
+    {
+      mode: "interaction" as const,
+      allowed: { runtimeMode: "full-access" as const, interactionMode: "plan" as const },
+    },
+  ].flatMap((limit) =>
+    ["before-inspection", "during-inspection", "after-recovering"].flatMap((timing) =>
+      [terminal, released].map((inspection) => ({
+        ...limit,
+        timing,
+        inspection,
+        evidence: inspection.status,
+      })),
+    ),
+  ),
+)("archive verification respects the $mode ceiling $timing for $evidence evidence", (scenario) => {
+  const test = harness();
+  test.setModes(scenario.allowed);
+  test.inspect(scenario.inspection);
+  const higherModes = { runtimeMode: "full-access" as const, interactionMode: "default" as const };
+  const raiseModes = Effect.sync(() => test.setModes(higherModes));
+  if (scenario.timing === "before-inspection") test.setModes(higherModes);
+  if (scenario.timing === "during-inspection") test.beforeInspect(raiseModes);
+  if (scenario.timing === "after-recovering") test.afterRecovering(raiseModes);
+  return Effect.gen(function* () {
+    const service = yield* test.register;
+    const refused = yield* Ref.make<DispatchModeRefusal | undefined>(undefined);
+    const savedRun = test.run;
+    const savedTurn = test.providerTurn;
+    const refusal = yield* service
+      .verify(identity)
+      .pipe(
+        Effect.provideService(DispatchModeLimit, { ...scenario.allowed, refused }),
+        Effect.flip,
+      );
+    assert.equal(refusal._tag, "ThreadRecoveryAboveModeLimitError");
+    assert.deepEqual(yield* Ref.get(refused), {
+      threadId: identity.threadId,
+      mode: scenario.mode,
+      ...higherModes,
+    });
+    assert.equal(test.finalizations, 0);
+    assert.deepEqual(test.run, savedRun);
+    assert.deepEqual(test.providerTurn, savedTurn);
+    assert.deepEqual(test.statuses, scenario.timing === "after-recovering" ? ["recovering"] : []);
+    // The same registration remains available to an authorized retry. A denied
+    // verification must not queue a failure that replaces terminal evidence.
+    test.beforeInspect(Effect.void);
+    test.afterRecovering(Effect.void);
+    yield* service.verify(identity);
+    assert.equal(test.finalizations, 1);
+    assert.equal(test.run.status, scenario.evidence === "released" ? "cancelled" : "completed");
+    assert.equal(test.thread.recovery?.status, "recovered");
+    assert.equal(test.finalRuntimeReleased, scenario.evidence === "released");
+  }).pipe(Effect.provide(test.layer));
+});
+it.effect("manual recovery does not turn a mode refusal into a pending provider failure", () => {
+  const test = harness();
+  test.inspect(terminal);
+  const allowed = {
+    runtimeMode: "approval-required" as const,
+    interactionMode: "default" as const,
+  };
+  test.setModes(allowed);
+  test.afterRecovering(
+    Effect.sync(() => test.setModes({ runtimeMode: "full-access", interactionMode: "default" })),
+  );
+  return Effect.gen(function* () {
+    const service = yield* test.register;
+    const refusal = yield* service
+      .recover(identity)
+      .pipe(Effect.provideService(DispatchModeLimit, allowed), Effect.flip);
+    assert.equal(refusal._tag, "ThreadRecoveryAboveModeLimitError");
+    assert.equal(test.finalizations, 0);
+    assert.deepEqual(test.statuses, ["recovering"]);
+    test.afterRecovering(Effect.void);
+    yield* service.recover(identity);
+    assert.equal(test.finalizations, 1);
+    assert.deepEqual(test.statuses, ["recovering", "recovering", "recovered"]);
   }).pipe(Effect.provide(test.layer));
 });
 it.effect("failed archive inspection does not write a recovery failure", () => {

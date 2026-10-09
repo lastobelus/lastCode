@@ -20,7 +20,7 @@ import {
   createAtomCommandScheduler,
   createEnvironmentCommand,
   createEnvironmentRpcCommand,
-  createEnvironmentQueryAtomFamily,
+  mapAtomCommandResult,
 } from "./runtime.ts";
 import {
   type ThreadCommandInput,
@@ -531,17 +531,21 @@ export function createThreadEnvironmentAtoms<R, E>(
       concurrency,
     }),
   };
+  // Inspection may reconcile provider-proven stale activity, so use the write guard.
+  const archiveFamily = createEnvironmentRpcCommand(runtime, {
+    label: "environment-data:commands:thread:archive-family",
+    tag: ORCHESTRATION_V2_WS_METHODS.getThreadArchiveFamily,
+    scheduler,
+    concurrency,
+  });
   const optimistic = createOptimisticThreadLifecycle(snapshotAtom);
   return {
-    archiveFamilyAtom: createEnvironmentQueryAtomFamily(runtime, {
-      label: "environment-data:queries:thread:archive-family",
-      staleTimeMs: 0,
-      execute: (input: { readonly threadId: ThreadId }) =>
-        Effect.gen(function* () {
-          const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
-          const family = yield* request(ORCHESTRATION_V2_WS_METHODS.getThreadArchiveFamily, input);
+    loadArchiveFamily: {
+      ...archiveFamily,
+      run: async (...[registry, target]: Parameters<typeof archiveFamily.run>) =>
+        mapAtomCommandResult(await archiveFamily.run(registry, target), (family) => {
           const threads = family.threads.map((shell) =>
-            presentThreadShell(supervisor.target.environmentId, shell),
+            presentThreadShell(target.environmentId, shell),
           );
           const byId = new Map(threads.map((thread) => [thread.id, thread]));
           const select = (ids: readonly ThreadId[]) =>
@@ -560,7 +564,7 @@ export function createThreadEnvironmentAtoms<R, E>(
             protectedChildren: select(family.protectedChildThreadIds),
           };
         }),
-    }),
+    },
     ...commands,
     snapshotAtom: optimistic.snapshotAtom,
     settle: optimistic.wrap(commands.settle, (thread, _input, now, accepted) =>
