@@ -111,6 +111,7 @@ const agentReady: DeviceService.DeviceAgentReadiness = {
 const layerDeviceServiceMock = Layer.mock(DeviceService.DeviceService)({
   state: Effect.succeed(state),
   list: Effect.succeed(state),
+  completeOpen: () => Effect.void,
   open: (input) =>
     Effect.succeed({
       threadId: input.threadId,
@@ -296,6 +297,7 @@ it.effect.each([
         }),
       agentCli: Effect.succeed("/cli"),
       abortOpen: () => Effect.die("A successful open must retain its session"),
+      completeOpen: () => Effect.void,
     });
     return Effect.gen(function* () {
       const server = yield* McpServer.McpServer;
@@ -450,6 +452,7 @@ it.effect.each([
             };
           }),
         agentCli: Effect.succeed("/cli"),
+        completeOpen: () => Effect.void,
         sessionsForThread: () =>
           Effect.sync(() => {
             operations.push("device sessions");

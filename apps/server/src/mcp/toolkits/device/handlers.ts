@@ -172,12 +172,15 @@ const handlers = {
       }
       // Installing or starting agent tools can outlive the caller's consent.
       yield* requireDeviceAccess;
-      const session = yield* devices.open({
-        threadId: scope.thread.threadId,
-        hostId: target.hostId,
-        deviceId: target.id,
-        platform: target.platform,
-      });
+      const session = yield* devices.open(
+        {
+          threadId: scope.thread.threadId,
+          hostId: target.hostId,
+          deviceId: target.id,
+          platform: target.platform,
+        },
+        { rollbackOnFailure: true },
+      );
       return yield* Effect.gen(function* () {
         // Android boot resolves an AVD name to the serial used by subsequent CLI commands.
         const agentArgs = yield* devices.agentTarget({
@@ -232,7 +235,7 @@ const handlers = {
                   }),
                 ),
               )
-            : Effect.void,
+            : devices.completeOpen(session),
         ),
       );
     }).pipe(Effect.mapError(toolError)),
