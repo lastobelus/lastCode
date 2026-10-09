@@ -104,7 +104,11 @@ import { CommandReceiptStoreV2 } from "./CommandReceiptStore.ts";
 import { ContextHandoffServiceV2 } from "./ContextHandoffService.ts";
 import { notificationTurnItem } from "./Notification.ts";
 import { isRestartNoteSource } from "./RestartBackgroundNote.ts";
-import { isAutomaticWakeMessage, isUndeliveredMailboxSteer } from "./NotificationMailbox.ts";
+import {
+  isAutomaticWakeMessage,
+  isEnvironmentPauseMessageId,
+  isUndeliveredMailboxSteer,
+} from "./NotificationMailbox.ts";
 import * as EnvironmentPauseStore from "../environment/EnvironmentPauseStore.ts";
 import { EventSinkV2 } from "./EventSink.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
@@ -1276,7 +1280,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ["runs", "nodes", "attempts", "providerThreads", "turnItems", "messages"],
         { turnItemTypes: [], messageRoles: ["user"] },
       );
-      const queuedRun = yield* nextDeliverableQueuedRun(projection);
+      const queuedRun =
+        queuedRunsInDeliveryOrder(projection).find((run) =>
+          isEnvironmentPauseMessageId(run.userMessageId),
+        ) ?? (yield* nextDeliverableQueuedRun(projection));
       if (queuedRun === undefined) return;
       const now = yield* DateTime.now;
       const rootNode = projection.nodes.find((node) => node.id === queuedRun.rootNodeId);
@@ -1383,11 +1390,21 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (
         projection.thread.archivedAt !== null ||
         projection.thread.deletedAt !== null ||
-        projection.runs.some(isBlockingRun) ||
-        projection.runs.some((run) => run.status === "queued" && run.queueHeld === true)
+        projection.runs.some(isBlockingRun)
       ) {
         return;
       }
+
+      // Pause/Resume must reach the provider without releasing the user's held
+      // queue. Select the control first and leave ordinary queue consent intact.
+      const controlRun = queuedRunsInDeliveryOrder(projection).find((run) =>
+        isEnvironmentPauseMessageId(run.userMessageId),
+      );
+      if (
+        controlRun === undefined &&
+        projection.runs.some((run) => run.status === "queued" && run.queueHeld === true)
+      )
+        return;
 
       // The limit already stopped this thread. Starting the queue would send
       // every waiting message and drop it from the queue as each one fails.
@@ -1400,7 +1417,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           )[0]?.lastError ?? null;
       const blockedRun = usageLimitBlockedRun(projection.runs, projection.turnItems, sessionError);
       let limitRecoveryMessageId: string | null = null;
-      if (blockedRun !== null) {
+      if (blockedRun !== null && controlRun === undefined) {
         const failure = latestRootProviderFailure(blockedRun, projection.turnItems);
         const recovery = projection.thread.limitRecovery;
         const now = yield* DateTime.now;
@@ -1421,10 +1438,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         // Only its original identity may pass the quota guard ahead of the queue.
         limitRecoveryMessageId = `limit-resume:${threadId}:${blockedRun.id}:${Date.parse(recovery.resetAt)}:${recovery.requestId ?? "legacy"}`;
       }
-      const queuedRun = yield* nextDeliverableQueuedRun(
-        projection,
-        (run) => limitRecoveryMessageId === null || run.userMessageId === limitRecoveryMessageId,
-      );
+      const queuedRun =
+        controlRun ??
+        (yield* nextDeliverableQueuedRun(
+          projection,
+          (run) => limitRecoveryMessageId === null || run.userMessageId === limitRecoveryMessageId,
+        ));
       if (queuedRun === undefined) {
         return;
       }
@@ -1440,6 +1459,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (
         failureClass !== undefined &&
         failureClass !== "validation_error" &&
+        controlRun === undefined &&
         limitRecoveryMessageId === null &&
         failedRun?.providerInstanceId === queuedRun.providerInstanceId
       ) {
@@ -5915,7 +5935,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           rootNodeId,
           activeAttemptId: attemptId,
           status: "queued",
-          ...(projection.runs.some(
+          ...(!isEnvironmentPauseMessageId(command.messageId) &&
+          projection.runs.some(
             (candidate) => candidate.status === "queued" && candidate.queueHeld === true,
           )
             ? { queueHeld: true }

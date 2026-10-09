@@ -6,6 +6,12 @@ import {
   type RunId,
 } from "@t3tools/contracts";
 
+export const ENVIRONMENT_PAUSE_MESSAGE_PREFIX = "environment-pause:";
+
+export function isEnvironmentPauseMessageId(messageId: MessageId): boolean {
+  return messageId.startsWith(ENVIRONMENT_PAUSE_MESSAGE_PREFIX);
+}
+
 /** Explicit environment fanout is allowed while automatic follow-ups wait. */
 export function isAutomaticWakeMessage(
   message: Pick<
@@ -22,7 +28,7 @@ export function isAutomaticWakeMessage(
   },
 ): boolean {
   return (
-    !message.id.startsWith("environment-pause:") &&
+    !isEnvironmentPauseMessageId(message.id) &&
     (message.notification !== undefined ||
       message.delegatedCompletion !== undefined ||
       message.scheduledTaskId !== undefined ||
