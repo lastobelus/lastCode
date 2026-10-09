@@ -67,9 +67,7 @@ export function EnvironmentPauseControl({ onBackdrop }: { onBackdrop: boolean })
     }) ??
     choices.find((environment) => environment.environmentId === primaryEnvironmentId) ??
     choices[0];
-  useEffect(() => {
-    if (!selected) setOpen(false);
-  }, [selected]);
+  if (open && !selected) setOpen(false);
   if (!selected) return null;
   const hasSession = choices.some((environment) => {
     const status = statuses.get(environment.environmentId);

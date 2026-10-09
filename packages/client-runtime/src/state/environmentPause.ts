@@ -22,6 +22,9 @@ export function createEnvironmentPauseAtoms<R, E>(
     source.pipe(Atom.withRefresh(15_000), Atom.setIdleTTL(0)),
   );
   const monitorStatus = (target: Parameters<typeof status>[0]) => monitorFamily(status(target));
+  const changingFamily = Atom.family((source: ReturnType<typeof status>) =>
+    source.pipe(Atom.withRefresh(1_000), Atom.setIdleTTL(0)),
+  );
   const activeFamily = Atom.family((source: ReturnType<typeof status>) =>
     Atom.transform(
       source,
@@ -30,9 +33,7 @@ export function createEnvironmentPauseAtoms<R, E>(
         const value = Option.getOrNull(AsyncResult.value(result));
         const changing =
           value?.session != null && (value.session.phase === "resuming" || !value.quiet);
-        const timer = setTimeout(() => get.refresh(source), changing ? 1_000 : 15_000);
-        get.addFinalizer(() => clearTimeout(timer));
-        return result;
+        return get(changing ? changingFamily(source) : monitorFamily(source));
       },
       { initialValueTarget: source },
     ).pipe(Atom.setIdleTTL(0)),
