@@ -96,7 +96,26 @@ const layer = (
   hostname: string,
   beforeWrite: (content: string) => Effect.Effect<void> = () => Effect.void,
   http = HttpClient.make((request) =>
-    Effect.succeed(HttpClientResponse.fromWeb(request, new Response("ok"))),
+    Effect.succeed(
+      HttpClientResponse.fromWeb(
+        request,
+        Response.json(
+          new URL(request.url).pathname === "/api/devices"
+            ? {
+                emulators: ["device-1", "device-2"].map((id) => ({
+                  id,
+                  name: id,
+                  platform: "android",
+                  version: "26",
+                  physical: false,
+                  booted: true,
+                })),
+                simulators: [],
+              }
+            : { ok: true },
+        ),
+      ),
+    ),
   ),
 ) =>
   Layer.effect(
@@ -134,9 +153,12 @@ it.effect.each(["127.0.0.1", "::1"])(
       const server = yield* HttpServer.HttpServer;
       const fs = yield* FileSystem.FileSystem;
       const args = yield* devices.agentTarget({
-        threadId: ThreadId.make("thread-1"),
-        hostId: "local",
-        deviceId: DeviceId.make("device-1"),
+        openedSession: yield* devices.open({
+          threadId: ThreadId.make("thread-1"),
+          hostId: "local",
+          deviceId: DeviceId.make("device-1"),
+          platform: "android",
+        }),
         agentAccessEnabled: true,
       });
       const config = decodeConfig(yield* fs.readFileString(args[1]!));
@@ -155,15 +177,21 @@ it.effect.each(["127.0.0.1", "::1"])(
         session: args[3],
       });
       const otherThread = yield* devices.agentTarget({
-        threadId: ThreadId.make("thread-2"),
-        hostId: "local",
-        deviceId: DeviceId.make("device-1"),
+        openedSession: yield* devices.open({
+          threadId: ThreadId.make("thread-2"),
+          hostId: "local",
+          deviceId: DeviceId.make("device-1"),
+          platform: "android",
+        }),
         agentAccessEnabled: true,
       });
       const otherDevice = yield* devices.agentTarget({
-        threadId: ThreadId.make("thread-1"),
-        hostId: "local",
-        deviceId: DeviceId.make("device-2"),
+        openedSession: yield* devices.open({
+          threadId: ThreadId.make("thread-1"),
+          hostId: "local",
+          deviceId: DeviceId.make("device-2"),
+          platform: "android",
+        }),
         agentAccessEnabled: true,
       });
       expect(new Set([args[1], otherThread[1], otherDevice[1]]).size).toBe(3);
@@ -189,13 +217,14 @@ it.effect("thread deletion waits for an issued config write before removing it",
       const access = yield* DeviceAgentAccess.DeviceAgentAccess;
       const fs = yield* FileSystem.FileSystem;
       const threadId = ThreadId.make("thread-1");
+      const openedSession = yield* devices.open({
+        threadId,
+        hostId: "local",
+        deviceId: DeviceId.make("device-1"),
+        platform: "android",
+      });
       const writer = yield* devices
-        .agentTarget({
-          threadId,
-          hostId: "local",
-          deviceId: DeviceId.make("device-1"),
-          agentAccessEnabled: true,
-        })
+        .agentTarget({ openedSession, agentAccessEnabled: true })
         .pipe(Effect.forkChild);
       yield* Deferred.await(writing);
       let cleaned = false;
@@ -214,9 +243,7 @@ it.effect("thread deletion waits for an issued config write before removing it",
       expect(yield* fs.exists(args[1]!)).toBe(false);
       expect((yield* Effect.exit(access.authorize(issuedToken)))._tag).toBe("Failure");
       const fresh = yield* devices.agentTarget({
-        threadId,
-        hostId: "local",
-        deviceId: DeviceId.make("device-1"),
+        openedSession,
         agentAccessEnabled: true,
       });
       const config = decodeConfig(yield* fs.readFileString(fresh[1]!));
@@ -277,9 +304,9 @@ it.effect.each([
         const access = yield* DeviceAgentAccess.DeviceAgentAccess;
         const fs = yield* FileSystem.FileSystem;
         const input = { threadId, hostId: "local" as const, deviceId, platform };
-        yield* devices.open(input);
+        let openedSession = yield* devices.open(input);
         const issueConfig = Effect.gen(function* () {
-          const args = yield* devices.agentTarget({ ...input, agentAccessEnabled: true });
+          const args = yield* devices.agentTarget({ openedSession, agentAccessEnabled: true });
           return decodeConfig(yield* fs.readFileString(args[1]!)).daemonAuthToken;
         });
         const token = yield* issueConfig;
@@ -326,7 +353,7 @@ it.effect.each([
         );
         expect((yield* access.authorize(otherHostToken)).hostId).toBe("other-host");
         if (retired) {
-          yield* devices.open(input);
+          openedSession = yield* devices.open(input);
           const freshToken = yield* issueConfig;
           expect(freshToken).not.toBe(token);
           expect((yield* access.authorize(freshToken)).deviceId).toBe(deviceId);
@@ -341,4 +368,167 @@ it.effect.each([
         }
       }).pipe(Effect.provide(layer("127.0.0.1", undefined, http)), Effect.scoped);
     }),
+);
+
+const shutdownFixture = (beforeShutdown: Effect.Effect<void> = Effect.void) => {
+  const deviceId = DeviceId.make("emulator-5554");
+  let booted = true;
+  return {
+    input: {
+      threadId: ThreadId.make("thread-1"),
+      hostId: "local" as const,
+      deviceId,
+      platform: "android" as const,
+    },
+    http: HttpClient.make((request) =>
+      Effect.gen(function* () {
+        const path = new URL(request.url).pathname;
+        if (path === "/api/devices") {
+          return HttpClientResponse.fromWeb(
+            request,
+            Response.json({
+              emulators: [
+                {
+                  id: deviceId,
+                  name: "Test AVD",
+                  platform: "android",
+                  version: "26",
+                  physical: false,
+                  booted,
+                },
+              ],
+              simulators: [],
+            }),
+          );
+        }
+        if (path === "/api/devices/shutdown") {
+          yield* beforeShutdown;
+          booted = false;
+        } else if (path === "/api/devices/boot") booted = true;
+        else throw new Error(`Unexpected hub path: ${path}`);
+        return HttpClientResponse.fromWeb(request, Response.json({ ok: true, id: deviceId }));
+      }),
+    ),
+  };
+};
+
+it.effect.each([false, true])(
+  "rejects issuance delayed past shutdown (same slot reopened: %s)",
+  (reopen) =>
+    Effect.gen(function* () {
+      const paused = yield* Deferred.make<void>();
+      const resume = yield* Deferred.make<void>();
+      const { input, http } = shutdownFixture();
+      yield* Effect.gen(function* () {
+        const devices = yield* DeviceService.DeviceService;
+        const fs = yield* FileSystem.FileSystem;
+        const access = yield* DeviceAgentAccess.DeviceAgentAccess;
+        const openedSession = yield* devices.open(input);
+        const delayed = yield* Deferred.succeed(paused, undefined).pipe(
+          Effect.andThen(Deferred.await(resume)),
+          Effect.andThen(devices.agentTarget({ openedSession, agentAccessEnabled: true })),
+          Effect.exit,
+          Effect.forkChild,
+        );
+        yield* Deferred.await(paused);
+        yield* devices.shutdown(input);
+        const replacement = reopen ? yield* devices.open(input) : null;
+        yield* Deferred.succeed(resume, undefined);
+        expect((yield* Fiber.join(delayed))._tag).toBe("Failure");
+        if (replacement) {
+          const args = yield* devices.agentTarget({
+            openedSession: replacement,
+            agentAccessEnabled: true,
+          });
+          const config = decodeConfig(yield* fs.readFileString(args[1]!));
+          expect((yield* access.authorize(config.daemonAuthToken)).deviceId).toBe(input.deviceId);
+        }
+      }).pipe(Effect.provide(layer("127.0.0.1", undefined, http)), Effect.scoped);
+    }),
+);
+
+it.effect("shutdown waits for overlapping issuance and retires its token before returning", () =>
+  Effect.gen(function* () {
+    const writing = yield* Deferred.make<void>();
+    const resumeWrite = yield* Deferred.make<void>();
+    const shutdownStarted = yield* Deferred.make<void>();
+    let issuedToken = "";
+    let shutdownRequested = false;
+    const { input, http } = shutdownFixture(
+      Effect.sync(() => {
+        shutdownRequested = true;
+      }),
+    );
+    const beforeWrite = (content: string) =>
+      Effect.gen(function* () {
+        issuedToken = decodeConfig(content).daemonAuthToken;
+        yield* Deferred.succeed(writing, undefined);
+        yield* Deferred.await(resumeWrite);
+      });
+    yield* Effect.gen(function* () {
+      const devices = yield* DeviceService.DeviceService;
+      const access = yield* DeviceAgentAccess.DeviceAgentAccess;
+      const openedSession = yield* devices.open(input);
+      const issuing = yield* devices
+        .agentTarget({ openedSession, agentAccessEnabled: true })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(writing);
+      const shuttingDown = yield* Deferred.succeed(shutdownStarted, undefined).pipe(
+        Effect.andThen(devices.shutdown(input)),
+        Effect.forkChild({ startImmediately: true }),
+      );
+      yield* Deferred.await(shutdownStarted);
+      expect(shutdownRequested).toBe(false);
+      expect((yield* access.authorize(issuedToken)).deviceId).toBe(input.deviceId);
+      yield* Deferred.succeed(resumeWrite, undefined);
+      yield* Fiber.join(issuing);
+      yield* Fiber.join(shuttingDown);
+      expect(shutdownRequested).toBe(true);
+      expect((yield* Effect.exit(access.authorize(issuedToken)))._tag).toBe("Failure");
+    }).pipe(Effect.provide(layer("127.0.0.1", beforeWrite, http)), Effect.scoped);
+  }),
+);
+
+it.effect("issuance waits for an in-flight shutdown and cannot recreate retired access", () =>
+  Effect.gen(function* () {
+    const shuttingDown = yield* Deferred.make<void>();
+    const resumeShutdown = yield* Deferred.make<void>();
+    const issuanceStarted = yield* Deferred.make<void>();
+    const { input, http } = shutdownFixture(
+      Deferred.succeed(shuttingDown, undefined).pipe(
+        Effect.andThen(Deferred.await(resumeShutdown)),
+        Effect.asVoid,
+      ),
+    );
+    let writes = 0;
+    yield* Effect.gen(function* () {
+      const devices = yield* DeviceService.DeviceService;
+      const openedSession = yield* devices.open(input);
+      const shutdown = yield* devices.shutdown(input).pipe(Effect.forkChild);
+      yield* Deferred.await(shuttingDown);
+      const issuing = yield* Deferred.succeed(issuanceStarted, undefined).pipe(
+        Effect.andThen(devices.agentTarget({ openedSession, agentAccessEnabled: true })),
+        Effect.exit,
+        Effect.forkChild({ startImmediately: true }),
+      );
+      yield* Deferred.await(issuanceStarted);
+      expect(writes).toBe(0);
+      yield* Deferred.succeed(resumeShutdown, undefined);
+      yield* Fiber.join(shutdown);
+      expect((yield* Fiber.join(issuing))._tag).toBe("Failure");
+      expect(writes).toBe(0);
+    }).pipe(
+      Effect.provide(
+        layer(
+          "127.0.0.1",
+          () =>
+            Effect.sync(() => {
+              writes++;
+            }),
+          http,
+        ),
+      ),
+      Effect.scoped,
+    );
+  }),
 );

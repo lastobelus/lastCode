@@ -276,9 +276,13 @@ it.effect.each([
         Effect.sync(() => {
           expect(operations).toEqual(["ready", "open"]);
           expect(input).toEqual({
-            threadId,
-            hostId: "local",
-            deviceId: opened,
+            openedSession: {
+              threadId,
+              hostId: "local",
+              deviceId: opened,
+              platform,
+              openedAt: "2026-09-08T00:00:00.000Z",
+            },
             agentAccessEnabled: true,
           });
           operations.push("credential");
