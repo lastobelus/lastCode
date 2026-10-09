@@ -154,18 +154,15 @@ const make = Effect.gen(function* () {
   const resolveFile: ThreadLinkedFiles["Service"]["resolveFile"] = Effect.fn(
     "ThreadLinkedFiles.resolveFile",
   )(function* (input) {
-    const records = yield* projections
-      .getThreadRecords(input.threadId, ["messages", "plans", "turnItems"], {
-        messageRoles: ["assistant"],
-        turnItemTypes: ["proposed_plan"],
-      })
+    const visible = yield* projections
+      .getVisiblePublications(input.threadId)
       .pipe(
         Effect.mapError(
           (cause) => new ThreadLinkedFileResolutionError({ threadId: input.threadId, cause }),
         ),
       );
     const project = yield* projects
-      .get(records.thread.projectId)
+      .get(visible.thread.projectId)
       .pipe(
         Effect.mapError(
           (cause) => new ThreadLinkedFileResolutionError({ threadId: input.threadId, cause }),
@@ -173,7 +170,7 @@ const make = Effect.gen(function* () {
       );
     if (Option.isNone(project))
       return yield* new ThreadLinkedFileDeniedError({ threadId: input.threadId });
-    const cwd = path.resolve(records.thread.worktreePath ?? project.value.workspaceRoot);
+    const cwd = path.resolve(visible.thread.worktreePath ?? project.value.workspaceRoot);
     if (input.cwd !== undefined && path.resolve(input.cwd) !== cwd)
       return yield* new ThreadLinkedFileDeniedError({ threadId: input.threadId });
     const requested = input.path;
@@ -187,57 +184,15 @@ const make = Effect.gen(function* () {
       path.isAbsolute(relative);
     const requestedOutside = outside(path.relative(cwd, requestedPath));
 
-    const planItems = new Map(
-      records.turnItems.flatMap((item) =>
-        item.type === "proposed_plan" ? [[item.planId, item] as const] : [],
-      ),
-    );
-    const inherited =
-      records.thread.forkedFrom?.type === "run"
-        ? yield* projections
-            .getInheritedPublications(input.threadId)
-            .pipe(
-              Effect.mapError(
-                (cause) => new ThreadLinkedFileResolutionError({ threadId: input.threadId, cause }),
-              ),
-            )
-        : [];
-    const publications: Array<Publication> = [
-      // Inherited cards render in the active conversation's cwd. Their source
-      // identity distinguishes cache entries; visibility comes from the timeline.
-      ...inherited.map((row) => ({
-        key: JSON.stringify([input.threadId, "inherited", row.sourceThreadId, row.sourceItemId]),
+    // Cards, including inherited ones, render in the active conversation's cwd.
+    // Only current visible item bodies publish files; retained rollback records do not.
+    const publications: Array<Publication> = visible.publications
+      .map((row) => ({
+        key: JSON.stringify([input.threadId, row.sourceThreadId, row.sourceItemId]),
         text: row.item.type === "proposed_plan" ? row.item.markdown : row.item.text,
         plan: row.item.type === "proposed_plan",
         updatedAt: DateTime.toEpochMillis(row.item.updatedAt),
-      })),
-      ...records.messages
-        .filter((message) => message.role === "assistant")
-        .map((message) => ({
-          key: JSON.stringify([input.threadId, "message", message.id]),
-          text: message.text,
-          plan: false,
-          updatedAt: DateTime.toEpochMillis(message.updatedAt),
-        })),
-      ...records.plans.flatMap((plan) =>
-        plan.kind === "proposed_plan" && !planItems.has(plan.id)
-          ? [
-              {
-                key: JSON.stringify([input.threadId, "plan", plan.id]),
-                text: plan.markdown,
-                plan: true,
-                updatedAt: 0,
-              },
-            ]
-          : [],
-      ),
-      ...Array.from(planItems.values(), (item) => ({
-        key: JSON.stringify([input.threadId, "plan", item.planId]),
-        text: item.markdown,
-        plan: true,
-        updatedAt: DateTime.toEpochMillis(item.updatedAt),
-      })),
-    ]
+      }))
       .toReversed()
       .sort((a, b) => b.updatedAt - a.updatedAt);
     const currentPublications = new Map(publications.map((item) => [item.key, item.text]));

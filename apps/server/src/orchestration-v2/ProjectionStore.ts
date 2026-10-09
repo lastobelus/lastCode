@@ -339,7 +339,7 @@ export interface ProjectionTimelinePage {
   readonly hasMore: boolean;
 }
 
-export interface ProjectionInheritedPublication {
+export interface ProjectionVisiblePublication {
   readonly sourceThreadId: ThreadId;
   readonly sourceItemId: TurnItemId;
   readonly item: Extract<OrchestrationV2TurnItem, { type: "assistant_message" | "proposed_plan" }>;
@@ -374,10 +374,14 @@ export interface ProjectionStoreV2Shape {
     threadId: ThreadId,
     options: ProjectionTimelinePageOptions,
   ) => Effect.Effect<ProjectionTimelinePage, ProjectionStoreV2Error>;
-  /** Current assistant/plan bodies in the visible inherited prefix, with fork cutoffs applied. */
-  readonly getInheritedPublications: (
-    threadId: ThreadId,
-  ) => Effect.Effect<ReadonlyArray<ProjectionInheritedPublication>, ProjectionStoreV2Error>;
+  /** Current displayed assistant/plan bodies and their active thread, with rollback and fork cutoffs applied. */
+  readonly getVisiblePublications: (threadId: ThreadId) => Effect.Effect<
+    {
+      readonly thread: OrchestrationV2AppThread;
+      readonly publications: ReadonlyArray<ProjectionVisiblePublication>;
+    },
+    ProjectionStoreV2Error
+  >;
   readonly getMessageCount: (threadId: ThreadId) => Effect.Effect<number, ProjectionStoreV2Error>;
   readonly getNextTurnItemOrdinal: (
     threadId: ThreadId,
@@ -5102,21 +5106,18 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       readTimelineIndex(threadId, new Set()).pipe(Effect.map((index) => index.visible)),
     );
 
-    const getInheritedPublications: ProjectionStoreV2Shape["getInheritedPublications"] = (
-      threadId,
-    ) =>
+    const getVisiblePublications: ProjectionStoreV2Shape["getVisiblePublications"] = (threadId) =>
       sql
         .withTransaction(
           Effect.gen(function* () {
             const index = yield* readTimelineIndex(threadId, new Set());
-            const inherited = index.visible.filter(
-              (row) =>
-                row.visibility === "inherited" &&
-                (row.item.type === "assistant_message" || row.item.type === "proposed_plan"),
+            const publications = index.visible.filter(
+              (row) => row.item.type === "assistant_message" || row.item.type === "proposed_plan",
             );
-            if (inherited.length === 0) return [];
+            if (publications.length === 0)
+              return { thread: index.records.thread, publications: [] };
             const sources = yield* encodeTimelineSources(
-              inherited.map((row) => ({
+              publications.map((row) => ({
                 threadId: row.sourceThreadId,
                 id: row.sourceItemId,
               })),
@@ -5134,7 +5135,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             const byIdentity = new Map(
               payloads.map((row) => [sourceKey(row.thread_id, row.turn_item_id), row.payload_json]),
             );
-            return yield* Effect.forEach(inherited, (row) =>
+            const bodies = yield* Effect.forEach(publications, (row) =>
               Effect.gen(function* () {
                 const payload = byIdentity.get(sourceKey(row.sourceThreadId, row.sourceItemId));
                 if (payload === undefined) return yield* new ProjectionStoreReadError({ threadId });
@@ -5144,6 +5145,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 return { sourceThreadId: row.sourceThreadId, sourceItemId: row.sourceItemId, item };
               }),
             );
+            return { thread: index.records.thread, publications: bodies };
           }),
         )
         .pipe(Effect.mapError(controlReadError(threadId)));
@@ -6217,7 +6219,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getThreadSnapshot,
       getThreadSnapshotWindow,
       getTimelinePage,
-      getInheritedPublications,
+      getVisiblePublications,
       getThreadHistoryPage,
       searchThread,
       searchThreadStream,
@@ -6914,12 +6916,12 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
             };
           }),
         ),
-      getInheritedPublications: (threadId) =>
+      getVisiblePublications: (threadId) =>
         service.getThreadProjection(threadId).pipe(
-          Effect.map((projection) =>
-            projection.visibleTurnItems.flatMap((row) =>
-              row.visibility === "inherited" &&
-              (row.item.type === "assistant_message" || row.item.type === "proposed_plan")
+          Effect.map((projection) => ({
+            thread: projection.thread,
+            publications: projection.visibleTurnItems.flatMap((row) =>
+              row.item.type === "assistant_message" || row.item.type === "proposed_plan"
                 ? [
                     {
                       sourceThreadId: row.sourceThreadId,
@@ -6929,7 +6931,7 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                   ]
                 : [],
             ),
-          ),
+          })),
         ),
       getThreadSnapshotWindow: (threadId, options) =>
         service.getThreadSnapshot(threadId).pipe(

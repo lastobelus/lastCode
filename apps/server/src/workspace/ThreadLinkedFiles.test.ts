@@ -137,6 +137,8 @@ const addMessage = Effect.fn("addMessage")(function* (
   text: string,
   role: "assistant" | "user" = "assistant",
   id = MessageId.make(`message-${role}`),
+  runId: RunId | null = null,
+  rendered = true,
 ) {
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const now = yield* DateTime.now;
@@ -150,7 +152,7 @@ const addMessage = Effect.fn("addMessage")(function* (
       creationSource: "provider",
       id,
       threadId,
-      runId: null,
+      runId,
       nodeId: null,
       role,
       text,
@@ -160,13 +162,51 @@ const addMessage = Effect.fn("addMessage")(function* (
       updatedAt: now,
     },
   });
+  if (rendered)
+    yield* projections.apply({
+      id: EventId.make(`item-event-${id}`),
+      type: "turn-item.updated",
+      threadId,
+      occurredAt: now,
+      payload: {
+        id: TurnItemId.make(`item-${id}`),
+        threadId,
+        runId,
+        nodeId: null,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: yield* projections.getNextTurnItemOrdinal(threadId),
+        status: "completed",
+        title: null,
+        startedAt: now,
+        completedAt: now,
+        updatedAt: now,
+        ...(role === "assistant"
+          ? { type: "assistant_message" as const, messageId: id, text, streaming: false }
+          : {
+              type: "user_message" as const,
+              messageId: id,
+              text,
+              attachments: [],
+              createdBy: "user" as const,
+              creationSource: "web" as const,
+              inputIntent: "turn_start" as const,
+            }),
+      },
+    });
 });
 
-const addPlan = Effect.fn("addPlan")(function* (markdown: string, inTurnItem = false) {
+const addPlan = Effect.fn("addPlan")(function* (
+  markdown: string,
+  inTurnItem = false,
+  runId: RunId | null = null,
+  planId = PlanId.make("published-plan"),
+) {
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const now = yield* DateTime.now;
-  const planId = PlanId.make("published-plan");
-  const nodeId = NodeId.make("published-plan-node");
+  const nodeId = NodeId.make(`node-${planId}`);
   yield* projections.apply({
     id: EventId.make("published-plan-event"),
     type: "plan.updated",
@@ -175,7 +215,7 @@ const addPlan = Effect.fn("addPlan")(function* (markdown: string, inTurnItem = f
     payload: {
       id: planId,
       threadId,
-      runId: null,
+      runId,
       nodeId,
       kind: "proposed_plan",
       status: "completed",
@@ -183,38 +223,245 @@ const addPlan = Effect.fn("addPlan")(function* (markdown: string, inTurnItem = f
       ...(inTurnItem ? { detailInTurnItem: true } : {}),
     },
   });
-  if (inTurnItem)
-    yield* projections.apply({
-      id: EventId.make("published-plan-item-event"),
-      type: "turn-item.updated",
+  yield* projections.apply({
+    id: EventId.make("published-plan-item-event"),
+    type: "turn-item.updated",
+    threadId,
+    occurredAt: now,
+    payload: {
+      id: TurnItemId.make(`item-${planId}`),
       threadId,
-      occurredAt: now,
-      payload: {
-        id: TurnItemId.make("published-plan-item"),
-        threadId,
-        runId: null,
-        nodeId,
-        providerThreadId: null,
-        providerTurnId: null,
-        nativeItemRef: null,
-        parentItemId: null,
-        ordinal: 1,
-        status: "completed",
-        title: null,
-        startedAt: now,
-        completedAt: now,
-        updatedAt: now,
-        type: "proposed_plan",
-        planId,
-        markdown,
-        streaming: false,
-      },
-    });
+      runId,
+      nodeId,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: yield* projections.getNextTurnItemOrdinal(threadId),
+      status: "completed",
+      title: null,
+      startedAt: now,
+      completedAt: now,
+      updatedAt: now,
+      type: "proposed_plan",
+      planId,
+      markdown,
+      streaming: false,
+    },
+  });
 });
 
 afterEach(() => vi.restoreAllMocks());
 
 describe("ThreadLinkedFiles", () => {
+  it.effect.each(["memory", "sqlite"])(
+    "revokes cached assistant and plan links after persisted rollback (%s)",
+    (store) =>
+      withWorkspace(
+        (root) =>
+          Effect.gen(function* () {
+            const fs = yield* FileSystem.FileSystem;
+            const path = yield* Path.Path;
+            const linked = yield* ThreadLinkedFiles.ThreadLinkedFiles;
+            const projections = yield* ProjectionStore.ProjectionStoreV2;
+            const base = yield* projections.getThread(threadId);
+            const now = yield* DateTime.now;
+            const createRun = Effect.fn(function* (ordinal: number) {
+              const run = {
+                id: RunId.make(`rollback-run-${ordinal}`),
+                threadId,
+                ordinal,
+                providerInstanceId: base.providerInstanceId,
+                modelSelection: base.modelSelection,
+                providerThreadId: null,
+                userMessageId: MessageId.make(`rollback-user-${ordinal}`),
+                rootNodeId: null,
+                activeAttemptId: null,
+                status: "completed" as const,
+                requestedAt: now,
+                startedAt: now,
+                completedAt: now,
+                checkpointId: null,
+                contextHandoffId: null,
+              };
+              yield* projections.apply({
+                id: EventId.make(`created-${run.id}`),
+                type: "run.created",
+                threadId,
+                occurredAt: now,
+                payload: run,
+              });
+              return run;
+            });
+            const remaining = yield* createRun(1);
+            const rolledBack = yield* createRun(2);
+            const assistantId = MessageId.make("rollback-assistant");
+            const planId = PlanId.make("rollback-plan");
+            const files = [
+              "visible-assistant.md",
+              "visible-plan.md",
+              "rolled-assistant.md",
+              "rolled-plan.md",
+            ];
+            for (const file of files) yield* fs.writeFileString(path.join(root, file), file);
+            yield* addMessage(
+              "[Visible](./visible-assistant.md)",
+              "assistant",
+              MessageId.make("remaining-assistant"),
+              remaining.id,
+            );
+            yield* addPlan(
+              "[Visible plan](./visible-plan.md)",
+              false,
+              remaining.id,
+              PlanId.make("remaining-plan"),
+            );
+            yield* addMessage(
+              "[Rolled back](./rolled-assistant.md)",
+              "assistant",
+              assistantId,
+              rolledBack.id,
+            );
+            yield* addPlan("[Rolled back plan](./rolled-plan.md)", true, rolledBack.id, planId);
+            const childId = ThreadId.make("rollback-fork");
+            yield* projections.apply({
+              id: EventId.make("rollback-fork-created"),
+              type: "thread.created",
+              threadId: childId,
+              occurredAt: now,
+              payload: {
+                ...base,
+                id: childId,
+                forkedFrom: { type: "run", threadId, runId: rolledBack.id },
+                lineage: {
+                  parentThreadId: threadId,
+                  relationshipToParent: "fork",
+                  rootThreadId: threadId,
+                },
+              },
+            });
+            for (const file of files) {
+              expect(
+                (yield* linked.readFile({
+                  cwd: root,
+                  relativePath: file,
+                  linkedThreadId: threadId,
+                })).contents,
+              ).toBe(file);
+            }
+            // The checkpoint rollback commits run.updated; it hides items without deleting their bodies.
+            yield* projections.apply({
+              id: EventId.make("rollback-completed"),
+              type: "run.updated",
+              threadId,
+              occurredAt: now,
+              payload: { ...rolledBack, status: "rolled_back" },
+            });
+            const retained = yield* projections.getThreadRecords(threadId, [
+              "messages",
+              "plans",
+              "turnItems",
+            ]);
+            expect(retained.messages.some((message) => message.id === assistantId)).toBe(true);
+            expect(retained.plans.some((plan) => plan.id === planId)).toBe(true);
+            expect(retained.turnItems.filter((item) => item.runId === rolledBack.id)).toHaveLength(
+              2,
+            );
+            const visible = yield* projections.getTimelinePage(threadId, {
+              limit: 20,
+              view: "messages",
+            });
+            expect(visible.items.some((row) => row.item.runId === rolledBack.id)).toBe(false);
+            expect(visible.items.filter((row) => row.item.runId === remaining.id)).toHaveLength(2);
+            // Both text reads and fresh media resolutions must reject previously cached publications.
+            for (const file of files.slice(2)) {
+              expect(
+                (yield* linked
+                  .readFile({ cwd: root, relativePath: file, linkedThreadId: threadId })
+                  .pipe(Effect.flip))._tag,
+              ).toBe("ThreadLinkedFileDeniedError");
+              expect(
+                (yield* linked.resolveFile({ cwd: root, threadId, path: file }).pipe(Effect.flip))
+                  ._tag,
+              ).toBe("ThreadLinkedFileDeniedError");
+            }
+            for (const file of files.slice(0, 2)) {
+              expect(
+                (yield* linked.readFile({
+                  cwd: root,
+                  relativePath: file,
+                  linkedThreadId: threadId,
+                })).contents,
+              ).toBe(file);
+            }
+            // The fork still displays this snapshot even after the source thread rolls back.
+            const childVisible = yield* projections.getTimelinePage(childId, {
+              limit: 20,
+              view: "messages",
+            });
+            expect(
+              childVisible.items.filter((row) => row.item.runId === rolledBack.id),
+            ).toHaveLength(2);
+            for (const file of files.slice(2)) {
+              expect(
+                (yield* linked.readFile({ cwd: root, relativePath: file, linkedThreadId: childId }))
+                  .contents,
+              ).toBe(file);
+            }
+          }),
+        undefined,
+        store === "sqlite"
+          ? ProjectionStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory))
+          : ProjectionStore.layerMemory,
+      ),
+  );
+
+  it.effect("does not publish retained local records without displayed items", () =>
+    withWorkspace((root) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const linked = yield* ThreadLinkedFiles.ThreadLinkedFiles;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        yield* fs.writeFileString(path.join(root, "orphan.md"), "not displayed");
+        yield* addMessage(
+          "[Orphan](./orphan.md)",
+          "assistant",
+          MessageId.make("orphan-message"),
+          null,
+          false,
+        );
+        yield* projections.apply({
+          id: EventId.make("orphan-plan-event"),
+          type: "plan.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: PlanId.make("orphan-plan"),
+            threadId,
+            runId: null,
+            nodeId: NodeId.make("orphan-node"),
+            kind: "proposed_plan",
+            status: "completed",
+            markdown: "[Orphan plan](./orphan.md)",
+          },
+        });
+        expect(
+          (yield* linked.resolveFile({ threadId, path: "orphan.md" }).pipe(Effect.flip))._tag,
+        ).toBe("ThreadLinkedFileDeniedError");
+        yield* addMessage("[Displayed](./orphan.md)");
+        expect(
+          (yield* linked.readFile({
+            cwd: root,
+            relativePath: "orphan.md",
+            linkedThreadId: threadId,
+          })).contents,
+        ).toBe("not displayed");
+      }),
+    ),
+  );
+
   it.effect.each(["memory", "sqlite"])(
     "reads only visible inherited publications through nested fork cutoffs (%s)",
     (store) =>
@@ -392,7 +639,13 @@ describe("ThreadLinkedFiles", () => {
               `[User file](${userFile})`,
               "user_message",
             );
-            yield* addMessage(`[Unrendered](${orphanFile})`);
+            yield* addMessage(
+              `[Unrendered](${orphanFile})`,
+              "assistant",
+              MessageId.make("unrendered-message"),
+              null,
+              false,
+            );
             yield* publish(
               threadId,
               parentLaterRun,
@@ -651,7 +904,7 @@ describe("ThreadLinkedFiles", () => {
   );
 
   it.effect.each([false, true])(
-    "reads a file published only in a stored plan (turn item: %s)",
+    "reads a visible plan publication (artifact placeholder: %s)",
     (inTurnItem) =>
       withWorkspace((root) =>
         Effect.gen(function* () {

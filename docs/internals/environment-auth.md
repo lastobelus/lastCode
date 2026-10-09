@@ -108,9 +108,11 @@ absolute paths outside a project. This lets clients display artifacts that an
 agent writes in a temporary directory. Relative paths and writes still follow
 the [workspace path rules](../../apps/server/src/workspace/WorkspaceFileSystem.ts).
 
-`orchestration:read` also permits opening an individual file linked in a persisted
-assistant message or proposed plan. The server derives relative paths from the
-thread's workspace and matches the rendered reference. Explicit links may publish
+`orchestration:read` also permits opening an individual file linked in a visible
+assistant message or proposed plan. Local and inherited publications follow the
+conversation timeline, so rows hidden by rollback cannot mint new file URLs.
+The server derives relative paths from the thread's workspace and matches the
+rendered reference. Explicit links may publish
 files outside the workspace; workspace links and bare filename lookup remain
 contained by lexical and real-path checks. This lets a conversation reader open
 its reports without granting host-file browsing. It does not grant access to the
