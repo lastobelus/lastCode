@@ -48,12 +48,14 @@ Do not open a PR unless the user explicitly asks.
    upstream provenance using
    `docs/lastcode/nightly-workflow.md#carry-replay-ownership` before validation
    and review. These trailers belong only on the LastCode delivery.
-4. Run focused validation. A push invokes quick local CI.
+4. Run focused validation and follow `lastcode-pr` for optional local Quick CI.
+   The pre-push hook follows the configured mode; GitHub CI remains required.
 5. When asked to open a PR, target `lastobelus/lastCode:lastcode/main` and link
    the upstream PR in both descriptions.
 6. Before merge, require a current-head clean Codex review, zero unresolved
-   review threads, and full local CI for the exact head and current base. Merge
-   through `pnpm lastcode:merge`.
+   review threads, and successful exact-head/base GitHub CI and `CI Gate`. Merge
+   through `pnpm lastcode:merge`. If the base changes, refresh the branch as
+   needed and obtain fresh validation against the new base before merging.
 
 The LastCode PR does not wait for upstream acceptance. The upstream PR does not
 depend on LastCode. When upstream later lands the change, let the nightly rebase
