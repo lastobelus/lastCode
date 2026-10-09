@@ -479,9 +479,23 @@ it.effect("separates host file URLs from readable attachment URLs", () =>
     yield* client[WS_METHODS.assetsCreateUrl]({
       resource: { _tag: "attachment", attachmentId: "image" },
     });
+    yield* client[WS_METHODS.assetsCreateUrl]({
+      resource: {
+        _tag: "media-file",
+        threadId: ThreadId.make("thread"),
+        path: "image.png",
+        linkedThreadFile: true,
+      },
+    });
     for (const resource of [
       { _tag: "workspace-file", threadId: ThreadId.make("thread"), path: "file.txt" },
       { _tag: "media-file", threadId: ThreadId.make("thread"), path: "/repo/image.png" },
+      {
+        _tag: "media-file",
+        threadId: ThreadId.make("thread"),
+        path: "/repo/image.png",
+        linkedThreadFile: false,
+      },
       { _tag: "draft-workspace-file", cwd: "/repo", path: "file.txt" },
     ] as const) {
       expect(
@@ -491,6 +505,49 @@ it.effect("separates host file URLs from readable attachment URLs", () =>
         requiredPermission: AuthFilesystemReadScope,
       });
     }
+    expect(handled).toBe(2);
+  }).pipe(Effect.scoped),
+);
+
+it.effect("allows only tagged thread file reads with orchestration read permission", () =>
+  Effect.gen(function* () {
+    const group = WsRpcGroup.omit(
+      ...[...WsRpcGroup.requests.keys()].filter(
+        (
+          tag,
+        ): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, typeof WS_METHODS.projectsReadFile> =>
+          tag !== WS_METHODS.projectsReadFile,
+      ),
+    );
+    let handled = 0;
+    const client = yield* RpcTest.makeClient(group).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          group.toLayerHandler(WS_METHODS.projectsReadFile, () =>
+            Effect.sync(() => {
+              handled++;
+              return {
+                relativePath: "report.md",
+                contents: "artifact",
+                byteLength: 8,
+                truncated: false,
+              };
+            }),
+          ),
+          RpcAuthorization.layer([AuthOrchestrationReadScope]),
+        ),
+      ),
+    );
+    yield* client[WS_METHODS.projectsReadFile]({
+      cwd: "/repo",
+      relativePath: "report.md",
+      linkedThreadId: ThreadId.make("thread"),
+    });
+    expect(
+      yield* client[WS_METHODS.projectsReadFile]({ cwd: "/repo", relativePath: "report.md" }).pipe(
+        Effect.flip,
+      ),
+    ).toMatchObject({ requiredPermission: AuthFilesystemReadScope });
     expect(handled).toBe(1);
   }).pipe(Effect.scoped),
 );

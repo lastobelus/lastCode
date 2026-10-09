@@ -10,6 +10,7 @@ import {
   extractInlineCodeSpans,
   extractMarkdownLinkHrefs,
   inlineCodeFilePathCandidate,
+  parseMarkdownFileLink,
 } from "@t3tools/shared/markdownLinks";
 import { isAbsolutePath } from "@t3tools/shared/path";
 import { hostedPreviewNavigationUrl } from "@t3tools/client-runtime/preview-hosting";
@@ -71,7 +72,8 @@ import {
 import {
   classifyMarkdownImageSource,
   markdownImageSourceFragment,
-} from "@t3tools/client-runtime/markdown-images";
+} from "@t3tools/shared/markdownImages";
+import { fileAssetResourceForAccess } from "@t3tools/client-runtime/state/assets";
 import { mediaFileReference, mediaUrlReference } from "@t3tools/client-runtime/media-reference";
 import { mediaKindFromPath, mediaMimeTypeFromExtension } from "@t3tools/shared/filePreview";
 import * as Cause from "effect/Cause";
@@ -192,12 +194,12 @@ import { previewEnvironment } from "../state/preview";
 import { useAtomCommand } from "../state/use-atom-command";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
 import { projectEnvironment } from "../state/projects";
+import { claimWorkspaceBasenameLookup } from "../workspaceBasenameLookup";
 import {
-  claimWorkspaceBasenameLookup,
   needsWorkspaceBasenameLookup,
   pickWorkspaceBasenameMatch,
   WORKSPACE_BASENAME_LOOKUP_LIMIT,
-} from "../workspaceBasenameLookup";
+} from "@t3tools/shared/workspaceBasenameLookup";
 import {
   parseChangeRequestUrl,
   pullRequestCandidateUrlFromReferenceAutolink,
@@ -1234,13 +1236,19 @@ interface MarkdownFileLinkProps {
   /** What the files panel opens: workspace-relative inside the workspace, the
       absolute host path outside it, null when the panel cannot show the file. */
   panelPath: string | null;
+  isBareFilename: boolean;
   line?: number | undefined;
   label: string;
   copyMarkdown: string;
   theme: "light" | "dark";
   threadRef?: ScopedThreadRef | undefined;
   onOpen?: ((targetPath: string) => Promise<AtomCommandResult<unknown, unknown>>) | undefined;
-  onOpenInPanel: (panelPath: string, line: number | undefined, label?: string) => void;
+  onOpenInPanel: (
+    panelPath: string,
+    line: number | undefined,
+    label: string | undefined,
+    isBareFilename: boolean,
+  ) => void;
   openInEditorMenuLabel: string;
   onOpenInBrowser?: (() => Promise<AtomCommandResult<unknown, unknown>>) | undefined;
   onOpenMedia?: (() => void) | undefined;
@@ -2022,6 +2030,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
   iconPath,
   displayPath,
   panelPath,
+  isBareFilename,
   line,
   label,
   copyMarkdown,
@@ -2076,7 +2085,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
   const handleOpenInFilePreview = useCallback(() => {
     if (threadRef && panelPath) {
       const authoredLabel = children ? nodeToPlainText(children).trim() : "";
-      onOpenInPanel(panelPath, line, authoredLabel || undefined);
+      onOpenInPanel(panelPath, line, authoredLabel || undefined, isBareFilename);
       return;
     }
     if (onOpenMedia) {
@@ -2084,7 +2093,16 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
       return;
     }
     handleOpenInEditor();
-  }, [children, handleOpenInEditor, line, onOpenInPanel, onOpenMedia, panelPath, threadRef]);
+  }, [
+    children,
+    handleOpenInEditor,
+    isBareFilename,
+    line,
+    onOpenInPanel,
+    onOpenMedia,
+    panelPath,
+    threadRef,
+  ]);
 
   const handleOpenInBrowser = useCallback(() => {
     if (!onOpenInBrowser) {
@@ -2377,6 +2395,7 @@ function areMarkdownFileLinkPropsEqual(
     previous.iconPath === next.iconPath &&
     previous.displayPath === next.displayPath &&
     previous.panelPath === next.panelPath &&
+    previous.isBareFilename === next.isBareFilename &&
     previous.line === next.line &&
     previous.label === next.label &&
     previous.copyMarkdown === next.copyMarkdown &&
@@ -2421,10 +2440,24 @@ function useChatMarkdownState({
       mediaRequestId.current += 1;
     };
   }, [threadRef?.environmentId, threadRef?.threadId, explicitEnvironmentId, cwd, imageBaseDir]);
-  const createAssetUrl = useAtomQueryRunner(assetEnvironment.createUrl, {
+  const createRawAssetUrl = useAtomQueryRunner(assetEnvironment.createUrl, {
     reportFailure: false,
     refresh: true,
   });
+  const createAssetUrl = useCallback(
+    (request: Parameters<typeof createRawAssetUrl>[0]) =>
+      createRawAssetUrl({
+        ...request,
+        input: {
+          ...request.input,
+          resource: fileAssetResourceForAccess(
+            request.input.resource,
+            readEnvironmentScope(request.environmentId, AuthFilesystemReadScope),
+          ),
+        },
+      }),
+    [createRawAssetUrl],
+  );
   const searchProjectEntries = useAtomQueryRunner(projectEnvironment.searchEntries, {
     reportFailure: false,
   });
@@ -2574,7 +2607,8 @@ function useChatMarkdownState({
     if (parseComposerContextHref(href)) return href;
     if (parseThreadLinkHref(href)) return href;
     if (isWindowsDrivePathHref(href)) return href;
-    return rewriteMarkdownFileUriHref(href) ?? defaultUrlTransform(href);
+    if (parseMarkdownFileLink(href)) return rewriteMarkdownFileUriHref(href) ?? href;
+    return defaultUrlTransform(href);
   }, []);
   // Re-emit highlighted content as markdown so copying out of the rendered
   // view keeps links, emphasis, lists, and code fences intact.
@@ -2690,6 +2724,7 @@ function useChatMarkdownState({
         threadRef,
         filePath: path,
         workspaceRoot: cwd,
+        canReadFiles: readEnvironmentScope(threadRef.environmentId, AuthFilesystemReadScope),
         httpBaseUrl: preparedConnection.value.httpBaseUrl,
         createAssetUrl,
         openPreview,
@@ -2732,9 +2767,14 @@ function useChatMarkdownState({
     [cwd, environmentId, searchProjectEntries],
   );
   // A bare filename resolves to the workspace root, which is rarely where the
-  // file is, so ask the index before opening. Absolute host paths open as-is.
+  // file is, so ask the index before opening. Explicit paths open as authored.
   const openFileInPanel = useCallback(
-    (panelPath: string, line: number | undefined, label?: string) => {
+    (
+      panelPath: string,
+      line: number | undefined,
+      label: string | undefined,
+      isBareFilename: boolean,
+    ) => {
       if (!threadRef) return;
       // Claimed on every open so a synchronous one supersedes a lookup already
       // in flight.
@@ -2749,7 +2789,7 @@ function useChatMarkdownState({
             label ? { label } : {},
           );
       };
-      if (!cwd || !needsWorkspaceBasenameLookup(panelPath)) {
+      if (!isBareFilename || !cwd || !needsWorkspaceBasenameLookup(panelPath)) {
         openAt(panelPath);
         return;
       }
@@ -2764,9 +2804,10 @@ function useChatMarkdownState({
   const revealMarkdownFileInFileManager = useCallback(
     async (fileLinkMeta: MarkdownFileLinkMeta) => {
       const workspaceRelativePath = fileLinkMeta.workspaceRelativePath;
-      const match = workspaceRelativePath
-        ? await findWorkspaceBasenameMatch(workspaceRelativePath)
-        : null;
+      const match =
+        fileLinkMeta.isBareFilename && workspaceRelativePath
+          ? await findWorkspaceBasenameMatch(workspaceRelativePath)
+          : null;
       const filePath = match && cwd ? resolvePathLinkTarget(match, cwd) : fileLinkMeta.filePath;
       return revealFileInFileManager(filePath);
     },
@@ -2797,6 +2838,7 @@ function useChatMarkdownState({
           iconPath={fileLinkMeta.filePath}
           displayPath={fileLinkMeta.displayPath}
           panelPath={panelPath}
+          isBareFilename={fileLinkMeta.isBareFilename}
           line={fileLinkMeta.line}
           label={fileLinkLabel(
             {

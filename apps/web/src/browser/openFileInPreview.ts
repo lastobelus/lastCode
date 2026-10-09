@@ -8,6 +8,7 @@ import type {
   ScopedThreadRef,
 } from "@t3tools/contracts";
 import { mediaFileReference } from "@t3tools/client-runtime/media-reference";
+import { fileAssetResourceForAccess } from "@t3tools/client-runtime/state/assets";
 import {
   type AtomCommandResult,
   mapAtomCommandResult,
@@ -117,6 +118,7 @@ export async function openFileInPreview<AssetError, PreviewError>(input: {
   readonly threadRef: ScopedThreadRef;
   readonly filePath: string;
   readonly workspaceRoot: string | undefined;
+  readonly canReadFiles: boolean;
   readonly httpBaseUrl: string;
   readonly createAssetUrl: (input: {
     readonly environmentId: EnvironmentId;
@@ -143,11 +145,14 @@ export async function openFileInPreview<AssetError, PreviewError>(input: {
   const assetResult = await input.createAssetUrl({
     environmentId: input.threadRef.environmentId,
     input: {
-      resource: {
-        _tag: insideWorkspace ? "workspace-file" : "media-file",
-        threadId: input.threadRef.threadId,
-        path: input.filePath,
-      },
+      resource: fileAssetResourceForAccess(
+        {
+          _tag: insideWorkspace ? "workspace-file" : "media-file",
+          threadId: input.threadRef.threadId,
+          path: input.filePath,
+        },
+        input.canReadFiles,
+      ),
     },
   });
   if (assetResult._tag === "Failure") {

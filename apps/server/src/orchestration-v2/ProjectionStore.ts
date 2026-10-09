@@ -339,6 +339,12 @@ export interface ProjectionTimelinePage {
   readonly hasMore: boolean;
 }
 
+export interface ProjectionVisiblePublication {
+  readonly sourceThreadId: ThreadId;
+  readonly sourceItemId: TurnItemId;
+  readonly item: Extract<OrchestrationV2TurnItem, { type: "assistant_message" | "proposed_plan" }>;
+}
+
 export interface ShellSnapshotOptions {
   readonly location?: "active" | "archive";
   /**
@@ -368,6 +374,14 @@ export interface ProjectionStoreV2Shape {
     threadId: ThreadId,
     options: ProjectionTimelinePageOptions,
   ) => Effect.Effect<ProjectionTimelinePage, ProjectionStoreV2Error>;
+  /** Current displayed assistant/plan bodies and their active thread, with rollback and fork cutoffs applied. */
+  readonly getVisiblePublications: (threadId: ThreadId) => Effect.Effect<
+    {
+      readonly thread: OrchestrationV2AppThread;
+      readonly publications: ReadonlyArray<ProjectionVisiblePublication>;
+    },
+    ProjectionStoreV2Error
+  >;
   readonly getMessageCount: (threadId: ThreadId) => Effect.Effect<number, ProjectionStoreV2Error>;
   readonly getNextTurnItemOrdinal: (
     threadId: ThreadId,
@@ -5092,6 +5106,52 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       readTimelineIndex(threadId, new Set()).pipe(Effect.map((index) => index.visible)),
     );
 
+    const getVisiblePublications: ProjectionStoreV2Shape["getVisiblePublications"] = (threadId) =>
+      sql
+        .withTransaction(
+          Effect.gen(function* () {
+            const index = yield* readTimelineIndex(threadId, new Set());
+            if (index.records.thread.deletedAt !== null)
+              return yield* new ProjectionStoreThreadNotFoundError({ threadId });
+            const publications = index.visible.filter(
+              (row) => row.item.type === "assistant_message" || row.item.type === "proposed_plan",
+            );
+            if (publications.length === 0)
+              return { thread: index.records.thread, publications: [] };
+            const sources = yield* encodeTimelineSources(
+              publications.map((row) => ({
+                threadId: row.sourceThreadId,
+                id: row.sourceItemId,
+              })),
+            );
+            const payloads = yield* sql<{
+              thread_id: string;
+              turn_item_id: string;
+              payload_json: string;
+            }>`SELECT item.thread_id, item.turn_item_id, item.payload_json
+          FROM orchestration_v2_projection_turn_items item JOIN json_each(${sources}) wanted
+          ON item.thread_id = json_extract(wanted.value, '$.threadId')
+            AND item.turn_item_id = json_extract(wanted.value, '$.id')`;
+            const sourceKey = (sourceThreadId: string, sourceItemId: string) =>
+              `${sourceThreadId.length}:${sourceThreadId}${sourceItemId}`;
+            const byIdentity = new Map(
+              payloads.map((row) => [sourceKey(row.thread_id, row.turn_item_id), row.payload_json]),
+            );
+            const bodies = yield* Effect.forEach(publications, (row) =>
+              Effect.gen(function* () {
+                const payload = byIdentity.get(sourceKey(row.sourceThreadId, row.sourceItemId));
+                if (payload === undefined) return yield* new ProjectionStoreReadError({ threadId });
+                const item = yield* decodeTurnItemPayload(payload);
+                if (item.type !== "assistant_message" && item.type !== "proposed_plan")
+                  return yield* new ProjectionStoreReadError({ threadId });
+                return { sourceThreadId: row.sourceThreadId, sourceItemId: row.sourceItemId, item };
+              }),
+            );
+            return { thread: index.records.thread, publications: bodies };
+          }),
+        )
+        .pipe(Effect.mapError(controlReadError(threadId)));
+
     const getThreadHistoryPage: ProjectionStoreV2Shape["getThreadHistoryPage"] = (
       threadId,
       cursor,
@@ -6161,6 +6221,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getThreadSnapshot,
       getThreadSnapshotWindow,
       getTimelinePage,
+      getVisiblePublications,
       getThreadHistoryPage,
       searchThread,
       searchThreadStream,
@@ -6856,6 +6917,27 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
               hasMore: matching.length > options.limit,
             };
           }),
+        ),
+      getVisiblePublications: (threadId) =>
+        service.getThreadProjection(threadId).pipe(
+          Effect.flatMap((projection) =>
+            projection.thread.deletedAt !== null
+              ? Effect.fail(new ProjectionStoreThreadNotFoundError({ threadId }))
+              : Effect.succeed({
+                  thread: projection.thread,
+                  publications: projection.visibleTurnItems.flatMap((row) =>
+                    row.item.type === "assistant_message" || row.item.type === "proposed_plan"
+                      ? [
+                          {
+                            sourceThreadId: row.sourceThreadId,
+                            sourceItemId: row.sourceItemId,
+                            item: row.item,
+                          },
+                        ]
+                      : [],
+                  ),
+                }),
+          ),
         ),
       getThreadSnapshotWindow: (threadId, options) =>
         service.getThreadSnapshot(threadId).pipe(

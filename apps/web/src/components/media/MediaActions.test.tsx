@@ -1,10 +1,12 @@
 import {
   AuthFilesystemReadScope,
+  AuthOrchestrationReadScope,
   EnvironmentId,
   ThreadId,
   type AuthSessionState,
 } from "@t3tools/contracts";
 import { AsyncResult } from "effect/reactivity";
+import * as Cause from "effect/Cause";
 import { createElement, isValidElement, type ReactNode } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 
@@ -17,7 +19,7 @@ function deferred<T>() {
 }
 
 const state = vi.hoisted(() => ({
-  sessions: new Map<string, Pick<AuthSessionState, "authenticated" | "scopes">>(),
+  sessions: new Map<string, Pick<AuthSessionState, "authenticated" | "scopes" | "permissions">>(),
   mint: vi.fn(),
   download: vi.fn(),
   png: vi.fn(),
@@ -249,6 +251,36 @@ it("reenables the menu and a retained action when file access is gained", async 
     expect.arrayContaining([expect.objectContaining({ id: "save", disabled: false })]),
     expect.anything(),
   );
+});
+
+it("saves a conversation-linked image using only its exact file capability", async () => {
+  state.sessions.set(environmentId, {
+    authenticated: true,
+    permissions: [AuthOrchestrationReadScope],
+  });
+  await useMediaActions(hostSource("workspace-file")).save();
+  expect(state.mint).toHaveBeenCalledWith({
+    environmentId,
+    input: {
+      resource: { _tag: "media-file", threadId, path: "/repo/image.png", linkedThreadFile: true },
+    },
+  });
+  expect(state.download).toHaveBeenCalledWith(
+    "https://host.test/api/assets/image.png",
+    "image.png",
+  );
+});
+
+it("does not download an unlinked image when the server denies scoped access", async () => {
+  state.sessions.set(environmentId, {
+    authenticated: true,
+    permissions: [AuthOrchestrationReadScope],
+  });
+  state.mint.mockResolvedValue(
+    AsyncResult.failure(Cause.fail(new Error("This file is not linked in this conversation."))),
+  );
+  await expect(useMediaActions(hostSource()).save()).rejects.toThrow("not linked");
+  expect(state.download).not.toHaveBeenCalled();
 });
 
 it.each([false, true])("uses the media environment's grant (allowed: %s)", async (allowed) => {

@@ -57,7 +57,7 @@ import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime"
 import {
   classifyMarkdownImageSource,
   markdownImageSourceFragment,
-} from "@t3tools/client-runtime/markdown-images";
+} from "@t3tools/shared/markdownImages";
 import { resolveViewedImageAsset } from "@t3tools/client-runtime/work-log/presentation";
 import {
   renderCodexFileCitationsAsMarkdown,
@@ -231,12 +231,7 @@ import { appAtomRegistry } from "../../state/atom-registry";
 import { environmentThreadShells, threadEnvironment } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useV2ItemSupport } from "../../state/v2-item-support";
-import {
-  basename,
-  fileRoutePathSegments,
-  isAbsolutePath,
-  resolveWorkspaceRelativeFilePath,
-} from "../files/filePath";
+import { basename, fileRoutePathSegments } from "../files/filePath";
 import { waitForThreadShellReady } from "./threadForkNavigation";
 import { resolveUserMessageIntentBadge } from "./userMessageIntentBadge";
 import { IncomingMessageDisclosure } from "./incoming-message-disclosure";
@@ -2688,11 +2683,10 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
         return;
       }
       const presentation = resolveMarkdownLinkPresentation(href);
+      const fileTarget =
+        presentation.kind === "file" ? resolveFileChipTarget(href, props.workspaceRoot) : null;
       if (presentation.kind === "file") {
-        const relativePath = resolveWorkspaceRelativeFilePath(
-          props.workspaceRoot,
-          presentation.path,
-        );
+        const relativePath = fileTarget?.relativePath;
         if (relativePath) {
           void Haptics.selectionAsync();
           if (isPdfFile({ name: relativePath })) {
@@ -2703,7 +2697,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
                   name: relativePath.split("/").at(-1),
                   environmentId: props.environmentId,
                   resource: {
-                    _tag: "workspace-file",
+                    _tag: "media-file",
                     threadId: props.threadId,
                     path: relativePath,
                   },
@@ -2770,19 +2764,20 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
 
       // A host file outside the workspace, such as a report an agent wrote to
       // a temp directory, opens read-only in the file screen.
-      if (presentation.kind === "file" && isAbsolutePath(presentation.path)) {
+      const hostFileTarget = fileTarget?.fullPath;
+      if (presentation.kind === "file" && hostFileTarget) {
         void Haptics.selectionAsync();
-        if (isPdfFile({ name: presentation.path })) {
+        if (isPdfFile({ name: hostFileTarget })) {
           setExpandedFile(
             (current) =>
               current ?? {
                 kind: "pdf",
-                name: basename(presentation.path),
+                name: basename(hostFileTarget),
                 environmentId: props.environmentId,
                 resource: {
                   _tag: "media-file",
                   threadId: props.threadId,
-                  path: presentation.path,
+                  path: hostFileTarget,
                 },
               },
           );
@@ -2791,13 +2786,23 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
         navigation.navigate("ThreadFile", {
           environmentId: String(props.environmentId),
           threadId: String(props.threadId),
-          path: fileRoutePathSegments(presentation.path),
+          path: fileRoutePathSegments(hostFileTarget),
           ...(presentation.line ? { line: String(presentation.line) } : {}),
         });
         return;
       }
 
-      if (presentation.kind !== "file" && presentation.href) {
+      if (presentation.kind === "file") {
+        Alert.alert(
+          "File unavailable",
+          /^~(?:[\\/]|$)/.test(presentation.path)
+            ? "The host home directory is unknown. Ask for an absolute file link."
+            : "The workspace is unavailable, so this relative file link cannot be resolved.",
+        );
+        return;
+      }
+
+      if (presentation.href) {
         if (/^https?:\/\//i.test(presentation.href) && isPdfFile({ name: presentation.href })) {
           void openThreadFeedMarkdownUrl(
             previewPreparationInput(presentation.href),
