@@ -203,6 +203,7 @@ export function HomeRouteScreen() {
         />
         <HomeHeader
           onOpenPause={pauseControl.visible ? pauseControl.onPress : undefined}
+          hasPauseSession={pauseControl.hasSession}
           environments={environments}
           projects={projectFilterOptions}
           searchQuery={searchQuery}

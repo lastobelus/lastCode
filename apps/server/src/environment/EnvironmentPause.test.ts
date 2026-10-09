@@ -2,7 +2,12 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   DEFAULT_SERVER_SETTINGS,
+  CommandId,
+  NodeId,
   ProjectId,
+  type OrchestrationV2ConversationMessage,
+  type OrchestrationV2ProviderTurn,
+  type OrchestrationV2Run,
   ProviderSessionId,
   RunId,
   ThreadId,
@@ -47,6 +52,8 @@ const thread = (id: ThreadId, status = "running"): OrchestrationV2ThreadShell =>
     activeRunId: status === "running" ? RunId.make(`run-${id}`) : null,
     pendingRuntimeRequest: null,
     pendingBackgroundTasks: [],
+    creationSource: "web",
+    lineage: { relationshipToParent: null },
     archivedAt: null,
     deletedAt: null,
   }) as OrchestrationV2ThreadShell;
@@ -59,6 +66,11 @@ const harness = Effect.gen(function* () {
     ReadonlyArray<{ providerSessionId: ProviderSessionId; status: "running" | "stopping" }>
   >([]);
   const pending = yield* Ref.make<ReadonlyArray<{ threadId: ThreadId }>>([]);
+  const effects = yield* Ref.make<ReadonlyArray<EffectOutbox.OrchestrationEffectV2>>([]);
+  const messages = yield* Ref.make<ReadonlyArray<OrchestrationV2ConversationMessage>>([]);
+  const runs = yield* Ref.make<ReadonlyArray<OrchestrationV2Run>>([]);
+  const providerTurns = yield* Ref.make<ReadonlyArray<OrchestrationV2ProviderTurn>>([]);
+  const queued = yield* Ref.make(false);
   const terminals = yield* Ref.make<ReadonlyArray<TerminalSummary>>([]);
   const calls = yield* Ref.make<ReadonlyArray<Threads.ThreadManagementSendInput>>([]);
   const failures = yield* Ref.make(new Set<ThreadId>());
@@ -76,7 +88,10 @@ const harness = Effect.gen(function* () {
     Layer.mock(EffectOutbox.EffectOutboxV2)({
       pendingCleanup: Effect.succeed([]),
       pendingExecution: Ref.get(pending),
-      listByCommandId: () => Effect.succeed([]),
+      listByCommandId: (commandId) =>
+        Ref.get(effects).pipe(
+          Effect.map((rows) => rows.filter((row) => row.commandId === commandId)),
+        ),
     }),
     Layer.mock(ProviderSessions.ProviderSessionManagerV2)({
       pendingExecution: Effect.gen(function* () {
@@ -92,11 +107,17 @@ const harness = Effect.gen(function* () {
     Layer.mock(TerminalManager)({ refreshMetadata: Ref.get(terminals) }),
     Layer.mock(Threads.ThreadManagementService)({
       getProjectThreadRecords: () =>
-        Effect.succeed({ messages: [] } as unknown as Awaited<
-          Effect.Success<
-            ReturnType<Threads.ThreadManagementService["Service"]["getProjectThreadRecords"]>
-          >
-        >),
+        Effect.gen(function* () {
+          return {
+            messages: yield* Ref.get(messages),
+            runs: yield* Ref.get(runs),
+            providerTurns: yield* Ref.get(providerTurns),
+          } as Awaited<
+            Effect.Success<
+              ReturnType<Threads.ThreadManagementService["Service"]["getProjectThreadRecords"]>
+            >
+          >;
+        }),
       sendToThread: (input) =>
         Effect.gen(function* () {
           yield* Ref.update(calls, (previous) => [...previous, input]);
@@ -107,7 +128,24 @@ const harness = Effect.gen(function* () {
             return yield* new Threads.ThreadManagementThreadArchivedError({
               threadId: input.threadId,
             });
-          yield* store.recordDelivery(input.messageId, true);
+          if (yield* Ref.get(queued)) {
+            const runId = RunId.make(`queued-${input.messageId}`);
+            yield* Ref.update(messages, (previous) => [
+              ...previous,
+              { id: input.messageId, runId } as OrchestrationV2ConversationMessage,
+            ]);
+            yield* Ref.update(runs, (previous) => [
+              ...previous,
+              {
+                id: runId,
+                threadId: input.threadId,
+                userMessageId: input.messageId,
+                status: "queued",
+                rootNodeId: null,
+                activeAttemptId: null,
+              } as OrchestrationV2Run,
+            ]);
+          } else yield* store.recordDelivery(input.messageId, true);
           return {} as Threads.ThreadManagementSendResult;
         }),
     }),
@@ -126,6 +164,11 @@ const harness = Effect.gen(function* () {
     failures,
     observationFailed,
     pending,
+    effects,
+    messages,
+    runs,
+    providerTurns,
+    queued,
     gate,
     entered,
     layers,
@@ -265,5 +308,144 @@ it.effect("defaults off and refuses starting a pause while preserving recovery o
     assert.strictEqual((yield* h.pause.start.pipe(Effect.flip)).reason, "disabled");
     assert.isNull((yield* h.pause.status).session);
     assert.isEmpty(yield* Ref.get(h.calls));
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect.each([{ terminalStatus: "cancelled" as const }, { terminalStatus: "failed" as const }])(
+  "keeps queued pause work known and retries a $terminalStatus run before delivery",
+  ({ terminalStatus }) =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      yield* Ref.set(h.snapshot, shell([thread(a)]));
+      yield* Ref.set(h.queued, true);
+      const waiting = yield* h.pause.start;
+      assert.strictEqual(waiting.observation, "known");
+      assert.strictEqual(waiting.activeThreadCount, 1);
+      assert.strictEqual(waiting.session?.targets[0]?.pause, "pending");
+      assert.isFalse(waiting.quiet);
+      const first = (yield* Ref.get(h.calls))[0]!;
+      yield* Ref.update(h.runs, (runs) => runs.map((run) => ({ ...run, status: terminalStatus })));
+      // Retry itself discovers the terminal queued run, without an intervening status read.
+      const retried = yield* h.pause.retry;
+      const calls = yield* Ref.get(h.calls);
+      assert.strictEqual(calls.length, 2);
+      assert.notStrictEqual(calls[1]!.messageId, first.messageId);
+      assert.strictEqual(retried.observation, "known");
+      assert.strictEqual(retried.session?.targets[0]?.pause, "pending");
+      assert.strictEqual((yield* h.store.get)?.targets[0]?.pauseAttempt, 1);
+      yield* Ref.update(h.runs, (runs) => runs.map((run) => ({ ...run, status: terminalStatus })));
+      assert.strictEqual((yield* h.pause.status).session?.targets[0]?.pause, "failed");
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect(
+  "follows a queued pause's later start effect and preserves an ambiguous native receipt",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      yield* Ref.set(h.snapshot, shell([thread(a)]));
+      yield* Ref.set(h.queued, true);
+      yield* h.pause.start;
+      const run = (yield* Ref.get(h.runs))[0]!;
+      const startEffect = {
+        commandId: CommandId.make(`command:system:start-queued:${run.id}`),
+        request: { type: "provider-turn.start", runId: run.id },
+        status: "pending",
+        attemptCount: 0,
+      } as EffectOutbox.OrchestrationEffectV2;
+      yield* Ref.update(h.runs, (runs) => runs.map((run) => ({ ...run, status: "starting" })));
+      yield* Ref.set(h.snapshot, shell([]));
+      yield* Ref.set(h.pending, [{ threadId: a }]);
+      yield* Ref.set(h.effects, [startEffect]);
+      const starting = yield* h.pause.status;
+      assert.strictEqual(starting.observation, "known");
+      assert.strictEqual(starting.activeThreadCount, 1);
+      yield* Ref.set(h.pending, []);
+      yield* Ref.set(h.effects, [{ ...startEffect, status: "succeeded", attemptCount: 1 }]);
+      const ambiguous = yield* h.pause.retry;
+      assert.strictEqual(ambiguous.observation, "unknown");
+      assert.isFalse(ambiguous.quiet);
+      assert.strictEqual((yield* Ref.get(h.calls)).length, 1);
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect.each([
+  { attemptCount: 0, observation: "known", delivery: "failed" },
+  { attemptCount: 1, observation: "unknown", delivery: "pending" },
+])("reconciles a cancelled queued start that was claimed $attemptCount times", (scenario) =>
+  Effect.gen(function* () {
+    const h = yield* harness;
+    yield* Ref.set(h.snapshot, shell([thread(a)]));
+    yield* Ref.set(h.queued, true);
+    yield* h.pause.start;
+    const run = (yield* Ref.get(h.runs))[0]!;
+    yield* Ref.update(h.runs, (runs) => runs.map((run) => ({ ...run, status: "cancelled" })));
+    yield* Ref.set(h.effects, [
+      {
+        commandId: CommandId.make(`command:system:start-queued:${run.id}`),
+        request: { type: "provider-turn.start", runId: run.id },
+        status: "cancelled",
+        attemptCount: scenario.attemptCount,
+      } as EffectOutbox.OrchestrationEffectV2,
+    ]);
+    const observed = yield* h.pause.status;
+    assert.strictEqual(observed.observation, scenario.observation);
+    assert.strictEqual(observed.session?.targets[0]?.pause, scenario.delivery);
+    assert.isFalse(observed.quiet);
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("does not resend a terminal queued run with durable native acceptance evidence", () =>
+  Effect.gen(function* () {
+    const h = yield* harness;
+    yield* Ref.set(h.snapshot, shell([thread(a)]));
+    yield* Ref.set(h.queued, true);
+    yield* h.pause.start;
+    const rootNodeId = NodeId.make("node-example");
+    yield* Ref.update(h.runs, (runs) =>
+      runs.map((run) => ({ ...run, status: "failed", rootNodeId })),
+    );
+    yield* Ref.set(h.providerTurns, [
+      {
+        nodeId: rootNodeId,
+        nativeTurnRef: { driver: "codex", id: "native-turn-example" },
+      } as OrchestrationV2ProviderTurn,
+    ]);
+    const observed = yield* h.pause.retry;
+    assert.strictEqual(observed.observation, "unknown");
+    assert.strictEqual(observed.session?.targets[0]?.pause, "pending");
+    assert.strictEqual((yield* Ref.get(h.calls)).length, 1);
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("waits for provider-owned children but sends only to messageable threads", () =>
+  Effect.gen(function* () {
+    const h = yield* harness;
+    const nativeChild = {
+      ...thread(b),
+      creationSource: "provider" as const,
+      lineage: { ...thread(b).lineage, relationshipToParent: "subagent" as const },
+    };
+    const delegatedChild = {
+      ...thread(c),
+      creationSource: "mcp" as const,
+      lineage: { ...thread(c).lineage, relationshipToParent: "subagent" as const },
+    };
+    yield* Ref.set(h.snapshot, shell([thread(a), nativeChild, delegatedChild]));
+    const started = yield* h.pause.start;
+    assert.deepEqual(
+      started.session?.targets.map((target) => target.threadId),
+      [a, c],
+    );
+    assert.deepEqual(
+      (yield* Ref.get(h.calls)).map((call) => call.threadId),
+      [a, c],
+    );
+    yield* Ref.set(h.snapshot, shell([nativeChild]));
+    const waiting = yield* h.pause.status;
+    assert.strictEqual(waiting.activeThreadCount, 1);
+    assert.isFalse(waiting.quiet);
+    yield* Ref.set(h.snapshot, shell([]));
+    assert.isTrue((yield* h.pause.status).quiet);
   }).pipe(Effect.provide(testLayer)),
 );

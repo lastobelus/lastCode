@@ -36,7 +36,7 @@ export function HomeHeader(props: HomeHeaderProps) {
   return (
     <>
       <NativeStackScreenOptions
-        optionsVersion={[filterMenu.items, props.onOpenPause]}
+        optionsVersion={[filterMenu.items, props.onOpenPause, props.hasPauseSession]}
         options={{
           // Static header config (glass, title, fonts) lives in Stack.tsx
           // (GLASS_HEADER_OPTIONS). Only dynamic values are set here.
@@ -50,13 +50,19 @@ export function HomeHeader(props: HomeHeaderProps) {
                   filterMenu,
                   onOpenSettings: props.onOpenSettings,
                   onOpenPause: props.onOpenPause,
+                  hasPauseSession: props.hasPauseSession,
                 })
               : [
                   ...(props.onOpenPause
                     ? [
                         withNativeGlassHeaderItem({
-                          accessibilityLabel: "Pause or resume environment",
-                          icon: { name: "pause", type: "sfSymbol" } as const,
+                          accessibilityLabel: props.hasPauseSession
+                            ? "Resume environment"
+                            : "Pause environment",
+                          icon: {
+                            name: props.hasPauseSession ? "play" : "pause",
+                            type: "sfSymbol",
+                          } as const,
                           identifier: "home-environment-pause",
                           label: "",
                           onPress: props.onOpenPause,

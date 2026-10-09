@@ -30,6 +30,7 @@ export function MaterialThreadListToolbar(props: {
   readonly onFilterAction: NonNullable<ComponentProps<typeof ControlPillMenu>["onPressAction"]>;
   readonly onOpenSettings: () => void;
   readonly onOpenPause?: () => void;
+  readonly hasPauseSession?: boolean;
   readonly onOpenEnvironments: () => void;
   readonly sidebar?: boolean;
   readonly onLayout?: (event: LayoutChangeEvent) => void;
@@ -121,8 +122,10 @@ export function MaterialThreadListToolbar(props: {
               />
               {props.onOpenPause ? (
                 <AndroidHeaderIconButton
-                  accessibilityLabel="Pause or resume environment"
-                  icon="pause"
+                  accessibilityLabel={
+                    props.hasPauseSession ? "Resume environment" : "Pause environment"
+                  }
+                  icon={props.hasPauseSession ? "play" : "pause"}
                   onPress={props.onOpenPause}
                 />
               ) : null}

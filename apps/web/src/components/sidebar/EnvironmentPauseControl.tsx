@@ -28,7 +28,7 @@ export function EnvironmentPauseControl({ onBackdrop }: { onBackdrop: boolean })
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const [selectedId, setSelectedId] = useState<EnvironmentId | null>(null);
   const [open, setOpen] = useState(false);
-  // One initial read also discovers a retained session after the visibility setting was disabled.
+  // A slow shared read discovers sessions started on another client, even when disabled.
   const statuses = useAtomValue(
     useMemo(
       () =>
@@ -43,7 +43,7 @@ export function EnvironmentPauseControl({ onBackdrop }: { onBackdrop: boolean })
                 .map((environment) => [
                   environment.environmentId,
                   get(
-                    environmentPause.status({
+                    environmentPause.monitorStatus({
                       environmentId: environment.environmentId,
                       input: {},
                     }),
@@ -61,8 +61,15 @@ export function EnvironmentPauseControl({ onBackdrop }: { onBackdrop: boolean })
   });
   const selected =
     choices.find((environment) => environment.environmentId === selectedId) ??
+    choices.find((environment) => {
+      const result = statuses.get(environment.environmentId);
+      return result && Option.getOrNull(AsyncResult.value(result))?.session != null;
+    }) ??
     choices.find((environment) => environment.environmentId === primaryEnvironmentId) ??
     choices[0];
+  useEffect(() => {
+    if (!selected) setOpen(false);
+  }, [selected]);
   if (!selected) return null;
   const hasSession = choices.some((environment) => {
     const status = statuses.get(environment.environmentId);
@@ -147,12 +154,19 @@ function EnvironmentPauseDialog({
   const resumeFailures = session?.targets.filter((thread) => thread.resume === "failed") ?? [];
   const resuming = session?.phase === "resuming";
   const quiet = known && status.quiet && pauseFailures.length === 0;
+  const canCancelPause =
+    known &&
+    session !== null &&
+    !resuming &&
+    !quiet &&
+    session.targets.every((thread) => thread.pause !== "pending");
   const sawSession = useRef(false);
   // Delivery receipts may finish after Resume returns; close only after the server clears the session.
   useEffect(() => {
     if (session !== null) sawSession.current = true;
     else if (known && sawSession.current) onClose();
   }, [known, onClose, session]);
+  useEffect(() => refreshInitial(), [refreshInitial]);
 
   const execute = async (action: "start" | "retry" | "resume") => {
     setPending(true);
@@ -292,6 +306,15 @@ function EnvironmentPauseDialog({
           <Button variant="outline" disabled={pending} onClick={onClose}>
             {session ? "Close" : "Cancel"}
           </Button>
+          {canCancelPause ? (
+            <Button
+              variant="outline"
+              disabled={pending || !canResume}
+              onClick={() => void execute("resume")}
+            >
+              Cancel pause
+            </Button>
+          ) : null}
           {!session ? (
             <Button
               disabled={pending || !known || !enabled || !canStart}

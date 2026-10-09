@@ -1,5 +1,7 @@
 import {
+  CommandId,
   EnvironmentPauseError,
+  isProviderNativeSubagentThread,
   type EnvironmentPauseStatus,
   type OrchestrationV2ThreadShell,
   type ThreadId,
@@ -68,7 +70,10 @@ const make = Effect.gen(function* () {
     );
     const pendingIds = new Set(pending.map(({ threadId }) => threadId));
     return [...shell.threads, ...shell.archivedThreads].filter(
-      (thread) => thread.deletedAt == null && (activeThread(thread) || pendingIds.has(thread.id)),
+      (thread) =>
+        thread.deletedAt == null &&
+        !isProviderNativeSubagentThread(thread) &&
+        (activeThread(thread) || pendingIds.has(thread.id)),
     );
   });
 
@@ -108,7 +113,7 @@ const make = Effect.gen(function* () {
         const direction = session.phase === "resuming" ? "resume" : "pause";
         if (target[direction] !== "pending" || !target[`${direction}Accepted`]) continue;
         const identity = Store.deliveryIdentity(session, target, direction);
-        const effects = yield* outbox
+        let effects = yield* outbox
           .listByCommandId(identity.commandId)
           .pipe(
             Effect.mapError(
@@ -116,16 +121,75 @@ const make = Effect.gen(function* () {
                 new EnvironmentPauseError({ operation: "status", reason: "unavailable", cause }),
             ),
           );
-        const deliveries = effects.filter(
+        let deliveries = effects.filter(
           (effect) =>
             effect.request.type === "provider-turn.start" ||
             effect.request.type === "provider-turn.steer",
         );
+        if (deliveries.length === 0) {
+          const records = yield* threads
+            .getProjectThreadRecords(target, ["messages", "runs", "providerTurns"], {
+              messageIds: [identity.messageId],
+            })
+            .pipe(Effect.result);
+          if (records._tag === "Failure") {
+            deliveryUnknown = true;
+            continue;
+          }
+          const message = records.success.messages.find(
+            (message) => message.id === identity.messageId,
+          );
+          const run = records.success.runs.find(
+            (run) => run.id === message?.runId && run.userMessageId === identity.messageId,
+          );
+          if (run === undefined) {
+            deliveryUnknown = true;
+            continue;
+          }
+          // Queued messages acquire their start effect under a later system command.
+          // The original message command has no provider effect while waiting.
+          if (run.status === "queued") continue;
+          effects = yield* outbox
+            .listByCommandId(CommandId.make(`command:system:start-queued:${run.id}`))
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new EnvironmentPauseError({ operation: "status", reason: "unavailable", cause }),
+              ),
+            );
+          deliveries = effects.filter((effect) => effect.request.type === "provider-turn.start");
+          const nativeAcceptance = records.success.providerTurns.some(
+            (turn) =>
+              turn.nativeTurnRef !== null &&
+              ((run.rootNodeId !== null && turn.nodeId === run.rootNodeId) ||
+                (run.activeAttemptId !== null && turn.runAttemptId === run.activeAttemptId)),
+          );
+          if (
+            deliveries.length === 0 &&
+            !nativeAcceptance &&
+            (run.status === "cancelled" || run.status === "failed")
+          ) {
+            yield* store.recordDelivery(identity.messageId, false);
+            continue;
+          }
+          if (deliveries.length === 0) {
+            deliveryUnknown = true;
+            continue;
+          }
+        }
+        const unsettled = deliveries.some(
+          (effect) => effect.status === "pending" || effect.status === "running",
+        );
+        if (unsettled) continue;
         if (
-          deliveries.some((effect) => effect.status === "cancelled" || effect.status === "failed")
+          deliveries.some(
+            (effect) =>
+              (effect.status === "cancelled" || effect.status === "failed") &&
+              effect.attemptCount === 0,
+          )
         ) {
           yield* store.recordDelivery(identity.messageId, false);
-        } else if (deliveries.every((effect) => effect.status === "succeeded")) {
+        } else {
           // A crash between native acceptance and its receipt cannot prove non-delivery.
           // Keep the target; never re-send it or declare it safely paused by inference.
           deliveryUnknown = true;
@@ -342,6 +406,7 @@ const make = Effect.gen(function* () {
     ),
     retry: operations.withPermits(1)(
       Effect.gen(function* () {
+        yield* status;
         const session = yield* store.get;
         if (session === null)
           return yield* new EnvironmentPauseError({ operation: "retry", reason: "no_session" });

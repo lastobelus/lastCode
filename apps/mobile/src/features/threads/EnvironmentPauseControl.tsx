@@ -28,13 +28,11 @@ export function useEnvironmentPauseControl() {
           const config = get(serverEnvironment.configValueAtom(target.environmentId));
           const supported = config?.environment.capabilities.environmentPause === true;
           const initial = supported
-            ? get(environmentPause.status(request))
+            ? get(environmentPause.monitorStatus(request))
             : AsyncResult.initial<EnvironmentPauseStatus>();
           const saved = Option.getOrNull(AsyncResult.value(initial));
           const polling =
-            target.connected &&
-            ((saved?.session !== null && saved?.session !== undefined) ||
-              (open && selectedId === target.environmentId));
+            supported && target.connected && open && selectedId === target.environmentId;
           const result = polling ? get(environmentPause.activeStatus(request)) : initial;
           const latest = Option.getOrNull(AsyncResult.value(result));
           const status = latest ?? saved;
@@ -66,6 +64,9 @@ export function useEnvironmentPauseControl() {
   }, [candidates]);
   return {
     visible: candidates.length > 0,
+    hasSession: entries.some(
+      (entry) => entry.status?.session !== null && entry.status?.session !== undefined,
+    ),
     onPress,
     modal: open ? (
       <EnvironmentPauseModal
@@ -124,7 +125,7 @@ function EnvironmentPauseModal(props: {
                 <Pressable
                   key={candidate.environmentId}
                   accessibilityRole="button"
-                  accessibilityLabel={`Pause controls for ${candidate.environmentLabel}`}
+                  accessibilityLabel={`${candidate.status?.session ? "Resume" : "Pause"} controls for ${candidate.environmentLabel}`}
                   className="min-h-12 justify-center rounded-xl bg-subtle px-4 py-3"
                   onPress={() => props.onSelect(candidate.environmentId)}
                 >
@@ -162,11 +163,12 @@ function EnvironmentPauseDetails(props: {
   const [resumed, setResumed] = useState(false);
   const session = entry.status?.session ?? null;
   const availability = entry.availability;
-  const run = async (action: "start" | "retry" | "resume") => {
+  const run = async (action: "start" | "retry" | "resume" | "cancel") => {
     if (pendingRef.current) return;
     if (action === "start" && (!entry.canStart || !availability.canStart)) return;
     if (action === "retry" && (!entry.canRetry || !availability.canRetryPause)) return;
     if (action === "resume" && (!entry.canResume || !availability.canResume)) return;
+    if (action === "cancel" && (!entry.canResume || !availability.canCancelPause)) return;
     pendingRef.current = true;
     setPending(true);
     setError(null);
@@ -174,7 +176,7 @@ function EnvironmentPauseDetails(props: {
       const command = action === "start" ? start : action === "retry" ? retry : resume;
       const result = await command({ environmentId: entry.environmentId, input: {} });
       if (AsyncResult.isFailure(result)) throw squashAtomCommandFailure(result);
-      if (action === "resume") setResumed(true);
+      if (action === "resume" || action === "cancel") setResumed(true);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "The request failed. Try again.");
     } finally {
@@ -238,6 +240,11 @@ function EnvironmentPauseDetails(props: {
             {session.targets.length} original {session.targets.length === 1 ? "thread" : "threads"}{" "}
             tracked. Resume sends “resume” to the threads that received the pause message.
           </Text>
+          {availability.showCancelPause ? (
+            <Text className="text-sm text-foreground-muted">
+              Cancel pause resumes those threads so you can deal with unfinished work.
+            </Text>
+          ) : null}
           {entry.status?.blockers.map((blocker) => {
             const target =
               "threadId" in blocker
@@ -283,14 +290,24 @@ function EnvironmentPauseDetails(props: {
                 onPress={() => void run("retry")}
               />
             ) : null}
-            <ControlPill
-              label={
-                pending ? "Sending…" : session.phase === "resuming" ? "Retry resume" : "Resume"
-              }
-              variant="primary"
-              disabled={pending || !entry.canResume || !availability.canResume}
-              onPress={() => void run("resume")}
-            />
+            {availability.showCancelPause ? (
+              <ControlPill
+                label={pending ? "Sending…" : "Cancel pause"}
+                variant="pill"
+                disabled={pending || !entry.canResume || !availability.canCancelPause}
+                onPress={() => void run("cancel")}
+              />
+            ) : null}
+            {availability.ready || session.phase === "resuming" ? (
+              <ControlPill
+                label={
+                  pending ? "Sending…" : session.phase === "resuming" ? "Retry resume" : "Resume"
+                }
+                variant="primary"
+                disabled={pending || !entry.canResume || !availability.canResume}
+                onPress={() => void run("resume")}
+              />
+            ) : null}
           </>
         )}
       </View>

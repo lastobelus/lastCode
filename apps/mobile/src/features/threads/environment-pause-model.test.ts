@@ -49,6 +49,8 @@ describe("mobile environment pause availability", () => {
       ready: true,
       canResume: true,
       canStart: false,
+      showCancelPause: false,
+      canCancelPause: false,
     });
     expect(availability({ ...paused, session: null }, { enabled: false }).visible).toBe(false);
   });
@@ -61,6 +63,7 @@ describe("mobile environment pause availability", () => {
         ready: false,
         canResume: false,
         canRetryPause: false,
+        canCancelPause: false,
       });
     },
   );
@@ -109,6 +112,68 @@ describe("mobile environment pause availability", () => {
           targets: [{ ...paused.session!.targets[0]!, resume: "failed" }],
         },
       }),
-    ).toMatchObject({ ready: false, canResume: true, canRetryPause: false });
+    ).toMatchObject({ ready: false, canResume: true, canRetryPause: false, canCancelPause: false });
+  });
+
+  it("lets a stalled pause resume its successful recipients despite a permanent delivery failure", () => {
+    expect(
+      availability({
+        ...paused,
+        quiet: false,
+        activeThreadCount: 1,
+        session: {
+          ...paused.session!,
+          phase: "pausing",
+          targets: [
+            paused.session!.targets[0]!,
+            {
+              ...paused.session!.targets[0]!,
+              threadId: ThreadId.make("unavailable-thread"),
+              pause: "failed",
+              error: "Thread is unavailable.",
+            },
+          ],
+        },
+      }),
+    ).toMatchObject({
+      ready: false,
+      canResume: false,
+      showCancelPause: true,
+      canCancelPause: true,
+    });
+  });
+
+  it("allows cancellation when settled pause messages leave a thread waiting for an approval", () => {
+    const status: EnvironmentPauseStatus = {
+      ...paused,
+      quiet: false,
+      activeThreadCount: 1,
+      session: { ...paused.session!, phase: "pausing" },
+      blockers: [
+        { type: "thread-turn", threadId: ThreadId.make("thread"), turnId: null, status: "running" },
+      ],
+    };
+    expect(availability(status)).toMatchObject({
+      ready: false,
+      canResume: false,
+      canCancelPause: true,
+    });
+    expect(availability({ ...status, observation: "unknown" }).canCancelPause).toBe(false);
+    expect(availability(status, { connected: false }).canCancelPause).toBe(false);
+    expect(availability(status, { fresh: false }).canCancelPause).toBe(false);
+  });
+
+  it("does not cancel while pause delivery is still pending", () => {
+    expect(
+      availability({
+        ...paused,
+        quiet: false,
+        session: {
+          ...paused.session!,
+          phase: "pausing",
+          targets: [{ ...paused.session!.targets[0]!, pause: "pending" }],
+        },
+      }),
+    ).toMatchObject({ showCancelPause: false, canCancelPause: false, canResume: false });
   });
 });

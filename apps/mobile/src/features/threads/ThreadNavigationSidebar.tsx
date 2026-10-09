@@ -868,8 +868,16 @@ function ThreadNavigationSidebarPane(
         filterMenu,
         onOpenSettings: props.onOpenSettings,
         onOpenPause: pauseControl.visible ? pauseControl.onPress : undefined,
+        hasPauseSession: pauseControl.hasSession,
       }),
-    [filterIcon, filterMenu, props.onOpenSettings, pauseControl.visible, pauseControl.onPress],
+    [
+      filterIcon,
+      filterMenu,
+      props.onOpenSettings,
+      pauseControl.visible,
+      pauseControl.onPress,
+      pauseControl.hasSession,
+    ],
   );
   // Snoozed threads need no special case: the shelf header is a list row
   // even while collapsed.
@@ -1046,6 +1054,7 @@ function ThreadNavigationSidebarPane(
           onFilterAction={handleListMenuAction}
           onOpenSettings={props.onOpenSettings}
           onOpenPause={pauseControl.visible ? pauseControl.onPress : undefined}
+          hasPauseSession={pauseControl.hasSession}
           onOpenEnvironments={props.onOpenEnvironmentSettings}
           onRequestVisibility={props.onRequestVisibility}
         />
@@ -1078,6 +1087,7 @@ function ThreadNavigationSidebarPane(
               <SidebarHeaderActions
                 onOpenSettings={props.onOpenSettings}
                 onOpenPause={pauseControl.visible ? pauseControl.onPress : undefined}
+                hasPauseSession={pauseControl.hasSession}
               />
             </View>
           </View>

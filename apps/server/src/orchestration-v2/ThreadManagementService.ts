@@ -716,7 +716,11 @@ const make = Effect.gen(function* () {
 
   const sendToThread: ThreadManagementServiceShape["sendToThread"] = (input) =>
     Effect.gen(function* () {
-      const target = yield* getProjectThreadRecords(input, ["runs", "providerTurns"]);
+      const target = yield* getProjectThreadRecords(input, [
+        "runs",
+        "providerTurns",
+        ...(input.mode === "cooperative" ? (["providerThreads", "providerSessions"] as const) : []),
+      ]);
       if (target.thread.archivedAt !== null) {
         return yield* new ThreadManagementThreadArchivedError({
           threadId: input.threadId,
@@ -724,6 +728,16 @@ const make = Effect.gen(function* () {
       }
 
       const steerableRun = latestSteerableRun(target);
+      const activeProviderThread =
+        input.mode === "cooperative"
+          ? target.providerThreads.find((thread) => thread.id === steerableRun?.providerThreadId)
+          : undefined;
+      const activeTurns =
+        input.mode === "cooperative"
+          ? target.providerSessions.find(
+              (session) => session.id === activeProviderThread?.providerSessionId,
+            )?.capabilities.turns
+          : undefined;
       let dispatchMode: Extract<
         OrchestrationV2Command,
         { readonly type: "message.dispatch" }
@@ -739,7 +753,13 @@ const make = Effect.gen(function* () {
           type: input.mode === "steer" ? "steer_active" : "restart_active",
           targetRunId: steerableRun.id,
         };
-      } else if (input.mode === "cooperative" && steerableRun !== undefined) {
+      } else if (
+        input.mode === "cooperative" &&
+        steerableRun !== undefined &&
+        activeTurns?.supportsActiveSteering === true &&
+        activeTurns.supportsStrictActiveSteering === true &&
+        activeTurns.activeSteeringInterruptsTools !== true
+      ) {
         dispatchMode = { type: "steer_active_native", targetRunId: steerableRun.id };
       } else if (input.mode === "auto" && steerableRun !== undefined) {
         dispatchMode = { type: "steer_active", targetRunId: steerableRun.id };
