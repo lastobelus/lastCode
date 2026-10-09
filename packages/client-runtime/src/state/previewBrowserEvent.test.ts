@@ -13,8 +13,13 @@ import { RpcClient, RpcSerialization } from "effect/rpc";
 
 import * as EnvironmentRegistry from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
-import { AVAILABLE_CONNECTION_STATE, PrimaryConnectionTarget } from "../connection/model.ts";
+import {
+  AVAILABLE_CONNECTION_STATE,
+  PrimaryConnectionTarget,
+  type PreparedConnection,
+} from "../connection/model.ts";
 import { makeWsRpcProtocolClient } from "../rpc/protocol.ts";
+import type { RpcSession } from "../rpc/session.ts";
 import { createPreviewEnvironmentAtoms } from "./preview.ts";
 
 const decodeBrowserEvent = Schema.decodeUnknownSync(DesktopBrowserEventInput);
@@ -42,7 +47,7 @@ const makeHarness = Effect.fn("PreviewBrowserEventTest.makeHarness")(function* (
   const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
     target,
     state: yield* SubscriptionRef.make(AVAILABLE_CONNECTION_STATE),
-    session: yield* SubscriptionRef.make(
+    session: yield* SubscriptionRef.make<Option.Option<RpcSession>>(
       Option.some({
         client,
         initialConfig: Effect.never,
@@ -52,7 +57,7 @@ const makeHarness = Effect.fn("PreviewBrowserEventTest.makeHarness")(function* (
         closed: Effect.never,
       }),
     ),
-    prepared: yield* SubscriptionRef.make(Option.none()),
+    prepared: yield* SubscriptionRef.make<Option.Option<PreparedConnection>>(Option.none()),
     connect: Effect.void,
     disconnect: Effect.void,
     retryNow: Effect.void,
@@ -68,7 +73,7 @@ const makeHarness = Effect.fn("PreviewBrowserEventTest.makeHarness")(function* (
     Effect.sync(() => registry.dispose()),
   );
   const command = createPreviewEnvironmentAtoms(runtime).browserEvent;
-  const send = (input: DesktopBrowserEventInput) =>
+  const send = (input: typeof DesktopBrowserEventInput.Type) =>
     command.run(registry, { environmentId: target.environmentId, input });
   return { sent, handle, send };
 });
@@ -78,7 +83,7 @@ describe("remote browser event delivery", () => {
     Effect.scoped(
       Effect.gen(function* () {
         const harness = yield* makeHarness();
-        const events: Array<DesktopBrowserEventInput["event"]> = [
+        const events: Array<(typeof DesktopBrowserEventInput.Type)["event"]> = [
           { type: "attached", threadId: "thread", tabId: "tab", supportsNativeSurface: true },
           ...Array.from({ length: 200 }, (_, index) => ({
             type: "cdp" as const,
