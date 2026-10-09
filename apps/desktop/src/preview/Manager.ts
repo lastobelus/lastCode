@@ -65,6 +65,7 @@ import { MENU_ACTION_CHANNEL, PREVIEW_PICTURE_IN_PICTURE_FRAME_CHANNEL } from ".
 import * as DesktopBrowserHost from "./DesktopBrowserHost.ts";
 import { captureAnnotationImage } from "./AnnotationScreenshot.ts";
 import * as BrowserSession from "./BrowserSession.ts";
+import * as BrowserRootWindow from "./BrowserRootWindow.ts";
 import {
   ANNOTATION_CAPTURED_CHANNEL,
   ANNOTATION_SEND_ENABLED_CHANNEL,
@@ -3722,6 +3723,16 @@ export const make = Effect.gen(function* PreviewManagerMake() {
       });
     });
   };
+  browserHost.setRootFactory((input) =>
+    BrowserRootWindow.create(browserSession, input, input.partition).pipe(
+      Effect.flatMap((window) =>
+        Effect.sync(() => placeServerDownloads(window.webContents.session)).pipe(
+          Effect.onError(() => Effect.sync(() => window.destroy())),
+          Effect.as(window),
+        ),
+      ),
+    ),
+  );
 
   const operations = yield* makeNativeOperations(
     environment.browserArtifactsDir,

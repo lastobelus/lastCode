@@ -18,6 +18,7 @@ import { useActivePreviewSessions } from "~/previewStateStore";
 import { previewEnvironment } from "~/state/preview";
 import { useEnvironmentScope } from "~/state/session";
 import { useAtomCommand } from "~/state/use-atom-command";
+import { useEnvironmentHasLocalDesktopBrowser } from "~/state/entities";
 
 import { readPreviewAnnotationTheme } from "./annotationTheme";
 import { useBrowserDefaults } from "./browserDefaults";
@@ -40,7 +41,22 @@ export function ElectronBrowserHost() {
   const { resolvedTheme } = useTheme();
   const previewByThreadKey = useActivePreviewSessions();
   const primaryEnvironmentId = useAtomValue(primaryEnvironmentIdAtom);
+  const hasLocalDesktopBrowser = useEnvironmentHasLocalDesktopBrowser(primaryEnvironmentId);
   useDesktopBrowserSessions(primaryEnvironmentId);
+  useEffect(() => {
+    if (
+      primaryEnvironmentId === null ||
+      hasLocalDesktopBrowser !== true ||
+      !window.desktopBridge?.preview
+    )
+      return;
+    void window.desktopBridge.preview
+      .bindBrowserEnvironment({
+        desktopHostId: "local",
+        environmentId: primaryEnvironmentId,
+      })
+      .catch((cause) => console.error("Native browser environment binding failed", cause));
+  }, [primaryEnvironmentId, hasLocalDesktopBrowser]);
   const sessions = useMemo(
     () =>
       Object.entries(previewByThreadKey).flatMap(([threadKey, previewState]) => {

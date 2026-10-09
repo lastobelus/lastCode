@@ -65,6 +65,15 @@ export class PreviewManager extends Context.Service<
           /** Waits for the actual native close before discarding its ownership/session. */
           readonly close?: () => Effect.Effect<void, PreviewError>;
         };
+        /** Creates an independent native page before any subscriber sees the tab. */
+        readonly createDesktopRoot?: (snapshot: PreviewSessionSnapshot) => Effect.Effect<
+          {
+            readonly rootId: string;
+            readonly close: () => Effect.Effect<void, PreviewError>;
+            readonly publish: () => Effect.Effect<void, PreviewError>;
+          },
+          PreviewError
+        >;
         /** Runs before the `opened` event publishes, so subscribers find state keyed by the tab. */
         readonly beforePublish?: (snapshot: PreviewSessionSnapshot) => void;
       },
@@ -285,7 +294,14 @@ export const make = Effect.gen(function* PreviewManagerMake() {
       // Persisted client surfaces must not bind to a different tab after a server restart.
       const tabId = `${newPreviewTabId()}${runtime === "server" ? `_${serverEpoch}` : ""}`;
       const updatedAt = yield* currentIsoTimestamp;
-      const snapshot: PreviewSessionSnapshot = {
+      const createDesktopRoot =
+        runtime === "server" &&
+        desktopHostId !== undefined &&
+        input.automationOwner !== undefined &&
+        input.desktopPopup === undefined
+          ? input.createDesktopRoot
+          : undefined;
+      let snapshot: PreviewSessionSnapshot = {
         threadId: input.threadId,
         tabId,
         navStatus: input.url
@@ -303,7 +319,9 @@ export const make = Effect.gen(function* PreviewManagerMake() {
                 desktopHostId === undefined
                   ? ("server" as const)
                   : input.desktopPopup === undefined
-                    ? ("desktop" as const)
+                    ? createDesktopRoot === undefined
+                      ? ("desktop" as const)
+                      : ("desktop-root" as const)
                     : ("desktop-popup" as const),
               ...(desktopHostId === undefined || input.desktopPopup === undefined
                 ? {}
@@ -316,6 +334,10 @@ export const make = Effect.gen(function* PreviewManagerMake() {
         ...(input.reveal === undefined ? {} : { reveal: input.reveal }),
         updatedAt,
       };
+      // Native creation can await transport and re-enter this service; keep it outside the lock.
+      const nativeRoot = createDesktopRoot ? yield* createDesktopRoot(snapshot) : undefined;
+      if (nativeRoot) snapshot = { ...snapshot, desktopRootId: nativeRoot.rootId };
+      let publicationCommitted = false;
       yield* SynchronizedRef.modifyEffect(stateRef, (state) =>
         Effect.gen(function* () {
           const revision = state.revision + 1;
@@ -326,8 +348,12 @@ export const make = Effect.gen(function* PreviewManagerMake() {
             snapshot,
           });
           input.beforePublish?.(snapshot);
+          if (nativeRoot) yield* nativeRoot.publish();
+          publicationCommitted = true;
           if (snapshot.backingPage === "desktop-popup" && input.desktopPopup?.close)
             nativeCloseGuards.set(compositeKey(input.threadId, tabId), input.desktopPopup.close);
+          if (nativeRoot)
+            nativeCloseGuards.set(compositeKey(input.threadId, tabId), nativeRoot.close);
           yield* PubSub.publish(eventsPubSub, {
             type: "opened",
             threadId: input.threadId,
@@ -341,6 +367,13 @@ export const make = Effect.gen(function* PreviewManagerMake() {
           });
           return [snapshot, { sessions, revision }] as const;
         }),
+      ).pipe(
+        Effect.uninterruptible,
+        Effect.onError(() =>
+          publicationCommitted
+            ? Effect.void
+            : (nativeRoot?.close().pipe(Effect.ignore) ?? Effect.void),
+        ),
       );
       return snapshot;
     },
@@ -630,14 +663,22 @@ export const make = Effect.gen(function* PreviewManagerMake() {
       yield* commitClosed(
         new Set(
           targets
-            .filter((target) => target.snapshot.backingPage !== "desktop-popup")
+            .filter(
+              (target) =>
+                target.snapshot.backingPage !== "desktop-popup" &&
+                target.snapshot.backingPage !== "desktop-root",
+            )
             .map((target) => compositeKey(target.threadId, target.tabId)),
         ),
       );
       let firstFailure: PreviewError | undefined;
       // Native acknowledgment can re-enter the manager. Never await it under the state lock.
       for (const target of targets) {
-        if (target.snapshot.backingPage !== "desktop-popup") continue;
+        if (
+          target.snapshot.backingPage !== "desktop-popup" &&
+          target.snapshot.backingPage !== "desktop-root"
+        )
+          continue;
         const guard = nativeCloseGuards.get(compositeKey(target.threadId, target.tabId));
         if (!guard) {
           const current = yield* SynchronizedRef.get(stateRef);

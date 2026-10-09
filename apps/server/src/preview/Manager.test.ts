@@ -1,7 +1,12 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
-import { type PreviewEvent, PreviewNativeCloseError, ThreadId } from "@t3tools/contracts";
+import {
+  type PreviewEvent,
+  PreviewNativeCloseError,
+  PreviewNativeCreateError,
+  ThreadId,
+} from "@t3tools/contracts";
 import { PreviewUrlNormalizationError } from "@t3tools/shared/preview";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
@@ -51,6 +56,221 @@ const PreviewManagerTestLayer = PreviewManager.layer.pipe(
 );
 
 it.layer(PreviewManagerTestLayer)("PreviewManager", (it) => {
+  it.effect("creates an immutable native root outside the lock before publishing its tab", () =>
+    Effect.gen(function* () {
+      const manager = yield* PreviewManager.PreviewManager;
+      const threadId = freshThreadId();
+      const events = yield* collectEvents;
+      const requested = yield* Deferred.make<void>();
+      const created = yield* Deferred.make<void>();
+      let canceled = true;
+      const opening = yield* manager
+        .open({
+          threadId,
+          runtime: "server",
+          desktopHostId: "host-a",
+          profileId: "work",
+          automationOwner: "agent-a",
+          url: "https://example.test/start",
+          createDesktopRoot: (snapshot) =>
+            Effect.gen(function* () {
+              expect(snapshot).toMatchObject({
+                backingPage: "desktop-root",
+                desktopHostId: "host-a",
+                profileId: "work",
+                automationOwner: "agent-a",
+              });
+              expect((yield* manager.list({ threadId })).sessions).toEqual([]);
+              yield* Deferred.succeed(requested, undefined);
+              yield* Deferred.await(created);
+              return {
+                rootId: "root-a",
+                publish: () => Effect.void,
+                close: () =>
+                  canceled
+                    ? Effect.fail(
+                        new PreviewNativeCloseError({ tabId: snapshot.tabId, reason: "canceled" }),
+                      )
+                    : Effect.void,
+              };
+            }),
+        })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(requested);
+      expect(yield* events.drain).toEqual([]);
+      // An unrelated open proceeds while the native creation callback is waiting.
+      const ordinary = yield* manager.open({ threadId, runtime: "server" });
+      expect((yield* events.drain).map((event) => event.tabId)).toEqual([ordinary.tabId]);
+      yield* Deferred.succeed(created, undefined);
+      const root = yield* Fiber.join(opening);
+      expect(root).toMatchObject({ backingPage: "desktop-root", desktopRootId: "root-a" });
+      expect(yield* events.drain).toEqual([
+        expect.objectContaining({ type: "opened", snapshot: root }),
+      ]);
+      yield* manager.reportStatus({
+        threadId,
+        tabId: root.tabId,
+        serverControlled: true,
+        navStatus: { _tag: "Success", url: "https://example.test/next", title: "Next" },
+        canGoBack: true,
+        canGoForward: false,
+      });
+      yield* manager.resize({
+        threadId,
+        tabId: root.tabId,
+        viewport: { _tag: "freeform", width: 900, height: 600 },
+      });
+      yield* manager.requestReveal({ threadId, tabId: root.tabId, force: true });
+      expect(yield* manager.close({ threadId, tabId: root.tabId }).pipe(Effect.flip)).toMatchObject(
+        { reason: "canceled" },
+      );
+      expect(
+        (yield* manager.list({ threadId })).sessions.find(
+          (session) => session.tabId === root.tabId,
+        ),
+      ).toMatchObject({
+        backingPage: "desktop-root",
+        desktopRootId: "root-a",
+        desktopHostId: "host-a",
+        profileId: "work",
+        automationOwner: "agent-a",
+        navStatus: { title: "Next" },
+      });
+      canceled = false;
+      yield* manager.close({ threadId, tabId: root.tabId });
+      expect((yield* manager.list({ threadId })).sessions).toEqual([ordinary]);
+    }),
+  );
+
+  it.effect("abort during final publication retains the committed native tab without cleanup", () =>
+    Effect.gen(function* () {
+      const manager = yield* PreviewManager.PreviewManager;
+      const threadId = freshThreadId();
+      const events = yield* collectEvents;
+      const publishing = yield* Deferred.make<void>();
+      const finishPublishing = yield* Deferred.make<void>();
+      let closed = 0;
+      let prepared = false;
+      const opening = yield* manager
+        .open({
+          threadId,
+          runtime: "server",
+          desktopHostId: "host-a",
+          automationOwner: "agent-a",
+          beforePublish: () => {
+            prepared = true;
+          },
+          createDesktopRoot: () =>
+            Effect.succeed({
+              rootId: "committed-root",
+              close: () =>
+                Effect.sync(() => {
+                  closed++;
+                }),
+              publish: () =>
+                Effect.gen(function* () {
+                  expect(prepared).toBe(true);
+                  yield* Deferred.succeed(publishing, undefined);
+                  yield* Deferred.await(finishPublishing);
+                }),
+            }),
+        })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(publishing);
+      const interruption = yield* Fiber.interrupt(opening).pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      yield* Deferred.succeed(finishPublishing, undefined);
+      yield* Fiber.join(interruption);
+      expect(closed).toBe(0);
+      expect((yield* manager.list({ threadId })).sessions).toEqual([
+        expect.objectContaining({ backingPage: "desktop-root", desktopRootId: "committed-root" }),
+      ]);
+      expect(yield* events.drain).toEqual([expect.objectContaining({ type: "opened" })]);
+    }),
+  );
+
+  it.effect("a failed pre-publication callback cancels the native attempt before publication", () =>
+    Effect.gen(function* () {
+      const manager = yield* PreviewManager.PreviewManager;
+      const threadId = freshThreadId();
+      const events = yield* collectEvents;
+      let canceled = 0;
+      let published = 0;
+      yield* manager
+        .open({
+          threadId,
+          runtime: "server",
+          desktopHostId: "host-a",
+          automationOwner: "agent-a",
+          beforePublish: () => {
+            throw new Error("registration failed");
+          },
+          createDesktopRoot: () =>
+            Effect.succeed({
+              rootId: "abandoned-root",
+              close: () =>
+                Effect.sync(() => {
+                  canceled++;
+                }),
+              publish: () =>
+                Effect.sync(() => {
+                  published++;
+                }),
+            }),
+        })
+        .pipe(Effect.exit);
+      expect(canceled).toBe(1);
+      expect(published).toBe(0);
+      expect((yield* manager.list({ threadId })).sessions).toEqual([]);
+      expect(yield* events.drain).toEqual([]);
+    }),
+  );
+
+  it.effect(
+    "failed native creation publishes no tab and shared opens keep their current backing",
+    () =>
+      Effect.gen(function* () {
+        const manager = yield* PreviewManager.PreviewManager;
+        const threadId = freshThreadId();
+        const events = yield* collectEvents;
+        const createDesktopRoot = (snapshot: { readonly tabId: string }) =>
+          Effect.fail(
+            new PreviewNativeCreateError({
+              tabId: snapshot.tabId,
+              cause: new Error("unavailable"),
+            }),
+          );
+        expect(
+          yield* manager
+            .open({
+              threadId,
+              runtime: "server",
+              desktopHostId: "host-a",
+              automationOwner: "agent-a",
+              createDesktopRoot,
+            })
+            .pipe(Effect.flip),
+        ).toMatchObject({ _tag: "PreviewNativeCreateError" });
+        expect((yield* manager.list({ threadId })).sessions).toEqual([]);
+        expect(yield* events.drain).toEqual([]);
+        const shared = yield* manager.open({
+          threadId,
+          runtime: "server",
+          desktopHostId: "host-a",
+          createDesktopRoot,
+        });
+        expect(shared.backingPage).toBe("desktop");
+        expect(shared.desktopRootId).toBeUndefined();
+        const headless = yield* manager.open({
+          threadId,
+          runtime: "server",
+          automationOwner: "agent-a",
+          createDesktopRoot,
+        });
+        expect(headless.backingPage).toBe("server");
+      }),
+  );
+
   it.effect(
     "bulk close removes ordinary and confirmed tabs while retaining failed native tabs",
     () =>

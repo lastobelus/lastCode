@@ -109,6 +109,29 @@ export class DesktopBrowserChannel extends Context.Service<
       key: DesktopTabKey,
       popupId: string,
     ) => Effect.Effect<boolean, DesktopBrowserTransportError>;
+    readonly closedRoots: Stream.Stream<DesktopTabKey & { readonly rootId: string }>;
+    readonly createRoot: (
+      key: DesktopTabKey,
+      input: {
+        readonly profileId: string;
+        readonly url: string;
+        readonly viewport?: PreviewViewportSetting;
+      },
+    ) => Effect.Effect<string, DesktopBrowserTransportError>;
+    readonly acceptRoot: (
+      key: DesktopTabKey,
+      rootId: string,
+    ) => Effect.Effect<void, DesktopBrowserTransportError>;
+    readonly publishRoot: (
+      key: DesktopTabKey,
+      rootId: string,
+    ) => Effect.Effect<void, DesktopBrowserTransportError>;
+    readonly closeRoot: (
+      key: DesktopTabKey,
+      rootId: string,
+    ) => Effect.Effect<void, DesktopBrowserTransportError>;
+    /** Discards this creation attempt before its tab is published; a page cannot veto it. */
+    readonly cancelRootCreation: (key: DesktopTabKey, rootId: string) => Effect.Effect<void>;
     readonly bindPopup: (
       key: DesktopTabKey,
       input: { readonly popupId: string; readonly openerTabId: string },
@@ -159,14 +182,51 @@ const make = Effect.gen(function* () {
     DesktopTabKey & { readonly popupId: string; readonly url: string }
   >();
   const closedPopups = yield* PubSub.unbounded<DesktopTabKey & { readonly popupId: string }>();
+  const closedRoots = yield* PubSub.unbounded<DesktopTabKey & { readonly rootId: string }>();
+  const roots = new Map<
+    string,
+    {
+      readonly key: DesktopTabKey;
+      readonly rootId: string;
+      readonly requestId: string;
+      readonly profileId: string;
+      accepted: boolean;
+      published: boolean;
+    }
+  >();
+  const rootCreateRequests = new Map<
+    string,
+    {
+      readonly key: DesktopTabKey;
+      readonly profileId: string;
+      acknowledged: boolean;
+      created: boolean;
+      active: boolean;
+      readonly deferred: Deferred.Deferred<string, DesktopBrowserTransportError>;
+    }
+  >();
+  const rootAcceptRequests = new Map<
+    string,
+    {
+      readonly key: DesktopTabKey;
+      readonly rootId: string;
+      readonly profileId: string;
+      readonly deferred: Deferred.Deferred<void, DesktopBrowserTransportError>;
+    }
+  >();
+  // Creation can finish after its caller times out or disconnects. Cancel that exact attempt.
+  const abandonedRootRequests = new Map<
+    string,
+    { readonly key: DesktopTabKey; readonly profileId: string }
+  >();
   const popupAnnouncements = new Map<
     string,
     DesktopTabKey & { readonly popupId: string; readonly url: string }
   >();
   const popupIdOf = (key: DesktopTabKey, popupId: string) => JSON.stringify([keyOf(key), popupId]);
+  const nativeIdOf = (key: DesktopTabKey, kind: "popup" | "root", nativeId: string) =>
+    JSON.stringify([keyOf(key), kind, nativeId]);
   // Native vetoes survive a dropped connection. A transport retry is the same close attempt.
-  const popupCloseAttempts = new Map<string, string>();
-  const canceledPopupCloses = new Set<string>();
   const popupProbeRequests = new Map<
     string,
     {
@@ -175,7 +235,9 @@ const make = Effect.gen(function* () {
       readonly deferred: Deferred.Deferred<boolean, DesktopBrowserTransportError>;
     }
   >();
-  const popupCloseRequests = new Map<
+  const nativeCloseAttempts = new Map<string, string>();
+  const canceledNativeCloses = new Set<string>();
+  const nativeCloseRequests = new Map<
     string,
     {
       readonly key: DesktopTabKey;
@@ -258,6 +320,64 @@ const make = Effect.gen(function* () {
     }
     const key = { threadId: event.threadId, tabId: event.tabId, desktopHostId };
     const id = keyOf(key);
+    if (event.type === "rootCreated") {
+      const pending = rootCreateRequests.get(event.requestId);
+      const abandoned = abandonedRootRequests.get(event.requestId);
+      if (pending?.active && keyOf(pending.key) === id && pending.profileId === event.profileId) {
+        pending.acknowledged = true;
+        if (event.rootId === null || event.reason)
+          return Deferred.fail(
+            pending.deferred,
+            new DesktopBrowserTransportError({ reason: event.reason ?? "guest-unavailable" }),
+          ).pipe(Effect.asVoid);
+        pending.created = true;
+        roots.set(id, {
+          key,
+          rootId: event.rootId,
+          requestId: event.requestId,
+          profileId: event.profileId,
+          accepted: false,
+          published: false,
+        });
+        return Deferred.succeed(pending.deferred, event.rootId).pipe(Effect.asVoid);
+      }
+      if (abandoned && keyOf(abandoned.key) === id && abandoned.profileId === event.profileId) {
+        if (event.rootId === null) abandonedRootRequests.delete(event.requestId);
+        else
+          return command(
+            {
+              type: "cancelRootCreation",
+              threadId: key.threadId,
+              tabId: key.tabId,
+              requestId: event.requestId,
+              profileId: event.profileId,
+            },
+            desktopHostId,
+          );
+      }
+      return Effect.void;
+    }
+    if (event.type === "rootAccepted") {
+      const pending = rootAcceptRequests.get(event.requestId);
+      const root = roots.get(id);
+      if (
+        !pending ||
+        keyOf(pending.key) !== id ||
+        pending.rootId !== event.rootId ||
+        pending.profileId !== event.profileId ||
+        root?.rootId !== event.rootId ||
+        root.requestId !== event.requestId ||
+        root.profileId !== event.profileId
+      )
+        return Effect.void;
+      if (!event.accepted)
+        return Deferred.fail(
+          pending.deferred,
+          new DesktopBrowserTransportError({ reason: "guest-unavailable" }),
+        ).pipe(Effect.asVoid);
+      root.accepted = true;
+      return Deferred.succeed(pending.deferred, undefined).pipe(Effect.asVoid);
+    }
     if (event.type === "surfaceReady") {
       const pending = surfaceRequests.get(event.requestId);
       if (!pending || keyOf(pending.key) !== id) return Effect.void;
@@ -278,11 +398,12 @@ const make = Effect.gen(function* () {
         popupProbeRequests.delete(event.requestId);
         if (!event.present) {
           const popupKey = popupIdOf(key, event.popupId);
-          popupCloseAttempts.delete(popupKey);
-          canceledPopupCloses.delete(popupKey);
+          const closeId = nativeIdOf(key, "popup", event.popupId);
+          nativeCloseAttempts.delete(closeId);
+          canceledNativeCloses.delete(closeId);
           popupAnnouncements.delete(popupKey);
-          const closing = popupCloseRequests.get(popupKey);
-          popupCloseRequests.delete(popupKey);
+          const closing = nativeCloseRequests.get(closeId);
+          nativeCloseRequests.delete(closeId);
           return (closing ? Deferred.succeed(closing.deferred, undefined) : Effect.void).pipe(
             Effect.andThen(Deferred.succeed(pending.deferred, false)),
             Effect.asVoid,
@@ -301,13 +422,17 @@ const make = Effect.gen(function* () {
         popupAnnouncements.set(popupIdOf(key, event.popupId), popup);
         return PubSub.publish(popups, popup).pipe(Effect.asVoid);
       }
+      case "rootCloseCanceled":
       case "popupCloseCanceled": {
-        const id = popupIdOf(key, event.popupId);
-        if (popupCloseAttempts.get(id) !== event.requestId) return Effect.void;
-        popupCloseAttempts.delete(id);
-        const pending = popupCloseRequests.get(id);
-        if (pending) popupCloseRequests.delete(id);
-        else canceledPopupCloses.add(id);
+        const id =
+          event.type === "popupCloseCanceled"
+            ? nativeIdOf(key, "popup", event.popupId)
+            : nativeIdOf(key, "root", event.rootId);
+        if (nativeCloseAttempts.get(id) !== event.requestId) return Effect.void;
+        nativeCloseAttempts.delete(id);
+        const pending = nativeCloseRequests.get(id);
+        if (pending) nativeCloseRequests.delete(id);
+        else canceledNativeCloses.add(id);
         return pending
           ? Deferred.fail(
               pending.deferred,
@@ -315,15 +440,26 @@ const make = Effect.gen(function* () {
             ).pipe(Effect.asVoid)
           : Effect.void;
       }
+      case "rootClosed":
       case "popupClosed": {
-        const id = popupIdOf(key, event.popupId);
-        popupAnnouncements.delete(id);
-        popupCloseAttempts.delete(id);
-        canceledPopupCloses.delete(id);
-        const pending = popupCloseRequests.get(id);
-        popupCloseRequests.delete(id);
+        if (event.type === "rootClosed" && roots.get(id)?.rootId !== event.rootId)
+          return Effect.void;
+        const closeId =
+          event.type === "popupClosed"
+            ? nativeIdOf(key, "popup", event.popupId)
+            : nativeIdOf(key, "root", event.rootId);
+        if (event.type === "popupClosed") popupAnnouncements.delete(popupIdOf(key, event.popupId));
+        else roots.delete(id);
+        nativeCloseAttempts.delete(closeId);
+        canceledNativeCloses.delete(closeId);
+        const pending = nativeCloseRequests.get(closeId);
+        nativeCloseRequests.delete(closeId);
         return (pending ? Deferred.succeed(pending.deferred, undefined) : Effect.void).pipe(
-          Effect.andThen(PubSub.publish(closedPopups, { ...key, popupId: event.popupId })),
+          Effect.andThen(
+            event.type === "popupClosed"
+              ? PubSub.publish(closedPopups, { ...key, popupId: event.popupId })
+              : PubSub.publish(closedRoots, { ...key, rootId: event.rootId }),
+          ),
           Effect.asVoid,
         );
       }
@@ -434,10 +570,29 @@ const make = Effect.gen(function* () {
             new DesktopBrowserTransportError({ reason: "host-unavailable" }),
           );
         }
-      for (const [id, pending] of popupCloseRequests)
+      for (const [requestId, pending] of rootAcceptRequests)
+        if ((pending.key.desktopHostId ?? "local") === desktopHostId) {
+          rootAcceptRequests.delete(requestId);
+          yield* Deferred.fail(
+            pending.deferred,
+            new DesktopBrowserTransportError({ reason: "host-unavailable" }),
+          );
+        }
+      for (const [requestId, pending] of rootCreateRequests)
+        if ((pending.key.desktopHostId ?? "local") === desktopHostId) {
+          if (pending.acknowledged) continue;
+          pending.active = false;
+          rootCreateRequests.delete(requestId);
+          abandonedRootRequests.set(requestId, { key: pending.key, profileId: pending.profileId });
+          yield* Deferred.fail(
+            pending.deferred,
+            new DesktopBrowserTransportError({ reason: "host-unavailable" }),
+          );
+        }
+      for (const [id, pending] of nativeCloseRequests)
         if (pending.key.desktopHostId === desktopHostId) {
           // A replacement connection must never join its predecessor's failed acknowledgment.
-          popupCloseRequests.delete(id);
+          nativeCloseRequests.delete(id);
           yield* Deferred.fail(
             pending.deferred,
             new DesktopBrowserTransportError({ reason: "host-unavailable" }),
@@ -445,7 +600,7 @@ const make = Effect.gen(function* () {
         }
       for (const [id, popup] of popupAnnouncements)
         if (popup.desktopHostId === desktopHostId) popupAnnouncements.delete(id);
-      for (const key of [...attachedTabs.values()]) {
+      for (const key of attachedTabs.values()) {
         if (key.desktopHostId === desktopHostId) {
           yield* handleEvent(desktopHostId, {
             type: "detached",
@@ -574,6 +729,55 @@ const make = Effect.gen(function* () {
       return `ws://127.0.0.1:${address.port}/${secret}`;
     });
 
+  const closeNative = Effect.fnUntraced(function* (
+    key: DesktopTabKey,
+    kind: "popup" | "root",
+    nativeId: string,
+  ) {
+    const desktopHostId = key.desktopHostId ?? "local";
+    const id = nativeIdOf(key, kind, nativeId);
+    if (canceledNativeCloses.delete(id))
+      return yield* new DesktopBrowserTransportError({ reason: "close-canceled" });
+    const requestId = nativeCloseAttempts.get(id) ?? NodeCrypto.randomUUID();
+    nativeCloseAttempts.set(id, requestId);
+    if (desktopHostId === "local" ? !localAvailable : !hosts.has(desktopHostId))
+      return yield* new DesktopBrowserTransportError({ reason: "host-unavailable" });
+    const pending = nativeCloseRequests.get(id);
+    if (pending) return yield* Deferred.await(pending.deferred);
+    const deferred = yield* Deferred.make<void, DesktopBrowserTransportError>();
+    const request = { key, requestId, deferred };
+    nativeCloseRequests.set(id, request);
+    return yield* command(
+      {
+        threadId: key.threadId,
+        tabId: key.tabId,
+        requestId,
+        ...(kind === "popup"
+          ? { type: "closePopup" as const, popupId: nativeId }
+          : { type: "closeRoot" as const, rootId: nativeId }),
+      },
+      desktopHostId,
+    ).pipe(
+      Effect.andThen(Deferred.await(deferred)),
+      Effect.timeoutOrElse({
+        duration: "10 seconds",
+        orElse: () => Effect.fail(new DesktopBrowserTransportError({ reason: "host-unavailable" })),
+      }),
+      Effect.ensuring(
+        Effect.sync(() => {
+          if (nativeCloseRequests.get(id) === request) nativeCloseRequests.delete(id);
+        }).pipe(
+          Effect.andThen(
+            Deferred.fail(
+              deferred,
+              new DesktopBrowserTransportError({ reason: "host-unavailable" }),
+            ),
+          ),
+        ),
+      ),
+    );
+  });
+
   return DesktopBrowserChannel.of({
     get available() {
       return localAvailable || hosts.size > 0;
@@ -597,6 +801,26 @@ const make = Effect.gen(function* () {
             }),
           );
           yield* Queue.offer(queue, { type: "announce" });
+          // Publication retires creation cancellation even if the transport vanished at commit.
+          for (const root of roots.values())
+            if (root.published && (root.key.desktopHostId ?? "local") === desktopHostId)
+              yield* Queue.offer(queue, {
+                type: "publishRoot",
+                threadId: root.key.threadId,
+                tabId: root.key.tabId,
+                rootId: root.rootId,
+                requestId: root.requestId,
+                profileId: root.profileId,
+              });
+          for (const [requestId, abandoned] of abandonedRootRequests)
+            if ((abandoned.key.desktopHostId ?? "local") === desktopHostId)
+              yield* Queue.offer(queue, {
+                type: "cancelRootCreation",
+                threadId: abandoned.key.threadId,
+                tabId: abandoned.key.tabId,
+                requestId,
+                profileId: abandoned.profileId,
+              });
           yield* PubSub.publish(connectedHosts, desktopHostId);
           return Stream.fromQueue(queue);
         }),
@@ -641,32 +865,77 @@ const make = Effect.gen(function* () {
           Effect.ensuring(Effect.sync(() => popupProbeRequests.delete(requestId))),
         );
       }),
-    bindPopup: (key, input) =>
-      Effect.suspend(() =>
-        popupAnnouncements.has(popupIdOf({ ...key, tabId: input.openerTabId }, input.popupId))
-          ? command(
-              { type: "bindPopup", threadId: key.threadId, tabId: key.tabId, ...input },
-              key.desktopHostId,
-            )
-          : Effect.fail(new DesktopBrowserTransportError({ reason: "guest-unavailable" })),
-      ),
-    closePopup: (key, popupId) =>
+    closedRoots: Stream.fromPubSub(closedRoots),
+    createRoot: (key, input) =>
       Effect.gen(function* () {
         const desktopHostId = key.desktopHostId ?? "local";
-        const id = popupIdOf(key, popupId);
-        if (canceledPopupCloses.delete(id))
-          return yield* new DesktopBrowserTransportError({ reason: "close-canceled" });
-        const requestId = popupCloseAttempts.get(id) ?? NodeCrypto.randomUUID();
-        popupCloseAttempts.set(id, requestId);
         if (desktopHostId === "local" ? !localAvailable : !hosts.has(desktopHostId))
           return yield* new DesktopBrowserTransportError({ reason: "host-unavailable" });
-        const pending = popupCloseRequests.get(id);
-        if (pending) return yield* Deferred.await(pending.deferred);
-        const deferred = yield* Deferred.make<void, DesktopBrowserTransportError>();
-        const request = { key, requestId, deferred };
-        popupCloseRequests.set(id, request);
+        const requestId = NodeCrypto.randomUUID();
+        const deferred = yield* Deferred.make<string, DesktopBrowserTransportError>();
+        const pending = {
+          key,
+          profileId: input.profileId,
+          acknowledged: false,
+          created: false,
+          active: true,
+          deferred,
+        };
+        rootCreateRequests.set(requestId, pending);
         return yield* command(
-          { type: "closePopup", threadId: key.threadId, tabId: key.tabId, popupId, requestId },
+          { type: "createRoot", threadId: key.threadId, tabId: key.tabId, requestId, ...input },
+          desktopHostId,
+        ).pipe(
+          Effect.andThen(Deferred.await(deferred)),
+          Effect.timeoutOrElse({
+            duration: "10 seconds",
+            orElse: () =>
+              Effect.fail(new DesktopBrowserTransportError({ reason: "host-unavailable" })),
+          }),
+          Effect.onError(() =>
+            Effect.sync(() => {
+              pending.active = false;
+              if (!pending.acknowledged || pending.created)
+                abandonedRootRequests.set(requestId, { key, profileId: input.profileId });
+            }).pipe(
+              Effect.andThen(
+                command(
+                  {
+                    type: "cancelRootCreation",
+                    threadId: key.threadId,
+                    tabId: key.tabId,
+                    requestId,
+                    profileId: input.profileId,
+                  },
+                  desktopHostId,
+                ),
+              ),
+            ),
+          ),
+          Effect.ensuring(Effect.sync(() => rootCreateRequests.delete(requestId))),
+        );
+      }),
+    acceptRoot: (key, rootId) =>
+      Effect.gen(function* () {
+        const desktopHostId = key.desktopHostId ?? "local";
+        const root = roots.get(keyOf(key));
+        if (root?.rootId !== rootId)
+          return yield* new DesktopBrowserTransportError({ reason: "guest-unavailable" });
+        if (root.accepted) return;
+        if (desktopHostId === "local" ? !localAvailable : !hosts.has(desktopHostId))
+          return yield* new DesktopBrowserTransportError({ reason: "host-unavailable" });
+        const deferred = yield* Deferred.make<void, DesktopBrowserTransportError>();
+        const pending = { key, rootId, profileId: root.profileId, deferred };
+        rootAcceptRequests.set(root.requestId, pending);
+        yield* command(
+          {
+            type: "acceptRoot",
+            threadId: key.threadId,
+            tabId: key.tabId,
+            rootId,
+            requestId: root.requestId,
+            profileId: root.profileId,
+          },
           desktopHostId,
         ).pipe(
           Effect.andThen(Deferred.await(deferred)),
@@ -677,18 +946,58 @@ const make = Effect.gen(function* () {
           }),
           Effect.ensuring(
             Effect.sync(() => {
-              if (popupCloseRequests.get(id) === request) popupCloseRequests.delete(id);
-            }).pipe(
-              Effect.andThen(
-                Deferred.fail(
-                  deferred,
-                  new DesktopBrowserTransportError({ reason: "host-unavailable" }),
-                ),
-              ),
-            ),
+              if (rootAcceptRequests.get(root.requestId) === pending)
+                rootAcceptRequests.delete(root.requestId);
+            }),
           ),
         );
       }),
+    publishRoot: (key, rootId) =>
+      Effect.suspend(() => {
+        const root = roots.get(keyOf(key));
+        if (root?.rootId !== rootId || !root.accepted)
+          return Effect.fail(new DesktopBrowserTransportError({ reason: "guest-unavailable" }));
+        root.published = true;
+        abandonedRootRequests.delete(root.requestId);
+        return command(
+          {
+            type: "publishRoot",
+            threadId: key.threadId,
+            tabId: key.tabId,
+            rootId,
+            requestId: root.requestId,
+            profileId: root.profileId,
+          },
+          key.desktopHostId,
+        );
+      }),
+    closeRoot: (key, rootId) => closeNative(key, "root", rootId),
+    cancelRootCreation: (key, rootId) =>
+      Effect.suspend(() => {
+        const root = roots.get(keyOf(key));
+        if (root?.rootId !== rootId || root.published) return Effect.void;
+        abandonedRootRequests.set(root.requestId, { key, profileId: root.profileId });
+        return command(
+          {
+            type: "cancelRootCreation",
+            threadId: key.threadId,
+            tabId: key.tabId,
+            requestId: root.requestId,
+            profileId: root.profileId,
+          },
+          key.desktopHostId,
+        );
+      }),
+    bindPopup: (key, input) =>
+      Effect.suspend(() =>
+        popupAnnouncements.has(popupIdOf({ ...key, tabId: input.openerTabId }, input.popupId))
+          ? command(
+              { type: "bindPopup", threadId: key.threadId, tabId: key.tabId, ...input },
+              key.desktopHostId,
+            )
+          : Effect.fail(new DesktopBrowserTransportError({ reason: "guest-unavailable" })),
+      ),
+    closePopup: (key, popupId) => closeNative(key, "popup", popupId),
     receiveEvent: (owner, desktopHostId, event) =>
       Effect.suspend(() => {
         const host = hosts.get(desktopHostId);
@@ -696,7 +1005,11 @@ const make = Effect.gen(function* () {
           return Effect.fail(new DesktopBrowserTransportError({ reason: "host-unavailable" }));
         }
         return host.lock.withPermits(1)(
-          Effect.suspend(() => handleEvent(desktopHostId, event)).pipe(
+          Effect.suspend(() =>
+            hosts.get(desktopHostId) === host
+              ? handleEvent(desktopHostId, event)
+              : Effect.fail(new DesktopBrowserTransportError({ reason: "host-unavailable" })),
+          ).pipe(
             Effect.tapError(() => {
               if (event.type !== "download") return Effect.void;
               const id = keyOf({ ...event, desktopHostId });

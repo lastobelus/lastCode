@@ -78,7 +78,7 @@ await bundle("browser-surface.preload.mjs", "cjs", "preload.cjs", true);
 await bundle("browser-surface.renderer.mjs", "iife", "renderer.js");
 await NodeFSP.writeFile(
   NodePath.join(scratch, "index.html"),
-  '<!doctype html><style>html,body{margin:0;overflow:hidden}body{background:#eee}</style><script src="renderer.js"></script>',
+  '<!doctype html><html><head><style>html,body{margin:0;overflow:hidden}body{background:#eee}</style></head><body><script src="renderer.js"></script></body></html>',
 );
 const manifest = {
   scratch,

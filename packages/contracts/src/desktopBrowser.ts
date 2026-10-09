@@ -16,6 +16,12 @@ const TabKey = {
   threadId: TrimmedNonEmptyString,
   tabId: TrimmedNonEmptyString,
 };
+const RootAttempt = {
+  ...TabKey,
+  rootId: TrimmedNonEmptyString,
+  requestId: TrimmedNonEmptyString,
+  profileId: TrimmedNonEmptyString,
+};
 
 const SurfaceViewport = Schema.Struct({
   width: Schema.Int.check(Schema.isGreaterThan(0)),
@@ -57,6 +63,22 @@ export const DESKTOP_BROWSER_DOWNLOAD_MAX_BYTES = 64 * 1024 * 1024;
 export const DESKTOP_BROWSER_DOWNLOAD_CHUNK_BYTES = 192 * 1024;
 
 export const DesktopBrowserEvent = Schema.Union([
+  Schema.Struct({ type: Schema.Literal("rootAccepted"), ...RootAttempt, accepted: Schema.Boolean }),
+  Schema.Struct({
+    type: Schema.Literal("rootCreated"),
+    ...TabKey,
+    requestId: TrimmedNonEmptyString,
+    profileId: TrimmedNonEmptyString,
+    rootId: Schema.NullOr(TrimmedNonEmptyString),
+    reason: Schema.optionalKey(Schema.Literals(["guest-unavailable", "profile-unavailable"])),
+  }),
+  Schema.Struct({ type: Schema.Literal("rootClosed"), ...TabKey, rootId: TrimmedNonEmptyString }),
+  Schema.Struct({
+    type: Schema.Literal("rootCloseCanceled"),
+    ...TabKey,
+    rootId: TrimmedNonEmptyString,
+    requestId: TrimmedNonEmptyString,
+  }),
   /** An actual child window opened by this source tab, awaiting a server tab identity. */
   Schema.Struct({
     type: Schema.Literal("popupCreated"),
@@ -123,6 +145,29 @@ export const DesktopBrowserCommand = Schema.Union([
     popupId: TrimmedNonEmptyString,
     requestId: TrimmedNonEmptyString,
   }),
+  Schema.Struct({ type: Schema.Literal("acceptRoot"), ...RootAttempt }),
+  Schema.Struct({ type: Schema.Literal("publishRoot"), ...RootAttempt }),
+  /** Create one permanent hidden native page, independent of the shared renderer window. */
+  Schema.Struct({
+    type: Schema.Literal("createRoot"),
+    ...TabKey,
+    requestId: TrimmedNonEmptyString,
+    profileId: TrimmedNonEmptyString,
+    url: Schema.String,
+    viewport: Schema.optionalKey(PreviewViewportSetting),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("cancelRootCreation"),
+    ...TabKey,
+    requestId: TrimmedNonEmptyString,
+    profileId: TrimmedNonEmptyString,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("closeRoot"),
+    ...TabKey,
+    rootId: TrimmedNonEmptyString,
+    requestId: TrimmedNonEmptyString,
+  }),
   /** Bind the existing child window; never create another page for it. */
   Schema.Struct({
     type: Schema.Literal("bindPopup"),
@@ -169,12 +214,15 @@ export class DesktopBrowserTransportError extends Schema.TaggedError<DesktopBrow
       "download-transfer-failed",
       "layout-timeout",
       "guest-unavailable",
+      "profile-unavailable",
       "surface-unsupported",
       "close-canceled",
     ]),
   },
 ) {
   override get message(): string {
+    if (this.reason === "profile-unavailable")
+      return "The selected native browser profile is unavailable.";
     if (this.reason === "close-canceled")
       return "The native browser window canceled the close request.";
     if (this.reason === "surface-unsupported")

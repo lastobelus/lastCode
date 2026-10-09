@@ -8,6 +8,10 @@ import * as NodePath from "node:path";
 import { app, BrowserWindow, ipcMain, nativeImage, webContents } from "electron";
 import { chromium } from "playwright-core";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import { DEFAULT_CLIENT_SETTINGS } from "@t3tools/contracts";
+import * as BrowserSession from "../src/preview/BrowserSession.ts";
+import { resolvePartitionScope } from "../src/preview/BrowserProfileScope.ts";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Scope from "effect/Scope";
@@ -15,12 +19,11 @@ import * as Stream from "effect/Stream";
 import * as Layer from "effect/Layer";
 
 import * as DesktopBrowserHost from "../src/preview/DesktopBrowserHost.ts";
-import * as BrowserSession from "../src/preview/BrowserSession.ts";
-import { resolvePartitionScope } from "../src/preview/BrowserProfileScope.ts";
 import * as ElectronDialog from "../src/electron/ElectronDialog.ts";
 import * as DesktopClientSettings from "../src/settings/DesktopClientSettings.ts";
 import * as ServerBrowserPage from "../../server/src/preview/ServerBrowserPage.ts";
 import { DESKTOP_BROWSER_SURFACE_RESPONSE_CHANNEL } from "../src/ipc/channels.ts";
+import { runNativeKeyboardFixture } from "./browser-keyboard-root.fixture.mjs";
 
 const [scratch, wsModulePath] = process.argv.slice(2);
 NodeAssert.ok(scratch && wsModulePath, "isolated fixture arguments required");
@@ -34,15 +37,18 @@ const tabs = [
   {
     runtimeTabId: "surface-default",
     tabId: "tab-default",
-    partition: "persist:t3code-preview-profile-default",
+    profileId: "default",
+    partition: "",
   },
   {
     runtimeTabId: "surface-synthetic",
     tabId: "tab-synthetic",
-    partition: "persist:t3code-preview-profile-synthetic",
+    profileId: "synthetic",
+    partition: "",
   },
 ];
 const key = (tab) => ({ threadId: "surface-smoke-thread", tabId: tab.tabId });
+const environmentId = "fixture-environment";
 const viewport = { _tag: "freeform", width: 390, height: 844 };
 
 async function main() {
@@ -51,6 +57,17 @@ async function main() {
   const browserSession = await Effect.runPromise(
     BrowserSession.make.pipe(Effect.provide(Layer.merge(NodeServices.layer, ElectronDialog.layer))),
   );
+  for (const tab of tabs) {
+    const {
+      scope: partitionScope,
+      persistent,
+      namespace,
+    } = resolvePartitionScope(environmentId, tab.profileId, environmentId);
+    tab.partition = await Effect.runPromise(
+      browserSession.getPartition(partitionScope, persistent, namespace),
+    );
+    await Effect.runPromise(browserSession.getSession(partitionScope, persistent, namespace));
+  }
   for (const environmentId of ["fixture-local", "fixture-remote"]) {
     const { scope, persistent, namespace } = resolvePartitionScope(
       environmentId,
@@ -67,7 +84,14 @@ async function main() {
   const scope = await Effect.runPromise(Scope.make());
   const host = await Effect.runPromise(
     DesktopBrowserHost.make.pipe(
-      Effect.provide(DesktopClientSettings.layerTest()),
+      Effect.provide(
+        DesktopClientSettings.layerTest(
+          Option.some({
+            ...DEFAULT_CLIENT_SETTINGS,
+            browserProfiles: [{ id: "synthetic", name: "Synthetic", kind: "persistent" }],
+          }),
+        ),
+      ),
       Effect.provideService(Scope.Scope, scope),
     ),
   );
@@ -133,7 +157,7 @@ async function main() {
     }
     response.writeHead(200, { "content-type": "text/html" });
     response.end(
-      `<!doctype html><title>Isolated browser surface</title><style>html,body{margin:0;background:#ffcc66;color:#000}button{margin:20px}</style><h1>Native surface fixture</h1><button id="choose" onclick="document.querySelector('#upload').click()">Choose fixture file</button><input id="upload" type="file"><pre id="uploaded"></pre><script>document.querySelector('#upload').addEventListener('change', async event => { const file=event.target.files[0]; document.querySelector('#uploaded').textContent=file.name+':'+await file.text(); });</script>`,
+      `<!doctype html><title>Isolated browser surface</title><style>html,body{margin:0;background:#ffcc66;color:#000}button{margin:20px}</style><h1>Native surface fixture</h1><button id="choose" onclick="document.querySelector('#upload').click()">Choose fixture file</button><input id="upload" type="file"><pre id="uploaded"></pre><textarea id="draft" aria-label="Review note">original text</textarea><div id="rich" contenteditable="true" aria-label="Rich note">original rich text</div><script>window.receivedCookie=${JSON.stringify(request.headers.cookie ?? "")};window.keyboardEvents=[];for(const type of ['keydown','keyup','beforeinput','input'])document.addEventListener(type,event=>window.keyboardEvents.push({type,target:event.target.id,key:event.key??null,data:event.data??null,trusted:event.isTrusted}));document.querySelector('#upload').addEventListener('change', async event => { const file=event.target.files[0]; document.querySelector('#uploaded').textContent=file.name+':'+await file.text(); });</script>`,
     );
   });
   await new Promise((resolve) => fixtureServer.listen(0, "127.0.0.1", resolve));
@@ -198,7 +222,7 @@ async function main() {
     const debuggerProxy = {
       on: guest.debugger.on.bind(guest.debugger),
       off: guest.debugger.off.bind(guest.debugger),
-      sendCommand: (method, ...args) => {
+      sendCommand: async (method, ...args) => {
         if (method === "Runtime.runIfWaitingForDebugger" && typeof args[1] === "string")
           resumedChildSessions.add(args[1]);
         if (failCapture && tab === tabs[0] && method === "Page.captureScreenshot")
@@ -351,6 +375,41 @@ async function main() {
     NodeAssert.deepEqual(await page.evaluate(() => ({ width: innerWidth, height: innerHeight })), {
       width: 390,
       height: 844,
+    });
+    await hostWindow.webContents.executeJavaScript("surfaceSmokeResetKeyboard()");
+    await NodeAssert.rejects(
+      ServerBrowserPage.type(page, {
+        selector: "#draft",
+        text: "must not reach host",
+        clear: false,
+      }),
+      /reuseExistingTab:false/,
+    );
+    await NodeAssert.rejects(ServerBrowserPage.press(page, { key: "q" }), /reuseExistingTab:false/);
+    const protectedHost = await hostWindow.webContents.executeJavaScript(
+      "surfaceSmokeKeyboardState()",
+    );
+    NodeAssert.equal(protectedHost.value, protectedHost.expected);
+    NodeAssert.equal(protectedHost.activeElement, "host-sentinel");
+    NodeAssert.deepEqual(protectedHost.events, []);
+    results.push(
+      "shared guest rejects text/key input before native injection and leaves host unchanged",
+    );
+    results.push(
+      await runNativeKeyboardFixture({
+        scratch,
+        fixtureOrigin,
+        hostWindow,
+        nativeGuests,
+        tabs,
+        WebSocketServer,
+        host,
+        browserSessions: browserSession,
+        environmentId,
+      }),
+    );
+    await page.evaluate(() => {
+      document.cookie = "root-shared=; max-age=0; path=/";
     });
     renderScale = await page.evaluate(() => devicePixelRatio);
     const textSnapshot = await takeSnapshot(page, cdp, false);

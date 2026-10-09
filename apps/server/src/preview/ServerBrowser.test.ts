@@ -143,6 +143,7 @@ function makeContext(onClose?: (context: BrowserContext) => void) {
     locator: vi.fn(() => {
       throw new Error("Unexpected locator action");
     }),
+    keyboard: { press: vi.fn(async () => {}), insertText: vi.fn(async () => {}) },
     isClosed: () => closed,
     close: vi.fn(async () => {
       if (!closed) {
@@ -199,6 +200,7 @@ type ProfileCatalogue = NonNullable<
   Effect.Success<ReturnType<DesktopChannel.DesktopBrowserChannel["Service"]["getProfiles"]>>
 >;
 let profileCatalogue: ProfileCatalogue | null = null;
+let profileCatalogueUnavailable = false;
 const profileRequests: Array<{ desktopHostId?: string }> = [];
 const profileCatalogues = new Map<string, ProfileCatalogue>();
 /** Pages the fake desktop takes back or returns; the channel's streams emit them. */
@@ -245,6 +247,22 @@ const popupBindings: Array<{
   openerTabId: string;
 }> = [];
 const popupClosures: Array<{ threadId: string; tabId: string; popupId: string }> = [];
+const rootCreations: Array<
+  DesktopChannel.DesktopTabKey & {
+    profileId: string;
+    url: string;
+    viewport?: PreviewViewportSetting;
+  }
+> = [];
+const rootClosures: Array<DesktopChannel.DesktopTabKey & { rootId: string }> = [];
+const rootAcceptances: Array<DesktopChannel.DesktopTabKey & { rootId: string }> = [];
+const rootPublications: Array<DesktopChannel.DesktopTabKey & { rootId: string }> = [];
+let rootAcceptanceGate: PromiseWithResolvers<void> | null = null;
+let rootAcceptanceEntered: PromiseWithResolvers<void> | null = null;
+let rootAcceptanceFailure: DesktopBrowserTransportError | null = null;
+let rootCloseFailure: "close-canceled" | null = null;
+let rootCloseAttempted: PromiseWithResolvers<void> | null = null;
+let releasedDesktopSeen: PromiseWithResolvers<void> | null = null;
 const nativePopupEvents = <T>(name: string) =>
   Stream.callback<T>((queue) =>
     Effect.acquireRelease(
@@ -301,10 +319,23 @@ const dependencies = Layer.mergeAll(
     getProfiles: (input) =>
       Effect.sync(() => {
         profileRequests.push(input);
-        return input.desktopHostId === undefined
-          ? profileCatalogue
-          : (profileCatalogues.get(input.desktopHostId) ??
+        const selected =
+          input.desktopHostId === undefined
+            ? profileCatalogue
+            : (profileCatalogues.get(input.desktopHostId) ??
               (profileCatalogue?.desktopHostId === input.desktopHostId ? profileCatalogue : null));
+        return (
+          selected ??
+          (!profileCatalogueUnavailable &&
+          (input.desktopHostId === undefined || input.desktopHostId === "local") &&
+          (desktopRendersNext || localDesktopAvailable)
+            ? {
+                desktopHostId: "local",
+                profiles: [{ id: "default", name: "Default", kind: "persistent" as const }],
+                defaultProfileId: "default",
+              }
+            : null)
+        );
       }),
     resolveUrl: (input) =>
       Effect.promise(async () => {
@@ -365,6 +396,47 @@ const dependencies = Layer.mergeAll(
           Effect.ensuring(Effect.sync(() => nativePopupProbeProcessed?.resolve())),
         );
       }),
+    closedRoots: nativePopupEvents<DesktopChannel.DesktopTabKey & { rootId: string }>(
+      "root-closed",
+    ),
+    createRoot: (key, input) =>
+      Effect.suspend(() => {
+        rootCreations.push({ ...key, ...input });
+        return desktopRenders(key.tabId)
+          ? Effect.succeed(`root-${key.tabId}`)
+          : Effect.fail(new DesktopBrowserTransportError({ reason: "guest-unavailable" }));
+      }),
+    acceptRoot: (key, rootId) =>
+      Effect.promise(async () => {
+        rootAcceptances.push({ ...key, rootId });
+        rootAcceptanceEntered?.resolve();
+        await rootAcceptanceGate?.promise;
+      }).pipe(
+        Effect.andThen(
+          Effect.suspend(() =>
+            rootAcceptanceFailure ? Effect.fail(rootAcceptanceFailure) : Effect.void,
+          ),
+        ),
+      ),
+    publishRoot: (key, rootId) =>
+      Effect.sync(() => {
+        rootPublications.push({ ...key, rootId });
+      }),
+    closeRoot: (key, rootId) =>
+      Effect.suspend(() => {
+        rootClosures.push({ ...key, rootId });
+        rootCloseAttempted?.resolve();
+        if (rootCloseFailure)
+          return Effect.fail(new DesktopBrowserTransportError({ reason: rootCloseFailure }));
+        desktopPopupEvents.emit("root-closed", { ...key, rootId });
+        return Effect.void;
+      }),
+    cancelRootCreation: (key, rootId) =>
+      Effect.sync(() => {
+        rootClosures.push({ ...key, rootId });
+        rootCloseAttempted?.resolve();
+        desktopPopupEvents.emit("root-closed", { ...key, rootId });
+      }),
     bindPopup: (key, input) =>
       Effect.sync(() => {
         popupBindings.push({ ...key, ...input });
@@ -411,7 +483,10 @@ const dependencies = Layer.mergeAll(
       ),
     endpoint: (key) =>
       Effect.acquireRelease(Effect.succeed(`ws://desktop/${key.tabId}`), () =>
-        Effect.sync(() => releasedDesktopTabs.push(key.tabId)),
+        Effect.sync(() => {
+          releasedDesktopTabs.push(key.tabId);
+          releasedDesktopSeen?.resolve();
+        }),
       ),
     pointer: () => Effect.void,
   }),
@@ -447,7 +522,7 @@ const observedManager = Layer.effect(
           .pipe(Effect.tapError(() => Effect.sync(() => nativeCloseRejected?.resolve()))),
       reportStatus: (input: Parameters<typeof manager.reportStatus>[0]) =>
         manager.reportStatus(input).pipe(
-          Effect.tap(() =>
+          Effect.ensuring(
             Effect.sync(() => {
               if (input.navStatus._tag === nativeNavigationReported?.status)
                 nativeNavigationReported.completed.resolve();
@@ -514,6 +589,7 @@ beforeEach(() => {
   desktopRendersNext = false;
   localDesktopAvailable = false;
   profileCatalogue = null;
+  profileCatalogueUnavailable = false;
   profileRequests.length = 0;
   profileCatalogues.clear();
   remoteUrlAvailable = true;
@@ -522,6 +598,16 @@ beforeEach(() => {
   desktopPageSetup = null;
   popupBindings.length = 0;
   popupClosures.length = 0;
+  rootCreations.length = 0;
+  rootClosures.length = 0;
+  rootAcceptances.length = 0;
+  rootPublications.length = 0;
+  rootAcceptanceGate = null;
+  rootAcceptanceEntered = null;
+  rootAcceptanceFailure = null;
+  rootCloseFailure = null;
+  rootCloseAttempted = null;
+  releasedDesktopSeen = null;
   nativePopupCreatedSeen = null;
   nativePopupClosedSeen = null;
   nativePopupCloseAttempted = null;
@@ -2712,6 +2798,311 @@ it.effect("a timed-out native snapshot preserves its connection and leaves both 
   ).pipe(Effect.provide(layer)),
 );
 
+it.live.each([
+  ["default", "Default", "local"],
+  ["developer", "Logged in Developer", "remote-desktop"],
+  ["incognito", "Incognito", "remote-desktop"],
+] as const)(
+  "agent opens %s on an independent native page owned by its selected host",
+  ([profileId, profileName, desktopHostId]) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const browser = yield* ServerBrowser.ServerBrowser;
+        const broker = yield* Broker.PreviewAutomationBroker;
+        const manager = yield* Manager.PreviewManager;
+        yield* Effect.yieldNow;
+        profileCatalogue = {
+          desktopHostId,
+          defaultProfileId: profileId,
+          profiles: [
+            {
+              id: profileId,
+              name: profileName,
+              kind: profileId === "incognito" ? "incognito" : "persistent",
+            },
+          ],
+        };
+        desktopRendersNext = true;
+        const setupEntered = Promise.withResolvers<void>();
+        const setupGate = Promise.withResolvers<void>();
+        desktopPageSetup = async () => {
+          setupEntered.resolve();
+          await setupGate.promise;
+        };
+        const events = yield* manager.subscribeEvents;
+        const opening = yield* broker
+          .invoke<PreviewAutomationStatus>({
+            scope,
+            operation: "openWithProfile",
+            input: {
+              profileId,
+              reuseExistingTab: false,
+              show: false,
+              url: "https://example.test/start",
+            },
+          })
+          .pipe(Effect.forkChild);
+        yield* Effect.promise(() => setupEntered.promise);
+        expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toEqual([]);
+        expect(yield* PubSub.takeUpTo(events, 100)).toEqual([]);
+        setupGate.resolve();
+        const opened = yield* Fiber.join(opening);
+        const snapshot = (yield* manager.list({ threadId: scope.thread.threadId })).sessions[0]!;
+        expect(snapshot).toMatchObject({
+          backingPage: "desktop-root",
+          desktopRootId: `root-${opened.tabId}`,
+          automationOwner: `${scope.environmentId}\u0000${scope.thread.providerSessionId}`,
+          desktopHostId,
+          profileId,
+        });
+        expect(rootCreations).toEqual([
+          expect.objectContaining({
+            tabId: opened.tabId,
+            desktopHostId,
+            profileId,
+            url: "https://example.test/start",
+          }),
+        ]);
+        expect(contexts).toHaveLength(0);
+        expect(desktopConnections).toHaveLength(1);
+        const page = desktopConnections[0]!.context.page;
+        expect(page.goto).toHaveBeenCalledExactlyOnceWith(
+          "https://example.test/start",
+          expect.objectContaining({ waitUntil: "commit" }),
+        );
+        const published = yield* Stream.fromSubscription(events).pipe(
+          Stream.filter((event) => event.type === "opened"),
+          Stream.runHead,
+        );
+        expect(Option.getOrNull(published)).toMatchObject({
+          snapshot: { desktopRootId: snapshot.desktopRootId },
+        });
+        yield* browser.attachViewer(viewerInput(opened.tabId!, false));
+        expect(desktopConnections).toHaveLength(1);
+        page.locator.mockReturnValue({ evaluate: async () => true } as never);
+        yield* broker.invoke({
+          scope,
+          tabId: opened.tabId!,
+          operation: "type",
+          input: { locator: "#field", text: "root input" },
+        });
+        yield* broker.invoke({
+          scope,
+          tabId: opened.tabId!,
+          operation: "press",
+          input: { key: "Enter" },
+        });
+        expect(page.keyboard.insertText).toHaveBeenCalledExactlyOnceWith("root input");
+        expect(page.keyboard.press).toHaveBeenCalledExactlyOnceWith("Enter");
+        rootCloseFailure = "close-canceled";
+        yield* broker
+          .invoke<void>({ scope, tabId: opened.tabId!, operation: "close", input: {} })
+          .pipe(Effect.flip);
+        expect(
+          (yield* manager.list({ threadId: scope.thread.threadId })).sessions[0],
+        ).toMatchObject({
+          desktopRootId: snapshot.desktopRootId,
+          automationOwner: `${scope.environmentId}\u0000${scope.thread.providerSessionId}`,
+        });
+        rootCloseFailure = null;
+        yield* broker.invoke({ scope, tabId: opened.tabId!, operation: "close", input: {} });
+        expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toEqual([]);
+        expect(rootClosures.map((close) => close.rootId)).toEqual([
+          snapshot.desktopRootId,
+          snapshot.desktopRootId,
+        ]);
+        expect(page.close).not.toHaveBeenCalled();
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live("a root loaded before native acceptance publishes its completed navigation", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      yield* ServerBrowser.ServerBrowser;
+      const manager = yield* Manager.PreviewManager;
+      const broker = yield* Broker.PreviewAutomationBroker;
+      yield* Effect.yieldNow;
+      desktopRendersNext = true;
+      rootAcceptanceEntered = Promise.withResolvers<void>();
+      rootAcceptanceGate = Promise.withResolvers<void>();
+      nativeNavigationReported = { status: "Success", completed: Promise.withResolvers<void>() };
+      desktopPageSetup = async (context) => {
+        context.page.title.mockResolvedValue("Completed before acceptance");
+      };
+      yield* Effect.addFinalizer(() => Effect.sync(() => rootAcceptanceGate!.resolve()));
+      const events = yield* manager.subscribeEvents;
+      const opening = yield* broker
+        .invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { reuseExistingTab: false, show: false, url: "https://example.test/completed" },
+        })
+        .pipe(Effect.forkChild);
+      yield* Effect.promise(() => rootAcceptanceEntered!.promise);
+      yield* Effect.promise(() => nativeNavigationReported!.completed.promise);
+      const page = desktopConnections[0]!.context.page;
+      expect(page.url()).toBe("https://example.test/completed");
+      expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toEqual([]);
+      expect(yield* PubSub.takeUpTo(events, 100)).toEqual([]);
+      rootAcceptanceGate.resolve();
+      const opened = yield* Fiber.join(opening);
+      expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toEqual([
+        expect.objectContaining({
+          tabId: opened.tabId,
+          navStatus: {
+            _tag: "Success",
+            url: "https://example.test/completed",
+            title: "Completed before acceptance",
+          },
+        }),
+      ]);
+      expect(page.goto).toHaveBeenCalledTimes(1);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("a root that failed before native acceptance publishes its failed navigation", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      yield* ServerBrowser.ServerBrowser;
+      const manager = yield* Manager.PreviewManager;
+      const broker = yield* Broker.PreviewAutomationBroker;
+      yield* Effect.yieldNow;
+      desktopRendersNext = true;
+      rootAcceptanceEntered = Promise.withResolvers<void>();
+      rootAcceptanceGate = Promise.withResolvers<void>();
+      nativeNavigationReported = { status: "LoadFailed", completed: Promise.withResolvers<void>() };
+      const url = "https://example.test/refused";
+      desktopPageSetup = async (context) => {
+        context.page.goto.mockImplementationOnce(async (next) => {
+          const request = {
+            isNavigationRequest: () => true,
+            frame: () => context.page,
+            url: () => next,
+            method: () => "GET",
+            failure: () => ({ errorText: "net::ERR_CONNECTION_REFUSED" }),
+          };
+          context.page.emit("request", request);
+          context.page.emit("requestfailed", request);
+          throw new Error(`page.goto: net::ERR_CONNECTION_REFUSED at ${next}`);
+        });
+      };
+      yield* Effect.addFinalizer(() => Effect.sync(() => rootAcceptanceGate!.resolve()));
+      const opening = yield* broker
+        .invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { reuseExistingTab: false, show: false, url },
+        })
+        .pipe(Effect.flip, Effect.forkChild);
+      yield* Effect.promise(() => rootAcceptanceEntered!.promise);
+      yield* Effect.promise(() => nativeNavigationReported!.completed.promise);
+      expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toEqual([]);
+      rootAcceptanceGate.resolve();
+      const failure = yield* Fiber.join(opening);
+      expect(failure).toMatchObject({ _tag: "PreviewAutomationExecutionError" });
+      expect(failure.message).toContain("ERR_CONNECTION_REFUSED");
+      expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toEqual([
+        expect.objectContaining({
+          navStatus: expect.objectContaining({
+            _tag: "LoadFailed",
+            url,
+            title: "",
+            code: -102,
+            description: "ERR_CONNECTION_REFUSED",
+          }),
+        }),
+      ]);
+      expect(desktopConnections[0]!.context.page.goto).toHaveBeenCalledTimes(1);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.effect("canceled root connection closes its attempted page and never publishes a late tab", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      yield* ServerBrowser.ServerBrowser;
+      const manager = yield* Manager.PreviewManager;
+      const broker = yield* Broker.PreviewAutomationBroker;
+      yield* Effect.yieldNow;
+      desktopRendersNext = true;
+      const setupEntered = Promise.withResolvers<void>();
+      const setupGate = Promise.withResolvers<void>();
+      desktopPageSetup = async () => {
+        setupEntered.resolve();
+        await setupGate.promise;
+      };
+      rootCloseAttempted = Promise.withResolvers<void>();
+      rootCloseFailure = "close-canceled";
+      releasedDesktopSeen = Promise.withResolvers<void>();
+      const events = yield* manager.subscribeEvents;
+      const opening = yield* broker
+        .invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { reuseExistingTab: false, show: false },
+          timeoutMs: 200,
+        })
+        .pipe(Effect.flip, Effect.forkChild);
+      yield* Effect.promise(() => setupEntered.promise);
+      yield* TestClock.adjust("201 millis");
+      expect(yield* Fiber.join(opening)).toMatchObject({ _tag: "PreviewAutomationTimeoutError" });
+      yield* Effect.promise(() => rootCloseAttempted!.promise);
+      setupGate.resolve();
+      yield* Effect.promise(() => releasedDesktopSeen!.promise);
+      expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toEqual([]);
+      expect(yield* PubSub.takeUpTo(events, 100)).toEqual([]);
+      expect(rootClosures).toEqual([
+        expect.objectContaining({ rootId: `root-${rootCreations[0]!.tabId}` }),
+      ]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live(
+  "shared native pages reject keyboard automation before acquiring a surface or sending input",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const browser = yield* ServerBrowser.ServerBrowser;
+        const manager = yield* Manager.PreviewManager;
+        const broker = yield* Broker.PreviewAutomationBroker;
+        yield* Effect.yieldNow;
+        desktopRendersNext = true;
+        const shared = yield* manager.open({
+          threadId: scope.thread.threadId,
+          runtime: "server",
+          desktopHostId: "local",
+          automationOwner: `${scope.environmentId}\u0000${scope.thread.providerSessionId}`,
+        });
+        yield* browser.attachViewer(viewerInput(shared.tabId, false));
+        expect(shared.backingPage).toBe("desktop");
+        surfaceCalls.length = 0;
+        for (const [operation, input] of [
+          ["type", { locator: "#field", text: "shared input" }],
+          ["press", { key: "Enter" }],
+        ] as const) {
+          const failure = yield* broker
+            .invoke<void>({ scope, tabId: shared.tabId, operation, input })
+            .pipe(Effect.flip);
+          expect(failure).toMatchObject({ _tag: "PreviewAutomationExecutionError" });
+          expect(failure.message).toContain("preview_open({reuseExistingTab:false})");
+          expect(failure.message).toContain("returned tabId");
+        }
+        expect(surfaceCalls).toEqual([]);
+        expect(rootCreations).toEqual([]);
+        const page = desktopConnections[0]!.context.page;
+        expect(page.locator).not.toHaveBeenCalled();
+        expect(page.keyboard.insertText).not.toHaveBeenCalled();
+        expect(page.keyboard.press).not.toHaveBeenCalled();
+        expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toEqual([
+          shared,
+        ]);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
 it.live("drives the desktop's own page for a tab the desktop renders", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -3268,7 +3659,7 @@ it.live("never substitutes a headless page when the selected desktop does not at
   ).pipe(Effect.provide(layer)),
 );
 
-it.live("catalogue timeout and late desktop attachment keep the original native page choice", () =>
+it.live("an unavailable profile catalogue never opens a fallback profile or publishes a tab", () =>
   Effect.scoped(
     Effect.gen(function* () {
       const browser = yield* ServerBrowser.ServerBrowser;
@@ -3277,22 +3668,26 @@ it.live("catalogue timeout and late desktop attachment keep the original native 
       yield* Effect.yieldNow;
       localDesktopAvailable = true;
       profileCatalogue = null;
+      profileCatalogueUnavailable = true;
       yield* broker
-        .invoke<void>({ scope, operation: "open", input: { reuseExistingTab: false, show: false } })
+        .invoke<void>({
+          scope,
+          operation: "open",
+          input: { reuseExistingTab: false, show: false },
+        })
         .pipe(Effect.flip);
       const { sessions } = yield* manager.list({ threadId: scope.thread.threadId });
-      expect(sessions).toHaveLength(1);
-      expect(sessions[0]).toMatchObject({ backingPage: "desktop", desktopHostId: "local" });
+      expect(sessions).toHaveLength(0);
+      expect(rootCreations).toEqual([]);
       expect(contexts).toHaveLength(0);
       expect(desktopConnections).toHaveLength(0);
-      desktopTabs.add(sessions[0]!.tabId);
-      yield* browser.attachViewer(viewerInput(sessions[0]!.tabId, false));
-      expect(desktopConnections).toHaveLength(1);
+      desktopTabs.add("unpublished-root");
+      expect(
+        yield* browser.attachViewer(viewerInput("unpublished-root", false)).pipe(Effect.flip),
+      ).toMatchObject({ _tag: "ServerBrowserTabNotFoundError" });
+      expect(desktopConnections).toHaveLength(0);
       expect(contexts).toHaveLength(0);
-      expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions[0]).toMatchObject({
-        backingPage: "desktop",
-        desktopHostId: "local",
-      });
+      expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toEqual([]);
     }),
   ).pipe(Effect.provide(layer)),
 );
@@ -3438,16 +3833,20 @@ it.live("resolves remote environment URLs for explicit profile opens and later n
       const initial = (yield* manager.list({ threadId: scope.thread.threadId })).sessions.find(
         (session) => session.tabId === opened.tabId,
       );
-      // The desktop loads the initial URL from the session snapshot itself.
+      // The server navigates the acknowledged root, after resolving the environment URL.
       expect(initial).toMatchObject({
         desktopHostId: "remote-desktop",
         profileId: "work",
         navStatus: {
-          _tag: "Loading",
+          _tag: "Success",
           url: "http://environment.example.test:5173/start?x=1#section",
+          title: "test page",
         },
       });
-      expect(page.goto).not.toHaveBeenCalled();
+      expect(page.goto).toHaveBeenCalledExactlyOnceWith(
+        "http://environment.example.test:5173/start?x=1#section",
+        expect.objectContaining({ waitUntil: "commit" }),
+      );
       yield* broker.invoke<PreviewAutomationStatus>({
         scope,
         tabId: opened.tabId!,
