@@ -720,6 +720,51 @@ describe("resolveQuickCiScope", () => {
   });
 
   it.each([
+    ["*.md", "note.md", true],
+    ["*.md", "nested/note.md", false],
+    ["?.md", "a.md", true],
+    ["?.md", "ab.md", false],
+    ["?.md", "😀.md", false],
+    ["**.md", "nested/note.md", true],
+    ["**/*.md", "note.md", true],
+    ["**/*.md", "nested/note.md", true],
+    ["***/*.md", "note.md", false],
+    ["****/*.md", "note.md", true],
+    ["****/*.md", "nested/note.md", true],
+    ["a.+^$()|.md", "a.+^$()|.md", true],
+    ["*.md", "line\nbreak.md", true],
+    ["**.md", "line\nbreak.md", false],
+    ["nested", "nested/note.md", false],
+  ])("keeps limited config glob %s for %s (included: %s)", (pattern, file, included) => {
+    const repo = fixture({
+      ...workspace("apps/unrelated", "@fixture/unrelated", {
+        config: { extends: "../../tsconfig.base.json", include: ["src", `docs/${pattern}`] },
+      }),
+    });
+    repo.change(`apps/unrelated/docs/${file}`, "Documentation input.\n");
+    expect(repo.scope()).toMatchObject({
+      kind: included ? "affected" : "none",
+      packages: included ? ["@fixture/unrelated"] : [],
+    });
+  });
+
+  it.each(["[ab]", "{a,b}", "!a", "a\\b"])(
+    "falls back to the full gate with the exact unsupported glob diagnostic: %s",
+    (pattern) => {
+      const repo = fixture({
+        ...workspace("apps/unrelated", "@fixture/unrelated", {
+          config: { include: [`docs/${pattern}`] },
+        }),
+      });
+      repo.change("apps/unrelated/docs/note.md", "Documentation input.\n");
+      expect(repo.scope()).toMatchObject({
+        kind: "full",
+        reason: `Cannot safely narrow typecheck: Unsupported scope pattern apps/unrelated/docs/${pattern}`,
+      });
+    },
+  );
+
+  it.each([
     ["tsconfig.base.json", '{"compilerOptions":{"strict":false}}'],
     ["vite.config.ts", "export default {};\n"],
     ["pnpm-lock.yaml", "lockfileVersion: '9.0'\n"],
