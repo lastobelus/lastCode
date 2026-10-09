@@ -22,6 +22,11 @@ vi.mock("node:os", async (importOriginal) => {
   return { ...actual, homedir: vi.fn(actual.homedir) };
 });
 
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return { ...actual, readdirSync: vi.fn(actual.readdirSync) };
+});
+
 const directories: string[] = [];
 const children: NodeChildProcess.ChildProcess[] = [];
 const cleanups: Array<() => Promise<void>> = [];
@@ -450,14 +455,17 @@ describe("lease record admission", () => {
   });
 
   it("reports the first lease error in directory order before reading later records", async () => {
-    for (const first of ["null", "{"]) {
+    for (const entries of [
+      ["a.lease.json", "b.lease.json"],
+      ["b.lease.json", "a.lease.json"],
+    ]) {
       const directory = temporaryDirectory();
-      NodeFS.writeFileSync(NodePath.join(directory, "a.lease.json"), first);
-      NodeFS.writeFileSync(
-        NodePath.join(directory, "b.lease.json"),
-        first === "null" ? "{" : "null",
+      NodeFS.writeFileSync(NodePath.join(directory, "a.lease.json"), "null");
+      NodeFS.writeFileSync(NodePath.join(directory, "b.lease.json"), "{");
+      const enumeration = vi.spyOn(NodeFS, "readdirSync").mockReturnValueOnce(
+        // This overload returns names; the final Node overload is typed as Dirent[].
+        entries as unknown as ReturnType<typeof NodeFS.readdirSync>,
       );
-      expect(NodeFS.readdirSync(directory)).toEqual(["a.lease.json", "b.lease.json"]);
       await expect(
         tryAcquireLocalCiBudget({
           policy: DEFAULT_LASTCODE_LOCAL_CI_SETTINGS,
@@ -465,8 +473,12 @@ describe("lease record admission", () => {
           directory,
         }),
       ).rejects.toThrow(
-        first === "null" ? "Invalid local CI lease. " : "Invalid local CI lease JSON. ",
+        entries[0] === "a.lease.json"
+          ? "Invalid local CI lease. "
+          : "Invalid local CI lease JSON. ",
       );
+      expect(enumeration).toHaveBeenCalledWith(directory);
+      enumeration.mockRestore();
     }
   });
 });
