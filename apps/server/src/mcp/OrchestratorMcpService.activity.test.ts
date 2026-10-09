@@ -12,6 +12,7 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Stream from "effect/Stream";
 import * as Layer from "effect/Layer";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { expect, it } from "vite-plus/test";
@@ -23,6 +24,7 @@ import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import type * as McpInvocationContext from "./McpInvocationContext.ts";
+import * as ThreadReadBroker from "./ThreadReadBroker.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 
 const environmentId = EnvironmentId.make("environment-mcp-orchestrator-detail");
@@ -127,6 +129,7 @@ it("readThread prefers activity-run status over a newer cancelled queued run", a
   } as unknown as OrchestrationV2ThreadProjection;
 
   const layer = OrchestratorMcpService.layer.pipe(
+    Layer.provide(ThreadReadBroker.layer),
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ThreadManagementService.ThreadManagementService)({
@@ -192,6 +195,7 @@ it("readThread prefers waiting activity status over a newer cancelled queued run
   } as unknown as OrchestrationV2ThreadProjection;
 
   const layer = OrchestratorMcpService.layer.pipe(
+    Layer.provide(ThreadReadBroker.layer),
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ThreadManagementService.ThreadManagementService)({
@@ -314,6 +318,7 @@ it("taskStatus returns task.providerInstanceId rather than the driver kind", asy
   } as unknown as OrchestrationV2ThreadProjection;
 
   const layer = OrchestratorMcpService.layer.pipe(
+    Layer.provide(ThreadReadBroker.layer),
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ThreadManagementService.ThreadManagementService)({
@@ -412,6 +417,7 @@ it("readThread and sendToThread reach threads in other projects", async () => {
     }) as unknown as OrchestrationV2ThreadProjection;
 
   const layer = OrchestratorMcpService.layer.pipe(
+    Layer.provideMerge(ThreadReadBroker.layer),
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ThreadManagementService.ThreadManagementService)({
@@ -480,6 +486,45 @@ it("readThread and sendToThread reach threads in other projects", async () => {
     expect(foreign.thread.projectId).toBe(foreignProjectId);
     expect(foreign.items.map((item) => item.text)).toEqual(["Foreign thread said hello"]);
 
+    const broker = yield* ThreadReadBroker.ThreadReadBroker;
+    const remoteThreadId = ThreadId.make("thread-remote-read-example");
+    const remoteEnvironmentId = EnvironmentId.make("remote-read-environment");
+    const remote = {
+      ...foreign,
+      thread: {
+        ...foreign.thread,
+        threadId: remoteThreadId,
+        environmentId: remoteEnvironmentId,
+        link: "[Remote](t3-thread://v1/remote-read-environment/thread-remote-read-example)",
+      },
+    };
+    const remoteInput = { threadId: remoteThreadId, afterPosition: 5, maxCharsPerItem: 30 };
+    let forwarded = 0;
+    yield* (yield* broker.connect("client-session")).pipe(
+      Stream.runForEach((request) => {
+        forwarded++;
+        expect(request.input).toEqual(remoteInput);
+        return broker.respond("client-session", {
+          connectionId: request.connectionId,
+          requestId: request.requestId,
+          result: remote,
+          unavailableEnvironmentIds: [],
+        });
+      }),
+      Effect.forkScoped,
+    );
+    expect(yield* service.readThread(makeScope(), remoteInput)).toEqual(remote);
+    expect(forwarded).toBe(1);
+    expect(
+      yield* service.readThreadLocal(makeScope(), remoteInput).pipe(Effect.flip),
+    ).toMatchObject({ code: "thread_not_found" });
+    expect(
+      yield* service
+        .readThread({ ...makeScope(), thread: undefined }, remoteInput)
+        .pipe(Effect.flip),
+    ).toMatchObject({ code: "thread_not_found" });
+    expect(forwarded).toBe(1);
+
     const sent = yield* service.sendToThread(makeScope(), {
       threadId: foreignThreadId,
       message: "hi",
@@ -517,5 +562,5 @@ it("readThread and sendToThread reach threads in other projects", async () => {
       .deleteScheduledTask(makeScope(), { scheduledTaskId: ScheduledTaskId.make("task-foreign") })
       .pipe(Effect.flip);
     expect(staleDelete.code).toBe("parent_not_active");
-  }).pipe(Effect.provide(layer), Effect.runPromise);
+  }).pipe(Effect.scoped, Effect.provide(layer), Effect.runPromise);
 });

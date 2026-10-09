@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { formatThreadLink, parseThreadLinkHref, relabelThreadLinks } from "./threadLinks.ts";
+import {
+  formatThreadLink,
+  parseThreadLinkHref,
+  parseThreadLinkReference,
+  relabelThreadLinks,
+} from "./threadLinks.ts";
 
 describe("thread links", () => {
   it("takes the thread id verbatim, percent escapes included", () => {
@@ -14,6 +19,51 @@ describe("thread links", () => {
     expect(parseThreadLinkHref("https://t3.codes")).toBeNull();
     expect(parseThreadLinkHref("t3-thread://v1/")).toBeNull();
     expect(parseThreadLinkHref("t3-thread://v1/ ")).toBeNull();
+  });
+
+  it("round trips an environment-scoped reference without decoding its thread id", () => {
+    const href = "t3-thread://v1/remote/thread:delegated:mcp%3A1";
+    expect(parseThreadLinkReference(href)).toEqual({
+      environmentId: "remote",
+      threadId: "thread:delegated:mcp%3A1",
+    });
+    expect(parseThreadLinkHref(href)).toBe("thread:delegated:mcp%3A1");
+    expect(formatThreadLink("thread:delegated:mcp%3A1", "Task", "remote")).toBe(`[Task](${href})`);
+    expect(parseThreadLinkReference("t3-thread://v1/local-thread")).toEqual({
+      threadId: "local-thread",
+    });
+    expect(parseThreadLinkReference("t3-thread://v1//thread")).toBeNull();
+    expect(parseThreadLinkReference("t3-thread://v1/remote/")).toBeNull();
+  });
+
+  it("resolves titles and percent-decoded fallback only in the link's owning environment", () => {
+    const titles = new Map([
+      ["local:shared", "Local title"],
+      ["remote:shared", "Remote title"],
+      ["remote:thread:1", "Decoded remote"],
+      ["remote:literal%3A1", "Literal remote"],
+      ["local:missing", "Unrelated local thread"],
+    ]);
+    expect(
+      relabelThreadLinks(
+        [
+          "[old](t3-thread://v1/shared)",
+          "[old](t3-thread://v1/remote/shared)",
+          "[old](t3-thread://v1/remote/thread%3A1)",
+          "[old](t3-thread://v1/remote/literal%3A1)",
+          "[Kept](t3-thread://v1/remote/missing)",
+        ].join(" "),
+        (threadId, environmentId) => titles.get(`${environmentId ?? "local"}:${threadId}`),
+      ),
+    ).toBe(
+      [
+        "[Local title](t3-thread://v1/shared)",
+        "[Remote title](t3-thread://v1/remote/shared)",
+        "[Decoded remote](t3-thread://v1/remote/thread:1)",
+        "[Literal remote](t3-thread://v1/remote/literal%3A1)",
+        "[Kept](t3-thread://v1/remote/missing)",
+      ].join(" "),
+    );
   });
 
   it("resolves a percent-encoded id when the id as written names no thread", () => {
