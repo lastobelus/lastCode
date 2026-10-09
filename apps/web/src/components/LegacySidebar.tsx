@@ -3273,8 +3273,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                         : "creator-grouped",
                     label:
                       thread.creatorGrouping === "grouped"
-                        ? "Show independently"
-                        : "Group with creator",
+                        ? "Move to top level"
+                        : "Group with creator thread",
                   },
                 ]
               : []),
