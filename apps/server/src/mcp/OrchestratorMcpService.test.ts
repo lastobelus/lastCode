@@ -45,6 +45,13 @@ import { idleThreadProjection, liveThreadShell } from "./McpToolAccess.testkit.t
 import * as ThreadReadBroker from "./ThreadReadBroker.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 
+/** The service with a real thread-read broker over the test's dependencies. */
+const layerWithBroker = <ROut, E, RIn>(dependencies: Layer.Layer<ROut, E, RIn>) =>
+  OrchestratorMcpService.layer.pipe(
+    Layer.provide(ThreadReadBroker.layer),
+    Layer.provide(dependencies),
+  );
+
 describe("OrchestratorMcpService", () => {
   it.effect("retries terminal acknowledgement with a fresh command id", () =>
     Effect.gen(function* () {
@@ -173,14 +180,7 @@ describe("OrchestratorMcpService", () => {
         const commandIds = yield* Ref.get(acknowledgementCommandIds);
         assert.equal(commandIds.length, 2);
         assert.notEqual(commandIds[0], commandIds[1]);
-      }).pipe(
-        Effect.provide(
-          OrchestratorMcpService.layer.pipe(
-            Layer.provide(ThreadReadBroker.layer),
-            Layer.provide(layerDependencies),
-          ),
-        ),
-      );
+      }).pipe(Effect.provide(layerWithBroker(layerDependencies)));
     }),
   );
 
@@ -267,14 +267,7 @@ describe("OrchestratorMcpService", () => {
         const settled = yield* service.taskStatus(scope, taskId);
         assert.equal(settled.status, "cancelled");
         assert.equal(yield* Ref.get(dispatched), 1);
-      }).pipe(
-        Effect.provide(
-          OrchestratorMcpService.layer.pipe(
-            Layer.provide(ThreadReadBroker.layer),
-            Layer.provide(layerDependencies),
-          ),
-        ),
-      );
+      }).pipe(Effect.provide(layerWithBroker(layerDependencies)));
     }),
   );
 
@@ -349,14 +342,7 @@ describe("OrchestratorMcpService", () => {
           .pipe(Effect.flip);
         assert.equal(error.code, "task_not_cancellable");
         assert.deepEqual(yield* Ref.get(dispatched), []);
-      }).pipe(
-        Effect.provide(
-          OrchestratorMcpService.layer.pipe(
-            Layer.provide(ThreadReadBroker.layer),
-            Layer.provide(layerDependencies),
-          ),
-        ),
-      );
+      }).pipe(Effect.provide(layerWithBroker(layerDependencies)));
     }),
   );
 
@@ -435,14 +421,7 @@ describe("OrchestratorMcpService", () => {
           (yield* Ref.get(dispatched)).map((command) => (command as { type: string }).type),
           ["thread.stop"],
         );
-      }).pipe(
-        Effect.provide(
-          OrchestratorMcpService.layer.pipe(
-            Layer.provide(ThreadReadBroker.layer),
-            Layer.provide(layerDependencies),
-          ),
-        ),
-      );
+      }).pipe(Effect.provide(layerWithBroker(layerDependencies)));
     }),
   );
 
@@ -527,14 +506,7 @@ describe("OrchestratorMcpService", () => {
           (yield* Ref.get(dispatched)).map((command) => (command as { type: string }).type),
           ["thread.stop", "delegated_task.completion-delivery.dispose"],
         );
-      }).pipe(
-        Effect.provide(
-          OrchestratorMcpService.layer.pipe(
-            Layer.provide(ThreadReadBroker.layer),
-            Layer.provide(layerDependencies),
-          ),
-        ),
-      );
+      }).pipe(Effect.provide(layerWithBroker(layerDependencies)));
     }),
   );
 
@@ -616,14 +588,7 @@ describe("OrchestratorMcpService", () => {
           .pipe(Effect.flip);
         assert.equal(error.code, "runtime_mode_escalation_denied");
         assert.deepEqual(yield* Ref.get(dispatched), []);
-      }).pipe(
-        Effect.provide(
-          OrchestratorMcpService.layer.pipe(
-            Layer.provide(ThreadReadBroker.layer),
-            Layer.provide(layerDependencies),
-          ),
-        ),
-      );
+      }).pipe(Effect.provide(layerWithBroker(layerDependencies)));
     }),
   );
 
@@ -810,14 +775,7 @@ describe("OrchestratorMcpService", () => {
           ...(child.captureOwnership ? { ownership: yield* Ref.get(ownership) } : {}),
           ...(status === undefined ? {} : { status }),
         };
-      }).pipe(
-        Effect.provide(
-          OrchestratorMcpService.layer.pipe(
-            Layer.provide(ThreadReadBroker.layer),
-            Layer.provide(layerDependencies),
-          ),
-        ),
-      );
+      }).pipe(Effect.provide(layerWithBroker(layerDependencies)));
     });
 
   it.effect("refuses to cancel a task when a task under it now runs above the parent's modes", () =>
@@ -1148,14 +1106,7 @@ describe("OrchestratorMcpService provider resolution", () => {
           assert.isTrue(
             fork!.constraints.includes("Driver 'forkOnly' is not registered in this build."),
           );
-        }).pipe(
-          Effect.provide(
-            OrchestratorMcpService.layer.pipe(
-              Layer.provide(ThreadReadBroker.layer),
-              Layer.provide(layerDependencies),
-            ),
-          ),
-        );
+        }).pipe(Effect.provide(layerWithBroker(layerDependencies)));
       }),
   );
 
@@ -1252,14 +1203,7 @@ describe("OrchestratorMcpService provider resolution", () => {
           assert.equal(request.type, "delegated_task.request");
           assert.equal(request.modelSelection.instanceId, antigravityInstanceId);
           assert.equal(request.modelSelection.model, "ant-model");
-        }).pipe(
-          Effect.provide(
-            OrchestratorMcpService.layer.pipe(
-              Layer.provide(ThreadReadBroker.layer),
-              Layer.provide(layerDependencies),
-            ),
-          ),
-        );
+        }).pipe(Effect.provide(layerWithBroker(layerDependencies)));
       }),
   );
 
@@ -1351,14 +1295,7 @@ describe("OrchestratorMcpService provider resolution", () => {
         };
         assert.equal(request.modelSelection.instanceId, antigravityInstanceId);
         assert.equal(request.modelSelection.model, "ant-model");
-      }).pipe(
-        Effect.provide(
-          OrchestratorMcpService.layer.pipe(
-            Layer.provide(ThreadReadBroker.layer),
-            Layer.provide(layerDependencies),
-          ),
-        ),
-      );
+      }).pipe(Effect.provide(layerWithBroker(layerDependencies)));
     }),
   );
 
@@ -1415,14 +1352,7 @@ describe("OrchestratorMcpService provider resolution", () => {
         assert.isTrue(
           byDriver.message.includes("No V2 provider adapter is registered for driver forkOnly."),
         );
-      }).pipe(
-        Effect.provide(
-          OrchestratorMcpService.layer.pipe(
-            Layer.provide(ThreadReadBroker.layer),
-            Layer.provide(layerDependencies),
-          ),
-        ),
-      );
+      }).pipe(Effect.provide(layerWithBroker(layerDependencies)));
     }),
   );
 
@@ -1524,14 +1454,7 @@ describe("OrchestratorMcpService provider resolution", () => {
         assert.equal(result.providerInstanceId, claudeInstanceId);
         assert.equal(yield* Ref.get(probes), 2);
         assert.equal(yield* Ref.get(dispatched), 1);
-      }).pipe(
-        Effect.provide(
-          OrchestratorMcpService.layer.pipe(
-            Layer.provide(ThreadReadBroker.layer),
-            Layer.provide(layerDependencies),
-          ),
-        ),
-      );
+      }).pipe(Effect.provide(layerWithBroker(layerDependencies)));
     }),
   );
 
@@ -1738,14 +1661,7 @@ describe("OrchestratorMcpService provider resolution", () => {
             } else {
               assert.equal(request.modelSelection.model, "codex-alt-model", testCase.name);
             }
-          }).pipe(
-            Effect.provide(
-              OrchestratorMcpService.layer.pipe(
-                Layer.provide(ThreadReadBroker.layer),
-                Layer.provide(layerDependencies),
-              ),
-            ),
-          );
+          }).pipe(Effect.provide(layerWithBroker(layerDependencies)));
         }
       }),
   );
@@ -1798,27 +1714,24 @@ describe("OrchestratorMcpService provider resolution", () => {
       boundThread: OrchestrationV2ThreadShell | null,
       upserted: Ref.Ref<number>,
     ) =>
-      OrchestratorMcpService.layer.pipe(
-        Layer.provide(ThreadReadBroker.layer),
-        Layer.provide(
-          Layer.mergeAll(
-            NodeServices.layer,
-            Layer.mock(ThreadManagementService.ThreadManagementService)({
-              getThreadShell: (threadId) =>
-                Effect.succeed(threadId === boundThreadId ? boundThread : null),
-            }),
-            Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
-            Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
-              list: () => Effect.succeed([]),
-            }),
-            Layer.mock(ProjectService.ProjectService)({}),
-            Layer.mock(SecretRequests.SecretRequests)({}),
-            Layer.mock(ScheduledTaskService.ScheduledTaskService)({
-              list: () => Effect.succeed({ tasks }),
-              upsert: () =>
-                Ref.update(upserted, (count) => count + 1).pipe(Effect.as({ task: tasks[0]! })),
-            }),
-          ),
+      layerWithBroker(
+        Layer.mergeAll(
+          NodeServices.layer,
+          Layer.mock(ThreadManagementService.ThreadManagementService)({
+            getThreadShell: (threadId) =>
+              Effect.succeed(threadId === boundThreadId ? boundThread : null),
+          }),
+          Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+          Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+            list: () => Effect.succeed([]),
+          }),
+          Layer.mock(ProjectService.ProjectService)({}),
+          Layer.mock(SecretRequests.SecretRequests)({}),
+          Layer.mock(ScheduledTaskService.ScheduledTaskService)({
+            list: () => Effect.succeed({ tasks }),
+            upsert: () =>
+              Ref.update(upserted, (count) => count + 1).pipe(Effect.as({ task: tasks[0]! })),
+          }),
         ),
       );
 
@@ -1866,28 +1779,25 @@ describe("OrchestratorMcpService provider resolution", () => {
             ),
           ),
           Effect.provide(
-            OrchestratorMcpService.layer.pipe(
-              Layer.provide(ThreadReadBroker.layer),
-              Layer.provide(
-                Layer.mergeAll(
-                  NodeServices.layer,
-                  Layer.mock(ThreadManagementService.ThreadManagementService)({
-                    getThreadShell: () => Effect.succeed(null),
-                    // Its turn ended: no run is active.
-                    getThreadRecords: () => Effect.succeed(idleThreadProjection(shell)),
-                  }),
-                  Layer.mock(ProviderRegistry.ProviderRegistry)({
-                    getProviders: Effect.succeed([]),
-                  }),
-                  Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
-                    list: () => Effect.succeed([]),
-                  }),
-                  Layer.mock(ProjectService.ProjectService)({}),
-                  Layer.mock(SecretRequests.SecretRequests)({}),
-                  Layer.mock(ScheduledTaskService.ScheduledTaskService)({
-                    list: () => Effect.succeed({ tasks: [task({})] }),
-                  }),
-                ),
+            layerWithBroker(
+              Layer.mergeAll(
+                NodeServices.layer,
+                Layer.mock(ThreadManagementService.ThreadManagementService)({
+                  getThreadShell: () => Effect.succeed(null),
+                  // Its turn ended: no run is active.
+                  getThreadRecords: () => Effect.succeed(idleThreadProjection(shell)),
+                }),
+                Layer.mock(ProviderRegistry.ProviderRegistry)({
+                  getProviders: Effect.succeed([]),
+                }),
+                Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+                  list: () => Effect.succeed([]),
+                }),
+                Layer.mock(ProjectService.ProjectService)({}),
+                Layer.mock(SecretRequests.SecretRequests)({}),
+                Layer.mock(ScheduledTaskService.ScheduledTaskService)({
+                  list: () => Effect.succeed({ tasks: [task({})] }),
+                }),
               ),
             ),
           ),
@@ -1949,37 +1859,34 @@ describe("OrchestratorMcpService provider resolution", () => {
         // The edit's own check reads the thread; the read after the save fails.
         const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
           Effect.provide(
-            OrchestratorMcpService.layer.pipe(
-              Layer.provide(ThreadReadBroker.layer),
-              Layer.provide(
-                Layer.mergeAll(
-                  NodeServices.layer,
-                  Layer.mock(ThreadManagementService.ThreadManagementService)({
-                    getThreadShell: (threadId) =>
-                      Ref.getAndUpdate(lookups, (count) => count + 1).pipe(
-                        Effect.flatMap((count) =>
-                          count === 0
-                            ? Effect.succeed(
-                                liveThreadShell(threadId, { runtimeMode: "approval-required" }),
-                              )
-                            : Effect.fail(new OrchestratorProjectionError({ threadId })),
-                        ),
+            layerWithBroker(
+              Layer.mergeAll(
+                NodeServices.layer,
+                Layer.mock(ThreadManagementService.ThreadManagementService)({
+                  getThreadShell: (threadId) =>
+                    Ref.getAndUpdate(lookups, (count) => count + 1).pipe(
+                      Effect.flatMap((count) =>
+                        count === 0
+                          ? Effect.succeed(
+                              liveThreadShell(threadId, { runtimeMode: "approval-required" }),
+                            )
+                          : Effect.fail(new OrchestratorProjectionError({ threadId })),
                       ),
-                  }),
-                  Layer.mock(ProviderRegistry.ProviderRegistry)({
-                    getProviders: Effect.succeed([]),
-                  }),
-                  Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
-                    list: () => Effect.succeed([]),
-                  }),
-                  Layer.mock(ProjectService.ProjectService)({}),
-                  Layer.mock(SecretRequests.SecretRequests)({}),
-                  Layer.mock(ScheduledTaskService.ScheduledTaskService)({
-                    list: () => Effect.succeed({ tasks: [bound] }),
-                    upsert: () =>
-                      Ref.update(upserted, (count) => count + 1).pipe(Effect.as({ task: bound })),
-                  }),
-                ),
+                    ),
+                }),
+                Layer.mock(ProviderRegistry.ProviderRegistry)({
+                  getProviders: Effect.succeed([]),
+                }),
+                Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+                  list: () => Effect.succeed([]),
+                }),
+                Layer.mock(ProjectService.ProjectService)({}),
+                Layer.mock(SecretRequests.SecretRequests)({}),
+                Layer.mock(ScheduledTaskService.ScheduledTaskService)({
+                  list: () => Effect.succeed({ tasks: [bound] }),
+                  upsert: () =>
+                    Ref.update(upserted, (count) => count + 1).pipe(Effect.as({ task: bound })),
+                }),
               ),
             ),
           ),
@@ -2048,14 +1955,7 @@ describe("OrchestratorMcpService provider resolution", () => {
         assert.equal(result.threads[0]?.creatorThreadId, parentThreadId);
         assert.isFalse(commands.some((command) => command.type === "message.dispatch"));
         assert.isFalse(commands.some((command) => command.type === "delegated_task.request"));
-      }).pipe(
-        Effect.provide(
-          OrchestratorMcpService.layer.pipe(
-            Layer.provide(ThreadReadBroker.layer),
-            Layer.provide(dependencies),
-          ),
-        ),
-      );
+      }).pipe(Effect.provide(layerWithBroker(dependencies)));
     }),
   );
 });

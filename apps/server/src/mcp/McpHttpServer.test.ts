@@ -101,6 +101,7 @@ it.effect("isolates full and restricted tool discovery over HTTP", () =>
         disableListenLog: true,
         disableLogger: true,
       }).pipe(
+        Layer.provide(ThreadReadBroker.layer),
         Layer.provide(
           Layer.mergeAll(
             Layer.mock(McpSessionRegistry.McpSessionRegistry)({
@@ -135,7 +136,6 @@ it.effect("isolates full and restricted tool discovery over HTTP", () =>
             Layer.mock(VcsStatusBroadcaster.VcsStatusBroadcaster)({}),
             Layer.mock(UpdateDrainAdmission)({}),
             PreviewAutomationBroker.layer,
-            ThreadReadBroker.layer,
           ),
         ),
         Layer.build,
