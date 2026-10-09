@@ -22,7 +22,7 @@ import * as ProjectionStore from "./ProjectionStore.ts";
 import {
   ProviderAdapterCapabilitiesError,
   type ProviderAdapterV2Shape,
-} from "./ProviderAdapter.ts";
+} from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 

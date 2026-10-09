@@ -199,6 +199,7 @@ const harness = Effect.gen(function* () {
     ReadonlyArray<{ providerSessionId: ProviderSessionId; status: "running" | "stopping" }>
   >([]);
   const pending = yield* Ref.make<ReadonlyArray<{ threadId: ThreadId }>>([]);
+  const pendingCleanup = yield* Ref.make<ReadonlyArray<{ threadId: ThreadId }>>([]);
   const deferred = yield* Ref.make<ReadonlyArray<{ threadId: ThreadId; runId: RunId }>>([]);
   const gateObservations = yield* Ref.make<ReadonlyArray<Store.StoredSession["phase"] | null>>([]);
   const effects = yield* Ref.make<ReadonlyArray<EffectOutbox.OrchestrationEffectV2>>([]);
@@ -252,7 +253,7 @@ const harness = Effect.gen(function* () {
         }),
     }),
     Layer.mock(EffectOutbox.EffectOutboxV2)({
-      pendingCleanup: Effect.succeed([]),
+      pendingCleanup: Ref.get(pendingCleanup),
       pendingExecution: Ref.get(pending),
       pendingAutomaticRelease: Ref.get(deferred),
       deferredAutomaticExecution: Effect.gen(function* () {
@@ -354,6 +355,7 @@ const harness = Effect.gen(function* () {
     receiptEntered,
     observationFailed,
     pending,
+    pendingCleanup,
     deferred,
     gateObservations,
     effects,
@@ -438,6 +440,293 @@ it.effect.each(["archive-pending", "provider-running"] as const)(
 const testLayer = Store.layer.pipe(
   Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "environment-pause-test-" })),
   Layer.provideMerge(NodeServices.layer),
+);
+
+it.effect.each(["archived", "deleted", "missing"] as const)(
+  "retires an enrolled %s recipient after non-delivery while retaining cleanup blockers",
+  (state) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const h = yield* harness;
+        yield* Ref.set(h.snapshot, shell([thread(a)]));
+        const gate = yield* Deferred.make<void>();
+        yield* Ref.set(h.gate, gate);
+        const starting = yield* h.pause.start.pipe(Effect.forkChild);
+        yield* Deferred.await(h.entered);
+        yield* Ref.set(h.recipientStates, new Map([[a, state]]));
+        yield* Ref.set(h.failures, new Set([a]));
+        // The command admission is still in flight, so unavailability alone
+        // cannot retire its enrolled recipient.
+        const inFlight = yield* h.pause.status;
+        assert.strictEqual(inFlight.session?.targets[0]?.pause, "pending");
+        assert.isFalse(inFlight.quiet);
+        yield* Deferred.succeed(gate, undefined);
+        assert.strictEqual((yield* Fiber.join(starting)).session?.targets[0]?.pause, "failed");
+        yield* Ref.set(h.snapshot, {
+          ...shell([]),
+          archivedThreads: state === "archived" ? [{ ...thread(a, "idle"), archivedAt: now }] : [],
+        });
+        yield* Ref.set(h.pendingCleanup, [{ threadId: a }]);
+        const waiting = yield* h.pause.status;
+        assert.strictEqual(waiting.session?.targets[0]?.pause, "unavailable");
+        assert.strictEqual(waiting.observation, "known");
+        assert.strictEqual(waiting.activeThreadCount, 1);
+        assert.isTrue(waiting.blockers.some((blocker) => blocker.type === "thread-cleanup"));
+        assert.isFalse(waiting.quiet);
+        yield* Ref.set(h.pendingCleanup, []);
+        const recovered = yield* restart(h);
+        const quiet = yield* recovered.pause.status;
+        assert.strictEqual(quiet.session?.targets[0]?.pause, "unavailable");
+        assert.isTrue(quiet.quiet);
+        yield* recovered.pause.retry;
+        assert.strictEqual((yield* Ref.get(h.calls)).length, 1);
+        assert.isNull((yield* recovered.pause.resume).session);
+        assert.isEmpty((yield* Ref.get(h.calls)).filter((call) => call.text === "resume"));
+      }),
+    ).pipe(Effect.provide(testLayer)),
+);
+
+it.effect(
+  "retains successful Pause recipients for Resume while retiring an unavailable failure",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      yield* Ref.set(h.failures, new Set([b]));
+      yield* h.pause.start;
+      yield* Ref.set(h.recipientStates, new Map([[b, "archived"]]));
+      yield* Ref.set(h.snapshot, shell([]));
+      const quiet = yield* h.pause.status;
+      assert.deepEqual(
+        quiet.session?.targets.map((target) => target.pause),
+        ["sent", "unavailable"],
+      );
+      assert.isTrue(quiet.quiet);
+      const saved = (yield* h.store.get)!;
+      yield* h.store.recordDelivery(
+        Store.deliveryIdentity(saved, saved.targets[1]!, "pause").messageId,
+        true,
+      );
+      assert.strictEqual((yield* h.store.get)?.targets[1]?.pause, "unavailable");
+      assert.isNull((yield* h.pause.resume).session);
+      assert.deepEqual(
+        (yield* Ref.get(h.calls))
+          .filter((call) => call.text === "resume")
+          .map((call) => call.threadId),
+        [a],
+      );
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("re-enrolls a restored active recipient with a fresh Pause delivery identity", () =>
+  Effect.gen(function* () {
+    const h = yield* harness;
+    yield* Ref.set(h.snapshot, shell([thread(a)]));
+    yield* Ref.set(h.failures, new Set([a]));
+    yield* h.pause.start;
+    const enrolled = (yield* h.store.get)!;
+    const oldIdentity = Store.deliveryIdentity(enrolled, enrolled.targets[0]!, "pause");
+    yield* Ref.set(h.recipientStates, new Map([[a, "archived"]]));
+    yield* Ref.set(h.snapshot, shell([]));
+    assert.strictEqual((yield* h.pause.status).session?.targets[0]?.pause, "unavailable");
+    yield* Ref.set(h.recipientStates, new Map<ThreadId, "archived" | "deleted" | "missing">());
+    yield* Ref.set(h.failures, new Set<ThreadId>());
+    yield* Ref.set(h.snapshot, shell([{ ...thread(a), title: "Restored example" }]));
+    const restored = yield* h.pause.retry;
+    assert.lengthOf(restored.session!.targets, 1);
+    assert.strictEqual(restored.session?.targets[0]?.pause, "sent");
+    assert.strictEqual(restored.session?.targets[0]?.title, "Restored example");
+    const saved = (yield* h.store.get)!;
+    assert.strictEqual(saved.targets[0]?.pauseAttempt, 1);
+    const calls = yield* Ref.get(h.calls);
+    assert.lengthOf(calls, 2);
+    assert.notStrictEqual(calls[1]?.messageId, oldIdentity.messageId);
+    assert.notStrictEqual(calls[1]?.commandId, oldIdentity.commandId);
+    yield* h.store.recordDelivery(oldIdentity.messageId, false);
+    assert.strictEqual((yield* h.store.get)?.targets[0]?.pause, "sent");
+    yield* Ref.set(h.snapshot, shell([]));
+    assert.isTrue((yield* h.pause.status).quiet);
+    assert.isNull((yield* h.pause.resume).session);
+    assert.deepEqual(
+      (yield* Ref.get(h.calls))
+        .filter((call) => call.text === "resume")
+        .map((call) => call.threadId),
+      [a],
+    );
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("keeps a committed Pause with uncertain failure bookkeeping pending after deletion", () =>
+  Effect.gen(function* () {
+    const h = yield* harness;
+    yield* Ref.set(h.snapshot, shell([thread(a)]));
+    yield* Ref.set(h.queued, true);
+    yield* h.pause.start;
+    const session = (yield* h.store.get)!;
+    const identity = Store.deliveryIdentity(session, session.targets[0]!, "pause");
+    const submitted = (yield* Ref.get(h.runs))[0]!;
+    yield* h.store.update((current) =>
+      current === null
+        ? null
+        : {
+            ...current,
+            targets: current.targets.map((target) => ({
+              ...target,
+              pause: "failed" as const,
+              pauseAccepted: false,
+            })),
+          },
+    );
+    yield* Ref.set(h.effects, [
+      {
+        ...providerStartEffect(identity.commandId, submitted.id),
+        status: "succeeded",
+        attemptCount: 1,
+      },
+    ]);
+    yield* Ref.set(h.recipientStates, new Map([[a, "deleted"]]));
+    yield* Ref.set(h.snapshot, shell([]));
+    const recovered = yield* restart(h);
+    const status = yield* recovered.pause.retry;
+    assert.strictEqual(status.session?.targets[0]?.pause, "pending");
+    assert.strictEqual(status.observation, "unknown");
+    assert.isFalse(status.quiet);
+    assert.strictEqual((yield* Ref.get(h.calls)).length, 1);
+    assert.isTrue((yield* recovered.store.get)?.targets[0]?.pauseAccepted);
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect.each([
+  {
+    scenario: "cancelled before start",
+    attemptCount: null,
+    nativeAccepted: false,
+    delivery: "unavailable",
+    observation: "known",
+  },
+  {
+    scenario: "cancelled before claim",
+    attemptCount: 0,
+    nativeAccepted: false,
+    delivery: "unavailable",
+    observation: "known",
+  },
+  {
+    scenario: "cancelled after claim",
+    attemptCount: 1,
+    nativeAccepted: false,
+    delivery: "pending",
+    observation: "unknown",
+  },
+  {
+    scenario: "native acceptance",
+    attemptCount: null,
+    nativeAccepted: true,
+    delivery: "pending",
+    observation: "unknown",
+  },
+] as const)(
+  "recovers unavailable queued Pause with $scenario without duplicating admission",
+  (scenario) =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      yield* Ref.set(h.snapshot, shell([thread(a)]));
+      yield* Ref.set(h.queued, true);
+      yield* h.pause.start;
+      const submitted = (yield* Ref.get(h.runs))[0]!;
+      const rootNodeId = NodeId.make("queued-root-example");
+      yield* Ref.update(h.runs, (runs) =>
+        runs.map((run) => ({
+          ...run,
+          status: "cancelled",
+          rootNodeId: scenario.nativeAccepted ? rootNodeId : null,
+        })),
+      );
+      if (scenario.attemptCount !== null)
+        yield* Ref.set(h.effects, [
+          {
+            ...providerStartEffect(
+              CommandId.make(`command:system:start-queued:${submitted.id}`),
+              submitted.id,
+            ),
+            status: "cancelled",
+            attemptCount: scenario.attemptCount,
+          },
+        ]);
+      if (scenario.nativeAccepted) yield* Ref.set(h.providerTurns, [nativeTurn(rootNodeId)]);
+      yield* Ref.set(h.recipientStates, new Map([[a, "deleted"]]));
+      yield* Ref.set(h.snapshot, shell([]));
+      const recovered = yield* restart(h);
+      const status = yield* recovered.pause.retry;
+      assert.strictEqual(status.session?.targets[0]?.pause, scenario.delivery);
+      assert.strictEqual(status.observation, scenario.observation);
+      assert.strictEqual(status.quiet, scenario.delivery === "unavailable");
+      yield* recovered.pause.retry;
+      assert.strictEqual((yield* Ref.get(h.calls)).length, 1);
+      if (scenario.delivery === "unavailable") {
+        assert.isNull((yield* recovered.pause.resume).session);
+        assert.isEmpty((yield* Ref.get(h.calls)).filter((call) => call.text === "resume"));
+      }
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("retires a definitive native rejection even when its committed command remains", () =>
+  Effect.gen(function* () {
+    const h = yield* harness;
+    yield* Ref.set(h.snapshot, shell([thread(a)]));
+    yield* Ref.set(h.receiptFailures, new Set([a]));
+    yield* h.pause.start;
+    const saved = (yield* h.store.get)!;
+    assert.strictEqual(saved.targets[0]?.pause, "failed");
+    assert.isTrue(saved.targets[0]!.pauseAccepted);
+    const identity = Store.deliveryIdentity(saved, saved.targets[0]!, "pause");
+    const run = (yield* Ref.get(h.runs))[0]!;
+    const rootNodeId = NodeId.make("existing-root-example");
+    yield* Ref.update(h.runs, (runs) => runs.map((run) => ({ ...run, rootNodeId })));
+    yield* Ref.set(h.providerTurns, [nativeTurn(rootNodeId)]);
+    yield* Ref.set(h.effects, [
+      {
+        ...providerStartEffect(identity.commandId, run.id),
+        status: "succeeded",
+        attemptCount: 1,
+        request: {
+          type: "provider-turn.steer",
+          providerSessionId: ProviderSessionId.make("provider-session-example"),
+          providerThreadId: ProviderThreadId.make("provider-thread-example"),
+          providerTurnId: ProviderTurnId.make("provider-turn-example"),
+          messageId: identity.messageId,
+        },
+      },
+    ]);
+    yield* Ref.set(h.recipientStates, new Map([[a, "archived"]]));
+    yield* Ref.set(h.snapshot, shell([]));
+    const recovered = yield* restart(h);
+    const quiet = yield* recovered.pause.status;
+    assert.strictEqual(quiet.session?.targets[0]?.pause, "unavailable");
+    assert.isTrue(quiet.quiet);
+    assert.isNull((yield* recovered.pause.resume).session);
+    assert.strictEqual((yield* Ref.get(h.calls)).length, 1);
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect(
+  "keeps an unavailable recipient retryable while its authoritative records cannot be read",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      yield* Ref.set(h.snapshot, shell([thread(a)]));
+      yield* Ref.set(h.failures, new Set([a]));
+      yield* h.pause.start;
+      yield* Ref.set(h.recipientStates, new Map([[a, "deleted"]]));
+      yield* Ref.set(h.readFailures, new Set([a]));
+      yield* Ref.set(h.snapshot, shell([]));
+      const unknown = yield* h.pause.status;
+      assert.strictEqual(unknown.session?.targets[0]?.pause, "failed");
+      assert.strictEqual(unknown.observation, "unknown");
+      assert.isFalse(unknown.quiet);
+      yield* Ref.set(h.readFailures, new Set());
+      assert.strictEqual((yield* h.pause.status).session?.targets[0]?.pause, "unavailable");
+      assert.strictEqual((yield* Ref.get(h.calls)).length, 1);
+    }).pipe(Effect.provide(testLayer)),
 );
 
 it.effect("keeps live queued acceptance pending while fanout bookkeeping is outstanding", () =>

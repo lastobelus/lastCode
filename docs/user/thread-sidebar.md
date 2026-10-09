@@ -19,7 +19,9 @@ tasks keep their usual missed-run policy when you return.
 Once the environment is quiet, leave the dialog available until you return, then
 choose **Resume** to send “resume” to the threads that received the pause request.
 You can reopen the dialog after closing it or reconnecting. Failed deliveries
-remain available to retry. Deleted or archived threads cannot receive Resume.
+remain available to retry. A thread archived or deleted before receiving Pause
+no longer blocks the dialog once its work stops. Deleted or archived threads
+cannot receive Resume.
 
 ## Start a thread
 

@@ -43,6 +43,43 @@ const availability = (
   });
 
 describe("mobile environment pause availability", () => {
+  it("offers Resume after unavailable pause recipients retire without retrying them", () => {
+    const quiet: EnvironmentPauseStatus = {
+      ...paused,
+      session: {
+        ...paused.session!,
+        targets: [
+          ...paused.session!.targets,
+          {
+            ...paused.session!.targets[0]!,
+            threadId: ThreadId.make("archived-before-pause"),
+            pause: "unavailable",
+            error: "Archived before the pause message was delivered.",
+          },
+        ],
+      },
+    };
+    expect(availability(quiet)).toMatchObject({
+      ready: true,
+      canResume: true,
+      pauseFailed: false,
+      showRetryPause: false,
+      showCancelPause: false,
+    });
+    expect(
+      availability({
+        ...quiet,
+        session: { ...quiet.session!, phase: "pausing" },
+        activeThreadCount: 1,
+        quiet: false,
+      }),
+    ).toMatchObject({
+      ready: false,
+      canResume: false,
+      showPauseRemaining: true,
+    });
+  });
+
   it("can pause again after resume messages settle while released work is queued", () => {
     const resuming: EnvironmentPauseStatus = {
       ...paused,

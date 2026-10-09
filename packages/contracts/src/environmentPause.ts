@@ -8,11 +8,12 @@ import {
 } from "./baseSchemas.ts";
 import { UpdateDrainBlocker } from "./updateDrain.ts";
 
-const EnvironmentPauseDelivery = Schema.Literals(["pending", "sent", "failed"]);
+const EnvironmentPauseDelivery = Schema.Literals(["pending", "sent", "failed", "unavailable"]);
 export const EnvironmentPauseTarget = Schema.Struct({
   threadId: ThreadId,
   projectId: ProjectId,
   title: Schema.String,
+  /** An unavailable recipient with definite non-delivery no longer needs Pause. */
   pause: EnvironmentPauseDelivery,
   /** An archived or deleted recipient can finish recovery without receiving Resume. */
   resume: Schema.Literals(["pending", "sent", "failed", "unavailable"]),

@@ -208,6 +208,83 @@ const make = Effect.gen(function* () {
     return retryable;
   });
 
+  const retireUnavailablePauseRecipients = Effect.gen(function* () {
+    const session = yield* store.get;
+    if (session === null || session.phase === "resuming") return false;
+    let unknown = false;
+    for (const target of session.targets) {
+      if (
+        target.pause === "sent" ||
+        target.pause === "unavailable" ||
+        (target.pause === "pending" && target.pauseAccepted)
+      )
+        continue;
+      const identity = Store.deliveryIdentity(session, target, "pause");
+      const record = yield* projections
+        .getThreadRecords(target.threadId, ["messages"], { messageIds: [identity.messageId] })
+        .pipe(Effect.result);
+      if (
+        record._tag === "Failure" &&
+        record.failure._tag !== "ProjectionStoreThreadNotFoundError"
+      ) {
+        unknown = true;
+        continue;
+      }
+      const unavailable =
+        record._tag === "Failure" ||
+        record.success.thread.archivedAt !== null ||
+        record.success.thread.deletedAt !== null;
+      if (!unavailable) continue;
+      let accepted = false;
+      if (!target.pauseAccepted) {
+        const effects = yield* outbox.listByCommandId(identity.commandId).pipe(Effect.result);
+        if (effects._tag === "Failure") {
+          unknown = true;
+          continue;
+        }
+        // A committed command can precede pause bookkeeping. Let the normal
+        // delivery reconciliation inspect its queued run and native evidence.
+        accepted =
+          (record._tag === "Success" && record.success.messages.length > 0) ||
+          effects.success.some(
+            (effect) =>
+              effect.request.type === "provider-turn.start" ||
+              effect.request.type === "provider-turn.steer",
+          );
+      }
+      // failed + accepted is a definitive negative receipt, not an uncertain
+      // acceptance. Successful recipients keep their original Resume obligation.
+      yield* store.update((current) =>
+        current?.id !== session.id
+          ? current
+          : {
+              ...current,
+              targets: current.targets.map((latest) =>
+                latest.threadId !== target.threadId ||
+                latest.pauseAttempt !== target.pauseAttempt ||
+                latest.pause !== target.pause ||
+                latest.pauseAccepted !== target.pauseAccepted
+                  ? latest
+                  : {
+                      ...latest,
+                      pause: accepted ? ("pending" as const) : ("unavailable" as const),
+                      pauseAccepted: accepted || latest.pauseAccepted,
+                      error: accepted
+                        ? null
+                        : "This thread is no longer available and did not receive Pause.",
+                    },
+              ),
+            },
+      );
+    }
+    return unknown;
+  });
+  const reconcileUnavailablePauseRecipients = Effect.gen(function* () {
+    // Admission and its bookkeeping own these rows until fanout completes.
+    if (yield* Ref.get(operationActive)) return false;
+    return yield* retireUnavailablePauseRecipients;
+  });
+
   const recoverUnaccepted = Effect.gen(function* () {
     // Live fanout owns these pending rows until its command result/receipt is saved.
     // A newly constructed service has no such operation, so it can recover them.
@@ -260,7 +337,7 @@ const make = Effect.gen(function* () {
             },
       );
     }
-    return unknown;
+    return (yield* reconcileUnavailablePauseRecipients) || unknown;
   });
   const reconcileUnaccepted = recovery.withPermits(1)(recoverUnaccepted);
 
@@ -400,6 +477,8 @@ const make = Effect.gen(function* () {
           deliveryUnknown = true;
         }
       }
+      deliveryUnknown =
+        (yield* recovery.withPermits(1)(reconcileUnavailablePauseRecipients)) || deliveryUnknown;
       session = yield* store.get;
     }
     const execution = yield* readBlockers.pipe(Effect.result);
@@ -458,7 +537,9 @@ const make = Effect.gen(function* () {
       blockers.length === 0 &&
       activeIds.size === 0 &&
       session !== null &&
-      session.targets.every((target) => target.pause === "sent") &&
+      session.targets.every(
+        (target) => target.pause === "sent" || target.pause === "unavailable",
+      ) &&
       session.phase !== "resuming";
     return {
       session:
@@ -561,6 +642,21 @@ const make = Effect.gen(function* () {
     yield* store.update((session) => {
       if (session === null || session.phase === "resuming") return session;
       const existing = new Set(session.targets.map((target) => target.threadId));
+      const activeById = new Map(activeTargets.map((thread) => [thread.id, thread]));
+      const restored = session.targets.map((target) => {
+        const thread = activeById.get(target.threadId);
+        return target.pause !== "unavailable" || thread === undefined
+          ? target
+          : {
+              ...target,
+              projectId: thread.projectId,
+              title: thread.title,
+              pause: "pending" as const,
+              pauseAttempt: target.pauseAttempt + 1,
+              pauseAccepted: false,
+              error: null,
+            };
+      });
       const targets = activeTargets
         .filter((thread) => !existing.has(thread.id))
         .map((thread) => ({
@@ -575,14 +671,18 @@ const make = Effect.gen(function* () {
           resumeAccepted: false,
           error: null,
         }));
-      return targets.length === 0
+      return targets.length === 0 &&
+        restored.every((target, index) => target === session.targets[index])
         ? session
-        : { ...session, targets: [...session.targets, ...targets] };
+        : { ...session, targets: [...restored, ...targets] };
     });
   });
   const retryDirection = Effect.fn("EnvironmentPause.retryDirection")(function* (
     direction: "pause" | "resume",
   ) {
+    // This serialized operation has not started fanout yet. Retire definitive
+    // cancellations discovered by status before Retry gives them a new attempt.
+    if (direction === "pause") yield* recovery.withPermits(1)(retireUnavailablePauseRecipients);
     const retryable = direction === "resume" ? yield* reconcileResumeRecipients : null;
     yield* store.update((session) =>
       session === null

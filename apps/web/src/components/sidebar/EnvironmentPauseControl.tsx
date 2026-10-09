@@ -150,9 +150,11 @@ function EnvironmentPauseDialog({
   const [error, setError] = useState<string | null>(null);
   const pauseFailures = session?.targets.filter((thread) => thread.pause === "failed") ?? [];
   const resumeFailures = session?.targets.filter((thread) => thread.resume === "failed") ?? [];
-  const unavailableRecipients =
-    session?.targets.filter((thread) => thread.resume === "unavailable") ?? [];
   const resuming = session?.phase === "resuming";
+  const unavailableRecipients =
+    session?.targets.filter(
+      (thread) => thread.pause === "unavailable" || (resuming && thread.resume === "unavailable"),
+    ) ?? [];
   const quiet = known && status.quiet && pauseFailures.length === 0;
   const canCancelPause =
     known &&
@@ -296,9 +298,12 @@ function EnvironmentPauseDialog({
                 <p>Retry sends only the messages that are still missing.</p>
               </div>
             ) : null}
-            {resuming && unavailableRecipients.length > 0 ? (
+            {unavailableRecipients.length > 0 ? (
               <div className="space-y-1 text-sm text-muted-foreground">
-                <p>Archived or deleted threads cannot receive resume requests.</p>
+                <p>
+                  Archived or deleted threads cannot receive {resuming ? "resume" : "pause"}{" "}
+                  requests.
+                </p>
                 <ul className="list-inside list-disc">
                   {unavailableRecipients.map((thread) => (
                     <li key={thread.threadId}>{thread.title}</li>

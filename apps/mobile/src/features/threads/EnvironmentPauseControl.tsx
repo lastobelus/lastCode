@@ -272,10 +272,15 @@ function EnvironmentPauseDetails(props: {
               </Text>
             ))}
           {session.targets
-            .filter((target) => target.resume === "unavailable")
+            .filter(
+              (target) =>
+                target.pause === "unavailable" ||
+                (session.phase === "resuming" && target.resume === "unavailable"),
+            )
             .map((target) => (
               <Text key={target.threadId} className="text-sm text-foreground-muted">
-                {target.title}: Archived or deleted threads cannot receive resume requests.
+                {target.title}: Archived or deleted threads cannot receive{" "}
+                {session.phase === "resuming" ? "resume" : "pause"} requests.
               </Text>
             ))}
         </>
