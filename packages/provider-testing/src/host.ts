@@ -46,6 +46,7 @@ export const layerTestProviderHost = (
           cwd: options.cwd ?? process.cwd(),
           baseDir,
           stateDir,
+          settingsPath: path.join(stateDir, "settings.json"),
           providerStatusCacheDir,
           attachmentsDir,
         },
