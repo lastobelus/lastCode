@@ -44,6 +44,7 @@ const fixture = () => {
   const payloads: Array<Record<string, unknown>> = [];
   const attempts = new Map<string, string>();
   let uploaded = 0;
+  let cachedUploadId: string | undefined;
   let directUploadStatus = 200;
   let ndjson = false;
   let rpcStream: ReadableStream<Uint8Array> | undefined;
@@ -117,12 +118,12 @@ const fixture = () => {
       let contentType = "text/plain";
       if (request.url.endsWith("/upload/preflight")) {
         const attempt = String(payload?.uploadAttemptId);
-        const id = attempts.get(attempt) ?? `upload-${attempts.size + 1}`;
+        const id = cachedUploadId ?? attempts.get(attempt) ?? `upload-${attempts.size + 1}`;
         attempts.set(attempt, id);
         body = JSON.stringify({
           ok: true,
           uploadId: id,
-          cacheHit: false,
+          cacheHit: cachedUploadId !== undefined,
           upload: {
             url: `${origin}/upload/direct/${id}`,
             headers: {
@@ -312,6 +313,9 @@ const fixture = () => {
     },
     directUploadStatus: (status: number) => {
       directUploadStatus = status;
+    },
+    cachedUpload: (id: string) => {
+      cachedUploadId = id;
     },
     artifacts: (ids: ReadonlyArray<string>) => {
       artifactIds = ids;
@@ -662,6 +666,74 @@ it("expires uploaded resources and screenshots at the daemon's respective lifeti
   await (await f.capture(other, "session-thread-2")).text();
   expect((await f.call(other, "/artifacts/artifact-1", "GET")).status).toBe(200);
 });
+
+effectIt.effect.each(["download", "direct upload", "finalize", "install"] as const)(
+  "rechecks %s ownership after delayed readiness",
+  (operation) =>
+    Effect.gen(function* () {
+      const f = fixture();
+      const owner = yield* Effect.promise(() => f.issue());
+      const other = yield* Effect.promise(() => f.issue("thread-2"));
+      const download = operation === "download";
+      yield* Effect.promise(async () => {
+        await (await (download ? f.capture(owner) : f.call(owner, "/upload/preflight"))).text();
+      });
+      const started = yield* Deferred.make<void>();
+      const resume = yield* Deferred.make<void>();
+      f.pauseReadiness(
+        Deferred.succeed(started, undefined).pipe(
+          Effect.andThen(Deferred.await(resume)),
+          Effect.asVoid,
+        ),
+      );
+      const pending =
+        operation === "download"
+          ? f.call(owner, "/artifacts/artifact-1", "GET")
+          : operation === "direct upload"
+            ? f.call(owner, "/upload/direct/upload-1", "PUT", "bytes")
+            : operation === "finalize"
+              ? f.call(owner, "/upload/finalize")
+              : f.call(
+                  owner,
+                  "/rpc",
+                  "POST",
+                  JSON.stringify({
+                    jsonrpc: "2.0",
+                    id: "install-1",
+                    method: "agent_device.command",
+                    params: {
+                      session: "session-thread-1",
+                      command: "install",
+                      flags: { udid: "device-1" },
+                      meta: { uploadedArtifactId: "upload-1" },
+                    },
+                  }),
+                );
+      yield* Deferred.await(started);
+      f.advance((download ? 15 : 5) * 60_000);
+      f.pauseReadiness(Effect.void);
+      f.artifacts(["artifact-1"]);
+      f.cachedUpload("upload-1");
+      yield* Effect.promise(async () => {
+        await (
+          await (download
+            ? f.capture(other, "session-thread-2")
+            : f.call(other, "/upload/preflight"))
+        ).text();
+      });
+      const forwarded = f.requests.length;
+      yield* Deferred.succeed(resume, undefined);
+      expect((yield* Effect.promise(() => pending)).status).toBe(403);
+      expect(f.requests).toHaveLength(forwarded);
+      expect(
+        (yield* Effect.promise(() =>
+          download
+            ? f.call(other, "/artifacts/artifact-1", "GET")
+            : f.call(other, "/upload/direct/upload-1", "PUT", "bytes"),
+        )).status,
+      ).toBe(200);
+    }),
+);
 
 it.each([200, 308])("keeps ownership for an upload progressing with status %s", async (status) => {
   const f = fixture();
