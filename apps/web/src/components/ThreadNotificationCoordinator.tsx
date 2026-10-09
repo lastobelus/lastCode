@@ -123,7 +123,11 @@ function EnvironmentNotifications({
     }
     const next = new Map<ThreadId, NotificationState>();
     for (const rawThread of threads) {
-      if (rawThread.lineage.relationshipToParent === "subagent") continue;
+      if (
+        rawThread.lineage.relationshipToParent === "subagent" &&
+        rawThread.lineage.independent !== true
+      )
+        continue;
       const prior = previous.current.get(rawThread.id);
       // The same object cannot produce a new notification.
       if (prior?.raw === rawThread) {

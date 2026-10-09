@@ -623,15 +623,16 @@ export const make = Effect.gen(function* () {
           Effect.as(result),
         );
       }),
-      Effect.catchTag("LastCodeLocalUpdateError", (error) =>
-        setState(
-          state.status === "available" ||
-            state.downloadedVersion !== null ||
-            (state.status === "error" && state.errorContext === "download" && state.canRetry)
-            ? { ...state, checkedAt }
-            : reduceDesktopUpdateStateOnCheckFailure(state, error.message, checkedAt),
-        ).pipe(Effect.as({ checked: true, checkpointRequested: false, error: error.message })),
-      ),
+      Effect.catchTags({
+        LastCodeLocalUpdateError: (error) =>
+          setState(
+            state.status === "available" ||
+              state.downloadedVersion !== null ||
+              (state.status === "error" && state.errorContext === "download" && state.canRetry)
+              ? { ...state, checkedAt }
+              : reduceDesktopUpdateStateOnCheckFailure(state, error.message, checkedAt),
+          ).pipe(Effect.as({ checked: true, checkpointRequested: false, error: error.message })),
+      }),
     );
   });
 

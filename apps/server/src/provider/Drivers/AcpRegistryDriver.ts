@@ -82,6 +82,7 @@ const makeUnsupportedTextGeneration = (): TextGeneration["Service"] => {
       }),
     );
   return {
+    generateIncomingMessageSummary: () => unsupported("generateIncomingMessageSummary"),
     generateCommitMessage: () => unsupported("generateCommitMessage"),
     generatePrContent: () => unsupported("generatePrContent"),
     generateBranchName: () => unsupported("generateBranchName"),

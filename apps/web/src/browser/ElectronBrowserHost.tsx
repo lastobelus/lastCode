@@ -1,5 +1,7 @@
 "use client";
 
+import { DesktopCdpRelay } from "./DesktopCdpRelay";
+
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
 import { AuthPreviewOperateScope, FILL_PREVIEW_VIEWPORT } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
@@ -128,6 +130,7 @@ export function ElectronBrowserHost() {
   if (!isElectron) return null;
   return (
     <div className="contents" data-electron-browser-host>
+      <DesktopCdpRelay />
       {sessions.map(({ threadRef, snapshot, runtimeTabId, pictureInPicture, zoomFactor }) => {
         const url = snapshot.navStatus._tag === "Idle" ? null : snapshot.navStatus.url;
         return (
@@ -142,6 +145,7 @@ export function ElectronBrowserHost() {
             profileId={snapshot.profileId}
             zoomFactor={zoomFactor}
             serverDriven={snapshot.runtime === "server"}
+            desktopHostId={snapshot.desktopHostId}
             {...(snapshot.runtime === "server"
               ? {
                   serverRendering: {

@@ -1371,6 +1371,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   isRunning: boolean;
   canInterrupt: boolean;
   followUpBehavior: "queue" | "steer";
+  forceQueue: boolean;
   alternateShortcutLabel: string | null;
   showPlanFollowUpPrompt: boolean;
   promptHasText: boolean;
@@ -1414,6 +1415,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
         isRunning={props.isRunning}
         canInterrupt={props.canInterrupt}
         followUpBehavior={props.followUpBehavior}
+        forceQueue={props.forceQueue}
         alternateShortcutLabel={props.alternateShortcutLabel}
         showPlanFollowUpPrompt={props.showPlanFollowUpPrompt}
         promptHasText={props.promptHasText}
@@ -1544,6 +1546,8 @@ export interface ChatComposerProps {
 
   // Session phase
   phase: SessionPhase;
+  /** The active recovery incident queues follow-ups regardless of visible phase. */
+  forceQueue?: boolean;
   /** Stop is offered: a run is preparing, starting, or running. */
   canInterrupt: boolean;
   isConnecting: boolean;
@@ -1559,6 +1563,7 @@ export interface ChatComposerProps {
   keepFullHistory: boolean;
   /** Flips the Compact chip for the active thread. */
   onToggleKeepFullHistory: () => void;
+  suppressStaleActivity?: boolean;
   /** Picking /usage-limits from the menu is the action itself; the draft keeps nothing of it. */
   onUsageLimitsCommand?: (() => void) | undefined;
   environmentUnavailable: {
@@ -1635,6 +1640,7 @@ export interface ChatComposerProps {
    * effect, so it is current before the chat view measures the overlay.
    */
   onRestingChange: (resting: boolean) => void;
+  threadAnnotationsSupported: boolean;
 
   // Refs the parent needs kept in sync
   promptRef: React.RefObject<string>;
@@ -1699,6 +1705,7 @@ export interface ChatComposerProps {
   setThreadError: (threadId: ThreadId | null, error: string | null) => void;
   onExpandImage: (preview: ExpandedImagePreview) => void;
   onFileOpen: (attachment: ChatFileAttachment) => void;
+  onOpenThreadAnnotation: () => void;
 }
 
 // --------------------------------------------------------------------------
@@ -1729,6 +1736,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     forceExpandedOnMobile,
     projectSelectionRequired,
     phase,
+    forceQueue = false,
     canInterrupt,
     isConnecting,
     isSendBusy,
@@ -1775,6 +1783,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     timelineOverflows,
     onComposerOverlayHeightChange,
     onRestingChange,
+    threadAnnotationsSupported,
     promptRef,
     composerRef,
     composerImagesRef,
@@ -1805,6 +1814,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     setThreadError,
     onExpandImage,
     onFileOpen,
+    onOpenThreadAnnotation,
     editingQueuedAttachments,
     onRemoveEditingQueuedAttachment,
   } = props;
@@ -1815,8 +1825,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // hide the tasks row for it, only when the sync lasts. Logic that depends on
   // the real phase keeps reading `props.threadSyncPhase`.
   const shownSyncPhase = useDelayedStatus(composerDraftTargetKey, props.threadSyncPhase);
-  const activeTasksProgress = shownSyncPhase === null ? props.activeTasksProgress : null;
-  const activeTaskSteps = shownSyncPhase === null ? props.activeTaskSteps : null;
+  const activeTasksProgress =
+    shownSyncPhase === null && !props.suppressStaleActivity ? props.activeTasksProgress : null;
+  const activeTaskSteps =
+    shownSyncPhase === null && !props.suppressStaleActivity ? props.activeTaskSteps : null;
   const isEditingQueuedMessage = editingQueuedAttachments !== null;
   // ------------------------------------------------------------------
   // Store subscriptions (prompt / images / terminal contexts)
@@ -2677,6 +2689,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           label: "/model",
           description: "Switch response model for this thread",
         },
+        ...(threadAnnotationsSupported
+          ? ([
+              {
+                id: "slash:annotate",
+                type: "slash-command",
+                command: "annotate",
+                label: "/annotate",
+                description: "Add or edit this thread's annotation",
+              },
+            ] as const)
+          : []),
         ...(planModeUiEnabled
           ? ([
               {
@@ -2814,6 +2837,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     selectedProviderSlashCommands,
     selectedProviderStatus,
     settings.showSkillsInSlashMenu,
+    threadAnnotationsSupported,
     workspaceEntries.entries,
   ]);
 
@@ -4012,6 +4036,18 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           }
           return;
         }
+        if (item.command === "annotate") {
+          if (!readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)) return;
+          const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
+            expectedText: snapshot.value.slice(trigger.rangeStart, trigger.rangeEnd),
+            focusEditorAfterReplace: false,
+          });
+          if (applied) {
+            setComposerHighlightedItemId(null);
+            onOpenThreadAnnotation();
+          }
+          return;
+        }
         if (!planModeUiEnabled) return;
         void handleInteractionModeChange(item.command === "plan" ? "plan" : "default");
         const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
@@ -4130,7 +4166,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       addComposerDraftThreadContexts,
       applyPromptReplacement,
       composerDraftTarget,
+      environmentId,
       handleInteractionModeChange,
+      onOpenThreadAnnotation,
       planModeUiEnabled,
       onUsageLimitsCommand,
       resolveActiveComposerTrigger,
@@ -4261,6 +4299,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 running: phase === "running",
                 alternateModifier: false,
                 activeTurnDefault: settings.followUpBehavior,
+                forceQueue,
               }),
             submissionIntent,
           );
@@ -4279,6 +4318,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       attachmentTargetKey,
       blurMobileComposerAfterSend,
       environmentId,
+      forceQueue,
       isSendDisabled,
       noProviderAvailable,
       onSend,
@@ -4297,10 +4337,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           running: phase === "running",
           alternateModifier: event.metaKey || event.ctrlKey,
           activeTurnDefault: settings.followUpBehavior,
+          forceQueue,
         }),
       );
     },
-    [phase, settings.followUpBehavior, submitComposer],
+    [forceQueue, phase, settings.followUpBehavior, submitComposer],
   );
   const submitCitationAndSend = useCallback(() => {
     submitComposer(
@@ -4309,9 +4350,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         running: phase === "running",
         alternateModifier: false,
         activeTurnDefault: settings.followUpBehavior,
+        forceQueue,
       }),
     );
-  }, [phase, settings.followUpBehavior, submitComposer]);
+  }, [forceQueue, phase, settings.followUpBehavior, submitComposer]);
   const compactThreadContext = useCallback(() => {
     if (
       !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope) ||
@@ -4451,7 +4493,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       keybindings,
       isMobileViewport,
       isDraftThread: routeKind === "draft",
-      isRunning: phase === "running",
+      isRunning: phase === "running" || forceQueue,
       sendShortcut: settings.sendShortcut,
       prompt: promptRef.current,
     });
@@ -4495,6 +4537,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           running: phase === "running",
           alternateModifier: submissionIntent === "alternate",
           activeTurnDefault: settings.followUpBehavior,
+          forceQueue,
         }),
         submissionIntent,
       );
@@ -6828,6 +6871,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                               canOperateThread={canOperateThread}
                               pendingAction={pendingPrimaryAction}
                               isRunning={false}
+                              forceQueue={forceQueue}
                               canInterrupt={false}
                               showPlanFollowUpPrompt={false}
                               promptHasText={false}
@@ -7516,6 +7560,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       canOperateThread={canOperateThread}
                       pendingAction={pendingPrimaryAction}
                       isRunning={false}
+                      forceQueue={forceQueue}
                       canInterrupt={false}
                       showPlanFollowUpPrompt={false}
                       promptHasText={false}
@@ -7630,6 +7675,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     isRunning={phase === "running"}
                     canInterrupt={canInterrupt}
                     followUpBehavior={settings.followUpBehavior}
+                    forceQueue={forceQueue}
                     alternateShortcutLabel={shortcutLabelForCommand(
                       keybindings,
                       "composer.sendAlternate",

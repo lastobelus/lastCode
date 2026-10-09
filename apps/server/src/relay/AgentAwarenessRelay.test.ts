@@ -181,6 +181,8 @@ const makeTestRelay = Effect.fnUntraced(function* (
   // Catch-up publishes read the whole shell once each.
   const catchUp = { shellSnapshotReads: 0 };
   const threads = ThreadManagementService.ThreadManagementService.of({
+    executeArchive: unused,
+    getThreadArchiveFamily: unused,
     getThreadShell: (threadId) =>
       Effect.sync(() => shellReads.push(threadId)).pipe(
         Effect.andThen(options.readShell?.(threadId) ?? Ref.get(currentShell)),
@@ -260,6 +262,7 @@ const makeTestRelay = Effect.fnUntraced(function* (
       bootstrap: unused,
       update: unused,
       delete: unused,
+      reconcileScripts: unused,
       getByWorkspaceRoot: unused,
       snapshot: Effect.succeed({ projects: [] } as never),
       getShell: unused,
@@ -690,6 +693,26 @@ describe("AgentAwarenessRelay", () => {
       yield* TestClock.adjust("5 seconds");
       yield* relay.drain;
       assert.equal(publications.length, 0);
+    }),
+  );
+
+  it.effect("publishes promoted conversations as independent activity", () =>
+    Effect.gen(function* () {
+      const { relay, currentShell, publications } = yield* makeTestRelay();
+      yield* Ref.set(
+        currentShell,
+        shell({
+          lineage: {
+            rootThreadId: ThreadId.make("former-parent"),
+            parentThreadId: ThreadId.make("former-parent"),
+            relationshipToParent: "subagent",
+            independent: true,
+          },
+        }),
+      );
+      yield* relay.publishThread(THREAD_ID);
+      assert.equal(publications.length, 1);
+      assert.equal(publications[0]?.state?.phase, "running");
     }),
   );
 
