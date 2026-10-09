@@ -22,10 +22,12 @@ if [ -n "$JAVA_HOME" ]; then export PATH="$JAVA_HOME/bin:$PATH"; fi
 export const remoteDeviceScript = (
   owner: string,
   mode: "probe" | "start" | "agent-start" | "stop-agent" | "stop",
+  agentRuntimeId?: string,
 ) =>
   `
 const owner = ${JSON.stringify(owner)};
 const mode = ${JSON.stringify(mode)};
+const agentRuntimeId = ${JSON.stringify(agentRuntimeId ?? null)};
 const hubVersion = ${JSON.stringify(DEVICE_HUB_VERSION)};
 const agentVersion = ${JSON.stringify(AGENT_DEVICE_VERSION)};
 ` +
@@ -159,7 +161,12 @@ async function install(name, version, entry) {
       fs.rmSync(hubFile, { force: true });
     }
     const entry = read(agentFile)?.entryPath || path.join(root, 'tools', 'agent-device@' + agentVersion, 'node_modules', 'agent-device', 'bin', 'agent-device.mjs');
-    if (fs.existsSync(entry)) run(process.execPath, [entry, 'daemon', 'stop', '--state-dir', state]);
+    if (read(daemonFile)) {
+      if (!fs.existsSync(entry)) throw Error('The installed agent-device launcher is unavailable.');
+      const stopped = run(process.execPath, [entry, 'daemon', 'stop', '--state-dir', state]);
+      if (stopped.status !== 0) throw Error('Could not stop the previous agent-device daemon.');
+      fs.rmSync(daemonFile, { force: true });
+    }
     return;
   }
   if (!ios && !android) throw Error(platforms.map(p => p.reason).join(' '));
@@ -195,10 +202,10 @@ async function install(name, version, entry) {
   let agentResult = {};
   if (mode === 'agent-start') {
   const agentEntry = await install('agent-device', agentVersion, 'bin/agent-device.mjs');
-  const previousAgent = read(agentFile)?.entryPath;
+  const previousAgent = read(agentFile);
   let daemon = read(daemonFile);
-  if (daemon && (previousAgent !== agentEntry || !await healthy(daemon.httpPort, '/health'))) {
-    const stopped = run(process.execPath, [previousAgent || agentEntry, 'daemon', 'stop', '--state-dir', state]);
+  if (daemon && (previousAgent?.entryPath !== agentEntry || previousAgent?.runtimeId !== agentRuntimeId || !await healthy(daemon.httpPort, '/health'))) {
+    const stopped = run(process.execPath, [previousAgent?.entryPath || agentEntry, 'daemon', 'stop', '--state-dir', state]);
     if (stopped.status !== 0) throw Error('Could not stop the previous agent-device version.');
     fs.rmSync(daemonFile, { force: true });
     daemon = null;
@@ -211,7 +218,7 @@ async function install(name, version, entry) {
     daemon = read(daemonFile);
   }
   if (!daemon || !await healthy(daemon.httpPort, '/health')) throw Error('agent-device daemon did not become ready in ' + state);
-  write(agentFile, { entryPath: agentEntry });
+  write(agentFile, { entryPath: agentEntry, runtimeId: agentRuntimeId });
   agentResult = { daemonPort: daemon.httpPort, token: daemon.token, entryPath: agentEntry };
   }
   const vendor = path.resolve(path.dirname(hubEntry), '../../vendor/serve-sim/dist');

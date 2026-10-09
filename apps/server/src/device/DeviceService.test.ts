@@ -8,6 +8,17 @@ import {
   type DeviceServiceState,
 } from "@t3tools/contracts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Layer from "effect/Layer";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
+import * as NetAddress from "effect/net/NetAddress";
+import * as Result from "effect/Result";
+import * as NetService from "@t3tools/shared/Net";
+import * as ServerConfig from "../config.ts";
+import * as ProcessRunner from "../processRunner.ts";
+import * as DeviceAgentAccess from "./DeviceAgentAccess.ts";
+import { agentDeviceConfigPath, writeAgentDeviceConfig } from "./AgentDeviceTarget.ts";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Deferred from "effect/Deferred";
@@ -16,7 +27,7 @@ import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import { HttpClient, HttpClientResponse } from "effect/http";
+import { HttpClient, HttpClientResponse, HttpServer } from "effect/http";
 import * as ServerSettings from "../serverSettings.ts";
 import * as DeviceHost from "./DeviceHost.ts";
 import { NodeRuntimeUnavailableError } from "@t3tools/shared/nodeRuntime";
@@ -813,4 +824,82 @@ it.effect("reads an already running daemon without startup phases or state broad
     expect(agentStarts).toEqual([]);
     expect((yield* service.state).revision).toBe(revision);
   }).pipe(Effect.scoped),
+);
+
+it.effect.each([true, false])(
+  "blocks revoked local startup until legacy retirement completes (stop succeeds: %s)",
+  (stopSucceeds) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-local-admission-" });
+      const config = yield* ServerConfig.ServerConfig.pipe(
+        Effect.provide(ServerConfig.layerTest(directory, directory)),
+      );
+      const legacy = yield* agentDeviceConfigPath(config.stateDir, LOCAL_DEVICE_HOST_ID, path);
+      yield* writeAgentDeviceConfig(legacy, {
+        baseUrl: "http://127.0.0.1:1234",
+        token: "recovered-raw-token",
+        entryPath: "/agent.mjs",
+      });
+      const stopping = yield* Deferred.make<void>();
+      const finish = yield* Deferred.make<void>();
+      const admitted = yield* Ref.make(false);
+      let rawCredentialAccepted = true;
+      const dependencies = Layer.mergeAll(
+        Layer.succeed(ServerConfig.ServerConfig, config),
+        Layer.mock(DeviceHost.DeviceHost)({
+          id: LOCAL_DEVICE_HOST_ID,
+          summary: Effect.succeed({
+            id: LOCAL_DEVICE_HOST_ID,
+            kind: "local",
+            label: "Test host",
+            platforms: [],
+            hubInstalled: true,
+            agentDeviceInstalled: true,
+          }),
+          stopAgent: Effect.gen(function* () {
+            yield* Deferred.succeed(stopping, undefined);
+            yield* Deferred.await(finish);
+            if (!stopSucceeds)
+              return yield* new DeviceHost.DeviceHostError({
+                hostId: LOCAL_DEVICE_HOST_ID,
+                step: "stop-agent",
+                cause: new Error("could not stop"),
+              });
+            rawCredentialAccepted = false;
+          }),
+          ensureReady: () => Effect.die("Revoked startup must not start manual helpers"),
+          ensureAgentReady: () => Effect.die("Revoked startup must not start agent helpers"),
+        }),
+        // Consent was revoked before restart; cleanup cannot depend on a new device_open.
+        ServerSettings.layerTest({ enableDeviceSupport: false, enableAgentDeviceAccess: false }),
+        Layer.mock(ProcessRunner.ProcessRunner)({}),
+        Layer.mock(DeviceAgentAccess.DeviceAgentAccess)({}),
+        Layer.mock(HttpServer.HttpServer)({
+          address: Result.getOrThrow(NetAddress.inetAddressV4(NetAddress.ipv4Loopback, 1234)),
+        }),
+        Layer.succeed(
+          HttpClient.HttpClient,
+          HttpClient.make(() => Effect.die("Revoked startup must not contact devices")),
+        ),
+        NetService.layer,
+      );
+      const construction = yield* DeviceService.make.pipe(
+        Effect.provide(dependencies),
+        Effect.tap(() => Ref.set(admitted, true)),
+        Effect.result,
+        Effect.forkChild,
+      );
+      yield* Deferred.await(stopping);
+      expect(yield* Ref.get(admitted)).toBe(false);
+      expect(rawCredentialAccepted).toBe(true);
+      expect(yield* fs.exists(legacy)).toBe(true);
+      yield* Deferred.succeed(finish, undefined);
+      const result = yield* Fiber.join(construction);
+      expect(result._tag).toBe(stopSucceeds ? "Success" : "Failure");
+      expect(yield* Ref.get(admitted)).toBe(stopSucceeds);
+      expect(rawCredentialAccepted).toBe(!stopSucceeds);
+      expect(yield* fs.exists(legacy)).toBe(!stopSucceeds);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

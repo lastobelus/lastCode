@@ -43,6 +43,7 @@ import * as ServerConfig from "../config.ts";
 import {
   agentDeviceConfigPath,
   agentDeviceSession,
+  retireLegacyAgentDeviceConfig,
   writeAgentDeviceConfig,
 } from "./AgentDeviceTarget.ts";
 import * as Context from "effect/Context";
@@ -1002,8 +1003,9 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
 
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
-  const localHost = yield* DeviceHost.DeviceHost;
+  const unpreparedLocalHost = yield* DeviceHost.DeviceHost;
   const config = yield* ServerConfig.ServerConfig;
+  const localHost = yield* retireLegacyAgentDeviceConfig(config.stateDir, unpreparedLocalHost);
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const runner = yield* ProcessRunner.ProcessRunner;
@@ -1013,10 +1015,6 @@ export const make = Effect.gen(function* () {
     [localHost.id, localHost],
   ]);
   const crypto = yield* Crypto.Crypto;
-  const configPath = (hostId: DeviceHostId) =>
-    agentDeviceConfigPath(config.stateDir, hostId, path).pipe(
-      Effect.provideService(Crypto.Crypto, crypto),
-    );
   const access = yield* DeviceAgentAccess.DeviceAgentAccess;
   const server = yield* HttpServer.HttpServer;
   const configureAgent = (
@@ -1125,13 +1123,12 @@ export const make = Effect.gen(function* () {
           return removed;
         }),
       );
-      // Stop old writers before deleting config files or publishing replacements, without blocking healthy hosts.
+      // Stop old writers before publishing replacements, without blocking healthy hosts.
       yield* Effect.forEach(
         removed,
-        ({ id, scope }) =>
+        ({ scope }) =>
           Effect.gen(function* () {
             yield* Scope.close(scope, Exit.void);
-            yield* fs.remove(yield* configPath(id), { force: true }).pipe(Effect.ignore);
           }),
         { concurrency: 4, discard: true },
       );
@@ -1147,7 +1144,11 @@ export const make = Effect.gen(function* () {
                 service
                   .setHostStatus(host.id, { status, ...(detail ? { detail } : {}) })
                   .pipe(Effect.asVoid),
-            ).pipe(Effect.provideService(Scope.Scope, hostScope), Effect.provide(hostContext));
+            ).pipe(
+              Effect.flatMap((host) => retireLegacyAgentDeviceConfig(config.stateDir, host)),
+              Effect.provideService(Scope.Scope, hostScope),
+              Effect.provide(hostContext),
+            );
             hosts.set(host.id, instance);
             configured.set(host.id, { config: host, scope: hostScope });
           }

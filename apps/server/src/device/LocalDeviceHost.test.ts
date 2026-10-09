@@ -7,6 +7,8 @@ import {
   HostProcessUserId,
 } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
+import * as Stream from "effect/Stream";
+import * as Sink from "effect/Sink";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
@@ -15,7 +17,12 @@ import * as FileSystem from "effect/FileSystem";
 import * as LocalDeviceHost from "./LocalDeviceHost.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
-import { HttpClient } from "effect/http";
+import { HttpClient, HttpClientResponse } from "effect/http";
+import {
+  AGENT_DEVICE_VERSION,
+  DEVICE_HUB_VERSION,
+  agentDeviceStateDir,
+} from "./DeviceToolchain.ts";
 import * as NetService from "@t3tools/shared/Net";
 import * as ServerConfig from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
@@ -218,5 +225,115 @@ it.effect(
       expect(error.message).toContain("Install Node.js");
       yield* host.stop;
       expect(yield* fs.exists(`${baseDir}/tools`)).toBe(false);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect.each([true, false])(
+  "invalidates a recovered daemon before use (stop succeeds: %s)",
+  (stopSucceeds) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-recovered-agent-" });
+      const config = yield* ServerConfig.ServerConfig.pipe(
+        Effect.provide(ServerConfig.layerTest(directory, directory)),
+      );
+      for (const [name, version, entry] of [
+        ["expo-device-hub", DEVICE_HUB_VERSION, "dist/server/cli.mjs"],
+        ["agent-device", AGENT_DEVICE_VERSION, "bin/agent-device.mjs"],
+      ]) {
+        const install = path.join(config.baseDir, "tools", name!, version!);
+        const file = path.join(install, "node_modules", name!, entry!);
+        yield* fs.makeDirectory(path.dirname(file), { recursive: true });
+        yield* fs.writeFileString(file, "");
+        yield* fs.writeFileString(path.join(install, ".install-complete"), version!);
+      }
+      const state = agentDeviceStateDir(path, config.stateDir);
+      const daemonFile = path.join(state, "daemon.json");
+      yield* fs.makeDirectory(state, { recursive: true });
+      yield* fs.writeFileString(
+        daemonFile,
+        JSON.stringify({ httpPort: 1234, token: "old-raw-token" }),
+      );
+      const commands: string[] = [];
+      let rawCredentialAccepted = true;
+      const runner: ProcessRunner.ProcessRunner["Service"] = {
+        run: (input) =>
+          Effect.gen(function* () {
+            if (input.args[1] === "daemon") {
+              commands.push("stop");
+              if (stopSucceeds) {
+                rawCredentialAccepted = false;
+                yield* fs.remove(daemonFile, { force: true });
+              }
+            } else if (input.args[1] === "devices") {
+              commands.push("devices");
+              yield* fs.writeFileString(
+                daemonFile,
+                JSON.stringify({ httpPort: 2345, token: "current-raw-token" }),
+              );
+            }
+            return {
+              code: ChildProcessSpawner.ExitCode(
+                input.args[1] === "daemon" && !stopSucceeds ? 1 : 0,
+              ),
+              stdout: "",
+              stderr: "",
+              timedOut: false,
+              stdoutTruncated: false,
+              stderrTruncated: false,
+              stdoutInvalidUtf8: false,
+              stderrInvalidUtf8: false,
+            };
+          }).pipe(Effect.orDie),
+      };
+      const spawner = ChildProcessSpawner.make(() =>
+        Effect.succeed(
+          ChildProcessSpawner.makeHandle({
+            pid: ChildProcessSpawner.ProcessId(123),
+            stdout: Stream.empty,
+            stderr: Stream.empty,
+            all: Stream.empty,
+            exitCode: Effect.never,
+            isRunning: Effect.succeed(true),
+            kill: () => Effect.void,
+            stdin: Sink.drain,
+            getInputFd: () => Sink.drain,
+            getOutputFd: () => Stream.empty,
+            unref: Effect.succeed(Effect.void),
+          }),
+        ),
+      );
+      const host = yield* LocalDeviceHost.make().pipe(
+        Effect.provideService(ServerConfig.ServerConfig, config),
+        Effect.provide(NetService.layer),
+        Effect.provideService(HostProcessEnvironment, { HOME: directory, PATH: "" }),
+        Effect.provideService(HostProcessPlatform, "linux"),
+        Effect.provideService(HostProcessIsExecutable, false),
+        Effect.provideService(ProcessRunner.ProcessRunner, runner),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make((request) =>
+            Effect.succeed(HttpClientResponse.fromWeb(request, new Response("ok"))),
+          ),
+        ),
+      );
+      // Revocation can run before consent or helper activation; it must not start anything.
+      const retired = yield* host.stopAgent.pipe(Effect.result);
+      if (!stopSucceeds) {
+        expect(retired._tag).toBe("Failure");
+        expect(rawCredentialAccepted).toBe(true);
+        expect(commands).toEqual(["stop"]);
+        expect(yield* fs.exists(daemonFile)).toBe(true);
+        return;
+      }
+      expect(rawCredentialAccepted).toBe(false);
+      expect(commands).toEqual(["stop"]);
+      const first = yield* host.ensureAgentReady(() => Effect.void);
+      const reused = yield* host.ensureAgentReady(() => Effect.void);
+      expect(first.agentDevice.token).toBe("current-raw-token");
+      expect(reused.agentDevice).toEqual(first.agentDevice);
+      expect(commands).toEqual(["stop", "devices"]);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
