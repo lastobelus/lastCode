@@ -249,11 +249,19 @@ const popupBindings: Array<{
 const popupClosures: Array<{ threadId: string; tabId: string; popupId: string }> = [];
 const rootCreations: Array<
   DesktopChannel.DesktopTabKey & {
+    serverEpoch: string;
     profileId: string;
     url: string;
     viewport?: PreviewViewportSetting;
   }
 > = [];
+const rootOwnerReconciliations: Array<{ desktopHostId: string; serverEpoch: string }> = [];
+const nativeRootPresence = new Map<string, boolean>();
+const nativeRootProbes: Array<DesktopChannel.DesktopTabKey & { rootId: string }> = [];
+let nativeRootProbeUnavailable = false;
+let nativeRootProbeEntered: PromiseWithResolvers<void> | null = null;
+let nativeRootProbeGate: PromiseWithResolvers<void> | null = null;
+let nativeRootProbeProcessed: PromiseWithResolvers<void> | null = null;
 const rootClosures: Array<DesktopChannel.DesktopTabKey & { rootId: string }> = [];
 const rootAcceptances: Array<DesktopChannel.DesktopTabKey & { rootId: string }> = [];
 const rootPublications: Array<DesktopChannel.DesktopTabKey & { rootId: string }> = [];
@@ -399,6 +407,26 @@ const dependencies = Layer.mergeAll(
     closedRoots: nativePopupEvents<DesktopChannel.DesktopTabKey & { rootId: string }>(
       "root-closed",
     ),
+    reconcileRoots: (desktopHostId, serverEpoch) =>
+      Effect.sync(() => {
+        rootOwnerReconciliations.push({ desktopHostId, serverEpoch });
+      }),
+    probeRoot: (key, rootId) =>
+      Effect.suspend(() => {
+        nativeRootProbes.push({ ...key, rootId });
+        return Effect.promise(async () => {
+          nativeRootProbeEntered?.resolve();
+          await nativeRootProbeGate?.promise;
+          return nativeRootPresence.get(rootId) ?? true;
+        }).pipe(
+          Effect.flatMap((present) =>
+            nativeRootProbeUnavailable
+              ? Effect.fail(new DesktopBrowserTransportError({ reason: "host-unavailable" }))
+              : Effect.succeed(present),
+          ),
+          Effect.ensuring(Effect.sync(() => nativeRootProbeProcessed?.resolve())),
+        );
+      }),
     createRoot: (key, input) =>
       Effect.suspend(() => {
         rootCreations.push({ ...key, ...input });
@@ -599,6 +627,13 @@ beforeEach(() => {
   popupBindings.length = 0;
   popupClosures.length = 0;
   rootCreations.length = 0;
+  rootOwnerReconciliations.length = 0;
+  nativeRootPresence.clear();
+  nativeRootProbes.length = 0;
+  nativeRootProbeUnavailable = false;
+  nativeRootProbeEntered = null;
+  nativeRootProbeGate = null;
+  nativeRootProbeProcessed = null;
   rootClosures.length = 0;
   rootAcceptances.length = 0;
   rootPublications.length = 0;
@@ -2912,6 +2947,89 @@ it.live.each([
           snapshot.desktopRootId,
         ]);
         expect(page.close).not.toHaveBeenCalled();
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live.each(["absent", "present", "unavailable"] as const)(
+  "reconnect reconciles an ordinary offline root close and its tab capacity (%s)",
+  (presence) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        profileCatalogue = {
+          desktopHostId: "host-a",
+          profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+          defaultProfileId: "work",
+        };
+        desktopRendersNext = true;
+        const { broker, browser, tabId } = yield* ready;
+        const manager = yield* Manager.PreviewManager;
+        const viewer = yield* browser.attachViewer(viewerInput(tabId, false));
+        desktopDetaches.emit("detach", {
+          threadId: scope.thread.threadId,
+          tabId,
+          desktopHostId: "host-a",
+        });
+        let ending = yield* Queue.take(viewer.output);
+        while (ending._tag !== "reconnect") ending = yield* Queue.take(viewer.output);
+        // The detached root still uses one slot while its native window may be alive.
+        for (let index = 1; index < 8; index++) {
+          desktopRendersNext = true;
+          yield* broker.invoke<PreviewAutomationStatus>({
+            scope,
+            operation: "open",
+            input: { reuseExistingTab: false, show: false },
+          });
+        }
+        const before = yield* manager.list({});
+        expect(before.sessions).toHaveLength(8);
+        expect(rootCreations.every((root) => root.serverEpoch === before.serverEpoch)).toBe(true);
+        nativeRootPresence.set(`root-${tabId}`, presence !== "absent");
+        nativeRootProbeUnavailable = presence === "unavailable";
+        nativeRootProbeEntered = Promise.withResolvers<void>();
+        nativeRootProbeProcessed = Promise.withResolvers<void>();
+        nativeRootProbeGate = Promise.withResolvers<void>();
+        nativeCloseProcessed = Promise.withResolvers<void>();
+        yield* Effect.addFinalizer(() => Effect.sync(() => nativeRootProbeGate?.resolve()));
+        desktopPopupEvents.emit("host-connected", "other-host");
+        desktopPopupEvents.emit("host-connected", "host-a");
+        yield* Effect.promise(() => nativeRootProbeEntered!.promise);
+        expect(nativeRootProbes).toEqual([
+          {
+            threadId: scope.thread.threadId,
+            tabId,
+            desktopHostId: "host-a",
+            rootId: `root-${tabId}`,
+          },
+        ]);
+        expect(rootOwnerReconciliations).toEqual([
+          { desktopHostId: "other-host", serverEpoch: before.serverEpoch },
+          { desktopHostId: "host-a", serverEpoch: before.serverEpoch },
+        ]);
+        nativeRootProbeGate.resolve();
+        yield* Effect.promise(() =>
+          presence === "absent" ? nativeCloseProcessed!.promise : nativeRootProbeProcessed!.promise,
+        );
+        const after = (yield* manager.list({})).sessions;
+        expect(after.some((session) => session.tabId === tabId)).toBe(presence !== "absent");
+        expect(after.filter((session) => session.tabId !== tabId)).toEqual(
+          before.sessions.filter((session) => session.tabId !== tabId),
+        );
+        expect(rootClosures).toEqual([]);
+        desktopRendersNext = true;
+        const replacement = broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { reuseExistingTab: false, show: false },
+        });
+        if (presence === "absent") {
+          const opened = yield* replacement;
+          expect(opened.tabId).not.toBe(tabId);
+          expect((yield* manager.list({})).sessions).toHaveLength(8);
+        } else {
+          expect((yield* replacement.pipe(Effect.flip)).message).toContain("Too many");
+          expect((yield* manager.list({})).sessions).toHaveLength(8);
+        }
       }),
     ).pipe(Effect.provide(layer)),
 );

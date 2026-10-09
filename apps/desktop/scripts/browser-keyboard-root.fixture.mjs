@@ -175,6 +175,7 @@ export async function runNativeKeyboardFixture({
       const selectedSession = nativeGuests.get(definition.profile.tabId).session;
       const response = await acknowledge({
         type: "createRoot",
+        serverEpoch: "server-epoch-a",
         ...rootKey(definition.id),
         requestId: `create:${definition.id}`,
         profileId: definition.profile.profileId,

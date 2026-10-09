@@ -40,6 +40,16 @@ it("receives desktop messages and exits while the parent keeps both input pipes 
     if (!stream || !("write" in stream)) throw new Error(`Missing pipe ${fd}`);
     stream.write(`${JSON.stringify(value)}\n`);
   };
+  const controlCommands: Array<unknown> = [];
+  let controlBuffer = "";
+  child.stdio[4]?.on("data", (chunk: Buffer) => {
+    controlBuffer += chunk.toString();
+    let end: number;
+    while ((end = controlBuffer.indexOf("\n")) >= 0) {
+      controlCommands.push(JSON.parse(controlBuffer.slice(0, end)));
+      controlBuffer = controlBuffer.slice(end + 1);
+    }
+  });
   const key = { threadId: "thread-1", tabId: "tab-1" };
   child.stdout?.on("data", (chunk: Buffer) => {
     output += chunk.toString();
@@ -66,6 +76,10 @@ it("receives desktop messages and exits while the parent keeps both input pipes 
     );
     expect(errors).not.toContain("Error");
     expect(verified).toBe(true);
+    expect(controlCommands).toContainEqual({
+      type: "reconcileRoots",
+      serverEpoch: "fixture-server-epoch",
+    });
     expect(result).toEqual({ code: 0, signal: null });
   } finally {
     clearTimeout(watchdog);
@@ -160,6 +174,7 @@ it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
           .createRoot(
             { ...key, desktopHostId: "host-a" },
             {
+              serverEpoch: "server-epoch-a",
               profileId: "work",
               url: "https://example.test/start",
               viewport: { _tag: "freeform", width: 900, height: 600 },
@@ -207,7 +222,7 @@ it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
         const opening = yield* channel
           .createRoot(
             { ...key, desktopHostId: "host-a" },
-            { profileId: "work", url: "about:blank" },
+            { serverEpoch: "server-epoch-a", profileId: "work", url: "about:blank" },
           )
           .pipe(Effect.flip, Effect.forkScoped);
         const creation = yield* Queue.take(host.commands);
@@ -260,7 +275,7 @@ it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
       const opening = yield* channel
         .createRoot(
           { ...key, desktopHostId: "host-a" },
-          { profileId: "default", url: "about:blank" },
+          { serverEpoch: "server-epoch-a", profileId: "default", url: "about:blank" },
         )
         .pipe(Effect.forkScoped);
       const creation = yield* Queue.take(host.commands);
@@ -289,7 +304,11 @@ it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
         const host = yield* connectHost(channel, "socket-a", "host-a");
         const source = { ...key, desktopHostId: "host-a" };
         const opening = yield* channel
-          .createRoot(source, { profileId: "work", url: "about:blank" })
+          .createRoot(source, {
+            serverEpoch: "server-epoch-a",
+            profileId: "work",
+            url: "about:blank",
+          })
           .pipe(Effect.forkScoped);
         const creation = yield* Queue.take(host.commands);
         if (creation.type !== "createRoot") throw new Error("Expected root creation");
@@ -341,7 +360,11 @@ it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
         yield* connectHost(channel, "socket-b", "host-b");
         const source = { ...key, desktopHostId: "host-a" };
         const opening = yield* channel
-          .createRoot(source, { profileId: "default", url: "about:blank" })
+          .createRoot(source, {
+            serverEpoch: "server-epoch-a",
+            profileId: "default",
+            url: "about:blank",
+          })
           .pipe(Effect.forkScoped);
         const creation = yield* Queue.take(host.commands);
         if (creation.type !== "createRoot") throw new Error("Expected root creation");
@@ -436,6 +459,145 @@ it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
         expect(yield* Fiber.join(probe)).toBe(present);
         expect(yield* Queue.size(host.commands)).toBe(0);
       }).pipe(Effect.scoped),
+  );
+
+  it.effect.each([false, true])(
+    "correlates native root presence with its exact owner, tab, root, request and kind (%s)",
+    (present) =>
+      Effect.gen(function* () {
+        const channel = yield* remoteChannel;
+        const host = yield* connectHost(channel, "socket-a", "host-a");
+        const other = yield* connectHost(channel, "socket-b", "host-b");
+        const source = { ...key, desktopHostId: "host-a" };
+        yield* channel.reconcileRoots("host-a", "server-epoch-a");
+        expect(yield* Queue.take(host.commands)).toEqual({
+          type: "reconcileRoots",
+          serverEpoch: "server-epoch-a",
+        });
+        expect(yield* Queue.size(other.commands)).toBe(0);
+        const checking = yield* channel.probeRoot(source, "root-a").pipe(Effect.forkScoped);
+        const command = yield* Queue.take(host.commands);
+        if (command.type !== "probeRoot") throw new Error("Expected native root presence probe");
+        const response = {
+          type: "rootPresence" as const,
+          ...key,
+          rootId: command.rootId,
+          requestId: command.requestId,
+          present,
+        };
+        yield* channel.receiveEvent("socket-b", "host-b", response);
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          ...response,
+          threadId: "other-thread",
+        });
+        yield* channel.receiveEvent("socket-a", "host-a", { ...response, tabId: "other-tab" });
+        yield* channel.receiveEvent("socket-a", "host-a", { ...response, rootId: "other-root" });
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          ...response,
+          requestId: "other-request",
+        });
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          type: "popupPresence",
+          ...key,
+          popupId: command.rootId,
+          requestId: command.requestId,
+          present,
+        });
+        expect(checking.pollUnsafe()).toBeUndefined();
+        yield* channel.receiveEvent("socket-a", "host-a", response);
+        expect(yield* Fiber.join(checking)).toBe(present);
+        expect(yield* Queue.size(host.commands)).toBe(0);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    "an absent root completes a lost close and retires its published reconnect replay",
+    () =>
+      Effect.gen(function* () {
+        const channel = yield* remoteChannel;
+        const host = yield* connectHost(channel, "socket-a", "host-a");
+        const source = { ...key, desktopHostId: "host-a" };
+        const opening = yield* channel
+          .createRoot(source, {
+            serverEpoch: "server-epoch-a",
+            profileId: "default",
+            url: "about:blank",
+          })
+          .pipe(Effect.forkScoped);
+        const creation = yield* Queue.take(host.commands);
+        if (creation.type !== "createRoot") throw new Error("Expected native root creation");
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          type: "rootCreated",
+          ...key,
+          rootId: "root-a",
+          requestId: creation.requestId,
+          profileId: "default",
+        });
+        yield* Fiber.join(opening);
+        const accepting = yield* channel.acceptRoot(source, "root-a").pipe(Effect.forkScoped);
+        const acceptance = yield* Queue.take(host.commands);
+        if (acceptance.type !== "acceptRoot") throw new Error("Expected native root acceptance");
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          ...acceptance,
+          type: "rootAccepted",
+          accepted: true,
+        });
+        yield* Fiber.join(accepting);
+        yield* channel.publishRoot(source, "root-a");
+        expect((yield* Queue.take(host.commands)).type).toBe("publishRoot");
+        const closing = yield* channel.closeRoot(source, "root-a").pipe(Effect.forkScoped);
+        expect((yield* Queue.take(host.commands)).type).toBe("closeRoot");
+        const checking = yield* channel.probeRoot(source, "root-a").pipe(Effect.forkScoped);
+        const probe = yield* Queue.take(host.commands);
+        if (probe.type !== "probeRoot") throw new Error("Expected native root probe");
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          type: "rootPresence",
+          ...key,
+          rootId: "root-a",
+          requestId: probe.requestId,
+          present: false,
+        });
+        expect(yield* Fiber.join(checking)).toBe(false);
+        yield* Fiber.join(closing);
+        yield* Fiber.interrupt(host.fiber);
+        const reconnected = yield* connectHost(channel, "socket-b", "host-a");
+        expect(yield* Queue.size(reconnected.commands)).toBe(0);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect("disconnect fails an outstanding root probe and ignores its old response", () =>
+    Effect.gen(function* () {
+      const channel = yield* remoteChannel;
+      const host = yield* connectHost(channel, "socket-a", "host-a");
+      const source = { ...key, desktopHostId: "host-a" };
+      const checking = yield* channel
+        .probeRoot(source, "root-a")
+        .pipe(Effect.flip, Effect.forkScoped);
+      const old = yield* Queue.take(host.commands);
+      if (old.type !== "probeRoot") throw new Error("Expected root probe");
+      yield* Fiber.interrupt(host.fiber);
+      expect((yield* Fiber.join(checking)).reason).toBe("host-unavailable");
+      const reconnected = yield* connectHost(channel, "socket-b", "host-a");
+      const retry = yield* channel.probeRoot(source, "root-a").pipe(Effect.forkScoped);
+      const command = yield* Queue.take(reconnected.commands);
+      if (command.type !== "probeRoot") throw new Error("Expected replacement root probe");
+      yield* channel.receiveEvent("socket-b", "host-a", {
+        type: "rootPresence",
+        ...key,
+        rootId: "root-a",
+        requestId: old.requestId,
+        present: false,
+      });
+      expect(retry.pollUnsafe()).toBeUndefined();
+      yield* channel.receiveEvent("socket-b", "host-a", {
+        type: "rootPresence",
+        ...key,
+        rootId: "root-a",
+        requestId: command.requestId,
+        present: true,
+      });
+      expect(yield* Fiber.join(retry)).toBe(true);
+    }).pipe(Effect.scoped),
   );
 
   it.effect(

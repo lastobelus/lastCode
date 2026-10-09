@@ -121,6 +121,7 @@ interface NativePopup {
     | {
         readonly profileId: string;
         readonly environmentId: string;
+        readonly serverEpoch: string;
         readonly url: string;
         readonly requestId: string;
         // Cancellation ends when the server commits tab ownership; no page backing ever migrates.
@@ -848,6 +849,7 @@ export const make = Effect.gen(function* () {
                 root?.kind === "root" &&
                 root.creation?.environmentId === environmentId &&
                 root.creation.profileId === command.profileId &&
+                root.creation.serverEpoch === command.serverEpoch &&
                 root.creation.url === command.url &&
                 root.creation.requestId === command.requestId;
               respond(matches ? root.id : null, matches ? undefined : "guest-unavailable");
@@ -901,6 +903,7 @@ export const make = Effect.gen(function* () {
             }
             const root = registerNativePage(key, window, {
               environmentId,
+              serverEpoch: command.serverEpoch,
               profileId: command.profileId,
               url: command.url,
               requestId: command.requestId,
@@ -1019,6 +1022,17 @@ export const make = Effect.gen(function* () {
         );
         return Effect.void;
       }
+      if (command.type === "reconcileRoots") {
+        for (const root of popups.values())
+          if (
+            root.kind === "root" &&
+            (root.source.desktopHostId ?? "local") === desktopHostId &&
+            root.creation?.serverEpoch !== command.serverEpoch &&
+            !root.window.isDestroyed()
+          )
+            root.window.destroy();
+        return Effect.void;
+      }
       if (command.type === "announce") return announceAll(desktopHostId);
       if (command.type === "disconnect") {
         for (const [attempt, key] of pendingRootCreations)
@@ -1072,6 +1086,25 @@ export const make = Effect.gen(function* () {
           ),
           Effect.asVoid,
         );
+      }
+      if (command.type === "probeRoot") {
+        const root = popups.get(command.rootId);
+        const source = { threadId: command.threadId, tabId: command.tabId, desktopHostId };
+        if (root && (root.kind !== "root" || keyOf(root.source) !== keyOf(source)))
+          return Effect.void;
+        emit(
+          {
+            type: "rootPresence",
+            threadId: command.threadId,
+            tabId: command.tabId,
+            rootId: command.rootId,
+            requestId: command.requestId,
+            present:
+              root !== undefined && !root.window.isDestroyed() && !root.contents.isDestroyed(),
+          },
+          desktopHostId,
+        );
+        return Effect.void;
       }
       if (command.type === "probePopup") {
         const popup = popups.get(command.popupId);

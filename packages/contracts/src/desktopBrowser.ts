@@ -74,6 +74,13 @@ export const DesktopBrowserEvent = Schema.Union([
   }),
   Schema.Struct({ type: Schema.Literal("rootClosed"), ...TabKey, rootId: TrimmedNonEmptyString }),
   Schema.Struct({
+    type: Schema.Literal("rootPresence"),
+    ...TabKey,
+    rootId: TrimmedNonEmptyString,
+    requestId: TrimmedNonEmptyString,
+    present: Schema.Boolean,
+  }),
+  Schema.Struct({
     type: Schema.Literal("rootCloseCanceled"),
     ...TabKey,
     rootId: TrimmedNonEmptyString,
@@ -138,6 +145,14 @@ export type DesktopBrowserEvent = typeof DesktopBrowserEvent.Type;
 
 /** Server -> desktop. */
 export const DesktopBrowserCommand = Schema.Union([
+  /** A new server lifetime cannot own roots retained from its previous process. */
+  Schema.Struct({ type: Schema.Literal("reconcileRoots"), serverEpoch: TrimmedNonEmptyString }),
+  Schema.Struct({
+    type: Schema.Literal("probeRoot"),
+    ...TabKey,
+    rootId: TrimmedNonEmptyString,
+    requestId: TrimmedNonEmptyString,
+  }),
   /** Checks one existing native identity without changing or closing its window. */
   Schema.Struct({
     type: Schema.Literal("probePopup"),
@@ -151,6 +166,7 @@ export const DesktopBrowserCommand = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("createRoot"),
     ...TabKey,
+    serverEpoch: TrimmedNonEmptyString,
     requestId: TrimmedNonEmptyString,
     profileId: TrimmedNonEmptyString,
     url: Schema.String,

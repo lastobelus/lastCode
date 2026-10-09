@@ -492,6 +492,7 @@ const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const host = { platform: yield* HostProcessPlatform, arch: yield* HostProcessArchitecture };
   const manager = yield* PreviewManager.PreviewManager;
+  const { serverEpoch } = yield* manager.list({});
   const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
   const environment = yield* ServerEnvironment.ServerEnvironment;
   const previewBrowser = yield* PreviewBrowser.PreviewBrowser;
@@ -548,6 +549,32 @@ const make = Effect.gen(function* () {
       published: boolean;
     }
   >();
+  const confirmNativeRootClosed = (
+    event: DesktopBrowserChannel.DesktopTabKey & { readonly rootId: string },
+    expected = nativeRoots.get(tabKey(event.threadId, event.tabId)),
+  ) =>
+    Effect.gen(function* () {
+      const key = tabKey(event.threadId, event.tabId);
+      const root = nativeRoots.get(key);
+      if (
+        !root ||
+        root !== expected ||
+        (root.key.desktopHostId ?? "local") !== (event.desktopHostId ?? "local") ||
+        (root.rootId !== null && root.rootId !== event.rootId)
+      )
+        return;
+      root.rootId = event.rootId;
+      root.closed = true;
+      if (!root.published) {
+        if (root.closeRequested) nativeRoots.delete(key);
+        return;
+      }
+      nativeRoots.delete(key);
+      yield* manager.nativeClosedConfirmed({
+        threadId: ThreadId.make(event.threadId),
+        tabId: event.tabId,
+      });
+    });
   /** Sessions the manager closed, so their tabs end for good. Pruned once dropped. */
   const closedSessions = new Set<string>();
   let hostConnectionId: string | null = null;
@@ -1532,6 +1559,7 @@ const make = Effect.gen(function* () {
         try {
           root.rootId = await Effect.runPromise(
             desktopChannel.createRoot(key, {
+              serverEpoch,
               profileId: snapshot.profileId,
               url: snapshot.navStatus._tag === "Idle" ? "about:blank" : snapshot.navStatus.url,
               ...(snapshot.viewport === undefined ? {} : { viewport: snapshot.viewport }),
@@ -3429,6 +3457,7 @@ const make = Effect.gen(function* () {
 
   yield* manager.events.pipe(Stream.runForEach(mirrorManagerEvent), Effect.forkScoped);
   yield* desktopChannel.connectedHosts.pipe(
+    Stream.tap((desktopHostId) => desktopChannel.reconcileRoots(desktopHostId, serverEpoch)),
     Stream.runForEach((desktopHostId) =>
       Effect.forEach(
         [...nativePopups.values()].filter(
@@ -3458,17 +3487,34 @@ const make = Effect.gen(function* () {
           Effect.forEach(
             [...nativeRoots.values()].filter(
               (root) =>
-                root.closeRequested &&
                 !root.closed &&
                 root.rootId !== null &&
                 (root.key.desktopHostId ?? "local") === desktopHostId,
             ),
             (root) =>
-              root.published
-                ? manager
-                    .close({ threadId: ThreadId.make(root.key.threadId), tabId: root.key.tabId })
-                    .pipe(Effect.ignore)
-                : desktopChannel.cancelRootCreation(root.key, root.rootId!),
+              Effect.gen(function* () {
+                const rootId = root.rootId!;
+                const presence = yield* desktopChannel
+                  .probeRoot(root.key, rootId)
+                  .pipe(Effect.option);
+                if (
+                  nativeRoots.get(tabKey(root.key.threadId, root.key.tabId)) !== root ||
+                  root.rootId !== rootId ||
+                  Option.isNone(presence)
+                )
+                  return;
+                if (!presence.value)
+                  return yield* confirmNativeRootClosed({ ...root.key, rootId }, root);
+                if (!root.closeRequested) return;
+                yield* root.published
+                  ? manager
+                      .close({
+                        threadId: ThreadId.make(root.key.threadId),
+                        tabId: root.key.tabId,
+                      })
+                      .pipe(Effect.ignore)
+                  : desktopChannel.cancelRootCreation(root.key, rootId);
+              }),
             { discard: true },
           ),
         ),
@@ -3485,29 +3531,7 @@ const make = Effect.gen(function* () {
     Effect.forkScoped,
   );
   yield* desktopChannel.closedRoots.pipe(
-    Stream.runForEach((event) =>
-      Effect.gen(function* () {
-        const key = tabKey(event.threadId, event.tabId);
-        const root = nativeRoots.get(key);
-        if (
-          !root ||
-          (root.key.desktopHostId ?? "local") !== (event.desktopHostId ?? "local") ||
-          (root.rootId !== null && root.rootId !== event.rootId)
-        )
-          return;
-        root.rootId = event.rootId;
-        root.closed = true;
-        if (!root.published) {
-          if (root.closeRequested) nativeRoots.delete(key);
-          return;
-        }
-        nativeRoots.delete(key);
-        yield* manager.nativeClosedConfirmed({
-          threadId: ThreadId.make(event.threadId),
-          tabId: event.tabId,
-        });
-      }),
-    ),
+    Stream.runForEach((event) => confirmNativeRootClosed(event)),
     Effect.forkScoped,
   );
   // Whoever runs the server learns the fix before anyone opens a tab.
