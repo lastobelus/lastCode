@@ -1,3 +1,10 @@
+import type {
+  DesktopBrowserCommand,
+  DesktopBrowserEvent,
+  DesktopBrowserSurfaceRequest,
+  DesktopBrowserSurfaceResponse,
+  DesktopBrowserPresentationInput,
+} from "./desktopBrowser.ts";
 import * as Schema from "effect/Schema";
 
 import { SnapShotSource } from "./chatAttachment.ts";
@@ -81,6 +88,7 @@ export type DesktopUpdateStatus =
 export type DesktopRuntimeArch = "arm64" | "x64" | "other";
 export type DesktopTheme = "light" | "dark" | "system";
 export type DesktopUpdateChannel = "latest" | "nightly";
+export type DesktopUpdateSource = "hosted" | "lastcode-local";
 export type DesktopAppStageLabel = "Alpha" | "Dev" | "Nightly";
 
 export const DesktopUpdateStatusSchema = Schema.Literals([
@@ -96,6 +104,7 @@ export const DesktopUpdateStatusSchema = Schema.Literals([
 export const DesktopRuntimeArchSchema = Schema.Literals(["arm64", "x64", "other"]);
 export const DesktopThemeSchema = Schema.Literals(["light", "dark", "system"]);
 export const DesktopUpdateChannelSchema = Schema.Literals(["latest", "nightly"]);
+export const DesktopUpdateSourceSchema = Schema.Literals(["hosted", "lastcode-local"]);
 export const DesktopAppStageLabelSchema = Schema.Literals(["Alpha", "Dev", "Nightly"]);
 
 export interface DesktopAppBranding {
@@ -267,8 +276,44 @@ export interface DesktopRuntimeInfo {
   runningUnderArm64Translation: boolean;
 }
 
+export const DesktopLocalBuildErrorKindSchema = Schema.Literals(["build", "packaging"]);
+export type DesktopLocalBuildErrorKind = typeof DesktopLocalBuildErrorKindSchema.Type;
+const DesktopLocalBuildPercentSchema = Schema.Int.check(
+  Schema.isBetween({ minimum: 0, maximum: 99 }),
+);
+
+export interface DesktopLocalBuildProgress {
+  checkpointTag: string;
+  phase: string;
+  percent: number;
+  errorKind: DesktopLocalBuildErrorKind;
+}
+
+export const DesktopLocalBuildProgressSchema = Schema.Struct({
+  checkpointTag: Schema.String,
+  phase: Schema.String,
+  percent: DesktopLocalBuildPercentSchema,
+  errorKind: DesktopLocalBuildErrorKindSchema,
+});
+
+export interface DesktopLocalBuildFailure extends DesktopLocalBuildProgress {
+  currentVersion: string;
+  targetVersion: string;
+  logPath: string;
+  error: string;
+}
+
+export const DesktopLocalBuildFailureSchema = Schema.Struct({
+  ...DesktopLocalBuildProgressSchema.fields,
+  currentVersion: Schema.String,
+  targetVersion: Schema.String,
+  logPath: Schema.String,
+  error: Schema.String,
+});
+
 export interface DesktopUpdateState {
   enabled: boolean;
+  source: DesktopUpdateSource;
   status: DesktopUpdateStatus;
   channel: DesktopUpdateChannel;
   currentVersion: string;
@@ -280,6 +325,8 @@ export interface DesktopUpdateState {
   releaseNotes: ReadonlyArray<DesktopUpdateReleaseNote>;
   omittedReleaseCount: number;
   downloadPercent: number | null;
+  localBuildProgress: DesktopLocalBuildProgress | null;
+  localBuildFailure: DesktopLocalBuildFailure | null;
   checkedAt: string | null;
   message: string | null;
   errorContext: "check" | "download" | "install" | null;
@@ -290,16 +337,21 @@ export interface DesktopUpdateReleaseNote {
   version: string;
   items: ReadonlyArray<string>;
   totalItems: number;
+  heading?: string;
+  summaries?: ReadonlyArray<string>;
 }
 
 export const DesktopUpdateReleaseNoteSchema = Schema.Struct({
   version: Schema.String,
   items: Schema.Array(Schema.String),
   totalItems: Schema.Number,
+  heading: Schema.optionalKey(Schema.String),
+  summaries: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 
 export const DesktopUpdateStateSchema = Schema.Struct({
   enabled: Schema.Boolean,
+  source: DesktopUpdateSourceSchema,
   status: DesktopUpdateStatusSchema,
   channel: DesktopUpdateChannelSchema,
   currentVersion: Schema.String,
@@ -311,6 +363,8 @@ export const DesktopUpdateStateSchema = Schema.Struct({
   releaseNotes: Schema.Array(DesktopUpdateReleaseNoteSchema),
   omittedReleaseCount: Schema.Number,
   downloadPercent: Schema.NullOr(Schema.Number),
+  localBuildProgress: Schema.NullOr(DesktopLocalBuildProgressSchema),
+  localBuildFailure: Schema.NullOr(DesktopLocalBuildFailureSchema),
   checkedAt: Schema.NullOr(Schema.String),
   message: Schema.NullOr(Schema.String),
   errorContext: Schema.NullOr(Schema.Literals(["check", "download", "install"])),
@@ -328,6 +382,77 @@ export const DesktopCliCommandStateSchema = Schema.Struct({
 });
 export type DesktopCliCommandState = typeof DesktopCliCommandStateSchema.Type;
 
+export interface DesktopLastCodeSettingsState {
+  supported: boolean;
+  showAndInstallLocalNightlies: boolean;
+  message: string | null;
+}
+
+export const DesktopLastCodeSettingsStateSchema = Schema.Struct({
+  supported: Schema.Boolean,
+  showAndInstallLocalNightlies: Schema.Boolean,
+  message: Schema.NullOr(Schema.String),
+});
+
+export const LastCodeSettingsImportCategoryIdSchema = Schema.Literals([
+  "client-preferences",
+  "keybindings",
+  "server-preferences",
+]);
+export type LastCodeSettingsImportCategoryId = typeof LastCodeSettingsImportCategoryIdSchema.Type;
+
+export const LastCodeSettingsImportCategoryStatusSchema = Schema.Literals([
+  "ready",
+  "missing",
+  "invalid",
+]);
+export type LastCodeSettingsImportCategoryStatus =
+  typeof LastCodeSettingsImportCategoryStatusSchema.Type;
+
+export interface LastCodeSettingsImportCategory {
+  id: LastCodeSettingsImportCategoryId;
+  label: string;
+  sourceFile: string;
+  status: LastCodeSettingsImportCategoryStatus;
+  detail: string;
+}
+
+export const LastCodeSettingsImportCategorySchema = Schema.Struct({
+  id: LastCodeSettingsImportCategoryIdSchema,
+  label: Schema.String,
+  sourceFile: Schema.String,
+  status: LastCodeSettingsImportCategoryStatusSchema,
+  detail: Schema.String,
+});
+
+export interface LastCodeSettingsImportPreview {
+  sourceDirectory: string;
+  destinationDirectory: string;
+  categories: readonly LastCodeSettingsImportCategory[];
+  excluded: readonly string[];
+  canImport: boolean;
+  message: string | null;
+}
+
+export const LastCodeSettingsImportPreviewSchema = Schema.Struct({
+  sourceDirectory: Schema.String,
+  destinationDirectory: Schema.String,
+  categories: Schema.Array(LastCodeSettingsImportCategorySchema),
+  excluded: Schema.Array(Schema.String),
+  canImport: Schema.Boolean,
+  message: Schema.NullOr(Schema.String),
+});
+
+export interface LastCodeSettingsImportResult {
+  imported: readonly LastCodeSettingsImportCategoryId[];
+  backupDirectory: string;
+}
+
+export const LastCodeSettingsImportResultSchema = Schema.Struct({
+  imported: Schema.Array(LastCodeSettingsImportCategoryIdSchema),
+  backupDirectory: Schema.String,
+});
+
 export interface DesktopUpdateActionResult {
   accepted: boolean;
   completed: boolean;
@@ -342,11 +467,15 @@ export const DesktopUpdateActionResultSchema = Schema.Struct({
 
 export interface DesktopUpdateCheckResult {
   checked: boolean;
+  checkpointRequested: boolean;
+  error: string | null;
   state: DesktopUpdateState;
 }
 
 export const DesktopUpdateCheckResultSchema = Schema.Struct({
   checked: Schema.Boolean,
+  checkpointRequested: Schema.Boolean,
+  error: Schema.NullOr(Schema.String),
   state: DesktopUpdateStateSchema,
 });
 
@@ -831,6 +960,8 @@ export interface PickedElementPayload {
   pageTitle: string | null;
   /** Lowercase tag name, e.g. `"button"`. */
   tagName: string;
+  /** Outer-to-inner iframe selectors, each scoped to its parent document URL. */
+  framePath?: ReadonlyArray<{ pageUrl: string; selector: string }>;
   /** CSS selector resolving back to the element on a re-render. */
   selector: string | null;
   /** Truncated outer-HTML preview (matches react-grab's `htmlPreview`). */
@@ -851,6 +982,9 @@ export const PickedElementPayloadSchema: Schema.Codec<PickedElementPayload> = Sc
   pageUrl: Schema.String,
   pageTitle: Schema.NullOr(Schema.String),
   tagName: Schema.String,
+  framePath: Schema.optionalKey(
+    Schema.Array(Schema.Struct({ pageUrl: Schema.String, selector: Schema.String })),
+  ),
   selector: Schema.NullOr(Schema.String),
   htmlPreview: Schema.String,
   componentName: Schema.NullOr(Schema.String),
@@ -1023,7 +1157,11 @@ export const DesktopPreviewCreateTabInputSchema = Schema.Struct({
   zoomFactor: Schema.optional(Schema.Number.check(Schema.isGreaterThan(0))),
   colorScheme: Schema.optional(DesktopPreviewColorSchemeSchema),
   serverTab: Schema.optional(
-    Schema.Struct({ threadId: TrimmedNonEmptyString, tabId: TrimmedNonEmptyString }),
+    Schema.Struct({
+      threadId: TrimmedNonEmptyString,
+      tabId: TrimmedNonEmptyString,
+      desktopHostId: Schema.optional(TrimmedNonEmptyString),
+    }),
   ),
 });
 
@@ -1031,7 +1169,13 @@ export interface DesktopPreviewTabDefaults {
   readonly zoomFactor?: number | undefined;
   readonly colorScheme?: DesktopPreviewColorScheme | undefined;
   /** A tab of the desktop's own server: the server drives it through the desktop browser channel. */
-  readonly serverTab?: { readonly threadId: string; readonly tabId: string } | undefined;
+  readonly serverTab?:
+    | {
+        readonly threadId: string;
+        readonly tabId: string;
+        readonly desktopHostId?: string | undefined;
+      }
+    | undefined;
 }
 
 export const DesktopPreviewRegisterWebviewInputSchema = Schema.Struct({
@@ -1124,6 +1268,7 @@ export interface DesktopBridge {
   getLocalEnvironmentBootstraps: () => readonly DesktopEnvironmentBootstrap[];
   getLocalEnvironmentEnabled?: () => boolean;
   setLocalEnvironmentEnabled?: (enabled: boolean) => Promise<void>;
+  reportRunningActionCount?: (count: number) => Promise<void>;
   getLocalEnvironmentBearerToken: () => Promise<string>;
   getClientSettings: () => Promise<ClientSettings | null>;
   setClientSettings: (settings: ClientSettings) => Promise<void>;
@@ -1217,10 +1362,16 @@ export interface DesktopBridge {
    * Quit-confirmation hint pushes. Optional: older desktop builds never emit
    * them.
    */
-  onQuitShortcut?: (listener: (event: QuitShortcutHintEvent) => void) => () => void;
+  onQuitShortcut?: (
+    listener: (event: QuitShortcutHintEvent, runningActionCount: number) => void,
+  ) => () => void;
   getWindowFullscreenState: () => boolean;
   onWindowFullscreenStateChange: (listener: (fullscreen: boolean) => void) => () => void;
   getUpdateState: () => Promise<DesktopUpdateState>;
+  getLastCodeSettings: () => Promise<DesktopLastCodeSettingsState>;
+  setShowAndInstallLocalNightlies: (enabled: boolean) => Promise<DesktopLastCodeSettingsState>;
+  previewT3SettingsImport: () => Promise<LastCodeSettingsImportPreview>;
+  importT3Settings: () => Promise<LastCodeSettingsImportResult>;
   setUpdateChannel: (channel: DesktopUpdateChannel) => Promise<DesktopUpdateState>;
   checkForUpdate: () => Promise<DesktopUpdateCheckResult>;
   downloadUpdate: () => Promise<DesktopUpdateActionResult>;
@@ -1249,6 +1400,19 @@ export interface DesktopBridge {
 export const DESKTOP_PREVIEW_RECORDING_CAPTURE_TRIGGER = "__t3DesktopPreviewRecordingCapture";
 
 export interface DesktopPreviewBridge {
+  onBrowserSurfaceRequest: (listener: (input: DesktopBrowserSurfaceRequest) => void) => () => void;
+  browserSurfaceResponse: (input: DesktopBrowserSurfaceResponse) => Promise<void>;
+  browserPresentation: (input: DesktopBrowserPresentationInput) => Promise<void>;
+  browserCommand: (input: {
+    readonly desktopHostId: string;
+    readonly command: DesktopBrowserCommand;
+  }) => Promise<void>;
+  onBrowserEvent: (
+    listener: (input: {
+      readonly desktopHostId: string;
+      readonly event: DesktopBrowserEvent;
+    }) => void,
+  ) => () => void;
   setForwardedShortcuts?: (shortcuts: ReadonlyArray<PreviewForwardedShortcut>) => Promise<void>;
   createTab: (tabId: string, defaults?: DesktopPreviewTabDefaults) => Promise<void>;
   closeTab: (tabId: string) => Promise<void>;
