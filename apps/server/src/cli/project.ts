@@ -6,7 +6,18 @@ import {
   type ProjectMutation,
   type ProjectSnapshot,
   ProjectId,
+  ProjectScript,
 } from "@t3tools/contracts";
+import { T3ProjectFileFromJson } from "@t3tools/shared/t3ProjectFile";
+import { writeFileStringAtomically } from "../atomicWrite.ts";
+import {
+  ManagedProjectActionState,
+  ProjectActionReconciliationError,
+  prepareManagedProjectActionPendingState,
+  markManagedProjectActionPendingStateApplied,
+  reconcileProjectActions,
+  resolveManagedProjectActionPendingState,
+} from "./projectActionReconciliation.ts";
 import * as Console from "effect/Console";
 import * as Crypto from "effect/Crypto";
 import * as Duration from "effect/Duration";
@@ -35,7 +46,12 @@ import * as T3ProjectFileLoader from "../project/T3ProjectFileLoader.ts";
 import {
   clearPersistedServerRuntimeState,
   readPersistedServerRuntimeState,
+  isProcessAlive,
 } from "../serverRuntimeState.ts";
+import * as ServerOwnerLease from "../serverOwnerLease.ts";
+import * as UpdateDrain from "../updateDrain/UpdateDrain.ts";
+import * as UpdateDrainAdmission from "../updateDrain/UpdateDrainAdmission.ts";
+import * as UpdateDrainRepository from "../persistence/UpdateDrainRepository.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { type CliAuthLocationFlags, projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
 
@@ -153,6 +169,25 @@ export class ProjectAlreadyExistsError extends Schema.TaggedError<ProjectAlready
   }
 }
 
+export class ProjectActionReconcileFileError extends Schema.TaggedError<ProjectActionReconcileFileError>()(
+  "ProjectActionReconcileFileError",
+  {
+    operation: Schema.Literals([
+      "read_source",
+      "decode_source",
+      "read_state",
+      "decode_state",
+      "write_state",
+    ]),
+    filePath: Schema.String,
+    cause: Schema.Defect(),
+  },
+) {
+  override get message(): string {
+    return `Failed to ${this.operation.replaceAll("_", " ")} at ${this.filePath}.`;
+  }
+}
+
 export const ProjectCommandError = Schema.Union([
   ProjectCommandIdGenerationError,
   ProjectLiveServerDeclaredResponseError,
@@ -162,6 +197,8 @@ export const ProjectCommandError = Schema.Union([
   ProjectIdentifierEmptyError,
   ProjectNotFoundError,
   ProjectAlreadyExistsError,
+  ProjectActionReconcileFileError,
+  ProjectActionReconciliationError,
 ]);
 export type ProjectCommandError = typeof ProjectCommandError.Type;
 
@@ -197,6 +234,11 @@ const projectCommandUuid = Crypto.Crypto.pipe(
 );
 
 const layerProjectCliRuntime = RuntimeLayer.layerProjectService.pipe(
+  Layer.provide(
+    UpdateDrainAdmission.layerOffline.pipe(
+      Layer.provide(UpdateDrain.layer.pipe(Layer.provide(UpdateDrainRepository.layer))),
+    ),
+  ),
   Layer.provideMerge(ProjectEnrichmentService.layer),
   Layer.provideMerge(RepositoryIdentityResolver.layer),
   Layer.provideMerge(
@@ -343,6 +385,11 @@ const getOfflineSnapshot = Effect.fn("getOfflineSnapshot")(function* () {
   return yield* projects.snapshot;
 });
 
+export class ProjectOfflineOwnershipError extends Schema.TaggedError<ProjectOfflineOwnershipError>()(
+  "ProjectOfflineOwnershipError",
+  { message: Schema.String },
+) {}
+
 const tryResolveLiveProjectExecutionMode = Effect.fn("tryResolveLiveProjectExecutionMode")(
   function* (
     environmentAuth: EnvironmentAuth.EnvironmentAuth["Service"],
@@ -370,7 +417,8 @@ const tryResolveLiveProjectExecutionMode = Effect.fn("tryResolveLiveProjectExecu
       origin: runtimeState.value.origin,
       cause: attempted.failure,
     });
-    yield* clearPersistedServerRuntimeState(config.serverRuntimeStatePath);
+    if (isProcessAlive(runtimeState.value.pid)) return yield* attempted.failure;
+    // Stale state is cleared only after acquiring offline ownership below.
     return Option.none<{ readonly origin: string }>();
   },
 );
@@ -397,12 +445,19 @@ const runProjectMutation = Effect.fn("runProjectMutation")(function* (
   const config = yield* resolveCliAuthConfig(flags, logLevel);
   const minimumLogLevel = config.logLevel;
 
-  return yield* Effect.gen(function* () {
-    const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
-    const liveMode = yield* tryResolveLiveProjectExecutionMode(environmentAuth, config);
-
-    if (Option.isSome(liveMode)) {
-      return yield* withProjectCliSessionToken(environmentAuth, (token) =>
+  const authLayer = EnvironmentAuth.layerRuntime.pipe(
+    Layer.provideMerge(FetchHttpClient.layer),
+    Layer.provide(ServerConfig.layer(config)),
+    Layer.provide(Layer.succeed(References.MinimumLogLevel, minimumLogLevel)),
+  );
+  // Avoid opening the offline database before kernel ownership is acquired.
+  const runtimeState = yield* readPersistedServerRuntimeState(config.serverRuntimeStatePath);
+  if (Option.isSome(runtimeState) && isProcessAlive(runtimeState.value.pid)) {
+    const handled = yield* Effect.gen(function* () {
+      const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
+      const liveMode = yield* tryResolveLiveProjectExecutionMode(environmentAuth, config);
+      if (Option.isNone(liveMode)) return false;
+      yield* withProjectCliSessionToken(environmentAuth, (token) =>
         Effect.gen(function* () {
           const snapshot = yield* fetchLiveOrchestrationSnapshot(liveMode.value.origin, token);
           const output = yield* run({
@@ -414,32 +469,49 @@ const runProjectMutation = Effect.fn("runProjectMutation")(function* (
           yield* Console.log(output);
         }),
       );
-    }
+      return true;
+    }).pipe(Effect.provide(Layer.mergeAll(authLayer, WorkspacePaths.layer)));
+    if (handled) return;
+  }
 
-    const layerOfflineRuntime = layerProjectCliRuntime.pipe(
-      Layer.provide(ServerConfig.layer(config)),
-      Layer.provide(Layer.succeed(References.MinimumLogLevel, minimumLogLevel)),
-    );
-
-    return yield* Effect.gen(function* () {
-      const snapshot = yield* getOfflineSnapshot();
-      const projects = yield* ProjectService.ProjectService;
-      const output = yield* run({
-        snapshot,
-        dispatch: (command) => projectMutationOperation(projects, command).pipe(Effect.asVoid),
-        mode: "offline",
-      });
-      yield* Console.log(output);
-    }).pipe(Effect.provide(layerOfflineRuntime));
-  }).pipe(
-    Effect.provide(
-      Layer.mergeAll(EnvironmentAuth.layerRuntime, WorkspacePaths.layer).pipe(
-        Layer.provideMerge(FetchHttpClient.layer),
-        Layer.provide(ServerConfig.layer(config)),
-        Layer.provide(Layer.succeed(References.MinimumLogLevel, minimumLogLevel)),
-      ),
-    ),
-  );
+  return yield* Effect.acquireUseRelease(
+    ServerOwnerLease.acquireServerOwnerLease(config.stateDir),
+    (lease) =>
+      Effect.gen(function* () {
+        const current = yield* readPersistedServerRuntimeState(config.serverRuntimeStatePath);
+        if (Option.isSome(current)) {
+          if (isProcessAlive(current.value.pid))
+            return yield* new ProjectOfflineOwnershipError({
+              message: "The recorded server is still running; reconnect before changing projects.",
+            });
+          yield* clearPersistedServerRuntimeState(config.serverRuntimeStatePath);
+        }
+        const layerOfflineRuntime = layerProjectCliRuntime.pipe(
+          Layer.provide(ServerConfig.layer(config)),
+          Layer.provide(Layer.succeed(References.MinimumLogLevel, minimumLogLevel)),
+        );
+        // The lease outlives construction, commands, and release of this layer's SQL scope.
+        yield* Effect.gen(function* () {
+          const snapshot = yield* getOfflineSnapshot();
+          const projects = yield* ProjectService.ProjectService;
+          const output = yield* run({
+            snapshot,
+            dispatch: (command) =>
+              command.type === "project.delete" && lease.endpoint === "unmanaged"
+                ? Effect.fail(
+                    new ProjectOfflineOwnershipError({
+                      message:
+                        "Offline project deletion requires exclusive server ownership, which is unavailable on this platform. Connect to the running server to delete the project.",
+                    }),
+                  )
+                : projectMutationOperation(projects, command).pipe(Effect.asVoid),
+            mode: "offline",
+          });
+          yield* Console.log(output);
+        }).pipe(Effect.provide(layerOfflineRuntime));
+      }),
+    (lease) => lease.release,
+  ).pipe(Effect.provide(Layer.mergeAll(FetchHttpClient.layer, WorkspacePaths.layer)));
 });
 
 const projectAddCommand = Command.make("add", {
@@ -569,7 +641,249 @@ const projectRenameCommand = Command.make("rename", {
   ),
 );
 
+const decodeT3ProjectFile = Schema.decodeUnknownEffect(T3ProjectFileFromJson);
+const decodeManagedProjectActionState = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(ManagedProjectActionState),
+);
+const encodeManagedProjectActionState = Schema.encodeSync(
+  Schema.fromJsonString(ManagedProjectActionState),
+);
+const encodeProjectScripts = Schema.encodeSync(Schema.fromJsonString(Schema.Array(ProjectScript)));
+const encodeUnknownJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+
+const readManagedProjectActionState = Effect.fn("readManagedProjectActionState")(function* (
+  stateFile: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const raw = yield* fs.readFileString(stateFile).pipe(
+    Effect.matchEffect({
+      onFailure: (cause) =>
+        cause.reason._tag === "NotFound"
+          ? Effect.succeed(Option.none<string>())
+          : Effect.fail(
+              new ProjectActionReconcileFileError({
+                operation: "read_state",
+                filePath: stateFile,
+                cause,
+              }),
+            ),
+      onSuccess: (contents) => Effect.succeed(Option.some(contents)),
+    }),
+  );
+  if (Option.isNone(raw)) return Option.none<ManagedProjectActionState>();
+  return Option.some(
+    yield* decodeManagedProjectActionState(raw.value).pipe(
+      Effect.mapError(
+        (cause) =>
+          new ProjectActionReconcileFileError({
+            operation: "decode_state",
+            filePath: stateFile,
+            cause,
+          }),
+      ),
+    ),
+  );
+});
+
+const projectReconcileActionsCommand = Command.make("reconcile-actions", {
+  ...projectLocationFlags,
+  project: Argument.String("project").pipe(
+    Argument.withDescription("Project id or workspace root to reconcile."),
+  ),
+  sourceFile: Flag.String("source-file").pipe(
+    Flag.withDescription("Absolute path to the checked-in t3.json source."),
+  ),
+  stateFile: Flag.String("state-file").pipe(
+    Flag.withDescription("Absolute environment-local ownership state path."),
+  ),
+  createIfMissing: Flag.Boolean("create-if-missing").pipe(
+    Flag.withDescription("Create the project before reconciling when it is not yet registered."),
+    Flag.withDefault(false),
+  ),
+  trustedSourceIds: Flag.String("trusted-source-ids").pipe(
+    Flag.withDescription("Comma-separated checked-in Action ids granted agent resume."),
+    Flag.optional,
+  ),
+}).pipe(
+  Command.withDescription("Reconcile managed checked-in Project Actions."),
+  Command.withHandler((flags) =>
+    runProjectMutation(
+      flags,
+      Effect.fn("projectReconcileActionsMutation")(function* ({ snapshot, dispatch, mode }) {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        if (!path.isAbsolute(flags.sourceFile) || !path.isAbsolute(flags.stateFile)) {
+          return yield* new ProjectActionReconcileFileError({
+            operation: "read_source",
+            filePath: !path.isAbsolute(flags.sourceFile) ? flags.sourceFile : flags.stateFile,
+            cause: new Error("Managed Project Action paths must be absolute."),
+          });
+        }
+
+        const sourceRaw = yield* fs.readFileString(flags.sourceFile).pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProjectActionReconcileFileError({
+                operation: "read_source",
+                filePath: flags.sourceFile,
+                cause,
+              }),
+          ),
+        );
+        const source = yield* decodeT3ProjectFile(sourceRaw).pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProjectActionReconcileFileError({
+                operation: "decode_source",
+                filePath: flags.sourceFile,
+                cause,
+              }),
+          ),
+        );
+        const persistedState = yield* readManagedProjectActionState(flags.stateFile);
+        const trustedSourceIds = new Set(
+          (Option.getOrUndefined(flags.trustedSourceIds) ?? "")
+            .split(",")
+            .map((value) => value.trim())
+            .filter(Boolean),
+        );
+
+        const target = yield* Effect.result(
+          findActiveProjectTarget({ snapshot, identifier: flags.project }),
+        );
+        let projectId: ProjectId;
+        let projectTitle: string;
+        let projectWorkspaceRoot: string;
+        let currentScripts: ReadonlyArray<ProjectScript>;
+        let projectCreated = false;
+        if (target._tag === "Success") {
+          const project = snapshot.projects.find((entry) => entry.id === target.success.id);
+          if (project === undefined) {
+            return yield* new ProjectNotFoundError({
+              operation: "resolveProjectTarget",
+              identifier: flags.project,
+              activeProjectCount: snapshot.projects.length,
+            });
+          }
+          projectId = project.id;
+          projectTitle = project.title;
+          projectWorkspaceRoot = project.workspaceRoot;
+          currentScripts = project.scripts;
+        } else if (target.failure._tag === "ProjectNotFoundError" && flags.createIfMissing) {
+          projectWorkspaceRoot = yield* normalizeWorkspaceRootForProjectCommand(flags.project);
+          projectTitle = yield* resolveProjectTitle(projectWorkspaceRoot);
+          projectId = ProjectId.make(yield* projectCommandUuid);
+          currentScripts = [];
+          projectCreated = true;
+        } else {
+          return yield* target.failure;
+        }
+
+        const previousState = Option.map(persistedState, (state) =>
+          resolveManagedProjectActionPendingState({ state, currentScripts }),
+        );
+
+        const reconciled = yield* reconcileProjectActions({
+          projectWorkspaceRoot,
+          currentScripts,
+          declarations: source.scripts ?? [],
+          ...(Option.isSome(previousState) ? { previousState: previousState.value } : {}),
+          trustedSourceIds,
+        });
+        const scriptsChanged =
+          encodeProjectScripts(currentScripts) !== encodeProjectScripts(reconciled.scripts);
+
+        if (projectCreated) {
+          yield* dispatch({
+            type: "project.create",
+            commandId: CommandId.make(yield* projectCommandUuid),
+            projectId,
+            title: projectTitle,
+            workspaceRoot: projectWorkspaceRoot,
+          });
+        }
+
+        if (scriptsChanged) {
+          const pendingState = prepareManagedProjectActionPendingState({
+            projectWorkspaceRoot,
+            ...(Option.isSome(previousState) ? { previousState: previousState.value } : {}),
+            nextScripts: reconciled.scripts,
+            nextState: reconciled.state,
+          });
+          yield* writeFileStringAtomically({
+            filePath: flags.stateFile,
+            contents: `${encodeManagedProjectActionState(pendingState)}\n`,
+          }).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProjectActionReconcileFileError({
+                  operation: "write_state",
+                  filePath: flags.stateFile,
+                  cause,
+                }),
+            ),
+          );
+          yield* dispatch({
+            type: "project.scripts.reconcile",
+            commandId: CommandId.make(yield* projectCommandUuid),
+            projectId,
+            expectedScripts: Array.from(currentScripts),
+            scripts: Array.from(reconciled.scripts),
+          });
+          const appliedState = markManagedProjectActionPendingStateApplied(pendingState);
+          yield* writeFileStringAtomically({
+            filePath: flags.stateFile,
+            contents: `${encodeManagedProjectActionState(appliedState)}\n`,
+          }).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProjectActionReconcileFileError({
+                  operation: "write_state",
+                  filePath: flags.stateFile,
+                  cause,
+                }),
+            ),
+          );
+        }
+
+        const encodedState = `${encodeManagedProjectActionState(reconciled.state)}\n`;
+        const previousEncoded = Option.isSome(persistedState)
+          ? `${encodeManagedProjectActionState(persistedState.value)}\n`
+          : null;
+        if (encodedState !== previousEncoded) {
+          yield* writeFileStringAtomically({
+            filePath: flags.stateFile,
+            contents: encodedState,
+          }).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProjectActionReconcileFileError({
+                  operation: "write_state",
+                  filePath: flags.stateFile,
+                  cause,
+                }),
+            ),
+          );
+        }
+
+        return encodeUnknownJson({
+          mode,
+          projectId,
+          projectCreated,
+          scriptsChanged,
+          ...reconciled.report,
+        });
+      }),
+    ),
+  ),
+);
+
 export const projectCommand = Command.make("project").pipe(
   Command.withDescription("Manage projects."),
-  Command.withSubcommands([projectAddCommand, projectRemoveCommand, projectRenameCommand]),
+  Command.withSubcommands([
+    projectAddCommand,
+    projectRemoveCommand,
+    projectRenameCommand,
+    projectReconcileActionsCommand,
+  ]),
 );

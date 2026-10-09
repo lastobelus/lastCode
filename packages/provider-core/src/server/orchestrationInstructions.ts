@@ -42,10 +42,17 @@ export const T3_CODE_BROWSER_TOOL_INSTRUCTIONS = `
 
 You are running inside T3 Code. The \`t3-code\` MCP server is the product-native collaborative browser shared with the user. When it exposes \`preview_*\` tools, prefer those tools for browser navigation, inspection, interaction, screenshots, and recordings.
 
-For browser work, first call \`preview_status\`. If no automation-capable preview is attached, call \`preview_open\` before concluding that the browser is unavailable. Then use \`preview_navigate\`, \`preview_snapshot\`, and the focused interaction tools. Prefer snapshot-provided locators over coordinates.
+For routine QA within the user's requested task, use a thread-owned background browser against isolated test state without a separate browser-permission prompt. Call \`preview_status\`, then create a dedicated QA tab with \`preview_open({ open: false, reuseExistingTab: false })\`. Retain the returned \`tabId\` and use it for subsequent calls; reuse that QA tab for the rest of the task. Do not hide or repurpose a tab the user is inspecting. Do not focus applications, switch the user's thread, or operate their live workspace. Explicit user restrictions and permission requirements for foreground computer use or human acceptance still apply.
+
+A new blank tab can briefly report \`available: false\` while its native browser starts; use \`preview_navigate\`, which waits for readiness, before declaring the browser unavailable. Then use \`preview_snapshot\` and the focused interaction tools. Prefer snapshot-provided locators over coordinates. A managed server readiness failure is separate from browser permission: inspect the returned readiness and terminal-status diagnostics, the launch command, actual listening port, and ownership. Terminal transcripts are not returned and a failed initial launch cleans up its terminal; do not search for deleted output or infer a specific startup error from status alone. Repair an identified startup problem and retry within a bounded attempt. Do not ask the user to open a browser to fix a server launch failure.
 
 Do not switch to global browser skills, Chrome, Node REPL browser automation, standalone Playwright, or agent-browser merely because the preview is initially closed or a first call fails. Use an alternative browser system only when the T3 preview tools are absent, the user explicitly requests another browser, or \`preview_open\` returns an explicit unsupported/unavailable error. A failed T3 preview tool call should be inspected and retried with corrected arguments when the error is actionable.
 `;
+
+export const T3_CODE_MCP_INSTRUCTIONS = [
+  T3_CODE_BROWSER_TOOL_INSTRUCTIONS.trim(),
+  T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim(),
+].join("\n\n");
 
 const T3_CODE_ACP_DEFAULT_MODE_INSTRUCTIONS = `## T3 Code interaction mode: Default
 
@@ -81,9 +88,7 @@ export function t3AcpPromptWithInstructions(input: {
     input.state.interactionMode === "plan"
       ? T3_CODE_ACP_PLAN_MODE_INSTRUCTIONS
       : T3_CODE_ACP_DEFAULT_MODE_INSTRUCTIONS,
-    ...(input.state.hasT3Mcp
-      ? [T3_CODE_BROWSER_TOOL_INSTRUCTIONS.trim(), T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim()]
-      : []),
+    ...(input.state.hasT3Mcp ? [T3_CODE_MCP_INSTRUCTIONS] : []),
   ];
   return `<t3_code_instructions>\n${instructions.join("\n\n")}\n</t3_code_instructions>\n\n<user_request>\n${input.prompt}\n</user_request>`;
 }
@@ -94,7 +99,7 @@ export function t3AcpPromptWithInstructions(input: {
  * mistaken for text authored by the user.
  */
 function prependT3OrchestrationInstructions(prompt: string): string {
-  return `<t3_code_orchestration_instructions>${T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim()}</t3_code_orchestration_instructions>\n\n<user_request>\n${prompt}\n</user_request>`;
+  return `<t3_code_orchestration_instructions>${T3_CODE_MCP_INSTRUCTIONS}</t3_code_orchestration_instructions>\n\n<user_request>\n${prompt}\n</user_request>`;
 }
 
 export function t3OrchestrationPromptForFirstRun(input: {
@@ -108,5 +113,5 @@ export function t3OrchestrationPromptForFirstRun(input: {
 }
 
 export function t3OrchestrationSystemPrompt(hasT3Mcp: boolean): string | undefined {
-  return hasT3Mcp ? T3_CODE_ORCHESTRATION_INSTRUCTIONS : undefined;
+  return hasT3Mcp ? T3_CODE_MCP_INSTRUCTIONS : undefined;
 }
