@@ -17,6 +17,10 @@ import {
 import { acquireLocalCiAdmissionLock } from "./lastcode-ci-admission-lock.ts";
 import * as ProcessIdentity from "./lastcode-ci-process-identity.ts";
 
+vi.mock("node:fs", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:fs")>()),
+}));
+
 vi.mock("node:os", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:os")>();
   return { ...actual, homedir: vi.fn(actual.homedir) };
@@ -810,5 +814,208 @@ describe("portable CI admission mutex", () => {
     await lateContender.next("contended");
     await lateContender.closed;
     await winner.release();
+  });
+});
+
+describe("waiter records at the admission boundary", () => {
+  function options(directory: string) {
+    return { directory, policy: DEFAULT_LASTCODE_LOCAL_CI_SETTINGS, repoRoot: "workspace.example" };
+  }
+
+  function record(token = "queued") {
+    return {
+      pid: NodeProcess.pid,
+      startIdentity: ProcessIdentity.getCurrentProcessStartIdentity(),
+      token,
+      order: 1,
+    };
+  }
+
+  function writeWaiter(directory: string, value: unknown, name = "queued.waiter.json") {
+    const path = NodePath.join(directory, name);
+    NodeFS.writeFileSync(path, JSON.stringify(value));
+    return path;
+  }
+
+  it("does not overtake valid live records, including empty and Unicode tokens and extra fields", async () => {
+    for (const token of ["", "queued", "é", "😀"]) {
+      const directory = temporaryDirectory();
+      const path = writeWaiter(
+        directory,
+        { ...record(token), extra: true },
+        `${token}.waiter.json`,
+      );
+      expect(await tryAcquireLocalCiBudget(options(directory))).toBeUndefined();
+      expect(NodeFS.existsSync(path)).toBe(true);
+      expect(NodeFS.readdirSync(directory).filter((name) => name !== "admission.lock")).toEqual([
+        `${token}.waiter.json`,
+      ]);
+    }
+  });
+
+  it("rejects malformed records conservatively without rewriting them or claiming capacity", async () => {
+    const valid = record();
+    const invalid: unknown[] = [null, [], true, 1, "text", {}];
+    for (const key of ["pid", "order"] as const) {
+      for (const value of [
+        undefined,
+        null,
+        false,
+        "1",
+        0,
+        -0,
+        -1,
+        1.5,
+        Number.MAX_SAFE_INTEGER + 1,
+      ])
+        invalid.push({ ...valid, [key]: value });
+    }
+    for (const value of [undefined, null, 1, false, ""])
+      invalid.push({ ...valid, startIdentity: value });
+    for (const value of [undefined, null, 1, false, "mismatched"])
+      invalid.push({ ...valid, token: value });
+    for (const value of invalid) {
+      const directory = temporaryDirectory();
+      const path = writeWaiter(directory, value);
+      const bytes = NodeFS.readFileSync(path, "utf8");
+      await expect(tryAcquireLocalCiBudget(options(directory))).rejects.toThrow(
+        "Invalid local CI waiter. Admission has stopped.",
+      );
+      expect(NodeFS.readFileSync(path, "utf8")).toBe(bytes);
+      expect(NodeFS.readdirSync(directory).filter((name) => name !== "admission.lock")).toEqual([
+        "queued.waiter.json",
+      ]);
+    }
+  });
+
+  it("accepts safe integer boundaries but refuses overflowing JSON numbers and queue allocation", async () => {
+    const directory = temporaryDirectory();
+    const path = writeWaiter(directory, { ...record(), order: Number.MAX_SAFE_INTEGER });
+    await expect(tryAcquireLocalCiBudget(options(directory))).rejects.toThrow(
+      "The local CI queue order exceeded its supported range.",
+    );
+    for (const key of ["pid", "order"]) {
+      NodeFS.writeFileSync(
+        path,
+        JSON.stringify(record()).replace(
+          `"${key}":${record()[key as "pid" | "order"]}`,
+          `"${key}":1e999`,
+        ),
+      );
+      await expect(tryAcquireLocalCiBudget(options(directory))).rejects.toThrow(
+        "Invalid local CI waiter. Admission has stopped.",
+      );
+    }
+    writeWaiter(directory, { ...record(), pid: Number.MAX_SAFE_INTEGER });
+    const lookup = vi.spyOn(ProcessIdentity, "readProcessIdentities").mockReturnValue(new Map());
+    const alive = vi.spyOn(ProcessIdentity, "isProcessIdentityRunning").mockReturnValue(false);
+    const lease = await tryAcquireLocalCiBudget(options(directory));
+    expect(lease).toBeDefined();
+    lease!.release();
+    alive.mockRestore();
+    lookup.mockRestore();
+  });
+
+  it("ignores unrelated suffixes and skips only a waiter removed between enumeration and read", async () => {
+    const directory = temporaryDirectory();
+    NodeFS.writeFileSync(NodePath.join(directory, "ignored.waiter.json.tmp"), "broken");
+    NodeFS.writeFileSync(NodePath.join(directory, "ignored.json"), "broken");
+    const path = writeWaiter(directory, record());
+    const read = NodeFS.readFileSync;
+    vi.spyOn(NodeFS, "readFileSync").mockImplementation(
+      (...args: Parameters<typeof NodeFS.readFileSync>) => {
+        if (args[0] === path) NodeFS.rmSync(path, { force: true });
+        return read(...args);
+      },
+    );
+    const lease = await tryAcquireLocalCiBudget(options(directory));
+    expect(lease).toBeDefined();
+    lease!.release();
+    expect(
+      NodeFS.readdirSync(directory)
+        .filter((name) => name !== "admission.lock")
+        .sort(),
+    ).toEqual(["ignored.json", "ignored.waiter.json.tmp"]);
+  });
+
+  it("keeps the first error in either explicit directory order and preserves read-error causes", async () => {
+    for (const names of [
+      ["a.waiter.json", "b.waiter.json"],
+      ["b.waiter.json", "a.waiter.json"],
+    ]) {
+      const directory = temporaryDirectory();
+      NodeFS.writeFileSync(NodePath.join(directory, names[0]!), "{");
+      NodeFS.writeFileSync(NodePath.join(directory, names[1]!), "{}");
+      const enumerate = NodeFS.readdirSync;
+      const reads: string[] = [];
+      const read = NodeFS.readFileSync;
+      const listing = vi
+        .spyOn(NodeFS, "readdirSync")
+        .mockImplementation((...args: Parameters<typeof NodeFS.readdirSync>) =>
+          args[0] === directory
+            ? (names as unknown as ReturnType<typeof NodeFS.readdirSync>)
+            : enumerate(...args),
+        );
+      const reading = vi
+        .spyOn(NodeFS, "readFileSync")
+        .mockImplementation((...args: Parameters<typeof NodeFS.readFileSync>) => {
+          if (typeof args[0] === "string" && args[0].endsWith(".waiter.json")) reads.push(args[0]);
+          return read(...args);
+        });
+      await expect(tryAcquireLocalCiBudget(options(directory))).rejects.toThrow(
+        "Invalid local CI waiter JSON. Admission has stopped.",
+      );
+      expect(reads).toEqual([NodePath.join(directory, names[0]!)]);
+      const cause = Object.assign(new Error("fixture permission failure"), { code: "EACCES" });
+      reading.mockImplementation((...args: Parameters<typeof NodeFS.readFileSync>) => {
+        if (args[0] === NodePath.join(directory, names[0]!)) throw cause;
+        return read(...args);
+      });
+      const error = await tryAcquireLocalCiBudget(options(directory)).catch(
+        (error: unknown) => error,
+      );
+      expect(error).toBeInstanceOf(Error);
+      expect(error).toMatchObject({
+        message: "Unable to read a local CI waiter. Admission has stopped.",
+        cause,
+      });
+      reading.mockRestore();
+      listing.mockRestore();
+    }
+  });
+
+  it("reads in enumeration order, then queries the numeric FIFO queue with native locale ties", async () => {
+    const tokens = ["z", "é", "😀", "a"];
+    const records = tokens.map((token, index) => ({
+      ...record(token),
+      pid: 100 + index,
+      order: index === 0 ? 2 : 1,
+    }));
+    const expected = [...records].sort(
+      (a, b) => a.order - b.order || a.token.localeCompare(b.token),
+    );
+    for (const names of [
+      tokens.map((t) => `${t}.waiter.json`),
+      tokens.map((t) => `${t}.waiter.json`).toReversed(),
+    ]) {
+      const directory = temporaryDirectory();
+      for (const value of records) writeWaiter(directory, value, `${value.token}.waiter.json`);
+      const enumerate = NodeFS.readdirSync;
+      const listing = vi
+        .spyOn(NodeFS, "readdirSync")
+        .mockImplementation((...args: Parameters<typeof NodeFS.readdirSync>) =>
+          args[0] === directory
+            ? (names as unknown as ReturnType<typeof NodeFS.readdirSync>)
+            : enumerate(...args),
+        );
+      const lookup = vi.spyOn(ProcessIdentity, "readProcessIdentities").mockReturnValue(new Map());
+      const alive = vi.spyOn(ProcessIdentity, "isProcessIdentityRunning").mockReturnValue(true);
+      expect(await tryAcquireLocalCiBudget(options(directory))).toBeUndefined();
+      expect(lookup).toHaveBeenCalledWith(expected.map((value) => value.pid));
+      expect(NodeFS.readdirSync(directory)).toEqual(names);
+      alive.mockRestore();
+      lookup.mockRestore();
+      listing.mockRestore();
+    }
   });
 });
