@@ -17,6 +17,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as LocalDeviceHost from "./LocalDeviceHost.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+import * as ChildProcess from "effect/process/ChildProcess";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import {
   AGENT_DEVICE_VERSION,
@@ -336,4 +337,95 @@ it.effect.each([true, false])(
       expect(reused.agentDevice).toEqual(first.agentDevice);
       expect(commands).toEqual(["stop", "devices"]);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect.each([
+  { launcher: false, state: "dead", succeeds: true },
+  { launcher: false, state: "alive", succeeds: false },
+  { launcher: false, state: "unknown", succeeds: false },
+  { launcher: true, state: "deadAfterStop", succeeds: true },
+  { launcher: true, state: "alive", succeeds: false },
+])("retires stale recovered daemon state safely (%s)", ({ launcher, state, succeeds }) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-stale-agent-" });
+    const config = yield* ServerConfig.ServerConfig.pipe(
+      Effect.provide(ServerConfig.layerTest(directory, directory)),
+    );
+    // Use only a process captured by this test; no real daemon or arbitrary PID is stopped.
+    const child =
+      state === "dead" || state === "deadAfterStop"
+        ? yield* spawner.spawn(
+            ChildProcess.make(process.execPath, [
+              "-e",
+              state === "dead" ? "" : "setInterval(() => {}, 1000)",
+            ]),
+          )
+        : undefined;
+    if (state === "dead") yield* child!.exitCode.pipe(Effect.result);
+    if (launcher) {
+      const install = path.join(config.baseDir, "tools", "agent-device", AGENT_DEVICE_VERSION);
+      const entry = path.join(install, "node_modules", "agent-device", "bin/agent-device.mjs");
+      yield* fs.makeDirectory(path.dirname(entry), { recursive: true });
+      yield* fs.writeFileString(entry, "");
+      yield* fs.writeFileString(path.join(install, ".install-complete"), AGENT_DEVICE_VERSION);
+    }
+    const daemonFile = path.join(agentDeviceStateDir(path, config.stateDir), "daemon.json");
+    yield* fs.makeDirectory(path.dirname(daemonFile), { recursive: true });
+    yield* fs.writeFileString(
+      daemonFile,
+      JSON.stringify({
+        httpPort: 1234,
+        token: "recovered-raw-token",
+        version: "0.0.1",
+        ...(state === "unknown" ? {} : { pid: child?.pid ?? process.pid }),
+      }),
+    );
+    const commands: string[] = [];
+    const runner: ProcessRunner.ProcessRunner["Service"] = {
+      run: (input) =>
+        Effect.gen(function* () {
+          commands.push(input.args[1]!);
+          expect(input.args.slice(1, 3)).toEqual(["daemon", "stop"]);
+          if (state === "deadAfterStop") {
+            yield* child!.kill();
+            yield* child!.exitCode.pipe(Effect.result);
+          }
+          return {
+            code: ChildProcessSpawner.ExitCode(1),
+            stdout: "",
+            stderr: "",
+            timedOut: false,
+            stdoutTruncated: false,
+            stderrTruncated: false,
+            stdoutInvalidUtf8: false,
+            stderrInvalidUtf8: false,
+          };
+        }).pipe(Effect.orDie),
+    };
+    const host = yield* LocalDeviceHost.make().pipe(
+      Effect.provideService(ServerConfig.ServerConfig, config),
+      Effect.provide(NetService.layer),
+      Effect.provideService(HostProcessEnvironment, { HOME: directory, PATH: "" }),
+      Effect.provideService(HostProcessPlatform, "linux"),
+      Effect.provideService(HostProcessIsExecutable, false),
+      Effect.provideService(ProcessRunner.ProcessRunner, runner),
+      Effect.provideService(
+        ChildProcessSpawner.ChildProcessSpawner,
+        ChildProcessSpawner.make(() => Effect.die("Retirement must not start a helper")),
+      ),
+      Effect.provideService(
+        HttpClient.HttpClient,
+        HttpClient.make(() => Effect.die("Retirement must not make network requests")),
+      ),
+    );
+    const result = yield* host.stopAgent.pipe(Effect.result);
+    expect(result._tag).toBe(succeeds ? "Success" : "Failure");
+    expect(yield* fs.exists(daemonFile)).toBe(!succeeds);
+    expect(commands).toEqual(launcher && state !== "dead" ? ["daemon"] : []);
+    if (!launcher) expect(yield* fs.exists(path.join(config.baseDir, "tools"))).toBe(false);
+    expect(yield* host.current).toBeNull();
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
