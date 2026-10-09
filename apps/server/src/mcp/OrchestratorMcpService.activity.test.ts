@@ -437,7 +437,7 @@ it("readThread and sendToThread reach threads in other projects", async () => {
         Layer.mock(ThreadManagementService.ThreadManagementService)({
           getThreadRecords: (threadId) => {
             if (threadId === parentThreadId) {
-              const loaded = { ...parentProjection, runs: parentRuns };
+              const loaded = { ...parentProjection };
               if (advanceAfterCallerLoads) {
                 advanceAfterCallerLoads = false;
                 parentRuns = [
