@@ -25,7 +25,6 @@ import { EnvironmentRoutesSection } from "./EnvironmentRoutesSection";
 import { SettingsActionRow } from "./components/SettingsActionRow";
 import { SettingsScreen } from "./components/SettingsScreen";
 import { SettingsSection } from "./components/SettingsSection";
-import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
 import {
   canMaintainEnvironment,
   canUpdateEnvironmentProvider,
@@ -61,10 +60,6 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
   const updateServer = useAtomCommand(serverEnvironment.updateServer);
   const updateProvider = useAtomCommand(serverEnvironment.updateProvider);
   const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders);
-  const updateSettings = useAtomCommand(serverEnvironment.updateSettings, { reportFailure: false });
-  const canWriteSettings = useAtomValue(
-    serverEnvironment.updateSettings.permissionAtom(environmentId),
-  );
   const [connectionExpanded, setConnectionExpanded] = useState(false);
   const [pending, setPending] = useState<string | null>(null);
   const pendingRef = useRef(false);
@@ -232,27 +227,6 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
             {notice ? <Text className="px-2 text-sm text-foreground-muted">{notice}</Text> : null}
             {config ? (
               <>
-                {config.environment.capabilities.environmentPause ? (
-                  <SettingsSection title="Pause to go offline">
-                    <SettingsSwitchRow
-                      icon="pause"
-                      label="Show environment pause button"
-                      subtitle="Ask active threads to pause, wait for quiet, then resume the same threads."
-                      value={config.settings.environmentPauseEnabled}
-                      disabled={!connected || !canWriteSettings || pending !== null}
-                      onValueChange={(enabled) => {
-                        if (!connected || !canWriteSettings || pending !== null) return;
-                        void run("pause-setting", async () => {
-                          const result = await updateSettings({
-                            environmentId,
-                            input: { patch: { environmentPauseEnabled: enabled } },
-                          });
-                          if (AsyncResult.isFailure(result)) throw squashAtomCommandFailure(result);
-                        });
-                      }}
-                    />
-                  </SettingsSection>
-                ) : null}
                 <SettingsSection title="T3 Code">
                   <View className="gap-1 p-4">
                     <Text className="text-base text-foreground">Version {version}</Text>

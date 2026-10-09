@@ -5,7 +5,7 @@ need a separate branch and working directory.
 
 ## Pause before going offline
 
-Enable **Environment pause button** in **Settings → General** for each environment
+Enable **Environment pause button** in **Settings → LastCode** for each environment
 where you want it. It is off by default. Use the pause control in the sidebar
 header, choose an environment, and confirm to send “pause to go offline” to its
 active threads. The dialog counts down while the agents finish pausing and other

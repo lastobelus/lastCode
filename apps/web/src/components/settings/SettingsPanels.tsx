@@ -591,9 +591,6 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...(settings.sidebarAutoSettleOnMerge !== DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleOnMerge
         ? ["Auto-settle merged threads"]
         : []),
-      ...(settings.environmentPauseEnabled !== DEFAULT_UNIFIED_SETTINGS.environmentPauseEnabled
-        ? ["Environment pause button"]
-        : []),
       ...(settings.autoResumeLimitedThreads !== DEFAULT_UNIFIED_SETTINGS.autoResumeLimitedThreads
         ? ["Auto-resume limited threads"]
         : []),
@@ -718,7 +715,6 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.continueThreadsAfterServerUpdate,
       settings.sidebarAutoSettleAfterDays,
       settings.sidebarAutoSettleOnMerge,
-      settings.environmentPauseEnabled,
       settings.autoResumeLimitedThreads,
       settings.snoozeLimitedThreads,
       settings.sidebarProjectGroupingMode,
@@ -826,7 +822,6 @@ export function useSettingsRestore(onRestored?: () => void) {
       sidebarWorkingShelfEnabled: DEFAULT_UNIFIED_SETTINGS.sidebarWorkingShelfEnabled,
       sidebarAutoSettleAfterDays: DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleAfterDays,
       sidebarAutoSettleOnMerge: DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleOnMerge,
-      environmentPauseEnabled: DEFAULT_UNIFIED_SETTINGS.environmentPauseEnabled,
       autoResumeLimitedThreads: DEFAULT_UNIFIED_SETTINGS.autoResumeLimitedThreads,
       snoozeLimitedThreads: DEFAULT_UNIFIED_SETTINGS.snoozeLimitedThreads,
       responseStreamingMode: DEFAULT_UNIFIED_SETTINGS.responseStreamingMode,
@@ -2218,11 +2213,6 @@ export function GeneralSettingsPanel() {
     connectedEnvironments.every(
       (target) => target.serverConfig?.environment.capabilities.threadRestartContinuation === true,
     );
-  const supportsEnvironmentPause =
-    connectedEnvironments.length > 0 &&
-    connectedEnvironments.every(
-      (target) => target.serverConfig?.environment.capabilities.environmentPause === true,
-    );
 
   const textGenerationProviders = serverProviders.filter(
     (provider) => provider.supportsTextGeneration !== false,
@@ -2279,28 +2269,6 @@ export function GeneralSettingsPanel() {
   return (
     <SettingsPageContainer>
       <ProjectDefaultsSettings category="general" />
-      <SettingsSection id="environment-controls" title="Environment controls">
-        <SettingsRow
-          serverScoped
-          settingKeys={["environmentPauseEnabled"]}
-          {...searchableSetting("environment-pause")}
-          description="Show a sidebar button to ask active threads on this environment to pause before you go offline, then resume them when you return."
-          status={
-            supportsEnvironmentPause ? undefined : "Update the environment to enable this feature."
-          }
-          control={
-            <ScopedSwitch
-              settingKeys={["environmentPauseEnabled"]}
-              checked={settings.environmentPauseEnabled}
-              disabled={!supportsEnvironmentPause}
-              onCheckedChange={(checked) =>
-                updateSettings({ environmentPauseEnabled: Boolean(checked) })
-              }
-              aria-label="Environment pause button"
-            />
-          }
-        />
-      </SettingsSection>
       <SettingsSection id="organization" title="Organization">
         <SettingsRow
           {...searchableSetting("project-grouping")}

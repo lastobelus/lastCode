@@ -463,7 +463,7 @@ export const SETTINGS_SEARCH_ITEMS = [
   {
     id: "environment-pause",
     title: "Environment pause button",
-    to: "/settings/general",
+    to: "/settings/lastcode",
     scope: "environment-defaults",
     searchTerms: ["pause resume offline active threads sidebar environment"],
   },
