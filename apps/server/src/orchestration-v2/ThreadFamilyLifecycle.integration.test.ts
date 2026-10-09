@@ -362,7 +362,7 @@ it.layer(TestLayer)("thread family lifecycle", (it) => {
         if (refused._tag === "OrchestratorDispatchError")
           assert.equal(
             refused.cause,
-            "Choose whether to stop and archive the subagents or keep them separately before archiving.",
+            "Confirm archiving this conversation and its grouped conversations and subagents.",
           );
         for (const id of [h.rootId, h.nativeId, h.nestedId])
           assert.isNull((yield* h.store.getThread(id)).archivedAt);

@@ -1,5 +1,9 @@
+import { vi } from "vite-plus/test";
 import { describe, expect, it } from "@effect/vitest";
 import {
+  AuthOrchestrationOperateScope,
+  AuthOrchestrationReadScope,
+  type AuthSessionState,
   CommandId,
   RuntimeRequestId,
   EnvironmentId,
@@ -21,15 +25,20 @@ import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import * as Stream from "effect/Stream";
-import { Atom, AtomRegistry } from "effect/reactivity";
+import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 
 import * as EnvironmentRegistry from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import type { RpcSession } from "../rpc/session.ts";
 import { createThreadEnvironmentAtoms } from "./threadCommands.ts";
-import { executeAtomQuery } from "./runtime.ts";
 import { AVAILABLE_CONNECTION_STATE } from "../connection/model.ts";
 
+vi.mock("./session.ts", () => ({
+  createEnvironmentSessionAtoms: () => ({ sessionStateAtom: sessions }),
+}));
+const sessions = Atom.family((_id: EnvironmentId) =>
+  Atom.make<AsyncResult.AsyncResult<AuthSessionState>>(AsyncResult.initial()),
+);
 const ENVIRONMENT_ID = EnvironmentId.make("remote");
 const THREAD_ID = ThreadId.make("thread");
 const NOW = DateTime.makeUnsafe("2026-09-12T10:00:00.000Z");
@@ -91,6 +100,8 @@ const makeHarness = Effect.fn("TestThreadCommands.makeHarness")(function* (
   decision: Omit<OrchestrationV2ThreadArchiveFamily, "threads"> = {
     childThreadIds: [],
     activeChildThreadIds: [],
+    activeThreadIds: [],
+    unreadThreadIds: [],
     promotableChildThreadIds: [],
     keptThreadIds: [],
     protectedChildThreadIds: [],
@@ -154,6 +165,20 @@ const makeHarness = Effect.fn("TestThreadCommands.makeHarness")(function* (
   yield* Effect.addFinalizer(() => Effect.sync(() => registry.dispose()));
   const visibleAtom = commands.snapshotAtom(ENVIRONMENT_ID);
   registry.mount(visibleAtom);
+  registry.set(
+    sessions(ENVIRONMENT_ID),
+    AsyncResult.success({
+      authenticated: true,
+      scopes: [AuthOrchestrationReadScope, AuthOrchestrationOperateScope],
+      permissions: [AuthOrchestrationReadScope, AuthOrchestrationOperateScope],
+      auth: {
+        policy: "remote-reachable",
+        bootstrapMethods: [],
+        sessionMethods: [],
+        sessionCookieName: "test",
+      },
+    }),
+  );
   return { registry, commands, snapshotAtom, visibleAtom, requests, familyReads };
 });
 
@@ -188,6 +213,8 @@ it.effect("reads a scoped complete family without replacing the active shell sna
     const h = yield* makeHarness(shells, undefined, {
       childThreadIds: [liveChildId],
       activeChildThreadIds: [liveChildId],
+      activeThreadIds: [liveChildId],
+      unreadThreadIds: [root.id],
       promotableChildThreadIds: [],
       keptThreadIds: [],
       protectedChildThreadIds: [liveChildId],
@@ -197,14 +224,10 @@ it.effect("reads a scoped complete family without replacing the active shell sna
       canStopAndArchive: false,
     });
     const result = yield* Effect.promise(() =>
-      executeAtomQuery(
-        h.registry,
-        h.commands.archiveFamilyAtom({
-          environmentId: ENVIRONMENT_ID,
-          input: { threadId: THREAD_ID },
-        }),
-        { reportFailure: false },
-      ),
+      h.commands.loadArchiveFamily.run(h.registry, {
+        environmentId: ENVIRONMENT_ID,
+        input: { threadId: THREAD_ID },
+      }),
     );
     expect(result._tag).toBe("Success");
     if (result._tag !== "Success") return;
@@ -213,6 +236,8 @@ it.effect("reads a scoped complete family without replacing the active shell sna
     );
     expect(result.value.children.map(({ id }) => id)).toEqual([liveChildId]);
     expect(result.value.activeChildren[0]?.runtime?.status).toBe("running");
+    expect(result.value.activeThreads.map(({ id }) => id)).toEqual([liveChildId]);
+    expect(result.value.unreadThreads.map(({ id }) => id)).toEqual([root.id]);
     expect(result.value.protectedChildren.map(({ id }) => id)).toEqual([liveChildId]);
     expect(result.value.promotableChildren).toEqual([]);
     expect(result.value.requiresConfirmation).toBe(true);
@@ -223,18 +248,14 @@ it.effect("reads a scoped complete family without replacing the active shell sna
   }),
 );
 
-it.effect("fails the family query rather than returning the local active-only snapshot", () =>
+it.effect("fails family inspection rather than returning the local active-only snapshot", () =>
   Effect.gen(function* () {
     const h = yield* makeHarness([], new Error("Family unavailable"));
     const result = yield* Effect.promise(() =>
-      executeAtomQuery(
-        h.registry,
-        h.commands.archiveFamilyAtom({
-          environmentId: ENVIRONMENT_ID,
-          input: { threadId: THREAD_ID },
-        }),
-        { reportFailure: false },
-      ),
+      h.commands.loadArchiveFamily.run(h.registry, {
+        environmentId: ENVIRONMENT_ID,
+        input: { threadId: THREAD_ID },
+      }),
     );
     expect(result._tag).toBe("Failure");
     expect(h.familyReads).toEqual([{ threadId: THREAD_ID }]);
@@ -493,3 +514,28 @@ describe("remote thread lifecycle commands", () => {
       }),
   );
 });
+
+it.effect("requires operate permission before verifying archive-family activity", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness();
+    const session = h.registry.get(sessions(ENVIRONMENT_ID));
+    if (session._tag !== "Success") throw new Error("Missing test session.");
+    h.registry.set(
+      sessions(ENVIRONMENT_ID),
+      AsyncResult.success({
+        ...session.value,
+        scopes: [AuthOrchestrationReadScope],
+        permissions: [AuthOrchestrationReadScope],
+      }),
+    );
+    expect(h.registry.get(h.commands.loadArchiveFamily.permissionAtom(ENVIRONMENT_ID))).toBe(false);
+    const result = yield* Effect.promise(() =>
+      h.commands.loadArchiveFamily.run(h.registry, {
+        environmentId: ENVIRONMENT_ID,
+        input: { threadId: THREAD_ID },
+      }),
+    );
+    expect(result._tag).toBe("Failure");
+    expect(h.familyReads).toEqual([]);
+  }),
+);

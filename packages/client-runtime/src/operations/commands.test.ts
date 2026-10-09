@@ -289,7 +289,7 @@ describe("V2 environment commands", () => {
       yield* archiveThread({
         commandId: CommandId.make("archive-family"),
         threadId: ThreadId.make("parent"),
-        childDisposition: "promote",
+        childDisposition: "archive_after_review",
         expectedChildThreadIds: [ThreadId.make("child")],
         expectedArchiveCommandId: CommandId.make("failed-attempt"),
       }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
@@ -298,7 +298,7 @@ describe("V2 environment commands", () => {
           type: "thread.archive",
           commandId: "archive-family",
           threadId: "parent",
-          childDisposition: "promote",
+          childDisposition: "archive_after_review",
           expectedChildThreadIds: ["child"],
           expectedArchiveCommandId: "failed-attempt",
         },

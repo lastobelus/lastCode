@@ -9,7 +9,6 @@ import {
   shouldDeleteWorktreeClientSide,
   navigateAfterThreadDeletion,
   requestThreadUnpinConfirmation,
-  ThreadArchiveBlockedError,
   normalizeArchiveSelectedEntries,
 } from "./useThreadActions";
 import { toastManager } from "../components/ui/toast";
@@ -96,20 +95,6 @@ describe("navigateAfterThreadDeletion", () => {
   });
 });
 
-describe("ThreadArchiveBlockedError", () => {
-  it("keeps the blocked thread context with the fixed message", () => {
-    const error = new ThreadArchiveBlockedError({
-      environmentId: EnvironmentId.make("environment-1"),
-      threadId: ThreadId.make("thread-1"),
-    });
-
-    expect(error).toMatchObject({
-      environmentId: "environment-1",
-      threadId: "thread-1",
-    });
-    expect(error.message).toBe("Cannot archive while the provider is active.");
-  });
-});
 describe("requestThreadUnpinConfirmation", () => {
   it("skips the dialog when confirmation is disabled", async () => {
     let callCount = 0;

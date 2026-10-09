@@ -23,27 +23,54 @@ export function compactThreadArchiveParticipant(
 
 interface FamilyThread {
   readonly id: ThreadId;
+  readonly projectId: OrchestrationV2AppThread["projectId"];
   readonly lineage: OrchestrationV2AppThreadLineage;
   readonly archivedAt: unknown | null;
   readonly deletedAt?: unknown | null;
   readonly persistent?: boolean | undefined;
   readonly creationSource: string;
+  readonly createdBy?: string | undefined;
+  readonly creatorThreadId?: ThreadId | undefined;
+  readonly creatorGrouping?: string | undefined;
+  readonly forkedFrom?: unknown | null;
 }
 
-/** Current ownership follows subagent edges; forks and released conversations keep provenance only. */
+/** Creator grouping needs the creator row to enforce the sidebar's project boundary. */
+export function getArchiveFamilyParentThreadId(
+  thread: FamilyThread,
+  creator?: Pick<FamilyThread, "id" | "projectId">,
+): ThreadId | null {
+  if (thread.lineage.independent === true) return null;
+  if (thread.lineage.relationshipToParent === "subagent") return thread.lineage.parentThreadId;
+  if (
+    thread.deletedAt == null &&
+    thread.createdBy === "agent" &&
+    thread.creatorGrouping === "grouped" &&
+    thread.lineage.parentThreadId === null &&
+    thread.lineage.relationshipToParent === null &&
+    thread.forkedFrom == null &&
+    creator?.id === thread.creatorThreadId &&
+    creator?.projectId === thread.projectId
+  )
+    return thread.creatorThreadId ?? null;
+  return null;
+}
+
+/** Forks and explicitly independent branches retain provenance without archive membership. */
 export function getOwnedThreadFamily<T extends FamilyThread>(
   threads: ReadonlyArray<T>,
   rootThreadId: ThreadId,
 ) {
+  const byId = new Map(threads.map((thread) => [thread.id, thread]));
+  const parentOf = (thread: T) =>
+    getArchiveFamilyParentThreadId(
+      thread,
+      thread.creatorThreadId === undefined ? undefined : byId.get(thread.creatorThreadId),
+    );
   const byParent = new Map<ThreadId, T[]>();
   for (const thread of threads) {
-    const parent = thread.lineage.parentThreadId;
-    if (
-      parent === null ||
-      thread.lineage.relationshipToParent !== "subagent" ||
-      thread.lineage.independent === true
-    )
-      continue;
+    const parent = parentOf(thread);
+    if (parent === null) continue;
     const siblings = byParent.get(parent) ?? [];
     siblings.push(thread);
     byParent.set(parent, siblings);
@@ -65,7 +92,7 @@ export function getOwnedThreadFamily<T extends FamilyThread>(
     }
   };
   visit(rootThreadId);
-  const directChildren = children.filter((child) => child.lineage.parentThreadId === rootThreadId);
+  const directChildren = children.filter((child) => parentOf(child) === rootThreadId);
   const promotableChildren = directChildren.filter((child) => child.creationSource !== "provider");
   const nativeChildren = directChildren.filter((child) => child.creationSource === "provider");
   const protectedChildren = children.filter((child) => child.persistent === true);

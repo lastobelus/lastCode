@@ -126,6 +126,9 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   /** Server reads recursive owned families and enforces archive consent and
       provider shutdown. Missing support requires an update before archiving. */
   threadArchiveFamilies: Schema.optionalKey(Schema.Boolean),
+  /** Server returns active/unread family members and accepts archive_after_review.
+      Clients requiring this policy must not query older archive-family payloads. */
+  threadArchiveFamiliesV2: Schema.optionalKey(Schema.Boolean),
   /** Server evaluates merge and inactivity settlement without a client. */
   threadAutoSettlement: Schema.optionalKey(Schema.Boolean),
   /** Server persists the environment-owned Local CI policy. */

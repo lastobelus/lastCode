@@ -18,6 +18,8 @@ import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as Ref from "effect/Ref";
+import { DispatchModeLimit, type DispatchModeRefusal } from "./DispatchModeLimit.ts";
 import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -54,7 +56,11 @@ const released: ProviderAdapterV2TurnInspection = {
 };
 
 function harness() {
-  let thread = { id: identity.threadId } as OrchestrationV2AppThread;
+  let thread = {
+    id: identity.threadId,
+    runtimeMode: "full-access",
+    interactionMode: "default",
+  } as OrchestrationV2AppThread;
   let run = {
     id: identity.runId,
     activeAttemptId: identity.attemptId,
@@ -204,6 +210,9 @@ function harness() {
     get laterRuns() {
       return laterRuns;
     },
+    setModes(modes: Pick<OrchestrationV2AppThread, "runtimeMode" | "interactionMode">) {
+      thread = { ...thread, ...modes };
+    },
     inspect(value: ProviderAdapterV2TurnInspection) {
       inspection = value;
     },
@@ -324,6 +333,213 @@ it.effect("does not recover active or unknown turns automatically", () => {
     assert.equal(test.thread.recovery?.status, "failed");
   }).pipe(Effect.provide(test.layer));
 });
+it.effect("archive verification leaves active and unknown turns untouched", () => {
+  const test = harness();
+  return Effect.gen(function* () {
+    const service = yield* test.register;
+    yield* service.verify(identity);
+    test.inspect({ status: "unknown" });
+    yield* service.verify(identity);
+    assert.equal(test.finalizations, 0);
+    assert.deepEqual(test.statuses, []);
+    assert.equal(test.run.status, "running");
+  }).pipe(Effect.provide(test.layer));
+});
+it.effect("archive verification settles a proven terminal attempt once", () => {
+  const test = harness();
+  test.inspect(terminal);
+  return Effect.gen(function* () {
+    const service = yield* test.register;
+    yield* service.verify(identity);
+    yield* service.verify(identity);
+    assert.equal(test.finalizations, 1);
+    assert.equal(test.run.status, "completed");
+  }).pipe(Effect.provide(test.layer));
+});
+it.effect.each(
+  [
+    {
+      mode: "runtime" as const,
+      allowed: { runtimeMode: "approval-required" as const, interactionMode: "default" as const },
+    },
+    {
+      mode: "interaction" as const,
+      allowed: { runtimeMode: "full-access" as const, interactionMode: "plan" as const },
+    },
+  ].flatMap((limit) =>
+    ["before-inspection", "during-inspection", "after-recovering"].flatMap((timing) =>
+      [terminal, released].map((inspection) => ({
+        ...limit,
+        timing,
+        inspection,
+        evidence: inspection.status,
+      })),
+    ),
+  ),
+)("archive verification respects the $mode ceiling $timing for $evidence evidence", (scenario) => {
+  const test = harness();
+  test.setModes(scenario.allowed);
+  test.inspect(scenario.inspection);
+  const higherModes = { runtimeMode: "full-access" as const, interactionMode: "default" as const };
+  const raiseModes = Effect.sync(() => test.setModes(higherModes));
+  if (scenario.timing === "before-inspection") test.setModes(higherModes);
+  if (scenario.timing === "during-inspection") test.beforeInspect(raiseModes);
+  if (scenario.timing === "after-recovering") test.afterRecovering(raiseModes);
+  return Effect.gen(function* () {
+    const service = yield* test.register;
+    const refused = yield* Ref.make<DispatchModeRefusal | undefined>(undefined);
+    const savedRun = test.run;
+    const savedTurn = test.providerTurn;
+    const refusal = yield* service
+      .verify(identity)
+      .pipe(
+        Effect.provideService(DispatchModeLimit, { ...scenario.allowed, refused }),
+        Effect.flip,
+      );
+    assert.equal(refusal._tag, "ThreadRecoveryAboveModeLimitError");
+    assert.deepEqual(yield* Ref.get(refused), {
+      threadId: identity.threadId,
+      mode: scenario.mode,
+      ...higherModes,
+    });
+    assert.equal(test.finalizations, 0);
+    assert.deepEqual(test.run, savedRun);
+    assert.deepEqual(test.providerTurn, savedTurn);
+    assert.deepEqual(test.statuses, scenario.timing === "after-recovering" ? ["recovering"] : []);
+    // The same registration remains available to an authorized retry. A denied
+    // verification must not queue a failure that replaces terminal evidence.
+    test.beforeInspect(Effect.void);
+    test.afterRecovering(Effect.void);
+    yield* service.verify(identity);
+    assert.equal(test.finalizations, 1);
+    assert.equal(test.run.status, scenario.evidence === "released" ? "cancelled" : "completed");
+    assert.equal(test.thread.recovery?.status, "recovered");
+    assert.equal(test.finalRuntimeReleased, scenario.evidence === "released");
+  }).pipe(Effect.provide(test.layer));
+});
+it.effect("manual recovery does not turn a mode refusal into a pending provider failure", () => {
+  const test = harness();
+  test.inspect(terminal);
+  const allowed = {
+    runtimeMode: "approval-required" as const,
+    interactionMode: "default" as const,
+  };
+  test.setModes(allowed);
+  test.afterRecovering(
+    Effect.sync(() => test.setModes({ runtimeMode: "full-access", interactionMode: "default" })),
+  );
+  return Effect.gen(function* () {
+    const service = yield* test.register;
+    const refusal = yield* service
+      .recover(identity)
+      .pipe(Effect.provideService(DispatchModeLimit, allowed), Effect.flip);
+    assert.equal(refusal._tag, "ThreadRecoveryAboveModeLimitError");
+    assert.equal(test.finalizations, 0);
+    assert.deepEqual(test.statuses, ["recovering"]);
+    test.afterRecovering(Effect.void);
+    yield* service.recover(identity);
+    assert.equal(test.finalizations, 1);
+    assert.deepEqual(test.statuses, ["recovering", "recovering", "recovered"]);
+  }).pipe(Effect.provide(test.layer));
+});
+it.effect("refused unknown recovery does not block fresh terminal evidence", () => {
+  const test = harness();
+  const allowed = {
+    runtimeMode: "approval-required" as const,
+    interactionMode: "default" as const,
+  };
+  test.setModes(allowed);
+  test.inspect({ status: "unknown" });
+  test.beforeInspect(
+    Effect.sync(() => test.setModes({ runtimeMode: "full-access", interactionMode: "default" })),
+  );
+  return Effect.gen(function* () {
+    const service = yield* test.register;
+    const refusal = yield* service
+      .recover(identity)
+      .pipe(Effect.provideService(DispatchModeLimit, allowed), Effect.flip);
+    assert.equal(refusal._tag, "ThreadRecoveryAboveModeLimitError");
+    assert.deepEqual(test.statuses, []);
+    assert.equal(test.finalizations, 0);
+    assert.equal(test.run.status, "running");
+    test.beforeInspect(Effect.void);
+    test.inspect(terminal);
+    yield* service.recover(identity);
+    assert.deepEqual(test.statuses, ["recovering", "recovered"]);
+    assert.equal(test.finalizations, 1);
+    assert.equal(test.run.status, "completed");
+  }).pipe(Effect.provide(test.layer));
+});
+it.effect("refused recovery preserves a failure queued during a database outage", () => {
+  const test = harness();
+  const allowed = {
+    runtimeMode: "approval-required" as const,
+    interactionMode: "default" as const,
+  };
+  test.inspect({ status: "unknown" });
+  test.setFailedReceiptOutage(true);
+  return Effect.gen(function* () {
+    const service = yield* test.register;
+    assert.isTrue(Exit.isFailure(yield* service.recover(identity).pipe(Effect.exit)));
+    test.setFailedReceiptOutage(false);
+    test.inspect(terminal);
+    const refusal = yield* service
+      .recover(identity)
+      .pipe(Effect.provideService(DispatchModeLimit, allowed), Effect.flip);
+    assert.equal(refusal._tag, "ThreadRecoveryAboveModeLimitError");
+    assert.deepEqual(test.statuses, []);
+    yield* service.recover(identity);
+    assert.deepEqual(test.statuses, ["failed"]);
+    assert.equal(test.finalizations, 0);
+    yield* service.recover(identity);
+    assert.deepEqual(test.statuses, ["failed", "recovering", "recovered"]);
+    assert.equal(test.finalizations, 1);
+    assert.equal(test.run.status, "completed");
+  }).pipe(Effect.provide(test.layer));
+});
+it.effect("failed archive inspection does not write a recovery failure", () => {
+  const test = harness();
+  test.beforeInspect(Effect.die("inspection unavailable"));
+  return Effect.gen(function* () {
+    const service = yield* test.register;
+    const result = yield* Effect.exit(service.verify(identity));
+    assert.isTrue(Exit.isFailure(result));
+    assert.deepEqual(test.statuses, []);
+    assert.equal(test.run.status, "running");
+    test.beforeInspect(Effect.void);
+    test.inspect(terminal);
+    yield* service.verify(identity);
+    assert.equal(test.finalizations, 1);
+  }).pipe(Effect.provide(test.layer));
+});
+it.effect("archive verification leaves unmatched terminal evidence active", () => {
+  const test = harness();
+  test.inspect(terminal);
+  test.omitProviderTurn();
+  return Effect.gen(function* () {
+    const service = yield* test.register;
+    yield* service.verify(identity);
+    assert.deepEqual(test.statuses, []);
+    assert.equal(test.finalizations, 0);
+    assert.equal(test.run.status, "running");
+  }).pipe(Effect.provide(test.layer));
+});
+it.effect(
+  "archive verification accepts new terminal evidence after an earlier unknown failure",
+  () => {
+    const test = harness();
+    test.inspect({ status: "unknown" });
+    return Effect.gen(function* () {
+      const service = yield* test.register;
+      yield* service.recover(identity);
+      assert.equal(test.thread.recovery?.status, "failed");
+      test.inspect(terminal);
+      yield* service.verify(identity);
+      assert.equal(test.finalizations, 1);
+      assert.equal(test.run.status, "completed");
+    }).pipe(Effect.provide(test.layer));
+  },
+);
 it.effect("cancels the exact released attempt once and preserves queued runs", () => {
   const test = harness();
   test.inspect(released);

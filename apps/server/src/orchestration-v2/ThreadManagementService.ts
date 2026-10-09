@@ -46,6 +46,8 @@ import { DelegatedTaskCancellation } from "./DelegatedTaskCancellation.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import { projectTurnItemForDetail } from "./WireProjection.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
+import * as ThreadRecovery from "./ThreadRecoveryService.ts";
+import { withVerifiedArchiveActivity } from "./ThreadArchiveActivity.ts";
 
 const isThreadAboveModeLimitError = Schema.is(Orchestrator.OrchestratorThreadAboveModeLimitError);
 
@@ -1046,7 +1048,7 @@ const make = Effect.gen(function* () {
       if (failures[0] !== undefined) return yield* Effect.fail(failures[0]);
     });
 
-  return ThreadManagementService.of({
+  const service = ThreadManagementService.of({
     ensureLegacyTranscript,
     searchThreadStream: (input) =>
       Stream.unwrap(
@@ -1107,6 +1109,8 @@ const make = Effect.gen(function* () {
     streamStoredEventsFrom: orchestrator.streamStoredEventsFrom,
     streamDomainEvents: orchestrator.streamDomainEvents,
   });
+  const recovery = yield* Effect.serviceOption(ThreadRecovery.ThreadRecoveryService);
+  return withVerifiedArchiveActivity(service, Option.getOrUndefined(recovery));
 });
 
 const layerLegacyV1ThreadImporterNoop = Layer.succeed(

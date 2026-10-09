@@ -11,11 +11,51 @@ import {
   archiveRetryThreadId,
   getArchiveRecoveryRows,
   presentThreadArchive,
+  buildThreadArchiveConfirmation,
 } from "./threadArchive.ts";
 import { presentThreadShell } from "./models.ts";
 import { v2ThreadShell } from "./orchestrationV2TestFixtures.ts";
 
 const base = presentThreadShell(EnvironmentId.make("environment-test"), v2ThreadShell);
+
+describe("archive confirmation", () => {
+  const child = { ...base, id: ThreadId.make("child"), title: "Review implementation" };
+  const family = {
+    threads: [base, child],
+    children: [child],
+    activeThreadIds: [],
+    unreadThreadIds: [child.id],
+    protectedChildThreadIds: [],
+    canStopAndArchive: true,
+  };
+  it("warns about unread replies without consenting to stop newly active work", () => {
+    const confirmation = buildThreadArchiveConfirmation(family);
+    expect(confirmation.confirmLabel).toBe("Archive unread threads");
+    expect(confirmation.disposition).toBe("archive_after_review");
+    expect(confirmation.threads).toEqual([{ thread: child, label: "Unread" }]);
+    expect(confirmation.description).toContain("Replies stay in archived history");
+  });
+  it("lists an active owner and dual-status child once", () => {
+    const confirmation = buildThreadArchiveConfirmation({
+      ...family,
+      activeThreadIds: [base.id, child.id],
+    });
+    expect(confirmation.disposition).toBe("stop_and_archive");
+    expect(confirmation.threads.map(({ label }) => label)).toEqual(["Working", "Working · Unread"]);
+    expect(confirmation.description).toContain("cancels pending approvals and queued messages");
+  });
+  it("blocks the whole operation for a protected child", () => {
+    const confirmation = buildThreadArchiveConfirmation({
+      ...family,
+      threads: [base, { ...child, persistent: true }],
+      protectedChildThreadIds: [child.id],
+      canStopAndArchive: false,
+    });
+    expect(confirmation.blocked).toBe(true);
+    expect(confirmation.threads[0]?.label).toBe("Persistent");
+    expect(confirmation.description).toContain("can't be archived");
+  });
+});
 const encodeShell = Schema.encodeSync(OrchestrationV2ThreadShellJson);
 const decodeShell = Schema.decodeSync(OrchestrationV2ThreadShellJson);
 const pending = {

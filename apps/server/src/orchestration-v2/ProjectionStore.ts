@@ -63,6 +63,7 @@ import {
   ThreadId,
   TurnItemId,
   NodeId,
+  getArchiveFamilyParentThreadId,
 } from "@t3tools/contracts";
 import {
   createOrchestrationV2TurnItemVisibility,
@@ -422,6 +423,9 @@ export interface ProjectionStoreV2Shape {
   readonly getThreadShell: (
     threadId: ThreadId,
   ) => Effect.Effect<OrchestrationV2ThreadShell | null, ProjectionStoreV2Error>;
+  readonly getThreadLatestAssistantMessageAt: (
+    threadId: ThreadId,
+  ) => Effect.Effect<DateTime.Utc | null, ProjectionStoreV2Error>;
   readonly getWorktreeCleanupThreads: Effect.Effect<
     ReadonlyArray<OrchestrationV2AppThread>,
     ProjectionStoreV2Error
@@ -431,6 +435,9 @@ export interface ProjectionStoreV2Shape {
     ProjectionStoreV2Error
   >;
   readonly getOwnedThreadIds: (
+    threadId: ThreadId,
+  ) => Effect.Effect<ReadonlyArray<ThreadId>, ProjectionStoreV2Error>;
+  readonly getArchiveFamilyThreadIds: (
     threadId: ThreadId,
   ) => Effect.Effect<ReadonlyArray<ThreadId>, ProjectionStoreV2Error>;
   readonly getGroupedCreatorThreadIds: (
@@ -3691,7 +3698,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   AND json_extract(child.payload_json, '$.lineage.parentThreadId') IS NULL
                   AND json_extract(child.payload_json, '$.lineage.relationshipToParent') IS NULL
                   AND json_extract(child.payload_json, '$.forkedFrom') IS NULL
-                  AND (creator.thread_id IS NULL OR creator.archived_at IS NOT NULL OR creator.deleted_at IS NOT NULL)
+                  AND (creator.thread_id IS NULL OR creator.deleted_at IS NOT NULL)
               `;
             case "thread-families":
               return sql`
@@ -3703,6 +3710,21 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   AND json_extract(child.payload_json, '$.lineage.independent') IS NOT 1
                   AND child.deleted_at IS NULL
                   AND (parent.deleted_at IS NOT NULL OR (parent.archived_at IS NOT NULL AND child.archived_at IS NULL))
+                UNION
+                SELECT DISTINCT creator.thread_id
+                FROM orchestration_v2_projection_threads AS creator
+                JOIN orchestration_v2_projection_threads AS child
+                  ON creator.thread_id = CAST(json_extract(child.payload_json, '$.creatorThreadId') AS TEXT)
+                WHERE creator.deleted_at IS NULL AND creator.archived_at IS NOT NULL
+                  AND child.deleted_at IS NULL AND child.archived_at IS NULL
+                  AND child.project_id = creator.project_id
+                  AND json_extract(child.payload_json, '$.createdBy') = 'agent'
+                  AND json_extract(child.payload_json, '$.creatorThreadId') IS NOT NULL
+                  AND json_extract(child.payload_json, '$.creatorGrouping') = 'grouped'
+                  AND json_extract(child.payload_json, '$.lineage.parentThreadId') IS NULL
+                  AND json_extract(child.payload_json, '$.lineage.relationshipToParent') IS NULL
+                  AND json_extract(child.payload_json, '$.lineage.independent') IS NOT 1
+                  AND json_extract(child.payload_json, '$.forkedFrom') IS NULL
               `;
             case "subagent-promotions":
               return sql`
@@ -4427,6 +4449,37 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         Effect.mapError((cause) => new ProjectionStoreReadError({ threadId, cause })),
       );
 
+    const getArchiveFamilyThreadIds: ProjectionStoreV2Shape["getArchiveFamilyThreadIds"] = (
+      threadId,
+    ) =>
+      sql<{ readonly thread_id: string }>`
+        WITH RECURSIVE family(thread_id) AS (
+          SELECT ${threadId}
+          UNION
+          SELECT child.thread_id FROM orchestration_v2_projection_threads AS child
+          JOIN family ON CAST(json_extract(child.payload_json, '$.lineage.parentThreadId') AS TEXT) = family.thread_id
+          WHERE json_extract(child.payload_json, '$.lineage.relationshipToParent') = 'subagent'
+            AND json_extract(child.payload_json, '$.lineage.independent') IS NOT 1
+          UNION
+          SELECT child.thread_id FROM orchestration_v2_projection_threads AS child
+          JOIN family ON CAST(json_extract(child.payload_json, '$.creatorThreadId') AS TEXT) = family.thread_id
+          JOIN orchestration_v2_projection_threads AS creator ON creator.thread_id = family.thread_id
+          WHERE child.deleted_at IS NULL
+            AND child.project_id = creator.project_id
+            AND json_extract(child.payload_json, '$.createdBy') = 'agent'
+            AND json_extract(child.payload_json, '$.creatorThreadId') IS NOT NULL
+            AND json_extract(child.payload_json, '$.creatorGrouping') = 'grouped'
+            AND json_extract(child.payload_json, '$.lineage.parentThreadId') IS NULL
+            AND json_extract(child.payload_json, '$.lineage.relationshipToParent') IS NULL
+            AND json_extract(child.payload_json, '$.lineage.independent') IS NOT 1
+            AND json_extract(child.payload_json, '$.forkedFrom') IS NULL
+        )
+        SELECT thread_id FROM family
+      `.pipe(
+        Effect.map((rows) => rows.map((row) => ThreadId.make(row.thread_id))),
+        Effect.mapError((cause) => new ProjectionStoreReadError({ threadId, cause })),
+      );
+
     const getGroupedCreatorThreadIds = Effect.fn("ProjectionStore.getGroupedCreatorThreadIds")(
       function* (creatorThreadIds: ReadonlyArray<ThreadId>) {
         if (creatorThreadIds.length === 0) return [];
@@ -4464,6 +4517,19 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             : new ProjectionStoreReadError({ threadId, cause }),
         ),
       );
+
+    const getThreadLatestAssistantMessageAt: ProjectionStoreV2Shape["getThreadLatestAssistantMessageAt"] =
+      (threadId) =>
+        sql<{ readonly updated_at: string }>`
+        SELECT updated_at FROM orchestration_v2_projection_messages
+        WHERE thread_id = ${threadId} AND role = 'assistant'
+        ORDER BY updated_at DESC LIMIT 1
+      `.pipe(
+          Effect.map((rows) =>
+            rows[0] === undefined ? null : DateTime.makeUnsafe(rows[0].updated_at),
+          ),
+          Effect.mapError((cause) => new ProjectionStoreReadError({ threadId, cause })),
+        );
 
     const requireThread = (threadId: ThreadId) =>
       Effect.gen(function* () {
@@ -6197,8 +6263,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getShellSnapshot,
       readShellSnapshot,
       getThreadShell,
+      getThreadLatestAssistantMessageAt,
       getWorktreeCleanupThreads,
       getOwnedThreadIds,
+      getArchiveFamilyThreadIds,
       getGroupedCreatorThreadIds,
       getPersistentThreads,
       getThread,
@@ -6314,6 +6382,21 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
             .pipe(Effect.map((projection) => shellFromReplayProjection(projection, existing)));
           return shell.deletedAt === null || shell.worktreeCleanup != null ? shell : null;
         }),
+      getThreadLatestAssistantMessageAt: (threadId) =>
+        Ref.get(replayState).pipe(
+          Effect.map((state) => {
+            const messages = state.projections.get(threadId)?.messages ?? [];
+            let latest: DateTime.Utc | null = null;
+            for (const message of messages)
+              if (
+                message.role === "assistant" &&
+                (latest === null ||
+                  DateTime.toEpochMillis(message.updatedAt) > DateTime.toEpochMillis(latest))
+              )
+                latest = message.updatedAt;
+            return latest;
+          }),
+        ),
       getWorktreeCleanupThreads: Ref.get(replayState).pipe(
         Effect.map((state) =>
           [...state.projections.values()]
@@ -6342,6 +6425,19 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                   ids.add(thread.id);
               }
             }
+            return [...ids];
+          }),
+        ),
+      getArchiveFamilyThreadIds: (threadId) =>
+        Ref.get(replayState).pipe(
+          Effect.map((state) => {
+            const ids = new Set([threadId]);
+            for (const id of ids)
+              for (const { thread } of state.projections.values())
+                if (
+                  getArchiveFamilyParentThreadId(thread, state.projections.get(id)?.thread) === id
+                )
+                  ids.add(thread.id);
             return [...ids];
           }),
         ),
@@ -6473,19 +6569,21 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
               if (kind === "creator-grouping") {
                 if (!isGroupedCreatorThread(projection.thread)) return false;
                 const creator = projections.get(projection.thread.creatorThreadId!)?.thread;
-                return (
-                  creator === undefined || creator.archivedAt !== null || creator.deletedAt !== null
-                );
+                return creator === undefined || creator.deletedAt !== null;
               }
               return kind === "thread-families"
                 ? [...projections.values()].some(
                     ({ thread: child }) =>
-                      child.lineage.parentThreadId === projection.thread.id &&
-                      child.lineage.relationshipToParent === "subagent" &&
-                      child.lineage.independent !== true &&
                       child.deletedAt === null &&
-                      (projection.thread.deletedAt !== null ||
-                        (projection.thread.archivedAt !== null && child.archivedAt === null)),
+                      ((child.lineage.parentThreadId === projection.thread.id &&
+                        child.lineage.relationshipToParent === "subagent" &&
+                        child.lineage.independent !== true &&
+                        projection.thread.deletedAt !== null) ||
+                        (getArchiveFamilyParentThreadId(child, projection.thread) ===
+                          projection.thread.id &&
+                          projection.thread.archivedAt !== null &&
+                          projection.thread.deletedAt === null &&
+                          child.archivedAt === null)),
                   )
                 : needsRecovery(projection, kind);
             })

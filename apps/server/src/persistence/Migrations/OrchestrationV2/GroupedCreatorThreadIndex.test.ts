@@ -16,6 +16,7 @@ it.effect(
       yield* runLastCodeMigrations({ toMigrationInclusive: 13 });
       assert.deepEqual(yield* runDatabaseMigrations(), [
         [14, "OrchestrationV2GroupedCreatorThreadIndex"],
+        [15, "OrchestrationV2ArchiveReadIndex"],
       ]);
       assert.deepEqual(yield* runDatabaseMigrations(), []);
       for (const recovery of [false, true]) {

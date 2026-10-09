@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { create } from "zustand";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
-import { legacySidebarSubagentStatusLabel } from "./legacySidebarFamilies.logic";
-import { resolveThreadStatusPill } from "./Sidebar.logic";
+import { buildThreadArchiveConfirmation } from "@t3tools/client-runtime/state/thread-archive";
 import { Button } from "./ui/button";
 import {
   AlertDialog,
@@ -13,15 +12,10 @@ import {
   AlertDialogTitle,
 } from "./ui/alert-dialog";
 
-export type ArchiveChildDisposition = "stop_and_archive" | "promote";
+export type ArchiveChildDisposition = "stop_and_archive" | "archive_after_review";
 type Request = {
   readonly title: string;
-  readonly children: ReadonlyArray<EnvironmentThreadShell>;
-  readonly activeChildren: ReadonlyArray<EnvironmentThreadShell>;
-  readonly canPromote: boolean;
-  readonly canStopAndArchive: boolean;
-  readonly protectedCount: number;
-  readonly nativeCount: number;
+  readonly family: Parameters<typeof buildThreadArchiveConfirmation<EnvironmentThreadShell>>[0];
   /** A failed attempt closes; the caller reports its original error. */
   readonly submit: (choice: ArchiveChildDisposition) => Promise<string | null>;
   readonly resolve: (choice: ArchiveChildDisposition | null) => void;
@@ -59,29 +53,7 @@ function ThreadArchiveDialog({ request }: { request: Request }) {
   const cancelRef = useRef<HTMLButtonElement>(null);
   const submitting = useRef(false);
   const [choice, setChoice] = useState<ArchiveChildDisposition | null>(null);
-  const activeCount = request.activeChildren.length;
-  const count = request.children.length;
-  const listedChildren =
-    request.activeChildren.length > 0
-      ? request.activeChildren
-      : request.protectedCount > 0
-        ? request.children.filter((thread) => thread.persistent)
-        : request.children;
-  const depthOf = (thread: EnvironmentThreadShell) => {
-    let depth = 0;
-    const seen = new Set([thread.id]);
-    let parentId = thread.lineage?.parentThreadId;
-    while (parentId && !seen.has(parentId)) {
-      const parent = request.children.find(
-        (child) => child.environmentId === thread.environmentId && child.id === parentId,
-      );
-      if (!parent) break;
-      seen.add(parentId);
-      depth++;
-      parentId = parent.lineage?.parentThreadId;
-    }
-    return Math.min(depth, 3);
-  };
+  const confirmation = buildThreadArchiveConfirmation(request.family);
   const submit = async (next: ArchiveChildDisposition) => {
     if (submitting.current) return;
     submitting.current = true;
@@ -107,64 +79,21 @@ function ThreadArchiveDialog({ request }: { request: Request }) {
       <AlertDialogPopup initialFocus={cancelRef}>
         <AlertDialogHeader>
           <AlertDialogTitle>{request.title}</AlertDialogTitle>
-          <AlertDialogDescription>
-            {activeCount > 0
-              ? `${activeCount} ${activeCount === 1 ? "subagent is" : "subagents are"} still working or need${activeCount === 1 ? "s" : ""} your attention. `
-              : request.protectedCount > 0
-                ? "This family includes protected subagents. "
-                : "The parent is still working and will stop when archived. "}
-            Stopping archives all {count} {count === 1 ? "subagent" : "subagents"} with{" "}
-            {request.title.includes("threads?") ? "these threads" : "this thread"}.
-          </AlertDialogDescription>
+          <AlertDialogDescription>{confirmation.description}</AlertDialogDescription>
           <ul
-            aria-label={
-              activeCount > 0
-                ? "Active subagents"
-                : request.protectedCount > 0
-                  ? "Protected subagents"
-                  : "Subagents"
-            }
-            className="space-y-1 text-sm"
+            aria-label="Threads needing attention"
+            className="max-h-64 space-y-1 overflow-y-auto text-sm"
           >
-            {listedChildren.slice(0, 5).map((thread) => (
+            {confirmation.threads.map(({ thread, label }) => (
               <li
                 key={`${thread.environmentId}:${thread.id}`}
                 className="flex justify-between gap-3"
-                style={{ paddingInlineStart: `${depthOf(thread)}rem` }}
               >
-                <span className="min-w-0 truncate">{thread.title}</span>
-                <span className="shrink-0 text-muted-foreground">
-                  {thread.persistent
-                    ? "Persistent"
-                    : legacySidebarSubagentStatusLabel(thread, resolveThreadStatusPill({ thread }))}
-                </span>
+                <span className="min-w-0 break-words">{thread.title || "Untitled thread"}</span>
+                <span className="shrink-0 text-muted-foreground">{label}</span>
               </li>
             ))}
-            {listedChildren.length > 5 ? (
-              <li className="text-muted-foreground">+{listedChildren.length - 5} more</li>
-            ) : null}
           </ul>
-          {request.canPromote ? (
-            <p className="text-sm text-muted-foreground">
-              Keeping them separately preserves their work, queues, and pending requests.
-            </p>
-          ) : null}
-          {request.nativeCount > 0 ? (
-            <p className="text-sm text-muted-foreground">
-              Provider subagents cannot run on their own and will stop with their owner.
-            </p>
-          ) : null}
-          {request.protectedCount > 0 ? (
-            <p className="text-sm text-muted-foreground">
-              {request.canPromote
-                ? "Persistent subagents are protected. Keep them separately to archive this thread."
-                : "Persistent subagents are protected and cannot run separately. Remove their protection before archiving this family."}
-            </p>
-          ) : null}
-          <p className="text-sm text-muted-foreground">
-            Undo restores archived threads. Stopped work won't restart; promoted threads stay
-            separate.
-          </p>
         </AlertDialogHeader>
         <AlertDialogFooter>
           <Button
@@ -173,24 +102,17 @@ function ThreadArchiveDialog({ request }: { request: Request }) {
             disabled={choice !== null}
             onClick={() => finish(null)}
           >
-            Cancel
+            {confirmation.blocked ? "Close" : "Cancel"}
           </Button>
-          {request.canPromote ? (
+          {!confirmation.blocked ? (
             <Button
-              variant="outline"
+              variant={confirmation.active ? "destructive" : "default"}
               disabled={choice !== null}
-              onClick={() => void submit("promote")}
+              onClick={() => void submit(confirmation.disposition)}
             >
-              {choice === "promote" ? "Archiving…" : "Keep running separately"}
+              {choice !== null ? "Archiving…" : confirmation.confirmLabel}
             </Button>
           ) : null}
-          <Button
-            variant="destructive"
-            disabled={choice !== null || !request.canStopAndArchive}
-            onClick={() => void submit("stop_and_archive")}
-          >
-            {choice === "stop_and_archive" ? "Archiving…" : "Stop and archive"}
-          </Button>
         </AlertDialogFooter>
       </AlertDialogPopup>
     </AlertDialog>

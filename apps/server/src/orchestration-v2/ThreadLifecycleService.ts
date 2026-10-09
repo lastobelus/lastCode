@@ -87,7 +87,7 @@ export class ThreadLifecycleService extends Context.Service<
     readonly archive: (input: {
       readonly commandId: CommandId;
       readonly threadId: ThreadId;
-      readonly childDisposition?: "stop_and_archive" | "promote";
+      readonly childDisposition?: "archive_if_idle" | "archive_after_review" | "stop_and_archive";
       readonly expectedChildThreadIds?: ReadonlyArray<ThreadId>;
     }) => Effect.Effect<Pick<OrchestrationV2ThreadProjection, "thread">, ThreadLifecycleError>;
     readonly unarchive: (input: {

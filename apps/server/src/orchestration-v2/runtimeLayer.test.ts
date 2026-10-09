@@ -4338,9 +4338,13 @@ it.layer(layerTest)("RuntimeLayer.layer lifecycle", (it) => {
         type: "thread.archive",
         commandId: CommandId.make("runtime-layer-archive-queued-archive"),
         threadId,
+        childDisposition: "stop_and_archive",
+        expectedChildThreadIds: [],
       });
       const stopping = yield* orchestrator.getThreadProjection(threadId);
       assert.equal(stopping.runs.find((run) => run.id === activeRun.id)?.status, "interrupted");
+      assert.isNull(stopping.thread.archivedAt);
+      assert.equal(stopping.thread.archivePending?.status, "stopping");
       assert.equal(stopping.runs.find((run) => run.id === queuedRun.id)?.status, "cancelled");
       yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain();
 
@@ -5996,12 +6000,17 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
           threadId,
           limitRecovery: { runId: run.id, resetAt, autoResume: false },
         });
-      if (scenario === "archive")
+      if (scenario === "archive") {
         yield* orchestrator.dispatch({
           type: "thread.archive",
           commandId: CommandId.make(`recovery:archive:${scenario}`),
           threadId,
+          childDisposition: "stop_and_archive",
+          expectedChildThreadIds: [],
         });
+        yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain();
+        assert.isNotNull((yield* orchestrator.getThreadProjection(threadId)).thread.archivedAt);
+      }
       if (scenario === "new-message")
         yield* orchestrator.dispatch({
           type: "message.dispatch",

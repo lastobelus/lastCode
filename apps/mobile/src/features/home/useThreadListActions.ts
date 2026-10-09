@@ -23,7 +23,6 @@ import { readEnvironmentScope } from "../../state/session";
 import { environmentThreadShells, threadEnvironment } from "../../state/threads";
 import { queuedThreadKeysAtom } from "../../state/use-thread-outbox";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { useAtomQueryRunner } from "../../state/use-atom-query-runner";
 import {
   beginPendingThreadOrder,
   getPendingThreadOrder,
@@ -35,11 +34,7 @@ import {
   threadDropLifecycle,
 } from "../threads/threadOrder";
 import { getThreadListV2OrderedSection } from "../threads/threadListV2";
-import {
-  resolveThreadArchiveFamily,
-  threadCanArchive,
-  threadUnarchiveTargetId,
-} from "./threadArchive";
+import { resolveThreadArchiveFamily, threadUnarchiveTargetId } from "./threadArchive";
 import { resolveThreadTitleRename } from "../threads/thread-title-rename";
 
 /** Version skew: never send settle/unsettle to a server that predates them
@@ -132,9 +127,8 @@ function useThreadActionExecutor(
   archivedThreads?: readonly EnvironmentThreadShell[],
 ) {
   const archiveMutation = useAtomCommand(threadEnvironment.archive, { reportFailure: false });
-  const loadArchiveFamily = useAtomQueryRunner(threadEnvironment.archiveFamilyAtom, {
+  const loadArchiveFamily = useAtomCommand(threadEnvironment.loadArchiveFamily, {
     reportFailure: false,
-    refresh: true,
   });
   const unarchiveMutation = useAtomCommand(threadEnvironment.unarchive, { reportFailure: false });
   const deleteMutation = useAtomCommand(threadEnvironment.delete, { reportFailure: false });
@@ -166,7 +160,7 @@ function useThreadActionExecutor(
         if (action === "archive") {
           if (
             appAtomRegistry.get(environmentServerConfigsAtom).get(thread.environmentId)?.environment
-              .capabilities.threadArchiveFamilies !== true
+              .capabilities.threadArchiveFamiliesV2 !== true
           ) {
             Alert.alert("Server update required", THREAD_ARCHIVE_UPDATE_REQUIRED_MESSAGE);
             return false;
@@ -182,7 +176,6 @@ function useThreadActionExecutor(
           const failedAttempt =
             observedFailure ??
             (thread.archivePending?.status === "failed" ? thread.archivePending : undefined);
-          const retry = failedAttempt !== undefined;
           const archiveThreadId = failedAttempt?.threadId ?? thread.id;
           const familyResult = await loadArchiveFamily({
             environmentId: thread.environmentId,
@@ -214,31 +207,25 @@ function useThreadActionExecutor(
             );
             return false;
           }
-          const family = resolveThreadArchiveFamily(familyResult.value, thread);
-          if (!retry && !threadCanArchive(thread.runtime) && family.children.length === 0) {
-            Alert.alert(
-              actionFailureTitle(action),
-              "This thread is working. Interrupt it first, then try again.",
-            );
-            return false;
-          }
+          const family = resolveThreadArchiveFamily(familyResult.value);
 
           const childDisposition = family.requiresConfirmation
-            ? await new Promise<"stop_and_archive" | "promote" | null>((resolve) => {
+            ? await new Promise<typeof family.disposition | null>((resolve) => {
                 Alert.alert(
                   `Archive "${thread.title || "Untitled thread"}"?`,
                   family.message,
                   [
-                    { text: "Cancel", style: "cancel", onPress: () => resolve(null) },
-                    ...(family.canKeepSeparately
-                      ? [{ text: "Keep running separately", onPress: () => resolve("promote") }]
-                      : []),
-                    ...(family.canStopAndArchive
+                    {
+                      text: family.blocked ? "Close" : "Cancel",
+                      style: "cancel",
+                      onPress: () => resolve(null),
+                    },
+                    ...(!family.blocked
                       ? [
                           {
-                            text: "Stop and archive",
+                            text: family.confirmLabel,
                             style: "destructive" as const,
-                            onPress: () => resolve("stop_and_archive"),
+                            onPress: () => resolve(family.disposition),
                           },
                         ]
                       : []),

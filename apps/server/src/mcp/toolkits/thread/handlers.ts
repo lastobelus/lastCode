@@ -247,7 +247,7 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       };
     }),
   ),
-  t3_thread_archive_family: McpToolAccess.reads((input) =>
+  t3_thread_archive_family: writesThread((input) =>
     Effect.gen(function* () {
       const { threads, projection } = yield* readArchiveThread(input.threadId);
       const family = yield* threads

@@ -479,6 +479,8 @@ it.effect(
           apply: () => Effect.void,
           getLimitRecoveryCandidates: () => Effect.die("unused getLimitRecoveryCandidates"),
           getOwnedThreadIds: () => Effect.die("not used by turn control tests"),
+          getArchiveFamilyThreadIds: () => Effect.die("not used by turn control tests"),
+          getThreadLatestAssistantMessageAt: () => Effect.die("not used by turn control tests"),
           getGroupedCreatorThreadIds: () => Effect.die("not used by turn control tests"),
           getShellSnapshot: () => Effect.die("unused getShellSnapshot"),
           readShellSnapshot: () => Effect.die("unused readShellSnapshot"),

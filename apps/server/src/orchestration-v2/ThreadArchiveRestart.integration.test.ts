@@ -152,7 +152,7 @@ const createFamily = Effect.gen(function* () {
   return childId;
 });
 
-const archiveCommand = (childId: ThreadId, childDisposition: "stop_and_archive" | "promote") => ({
+const archiveCommand = (childId: ThreadId, childDisposition: "stop_and_archive") => ({
   type: "thread.archive" as const,
   commandId: CommandId.make(`archive-restart:${childDisposition}`),
   threadId: parentId,
@@ -358,7 +358,7 @@ it.effect.each([
   { runtimeMode: "approval-required", interactionMode: "default", mode: "runtime" },
   { runtimeMode: "full-access", interactionMode: "plan", mode: "interaction" },
 ] as const)(
-  "preserves the $mode ceiling after restart and permits a fresh unlimited retry",
+  "preserves a legacy pending operation's $mode ceiling after restart and permits a fresh family retry",
   (limit) =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -382,10 +382,39 @@ it.effect.each([
                 },
               });
             }
-            const command = archiveCommand(childId, "promote");
+            const command = archiveCommand(childId, "stop_and_archive");
             const result = yield* orchestrator
               .dispatch(command)
               .pipe(Effect.provideService(DispatchModeLimit, limit));
+            // Simulate the durable shape emitted by the retired archive-promotion path.
+            // New commands use family archive, while already pending operations still recover.
+            const root = yield* projections.getThread(parentId);
+            const legacyPending = { ...getThreadArchivePlan(root.archivePending)! };
+            delete legacyPending.familyVersion;
+            const child = yield* projections.getThread(childId);
+            const now = yield* DateTime.now;
+            yield* projections.apply({
+              id: EventId.make("restart-legacy-pending-owner"),
+              type: "thread.metadata-updated",
+              threadId: parentId,
+              occurredAt: now,
+              payload: {
+                ...root,
+                archivePending: {
+                  ...legacyPending,
+                  childDisposition: "promote",
+                  archiveThreadIds: [parentId],
+                  promoteThreadIds: [childId],
+                },
+              },
+            });
+            yield* projections.apply({
+              id: EventId.make("restart-legacy-pending-child"),
+              type: "thread.metadata-updated",
+              threadId: childId,
+              occurredAt: now,
+              payload: { ...child, archivePending: null },
+            });
             const effectId = yield* claimArchiveBeforeProcessLoss(command.commandId);
             return { childId, command, effectId, sequence: result.sequence };
           }).pipe(Effect.provide(runtimeLayer(dbPath, workspace))),
@@ -461,8 +490,8 @@ it.effect.each([
             yield* worker.drain();
             assert.isNotNull((yield* orchestrator.getThreadProjection(parentId)).thread.archivedAt);
             const released = yield* orchestrator.getThreadProjection(staged.childId);
-            assert.isNull(released.thread.archivedAt);
-            assert.isTrue(released.thread.lineage.independent);
+            assert.isNotNull(released.thread.archivedAt);
+            assert.isUndefined(released.thread.lineage.independent);
             assert.lengthOf(released.runs, 1);
             assert.equal(released.runs[0]?.status, "cancelled");
             assert.isAbove((yield* threads.dispatch(retry)).sequence, staged.sequence);

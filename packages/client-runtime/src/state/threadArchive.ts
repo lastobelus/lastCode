@@ -1,7 +1,55 @@
 import type { EnvironmentThreadShell } from "./models.ts";
 
 export const THREAD_ARCHIVE_UPDATE_REQUIRED_MESSAGE =
-  "Update this environment's server before archiving threads and their subagents safely.";
+  "Update this environment's server before archiving thread families safely.";
+
+/** One shared presentation for web and mobile; family membership and activity come from the server. */
+export function buildThreadArchiveConfirmation<
+  T extends Pick<EnvironmentThreadShell, "id" | "title" | "persistent">,
+>(family: {
+  readonly threads: readonly T[];
+  readonly children: readonly T[];
+  readonly activeThreadIds: readonly string[];
+  readonly unreadThreadIds: readonly string[];
+  readonly protectedChildThreadIds: readonly string[];
+  readonly canStopAndArchive: boolean;
+}) {
+  const activeIds = new Set(family.activeThreadIds);
+  const unreadIds = new Set(family.unreadThreadIds);
+  const active = activeIds.size > 0;
+  const unread = unreadIds.size > 0;
+  const blocked = !family.canStopAndArchive;
+  const protectedThreads = family.threads.filter((thread) => thread.persistent);
+  const summary = blocked
+    ? `${protectedThreads.length === 1 ? `${protectedThreads[0]!.title || "This thread"} is` : `${protectedThreads.length} threads are`} persistent and can't be archived. Remove persistent protection, then try again.`
+    : active
+      ? `${activeIds.size} ${activeIds.size === 1 ? "thread is" : "threads are"} still working. Archiving stops ${activeIds.size === 1 ? "it" : "them"}, cancels pending approvals and queued messages, and archives the whole family.${unread ? " Unread replies stay in archived history." : ""}`
+      : `${unreadIds.size} ${unreadIds.size === 1 ? "thread has" : "threads have"} replies you haven't read. Archiving closes the whole family. Replies stay in archived history.`;
+  return {
+    blocked,
+    active,
+    description: blocked
+      ? summary
+      : `${summary} Unarchiving reopens history. Stopped work won't restart.`,
+    confirmLabel: active ? "Stop active threads & archive" : "Archive unread threads",
+    disposition: active ? ("stop_and_archive" as const) : ("archive_after_review" as const),
+    threads: family.threads
+      .filter((thread) =>
+        blocked ? thread.persistent : activeIds.has(thread.id) || unreadIds.has(thread.id),
+      )
+      .map((thread) => ({
+        thread,
+        label: blocked
+          ? "Persistent"
+          : [
+              activeIds.has(thread.id) ? "Working" : null,
+              unreadIds.has(thread.id) ? "Unread" : null,
+            ]
+              .filter(Boolean)
+              .join(" · "),
+      })),
+  };
+}
 
 type ArchiveRecoveryThread = Pick<EnvironmentThreadShell, "lineage" | "archivePending"> & {
   readonly id: string;

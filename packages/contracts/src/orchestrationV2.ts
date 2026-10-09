@@ -126,8 +126,8 @@ export type OrchestrationV2AppThreadLineage = typeof OrchestrationV2AppThreadLin
 /** Idle archive is not consent to stop newly active work; the server rechecks before accepting it. */
 export const ThreadArchiveChildDisposition = Schema.Literals([
   "archive_if_idle",
+  "archive_after_review",
   "stop_and_archive",
-  "promote",
 ]);
 export type ThreadArchiveChildDisposition = typeof ThreadArchiveChildDisposition.Type;
 export const ThreadArchivedWith = Schema.Struct({ threadId: ThreadId, commandId: CommandId });
@@ -140,7 +140,15 @@ export const ThreadArchiveParticipant = Schema.Struct({
 /** Only the operation owner stores the family plan; participants hold a compact reference. */
 export const ThreadArchiveOperation = Schema.Struct({
   ...ThreadArchiveParticipant.fields,
-  childDisposition: ThreadArchiveChildDisposition,
+  /** Missing on deployed plans whose consent covered delegated ownership only. */
+  familyVersion: Schema.optional(Schema.Literal(1)),
+  // Already-deployed pending operations may finish their original promotion plan.
+  childDisposition: Schema.Literals([
+    "archive_if_idle",
+    "archive_after_review",
+    "stop_and_archive",
+    "promote",
+  ]),
   childThreadIds: Schema.Array(ThreadId),
   archiveThreadIds: Schema.Array(ThreadId),
   promoteThreadIds: Schema.Array(ThreadId),
@@ -3853,6 +3861,8 @@ export const OrchestrationV2ThreadArchiveFamily = Schema.Struct({
   threads: Schema.Array(OrchestrationV2ThreadShell),
   childThreadIds: Schema.Array(ThreadId),
   activeChildThreadIds: Schema.Array(ThreadId),
+  activeThreadIds: Schema.Array(ThreadId),
+  unreadThreadIds: Schema.Array(ThreadId),
   promotableChildThreadIds: Schema.Array(ThreadId),
   keptThreadIds: Schema.Array(ThreadId),
   protectedChildThreadIds: Schema.Array(ThreadId),

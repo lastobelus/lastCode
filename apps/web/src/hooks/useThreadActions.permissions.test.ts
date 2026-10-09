@@ -63,51 +63,50 @@ vi.mock("../state/use-atom-command", () => ({
         return AsyncResult.failure(Cause.fail(new Error("Server denied the request")));
       }
       state.afterRequest?.(action);
+      if (action === "loadArchiveFamily") {
+        return AsyncResult.success({
+          childThreadIds: [],
+          promotableChildThreadIds: [],
+          keptThreadIds: [],
+          activeChildThreadIds: [],
+          activeThreadIds: [],
+          unreadThreadIds: [],
+          protectedChildThreadIds: [],
+          nativeStopCount: 0,
+          requiresConfirmation: false,
+          canPromote: false,
+          canStopAndArchive: true,
+          children: [],
+          activeChildren: [],
+          activeThreads: [],
+          unreadThreads: [],
+          promotableChildren: [],
+          protectedChildren: [],
+          threads: state.threads
+            .filter(
+              (thread) =>
+                thread.environmentId === request.environmentId &&
+                thread.id === request.input.threadId,
+            )
+            .map((thread) => makeThreadFixture({ ...thread, runtime: null })),
+        });
+      }
       return AsyncResult.success(undefined);
     },
 }));
 vi.mock("../state/use-atom-query-runner", () => ({
-  useAtomQueryRunner: (family: unknown) =>
-    family === "archive-family"
-      ? async ({
-          environmentId,
-          input,
-        }: {
-          environmentId: EnvironmentId;
-          input: { threadId: ThreadId };
-        }) =>
-          AsyncResult.success({
-            childThreadIds: [],
-            promotableChildThreadIds: [],
-            keptThreadIds: [],
-            activeChildThreadIds: [],
-            protectedChildThreadIds: [],
-            nativeStopCount: 0,
-            requiresConfirmation: false,
-            canPromote: false,
-            canStopAndArchive: true,
-            children: [],
-            activeChildren: [],
-            promotableChildren: [],
-            protectedChildren: [],
-            threads: state.threads
-              .filter(
-                (thread) => thread.environmentId === environmentId && thread.id === input.threadId,
-              )
-              .map((thread) => makeThreadFixture({ ...thread, runtime: null })),
-          })
-      : async (environmentId: string) =>
-          state.sessionLookupFails
-            ? AsyncResult.failure(Cause.fail(new Error("Session lookup failed")))
-            : AsyncResult.success({
-                authenticated: true,
-                scopes: [...(state.scopes.get(environmentId) ?? [])],
-                auth: { serverUpdateScope: "environment:maintain" },
-              }),
+  useAtomQueryRunner: () => async (environmentId: string) =>
+    state.sessionLookupFails
+      ? AsyncResult.failure(Cause.fail(new Error("Session lookup failed")))
+      : AsyncResult.success({
+          authenticated: true,
+          scopes: [...(state.scopes.get(environmentId) ?? [])],
+          auth: { serverUpdateScope: "environment:maintain" },
+        }),
 }));
 vi.mock("../state/threads", () => ({
   threadEnvironment: {
-    archiveFamilyAtom: "archive-family",
+    loadArchiveFamily: "loadArchiveFamily",
     ...Object.fromEntries(
       [
         "archive",
@@ -292,6 +291,15 @@ describe("thread action permissions", () => {
       state.scopes.get(secondary)!.add(AuthOrchestrationOperateScope);
       expect((await run(actions, target))._tag).toBe("Success");
       expect(state.requests).toEqual([
+        ...(name === "archive"
+          ? [
+              expect.objectContaining({
+                action: "loadArchiveFamily",
+                environmentId: secondary,
+                input: { threadId: target.threadId },
+              }),
+            ]
+          : []),
         expect.objectContaining({ action: name, environmentId: secondary }),
       ]);
     },

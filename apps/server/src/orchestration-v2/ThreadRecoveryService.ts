@@ -4,18 +4,25 @@ import {
   RunId,
   RunAttemptId,
   ThreadId,
+  RuntimeMode,
+  ProviderInteractionMode,
+  type OrchestrationV2AppThread,
   type OrchestrationV2ThreadRecovery,
   type OrchestrationV2DomainEvent,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
+import { DispatchModeLimit, exceededDispatchModeLimit } from "./DispatchModeLimit.ts";
 import type {
   ProviderAdapterV2Event,
   ProviderAdapterV2TurnInspection,
@@ -46,13 +53,32 @@ export class ThreadRecoveryError extends Schema.TaggedError<ThreadRecoveryError>
     return "Could not recover this thread.";
   }
 }
+export class ThreadRecoveryAboveModeLimitError extends Schema.TaggedError<ThreadRecoveryAboveModeLimitError>()(
+  "ThreadRecoveryAboveModeLimitError",
+  {
+    threadId: ThreadId,
+    mode: Schema.Literals(["runtime", "interaction"]),
+    runtimeMode: RuntimeMode,
+    interactionMode: ProviderInteractionMode,
+  },
+) {
+  override get message() {
+    return "This thread exceeds the caller's permitted mode for recovery.";
+  }
+}
 export class ThreadRecoveryService extends Context.Service<
   ThreadRecoveryService,
   {
     readonly register: (input: RecoveryRegistration) => Effect.Effect<void>;
     readonly suspect: (input: ThreadRecoveryIdentity) => Effect.Effect<void, ThreadRecoveryError>;
     readonly completed: (input: ThreadRecoveryIdentity) => Effect.Effect<void>;
-    readonly recover: (input: ThreadRecoveryIdentity) => Effect.Effect<void, ThreadRecoveryError>;
+    readonly recover: (
+      input: ThreadRecoveryIdentity,
+    ) => Effect.Effect<void, ThreadRecoveryError | ThreadRecoveryAboveModeLimitError>;
+    /** Archive inspection repairs proven terminal attempts without turning unknown evidence into a failure. */
+    readonly verify: (
+      input: ThreadRecoveryIdentity,
+    ) => Effect.Effect<void, ThreadRecoveryError | ThreadRecoveryAboveModeLimitError>;
     readonly reconcile: Effect.Effect<void>;
     readonly withRepairableIncident: <A, E, R>(
       input: ThreadRecoveryIdentity,
@@ -78,6 +104,20 @@ const make = Effect.gen(function* () {
     `${input.threadId}:${input.runId}:${input.attemptId}`;
   const matches = (a: ThreadRecoveryIdentity, b: ThreadRecoveryIdentity) =>
     a.runId === b.runId && a.attemptId === b.attemptId;
+  const assertWithinModeLimit = Effect.fnUntraced(function* (thread: OrchestrationV2AppThread) {
+    const limit = yield* DispatchModeLimit;
+    if (limit === undefined) return;
+    const mode = exceededDispatchModeLimit(limit, thread);
+    if (mode === undefined) return;
+    const refusal = {
+      threadId: thread.id,
+      mode,
+      runtimeMode: thread.runtimeMode,
+      interactionMode: thread.interactionMode,
+    };
+    if (limit.refused !== undefined) yield* Ref.set(limit.refused, refusal);
+    return yield* new ThreadRecoveryAboveModeLimitError(refusal);
+  });
   const repairLink = (
     input: ThreadRecoveryIdentity,
     recovery: OrchestrationV2ThreadRecovery | undefined,
@@ -118,6 +158,7 @@ const make = Effect.gen(function* () {
         const state = yield* current(input);
         if (state === null || (expectedStatus !== undefined && state.run.status !== expectedStatus))
           return false;
+        yield* assertWithinModeLimit(state.thread);
         const recovery = state.thread.recovery;
         if (
           status === "suspect" &&
@@ -157,16 +198,26 @@ const make = Effect.gen(function* () {
       }),
     );
   const markFailed = Effect.fnUntraced(function* (input: ThreadRecoveryIdentity, detail: string) {
-    pendingFailures.set(incidentKey(input), detail);
-    yield* write(input, "failed", detail);
-    pendingFailures.delete(incidentKey(input));
+    const key = incidentKey(input);
+    const priorFailure = pendingFailures.get(key);
+    pendingFailures.set(key, detail);
+    yield* write(input, "failed", detail).pipe(
+      Effect.catchTags({
+        ThreadRecoveryAboveModeLimitError: (error) =>
+          Effect.sync(() => {
+            if (priorFailure === undefined) pendingFailures.delete(key);
+            else pendingFailures.set(key, priorFailure);
+          }).pipe(Effect.andThen(error)),
+      }),
+    );
+    pendingFailures.delete(key);
   });
-  const recover = (input: ThreadRecoveryIdentity, manual: boolean) =>
+  const recover = (input: ThreadRecoveryIdentity, manual: boolean, reportFailure = true) =>
     lock.withLock(
       input.threadId,
       Effect.gen(function* () {
         const pendingFailure = pendingFailures.get(incidentKey(input));
-        if (pendingFailure !== undefined) {
+        if (reportFailure && pendingFailure !== undefined) {
           yield* markFailed(input, pendingFailure);
           return;
         }
@@ -190,6 +241,7 @@ const make = Effect.gen(function* () {
         )
           return;
         if (inspection.status === "unknown") {
+          if (!reportFailure) return;
           yield* markFailed(
             input,
             "The provider's turn state could not be confirmed. No work was interrupted or restarted.",
@@ -222,6 +274,7 @@ const make = Effect.gen(function* () {
               (inspection.status !== "released" || turn.status === "running"),
           )
         ) {
+          if (!reportFailure) return;
           yield* markFailed(
             input,
             "The saved provider-turn record is missing or does not match this attempt. Automatic recovery cannot safely restore its history. Open a repair thread to investigate.",
@@ -243,6 +296,7 @@ const make = Effect.gen(function* () {
           Effect.gen(function* () {
             const latest = yield* current(input);
             if (latest === null || latest.run.status !== "running") return;
+            yield* assertWithinModeLimit(latest.thread);
             const now = yield* DateTime.now;
             const turn = latest.providerTurns.find(
               (turn) =>
@@ -294,13 +348,21 @@ const make = Effect.gen(function* () {
           matches(registeredAfterFinalization, input)
         )
           registrations.delete(input.threadId);
+        pendingFailures.delete(incidentKey(input));
       }).pipe(
         Effect.catchCause((cause) =>
           Effect.gen(function* () {
-            yield* markFailed(
-              input,
-              "Automatic recovery could not finish. Open a repair thread to investigate without repeating the original work.",
-            ).pipe(Effect.ignore);
+            const failure = Cause.findErrorOption(cause);
+            if (
+              Option.isSome(failure) &&
+              failure.value._tag === "ThreadRecoveryAboveModeLimitError"
+            )
+              return yield* failure.value;
+            if (reportFailure)
+              yield* markFailed(
+                input,
+                "Automatic recovery could not finish. Open a repair thread to investigate without repeating the original work.",
+              ).pipe(Effect.ignore);
             return yield* new ThreadRecoveryError({ threadId: input.threadId, cause });
           }),
         ),
@@ -427,6 +489,7 @@ const make = Effect.gen(function* () {
           Effect.mapError((cause) => new ThreadRecoveryError({ threadId: input.threadId, cause })),
         ),
     recover: (input) => recover(input, true),
+    verify: (input) => recover(input, true, false),
     reconcile: Effect.suspend(() =>
       Effect.forEach(
         [...registrations.values()],
