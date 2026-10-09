@@ -38,7 +38,11 @@ async function bundle(entry, format, output, native = false) {
       minify: false,
       target: native ? "node24" : "chrome144",
       lib: { entry: NodePath.join(directory, entry), formats: [format], name: "SurfaceSmoke" },
-      rolldownOptions: { external: native ? [/^node:/, "electron", "playwright-core"] : [] },
+      rolldownOptions: {
+        external: native
+          ? [/^node:/, "electron", "playwright-core", "ffi-rs", "@napi-rs/keyring"]
+          : [],
+      },
     },
   });
   const code = (Array.isArray(result) ? result[0] : result).output.find(

@@ -83,7 +83,7 @@ const PreviewStatusTool = Tool.make("preview_status", {
 
 const PreviewProfilesTool = Tool.make("preview_profiles", {
   description:
-    "List existing browser profiles (id, name, kind) and the configured defaultProfileId on this agent session's desktop host. Names may repeat; select a stable ID when they do. Profiles are desktop-local; their cookie jars are isolated per environment. This tool does not create profiles, change the default, or open a tab.",
+    "List existing browser profiles (id, name, kind) and the configured defaultProfileId on this agent session's desktop host. Names may repeat; select a stable ID when they do. Named profiles share their sign-in across environments on that desktop; Default and Incognito remain environment-local. This tool does not create profiles, change the default, or open a tab.",
   success: PreviewAutomationProfiles,
   failure: PreviewToolFailure,
   dependencies,
