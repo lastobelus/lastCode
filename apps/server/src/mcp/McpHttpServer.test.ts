@@ -29,6 +29,7 @@ import * as McpToolAccessTestkit from "./McpToolAccess.testkit.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
+import * as ThreadReadBroker from "./ThreadReadBroker.ts";
 import { ActionResume } from "../actionResume/ActionResume.ts";
 import { UpdateDrainAdmission } from "../updateDrain/UpdateDrainAdmission.ts";
 import * as DeviceService from "../device/DeviceService.ts";
@@ -134,6 +135,7 @@ it.effect("isolates full and restricted tool discovery over HTTP", () =>
             Layer.mock(VcsStatusBroadcaster.VcsStatusBroadcaster)({}),
             Layer.mock(UpdateDrainAdmission)({}),
             PreviewAutomationBroker.layer,
+            ThreadReadBroker.layer,
           ),
         ),
         Layer.build,

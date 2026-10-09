@@ -1,3 +1,4 @@
+import { ThreadReadAuthorization } from "./ThreadReadAuthorization.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
@@ -318,6 +319,38 @@ function launchInput(input: {
     creationSource: "web" as const,
   };
 }
+
+it.effect("authorizes an allocated first message before its run is committed", () => {
+  const harness = makeHarness();
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const { threadId: suppliedThreadId, ...input } = launchInput({
+      command: "authorize-generated-first-message",
+      thread: "unused-supplied-thread",
+    });
+    let authorized: { threadId: ThreadId; messageId: MessageId } | undefined;
+    const launched = yield* launches
+      .launch({
+        ...input,
+        initialMessage: { text: "First message", attachments: [] },
+      })
+      .pipe(
+        Effect.provideService(ThreadReadAuthorization, {
+          authorize: (threadId, messageId) =>
+            Effect.gen(function* () {
+              const before = yield* threads.getThreadRecords(threadId, ["runs"]);
+              assert.isFalse(before.runs.some((run) => run.userMessageId === messageId));
+              authorized = { threadId, messageId };
+            }).pipe(Effect.orDie),
+        }),
+      );
+    assert.isDefined(authorized);
+    assert.notEqual(launched.threadId, suppliedThreadId);
+    assert.equal(authorized?.threadId, launched.threadId);
+    assert.equal(launched.projection.runs[0]?.userMessageId, authorized?.messageId);
+  }).pipe(Effect.provide(harness.layer));
+});
 
 function waitUntil<E, R>(predicate: () => Effect.Effect<boolean, E, R>): Effect.Effect<void, E, R> {
   return Effect.gen(function* () {
