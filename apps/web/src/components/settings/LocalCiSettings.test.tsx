@@ -34,6 +34,7 @@ const state = vi.hoisted(() => ({
 vi.mock("../../state/environments", () => ({
   useEnvironments: () => ({ environments: state.environments }),
   usePrimaryEnvironmentId: () => state.environments[0]?.environmentId ?? null,
+  usePrimaryEnvironment: () => state.environments[0] ?? null,
 }));
 vi.mock("../../state/session", () => ({
   useEnvironmentScope: (id: EnvironmentId | null, scope: AuthEnvironmentScope) =>
