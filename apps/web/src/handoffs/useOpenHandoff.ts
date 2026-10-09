@@ -1,4 +1,5 @@
 import { hostedPreviewNavigationUrl } from "@t3tools/client-runtime/preview-hosting";
+import { AuthFilesystemReadScope } from "@t3tools/contracts";
 import type {
   AssetResource,
   ScopedThreadRef,
@@ -6,6 +7,7 @@ import type {
   PreviewNavigateInput,
   PreviewSessionSnapshot,
 } from "@t3tools/contracts";
+import { fileAssetResourceForAccess } from "@t3tools/client-runtime/state/assets";
 import { mediaFileReference } from "@t3tools/client-runtime/media-reference";
 import {
   type AtomCommandResult,
@@ -30,7 +32,7 @@ import { useRightPanelStore } from "~/rightPanelStore";
 import { assetEnvironment } from "~/state/assets";
 import { readProjects, readThreadShell } from "~/state/entities";
 import { previewEnvironment } from "~/state/preview";
-import { readPreparedConnection } from "~/state/session";
+import { readEnvironmentScope, readPreparedConnection } from "~/state/session";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
 import { primaryEnvironmentIdAtom } from "~/state/primaryEnvironment";
@@ -199,7 +201,12 @@ export async function openHandoff(
               };
         const result = await createAssetUrl({
           environmentId: ref.environmentId,
-          input: { resource },
+          input: {
+            resource: fileAssetResourceForAccess(
+              resource,
+              readEnvironmentScope(ref.environmentId, AuthFilesystemReadScope),
+            ),
+          },
         });
         if (result._tag === "Failure") throw squashAtomCommandFailure(result);
         if (existing) {
