@@ -12,6 +12,8 @@ import {
 import * as Effect from "effect/Effect";
 
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
+import { AcpProviderCapabilitiesV2 } from "@t3tools/provider-acp/server/adapter";
+import { ClaudeProviderCapabilitiesV2 } from "./Adapters/ClaudeAdapterV2.ts";
 import { CursorProviderCapabilitiesV2 } from "@t3tools/provider-cursor/testing";
 import { GrokProviderCapabilitiesV2 } from "@t3tools/provider-grok/testing";
 import * as CommandPolicy from "./CommandPolicy.ts";
@@ -144,6 +146,53 @@ it("targets the latest active run for explicit steer and restart intent", () => 
 const layer = it.layer(CommandPolicy.layer);
 
 layer("CommandPolicyV2", (it) => {
+  it.effect("native-only steering never falls back to interruption", () =>
+    Effect.gen(function* () {
+      const policy = yield* CommandPolicy.CommandPolicyV2;
+      const input = {
+        commandId,
+        threadId,
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        nativeOnly: true,
+      };
+      assert.equal(
+        yield* policy.decideSteeringExecution({ ...input, capabilities: baseCapabilities }),
+        "active_steering",
+      );
+      for (const unsafe of [
+        { forceRestart: true, capabilities: baseCapabilities },
+        ...[
+          AcpProviderCapabilitiesV2,
+          ClaudeProviderCapabilitiesV2,
+          CursorProviderCapabilitiesV2,
+          GrokProviderCapabilitiesV2,
+        ].map((providerCapabilities) => ({ capabilities: providerCapabilities })),
+        ...[false, undefined].map((supportsStrictActiveSteering) => ({
+          capabilities: capabilities((current) => ({
+            ...current,
+            turns: { ...current.turns, supportsStrictActiveSteering },
+          })),
+        })),
+        {
+          capabilities: capabilities((current) => ({
+            ...current,
+            turns: { ...current.turns, supportsActiveSteering: false },
+          })),
+        },
+        {
+          capabilities: capabilities((current) => ({
+            ...current,
+            turns: { ...current.turns, activeSteeringInterruptsTools: true },
+          })),
+        },
+      ]) {
+        const error = yield* policy
+          .decideSteeringExecution({ ...input, ...unsafe })
+          .pipe(Effect.flip);
+        assert.instanceOf(error, CommandPolicy.CommandPolicyCapabilityUnsupportedError);
+      }
+    }),
+  );
   it.effect("prefers direct active steering when the provider supports it", () =>
     Effect.gen(function* () {
       const policy = yield* CommandPolicy.CommandPolicyV2;

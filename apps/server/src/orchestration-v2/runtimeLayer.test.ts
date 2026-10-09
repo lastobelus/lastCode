@@ -965,6 +965,104 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
         ],
       );
 
+      const nativeCommand = {
+        type: "message.dispatch" as const,
+        createdBy: "user" as const,
+        creationSource: "web" as const,
+        commandId: CommandId.make("runtime-native-steer"),
+        threadId,
+        messageId: MessageId.make("runtime-native-steer"),
+        text: "Pause cooperatively after the current tool finishes.",
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: "steer_active_native" as const, targetRunId: run.id },
+      };
+      yield* orchestrator.dispatch(nativeCommand);
+      assert.deepEqual(
+        (yield* outbox.listByCommandId(nativeCommand.commandId)).map((effect) => effect.request),
+        [
+          {
+            type: "provider-turn.steer",
+            nativeOnly: true,
+            providerSessionId: providerSession.id,
+            providerThreadId: providerThread.id,
+            providerTurnId: providerTurn.id,
+            messageId: nativeCommand.messageId,
+          },
+        ],
+      );
+      for (const variant of ["selection", "interrupting", "unsupported", "stale"] as const) {
+        const commandId = CommandId.make(`runtime-native-rejected-${variant}`);
+        if (variant === "interrupting" || variant === "unsupported") {
+          sessionSpy.mockReturnValue(
+            Effect.succeed(
+              Option.some({
+                providerSession: {
+                  ...providerSession,
+                  capabilities: {
+                    ...CodexProviderCapabilitiesV2,
+                    turns: {
+                      ...CodexProviderCapabilitiesV2.turns,
+                      activeSteeringInterruptsTools: variant === "interrupting",
+                      supportsActiveSteering: variant !== "unsupported",
+                    },
+                  },
+                },
+              } as ProviderAdapterV2SessionRuntime),
+            ),
+          );
+        }
+        const sequence = yield* orchestrator.getThreadEventSequence(threadId);
+        yield* orchestrator
+          .dispatch({
+            ...nativeCommand,
+            commandId,
+            messageId: MessageId.make(`runtime-native-rejected-${variant}`),
+            ...(variant === "selection"
+              ? { modelSelection: { ...modelSelection, model: "other-model" } }
+              : {}),
+            ...(variant === "stale"
+              ? {
+                  dispatchMode: {
+                    type: "steer_active_native" as const,
+                    targetRunId: RunId.make("stale-run"),
+                  },
+                }
+              : {}),
+          })
+          .pipe(Effect.flip);
+        assert.equal(yield* orchestrator.getThreadEventSequence(threadId), sequence);
+        assert.deepEqual(yield* outbox.listByCommandId(commandId), []);
+        sessionSpy.mockReturnValue(
+          Effect.succeed(Option.some({ providerSession } as ProviderAdapterV2SessionRuntime)),
+        );
+      }
+
+      yield* eventSink.write({
+        commandId: CommandId.make("runtime-native-turn-completed"),
+        events: [
+          {
+            id: EventId.make("runtime-native-turn-completed"),
+            type: "provider-turn.updated",
+            threadId,
+            runId: run.id,
+            occurredAt: now,
+            payload: { ...providerTurn, status: "completed", completedAt: now },
+          },
+        ],
+      });
+      const noRunningTurnId = CommandId.make("runtime-native-no-running-turn");
+      const noRunningTurnSequence = yield* orchestrator.getThreadEventSequence(threadId);
+      yield* orchestrator
+        .dispatch({
+          ...nativeCommand,
+          commandId: noRunningTurnId,
+          messageId: MessageId.make("runtime-native-no-running-turn"),
+        })
+        .pipe(Effect.flip);
+      assert.equal(yield* orchestrator.getThreadEventSequence(threadId), noRunningTurnSequence);
+      assert.deepEqual(yield* outbox.listByCommandId(noRunningTurnId), []);
+
       yield* eventSink.write({
         commandId: CommandId.make("runtime-delivery-intent-completed"),
         events: [
@@ -986,6 +1084,20 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
           },
         ],
       });
+      const completedNativeId = CommandId.make("runtime-native-completed");
+      const completedSequence = yield* orchestrator.getThreadEventSequence(threadId);
+      yield* orchestrator
+        .dispatch({
+          ...nativeCommand,
+          commandId: completedNativeId,
+          messageId: MessageId.make("runtime-native-completed"),
+          deliveryIntent: "restart",
+        })
+        .pipe(Effect.flip);
+      assert.equal(yield* orchestrator.getThreadEventSequence(threadId), completedSequence);
+      assert.deepEqual(yield* outbox.listByCommandId(completedNativeId), []);
+      assert.lengthOf((yield* orchestrator.getThreadProjection(threadId)).runs, 1);
+
       const nextCommandId = CommandId.make("runtime-delivery-intent-next");
       yield* orchestrator.dispatch({
         type: "message.dispatch",
@@ -1009,6 +1121,242 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
         ["provider-turn.start"],
       );
     }),
+  );
+
+  it.effect.each(["delete", "restart"] as const)(
+    "strict steering keeps the active model and settles before %s",
+    (nextAction) =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const eventSink = yield* EventSink.EventSinkV2;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const threadId = ThreadId.make("runtime-native-queued-model");
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make("runtime-native-queued-model-create"),
+          threadId,
+          projectId: ProjectId.make("runtime-native-queued-model-project"),
+          title: "Native steering with queued model",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: process.cwd(),
+        });
+        const message = {
+          type: "message.dispatch" as const,
+          createdBy: "user" as const,
+          creationSource: "web" as const,
+          threadId,
+          text: "Work on this.",
+          attachments: [],
+        };
+        yield* orchestrator.dispatch({
+          ...message,
+          commandId: CommandId.make("runtime-native-queued-model-first"),
+          messageId: MessageId.make("runtime-native-queued-model-first"),
+          dispatchMode: { type: "start_immediately" },
+        });
+        const initial = yield* orchestrator.getThreadProjection(threadId);
+        const run = initial.runs[0]!;
+        const providerThread = initial.providerThreads[0]!;
+        const now = yield* DateTime.now;
+        const providerSession = {
+          id: providerThread.providerSessionId!,
+          driver,
+          providerInstanceId: modelSelection.instanceId,
+          status: "running" as const,
+          cwd: process.cwd(),
+          model: modelSelection.model,
+          capabilities: CodexProviderCapabilitiesV2,
+          createdAt: now,
+          updatedAt: now,
+          lastError: null,
+        };
+        const providerTurnId = ProviderTurnId.make("runtime-native-queued-model-turn");
+        yield* eventSink.write({
+          commandId: CommandId.make("runtime-native-queued-model-running"),
+          events: [
+            {
+              id: EventId.make("runtime-native-queued-model-run-event"),
+              type: "run.updated",
+              threadId,
+              runId: run.id,
+              occurredAt: now,
+              payload: { ...run, status: "running", startedAt: now },
+            },
+            {
+              id: EventId.make("runtime-native-queued-model-session-event"),
+              type: "provider-session.attached",
+              threadId,
+              occurredAt: now,
+              payload: providerSession,
+            },
+            {
+              id: EventId.make("runtime-native-queued-model-turn-event"),
+              type: "provider-turn.updated",
+              threadId,
+              runId: run.id,
+              occurredAt: now,
+              payload: {
+                id: providerTurnId,
+                providerThreadId: providerThread.id,
+                nodeId: run.rootNodeId!,
+                runAttemptId: run.activeAttemptId,
+                nativeTurnRef: null,
+                ordinal: 1,
+                status: "running",
+                startedAt: now,
+                completedAt: null,
+              },
+            },
+          ],
+        });
+        const sessionSpy = vi
+          .spyOn(sessions, "get")
+          .mockReturnValue(
+            Effect.succeed(Option.some({ providerSession } as ProviderAdapterV2SessionRuntime)),
+          );
+        yield* Effect.addFinalizer(() => Effect.sync(() => sessionSpy.mockRestore()));
+        const nextModelSelection = { ...modelSelection, model: "other-model" };
+        yield* orchestrator.dispatch({
+          type: "thread.model-selection.set",
+          commandId: CommandId.make("runtime-native-queued-model-select"),
+          threadId,
+          modelSelection: nextModelSelection,
+        });
+        yield* orchestrator.dispatch({
+          ...message,
+          commandId: CommandId.make("runtime-native-queued-model-follow-up"),
+          messageId: MessageId.make("runtime-native-queued-model-follow-up"),
+          modelSelection: nextModelSelection,
+          dispatchMode: { type: "queue_after_active" },
+        });
+        const queued = yield* orchestrator.getThreadProjection(threadId);
+        assert.deepEqual(queued.thread.modelSelection, nextModelSelection);
+        assert.deepEqual(
+          queued.runs.map((row) => row.modelSelection),
+          [modelSelection, nextModelSelection],
+        );
+        assert.deepEqual(
+          queued.runs.map((row) => row.status),
+          ["running", "queued"],
+        );
+
+        const strict = {
+          ...message,
+          commandId: CommandId.make("runtime-native-queued-model-steer"),
+          messageId: MessageId.make("runtime-native-queued-model-steer"),
+          dispatchMode: { type: "steer_active_native" as const, targetRunId: run.id },
+        };
+        yield* orchestrator.dispatch(strict);
+        const steered = yield* orchestrator.getThreadProjection(threadId);
+        assert.deepEqual(steered.thread.modelSelection, nextModelSelection);
+        assert.deepEqual(steered.runs, queued.runs);
+        assert.equal(steered.messages.find((row) => row.id === strict.messageId)?.runId, run.id);
+        assert.deepEqual(
+          (yield* outbox.listByCommandId(strict.commandId)).map((effect) => effect.request),
+          [
+            {
+              type: "provider-turn.steer",
+              nativeOnly: true,
+              providerSessionId: providerSession.id,
+              providerThreadId: providerThread.id,
+              providerTurnId,
+              messageId: strict.messageId,
+            },
+          ],
+        );
+        const rejectedCommandId = CommandId.make("runtime-native-queued-model-rejected");
+        const sequence = yield* orchestrator.getThreadEventSequence(threadId);
+        const error = yield* orchestrator
+          .dispatch({
+            ...strict,
+            commandId: rejectedCommandId,
+            messageId: MessageId.make("runtime-native-queued-model-rejected"),
+            modelSelection: nextModelSelection,
+          })
+          .pipe(Effect.flip);
+        assert.instanceOf(error, Orchestrator.OrchestratorDispatchError);
+        assert.equal(yield* orchestrator.getThreadEventSequence(threadId), sequence);
+        assert.deepEqual(yield* outbox.listByCommandId(rejectedCommandId), []);
+        // The accepted steer is still durable when its target is retired.
+        // Cancel the initial start: this fixture already supplied the running turn.
+        yield* outbox.cancelUnsettled({
+          threadId,
+          effectTypes: ["provider-turn.start"],
+          reason: "running provider turn seeded by test",
+        });
+        if (nextAction === "delete") {
+          yield* orchestrator.dispatch({
+            type: "thread.delete",
+            commandId: CommandId.make("zz-runtime-native-queued-model-delete"),
+            threadId,
+          });
+          const deleted = yield* orchestrator.getThreadProjection(threadId);
+          assert.isNotNull(deleted.thread.deletedAt);
+          assert.notInclude(
+            deleted.providerSessions.map((row) => row.id),
+            providerSession.id,
+          );
+          assert.equal(deleted.runs.find((row) => row.id === run.id)?.status, "cancelled");
+          assert.equal(
+            deleted.providerTurns.find((row) => row.id === providerTurnId)?.status,
+            "running",
+          );
+        } else {
+          yield* orchestrator.dispatch({
+            ...message,
+            commandId: CommandId.make("zz-runtime-native-queued-model-restart"),
+            messageId: MessageId.make("runtime-native-queued-model-restart"),
+            modelSelection,
+            dispatchMode: { type: "restart_active", targetRunId: run.id },
+          });
+          const restarted = yield* orchestrator.getThreadProjection(threadId);
+          assert.notEqual(
+            restarted.runs.find((row) => row.id === run.id)?.activeAttemptId,
+            run.activeAttemptId,
+          );
+          assert.equal(
+            restarted.providerThreads.find((row) => row.id === providerThread.id)
+              ?.providerSessionId,
+            providerSession.id,
+          );
+          const projections = yield* ProjectionStore.ProjectionStoreV2;
+          const obsolete = yield* projections.getProviderControlContext(threadId, {
+            providerThreadId: providerThread.id,
+            providerTurnId,
+            messageId: strict.messageId,
+          });
+          assert.equal(obsolete.providerTurn?.status, "running");
+          assert.isUndefined(obsolete.run);
+        }
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        // The earlier steer must settle before later provider effects can be claimed.
+        assert.isTrue(yield* worker.runOnce);
+        const [settledSteer] = yield* outbox.listByCommandId(strict.commandId);
+        assert.equal(settledSteer?.status, "succeeded");
+        assert.equal(settledSteer?.attemptCount, 1);
+        if (nextAction === "restart") {
+          const next = yield* outbox.claimNext({
+            workerId: "restart-regression",
+            leaseDurationMs: 30_000,
+          });
+          assert.isTrue(Option.isSome(next));
+          if (Option.isNone(next))
+            return assert.fail("Restart remained blocked behind the stale steer");
+          assert.equal(next.value.request.type, "provider-turn.restart");
+          assert.equal(
+            next.value.commandId,
+            CommandId.make("zz-runtime-native-queued-model-restart"),
+          );
+          assert.equal(next.value.status, "running");
+          assert.equal(next.value.attemptCount, 1);
+        }
+      }).pipe(Effect.provide(Layer.fresh(layerTest))),
   );
 
   it.effect("answers an async question after its provider exits and commits the answer once", () =>
