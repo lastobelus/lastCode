@@ -74,6 +74,61 @@ const refusedBeforePrompt = (error: unknown): boolean =>
   Predicate.isTagged(error, "ClaudeBackgroundWorkBlocksQueryReplacementError") ||
   (Predicate.hasProperty(error, "cause") && refusedBeforePrompt(error.cause));
 
+interface StartDeliveryEvidence {
+  observedStarting: boolean;
+  invoked: boolean;
+  receiptReported: boolean;
+}
+
+// These callbacks outlive startup with the event worker. Create them outside
+// the startup generator so their closure cannot retain its projection/history.
+const makeDeliveryReporter = (
+  messageId: MessageId,
+  onMessageDelivery: Parameters<ProviderTurnStartServiceV2Shape["start"]>[0]["onMessageDelivery"],
+  evidence: StartDeliveryEvidence,
+) => {
+  const report = (delivered: boolean) =>
+    Effect.suspend(() => {
+      if (
+        evidence.receiptReported ||
+        onMessageDelivery === undefined ||
+        (!delivered && evidence.invoked)
+      )
+        return Effect.void;
+      evidence.receiptReported = true;
+      return onMessageDelivery(messageId, delivered);
+    });
+  return {
+    report,
+    preNativeFailure: (delivered: boolean) => (delivered ? Effect.void : report(false)),
+  };
+};
+
+const makeNativeDeliverySession = (
+  session: ProviderAdapterV2SessionRuntime,
+  evidence: StartDeliveryEvidence,
+  reportDelivery: (delivered: boolean) => Effect.Effect<void>,
+): ProviderAdapterV2SessionRuntime => {
+  const start = (turnInput: Parameters<typeof session.startTurn>[0], compact = false) =>
+    Effect.suspend(() => {
+      // An error after invocation cannot prove the prompt was not received.
+      evidence.invoked = true;
+      return (compact ? session.compactThread!(turnInput) : session.startTurn(turnInput)).pipe(
+        Effect.tap(() => reportDelivery(true)),
+      );
+    });
+  return {
+    ...session,
+    startTurn: (turnInput) => start(turnInput),
+    ...(session.compactThread === undefined
+      ? {}
+      : {
+          compactThread: (turnInput: Parameters<typeof session.startTurn>[0]) =>
+            start(turnInput, true),
+        }),
+  };
+};
+
 export interface ProviderTurnStartServiceV2Shape {
   /**
    * Starts the run's provider turn. When `willRetry` is true, a session open
@@ -235,7 +290,7 @@ export const layer: Layer.Layer<
           delivered: boolean,
         ) => Effect.Effect<void>;
       },
-      nativeStart: { observedStarting: boolean; invoked: boolean; receiptReported: boolean },
+      nativeStart: StartDeliveryEvidence,
     ) {
       const { runId } = input;
       const projection = yield* projectionStore.getTurnStartContext(input.threadId, runId);
@@ -248,17 +303,12 @@ export const layer: Layer.Layer<
         return;
       }
       nativeStart.observedStarting = true;
-      const reportDelivery = (delivered: boolean) =>
-        Effect.suspend(() => {
-          if (
-            nativeStart.receiptReported ||
-            input.onMessageDelivery === undefined ||
-            (!delivered && nativeStart.invoked)
-          )
-            return Effect.void;
-          nativeStart.receiptReported = true;
-          return input.onMessageDelivery(run.userMessageId, delivered);
-        });
+      const deliveryReporter = makeDeliveryReporter(
+        run.userMessageId,
+        input.onMessageDelivery,
+        nativeStart,
+      );
+      const reportDelivery = deliveryReporter.report;
       const rootNode = projection.nodes.find((candidate) => candidate.id === run.rootNodeId);
       const attempt = projection.attempts.find((candidate) => candidate.id === run.activeAttemptId);
       const providerThread = projection.providerThreads.find(
@@ -621,29 +671,7 @@ export const layer: Layer.Layer<
         });
         return;
       }
-      const nativeSession = sessionResult.success;
-      const invokeNativeStart = (
-        turnInput: Parameters<typeof nativeSession.startTurn>[0],
-        compact = false,
-      ) =>
-        Effect.suspend(() => {
-          // An error after this boundary cannot prove that the prompt was not
-          // received, including a lost acknowledgement or finalization failure.
-          nativeStart.invoked = true;
-          return (
-            compact ? nativeSession.compactThread!(turnInput) : nativeSession.startTurn(turnInput)
-          ).pipe(Effect.tap(() => reportDelivery(true)));
-        });
-      const session: ProviderAdapterV2SessionRuntime = {
-        ...nativeSession,
-        startTurn: (turnInput) => invokeNativeStart(turnInput),
-        ...(nativeSession.compactThread === undefined
-          ? {}
-          : {
-              compactThread: (turnInput: Parameters<typeof nativeSession.startTurn>[0]) =>
-                invokeNativeStart(turnInput, true),
-            }),
-      };
+      const session = makeNativeDeliverySession(sessionResult.success, nativeStart, reportDelivery);
       // Only the provider's own thread load fails the run on the last attempt;
       // store, id and handoff failures around it keep their typed errors.
       const loadFromProvider = (
@@ -1290,8 +1318,7 @@ export const layer: Layer.Layer<
         ...(input.onMessageDelivery === undefined
           ? {}
           : {
-              onMessageDelivery: (delivered: boolean) =>
-                delivered ? Effect.void : reportDelivery(false),
+              onMessageDelivery: deliveryReporter.preNativeFailure,
             }),
         appThread: projection.thread,
         providerSessionId,
