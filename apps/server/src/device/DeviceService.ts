@@ -219,6 +219,11 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
     Effect.map((value) => ({
       enabled: value.enableDeviceSupport,
       agentAccessEnabled: value.enableAgentDeviceAccess,
+      anyAgentAccessEnabled:
+        value.enableAgentDeviceAccess ||
+        Object.values(value.projectSettingsOverrides).some(
+          (override) => override.enableAgentDeviceAccess === true,
+        ),
       onboardingCompleted: value.deviceOnboardingCompleted,
     })),
     Effect.mapError(
@@ -344,7 +349,12 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
   const agentReadinessIfSupported: DeviceService["Service"]["agentReadinessIfSupported"] =
     Effect.fn("DeviceService.agentReadinessIfSupported")(function* (hostId, agentAccessEnabled) {
       const deviceSettings = yield* readDeviceSettings;
-      if (!deviceSettings.enabled || !(agentAccessEnabled ?? deviceSettings.agentAccessEnabled))
+      // A caller's earlier project authorization cannot revive a revoked final grant.
+      if (
+        !deviceSettings.enabled ||
+        !deviceSettings.anyAgentAccessEnabled ||
+        !(agentAccessEnabled ?? deviceSettings.agentAccessEnabled)
+      )
         return null;
       const host = yield* resolveHost(hostId);
       const current = yield* host.current;
@@ -595,19 +605,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
   );
 
   const stopUnusedAgents = Effect.gen(function* () {
-    const current = yield* settings.getSettings.pipe(
-      Effect.mapError(
-        (cause) =>
-          new DeviceOperationError({ operation: "settings", reason: "settings_failed", cause }),
-      ),
-    );
-    if (
-      current.enableAgentDeviceAccess ||
-      Object.values(current.projectSettingsOverrides).some(
-        (override) => override.enableAgentDeviceAccess === true,
-      )
-    )
-      return;
+    if ((yield* readDeviceSettings).anyAgentAccessEnabled) return;
     yield* Effect.forEach(
       hosts.values(),
       (host) =>

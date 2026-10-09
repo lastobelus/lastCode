@@ -325,6 +325,10 @@ describe("device setup consent", () => {
   it.effect("starts agent helpers for authorized project access when global access is off", () =>
     Effect.gen(function* () {
       const { service, agentStarts, settings } = yield* fixture();
+      yield* Ref.update(settings, (current) => ({
+        ...current,
+        projectSettingsOverrides: { "project-1": { enableAgentDeviceAccess: true } },
+      }));
       yield* service.configure({ enabled: true });
       expect((yield* Ref.get(settings)).enableAgentDeviceAccess).toBe(false);
       expect(yield* service.agentReadinessIfSupported()).toBeNull();
@@ -382,6 +386,11 @@ describe("device setup consent", () => {
       yield* service.configure({ agentAccessEnabled: false, onboardingCompleted: true });
       expect(agentStops).toEqual(["stop"]);
       expect(yield* service.agentReadinessIfSupported()).toBeNull();
+      expect(yield* service.agentReadinessIfSupported(LOCAL_DEVICE_HOST_ID, true)).toBeNull();
+      yield* Ref.update(settings, (current) => ({
+        ...current,
+        projectSettingsOverrides: { "project-1": { enableAgentDeviceAccess: true } },
+      }));
       expect(yield* service.agentReadinessIfSupported(LOCAL_DEVICE_HOST_ID, true)).not.toBeNull();
       expect((yield* service.state).onboardingCompleted).toBe(true);
       expect((yield* Ref.get(settings)).deviceOnboardingCompleted).toBe(true);
@@ -415,6 +424,9 @@ it.effect.each(["disabled", "removed"] as const)(
       }));
       yield* service.reconcileAgentAccess;
       expect(agentStops).toEqual(["stop"]);
+      // A delayed caller's earlier grant must not restart the just-stopped helper.
+      expect(yield* service.agentReadinessIfSupported(LOCAL_DEVICE_HOST_ID, true)).toBeNull();
+      expect(agentStarts).toHaveLength(1);
       expect(starts).not.toContain("stop");
       expect((yield* service.state).sessions).toContain(opened);
       // Unrelated settings changes do not contact an inactive host again.
@@ -863,7 +875,11 @@ it.effect("reads an already running daemon without startup phases or state broad
       undefined,
       true,
     );
-    yield* Ref.update(settings, (current) => ({ ...current, enableDeviceSupport: true }));
+    yield* Ref.update(settings, (current) => ({
+      ...current,
+      enableDeviceSupport: true,
+      projectSettingsOverrides: { "project-1": { enableAgentDeviceAccess: true } },
+    }));
     const revision = (yield* service.state).revision;
     expect(
       (yield* service.agentReadinessIfSupported(LOCAL_DEVICE_HOST_ID, true))?.agentDevice.baseUrl,

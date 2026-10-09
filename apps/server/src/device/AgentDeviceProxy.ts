@@ -72,6 +72,7 @@ const targetsAnotherDevice = (
   selectors: Readonly<Record<string, unknown>> | undefined,
   deviceId: string,
 ) =>
+  selectors?.device !== undefined ||
   [selectors?.udid, selectors?.serial, selectors?.deviceId].some(
     (id) => id !== undefined && id !== deviceId,
   );
@@ -213,11 +214,11 @@ const handler = Effect.gen(function* () {
   }
   const devices = yield* DeviceService.DeviceService;
   const ready = yield* devices.agentReadinessIfSupported(target.hostId, true);
-  if (!ready) return HttpServerResponse.text("Device agent is not running", { status: 503 });
   // Commands must observe external shutdown/replacement before using a retained credential.
-  if (rpc) yield* devices.refreshAgentDevice(ready);
+  if (ready && rpc) yield* devices.refreshAgentDevice(ready);
   // Readiness can outlast resource ownership, host identity, or thread consent.
   yield* access.authorize(token, resource);
+  if (!ready) return HttpServerResponse.text("Device agent is not running", { status: 503 });
   const headers: Record<string, string> = {};
   const connectionHeaders = new Set(
     (request.headers.connection ?? "")
