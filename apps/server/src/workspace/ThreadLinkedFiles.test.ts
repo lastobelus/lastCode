@@ -12,6 +12,7 @@ import {
 } from "@t3tools/contracts";
 import * as AssistantMarkdownFiles from "@t3tools/shared/assistantMarkdownFiles";
 import { resolvePathLinkTarget } from "@t3tools/shared/fileLinks";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { vi } from "vite-plus/test";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -211,7 +212,7 @@ describe("ThreadLinkedFiles", () => {
   for (const filename of ["report.md", "report%20.md", "report#L12.md", "report.md:012"]) {
     it.effect.skipIf(
       resolvePathLinkTarget("~/", process.cwd()) === "~/" ||
-        (process.platform === "win32" && filename.includes(":")),
+        (HostProcessPlatform.defaultValue() === "win32" && filename.includes(":")),
     )(`reads the exact home-relative publication ${filename} without reparsing its filename`, () =>
       withWorkspace(
         (root) =>
