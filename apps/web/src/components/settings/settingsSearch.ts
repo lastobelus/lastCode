@@ -923,6 +923,11 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/lastcode",
   },
   {
+    id: "scale-legacy-sidebar",
+    title: "Scale legacy sidebar",
+    to: "/settings/lastcode",
+  },
+  {
     id: "local-ci-quick-mode",
     title: "Quick CI mode",
     to: "/settings/lastcode",
@@ -956,6 +961,53 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/lastcode",
     scope: "environment-defaults",
     searchTerms: ["local ci quick full cpu priority responsive nice"],
+  },
+  {
+    id: "thread-grouping-style",
+    title: "Thread grouping style",
+    to: "/settings/lastcode",
+    searchTerms: ["legacy sidebar subagents agent-created minimal typed groups relationships"],
+  },
+  {
+    id: "compact-status-indicators",
+    title: "Compact status indicators",
+    to: "/settings/lastcode",
+  },
+  {
+    id: "show-worktree-indicators",
+    title: "Show worktree indicators (legacy sidebar)",
+    to: "/settings/lastcode",
+  },
+  {
+    id: "rounded-project-icons",
+    title: "Rounded project icons",
+    to: "/settings/lastcode",
+  },
+  {
+    id: "show-thread-provider-badges",
+    title: "Show thread provider badges",
+    to: "/settings/lastcode",
+    searchTerms: ["sidebar provider logo badge environment machine local icon"],
+  },
+  {
+    id: "thread-provider-badge-size",
+    title: "Provider badge size",
+    to: "/settings/lastcode",
+    // The toggle stays mounted when its size and transparency sliders are hidden.
+    targetId: "show-thread-provider-badges",
+    searchTerms: ["sidebar provider logo badge size percentage machine icon scale"],
+  },
+  {
+    id: "thread-provider-badge-transparency",
+    title: "Provider badge transparency",
+    to: "/settings/lastcode",
+    targetId: "show-thread-provider-badges",
+    searchTerms: ["sidebar provider logo badge transparency opacity transparent"],
+  },
+  {
+    id: "environment-icons",
+    title: "Environment icons",
+    to: "/settings/lastcode",
   },
   {
     id: "archive",

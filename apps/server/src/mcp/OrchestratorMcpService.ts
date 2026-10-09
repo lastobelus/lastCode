@@ -642,6 +642,8 @@ function listItemFromShell(
     title: shell.title,
     createdBy: shell.createdBy,
     creationSource: shell.creationSource,
+    ...(shell.creatorThreadId === undefined ? {} : { creatorThreadId: shell.creatorThreadId }),
+    ...(shell.creatorGrouping === undefined ? {} : { creatorGrouping: shell.creatorGrouping }),
     status: shell.activityRunStatus ?? shell.status,
     latestRunId: shell.latestRunId,
     providerInstanceId: shell.modelSelection.instanceId,
@@ -673,6 +675,12 @@ function threadDetail(
     title: projection.thread.title,
     createdBy: projection.thread.createdBy,
     creationSource: projection.thread.creationSource,
+    ...(projection.thread.creatorThreadId === undefined
+      ? {}
+      : { creatorThreadId: projection.thread.creatorThreadId }),
+    ...(projection.thread.creatorGrouping === undefined
+      ? {}
+      : { creatorGrouping: projection.thread.creatorGrouping }),
     status: active?.status ?? latest?.status ?? "idle",
     latestRunId: latest?.id ?? null,
     activeRunId: active?.id ?? null,
@@ -2140,6 +2148,7 @@ const make = Effect.gen(function* () {
                   type: "thread.create",
                   createdBy: "agent",
                   creationSource: "mcp",
+                  creatorThreadId: scope.thread.threadId,
                   commandId: stableCommandId({
                     scope,
                     requestKey: key,
@@ -2228,6 +2237,12 @@ const make = Effect.gen(function* () {
                 title: projection.thread.title,
                 createdBy: projection.thread.createdBy,
                 creationSource: projection.thread.creationSource,
+                ...(projection.thread.creatorThreadId === undefined
+                  ? {}
+                  : { creatorThreadId: projection.thread.creatorThreadId }),
+                ...(projection.thread.creatorGrouping === undefined
+                  ? {}
+                  : { creatorGrouping: projection.thread.creatorGrouping }),
                 providerInstanceId: target.modelSelection.instanceId,
                 model: target.modelSelection.model,
               } satisfies OrchestratorMcpCreatedThread;
