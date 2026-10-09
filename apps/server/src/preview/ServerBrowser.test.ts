@@ -195,13 +195,12 @@ let encoderSetupGate: ReturnType<typeof Promise.withResolvers<void>> | null = nu
 let recordingCdpGate: ReturnType<typeof Promise.withResolvers<void>> | null = null;
 let recordingStageEntered: ReturnType<typeof Promise.withResolvers<void>> | null = null;
 const encoderPages: Array<ReturnType<typeof makeContext>["page"]> = [];
-let profileCatalogue: {
-  desktopHostId: string;
-  profiles: Array<{ id: string; name: string; kind: "persistent" }>;
-  defaultProfileId: string;
-} | null = null;
+type ProfileCatalogue = NonNullable<
+  Effect.Success<ReturnType<DesktopChannel.DesktopBrowserChannel["Service"]["getProfiles"]>>
+>;
+let profileCatalogue: ProfileCatalogue | null = null;
 const profileRequests: Array<{ desktopHostId?: string }> = [];
-const profileCatalogues = new Map<string, NonNullable<typeof profileCatalogue>>();
+const profileCatalogues = new Map<string, ProfileCatalogue>();
 /** Pages the fake desktop takes back or returns; the channel's streams emit them. */
 const desktopDetaches = new NodeEvents.EventEmitter();
 const desktopTabs = new Set<string>();
@@ -3117,7 +3116,7 @@ it.live("keeps profile discovery and new tabs on the caller's retained desktop o
       ).toMatchObject({ desktopHostId: "host-b", profileId: "work" });
       const requestedCatalogues = profileRequests.length;
       const stale = yield* broker
-        .invoke({
+        .invoke<PreviewAutomationStatus>({
           scope,
           tabId: PreviewTabId.make("missing-tab"),
           operation: "openWithProfile",
@@ -3128,7 +3127,7 @@ it.live("keeps profile discovery and new tabs on the caller's retained desktop o
       expect(profileRequests).toHaveLength(requestedCatalogues);
       profileCatalogues.clear();
       const unavailable = yield* broker
-        .invoke({
+        .invoke<PreviewAutomationStatus>({
           scope,
           tabId,
           operation: "open",
@@ -3199,7 +3198,7 @@ it.live.each([false, true])(
         );
         yield* browser.attachViewer(viewerInput(tabId, true));
         const controlled = yield* broker
-          .invoke({
+          .invoke<PreviewAutomationStatus>({
             scope,
             tabId,
             operation: "openWithProfile",
