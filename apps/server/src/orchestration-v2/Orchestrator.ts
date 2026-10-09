@@ -427,6 +427,12 @@ function isGoalCommand(message: {
 
 const threadPullRequestLinksEqual = Schema.toEquivalence(Schema.NullOr(ThreadLinkedPullRequest));
 
+/** Only the outbox's late-steer fallback may finish an already accepted delivery. */
+export const AcceptedSteeringContinuation = Context.Reference<MessageId | null>(
+  "t3/orchestration-v2/AcceptedSteeringContinuation",
+  { defaultValue: () => null },
+);
+
 function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
   switch (command.type) {
     case "thread.create":
@@ -4588,9 +4594,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (
         command.senderThreadId !== undefined &&
         command.senderThreadId !== command.threadId &&
-        !projection.messages.some(
-          (message) =>
-            message.id === command.messageId && message.senderThreadId === command.senderThreadId,
+        !(
+          (yield* AcceptedSteeringContinuation) === command.messageId &&
+          projection.messages.some(
+            (message) =>
+              message.id === command.messageId && message.senderThreadId === command.senderThreadId,
+          )
         )
       ) {
         const sender = yield* projectionStore

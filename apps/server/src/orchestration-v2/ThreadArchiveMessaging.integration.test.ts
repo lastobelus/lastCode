@@ -139,6 +139,26 @@ it.effect("rejects an archived sender without changing its recipient", () =>
   }).pipe(Effect.provide(fixture())),
 );
 
+it.effect("does not reuse an accepted turn as a new send from an archived sender", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const sender = ThreadId.make("accepted-turn-sender");
+    const target = ThreadId.make("accepted-turn-recipient");
+    yield* create(sender);
+    yield* create(target);
+    const accepted = message(target, "accepted-turn", undefined, sender);
+    yield* orchestrator.dispatch(accepted);
+    yield* archive(sender);
+    const before = yield* orchestrator.getThreadProjection(target);
+    const command = { ...accepted, commandId: CommandId.make("send:reused-accepted-turn") };
+    const error = yield* orchestrator.dispatch(command).pipe(Effect.flip);
+    assert.instanceOf(error, Orchestrator.OrchestratorDispatchError);
+    assert.deepEqual(yield* orchestrator.getThreadProjection(target), before);
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    assert.isEmpty(yield* outbox.listByCommandId(command.commandId));
+  }).pipe(Effect.provide(fixture())),
+);
+
 it.effect("keeps live, self, opposite-direction sends and committed receipt replay working", () =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;

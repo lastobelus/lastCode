@@ -1,5 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import {
+  ChatAttachmentId,
   CommandId,
   MessageId,
   EventId,
@@ -682,6 +683,47 @@ it.effect("starts a steer that missed the turn on the saved next-turn selection"
         assert.isNotNull(
           (yield* orchestrator.getThreadProjection(senderThreadId)).thread.archivedAt,
         );
+        const accepted = (yield* orchestrator.getThreadProjection(threadId)).messages.find(
+          (message) => message.id === MessageId.make("message:steer"),
+        )!;
+        const beforeRejectedSend = yield* orchestrator.getThreadProjection(threadId);
+        const alterations = [
+          {},
+          { text: "new content after archive" },
+          {
+            attachments: [
+              {
+                type: "file" as const,
+                id: ChatAttachmentId.make("attachment_changed_steer"),
+                name: "changed.txt",
+                mimeType: "text/plain",
+                sizeBytes: 1,
+              },
+            ],
+          },
+          { context: { version: 1 as const, records: [] } },
+          { dispatchMode: { type: "steer_active" as const, targetRunId: first.runId } },
+          { deliveryIntent: "steer" as const },
+        ];
+        for (const [index, alteration] of alterations.entries()) {
+          const error = yield* orchestrator
+            .dispatch({
+              type: "message.dispatch",
+              commandId: CommandId.make(`changed-steer:${index}`),
+              threadId,
+              messageId: accepted.id,
+              senderThreadId,
+              text: accepted.text,
+              attachments: accepted.attachments,
+              createdBy: accepted.createdBy,
+              creationSource: accepted.creationSource,
+              dispatchMode: { type: "start_immediately" },
+              ...alteration,
+            })
+            .pipe(Effect.flip);
+          assert.instanceOf(error, Orchestrator.OrchestratorDispatchError);
+          assert.deepEqual(yield* orchestrator.getThreadProjection(threadId), beforeRejectedSend);
+        }
         // The turn ends before the worker delivers the steer, so the steer
         // becomes a follow-up turn.
         const settled = yield* orchestrator.streamDomainEvents.pipe(
