@@ -7,6 +7,7 @@ import {
   PlanId,
   ProjectId,
   ProviderInstanceId,
+  RunId,
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
@@ -24,6 +25,7 @@ import * as Path from "effect/Path";
 import * as ServerConfig from "../config.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as ThreadLinkedFiles from "./ThreadLinkedFiles.ts";
@@ -43,7 +45,7 @@ const layerBase = Layer.mergeAll(
   ServerConfig.ServerConfig.layerTest(process.cwd(), { prefix: "t3-linked-files-test-" }),
 ).pipe(Layer.provideMerge(NodeServices.layer));
 
-const withWorkspace = <E>(
+const withWorkspace = <E, EProjection = never>(
   test: (
     root: string,
     outside: string,
@@ -56,6 +58,10 @@ const withWorkspace = <E>(
     | Path.Path
   >,
   directory?: string,
+  projectionLayer: Layer.Layer<
+    ProjectionStore.ProjectionStoreV2,
+    EProjection
+  > = ProjectionStore.layerMemory,
 ) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -83,7 +89,7 @@ const withWorkspace = <E>(
       deletedAt: null,
     } satisfies ProjectStore.ProjectRow;
     const layerLinked = ThreadLinkedFiles.layer.pipe(
-      Layer.provideMerge(ProjectionStore.layerMemory),
+      Layer.provideMerge(projectionLayer),
       Layer.provide(layerFiles),
       Layer.provide(WorkspaceEntries.layer.pipe(Layer.provide(WorkspacePaths.layer))),
       Layer.provide(
@@ -209,6 +215,303 @@ const addPlan = Effect.fn("addPlan")(function* (markdown: string, inTurnItem = f
 afterEach(() => vi.restoreAllMocks());
 
 describe("ThreadLinkedFiles", () => {
+  it.effect.each(["memory", "sqlite"])(
+    "reads only visible inherited publications through nested fork cutoffs (%s)",
+    (store) =>
+      withWorkspace(
+        (root) =>
+          Effect.gen(function* () {
+            const fs = yield* FileSystem.FileSystem;
+            const path = yield* Path.Path;
+            const linked = yield* ThreadLinkedFiles.ThreadLinkedFiles;
+            const projections = yield* ProjectionStore.ProjectionStoreV2;
+            const base = yield* projections.getThread(threadId);
+            const childId = ThreadId.make("linked-child");
+            const leafId = ThreadId.make("linked-leaf");
+            const unrelatedId = ThreadId.make("linked-unrelated");
+            const childRoot = path.resolve(root, "../child-worktree");
+            const leafRoot = path.resolve(root, "../leaf-worktree");
+            const createThread = Effect.fn(function* (
+              id: ThreadId,
+              cwd: string,
+              fork?: { threadId: ThreadId; runId: RunId },
+            ) {
+              const now = yield* DateTime.now;
+              yield* fs.makeDirectory(cwd, { recursive: true });
+              yield* projections.apply({
+                id: EventId.make(`created-${id}`),
+                type: "thread.created",
+                threadId: id,
+                occurredAt: now,
+                payload: {
+                  ...base,
+                  id,
+                  worktreePath: cwd,
+                  createdAt: now,
+                  updatedAt: now,
+                  forkedFrom: fork === undefined ? null : { type: "run", ...fork },
+                  lineage: {
+                    parentThreadId: fork?.threadId ?? null,
+                    relationshipToParent: fork === undefined ? null : "fork",
+                    rootThreadId: fork === undefined ? id : threadId,
+                  },
+                },
+              });
+            });
+            const createRun = Effect.fn(function* (owner: ThreadId, ordinal: number) {
+              const now = yield* DateTime.now;
+              const id = RunId.make(`run-${owner}-${ordinal}`);
+              yield* projections.apply({
+                id: EventId.make(`created-${id}`),
+                type: "run.created",
+                threadId: owner,
+                occurredAt: now,
+                payload: {
+                  id,
+                  threadId: owner,
+                  ordinal,
+                  providerInstanceId: base.providerInstanceId,
+                  modelSelection: base.modelSelection,
+                  providerThreadId: null,
+                  userMessageId: MessageId.make(`user-${id}`),
+                  rootNodeId: null,
+                  activeAttemptId: null,
+                  status: "completed",
+                  requestedAt: now,
+                  startedAt: now,
+                  completedAt: now,
+                  checkpointId: null,
+                  contextHandoffId: null,
+                },
+              });
+              return id;
+            });
+            const publish = Effect.fn(function* (
+              owner: ThreadId,
+              runId: RunId,
+              id: TurnItemId,
+              text: string,
+              kind: "assistant_message" | "proposed_plan" | "user_message" = "assistant_message",
+            ) {
+              const now = yield* DateTime.now;
+              const detail =
+                kind === "proposed_plan"
+                  ? {
+                      type: "proposed_plan" as const,
+                      planId: PlanId.make(`plan-${id}`),
+                      markdown: text,
+                      streaming: false,
+                    }
+                  : kind === "user_message"
+                    ? {
+                        type: "user_message" as const,
+                        messageId: MessageId.make(`message-${id}`),
+                        text,
+                        attachments: [],
+                        createdBy: "user" as const,
+                        creationSource: "web" as const,
+                        inputIntent: "turn_start" as const,
+                      }
+                    : {
+                        type: "assistant_message" as const,
+                        messageId: MessageId.make(`message-${id}`),
+                        text,
+                        streaming: false,
+                      };
+              yield* projections.apply({
+                id: EventId.make(`updated-${id}`),
+                type: "turn-item.updated",
+                threadId: owner,
+                occurredAt: now,
+                payload: {
+                  id,
+                  threadId: owner,
+                  runId,
+                  nodeId: null,
+                  providerThreadId: null,
+                  providerTurnId: null,
+                  nativeItemRef: null,
+                  parentItemId: null,
+                  ordinal: yield* projections.getNextTurnItemOrdinal(owner),
+                  status: "completed",
+                  title: null,
+                  startedAt: now,
+                  completedAt: now,
+                  updatedAt: now,
+                  ...detail,
+                },
+              });
+            });
+            const parentRun = yield* createRun(threadId, 1);
+            const parentLaterRun = yield* createRun(threadId, 2);
+            yield* createThread(childId, childRoot, { threadId, runId: parentRun });
+            const childRun = yield* createRun(childId, 1);
+            const childLaterRun = yield* createRun(childId, 2);
+            yield* createThread(leafId, leafRoot, { threadId: childId, runId: childRun });
+            yield* createThread(unrelatedId, root);
+            const unrelatedRun = yield* createRun(unrelatedId, 1);
+            const parentFile = path.join(root, "parent.md");
+            const parentLaterFile = path.join(root, "post-fork.md");
+            const userFile = path.join(root, "user-only.md");
+            const orphanFile = path.join(root, "unrendered.md");
+            const unrelatedFile = path.join(root, "unrelated.md");
+            const childFile = path.join(childRoot, "visible-child.md");
+            const childLaterFile = path.join(childRoot, "post-child-fork.md");
+            for (const file of [
+              parentFile,
+              parentLaterFile,
+              userFile,
+              orphanFile,
+              unrelatedFile,
+              childFile,
+              childLaterFile,
+            ])
+              yield* fs.writeFileString(file, "published artifact");
+            for (const cwd of [root, childRoot, leafRoot]) {
+              yield* fs.writeFileString(path.join(cwd, "relative.md"), cwd);
+              yield* fs.writeFileString(path.join(cwd, "plan.md"), "inherited plan artifact");
+            }
+            const parentItem = TurnItemId.make("parent-publication");
+            yield* publish(
+              threadId,
+              parentRun,
+              parentItem,
+              `[Parent](${parentFile}) [Relative](./relative.md)`,
+            );
+            yield* publish(
+              threadId,
+              parentRun,
+              TurnItemId.make("parent-plan"),
+              "# Plan\n\n[Artifact](./plan.md)",
+              "proposed_plan",
+            );
+            yield* publish(
+              threadId,
+              parentRun,
+              TurnItemId.make("parent-user"),
+              `[User file](${userFile})`,
+              "user_message",
+            );
+            yield* addMessage(`[Unrendered](${orphanFile})`);
+            yield* publish(
+              threadId,
+              parentLaterRun,
+              TurnItemId.make("parent-post-fork"),
+              `[Later](${parentLaterFile})`,
+            );
+            yield* publish(
+              threadId,
+              parentLaterRun,
+              TurnItemId.make("parent-post-fork-plan"),
+              `[Later plan](${parentLaterFile})`,
+              "proposed_plan",
+            );
+            yield* publish(
+              childId,
+              childRun,
+              TurnItemId.make("child-publication"),
+              `[Child](${childFile})`,
+            );
+            yield* publish(
+              childId,
+              childLaterRun,
+              TurnItemId.make("child-post-fork"),
+              `[Later child](${childLaterFile})`,
+            );
+            yield* publish(
+              unrelatedId,
+              unrelatedRun,
+              TurnItemId.make("unrelated-publication"),
+              `[Other](${unrelatedFile})`,
+            );
+            for (const [owner, cwd] of [
+              [childId, childRoot],
+              [leafId, leafRoot],
+            ] as const) {
+              expect(
+                (yield* linked.readFile({ cwd, relativePath: parentFile, linkedThreadId: owner }))
+                  .contents,
+              ).toBe("published artifact");
+              expect(
+                (yield* linked.readFile({
+                  cwd,
+                  relativePath: "relative.md",
+                  linkedThreadId: owner,
+                })).contents,
+              ).toBe(cwd);
+              expect(
+                (yield* linked.readFile({ cwd, relativePath: "plan.md", linkedThreadId: owner }))
+                  .contents,
+              ).toBe("inherited plan artifact");
+              for (const denied of [
+                parentLaterFile,
+                userFile,
+                orphanFile,
+                unrelatedFile,
+                path.join(root, "relative.md"),
+              ])
+                expect(
+                  (yield* linked
+                    .resolveFile({ cwd, threadId: owner, path: denied })
+                    .pipe(Effect.flip))._tag,
+                ).toBe("ThreadLinkedFileDeniedError");
+            }
+            expect(
+              (yield* linked.resolveFile({ cwd: leafRoot, threadId: leafId, path: childFile }))
+                .absolutePath,
+            ).toBe(yield* fs.realPath(childFile));
+            expect(
+              (yield* linked
+                .resolveFile({ threadId: leafId, path: childLaterFile })
+                .pipe(Effect.flip))._tag,
+            ).toBe("ThreadLinkedFileDeniedError");
+            expect(
+              (yield* linked
+                .resolveFile({ cwd: root, threadId: leafId, path: parentFile })
+                .pipe(Effect.flip))._tag,
+            ).toBe("ThreadLinkedFileDeniedError");
+            yield* publish(threadId, parentRun, parentItem, "The inherited links were removed");
+            expect(
+              (yield* linked.resolveFile({ threadId: leafId, path: parentFile }).pipe(Effect.flip))
+                ._tag,
+            ).toBe("ThreadLinkedFileDeniedError");
+            expect(
+              (yield* linked
+                .resolveFile({ threadId: childId, path: "relative.md" })
+                .pipe(Effect.flip))._tag,
+            ).toBe("ThreadLinkedFileDeniedError");
+            const leaf = yield* projections.getThread(leafId);
+            const now = yield* DateTime.now;
+            yield* projections.apply({
+              id: EventId.make("changed-fork-source"),
+              type: "thread.metadata-updated",
+              threadId: leafId,
+              occurredAt: now,
+              payload: {
+                ...leaf,
+                forkedFrom: { type: "run", threadId, runId: parentRun },
+                updatedAt: now,
+              },
+            });
+            expect(
+              (yield* linked.resolveFile({ threadId: leafId, path: childFile }).pipe(Effect.flip))
+                ._tag,
+            ).toBe("ThreadLinkedFileDeniedError");
+            expect(
+              (yield* linked.readFile({
+                cwd: leafRoot,
+                relativePath: "plan.md",
+                linkedThreadId: leafId,
+              })).contents,
+            ).toBe("inherited plan artifact");
+          }),
+        undefined,
+        store === "sqlite"
+          ? ProjectionStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory))
+          : ProjectionStore.layerMemory,
+      ),
+  );
+
   for (const filename of ["report.md", "report%20.md", "report#L12.md", "report.md:012"]) {
     it.effect.skipIf(
       resolvePathLinkTarget("~/", process.cwd()) === "~/" ||

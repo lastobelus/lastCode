@@ -192,7 +192,25 @@ const make = Effect.gen(function* () {
         item.type === "proposed_plan" ? [[item.planId, item] as const] : [],
       ),
     );
+    const inherited =
+      records.thread.forkedFrom?.type === "run"
+        ? yield* projections
+            .getInheritedPublications(input.threadId)
+            .pipe(
+              Effect.mapError(
+                (cause) => new ThreadLinkedFileResolutionError({ threadId: input.threadId, cause }),
+              ),
+            )
+        : [];
     const publications: Array<Publication> = [
+      // Inherited cards render in the active conversation's cwd. Their source
+      // identity distinguishes cache entries; visibility comes from the timeline.
+      ...inherited.map((row) => ({
+        key: JSON.stringify([input.threadId, "inherited", row.sourceThreadId, row.sourceItemId]),
+        text: row.item.type === "proposed_plan" ? row.item.markdown : row.item.text,
+        plan: row.item.type === "proposed_plan",
+        updatedAt: DateTime.toEpochMillis(row.item.updatedAt),
+      })),
       ...records.messages
         .filter((message) => message.role === "assistant")
         .map((message) => ({
