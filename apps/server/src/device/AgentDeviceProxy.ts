@@ -58,6 +58,12 @@ const DROPPED_HEADERS = new Set([
   "host",
   "connection",
   "upgrade",
+  "keep-alive",
+  "transfer-encoding",
+  "te",
+  "trailer",
+  "proxy-authorization",
+  "proxy-connection",
   "cookie",
   "authorization",
   "x-agent-device-token",
@@ -157,8 +163,15 @@ const handler = Effect.gen(function* () {
   const ready = yield* devices.agentReadinessIfSupported(target.hostId, true);
   if (!ready) return HttpServerResponse.text("Device agent is not running", { status: 503 });
   const headers: Record<string, string> = {};
+  const connectionHeaders = new Set(
+    (request.headers.connection ?? "")
+      .split(",")
+      .map((name) => name.trim().toLowerCase())
+      .filter(Boolean),
+  );
   for (const [name, value] of Object.entries(request.headers)) {
-    if (!DROPPED_HEADERS.has(name) && value !== undefined) headers[name] = value;
+    if (!DROPPED_HEADERS.has(name) && !connectionHeaders.has(name) && value !== undefined)
+      headers[name] = value;
   }
   headers.authorization = `Bearer ${ready.agentDevice.token}`;
   headers["x-agent-device-token"] = ready.agentDevice.token;
@@ -175,6 +188,11 @@ const handler = Effect.gen(function* () {
     upstream = upstream.pipe(HttpClientRequest.bodyStream(request.stream));
   const client = HttpClient.withScope(yield* HttpClient.HttpClient);
   const response = yield* client.execute(upstream);
+  if (
+    directUploadId !== undefined &&
+    ((response.status >= 200 && response.status < 300) || response.status === 308)
+  )
+    yield* access.recordResource(target, { kind: "upload", id: directUploadId });
   if (path === "/upload/preflight" && response.status >= 200 && response.status < 300) {
     const descriptor = yield* decodeUploadDescriptor(yield* response.json);
     if (descriptor.ok)

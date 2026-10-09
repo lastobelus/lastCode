@@ -1,6 +1,7 @@
 import { type DeviceHostId, type DeviceId, type ThreadId } from "@t3tools/contracts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import * as Context from "effect/Context";
+import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -77,11 +78,15 @@ export class DeviceAgentAccess extends Context.Service<
 const make = Effect.gen(function* () {
   const threads = yield* ProjectionStore.ProjectionStoreV2;
   const crypto = yield* Crypto.Crypto;
+  const clock = yield* Clock.Clock;
   const consentContext = yield* Effect.context<
     ProjectStore.ProjectStoreV2 | ServerSettings.ServerSettingsService
   >();
   const credentials = new Map<string, Target>();
   const slots = new Map<string, string>();
+  // Match the pinned daemon's artifact and upload lifetimes, with a hard memory bound.
+  const resources = new Map<string, { readonly owner: string; readonly expiresAt: number }>();
+  const owner = (target: Target) => JSON.stringify([target.threadId, target.session]);
   const credentialLock = yield* Semaphore.make(1);
   const targetKey = (target: Target) =>
     JSON.stringify([target.threadId, target.hostId, target.deviceId, target.session]);
@@ -90,15 +95,25 @@ const make = Effect.gen(function* () {
     const token = slots.get(key);
     if (token !== undefined) credentials.delete(token);
     slots.delete(key);
+    for (const [key, resource] of resources) {
+      if (resource.owner === owner(target)) resources.delete(key);
+    }
   };
   // The pinned daemon only tracks tenants, not sessions. Keep session ownership
   // alongside the issued credentials; a server restart makes unknown IDs fail closed.
-  const resources = new Map<string, string>();
-  const owner = (target: Target) => JSON.stringify([target.threadId, target.session]);
+  const expireResources = () => {
+    const now = clock.currentTimeMillisUnsafe();
+    for (const [key, resource] of resources) {
+      if (resource.expiresAt <= now) resources.delete(key);
+    }
+    return now;
+  };
   const resourceKey = (target: Target, resource: Resource) =>
     JSON.stringify([target.hostId, resource.kind, resource.id]);
-  const owns = (target: Target, resource: Resource) =>
-    resources.get(resourceKey(target, resource)) === owner(target);
+  const owns = (target: Target, resource: Resource) => {
+    expireResources();
+    return resources.get(resourceKey(target, resource))?.owner === owner(target);
+  };
   const allowed = (target: Target) =>
     currentThreadDeviceAccess(threads.getThreadShell(target.threadId)).pipe(
       Effect.provide(consentContext),
@@ -132,11 +147,20 @@ const make = Effect.gen(function* () {
     ownsResource: (target, resource) => Effect.sync(() => owns(target, resource)),
     recordResource: (target, resource) =>
       Effect.gen(function* () {
+        const now = expireResources();
         const key = resourceKey(target, resource);
         const previous = resources.get(key);
-        if (previous !== undefined && previous !== owner(target))
+        if (previous !== undefined && previous.owner !== owner(target))
           return yield* new DeviceAgentAccessDenied({});
-        resources.set(key, owner(target));
+        resources.delete(key);
+        resources.set(key, {
+          owner: owner(target),
+          expiresAt: now + (resource.kind === "artifact" ? 15 : 5) * 60_000,
+        });
+        if (resources.size > 4096) {
+          const oldest = resources.keys().next().value;
+          if (oldest !== undefined) resources.delete(oldest);
+        }
       }),
   });
 });

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vite-plus/test";
 import { DeviceId, ProjectId, ThreadId, DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -29,11 +30,18 @@ const fixture = () => {
   let threadState: "present" | "deleted" | "missing" = "present";
   let projectState: "present" | "deleted" | "missing" = "present";
   let origin = "http://local-daemon.example";
-  const requests: Array<{ url: string; token: string | undefined }> = [];
+  let now = 0;
+  let artifactIds: ReadonlyArray<string> | undefined;
+  const requests: Array<{
+    url: string;
+    token: string | undefined;
+    headers: Readonly<Record<string, string>>;
+  }> = [];
   const hostRequests: string[] = [];
   const payloads: Array<Record<string, unknown>> = [];
   const attempts = new Map<string, string>();
   let uploaded = 0;
+  let directUploadStatus = 200;
   let ndjson = false;
   let rpcStream: ReadableStream<Uint8Array> | undefined;
   const project = ProjectId.make("project-1");
@@ -81,10 +89,20 @@ const fixture = () => {
       }),
     ),
     Layer.provide(NodeCrypto.layer),
+    Layer.provide(
+      Layer.succeed(Clock.Clock, {
+        ...Clock.Clock.defaultValue(),
+        currentTimeMillisUnsafe: () => now,
+      }),
+    ),
   );
   const client = HttpClient.make((request) =>
     Effect.sync(() => {
-      requests.push({ url: request.url, token: request.headers["x-agent-device-token"] });
+      requests.push({
+        url: request.url,
+        token: request.headers["x-agent-device-token"],
+        headers: request.headers,
+      });
       const payload =
         request.body._tag === "Uint8Array"
           ? (JSON.parse(new TextDecoder().decode(request.body.body)) as Record<string, unknown>)
@@ -119,13 +137,13 @@ const fixture = () => {
           result: {
             ok: true,
             data: {
-              artifacts: [
-                {
-                  artifactId: params.session === "session-thread-2" ? "artifact-2" : "artifact-1",
-                  field: "path",
-                  fileName: "screenshot.png",
-                },
-              ],
+              artifacts: (
+                artifactIds ?? [params.session === "session-thread-2" ? "artifact-2" : "artifact-1"]
+              ).map((artifactId) => ({
+                artifactId,
+                field: "path",
+                fileName: "screenshot.png",
+              })),
             },
           },
         };
@@ -145,7 +163,11 @@ const fixture = () => {
       return HttpClientResponse.fromWeb(
         request,
         new Response(request.url.endsWith("/rpc") && rpcStream ? rpcStream : body, {
-          status: request.url.includes("/artifacts/") && request.headers.range ? 206 : 200,
+          status: request.url.includes("/upload/direct/")
+            ? directUploadStatus
+            : request.url.includes("/artifacts/") && request.headers.range
+              ? 206
+              : 200,
           headers: {
             "content-type": contentType,
             ...(request.url.includes("/artifacts/") && request.headers.range
@@ -252,6 +274,27 @@ const fixture = () => {
     requests,
     hostRequests,
     payloads,
+    advance: (milliseconds: number) => {
+      now += milliseconds;
+    },
+    directUploadStatus: (status: number) => {
+      directUploadStatus = status;
+    },
+    artifacts: (ids: ReadonlyArray<string>) => {
+      artifactIds = ids;
+    },
+    capture: (token: string, session = "session-thread-1") =>
+      call(
+        token,
+        "/rpc",
+        "POST",
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: "request-1",
+          method: "agent_device.command",
+          params: { session, command: "snapshot", flags: { udid: "device-1" } },
+        }),
+      ),
     streamRpc: (stream: ReadableStream<Uint8Array>) => {
       rpcStream = stream;
       ndjson = true;
@@ -286,7 +329,7 @@ describe("thread-scoped device CLI proxy", () => {
     const token = await f.issue();
     const other = await f.issue("thread-2");
     expect((await f.call(token)).status).toBe(200);
-    expect(f.requests).toEqual([
+    expect(f.requests).toMatchObject([
       { url: "http://local-daemon.example/rpc", token: "raw-daemon-token" },
     ]);
     f.revoke();
@@ -450,6 +493,104 @@ it("preserves partial-download status and content-range for an owned artifact", 
   expect(response.status).toBe(206);
   expect(response.headers.get("content-range")).toBe("bytes 0-1/8");
   expect(await response.text()).toBe("ok");
+});
+
+it("expires uploaded resources and screenshots at the daemon's respective lifetimes", async () => {
+  const f = fixture();
+  const token = await f.issue();
+  await (await f.call(token)).text();
+  await (await f.call(token, "/upload/preflight")).text();
+  f.advance(5 * 60_000);
+  expect((await f.call(token, "/upload/direct/upload-1", "PUT", "bytes")).status).toBe(403);
+  expect((await f.call(token, "/artifacts/artifact-1", "GET")).status).toBe(200);
+  f.advance(10 * 60_000);
+  expect((await f.call(token, "/artifacts/artifact-1", "GET")).status).toBe(403);
+  const other = await f.issue("thread-2");
+  f.artifacts(["artifact-1"]);
+  await (await f.capture(other, "session-thread-2")).text();
+  expect((await f.call(other, "/artifacts/artifact-1", "GET")).status).toBe(200);
+});
+
+it.each([200, 308])("keeps ownership for an upload progressing with status %s", async (status) => {
+  const f = fixture();
+  const token = await f.issue();
+  f.directUploadStatus(status);
+  await (await f.call(token, "/upload/preflight")).text();
+  f.advance(4 * 60_000);
+  const chunk = await f.call(token, "/upload/direct/upload-1", "PUT", "bytes");
+  expect(chunk.status).toBe(status);
+  await chunk.text();
+  f.advance(2 * 60_000);
+  expect((await f.call(token, "/upload/finalize")).status).toBe(200);
+});
+
+it("releases resource ownership when the credential is discarded", async () => {
+  const f = fixture();
+  const token = await f.issue();
+  await (await f.call(token)).text();
+  f.revoke();
+  expect((await f.call(token, "/health", "GET")).status).toBe(403);
+  const other = await f.issue("thread-2");
+  f.artifacts(["artifact-1"]);
+  await (await f.capture(other, "session-thread-2")).text();
+  expect((await f.call(other, "/artifacts/artifact-1", "GET")).status).toBe(200);
+});
+
+it("bounds retained resource ownership even within one active capture session", async () => {
+  const f = fixture();
+  const token = await f.issue();
+  f.artifacts(Array.from({ length: 4097 }, (_, index) => `capture-${index}`));
+  await (await f.capture(token)).text();
+  expect((await f.call(token, "/artifacts/capture-0", "GET")).status).toBe(403);
+  expect((await f.call(token, "/artifacts/capture-4096", "GET")).status).toBe(200);
+});
+
+it("removes hop-by-hop request headers while retaining upload range metadata", async () => {
+  const f = fixture();
+  const token = await f.issue();
+  const response = await f.handler(
+    new Request("http://t3.example/api/agent-device/rpc", {
+      method: "POST",
+      headers: {
+        "x-agent-device-token": token,
+        connection: "keep-alive, X-Internal-Hop",
+        "x-internal-hop": "private",
+        "keep-alive": "timeout=5",
+        "transfer-encoding": "chunked",
+        te: "trailers",
+        trailer: "checksum",
+        "proxy-authorization": "Bearer proxy-only",
+        "proxy-connection": "keep-alive",
+        "content-range": "bytes 0-1/8",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: "request-1",
+        method: "agent_device.command",
+        params: {
+          session: "session-thread-1",
+          command: "snapshot",
+          flags: { udid: "device-1" },
+        },
+      }),
+    }),
+  );
+  expect(response.status).toBe(200);
+  await response.text();
+  const forwarded = f.requests[0]!.headers;
+  for (const name of [
+    "connection",
+    "x-internal-hop",
+    "keep-alive",
+    "transfer-encoding",
+    "te",
+    "trailer",
+    "proxy-authorization",
+    "proxy-connection",
+  ])
+    expect(forwarded[name]).toBeUndefined();
+  expect(forwarded["content-range"]).toBe("bytes 0-1/8");
+  expect(forwarded["x-agent-device-token"]).toBe("raw-daemon-token");
 });
 
 it.each([false, true])(
