@@ -1,7 +1,13 @@
 // @effect-diagnostics nodeBuiltinImport:off - uses an isolated ephemeral HTTP listener to verify the issued CLI endpoint.
 import * as NodeHttp from "node:http";
 import { expect, it } from "@effect/vitest";
-import { DeviceId, ProjectId, ThreadId, DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts";
+import {
+  DeviceId,
+  DeviceHostId,
+  ProjectId,
+  ThreadId,
+  DEFAULT_SERVER_SETTINGS,
+} from "@t3tools/contracts";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NetService from "@t3tools/shared/Net";
@@ -64,6 +70,14 @@ const host = Layer.mock(DeviceHost.DeviceHost)({
     hubInstalled: true,
     agentDeviceInstalled: true,
   }),
+  platformAvailability: (platform) => Effect.succeed({ platform, available: true }),
+  ensureReady: () =>
+    Effect.succeed({
+      hub: { origin: "http://hub.example" },
+      nodePath: process.execPath,
+      run: () => Effect.succeed({ code: 0, stdout: "", stderr: "" }),
+      helpers: { serveSimAxSettings: null, serveSimCli: null },
+    }),
   current: Effect.succeed(null),
   ensureAgentReady: () =>
     Effect.succeed({
@@ -81,6 +95,9 @@ const host = Layer.mock(DeviceHost.DeviceHost)({
 const layer = (
   hostname: string,
   beforeWrite: (content: string) => Effect.Effect<void> = () => Effect.void,
+  http = HttpClient.make((request) =>
+    Effect.succeed(HttpClientResponse.fromWeb(request, new Response("ok"))),
+  ),
 ) =>
   Layer.effect(
     DeviceService.DeviceService,
@@ -103,14 +120,7 @@ const layer = (
     Layer.provideMerge(
       NodeHttpServer.layer(() => NodeHttp.createServer(), { host: hostname, port: 0 }),
     ),
-    Layer.provideMerge(
-      Layer.succeed(
-        HttpClient.HttpClient,
-        HttpClient.make((request) =>
-          Effect.succeed(HttpClientResponse.fromWeb(request, new Response("ok"))),
-        ),
-      ),
-    ),
+    Layer.provideMerge(Layer.succeed(HttpClient.HttpClient, http)),
     Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-device-agent-config-" })),
     Layer.provideMerge(NodeServices.layer),
   );
@@ -213,4 +223,122 @@ it.effect("thread deletion waits for an issued config write before removing it",
       expect((yield* access.authorize(config.daemonAuthToken)).threadId).toBe(threadId);
     }).pipe(Effect.provide(layer("127.0.0.1", writeGate)), Effect.scoped);
   }),
+);
+
+it.effect.each([
+  { operation: "shutdown", platform: "android", outcome: "accepted" },
+  { operation: "close", platform: "android", outcome: "accepted" },
+  { operation: "shutdown", platform: "ios", outcome: "already-off" },
+  { operation: "shutdown", platform: "android", outcome: "failed" },
+  { operation: "shutdown", platform: "ios", outcome: "failed" },
+  { operation: "close", platform: "android", outcome: "ordinary-close" },
+] as const)(
+  "$operation $platform $outcome retires only credentials for an accepted device shutdown",
+  ({ operation, platform, outcome }) =>
+    Effect.gen(function* () {
+      const deviceId = DeviceId.make("emulator-5554");
+      const threadId = ThreadId.make("thread-1");
+      let booted = true;
+      const http = HttpClient.make((request) =>
+        Effect.sync(() => {
+          const path = new URL(request.url).pathname;
+          if (path === "/api/devices") {
+            const device = {
+              id: deviceId,
+              name: "Test device",
+              platform,
+              version: "26",
+              physical: false,
+              booted,
+            };
+            return HttpClientResponse.fromWeb(
+              request,
+              Response.json({
+                emulators: platform === "android" ? [device] : [],
+                simulators: platform === "ios" ? [device] : [],
+              }),
+            );
+          }
+          if (path.endsWith("/shutdown")) {
+            if (outcome === "already-off") booted = false;
+            if (outcome === "failed" || outcome === "already-off") {
+              return HttpClientResponse.fromWeb(request, Response.json({ ok: false }));
+            }
+            booted = false;
+          } else if (path === "/api/devices/boot") booted = true;
+          else if (path !== "/vendor/serve-sim/grid/api/start") {
+            throw new Error(`Unexpected hub path: ${path}`);
+          }
+          return HttpClientResponse.fromWeb(request, Response.json({ ok: true, id: deviceId }));
+        }),
+      );
+      yield* Effect.gen(function* () {
+        const devices = yield* DeviceService.DeviceService;
+        const access = yield* DeviceAgentAccess.DeviceAgentAccess;
+        const fs = yield* FileSystem.FileSystem;
+        const input = { threadId, hostId: "local" as const, deviceId, platform };
+        yield* devices.open(input);
+        const issueConfig = Effect.gen(function* () {
+          const args = yield* devices.agentTarget({ ...input, agentAccessEnabled: true });
+          return decodeConfig(yield* fs.readFileString(args[1]!)).daemonAuthToken;
+        });
+        const token = yield* issueConfig;
+        const target = yield* access.authorize(token);
+        const resource = { kind: "artifact" as const, id: "old-artifact" };
+        const upload = { kind: "upload" as const, id: "old-upload" };
+        yield* access.recordResource(target, resource);
+        yield* access.recordResource(target, upload);
+        const otherThreadToken = yield* access.issue({
+          ...target,
+          threadId: ThreadId.make("thread-2"),
+          session: "other-thread",
+        });
+        const otherDeviceToken = yield* access.issue({
+          ...target,
+          deviceId: DeviceId.make("emulator-5556"),
+          session: "other-device",
+        });
+        const otherHostToken = yield* access.issue({
+          ...target,
+          hostId: DeviceHostId.make("other-host"),
+          session: "other-host",
+        });
+        const unrelatedTarget = yield* access.authorize(otherDeviceToken);
+        const unrelatedResource = { kind: "artifact" as const, id: "unrelated-artifact" };
+        yield* access.recordResource(unrelatedTarget, unrelatedResource);
+        const exit = yield* Effect.exit(
+          operation === "shutdown"
+            ? devices.shutdown(input)
+            : devices.close({ ...input, shutdown: outcome !== "ordinary-close" }),
+        );
+        expect(exit._tag).toBe(outcome === "failed" ? "Failure" : "Success");
+        const retired = outcome === "accepted" || outcome === "already-off";
+        for (const oldToken of [token, otherThreadToken]) {
+          expect((yield* Effect.exit(access.authorize(oldToken)))._tag).toBe(
+            retired ? "Failure" : "Success",
+          );
+        }
+        for (const oldResource of [resource, upload]) {
+          expect(yield* access.ownsResource(target, oldResource)).toBe(!retired);
+        }
+        expect(yield* access.authorize(otherDeviceToken, unrelatedResource)).toEqual(
+          unrelatedTarget,
+        );
+        expect((yield* access.authorize(otherHostToken)).hostId).toBe("other-host");
+        if (retired) {
+          yield* devices.open(input);
+          const freshToken = yield* issueConfig;
+          expect(freshToken).not.toBe(token);
+          expect((yield* access.authorize(freshToken)).deviceId).toBe(deviceId);
+          for (const oldResource of [resource, upload]) {
+            expect((yield* Effect.exit(access.authorize(freshToken, oldResource)))._tag).toBe(
+              "Failure",
+            );
+          }
+          expect((yield* Effect.exit(access.authorize(token)))._tag).toBe("Failure");
+        } else {
+          expect(yield* access.authorize(token, resource)).toEqual(target);
+        }
+      }).pipe(Effect.provide(layer("127.0.0.1", undefined, http)), Effect.scoped);
+    }),
 );
