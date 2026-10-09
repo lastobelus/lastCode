@@ -11,6 +11,7 @@ import {
   TurnItemId,
 } from "@t3tools/contracts";
 import * as AssistantMarkdownFiles from "@t3tools/shared/assistantMarkdownFiles";
+import { resolvePathLinkTarget } from "@t3tools/shared/fileLinks";
 import { vi } from "vite-plus/test";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -53,11 +54,15 @@ const withWorkspace = <E>(
     | FileSystem.FileSystem
     | Path.Path
   >,
+  directory?: string,
 ) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const projectRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-linked-project-" });
+    const projectRoot = yield* fs.makeTempDirectoryScoped({
+      prefix: "t3-linked-project-",
+      directory,
+    });
     const root = path.join(projectRoot, "thread-worktree");
     const outside = yield* fs.makeTempDirectoryScoped({ prefix: "t3-linked-outside-" });
     yield* fs.makeDirectory(root);
@@ -203,6 +208,51 @@ const addPlan = Effect.fn("addPlan")(function* (markdown: string, inTurnItem = f
 afterEach(() => vi.restoreAllMocks());
 
 describe("ThreadLinkedFiles", () => {
+  for (const filename of ["report.md", "report%20.md", "report#L12.md", "report.md:012"]) {
+    it.effect.skipIf(
+      resolvePathLinkTarget("~/", process.cwd()) === "~/" ||
+        (process.platform === "win32" && filename.includes(":")),
+    )(`reads the exact home-relative publication ${filename} without reparsing its filename`, () =>
+      withWorkspace(
+        (root) =>
+          Effect.gen(function* () {
+            const fs = yield* FileSystem.FileSystem;
+            const path = yield* Path.Path;
+            const linked = yield* ThreadLinkedFiles.ThreadLinkedFiles;
+            const home = resolvePathLinkTarget("~/", root);
+            const artifactDirectory = path.resolve(root, "../home-artifacts");
+            yield* fs.makeDirectory(artifactDirectory);
+            const file = path.join(artifactDirectory, filename);
+            yield* fs.writeFileString(file, "published home artifact");
+            const homePath = `~/${path.relative(home, file).replaceAll("\\", "/")}`;
+            const destination = `${encodeURI(homePath).replaceAll("#", "%23")}:66:7`;
+            yield* addMessage(`[Report](${destination})`);
+            const result = yield* linked.readFile({
+              cwd: root,
+              relativePath: file,
+              linkedThreadId: threadId,
+            });
+            expect(result.contents).toBe("published home artifact");
+            expect(result.relativePath).toBe(file);
+            expect((yield* linked.resolveFile({ threadId, path: homePath })).absolutePath).toBe(
+              yield* fs.realPath(file),
+            );
+            const unlinked = path.join(artifactDirectory, "private", filename);
+            yield* fs.makeDirectory(path.dirname(unlinked));
+            yield* fs.writeFileString(unlinked, "unlinked host file");
+            expect(
+              (yield* linked.resolveFile({ threadId, path: unlinked }).pipe(Effect.flip))._tag,
+            ).toBe("ThreadLinkedFileDeniedError");
+            yield* addMessage("The home-relative link was removed");
+            expect(
+              (yield* linked.resolveFile({ threadId, path: file }).pipe(Effect.flip))._tag,
+            ).toBe("ThreadLinkedFileDeniedError");
+          }),
+        process.cwd(),
+      ),
+    );
+  }
+
   it.effect.each(["absolute", "relative-outside"])(
     "reads an explicitly published host file using an %s destination",
     (syntax) =>

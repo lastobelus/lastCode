@@ -12,6 +12,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { assistantMarkdownFileReferences } from "@t3tools/shared/assistantMarkdownFiles";
+import { resolvePathLinkTarget } from "@t3tools/shared/fileLinks";
 import { stripDisplayedPlanMarkdown } from "@t3tools/shared/proposedPlanText";
 import {
   pickWorkspaceBasenameMatch,
@@ -83,6 +84,15 @@ const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
   const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+  const resolvePublishedPath = (filePath: string, cwd: string) =>
+    path.resolve(
+      cwd,
+      // The publication path is already decoded and has had its authored
+      // position removed. Resolve only the home prefix to preserve its filename.
+      filePath.startsWith("~/")
+        ? path.join(resolvePathLinkTarget("~/", cwd), filePath.slice(2))
+        : filePath,
+    );
   // Cache only parsing: current publications and workspace authority are reread,
   // and filesystem containment is checked anew for every preview request.
   const publicationCache = new Map<
@@ -169,7 +179,7 @@ const make = Effect.gen(function* () {
     const requested = input.path;
     if (!requested || requested.includes("\0"))
       return yield* new ThreadLinkedFileDeniedError({ threadId: input.threadId });
-    const requestedPath = path.resolve(cwd, requested);
+    const requestedPath = resolvePublishedPath(requested, cwd);
     const outside = (relative: string) =>
       !relative ||
       relative === ".." ||
@@ -228,7 +238,8 @@ const make = Effect.gen(function* () {
       const references = publicationReferences(publication, input.threadId, cwd);
       if (
         references.some(
-          (linked) => !linked.bareFilename && path.resolve(cwd, linked.path) === requestedPath,
+          (linked) =>
+            !linked.bareFilename && resolvePublishedPath(linked.path, cwd) === requestedPath,
         )
       ) {
         absolutePath = requestedPath;

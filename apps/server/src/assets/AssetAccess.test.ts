@@ -128,7 +128,7 @@ const layerTest = Layer.mergeAll(
 ).pipe(Layer.provideMerge(NodeServices.layer));
 
 describe("AssetAccess", () => {
-  it.effect.each(["workspace", "external"])(
+  it.effect.each(["workspace", "external", "home-relative"])(
     "requires linked-file validation before minting an exact %s media URL",
     (location) =>
       Effect.gen(function* () {
@@ -136,19 +136,24 @@ describe("AssetAccess", () => {
         const path = yield* Path.Path;
         const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-linked-media-" });
         const hostRoot =
-          location === "external"
+          location !== "workspace"
             ? yield* fs.makeTempDirectoryScoped({ prefix: "t3-linked-host-media-" })
             : root;
         const filePath = path.join(hostRoot, "report.html");
         yield* fs.writeFileString(filePath, "<h1>Linked report</h1>");
         const canonicalFile = yield* fs.realPath(filePath);
-        const publishedPath = location === "external" ? filePath : "report.html";
+        const publishedPath =
+          location === "home-relative"
+            ? "~/notes/report.html"
+            : location === "external"
+              ? filePath
+              : "report.html";
         const linkedResolver = Layer.mock(ThreadLinkedFiles.ThreadLinkedFiles)({
           resolveFile: (input) =>
             input.path === publishedPath && input.threadId === ThreadId.make("thread-1")
               ? Effect.succeed({
                   cwd: root,
-                  relativePath: location === "external" ? canonicalFile : "report.html",
+                  relativePath: location !== "workspace" ? canonicalFile : "report.html",
                   absolutePath: canonicalFile,
                 })
               : Effect.fail(
