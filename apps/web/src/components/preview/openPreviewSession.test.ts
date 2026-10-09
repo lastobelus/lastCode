@@ -375,21 +375,26 @@ describe("openUrlInPreview from a link", () => {
 it.each(
   (["terminal", "file"] as const).flatMap((initialPanel) =>
     (["event-first", "reply-first"] as const).flatMap((order) =>
-      (["foreground", "background", "later-choice"] as const).map((intent) => ({
-        initialPanel,
-        order,
-        intent,
-      })),
+      (["foreground", "background", "later-choice"] as const).flatMap((intent) =>
+        (["empty", "pending"] as const).map((initialList) => ({
+          initialPanel,
+          order,
+          intent,
+          initialList,
+        })),
+      ),
     ),
   ),
 )(
-  "handles the first $intent open from an authoritative empty list with $initialPanel and $order delivery",
-  async ({ initialPanel, order, intent }) => {
-    reconcilePreviewServerSessions(threadRef, {
-      serverEpoch: "server-a",
-      revision: 0,
-      sessions: [],
-    });
+  "handles the first $intent open with $initialList initial list, $initialPanel and $order delivery",
+  async ({ initialPanel, order, intent, initialList }) => {
+    if (initialList === "empty") {
+      reconcilePreviewServerSessions(threadRef, {
+        serverEpoch: "server-a",
+        revision: 0,
+        sessions: [],
+      });
+    }
     const panel = useRightPanelStore.getState();
     if (initialPanel === "terminal") panel.openTerminal(threadRef, "terminal-1");
     else panel.openFile(threadRef, "src/app.ts");
@@ -417,10 +422,12 @@ it.each(
       navStatus: { _tag: "Success" as const, url: "https://t3.chat/", title: "Loaded" },
       updatedAt: "2026-06-11T23:00:02.000Z",
     };
+    const historical = { ...snapshot, tabId: "historical-tab" };
+    const listRevision = initialList === "pending" ? 3 : 2;
     reconcilePreviewServerSessions(threadRef, {
       serverEpoch: "server-a",
-      revision: 2,
-      sessions: [listed],
+      revision: listRevision,
+      sessions: initialList === "pending" ? [historical, listed] : [listed],
     });
     const reconcilePanel = () => {
       const state = readThreadPreviewState(threadRef);
@@ -434,13 +441,33 @@ it.each(
     expect(useRightPanelStore.getState().byThreadKey["local:thread-1"]?.activeSurfaceId).toBe(
       chosenSurface,
     );
+    if (initialList === "pending") {
+      // An unrelated historical creation must stay suppressed even while a
+      // local open is pending, including events carrying another client's focus.
+      for (const focus of [undefined, { clientId: "another-client", userActionRevision: 0 }]) {
+        applyPreviewServerEvent(threadRef, {
+          type: "opened",
+          threadId: threadRef.threadId,
+          tabId: historical.tabId,
+          snapshot: historical,
+          serverEpoch: "server-a",
+          revision: 1,
+          createdAt: historical.updatedAt,
+          focus,
+        });
+        expect(useRightPanelStore.getState().byThreadKey["local:thread-1"]?.activeSurfaceId).toBe(
+          chosenSurface,
+        );
+        expect(panel.getUserActionRevision(threadRef)).toBe(revision);
+      }
+    }
     const event = {
       type: "opened" as const,
       threadId: threadRef.threadId,
       tabId: snapshot.tabId,
       snapshot,
       serverEpoch: "server-a",
-      revision: 1,
+      revision: listRevision - 1,
       createdAt: snapshot.updatedAt,
       background: request.background,
       focus: request.focus,
@@ -449,7 +476,7 @@ it.each(
     const assertDisplayedSurface = () => {
       const state = readThreadPreviewState(threadRef);
       expect(state.sessions[snapshot.tabId]).toEqual(listed);
-      expect(state.serverRevision).toBe(2);
+      expect(state.serverRevision).toBe(listRevision);
       expect(hiddenPreviewTabIds(state.sessions).size).toBe(0);
       const currentPanel = useRightPanelStore.getState().byThreadKey["local:thread-1"];
       expect(currentPanel?.isOpen).toBe(true);
@@ -863,6 +890,101 @@ it.each(
     applyPreviewServerEvent(threadRef, event);
     assertSelection();
     expect(readThreadPreviewState(threadRef).sessions[snapshot.tabId]).toEqual(snapshot);
+  },
+);
+
+it.each(
+  (["older-first", "newer-first"] as const).flatMap((completionOrder) =>
+    (["newest", "later-foreign", "later-manual"] as const).map((choice) => ({
+      completionOrder,
+      choice,
+    })),
+  ),
+)(
+  "preserves $choice focus across initial hydration of concurrent opens completed $completionOrder",
+  async ({ completionOrder, choice }) => {
+    const panel = useRightPanelStore.getState();
+    panel.openFile(threadRef, "src/app.ts");
+    const pages = ["older", "newer"].map((tabId) => ({ ...snapshot, tabId }));
+    const requests = pages.map(() => deferred<PreviewOpenInput>());
+    const replies = pages.map(() => deferred<PreviewSessionSnapshot>());
+    const openings = pages.map((page, index) =>
+      openUrlInPreview({
+        threadRef,
+        url: `https://app.example/${page.tabId}`,
+        openPreview: async ({ input }) => {
+          requests[index]!.resolve(input);
+          return AsyncResult.success(await replies[index]!.promise);
+        },
+      }),
+    );
+    const inputs = await Promise.all(requests.map((request) => request.promise));
+    const listed = pages.map((page) => ({ ...page, updatedAt: "2026-06-11T23:00:02.000Z" }));
+    reconcilePreviewServerSessions(threadRef, {
+      serverEpoch: "server-a",
+      revision: 3,
+      sessions: listed,
+    });
+    const reconcilePanel = () => {
+      const state = readThreadPreviewState(threadRef);
+      panel.reconcileBrowserSurfaces(
+        threadRef,
+        Object.keys(state.sessions),
+        hiddenPreviewTabIds(state.sessions),
+      );
+    };
+    reconcilePanel();
+    expect(useRightPanelStore.getState().byThreadKey["local:thread-1"]?.activeSurfaceId).toBe(
+      "file:src/app.ts",
+    );
+    if (choice === "later-foreign") {
+      const foreign = { ...snapshot, tabId: "foreign-tab" };
+      applyPreviewServerEvent(threadRef, {
+        type: "opened",
+        threadId: threadRef.threadId,
+        tabId: foreign.tabId,
+        snapshot: foreign,
+        createdAt: foreign.updatedAt,
+        serverEpoch: "server-a",
+        revision: 4,
+        focus: { clientId: "another-client", userActionRevision: 0 },
+      });
+    } else if (choice === "later-manual") {
+      panel.openTerminal(threadRef, "later-terminal");
+    }
+    const revision = panel.getUserActionRevision(threadRef);
+    let newestCompleted = false;
+    for (const index of completionOrder === "older-first" ? [0, 1] : [1, 0]) {
+      const event = {
+        type: "opened" as const,
+        threadId: threadRef.threadId,
+        tabId: pages[index]!.tabId,
+        snapshot: pages[index]!,
+        createdAt: snapshot.updatedAt,
+        serverEpoch: "server-a",
+        revision: index + 1,
+        focus: inputs[index]!.focus,
+      };
+      applyPreviewServerEvent(threadRef, event);
+      replies[index]!.resolve(pages[index]!);
+      await openings[index];
+      newestCompleted ||= index === 1;
+      applyPreviewServerEvent(threadRef, event);
+      reconcilePanel();
+      const expected =
+        choice === "later-foreign"
+          ? "browser:foreign-tab"
+          : choice === "later-manual"
+            ? "terminal:later-terminal"
+            : newestCompleted
+              ? "browser:newer"
+              : "file:src/app.ts";
+      expect(useRightPanelStore.getState().byThreadKey["local:thread-1"]?.activeSurfaceId).toBe(
+        expected,
+      );
+      expect(panel.getUserActionRevision(threadRef)).toBe(revision);
+      expect(readThreadPreviewState(threadRef).sessions[pages[index]!.tabId]).toEqual(listed[index]);
+    }
   },
 );
 
