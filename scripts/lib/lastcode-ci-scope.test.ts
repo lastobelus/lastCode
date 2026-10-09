@@ -537,6 +537,35 @@ describe("resolveQuickCiScope", () => {
     });
   });
 
+  it("preserves unusual paths across additions, modifications, deletions and renames", () => {
+    const removed = "docs/removed\npage.md";
+    const modified = "docs/modified\tpage.md";
+    const original = "packages/library/src/café source.ts";
+    const destination = "apps/unrelated/src/moved\t文.ts";
+    const added = "docs/added space 文.md";
+    const repo = fixture({
+      [removed]: "Remove this page.\n",
+      [modified]: "Original page.\n",
+      [original]: "export const renamed = true;\n",
+    });
+    NodeFS.unlinkSync(NodePath.join(repo.repo, removed));
+    repo.change(modified, "Updated page.\n");
+    repo.change(added, "New page.\n");
+    git(repo.repo, ["mv", original, destination]);
+    expect(repo.scope()).toMatchObject({
+      kind: "affected",
+      packages: ["@fixture/consumer", "@fixture/library", "@fixture/unrelated"],
+      changedFiles: [destination, added, modified, removed, original].sort(),
+    });
+  });
+
+  it("throws native Git resolution errors rather than returning a full scope", () => {
+    const repo = fixture();
+    expect(() => resolveQuickCiScope(repo.repo, repo.base, "missing-fixture-revision")).toThrow(
+      "Cannot resolve Quick CI scope:",
+    );
+  });
+
   it("checks the source side when a code file is renamed to documentation", () => {
     const repo = fixture();
     NodeFS.mkdirSync(NodePath.join(repo.repo, "docs"));
