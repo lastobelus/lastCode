@@ -38,8 +38,7 @@ symptom has not been reproduced under controlled conditions in this investigatio
 
 [T3 Code #15979](https://github.com/pingdotgg/t3code/issues/15979) concerns
 per-thread MCP servers accumulating in a shared Codex app-server. It was closed
-by [PR #16917](https://github.com/pingdotgg/t3code/pull/16917), merged October 7,
-2026. The current LastCode source includes this cleanup.
+by [PR #16917](https://github.com/pingdotgg/t3code/pull/16917), merged October 7, 2026. The current LastCode source includes this cleanup.
 
 [ProviderSessionManager](../../apps/server/src/orchestration-v2/ProviderSessionManager.ts)
 unloads an inactive thread after the default 30-minute idle timeout, defers
