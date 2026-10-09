@@ -143,6 +143,7 @@ const allowedSettings = {
   enableAgentDeviceAccess: true,
 };
 const layerAccess = Layer.mergeAll(
+  McpToolAccessTestkit.liveThreadProjectionsLayer,
   Layer.mock(ProjectStore.ProjectStoreV2)({ get: () => Effect.succeed(Option.some(project)) }),
   Layer.mock(ServerSettings.ServerSettingsService)({
     getSettings: Effect.succeed(allowedSettings),
@@ -291,6 +292,7 @@ it.effect.each([
       const dependencies = Layer.mergeAll(
         observedService,
         McpToolAccessTestkit.liveThreadsLayer,
+        McpToolAccessTestkit.liveThreadProjectionsLayer,
         Layer.mock(ProjectStore.ProjectStoreV2)({ get: () => Ref.get(availableProject) }),
         Layer.mock(ServerSettings.ServerSettingsService)({ getSettings: Ref.get(settings) }),
       );
