@@ -46,6 +46,8 @@ directories.
   T3 Code into an independent LastCode profile, including exclusions and backups.
 - [QA preview handoffs](preview-handoffs.md): recovery requests and the required
   24-hour hosting and automatic cleanup contract for agent-delivered previews.
+- [Codex Computer Use lifecycle](computer-use-lifecycle.md): lingering native
+  indicators, upstream findings, and the limits of LastCode cleanup.
 
 ## Command Summary
 
