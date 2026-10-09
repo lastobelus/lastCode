@@ -1,11 +1,15 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
-import { type PreviewEvent, ThreadId } from "@t3tools/contracts";
+import { type PreviewEvent, PreviewNativeCloseError, ThreadId } from "@t3tools/contracts";
 import { PreviewUrlNormalizationError } from "@t3tools/shared/preview";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import { expect } from "vite-plus/test";
 
 import * as ServerConfig from "../config.ts";
@@ -40,13 +44,350 @@ const collectEvents = Effect.gen(function* () {
   return collector;
 }).pipe(Effect.withSpan("preview.test.collectEvents"));
 
-const layer = PreviewManager.layer.pipe(
-  Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-preview-manager-" })),
-  Layer.provide(NodeCrypto.layer),
-  Layer.provide(NodeServices.layer),
+const PreviewManagerTestLayer = PreviewManager.layer.pipe(
+  Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-preview-manager-" })),
+  Layer.provideMerge(NodeCrypto.layer),
+  Layer.provideMerge(NodeServices.layer),
 );
 
-it.layer(layer)("PreviewManager", (it) => {
+it.layer(PreviewManagerTestLayer)("PreviewManager", (it) => {
+  it.effect(
+    "bulk close removes ordinary and confirmed tabs while retaining failed native tabs",
+    () =>
+      Effect.gen(function* () {
+        const manager = yield* PreviewManager.PreviewManager;
+        const threadId = freshThreadId();
+        // Put a failed guard before the eligible tabs to exercise cleanup's bulk close.
+        const failed = yield* manager.open({
+          threadId,
+          runtime: "server",
+          desktopHostId: "host-a",
+          automationOwner: "agent-a",
+          desktopPopup: {
+            popupId: "failed-native",
+            close: () =>
+              Effect.fail(
+                new PreviewNativeCloseError({ tabId: "failed-native", reason: "unavailable" }),
+              ),
+          },
+        });
+        const ordinary = yield* manager.open({ threadId, runtime: "server" });
+        let confirmed = false;
+        const successful = yield* manager.open({
+          threadId,
+          runtime: "server",
+          desktopHostId: "host-a",
+          desktopPopup: {
+            popupId: "confirmed-native",
+            close: () =>
+              Effect.sync(() => {
+                confirmed = true;
+              }),
+          },
+        });
+        const events = yield* collectEvents;
+        const failure = yield* manager.close({ threadId }).pipe(Effect.flip);
+        expect(failure).toMatchObject({ _tag: "PreviewNativeCloseError", reason: "unavailable" });
+        expect(confirmed).toBe(true);
+        expect((yield* manager.list({ threadId })).sessions).toEqual([failed]);
+        expect((yield* events.drain).map((event) => event.tabId)).toEqual([
+          ordinary.tabId,
+          successful.tabId,
+        ]);
+      }),
+  );
+
+  it.effect(
+    "native close preserves current state while acknowledgment waits outside the lock",
+    () =>
+      Effect.gen(function* () {
+        const manager = yield* PreviewManager.PreviewManager;
+        const threadId = freshThreadId();
+        const requested = yield* Deferred.make<void>();
+        const confirmed = yield* Deferred.make<void>();
+        const popup = yield* manager.open({
+          threadId,
+          runtime: "server",
+          desktopHostId: "host-a",
+          automationOwner: "agent-a",
+          desktopPopup: {
+            popupId: "child-1",
+            close: () =>
+              Deferred.succeed(requested, undefined).pipe(
+                Effect.andThen(Deferred.await(confirmed)),
+              ),
+          },
+        });
+        const closing = yield* manager
+          .close({ threadId, tabId: popup.tabId })
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(requested);
+        yield* manager.reportStatus({
+          threadId,
+          tabId: popup.tabId,
+          serverControlled: true,
+          navStatus: {
+            _tag: "Success",
+            url: "https://signin.example.test/",
+            title: "Updated while waiting",
+          },
+          canGoBack: false,
+          canGoForward: false,
+        });
+        const retained = (yield* manager.list({ threadId })).sessions[0];
+        expect(retained).toMatchObject({
+          automationOwner: "agent-a",
+          navStatus: { title: "Updated while waiting" },
+        });
+        yield* Deferred.succeed(confirmed, undefined);
+        yield* Fiber.join(closing);
+        expect((yield* manager.list({ threadId })).sessions).toEqual([]);
+      }),
+  );
+
+  it.effect("canceled and unavailable native closes preserve their authoritative session", () =>
+    Effect.gen(function* () {
+      const manager = yield* PreviewManager.PreviewManager;
+      for (const reason of ["canceled", "unavailable"] as const) {
+        const threadId = freshThreadId();
+        const popup = yield* manager.open({
+          threadId,
+          runtime: "server",
+          desktopHostId: "host-a",
+          automationOwner: "agent-a",
+          desktopPopup: {
+            popupId: "child-1",
+            close: () => Effect.fail(new PreviewNativeCloseError({ tabId: "child-1", reason })),
+          },
+        });
+        const events = yield* collectEvents;
+        const error = yield* manager.close({ threadId, tabId: popup.tabId }).pipe(Effect.flip);
+        expect(error).toMatchObject({ _tag: "PreviewNativeCloseError", reason });
+        expect((yield* manager.list({ threadId })).sessions).toEqual([popup]);
+        expect(yield* events.drain).toEqual([]);
+        yield* manager.nativeClosedConfirmed({ threadId, tabId: popup.tabId });
+        expect((yield* manager.list({ threadId })).sessions).toEqual([]);
+        expect(yield* events.drain).toEqual([
+          expect.objectContaining({ type: "closed", tabId: popup.tabId }),
+        ]);
+      }
+      const threadId = freshThreadId();
+      const unknown = yield* manager.open({
+        threadId,
+        runtime: "server",
+        desktopHostId: "host-a",
+        desktopPopup: { popupId: "no-guard" },
+      });
+      const failure = yield* manager.close({ threadId, tabId: unknown.tabId }).pipe(Effect.flip);
+      expect(failure).toMatchObject({ _tag: "PreviewNativeCloseError", reason: "unavailable" });
+      expect((yield* manager.list({ threadId })).sessions).toEqual([unknown]);
+    }),
+  );
+
+  it.effect("publishes one authoritative backing page before subscribers can attach", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const manager = yield* PreviewManager.make.pipe(
+        Effect.provideService(ServerConfig.ServerConfig, {
+          ...config,
+          desktopBrowserFd: 4,
+          desktopBrowserControlFd: 5,
+        }),
+      );
+      const events = yield* manager.subscribeEvents;
+      // Extra client properties cannot override the server's choice.
+      const input = {
+        threadId: freshThreadId(),
+        runtime: "server" as const,
+        backingPage: "server",
+      };
+      const local = yield* manager.open(input);
+      const remote = yield* manager.open({
+        threadId: input.threadId,
+        runtime: "server",
+        desktopHostId: "remote-desktop",
+        profileId: "work",
+      });
+      const popup = yield* manager.open({
+        threadId: input.threadId,
+        runtime: "server",
+        desktopHostId: "remote-desktop",
+        profileId: "work",
+        desktopPopup: { popupId: "native-child" },
+      });
+      expect(local).toMatchObject({ backingPage: "desktop", desktopHostId: "local" });
+      expect(remote).toMatchObject({
+        backingPage: "desktop",
+        desktopHostId: "remote-desktop",
+        profileId: "work",
+      });
+      expect(popup).toMatchObject({
+        backingPage: "desktop-popup",
+        desktopPopupId: "native-child",
+        desktopHostId: "remote-desktop",
+        profileId: "work",
+      });
+      const opened = yield* PubSub.takeUpTo(events, DRAIN_LIMIT);
+      expect(opened.map((event) => ("snapshot" in event ? event.snapshot : null))).toEqual([
+        local,
+        remote,
+        popup,
+      ]);
+      expect((yield* manager.list({ threadId: input.threadId })).sessions).toEqual([
+        local,
+        remote,
+        popup,
+      ]);
+    }),
+  );
+
+  it.effect(
+    "chooses headless without both local IPC descriptors and preserves explicit hosts",
+    () =>
+      Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        for (const desktopBrowserFd of [undefined, 4]) {
+          const manager = yield* PreviewManager.make.pipe(
+            Effect.provideService(ServerConfig.ServerConfig, {
+              ...config,
+              desktopBrowserFd,
+              desktopBrowserControlFd: undefined,
+            }),
+          );
+          const threadId = freshThreadId();
+          const server = yield* manager.open({ threadId, runtime: "server" });
+          expect(server.backingPage).toBe("server");
+          expect(server.desktopHostId).toBeUndefined();
+          const pinned = yield* manager.open({
+            threadId,
+            runtime: "server",
+            desktopHostId: "local",
+          });
+          expect(pinned).toMatchObject({ backingPage: "desktop", desktopHostId: "local" });
+        }
+      }),
+  );
+
+  it.effect("lists all environment tabs when the thread filter is omitted", () =>
+    Effect.gen(function* () {
+      const manager = yield* PreviewManager.PreviewManager;
+      const firstThread = freshThreadId();
+      const secondThread = freshThreadId();
+      const first = yield* manager.open({ threadId: firstThread, runtime: "server" });
+      const second = yield* manager.open({ threadId: secondThread, runtime: "server" });
+      const all = yield* manager.list({});
+      expect(all.sessions).toEqual(expect.arrayContaining([first, second]));
+      const filtered = yield* manager.list({ threadId: firstThread });
+      expect(filtered.sessions).toEqual([first]);
+      expect(filtered.serverEpoch).toBe(all.serverEpoch);
+      expect(filtered.revision).toBe(all.revision);
+      yield* manager.close({ threadId: firstThread, tabId: first.tabId });
+      const refreshed = yield* manager.list({});
+      expect(refreshed.sessions.some((tab) => tab.tabId === first.tabId)).toBe(false);
+      expect(refreshed.sessions).toContainEqual(second);
+      expect(refreshed.revision).toBeGreaterThan(all.revision);
+    }),
+  );
+
+  it.effect("shares durable recovery identity by thread and exact URL until a tab succeeds", () =>
+    Effect.gen(function* () {
+      const manager = yield* PreviewManager.PreviewManager;
+      const first = yield* manager.claimRecovery({
+        threadId: ThreadId.make("recovery-thread-a"),
+        tabId: "tab-a",
+        url: "http://localhost:5173/failed",
+      });
+      const sameClaimOtherTab = yield* manager.claimRecovery({
+        threadId: ThreadId.make("recovery-thread-a"),
+        tabId: "tab-b",
+        url: "http://localhost:5173/failed",
+      });
+      const differentThread = yield* manager.claimRecovery({
+        threadId: ThreadId.make("recovery-thread-b"),
+        tabId: "tab-c",
+        url: "http://localhost:5173/failed",
+      });
+      expect(sameClaimOtherTab).toEqual(first);
+      expect(differentThread).not.toEqual(first);
+
+      const tab = yield* manager.open({
+        threadId: ThreadId.make("recovery-thread-a"),
+        url: "http://localhost:5173/failed",
+      });
+      const originalClaim = yield* manager.claimRecovery({
+        threadId: ThreadId.make("recovery-thread-a"),
+        tabId: tab.tabId,
+        url: "http://localhost:5173/redirected-from",
+      });
+      yield* manager.reportStatus({
+        threadId: ThreadId.make("recovery-thread-a"),
+        tabId: tab.tabId,
+        navStatus: { _tag: "Success", url: "http://localhost:5173/final", title: "Ready" },
+        canGoBack: true,
+        canGoForward: false,
+      });
+      const afterSuccess = yield* manager.claimRecovery({
+        threadId: ThreadId.make("recovery-thread-a"),
+        tabId: tab.tabId,
+        url: "http://localhost:5173/redirected-from",
+      });
+      expect(afterSuccess).not.toEqual(originalClaim);
+    }),
+  );
+
+  it.effect("restores a recovery identity when the manager is reconstructed", () =>
+    Effect.gen(function* () {
+      const manager = yield* PreviewManager.PreviewManager;
+      const threadId = ThreadId.make("recovery-restart-thread");
+      const first = yield* manager.claimRecovery({
+        threadId,
+        tabId: "tab-before-restart",
+        url: "http://localhost:5173/restart",
+      });
+      const config = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const restartedManager = yield* PreviewManager.make.pipe(
+        Effect.provideService(ServerConfig.ServerConfig, config),
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(Path.Path, path),
+      );
+      const afterRestart = yield* restartedManager.claimRecovery({
+        threadId,
+        tabId: "tab-after-restart",
+        url: "http://localhost:5173/restart",
+      });
+      expect(afterRestart).toEqual(first);
+    }),
+  );
+
+  it.effect("keeps browser previews available when the recovery registry is unreadable", () =>
+    Effect.gen(function* () {
+      const manager = yield* PreviewManager.PreviewManager;
+      const config = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      yield* fileSystem.writeFileString(
+        path.join(config.stateDir, "preview-recovery-claims.json"),
+        "not valid recovery data",
+      );
+      const managerAfterCorruption = yield* PreviewManager.make.pipe(
+        Effect.provideService(ServerConfig.ServerConfig, config),
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(Path.Path, path),
+      );
+      const claimResult = yield* Effect.exit(
+        managerAfterCorruption.claimRecovery({
+          threadId: ThreadId.make("corrupt-recovery-thread"),
+          tabId: "tab-corrupt",
+          url: "http://localhost:5173/corrupt",
+        }),
+      );
+      expect(claimResult._tag).toBe("Failure");
+      const opened = yield* manager.open({ threadId: ThreadId.make("browser-remains-available") });
+      expect(opened.navStatus._tag).toBe("Idle");
+    }),
+  );
   it.effect("opens a session and emits opened with normalized URL", () =>
     Effect.gen(function* () {
       const threadId = freshThreadId();
