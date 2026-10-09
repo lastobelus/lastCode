@@ -277,6 +277,7 @@ export const AcpRegistryAdapterV2Driver: ProviderAdapterDriver<
       const hostEnvironment = yield* HostProcessEnvironment;
       const selfInvocation = yield* resolveSelfInvocation();
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const host = yield* ProviderHost.ProviderHost;
       const providerEventLoggers = yield* ProviderEventLoggers.ProviderEventLoggers;
       const makeNativeLogger = yield* makeAcpNativeLoggerFactory();
       const resolver = yield* AcpRegistrySupport.AcpRegistryCatalog;
@@ -289,7 +290,7 @@ export const AcpRegistryAdapterV2Driver: ProviderAdapterDriver<
         environment: mergeProviderInstanceEnvironment(
           input.environment,
           hostEnvironment,
-          serverConfig.settingsPath,
+          host.paths.settingsPath,
         ),
         childProcessSpawner,
         resolver,

@@ -36,8 +36,15 @@ import * as ProviderContinuationRequests from "@t3tools/provider-core/server/con
 import * as McpProviderSession from "@t3tools/provider-core/server/mcpSession";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import { ProviderHost } from "@t3tools/provider-core/server/ProviderHost";
+import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
 import { handoffBudget } from "@t3tools/provider-core/server/handoffBudget";
-import { makePiAdapterV2, PI_PROVIDER, type PiAdapterV2Options } from "./adapter.ts";
+import {
+  makePiAdapterV2,
+  PiAdapterV2Driver,
+  PI_PROVIDER,
+  type PiAdapterV2Options,
+} from "./adapter.ts";
 import { makePiRpcConnection, type PiRpcRecord } from "./rpc.ts";
 
 const layerTest = Layer.mergeAll(

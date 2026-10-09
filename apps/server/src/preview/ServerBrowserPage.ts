@@ -616,7 +616,10 @@ export const evaluate = async (
     // awaitPromise is deliberate user work; honor the broker's explicit remaining budget.
     Number.POSITIVE_INFINITY,
   ).catch((cause: unknown) => {
-    if (cause instanceof ServerBrowserOperationError && cause.tag === "PreviewAutomationTimeoutError")
+    if (
+      cause instanceof ServerBrowserOperationError &&
+      cause.tag === "PreviewAutomationTimeoutError"
+    )
       void cdp.send("Runtime.terminateExecution").catch(constVoid);
     throw cause;
   });

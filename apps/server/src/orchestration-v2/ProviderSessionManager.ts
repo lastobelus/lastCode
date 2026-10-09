@@ -6,6 +6,7 @@ import {
   OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
   OrchestrationV2RuntimeRequest,
+  type ProviderDriverKind,
   ProviderInstanceId,
   ProviderSessionId,
   ThreadId,
@@ -40,6 +41,7 @@ import {
   withMetrics,
 } from "../observability/Metrics.ts";
 import { ProviderWorkspaceMissingError } from "../provider/Errors.ts";
+import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as McpProviderSession from "@t3tools/provider-core/server/mcpSession";
 import * as ServerSettings from "../serverSettings.ts";
@@ -444,6 +446,7 @@ export const layerWithOptions = (
       const threadAttachment = yield* KeyedLock.make<string>();
       const detachSerialization = yield* KeyedLock.make<string>();
       const closingSessionScopes = new Map<string, Set<Deferred.Deferred<void>>>();
+      let ownershipRevision = 0;
       // Each native call owns its cleanup evidence, even after runtime replacement.
       // Sleeping idle timers do not enter this map.
       const activeIdleThreadUnloads = new Map<symbol, ProviderSessionId>();
@@ -919,6 +922,7 @@ export const layerWithOptions = (
               const closing = closingSessionScopes.get(key) ?? new Set<Deferred.Deferred<void>>();
               closing.add(existing.scopeClosed);
               closingSessionScopes.set(key, closing);
+              ownershipRevision += 1;
               updated.delete(key);
               return ["removed", updated] as const;
             }),
@@ -1009,7 +1013,7 @@ export const layerWithOptions = (
                               if (Exit.isSuccess(exit)) {
                                 const key = sessionKey(input.providerSessionId);
                                 const closing = closingSessionScopes.get(key);
-                                closing?.delete(entry.scopeClosed);
+                                if (closing?.delete(entry.scopeClosed)) ownershipRevision += 1;
                                 if (closing?.size === 0) closingSessionScopes.delete(key);
                                 for (const [key, pending] of pendingThreadUnloads) {
                                   if (pending.entry.runtime === entry.runtime)
@@ -1275,6 +1279,7 @@ export const layerWithOptions = (
               ...entry,
               attachedThreadIds: new Set([...entry.attachedThreadIds, input.threadId]),
             });
+            ownershipRevision += 1;
             return [entry.runtime, updated] as const;
           }),
         );
@@ -1308,6 +1313,7 @@ export const layerWithOptions = (
             attachedThreadIds,
             loadedProviderThreadKeyByThread,
           });
+          ownershipRevision += 1;
           return updated;
         });
 
@@ -1704,6 +1710,8 @@ export const layerWithOptions = (
         subscribers: Ref.Ref<
           ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
         >,
+        publishEventsBarrier: ProviderAdapterV2SessionRuntime["publishEventsBarrier"],
+        driver: ProviderDriverKind,
       ): Effect.Effect<ProviderAdapterV2EventSubscription> =>
         Effect.gen(function* () {
           const queue = yield* Queue.unbounded<ProviderSessionEventSignal, Cause.Done>();
@@ -1804,7 +1812,29 @@ export const layerWithOptions = (
           });
         return {
           ...runtime,
+          ...(inspectTurn === undefined
+            ? {}
+            : {
+                inspectTurn: (input: Parameters<typeof inspectTurn>[0]) =>
+                  Effect.gen(function* () {
+                    const inspection = yield* inspectTurn(input);
+                    const current = (yield* Ref.get(sessions)).get(sessionKey(providerSessionId));
+                    // Cleanup can retain active references or clear them to unknown.
+                    // Lost ownership of this captured runtime is stronger evidence
+                    // than missing adapter state, but never proves native completion.
+                    if (current?.runtime === runtime) return inspection;
+                    if (inspection.status === "terminal")
+                      return { ...inspection, runtimeReleased: true as const };
+                    return {
+                      status: "released" as const,
+                      driver: runtime.driver,
+                      providerThreadId: input.providerThread.id,
+                      providerTurnId: input.providerTurnId,
+                    };
+                  }),
+              }),
           subscribeEvents,
+          isShuttingDown: Effect.sync(() => shutdownSignal.received),
           events: Stream.unwrap(
             subscribeEvents.pipe(Effect.map((subscription) => subscription.events)),
           ),
@@ -1998,6 +2028,7 @@ export const layerWithOptions = (
         return entry.runtime.events.pipe(
           Stream.runForEach((event) => {
             if (shutdownSignal.received) return Effect.void;
+            if (event.type === "events.barrier") return event.after;
             if (
               event.type === "provider_session.updated" &&
               event.providerSession.status === "stopped"
@@ -2085,11 +2116,8 @@ export const layerWithOptions = (
                       cause: "Provider event stream ended unexpectedly.",
                     }),
                   );
-              yield* publishToSubscribers(entry.eventSubscribers, {
-                type: "failure",
-                cause,
-              });
-              yield* Ref.set(entry.eventSubscribers, new Map());
+              // Release removes this exact runtime before notifying subscribers.
+              // Their cleanup probes must already observe the lost ownership.
               yield* releaseEntry({
                 providerSessionId: entry.runtime.providerSessionId,
                 reason: "runtime_error",
@@ -2108,6 +2136,7 @@ export const layerWithOptions = (
       // closing within the time box.
       const sessionScopes = yield* Scope.make("parallel");
       const shutdown = Effect.gen(function* () {
+        shutdownSignal.received = true;
         const activeSessions = [...(yield* Ref.get(sessions)).values()];
         yield* Effect.forEach(
           activeSessions,
@@ -2151,7 +2180,11 @@ export const layerWithOptions = (
                 {
                   const providerThreads = new Map(
                     projection.providerThreads
-                      .filter((thread) => thread.providerSessionId === input.providerSessionId)
+                      .filter(
+                        (thread) =>
+                          thread.providerSessionId === input.providerSessionId &&
+                          thread.appThreadId === input.threadId,
+                      )
                       .map((thread) => [thread.id, thread] as const),
                   );
                   detachedProviderThreads = [...providerThreads.values()];
@@ -2187,7 +2220,17 @@ export const layerWithOptions = (
               }
               const detachResult = yield* Ref.modify(sessions, (current) => {
                 const entry = current.get(key);
-                if (entry === undefined || !entry.attachedThreadIds.has(input.threadId)) {
+                // Native children are resident without an app attachment. Terminal
+                // cleanup still owns their provider threads and must unload them.
+                if (
+                  entry === undefined ||
+                  (!entry.attachedThreadIds.has(input.threadId) &&
+                    !(
+                      input.revokeMcpCredential === true &&
+                      entry.supportsMultipleProviderThreads &&
+                      detachedProviderThreads.length > 0
+                    ))
+                ) {
                   return [
                     Option.none<{
                       readonly entry: LiveSessionEntry;
@@ -2227,6 +2270,7 @@ export const layerWithOptions = (
                 };
                 const updated = new Map(current);
                 updated.set(key, updatedEntry);
+                ownershipRevision += 1;
                 return [
                   Option.some({
                     entry: updatedEntry,
@@ -2259,7 +2303,16 @@ export const layerWithOptions = (
                 });
               }
               const detachedEntry =
-                Option.getOrUndefined(detached) ?? pendingThreadUnloads.get(unloadKey)?.entry;
+                Option.getOrUndefined(detached) ??
+                pendingThreadUnloads.get(unloadKey)?.entry ??
+                // Native subagent mirrors share their parent's runtime without
+                // attaching independently. Terminal cleanup still owns their
+                // native threads and must unload them before confirming Stop.
+                (input.revokeMcpCredential === true &&
+                currentEntry?.supportsMultipleProviderThreads === true &&
+                detachedProviderThreads.length > 0
+                  ? currentEntry
+                  : undefined);
               if (detachedEntry === undefined) return;
               detachedProviderThreads =
                 pendingThreadUnloads.get(unloadKey)?.providerThreads ?? detachedProviderThreads;
@@ -2343,8 +2396,8 @@ export const layerWithOptions = (
 
       return ProviderSessionManagerV2.of({
         shutdown,
-        open: (input) =>
-          sessionOpen.withLock(
+        open: (input) => {
+          const open = sessionOpen.withLock(
             input.providerSessionId,
             Effect.gen(function* () {
               const cwd = input.runtimePolicy.cwd;
@@ -2498,6 +2551,7 @@ export const layerWithOptions = (
               yield* Ref.update(sessions, (current) => {
                 const updated = new Map(current);
                 updated.set(key, entry);
+                ownershipRevision += 1;
                 return updated;
               });
               // The entry now guards the credential via its recorded id, so
@@ -2533,6 +2587,21 @@ export const layerWithOptions = (
               yield* startEventPump(entry);
               yield* scheduleIdleRelease(input.providerSessionId);
               return exposedRuntime;
+            }),
+          );
+          // Cleanup owns the same lease until recursive deletion finishes.
+          // Keep startup protected until its durable attachment guards the cwd;
+          // running provider turns do not hold this lease.
+          return input.runtimePolicy.cwd === null
+            ? open
+            : withWorkspaceLease(input.runtimePolicy.cwd, open);
+        },
+        ownershipRevision: Effect.sync(() => ownershipRevision),
+        isLive: (providerSessionId) =>
+          Ref.get(sessions).pipe(
+            Effect.map((current) => {
+              const key = sessionKey(providerSessionId);
+              return current.has(key) || (closingSessionScopes.get(key)?.size ?? 0) > 0;
             }),
           ),
         pendingExecution: Effect.gen(function* () {
@@ -2663,6 +2732,38 @@ export const layerWithOptions = (
                       concurrency: "unbounded",
                       discard: true,
                     }).pipe(Effect.timeout(RELEASE_SCOPE_CLOSE_TIMEOUT_MS));
+              }),
+            ),
+            Effect.andThen(
+              Effect.gen(function* () {
+                // Persist each confirmed shutdown, even if a later participant fails.
+                // A retry after process loss may have a binding but no live runtime.
+                const { providerSessions } = yield* projectionStore.getThreadRecords(
+                  input.threadId,
+                  ["providerSessions"],
+                );
+                const session = providerSessions.find(
+                  (session) => session.id === input.providerSessionId,
+                );
+                if (session === undefined) return;
+                const now = yield* DateTime.now;
+                yield* eventSink.write({
+                  events: [
+                    {
+                      id: yield* idAllocator.allocate.event(input),
+                      type: "provider-session.detached",
+                      threadId: input.threadId,
+                      driver: session.driver,
+                      providerInstanceId: session.providerInstanceId,
+                      occurredAt: now,
+                      payload: {
+                        providerSessionId: input.providerSessionId,
+                        detachedAt: now,
+                        reason: input.detail ?? "Thread shut down.",
+                      },
+                    },
+                  ],
+                });
               }),
             ),
             Effect.catchCause((cause) =>

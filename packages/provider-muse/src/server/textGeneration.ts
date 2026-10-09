@@ -17,6 +17,7 @@ import * as Schema from "effect/Schema";
 import { createMuseSdkHost, createMuseSdkHostEffect, type MuseSdkHost } from "./sdk.ts";
 import { museModelCapabilities, resolveMuseReasoningEffort } from "./modelCatalog.ts";
 import type { ProviderTextGeneration } from "@t3tools/provider-core/server/textGeneration";
+import * as TextGenerationOperations from "@t3tools/provider-core/server/textGenerationOperations";
 import {
   buildBranchNamePrompt,
   buildCommitMessagePrompt,
@@ -341,7 +342,12 @@ export const makeMuseTextGeneration = Effect.fn("makeMuseTextGeneration")(functi
     });
     return { title: sanitizeThreadTitle(generated.title) };
   });
+  const { generateIncomingMessageSummary } = TextGenerationOperations.fromRunner(
+    "MuseTextGeneration",
+    runMuseJson,
+  );
   return {
+    generateIncomingMessageSummary,
     generateCommitMessage,
     generatePrContent,
     generateBranchName,

@@ -7,6 +7,10 @@
       "types": "./src/authScopeOptions.ts",
       "import": "./src/authScopeOptions.ts"
     },
+    "./userMessage": {
+      "types": "./src/userMessage.ts",
+      "import": "./src/userMessage.ts"
+    },
     "./threadAnnotation": {
       "types": "./src/threadAnnotation.ts",
       "import": "./src/threadAnnotation.ts"
@@ -486,6 +490,18 @@
     "./mcpResponsePayloads": {
       "types": "./src/mcpResponsePayloads.ts",
       "import": "./src/mcpResponsePayloads.ts"
+    },
+    "./markdownImages": {
+      "types": "./src/markdownImages.ts",
+      "import": "./src/markdownImages.ts"
+    },
+    "./assistantMarkdownFiles": {
+      "types": "./src/assistantMarkdownFiles.ts",
+      "import": "./src/assistantMarkdownFiles.ts"
+    },
+    "./workspaceBasenameLookup": {
+      "types": "./src/workspaceBasenameLookup.ts",
+      "import": "./src/workspaceBasenameLookup.ts"
     }
   },
   "scripts": {

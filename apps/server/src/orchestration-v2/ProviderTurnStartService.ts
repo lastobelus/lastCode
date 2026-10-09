@@ -2,6 +2,7 @@ import { modelSelectionsEqual } from "@t3tools/shared/model";
 import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
 import {
   CommandId,
+  type MessageId,
   latestProviderTurnForAttempt,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2ExecutionNode,
@@ -22,6 +23,7 @@ import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 
+import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
@@ -59,6 +61,8 @@ export class ProviderTurnStartError extends Schema.TaggedError<ProviderTurnStart
   "ProviderTurnStartError",
   {
     runId: RunId,
+    /** A starting run was observed, no native start occurred, and no receipt was reported. */
+    deliveryRejected: Schema.optional(Schema.Literal(true)),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {}
@@ -70,6 +74,61 @@ const refusedBeforePrompt = (error: unknown): boolean =>
   Predicate.isTagged(error, "ClaudeBackgroundWorkBlocksQueryReplacementError") ||
   (Predicate.hasProperty(error, "cause") && refusedBeforePrompt(error.cause));
 
+interface StartDeliveryEvidence {
+  observedStarting: boolean;
+  invoked: boolean;
+  receiptReported: boolean;
+}
+
+// These callbacks outlive startup with the event worker. Create them outside
+// the startup generator so their closure cannot retain its projection/history.
+const makeDeliveryReporter = (
+  messageId: MessageId,
+  onMessageDelivery: Parameters<ProviderTurnStartServiceV2Shape["start"]>[0]["onMessageDelivery"],
+  evidence: StartDeliveryEvidence,
+) => {
+  const report = (delivered: boolean) =>
+    Effect.suspend(() => {
+      if (
+        evidence.receiptReported ||
+        onMessageDelivery === undefined ||
+        (!delivered && evidence.invoked)
+      )
+        return Effect.void;
+      evidence.receiptReported = true;
+      return onMessageDelivery(messageId, delivered);
+    });
+  return {
+    report,
+    preNativeFailure: (delivered: boolean) => (delivered ? Effect.void : report(false)),
+  };
+};
+
+const makeNativeDeliverySession = (
+  session: ProviderAdapterV2SessionRuntime,
+  evidence: StartDeliveryEvidence,
+  reportDelivery: (delivered: boolean) => Effect.Effect<void>,
+): ProviderAdapterV2SessionRuntime => {
+  const start = (turnInput: Parameters<typeof session.startTurn>[0], compact = false) =>
+    Effect.suspend(() => {
+      // An error after invocation cannot prove the prompt was not received.
+      evidence.invoked = true;
+      return (compact ? session.compactThread!(turnInput) : session.startTurn(turnInput)).pipe(
+        Effect.tap(() => reportDelivery(true)),
+      );
+    });
+  return {
+    ...session,
+    startTurn: (turnInput) => start(turnInput),
+    ...(session.compactThread === undefined
+      ? {}
+      : {
+          compactThread: (turnInput: Parameters<typeof session.startTurn>[0]) =>
+            start(turnInput, true),
+        }),
+  };
+};
+
 export interface ProviderTurnStartServiceV2Shape {
   /**
    * Starts the run's provider turn. When `willRetry` is true, a session open
@@ -80,6 +139,7 @@ export interface ProviderTurnStartServiceV2Shape {
     readonly threadId: ThreadId;
     readonly runId: RunId;
     readonly willRetry?: boolean;
+    readonly onMessageDelivery?: (messageId: MessageId, delivered: boolean) => Effect.Effect<void>;
   }) => Effect.Effect<void, ProviderTurnStartError>;
 }
 
@@ -220,11 +280,18 @@ export const layer: Layer.Layer<
       };
     };
 
-    const start = Effect.fn("orchestrationV2.providerTurnStart.start")(function* (input: {
-      readonly threadId: ThreadId;
-      readonly runId: RunId;
-      readonly willRetry?: boolean;
-    }) {
+    const start = Effect.fn("orchestrationV2.providerTurnStart.start")(function* (
+      input: {
+        readonly threadId: ThreadId;
+        readonly runId: RunId;
+        readonly willRetry?: boolean;
+        readonly onMessageDelivery?: (
+          messageId: MessageId,
+          delivered: boolean,
+        ) => Effect.Effect<void>;
+      },
+      nativeStart: StartDeliveryEvidence,
+    ) {
       const { runId } = input;
       const projection = yield* projectionStore.getTurnStartContext(input.threadId, runId);
       const run = projection.runs.find((candidate) => candidate.id === runId);
@@ -235,6 +302,13 @@ export const layer: Layer.Layer<
         // The effect is idempotent once the run has advanced or terminalized.
         return;
       }
+      nativeStart.observedStarting = true;
+      const deliveryReporter = makeDeliveryReporter(
+        run.userMessageId,
+        input.onMessageDelivery,
+        nativeStart,
+      );
+      const reportDelivery = deliveryReporter.report;
       const rootNode = projection.nodes.find((candidate) => candidate.id === run.rootNodeId);
       const attempt = projection.attempts.find((candidate) => candidate.id === run.activeAttemptId);
       const providerThread = projection.providerThreads.find(
@@ -463,40 +537,45 @@ export const layer: Layer.Layer<
       }
       const { worktreePath, branch } = projection.thread;
       if (worktreePath !== null && branch !== null) {
-        const exists = yield* fileSystem
-          .exists(worktreePath)
-          .pipe(Effect.orElseSucceed(() => true));
-        if (!exists) {
-          const project = yield* projects.getById(projection.thread.projectId).pipe(
-            Effect.map(Option.getOrUndefined),
-            Effect.orElseSucceed(() => undefined),
-          );
-          if (project !== undefined) {
-            yield* Effect.logWarning("provider turn start recreating missing worktree", {
-              threadId: projection.thread.id,
-              worktreePath,
-              branch,
-            });
-            yield* gitWorkflow.pruneWorktrees({ cwd: project.workspaceRoot }).pipe(
-              Effect.andThen(
-                gitWorkflow.createWorktree({
-                  cwd: project.workspaceRoot,
-                  refName: branch,
-                  path: worktreePath,
-                }),
-              ),
-              Effect.catchCause((cause) =>
-                Cause.hasInterruptsOnly(cause)
-                  ? Effect.failCause(cause)
-                  : Effect.logWarning("provider turn start failed to recreate worktree", {
-                      threadId: projection.thread.id,
-                      worktreePath,
-                      cause: Cause.pretty(cause),
+        yield* withWorkspaceLease(
+          worktreePath,
+          Effect.gen(function* () {
+            const exists = yield* fileSystem
+              .exists(worktreePath)
+              .pipe(Effect.orElseSucceed(() => true));
+            if (!exists) {
+              const project = yield* projects.getById(projection.thread.projectId).pipe(
+                Effect.map(Option.getOrUndefined),
+                Effect.orElseSucceed(() => undefined),
+              );
+              if (project !== undefined) {
+                yield* Effect.logWarning("provider turn start recreating missing worktree", {
+                  threadId: projection.thread.id,
+                  worktreePath,
+                  branch,
+                });
+                yield* gitWorkflow.pruneWorktrees({ cwd: project.workspaceRoot }).pipe(
+                  Effect.andThen(
+                    gitWorkflow.createWorktree({
+                      cwd: project.workspaceRoot,
+                      refName: branch,
+                      path: worktreePath,
                     }),
-              ),
-            );
-          }
-        }
+                  ),
+                  Effect.catchCause((cause) =>
+                    Cause.hasInterruptsOnly(cause)
+                      ? Effect.failCause(cause)
+                      : Effect.logWarning("provider turn start failed to recreate worktree", {
+                          threadId: projection.thread.id,
+                          worktreePath,
+                          cause: Cause.pretty(cause),
+                        }),
+                  ),
+                );
+              }
+            }
+          }),
+        );
       }
       const selectInheritedBackgroundItems = (
         current: ProjectionStore.ProjectionRuntimeRecoveryState,
@@ -559,6 +638,7 @@ export const layer: Layer.Layer<
         readonly error: Error;
       }) =>
         Effect.gen(function* () {
+          yield* reportDelivery(false);
           const nestedCause = "cause" in failed.error ? failed.error.cause : undefined;
           yield* settleRunBeforeStart({
             signal: failed.signal,
@@ -591,7 +671,7 @@ export const layer: Layer.Layer<
         });
         return;
       }
-      const session = sessionResult.success;
+      const session = makeNativeDeliverySession(sessionResult.success, nativeStart, reportDelivery);
       // Only the provider's own thread load fails the run on the last attempt;
       // store, id and handoff failures around it keep their typed errors.
       const loadFromProvider = (
@@ -782,6 +862,7 @@ export const layer: Layer.Layer<
       // The last attempt already failed the run.
       if (loadedProviderThread === undefined) return;
       if (!(yield* isCurrentAttemptInStatus("starting"))) {
+        yield* reportDelivery(false);
         return;
       }
       const now = yield* DateTime.now;
@@ -945,6 +1026,7 @@ export const layer: Layer.Layer<
         events,
       });
       if (!runningWrite.committed) {
+        yield* reportDelivery(false);
         return;
       }
       const routableSubagents = projection.subagents.filter((subagent) =>
@@ -1169,7 +1251,10 @@ export const layer: Layer.Layer<
                 });
               }),
           });
-          if (!(yield* isCurrentAttemptInStatus("running"))) return;
+          if (!(yield* isCurrentAttemptInStatus("running"))) {
+            yield* reportDelivery(false);
+            return;
+          }
           const start = compact ? session.compactThread! : session.startTurn;
           const context = [delivery.context, restartNote]
             .filter((part) => part !== "")
@@ -1208,6 +1293,7 @@ export const layer: Layer.Layer<
             ),
           );
         }).pipe(
+          Effect.tapError(() => reportDelivery(false)),
           Effect.mapError((cause) =>
             cause._tag === "ProviderAdapterTurnStartError"
               ? cause
@@ -1229,6 +1315,11 @@ export const layer: Layer.Layer<
           : makeDeliverySession(session, startWithHandoffs);
       yield* runExecution.startRootRun({
         commandId: CommandId.make(`command:effect:provider-turn.start:${run.id}`),
+        ...(input.onMessageDelivery === undefined
+          ? {}
+          : {
+              onMessageDelivery: deliveryReporter.preNativeFailure,
+            }),
         appThread: projection.thread,
         providerSessionId,
         session: deliverySession,
@@ -1282,13 +1373,23 @@ export const layer: Layer.Layer<
 
     return ProviderTurnStartServiceV2.of({
       start: (input) =>
-        start(input).pipe(
-          Effect.mapError((cause) =>
-            isProviderTurnStartError(cause)
-              ? cause
-              : new ProviderTurnStartError({ runId: input.runId, cause }),
-          ),
-        ),
+        Effect.suspend(() => {
+          const nativeStart = { observedStarting: false, invoked: false, receiptReported: false };
+          return start(input, nativeStart).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderTurnStartError({
+                  runId: input.runId,
+                  cause: isProviderTurnStartError(cause) ? cause.cause : cause,
+                  ...(nativeStart.observedStarting &&
+                  !nativeStart.invoked &&
+                  !nativeStart.receiptReported
+                    ? { deliveryRejected: true }
+                    : {}),
+                }),
+            ),
+          );
+        }),
     });
   }),
 );

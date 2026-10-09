@@ -416,7 +416,7 @@ const layer: Layer.Layer<
   ProviderAdapter.ProviderAdapterV2,
   Effect.gen(function* () {
     const hostEnvironment = yield* HostProcessEnvironment;
-      const host = yield* ProviderHost.ProviderHost;
+    const host = yield* ProviderHost.ProviderHost;
     const hostPlatform = yield* HostProcessPlatform;
     const selfInvocation = yield* resolveSelfInvocation();
     const providerEventLoggers = yield* ProviderEventLoggers.ProviderEventLoggers;

@@ -161,8 +161,7 @@ function markdownThreadFindText(
         const labelText = (node: TextTree): string =>
           node.tagName === "br"
             ? "\n"
-            : node.value?.replace(/\r?\n/g, " ") ??
-              (node.children ?? []).map(labelText).join("");
+            : (node.value?.replace(/\r?\n/g, " ") ?? (node.children ?? []).map(labelText).join(""));
         const hasImage = (node: TextTree): boolean =>
           node.tagName === "img" || (node.children ?? []).some(hasImage);
         const label = labelText(node);

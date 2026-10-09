@@ -44,9 +44,9 @@ import { refreshPreviewStreamAccess, usePreviewStreamAccess } from "~/state/prev
 
 /** Chrome-row controls for a server tab; commands require current ownership. */
 export interface ServerBrowserHandle {
-  readonly navigate: (url: string) => void;
+  readonly navigate: (url: string) => boolean;
   readonly history: (delta: -1 | 1) => void;
-  readonly reload: (options?: { readonly ignoreCache?: boolean }) => void;
+  readonly reload: (options?: { readonly ignoreCache?: boolean }) => boolean;
   readonly viewport: (setting: PreviewViewportSetting) => void;
   readonly canvas: () => HTMLCanvasElement | null;
 }
@@ -227,7 +227,7 @@ export function ServerBrowserSurface(props: {
   const [cap, setCap] = useState<{ width: number; height: number } | null>(null);
 
   const send = useCallback((input: PreviewStreamInput) => {
-    clientRef.current?.send(input);
+    return clientRef.current?.send(input) ?? false;
   }, []);
 
   const clearInput = useCallback(() => {

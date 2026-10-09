@@ -9,7 +9,7 @@ import {
   ProjectScript,
 } from "@t3tools/contracts";
 import { T3ProjectFileFromJson } from "@t3tools/shared/t3ProjectFile";
-import { writeFileStringAtomically } from "../atomicWrite.ts";
+import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 import {
   ManagedProjectActionState,
   ProjectActionReconciliationError,

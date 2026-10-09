@@ -287,6 +287,11 @@ a client's permissions.
 local changes. Add `filesystem:write` to allow editing files or saving plans to
 the workspace. These scopes control direct file access from the client.
 
+Conversation readers can open individual files an assistant links in visible
+messages or proposed plans, including reports and images, without host-file
+browsing permission. This also covers linked files saved outside the project workspace.
+Opening other files or browsing their folders requires `filesystem:read`.
+
 To remove an environment from T3 Connect, open your account menu's **T3 Connect**
 page, or **Settings → T3 Connect** on mobile, and choose **Deregister**. This
 revokes its cloud access and frees its host space even when the environment is

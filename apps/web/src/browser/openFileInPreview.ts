@@ -1,3 +1,4 @@
+import { hostedPreviewNavigationUrl } from "@t3tools/client-runtime/preview-hosting";
 import type {
   AssetCreateUrlResult,
   AssetResource,
@@ -7,6 +8,7 @@ import type {
   ScopedThreadRef,
 } from "@t3tools/contracts";
 import { mediaFileReference } from "@t3tools/client-runtime/media-reference";
+import { fileAssetResourceForAccess } from "@t3tools/client-runtime/state/assets";
 import {
   type AtomCommandResult,
   mapAtomCommandResult,
@@ -15,8 +17,13 @@ import * as Cause from "effect/Cause";
 import * as Data from "effect/Data";
 import { AsyncResult } from "effect/reactivity";
 
+import { prepareHostedPreview } from "~/components/preview/previewHostingRecovery";
 import { resolveAssetUrl } from "~/assets/assetUrls";
-import { isPreviewAvailableFor, previewRuntimeFor } from "~/browser/previewRuntime";
+import {
+  desktopBrowserHostFor,
+  isPreviewAvailableFor,
+  previewRuntimeFor,
+} from "~/browser/previewRuntime";
 import {
   applyPreviewServerSnapshot,
   readThreadPreviewState,
@@ -25,6 +32,7 @@ import {
   updatePreviewServerSnapshot,
 } from "~/previewStateStore";
 import { selectSelectedRightPanelSurface, useRightPanelStore } from "~/rightPanelStore";
+import { rememberHandoffBrowser } from "~/handoffs/handoffsStore";
 
 import {
   browserDefaultOpenProfileId,
@@ -54,7 +62,7 @@ export type OpenPreviewMutation<E = unknown> = (input: {
   readonly input: PreviewOpenInput;
 }) => Promise<AtomCommandResult<PreviewSessionSnapshot, E>>;
 
-export async function openUrlInPreview<E>(input: {
+interface OpenUrlInPreviewInput<E> {
   readonly threadRef: ScopedThreadRef;
   readonly url: string;
   readonly openPreview: OpenPreviewMutation<E>;
@@ -62,7 +70,22 @@ export async function openUrlInPreview<E>(input: {
   readonly profileId?: PreviewOpenInput["profileId"];
   /** Open the tab without switching the thread to it. */
   readonly background?: boolean;
-}): Promise<AtomCommandResult<void, E | BrowserSettingsReadError>> {
+  readonly onOpened?: (tabId: string) => void;
+}
+
+export async function openUrlInPreview<E>(
+  input: OpenUrlInPreviewInput<E>,
+): Promise<AtomCommandResult<void, E | BrowserSettingsReadError>> {
+  const prepared = await prepareHostedPreview(input.threadRef, input.url);
+  return openPreparedUrlInPreview(input, prepared.url, prepared.navigationUrl);
+}
+
+/** Open an already recovered destination while retaining the authored URL. */
+export async function openPreparedUrlInPreview<E>(
+  input: OpenUrlInPreviewInput<E>,
+  destinationUrl: string,
+  navigationUrl?: string,
+): Promise<AtomCommandResult<void, E | BrowserSettingsReadError>> {
   const defaults = await resolveBrowserDefaults().catch(
     (cause: unknown) => new BrowserSettingsReadError({ cause }),
   );
@@ -70,24 +93,32 @@ export async function openUrlInPreview<E>(input: {
     return AsyncResult.failure(Cause.fail(defaults));
   }
   const runtime = previewRuntimeFor(input.threadRef.environmentId);
-  const previousActiveTabId = readThreadPreviewState(input.threadRef).activeTabId;
+  const desktopHostId =
+    runtime === "server" ? desktopBrowserHostFor(input.threadRef.environmentId) : undefined;
+  const previousActiveTabId = input.background
+    ? readThreadPreviewState(input.threadRef).activeTabId
+    : null;
   // The server's "opened" event switches the preview tab but not the panel's
   // selection, so a changed selection means the user picked a tab themselves.
   const selectedSurface = () =>
     selectSelectedRightPanelSurface(useRightPanelStore.getState().byThreadKey, input.threadRef)
       ?.id ?? null;
-  const surfaceBeforeOpen = selectedSurface();
+  const surfaceBeforeOpen = input.background ? selectedSurface() : null;
   const result = await input.openPreview({
     environmentId: input.threadRef.environmentId,
     input: {
       threadId: input.threadRef.threadId,
-      url: input.url,
+      url: hostedPreviewNavigationUrl(
+        { url: destinationUrl, ...(navigationUrl === undefined ? {} : { navigationUrl }) },
+        runtime === "server" && desktopHostId === undefined ? input.url : destinationUrl,
+      ),
       // Built here rather than via `openPreviewSession` because this path
       // maps the result differently, so the configured defaults have to be
       // applied explicitly or file/link opens would ignore them.
       viewport: browserDefaultOpenViewport(defaults),
       profileId: input.profileId ?? browserDefaultOpenProfileId(defaults),
       ...(runtime === undefined ? {} : { runtime }),
+      ...(desktopHostId === undefined ? {} : { desktopHostId }),
     },
   });
   return mapAtomCommandResult(result, (snapshot) => {
@@ -103,10 +134,12 @@ export async function openUrlInPreview<E>(input: {
       ) {
         setActivePreviewTab(input.threadRef, previousActiveTabId);
       }
+      input.onOpened?.(snapshot.tabId);
       return;
     }
     applyPreviewServerSnapshot(input.threadRef, snapshot);
     useRightPanelStore.getState().openBrowser(input.threadRef, snapshot.tabId);
+    input.onOpened?.(snapshot.tabId);
   });
 }
 
@@ -118,6 +151,7 @@ export async function openFileInPreview<AssetError, PreviewError>(input: {
   readonly threadRef: ScopedThreadRef;
   readonly filePath: string;
   readonly workspaceRoot: string | undefined;
+  readonly canReadFiles: boolean;
   readonly httpBaseUrl: string;
   readonly createAssetUrl: (input: {
     readonly environmentId: EnvironmentId;
@@ -144,11 +178,14 @@ export async function openFileInPreview<AssetError, PreviewError>(input: {
   const assetResult = await input.createAssetUrl({
     environmentId: input.threadRef.environmentId,
     input: {
-      resource: {
-        _tag: insideWorkspace ? "workspace-file" : "media-file",
-        threadId: input.threadRef.threadId,
-        path: input.filePath,
-      },
+      resource: fileAssetResourceForAccess(
+        {
+          _tag: insideWorkspace ? "workspace-file" : "media-file",
+          threadId: input.threadRef.threadId,
+          path: input.filePath,
+        },
+        input.canReadFiles,
+      ),
     },
   });
   if (assetResult._tag === "Failure") {
@@ -160,9 +197,18 @@ export async function openFileInPreview<AssetError, PreviewError>(input: {
       Cause.die(new Error("The environment returned an invalid asset URL.")),
     );
   }
-  return openUrlInPreview({
+  const result = await openUrlInPreview({
     threadRef: input.threadRef,
     url: assetUrl,
     openPreview: input.openPreview,
+    onOpened: (tabId) => {
+      rememberHandoffBrowser(
+        input.threadRef,
+        tabId,
+        { kind: "file", path: input.filePath },
+        assetUrl,
+      );
+    },
   });
+  return result;
 }

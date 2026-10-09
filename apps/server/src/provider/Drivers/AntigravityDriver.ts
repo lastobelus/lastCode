@@ -107,7 +107,7 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
       const processEnvironment = mergeProviderInstanceEnvironment(
         environment,
         process.env,
-        serverConfig.settingsPath,
+        host.paths.settingsPath,
       );
       const userHome = resolveAntigravityUserHome(yield* HostProcessPlatform, processEnvironment);
       const directories = yield* resolveAntigravityInstanceDirectories(

@@ -1,9 +1,10 @@
-import { fileBasename, workspaceRelativeFilePath } from "@t3tools/shared/path";
+import { fileBasename, isAbsolutePath, workspaceRelativeFilePath } from "@t3tools/shared/path";
 import {
   inlineCodeFilePathCandidate,
   isRelativeFilePath,
   normalizeMarkdownLinkDestination,
   resolveMarkdownFileLinkTarget,
+  parseMarkdownFileLink,
 } from "@t3tools/shared/markdownLinks";
 import { parseFileUrlHref, splitFilePathPosition } from "@t3tools/shared/fileLinks";
 
@@ -16,6 +17,8 @@ export interface MarkdownFileLinkMeta {
   displayPath: string;
   workspaceRelativePath: string | null;
   basename: string;
+  /** Whether the authored destination omitted every directory segment. */
+  isBareFilename: boolean;
   line?: number;
   column?: number;
 }
@@ -81,10 +84,21 @@ export function resolveMarkdownFileLinkMeta(
 ): MarkdownFileLinkMeta | null {
   const targetPath = resolveMarkdownFileLinkTarget(href, cwd, baseDir);
   if (!targetPath) return null;
-  return buildFileLinkMetaFromTarget(targetPath, cwd);
+  const authoredTarget = href ? parseMarkdownFileLink(href) : null;
+  const isBareFilename =
+    authoredTarget !== null &&
+    !isAbsolutePath(authoredTarget.path) &&
+    !/[\\/]/.test(authoredTarget.path) &&
+    authoredTarget.path !== "." &&
+    authoredTarget.path !== "..";
+  return buildFileLinkMetaFromTarget(targetPath, cwd, isBareFilename);
 }
 
-function buildFileLinkMetaFromTarget(targetPath: string, cwd?: string): MarkdownFileLinkMeta {
+function buildFileLinkMetaFromTarget(
+  targetPath: string,
+  cwd: string | undefined,
+  isBareFilename: boolean,
+): MarkdownFileLinkMeta {
   const { path, line, column } = splitFilePathPosition(targetPath);
   return {
     filePath: path,
@@ -92,6 +106,7 @@ function buildFileLinkMetaFromTarget(targetPath: string, cwd?: string): Markdown
     displayPath: formatWorkspaceRelativePath(targetPath, cwd),
     workspaceRelativePath: workspaceRelativeFilePath(path, cwd),
     basename: fileBasename(path),
+    isBareFilename,
     ...(line !== undefined ? { line } : {}),
     ...(column !== undefined ? { column } : {}),
   };

@@ -1,11 +1,8 @@
 import {
   OrchestratorMcpFailure,
   type MessageId,
-  type ThreadId,
   type RunId,
-  type OrchestrationV2Run,
-  type OrchestrationV2ThreadProjection,
-  type OrchestrationV2ContextTransfer,
+  type ThreadId,
   type OrchestratorMcpThreadReadInput,
   type OrchestratorMcpThreadReadResult,
   type ThreadReadRequest,
@@ -22,20 +19,29 @@ import * as Queue from "effect/Queue";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
-/** Clients retain their own destination credentials; servers only forward reads. */
+import type { OrchestratorV2Error } from "../orchestration-v2/Orchestrator.ts";
+import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import { ThreadReadAuthorization } from "../orchestration-v2/ThreadReadAuthorization.ts";
+
+type Authorization = Context.Service.Shape<typeof ThreadReadAuthorization>;
+
+/**
+ * Forwards thread reads that miss locally to the authenticated client that started the calling
+ * run. Clients retain their own destination credentials; this server only relays.
+ */
 export class ThreadReadBroker extends Context.Service<
   ThreadReadBroker,
   {
-    readonly authorize: (input: {
-      readonly threadId: ThreadId;
-      readonly messageId: MessageId;
-      readonly sessionId: string;
-      readonly alreadyStored: boolean;
-    }) => Effect.Effect<void>;
-    readonly authorizedSession: (
-      threadId: ThreadId,
-      messageId: MessageId,
-    ) => Effect.Effect<string | undefined>;
+    /** Binds each new input to the client session that submitted it. */
+    readonly forSession: (sessionId: string) => Authorization;
+    /**
+     * Binds each new input to the session that authorized the caller's captured run. Callers pass
+     * the run they already loaded, so a later run on the source never lends its authority.
+     */
+    readonly inherit: (
+      sourceThreadId: ThreadId,
+      sourceRunId: RunId | undefined,
+    ) => Effect.Effect<Authorization>;
     readonly connect: (
       sessionId: string,
     ) => Effect.Effect<Stream.Stream<ThreadReadRequest>, never, Scope.Scope>;
@@ -43,9 +49,10 @@ export class ThreadReadBroker extends Context.Service<
       sessionId: string,
       response: ThreadReadResponse,
     ) => Effect.Effect<void, OrchestratorMcpFailure>;
+    /** Reads through the clients of the session that authorized the caller's captured run. */
     readonly read: (
-      threadId: ThreadId,
-      messageId: MessageId,
+      sourceThreadId: ThreadId,
+      sourceRunId: RunId | undefined,
       input: OrchestratorMcpThreadReadInput,
     ) => Effect.Effect<OrchestratorMcpThreadReadResult, OrchestratorMcpFailure>;
   }
@@ -58,50 +65,85 @@ const unavailable = () =>
       "The local thread was not found, and the other environments could not all be checked. Keep a T3 client connected to the environments and retry; this does not mean the thread is missing.",
   });
 
-const authorizationIdleMillis = 7 * 24 * 60 * 60 * 1000;
-const maxAuthorizations = 10_000;
+const bindingIdleMillis = 7 * 24 * 60 * 60 * 1000;
+const maxBindings = 10_000;
 
 const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
-  const authorizations = new Map<string, { sessionId: string; lastUsedAt: number }>();
-  const authorizationKey = (threadId: ThreadId, messageId: MessageId) =>
+  const threads = yield* ThreadManagementService.ThreadManagementService;
+
+  // Map order follows valid use, so idle expiry and capacity eviction both remove the least
+  // recently used binding without extending rejected claims.
+  const bindings = new Map<string, { sessionId: string; lastUsedAt: number }>();
+  const bindingKey = (threadId: ThreadId, messageId: MessageId) =>
     JSON.stringify([threadId, messageId]);
-  // Map order follows valid use, so stale entries and capacity eviction both
-  // remove the least recently used authority without extending rejected claims.
-  const pruneAuthorizations = (now: number) => {
-    for (const [key, entry] of authorizations) {
-      if (now - entry.lastUsedAt < authorizationIdleMillis) break;
-      authorizations.delete(key);
+  const pruneBindings = Effect.map(Clock.currentTimeMillis, (now) => {
+    for (const [key, entry] of bindings) {
+      if (now - entry.lastUsedAt < bindingIdleMillis) break;
+      bindings.delete(key);
     }
-  };
-  const authorizedSession: ThreadReadBroker["Service"]["authorizedSession"] = (
-    threadId,
-    messageId,
-  ) =>
+    return now;
+  });
+
+  const bind = (threadId: ThreadId, messageId: MessageId, sessionId: string) =>
     Effect.gen(function* () {
-      const now = yield* Clock.currentTimeMillis;
-      pruneAuthorizations(now);
-      const key = authorizationKey(threadId, messageId);
-      const entry = authorizations.get(key);
-      if (entry === undefined) return undefined;
-      authorizations.delete(key);
-      authorizations.set(key, { ...entry, lastUsedAt: now });
-      return entry.sessionId;
-    });
-  const authorize: ThreadReadBroker["Service"]["authorize"] = (input) =>
-    Effect.gen(function* () {
-      const now = yield* Clock.currentTimeMillis;
-      pruneAuthorizations(now);
-      const key = authorizationKey(input.threadId, input.messageId);
+      const { runs } = yield* threads.getThreadRecords(threadId, ["runs"]);
+      const now = yield* pruneBindings;
+      const key = bindingKey(threadId, messageId);
       // A replay cannot claim an existing execution, including after eviction,
       // or replace its original requester while the binding remains present.
-      if (input.alreadyStored || authorizations.has(key)) return;
-      if (authorizations.size >= maxAuthorizations) {
-        const oldest = authorizations.keys().next().value;
-        if (oldest !== undefined) authorizations.delete(oldest);
+      if (runs.some((run) => run.userMessageId === messageId) || bindings.has(key)) return;
+      if (bindings.size >= maxBindings) {
+        const oldest = bindings.keys().next().value;
+        if (oldest !== undefined) bindings.delete(oldest);
       }
-      authorizations.set(key, { sessionId: input.sessionId, lastUsedAt: now });
+      bindings.set(key, { sessionId, lastUsedAt: now });
+    }).pipe(
+      // Failure to inspect the target denies remote routing without preventing its turn.
+      Effect.catch(() => Effect.void),
+    );
+
+  const forSession: ThreadReadBroker["Service"]["forSession"] = (sessionId) => ({
+    authorize: (threadId, messageId) => bind(threadId, messageId, sessionId),
+  });
+
+  /** A delegated run inherits the exact run that spawned it, even after its parent moves on. */
+  const runSession = (
+    threadId: ThreadId,
+    runId: RunId,
+    visited: Set<RunId>,
+  ): Effect.Effect<string | undefined, OrchestratorV2Error> =>
+    Effect.gen(function* () {
+      if (visited.has(runId)) return undefined;
+      visited.add(runId);
+      const source = yield* threads.getThreadRecords(threadId, ["runs", "contextTransfers"]);
+      const run = source.runs.find((candidate) => candidate.id === runId);
+      if (run === undefined) return undefined;
+      const now = yield* pruneBindings;
+      const key = bindingKey(threadId, run.userMessageId);
+      const entry = bindings.get(key);
+      if (entry !== undefined) {
+        bindings.delete(key);
+        bindings.set(key, { ...entry, lastUsedAt: now });
+        return entry.sessionId;
+      }
+      const spawn = source.contextTransfers.find(
+        (transfer) => transfer.type === "subagent_spawn" && transfer.targetRunId === run.id,
+      );
+      if (spawn?.sourcePoint.runId === undefined) return undefined;
+      return yield* runSession(spawn.sourceThreadId, spawn.sourcePoint.runId, visited);
     });
+  // Without a captured run there is no authority to inherit.
+  const sourceSession = (threadId: ThreadId, runId: RunId | undefined) =>
+    runId === undefined
+      ? Effect.succeed(undefined)
+      : runSession(threadId, runId, new Set()).pipe(Effect.orElseSucceed(() => undefined));
+
+  const inherit: ThreadReadBroker["Service"]["inherit"] = (sourceThreadId, sourceRunId) =>
+    Effect.map(sourceSession(sourceThreadId, sourceRunId), (sessionId) =>
+      sessionId === undefined ? ThreadReadAuthorization.defaultValue() : forSession(sessionId),
+    );
+
   const clients = new Map<
     string,
     { sessionId: string; queue: Queue.Queue<ThreadReadRequest, Cause.Done> }
@@ -184,11 +226,18 @@ const make = Effect.gen(function* () {
       yield* finishMiss(response.requestId);
     });
 
-  const read: ThreadReadBroker["Service"]["read"] = (threadId, messageId, input) =>
+  const read: ThreadReadBroker["Service"]["read"] = (sourceThreadId, sourceRunId, input) =>
     Effect.gen(function* () {
-      const sessionId = yield* authorizedSession(threadId, messageId);
+      const sessionId = yield* sourceSession(sourceThreadId, sourceRunId);
+      if (sessionId === undefined) {
+        return yield* new OrchestratorMcpFailure({
+          code: "environment_unavailable",
+          message:
+            "This run has no connected client authorized to read other environments. Send a new message from the client connected to those environments and retry.",
+        });
+      }
       const targets = [...clients].filter(([, client]) => client.sessionId === sessionId);
-      if (sessionId === undefined || targets.length === 0) return yield* unavailable();
+      if (targets.length === 0) return yield* unavailable();
       const requestId = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
       const result = yield* Deferred.make<
         OrchestratorMcpThreadReadResult,
@@ -212,48 +261,7 @@ const make = Effect.gen(function* () {
       }).pipe(Effect.ensuring(Effect.sync(() => pending.delete(requestId))));
     });
 
-  return ThreadReadBroker.of({ authorize, authorizedSession, connect, respond, read });
+  return ThreadReadBroker.of({ forSession, inherit, connect, respond, read });
 });
 
 export const layer = Layer.effect(ThreadReadBroker, make);
-
-/** Delegation inherits the run that spawned it, even after its parent starts another run. */
-type AuthoritySource = {
-  readonly thread: Pick<OrchestrationV2ThreadProjection["thread"], "id">;
-  readonly runs: ReadonlyArray<Pick<OrchestrationV2Run, "id" | "userMessageId">>;
-  readonly contextTransfers: ReadonlyArray<
-    Pick<OrchestrationV2ContextTransfer, "type" | "targetRunId" | "sourceThreadId" | "sourcePoint">
-  >;
-};
-
-export const resolveAuthority = <E>(
-  broker: ThreadReadBroker["Service"],
-  source: AuthoritySource,
-  run: Pick<OrchestrationV2Run, "id" | "userMessageId"> | undefined,
-  readSource: (threadId: ThreadId) => Effect.Effect<AuthoritySource, E>,
-  visited = new Set<RunId>(),
-): Effect.Effect<
-  | { readonly threadId: ThreadId; readonly messageId: MessageId; readonly sessionId: string }
-  | undefined,
-  E
-> =>
-  Effect.gen(function* () {
-    if (run === undefined || visited.has(run.id)) return undefined;
-    visited.add(run.id);
-    const sessionId = yield* broker.authorizedSession(source.thread.id, run.userMessageId);
-    if (sessionId !== undefined) {
-      return { threadId: source.thread.id, messageId: run.userMessageId, sessionId };
-    }
-    const transfer = source.contextTransfers.find(
-      (candidate) => candidate.type === "subagent_spawn" && candidate.targetRunId === run.id,
-    );
-    if (transfer?.sourcePoint.runId === undefined) return undefined;
-    const parent = yield* readSource(transfer.sourceThreadId);
-    return yield* resolveAuthority(
-      broker,
-      parent,
-      parent.runs.find((candidate) => candidate.id === transfer.sourcePoint.runId),
-      readSource,
-      visited,
-    );
-  });

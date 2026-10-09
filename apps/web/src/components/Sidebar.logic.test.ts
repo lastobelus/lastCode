@@ -10,6 +10,8 @@ import {
   archiveSelectedThreadEntries,
   buildBulkTitleRegenerationContextMenuItem,
   buildBulkUnpinContextMenuItem,
+  buildBulkThreadDeleteContextMenuItem,
+  collectUnprotectedBulkThreadEntries,
   buildMultiSelectThreadContextMenuItems,
   createThreadJumpHintVisibilityController,
   deleteSelectedThreadEntries,
@@ -65,6 +67,7 @@ import { sortSettledThreads } from "@t3tools/client-runtime/state/thread-sort";
 import {
   type ActionResumeState,
   type ThreadWorktreeCleanup,
+  CommandId,
   EnvironmentId,
   ProjectId,
   ProviderInstanceId,
@@ -352,17 +355,52 @@ describe("buildBulkTitleRegenerationContextMenuItem", () => {
   });
 });
 
+describe("buildBulkThreadDeleteContextMenuItem", () => {
+  it("blocks a mixed selection containing a persistent thread", () => {
+    expect(buildBulkThreadDeleteContextMenuItem({ count: 3, hasPersistentThread: true })).toEqual({
+      id: "delete",
+      label: "Delete (3) (disable persistence first)",
+      destructive: true,
+      disabled: true,
+    });
+  });
+});
+
+describe("collectUnprotectedBulkThreadEntries", () => {
+  it("rechecks live persistence before starting a destructive batch", () => {
+    const threads = new Map([
+      ["ordinary", { id: "ordinary", persistent: false }],
+      ["protected", { id: "protected", persistent: false }],
+    ]);
+    const getEntry = (threadKey: string) => {
+      const thread = threads.get(threadKey);
+      return thread ? { threadKey, thread } : undefined;
+    };
+
+    expect(
+      collectUnprotectedBulkThreadEntries({
+        threadKeys: ["ordinary", "protected"],
+        getEntry,
+      }),
+    ).toHaveLength(2);
+
+    threads.set("protected", { id: "protected", persistent: true });
+
+    expect(
+      collectUnprotectedBulkThreadEntries({
+        threadKeys: ["ordinary", "protected"],
+        getEntry,
+      }),
+    ).toBeNull();
+  });
+});
+
 describe("buildMultiSelectThreadContextMenuItems", () => {
   it("offers bulk archive with the selected count", () => {
-    expect(
-      buildMultiSelectThreadContextMenuItems({ count: 3, hasRunningThread: false }),
-    ).toContainEqual({ id: "archive", label: "Archive (3)", disabled: false });
-  });
-
-  it("disables bulk archive when a selected thread is running", () => {
-    expect(
-      buildMultiSelectThreadContextMenuItems({ count: 2, hasRunningThread: true }),
-    ).toContainEqual({ id: "archive", label: "Archive (2)", disabled: true });
+    expect(buildMultiSelectThreadContextMenuItems({ count: 3 })).toContainEqual({
+      id: "archive",
+      label: "Archive (3)",
+    });
   });
 });
 
@@ -502,6 +540,62 @@ describe("sidebar thread lineage helpers", () => {
     ).toEqual([]);
     expect(recovery.archivedAt).toBe("2026-03-09T09:00:00.000Z");
   });
+
+  it.each(["stopping", "failed"] as const)(
+    "shows a stranded %s archive repair without making ordinary owned children independent",
+    (status) => {
+      const owner = makeThreadFixture({
+        id: ThreadId.make("archive-owner"),
+        archivedAt: "2026-10-07T00:00:00.000Z",
+      });
+      const child = makeThreadFixture({
+        id: ThreadId.make("stranded-native"),
+        environmentId: owner.environmentId,
+        projectId: owner.projectId,
+        lineage: {
+          rootThreadId: owner.id,
+          parentThreadId: owner.id,
+          relationshipToParent: "subagent",
+        },
+        archivePending: {
+          threadId: owner.id,
+          commandId: CommandId.make("archive-repair"),
+          childDisposition: "stop_and_archive",
+          childThreadIds: [],
+          archiveThreadIds: [],
+          promoteThreadIds: [],
+          status,
+        },
+      });
+      const ordinaryChild = { ...child, id: ThreadId.make("ordinary-child"), archivePending: null };
+      const scope = new Set([`${owner.environmentId}:${owner.projectId}`]);
+      expect(filterSidebarV2VisibleThreads([owner, child, ordinaryChild], scope)).toEqual([child]);
+      expect(filterSidebarV2VisibleThreads([child, ordinaryChild], scope)).toEqual([child]);
+      expect(
+        filterSidebarV2VisibleThreads(
+          [{ ...owner, archivedAt: null }, child, ordinaryChild],
+          scope,
+        ),
+      ).toEqual([{ ...owner, archivedAt: null }]);
+      expect(filterSidebarV2VisibleThreads([owner, child], new Set())).toEqual([]);
+      expect(isSidebarSubagentThread(child)).toBe(true);
+      expect(child.lineage.independent).toBeUndefined();
+      const nestedOwner = {
+        ...child,
+        archivePending: { ...child.archivePending!, threadId: child.id },
+      };
+      const nestedChild = {
+        ...nestedOwner,
+        id: ThreadId.make("nested-participant"),
+        lineage: { ...child.lineage, parentThreadId: nestedOwner.id },
+      };
+      const activeRoot = { ...owner, archivedAt: null };
+      expect(filterSidebarV2VisibleThreads([activeRoot, nestedOwner, nestedChild], scope)).toEqual([
+        activeRoot,
+        nestedOwner,
+      ]);
+    },
+  );
 
   it("identifies subagent threads so the sidebar can hide them", () => {
     const parentId = ThreadId.make("thread-parent");
@@ -945,6 +1039,27 @@ describe("isContextMenuPointerDown", () => {
 });
 
 describe("resolveSidebarThreadStatus", () => {
+  it.each(["stopping", "failed"] as const)(
+    "keeps persisted %s archive visible before provider and Action status",
+    (archiveState) => {
+      const thread = makeThreadFixture({
+        archivePending: {
+          threadId: ThreadId.make("archive-root"),
+          commandId: CommandId.make("archive-request"),
+          childDisposition: "stop_and_archive",
+          childThreadIds: [],
+          archiveThreadIds: [],
+          promoteThreadIds: [],
+          status: archiveState,
+        },
+        hasPendingApprovals: true,
+      });
+      const status = resolveSidebarThreadStatus(thread);
+      expect(status).toBe(archiveState === "failed" ? "archive-failed" : "archiving");
+      expect(resolveSidebarV2TopStatus({ status, isUnread: true, isWoke: true })).toBe(status);
+      expect(resolveSidebarThreadStatus({ ...thread, archivePending: null })).toBe("approval");
+    },
+  );
   const runtime = {
     status: "running" as const,
     activeRunId: null,
@@ -1345,6 +1460,35 @@ describe("resolveThreadStatusPill", () => {
     },
   };
 
+  it.each(["stopping", "failed"] as const)(
+    "shows persisted %s archive ahead of provider work and approval",
+    (status) => {
+      const displayed = resolveThreadStatusPill({
+        thread: {
+          ...baseThread,
+          hasPendingApprovals: true,
+          archivePending: {
+            threadId: ThreadId.make("archive-root"),
+            commandId: CommandId.make("archive-request"),
+            childDisposition: "stop_and_archive",
+            childThreadIds: [],
+            archiveThreadIds: [],
+            promoteThreadIds: [],
+            status,
+          },
+        },
+      });
+      expect(displayed).toMatchObject({
+        label: status === "failed" ? "Archive failed" : "Archiving…",
+        pulse: false,
+      });
+      if (status === "failed")
+        expect(displayed?.description).toContain(
+          "some work may have stopped. Choose Archive again to retry, or dismiss to keep these threads as they are.",
+        );
+    },
+  );
+
   it("shows pending approval before all other statuses", () => {
     expect(
       resolveThreadStatusPill({
@@ -1366,6 +1510,26 @@ describe("resolveThreadStatusPill", () => {
         },
       }),
     ).toMatchObject({ label: "Awaiting Input", pulse: false });
+  });
+
+  it("shows a question after native input and before active work", () => {
+    expect(
+      resolveThreadStatusPill({
+        thread: {
+          ...baseThread,
+          attention: { kind: "question", raisedAt: "2026-03-09T10:00:00.000Z" },
+        },
+      }),
+    ).toMatchObject({ label: "Question", marker: "?", pulse: false });
+    expect(
+      resolveThreadStatusPill({
+        thread: {
+          ...baseThread,
+          hasPendingApprovals: true,
+          attention: { kind: "question", raisedAt: "2026-03-09T10:00:00.000Z" },
+        },
+      }),
+    ).toMatchObject({ label: "Pending Approval" });
   });
 
   it("falls back to working when the thread is actively running without blockers", () => {

@@ -1,3 +1,4 @@
+import { stripPreviewBootstrapTokenFromUrl } from "@t3tools/shared/remote";
 /**
  * Per-thread preview UI state.
  *
@@ -25,6 +26,7 @@ import { Atom } from "effect/reactivity";
 
 import { PREVIEW_RECENT_URL_LIMIT } from "./components/preview/previewConstants";
 import { appAtomRegistry } from "./rpc/atomRegistry";
+import { updateHandoffBrowserTitle } from "./handoffs/handoffsStore";
 
 export interface DesktopPreviewOverlay {
   hasWebContents: boolean;
@@ -124,16 +126,29 @@ function updateThreadPreviewState(
   const threadKey = scopedThreadKey(ref);
   const atom = previewStateAtom(threadKey);
   let nextState = appAtomRegistry.get(atom);
+  const previousSessions = nextState.sessions;
   const changed = appAtomRegistry.modify(atom, (current) => {
     nextState = update(current);
     return [nextState !== current, nextState];
   });
   if (!changed) return;
+  for (const [tabId, snapshot] of Object.entries(nextState.sessions)) {
+    const previous = previousSessions[tabId];
+    if (previous === snapshot || previous?.navStatus === snapshot.navStatus) continue;
+    if (snapshot.navStatus._tag === "Success" && snapshot.navStatus.title) {
+      updateHandoffBrowserTitle(ref, tabId, snapshot.navStatus.title, snapshot.navStatus.url);
+    }
+  }
   changedPreviewThreadKeys.add(threadKey);
   syncActivePreviewThread(threadKey, nextState);
 }
 
 const dedupeRecentUrls = (existing: string[], url: string): string[] => {
+  try {
+    url = stripPreviewBootstrapTokenFromUrl(new URL(url)).href;
+  } catch {
+    /* Relative input is normalized by navigation. */
+  }
   const next = [url, ...existing.filter((entry) => entry !== url)];
   return next.slice(0, PREVIEW_RECENT_URL_LIMIT);
 };

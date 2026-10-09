@@ -2196,7 +2196,10 @@ const make = Effect.gen(function* () {
           ? resolveOpenProfile(open.profileId ?? open.profileName)
           : undefined;
         let selectedProfileId: string | undefined;
-        if (!useReportedProfile && (open.profileId !== undefined || open.profileName !== undefined)) {
+        if (
+          !useReportedProfile &&
+          (open.profileId !== undefined || open.profileName !== undefined)
+        ) {
           if (catalogue === null)
             throw new ServerBrowserPage.ServerBrowserOperationError(
               "PreviewAutomationRemoteUnavailableError",
@@ -2225,7 +2228,8 @@ const make = Effect.gen(function* () {
           }
           selectedProfileId = matches[0]!.id;
         }
-        const newTabProfileId = selectedProfileId ?? catalogue?.defaultProfileId ?? reportedProfileId;
+        const newTabProfileId =
+          selectedProfileId ?? catalogue?.defaultProfileId ?? reportedProfileId;
         let url = open.url === undefined ? undefined : normalizePreviewUrl(open.url);
         const reuse = open.reuseExistingTab ?? true;
         if (

@@ -67,13 +67,14 @@ const create = (threadId: ThreadId) =>
     });
   });
 
-const archive = (threadId: ThreadId) =>
+const archive = (threadId: ThreadId, childDisposition?: "stop_and_archive") =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     yield* orchestrator.dispatch({
       type: "thread.archive",
       commandId: CommandId.make(`archive:${threadId}`),
       threadId,
+      childDisposition,
     });
     if (
       (yield* orchestrator.getThreadProjection(threadId)).thread.archivePending?.status ===
@@ -245,7 +246,7 @@ it.effect("keeps live, self, opposite-direction sends and committed receipt repl
       commandId: CommandId.make("stop:left"),
       threadId: left,
     });
-    yield* archive(left);
+    yield* archive(left, "stop_and_archive");
     const beforeReplay = yield* orchestrator.getThreadProjection(right);
     const replay = yield* orchestrator.dispatch(outgoing);
     assert.equal(replay.sequence, original.sequence);
