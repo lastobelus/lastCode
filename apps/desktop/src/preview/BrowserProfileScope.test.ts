@@ -208,12 +208,12 @@ describe("browser profile scope", () => {
           assert.isFalse(reads.includes(`${directory}/environment-id`));
           const switched = yield* named("another-remote").pipe(
             Effect.provide(
-              DesktopAppSettings.layerTest(DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS),
-            ),
-            Effect.provide(
-              Layer.mock(DesktopBackendPool.DesktopBackendPool)({
-                primary: Effect.die("Persisted identity must not read a changed primary"),
-              }),
+              Layer.merge(
+                DesktopAppSettings.layerTest(DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS),
+                Layer.mock(DesktopBackendPool.DesktopBackendPool)({
+                  primary: Effect.die("Persisted identity must not read a changed primary"),
+                }),
+              ),
             ),
           );
           assert.deepEqual(switched, resolved);
