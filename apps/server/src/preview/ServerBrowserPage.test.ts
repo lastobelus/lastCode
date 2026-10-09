@@ -303,7 +303,9 @@ describe("server browser element refs", () => {
     await expect(
       ServerBrowserPage.evaluate(cdp, { expression: "for (;;) {}" }, { timeoutMs: 200 }),
     ).rejects.toMatchObject({ tag: "PreviewAutomationTimeoutError" });
-    expect(await ServerBrowserPage.evaluate(cdp, { expression: "1 + 1" }, { timeoutMs: 2_000 })).toBe(2);
+    expect(
+      await ServerBrowserPage.evaluate(cdp, { expression: "1 + 1" }, { timeoutMs: 2_000 }),
+    ).toBe(2);
   });
 });
 

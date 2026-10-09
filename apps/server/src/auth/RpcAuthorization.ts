@@ -4,6 +4,7 @@ import {
   clientRpcRequiredScopes,
   authScopeRequiredResponse,
   AssetCreateUrlInput,
+  ProjectReadFileInput,
   AuthAccessReadScope,
   ServerSettingsPatch,
   ProviderInstanceMutation,
@@ -56,6 +57,8 @@ export const RPC_REQUIRED_SCOPES = {
   [ORCHESTRATION_V2_WS_METHODS.getThreadProjection]: AuthOrchestrationReadScope,
   [ORCHESTRATION_V2_WS_METHODS.getTurnItem]: AuthOrchestrationReadScope,
   [ORCHESTRATION_V2_WS_METHODS.launchThread]: AuthOrchestrationOperateScope,
+  [ORCHESTRATION_V2_WS_METHODS.recoverThread]: AuthOrchestrationOperateScope,
+  [ORCHESTRATION_V2_WS_METHODS.repairThread]: AuthOrchestrationOperateScope,
   [ORCHESTRATION_V2_WS_METHODS.subscribeArchivedShell]: AuthOrchestrationReadScope,
   [ORCHESTRATION_V2_WS_METHODS.subscribeShell]: AuthOrchestrationReadScope,
   [ORCHESTRATION_V2_WS_METHODS.subscribeThread]: AuthOrchestrationReadScope,
@@ -84,6 +87,7 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.serverCommitDesktopUpdate]: AuthEnvironmentMaintainScope,
   [WS_METHODS.serverUpsertKeybinding]: AuthSettingsWriteScope,
   [WS_METHODS.serverRemoveKeybinding]: AuthSettingsWriteScope,
+  [WS_METHODS.serverEnvironmentPauseStatus]: AuthOrchestrationReadScope,
   [WS_METHODS.serverGetSettings]: AuthOrchestrationReadScope,
   [WS_METHODS.serverUpdateSettings]: AuthSettingsWriteScope,
   [WS_METHODS.serverSearchAcpRegistry]: AuthOrchestrationReadScope,
@@ -184,8 +188,14 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.terminalClose]: AuthTerminalOperateScope,
   [WS_METHODS.actionResumeResume]: AuthOrchestrationOperateScope,
   [WS_METHODS.actionResumeDiscard]: AuthOrchestrationOperateScope,
+  [WS_METHODS.serverStartUpdateDrain]: AuthOrchestrationOperateScope,
+  [WS_METHODS.serverCancelUpdateDrain]: AuthOrchestrationOperateScope,
+  [WS_METHODS.serverClaimUpdateActivation]: AuthOrchestrationOperateScope,
+  [WS_METHODS.serverGetUpdateDrainStatus]: AuthOrchestrationReadScope,
   [WS_METHODS.subscribeTerminalEvents]: AuthTerminalReadScope,
   [WS_METHODS.subscribeTerminalMetadata]: AuthTerminalReadScope,
+  [WS_METHODS.subscribeDesktopBrowserCommands]: AuthPreviewOperateScope,
+  [WS_METHODS.desktopBrowserEvent]: AuthPreviewOperateScope,
   [WS_METHODS.previewOpen]: AuthPreviewOperateScope,
   [WS_METHODS.previewNavigate]: AuthPreviewOperateScope,
   [WS_METHODS.previewResize]: AuthPreviewOperateScope,
@@ -195,7 +205,12 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.previewList]: AuthOrchestrationReadScope,
   [WS_METHODS.previewClearProfile]: AuthPreviewOperateScope,
   [WS_METHODS.previewReportProfiles]: AuthPreviewOperateScope,
+  [WS_METHODS.previewHostingList]: AuthOrchestrationReadScope,
+  [WS_METHODS.previewHostingRecover]: AuthTerminalOperateScope,
+  [WS_METHODS.previewHostingStopThread]: AuthTerminalOperateScope,
+  [WS_METHODS.subscribePreviewHosting]: AuthOrchestrationReadScope,
   [WS_METHODS.previewReportStatus]: AuthPreviewOperateScope,
+  [WS_METHODS.previewClaimRecovery]: AuthOrchestrationOperateScope,
   [WS_METHODS.subscribePreviewEvents]: AuthOrchestrationReadScope,
   [WS_METHODS.subscribeDiscoveredLocalServers]: AuthOrchestrationReadScope,
   [WS_METHODS.deviceConfigure]: AuthSettingsWriteScope,
@@ -234,9 +249,12 @@ const SettingsUpdate = Schema.Struct({
   patch: ServerSettingsPatch,
   providerInstanceMutation: Schema.optionalKey(ProviderInstanceMutation),
 });
+const decodeSettingsUpdate = Schema.decodeUnknownSync(SettingsUpdate);
+const decodeAssetCreateUrlInput = Schema.decodeUnknownSync(AssetCreateUrlInput);
+const decodeProjectReadFileInput = Schema.decodeUnknownSync(ProjectReadFileInput);
 
 const requiredScopesForSettingsUpdate = (payload: unknown) => {
-  const input = Schema.decodeUnknownSync(SettingsUpdate)(payload);
+  const input = decodeSettingsUpdate(payload);
   const scopes = requiredScopesForServerSettingsPatch(input.patch);
   if (input.providerInstanceMutation === undefined) return scopes;
   // An atomic provider mutation carries an empty patch unless it also changes settings.
@@ -253,13 +271,19 @@ const requiredScopesForRpcCall = (
     return [AuthEnvironmentMaintainScope, AuthDiagnosticsReadScope];
   }
   if (method === WS_METHODS.assetsCreateUrl) {
-    const { resource } = Schema.decodeUnknownSync(AssetCreateUrlInput)(payload);
+    const { resource } = decodeAssetCreateUrlInput(payload);
     return [
       resource._tag === "workspace-file" ||
-      resource._tag === "media-file" ||
+      (resource._tag === "media-file" && resource.linkedThreadFile !== true) ||
       resource._tag === "draft-workspace-file"
         ? AuthFilesystemReadScope
         : AuthOrchestrationReadScope,
+    ];
+  }
+  if (method === WS_METHODS.projectsReadFile) {
+    const input = decodeProjectReadFileInput(payload);
+    return [
+      input.linkedThreadId === undefined ? AuthFilesystemReadScope : AuthOrchestrationReadScope,
     ];
   }
   if (method === WS_METHODS.serverUpdateSettings) return requiredScopesForSettingsUpdate(payload);

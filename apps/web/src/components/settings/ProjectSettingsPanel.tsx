@@ -46,6 +46,7 @@ import { ProjectActionsSettings } from "./ProjectActionsSettings";
 import { ProjectDefaultsSettings } from "./ProjectDefaultsSettings";
 import { projectGroupTitleNeedsUpdate } from "./ProjectSettingsPanel.logic";
 import { useSettingsProjectGroups } from "./useSettingsProjectGroups";
+import { projectsContainPersistentThread } from "../projectPersistence.logic";
 
 const ProjectIconPickerDialog = lazy(() =>
   import("./ProjectIconPickerDialog").then((module) => ({
@@ -183,6 +184,8 @@ function ProjectDetail({
       (member) => environmentById.get(member.environmentId)?.serverConfig != null,
     ) ?? group.memberProjects[0]!;
   const threads = useThreadShells();
+  const threadsRef = useRef(threads);
+  threadsRef.current = threads;
   const updateProject = useOrchestrationCommand(projectEnvironment.update, {
     reportFailure: false,
   });
@@ -191,6 +194,10 @@ function ProjectDetail({
   });
   const projectNameEditedRef = useRef(false);
 
+  const projectRemovalBlocked = projectsContainPersistentThread({
+    members: group.memberProjects,
+    threads,
+  });
   const faviconPath = representative.faviconPath ?? null;
   const projectIcon = representative.projectIcon ?? null;
   const pickProjectFavicon =
@@ -335,6 +342,18 @@ function ProjectDetail({
       const api = readLocalApi();
       if (!api) return;
 
+      if (projectsContainPersistentThread({ members, threads })) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Persistent thread protected",
+            description:
+              "Disable persistence or move it to another thread before removing this project.",
+          }),
+        );
+        return;
+      }
+
       const memberKeys = new Set(members.map(memberKey));
       const projectThreads = threads.filter((thread) =>
         memberKeys.has(`${thread.environmentId}:${thread.projectId}`),
@@ -357,15 +376,10 @@ function ProjectDetail({
                     : []),
                 ]
               : [`This removes ${members.length} grouped project entries.`]),
-            ...(projectThreads.length > 0
-              ? [
-                  "This permanently clears conversation history for those threads and any archived threads.",
-                ]
-              : ["This permanently clears any archived conversation history."]),
+            "This deletes all threads in the selected project entries, including archived threads, forks, independent threads, and subagents. This cannot be undone.",
             isWholeGroup && !hasOtherMembers
               ? "This removes only the project entries, not the files on disk."
               : "Other entries in this grouped project are unaffected.",
-            "This action cannot be undone.",
           ].join("\n"),
           { variant: "destructive" },
         ),
@@ -373,10 +387,26 @@ function ProjectDetail({
       if (confirmed._tag === "Failure" || !confirmed.value) return;
       if (checkProjectAccess(members, "Failed to remove project")) return;
 
+      const currentThreads = threadsRef.current;
+      if (projectsContainPersistentThread({ members, threads: currentThreads })) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Persistent thread protected",
+            description:
+              "Disable persistence or move it to another thread before removing this project.",
+          }),
+        );
+        return;
+      }
+      const currentProjectThreads = currentThreads.filter((thread) =>
+        memberKeys.has(`${thread.environmentId}:${thread.projectId}`),
+      );
+
       const draftStore = useComposerDraftStore.getState();
       for (const member of members) {
         if (checkProjectAccess([member], "Failed to remove project")) return;
-        const memberThreads = projectThreads.filter(
+        const memberThreads = currentProjectThreads.filter(
           (thread) =>
             thread.environmentId === member.environmentId && thread.projectId === member.id,
         );
@@ -549,25 +579,29 @@ function ProjectDetail({
                   : "Remove project"
             }
             description={
-              hasOtherMembers
-                ? "Deletes the selected machine's checkout entries and their threads. Other machines and files on disk are not touched."
-                : group.memberProjects.length > 1
-                  ? `Deletes all ${group.memberProjects.length} checkout entries and their threads on every machine. Files on disk are not touched.`
-                  : "Deletes the project entry and its threads. Files on disk are not touched."
+              projectRemovalBlocked
+                ? "Disable persistence or move it to another thread before removing this project."
+                : hasOtherMembers
+                  ? "Deletes the selected machine's checkout entries and their threads. Other machines and files on disk are not touched."
+                  : group.memberProjects.length > 1
+                    ? `Deletes all ${group.memberProjects.length} checkout entries and their threads on every machine. Files on disk are not touched.`
+                    : "Deletes the project entry and its threads. Files on disk are not touched."
             }
             control={
               <Button
                 size="sm"
                 variant="destructive-outline"
-                disabled={!canEditGroup}
+                disabled={!canEditGroup || projectRemovalBlocked}
                 onClick={() => void removeMembers(group.memberProjects)}
               >
                 <Trash2Icon />
-                {hasOtherMembers
-                  ? "Remove checkout"
-                  : group.memberProjects.length > 1
-                    ? "Remove all entries"
-                    : "Remove project"}
+                {projectRemovalBlocked
+                  ? "Disable persistence first"
+                  : hasOtherMembers
+                    ? "Remove checkout"
+                    : group.memberProjects.length > 1
+                      ? "Remove all entries"
+                      : "Remove project"}
               </Button>
             }
           />

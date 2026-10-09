@@ -74,6 +74,7 @@ export class DesktopBrowserChannel extends Context.Service<
     readonly getProfiles: (input: {
       readonly threadId: string;
       readonly agentSessionId: string;
+      readonly desktopHostId?: string;
     }) => Effect.Effect<(PreviewAutomationProfiles & { readonly desktopHostId: string }) | null>;
     readonly subscribeCommands: (
       owner: string,
@@ -741,14 +742,16 @@ const make = Effect.gen(function* () {
           Effect.ensuring(Effect.sync(() => urlRequests.delete(requestId))),
         );
       }),
-    getProfiles: () =>
+    getProfiles: (input) =>
       Effect.gen(function* () {
-        const desktopHostId = localAvailable
-          ? "local"
-          : hosts.size === 1
-            ? [...hosts.keys()][0]
-            : undefined;
-        if (!desktopHostId) return null;
+        const desktopHostId =
+          input.desktopHostId ??
+          (localAvailable ? "local" : hosts.size === 1 ? [...hosts.keys()][0] : undefined);
+        if (
+          !desktopHostId ||
+          (desktopHostId === "local" ? !localAvailable : !hosts.has(desktopHostId))
+        )
+          return null;
         const requestId = NodeCrypto.randomUUID();
         const deferred = yield* Deferred.make<PreviewAutomationProfiles | null>();
         profileRequests.set(requestId, deferred);

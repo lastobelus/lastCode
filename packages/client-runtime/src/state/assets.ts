@@ -63,6 +63,22 @@ export function resolveAssetUrl(httpBaseUrl: string, relativeUrl: string): strin
   }
 }
 
+/** A conversation link grants one published file, never its directory or another environment. */
+export function fileAssetResourceForAccess(
+  resource: AssetResource,
+  canReadFiles: boolean,
+): AssetResource {
+  if (canReadFiles || (resource._tag !== "workspace-file" && resource._tag !== "media-file")) {
+    return resource;
+  }
+  return {
+    _tag: "media-file",
+    threadId: resource.threadId,
+    path: resource.path,
+    linkedThreadFile: true,
+  };
+}
+
 export const EMPTY_ASSET_URL_ATOM = Atom.make(AsyncResult.initial<never, never>(false)).pipe(
   Atom.withLabel("asset-url:empty"),
 );
@@ -125,6 +141,7 @@ export function createAssetEnvironmentAtoms<R, E>(
         error._tag === "AssetWorkspaceContextNotFoundError"
       ) ||
       resource._tag !== "media-file" ||
+      resource.linkedThreadFile === true ||
       !(resource.path.startsWith("/") || isWindowsAbsolutePath(resource.path)) ||
       mediaMimeTypeFromExtension(resource.path.slice(resource.path.lastIndexOf("."))) === null
     )

@@ -11,6 +11,8 @@ import { AsyncResult } from "effect/reactivity";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import * as browserDefaults from "~/browser/browserDefaults";
+import * as previewRuntime from "~/browser/previewRuntime";
+import * as hostingRecovery from "./previewHostingRecovery";
 import { BrowserSettingsReadError, openUrlInPreview } from "~/browser/openFileInPreview";
 import { __setClientSettingsForTests } from "~/hooks/useSettings";
 import { useRightPanelStore } from "~/rightPanelStore";
@@ -52,6 +54,101 @@ afterEach(() => {
 });
 
 describe("openPreviewSession", () => {
+  it("moves to the environment's browser without selecting this desktop's native host", async () => {
+    vi.spyOn(previewRuntime, "previewRuntimeFor").mockReturnValue(undefined);
+    const desktopHost = vi
+      .spyOn(previewRuntime, "desktopBrowserHostFor")
+      .mockReturnValue("desktop-remote");
+    vi.spyOn(hostingRecovery, "prepareHostedPreview").mockResolvedValue({
+      url: "http://environment.example.test:5173/check",
+      managed: true,
+      restored: true,
+    });
+    const openPreview = vi.fn(async () => AsyncResult.success(snapshot));
+
+    await openPreviewSession({
+      openPreview,
+      threadRef,
+      url: "http://localhost:5173/check",
+      runtime: "server",
+    });
+
+    expect(desktopHost).not.toHaveBeenCalled();
+    expect(openPreview).toHaveBeenCalledExactlyOnceWith({
+      environmentId: threadRef.environmentId,
+      input: {
+        threadId: threadRef.threadId,
+        url: "http://localhost:5173/check",
+        runtime: "server",
+        profileId: DEFAULT_BROWSER_PROFILE_ID,
+        viewport: FILL_PREVIEW_VIEWPORT,
+      },
+    });
+  });
+
+  it("moves to this computer's browser even when the default runtime is server", async () => {
+    vi.spyOn(previewRuntime, "previewRuntimeFor").mockReturnValue("server");
+    const desktopHost = vi
+      .spyOn(previewRuntime, "desktopBrowserHostFor")
+      .mockReturnValue("desktop-remote");
+    vi.spyOn(hostingRecovery, "prepareHostedPreview").mockResolvedValue({
+      url: "http://environment.example.test:5173/check",
+      managed: true,
+      restored: true,
+    });
+    const openPreview = vi.fn(async () => AsyncResult.success(snapshot));
+
+    await openPreviewSession({
+      openPreview,
+      threadRef,
+      url: "http://localhost:5173/check",
+      runtime: "desktop",
+    });
+
+    expect(desktopHost).not.toHaveBeenCalled();
+    expect(openPreview).toHaveBeenCalledExactlyOnceWith({
+      environmentId: threadRef.environmentId,
+      input: {
+        threadId: threadRef.threadId,
+        url: "http://environment.example.test:5173/check",
+        profileId: DEFAULT_BROWSER_PROFILE_ID,
+        viewport: FILL_PREVIEW_VIEWPORT,
+      },
+    });
+  });
+
+  it.each(["session", "link"] as const)(
+    "pins a remote desktop %s open to its selected profile and recovered destination",
+    async (entryPoint) => {
+      vi.spyOn(previewRuntime, "previewRuntimeFor").mockReturnValue("server");
+      vi.spyOn(previewRuntime, "desktopBrowserHostFor").mockReturnValue("desktop-remote");
+      vi.spyOn(hostingRecovery, "prepareHostedPreview").mockResolvedValue({
+        url: "http://environment.example.test:5173/check?x=1#section",
+        managed: true,
+        restored: true,
+      });
+      __setClientSettingsForTests({
+        ...DEFAULT_CLIENT_SETTINGS,
+        browserDefaultProfileId: "work",
+        browserProfiles: [{ id: "work", name: "Work", kind: "persistent" }],
+      });
+      const openPreview = vi.fn(async () => AsyncResult.success(snapshot));
+      const open = entryPoint === "session" ? openPreviewSession : openUrlInPreview;
+      await open({ openPreview, threadRef, url: "http://localhost:5173/check?x=1#section" });
+      expect(openPreview).toHaveBeenCalledWith({
+        environmentId: threadRef.environmentId,
+        input: {
+          threadId: threadRef.threadId,
+          url: "http://environment.example.test:5173/check?x=1#section",
+          runtime: "server",
+          desktopHostId: "desktop-remote",
+          profileId: "work",
+          viewport: FILL_PREVIEW_VIEWPORT,
+        },
+      });
+    },
+  );
+
   it("creates an idle tab without recording a recently visited URL", async () => {
     const idleSnapshot: PreviewSessionSnapshot = {
       ...snapshot,

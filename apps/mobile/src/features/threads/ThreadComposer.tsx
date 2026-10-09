@@ -182,6 +182,8 @@ export interface ThreadComposerProps {
   readonly followUpBehavior: FollowUpBehavior;
   /** Whether the live turn can actually be steered by this provider. */
   readonly canSteerActiveTurn: boolean;
+  /** Recovery requires new follow-ups to wait even if the runtime looks idle. */
+  readonly forceQueue: boolean;
   readonly editorRef?: RefObject<ComposerEditorHandle | null>;
   readonly onChangeDraftMessage: (value: string) => void;
   readonly onPickDraftMedia: () => Promise<void>;
@@ -426,6 +428,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     editingQueuedMessage: queuedEdit !== null,
     running: props.activeThreadBusy,
     canSteer: props.canSteerActiveTurn,
+    forceQueue: props.forceQueue,
     followUpBehavior: props.followUpBehavior,
     deliveryDeferred:
       props.connectionState !== "connected" || props.queueCount > 0 || attachmentsUploading,

@@ -777,6 +777,35 @@ it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
     }).pipe(Effect.scoped),
   );
 
+  it.effect(
+    "selects an exact catalogue owner with two desktops and never substitutes a disconnected owner",
+    () =>
+      Effect.gen(function* () {
+        const channel = yield* remoteChannel;
+        const first = yield* connectHost(channel, "socket-a", "host-a");
+        const second = yield* connectHost(channel, "socket-b", "host-b");
+        const input = { threadId: "thread-1", agentSessionId: "agent-1", desktopHostId: "host-b" };
+        const request = yield* channel.getProfiles(input).pipe(Effect.forkScoped);
+        const command = yield* Queue.take(second.commands);
+        if (command.type !== "profiles") throw new Error("Expected profile catalogue request");
+        expect(yield* Queue.size(first.commands)).toBe(0);
+        const catalogue = {
+          profiles: [{ id: "work", name: "Work", kind: "persistent" as const }],
+          defaultProfileId: "work",
+        };
+        yield* channel.receiveEvent("socket-b", "host-b", {
+          type: "profiles",
+          requestId: command.requestId,
+          profiles: catalogue,
+        });
+        expect(yield* Fiber.join(request)).toEqual({ ...catalogue, desktopHostId: "host-b" });
+        yield* Fiber.interrupt(second.fiber);
+        expect(yield* channel.getProfiles(input)).toBeNull();
+        expect(yield* Queue.size(first.commands)).toBe(0);
+        expect(yield* channel.getProfiles({ ...input, desktopHostId: "local" })).toBeNull();
+      }).pipe(Effect.scoped),
+  );
+
   it.effect("releases only the disconnected host's tabs and pending catalogue requests", () =>
     Effect.gen(function* () {
       const channel = yield* remoteChannel;

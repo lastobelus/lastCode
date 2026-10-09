@@ -236,6 +236,7 @@ describe("webhook route", () => {
       [{ _tag: "rejected_signature" }, 401, "rejected_signature"],
       [{ _tag: "disabled" }, 409, "disabled"],
       [{ _tag: "rate_limited", outcome: "rate_limited" }, 429, "rate_limited"],
+      [{ _tag: "environment_paused" }, 503, "environment_paused"],
       [{ _tag: "rate_limited", outcome: "queue_full" }, 429, "queue_full"],
       [{ _tag: "expired" }, 410, "expired"],
     ];

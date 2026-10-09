@@ -261,3 +261,24 @@ it.effect("rejects protected unary and streamed RPCs outside a guarded command",
     expect(writes).toBe(0);
   }),
 );
+
+it.effect.each([
+  WS_METHODS.serverPauseEnvironment,
+  WS_METHODS.serverRetryEnvironmentPause,
+  WS_METHODS.serverResumeEnvironment,
+] as const)("checks destination grants for %s", (tag) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const registry = yield* setup;
+      registry.set(sessions(env), AsyncResult.success(grant(true)));
+      registry.set(sessions(other), AsyncResult.success(grant(false)));
+      const pause = createCommandPermissions(runtime, tag);
+      expect(registry.get(pause.permissionAtom(env))).toBe(true);
+      expect(registry.get(pause.permissionAtom(other))).toBe(false);
+      yield* pause.authorize(registry, env, {});
+      expect(
+        (yield* pause.authorize(registry, other, {}).pipe(Effect.flip)).requiredPermission,
+      ).toBe(AuthOrchestrationOperateScope);
+    }),
+  ),
+);

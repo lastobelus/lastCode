@@ -43,6 +43,7 @@ import { useThreadJumpShortcuts } from "../keyboard/threadKeyboardShortcuts";
 import { usePendingThreadOrder } from "../../state/thread-order";
 import { threadListEnvironmentsAtom } from "../../state/server";
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
+import { threadShellIsVisible } from "@t3tools/client-runtime/state/models";
 import { useQueuedThreadKeys } from "../../state/use-thread-outbox";
 import {
   ThreadListV2PendingRow,
@@ -522,6 +523,7 @@ export function HomeScreen(props: HomeScreenProps) {
     pinReorderEnvironmentIds,
     activeReorderEnvironmentIds,
     titleRegenerationEnvironmentIds,
+    persistenceEnvironmentIds,
   } = listEnvironments;
   const resolveProviderInstance = useThreadRowProviderInstanceResolver(providersByEnvironmentId);
   const pendingOrder = usePendingThreadOrder(nowMinute, snoozeWakeTick);
@@ -565,11 +567,10 @@ export function HomeScreen(props: HomeScreenProps) {
   ]);
   const threadListV2Layout = useMemo(() => {
     threadListInboxReturns.observe(workingShelfEnabled ? props.threads : null);
-    // Settled threads are live shells; archived threads keep their original
-    // "hidden from lists" meaning.
+    // Cleanup recovery stays reachable while its original archive timestamp is retained.
     return buildThreadListV2Items({
       pendingOrder,
-      threads: props.threads.filter((thread) => thread.archivedAt === null),
+      threads: props.threads.filter(threadShellIsVisible),
       environmentId: props.selectedEnvironmentId,
       projectRefs: v2ScopedProjectGroup === null ? null : v2ScopedProjectGroup.projectRefs,
       searchQuery: props.searchQuery,
@@ -777,6 +778,7 @@ export function HomeScreen(props: HomeScreenProps) {
           onRenameThread={handleRenameThread}
           onRegenerateThreadTitle={handleRegenerateThreadTitle}
           titleRegenerationSupported={titleRegenerationEnvironmentIds.has(thread.environmentId)}
+          persistenceSupported={persistenceEnvironmentIds.has(thread.environmentId)}
           settlementSupported={settlementEnvironmentIds.has(thread.environmentId)}
           onSettleThread={handleSettleThread}
           snoozeSupported={snoozeEnvironmentIds.has(thread.environmentId)}
@@ -838,6 +840,7 @@ export function HomeScreen(props: HomeScreenProps) {
       snoozeEnvironmentIds,
       threadSearchMatchByKey,
       titleRegenerationEnvironmentIds,
+      persistenceEnvironmentIds,
       toggleSettledShelf,
       toggleSnoozedShelf,
       toggleWorkingShelf,
@@ -879,10 +882,8 @@ export function HomeScreen(props: HomeScreenProps) {
   /* Empty states */
   // The signal must ignore the search/environment filters: an active query
   // that matches nothing needs the in-list "No results" state, not the
-  // full-page "No threads yet". Settled threads are unarchived live shells,
-  // so the archived-at check already covers the settled shelf.
-  const hasAnyThreads =
-    props.threads.some((thread) => thread.archivedAt === null) || props.pendingTasks.length > 0;
+  // full-page "No threads yet". Include settled shells and cleanup recovery.
+  const hasAnyThreads = props.threads.some(threadShellIsVisible) || props.pendingTasks.length > 0;
   const selectedEnvironmentLabel =
     props.selectedEnvironmentId === null
       ? null

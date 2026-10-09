@@ -1,6 +1,13 @@
 import { ThreadFindTimelineContext } from "./ThreadFindProvider";
 import { shouldPreserveAssistantLineBreaks } from "@t3tools/shared/markdownPipeline";
 import { MarkdownFindContext, useFindRevealRef } from "./markdownFindContext";
+import { useAtomValue } from "@effect/atom-react";
+import type { ThreadAnnotation } from "@t3tools/contracts";
+import {
+  ThreadAnnotationBody,
+  ThreadAnnotationActions,
+  useThreadAnnotationBodyPending,
+} from "../thread-annotation/ThreadAnnotation";
 import {
   parseActionResumeFollowUp,
   actionResultPresentation,
@@ -22,6 +29,7 @@ import {
 import {
   deriveTimelineMinimapItems,
   resolveTimelineMinimapPreview,
+  timelineMinimapPreviewUsesFullText,
   type TimelineMinimapItem,
 } from "./timelineMinimapItems";
 import {
@@ -40,9 +48,13 @@ import {
   type ToolActivityIcon,
 } from "@t3tools/contracts";
 import { parseScopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
-import { useAtomValue } from "@effect/atom-react";
 import { environmentThreadDetails } from "../../state/threads";
-import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
+import {
+  resolveIncomingMessagePreview,
+  resolveUserMessagePresentation,
+} from "@t3tools/client-runtime/user-message";
+import { IncomingMessageFrame } from "./IncomingMessageFrame";
+import { formatIncomingMessageOriginal } from "./incomingMessageOriginal";
 import { Link } from "@tanstack/react-router";
 import { canForkProjectedAssistantItem } from "@t3tools/client-runtime/state/thread-workflows";
 import { notificationChildThreadId } from "@t3tools/client-runtime/state/thread-execution";
@@ -455,6 +467,11 @@ export interface MessagesTimelineHistoryControls {
 }
 
 interface MessagesTimelineProps {
+  annotation?: ThreadAnnotation | null;
+  onAnnotationEdit?: () => void;
+  onAnnotationBodyChange?: (body: string) => Promise<boolean>;
+  onAnnotationResolve?: () => void;
+  onAnnotationReopen?: () => void;
   citationRequest?: AssistantCitationRequest | null;
   citationHistoryLoading?: boolean;
   onCiteAssistantText?: (
@@ -572,6 +589,11 @@ export function MessagesTimeline(props: MessagesTimelineProps) {
 }
 
 const ConversationTimeline = memo(function ConversationTimeline({
+  annotation = null,
+  onAnnotationEdit = () => {},
+  onAnnotationBodyChange,
+  onAnnotationResolve = () => {},
+  onAnnotationReopen = () => {},
   citationRequest = null,
   citationHistoryLoading = false,
   onCiteAssistantText,
@@ -805,7 +827,6 @@ const ConversationTimeline = memo(function ConversationTimeline({
     },
     [suspendEndScrollMaintenanceForDisclosure],
   );
-
   const onToggleActionFollowUp = useCallback(
     (rowId: string) => {
       suspendEndScrollMaintenanceForDisclosure(rowId);
@@ -1655,11 +1676,18 @@ const ConversationTimeline = memo(function ConversationTimeline({
               ListFooterComponent={timelineListFooter}
             />
             <TimelineMinimap
+              annotation={annotation}
               items={minimapItems}
               hasPersistentGutter={minimapHasPersistentGutter}
               hitStripWidth={minimapHitStripWidth}
               currentIndex={minimapCurrentIndex}
               stripMap={minimapStripMap}
+              threadRef={parseScopedThreadKey(routeThreadKey)}
+              markdownCwd={markdownCwd}
+              onAnnotationEdit={onAnnotationEdit}
+              onAnnotationBodyChange={onAnnotationBodyChange}
+              onAnnotationResolve={onAnnotationResolve}
+              onAnnotationReopen={onAnnotationReopen}
               onSelect={(item) => {
                 onManualNavigation();
                 void listRef.current?.scrollToIndex({
@@ -1734,22 +1762,126 @@ function timelineMinimapEventTargetsPreview(target: EventTarget): boolean {
   return target instanceof Element && target.closest("[data-minimap-preview]") !== null;
 }
 
+function TimelineAnnotationPopover({
+  annotation,
+  ariaLabel,
+  earlier,
+  markdownCwd,
+  open,
+  threadRef,
+  triggerClassName,
+  onActivate,
+  onAnnotationBodyChange,
+  onAnnotationEdit,
+  onAnnotationResolve,
+  onAnnotationReopen,
+  onOpenChange,
+}: {
+  annotation: ThreadAnnotation;
+  ariaLabel: string;
+  earlier: boolean;
+  markdownCwd: string | undefined;
+  open: boolean;
+  threadRef: ScopedThreadRef;
+  triggerClassName: string;
+  onActivate?: () => void;
+  onAnnotationBodyChange: ((body: string) => Promise<boolean>) | undefined;
+  onAnnotationEdit: () => void;
+  onAnnotationResolve: () => void;
+  onAnnotationReopen: () => void;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const annotationBodyPending = useThreadAnnotationBodyPending(threadRef);
+
+  return (
+    <Popover open={open} onOpenChange={onOpenChange}>
+      <PopoverTrigger
+        closeDelay={120}
+        delay={0}
+        openOnHover
+        render={
+          <button
+            aria-label={ariaLabel}
+            className={triggerClassName}
+            data-thread-annotation-marker={earlier ? undefined : ""}
+            type="button"
+          />
+        }
+        onClick={(event) => {
+          event.stopPropagation();
+          onActivate?.();
+        }}
+        onFocus={onActivate}
+      />
+      <PopoverPopup
+        align="center"
+        width="md"
+        data-minimap-preview
+        elevated
+        finalFocus={false}
+        initialFocus={false}
+        side="right"
+        tooltipStyle
+        padding="none"
+      >
+        <div className="w-80 max-w-80 bg-warning/10 p-3 text-left text-warning-foreground">
+          {earlier ? (
+            <div className="mb-2 text-2xs font-medium">Attached to an earlier message</div>
+          ) : null}
+          <ThreadAnnotationBody
+            annotation={annotation}
+            className="max-h-52 overflow-y-auto"
+            compact
+            cwd={markdownCwd}
+            onBodyChange={onAnnotationBodyChange}
+            threadRef={threadRef}
+          />
+          <div className="mt-2">
+            <ThreadAnnotationActions
+              annotation={annotation}
+              onEdit={onAnnotationEdit}
+              onReopen={onAnnotationReopen}
+              onResolve={onAnnotationResolve}
+              pending={annotationBodyPending}
+            />
+          </div>
+        </div>
+      </PopoverPopup>
+    </Popover>
+  );
+}
+
 function TimelineMinimap({
+  annotation,
   hasPersistentGutter,
   hitStripWidth,
   currentIndex,
   items,
+  markdownCwd,
   stripMap,
+  threadRef,
+  onAnnotationEdit,
+  onAnnotationBodyChange,
+  onAnnotationResolve,
+  onAnnotationReopen,
   onSelect,
 }: {
+  annotation: ThreadAnnotation | null;
   hasPersistentGutter: boolean;
   hitStripWidth: number;
   currentIndex: number | null;
   items: ReadonlyArray<TimelineMinimapItem>;
+  markdownCwd: string | undefined;
   stripMap: Map<string, HTMLSpanElement>;
+  threadRef: ScopedThreadRef | null;
+  onAnnotationEdit: () => void;
+  onAnnotationBodyChange: ((body: string) => Promise<boolean>) | undefined;
+  onAnnotationResolve: () => void;
+  onAnnotationReopen: () => void;
   onSelect: (item: TimelineMinimapItem) => void;
 }) {
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
+  const [annotationPopoverOpen, setAnnotationPopoverOpen] = useState(false);
 
   const resolvedActiveIndex =
     activeIndex !== null && activeIndex < items.length ? activeIndex : null;
@@ -1761,6 +1893,10 @@ function TimelineMinimap({
     [items, resolvedActiveIndex],
   );
   const navigationInteractive = resolveTimelineMinimapNavigationInteractive(hitStripWidth);
+  const annotationItemIndex = annotation
+    ? items.findIndex((item) => item.messageId === annotation.anchorMessageId)
+    : -1;
+  const annotationIsEarlier = annotation !== null && annotationItemIndex === -1;
   const activeTopPercent =
     resolvedActiveIndex === null
       ? 0
@@ -1810,7 +1946,7 @@ function TimelineMinimap({
     [items.length],
   );
 
-  if (items.length < TIMELINE_MINIMAP_MIN_ITEMS) {
+  if (items.length < TIMELINE_MINIMAP_MIN_ITEMS && annotation === null) {
     return null;
   }
 
@@ -1818,6 +1954,8 @@ function TimelineMinimap({
     <div
       className={cn(
         "group/minimap pointer-events-none absolute inset-y-0 left-0 z-40 hidden w-18 [@media(pointer:fine)]:block",
+        annotation !== null &&
+          "[@media(pointer:coarse)]:block [@media(pointer:coarse)]:opacity-100",
         hasPersistentGutter
           ? "opacity-100"
           : "opacity-0 transition-opacity duration-150 hover:opacity-100 focus-within:opacity-100",
@@ -1831,11 +1969,16 @@ function TimelineMinimap({
             "absolute top-1/2 left-3 -translate-y-1/2",
             // The strip is width-capped to the side gutter so it never overlays
             // the centered content column; with no usable gutter it goes inert.
-            hitStripWidth > 0 ? "pointer-events-auto" : "pointer-events-none",
+            hitStripWidth > 0 || annotation !== null
+              ? "pointer-events-auto"
+              : "pointer-events-none",
           )}
           style={{
             height: resolveTimelineMinimapHeightStyle(items.length),
-            width: resolveTimelineMinimapInteractiveWidth(hitStripWidth, activeItem !== null),
+            width: resolveTimelineMinimapInteractiveWidth(
+              Math.max(hitStripWidth, annotation === null ? 0 : 14),
+              activeItem !== null,
+            ),
           }}
         >
           <TimelineMinimapNavigationButton
@@ -1863,6 +2006,9 @@ function TimelineMinimap({
             }}
             onFocus={() => setActiveIndex((current) => current ?? resolvedCurrentIndex ?? 0)}
             onKeyDown={(event) => {
+              if (timelineMinimapEventTargetsPreview(event.target)) {
+                return;
+              }
               if (event.key === "ArrowDown") {
                 event.preventDefault();
                 moveActiveIndex(1);
@@ -1909,7 +2055,11 @@ function TimelineMinimap({
                   aria-hidden="true"
                   className={cn(
                     "group/strip pointer-events-none absolute left-0 h-0.5 w-6 origin-left -translate-y-1/2 rounded-full transition-transform duration-150",
-                    activeDistance === 0 ? "bg-muted-foreground/75" : "bg-muted-foreground/35",
+                    activeDistance === 0
+                      ? "bg-muted-foreground/75"
+                      : item.isIncoming
+                        ? "bg-muted-foreground/14"
+                        : "bg-muted-foreground/35",
                     activeDistance === 0
                       ? "scale-x-100"
                       : activeDistance === 1
@@ -1919,6 +2069,7 @@ function TimelineMinimap({
                           : "scale-x-[0.333]",
                   )}
                   data-in-view="false"
+                  data-minimap-incoming={item.isIncoming ? "true" : "false"}
                   data-minimap-strip
                   key={item.id}
                   ref={(node) => {
@@ -1930,11 +2081,18 @@ function TimelineMinimap({
                   }}
                   style={{ top }}
                 >
-                  <span className="absolute inset-0 rounded-full bg-foreground/90 opacity-0 transition-opacity duration-150 group-data-[in-view=true]/strip:opacity-100" />
+                  <span
+                    className={cn(
+                      "absolute inset-0 rounded-full bg-foreground/90 opacity-0 transition-opacity duration-150",
+                      item.isIncoming && activeDistance !== 0
+                        ? "group-data-[in-view=true]/strip:opacity-28"
+                        : "group-data-[in-view=true]/strip:opacity-100",
+                    )}
+                  />
                 </span>
               );
             })}
-            {activeItem ? (
+            {activeItem && !annotationPopoverOpen ? (
               <span
                 className="pointer-events-auto absolute left-8 w-80 cursor-text select-text"
                 data-minimap-preview
@@ -1945,8 +2103,21 @@ function TimelineMinimap({
                 }}
               >
                 <span className="dropdown-glass block rounded-xl p-3 text-left text-popover-foreground shadow-xl shadow-black/25">
-                  <span className="block max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-sm font-medium leading-5">
-                    {activeItem.userText ?? "User message"}
+                  <span
+                    className={cn(
+                      "block max-w-full text-sm font-medium leading-5",
+                      activeItem.summaryPending && "flex items-center gap-1.5",
+                      timelineMinimapPreviewUsesFullText(activeItem)
+                        ? "whitespace-normal wrap-anywhere"
+                        : "overflow-hidden text-ellipsis whitespace-nowrap",
+                    )}
+                  >
+                    {activeItem.summaryPending ? (
+                      <Spinner size="xs" tone="muted" aria-label="Preparing summary" />
+                    ) : null}
+                    <span className={cn("min-w-0", activeItem.summaryPending && "truncate")}>
+                      {activeItem.userText ?? "User message"}
+                    </span>
                   </span>
                   {activeItem.assistantText ? (
                     <span
@@ -1964,6 +2135,30 @@ function TimelineMinimap({
               </span>
             ) : null}
           </button>
+          {annotationItemIndex >= 0 && annotation && threadRef ? (
+            <span
+              className="pointer-events-none absolute left-0 h-0.5 w-2 -translate-y-1/2"
+              style={{
+                top: `${resolveTimelineMinimapTopPercent(annotationItemIndex, items.length)}%`,
+              }}
+            >
+              <TimelineAnnotationPopover
+                annotation={annotation}
+                ariaLabel="Thread annotation"
+                earlier={false}
+                markdownCwd={markdownCwd}
+                open={annotationPopoverOpen}
+                threadRef={threadRef}
+                triggerClassName="pointer-events-auto absolute left-full top-1/2 ml-1 size-1.5 -translate-y-1/2 rounded-full bg-warning ring-1 ring-background/70"
+                onActivate={() => setActiveIndex(annotationItemIndex)}
+                onAnnotationBodyChange={onAnnotationBodyChange}
+                onAnnotationEdit={onAnnotationEdit}
+                onAnnotationReopen={onAnnotationReopen}
+                onAnnotationResolve={onAnnotationResolve}
+                onOpenChange={setAnnotationPopoverOpen}
+              />
+            </span>
+          ) : null}
           <TimelineMinimapNavigationButton
             direction="next"
             disabled={nextItem === null}
@@ -1973,6 +2168,31 @@ function TimelineMinimap({
             }}
           />
         </div>
+        {annotationIsEarlier && annotation && threadRef ? (
+          <div
+            className="pointer-events-auto absolute left-3"
+            data-thread-annotation-overflow
+            style={{
+              top: "50%",
+              transform: `translateY(calc(-50% - ${resolveTimelineMinimapHeightStyle(items.length)} / 2))`,
+            }}
+          >
+            <TimelineAnnotationPopover
+              annotation={annotation}
+              ariaLabel="Annotation attached to an earlier message"
+              earlier
+              markdownCwd={markdownCwd}
+              open={annotationPopoverOpen}
+              threadRef={threadRef}
+              triggerClassName="size-1.5 rounded-full bg-warning ring-1 ring-background/70"
+              onAnnotationBodyChange={onAnnotationBodyChange}
+              onAnnotationEdit={onAnnotationEdit}
+              onAnnotationReopen={onAnnotationReopen}
+              onAnnotationResolve={onAnnotationResolve}
+              onOpenChange={setAnnotationPopoverOpen}
+            />
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -2110,6 +2330,9 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
         <AssistantTimelineRow row={row} />
       ) : null}
       {row.kind === "assistant-meta" ? <AssistantMetaTimelineRow row={row} /> : null}
+      {row.kind === "message" && row.message.role === "system" ? (
+        <SystemTimelineRow row={row} />
+      ) : null}
       {row.kind === "proposed-plan" ? <ProposedPlanTimelineRow row={row} /> : null}
       {row.kind === "html-render" ? <HtmlRenderTimelineRow row={row} /> : null}
       {row.kind === "mcp-app" ? <McpAppTimelineRow row={row} /> : null}
@@ -2267,6 +2490,11 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
     (attachment) => !isImageAttachment(attachment) && !isFileAttachment(attachment),
   );
   const userMessage = resolveUserMessagePresentation(row.message);
+  const incomingPreview = resolveIncomingMessagePreview(row.message);
+  const incomingMessageStyle = useClientSettings((settings) => settings.incomingMessageStyle);
+  const incomingMessageFillColor = useClientSettings(
+    (settings) => settings.incomingMessageFillColor,
+  );
   const resolvedContext = useMemo(() => resolveUserMessageContext(row.message), [row.message]);
   const previewImages = useMemo(
     () => userImages.filter((image) => image.name.startsWith("preview-annotation-")),
@@ -2392,6 +2620,171 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
     ],
   );
 
+  const attachments = (
+    <>
+      {(regularImages.length > 0 || userVideos.length > 0) && (
+        <div className="mb-2 grid max-w-[210px] grid-cols-2 gap-2">
+          {regularImages.map((image) => (
+            <div
+              key={image.id}
+              className={cn(
+                "bg-background/70",
+                image.source?.kind === "snap-shot" && image.previewUrl
+                  ? cn(SNAP_SHOT_ATTACHMENT_FRAME_CLASS, "col-span-2")
+                  : "aspect-[4/3] overflow-hidden rounded-lg border border-border/80",
+              )}
+            >
+              {image.previewUrl ? (
+                <button
+                  type="button"
+                  className="block h-full w-full cursor-zoom-in"
+                  aria-label={`Preview ${image.name}`}
+                  onClick={() => {
+                    const preview = buildExpandedImagePreview(regularImages, image.id);
+                    if (!preview) return;
+                    ctx.onImageExpand(preview);
+                  }}
+                >
+                  <img
+                    src={image.previewUrl}
+                    alt={image.name}
+                    className="block size-full object-cover"
+                  />
+                </button>
+              ) : (
+                <div className="flex min-h-[72px] items-center justify-center px-2 py-3 text-center text-2xs text-muted-foreground/70">
+                  {image.name}
+                </div>
+              )}
+              {image.previewUrl && image.source?.kind === "snap-shot" ? (
+                <SnapShotAttachmentDetails source={image.source} />
+              ) : null}
+            </div>
+          ))}
+          {userVideos.map((file) => (
+            <UserVideoAttachment key={file.id} file={file} />
+          ))}
+        </div>
+      )}
+      {unchippedFiles.length > 0 || unknownAttachments.length > 0 ? (
+        <div className="mb-2 flex flex-col gap-1">
+          {unchippedFiles.map((file) => {
+            const fileIdentity = (
+              <>
+                <PierreEntryIcon pathValue={file.name} kind="file" theme={ctx.resolvedTheme} />
+                <span className="min-w-0 flex-1 truncate">{file.name}</span>
+              </>
+            );
+            if (file.downloadable !== false) {
+              return (
+                <div key={file.id} className="flex min-w-0 items-center gap-1">
+                  <button
+                    type="button"
+                    aria-label={`Preview ${file.name}`}
+                    onClick={() => ctx.onFileOpen(file)}
+                    className="focus-visible:ring-ring/70 flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md py-1 text-left text-sm hover:underline focus-visible:ring-2 focus-visible:outline-none focus-visible:ring-inset"
+                  >
+                    {fileIdentity}
+                    <EyeIcon className="size-4 shrink-0" />
+                  </button>
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={
+                        <Button
+                          size="icon-xs"
+                          variant="ghost-muted"
+                          aria-label={`Download ${file.name}`}
+                          onClick={() => ctx.onFileDownload(file)}
+                        />
+                      }
+                    >
+                      <DownloadIcon />
+                    </TooltipTrigger>
+                    <TooltipPopup side="top">Download {file.name}</TooltipPopup>
+                  </Tooltip>
+                </div>
+              );
+            }
+
+            return (
+              <div key={file.id} className="flex min-w-0 items-center gap-2 py-1 text-sm">
+                {fileIdentity}
+              </div>
+            );
+          })}
+          {unknownAttachments.map((attachment) => (
+            <div key={attachment.id} className="flex min-w-0 items-center gap-2 py-1 text-sm">
+              <PierreEntryIcon pathValue={attachment.name} kind="file" theme={ctx.resolvedTheme} />
+              <span className="min-w-0 flex-1 truncate">{attachment.name}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </>
+  );
+  const renderActions = (incomingActions?: { expanded: boolean; toggle: () => void }) => (
+    <div
+      className={cn(
+        "flex w-full items-center justify-end pe-1 text-xs tabular-nums opacity-0 transition-opacity duration-200 pointer-coarse:opacity-100 focus-within:opacity-100 group-hover:opacity-100",
+        incomingPreview.isIncoming
+          ? "group-data-[incoming-message-lifted=true]/incoming:opacity-100"
+          : "max-w-[80%]",
+      )}
+    >
+      <div className="flex shrink-0 items-center gap-2">
+        {incomingPreview.isSummary && incomingActions && !incomingActions.expanded ? (
+          <>
+            <button
+              type="button"
+              className="cursor-pointer rounded-sm text-muted-foreground hover:text-foreground hover:underline focus-visible:outline-2 focus-visible:outline-ring"
+              onClick={incomingActions.toggle}
+              data-scroll-anchor-ignore
+            >
+              Summary · Luna
+            </button>
+            <span aria-hidden className="text-muted-foreground/50">
+              ·
+            </span>
+          </>
+        ) : incomingPreview.pending && incomingActions && !incomingActions.expanded ? (
+          <span className="text-muted-foreground">Summarizing…</span>
+        ) : null}
+        <Tooltip>
+          <TooltipTrigger render={<p className="text-muted-foreground text-xs tabular-nums" />}>
+            {formatDayAwareTimestamp(row.message.createdAt, ctx.timestampFormat)}
+          </TooltipTrigger>
+          <TooltipPopup>
+            {formatChatTimestampTooltip(row.message.createdAt, ctx.timestampFormat)}
+          </TooltipPopup>
+        </Tooltip>
+        <div className="flex items-center gap-0.5">
+          {typeof revertTurnCount === "number" && (
+            <RevertUserMessageButton turnCount={revertTurnCount} messageId={row.message.id} />
+          )}
+          {resolvedContext.text && (
+            <MessageCopyButton
+              // Structured paste needs the canonical links to retain their positions.
+              text={
+                contextClipboardFragment
+                  ? resolvedContext.text
+                  : replaceComposerContextReferences(
+                      resolvedContext.text,
+                      (reference) => reference.label,
+                    )
+              }
+              {...(contextClipboardFragment
+                ? {
+                    extraFlavors: { [COMPOSER_CONTEXT_CLIPBOARD_MIME]: contextClipboardFragment },
+                  }
+                : {})}
+              variant="ghost"
+            />
+          )}
+        </div>
+      </div>
+    </div>
+  );
+
   return (
     <div className="group flex flex-col items-end gap-1">
       {userMessage.isAutomation ? (
@@ -2432,119 +2825,45 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
       {row.message.inputIntent && row.message.inputIntent !== "turn_start" ? (
         <UserMessageIntentMarker intent={row.message.inputIntent} />
       ) : null}
-      <div className="relative max-w-[80%] rounded-2xl bg-message p-3 text-message-foreground">
-        <MessageAuthorHeading>You</MessageAuthorHeading>
-        {(regularImages.length > 0 || userVideos.length > 0) && (
-          <div className="mb-2 grid max-w-[210px] grid-cols-2 gap-2">
-            {regularImages.map((image) => (
-              <div
-                key={image.id}
-                className={cn(
-                  "bg-background/70",
-                  image.source?.kind === "snap-shot" && image.previewUrl
-                    ? cn(SNAP_SHOT_ATTACHMENT_FRAME_CLASS, "col-span-2")
-                    : "aspect-[4/3] overflow-hidden rounded-lg border border-border/80",
-                )}
-              >
-                {image.previewUrl ? (
-                  <button
-                    type="button"
-                    className="block h-full w-full cursor-zoom-in"
-                    aria-label={`Preview ${image.name}`}
-                    onClick={() => {
-                      const preview = buildExpandedImagePreview(regularImages, image.id);
-                      if (!preview) return;
-                      ctx.onImageExpand(preview);
-                    }}
-                  >
-                    <img
-                      src={image.previewUrl}
-                      alt={image.name}
-                      className="block size-full object-cover"
-                    />
-                  </button>
-                ) : (
-                  <div className="flex min-h-[72px] items-center justify-center px-2 py-3 text-center text-2xs text-muted-foreground/70">
-                    {image.name}
-                  </div>
-                )}
-                {image.previewUrl && image.source?.kind === "snap-shot" ? (
-                  <SnapShotAttachmentDetails source={image.source} />
-                ) : null}
-              </div>
-            ))}
-            {userVideos.map((file) => (
-              <UserVideoAttachment key={file.id} file={file} />
-            ))}
-          </div>
-        )}
-        {unchippedFiles.length > 0 || unknownAttachments.length > 0 ? (
-          <div className="mb-2 flex flex-col gap-1">
-            {unchippedFiles.map((file) => {
-              const fileIdentity = (
-                <>
-                  <PierreEntryIcon pathValue={file.name} kind="file" theme={ctx.resolvedTheme} />
-                  <span className="min-w-0 flex-1 truncate">{file.name}</span>
-                </>
-              );
-              if (file.downloadable !== false) {
-                return (
-                  <div key={file.id} className="flex min-w-0 items-center gap-1">
-                    <button
-                      type="button"
-                      aria-label={`Preview ${file.name}`}
-                      onClick={() => ctx.onFileOpen(file)}
-                      className="focus-visible:ring-ring/70 flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md py-1 text-left text-sm hover:underline focus-visible:ring-2 focus-visible:outline-none focus-visible:ring-inset"
-                    >
-                      {fileIdentity}
-                      <EyeIcon className="size-4 shrink-0" />
-                    </button>
-                    <Tooltip>
-                      <TooltipTrigger
-                        render={
-                          <Button
-                            size="icon-xs"
-                            variant="ghost-muted"
-                            aria-label={`Download ${file.name}`}
-                            onClick={() => ctx.onFileDownload(file)}
-                          />
-                        }
-                      >
-                        <DownloadIcon />
-                      </TooltipTrigger>
-                      <TooltipPopup side="top">Download {file.name}</TooltipPopup>
-                    </Tooltip>
-                  </div>
-                );
-              }
-
-              return (
-                <div key={file.id} className="flex min-w-0 items-center gap-2 py-1 text-sm">
-                  {fileIdentity}
-                </div>
-              );
-            })}
-            {unknownAttachments.map((attachment) => (
-              <div key={attachment.id} className="flex min-w-0 items-center gap-2 py-1 text-sm">
-                <PierreEntryIcon
-                  pathValue={attachment.name}
-                  kind="file"
-                  theme={ctx.resolvedTheme}
+      {incomingPreview.isIncoming ? (
+        <>
+          <MessageAuthorHeading>
+            {userMessage.isAutomation ? "Automation" : "Another agent"}
+          </MessageAuthorHeading>
+          <IncomingMessageFrame
+            preview={incomingPreview}
+            surface={incomingMessageStyle}
+            fillColor={incomingMessageFillColor}
+            attachments={attachments}
+            attachmentCount={row.message.attachments?.length ?? 0}
+            renderOriginal={() => (
+              <div onCopyCapture={onBodyCopyCapture}>
+                <IncomingMessageOriginalBody
+                  text={resolvedContext.text}
+                  formatJson={incomingPreview.canExpand}
+                  renderContextReference={renderContextReference}
+                  skills={ctx.skills}
+                  markdownCwd={ctx.markdownCwd}
                 />
-                <span className="min-w-0 flex-1 truncate">{attachment.name}</span>
               </div>
-            ))}
-          </div>
-        ) : null}
-        <div onCopyCapture={onBodyCopyCapture}>
-          <CollapsibleUserMessageBody
-            text={resolvedContext.text}
-            renderContextReference={renderContextReference}
-            skills={ctx.skills}
-            markdownCwd={ctx.markdownCwd}
+            )}
+            renderActions={renderActions}
           />
+        </>
+      ) : (
+        <div className="relative max-w-[80%] rounded-2xl bg-message p-3 text-message-foreground">
+          <MessageAuthorHeading>You</MessageAuthorHeading>
+          {attachments}
+          <div onCopyCapture={onBodyCopyCapture}>
+            <CollapsibleUserMessageBody
+              text={resolvedContext.text}
+              renderContextReference={renderContextReference}
+              skills={ctx.skills}
+              markdownCwd={ctx.markdownCwd}
+            />
+          </div>
         </div>
-      </div>
+      )}
       {row.projectedItem &&
       row.projectedItem.item.status !== "completed" &&
       row.projectedItem.item.status !== "pending" &&
@@ -2555,42 +2874,8 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
           </span>
         </div>
       ) : null}
-      <div className="flex w-full max-w-[80%] items-center justify-end pe-1 text-xs tabular-nums opacity-0 transition-opacity duration-200 pointer-coarse:opacity-100 focus-within:opacity-100 group-hover:opacity-100">
-        <div className="flex shrink-0 items-center gap-2">
-          <Tooltip>
-            <TooltipTrigger render={<p className="text-muted-foreground text-xs tabular-nums" />}>
-              {formatDayAwareTimestamp(row.message.createdAt, ctx.timestampFormat)}
-            </TooltipTrigger>
-            <TooltipPopup>
-              {formatChatTimestampTooltip(row.message.createdAt, ctx.timestampFormat)}
-            </TooltipPopup>
-          </Tooltip>
-          <div className="flex items-center gap-0.5">
-            {typeof revertTurnCount === "number" && (
-              <RevertUserMessageButton turnCount={revertTurnCount} messageId={row.message.id} />
-            )}
-            {resolvedContext.text && (
-              <MessageCopyButton
-                // Structured paste needs the canonical links to retain their positions.
-                text={
-                  contextClipboardFragment
-                    ? resolvedContext.text
-                    : replaceComposerContextReferences(
-                        resolvedContext.text,
-                        (reference) => reference.label,
-                      )
-                }
-                {...(contextClipboardFragment
-                  ? {
-                      extraFlavors: { [COMPOSER_CONTEXT_CLIPBOARD_MIME]: contextClipboardFragment },
-                    }
-                  : {})}
-                variant="ghost"
-              />
-            )}
-          </div>
-        </div>
-      </div>
+
+      {incomingPreview.isIncoming ? null : renderActions()}
     </div>
   );
 }
@@ -4937,6 +5222,20 @@ const CollapsibleUserMessageBody = memo(function CollapsibleUserMessageBody(prop
       ) : null}
     </div>
   );
+});
+
+const IncomingMessageOriginalBody = memo(function IncomingMessageOriginalBody(props: {
+  text: string;
+  formatJson: boolean;
+  renderContextReference: (reference: ChatMarkdownContextReference) => ReactNode;
+  skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
+  markdownCwd: string | undefined;
+}) {
+  const text = useMemo(
+    () => (props.formatJson ? formatIncomingMessageOriginal(props.text) : props.text),
+    [props.formatJson, props.text],
+  );
+  return <UserMessageBody {...props} text={text} />;
 });
 
 const UserMessageBody = memo(function UserMessageBody(props: {

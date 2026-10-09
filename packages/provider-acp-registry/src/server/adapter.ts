@@ -273,6 +273,7 @@ export const AcpRegistryAdapterV2Driver: ProviderAdapterDriver<
     function* (input: ProviderAdapterDriverCreateInput<AcpRegistrySettings>) {
       const hostEnvironment = yield* HostProcessEnvironment;
       const selfInvocation = yield* resolveSelfInvocation();
+      const host = yield* ProviderHost.ProviderHost;
       const providerEventLoggers = yield* ProviderEventLoggers.ProviderEventLoggers;
       const makeNativeLogger = yield* makeAcpNativeLoggerFactory();
       return yield* makeAcpRegistryAdapterV2({
@@ -281,7 +282,7 @@ export const AcpRegistryAdapterV2Driver: ProviderAdapterDriver<
         environment: mergeProviderInstanceEnvironment(
           input.environment,
           hostEnvironment,
-          serverConfig.settingsPath,
+          host.paths.settingsPath,
         ),
         selfInvocation,
         nativeLogging: (threadId) =>

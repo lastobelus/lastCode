@@ -37,8 +37,9 @@ import * as ProviderContinuationRequests from "@t3tools/provider-core/server/Pro
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
-import { handoffBudget } from "@t3tools/provider-core/server/handoffBudget";
+import { ProviderHost } from "@t3tools/provider-core/server/ProviderHost";
 import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
+import { handoffBudget } from "@t3tools/provider-core/server/handoffBudget";
 import {
   makePiAdapterV2,
   PiAdapterV2Driver,

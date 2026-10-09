@@ -9,7 +9,14 @@
  * @module Preview
  */
 import { Schema } from "effect";
-import { NonNegativeInt, PositiveInt, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import {
+  CommandId,
+  MessageId,
+  NonNegativeInt,
+  PositiveInt,
+  ThreadId,
+  TrimmedNonEmptyString,
+} from "./baseSchemas.ts";
 import { BROWSER_PROFILE_MAX_COUNT, BrowserProfile, BrowserProfileId } from "./browserProfile.ts";
 
 export const PREVIEW_URL_MAX_LENGTH = 2_048;
@@ -244,6 +251,8 @@ export const PreviewOpenInput = Schema.Struct({
   profileId: Schema.optional(BrowserProfileId),
   /** Omit for a desktop tab. `server` requires the `serverBrowser` capability. */
   runtime: Schema.optional(PreviewRuntime),
+  /** Desktop cookie jar selected for this tab; never fall back to another browser. */
+  desktopHostId: Schema.optional(Schema.String),
   /** Set by agent opens that should float for viewers; see the snapshot field. */
   reveal: Schema.optional(Schema.Boolean),
 });
@@ -265,6 +274,29 @@ export const PreviewReportStatusInput = Schema.Struct({
   canGoForward: Schema.Boolean,
 });
 export type PreviewReportStatusInput = typeof PreviewReportStatusInput.Type;
+
+/** Claim a recovery dispatch identity for one exact failed URL in a thread. */
+export const PreviewClaimRecoveryInput = Schema.Struct({
+  threadId: ThreadId,
+  tabId: PreviewTabId,
+  url: Url,
+});
+export type PreviewClaimRecoveryInput = typeof PreviewClaimRecoveryInput.Type;
+
+export const PreviewRecoveryClaim = Schema.Struct({
+  commandId: CommandId,
+  messageId: MessageId,
+});
+export type PreviewRecoveryClaim = typeof PreviewRecoveryClaim.Type;
+
+export class PreviewRecoveryStorageError extends Schema.TaggedError<PreviewRecoveryStorageError>()(
+  "PreviewRecoveryStorageError",
+  { cause: Schema.Defect() },
+) {
+  override get message() {
+    return "Could not persist the preview recovery request identity.";
+  }
+}
 
 export const PreviewRefreshInput = Schema.Struct({
   threadId: ThreadId,

@@ -1053,7 +1053,9 @@ describe("DesktopBrowserHost", () => {
 
   it.effect("tells a download the person clicked from one the agent's input started", () =>
     Effect.gen(function* () {
-      const host = yield* DesktopBrowserHost.make;
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
       const debuggee = makeDebuggee();
       host.attach(key, debuggee.tab, "runtime-download");
       // Reading the page is not acting on it.

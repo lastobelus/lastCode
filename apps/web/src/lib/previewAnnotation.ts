@@ -1,29 +1,40 @@
 import type { PreviewAnnotationPayload } from "@t3tools/contracts";
 
-import { dataUrlToFile } from "./imageCompression";
-
 export type PreviewAnnotationCapture =
-  /** The crop is ready to attach. */
   | { readonly status: "captured"; readonly file: File }
-  /** The pick carried no crop, which is normal for comment-only annotations. */
   | { readonly status: "none" }
-  /** The crop could not be decoded. Send the annotation without it. */
   | { readonly status: "failed" };
 
-const PNG_DATA_URL_PREFIX = "data:image/png;base64,";
-
-/** Decode Electron's PNG crop locally; fetching a data URL violates desktop connect-src. */
-export function capturePreviewAnnotationScreenshot(
+/** Decode the native PNG locally: the desktop CSP intentionally blocks data-URL fetches. */
+export async function capturePreviewAnnotationScreenshot(
   annotation: PreviewAnnotationPayload,
-): PreviewAnnotationCapture {
+): Promise<PreviewAnnotationCapture> {
   if (!annotation.screenshot) return { status: "none" };
   try {
-    const { dataUrl } = annotation.screenshot;
-    if (!dataUrl.startsWith(PNG_DATA_URL_PREFIX)) {
-      return { status: "failed" };
+    const prefix = "data:image/png;base64,";
+    const dataUrl = annotation.screenshot.dataUrl;
+    if (!dataUrl.startsWith(prefix)) return { status: "failed" };
+    const encoded = dataUrl.slice(prefix.length);
+    if (!encoded.length) return { status: "failed" };
+    // Decode in base64-aligned chunks so large crops yield to input and painting,
+    // and never retain a full-size intermediate binary string.
+    const chunkSize = 256 * 1024;
+    const chunks: Uint8Array<ArrayBuffer>[] = [];
+    for (let offset = 0; offset < encoded.length; offset += chunkSize) {
+      const binary = atob(encoded.slice(offset, offset + chunkSize));
+      const bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index++) {
+        bytes[index] = binary.charCodeAt(index);
+      }
+      chunks.push(bytes);
+      if (offset + chunkSize < encoded.length) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
     }
-    const file = dataUrlToFile(dataUrl, `preview-annotation-${annotation.id}.png`, "image/png");
-    return file.size > 0 ? { status: "captured", file } : { status: "failed" };
+    return {
+      status: "captured",
+      file: new File(chunks, `preview-annotation-${annotation.id}.png`, { type: "image/png" }),
+    };
   } catch {
     return { status: "failed" };
   }

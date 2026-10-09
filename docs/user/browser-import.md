@@ -10,6 +10,10 @@ unlock prompt if one appears.
 This is a one-time copy. Later login changes stay separate between the two browsers, and some
 sites may still require you to sign in again.
 
+Named profiles share their sign-in across environments connected to the same desktop. Select the
+same profile when working in another environment to reuse its session. Default and Incognito keep
+separate storage for each environment; profiles on another desktop have their own sessions.
+
 On macOS, Safari imports need Full Disk Access. Choose **Allow**, drag T3 Code into the
 System Settings permission list, and turn access on. **Continue** becomes available when access
 is detected. macOS may require you to quit and reopen T3 Code before the grant applies; reopen

@@ -1617,16 +1617,17 @@ const make = Effect.gen(function* () {
     // A reveal response only confirms the request. Presentation comes from
     // the actual native slot or an attached streamed viewer.
     if (tab.nativePresented || tab.viewers.size > 0) tab.revealRequested = false;
+    const desktopHostId = tab.desktop ? (tab.desktopHostId ?? "local") : tab.desktopHostId;
     const catalogue =
-      tab.desktopHostId === undefined || agentSessionId === undefined
+      desktopHostId === undefined || agentSessionId === undefined
         ? null
         : await Effect.runPromise(
-            desktopChannel.getProfiles({ threadId: tab.threadId, agentSessionId }),
+            desktopChannel.getProfiles({ threadId: tab.threadId, agentSessionId, desktopHostId }),
           );
     const status = {
       profileId: tab.profileId ?? null,
       profileName:
-        catalogue?.desktopHostId === tab.desktopHostId
+        catalogue?.desktopHostId === desktopHostId
           ? (catalogue?.profiles.find((profile) => profile.id === tab.profileId)?.name ?? null)
           : null,
       available: true,
@@ -2144,6 +2145,36 @@ const make = Effect.gen(function* () {
     return normalizePreviewUrl(resolved);
   };
 
+  const profileDesktopHost = async (request: PreviewAutomationRequest) => {
+    if (!request.agentSessionId) return undefined;
+    const owned = [...tabs.values()].filter(
+      (tab) => tab.threadId === request.threadId && tab.control.agentId === request.agentSessionId,
+    );
+    const current =
+      request.tabIdExplicit && request.tabId !== undefined
+        ? tabs.get(tabKey(request.threadId, request.tabId))
+        : owned.find((tab) => tab.tabId === request.tabId);
+    if (current) return current.desktop ? (current.desktopHostId ?? "local") : undefined;
+    if (request.tabId !== undefined) {
+      const { sessions } = await Effect.runPromise(manager.list({ threadId: request.threadId }));
+      const retained = sessions.find(
+        (session) =>
+          session.tabId === request.tabId &&
+          (request.tabIdExplicit || session.automationOwner === request.agentSessionId),
+      );
+      if (retained?.backingPage === "desktop" || retained?.backingPage === "desktop-popup")
+        return retained.desktopHostId ?? "local";
+      if (retained) return undefined;
+      if (request.tabIdExplicit)
+        throw new ServerBrowserPage.ServerBrowserOperationError(
+          "PreviewAutomationTabNotFoundError",
+          "The requested preview tab is unavailable to this agent session. Omit tabId to open a new tab.",
+        );
+    }
+    const latest = owned.sort((left, right) => right.createdAt - left.createdAt)[0];
+    return latest?.desktop ? (latest.desktopHostId ?? "local") : undefined;
+  };
+
   const runOperation = async (
     request: PreviewAutomationRequest,
     signal: AbortSignal,
@@ -2160,10 +2191,12 @@ const make = Effect.gen(function* () {
           request.agentSessionId,
         );
       case "profiles": {
+        const desktopHostId = await profileDesktopHost(request);
         const profiles = await Effect.runPromise(
           desktopChannel.getProfiles({
             threadId: request.threadId,
             agentSessionId: request.agentSessionId ?? "",
+            ...(desktopHostId === undefined ? {} : { desktopHostId }),
           }),
         );
         if (profiles === null)
@@ -2180,15 +2213,18 @@ const make = Effect.gen(function* () {
             "The agent session is missing. Reconnect the provider.",
           );
         const open = input as PreviewAutomationOpenInput;
+        const desktopHostId = await profileDesktopHost(request);
         const catalogue = await Effect.runPromise(
           desktopChannel.getProfiles({
             threadId: request.threadId,
             agentSessionId: request.agentSessionId,
+            ...(desktopHostId === undefined ? {} : { desktopHostId }),
           }),
         );
         // Reported web profiles remain available for environment-hosted pages. An
         // explicit desktop-profile operation must still use its owning desktop.
         const useReportedProfile =
+          desktopHostId === undefined &&
           catalogue === null &&
           request.operation === "open" &&
           (reportedProfiles !== null || !desktopChannel.available);
@@ -2196,7 +2232,10 @@ const make = Effect.gen(function* () {
           ? resolveOpenProfile(open.profileId ?? open.profileName)
           : undefined;
         let selectedProfileId: string | undefined;
-        if (!useReportedProfile && (open.profileId !== undefined || open.profileName !== undefined)) {
+        if (
+          !useReportedProfile &&
+          (open.profileId !== undefined || open.profileName !== undefined)
+        ) {
           if (catalogue === null)
             throw new ServerBrowserPage.ServerBrowserOperationError(
               "PreviewAutomationRemoteUnavailableError",
@@ -2225,7 +2264,8 @@ const make = Effect.gen(function* () {
           }
           selectedProfileId = matches[0]!.id;
         }
-        const newTabProfileId = selectedProfileId ?? catalogue?.defaultProfileId ?? reportedProfileId;
+        const newTabProfileId =
+          selectedProfileId ?? catalogue?.defaultProfileId ?? reportedProfileId;
         let url = open.url === undefined ? undefined : normalizePreviewUrl(open.url);
         const reuse = open.reuseExistingTab ?? true;
         if (
@@ -2307,6 +2347,7 @@ const make = Effect.gen(function* () {
                 runtime: "server",
                 reveal: false,
                 automationOwner: request.agentSessionId,
+                ...(desktopHostId === undefined ? {} : { desktopHostId }),
                 ...(newTabProfileId === undefined || catalogue === null
                   ? {}
                   : { profileId: newTabProfileId, desktopHostId: catalogue.desktopHostId }),

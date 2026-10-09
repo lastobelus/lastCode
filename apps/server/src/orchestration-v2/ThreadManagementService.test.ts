@@ -9,6 +9,9 @@ import {
   type OrchestrationV2ThreadProjection,
   ProjectId,
   ProviderInstanceId,
+  ProviderSessionId,
+  ProviderThreadId,
+  RunAttemptId,
   RunId,
   ThreadId,
 } from "@t3tools/contracts";
@@ -87,6 +90,106 @@ it.effect("binds a forwarded queued message's read authority before committing i
     );
     expect(sent.run.userMessageId).toBe(messageId);
     expect(sent.delivery).toBe("queued");
+  }),
+);
+
+it.effect.each([
+  { provider: "codex", active: true, strict: true, interruptsTools: false, native: true },
+  { provider: "claude", active: true, strict: undefined, interruptsTools: true, native: false },
+  { provider: "cursor", active: false, strict: undefined, interruptsTools: false, native: false },
+  { provider: "opencode", active: true, strict: undefined, interruptsTools: false, native: false },
+  {
+    provider: "strict-interrupting",
+    active: true,
+    strict: true,
+    interruptsTools: true,
+    native: false,
+  },
+  {
+    provider: "missing-session",
+    active: true,
+    strict: true,
+    interruptsTools: false,
+    native: false,
+  },
+])("cooperative delivery uses safe native steering or queues for $provider", (scenario) =>
+  Effect.gen(function* () {
+    const projectId = ProjectId.make("project-example");
+    const threadId = ThreadId.make("thread-example");
+    const messageId = MessageId.make("pause-message-example");
+    const activeRunId = RunId.make("active-run-example");
+    const queuedRunId = RunId.make("queued-run-example");
+    const providerThreadId = ProviderThreadId.make("provider-thread-example");
+    const providerSessionId = ProviderSessionId.make("provider-session-example");
+    const activeAttemptId = RunAttemptId.make("attempt-example");
+    const commands: Array<OrchestrationV2Command> = [];
+    const projection = () => {
+      const queued = commands.some(
+        (command) =>
+          command.type === "message.dispatch" &&
+          command.dispatchMode?.type === "queue_after_active",
+      );
+      return {
+        thread: { id: threadId, projectId, deletedAt: null, archivedAt: null },
+        runs: [
+          { id: activeRunId, status: "running", activeAttemptId, providerThreadId, ordinal: 1 },
+          ...(queued ? [{ id: queuedRunId, status: "queued", ordinal: 2 }] : []),
+        ],
+        providerTurns: [{ runAttemptId: activeAttemptId, status: "running" }],
+        providerThreads: [{ id: providerThreadId, providerSessionId }],
+        providerSessions:
+          scenario.provider === "missing-session"
+            ? []
+            : [
+                {
+                  id: providerSessionId,
+                  capabilities: {
+                    turns: {
+                      supportsActiveSteering: scenario.active,
+                      supportsStrictActiveSteering: scenario.strict,
+                      activeSteeringInterruptsTools: scenario.interruptsTools,
+                    },
+                  },
+                },
+              ],
+        messages: [{ id: messageId, runId: queued ? queuedRunId : activeRunId }],
+        turnItems: queued ? [] : [{ type: "user_message", messageId, inputIntent: "steering" }],
+      } as unknown as OrchestrationV2ThreadProjection;
+    };
+    const testLayer = ThreadManagementService.layer.pipe(
+      Layer.provide(
+        Layer.mock(Orchestrator.OrchestratorV2)({
+          getThreadRecords: () => Effect.sync(projection),
+          dispatch: (command) =>
+            Effect.sync(() => {
+              commands.push(command as OrchestrationV2Command);
+              return { sequence: 1, storedEvents: [] };
+            }),
+        }),
+      ),
+    );
+    const service = yield* ThreadManagementService.ThreadManagementService.pipe(
+      Effect.provide(testLayer),
+    );
+    const sent = yield* service.sendToThread({
+      projectId,
+      threadId,
+      messageId,
+      commandId: CommandId.make("pause-command-example"),
+      text: "pause to go offline",
+      attachments: [],
+      mode: "cooperative",
+      createdBy: "user",
+      creationSource: "server",
+    });
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toMatchObject({
+      type: "message.dispatch",
+      dispatchMode: scenario.native
+        ? { type: "steer_active_native", targetRunId: activeRunId }
+        : { type: "queue_after_active" },
+    });
+    expect(sent.delivery).toBe(scenario.native ? "steered" : "queued");
   }),
 );
 

@@ -52,6 +52,10 @@ vi.mock("~/state/primaryEnvironment", async () => {
 });
 vi.mock("~/state/preview", () => ({
   previewEnvironment: {
+    open: {
+      label: "environment-data:preview:open",
+      run: vi.fn<typeof import("~/state/preview").previewEnvironment.open.run>(),
+    },
     events: ({ environmentId }: { environmentId: string }) => previewEventsFor(environmentId),
     list: ({ environmentId, input }: { environmentId: string; input: { threadId?: string } }) => {
       if (input.threadId === undefined) return previewList;
