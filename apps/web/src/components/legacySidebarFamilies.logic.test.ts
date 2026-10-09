@@ -250,7 +250,7 @@ describe("legacy sidebar subagent families", () => {
     expect(resolveThreadStatusPill({ thread: parent })).toBeNull();
   });
 
-  it("reveals selected ancestors without overwriting the stored collapse preference", () => {
+  it("retains only the selected path in explicitly collapsed families", () => {
     const parent = thread("parent");
     const child = thread("child", "parent");
     const grandchild = thread("grandchild", "child");
@@ -258,15 +258,69 @@ describe("legacy sidebar subagent families", () => {
       [legacySidebarThreadKey(parent)]: true,
       [legacySidebarThreadKey(child)]: true,
     };
-    const selected = project([parent, child, grandchild], {
+    const threads = [
+      parent,
+      thread("sibling", "parent"),
+      child,
+      thread("nested-sibling", "child"),
+      grandchild,
+      thread("next-root"),
+    ];
+    const selected = project(threads, {
       collapsedByKey,
       activeThreadKey: legacySidebarThreadKey(grandchild),
     });
-    expect(keys(selected)).toEqual(["parent", "child", "grandchild"]);
+    expect(keys(selected)).toEqual(["parent", "child", "grandchild", "next-root"]);
     expect(
-      selected.renderedRows.slice(0, 2).every((row) => row.selectedDescendant && row.expanded),
+      selected.renderedRows
+        .slice(0, 2)
+        .every((row) => row.selectedDescendant && !row.expanded && row.collapseNavigatesToParent),
     ).toBe(true);
-    expect(keys(project([parent, child, grandchild], { collapsedByKey }))).toEqual(["parent"]);
+    expect(keys(project(threads, { collapsedByKey }))).toEqual(["parent", "next-root"]);
+  });
+
+  it("returns an open subagent to the collapsed ancestor rather than its immediate parent", () => {
+    const parent = thread("parent");
+    const child = thread("child", "parent");
+    const grandchild = thread("grandchild", "child");
+    const threads = [parent, created("conversation", "parent"), child, grandchild];
+    const collapsedByKey = { [legacySidebarThreadKey(parent)]: true };
+    const selected = project(threads, {
+      collapsedByKey,
+      activeThreadKey: legacySidebarThreadKey(grandchild),
+    });
+    expect(selected.renderedRows[0]).toMatchObject({
+      expanded: false,
+      collapseNavigatesToParent: true,
+    });
+    expect(
+      keys(project(threads, { collapsedByKey, activeThreadKey: legacySidebarThreadKey(parent) })),
+    ).toEqual(["parent"]);
+  });
+
+  it("collapses the subagent section without hiding its selected path before navigation", () => {
+    const parent = thread("parent");
+    const helper = thread("helper", "parent");
+    const nested = thread("nested", "helper");
+    const ordinary = created("ordinary", "parent");
+    const threads = [parent, ordinary, thread("other-helper", "parent"), helper, nested];
+    const collapsedByKey = {
+      [legacySidebarThreadKey(parent)]: false,
+      [legacySidebarSubagentGroupKey(legacySidebarThreadKey(parent))]: true,
+    };
+    const selected = project(threads, {
+      collapsedByKey,
+      activeThreadKey: legacySidebarThreadKey(nested),
+    });
+    expect(keys(selected)).toEqual(["parent", "ordinary", "helper", "nested"]);
+    expect(selected.renderedItems.find((item) => item.type === "subagents")).toMatchObject({
+      expanded: false,
+      collapseNavigatesToParent: true,
+      count: 2,
+    });
+    expect(
+      keys(project(threads, { collapsedByKey, activeThreadKey: legacySidebarThreadKey(parent) })),
+    ).toEqual(["parent", "ordinary"]);
   });
 
   it("keeps only the selected ancestor path visible in a collapsed project", () => {
@@ -597,7 +651,71 @@ describe("legacy sidebar creator grouping", () => {
       collapsedByKey: { [legacySidebarThreadKey(parent)]: true },
     });
     expect(keys(result)).toEqual(["first", "creator", "ordinary"]);
-    expect(result.renderedRows[1]?.expanded).toBe(true);
+    expect(result.renderedRows[1]?.expanded).toBe(false);
+  });
+
+  it.each(["minimal", "typed-groups"] as const)(
+    "keeps only the open interactive path when its mixed family is collapsed (%s)",
+    (groupingStyle) => {
+      const parent = thread("creator");
+      const child = created("conversation", "creator");
+      const grandchild = created("nested-conversation", "conversation");
+      const threads = [
+        parent,
+        created("sibling", "creator"),
+        child,
+        created("nested-sibling", "conversation"),
+        grandchild,
+        thread("helper", "creator"),
+        thread("next-root"),
+      ];
+      const options = {
+        groupingStyle,
+        collapsedByKey: { [legacySidebarThreadKey(parent)]: true },
+        activeThreadKey: legacySidebarThreadKey(grandchild),
+      };
+      const result = project(threads, options);
+      expect(keys(result)).toEqual(["creator", "conversation", "nested-conversation", "next-root"]);
+      expect(result.renderedRows[0]).toMatchObject({
+        expanded: false,
+        selectedDescendant: true,
+        collapseNavigatesToParent: false,
+      });
+      expect(result.orderedThreadKeys).toEqual(result.renderedRows.map((row) => row.key));
+      expect(keys(project(threads, { ...options, activeThreadKey: null }))).toEqual([
+        "creator",
+        "next-root",
+      ]);
+    },
+  );
+
+  it("keeps an interactive conversation open even when its collapsed ancestors are subagents", () => {
+    const parent = thread("parent");
+    const helper = thread("helper", "parent");
+    const selected = created("conversation", "helper");
+    const threads = [
+      parent,
+      created("ordinary-sibling", "parent"),
+      thread("other-helper", "parent"),
+      helper,
+      created("nested-sibling", "helper"),
+      selected,
+    ];
+    const result = project(threads, {
+      collapsedByKey: {
+        [legacySidebarThreadKey(parent)]: false,
+        [legacySidebarThreadKey(helper)]: false,
+        [legacySidebarSubagentGroupKey(legacySidebarThreadKey(parent))]: true,
+      },
+      activeThreadKey: legacySidebarThreadKey(selected),
+    });
+    expect(keys(result)).toEqual(["parent", "ordinary-sibling", "helper", "conversation"]);
+    expect(result.renderedItems.find((item) => item.type === "subagents")).toMatchObject({
+      expanded: false,
+      selectedDescendant: true,
+      collapseNavigatesToParent: false,
+    });
+    expect(result.renderedRows.every((row) => !row.collapseNavigatesToParent)).toBe(true);
   });
 
   it("marks the active-parent path as belonging to a collapsed project (R3)", () => {
