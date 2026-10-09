@@ -22,6 +22,11 @@ vi.mock("node:os", async (importOriginal) => {
   return { ...actual, homedir: vi.fn(actual.homedir) };
 });
 
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return { ...actual, readdirSync: vi.fn(actual.readdirSync) };
+});
+
 const directories: string[] = [];
 const children: NodeChildProcess.ChildProcess[] = [];
 const cleanups: Array<() => Promise<void>> = [];
@@ -362,6 +367,119 @@ describe("local CI policy", () => {
     await expect(readLocalCiPolicy({ T3CODE_LOCAL_CI_SETTINGS_PATH: path })).rejects.toThrow(
       "must contain an object",
     );
+  });
+});
+
+describe("lease record admission", () => {
+  it("preserves valid nullable child identities and the strictest capacity", async () => {
+    const directory = temporaryDirectory();
+    const owner = worker(directory, 1);
+    await owner.start();
+    await owner.next("acquired");
+    const name = NodeFS.readdirSync(directory).find((entry) => entry.endsWith(".lease.json"))!;
+    const path = NodePath.join(directory, name);
+    const original = JSON.parse(NodeFS.readFileSync(path, "utf8"));
+    for (const [childPid, childStartIdentity] of [
+      [null, null],
+      [owner.pid, null],
+      [owner.pid, original.startIdentity],
+    ]) {
+      const record = { ...original, childPid, childStartIdentity, repoRoot: "", extra: true };
+      NodeFS.writeFileSync(path, JSON.stringify(record));
+      NodeFS.writeFileSync(NodePath.join(directory, "ignored.txt"), "invalid JSON");
+      expect(
+        await tryAcquireLocalCiBudget({
+          policy: { ...DEFAULT_LASTCODE_LOCAL_CI_SETTINGS, maxConcurrentRuns: 4 },
+          repoRoot: "workspace.example",
+          directory,
+        }),
+      ).toBeUndefined();
+      expect(JSON.parse(NodeFS.readFileSync(path, "utf8"))).toEqual(record);
+      expect(
+        NodeFS.readdirSync(directory).filter((entry) => entry.endsWith(".lease.json")),
+      ).toEqual([name]);
+    }
+    NodeFS.writeFileSync(path, JSON.stringify(original));
+    await owner.release();
+  });
+
+  it("stops malformed records before granting otherwise available capacity", async () => {
+    const valid = {
+      pid: 1,
+      startIdentity: "fixture",
+      childPid: null,
+      childStartIdentity: null,
+      token: "record",
+      maxConcurrentRuns: 1,
+      repoRoot: "",
+    };
+    const malformed: unknown[] = [null, [], 1, true, "record"];
+    for (const key of Object.keys(valid)) {
+      const missing: Record<string, unknown> = { ...valid };
+      delete missing[key];
+      malformed.push(missing, { ...valid, [key]: {} });
+    }
+    for (const pid of [0, -0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "1", null]) {
+      malformed.push({ ...valid, pid });
+      if (pid !== null) malformed.push({ ...valid, childPid: pid });
+    }
+    malformed.push(
+      { ...valid, startIdentity: "" },
+      { ...valid, childStartIdentity: "identity" },
+      { ...valid, childPid: 1, childStartIdentity: "" },
+      { ...valid, token: "other" },
+    );
+    for (const maxConcurrentRuns of [0, -1, 1.5, 5, Number.MAX_SAFE_INTEGER, "1", null]) {
+      malformed.push({ ...valid, maxConcurrentRuns });
+    }
+    const contents = malformed.map((record) => JSON.stringify(record));
+    contents.push(JSON.stringify(valid).replace('"pid":1', '"pid":1e309'));
+    for (const content of contents) {
+      const directory = temporaryDirectory();
+      const path = NodePath.join(directory, "record.lease.json");
+      NodeFS.writeFileSync(path, content);
+      await expect(
+        tryAcquireLocalCiBudget({
+          policy: DEFAULT_LASTCODE_LOCAL_CI_SETTINGS,
+          repoRoot: "workspace.example",
+          directory,
+        }),
+      ).rejects.toThrow(
+        "Invalid local CI lease. Admission has stopped to avoid exceeding the budget.",
+      );
+      expect(NodeFS.readFileSync(path, "utf8")).toBe(content);
+      expect(
+        NodeFS.readdirSync(directory).filter((entry) => entry.endsWith(".lease.json")),
+      ).toEqual(["record.lease.json"]);
+    }
+  });
+
+  it("reports the first lease error in directory order before reading later records", async () => {
+    for (const entries of [
+      ["a.lease.json", "b.lease.json"],
+      ["b.lease.json", "a.lease.json"],
+    ]) {
+      const directory = temporaryDirectory();
+      NodeFS.writeFileSync(NodePath.join(directory, "a.lease.json"), "null");
+      NodeFS.writeFileSync(NodePath.join(directory, "b.lease.json"), "{");
+      const enumeration = vi.spyOn(NodeFS, "readdirSync").mockReturnValueOnce(
+        // This overload returns names; the final Node overload is typed as Dirent[].
+        entries as unknown as ReturnType<typeof NodeFS.readdirSync>,
+      );
+      await expect(
+        tryAcquireLocalCiBudget({
+          policy: DEFAULT_LASTCODE_LOCAL_CI_SETTINGS,
+          repoRoot: "workspace.example",
+          directory,
+        }),
+      ).rejects.toThrow(
+        entries[0] === "a.lease.json"
+          ? "Invalid local CI lease. "
+          : "Invalid local CI lease JSON. ",
+      );
+      expect(enumeration).toHaveBeenCalledWith(directory);
+      enumeration.mockRestore();
+    }
   });
 });
 
