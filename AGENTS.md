@@ -145,18 +145,22 @@ Most code changes do not need an internal documentation change. Agents can read 
 - Keep user docs in the shipped product's voice, without implementation details or contributor tooling. Update the relevant feature section when how to use it changes. A UI tweak does not need a documentation entry, and a new control does not need its own page.
 - `docs/operations/` holds maintainer setup, release, and debugging procedures. Keep instructions for operating an installed T3 Code server in the user guides.
 
-## Public repository boundary
+## Public/private infrastructure boundary
 
-Keep deployment-specific infrastructure out of this public repository. Do not
-commit real machine names, private endpoints, host roles, network topology,
-private ports, operator schedules, or paths that identify a maintainer's
-environment. Public automation must expose environment-neutral tools and
-document their contracts with generic examples. Put the concrete wiring and
-deployment policy in the private infrastructure repository that owns it.
+LastCode may contain generic, reusable infrastructure tooling only. Never put
+maintainer-specific machine names, private endpoints, host roles, network
+topology, ports, paths, service names, schedules, deployment configuration,
+credentials, operational procedures, or descriptions of how a maintainer uses
+the tooling in this public repository. This applies to code, documentation,
+fixtures, commits, branches, issues, pull requests, comments, reviews, releases,
+logs, screenshots, and generated artifacts. The private infrastructure project
+owns the concrete wiring, deployment policy, and operational detail.
 
-Before publishing a LastCode change, inspect the diff, PR body, issue text, and
-review replies for infrastructure details. Test fixtures must use unmistakably
-generic names such as `workstation.example`, `managed-server`, or `build-host`.
+Before any public GitHub write or push, inspect the proposed content for private
+infrastructure details. A violation is blocking: stop and move the private
+material to the infrastructure project rather than paraphrasing, abbreviating,
+or encoding it. Public examples and test fixtures must use unmistakably generic
+names such as `workstation.example`, `managed-server`, or `build-host`.
 
 ## Plans and work artifacts
 
