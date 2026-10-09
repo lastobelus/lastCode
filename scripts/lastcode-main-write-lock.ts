@@ -4,6 +4,17 @@ import * as NodeCrypto from "node:crypto";
 
 export const MAIN_WRITE_LOCK_REF = "refs/lastcode/main-write-lock";
 
+// A rejected main ref is definitive evidence; transport and child failures remain unknown.
+function mainPushOutcome(result: NodeChildProcess.SpawnSyncReturns<string>) {
+  if (result.error) return "uncertain";
+  if (result.status === 0) return "success";
+  if (result.status !== 1) return "uncertain";
+  const rejectedMain = /^!\t[^\n\t]*:refs\/heads\/lastcode\/main\t\[(?:remote )?rejected\]/mu.test(
+    result.stdout,
+  );
+  return rejectedMain ? "rejected" : "uncertain";
+}
+
 export function acquireMainWriteLock(
   repoRoot: string,
   remote: string,
@@ -68,18 +79,12 @@ export function acquireMainWriteLock(
       if (args[0] !== "push") throw new Error("Main write lock push requires git push arguments.");
       uncertain = true;
       const result = command("git", ["push", "--porcelain", ...args.slice(1)]);
-      if (!result.error && result.status === 0) {
+      const outcome = mainPushOutcome(result);
+      if (outcome === "success") {
         uncertain = false;
         return;
       }
-      // A reported rejection proves this main write did not land. Transport errors do not.
-      if (
-        !result.error &&
-        result.status === 1 &&
-        /^!\t[^\n\t]*:refs\/heads\/lastcode\/main\t\[(?:remote )?rejected\]/mu.test(result.stdout)
-      ) {
-        uncertain = false;
-      }
+      if (outcome === "rejected") uncertain = false;
       throw new Error(
         `Checkpoint push failed under ${identity}.\n${result.error?.message ?? result.stderr.trim()}\n${result.stdout ?? ""}`,
       );
@@ -93,6 +98,7 @@ export function acquireMainWriteLock(
           `PR merge outcome is uncertain under ${identity}.\n${result.error?.message ?? result.stderr.trim()}`,
         );
       }
+      // Decode metadata after the merge command; only exact terminal confirmation clears uncertainty.
       const repository = args[args.indexOf("--repo") + 1];
       const expectedHead = args[args.indexOf("--match-head-commit") + 1];
       const number = args[2];
