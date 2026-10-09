@@ -414,7 +414,7 @@ export const make = Effect.gen(function* () {
       ? "merged"
       : thread.settledOverride === "settled" || thread.settledAt !== null
         ? "settled"
-        : thread.lineage.relationshipToParent === "subagent"
+        : thread.lineage.relationshipToParent === "subagent" && thread.lineage.independent !== true
           ? "subagent"
           : undefined;
 

@@ -1,3 +1,5 @@
+import { stripPreviewBootstrapTokenFromUrl } from "@t3tools/shared/remote";
+import { hostedPreviewNavigationUrl } from "@t3tools/client-runtime/preview-hosting";
 import type {
   EnvironmentId,
   PreviewOpenInput,
@@ -15,8 +17,9 @@ import {
   resolveBrowserDefaults,
 } from "~/browser/browserDefaults";
 import { BrowserSettingsReadError } from "~/browser/openFileInPreview";
-import { previewRuntimeFor } from "~/browser/previewRuntime";
+import { desktopBrowserHostFor, previewRuntimeFor } from "~/browser/previewRuntime";
 import { applyPreviewServerSnapshot, rememberPreviewUrl } from "~/previewStateStore";
+import { prepareHostedPreview } from "./previewHostingRecovery";
 
 interface OpenPreviewSessionInput<E> {
   openPreview: (input: {
@@ -43,14 +46,26 @@ export async function openPreviewSession<E>(
     return AsyncResult.failure(Cause.fail(defaults));
   }
   const runtime = previewRuntimeFor(input.threadRef.environmentId);
+  const desktopHostId =
+    runtime === "server" ? desktopBrowserHostFor(input.threadRef.environmentId) : undefined;
+  const preparedUrl =
+    input.url === undefined ? undefined : await prepareHostedPreview(input.threadRef, input.url);
+  const url =
+    preparedUrl === undefined
+      ? undefined
+      : hostedPreviewNavigationUrl(
+          preparedUrl,
+          runtime === "server" && desktopHostId === undefined ? input.url : preparedUrl.url,
+        );
   const result = await input.openPreview({
     environmentId: input.threadRef.environmentId,
     input: {
       threadId: input.threadRef.threadId,
-      ...(input.url === undefined ? {} : { url: input.url }),
+      ...(url === undefined ? {} : { url }),
       viewport: input.viewport ?? browserDefaultOpenViewport(defaults),
       profileId: input.profileId ?? browserDefaultOpenProfileId(defaults),
       ...(runtime === undefined ? {} : { runtime }),
+      ...(desktopHostId === undefined ? {} : { desktopHostId }),
     },
   });
   if (result._tag === "Failure") {
@@ -61,7 +76,9 @@ export async function openPreviewSession<E>(
   if (input.url !== undefined) {
     rememberPreviewUrl(
       input.threadRef,
-      snapshot.navStatus._tag === "Idle" ? input.url : snapshot.navStatus.url,
+      snapshot.navStatus._tag === "Idle"
+        ? input.url
+        : stripPreviewBootstrapTokenFromUrl(new URL(snapshot.navStatus.url)).href,
     );
   }
   return result;

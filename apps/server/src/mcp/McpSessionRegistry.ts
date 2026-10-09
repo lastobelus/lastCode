@@ -128,6 +128,9 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
       const rawToken = yield* crypto.randomBytes(32).pipe(Effect.map(tokenFromBytes), Effect.orDie);
       const tokenHash = yield* hashToken(rawToken);
       const browserToolsAvailable = request.browserToolsAvailable ?? true;
+      const requestedCapabilities =
+        request.capabilities ??
+        new Set<McpInvocationContext.McpCapability>(browserToolsAvailable ? ["preview"] : []);
       const scope: McpInvocationContext.McpThreadInvocationScope = {
         environmentId,
         requestNamespace: providerSessionId,
@@ -141,7 +144,8 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
           "orchestration",
           "worktree",
           "pull-requests",
-          ...(request.capabilities ?? (browserToolsAvailable ? (["preview"] as const) : [])),
+          ...requestedCapabilities,
+          ...(requestedCapabilities.has("preview") ? (["action-resume"] as const) : []),
         ]),
         issuedAt,
       };
@@ -156,7 +160,10 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
           threadId: scope.thread.threadId,
           providerSessionId,
           providerInstanceId: scope.thread.providerInstanceId,
-          endpoint,
+          endpoint:
+            scope.capabilities.has("preview") || scope.capabilities.has("device")
+              ? endpoint
+              : `${endpoint}/thread`,
           authorizationHeader: `Bearer ${rawToken}`,
           browserToolsAvailable: scope.capabilities.has("preview"),
           capabilities: scope.capabilities,

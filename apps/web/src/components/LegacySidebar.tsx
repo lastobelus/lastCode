@@ -3,6 +3,7 @@ import {
   useSidebarProviderBadgePreferences,
   type SidebarProviderBadgePreferences,
 } from "./sidebar/SidebarEnvironmentIcon";
+import { ThreadDashboardIndicator } from "./dashboard/ThreadDashboardIndicator";
 import { describeHandoff } from "../handoffs/handoffMenu";
 import { readThreadHandoffs } from "../handoffs/handoffsStore";
 import { useOpenHandoff } from "../handoffs/useOpenHandoff";
@@ -95,10 +96,7 @@ import {
   settlePromise,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import {
-  threadRuntimeCanArchive,
-  threadShellIsVisible,
-} from "@t3tools/client-runtime/state/models";
+import { threadShellIsVisible } from "@t3tools/client-runtime/state/models";
 import { useNavigate, useParams, useRouter } from "@tanstack/react-router";
 import {
   MAX_SIDEBAR_THREAD_PREVIEW_COUNT,
@@ -246,7 +244,6 @@ import {
 } from "../threadSelectionStore";
 import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
 import {
-  archiveSelectedThreadEntries,
   buildMultiSelectThreadContextMenuItems,
   collectUnprotectedBulkThreadEntries,
   getSidebarThreadIdsToPrewarm,
@@ -594,7 +591,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     props.providerBadgePreferences.enabled ||
     (environmentPresentation.showRowIcon &&
       props.familyRow.parentKey === null &&
-      thread.lineage.relationshipToParent !== "subagent");
+      (thread.lineage.relationshipToParent !== "subagent" || thread.lineage.independent === true));
   const threadEnvironmentLabel = props.providerBadgePreferences.enabled
     ? (environmentPresentation.hoverLabel ?? remoteEnvLabel ?? "Local")
     : props.familyRow.parentKey !== null
@@ -649,7 +646,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     },
     [discoveredPorts, navigateToThread, openPreview, thread.environmentId, threadRef],
   );
-  const isThreadRunning = !threadRuntimeCanArchive(thread.runtime);
   const threadStatus = resolveThreadStatusPill({
     thread: {
       ...thread,
@@ -674,8 +670,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     canOperateThread &&
     !thread.persistent &&
     cleanup === null &&
-    confirmingArchiveThreadKey === threadKey &&
-    !isThreadRunning;
+    confirmingArchiveThreadKey === threadKey;
   const annotation = thread.annotation ?? null;
   const hasActiveAnnotation = annotation?.resolvedAt === null;
   const cleanupBlockerTitle =
@@ -713,7 +708,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const creatorDetails = legacySidebarCreatorDetails(thread, creatorShell);
   const creatorDescription = creatorDetails.description;
   const lineageDescription =
-    thread.lineage.relationshipToParent === "subagent"
+    thread.lineage.relationshipToParent === "subagent" && thread.lineage.independent !== true
       ? `Subagent · ${legacySidebarSubagentStatusLabel(thread, threadStatus)}${props.familyRow.unavailableParentLabel ? ` · ${props.familyRow.unavailableParentLabel}` : ""}`
       : null;
   const relationshipDescription = creatorDescription
@@ -753,7 +748,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   );
   const threadMetaVisibilityClassName = isConfirmingArchive
     ? "opacity-0"
-    : canOperateThread && !thread.persistent && cleanup === null && !isThreadRunning
+    : canOperateThread && !thread.persistent && cleanup === null
       ? "transition-opacity duration-150 group-hover/menu-sub-item:opacity-0 group-focus-within/menu-sub-item:opacity-0"
       : "";
   const threadMetaClassName = `pointer-events-none inline-flex w-full justify-end ${
@@ -1047,7 +1042,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const family = props.familyRow;
   const typedGroups = props.groupingStyle === "typed-groups";
   const subagentLabel =
-    thread.lineage.relationshipToParent === "subagent"
+    thread.lineage.relationshipToParent === "subagent" && thread.lineage.independent !== true
       ? `Subagent · ${legacySidebarSubagentStatusLabel(thread, threadStatus)}${family.unavailableParentLabel ? ` · ${family.unavailableParentLabel}` : ""}`
       : null;
   const relationshipLabel = subagentLabel ?? (isAgentCreated ? "Agent-created" : null);
@@ -1335,6 +1330,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                   </span>
                 ) : null}
               </span>
+              <ThreadDashboardIndicator items={thread.dashboardItems} />
             </>
           )}
         </div>
@@ -1463,7 +1459,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               >
                 Confirm
               </button>
-            ) : canOperateThread && !thread.persistent && !isThreadRunning && cleanup === null ? (
+            ) : canOperateThread && !thread.persistent && cleanup === null ? (
               appSettingsConfirmThreadArchive ? (
                 <div className="pointer-events-none absolute top-1/2 right-0.5 -translate-y-1/2 opacity-0 transition-opacity duration-150 max-sm:pointer-events-auto max-sm:opacity-100 group-hover/menu-sub-item:pointer-events-auto group-hover/menu-sub-item:opacity-100 group-focus-within/menu-sub-item:pointer-events-auto group-focus-within/menu-sub-item:opacity-100">
                   <button
@@ -1897,6 +1893,8 @@ interface SidebarProjectItemProps {
   newThreadShortcutLabel: string | null;
   handleNewThread: ReturnType<typeof useNewThreadHandler>;
   archiveThread: ReturnType<typeof useThreadActions>["archiveThread"];
+  archiveThreads: ReturnType<typeof useThreadActions>["archiveThreads"];
+  unarchiveThread: ReturnType<typeof useThreadActions>["unarchiveThread"];
   deleteThread: ReturnType<typeof useThreadActions>["deleteThread"];
   setThreadPersistence: ReturnType<typeof useThreadActions>["setThreadPersistence"];
   markThreadUnread: ReturnType<typeof useThreadActions>["markThreadUnread"];
@@ -1925,6 +1923,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     newThreadShortcutLabel,
     handleNewThread,
     archiveThread,
+    archiveThreads,
+    unarchiveThread,
     deleteThread,
     markThreadUnread,
     setThreadPersistence,
@@ -2363,9 +2363,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                           ...(member.environmentLabel
                             ? [`Environment: ${member.environmentLabel}`]
                             : []),
-                          "This permanently clears conversation history for those threads and any archived threads.",
+                          "This deletes all threads in this project, including archived threads, forks, independent threads, and subagents. This cannot be undone.",
                           "This removes only this project entry.",
-                          "This action cannot be undone.",
                         ].join("\n")
                       : [
                           `Remove project "${member.title}"?`,
@@ -2373,7 +2372,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                           ...(member.environmentLabel
                             ? [`Environment: ${member.environmentLabel}`]
                             : []),
-                          "This permanently clears any archived conversation history.",
+                          "This deletes all threads in this project, including archived threads, forks, independent threads, and subagents. This cannot be undone.",
                           "This removes only this project entry.",
                         ].join("\n"),
                     { variant: "destructive" },
@@ -2423,7 +2422,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         `Remove project "${member.title}"?`,
         `Path: ${member.workspaceRoot}`,
         ...(member.environmentLabel ? [`Environment: ${member.environmentLabel}`] : []),
-        "This permanently clears any archived conversation history.",
+        "This deletes all threads in this project, including archived threads, forks, independent threads, and subagents. This cannot be undone.",
         "This removes only this project entry.",
       ].join("\n");
       const confirmed = await api.dialogs.confirm(message, { variant: "destructive" });
@@ -2531,6 +2530,14 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
           };
         };
 
+        actionHandlers.set("open-dashboard", () => {
+          if (isMobile) setOpenMobile(false);
+          void router.navigate({
+            to: "/dashboard",
+            search: { environmentId: project.environmentId, projectId: project.id },
+          });
+        });
+
         actionHandlers.set("project-settings", () => {
           if (isMobile) setOpenMobile(false);
           void router.navigate({
@@ -2551,6 +2558,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                   buildTargetedItem("grouping", "Group into..."),
                 ]),
             buildTargetedItem("copy-path", "Copy Path"),
+            { id: "open-dashboard", label: "Open dashboard", icon: "layout-dashboard" },
             { id: "project-settings", label: "Project settings", icon: "settings" },
             buildTargetedItem(
               "delete",
@@ -2588,6 +2596,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       openProjectRenameDialog,
       project.groupedProjectCount,
       project.memberProjects,
+      project.environmentId,
+      project.id,
       projectSettingsKey,
       router,
       setOpenMobile,
@@ -2715,9 +2725,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       });
       const count = selectedThreadEntries.length;
       if (count === 0) return;
-      const hasRunningThread = selectedThreadEntries.some(
-        ({ thread }) => !threadRuntimeCanArchive(thread.runtime),
-      );
       const canOperateSelection = selectedThreadEntries.every(({ threadRef }) =>
         readEnvironmentScope(threadRef.environmentId, AuthOrchestrationOperateScope),
       );
@@ -2735,7 +2742,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         );
       const clicked = await api.contextMenu.show(
         protectLegacyThreadActions(
-          buildMultiSelectThreadContextMenuItems({ count, hasRunningThread }),
+          buildMultiSelectThreadContextMenuItems({ count }),
           hasPersistentThread,
         ).map((item) =>
           item.id === "archive" || item.id === "delete"
@@ -2768,20 +2775,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       }
 
       if (clicked === "archive") {
-        if (appSettingsConfirmThreadArchive) {
-          const confirmed = await api.dialogs.confirm(
-            `Archive ${count} thread${count === 1 ? "" : "s"}?`,
-          );
-          if (!confirmed) return;
-        }
-        if (
-          !selectedThreadEntries.every(({ threadRef }) =>
-            checkTaskPermission(threadRef.environmentId),
-          )
-        ) {
-          return;
-        }
-
         const currentEntries = collectUnprotectedBulkThreadEntries({
           threadKeys: selectedThreadEntries.map(({ threadKey }) => threadKey),
           getEntry: readSelectedThreadEntry,
@@ -2793,13 +2786,10 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
         if (!currentEntries.every(({ threadRef }) => checkTaskPermission(threadRef.environmentId)))
           return;
-
         if (currentEntries.some(({ thread }) => thread.worktreeCleanup != null)) return;
 
-        const archiveOutcome = await archiveSelectedThreadEntries({
-          entries: currentEntries,
-          archive: ({ threadRef }, onArchived) => archiveThread(threadRef, { onArchived }),
-        });
+        const archiveOutcome = await archiveThreads(currentEntries);
+        if (archiveOutcome === null) return;
         for (const failure of archiveOutcome.followupFailures) {
           if (isAtomCommandInterrupted(failure)) continue;
           const error = squashAtomCommandFailure(failure);
@@ -2835,7 +2825,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         const confirmed = await api.dialogs.confirm(
           [
             `Delete ${count} thread${count === 1 ? "" : "s"}?`,
-            "This permanently clears conversation history for these threads.",
+            `This also deletes any of ${count === 1 ? "its" : "their"} subagents, including archived ones; unselected forks and independent threads are kept. This cannot be undone.`,
           ].join("\n"),
           { variant: "destructive" },
         );
@@ -2894,9 +2884,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       );
     },
     [
-      appSettingsConfirmThreadArchive,
       appSettingsConfirmThreadDelete,
-      archiveThread,
+      archiveThreads,
       clearSelection,
       deleteThread,
       markThreadUnread,
@@ -2997,7 +2986,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         );
         return;
       }
-      const result = await archiveThread(threadRef);
+      const result = await archiveThread(threadRef, { confirmed: true });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
         toastManager.add(
@@ -3278,6 +3267,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             ...(stopProcessesAction ? [stopProcessesAction] : []),
             { id: "copy-path", label: "Copy Path" },
             { id: "copy-thread-id", label: "Copy Thread ID" },
+            { id: "open-dashboard", label: "Open dashboard", icon: "layout-dashboard" },
             {
               id: "project-settings",
               label: "Project settings",
@@ -3289,6 +3279,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
               : [{ id: "handoffs-empty", label: "No handoffs yet", disabled: true }]),
             ...(handoffs.length > handoffDescriptors.length
               ? [{ id: "handoff-show-all", label: "Show all…" }]
+              : []),
+            ...(thread.archivePending?.status === "failed"
+              ? [{ id: "dismiss-archive-failure", label: "Dismiss archive failure" }]
               : []),
             {
               id: "delete",
@@ -3308,6 +3301,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             "mark-persistent",
             "disable-persistence",
             "stop-thread-processes",
+            "dismiss-archive-failure",
             "delete",
           ].includes(item.id)
             ? { ...item, disabled: item.disabled || !canOperateThread }
@@ -3341,11 +3335,32 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
           "mark-persistent",
           "disable-persistence",
           "stop-thread-processes",
+          "dismiss-archive-failure",
           "delete",
         ].includes(clicked) &&
         !checkTaskPermission(threadRef.environmentId)
       )
         return;
+
+      if (clicked === "dismiss-archive-failure") {
+        const pending = thread.archivePending;
+        if (pending?.status !== "failed") return;
+        const result = await unarchiveThread(
+          scopeThreadRef(thread.environmentId, pending.threadId),
+          { expectedArchiveCommandId: pending.commandId },
+        );
+        if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+          const error = squashAtomCommandFailure(result);
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Couldn't dismiss archive failure",
+              description: error instanceof Error ? error.message : "An error occurred.",
+            }),
+          );
+        }
+        return;
+      }
 
       if (clicked === "creator-independent" || clicked === "creator-grouped") {
         if (!creatorGroupingEligible) return;
@@ -3370,6 +3385,15 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       }
       if (clicked === "open-creator" && creatorRef && canOpenCreator) {
         await navigateToThread(creatorRef);
+        return;
+      }
+
+      if (clicked === "open-dashboard") {
+        if (isMobile) setOpenMobile(false);
+        void router.navigate({
+          to: "/dashboard",
+          search: { environmentId: thread.environmentId, projectId: thread.projectId },
+        });
         return;
       }
 
@@ -3473,7 +3497,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         const confirmed = await api.dialogs.confirm(
           [
             `Delete thread "${thread.title}"?`,
-            "This permanently clears conversation history for this thread.",
+            "This also deletes any of its subagents, including archived ones; other forks and independent threads are kept. This cannot be undone.",
           ].join("\n"),
           { variant: "destructive" },
         );
@@ -3526,6 +3550,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       stopThreadProcesses,
       updateThreadMetadata,
       navigateToThread,
+      unarchiveThread,
     ],
   );
 
@@ -4153,6 +4178,8 @@ interface SidebarProjectsContentProps {
   handleProjectDragCancel: (event: DragCancelEvent) => void;
   handleNewThread: ReturnType<typeof useNewThreadHandler>;
   archiveThread: ReturnType<typeof useThreadActions>["archiveThread"];
+  archiveThreads: ReturnType<typeof useThreadActions>["archiveThreads"];
+  unarchiveThread: ReturnType<typeof useThreadActions>["unarchiveThread"];
   deleteThread: ReturnType<typeof useThreadActions>["deleteThread"];
   setThreadPersistence: ReturnType<typeof useThreadActions>["setThreadPersistence"];
   markThreadUnread: ReturnType<typeof useThreadActions>["markThreadUnread"];
@@ -4299,6 +4326,8 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     handleProjectDragCancel,
     handleNewThread,
     archiveThread,
+    archiveThreads,
+    unarchiveThread,
     deleteThread,
     markThreadUnread,
     setThreadPersistence,
@@ -4467,6 +4496,8 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                         newThreadShortcutLabel={newThreadShortcutLabel}
                         handleNewThread={handleNewThread}
                         archiveThread={archiveThread}
+                        archiveThreads={archiveThreads}
+                        unarchiveThread={unarchiveThread}
                         deleteThread={deleteThread}
                         setThreadPersistence={setThreadPersistence}
                         markThreadUnread={markThreadUnread}
@@ -4512,6 +4543,8 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                 newThreadShortcutLabel={newThreadShortcutLabel}
                 handleNewThread={handleNewThread}
                 archiveThread={archiveThread}
+                archiveThreads={archiveThreads}
+                unarchiveThread={unarchiveThread}
                 deleteThread={deleteThread}
                 setThreadPersistence={setThreadPersistence}
                 markThreadUnread={markThreadUnread}
@@ -4573,8 +4606,14 @@ export default function LegacySidebar() {
   );
   const updateSettings = useUpdateClientSettings();
   const handleNewThread = useNewThreadHandler();
-  const { archiveThread, deleteThread, markThreadUnread, setThreadPersistence } =
-    useThreadActions();
+  const {
+    archiveThread,
+    archiveThreads,
+    unarchiveThread,
+    deleteThread,
+    markThreadUnread,
+    setThreadPersistence,
+  } = useThreadActions();
   const { isMobile, setOpenMobile } = useSidebar();
   const routeTarget = useParams({
     strict: false,
@@ -5251,6 +5290,8 @@ export default function LegacySidebar() {
         handleProjectDragCancel={handleProjectDragCancel}
         handleNewThread={handleNewThread}
         archiveThread={archiveThread}
+        archiveThreads={archiveThreads}
+        unarchiveThread={unarchiveThread}
         deleteThread={deleteThread}
         setThreadPersistence={setThreadPersistence}
         markThreadUnread={markThreadUnread}

@@ -1,3 +1,4 @@
+import { hostedPreviewNavigationUrl } from "@t3tools/client-runtime/preview-hosting";
 import type {
   AssetCreateUrlResult,
   AssetResource,
@@ -15,10 +16,16 @@ import * as Cause from "effect/Cause";
 import * as Data from "effect/Data";
 import { AsyncResult } from "effect/reactivity";
 
+import { prepareHostedPreview } from "~/components/preview/previewHostingRecovery";
 import { resolveAssetUrl } from "~/assets/assetUrls";
-import { isPreviewAvailableFor, previewRuntimeFor } from "~/browser/previewRuntime";
+import {
+  desktopBrowserHostFor,
+  isPreviewAvailableFor,
+  previewRuntimeFor,
+} from "~/browser/previewRuntime";
 import { applyPreviewServerSnapshot, rememberPreviewUrl } from "~/previewStateStore";
 import { useRightPanelStore } from "~/rightPanelStore";
+import { rememberHandoffBrowser } from "~/handoffs/handoffsStore";
 
 import {
   browserDefaultOpenProfileId,
@@ -48,11 +55,26 @@ export type OpenPreviewMutation<E = unknown> = (input: {
   readonly input: PreviewOpenInput;
 }) => Promise<AtomCommandResult<PreviewSessionSnapshot, E>>;
 
-export async function openUrlInPreview<E>(input: {
+interface OpenUrlInPreviewInput<E> {
   readonly threadRef: ScopedThreadRef;
   readonly url: string;
   readonly openPreview: OpenPreviewMutation<E>;
-}): Promise<AtomCommandResult<void, E | BrowserSettingsReadError>> {
+  readonly onOpened?: (tabId: string) => void;
+}
+
+export async function openUrlInPreview<E>(
+  input: OpenUrlInPreviewInput<E>,
+): Promise<AtomCommandResult<void, E | BrowserSettingsReadError>> {
+  const prepared = await prepareHostedPreview(input.threadRef, input.url);
+  return openPreparedUrlInPreview(input, prepared.url, prepared.navigationUrl);
+}
+
+/** Open an already recovered destination while retaining the authored URL. */
+export async function openPreparedUrlInPreview<E>(
+  input: OpenUrlInPreviewInput<E>,
+  destinationUrl: string,
+  navigationUrl?: string,
+): Promise<AtomCommandResult<void, E | BrowserSettingsReadError>> {
   const defaults = await resolveBrowserDefaults().catch(
     (cause: unknown) => new BrowserSettingsReadError({ cause }),
   );
@@ -60,23 +82,30 @@ export async function openUrlInPreview<E>(input: {
     return AsyncResult.failure(Cause.fail(defaults));
   }
   const runtime = previewRuntimeFor(input.threadRef.environmentId);
+  const desktopHostId =
+    runtime === "server" ? desktopBrowserHostFor(input.threadRef.environmentId) : undefined;
   const result = await input.openPreview({
     environmentId: input.threadRef.environmentId,
     input: {
       threadId: input.threadRef.threadId,
-      url: input.url,
+      url: hostedPreviewNavigationUrl(
+        { url: destinationUrl, ...(navigationUrl === undefined ? {} : { navigationUrl }) },
+        runtime === "server" && desktopHostId === undefined ? input.url : destinationUrl,
+      ),
       // Built here rather than via `openPreviewSession` because this path
       // maps the result differently, so the configured defaults have to be
       // applied explicitly or file/link opens would ignore them.
       viewport: browserDefaultOpenViewport(defaults),
       profileId: browserDefaultOpenProfileId(defaults),
       ...(runtime === undefined ? {} : { runtime }),
+      ...(desktopHostId === undefined ? {} : { desktopHostId }),
     },
   });
   return mapAtomCommandResult(result, (snapshot) => {
     applyPreviewServerSnapshot(input.threadRef, snapshot);
     rememberPreviewUrl(input.threadRef, input.url);
     useRightPanelStore.getState().openBrowser(input.threadRef, snapshot.tabId);
+    input.onOpened?.(snapshot.tabId);
   });
 }
 
@@ -130,9 +159,18 @@ export async function openFileInPreview<AssetError, PreviewError>(input: {
       Cause.die(new Error("The environment returned an invalid asset URL.")),
     );
   }
-  return openUrlInPreview({
+  const result = await openUrlInPreview({
     threadRef: input.threadRef,
     url: assetUrl,
     openPreview: input.openPreview,
+    onOpened: (tabId) => {
+      rememberHandoffBrowser(
+        input.threadRef,
+        tabId,
+        { kind: "file", path: input.filePath },
+        assetUrl,
+      );
+    },
   });
+  return result;
 }

@@ -40,7 +40,7 @@ import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as CommandReceipts from "../orchestration-v2/CommandReceiptStore.ts";
 import * as ActionRunStore from "./ActionRunStore.ts";
 import * as UpdateDrainAdmission from "../updateDrain/UpdateDrainAdmission.ts";
-import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
+import { ProviderRegistry } from "../provider/ProviderRegistry.ts";
 
 const ACTION_RESUME_PROVIDER_DRIVERS = new Set([
   ProviderDriverKind.make("codex"),

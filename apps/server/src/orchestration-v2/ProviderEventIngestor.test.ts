@@ -1,5 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import {
+  CommandId,
   MessageId,
   type ModelSelection,
   NodeId,
@@ -13,9 +14,11 @@ import {
   type OrchestrationV2TurnItem,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderSessionId,
   PlanId,
   RunAttemptId,
   RunId,
+  ThreadId,
   RuntimeRequestId,
   TurnItemId,
 } from "@t3tools/contracts";
@@ -35,6 +38,8 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
+import * as EffectOutbox from "./EffectOutbox.ts";
+import { makeSubagentConversationArtifacts } from "./SubagentProjection.ts";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import {
   makeProviderEventRoutingState,
@@ -53,6 +58,7 @@ const layerTestEventSink = EventSink.layer.pipe(
 );
 
 const layerTest = Layer.mergeAll(
+  EffectOutbox.layer.pipe(Layer.provide(layerTestDatabase)),
   layerTestStores,
   layerTestEventSink,
   IdAllocator.layer,
@@ -135,6 +141,84 @@ function threadCreatedEvent(
 }
 
 const layer = it.layer(layerTest);
+
+layer("incoming native prompts", (it) => {
+  it.effect(
+    "enqueues one preview and copies a completed result to a later native timeline item",
+    () =>
+      Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const now = yield* DateTime.now;
+        const threadEvent = yield* threadCreatedEvent(now);
+        yield* sink.write({ events: [threadEvent] });
+        const artifacts = makeSubagentConversationArtifacts({
+          messageId: MessageId.make("native-prompt-preview"),
+          turnItemId: TurnItemId.make("native-item-preview"),
+          threadId: threadEvent.threadId,
+          senderThreadId: ThreadId.make("sending-parent-thread"),
+          rootNodeId: NodeId.make("native-root-node"),
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          role: "user",
+          text: "Review build changes and preserve the existing release workflow.\nDo not publish a release yet.",
+          ordinal: 1,
+          now,
+        });
+        const input = {
+          providerSessionId: ProviderSessionId.make("native-session"),
+          providerInstanceId: modelSelection.instanceId,
+          threadId: threadEvent.threadId,
+        };
+        const commandId = CommandId.make("native-preview-command");
+        const stored = yield* ingestor.ingestNormalized({
+          ...input,
+          commandId,
+          event: { type: "message.updated", driver: CODEX_DRIVER, message: artifacts.message },
+        });
+        const messageEvent = stored[0]?.event;
+        assert.equal(messageEvent?.type, "message.updated");
+        if (messageEvent?.type !== "message.updated") return;
+        assert.deepEqual(messageEvent.payload.incomingSummary, { status: "pending" });
+        assert.equal((yield* outbox.listByCommandId(commandId)).length, 1);
+        const ready = {
+          status: "ready" as const,
+          text: "Review build changes; do not release yet",
+        };
+        yield* sink.write({
+          events: [
+            {
+              ...messageEvent,
+              id: `completed:${messageEvent.id}` as typeof messageEvent.id,
+              payload: { ...messageEvent.payload, incomingSummary: ready },
+            },
+          ],
+        });
+        yield* ingestor.ingestNormalized({
+          ...input,
+          event: { type: "turn_item.updated", driver: CODEX_DRIVER, turnItem: artifacts.turnItem },
+        });
+        const records = yield* projections.getThreadRecords(threadEvent.threadId, ["turnItems"], {
+          turnItemMessageIds: [artifacts.message.id],
+        });
+        const item = records.turnItems[0];
+        assert.equal(item?.id, artifacts.turnItem.id);
+        assert.deepEqual(item?.type === "user_message" ? item.incomingSummary : undefined, ready);
+        yield* ingestor.ingestNormalized({
+          ...input,
+          commandId: CommandId.make("native-preview-update"),
+          event: { type: "message.updated", driver: CODEX_DRIVER, message: artifacts.message },
+        });
+        assert.equal(
+          (yield* outbox.listByCommandId(CommandId.make("native-preview-update"))).length,
+          0,
+        );
+      }),
+  );
+});
 
 it.effect("records accepted billed turn usage once without billing the context window", () => {
   const recorded: Array<Readonly<Record<string, unknown>>> = [];
@@ -1336,6 +1420,129 @@ layer("ProviderEventIngestorV2", (it) => {
     }),
   );
 
+  it.effect("a late first native child announcement inherits its parent's archived family", () =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const rootEvent = yield* threadCreatedEvent(now);
+      if (rootEvent.type !== "thread.created") throw new Error("Expected thread fixture");
+      const commandId = CommandId.make("archive-native-parent");
+      const parent = {
+        ...rootEvent.payload,
+        archivedAt: now,
+        archivedWith: { threadId: rootEvent.threadId, commandId },
+      };
+      yield* eventSink.write({ events: [{ ...rootEvent, payload: parent }] });
+      const childId = ThreadId.make("late-native-child");
+      yield* ingestor.ingestNormalized({
+        providerSessionId: yield* ids.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId: parent.id,
+        }),
+        providerInstanceId: modelSelection.instanceId,
+        threadId: parent.id,
+        event: {
+          type: "app_thread.created",
+          driver: CODEX_DRIVER,
+          appThread: {
+            ...parent,
+            id: childId,
+            creationSource: "provider",
+            archivedAt: null,
+            archivedWith: null,
+            lineage: {
+              parentThreadId: parent.id,
+              relationshipToParent: "subagent",
+              rootThreadId: parent.id,
+            },
+          },
+        },
+      });
+      const child = yield* projections.getThread(childId);
+      assert.deepEqual(child.archivedAt, now);
+      assert.deepEqual(child.archivedWith, parent.archivedWith);
+      assert.isFalse(
+        (yield* projections.getShellSnapshot()).threads.some((thread) => thread.id === childId),
+      );
+    }),
+  );
+
+  it.effect.each(["waiting", "promoted"] as const)(
+    "preserves %s promotion when a restarted provider reannounces its child",
+    (status) =>
+      Effect.gen(function* () {
+        const now = yield* DateTime.now;
+        const eventSink = yield* EventSink.EventSinkV2;
+        const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const rootEvent = yield* threadCreatedEvent(now);
+        if (rootEvent.type !== "thread.created") throw new Error("Expected thread fixture");
+        const childThreadId = idAllocator.derive.threadFromProviderThread({
+          driver: CODEX_DRIVER,
+          nativeThreadId: `native-reannounced-${status}`,
+        });
+        const childThread: OrchestrationV2AppThread = {
+          ...rootEvent.payload,
+          id: childThreadId,
+          title: "Saved child title",
+          archivedAt: now,
+          subagentPromotion: {
+            requestId: CommandId.make(`promotion-${status}`),
+            targetThreadId: ThreadId.make(`interactive-${status}`),
+            status,
+            createdBy: "user",
+            creationSource: "web",
+            requestedAt: now,
+            updatedAt: now,
+            error: null,
+          },
+          lineage: {
+            parentThreadId: rootEvent.threadId,
+            relationshipToParent: "subagent",
+            rootThreadId: rootEvent.threadId,
+          },
+        };
+        yield* eventSink.write({
+          events: [
+            rootEvent,
+            {
+              ...rootEvent,
+              id: yield* idAllocator.allocate.event({ threadId: childThreadId }),
+              threadId: childThreadId,
+              payload: childThread,
+            },
+          ],
+        });
+        const restartedIngestor = yield* ProviderEventIngestor.ProviderEventIngestorV2.pipe(
+          Effect.provide(Layer.fresh(ProviderEventIngestor.layer)),
+        );
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId: rootEvent.threadId,
+        });
+        const events = yield* restartedIngestor.ingestNormalized({
+          providerSessionId,
+          providerInstanceId: modelSelection.instanceId,
+          threadId: rootEvent.threadId,
+          event: {
+            type: "app_thread.created",
+            driver: CODEX_DRIVER,
+            appThread: {
+              ...childThread,
+              title: "Provider's fresh title",
+              archivedAt: null,
+              subagentPromotion: null,
+            },
+          },
+        });
+        assert.lengthOf(events, 0);
+        assert.deepEqual(yield* projectionStore.getThread(childThreadId), childThread);
+      }),
+  );
+
   it.effect("moves a native subagent's thread to the model its provider reports later", () =>
     Effect.gen(function* () {
       const now = yield* DateTime.now;
@@ -1429,5 +1636,55 @@ layer("ProviderEventIngestorV2", (it) => {
         model: "gpt-6.1-sol",
       });
     }),
+  );
+  it.effect.each(["archived", "deleted"] as const)(
+    "keeps late native children %s and never recreates deleted children",
+    (state) =>
+      Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const now = yield* DateTime.now;
+        const rootEvent = yield* threadCreatedEvent(now);
+        if (rootEvent.type !== "thread.created") throw new Error("Expected a thread fixture");
+        const owner = {
+          threadId: rootEvent.threadId,
+          commandId: CommandId.make(`archive:${rootEvent.threadId}`),
+        };
+        const parent = {
+          ...rootEvent.payload,
+          archivedAt: state === "archived" ? now : null,
+          archivedWith: state === "archived" ? owner : null,
+          deletedAt: state === "deleted" ? now : null,
+        };
+        yield* sink.write({ events: [{ ...rootEvent, payload: parent }] });
+        const childId = ThreadId.make(`late-child:${rootEvent.threadId}`);
+        const child = {
+          ...rootEvent.payload,
+          id: childId,
+          lineage: {
+            parentThreadId: rootEvent.threadId,
+            rootThreadId: rootEvent.threadId,
+            relationshipToParent: "subagent" as const,
+          },
+        };
+        const providerSessionId = yield* ids.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId: rootEvent.threadId,
+        });
+        const input = {
+          providerSessionId,
+          providerInstanceId: modelSelection.instanceId,
+          threadId: rootEvent.threadId,
+          event: { type: "app_thread.created" as const, driver: CODEX_DRIVER, appThread: child },
+        };
+        yield* ingestor.ingestNormalized(input);
+        const created = yield* store.getThread(childId);
+        assert.deepEqual(created.archivedAt, parent.archivedAt);
+        assert.deepEqual(created.deletedAt, parent.deletedAt);
+        assert.deepEqual(created.archivedWith, parent.archivedWith);
+        assert.deepEqual(yield* ingestor.ingestNormalized(input), []);
+      }),
   );
 });

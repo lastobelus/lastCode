@@ -46,7 +46,45 @@ function record(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+async function expectRejected(effect: () => Promise<unknown>): Promise<void> {
+  let rejected = false;
+  try {
+    await effect();
+  } catch {
+    rejected = true;
+  }
+  assert.isTrue(rejected);
+}
+
 describe("LastCodeSettingsImport", () => {
+  it("disables imports only for the Windows WSL-only profile", () => {
+    assert.isFalse(isT3SettingsImportSupported("win32", true));
+    assert.isTrue(isT3SettingsImportSupported("win32", false));
+    assert.isTrue(isT3SettingsImportSupported("darwin", true));
+    assert.isTrue(isT3SettingsImportSupported("linux", true));
+  });
+
+  it("previews missing and invalid categories without exposing file contents", async () => {
+    const paths = await makePaths();
+    await fs.writeFile(NodePath.join(paths.sourceDirectory, "client-settings.json"), "not-json");
+    await fs.writeFile(
+      NodePath.join(paths.sourceDirectory, "keybindings.json"),
+      "[\n  // T3 Code accepts JSONC here.\n]\n",
+    );
+
+    const preview = await previewT3SettingsImport(paths);
+
+    assert.equal(preview.canImport, true);
+    assert.deepEqual(
+      preview.categories.map(({ id, status }) => ({ id, status })),
+      [
+        { id: "client-preferences", status: "invalid" },
+        { id: "keybindings", status: "ready" },
+        { id: "server-preferences", status: "missing" },
+      ],
+    );
+  });
+
   it("imports allowlisted preferences while preserving LastCode-only state and secrets", async () => {
     const paths = await makePaths();
     const codex = ProviderInstanceId.make("codex");
@@ -230,4 +268,64 @@ describe("LastCodeSettingsImport", () => {
     );
   });
 
+  it("imports usable keybindings while omitting invalid entries", async () => {
+    const paths = await makePaths();
+    const usable = Array.from({ length: 258 }, (_, index) => ({
+      key: "mod+j",
+      command: "terminal.toggle",
+      when: `context${index}`,
+    }));
+    await fs.writeFile(
+      NodePath.join(paths.sourceDirectory, "keybindings.json"),
+      `[
+        // Obsolete commands and malformed shortcuts are ignored by T3 Code.
+        { "key": "mod+x", "command": "removed.command" },
+        { "key": "mod+shift+d+o", "command": "terminal.new" },
+        ${usable.map((rule) => JSON.stringify(rule)).join(",\n        ")},
+      ]`,
+    );
+
+    const preview = await previewT3SettingsImport(paths);
+    assert.equal(preview.categories.find(({ id }) => id === "keybindings")?.status, "ready");
+
+    await importT3Settings(paths);
+
+    assert.deepEqual(
+      JSON.parse(
+        await fs.readFile(NodePath.join(paths.destinationDirectory, "keybindings.json"), "utf8"),
+      ),
+      usable.slice(-256),
+    );
+  });
+
+  it("refuses to import when the source and destination are the same directory", async () => {
+    const paths = await makePaths();
+    const preview = await previewT3SettingsImport({
+      ...paths,
+      destinationDirectory: paths.sourceDirectory,
+    });
+
+    assert.equal(preview.canImport, false);
+    assert.isTrue(preview.categories.every((category) => category.status === "invalid"));
+  });
+
+  it("validates every destination before replacing any file", async () => {
+    const paths = await makePaths();
+    await Promise.all([
+      fs.writeFile(
+        NodePath.join(paths.sourceDirectory, "client-settings.json"),
+        json(DEFAULT_CLIENT_SETTINGS),
+      ),
+      fs.writeFile(
+        NodePath.join(paths.sourceDirectory, "settings.json"),
+        json(encodeServerSettings(DEFAULT_SERVER_SETTINGS)),
+      ),
+      fs.writeFile(NodePath.join(paths.destinationDirectory, "settings.json"), "not-json"),
+    ]);
+
+    await expectRejected(() => importT3Settings(paths));
+    await expectRejected(() =>
+      fs.readFile(NodePath.join(paths.destinationDirectory, "client-settings.json")),
+    );
+  });
 });
