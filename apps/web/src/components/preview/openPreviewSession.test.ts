@@ -898,6 +898,87 @@ it.each(
 );
 
 it.each(
+  (["file", "terminal"] as const).flatMap((initialPanel) =>
+    [2, 3].map((listRevision) => ({ initialPanel, listRevision })),
+  ),
+)(
+  "keeps foreign creation focus after a local reply with $initialPanel and list revision $listRevision",
+  async ({ initialPanel, listRevision }) => {
+    const panel = useRightPanelStore.getState();
+    if (initialPanel === "file") panel.openFile(threadRef, "src/app.ts");
+    else panel.openTerminal(threadRef, "terminal-1");
+    const local = { ...snapshot, tabId: "local-tab" };
+    const foreign = {
+      ...snapshot,
+      tabId: "foreign-tab",
+      updatedAt: "2026-06-11T23:00:01.000Z",
+    };
+    const listedForeign =
+      listRevision === 2 ? foreign : { ...foreign, updatedAt: "2026-06-11T23:00:02.000Z" };
+    const started = deferred<PreviewOpenInput>();
+    const reply = deferred<PreviewSessionSnapshot>();
+    const opening = openUrlInPreview({
+      threadRef,
+      url: "https://app.example/local",
+      openPreview: async ({ input }) => {
+        started.resolve(input);
+        return AsyncResult.success(await reply.promise);
+      },
+    });
+    const request = await started.promise;
+    reconcilePreviewServerSessions(threadRef, {
+      serverEpoch: "server-a",
+      revision: listRevision,
+      sessions: [local, listedForeign],
+    });
+    reply.resolve(local);
+    await expect(opening).resolves.toMatchObject({ _tag: "Success" });
+    expect(useRightPanelStore.getState().byThreadKey["local:thread-1"]?.activeSurfaceId).toBe(
+      `browser:${local.tabId}`,
+    );
+    const beforeForeign = panel.getUserActionRevision(threadRef);
+    const foreignEvent = {
+      type: "opened" as const,
+      threadId: threadRef.threadId,
+      tabId: foreign.tabId,
+      snapshot: foreign,
+      serverEpoch: "server-a",
+      revision: 2,
+      createdAt: foreign.updatedAt,
+      focus: { clientId: "another-client", userActionRevision: 0 },
+    };
+    applyPreviewServerEvent(threadRef, foreignEvent);
+    expect(useRightPanelStore.getState().byThreadKey["local:thread-1"]?.activeSurfaceId).toBe(
+      `browser:${foreign.tabId}`,
+    );
+    expect(readThreadPreviewState(threadRef).snapshot).toEqual(listedForeign);
+    expect(panel.getUserActionRevision(threadRef)).toBe(beforeForeign + 1);
+    applyPreviewServerEvent(threadRef, {
+      type: "opened",
+      threadId: threadRef.threadId,
+      tabId: local.tabId,
+      snapshot: local,
+      serverEpoch: "server-a",
+      revision: 1,
+      createdAt: local.updatedAt,
+      focus: request.focus,
+    });
+    expect(useRightPanelStore.getState().byThreadKey["local:thread-1"]?.activeSurfaceId).toBe(
+      `browser:${foreign.tabId}`,
+    );
+    // An explicit browser choice still suppresses repeated creation focus.
+    setActivePreviewTab(threadRef, local.tabId);
+    panel.openBrowser(threadRef, local.tabId);
+    const manualRevision = panel.getUserActionRevision(threadRef);
+    applyPreviewServerEvent(threadRef, foreignEvent);
+    expect(useRightPanelStore.getState().byThreadKey["local:thread-1"]?.activeSurfaceId).toBe(
+      `browser:${local.tabId}`,
+    );
+    expect(panel.getUserActionRevision(threadRef)).toBe(manualRevision);
+  },
+);
+
+it.each(
   (["older-first", "newer-first"] as const).flatMap((completionOrder) =>
     (["newest", "later-foreign", "later-manual"] as const).map((choice) => ({
       completionOrder,

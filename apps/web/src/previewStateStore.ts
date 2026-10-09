@@ -425,11 +425,9 @@ export function applyPreviewServerSnapshot(
       ...current,
       snapshot,
       sessions: { ...current.sessions, [snapshot.tabId]: snapshot },
-      handledOpenTabIds: new Set([
-        ...current.handledOpenTabIds,
-        ...Object.keys(current.sessions),
-        snapshot.tabId,
-      ]),
+      // An RPC reply applies only this tab's focus; other listed tabs can
+      // still have live creation events pending.
+      handledOpenTabIds: new Set(current.handledOpenTabIds).add(snapshot.tabId),
       activeTabId: snapshot.tabId,
       desktopOverlay: current.desktopByTabId[snapshot.tabId] ?? null,
       recentlySeenUrls,
