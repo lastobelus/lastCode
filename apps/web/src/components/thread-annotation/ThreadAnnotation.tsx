@@ -352,6 +352,7 @@ export function ThreadAnnotationHoverPopover(props: {
   const bodyChangePending = useThreadAnnotationBodyPending(props.threadRef);
   const popupRef = useRef<HTMLDivElement | null>(null);
   const actionsRef = useRef<PopoverPrimitive.Root.Actions | null>(null);
+  const openedByHover = useRef(false);
   useEffect(() => {
     // The detached row outlives annotations removed or resolved by another client.
     const actions = actionsRef.current;
@@ -383,6 +384,7 @@ export function ThreadAnnotationHoverPopover(props: {
         ) {
           details.cancel();
         }
+        if (!details.isCanceled) openedByHover.current = open && details.reason === "trigger-hover";
       }}
     >
       <PopoverPopup
@@ -399,7 +401,7 @@ export function ThreadAnnotationHoverPopover(props: {
         onFocusCapture={(event) => {
           if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
           // Keyboard interaction needs the popover's focus-out/Escape handling, unlike hover.
-          props.handle.open(props.navigationTriggerId);
+          if (openedByHover.current) props.handle.open(props.navigationTriggerId);
         }}
         onBlurCapture={(event) => {
           const nextFocus = event.relatedTarget as Node | null;

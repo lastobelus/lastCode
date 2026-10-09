@@ -288,6 +288,15 @@ describe("ThreadAnnotationHoverPopover", () => {
     expect(popup()).toBeNull();
   });
 
+  it("still toggles a marker-opened card after focus enters its controls", async () => {
+    await renderHoverCard();
+    await act(() => button("Show annotation").click());
+    await act(() => button("Edit").focus());
+    expect(popup()).not.toBeNull();
+    await act(() => button("Show annotation").click());
+    expect(popup()).toBeNull();
+  });
+
   it("navigates without pinning a hover card when the navigation trigger is clicked", async () => {
     const { onNavigate } = await renderHoverCard();
     await act(() => navigationTrigger().click());

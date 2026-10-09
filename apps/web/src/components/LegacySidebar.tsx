@@ -1534,7 +1534,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                 {jumpLabel ? (
                   hasActiveAnnotation && annotation ? (
                     <PopoverTrigger
-                      aria-label={`Show annotation for ${thread.title}`}
+                      aria-label={`${jumpLabel}; show annotation for ${thread.title}`}
                       className="pointer-events-auto"
                       handle={annotationPopoverHandle}
                       onPointerDown={stopPropagationOnPointerDown}
@@ -1543,10 +1543,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                         if (event.key === "Enter" || event.key === " ") event.stopPropagation();
                       }}
                     >
-                      <span
-                        aria-label={`${jumpLabel}; annotated`}
-                        className="inline-flex h-5 items-center rounded-full border border-dotted border-warning bg-warning/10 px-1.5 font-mono text-3xs font-medium tracking-tight text-warning-foreground shadow-sm"
-                      >
+                      <span className="inline-flex h-5 items-center rounded-full border border-dotted border-warning bg-warning/10 px-1.5 font-mono text-3xs font-medium tracking-tight text-warning-foreground shadow-sm">
                         {jumpLabel}
                       </span>
                     </PopoverTrigger>
