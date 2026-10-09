@@ -121,14 +121,13 @@ const handler = Effect.gen(function* () {
   const directUploadId = path.startsWith("/upload/direct/")
     ? decodeURIComponent(path.slice("/upload/direct/".length))
     : undefined;
-  const target = yield* access.authorize(
-    token,
+  let resource =
     downloadId !== undefined
-      ? { kind: "artifact", id: downloadId }
+      ? { kind: "artifact" as const, id: downloadId }
       : directUploadId !== undefined
-        ? { kind: "upload", id: directUploadId }
-        : undefined,
-  );
+        ? { kind: "upload" as const, id: directUploadId }
+        : undefined;
+  const target = yield* access.authorize(token, resource);
   if (path.startsWith("/sessions/") && path.split("/")[2] !== encodeURIComponent(target.session))
     return HttpServerResponse.text("Forbidden", { status: 403 });
   const rpc = path === "/rpc" ? yield* decodeRpcRequest(yield* request.json) : undefined;
@@ -147,7 +146,8 @@ const handler = Effect.gen(function* () {
     if (meta.uploadedArtifactId !== undefined) {
       if (typeof meta.uploadedArtifactId !== "string")
         return HttpServerResponse.text("Bad Request", { status: 400 });
-      yield* access.authorize(token, { kind: "upload", id: meta.uploadedArtifactId });
+      resource = { kind: "upload", id: meta.uploadedArtifactId };
+      yield* access.authorize(token, resource);
     }
     const flags = yield* decodeObject(rpc.params.flags ?? {});
     const input = yield* decodeObject(rpc.params.input ?? {});
@@ -194,7 +194,8 @@ const handler = Effect.gen(function* () {
     if (path === "/upload/finalize") {
       if (typeof uploadBody.uploadId !== "string")
         return HttpServerResponse.text("Bad Request", { status: 400 });
-      yield* access.authorize(token, { kind: "upload", id: uploadBody.uploadId });
+      resource = { kind: "upload", id: uploadBody.uploadId };
+      yield* access.authorize(token, resource);
     } else {
       if (typeof uploadBody.uploadAttemptId !== "string")
         return HttpServerResponse.text("Bad Request", { status: 400 });
@@ -215,8 +216,8 @@ const handler = Effect.gen(function* () {
   if (!ready) return HttpServerResponse.text("Device agent is not running", { status: 503 });
   // Commands must observe external shutdown/replacement before using a retained credential.
   if (rpc) yield* devices.refreshAgentDevice(ready);
-  // Readiness may wait while this host is replaced or thread consent is revoked.
-  yield* access.authorize(token);
+  // Readiness can outlast resource ownership, host identity, or thread consent.
+  yield* access.authorize(token, resource);
   const headers: Record<string, string> = {};
   const connectionHeaders = new Set(
     (request.headers.connection ?? "")
