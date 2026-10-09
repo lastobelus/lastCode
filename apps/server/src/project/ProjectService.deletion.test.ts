@@ -1,3 +1,9 @@
+import { projectMutationOperation } from "./ProjectMutation.ts";
+import * as SourceControlRepositoryService from "../sourceControl/SourceControlRepositoryService.ts";
+import * as ProjectCloneTracker from "./ProjectCloneTracker.ts";
+import * as PubSub from "effect/PubSub";
+import * as Context from "effect/Context";
+import * as Deferred from "effect/Deferred";
 import * as ServerSettings from "../serverSettings.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
@@ -545,9 +551,62 @@ it.effect.each([1, 3])(
         );
         const sink = yield* EventSink.EventSinkV2;
         yield* sink.write({ events: [nativeThreadCreated(projectId, threadId)] });
+        const workspaceRoot = `/work/${projectId}`;
+        const enrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
+        const changes = yield* enrichment.subscribeChanges;
+        yield* enrichment.request(workspaceRoot);
+        let change = yield* PubSub.take(changes);
+        while (!change.repositoryIdentityResolved) change = yield* PubSub.take(changes);
+        assert.isTrue((yield* enrichment.peek(workspaceRoot)).repositoryIdentityResolved);
+        const cloneStarted = yield* Deferred.make<void>();
+        const cloneInterrupted = yield* Deferred.make<void>();
+        const discarded: Array<string> = [];
+        const trackerContext = yield* Layer.build(
+          ProjectCloneTracker.layer.pipe(
+            Layer.provide(
+              Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({
+                prepareClone: (input) =>
+                  Effect.succeed({
+                    destinationPath: input.destinationPath,
+                    remoteUrl: input.remoteUrl ?? "",
+                    cloneUrl: input.remoteUrl ?? "",
+                    repository: null,
+                  }),
+                cloneRepository: () =>
+                  Deferred.succeed(cloneStarted, undefined).pipe(
+                    Effect.andThen(Effect.never),
+                    Effect.onInterrupt(() => Deferred.succeed(cloneInterrupted, undefined)),
+                  ),
+                discardClone: (destination) => Effect.sync(() => void discarded.push(destination)),
+              }),
+            ),
+          ),
+        );
+        const tracker = Context.get(trackerContext, ProjectCloneTracker.ProjectCloneTracker);
+        yield* tracker.start(
+          {
+            projectId,
+            title: "Deletion test",
+            createdAt: "2026-01-01T00:00:00.000Z",
+            remoteUrl: "https://repository.example/project.git",
+            destinationPath: workspaceRoot,
+          },
+          { createProject: () => Effect.void, onCloned: () => Effect.void },
+        );
+        yield* Deferred.await(cloneStarted);
+        const rejected = yield* projectMutationOperation(
+          service,
+          { type: "project.delete", commandId: CommandId.make("delete:rejected"), projectId },
+          tracker.discard,
+        ).pipe(Effect.flip);
+        assert.instanceOf(rejected, ProjectService.ProjectNotEmptyError);
+        assert.equal((yield* tracker.get(projectId))?.phase, "running");
+        assert.deepEqual(discarded, []);
         const input = { commandId, projectId, force: true };
+        const deleteProject = () =>
+          projectMutationOperation(service, { type: "project.delete", ...input }, tracker.discard);
         if (failures === 3) {
-          const failure = yield* service.delete(input).pipe(Effect.flip);
+          const failure = yield* deleteProject().pipe(Effect.flip);
           assert.instanceOf(failure, ProjectService.ProjectOperationError);
           if (failure._tag !== "ProjectOperationError")
             return assert.fail("Expected settings cleanup failure");
@@ -557,10 +616,14 @@ it.effect.each([1, 3])(
           assert.include(failure.message, "original command ID");
           assert.equal(yield* Ref.get(attempts), 3);
         } else {
-          const deleted = yield* service.delete(input);
+          const deleted = yield* deleteProject();
           assert.isNotNull(deleted.deletedAt);
           assert.equal(yield* Ref.get(attempts), 2);
         }
+        assert.isNull(yield* tracker.get(projectId));
+        assert.deepEqual(discarded, [workspaceRoot]);
+        yield* Deferred.await(cloneInterrupted);
+        assert.isFalse((yield* enrichment.peek(workspaceRoot)).repositoryIdentityResolved);
         const committed = Option.getOrThrow(
           yield* service.getById(projectId, { includeDeleted: true }),
         );
@@ -599,7 +662,7 @@ it.effect.each([1, 3])(
           effectsBefore.map((effect) => effect.effect_type),
           ["preview.cleanup", "terminal.cleanup"],
         );
-        assert.deepEqual(yield* service.delete(input), committed);
+        assert.deepEqual(yield* deleteProject(), committed);
         assert.equal(yield* Ref.get(attempts), failures === 3 ? 4 : 3);
         const repaired = yield* settings.getSettings;
         assert.isUndefined(repaired.projectSettingsOverrides[projectId]);
@@ -607,6 +670,7 @@ it.effect.each([1, 3])(
         assert.isTrue(repaired.projectSettingsOverrides[otherProjectId]?.enableAgentDeviceAccess);
         assert.deepEqual(yield* readDeletes, eventsBefore);
         assert.deepEqual(yield* readEffects, effectsBefore);
+        assert.deepEqual(discarded, [workspaceRoot]);
       }).pipe(Effect.provide(layerServices));
     }).pipe(Effect.provide(layerDatabase)),
 );

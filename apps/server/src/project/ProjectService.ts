@@ -124,7 +124,10 @@ export class ProjectService extends Context.Service<
       ProjectServiceError
     >;
     readonly update: (input: ProjectUpdateInput) => Effect.Effect<Project, ProjectServiceError>;
-    readonly delete: (input: ProjectDeleteInput) => Effect.Effect<Project, ProjectServiceError>;
+    readonly delete: (
+      input: ProjectDeleteInput,
+      onCommitted?: Effect.Effect<void>,
+    ) => Effect.Effect<Project, ProjectServiceError>;
     readonly getById: (
       projectId: ProjectId,
       options?: { readonly includeDeleted?: boolean },
@@ -492,7 +495,7 @@ export const make = Effect.gen(function* () {
   });
 
   const deleteProject: ProjectService["Service"]["delete"] = Effect.fn("ProjectService.delete")(
-    function* (input) {
+    function* (input, onCommitted = Effect.void) {
       const { projectId } = input;
       // A deleted row still reaches commit, so a retried command id replays its
       // receipt and any other command id is rejected as not found.
@@ -505,6 +508,9 @@ export const make = Effect.gen(function* () {
         yield* deleteChildThreads(input);
       }
       yield* commit({ type: "project.delete", commandId: input.commandId, projectId });
+      // Caller-owned cleanup follows durable acceptance, before fallible grant cleanup.
+      yield* onCommitted;
+      yield* projectEnrichment.invalidate([existing.value.workspaceRoot]);
       // Terminal deletion removes grants; receipt replay retries interrupted cleanup.
       yield* settings.updateSettings({ projectSettingsOverrides: { [projectId]: null } }).pipe(
         Effect.retry({ times: 2 }),
@@ -513,7 +519,6 @@ export const make = Effect.gen(function* () {
             new ProjectOperationError({ operation: "delete-project-settings", projectId, cause }),
         ),
       );
-      yield* projectEnrichment.invalidate([existing.value.workspaceRoot]);
       return yield* readCommitted(projectId);
     },
   );
