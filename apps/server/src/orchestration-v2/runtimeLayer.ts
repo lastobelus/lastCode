@@ -1,3 +1,5 @@
+import * as EnvironmentPause from "../environment/EnvironmentPause.ts";
+import * as EnvironmentPauseStore from "../environment/EnvironmentPauseStore.ts";
 import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as Layer from "effect/Layer";
@@ -439,12 +441,25 @@ export const layer = Layer.mergeAll(
   layerLegacyV1ThreadImporterProvided,
 );
 
+const layerEnvironmentPauseProvided = EnvironmentPause.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      EnvironmentPauseStore.layer,
+      layerThreadManagementProvided,
+      ProjectionStore.layer,
+      EffectOutbox.layer,
+      layerProviderSessionManagerProvided,
+    ),
+  ),
+);
+
 export const layerProduction = Layer.mergeAll(
+  layerEnvironmentPauseProvided,
   layerThreadRecoveryRepairProvided,
   layerThreadWaitProvided,
   layerActionResumeProvided,
   layerWorktreeCleanupWorkerProvided,
-  layer.pipe(Layer.provide(layerProjectService)),
+  layer.pipe(Layer.provide(Layer.merge(layerProjectService, EnvironmentPauseStore.layer))),
   layerProjectService,
   layerManagedProjectFoldersProvided,
   layerThreadLaunchProvided,

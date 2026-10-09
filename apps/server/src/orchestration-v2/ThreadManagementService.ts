@@ -49,7 +49,7 @@ import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 
 const isThreadAboveModeLimitError = Schema.is(Orchestrator.OrchestratorThreadAboveModeLimitError);
 
-export type ThreadManagementSendMode = "auto" | "queue" | "steer" | "restart";
+export type ThreadManagementSendMode = "auto" | "queue" | "steer" | "restart" | "cooperative";
 
 export interface ThreadManagementProvenance {
   readonly createdBy: OrchestrationV2Actor;
@@ -739,11 +739,16 @@ const make = Effect.gen(function* () {
           type: input.mode === "steer" ? "steer_active" : "restart_active",
           targetRunId: steerableRun.id,
         };
+      } else if (input.mode === "cooperative" && steerableRun !== undefined) {
+        dispatchMode = { type: "steer_active_native", targetRunId: steerableRun.id };
       } else if (input.mode === "auto" && steerableRun !== undefined) {
         dispatchMode = { type: "steer_active", targetRunId: steerableRun.id };
       } else {
         dispatchMode = {
-          type: input.mode === "queue" ? "queue_after_active" : "start_immediately",
+          type:
+            input.mode === "queue" || input.mode === "cooperative"
+              ? "queue_after_active"
+              : "start_immediately",
         };
       }
 

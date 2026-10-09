@@ -214,6 +214,11 @@ export class EffectOutboxError extends Schema.TaggedError<EffectOutboxError>()(
 const isEffectOutboxError = Schema.is(EffectOutboxError);
 
 export interface EffectOutboxV2Shape {
+  /** Accepted execution that may start or continue after its shell appears idle. */
+  readonly pendingExecution: Effect.Effect<
+    ReadonlyArray<{ readonly threadId: ThreadId }>,
+    EffectOutboxError
+  >;
   /** Unfinished cleanup, including pending retry backoff, without decoding payloads. */
   readonly pendingCleanup: Effect.Effect<
     ReadonlyArray<{ readonly threadId: ThreadId }>,
@@ -426,6 +431,20 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
       );
 
     const service: EffectOutboxV2Shape = {
+      pendingExecution: sql<{ thread_id: string }>`
+        SELECT DISTINCT thread_id FROM orchestration_v2_effect_outbox
+        WHERE status IN ('pending', 'running') AND effect_type IN (
+          'thread.archive', 'subagent.promote', 'provider-runtime.continue',
+          'provider-turn.start', 'provider-turn.restart', 'provider-turn.steer',
+          'runtime-request.respond', 'provider-thread.rollback', 'checkpoint.capture',
+          'delegated-tasks.stop'
+        ) ORDER BY thread_id
+      `.pipe(
+        Effect.map((rows) => rows.map((row) => ({ threadId: ThreadId.make(row.thread_id) }))),
+        Effect.mapError(
+          (cause) => new EffectOutboxError({ operation: "pending-execution", cause }),
+        ),
+      ),
       pendingCleanup: sql<{ thread_id: string }>`
         SELECT DISTINCT thread_id
         FROM orchestration_v2_effect_outbox

@@ -1,4 +1,5 @@
 import { ThreadReadAuthorization } from "./orchestration-v2/ThreadReadAuthorization.ts";
+import * as EnvironmentPause from "./environment/EnvironmentPause.ts";
 import { ThreadRecoveryOperationError } from "@t3tools/contracts";
 import * as ThreadRecovery from "./orchestration-v2/ThreadRecoveryService.ts";
 import * as ThreadRecoveryRepair from "./orchestration-v2/ThreadRecoveryRepairService.ts";
@@ -1225,6 +1226,7 @@ const layerWsRpc = (
       const threadManagement = yield* ThreadManagementService.ThreadManagementService;
       const actionResume = yield* Effect.serviceOption(ActionResume.ActionResume);
       const updateDrainAdmission = yield* UpdateDrainAdmission.UpdateDrainAdmission;
+      const environmentPause = yield* EnvironmentPause.EnvironmentPause;
       const intakeContext = yield* Effect.context<
         | ThreadManagementService.ThreadManagementService
         | ThreadLaunchService.ThreadLaunchService
@@ -2499,6 +2501,10 @@ const layerWsRpc = (
             const keybindingsConfig = yield* keybindings.removeKeybindingRule(rule);
             return { keybindings: keybindingsConfig, issues: [] };
           }),
+        [WS_METHODS.serverEnvironmentPauseStatus]: () => environmentPause.status,
+        [WS_METHODS.serverPauseEnvironment]: () => environmentPause.start,
+        [WS_METHODS.serverRetryEnvironmentPause]: () => environmentPause.retry,
+        [WS_METHODS.serverResumeEnvironment]: () => environmentPause.resume,
         [WS_METHODS.serverGetSettings]: (_input) =>
           serverSettings.getSettings.pipe(Effect.map(ServerSettings.redactServerSettingsForClient)),
         [WS_METHODS.serverUpdateSettings]: ({ patch, providerInstanceMutation }) =>

@@ -1374,6 +1374,7 @@ export type LastCodeLocalCiSettings = typeof LastCodeLocalCiSettings.Type;
 export const DEFAULT_LASTCODE_LOCAL_CI_SETTINGS = Schema.decodeSync(LastCodeLocalCiSettings)({});
 
 export const ServerSettings = Schema.Struct({
+  environmentPauseEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   lastcodeLocalCi: LastCodeLocalCiSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_LASTCODE_LOCAL_CI_SETTINGS)),
   ),
@@ -1714,6 +1715,7 @@ const ModelSelectionPatch = Schema.Struct({
 });
 
 export const ServerSettingsPatch = Schema.Struct({
+  environmentPauseEnabled: Schema.optionalKey(Schema.Boolean),
   lastcodeLocalCi: Schema.optionalKey(
     Schema.Struct({
       quickCiMode: Schema.optionalKey(LastCodeQuickCiMode),

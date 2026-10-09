@@ -965,6 +965,7 @@ it.effect("starts the provider when checkpoint baseline capture fails", () =>
       id: CheckpointScopeId.make("checkpoint-scope:run-execution-baseline-failure"),
     } as OrchestrationV2CheckpointScope;
     const providerStarts = yield* Ref.make(0);
+    const deliveries = yield* Ref.make<ReadonlyArray<boolean>>([]);
     const writes = yield* Ref.make<
       ReadonlyArray<{
         events: ReadonlyArray<OrchestrationV2DomainEvent>;
@@ -1005,6 +1006,8 @@ it.effect("starts the provider when checkpoint baseline capture fails", () =>
     yield* Effect.gen(function* () {
       const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
       yield* runExecution.startRootRun({
+        onMessageDelivery: (delivered) =>
+          Ref.update(deliveries, (previous) => [...previous, delivered]),
         commandId: CommandId.make("command:run-execution-baseline-failure"),
         appThread: { id: threadId } as OrchestrationV2AppThread,
         providerSessionId,
@@ -1053,6 +1056,7 @@ it.effect("starts the provider when checkpoint baseline capture fails", () =>
     }).pipe(Effect.provide(layerTest));
 
     assert.equal(yield* Ref.get(providerStarts), 1);
+    assert.deepEqual(yield* Ref.get(deliveries), [true]);
 
     const events = (yield* Ref.get(writes)).flatMap((write) => [...write.events]);
     const failedEvent = events.find(
@@ -3478,8 +3482,11 @@ it.effect("refreshes pull requests after a provider stream exits with an error",
 it.effect("refreshes pull requests only once when startup failure closes its event stream", () =>
   Effect.gen(function* () {
     const ingestionStarted = yield* Deferred.make<void>();
+    const deliveries = yield* Ref.make<ReadonlyArray<boolean>>([]);
     const { observed, written } = yield* captureRootRunTermination({
       key: "pull-request-refresh:startup-error",
+      onMessageDelivery: (delivered) =>
+        Ref.update(deliveries, (previous) => [...previous, delivered]),
       shouldFinalizeRun: () => Effect.succeed(true),
       events: () =>
         Stream.unwrap(Deferred.succeed(ingestionStarted, undefined).pipe(Effect.as(Stream.never))),
@@ -3500,6 +3507,7 @@ it.effect("refreshes pull requests only once when startup failure closes its eve
     });
     assert.equal(observed.filter((item) => item === "pull-requests-refreshed").length, 1);
     assert.equal(observed[0], "run:failed");
+    assert.deepEqual(yield* Ref.get(deliveries), [false]);
     const error = written.find((item) => item.type === "error");
     assert.include(error?.failure.message ?? "", "provider could not start this turn");
   }),
@@ -3519,6 +3527,7 @@ it.effect("keeps completed runs completed when pull request refresh fails", () =
 
 function captureRootRunTermination(input: {
   readonly key: string;
+  readonly onMessageDelivery?: (delivered: boolean) => Effect.Effect<void>;
   readonly shouldStartProviderTurn?: () => Effect.Effect<
     boolean,
     ProjectionStore.ProjectionStoreV2Error
@@ -3750,6 +3759,9 @@ function captureRootRunTermination(input: {
     yield* Effect.gen(function* () {
       const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
       yield* runExecution.startRootRun({
+        ...(input.onMessageDelivery === undefined
+          ? {}
+          : { onMessageDelivery: input.onMessageDelivery }),
         commandId: CommandId.make(`command:${input.key}`),
         appThread: { id: ids.threadId } as OrchestrationV2AppThread,
         providerSessionId: ProviderSessionId.make(`session:${input.key}`),

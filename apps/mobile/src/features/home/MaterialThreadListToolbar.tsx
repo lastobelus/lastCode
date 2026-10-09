@@ -29,6 +29,7 @@ export function MaterialThreadListToolbar(props: {
   readonly filterCustomized: boolean;
   readonly onFilterAction: NonNullable<ComponentProps<typeof ControlPillMenu>["onPressAction"]>;
   readonly onOpenSettings: () => void;
+  readonly onOpenPause?: () => void;
   readonly onOpenEnvironments: () => void;
   readonly sidebar?: boolean;
   readonly onLayout?: (event: LayoutChangeEvent) => void;
@@ -118,6 +119,13 @@ export function MaterialThreadListToolbar(props: {
                 icon="gearshape"
                 onPress={props.onOpenSettings}
               />
+              {props.onOpenPause ? (
+                <AndroidHeaderIconButton
+                  accessibilityLabel="Pause or resume environment"
+                  icon="pause"
+                  onPress={props.onOpenPause}
+                />
+              ) : null}
             </>
           )}
         </View>

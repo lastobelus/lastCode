@@ -40,8 +40,20 @@ export function createSidebarHeaderItems(input: {
   readonly filterIcon: string;
   readonly filterMenu: HomeListFilterMenu;
   readonly onOpenSettings: () => void;
+  readonly onOpenPause?: () => void;
 }): NativeStackHeaderItem[] {
   return [
+    ...(input.onOpenPause
+      ? [
+          withNativeGlassHeaderItem({
+            type: "button" as const,
+            label: "",
+            accessibilityLabel: "Pause or resume environment",
+            icon: sfSymbolIcon("pause"),
+            onPress: input.onOpenPause,
+          }),
+        ]
+      : []),
     withNativeGlassHeaderItem({
       type: "menu",
       label: "",

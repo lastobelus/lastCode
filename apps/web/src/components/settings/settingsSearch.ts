@@ -461,6 +461,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     scope: "environment-defaults",
   },
   {
+    id: "environment-pause",
+    title: "Environment pause button",
+    to: "/settings/general",
+    scope: "environment-defaults",
+    searchTerms: ["pause resume offline active threads sidebar environment"],
+  },
+  {
     id: "continue-threads-after-server-update",
     title: "Continue threads after restarts",
     to: "/settings/general",

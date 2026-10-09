@@ -1,4 +1,5 @@
-import { CommandId } from "@t3tools/contracts";
+import * as EnvironmentPauseStore from "../environment/EnvironmentPauseStore.ts";
+import { CommandId, type MessageId, type ThreadId, type RunId } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -112,6 +113,33 @@ export const layerExecutor: Layer.Layer<
     const threads = yield* ThreadManagementService.ThreadManagementService;
     const subagentPromotion = yield* SubagentPromotionService.SubagentPromotionService;
     const settings = yield* ServerSettings.ServerSettingsService;
+    const environmentPauseStore = yield* Effect.serviceOption(
+      EnvironmentPauseStore.EnvironmentPauseStore,
+    );
+    const recordPauseDelivery = (messageId: MessageId, delivered: boolean) =>
+      messageId.startsWith("environment-pause:") && Option.isSome(environmentPauseStore)
+        ? environmentPauseStore.value
+            .recordDelivery(messageId, delivered)
+            .pipe(Effect.ignore({ log: true }))
+        : Effect.void;
+    const recordPauseRunDelivery = (threadId: ThreadId, runId: RunId, delivered: boolean) =>
+      Option.isNone(environmentPauseStore)
+        ? Effect.void
+        : environmentPauseStore.value.get.pipe(
+            Effect.flatMap((session) =>
+              session === null
+                ? Effect.void
+                : threads.getThreadRecords(threadId, ["runs"], { runIds: [runId] }).pipe(
+                    Effect.flatMap((projection) => {
+                      const run = projection.runs.find((run) => run.id === runId);
+                      return run === undefined
+                        ? Effect.void
+                        : recordPauseDelivery(run.userMessageId, delivered);
+                    }),
+                    Effect.ignore({ log: true }),
+                  ),
+            ),
+          );
     return OrchestrationEffectExecutorV2.of({
       execute: (effect, options) => {
         const willRetry = options?.willRetry ?? false;
@@ -210,8 +238,18 @@ export const layerExecutor: Layer.Layer<
               );
           case "provider-turn.start":
             return providerTurnStart
-              .start({ threadId: effect.threadId, runId: effect.request.runId, willRetry })
+              .start({
+                threadId: effect.threadId,
+                runId: effect.request.runId,
+                willRetry,
+                onMessageDelivery: recordPauseDelivery,
+              })
               .pipe(
+                Effect.tapError(() =>
+                  !willRetry && effect.request.type === "provider-turn.start"
+                    ? recordPauseRunDelivery(effect.threadId, effect.request.runId, false)
+                    : Effect.void,
+                ),
                 Effect.mapError(
                   (cause) =>
                     new OrchestrationEffectExecutionError({
@@ -274,6 +312,7 @@ export const layerExecutor: Layer.Layer<
                 Effect.tap(() =>
                   Effect.gen(function* () {
                     if (effect.request.type !== "provider-turn.steer") return;
+                    yield* recordPauseDelivery(effect.request.messageId, true);
                     const messageId = effect.request.messageId;
                     const projection = yield* threads.getThreadRecords(
                       effect.threadId,
@@ -298,6 +337,7 @@ export const layerExecutor: Layer.Layer<
                       "deliveryRejected" in error &&
                       error.deliveryRejected === true
                     ) {
+                      yield* recordPauseDelivery(effect.request.messageId, false);
                       // A provider's definite rejection is final non-delivery;
                       // retrying it must not strand cleanup or start another turn.
                       return;
@@ -311,7 +351,10 @@ export const layerExecutor: Layer.Layer<
                     }
                     // The target already finished. Strict steering must neither start
                     // a follow-up nor leave an expected delivery race blocking cleanup.
-                    if (effect.request.nativeOnly === true) return;
+                    if (effect.request.nativeOnly === true) {
+                      yield* recordPauseDelivery(effect.request.messageId, false);
+                      return;
+                    }
                     const projection = yield* threads.getThreadRecords(
                       effect.threadId,
                       ["messages", "runs"],

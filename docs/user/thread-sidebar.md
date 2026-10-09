@@ -3,6 +3,19 @@
 Use a new thread for a separate task. Choose **New worktree** when its code changes
 need a separate branch and working directory.
 
+## Pause before going offline
+
+Enable **Environment pause button** in **Settings → General** for each environment
+where you want it. It is off by default. Use the pause control in the sidebar
+header, choose an environment, and confirm to send “pause to go offline” to its
+active threads. The dialog counts down while the agents finish pausing and other
+thread work stops.
+
+Once the environment is quiet, leave the dialog available until you return, then
+choose **Resume** to send “resume” to the threads that received the pause request.
+You can reopen the dialog after closing it or reconnecting. Failed deliveries
+remain available to retry.
+
 ## Start a thread
 
 On web and desktop, a new thread keeps the current project and carries your model

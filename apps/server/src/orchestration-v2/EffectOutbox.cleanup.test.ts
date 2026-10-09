@@ -1,6 +1,7 @@
 import { assert, it } from "@effect/vitest";
-import { CommandId, ProviderSessionId, ThreadId } from "@t3tools/contracts";
+import { CommandId, ProviderSessionId, RunId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -74,5 +75,46 @@ it.layer(layer)("unfinished cleanup projection", (it) => {
         ]);
         assert.isEmpty(yield* outbox.pendingCleanup);
       }),
+  );
+});
+
+it.layer(layer)("pending execution projection", (it) => {
+  it.effect("keeps queued continuations and excludes completed work and attachment cleanup", () =>
+    Effect.gen(function* () {
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const threadId = ThreadId.make("continuation-thread");
+      yield* outbox.enqueue([
+        {
+          id: "continuation",
+          commandId: CommandId.make("continue"),
+          threadId,
+          request: { type: "provider-runtime.continue", sourceRunId: RunId.make("source-run") },
+        },
+        {
+          id: "attachment-cleanup",
+          availableAt: DateTime.makeUnsafe("2099-01-01T00:00:00.000Z"),
+          commandId: CommandId.make("cleanup"),
+          threadId: ThreadId.make("other-thread"),
+          request: { type: "attachment.cleanup", attachmentIds: [] },
+        },
+      ]);
+      assert.deepEqual(yield* outbox.pendingExecution, [{ threadId }]);
+      const claimed = Option.getOrThrow(
+        yield* outbox.claimNext({ workerId: "execution-worker", leaseDurationMs: 60000 }),
+      );
+      assert.deepEqual(yield* outbox.pendingExecution, [{ threadId }]);
+      yield* outbox.retry({
+        effectId: claimed.id,
+        workerId: "execution-worker",
+        error: "retry",
+        delayMs: 0,
+      });
+      assert.deepEqual(yield* outbox.pendingExecution, [{ threadId }]);
+      const continued = Option.getOrThrow(
+        yield* outbox.claimNext({ workerId: "execution-worker", leaseDurationMs: 60000 }),
+      );
+      yield* outbox.succeed({ effectId: continued.id, workerId: "execution-worker" });
+      assert.isEmpty(yield* outbox.pendingExecution);
+    }),
   );
 });

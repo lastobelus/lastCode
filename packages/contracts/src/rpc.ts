@@ -1,3 +1,4 @@
+import { EnvironmentPauseStatus, EnvironmentPauseError } from "./environmentPause.ts";
 import {
   OrchestrationV2SearchThreadError,
   OrchestrationV2SearchThreadInput,
@@ -518,6 +519,10 @@ export const WS_METHODS = {
   serverCommitDesktopUpdate: "server.commitDesktopUpdate",
   serverUpsertKeybinding: "server.upsertKeybinding",
   serverRemoveKeybinding: "server.removeKeybinding",
+  serverEnvironmentPauseStatus: "server.environmentPauseStatus",
+  serverPauseEnvironment: "server.pauseEnvironment",
+  serverRetryEnvironmentPause: "server.retryEnvironmentPause",
+  serverResumeEnvironment: "server.resumeEnvironment",
   serverGetSettings: "server.getSettings",
   serverUpdateSettings: "server.updateSettings",
   serverDiscoverSourceControl: "server.discoverSourceControl",
@@ -783,6 +788,27 @@ const WsServerCommitDesktopUpdateRpc = Rpc.make(WS_METHODS.serverCommitDesktopUp
   payload: DesktopUpdateCommitInput,
   success: ServerSelfUpdateResult,
   error: Schema.Union([ServerSelfUpdateError, EnvironmentAuthorizationError]),
+});
+
+const WsEnvironmentPauseStatusRpc = Rpc.make(WS_METHODS.serverEnvironmentPauseStatus, {
+  payload: Schema.Struct({}),
+  success: EnvironmentPauseStatus,
+  error: Schema.Union([EnvironmentPauseError, EnvironmentAuthorizationError]),
+});
+const WsPauseEnvironmentRpc = Rpc.make(WS_METHODS.serverPauseEnvironment, {
+  payload: Schema.Struct({}),
+  success: EnvironmentPauseStatus,
+  error: Schema.Union([EnvironmentPauseError, EnvironmentAuthorizationError]),
+});
+const WsRetryEnvironmentPauseRpc = Rpc.make(WS_METHODS.serverRetryEnvironmentPause, {
+  payload: Schema.Struct({}),
+  success: EnvironmentPauseStatus,
+  error: Schema.Union([EnvironmentPauseError, EnvironmentAuthorizationError]),
+});
+const WsResumeEnvironmentRpc = Rpc.make(WS_METHODS.serverResumeEnvironment, {
+  payload: Schema.Struct({}),
+  success: EnvironmentPauseStatus,
+  error: Schema.Union([EnvironmentPauseError, EnvironmentAuthorizationError]),
 });
 
 const WsServerGetSettingsRpc = Rpc.make(WS_METHODS.serverGetSettings, {
@@ -2021,6 +2047,10 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerCommitDesktopUpdateRpc,
   WsServerUpsertKeybindingRpc,
   WsServerRemoveKeybindingRpc,
+  WsEnvironmentPauseStatusRpc,
+  WsPauseEnvironmentRpc,
+  WsRetryEnvironmentPauseRpc,
+  WsResumeEnvironmentRpc,
   WsServerGetSettingsRpc,
   WsServerUpdateSettingsRpc,
   WsServerDiscoverSourceControlRpc,

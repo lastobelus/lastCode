@@ -2,6 +2,7 @@ import { modelSelectionsEqual } from "@t3tools/shared/model";
 import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
 import {
   CommandId,
+  type MessageId,
   latestProviderTurnForAttempt,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2ExecutionNode,
@@ -81,6 +82,7 @@ export interface ProviderTurnStartServiceV2Shape {
     readonly threadId: ThreadId;
     readonly runId: RunId;
     readonly willRetry?: boolean;
+    readonly onMessageDelivery?: (messageId: MessageId, delivered: boolean) => Effect.Effect<void>;
   }) => Effect.Effect<void, ProviderTurnStartError>;
 }
 
@@ -225,6 +227,10 @@ export const layer: Layer.Layer<
       readonly threadId: ThreadId;
       readonly runId: RunId;
       readonly willRetry?: boolean;
+      readonly onMessageDelivery?: (
+        messageId: MessageId,
+        delivered: boolean,
+      ) => Effect.Effect<void>;
     }) {
       const { runId } = input;
       const projection = yield* projectionStore.getTurnStartContext(input.threadId, runId);
@@ -1235,6 +1241,12 @@ export const layer: Layer.Layer<
           : makeDeliverySession(session, startWithHandoffs);
       yield* runExecution.startRootRun({
         commandId: CommandId.make(`command:effect:provider-turn.start:${run.id}`),
+        ...(input.onMessageDelivery === undefined
+          ? {}
+          : {
+              onMessageDelivery: (delivered: boolean) =>
+                input.onMessageDelivery?.(run.userMessageId, delivered) ?? Effect.void,
+            }),
         appThread: projection.thread,
         providerSessionId,
         session: deliverySession,

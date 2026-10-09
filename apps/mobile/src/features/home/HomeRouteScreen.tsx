@@ -29,6 +29,7 @@ import { buildHomeProjectScopes } from "./homeThreadList";
 import { usePendingTaskListActions } from "./usePendingTaskListActions";
 import { useThreadListActions } from "./useThreadListActions";
 import { getConnectionAwareBrandHeaderOptions } from "./WorkspaceConnectionTitle";
+import { useEnvironmentPauseControl } from "../threads/EnvironmentPauseControl";
 
 /* ─── Route screen ───────────────────────────────────────────────────── */
 
@@ -48,6 +49,7 @@ export function HomeRouteScreen() {
   );
   const { environments: workspaceEnvironments, state: catalogState } = useWorkspaceState();
   const { savedConnectionsById } = useSavedRemoteConnections();
+  const pauseControl = useEnvironmentPauseControl();
   const navigation = useNavigation();
   const [searchQuery, setSearchQuery] = useState("");
   const handleSelectThread = useHomeThreadSelection();
@@ -183,12 +185,13 @@ export function HomeRouteScreen() {
             shallow-merged. The brand slot also doubles as the connection
             status surface while an environment reconnects. */}
         <NativeStackScreenOptions
-          optionsVersion={headerWidth}
+          optionsVersion={[headerWidth, pauseControl.visible]}
           options={{
             ...getConnectionAwareBrandHeaderOptions({
               headerWidth,
               trailingItemCount:
-                nativePrimaryColumn && Platform.OS === "ios" && Platform.isPad ? 2 : 1,
+                (nativePrimaryColumn && Platform.OS === "ios" && Platform.isPad ? 2 : 1) +
+                (pauseControl.visible ? 1 : 0),
               onOpenEnvironments: () =>
                 navigation.navigate("SettingsSheet", {
                   screen: "SettingsContent",
@@ -199,6 +202,7 @@ export function HomeRouteScreen() {
           }}
         />
         <HomeHeader
+          onOpenPause={pauseControl.visible ? pauseControl.onPress : undefined}
           environments={environments}
           projects={projectFilterOptions}
           searchQuery={searchQuery}
@@ -221,6 +225,7 @@ export function HomeRouteScreen() {
           onSearchQueryChange={setSearchQuery}
           onStartNewTask={() => navigation.navigate("NewTaskSheet", { screen: "NewTask" })}
         />
+        {pauseControl.modal}
 
         <HomeScreen
           catalogState={catalogState}

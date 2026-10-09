@@ -85,6 +85,7 @@ import IconPhoto from "@tabler/icons-react-native/IconPhoto";
 import IconPin from "@tabler/icons-react-native/IconPin";
 import IconPinnedOff from "@tabler/icons-react-native/IconPinnedOff";
 import IconPlayerPlay from "@tabler/icons-react-native/IconPlayerPlay";
+import IconPlayerPause from "@tabler/icons-react-native/IconPlayerPause";
 import IconPlayerStopFilled from "@tabler/icons-react-native/IconPlayerStopFilled";
 import IconPlus from "@tabler/icons-react-native/IconPlus";
 import IconQrcode from "@tabler/icons-react-native/IconQrcode";
@@ -201,6 +202,7 @@ const ANDROID_ICON_BY_SF_SYMBOL = {
   pin: IconPin,
   "pin.slash": IconPinnedOff,
   play: IconPlayerPlay,
+  pause: IconPlayerPause,
   plus: IconPlus,
   minus: IconMinus,
   "qrcode.viewfinder": IconQrcode,

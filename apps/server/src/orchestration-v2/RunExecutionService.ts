@@ -530,6 +530,8 @@ export interface RunExecutionServiceV2StartRootRunInput {
   readonly shouldStartProviderTurn?: () => Effect.Effect<boolean, ProjectionStoreV2Error>;
   readonly shouldFinalizeRun?: () => Effect.Effect<boolean, ProjectionStoreV2Error>;
   readonly hasUnpairedRunInterruptRequest?: () => Effect.Effect<boolean, never>;
+  /** Records actual native acceptance rather than merely scheduling a start. */
+  readonly onMessageDelivery?: (delivered: boolean) => Effect.Effect<void>;
   readonly message: ProviderAdapterV2TurnMessage;
   readonly modelSelection: ModelSelection;
   readonly runtimePolicy: ProviderAdapterV2RuntimePolicy;
@@ -2012,7 +2014,13 @@ export const layer: Layer.Layer<
                 }),
               ))
             : input.session.startTurn(turnInput);
-          yield* Effect.andThen(shouldStart, startTurn).pipe(
+          yield* Effect.andThen(
+            shouldStart,
+            startTurn.pipe(
+              Effect.tap(() => input.onMessageDelivery?.(true) ?? Effect.void),
+              Effect.tapError(() => input.onMessageDelivery?.(false) ?? Effect.void),
+            ),
+          ).pipe(
             Effect.catchCause((cause) =>
               Effect.logError("orchestration V2 provider turn start failed", {
                 runId: input.run.id,
