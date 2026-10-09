@@ -17,6 +17,8 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as PubSub from "effect/PubSub";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { HttpClient, HttpClientResponse, HttpServer } from "effect/http";
@@ -58,7 +60,6 @@ const access = DeviceAgentAccess.layer.pipe(
       get: () => Effect.succeed(Option.some({ deletedAt: null } as ProjectStore.ProjectRow)),
     }),
   ),
-  Layer.provide(settings),
 );
 const host = Layer.mock(DeviceHost.DeviceHost)({
   id: "local",
@@ -117,6 +118,8 @@ const layer = (
       ),
     ),
   ),
+  settingsLayer = settings,
+  hostLayer = host,
 ) =>
   Layer.effect(
     DeviceService.DeviceService,
@@ -132,8 +135,8 @@ const layer = (
     }),
   ).pipe(
     Layer.provideMerge(access),
-    Layer.provide(host),
-    Layer.provide(settings),
+    Layer.provide(hostLayer),
+    Layer.provide(settingsLayer),
     Layer.provide(ProcessRunner.layer),
     Layer.provide(NetService.layer),
     Layer.provideMerge(
@@ -685,5 +688,114 @@ it.effect("an older discovery cannot retire a runtime observed by a newer reques
       expect((yield* access.authorize(token)).deviceId).toBe(openedSession.deviceId);
       expect((yield* devices.state).sessions).toEqual([openedSession]);
     }).pipe(Effect.provide(layer("127.0.0.1", undefined, http)), Effect.scoped);
+  }),
+);
+
+it.effect("settings subscription stops the helper after the final project grant is disabled", () =>
+  Effect.gen(function* () {
+    const stopObserved = yield* Deferred.make<void>();
+    const positiveGrantObserved = yield* Deferred.make<void>();
+    const otherProject = ProjectId.make("project-2");
+    const initial = {
+      ...DEFAULT_SERVER_SETTINGS,
+      enableDeviceSupport: true,
+      enableAgentDeviceAccess: false,
+      projectSettingsOverrides: { [projectId]: { enableAgentDeviceAccess: true } },
+    };
+    const currentSettings = yield* Ref.make(initial);
+    const changes = yield* PubSub.unbounded<typeof initial>();
+    const changingSettings = Layer.mock(ServerSettings.ServerSettingsService)({
+      getSettings: Ref.get(currentSettings).pipe(
+        Effect.tap((value) =>
+          value.projectSettingsOverrides[otherProject]?.enableAgentDeviceAccess === true
+            ? Deferred.succeed(positiveGrantObserved, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+        ),
+      ),
+      subscribeChanges: PubSub.subscribe(changes).pipe(Effect.map(Stream.fromSubscription)),
+    });
+    let agentRunning = false;
+    let starts = 0;
+    let stops = 0;
+    let hubStops = 0;
+    const observedHost = Layer.effect(
+      DeviceHost.DeviceHost,
+      Effect.gen(function* () {
+        const base = yield* DeviceHost.DeviceHost;
+        const ready = yield* base.ensureReady(() => Effect.void).pipe(Effect.orDie);
+        const agentReady = yield* base.ensureAgentReady(() => Effect.void).pipe(Effect.orDie);
+        return DeviceHost.DeviceHost.of({
+          ...base,
+          current: Effect.sync(() => (agentRunning ? agentReady : ready)),
+          ensureAgentReady: () =>
+            Effect.sync(() => {
+              agentRunning = true;
+              starts++;
+              return agentReady;
+            }),
+          stopAgent: Effect.gen(function* () {
+            agentRunning = false;
+            stops++;
+            yield* Deferred.succeed(stopObserved, undefined);
+          }),
+          stop: Effect.sync(() => {
+            hubStops++;
+          }),
+        });
+      }),
+    ).pipe(Layer.provide(host));
+    yield* Effect.gen(function* () {
+      const devices = yield* DeviceService.DeviceService;
+      const openedSession = yield* devices.open({
+        threadId: ThreadId.make("thread-1"),
+        hostId: "local",
+        deviceId: DeviceId.make("device-1"),
+        platform: "android",
+      });
+      const args = yield* devices.agentTarget({ openedSession, agentAccessEnabled: true });
+      expect(args[0]).toBe("--config");
+      expect(agentRunning).toBe(true);
+      expect(starts).toBe(1);
+      const positiveGrant = {
+        ...initial,
+        projectSettingsOverrides: {
+          [projectId]: { enableAgentDeviceAccess: false },
+          [otherProject]: { enableAgentDeviceAccess: true },
+        },
+      };
+      yield* Ref.set(currentSettings, positiveGrant);
+      yield* PubSub.publish(changes, positiveGrant);
+      yield* Deferred.await(positiveGrantObserved);
+      expect(agentRunning).toBe(true);
+      expect(stops).toBe(0);
+      const revoked = {
+        ...initial,
+        projectSettingsOverrides: {
+          [projectId]: { enableAgentDeviceAccess: false },
+          [otherProject]: { enableAgentDeviceAccess: false },
+        },
+      };
+      yield* Ref.set(currentSettings, revoked);
+      yield* PubSub.publish(changes, revoked);
+      yield* Deferred.await(stopObserved);
+      expect(agentRunning).toBe(false);
+      expect(stops).toBe(1);
+      expect(hubStops).toBe(0);
+      expect((yield* devices.state).sessions).toEqual([openedSession]);
+      expect(
+        (yield* devices.state).devices.find((device) => device.id === openedSession.deviceId)
+          ?.booted,
+      ).toBe(true);
+      yield* Ref.set(currentSettings, initial);
+      yield* PubSub.publish(changes, initial);
+      yield* devices.agentTarget({ openedSession, agentAccessEnabled: true });
+      expect(agentRunning).toBe(true);
+      expect(starts).toBe(2);
+      expect(stops).toBe(1);
+      expect(hubStops).toBe(0);
+    }).pipe(
+      Effect.provide(layer("127.0.0.1", undefined, undefined, changingSettings, observedHost)),
+      Effect.scoped,
+    );
   }),
 );
