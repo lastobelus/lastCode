@@ -133,15 +133,15 @@ function matchesInput(file: string, input: ConfigInput): boolean {
 }
 
 function isInertFile(file: string): boolean {
-  const docs = /(?:^|\/)(?:docs|\.agents|\.github\/ISSUE_TEMPLATE)\//.test(file);
-  if (/\.(?:md|rst|txt)$/i.test(file) && (docs || /(?:^|\/)README(?:\.[^/]+)?$/i.test(file))) {
+  // Keep this allowlist conservative: text locations are case-sensitive, static locations are not.
+  if (/^(?:AGENTS|CONTRIBUTING|CHANGELOG|LICENSE|SECURITY)(?:\.[^/]+)?$/i.test(file)) {
     return true;
   }
-  if (
-    !file.includes("/") &&
-    /^(?:AGENTS|CONTRIBUTING|CHANGELOG|LICENSE|SECURITY)(?:\.[^/]+)?$/i.test(file)
-  ) {
-    return true;
+  if (/\.(?:md|rst|txt)$/i.test(file)) {
+    return (
+      /(?:^|\/)(?:docs|\.agents|\.github\/ISSUE_TEMPLATE)\//.test(file) ||
+      /(?:^|\/)README(?:\.[^/]+)?$/i.test(file)
+    );
   }
   return STATIC_FILE.test(file) && /(?:^|\/)(?:docs|public|assets|resources)\//i.test(file);
 }

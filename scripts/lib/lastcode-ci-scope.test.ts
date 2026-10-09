@@ -400,6 +400,48 @@ describe("resolveQuickCiScope", () => {
     expect(repo.scope()).toMatchObject({ kind: "none", packages: [] });
   });
 
+  it.each([
+    "docs/guide.MD",
+    ".agents/guide.rst",
+    ".github/ISSUE_TEMPLATE/bug.txt",
+    "packages/library/readme.notes.MD",
+    "AGENTS",
+    "license.notice.txt",
+    "CHANGELOG.release.notes",
+    "DOCS/icon.SVG",
+    "nested/Public/font.WOFF2",
+    "assets/sound.mp3",
+    "resources/icon.ico",
+  ])("skips the conservative documentation/asset allowlist: %s", (file) => {
+    const repo = fixture();
+    repo.change(file, "Updated inert contents.\n");
+    expect(repo.scope()).toMatchObject({ kind: "none", packages: [], changedFiles: [file] });
+  });
+
+  it.each([
+    "DOCS/guide.md",
+    ".github/issue_template/bug.txt",
+    "nested/LICENSE.txt",
+    "nested/AGENTS",
+    "notdocs/guide.md",
+    "docs-extra/guide.md",
+    "docs/guide.md.ts",
+    "README",
+    "README.md.js",
+    "public/settings.json",
+    "assets/worker.js",
+    "resources/options.yaml",
+    "unowned/logo.svg",
+  ])("keeps unrecognized or executable paths on the full fallback: %s", (file) => {
+    const repo = fixture();
+    repo.change(file, "Updated contents.\n");
+    expect(repo.scope()).toMatchObject({
+      kind: "full",
+      packages: ["@fixture/consumer", "@fixture/library", "@fixture/unrelated"],
+      changedFiles: [file],
+    });
+  });
+
   it("does not read an oversized unrelated vendored source for a documentation change", () => {
     const repo = fixture();
     const vendorFile = ".repos/reference/bundle.js";
