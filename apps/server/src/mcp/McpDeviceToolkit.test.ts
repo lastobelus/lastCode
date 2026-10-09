@@ -3,6 +3,8 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   DEFAULT_SERVER_SETTINGS,
   DeviceHostUnavailableError,
+  DeviceOperationError,
+  type DeviceSession,
   DeviceId,
   ProjectId,
   EnvironmentId,
@@ -10,6 +12,10 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
+import * as PlatformError from "effect/PlatformError";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -289,6 +295,7 @@ it.effect.each([
           return scopedArgs;
         }),
       agentCli: Effect.succeed("/cli"),
+      abortOpen: () => Effect.die("A successful open must retain its session"),
     });
     return Effect.gen(function* () {
       const server = yield* McpServer.McpServer;
@@ -518,4 +525,175 @@ it.effect.each([
       ),
     ),
   ),
+);
+
+it.effect.each([
+  { stage: "denied", cleanupFails: false },
+  { stage: "config", cleanupFails: false },
+  { stage: "cli", cleanupFails: false },
+  { stage: "shim", cleanupFails: false },
+  { stage: "denied", cleanupFails: true },
+] as const)(
+  "rolls back the exact opened session after $stage failure (cleanup failure: $cleanupFails)",
+  ({ stage, cleanupFails }) => {
+    const openedSession = {
+      threadId,
+      hostId: "local",
+      deviceId: DeviceId.make("UDID-1"),
+      platform: "ios" as const,
+      openedAt: "2026-09-08T00:00:00.000Z",
+    };
+    const aborted: DeviceSession[] = [];
+    const failure =
+      stage === "config"
+        ? new DeviceOperationError({
+            operation: "configure agent",
+            reason: "settings_failed",
+            cause: new Error("synthetic config write failure"),
+          })
+        : new DeviceHostUnavailableError({
+            hostId: "local",
+            reason:
+              stage === "cli"
+                ? "Agent CLI is unavailable."
+                : "Agent access was revoked during boot.",
+          });
+    let issued = false;
+    const failingDevices = Layer.mock(DeviceService.DeviceService)({
+      list: Effect.succeed(state),
+      state: Effect.succeed(state),
+      agentReadinessIfSupported: () => Effect.succeed(agentReady),
+      open: () => Effect.succeed(openedSession),
+      agentTarget: (input) =>
+        Effect.gen(function* () {
+          expect(input.openedSession).toBe(openedSession);
+          if (stage === "denied" || stage === "config") return yield* failure;
+          issued = true;
+          return ["--config", "/host.json", "--session", "opened-device-session"];
+        }),
+      agentCli: stage === "cli" ? Effect.fail(failure) : Effect.succeed("/cli"),
+      abortOpen: (session) =>
+        Effect.gen(function* () {
+          aborted.push(session);
+          if (cleanupFails)
+            return yield* new DeviceHostUnavailableError({
+              hostId: "local",
+              reason: "Synthetic cleanup failure.",
+            });
+        }),
+      close: () => Effect.die("Rollback must use exact session identity, not stable device IDs"),
+    });
+    const failingShim = Layer.effect(
+      FileSystem.FileSystem,
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const writeFileString: FileSystem.FileSystem["writeFileString"] = (
+          file,
+          content,
+          options,
+        ) =>
+          stage === "shim" && file.endsWith("agent-device-launcher.mjs")
+            ? Effect.fail(
+                new PlatformError.PlatformError(
+                  new PlatformError.SystemError({
+                    _tag: "PermissionDenied",
+                    module: "FileSystem",
+                    method: "writeFileString",
+                    pathOrDescriptor: file,
+                  }),
+                ),
+              )
+            : fs.writeFileString(file, content, options);
+        return { ...fs, writeFileString };
+      }),
+    ).pipe(Layer.provide(NodeServices.layer));
+    return Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const result = yield* server
+        .callTool({ name: "device_open", arguments: { platform: "ios" } })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, invocation(["device"])),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+      expect(result.isError).toBe(true);
+      expect(result.content).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "text",
+            text: expect.stringContaining(
+              stage === "shim" ? "Could not prepare the agent-device launcher." : failure.message,
+            ),
+          }),
+        ]),
+      );
+      expect(aborted).toHaveLength(1);
+      expect(aborted[0]).toBe(openedSession);
+      expect(issued).toBe(stage === "cli" || stage === "shim");
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        McpHttpServer.layerDeviceToolkit.pipe(
+          Layer.provideMerge(McpServer.McpServer.layer),
+          Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
+          Layer.provide(failingDevices),
+          Layer.provide(layerAccess),
+          Layer.provide(
+            ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-device-rollback-test-" }),
+          ),
+          Layer.provide(failingShim),
+          Layer.provide(NodeServices.layer),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect("rolls back the opened session when post-open credential issuance is interrupted", () =>
+  Effect.gen(function* () {
+    const issuing = yield* Deferred.make<void>();
+    const openedSession = {
+      threadId,
+      hostId: "local",
+      deviceId: DeviceId.make("UDID-1"),
+      platform: "ios" as const,
+      openedAt: "2026-09-08T00:00:00.000Z",
+    };
+    const aborted: DeviceSession[] = [];
+    const delayedDevices = Layer.mock(DeviceService.DeviceService)({
+      list: Effect.succeed(state),
+      agentReadinessIfSupported: () => Effect.succeed(agentReady),
+      open: () => Effect.succeed(openedSession),
+      agentTarget: () => Deferred.succeed(issuing, undefined).pipe(Effect.andThen(Effect.never)),
+      abortOpen: (session) =>
+        Effect.sync(() => {
+          aborted.push(session);
+        }),
+      close: () => Effect.die("Rollback must not close a device by stable IDs"),
+    });
+    yield* Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const request = yield* server
+        .callTool({ name: "device_open", arguments: { platform: "ios" } })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, invocation(["device"])),
+          Effect.provideService(McpSchema.McpServerClient, client),
+          Effect.forkChild,
+        );
+      yield* Deferred.await(issuing);
+      yield* Fiber.interrupt(request);
+      expect(aborted).toHaveLength(1);
+      expect(aborted[0]).toBe(openedSession);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        McpHttpServer.layerDeviceToolkit.pipe(
+          Layer.provideMerge(McpServer.McpServer.layer),
+          Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
+          Layer.provide(delayedDevices),
+          Layer.provide(layerAccess),
+          Layer.provide(NodeServices.layer),
+        ),
+      ),
+    );
+  }),
 );

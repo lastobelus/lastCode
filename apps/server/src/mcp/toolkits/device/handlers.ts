@@ -9,6 +9,7 @@ import {
   LOCAL_DEVICE_HOST_ID,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Path from "effect/Path";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as ServerConfig from "../../../config.ts";
@@ -175,43 +176,63 @@ const handlers = {
         deviceId: target.id,
         platform: target.platform,
       });
-      // Android boot resolves an AVD name to the serial used by subsequent CLI commands.
-      const agentArgs = yield* devices.agentTarget({
-        openedSession: session,
-        agentAccessEnabled: true,
-      });
-      const after = yield* devices.state;
-      const device = after.devices.find(
-        (candidate) => candidate.hostId === session.hostId && candidate.id === session.deviceId,
-      ) ?? { ...target, hostId: session.hostId, id: session.deviceId, platform: session.platform };
-      const targetArgs = [...agentDeviceTargetArgs(device), ...agentArgs];
-      const config = yield* ServerConfig.ServerConfig;
-      const path = yield* Path.Path;
-      const platform = yield* HostProcessPlatform;
-      const shimDir = yield* ensureAgentDeviceShim({
-        entryPath: yield* devices.agentCli,
-        stateDir: config.stateDir,
+      return yield* Effect.gen(function* () {
+        // Android boot resolves an AVD name to the serial used by subsequent CLI commands.
+        const agentArgs = yield* devices.agentTarget({
+          openedSession: session,
+          agentAccessEnabled: true,
+        });
+        const after = yield* devices.state;
+        const device = after.devices.find(
+          (candidate) => candidate.hostId === session.hostId && candidate.id === session.deviceId,
+        ) ?? {
+          ...target,
+          hostId: session.hostId,
+          id: session.deviceId,
+          platform: session.platform,
+        };
+        const targetArgs = [...agentDeviceTargetArgs(device), ...agentArgs];
+        const config = yield* ServerConfig.ServerConfig;
+        const path = yield* Path.Path;
+        const platform = yield* HostProcessPlatform;
+        const shimDir = yield* ensureAgentDeviceShim({
+          entryPath: yield* devices.agentCli,
+          stateDir: config.stateDir,
+        }).pipe(
+          Effect.mapError(
+            (error) =>
+              new DeviceToolUnavailableError({
+                reason:
+                  error._tag === "NodeRuntimeUnavailableError"
+                    ? nodeRuntimeUnavailableMessage("Device automation")
+                    : "Could not prepare the agent-device launcher.",
+                cause: error,
+              }),
+          ),
+        );
+        const command = path.join(
+          shimDir,
+          platform === "win32" ? "agent-device.cmd" : "agent-device",
+        );
+        return {
+          device,
+          agentDevice: { command, targetArgs },
+          quickStart: agentDeviceQuickStart(device, targetArgs, command),
+        };
       }).pipe(
-        Effect.mapError(
-          (error) =>
-            new DeviceToolUnavailableError({
-              reason:
-                error._tag === "NodeRuntimeUnavailableError"
-                  ? nodeRuntimeUnavailableMessage("Device automation")
-                  : "Could not prepare the agent-device launcher.",
-              cause: error,
-            }),
+        Effect.onExit((exit) =>
+          Exit.isFailure(exit)
+            ? devices.abortOpen(session).pipe(
+                Effect.catch(() =>
+                  Effect.logWarning("Could not roll back failed device open", {
+                    hostId: session.hostId,
+                    deviceId: session.deviceId,
+                  }),
+                ),
+              )
+            : Effect.void,
         ),
       );
-      const command = path.join(
-        shimDir,
-        platform === "win32" ? "agent-device.cmd" : "agent-device",
-      );
-      return {
-        device,
-        agentDevice: { command, targetArgs },
-        quickStart: agentDeviceQuickStart(device, targetArgs, command),
-      };
     }).pipe(Effect.mapError(toolError)),
   ),
   device_screenshot: McpToolAccess.readsAsCaller((input) =>

@@ -532,3 +532,158 @@ it.effect("issuance waits for an in-flight shutdown and cannot recreate retired 
     );
   }),
 );
+
+it.effect("aborts only the failed open and preserves a newer session and other threads", () =>
+  Effect.gen(function* () {
+    const devices = yield* DeviceService.DeviceService;
+    const access = yield* DeviceAgentAccess.DeviceAgentAccess;
+    const fs = yield* FileSystem.FileSystem;
+    const input = {
+      threadId: ThreadId.make("thread-1"),
+      hostId: "local" as const,
+      deviceId: DeviceId.make("device-1"),
+      platform: "android" as const,
+    };
+    const opened = yield* devices.open(input);
+    const issue = (openedSession: typeof opened) =>
+      Effect.gen(function* () {
+        const args = yield* devices.agentTarget({ openedSession, agentAccessEnabled: true });
+        return decodeConfig(yield* fs.readFileString(args[1]!)).daemonAuthToken;
+      });
+    const token = yield* issue(opened);
+    const other = yield* devices.open({ ...input, threadId: ThreadId.make("thread-2") });
+    const otherToken = yield* issue(other);
+    yield* devices.abortOpen(opened);
+    expect((yield* Effect.exit(access.authorize(token)))._tag).toBe("Failure");
+    expect((yield* access.authorize(otherToken)).threadId).toBe(other.threadId);
+    expect((yield* devices.state).sessions).toEqual([other]);
+    const replacement = yield* devices.open(input);
+    const replacementToken = yield* issue(replacement);
+    yield* devices.abortOpen(opened);
+    expect((yield* access.authorize(replacementToken)).threadId).toBe(input.threadId);
+    expect((yield* devices.state).sessions).toEqual([other, replacement]);
+  }).pipe(Effect.provide(layer("127.0.0.1")), Effect.scoped),
+);
+
+it.effect.each(["missing", "off", "replacement"] as const)(
+  "discovery retires a retained credential after external runtime %s",
+  (change) =>
+    Effect.gen(function* () {
+      let current: "original" | "missing" | "off" | "replacement" = "original";
+      const primary = DeviceId.make("emulator-5554");
+      const inventory = () => ({
+        emulators: [
+          ...(current === "missing"
+            ? []
+            : [
+                {
+                  id: primary,
+                  name: current === "replacement" ? "Second_AVD" : "First_AVD",
+                  platform: "android",
+                  version: "26",
+                  physical: false,
+                  booted: current !== "off",
+                },
+              ]),
+          {
+            id: "emulator-5556",
+            name: "Other_AVD",
+            platform: "android",
+            version: "26",
+            physical: false,
+            booted: true,
+          },
+        ],
+        simulators: [],
+      });
+      const http = HttpClient.make((request) =>
+        Effect.succeed(HttpClientResponse.fromWeb(request, Response.json(inventory()))),
+      );
+      yield* Effect.gen(function* () {
+        const devices = yield* DeviceService.DeviceService;
+        const access = yield* DeviceAgentAccess.DeviceAgentAccess;
+        const fs = yield* FileSystem.FileSystem;
+        const input = {
+          threadId: ThreadId.make("thread-1"),
+          hostId: "local" as const,
+          deviceId: primary,
+          platform: "android" as const,
+        };
+        const issue = (openedSession: Effect.Success<ReturnType<typeof devices.open>>) =>
+          Effect.gen(function* () {
+            const args = yield* devices.agentTarget({ openedSession, agentAccessEnabled: true });
+            return decodeConfig(yield* fs.readFileString(args[1]!)).daemonAuthToken;
+          });
+        const opened = yield* devices.open(input);
+        const token = yield* issue(opened);
+        const other = yield* devices.open({ ...input, deviceId: DeviceId.make("emulator-5556") });
+        const otherToken = yield* issue(other);
+        current = change;
+        yield* devices.list;
+        expect((yield* Effect.exit(access.authorize(token)))._tag).toBe("Failure");
+        expect((yield* access.authorize(otherToken)).deviceId).toBe(other.deviceId);
+        expect((yield* devices.state).sessions).toEqual([other]);
+        current = "replacement";
+        const replacement = yield* devices.open(input);
+        const fresh = yield* issue(replacement);
+        expect(fresh).not.toBe(token);
+        expect((yield* access.authorize(fresh)).deviceId).toBe(primary);
+      }).pipe(Effect.provide(layer("127.0.0.1", undefined, http)), Effect.scoped);
+    }),
+);
+
+it.effect("an older discovery cannot retire a runtime observed by a newer request", () =>
+  Effect.gen(function* () {
+    const started = yield* Deferred.make<void>();
+    const resume = yield* Deferred.make<void>();
+    let holdNext = false;
+    const inventory = {
+      emulators: [
+        {
+          id: "emulator-5554",
+          name: "Test_AVD",
+          platform: "android",
+          version: "26",
+          physical: false,
+          booted: true,
+        },
+      ],
+      simulators: [],
+    };
+    const http = HttpClient.make((request) =>
+      Effect.gen(function* () {
+        if (holdNext) {
+          holdNext = false;
+          yield* Deferred.succeed(started, undefined);
+          yield* Deferred.await(resume);
+          return HttpClientResponse.fromWeb(
+            request,
+            Response.json({ emulators: [], simulators: [] }),
+          );
+        }
+        return HttpClientResponse.fromWeb(request, Response.json(inventory));
+      }),
+    );
+    yield* Effect.gen(function* () {
+      const devices = yield* DeviceService.DeviceService;
+      const access = yield* DeviceAgentAccess.DeviceAgentAccess;
+      const fs = yield* FileSystem.FileSystem;
+      const openedSession = yield* devices.open({
+        threadId: ThreadId.make("thread-1"),
+        hostId: "local",
+        deviceId: DeviceId.make("emulator-5554"),
+        platform: "android",
+      });
+      const args = yield* devices.agentTarget({ openedSession, agentAccessEnabled: true });
+      const token = decodeConfig(yield* fs.readFileString(args[1]!)).daemonAuthToken;
+      holdNext = true;
+      const older = yield* devices.list.pipe(Effect.forkChild);
+      yield* Deferred.await(started);
+      yield* devices.list;
+      yield* Deferred.succeed(resume, undefined);
+      yield* Fiber.join(older);
+      expect((yield* access.authorize(token)).deviceId).toBe(openedSession.deviceId);
+      expect((yield* devices.state).sessions).toEqual([openedSession]);
+    }).pipe(Effect.provide(layer("127.0.0.1", undefined, http)), Effect.scoped);
+  }),
+);
