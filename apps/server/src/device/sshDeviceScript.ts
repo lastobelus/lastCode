@@ -41,7 +41,32 @@ const { spawn, spawnSync } = require('node:child_process');
 const root = path.join(os.homedir(), '.t3', 'device');
 const state = path.join(root, 'hosts', owner);
 const run = (command, args, options = {}) => spawnSync(command, args, { encoding: 'utf8', timeout: 30000, ...options });
-const read = (file) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; } };
+// Only a missing record allows recovery to treat an owned runtime as absent.
+const read = file => {
+  let raw;
+  try { raw = fs.readFileSync(file, 'utf8'); }
+  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  const value = JSON.parse(raw);
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw Error('Invalid device runtime state at ' + file);
+  return value;
+};
+const readHub = file => {
+  const value = read(file);
+  if (value && (typeof value.owner !== 'string' || !Number.isInteger(value.pid)
+    || !Number.isInteger(value.port) || typeof value.entryPath !== 'string')) {
+    throw Error('Invalid device hub state at ' + file);
+  }
+  return value;
+};
+const readDaemon = file => {
+  const value = read(file);
+  if (value && (!Number.isInteger(value.httpPort) || typeof value.token !== 'string'
+    || (value.pid !== undefined && !Number.isInteger(value.pid))
+    || (value.version !== undefined && typeof value.version !== 'string'))) {
+    throw Error('Invalid agent-device daemon state at ' + file);
+  }
+  return value;
+};
 const write = (file, value) => { const tmp = file + '.' + process.pid; fs.writeFileSync(tmp, JSON.stringify(value), { mode: 0o600 }); fs.renameSync(tmp, file); };
 const toolVersions = (name, requiredVersion, entry, record) => {
   const directory = path.join(root, 'tools');
@@ -67,8 +92,8 @@ const toolVersions = (name, requiredVersion, entry, record) => {
 };
 const versions = () => {
   const result = {
-  hub: toolVersions('expo-device-hub', hubVersion, 'dist/server/cli.mjs', read(path.join(state, 'hub.json'))),
-  agent: toolVersions('agent-device', agentVersion, 'bin/agent-device.mjs', { ...read(path.join(state, 'agent.json')), ...read(path.join(state, 'daemon.json')) }),
+  hub: toolVersions('expo-device-hub', hubVersion, 'dist/server/cli.mjs', readHub(path.join(state, 'hub.json'))),
+  agent: toolVersions('agent-device', agentVersion, 'bin/agent-device.mjs', { ...read(path.join(state, 'agent.json')), ...readDaemon(path.join(state, 'daemon.json')) }),
   };
   return result.hub && result.agent ? result : undefined;
 };
@@ -155,13 +180,13 @@ async function install(name, version, entry) {
   const daemonFile = path.join(state, 'daemon.json');
   const agentFile = path.join(state, 'agent.json');
   if (mode === 'stop' || mode === 'stop-agent') {
-    const hub = read(hubFile);
+    const hub = mode === 'stop' ? readHub(hubFile) : null;
     if (mode === 'stop' && hub && hub.owner === owner) {
       stopHub(hub);
       fs.rmSync(hubFile, { force: true });
     }
     const entry = read(agentFile)?.entryPath || path.join(root, 'tools', 'agent-device@' + agentVersion, 'node_modules', 'agent-device', 'bin', 'agent-device.mjs');
-    if (read(daemonFile)) {
+    if (readDaemon(daemonFile)) {
       if (!fs.existsSync(entry)) throw Error('The installed agent-device launcher is unavailable.');
       const stopped = run(process.execPath, [entry, 'daemon', 'stop', '--state-dir', state]);
       if (stopped.status !== 0) throw Error('Could not stop the previous agent-device daemon.');
@@ -172,7 +197,7 @@ async function install(name, version, entry) {
   if (!ios && !android) throw Error(platforms.map(p => p.reason).join(' '));
   fs.mkdirSync(state, { recursive: true, mode: 0o700 });
   const hubEntry = await install('expo-device-hub', hubVersion, 'dist/server/cli.mjs');
-  let hub = read(hubFile);
+  let hub = readHub(hubFile);
   if (!hub || hub.owner !== owner || hub.entryPath !== hubEntry || !await healthy(hub.port, '/readyz')) {
     stopHub(hub);
     for (let attempt = 0; attempt < 5; attempt++) {
@@ -203,7 +228,7 @@ async function install(name, version, entry) {
   if (mode === 'agent-start') {
   const agentEntry = await install('agent-device', agentVersion, 'bin/agent-device.mjs');
   const previousAgent = read(agentFile);
-  let daemon = read(daemonFile);
+  let daemon = readDaemon(daemonFile);
   if (daemon && (previousAgent?.entryPath !== agentEntry || previousAgent?.runtimeId !== agentRuntimeId || !await healthy(daemon.httpPort, '/health'))) {
     const stopped = run(process.execPath, [previousAgent?.entryPath || agentEntry, 'daemon', 'stop', '--state-dir', state]);
     if (stopped.status !== 0) throw Error('Could not stop the previous agent-device version.');
@@ -215,7 +240,7 @@ async function install(name, version, entry) {
     const env = { ...process.env, AGENT_DEVICE_STATE_DIR: state, AGENT_DEVICE_DAEMON_SERVER_MODE: 'http', AGENT_DEVICE_DAEMON_IDLE_TIMEOUT_MS: '0', AGENT_DEVICE_NO_UPDATE_NOTIFIER: '1' };
     delete env.AGENT_DEVICE_DAEMON_BASE_URL; delete env.AGENT_DEVICE_DAEMON_AUTH_TOKEN; delete env.AGENT_DEVICE_CONFIG;
     run(process.execPath, [agentEntry, 'devices', '--json'], { env });
-    daemon = read(daemonFile);
+    daemon = readDaemon(daemonFile);
   }
   if (!daemon || !await healthy(daemon.httpPort, '/health')) throw Error('agent-device daemon did not become ready in ' + state);
   write(agentFile, { entryPath: agentEntry, runtimeId: agentRuntimeId });

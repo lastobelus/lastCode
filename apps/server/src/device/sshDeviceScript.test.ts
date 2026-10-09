@@ -48,6 +48,111 @@ it.effect("preserves shell metacharacters and newlines in remote arguments", () 
 );
 
 describe("remote helper lifecycle", () => {
+  it.effect.each(
+    (["stop-agent", "stop"] as const).flatMap((mode) =>
+      (["daemon", "hub"] as const).flatMap((record) =>
+        [
+          "truncated",
+          "null",
+          "array",
+          "invalidFields",
+          "unreadable",
+          ...(record === "daemon" ? ["missing", "valid"] : []),
+        ].map((state) => ({ mode, state, record })),
+      ),
+    ),
+  )("retires only readable runtime state ($mode, $record, $state)", ({ mode, state, record }) =>
+    Effect.gen(function* () {
+      if ((yield* HostProcessPlatform) === "win32") return;
+      yield* Effect.promise(async () => {
+        const home = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-ssh-retirement-"));
+        try {
+          const directory = NodePath.join(home, ".t3/device/hosts/one");
+          const runtimeRecord = NodePath.join(directory, `${record}.json`);
+          const stopped = NodePath.join(home, "stopped");
+          const launcher = NodePath.join(home, "agent.cjs");
+          const bin = NodePath.join(home, "bin");
+          await NodeFSP.mkdir(directory, { recursive: true });
+          await NodeFSP.mkdir(bin);
+          for (const command of ["adb", "xcrun"]) {
+            await NodeFSP.writeFile(NodePath.join(bin, command), "#!/bin/sh\nexit 1\n", {
+              mode: 0o755,
+            });
+          }
+          await NodeFSP.writeFile(
+            launcher,
+            `require('node:fs').writeFileSync(${JSON.stringify(stopped)}, 'stopped');`,
+          );
+          await NodeFSP.writeFile(
+            NodePath.join(directory, "agent.json"),
+            JSON.stringify({ entryPath: launcher }),
+          );
+          const content =
+            state === "truncated"
+              ? '{"httpPort":1234'
+              : state === "null"
+                ? "null"
+                : state === "array"
+                  ? "[]"
+                  : JSON.stringify(
+                      record === "hub"
+                        ? {
+                            owner: "one",
+                            pid: "invalid",
+                            port: 1234,
+                            entryPath: launcher,
+                          }
+                        : {
+                            httpPort: state === "invalidFields" ? "invalid" : 1234,
+                            token: "fixture-token",
+                          },
+                    );
+          if (state === "unreadable") await NodeFSP.mkdir(runtimeRecord);
+          else if (state !== "missing") await NodeFSP.writeFile(runtimeRecord, content);
+          const ignoresHub = mode === "stop-agent" && record === "hub";
+          if (ignoresHub) {
+            await NodeFSP.writeFile(
+              NodePath.join(directory, "daemon.json"),
+              JSON.stringify({ httpPort: 1234, token: "fixture-token" }),
+            );
+          }
+          const script = NodePath.join(home, "stop.cjs");
+          await NodeFSP.writeFile(script, remoteDeviceScript("one", mode));
+          const invocation = exec(process.execPath, [script], {
+            env: { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}` },
+          });
+          const fails = state !== "missing" && state !== "valid" && !ignoresHub;
+          if (fails) await expect(invocation).rejects.toMatchObject({ code: 1 });
+          else await invocation;
+          if (record === "daemon" && !fails) {
+            await expect(NodeFSP.stat(runtimeRecord)).rejects.toMatchObject({ code: "ENOENT" });
+          } else {
+            if (state === "unreadable")
+              expect((await NodeFSP.stat(runtimeRecord)).isDirectory()).toBe(true);
+            else expect(await NodeFSP.readFile(runtimeRecord, "utf8")).toBe(content);
+          }
+          if (ignoresHub) {
+            await expect(
+              NodeFSP.stat(NodePath.join(directory, "daemon.json")),
+            ).rejects.toMatchObject({
+              code: "ENOENT",
+            });
+          }
+          if (state === "valid" || ignoresHub)
+            expect(await NodeFSP.readFile(stopped, "utf8")).toBe("stopped");
+          else await expect(NodeFSP.stat(stopped)).rejects.toMatchObject({ code: "ENOENT" });
+          await expect(
+            NodeFSP.lstat(NodePath.join(directory, "runtime.lock")),
+          ).rejects.toMatchObject({
+            code: "ENOENT",
+          });
+        } finally {
+          await NodeFSP.rm(home, { recursive: true, force: true });
+        }
+      });
+    }),
+  );
+
   it.effect("reuses its own healthy helpers and stops only its own runtime", () =>
     Effect.gen(function* () {
       if ((yield* HostProcessPlatform) === "win32") return;
@@ -239,6 +344,28 @@ else { const child=spawn(process.execPath,[path.join(path.dirname(process.argv[1
           ).toBe(200);
           expect(await invoke("one", "agent-start", true, "current-runtime")).toEqual(recovered);
           repaired = recovered;
+          const daemonRecord = NodePath.join(root, "hosts/one/daemon.json");
+          const savedDaemon = await NodeFSP.readFile(daemonRecord, "utf8");
+          for (const corruptState of [
+            "null",
+            '{"httpPort":',
+            '{"httpPort":"invalid","token":"fixture"}',
+          ]) {
+            await NodeFSP.writeFile(daemonRecord, corruptState);
+            try {
+              await expect(
+                invoke("one", "agent-start", true, "current-runtime"),
+              ).rejects.toMatchObject({
+                code: 1,
+              });
+              expect(await NodeFSP.readFile(daemonRecord, "utf8")).toBe(corruptState);
+              expect(
+                await authStatus(`http://127.0.0.1:${recovered.daemonPort}`, recovered.token),
+              ).toBe(200);
+            } finally {
+              await NodeFSP.writeFile(daemonRecord, savedDaemon);
+            }
+          }
           // Stop still uses the recorded entry when a future pinned package is not installed yet.
           const originalScript = remoteDeviceScript("one", "stop-agent");
           const upgradedStop = NodePath.join(home, "upgraded-stop.cjs");
