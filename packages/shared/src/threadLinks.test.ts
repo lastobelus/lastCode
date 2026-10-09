@@ -65,11 +65,6 @@ describe("thread links", () => {
       environmentId: "team",
       value: "",
     });
-    expect(resolveThreadLinkReference(reference, () => undefined)).toMatchObject({
-      threadId: "thread",
-      environmentId: "team",
-      value: undefined,
-    });
     expect(relabelThreadLinks("[Old](t3-thread://v1/team/thread)", local)).toBe(
       "[Local](t3-thread://v1/team/thread)",
     );
@@ -83,6 +78,28 @@ describe("thread links", () => {
       environmentId: undefined,
       value: "Decoded local",
     });
+  });
+
+  it("keeps an uncached archived legacy slash ID local without changing its label", () => {
+    const markdown = "[Archived task](t3-thread://v1/team/thread%3Aone)";
+    const reference = parseThreadLinkReference("t3-thread://v1/team/thread%3Aone")!;
+    expect(resolveThreadLinkReference(reference, () => undefined)).toEqual({
+      threadId: "team/thread%3Aone",
+      environmentId: undefined,
+      value: undefined,
+    });
+    expect(relabelThreadLinks(markdown, () => undefined)).toBe(markdown);
+  });
+
+  it("keeps an uncached V2 archived thread in its explicit remote environment", () => {
+    const markdown = "[Archived remote](t3-thread://v2/team%2Fwest/thread%2Ftask)";
+    const reference = parseThreadLinkReference("t3-thread://v2/team%2Fwest/thread%2Ftask")!;
+    expect(resolveThreadLinkReference(reference, () => undefined)).toEqual({
+      threadId: "thread/task",
+      environmentId: "team/west",
+      value: undefined,
+    });
+    expect(relabelThreadLinks(markdown, () => undefined)).toBe(markdown);
   });
 
   it("leaves scoped V2 links in code spans and fences untouched", () => {

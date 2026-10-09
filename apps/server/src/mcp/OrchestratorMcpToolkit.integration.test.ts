@@ -2213,6 +2213,8 @@ describe("orchestrator MCP toolkit", () => {
               metadataList.threads.find((thread) => thread.threadId === emptyThread.threadId),
             ).toMatchObject({
               title: "Metadata-managed thread",
+              environmentId: EnvironmentId.make("environment:mcp-orchestrator"),
+              link: metadataRead.thread.link,
               linkedPullRequest: linked.linkedPullRequest,
               settled: false,
               settledAt: null,

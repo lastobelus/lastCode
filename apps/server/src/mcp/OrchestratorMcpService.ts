@@ -645,9 +645,12 @@ function threadSnooze(
 function listItemFromShell(
   shell: OrchestrationV2ThreadShell,
   nowMs: number,
+  environmentId: EnvironmentId,
 ): OrchestratorMcpThreadListItem {
   return {
     threadId: shell.id,
+    environmentId,
+    link: formatThreadLink(shell.id, shell.title, environmentId),
     title: shell.title,
     createdBy: shell.createdBy,
     creationSource: shell.creationSource,
@@ -2454,7 +2457,7 @@ const make = Effect.gen(function* () {
         return {
           projectId,
           currentThreadId: parent?.thread.id ?? null,
-          threads: page.map((shell) => listItemFromShell(shell, nowMs)),
+          threads: page.map((shell) => listItemFromShell(shell, nowMs, scope.environmentId)),
           nextCursor,
           total: filtered.length,
         } satisfies OrchestratorMcpThreadListResult;

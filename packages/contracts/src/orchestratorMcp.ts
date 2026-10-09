@@ -309,6 +309,8 @@ export type OrchestratorMcpThreadListInput = typeof OrchestratorMcpThreadListInp
 
 export const OrchestratorMcpThreadListItem = Schema.Struct({
   threadId: ThreadId,
+  environmentId: EnvironmentId,
+  link: Schema.String,
   title: Schema.String,
   createdBy: OrchestrationV2Actor,
   creationSource: OrchestrationV2CreationSource,

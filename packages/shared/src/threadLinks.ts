@@ -63,7 +63,7 @@ export function parseThreadLinkReference(href: string): ThreadLinkReference | nu
       };
 }
 
-/** Prefer existing scoped V1 targets, then an existing legacy local path; keep unknown destinations. */
+/** Prefer existing scoped V1 targets; unresolved ambiguous V1 paths retain their legacy local target. */
 export function resolveThreadLinkReference<T>(
   reference: ThreadLinkReference,
   lookup: (threadId: ThreadId, environmentId?: EnvironmentId) => T | undefined,
@@ -88,6 +88,9 @@ export function resolveThreadLinkReference<T>(
     const value = lookup(candidate.threadId, candidate.environmentId);
     if (value !== undefined) return { ...candidate, value };
   }
+  if (reference.version === 1 && reference.legacyThreadId !== undefined) {
+    return { threadId: reference.legacyThreadId, environmentId: undefined, value: undefined };
+  }
   return { ...primary, value: undefined };
 }
 
@@ -100,7 +103,7 @@ export function parseThreadLinkHref(href: string): ThreadId | null {
  * Agents often percent-encode the id anyway. When the id as written names no thread, clients try
  * this decoded form. Null when decoding changes nothing or fails.
  */
-export function percentDecodedThreadLinkId(threadId: ThreadId): ThreadId | null {
+function percentDecodedThreadLinkId(threadId: ThreadId): ThreadId | null {
   try {
     const decoded = decodeURIComponent(threadId);
     return decoded === threadId ? null : Option.getOrNull(decodeThreadId(decoded));

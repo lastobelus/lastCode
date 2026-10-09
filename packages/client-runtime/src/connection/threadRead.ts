@@ -4,6 +4,7 @@ import {
   type OrchestratorMcpThreadReadResult,
   WS_METHODS,
 } from "@t3tools/contracts";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
@@ -29,7 +30,11 @@ export const resolveThreadRead = Effect.fn("connection.resolveThreadRead")(funct
       entry.enabled &&
       (input.environmentId === undefined || input.environmentId === environmentId),
   );
-  const attempts = yield* Effect.forEach(
+  const found = yield* Deferred.make<OrchestratorMcpThreadReadResult>();
+  const unavailable = new Set<EnvironmentId>();
+  // Start every destination within the same timeout window, and interrupt the
+  // remaining requests as soon as one returns the requested history.
+  const attempts = Effect.forEach(
     candidates,
     ([environmentId]) =>
       read(environmentId, input).pipe(
@@ -51,12 +56,19 @@ export const resolveThreadRead = Effect.fn("connection.resolveThreadRead")(funct
               error.code !== "thread_not_found",
           }),
         }),
+        Effect.tap((attempt) => {
+          if (attempt.unavailable) unavailable.add(attempt.environmentId);
+          return attempt.result === null ? Effect.void : Deferred.succeed(found, attempt.result);
+        }),
       ),
-    { concurrency: 4 },
+    { concurrency: "unbounded" },
+  ).pipe(
+    Effect.map((completed) => completed.find((attempt) => attempt.result !== null)?.result ?? null),
   );
-  const unavailableEnvironmentIds = attempts
-    .filter((attempt) => attempt.unavailable)
-    .map((attempt) => attempt.environmentId);
+  const result = yield* Effect.raceFirst(Deferred.await(found), attempts);
+  const unavailableEnvironmentIds = candidates
+    .filter(([environmentId]) => unavailable.has(environmentId))
+    .map(([environmentId]) => environmentId);
   if (
     input.environmentId !== undefined &&
     input.environmentId !== sourceEnvironmentId &&
@@ -65,7 +77,7 @@ export const resolveThreadRead = Effect.fn("connection.resolveThreadRead")(funct
     unavailableEnvironmentIds.push(input.environmentId);
   }
   return {
-    result: attempts.find((attempt) => attempt.result !== null)?.result ?? null,
+    result,
     unavailableEnvironmentIds,
   };
 });
