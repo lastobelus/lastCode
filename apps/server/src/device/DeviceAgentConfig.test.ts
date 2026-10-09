@@ -1010,11 +1010,22 @@ it.effect.each([false, true])(
     }).pipe(Effect.provide(layer("127.0.0.1")), Effect.scoped),
 );
 
-it.effect("command inventory checks stay quiet until observable device state changes", () =>
+it.effect("command checks use live inventory without repeated SSH discovery or panel churn", () =>
   Effect.gen(function* () {
     let name = "Initial AVD";
     let detail: string | undefined;
     let agentInstalled = true;
+    let availableAvds = [name, "Unbooted AVD"];
+    let probes = 0;
+    let commands = 0;
+    const observeReady = <Ready extends DeviceHost.DeviceHostReady>(ready: Ready) => ({
+      ...ready,
+      run: () =>
+        Effect.sync(() => {
+          commands++;
+          return { code: 0, stdout: availableAvds.join("\n"), stderr: "" };
+        }),
+    });
     const observedHost = Layer.effect(
       DeviceHost.DeviceHost,
       Effect.gen(function* () {
@@ -1022,7 +1033,19 @@ it.effect("command inventory checks stay quiet until observable device state cha
         const initial = yield* base.summary;
         return DeviceHost.DeviceHost.of({
           ...base,
-          summary: Effect.sync(() => ({ ...initial, agentDeviceInstalled: agentInstalled })),
+          summary: Effect.sync(() => ({
+            ...initial,
+            kind: "ssh" as const,
+            agentDeviceInstalled: agentInstalled,
+          })),
+          platformAvailability: (platform) =>
+            Effect.gen(function* () {
+              probes++;
+              return yield* base.platformAvailability(platform);
+            }),
+          ensureReady: (onPhase) => base.ensureReady(onPhase).pipe(Effect.map(observeReady)),
+          ensureAgentReady: (onPhase) =>
+            base.ensureAgentReady(onPhase).pipe(Effect.map(observeReady)),
         });
       }),
     ).pipe(Layer.provide(host));
@@ -1061,6 +1084,13 @@ it.effect("command inventory checks stay quiet until observable device state cha
       const token = decodeConfig(yield* fs.readFileString(args[1]!)).daemonAuthToken;
       const ready = yield* devices.agentReadinessIfSupported("local", true);
       expect(ready).not.toBeNull();
+      const initialProbes = probes;
+      const initialCommands = commands;
+      expect(initialProbes).toBeGreaterThan(0);
+      expect(initialCommands).toBeGreaterThan(0);
+      expect((yield* devices.state).devices).toContainEqual(
+        expect.objectContaining({ id: "Unbooted AVD", booted: false }),
+      );
       const changes = yield* devices.subscribe;
       let revision = (yield* devices.state).revision;
       for (let check = 0; check < 3; check++) yield* devices.refreshAgentDevice(ready!);
@@ -1089,6 +1119,15 @@ it.effect("command inventory checks stay quiet until observable device state cha
       }
       expect((yield* devices.state).sessions).toEqual([]);
       expect((yield* Effect.exit(access.authorize(token)))._tag).toBe("Failure");
+      expect(probes).toBe(initialProbes);
+      expect(commands).toBe(initialCommands);
+      availableAvds = [];
+      yield* devices.list;
+      expect(probes).toBe(initialProbes + 1);
+      expect(commands).toBe(initialCommands + 1);
+      expect((yield* devices.state).devices.some((device) => device.id === "Unbooted AVD")).toBe(
+        false,
+      );
     }).pipe(
       Effect.provide(layer("127.0.0.1", undefined, http, settings, observedHost)),
       Effect.scoped,
