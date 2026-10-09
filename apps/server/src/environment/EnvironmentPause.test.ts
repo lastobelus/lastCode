@@ -212,6 +212,10 @@ const harness = Effect.gen(function* () {
   const terminals = yield* Ref.make<ReadonlyArray<TerminalSummary>>([]);
   const calls = yield* Ref.make<ReadonlyArray<Threads.ThreadManagementSendInput>>([]);
   const failures = yield* Ref.make(new Set<ThreadId>());
+  const committedFailures = yield* Ref.make(new Set<ThreadId>());
+  const evidenceFailuresAfterCommit = yield* Ref.make(new Set<ThreadId>());
+  const outboxEvidenceAfterCommit = yield* Ref.make(new Set<ThreadId>());
+  const outboxReadFailed = yield* Ref.make(false);
   const receiptFailures = yield* Ref.make(new Set<ThreadId>());
   const receiptGate = yield* Ref.make<Deferred.Deferred<void> | null>(null);
   const receiptEntered = yield* Deferred.make<void>();
@@ -263,7 +267,17 @@ const harness = Effect.gen(function* () {
         return yield* Ref.get(deferred);
       }),
       listByCommandId: (commandId) =>
-        Ref.get(effects).pipe(
+        Ref.get(outboxReadFailed).pipe(
+          Effect.flatMap((failed) =>
+            failed
+              ? Effect.fail(
+                  new EffectOutbox.EffectOutboxError({
+                    operation: "list-by-command",
+                    cause: "Temporary evidence outage.",
+                  }),
+                )
+              : Ref.get(effects),
+          ),
           Effect.map((rows) => rows.filter((row) => row.commandId === commandId)),
         ),
     }),
@@ -317,6 +331,23 @@ const harness = Effect.gen(function* () {
           };
           yield* Ref.update(messages, (previous) => [...previous, submittedMessage]);
           yield* Ref.update(runs, (previous) => [...previous, submittedRun]);
+          if ((yield* Ref.get(committedFailures)).has(input.threadId)) {
+            if ((yield* Ref.get(outboxEvidenceAfterCommit)).has(input.threadId)) {
+              yield* Ref.update(effects, (rows) => [
+                ...rows,
+                providerStartEffect(input.commandId, runId),
+              ]);
+              yield* Ref.update(readFailures, (failed) => new Set([...failed, input.threadId]));
+            } else if ((yield* Ref.get(evidenceFailuresAfterCommit)).has(input.threadId)) {
+              yield* Ref.update(readFailures, (failed) => new Set([...failed, input.threadId]));
+              yield* Ref.set(outboxReadFailed, true);
+            }
+            return yield* new Threads.ThreadManagementProjectionLoadError({
+              projectId: input.projectId,
+              threadId: input.threadId,
+              cause: "Dispatch committed before its projection reload failed.",
+            });
+          }
           if (!isQueued) {
             const currentStore = yield* Ref.get(receiptStore);
             yield* currentStore
@@ -359,6 +390,10 @@ const harness = Effect.gen(function* () {
     terminals,
     calls,
     failures,
+    committedFailures,
+    evidenceFailuresAfterCommit,
+    outboxEvidenceAfterCommit,
+    outboxReadFailed,
     receiptFailures,
     receiptGate,
     receiptEntered,
@@ -934,7 +969,7 @@ it.effect(
       yield* Ref.set(h.readFailures, new Set([a]));
       yield* Ref.set(h.snapshot, shell([]));
       const unknown = yield* h.pause.status;
-      assert.strictEqual(unknown.session?.targets[0]?.pause, "failed");
+      assert.strictEqual(unknown.session?.targets[0]?.pause, "pending");
       assert.strictEqual(unknown.observation, "unknown");
       assert.isFalse(unknown.quiet);
       yield* Ref.set(h.readFailures, new Set());
@@ -1190,6 +1225,203 @@ it.effect("recovers a committed queued pause without resubmitting after restart"
   }).pipe(Effect.provide(testLayer)),
 );
 
+it.effect.each(["pause", "resume"] as const)(
+  "keeps committed %s pending after the send response fails and sends no duplicate",
+  (direction) =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      yield* Ref.set(h.snapshot, shell([thread(a)]));
+      if (direction === "resume") yield* h.pause.start;
+      yield* Ref.set(h.committedFailures, new Set([a]));
+      const waiting = yield* direction === "pause" ? h.pause.start : h.pause.resume;
+      assert.strictEqual(waiting.session?.targets[0]?.[direction], "pending");
+      const saved = (yield* h.store.get)!;
+      assert.isTrue(saved.targets[0]![`${direction}Accepted`]);
+      const original = Store.deliveryIdentity(saved, saved.targets[0]!, direction);
+      yield* h.pause.retry;
+      assert.lengthOf(
+        (yield* Ref.get(h.calls)).filter(
+          (call) => call.text === (direction === "pause" ? "pause to go offline" : "resume"),
+        ),
+        1,
+      );
+      if (direction === "pause") {
+        assert.strictEqual((yield* Effect.result(h.pause.resume))._tag, "Failure");
+        assert.strictEqual((yield* h.store.get)?.phase, "pausing");
+      }
+      const recovered = yield* restart(h);
+      yield* recovered.pause.retry;
+      assert.strictEqual(
+        Store.deliveryIdentity(
+          (yield* recovered.store.get)!,
+          (yield* recovered.store.get)!.targets[0]!,
+          direction,
+        ).messageId,
+        original.messageId,
+      );
+      yield* recovered.store.recordDelivery(original.messageId, true);
+      yield* Ref.set(h.committedFailures, new Set());
+      yield* Ref.set(h.snapshot, shell([]));
+      if (direction === "pause") {
+        assert.isTrue((yield* recovered.pause.status).quiet);
+        assert.isNull((yield* recovered.pause.resume).session);
+      } else {
+        assert.isNull((yield* recovered.pause.status).session);
+      }
+      assert.lengthOf(
+        (yield* Ref.get(h.calls)).filter((call) => call.text === "pause to go offline"),
+        1,
+      );
+      assert.lengthOf(
+        (yield* Ref.get(h.calls)).filter((call) => call.text === "resume"),
+        1,
+      );
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect.each(["pause", "resume"] as const)(
+  "recovers committed %s after evidence reads fail and restart without a second submission",
+  (direction) =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      yield* Ref.set(h.snapshot, shell([thread(a)]));
+      if (direction === "resume") yield* h.pause.start;
+      yield* Ref.set(h.committedFailures, new Set([a]));
+      yield* Ref.set(h.evidenceFailuresAfterCommit, new Set([a]));
+      const unknown = yield* direction === "pause" ? h.pause.start : h.pause.resume;
+      assert.strictEqual(unknown.session?.targets[0]?.[direction], "pending");
+      assert.strictEqual(unknown.observation, "unknown");
+      assert.isFalse((yield* h.store.get)?.targets[0]?.[`${direction}Accepted`]);
+      yield* h.pause.retry;
+      const recovered = yield* restart(h);
+      yield* recovered.pause.retry;
+      if (direction === "pause") {
+        assert.strictEqual((yield* Effect.result(recovered.pause.resume))._tag, "Failure");
+        assert.strictEqual((yield* recovered.store.get)?.phase, "pausing");
+      }
+      yield* Ref.set(h.readFailures, new Set());
+      yield* Ref.set(h.outboxReadFailed, false);
+      yield* recovered.pause.retry;
+      const saved = (yield* recovered.store.get)!;
+      assert.isTrue(saved.targets[0]![`${direction}Accepted`]);
+      assert.strictEqual(saved.targets[0]![`${direction}Attempt`], 0);
+      yield* recovered.store.recordDelivery(
+        Store.deliveryIdentity(saved, saved.targets[0]!, direction).messageId,
+        true,
+      );
+      yield* Ref.set(h.committedFailures, new Set());
+      yield* Ref.set(h.snapshot, shell([]));
+      if (direction === "pause") assert.isNull((yield* recovered.pause.resume).session);
+      else assert.isNull((yield* recovered.pause.status).session);
+      assert.lengthOf(
+        (yield* Ref.get(h.calls)).filter((call) => call.text === "pause to go offline"),
+        1,
+      );
+      assert.lengthOf(
+        (yield* Ref.get(h.calls)).filter((call) => call.text === "resume"),
+        1,
+      );
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("holds a failed unaccepted Pause during an evidence outage before Retry or Cancel", () =>
+  Effect.gen(function* () {
+    const h = yield* harness;
+    yield* Ref.set(h.snapshot, shell([thread(a)]));
+    yield* Ref.set(h.committedFailures, new Set([a]));
+    yield* h.pause.start;
+    const saved = (yield* h.store.get)!;
+    const identity = Store.deliveryIdentity(saved, saved.targets[0]!, "pause");
+    // Simulate saved failure bookkeeping after a committed dispatch.
+    yield* h.store.update((session) =>
+      session === null
+        ? session
+        : {
+            ...session,
+            targets: session.targets.map((target) => ({
+              ...target,
+              pause: "failed" as const,
+              pauseAccepted: false,
+            })),
+          },
+    );
+    yield* Ref.set(h.readFailures, new Set([a]));
+    yield* Ref.set(h.outboxReadFailed, true);
+    const recovered = yield* restart(h);
+    const waiting = yield* recovered.pause.retry;
+    assert.strictEqual(waiting.session?.targets[0]?.pause, "pending");
+    assert.strictEqual(waiting.observation, "unknown");
+    assert.strictEqual((yield* Effect.result(recovered.pause.resume))._tag, "Failure");
+    assert.strictEqual((yield* recovered.store.get)?.targets[0]?.pauseAttempt, 0);
+    assert.lengthOf(yield* Ref.get(h.calls), 1);
+    yield* Ref.set(h.readFailures, new Set());
+    yield* Ref.set(h.outboxReadFailed, false);
+    yield* recovered.pause.retry;
+    yield* recovered.store.recordDelivery(identity.messageId, true);
+    yield* Ref.set(h.committedFailures, new Set());
+    assert.isNull((yield* recovered.pause.resume).session);
+    assert.lengthOf(
+      (yield* Ref.get(h.calls)).filter((call) => call.text === "resume"),
+      1,
+    );
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("does not submit Pause when its pre-send evidence cannot be read", () =>
+  Effect.gen(function* () {
+    const h = yield* harness;
+    yield* Ref.set(h.snapshot, shell([thread(a)]));
+    yield* Ref.set(h.readFailures, new Set([a]));
+    const waiting = yield* h.pause.start;
+    assert.strictEqual(waiting.observation, "unknown");
+    assert.strictEqual(waiting.session?.targets[0]?.pause, "pending");
+    assert.isEmpty(yield* Ref.get(h.calls));
+    yield* Ref.set(h.readFailures, new Set());
+    yield* h.pause.retry;
+    assert.lengthOf(yield* Ref.get(h.calls), 1);
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("uses a committed command outbox when the post-dispatch projection is unreadable", () =>
+  Effect.gen(function* () {
+    const h = yield* harness;
+    yield* Ref.set(h.snapshot, shell([thread(a)]));
+    yield* Ref.set(h.committedFailures, new Set([a]));
+    yield* Ref.set(h.outboxEvidenceAfterCommit, new Set([a]));
+    const waiting = yield* h.pause.start;
+    assert.strictEqual(waiting.session?.targets[0]?.pause, "pending");
+    assert.isTrue((yield* h.store.get)?.targets[0]?.pauseAccepted);
+    assert.strictEqual(waiting.observation, "known");
+    assert.isFalse(waiting.quiet);
+    yield* h.pause.retry;
+    const recovered = yield* restart(h);
+    yield* recovered.pause.retry;
+    assert.lengthOf(yield* Ref.get(h.calls), 1);
+    assert.strictEqual((yield* Effect.result(recovered.pause.resume))._tag, "Failure");
+    assert.strictEqual((yield* recovered.store.get)?.phase, "pausing");
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("retries proven pre-dispatch failure with a fresh identity", () =>
+  Effect.gen(function* () {
+    const h = yield* harness;
+    yield* Ref.set(h.snapshot, shell([thread(a)]));
+    yield* Ref.set(h.failures, new Set([a]));
+    assert.strictEqual((yield* h.pause.start).session?.targets[0]?.pause, "failed");
+    const saved = (yield* h.store.get)!;
+    assert.isFalse(saved.targets[0]?.pauseAccepted);
+    assert.isEmpty(yield* Ref.get(h.messages));
+    const original = Store.deliveryIdentity(saved, saved.targets[0]!, "pause");
+    yield* Ref.set(h.failures, new Set());
+    assert.strictEqual((yield* h.pause.retry).session?.targets[0]?.pause, "sent");
+    const retried = (yield* h.store.get)!;
+    const current = Store.deliveryIdentity(retried, retried.targets[0]!, "pause");
+    assert.notStrictEqual(current.messageId, original.messageId);
+    assert.lengthOf(yield* Ref.get(h.messages), 1);
+    assert.lengthOf(yield* Ref.get(h.calls), 2);
+  }).pipe(Effect.provide(testLayer)),
+);
+
 it.effect("keeps a definitive failed Resume receipt through fanout, status, and restart", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -1318,7 +1550,7 @@ it.effect.each([
     );
     assert.strictEqual(
       partial.session?.targets.find((target) => target.threadId === c)?.resume,
-      "failed",
+      "pending",
     );
     const persisted = yield* Store.EnvironmentPauseStore.pipe(
       Effect.provide(Layer.fresh(Store.layer)),
@@ -1348,14 +1580,14 @@ it.effect.each([
   }).pipe(Effect.provide(testLayer)),
 );
 
-it.effect("clears an existing failed resume when its recipient is later archived", () =>
+it.effect("clears an unconfirmed unsent resume when its recipient is later archived", () =>
   Effect.gen(function* () {
     const h = yield* harness;
     yield* h.pause.start;
     yield* Ref.set(h.readFailures, new Set([b]));
     assert.strictEqual(
       (yield* h.pause.resume).session?.targets.find((target) => target.threadId === b)?.resume,
-      "failed",
+      "pending",
     );
     yield* Ref.set(h.readFailures, new Set());
     yield* Ref.set(h.recipientStates, new Map([[b, "archived"]]));
@@ -1423,7 +1655,7 @@ it.effect(
       yield* h.pause.resume;
       const session = (yield* h.store.get)!;
       const target = session.targets[0]!;
-      assert.strictEqual(target.resume, "failed");
+      assert.strictEqual(target.resume, "pending");
       yield* h.pause.retry;
       assert.strictEqual((yield* h.store.get)?.targets[0]?.resumeAttempt, target.resumeAttempt);
       const identity = Store.deliveryIdentity(session, target, "resume");

@@ -137,6 +137,32 @@ const make = Effect.gen(function* () {
       })
       .pipe(Effect.result);
 
+  const readSubmission = Effect.fnUntraced(function* (
+    session: Store.StoredSession,
+    target: Store.StoredSession["targets"][number],
+    direction: "pause" | "resume",
+  ) {
+    const identity = Store.deliveryIdentity(session, target, direction);
+    const record = yield* projections
+      .getThreadRecords(target.threadId, ["messages"], { messageIds: [identity.messageId] })
+      .pipe(Effect.result);
+    const effects = yield* outbox.listByCommandId(identity.commandId).pipe(Effect.result);
+    // Dispatch commits messages and effects atomically. A failed response/reload
+    // after that commit is not evidence that submitting another message is safe.
+    if (
+      (record._tag === "Success" &&
+        record.success.messages.some((message) => message.id === identity.messageId)) ||
+      (effects._tag === "Success" && effects.success.length > 0)
+    )
+      return "accepted" as const;
+    if (
+      effects._tag === "Failure" ||
+      (record._tag === "Failure" && record.failure._tag !== "ProjectionStoreThreadNotFoundError")
+    )
+      return "unknown" as const;
+    return "unsubmitted" as const;
+  });
+
   const reconcileResumeRecipients = Effect.gen(function* () {
     const session = yield* store.get;
     const retryable = new Set<ThreadId>();
@@ -297,26 +323,18 @@ const make = Effect.gen(function* () {
     const direction = session.phase === "resuming" ? "resume" : "pause";
     let unknown = false;
     for (const target of session.targets) {
-      if (target[direction] !== "pending" || target[`${direction}Accepted`]) continue;
-      const identity = Store.deliveryIdentity(session, target, direction);
-      const record = yield* projections
-        .getThreadRecords(target.threadId, ["messages"], { messageIds: [identity.messageId] })
-        .pipe(Effect.result);
-      const effects = yield* outbox.listByCommandId(identity.commandId).pipe(Effect.result);
       if (
-        effects._tag === "Failure" ||
-        (record._tag === "Failure" && record.failure._tag !== "ProjectionStoreThreadNotFoundError")
-      ) {
-        unknown = true;
+        (target[direction] !== "pending" && target[direction] !== "failed") ||
+        target[`${direction}Accepted`]
+      )
         continue;
+      const submission = yield* readSubmission(session, target, direction);
+      const accepted = submission === "accepted";
+      if (submission === "unknown") {
+        unknown = true;
+        if (target[direction] === "pending") continue;
       }
-      const accepted =
-        (record._tag === "Success" && record.success.messages.length > 0) ||
-        effects.success.some(
-          (effect) =>
-            effect.request.type === "provider-turn.start" ||
-            effect.request.type === "provider-turn.steer",
-        );
+      if (submission === "unsubmitted" && target[direction] === "failed") continue;
       yield* store.update((current) =>
         current?.id !== session.id
           ? current
@@ -325,16 +343,19 @@ const make = Effect.gen(function* () {
               targets: current.targets.map((latest) =>
                 latest.threadId !== target.threadId ||
                 latest[`${direction}Attempt`] !== target[`${direction}Attempt`] ||
-                latest[direction] !== "pending" ||
+                latest[direction] !== target[direction] ||
                 latest[`${direction}Accepted`]
                   ? latest
                   : {
                       ...latest,
-                      [direction]: accepted ? ("pending" as const) : ("failed" as const),
+                      [direction]:
+                        submission === "unsubmitted" ? ("failed" as const) : ("pending" as const),
                       [`${direction}Accepted`]: accepted,
                       error: accepted
                         ? null
-                        : "The message was not submitted before the server stopped. Retry to send it.",
+                        : submission === "unknown"
+                          ? "The message submission could not be confirmed. Waiting for recovery."
+                          : "The message was not submitted before the server stopped. Retry to send it.",
                     },
               ),
             },
@@ -396,7 +417,12 @@ const make = Effect.gen(function* () {
     if (session !== null) {
       for (const target of session.targets) {
         const direction = session.phase === "resuming" ? "resume" : "pause";
-        if (target[direction] !== "pending" || !target[`${direction}Accepted`]) continue;
+        if (target[direction] !== "pending") continue;
+        if (!target[`${direction}Accepted`]) {
+          if ((yield* readSubmission(session, target, direction)) === "unknown")
+            deliveryUnknown = true;
+          continue;
+        }
         const identity = Store.deliveryIdentity(session, target, direction);
         let effects = yield* outbox
           .listByCommandId(identity.commandId)
@@ -584,34 +610,25 @@ const make = Effect.gen(function* () {
           )
             return;
           const identity = Store.deliveryIdentity(snapshot, target, direction);
-          // The command could have committed before the pause file was updated.
-          const existing =
-            direction === "resume"
-              ? yield* readResumeRecipient(snapshot, target)
-              : yield* threads
-                  .getProjectThreadRecords(target, ["messages"], {
-                    messageIds: [identity.messageId],
-                  })
-                  .pipe(Effect.result);
-          const accepted =
-            existing._tag === "Success" &&
-            existing.success.messages.some((message) => message.id === identity.messageId);
-          const result = accepted
-            ? { _tag: "Success" as const }
-            : direction === "resume" && existing._tag === "Failure"
-              ? existing
-              : yield* threads
-                  .sendToThread({
-                    projectId: target.projectId,
-                    threadId: target.threadId,
-                    ...identity,
-                    text: direction === "pause" ? "pause to go offline" : "resume",
-                    attachments: [],
-                    mode: "cooperative",
-                    createdBy: "user",
-                    creationSource: "server",
-                  })
-                  .pipe(Effect.result);
+          let submission = yield* readSubmission(snapshot, target, direction);
+          if (submission === "unsubmitted") {
+            const result = yield* threads
+              .sendToThread({
+                projectId: target.projectId,
+                threadId: target.threadId,
+                ...identity,
+                text: direction === "pause" ? "pause to go offline" : "resume",
+                attachments: [],
+                mode: "cooperative",
+                createdBy: "user",
+                creationSource: "server",
+              })
+              .pipe(Effect.result);
+            submission =
+              result._tag === "Success"
+                ? "accepted"
+                : yield* readSubmission(snapshot, target, direction);
+          }
           yield* store.update((current) =>
             current?.id !== snapshot.id
               ? current
@@ -626,13 +643,17 @@ const make = Effect.gen(function* () {
                       ? latest
                       : {
                           ...latest,
-                          [`${direction}Accepted`]: result._tag === "Success",
+                          [`${direction}Accepted`]: submission === "accepted",
                           [direction]:
-                            result._tag === "Success" ? latest[direction] : ("failed" as const),
+                            submission === "unsubmitted"
+                              ? ("failed" as const)
+                              : ("pending" as const),
                           error:
-                            result._tag === "Success"
+                            submission === "accepted"
                               ? latest.error
-                              : "This thread could not accept the message. Retry after resolving its current state.",
+                              : submission === "unknown"
+                                ? "The message submission could not be confirmed. Waiting for recovery."
+                                : "This thread could not accept the message. Retry after resolving its current state.",
                         },
                   ),
                 },
