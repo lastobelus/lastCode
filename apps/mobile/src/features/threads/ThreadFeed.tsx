@@ -231,11 +231,7 @@ import { appAtomRegistry } from "../../state/atom-registry";
 import { environmentThreadShells, threadEnvironment } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useV2ItemSupport } from "../../state/v2-item-support";
-import {
-  basename,
-  fileRoutePathSegments,
-  resolveWorkspaceRelativeFilePath,
-} from "../files/filePath";
+import { basename, fileRoutePathSegments } from "../files/filePath";
 import { waitForThreadShellReady } from "./threadForkNavigation";
 import { resolveUserMessageIntentBadge } from "./userMessageIntentBadge";
 import { IncomingMessageDisclosure } from "./incoming-message-disclosure";
@@ -2687,11 +2683,10 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
         return;
       }
       const presentation = resolveMarkdownLinkPresentation(href);
+      const fileTarget =
+        presentation.kind === "file" ? resolveFileChipTarget(href, props.workspaceRoot) : null;
       if (presentation.kind === "file") {
-        const relativePath = resolveWorkspaceRelativeFilePath(
-          props.workspaceRoot,
-          presentation.path,
-        );
+        const relativePath = fileTarget?.relativePath;
         if (relativePath) {
           void Haptics.selectionAsync();
           if (isPdfFile({ name: relativePath })) {
@@ -2769,10 +2764,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
 
       // A host file outside the workspace, such as a report an agent wrote to
       // a temp directory, opens read-only in the file screen.
-      const hostFileTarget =
-        presentation.kind === "file"
-          ? resolveFileChipTarget(href, props.workspaceRoot)?.fullPath
-          : undefined;
+      const hostFileTarget = fileTarget?.fullPath;
       if (presentation.kind === "file" && hostFileTarget) {
         void Haptics.selectionAsync();
         if (isPdfFile({ name: hostFileTarget })) {

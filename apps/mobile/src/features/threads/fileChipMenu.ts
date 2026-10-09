@@ -1,3 +1,4 @@
+import { resolvePathLinkTarget } from "@t3tools/shared/fileLinks";
 import { fileBasename } from "@t3tools/shared/path";
 import type { ThreadId } from "@t3tools/contracts";
 import { resolveMarkdownLinkPresentation } from "@t3tools/mobile-markdown-text/links";
@@ -26,12 +27,20 @@ export function resolveFileChipTarget(
 ): FileChipTarget | null {
   const presentation = resolveMarkdownLinkPresentation(href);
   if (presentation.kind !== "file") return null;
-  if (/^~(?:[\\/]|$)/.test(presentation.path)) return null;
-  const relativePath = resolveWorkspaceRelativeFilePath(workspaceRoot, presentation.path);
-  const fullPath = isAbsolutePath(presentation.path)
-    ? presentation.path
+  let path = presentation.path;
+  if (/^~(?:[\\/]|$)/.test(path)) {
+    if (!path.startsWith("~/")) return null;
+    // Infer only the home prefix: the presentation already parsed positions and decoded
+    // filename characters, so resolving its whole path would parse literal colons again.
+    const home = workspaceRoot ? resolvePathLinkTarget("~/", workspaceRoot) : null;
+    if (!home || !isAbsolutePath(home)) return null;
+    path = resolveWorkspaceFilePath(home, path.slice(2));
+  }
+  const relativePath = resolveWorkspaceRelativeFilePath(workspaceRoot, path);
+  const fullPath = isAbsolutePath(path)
+    ? path
     : workspaceRoot
-      ? resolveWorkspaceFilePath(workspaceRoot, relativePath ?? presentation.path)
+      ? resolveWorkspaceFilePath(workspaceRoot, relativePath ?? path)
       : undefined;
   if (!fullPath && !relativePath) return null;
   return {

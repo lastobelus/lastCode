@@ -30,6 +30,37 @@ describe("resolveFileChipTarget", () => {
     });
   });
 
+  it.each([
+    ["/Users/developer/project", "/Users/developer/report.md"],
+    ["/home/developer/project", "/home/developer/report.md"],
+    ["C:\\Users\\developer\\project", "C:\\Users\\developer\\report.md"],
+    ["C:/Users/developer/project", "C:/Users/developer\\report.md"],
+  ])("resolves a home-relative file using the workspace at %s", (cwd, fullPath) => {
+    expect(resolveFileChipTarget("~/report.md:18:3", cwd)).toEqual({ fullPath });
+  });
+
+  it("keeps a home-relative file's workspace route when it resolves inside the workspace", () => {
+    expect(resolveFileChipTarget("~/project/report.md#L18C3", "/home/developer/project")).toEqual({
+      fullPath: "/home/developer/project/report.md",
+      relativePath: "report.md",
+    });
+  });
+
+  it("keeps encoded filename colons and percent signs literal when expanding home", () => {
+    expect(
+      resolveFileChipTarget("~/report%3A12%2520%23one.md:18", "/Users/developer/project"),
+    ).toEqual({
+      fullPath: "/Users/developer/report:12%20#one.md",
+    });
+    expect(resolveFileChipTarget("~/report%2520%23one.md:18", "/home/developer/project")).toEqual({
+      fullPath: "/home/developer/report%20#one.md",
+    });
+  });
+
+  it.each([null, "/repo", "/srv/project", "C:\\repo"])("cannot infer home from %s", (cwd) => {
+    expect(resolveFileChipTarget("~/report.md", cwd)).toBeNull();
+  });
+
   it("ignores links that are not files or cannot be opened", () => {
     expect(resolveFileChipTarget("https://example.com/app.ts", "/repo")).toBeNull();
     expect(resolveFileChipTarget("~/report.md", "/repo")).toBeNull();
@@ -55,6 +86,16 @@ describe("fileChipMenu", () => {
 
 describe("file chip downloads", () => {
   const threadId = ThreadId.make("thread-1");
+
+  it("saves a supported home-relative document through its resolved host destination", () => {
+    const target = resolveFileChipTarget("~/report.pdf#L12", "/home/developer/project")!;
+    expect(fileChipMenu(target).actions).toContainEqual({ id: "save", title: "Save or share" });
+    expect(fileChipShareSource(target, threadId)).toEqual({
+      name: "report.pdf",
+      mimeType: "application/pdf",
+      resource: { _tag: "media-file", threadId, path: "/home/developer/report.pdf" },
+    });
+  });
 
   it.each([
     [
