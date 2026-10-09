@@ -830,7 +830,7 @@ const McpCapabilityErrorFields = {
 export class PreviewAutomationUnavailableError extends Schema.TaggedError<PreviewAutomationUnavailableError>()(
   "PreviewAutomationUnavailableError",
   {
-    capability: Schema.Literal("preview"),
+    capability: Schema.Literals(["preview", "action-resume"]),
     ...McpCapabilityErrorFields,
   },
 ) {
