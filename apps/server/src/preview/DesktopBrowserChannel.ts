@@ -17,6 +17,7 @@ import {
   type DesktopBrowserEvent as DesktopBrowserEventType,
   type PreviewAutomationProfiles,
   type PreviewViewportSetting,
+  type PreviewZoomFactor,
   type DesktopBrowserCommand as DesktopBrowserCommandType,
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
@@ -153,6 +154,8 @@ export class DesktopBrowserChannel extends Context.Service<
         readonly leaseId: string;
         readonly action: "acquire" | "release";
         readonly viewport?: PreviewViewportSetting;
+        readonly viewportSize?: { readonly width: number; readonly height: number };
+        readonly zoomFactor?: PreviewZoomFactor;
         readonly timeoutMs?: number;
       },
       timeoutMs?: number,

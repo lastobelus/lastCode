@@ -206,8 +206,15 @@ const makeRoot = () => {
     getContentSize: () => size,
     destroy: root.window.close,
   });
-  Object.assign(root.contents, { setWindowOpenHandler: () => undefined });
-  return root;
+  let zoomFactor = 1;
+  const contents = Object.assign(root.contents, {
+    setWindowOpenHandler: () => undefined,
+    setZoomFactor: (value: number) => {
+      zoomFactor = value;
+    },
+    getZoomFactor: () => zoomFactor,
+  });
+  return { ...root, contents };
 };
 
 it.effect(
@@ -552,6 +559,74 @@ it.effect("root presence survives transport disconnect and detects an ordinary l
     });
     expect(root.closeCount()).toBe(1);
   }),
+);
+
+it.effect(
+  "native root leases apply fill size and native zoom while preserving fixed settings and release",
+  () =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      const events = yield* Queue.unbounded<DesktopBrowserEvent>();
+      yield* host.remoteEvents.pipe(
+        Stream.runForEach(({ event }) => Queue.offer(events, event)),
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      const root = makeRoot();
+      host.setRootFactory(() => Effect.succeed(root.window));
+      yield* host.bindEnvironment("host-a", "environment-a", profileResolver("environment-a"));
+      const send = (command: Parameters<typeof host.handleRemoteCommand>[0]["command"]) =>
+        host.handleRemoteCommand({ desktopHostId: "host-a", command });
+      yield* send({
+        type: "createRoot",
+        ...key,
+        serverEpoch: "epoch-a",
+        requestId: "create",
+        profileId: "default",
+        url: "about:blank",
+      });
+      yield* Queue.take(events);
+      yield* Queue.take(events);
+      const render = {
+        type: "surface" as const,
+        ...key,
+        requestId: "render",
+        leaseId: "viewer",
+        action: "acquire" as const,
+        viewport: { _tag: "fill" as const },
+        viewportSize: { width: 720, height: 480 },
+        zoomFactor: 1.25 as const,
+      };
+      yield* send(render);
+      expect(yield* Queue.take(events)).toMatchObject({
+        type: "surfaceReady",
+        viewport: { width: 720, height: 480 },
+      });
+      expect(root.window.getContentSize()).toEqual([720, 480]);
+      expect(root.contents.getZoomFactor()).toBe(1.25);
+      expect(root.window.isVisible()).toBe(false);
+      expect(root.window.isFocused()).toBe(false);
+      yield* send({
+        ...render,
+        action: "release",
+        viewportSize: { width: 999, height: 999 },
+        zoomFactor: 0.5,
+      });
+      yield* Queue.take(events);
+      expect(root.window.getContentSize()).toEqual([720, 480]);
+      expect(root.contents.getZoomFactor()).toBe(1.25);
+      yield* send({
+        ...render,
+        viewport: { _tag: "freeform", width: 390, height: 844 },
+        zoomFactor: 1,
+      });
+      expect(yield* Queue.take(events)).toMatchObject({
+        type: "surfaceReady",
+        viewport: { width: 390, height: 844 },
+      });
+      expect(root.contents.getZoomFactor()).toBe(1);
+    }),
 );
 
 it.effect("disconnect retires pending native creation before its factory returns", () =>

@@ -50,6 +50,7 @@ export async function runNativeKeyboardFixture({
   const nativeWindowEvents = [];
   const attempts = [];
   const profileOwnership = [];
+  const renderingMeasurements = [];
   const relayServer = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await new Promise((resolve) => relayServer.once("listening", resolve));
   const hostState = () => hostWindow.webContents.executeJavaScript("surfaceSmokeKeyboardState()");
@@ -219,6 +220,11 @@ export async function runNativeKeyboardFixture({
       browsers.push(browser);
       root.page = browser.contexts()[0].pages()[0];
       root.cdp = await root.page.context().newCDPSession(root.page);
+      NodeAssert.equal(
+        root.page.viewportSize(),
+        null,
+        "native CDP pages have no Playwright viewport",
+      );
       const accepted = await acknowledge({
         type: "acceptRoot",
         ...rootKey(root.id),
@@ -266,6 +272,74 @@ export async function runNativeKeyboardFixture({
         );
         assertHost(await hostState());
       }
+      const filled = await acknowledge({
+        type: "surface",
+        ...rootKey(root.id),
+        requestId: `fill-zoom:${root.id}`,
+        leaseId: `keyboard:${root.id}`,
+        action: "acquire",
+        viewport: { _tag: "fill" },
+        viewportSize: { width: 1000, height: 750 },
+        zoomFactor: 1.25,
+      });
+      NodeAssert.deepEqual(filled.viewport, { width: 1000, height: 750 });
+      NodeAssert.deepEqual(root.window.getContentSize(), [1000, 750]);
+      NodeAssert.equal(root.window.webContents.getZoomFactor(), 1.25);
+      await root.page.waitForFunction(() => innerWidth === 800 && innerHeight === 600, undefined, {
+        timeout: 5000,
+      });
+      const measuredViewport = await ServerBrowserPage.viewportSize(root.page, root.cdp);
+      NodeAssert.deepEqual(measuredViewport, { width: 800, height: 600 });
+      const nativePixelRatio = await root.page.evaluate(() => devicePixelRatio);
+      const zoomedSnapshot = await ServerBrowserPage.snapshot({
+        page: root.page,
+        cdp: root.cdp,
+        renderScale: nativePixelRatio,
+        consoleEntries: [],
+        networkEntries: [],
+        actionTimeline: [],
+        includeImage: true,
+        timeoutMs: 5000,
+      });
+      const pngSize = nativeImage
+        .createFromBuffer(Buffer.from(zoomedSnapshot.screenshot.data, "base64"))
+        .getSize();
+      NodeAssert.deepEqual(pngSize, {
+        width: zoomedSnapshot.screenshot.width,
+        height: zoomedSnapshot.screenshot.height,
+      });
+      NodeAssert.ok(pngSize.width <= 1280, "native zoomed snapshot honors its pixel-width limit");
+      const point = await root.page.locator("#draft").boundingBox();
+      await ServerBrowserPage.click(root.page, {
+        x: point.x + point.width / 2,
+        y: point.y + point.height / 2,
+      });
+      NodeAssert.equal(
+        await root.page.evaluate(() => document.activeElement.id),
+        "draft",
+        "CSS pointer coordinates hit the zoomed native element",
+      );
+      assertHost(await hostState());
+      renderingMeasurements.push({
+        root: root.id,
+        physicalViewport: filled.viewport,
+        cssViewport: measuredViewport,
+        zoomFactor: root.window.webContents.getZoomFactor(),
+        nativePixelRatio,
+        pngSize,
+      });
+      await acknowledge({
+        type: "surface",
+        ...rootKey(root.id),
+        requestId: `restore-zoom:${root.id}`,
+        leaseId: `keyboard:${root.id}`,
+        action: "acquire",
+        viewport: { _tag: "freeform", width: 390, height: 844 },
+        zoomFactor: 1,
+      });
+      await root.page.waitForFunction(() => innerWidth === 390 && innerHeight === 844, undefined, {
+        timeout: 5000,
+      });
       profileOwnership.push({
         root: root.id,
         webContentsId: root.window.webContents.id,
@@ -500,6 +574,7 @@ export async function runNativeKeyboardFixture({
           attempts,
           commands,
           profileOwnership,
+          renderingMeasurements,
           closeResults,
           host: hostStateAfterClose,
           nativeWindowEvents,

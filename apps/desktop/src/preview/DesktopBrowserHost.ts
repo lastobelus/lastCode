@@ -1281,13 +1281,15 @@ export const make = Effect.gen(function* () {
         if (tab.popup) {
           let viewport: DesktopBrowserSurfaceResponse["viewport"] = null;
           try {
-            if (
-              tab.popup.kind === "root" &&
-              command.action === "acquire" &&
-              command.viewport &&
-              command.viewport._tag !== "fill"
-            )
-              tab.popup.window.setContentSize(command.viewport.width, command.viewport.height);
+            if (tab.popup.kind === "root" && command.action === "acquire") {
+              const size =
+                command.viewport && command.viewport._tag !== "fill"
+                  ? command.viewport
+                  : command.viewportSize;
+              if (size) tab.popup.window.setContentSize(size.width, size.height);
+              if (command.zoomFactor !== undefined)
+                tab.popup.contents.setZoomFactor(command.zoomFactor);
+            }
             const [width, height] = tab.popup.window.getContentSize();
             if (
               !tab.popup.window.isDestroyed() &&

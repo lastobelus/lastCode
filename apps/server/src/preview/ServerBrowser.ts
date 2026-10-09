@@ -44,6 +44,7 @@ import {
   ThreadId,
   SERVER_BROWSER_AUTOMATION_CLIENT_ID,
   type PreviewAppearancePreference,
+  type PreviewZoomFactor,
 } from "@t3tools/contracts";
 import {
   HostProcessArchitecture,
@@ -107,6 +108,7 @@ const VIEWER_OUTPUT_LIMIT = 64;
 const RECORDING_SCREENCAST = { format: "jpeg", quality: 90, everyNthFrame: 1 } as const;
 const decodeViewportSetting = Schema.decodeUnknownSync(PreviewViewportSettingSchema);
 const isDesktopBrowserTransportError = Schema.is(DesktopBrowserTransportError);
+const isPreviewNativeCreateError = Schema.is(PreviewNativeCreateError);
 /** The agent cursor glides to its target, then pulses just before the press, like desktop tabs. */
 const AGENT_CURSOR_MOVE_MS = 160;
 const AGENT_CURSOR_CLICK_LEAD_MS = 40;
@@ -334,7 +336,7 @@ interface ServerTab {
   dialog: Dialog | null;
   setting: PreviewViewportSetting;
   colorScheme: PreviewAppearancePreference;
-  zoomFactor: number;
+  zoomFactor: PreviewZoomFactor;
   loading: boolean;
   navigationSequence: number;
   latestNavigationStatus: PreviewNavStatus;
@@ -719,11 +721,23 @@ const make = Effect.gen(function* () {
   };
 
   /**
-   * Zooms a headless page as Chrome's zoom does: it lays out in fewer CSS
-   * pixels and draws each one larger, so frames keep their size. The desktop
-   * zooms the pages it renders itself.
+   * Hidden roots use native zoom. Headless pages lay out in fewer CSS pixels
+   * and draw each one larger; embedded desktop guests own their zoom.
    */
   const applyZoom = async (tab: ServerTab) => {
+    if (tab.backingPage === "desktop-root") {
+      await withNativeSurface(
+        tab,
+        new AbortController().signal,
+        () => 2500,
+        async () => {},
+        tab.setting,
+        {
+          zoomFactor: tab.zoomFactor,
+        },
+      );
+      return;
+    }
     if (tab.desktop) return;
     const size = tab.page.viewportSize();
     if (!size) return;
@@ -741,8 +755,11 @@ const make = Effect.gen(function* () {
     });
   };
 
-  const broadcastViewport = (tab: ServerTab) => {
-    const size = layoutSize(tab);
+  const broadcastViewport = async (tab: ServerTab) => {
+    const size =
+      tab.backingPage === "desktop-root"
+        ? await ServerBrowserPage.viewportSize(tab.page, tab.cdp)
+        : layoutSize(tab);
     if (!size) return;
     for (const viewer of tab.viewers) viewer.push({ _tag: "viewport", ...size });
   };
@@ -750,7 +767,7 @@ const make = Effect.gen(function* () {
   const applySetting = async (tab: ServerTab, setting: PreviewViewportSetting) => {
     tab.setting = setting;
     // The desktop lays its webview out at the published setting itself.
-    if (tab.desktop) return;
+    if (tab.desktop && tab.backingPage !== "desktop-root") return;
     const size =
       fixedViewportSize(setting) ??
       [...tab.viewers]
@@ -758,12 +775,25 @@ const make = Effect.gen(function* () {
         .filter((requested) => requested !== null)
         .sort((left, right) => right.order - left.order)[0] ??
       UNATTACHED_FILL_VIEWPORT;
-    await tab.page.setViewportSize({ width: size.width, height: size.height });
-    await applyZoom(tab);
-    broadcastViewport(tab);
+    if (tab.backingPage === "desktop-root") {
+      await withNativeSurface(
+        tab,
+        new AbortController().signal,
+        () => 2500,
+        async () => {},
+        setting,
+        {
+          viewportSize: { width: size.width, height: size.height },
+        },
+      );
+    } else {
+      await tab.page.setViewportSize({ width: size.width, height: size.height });
+      await applyZoom(tab);
+    }
+    await broadcastViewport(tab);
   };
 
-  /** Applies a tab's published appearance and, for headless tabs, zoom. */
+  /** Applies appearance and zoom to pages whose rendering the server owns. */
   const applyRendering = async (tab: ServerTab, snapshot: PreviewSessionSnapshot) => {
     const colorScheme = snapshot.colorScheme ?? "system";
     if (colorScheme !== tab.colorScheme) {
@@ -771,10 +801,10 @@ const make = Effect.gen(function* () {
       await tab.page.emulateMedia({ colorScheme: colorScheme === "system" ? null : colorScheme });
     }
     const zoomFactor = snapshot.zoomFactor ?? 1;
-    if (zoomFactor !== tab.zoomFactor && !tab.desktop) {
+    if (zoomFactor !== tab.zoomFactor && (!tab.desktop || tab.backingPage === "desktop-root")) {
       tab.zoomFactor = zoomFactor;
       await applyZoom(tab);
-      broadcastViewport(tab);
+      await broadcastViewport(tab);
     }
   };
 
@@ -1790,7 +1820,10 @@ const make = Effect.gen(function* () {
       };
     }
     const url = tab.page.url();
-    const viewport = tab.page.viewportSize();
+    const viewport =
+      tab.backingPage === "desktop-root"
+        ? await ServerBrowserPage.viewportSize(tab.page, tab.cdp)
+        : tab.page.viewportSize();
     if (tab.desktop)
       tab.nativePresented = desktopChannel.isPresented({
         threadId: tab.threadId,
@@ -2722,7 +2755,7 @@ const make = Effect.gen(function* () {
     ...(tab.desktopHostId === undefined ? {} : { desktopHostId: tab.desktopHostId }),
   });
 
-  /** Native layout and captures need an on-window guest even when no thread shows it. */
+  /** Native layout and captures need a paintable page even when no thread shows it. */
   const withNativeSurface = async <A>(
     tab: ServerTab,
     signal: AbortSignal,
@@ -2732,6 +2765,10 @@ const make = Effect.gen(function* () {
       releaseSurface?: () => Promise<void>,
     ) => Promise<A>,
     viewport?: PreviewViewportSetting,
+    rendering?: Pick<
+      Parameters<DesktopBrowserChannel.DesktopBrowserChannel["Service"]["surface"]>[1],
+      "viewportSize" | "zoomFactor"
+    >,
   ): Promise<A> => {
     signal.throwIfAborted();
     if (!tab.desktop) return operation();
@@ -2759,6 +2796,7 @@ const make = Effect.gen(function* () {
               Math.floor(remainingTimeoutMs() - Math.min(150, remainingTimeoutMs() / 10)),
             ),
             ...(viewport === undefined ? {} : { viewport }),
+            ...rendering,
           },
           Math.min(2_500, remainingTimeoutMs()),
         ),
@@ -2880,15 +2918,18 @@ const make = Effect.gen(function* () {
           manager.resize({ threadId: tab.threadId, tabId: tab.tabId, viewport: setting }),
         );
         await applySetting(tab, setting);
-        const viewport = tab.desktop
-          ? await withNativeSurface(
-              tab,
-              signal,
-              remainingTimeoutMs,
-              async (applied) => applied ?? ServerBrowserPage.viewportSize(tab.page, tab.cdp),
-              setting,
-            )
-          : (tab.page.viewportSize() ?? UNATTACHED_FILL_VIEWPORT);
+        const viewport =
+          tab.backingPage === "desktop-root"
+            ? await ServerBrowserPage.viewportSize(tab.page, tab.cdp)
+            : tab.desktop
+              ? await withNativeSurface(
+                  tab,
+                  signal,
+                  remainingTimeoutMs,
+                  async (applied) => applied ?? ServerBrowserPage.viewportSize(tab.page, tab.cdp),
+                  setting,
+                )
+              : (tab.page.viewportSize() ?? UNATTACHED_FILL_VIEWPORT);
         return {
           tabId: tab.tabId,
           setting,
@@ -2905,14 +2946,30 @@ const make = Effect.gen(function* () {
       }
       case "snapshot": {
         const includeImage = (input as { readonly includeImage?: boolean }).includeImage !== false;
-        const capture = () =>
-          ServerBrowserPage.snapshot({
+        const capture = async () => {
+          const renderScale =
+            tab.backingPage === "desktop-root" && includeImage
+              ? await ServerBrowserPage.withReadBudget(
+                  { signal, timeoutMs: remainingTimeoutMs() },
+                  async (read) => {
+                    const response = await read("native pixel density", () =>
+                      tab.cdp.send("Runtime.evaluate", {
+                        expression: "devicePixelRatio",
+                        returnByValue: true,
+                      }),
+                    );
+                    return Number(response.result.value);
+                  },
+                )
+              : RENDER_SCALE;
+          return ServerBrowserPage.snapshot({
             ...tab,
-            renderScale: RENDER_SCALE,
+            renderScale,
             includeImage,
             signal,
             timeoutMs: remainingTimeoutMs(),
           });
+        };
         return includeImage
           ? withScreencastsPaused(tab, capture, signal, remainingTimeoutMs, releaseRequestSurface)
           : capture();
@@ -3000,7 +3057,7 @@ const make = Effect.gen(function* () {
                 cause.message,
                 { reason: cause.reason },
               )
-            : cause instanceof PreviewNativeCreateError
+            : isPreviewNativeCreateError(cause)
               ? new ServerBrowserPage.ServerBrowserOperationError(
                   "PreviewAutomationRemoteUnavailableError",
                   cause.message,
@@ -3184,11 +3241,16 @@ const make = Effect.gen(function* () {
         const height = Math.min(Math.round(num(message.height)), 2160);
         if (width < 100 || height < 100) return;
         viewer.requestedSize = { width, height, order: ++viewerResizeOrder };
-        if (tab.setting._tag !== "fill" || tab.desktop) return;
+        if (tab.setting._tag !== "fill" || (tab.desktop && tab.backingPage !== "desktop-root"))
+          return;
+        if (tab.backingPage === "desktop-root") {
+          await applySetting(tab, tab.setting);
+          return;
+        }
         const current = tab.page.viewportSize();
         if (current?.width === width && current.height === height) return;
         await tab.page.setViewportSize({ width, height });
-        broadcastViewport(tab);
+        await broadcastViewport(tab);
         return;
       }
       case "viewport": {
@@ -3407,7 +3469,7 @@ const make = Effect.gen(function* () {
           ),
         });
       });
-      broadcastViewport(tab);
+      yield* Effect.promise(() => broadcastViewport(tab));
       yield* Effect.promise(() => startScreencast(1));
       // An idle page does not repaint for a new screencast, so the viewer
       // starts from a still unless a live frame beat it.

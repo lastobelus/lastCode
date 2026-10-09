@@ -980,12 +980,19 @@ it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
           {
             action: "acquire",
             leaseId: "lease-a",
-            viewport: { _tag: "freeform", width: 390, height: 844 },
+            viewport: { _tag: "fill" },
+            viewportSize: { width: 390, height: 844 },
+            zoomFactor: 1.25,
           },
         )
         .pipe(Effect.forkScoped);
       const command = yield* Queue.take(first.commands);
       if (command.type !== "surface") throw new Error("Expected surface request");
+      expect(command).toMatchObject({
+        viewport: { _tag: "fill" },
+        viewportSize: { width: 390, height: 844 },
+        zoomFactor: 1.25,
+      });
       const response = {
         type: "surfaceReady" as const,
         ...key,

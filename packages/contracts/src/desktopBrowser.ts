@@ -1,7 +1,7 @@
 import * as Schema from "effect/Schema";
 
 import { PreviewAutomationProfiles } from "./previewAutomation.ts";
-import { PreviewViewportSetting } from "./preview.ts";
+import { PreviewViewportSetting, PreviewZoomFactor } from "./preview.ts";
 
 import { TrimmedNonEmptyString } from "./baseSchemas.ts";
 
@@ -39,6 +39,8 @@ const SurfaceRequest = {
   leaseId: Schema.String,
   action: Schema.Literals(["acquire", "release"]),
   viewport: Schema.optionalKey(PreviewViewportSetting),
+  viewportSize: Schema.optionalKey(SurfaceViewport),
+  zoomFactor: Schema.optionalKey(PreviewZoomFactor),
   timeoutMs: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0))),
 };
 

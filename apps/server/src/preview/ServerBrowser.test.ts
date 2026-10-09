@@ -68,6 +68,12 @@ vi.mock("./ServerBrowserContexts.ts", () => ({
     }
     async connectDesktopPage(endpoint: string) {
       const context = makeContext();
+      const creation = rootCreations.find((root) => endpoint === `ws://desktop/${root.tabId}`);
+      if (creation)
+        context.applyNativeRendering({
+          viewport: creation.viewport,
+          viewportSize: { width: 1024, height: 768 },
+        });
       await desktopPageSetup?.(context, endpoint);
       context.page.emulateMedia.mockImplementation(async () => {
         nativeRenderingEntered?.resolve();
@@ -82,13 +88,30 @@ vi.mock("./ServerBrowserContexts.ts", () => ({
   },
 }));
 
-function makeSession() {
+function makeSession(
+  viewport?: () => { width: number; height: number },
+  pixelRatio?: () => number,
+) {
   return {
     on: vi.fn(),
     detach: vi.fn(async () => {}),
     send: vi.fn(async (method: string, _input?: unknown): Promise<Record<string, unknown>> => {
+      if (
+        method === "Runtime.evaluate" &&
+        (_input as { expression?: string } | undefined)?.expression === "devicePixelRatio"
+      )
+        return { result: { value: pixelRatio?.() ?? 2 } };
       if (method === "Page.getNavigationHistory") return { currentIndex: 0, entries: [{}] };
-      if (method === "Page.getLayoutMetrics") return { cssVisualViewport: { pageX: 0, pageY: 0 } };
+      if (method === "Page.getLayoutMetrics") {
+        const size = viewport?.();
+        return {
+          cssVisualViewport: {
+            pageX: 0,
+            pageY: 0,
+            ...(size ? { clientWidth: size.width, clientHeight: size.height } : {}),
+          },
+        };
+      }
       if (method === "Page.captureScreenshot") return { data: "ZnJhbWU=" };
       return { result: { value: "evaluated" } };
     }),
@@ -100,6 +123,12 @@ function makeContext(onClose?: (context: BrowserContext) => void) {
   const sessions: ReturnType<typeof makeSession>[] = [];
   let url = "about:blank";
   let viewport = { width: 1280, height: 800 };
+  let native = false;
+  let zoomFactor = 1;
+  const cssViewport = () => ({
+    width: Math.round(viewport.width / zoomFactor),
+    height: Math.round(viewport.height / zoomFactor),
+  });
   let closed = false;
   let contextClosed = false;
   const page = {
@@ -115,7 +144,7 @@ function makeContext(onClose?: (context: BrowserContext) => void) {
     mainFrame: () => page,
     url: () => url,
     title: vi.fn(async () => "test page"),
-    viewportSize: () => viewport,
+    viewportSize: () => (native ? null : viewport),
     setViewportSize: vi.fn(async (size: typeof viewport) => {
       viewport = size;
     }),
@@ -153,6 +182,17 @@ function makeContext(onClose?: (context: BrowserContext) => void) {
     }),
   };
   const context = {
+    applyNativeRendering: (input: {
+      viewport?: PreviewViewportSetting;
+      viewportSize?: { width: number; height: number };
+      zoomFactor?: number;
+    }) => {
+      native = true;
+      const size =
+        input.viewport && input.viewport._tag !== "fill" ? input.viewport : input.viewportSize;
+      if (size) viewport = { width: size.width, height: size.height };
+      if (input.zoomFactor !== undefined) zoomFactor = input.zoomFactor;
+    },
     page,
     sessions,
     newPage: async () => page as unknown as Page,
@@ -162,7 +202,7 @@ function makeContext(onClose?: (context: BrowserContext) => void) {
     }),
     addInitScript: vi.fn(async () => {}),
     newCDPSession: async () => {
-      const session = makeSession();
+      const session = makeSession(cssViewport, () => 2 * zoomFactor);
       sessions.push(session);
       if (recordingCdpGate) recordingStageEntered?.resolve();
       await recordingCdpGate?.promise;
@@ -291,6 +331,8 @@ const surfaceCalls: Array<{
   leaseId: string;
   action: "acquire" | "release";
   viewport?: PreviewViewportSetting;
+  viewportSize?: { width: number; height: number };
+  zoomFactor?: number;
 }> = [];
 const testThread = {
   threadId: ThreadId.make("browser-test-thread"),
@@ -498,6 +540,11 @@ const dependencies = Layer.mergeAll(
       Effect.sync(() => {
         surfaceCalls.push({ tabId: key.tabId, ...input });
         if (input.action === "release") return null;
+        if (rootCreations.some((root) => root.tabId === key.tabId))
+          desktopConnections
+            .find((connection) => connection.endpoint === `ws://desktop/${key.tabId}`)
+            ?.context.applyNativeRendering(input);
+        if (input.viewportSize) return input.viewportSize;
         if (input.viewport && input.viewport._tag !== "fill") {
           return { width: input.viewport.width, height: input.viewport.height };
         }
@@ -965,6 +1012,168 @@ it.live("applies any client's viewport, appearance, and zoom to a headless tab",
         deviceScaleFactor: 2.5,
         mobile: false,
       });
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live.each(["local", "host-a"])(
+  "native root viewers apply fill and fixed sizes with measured CSS coordinates (%s)",
+  (desktopHostId) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        profileCatalogue = {
+          desktopHostId,
+          profiles: [{ id: "default", name: "Default", kind: "persistent" }],
+          defaultProfileId: "default",
+        };
+        desktopRendersNext = true;
+        const { browser, broker, tabId } = yield* ready;
+        const manager = yield* Manager.PreviewManager;
+        const page = desktopConnections[0]!.context.page;
+        expect(page.viewportSize()).toBeNull();
+        const passive = yield* browser.attachViewer(viewerInput(tabId, false));
+        expect(yield* Queue.takeAll(passive.output)).toContainEqual({
+          _tag: "viewport",
+          width: 1024,
+          height: 768,
+        });
+        yield* passive.input({ type: "resize", width: 333, height: 444 });
+        yield* passive.input({
+          type: "viewport",
+          setting: { _tag: "freeform", width: 333, height: 444 },
+        });
+        expect(
+          (yield* broker.invoke<PreviewAutomationStatus>({
+            scope,
+            tabId,
+            operation: "status",
+            input: {},
+          })).viewport,
+        ).toEqual({ width: 1024, height: 768 });
+        const active = yield* browser.attachViewer(viewerInput(tabId, true));
+        yield* active.input({ type: "takeControl" });
+        yield* active.input({ type: "resize", width: 1200, height: 720 });
+        expect(yield* Queue.takeAll(active.output)).toContainEqual({
+          _tag: "viewport",
+          width: 1200,
+          height: 720,
+        });
+        expect(
+          surfaceCalls.find((call) => call.viewport?._tag === "fill" && call.viewportSize),
+        ).toMatchObject({ viewportSize: { width: 1200, height: 720 } });
+        yield* active.input({
+          type: "mouse",
+          action: "down",
+          button: "left",
+          x: 600,
+          y: 360,
+          buttons: 1,
+        });
+        expect(desktopConnections[0]!.context.sessions.at(-1)!.send).toHaveBeenCalledWith(
+          "Input.dispatchMouseEvent",
+          expect.objectContaining({ x: 600, y: 360 }),
+        );
+        yield* active.input({
+          type: "viewport",
+          setting: { _tag: "freeform", width: 390, height: 844 },
+        });
+        yield* active.input({ type: "resize", width: 1400, height: 900 });
+        expect(
+          (yield* broker.invoke<PreviewAutomationStatus>({
+            scope,
+            tabId,
+            operation: "status",
+            input: {},
+          })).viewport,
+        ).toEqual({ width: 390, height: 844 });
+        // Switching back to fill chooses the most recent active viewer, not the passive one.
+        yield* active.input({ type: "viewport", setting: { _tag: "fill" } });
+        expect(
+          (yield* broker.invoke<PreviewAutomationStatus>({
+            scope,
+            tabId,
+            operation: "status",
+            input: {},
+          })).viewport,
+        ).toEqual({ width: 1400, height: 900 });
+        expect((yield* manager.list({})).sessions[0]!.viewport).toEqual({ _tag: "fill" });
+        expect(page.setViewportSize).not.toHaveBeenCalled();
+        yield* active.input({ type: "releaseControl" });
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live("published root zoom keeps measured viewport, pointer and snapshot scale coherent", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      desktopRendersNext = true;
+      const { browser, broker, tabId } = yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      const target = { threadId: scope.thread.threadId, tabId };
+      const page = desktopConnections[0]!.context.page;
+      expect(page.viewportSize()).toBeNull();
+      const viewer = yield* browser.attachViewer(viewerInput(tabId, true));
+      const session = desktopConnections[0]!.context.sessions[0]!;
+      const applied = Promise.withResolvers<void>();
+      const send = session.send.getMockImplementation()!;
+      session.send.mockImplementation(async (method, input) => {
+        if (method === "Page.reload") applied.resolve();
+        return send(method, input);
+      });
+      yield* manager.resize({
+        ...target,
+        viewport: { _tag: "freeform", width: 1000, height: 750 },
+      });
+      yield* manager.adjust({ ...target, zoomFactor: 1.25 });
+      yield* manager.adjust({ ...target, hardReload: true });
+      yield* Effect.promise(() => applied.promise);
+      expect(surfaceCalls).toContainEqual(
+        expect.objectContaining({ action: "acquire", zoomFactor: 1.25 }),
+      );
+      expect(yield* Queue.takeAll(viewer.output)).toContainEqual({
+        _tag: "viewport",
+        width: 800,
+        height: 600,
+      });
+      expect(
+        (yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          tabId,
+          operation: "status",
+          input: {},
+        })).viewport,
+      ).toEqual({ width: 800, height: 600 });
+      const snapshot = yield* broker.invoke<PreviewAutomationSnapshot>({
+        scope,
+        tabId,
+        operation: "snapshot",
+        input: { includeImage: true },
+      });
+      expect(snapshot.screenshot).toMatchObject({ width: 1280, height: 960 });
+      expect(session.send).toHaveBeenCalledWith(
+        "Page.captureScreenshot",
+        expect.objectContaining({
+          clip: expect.objectContaining({ width: 800, height: 600, scale: 0.64 }),
+        }),
+      );
+      expect(
+        session.send.mock.calls.some(([method]) => method === "Emulation.setDeviceMetricsOverride"),
+      ).toBe(false);
+      expect(page.setViewportSize).not.toHaveBeenCalled();
+      yield* viewer.input({ type: "takeControl" });
+      yield* viewer.input({
+        type: "mouse",
+        action: "down",
+        button: "left",
+        x: 400,
+        y: 300,
+        buttons: 1,
+      });
+      expect(desktopConnections[0]!.context.sessions.at(-1)!.send).toHaveBeenCalledWith(
+        "Input.dispatchMouseEvent",
+        expect.objectContaining({ x: 400, y: 300 }),
+      );
+      yield* viewer.input({ type: "releaseControl" });
     }),
   ).pipe(Effect.provide(layer)),
 );
@@ -3133,6 +3342,24 @@ it.live("a root that failed before native acceptance publishes its failed naviga
         }),
       ]);
       expect(desktopConnections[0]!.context.page.goto).toHaveBeenCalledTimes(1);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.effect("native root acceptance failure retains the unavailable error classification", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      yield* ServerBrowser.ServerBrowser;
+      const broker = yield* Broker.PreviewAutomationBroker;
+      const manager = yield* Manager.PreviewManager;
+      yield* Effect.yieldNow;
+      desktopRendersNext = true;
+      rootAcceptanceFailure = new DesktopBrowserTransportError({ reason: "guest-unavailable" });
+      const failure = yield* broker
+        .invoke({ scope, operation: "open", input: { reuseExistingTab: false, show: false } })
+        .pipe(Effect.flip);
+      expect(failure).toMatchObject({ _tag: "PreviewAutomationRemoteUnavailableError" });
+      expect((yield* manager.list({})).sessions).toEqual([]);
     }),
   ).pipe(Effect.provide(layer)),
 );
