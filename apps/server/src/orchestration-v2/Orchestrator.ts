@@ -483,6 +483,12 @@ function isGoalCommand(message: {
 
 const threadPullRequestLinksEqual = Schema.toEquivalence(Schema.NullOr(ThreadLinkedPullRequest));
 
+/** Only the outbox's late-steer fallback may finish an already accepted delivery. */
+export const AcceptedSteeringContinuation = Context.Reference<MessageId | null>(
+  "t3/orchestration-v2/AcceptedSteeringContinuation",
+  { defaultValue: () => null },
+);
+
 function hasUnfinishedArchiveWork(
   projection: Pick<
     OrchestrationV2ThreadProjection,
@@ -5536,6 +5542,41 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             payload: projection.thread,
           });
           return;
+        }
+      }
+
+      if (projection.thread.archivedAt !== null || projection.thread.deletedAt !== null) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `Thread ${command.threadId} is not active.`,
+        });
+      }
+      // A late steer can reroute an accepted message after its original sender archives.
+      if (
+        command.senderThreadId !== undefined &&
+        command.senderThreadId !== command.threadId &&
+        !(
+          (yield* AcceptedSteeringContinuation) === command.messageId &&
+          projection.messages.some(
+            (message) =>
+              message.id === command.messageId && message.senderThreadId === command.senderThreadId,
+          )
+        )
+      ) {
+        const sender = yield* projectionStore
+          .getThread(command.senderThreadId)
+          .pipe(mapDispatchError(command));
+        if (
+          sender.archivedAt !== null ||
+          sender.deletedAt !== null ||
+          sender.archivePending?.status === "stopping"
+        ) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: `Sender thread ${command.senderThreadId} is not active.`,
+          });
         }
       }
 
@@ -13370,10 +13411,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }),
       );
     }
-    const dispatch = threadDispatch.withLock(
-      commandThreadId(command),
-      dispatchWithReceiptEffect(command),
-    );
+    // Sending and archiving either participant must have one commit order.
+    const dispatch =
+      command.type === "message.dispatch" &&
+      command.senderThreadId !== undefined &&
+      command.senderThreadId !== command.threadId
+        ? [command.threadId, command.senderThreadId]
+            .toSorted()
+            .reduceRight(
+              (effect, threadId) => threadDispatch.withLock(threadId, effect),
+              dispatchWithReceiptEffect(command),
+            )
+        : threadDispatch.withLock(commandThreadId(command), dispatchWithReceiptEffect(command));
     if (command.type === "message.dispatch" || command.type === "delegated_task.request")
       return admitNewExecution(command, "thread-turn", dispatch);
     const operation = command.type.startsWith("thread.worktree-cleanup.")
