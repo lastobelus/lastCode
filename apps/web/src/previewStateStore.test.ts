@@ -979,17 +979,69 @@ it.each(["terminal", "file"] as const)(
   },
 );
 
+it.each(
+  (["file", "terminal"] as const).flatMap((panelKind) =>
+    [1, 2].map((listRevision) => ({ panelKind, listRevision })),
+  ),
+)(
+  "honors live foreign foreground focus after initial hydration with $panelKind and list revision $listRevision",
+  ({ panelKind, listRevision }) => {
+    const panel = useRightPanelStore.getState();
+    if (panelKind === "file") panel.openFile(ref, "src/app.ts");
+    else panel.openTerminal(ref, "terminal-1");
+    const beforeRevision = panel.getUserActionRevision(ref);
+    const opened = makeSnapshot({ tabId: "foreign-first-tab" });
+    const listed = { ...opened, updatedAt: "2026-01-01T00:00:02.000Z" };
+    reconcilePreviewServerSessions(ref, {
+      serverEpoch,
+      revision: listRevision,
+      sessions: [listed],
+    });
+    reconcilePanel();
+    const event = {
+      type: "opened" as const,
+      threadId: ref.threadId,
+      tabId: opened.tabId,
+      snapshot: opened,
+      serverEpoch,
+      revision: 1,
+      createdAt: opened.updatedAt,
+      focus: { clientId: "another-client", userActionRevision: 3 },
+    };
+    applyPreviewServerEventImpl(ref, event);
+    expect(selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, ref)?.id).toBe(
+      `browser:${opened.tabId}`,
+    );
+    expect(panel.getUserActionRevision(ref)).toBe(beforeRevision + 1);
+    panel.openFile(ref, "src/later.ts");
+    const laterRevision = panel.getUserActionRevision(ref);
+    applyPreviewServerEventImpl(ref, event);
+    reconcilePanel();
+    expect(selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, ref)?.id).toBe(
+      "file:src/later.ts",
+    );
+    expect(panel.getUserActionRevision(ref)).toBe(laterRevision);
+    if (listRevision === 2) expect(readThreadPreviewState(ref).snapshot).toEqual(listed);
+  },
+);
+
 it("does not replay historical creation focus after a cold authoritative baseline", () => {
   const old = makeSnapshot({ tabId: "older" });
   const newest = makeSnapshot({ tabId: "newest", updatedAt: "2026-01-01T00:00:02.000Z" });
   reconcilePreviewServerSessions(ref, { serverEpoch, revision: 5, sessions: [old, newest] });
-  applyPreviewServerEvent(ref, {
-    type: "opened",
-    threadId: ref.threadId,
-    tabId: old.tabId,
-    snapshot: old,
-    createdAt: old.updatedAt,
-  });
+  applyPreviewServerEventImpl(
+    ref,
+    {
+      type: "opened",
+      threadId: ref.threadId,
+      tabId: old.tabId,
+      snapshot: old,
+      createdAt: old.updatedAt,
+      serverEpoch,
+      revision: 1,
+    },
+    { replay: true },
+  );
   expect(readThreadPreviewState(ref).activeTabId).toBe(newest.tabId);
   expect(readThreadPreviewState(ref).serverRevision).toBe(5);
   expect(useRightPanelStore.getState().getUserActionRevision(ref)).toBe(0);

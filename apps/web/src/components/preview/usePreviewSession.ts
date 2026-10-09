@@ -66,7 +66,10 @@ const previewSessionSyncAtom = Atom.family((threadKey: string) => {
       }
     };
 
-    const applyLatestEvent = (result: Atom.Type<typeof eventsAtom>) => {
+    const applyLatestEvent = (
+      result: Atom.Type<typeof eventsAtom>,
+      options: { replay?: boolean } = {},
+    ) => {
       if (!AsyncResult.isSuccess(result) || result.value.threadId !== threadRef.threadId) return;
       const currentEpoch = readThreadPreviewState(threadRef).serverEpoch;
       if (currentEpoch !== null && currentEpoch !== result.value.serverEpoch) {
@@ -74,7 +77,7 @@ const previewSessionSyncAtom = Atom.family((threadKey: string) => {
         return;
       }
       // The persistent host already applies this desktop's primary-server events.
-      if (!hostAppliesEvents) applyPreviewServerEvent(threadRef, result.value);
+      if (!hostAppliesEvents) applyPreviewServerEvent(threadRef, result.value, options);
     };
 
     get.addFinalizer(() => {
@@ -86,7 +89,14 @@ const previewSessionSyncAtom = Atom.family((threadKey: string) => {
     });
     get.subscribe(eventsAtom, (result) => {
       eventsVersion += 1;
-      applyLatestEvent(result);
+      // The server's PubSub does not replay. A retained value from before this
+      // sync mounted is historical even if the atom re-emits it while reconnecting.
+      applyLatestEvent(result, {
+        replay:
+          AsyncResult.isSuccess(initialEvent) &&
+          result._tag === "Success" &&
+          result.value === initialEvent.value,
+      });
     });
     get.mount(sessionsAtom);
     get.mount(eventsAtom);
@@ -96,7 +106,7 @@ const previewSessionSyncAtom = Atom.family((threadKey: string) => {
       // snapshot visible until an authoritative refresh arrives instead of
       // reconciling against a stale empty result when the panel first mounts.
       get.refresh(sessionsAtom);
-      if (eventsVersion === 0) applyLatestEvent(initialEvent);
+      if (eventsVersion === 0) applyLatestEvent(initialEvent, { replay: true });
     });
   }).pipe(Atom.setIdleTTL(1_000), Atom.withLabel(`preview:session-sync:${threadKey}`));
 });

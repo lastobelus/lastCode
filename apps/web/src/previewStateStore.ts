@@ -66,8 +66,6 @@ export interface ThreadPreviewState {
   sessions: Record<string, PreviewSessionSnapshot>;
   /** Tabs intentionally closed by this client. Stale list snapshots must not resurrect them. */
   suppressedTabIds: ReadonlySet<string>;
-  /** Tabs from the initial list; their historical creation events must not select them. */
-  initialListTabIds: ReadonlySet<string>;
   /** Creation focus already applied, or superseded by an explicit selection. */
   handledOpenTabIds: ReadonlySet<string>;
   activeTabId: string | null;
@@ -86,7 +84,6 @@ const EMPTY_THREAD_PREVIEW_STATE: ThreadPreviewState = Object.freeze({
   snapshot: null,
   sessions: {},
   suppressedTabIds: new Set<string>(),
-  initialListTabIds: new Set<string>(),
   handledOpenTabIds: new Set<string>(),
   activeTabId: null,
   desktopOverlay: null,
@@ -204,7 +201,6 @@ const removeSession = (current: ThreadPreviewState, tabId: string): ThreadPrevie
   return {
     ...current,
     sessions,
-    initialListTabIds: new Set([...current.initialListTabIds].filter((id) => id !== tabId)),
     handledOpenTabIds: new Set([...current.handledOpenTabIds].filter((id) => id !== tabId)),
     desktopByTabId,
     activeTabId: snapshot?.tabId ?? null,
@@ -293,19 +289,25 @@ function applyOpenedFocus(
   };
 }
 
-export function applyPreviewServerEvent(ref: ScopedThreadRef, event: PreviewEvent): void {
+export function applyPreviewServerEvent(
+  ref: ScopedThreadRef,
+  event: PreviewEvent,
+  options: { replay?: boolean } = {},
+): void {
   const previous = readThreadPreviewState(ref);
   const focusSuperseded =
     event.type === "opened" &&
-    (event.focus?.clientId === openFocusClientId
-      ? event.focus.userActionRevision !== useRightPanelStore.getState().getUserActionRevision(ref)
-      : previous.initialListTabIds.has(event.tabId));
+    event.focus?.clientId === openFocusClientId &&
+    event.focus.userActionRevision !== useRightPanelStore.getState().getUserActionRevision(ref);
   updateThreadPreviewState(ref, (current) => {
     if (current.serverEpoch !== null && event.serverEpoch !== current.serverEpoch) return current;
-    // A list may hydrate a new tab before its creation event. Consume that
-    // event's focus once, while retaining newer metadata and revision ordering.
+    // A list may hydrate a new tab before its live creation event. Consume
+    // that focus once, while retaining newer metadata and revision ordering.
+    // A cached mount replay carries metadata only, leaving pending RPC focus intact.
     if (event.revision < current.serverRevision) {
-      return event.type === "opened" ? applyOpenedFocus(current, event, focusSuperseded) : current;
+      return event.type === "opened" && !options.replay
+        ? applyOpenedFocus(current, event, focusSuperseded)
+        : current;
     }
     const next = (() => {
       switch (event.type) {
@@ -329,7 +331,7 @@ export function applyPreviewServerEvent(ref: ScopedThreadRef, event: PreviewEven
             desktopOverlay: current.desktopByTabId[activeSnapshot.tabId] ?? null,
             recentlySeenUrls,
           };
-          return event.type === "opened"
+          return event.type === "opened" && !options.replay
             ? applyOpenedFocus(updated, event, focusSuperseded)
             : updated;
         }
@@ -409,7 +411,6 @@ export function applyPreviewServerSnapshot(
         ...current,
         snapshot: null,
         sessions: {},
-        initialListTabIds: new Set<string>(),
         handledOpenTabIds: new Set<string>(),
         activeTabId: null,
         desktopOverlay: null,
@@ -553,26 +554,10 @@ export function reconcilePreviewServerSessions(
         (tabId) => sessions[tabId] !== undefined,
       ),
     );
-    const initialListTabIds = new Set(
-      [...(sameServer || current.serverEpoch === null ? current.initialListTabIds : [])].filter(
-        (tabId) => sessions[tabId] !== undefined,
-      ),
-    );
-    // Initial hydration suppresses historical events, not an open requested by
-    // this client while the list was pending. Only applied or superseded focus
-    // belongs in handledOpenTabIds, so that open's RPC can still select its tab.
-    if (
-      !current.listLoaded &&
-      current.activeTabId === null &&
-      Object.keys(current.sessions).length === 0
-    ) {
-      for (const tabId of Object.keys(sessions)) initialListTabIds.add(tabId);
-    }
     return {
       ...current,
       sessions,
       suppressedTabIds,
-      initialListTabIds,
       handledOpenTabIds,
       activeTabId,
       snapshot,

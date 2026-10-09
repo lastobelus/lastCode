@@ -7,6 +7,7 @@ import {
   type DesktopPreviewBridge,
   type PreviewEvent,
   type PreviewListResult,
+  type PreviewSessionSnapshot,
 } from "@t3tools/contracts";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { Cause, Effect } from "effect";
@@ -96,6 +97,7 @@ import * as browserDefaults from "./browserDefaults";
 import { toastManager } from "~/components/ui/toast";
 import { usePreviewSession } from "~/components/preview/usePreviewSession";
 import { AppAtomRegistryProvider, appAtomRegistry } from "~/rpc/atomRegistry";
+import { selectActiveRightPanelSurface, useRightPanelStore } from "~/rightPanelStore";
 
 const previewEvents = new Map<
   string,
@@ -128,6 +130,9 @@ function deferred<A>() {
 }
 
 beforeEach(() => {
+  // Each case mounts its own sync hook; retained subscriptions from another
+  // renderer must not receive this case's pre-mount cached event as live.
+  appAtomRegistry.reset();
   resetPreviewStateForTests();
   threadListQueries.clear();
   appAtomRegistry.set(previewList, AsyncResult.initial());
@@ -350,6 +355,109 @@ describe("Electron browser hosting outside the selected thread", () => {
       snapshot.tabId,
     );
   });
+
+  it.each(
+    (["primary", "remote"] as const).flatMap((origin) =>
+      (["cached", "live"] as const).flatMap((delivery) =>
+        [1, 2].map((listRevision) => ({ origin, delivery, listRevision })),
+      ),
+    ),
+  )(
+    "classifies $delivery $origin creation focus after first list revision $listRevision",
+    async ({ origin, delivery, listRevision }) => {
+      useRightPanelStore.setState({
+        byThreadKey: {},
+        threadPanelVisibilityByThreadKey: {},
+        userActionRevisionByThreadKey: {},
+      });
+      const threadRef = scopeThreadRef(
+        EnvironmentId.make(origin === "primary" ? "desktop-primary" : "remote-hydration"),
+        ThreadId.make(`${origin}-${delivery}-list-${listRevision}`),
+      );
+      const snapshot: PreviewSessionSnapshot = {
+        threadId: threadRef.threadId,
+        tabId: "foreign-first-tab",
+        runtime: "server",
+        backingPage: "desktop",
+        desktopHostId: "local",
+        navStatus: { _tag: "Idle" },
+        canGoBack: false,
+        canGoForward: false,
+        updatedAt: "2026-10-07T00:00:00.000Z",
+      };
+      const event: PreviewEvent = {
+        type: "opened",
+        threadId: threadRef.threadId,
+        tabId: snapshot.tabId,
+        snapshot,
+        createdAt: snapshot.updatedAt,
+        serverEpoch: "server",
+        revision: 1,
+        focus: { clientId: "another-client", userActionRevision: 3 },
+      };
+      const panel = useRightPanelStore.getState();
+      panel.openFile(threadRef, "src/app.ts");
+      const beforeRevision = panel.getUserActionRevision(threadRef);
+      if (delivery === "cached") {
+        appAtomRegistry.set(previewEventsFor(threadRef.environmentId), AsyncResult.success(event));
+      }
+      function ChatSync() {
+        usePreviewSession(threadRef);
+        return null;
+      }
+      mocks.getClientSettings.mockResolvedValue(DEFAULT_CLIENT_SETTINGS);
+      await act(async () => {
+        await ensureClientSettingsHydrated();
+        renderer = create(
+          <AppAtomRegistryProvider>
+            {origin === "primary" ? <ElectronBrowserHost /> : <ChatSync />}
+          </AppAtomRegistryProvider>,
+          {
+            createNodeMock: (element) =>
+              element.type === "webview"
+                ? Object.assign(new EventTarget(), { getWebContentsId: () => 44 })
+                : { scrollLeft: 0, scrollTop: 0, scrollTo: () => undefined },
+          },
+        );
+      });
+      await act(() => {
+        appAtomRegistry.set(
+          origin === "primary" ? previewList : threadListValues(scopedThreadKey(threadRef)),
+          AsyncResult.success({
+            serverEpoch: "server",
+            revision: listRevision,
+            sessions: [{ ...snapshot, updatedAt: "2026-10-07T00:00:02.000Z" }],
+          }),
+        );
+      });
+      expect(
+        selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, threadRef)?.id,
+      ).toBe("file:src/app.ts");
+      // A cached value can re-emit as waiting during reconnect. A value first
+      // delivered after the sync mounted comes from the live server subscription.
+      await act(() => {
+        appAtomRegistry.set(
+          previewEventsFor(threadRef.environmentId),
+          AsyncResult.success(event, { waiting: true }),
+        );
+      });
+      expect(
+        selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, threadRef)?.id,
+      ).toBe(delivery === "live" ? `browser:${snapshot.tabId}` : "file:src/app.ts");
+      expect(panel.getUserActionRevision(threadRef)).toBe(
+        beforeRevision + (delivery === "live" ? 1 : 0),
+      );
+      panel.openTerminal(threadRef, "later-terminal");
+      const laterRevision = panel.getUserActionRevision(threadRef);
+      await act(() => {
+        appAtomRegistry.set(previewEventsFor(threadRef.environmentId), AsyncResult.success(event));
+      });
+      expect(
+        selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, threadRef)?.id,
+      ).toBe("terminal:later-terminal");
+      expect(panel.getUserActionRevision(threadRef)).toBe(laterRevision);
+    },
+  );
 
   it("applies primary events once and ignores retired lists while remote epochs advance", async () => {
     const local = {

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import {
   EnvironmentId,
   ThreadId,
@@ -10,9 +10,6 @@ import * as Cause from "effect/Cause";
 
 const mocks = vi.hoisted(() => ({
   prepareHostedPreview: vi.fn(async (_ref: unknown, url: string) => ({ url })),
-  applySnapshot: vi.fn(),
-  rememberUrl: vi.fn(),
-  openBrowser: vi.fn(),
   rememberHandoff: vi.fn(),
 }));
 vi.mock("~/components/preview/previewHostingRecovery", () => ({
@@ -23,14 +20,10 @@ vi.mock("~/browser/previewRuntime", () => ({
   previewRuntimeFor: () => "server",
   desktopBrowserHostFor: () => undefined,
 }));
-vi.mock("~/previewStateStore", () => ({
-  applyPreviewServerSnapshot: mocks.applySnapshot,
-  rememberPreviewUrl: mocks.rememberUrl,
+vi.mock("~/handoffs/handoffsStore", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("~/handoffs/handoffsStore")>()),
+  rememberHandoffBrowser: mocks.rememberHandoff,
 }));
-vi.mock("~/rightPanelStore", () => ({
-  useRightPanelStore: { getState: () => ({ openBrowser: mocks.openBrowser }) },
-}));
-vi.mock("~/handoffs/handoffsStore", () => ({ rememberHandoffBrowser: mocks.rememberHandoff }));
 vi.mock("./browserDefaults", () => ({
   resolveBrowserDefaults: async () => ({}),
   browserDefaultOpenViewport: () => ({ _tag: "fill" }),
@@ -38,6 +31,8 @@ vi.mock("./browserDefaults", () => ({
 }));
 
 import { openFileInPreview } from "./openFileInPreview";
+import { readThreadPreviewState, resetPreviewStateForTests } from "~/previewStateStore";
+import { selectActiveRightPanelSurface, useRightPanelStore } from "~/rightPanelStore";
 
 const threadRef = {
   environmentId: EnvironmentId.make("linked-file-env"),
@@ -51,6 +46,15 @@ const snapshot: PreviewSessionSnapshot = {
   canGoForward: false,
   updatedAt: "2026-01-01T00:00:00.000Z",
 };
+
+beforeEach(() => {
+  resetPreviewStateForTests();
+  useRightPanelStore.setState({
+    byThreadKey: {},
+    threadPanelVisibilityByThreadKey: {},
+    userActionRevisionByThreadKey: {},
+  });
+});
 
 afterEach(() => vi.clearAllMocks());
 
@@ -87,7 +91,10 @@ describe("linked file browser previews", () => {
         environmentId: threadRef.environmentId,
         input: expect.objectContaining({ threadId: threadRef.threadId }),
       });
-      expect(mocks.openBrowser).toHaveBeenCalledExactlyOnceWith(threadRef, snapshot.tabId);
+      expect(readThreadPreviewState(threadRef).snapshot).toEqual(snapshot);
+      expect(
+        selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, threadRef)?.id,
+      ).toBe(`browser:${snapshot.tabId}`);
       expect(mocks.rememberHandoff).toHaveBeenCalledExactlyOnceWith(
         threadRef,
         snapshot.tabId,
@@ -147,7 +154,10 @@ describe("linked file browser previews", () => {
     });
     expect(openPreview).not.toHaveBeenCalled();
     expect(mocks.prepareHostedPreview).not.toHaveBeenCalled();
-    expect(mocks.openBrowser).not.toHaveBeenCalled();
+    expect(readThreadPreviewState(threadRef).sessions).toEqual({});
+    expect(
+      selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, threadRef),
+    ).toBeNull();
     expect(mocks.rememberHandoff).not.toHaveBeenCalled();
   });
 });

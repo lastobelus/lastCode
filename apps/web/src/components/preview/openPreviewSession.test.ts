@@ -445,16 +445,20 @@ it.each(
       // An unrelated historical creation must stay suppressed even while a
       // local open is pending, including events carrying another client's focus.
       for (const focus of [undefined, { clientId: "another-client", userActionRevision: 0 }]) {
-        applyPreviewServerEvent(threadRef, {
-          type: "opened",
-          threadId: threadRef.threadId,
-          tabId: historical.tabId,
-          snapshot: historical,
-          serverEpoch: "server-a",
-          revision: 1,
-          createdAt: historical.updatedAt,
-          focus,
-        });
+        applyPreviewServerEvent(
+          threadRef,
+          {
+            type: "opened",
+            threadId: threadRef.threadId,
+            tabId: historical.tabId,
+            snapshot: historical,
+            serverEpoch: "server-a",
+            revision: 1,
+            createdAt: historical.updatedAt,
+            focus,
+          },
+          { replay: true },
+        );
         expect(useRightPanelStore.getState().byThreadKey["local:thread-1"]?.activeSurfaceId).toBe(
           chosenSurface,
         );
@@ -983,7 +987,9 @@ it.each(
         expected,
       );
       expect(panel.getUserActionRevision(threadRef)).toBe(revision);
-      expect(readThreadPreviewState(threadRef).sessions[pages[index]!.tabId]).toEqual(listed[index]);
+      expect(readThreadPreviewState(threadRef).sessions[pages[index]!.tabId]).toEqual(
+        listed[index],
+      );
     }
   },
 );
