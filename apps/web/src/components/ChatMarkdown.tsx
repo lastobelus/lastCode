@@ -3103,7 +3103,8 @@ const CHAT_MARKDOWN_COMPONENTS = {
       return linkedEnvironmentId ? (
         <MarkdownThreadLink
           environmentId={linkedEnvironmentId}
-          threadId={linkedThread.threadId}
+          reference={linkedThread}
+          messageEnvironmentId={environmentId ?? undefined}
           label={label}
         />
       ) : (

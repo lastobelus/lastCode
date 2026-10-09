@@ -1,5 +1,11 @@
 import {
   OrchestratorMcpFailure,
+  type MessageId,
+  type ThreadId,
+  type RunId,
+  type OrchestrationV2Run,
+  type OrchestrationV2ThreadProjection,
+  type OrchestrationV2ContextTransfer,
   type OrchestratorMcpThreadReadInput,
   type OrchestratorMcpThreadReadResult,
   type ThreadReadRequest,
@@ -19,6 +25,16 @@ import * as Stream from "effect/Stream";
 export class ThreadReadBroker extends Context.Service<
   ThreadReadBroker,
   {
+    readonly authorize: (input: {
+      readonly threadId: ThreadId;
+      readonly messageId: MessageId;
+      readonly sessionId: string;
+      readonly alreadyStored: boolean;
+    }) => Effect.Effect<void>;
+    readonly authorizedSession: (
+      threadId: ThreadId,
+      messageId: MessageId,
+    ) => Effect.Effect<string | undefined>;
     readonly connect: (
       sessionId: string,
     ) => Effect.Effect<Stream.Stream<ThreadReadRequest>, never, Scope.Scope>;
@@ -27,6 +43,8 @@ export class ThreadReadBroker extends Context.Service<
       response: ThreadReadResponse,
     ) => Effect.Effect<void, OrchestratorMcpFailure>;
     readonly read: (
+      threadId: ThreadId,
+      messageId: MessageId,
       input: OrchestratorMcpThreadReadInput,
     ) => Effect.Effect<OrchestratorMcpThreadReadResult, OrchestratorMcpFailure>;
   }
@@ -41,6 +59,19 @@ const unavailable = () =>
 
 const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
+  const authorizations = new Map<ThreadId, Map<MessageId, string>>();
+  const authorizedSession: ThreadReadBroker["Service"]["authorizedSession"] = (
+    threadId,
+    messageId,
+  ) => Effect.sync(() => authorizations.get(threadId)?.get(messageId));
+  const authorize: ThreadReadBroker["Service"]["authorize"] = (input) =>
+    Effect.sync(() => {
+      const messages = authorizations.get(input.threadId) ?? new Map<MessageId, string>();
+      // A replay cannot claim an existing execution, or replace its original requester.
+      if (input.alreadyStored || messages.has(input.messageId)) return;
+      messages.set(input.messageId, input.sessionId);
+      authorizations.set(input.threadId, messages);
+    });
   const clients = new Map<
     string,
     { sessionId: string; queue: Queue.Queue<ThreadReadRequest, Cause.Done> }
@@ -123,15 +154,16 @@ const make = Effect.gen(function* () {
       yield* finishMiss(response.requestId);
     });
 
-  const read: ThreadReadBroker["Service"]["read"] = (input) =>
+  const read: ThreadReadBroker["Service"]["read"] = (threadId, messageId, input) =>
     Effect.gen(function* () {
-      if (clients.size === 0) return yield* unavailable();
+      const sessionId = yield* authorizedSession(threadId, messageId);
+      const targets = [...clients].filter(([, client]) => client.sessionId === sessionId);
+      if (sessionId === undefined || targets.length === 0) return yield* unavailable();
       const requestId = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
       const result = yield* Deferred.make<
         OrchestratorMcpThreadReadResult,
         OrchestratorMcpFailure
       >();
-      const targets = [...clients];
       pending.set(requestId, {
         input,
         result,
@@ -150,7 +182,48 @@ const make = Effect.gen(function* () {
       }).pipe(Effect.ensuring(Effect.sync(() => pending.delete(requestId))));
     });
 
-  return ThreadReadBroker.of({ connect, respond, read });
+  return ThreadReadBroker.of({ authorize, authorizedSession, connect, respond, read });
 });
 
 export const layer = Layer.effect(ThreadReadBroker, make);
+
+/** Delegation inherits the run that spawned it, even after its parent starts another run. */
+type AuthoritySource = {
+  readonly thread: Pick<OrchestrationV2ThreadProjection["thread"], "id">;
+  readonly runs: ReadonlyArray<Pick<OrchestrationV2Run, "id" | "userMessageId">>;
+  readonly contextTransfers: ReadonlyArray<
+    Pick<OrchestrationV2ContextTransfer, "type" | "targetRunId" | "sourceThreadId" | "sourcePoint">
+  >;
+};
+
+export const resolveAuthority = <E>(
+  broker: ThreadReadBroker["Service"],
+  source: AuthoritySource,
+  run: Pick<OrchestrationV2Run, "id" | "userMessageId"> | undefined,
+  readSource: (threadId: ThreadId) => Effect.Effect<AuthoritySource, E>,
+  visited = new Set<RunId>(),
+): Effect.Effect<
+  | { readonly threadId: ThreadId; readonly messageId: MessageId; readonly sessionId: string }
+  | undefined,
+  E
+> =>
+  Effect.gen(function* () {
+    if (run === undefined || visited.has(run.id)) return undefined;
+    visited.add(run.id);
+    const sessionId = yield* broker.authorizedSession(source.thread.id, run.userMessageId);
+    if (sessionId !== undefined) {
+      return { threadId: source.thread.id, messageId: run.userMessageId, sessionId };
+    }
+    const transfer = source.contextTransfers.find(
+      (candidate) => candidate.type === "subagent_spawn" && candidate.targetRunId === run.id,
+    );
+    if (transfer?.sourcePoint.runId === undefined) return undefined;
+    const parent = yield* readSource(transfer.sourceThreadId);
+    return yield* resolveAuthority(
+      broker,
+      parent,
+      parent.runs.find((candidate) => candidate.id === transfer.sourcePoint.runId),
+      readSource,
+      visited,
+    );
+  });

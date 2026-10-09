@@ -1,3 +1,4 @@
+import { ThreadReadAuthorization } from "./orchestration-v2/ThreadReadAuthorization.ts";
 import { ThreadRecoveryOperationError } from "@t3tools/contracts";
 import * as ThreadRecovery from "./orchestration-v2/ThreadRecoveryService.ts";
 import * as ThreadRecoveryRepair from "./orchestration-v2/ThreadRecoveryRepairService.ts";
@@ -1246,6 +1247,19 @@ const layerWsRpc = (
         }
       };
       const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
+      const authorizeThreadRead = (threadId: ThreadId, messageId: MessageId) =>
+        Effect.gen(function* () {
+          const records = yield* threadManagement.getThreadRecords(threadId, ["runs"]);
+          yield* threadReadBroker.authorize({
+            threadId,
+            messageId,
+            sessionId: currentSessionId,
+            alreadyStored: records.runs.some((run) => run.userMessageId === messageId),
+          });
+        }).pipe(
+          // Failure to inspect the source must deny remote routing, without preventing a turn.
+          Effect.catch(() => Effect.void),
+        );
       const threadRecovery = yield* ThreadRecovery.ThreadRecoveryService;
       const threadRepair = yield* ThreadRecoveryRepair.ThreadRecoveryRepairService;
       const providerSessionManager = yield* ProviderSessionManager.ProviderSessionManagerV2;
@@ -1873,7 +1887,12 @@ const layerWsRpc = (
                             "creationSource" in command ? command.creationSource : "web",
                         }),
                       )
-                  ).pipe(Effect.provide(intakeContext)),
+                  ).pipe(Effect.provide(intakeContext), (effect) =>
+                    (command.type === "message.dispatch"
+                      ? authorizeThreadRead(command.threadId, command.messageId)
+                      : Effect.void
+                    ).pipe(Effect.andThen(effect)),
+                  ),
                 )
                 .pipe(
                   Effect.tap(() => recordClientCommandAnalytics(command)),
@@ -2038,7 +2057,12 @@ const layerWsRpc = (
                         }),
                     createdBy: "user",
                     creationSource: input.creationSource ?? "web",
-                  }).pipe(Effect.provide(intakeContext)),
+                  }).pipe(
+                    Effect.provideService(ThreadReadAuthorization, {
+                      authorize: authorizeThreadRead,
+                    }),
+                    Effect.provide(intakeContext),
+                  ),
                 )
                 .pipe(
                   Effect.tap(() =>

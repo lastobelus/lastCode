@@ -1,8 +1,10 @@
 import { describe, expect, it } from "@effect/vitest";
 import {
   EnvironmentId,
+  MessageId,
   ProjectId,
   ProviderInstanceId,
+  RunId,
   ThreadId,
   TurnItemId,
   type OrchestratorMcpThreadReadResult,
@@ -18,6 +20,8 @@ import * as TestClock from "effect/testing/TestClock";
 import * as ThreadReadBroker from "./ThreadReadBroker.ts";
 
 const threadId = ThreadId.make("thread-remote-example");
+const sourceThreadId = ThreadId.make("source-thread");
+const sourceMessageId = MessageId.make("source-message");
 const environmentId = EnvironmentId.make("remote-environment");
 const result: OrchestratorMcpThreadReadResult = {
   thread: {
@@ -58,15 +62,155 @@ const result: OrchestratorMcpThreadReadResult = {
   hasMore: true,
 };
 
-const makeBroker = ThreadReadBroker.ThreadReadBroker.pipe(
-  Effect.provide(ThreadReadBroker.layer.pipe(Layer.provide(NodeCrypto.layer))),
-);
+const makeBroker = Effect.gen(function* () {
+  const broker = yield* ThreadReadBroker.ThreadReadBroker;
+  yield* broker.authorize({
+    threadId: sourceThreadId,
+    messageId: sourceMessageId,
+    sessionId: "client-session",
+    alreadyStored: false,
+  });
+  return broker;
+}).pipe(Effect.provide(ThreadReadBroker.layer.pipe(Layer.provide(NodeCrypto.layer))));
 
 describe("ThreadReadBroker", () => {
+  it.effect(
+    "keeps running and queued inputs bound to their independently authenticated clients",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const broker = yield* makeBroker;
+          const queuedMessageId = MessageId.make("queued-message");
+          yield* broker.authorize({
+            threadId: sourceThreadId,
+            messageId: queuedMessageId,
+            sessionId: "other-session",
+            alreadyStored: false,
+          });
+          const delivered: string[] = [];
+          for (const sessionId of ["client-session", "other-session"]) {
+            yield* (yield* broker.connect(sessionId)).pipe(
+              Stream.runForEach((request) => {
+                delivered.push(sessionId);
+                return broker.respond(sessionId, {
+                  connectionId: request.connectionId,
+                  requestId: request.requestId,
+                  result,
+                  unavailableEnvironmentIds: [],
+                });
+              }),
+              Effect.forkScoped,
+            );
+          }
+          expect(yield* broker.read(sourceThreadId, sourceMessageId, { threadId })).toEqual(result);
+          expect(delivered).toEqual(["client-session"]);
+          expect(yield* broker.read(sourceThreadId, queuedMessageId, { threadId })).toEqual(result);
+          expect(delivered).toEqual(["client-session", "other-session"]);
+        }),
+      ),
+  );
+
+  it.effect("refuses replay claims and preserves the original input's authority", () =>
+    Effect.gen(function* () {
+      const broker = yield* makeBroker;
+      const replayedMessageId = MessageId.make("existing-unassociated-message");
+      yield* broker.authorize({
+        threadId: sourceThreadId,
+        messageId: replayedMessageId,
+        sessionId: "other-session",
+        alreadyStored: true,
+      });
+      yield* broker.authorize({
+        threadId: sourceThreadId,
+        messageId: sourceMessageId,
+        sessionId: "other-session",
+        alreadyStored: false,
+      });
+      expect(yield* broker.authorizedSession(sourceThreadId, sourceMessageId)).toBe(
+        "client-session",
+      );
+      expect(yield* broker.authorizedSession(sourceThreadId, replayedMessageId)).toBeUndefined();
+      expect(
+        yield* broker.read(sourceThreadId, replayedMessageId, { threadId }).pipe(Effect.flip),
+      ).toMatchObject({ code: "environment_unavailable" });
+    }),
+  );
+
+  it.effect(
+    "inherits the exact delegated parent run and fails closed for absent or cyclic ancestry",
+    () =>
+      Effect.gen(function* () {
+        const broker = yield* makeBroker;
+        const parentRun = { id: RunId.make("original-run"), userMessageId: sourceMessageId };
+        const laterRun = {
+          id: RunId.make("later-run"),
+          userMessageId: MessageId.make("later-message"),
+        };
+        const childThreadId = ThreadId.make("delegated-child");
+        const childRun = {
+          id: RunId.make("child-run"),
+          userMessageId: MessageId.make("child-message"),
+        };
+        yield* broker.authorize({
+          threadId: sourceThreadId,
+          messageId: laterRun.userMessageId,
+          sessionId: "other-session",
+          alreadyStored: false,
+        });
+        const parent = {
+          thread: { id: sourceThreadId },
+          runs: [parentRun, laterRun],
+          contextTransfers: [],
+        };
+        const child = {
+          thread: { id: childThreadId },
+          runs: [childRun],
+          contextTransfers: [
+            {
+              type: "subagent_spawn" as const,
+              targetRunId: childRun.id,
+              sourceThreadId,
+              sourcePoint: { threadId: sourceThreadId, runId: parentRun.id },
+            },
+          ],
+        };
+        expect(
+          yield* ThreadReadBroker.resolveAuthority(broker, child, childRun, () =>
+            Effect.succeed(parent),
+          ),
+        ).toEqual({
+          threadId: sourceThreadId,
+          messageId: sourceMessageId,
+          sessionId: "client-session",
+        });
+        expect(
+          yield* ThreadReadBroker.resolveAuthority(broker, child, childRun, () =>
+            Effect.succeed({ ...parent, runs: [laterRun] }),
+          ),
+        ).toBeUndefined();
+        const cyclic = {
+          ...child,
+          contextTransfers: [
+            {
+              ...child.contextTransfers[0]!,
+              sourcePoint: { threadId: childThreadId, runId: childRun.id },
+            },
+          ],
+        };
+        expect(
+          yield* ThreadReadBroker.resolveAuthority(broker, cyclic, childRun, () =>
+            Effect.succeed(cyclic),
+          ),
+        ).toBeUndefined();
+      }),
+  );
+
   it.effect("reports unavailable routing instead of falsely claiming the thread is missing", () =>
     Effect.gen(function* () {
       const broker = yield* makeBroker;
-      expect(yield* broker.read({ threadId }).pipe(Effect.flip)).toMatchObject({
+      expect(
+        yield* broker.read(sourceThreadId, sourceMessageId, { threadId }).pipe(Effect.flip),
+      ).toMatchObject({
         code: "environment_unavailable",
       });
     }),
@@ -99,7 +243,7 @@ describe("ThreadReadBroker", () => {
           }),
           Effect.forkScoped,
         );
-        expect(yield* broker.read(input)).toEqual(result);
+        expect(yield* broker.read(sourceThreadId, sourceMessageId, input)).toEqual(result);
         yield* Fiber.interrupt(consumer);
       }),
     ),
@@ -131,7 +275,7 @@ describe("ThreadReadBroker", () => {
           ),
           Effect.forkScoped,
         );
-        expect(yield* broker.read({ threadId })).toEqual(result);
+        expect(yield* broker.read(sourceThreadId, sourceMessageId, { threadId })).toEqual(result);
       }),
     ),
   );
@@ -150,7 +294,9 @@ describe("ThreadReadBroker", () => {
           }),
         ).pipe(Effect.forkScoped);
         yield* Deferred.await(connected);
-        const reading = yield* broker.read({ threadId }).pipe(Effect.flip, Effect.forkScoped);
+        const reading = yield* broker
+          .read(sourceThreadId, sourceMessageId, { threadId })
+          .pipe(Effect.flip, Effect.forkScoped);
         yield* Deferred.await(received);
         yield* Fiber.interrupt(consumer);
         expect(yield* Fiber.join(reading)).toMatchObject({ code: "environment_unavailable" });
@@ -174,11 +320,15 @@ describe("ThreadReadBroker", () => {
           ),
           Effect.forkScoped,
         );
-        expect(yield* broker.read({ threadId }).pipe(Effect.flip)).toMatchObject({
+        expect(
+          yield* broker.read(sourceThreadId, sourceMessageId, { threadId }).pipe(Effect.flip),
+        ).toMatchObject({
           code: "thread_not_found",
         });
         unavailableEnvironmentIds = [environmentId];
-        expect(yield* broker.read({ threadId }).pipe(Effect.flip)).toMatchObject({
+        expect(
+          yield* broker.read(sourceThreadId, sourceMessageId, { threadId }).pipe(Effect.flip),
+        ).toMatchObject({
           code: "environment_unavailable",
         });
       }),
@@ -194,7 +344,9 @@ describe("ThreadReadBroker", () => {
           Stream.runForEach((request) => Deferred.succeed(received, request)),
           Effect.forkScoped,
         );
-        const reading = yield* broker.read({ threadId, environmentId }).pipe(Effect.forkScoped);
+        const reading = yield* broker
+          .read(sourceThreadId, sourceMessageId, { threadId, environmentId })
+          .pipe(Effect.forkScoped);
         const request = yield* Deferred.await(received);
         expect(
           yield* broker
@@ -242,7 +394,9 @@ describe("ThreadReadBroker", () => {
           Stream.runForEach((request) => Deferred.succeed(received, request)),
           Effect.forkScoped,
         );
-        const reading = yield* broker.read({ threadId }).pipe(Effect.flip, Effect.forkScoped);
+        const reading = yield* broker
+          .read(sourceThreadId, sourceMessageId, { threadId })
+          .pipe(Effect.flip, Effect.forkScoped);
         const request = yield* Deferred.await(received);
         yield* TestClock.adjust("15 seconds");
         expect(yield* Fiber.join(reading)).toMatchObject({ code: "environment_unavailable" });

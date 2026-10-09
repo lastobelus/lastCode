@@ -1,3 +1,4 @@
+import { ThreadReadAuthorization } from "../orchestration-v2/ThreadReadAuthorization.ts";
 import {
   CommandId,
   type EnvironmentId,
@@ -975,6 +976,11 @@ const make = Effect.gen(function* () {
         },
       } as const;
     });
+
+  const resolveReadAuthority = (
+    source: Pick<OrchestrationV2ThreadProjection, "thread" | "runs" | "contextTransfers">,
+    run: OrchestrationV2Run | undefined,
+  ) => ThreadReadBroker.resolveAuthority(threadReadBroker, source, run, loadProjection);
 
   /** The caller's own thread, for operations that act as the caller. */
   const loadThreadCaller = (scope: McpInvocationScope, operation: string) =>
@@ -2322,6 +2328,17 @@ const make = Effect.gen(function* () {
                   ),
                 );
               if (request.prompt !== undefined) {
+                const messageId = stableMessageId({ scope, requestKey: key, index });
+                const authority = yield* resolveReadAuthority(parent, parentRun);
+                if (authority !== undefined) {
+                  const existing = yield* loadProjection(threadId);
+                  yield* threadReadBroker.authorize({
+                    threadId,
+                    messageId,
+                    sessionId: authority.sessionId,
+                    alreadyStored: existing.runs.some((run) => run.userMessageId === messageId),
+                  });
+                }
                 yield* threadManagement
                   .dispatch({
                     type: "message.dispatch",
@@ -2335,11 +2352,7 @@ const make = Effect.gen(function* () {
                     }),
                     threadId,
                     senderThreadId: scope.thread.threadId,
-                    messageId: stableMessageId({
-                      scope,
-                      requestKey: key,
-                      index,
-                    }),
+                    messageId,
                     text: request.prompt,
                     attachments: [],
                     modelSelection: target.modelSelection,
@@ -2450,12 +2463,25 @@ const make = Effect.gen(function* () {
     readThread: (scope, input) =>
       Effect.gen(function* () {
         // Validate the caller before allowing a miss to leave this environment.
-        yield* loadCaller(scope);
+        const { parent } = yield* loadCaller(scope);
         return yield* readThreadLocal(scope, input).pipe(
           Effect.catchIf(
             (error) => error.code === "thread_not_found",
             (error) =>
-              scope.thread === undefined ? Effect.fail(error) : threadReadBroker.read(input),
+              Effect.gen(function* () {
+                if (parent === undefined) return yield* error;
+                const run =
+                  ThreadManagementService.latestActiveRun(parent) ??
+                  ThreadManagementService.latestRun(parent);
+                const authority = yield* resolveReadAuthority(parent, run);
+                if (authority === undefined) {
+                  return yield* failure(
+                    "environment_unavailable",
+                    "This run has no connected client authorized to read other environments. Send a new message from the client connected to those environments and retry.",
+                  );
+                }
+                return yield* threadReadBroker.read(authority.threadId, authority.messageId, input);
+              }),
           ),
         );
       }),
@@ -2491,6 +2517,25 @@ const make = Effect.gen(function* () {
             creationSource: "mcp",
           })
           .pipe(
+            Effect.provideService(ThreadReadAuthorization, {
+              authorize: (threadId, messageId) =>
+                Effect.gen(function* () {
+                  if (parent === undefined) return;
+                  const authority = yield* resolveReadAuthority(
+                    parent,
+                    ThreadManagementService.latestActiveRun(parent) ??
+                      ThreadManagementService.latestRun(parent),
+                  );
+                  if (authority === undefined) return;
+                  const existing = yield* loadProjection(threadId);
+                  yield* threadReadBroker.authorize({
+                    threadId,
+                    messageId,
+                    sessionId: authority.sessionId,
+                    alreadyStored: existing.runs.some((run) => run.userMessageId === messageId),
+                  });
+                }).pipe(Effect.catch(() => Effect.void)),
+            }),
             Effect.mapError((error) =>
               isThreadManagementError(error)
                 ? threadManagementFailure(error)

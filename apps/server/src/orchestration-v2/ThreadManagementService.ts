@@ -41,6 +41,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import * as Orchestrator from "./Orchestrator.ts";
+import { ThreadReadAuthorization } from "./ThreadReadAuthorization.ts";
 import { DelegatedTaskCancellation } from "./DelegatedTaskCancellation.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import { projectTurnItemForDetail } from "./WireProjection.ts";
@@ -746,6 +747,8 @@ const make = Effect.gen(function* () {
         };
       }
 
+      const authorization = yield* ThreadReadAuthorization;
+      yield* authorization.authorize(input.threadId, input.messageId);
       const dispatch = yield* orchestrator.dispatch({
         type: "message.dispatch",
         commandId: input.commandId,
