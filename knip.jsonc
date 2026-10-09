@@ -16,11 +16,6 @@
       "vite": { "entry": [".github/**/*.test.cjs"] },
       "vitest": { "entry": [".github/**/*.test.cjs"] },
     },
-    "scripts": {
-      // Knip loads its preprocessor through a CLI option; native verification and
-      // worktree setup (from t3.json) run directly.
-      "entry": ["knip-schemas.ts", "mobile-native-client.ts", "setup-worktree.ts"],
-    },
     "apps/server": {
       // Vite+ pack entries and the launcher used by installed background services.
       "entry": [
@@ -56,10 +51,31 @@
         "src/preview-pip-preload.ts!",
         "src/mac-permission-preload.ts!",
         "src/preview/Annotation.css!",
+        "scripts/picker-frames.smoke.mjs",
+        "scripts/picker-electron-capture.smoke.mjs",
+        // The browser surface smoke command bundles these entries by filename.
+        "scripts/browser-surface.smoke.mjs",
+        "scripts/browser-surface.fixture.mjs",
+        "scripts/browser-surface.preload.mjs",
+        "scripts/browser-surface.renderer.mjs",
       ],
       // The injected runtime resolves Playwright by string; release tooling runs
       // electron-builder from this workspace, outside its package scripts.
       "ignoreDependencies": ["playwright-core", "electron-builder"],
+    },
+    "scripts": {
+      // Spawned by filename, or declarations paired with JavaScript tooling.
+      "entry": [
+        "knip-schemas.ts",
+        "mobile-native-client.ts",
+        "setup-worktree.ts",
+        "fixtures/lastcode-docs-install.mjs",
+        "fixtures/lastcode-docs-local-update.mjs",
+        "lastcode-packaged-server-supervisor.mjs!",
+        "lib/lastcode-ci-worker.mjs!",
+        "lastcode-local-update.d.mts",
+        "lastcode-lock.d.mts",
+      ],
     },
     "apps/web": {
       // Vitest loads this through the per-file @vitest-environment directive.

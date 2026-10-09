@@ -244,6 +244,7 @@ export const CodexProviderCapabilitiesV2 = {
     emitsTurnCompleted: true,
     supportsInterrupt: true,
     supportsActiveSteering: true,
+    supportsStrictActiveSteering: true,
     supportsSteeringByInterruptRestart: true,
     supportsQueuedMessages: true,
     terminalStatusQuality: "strong",
@@ -656,6 +657,18 @@ const decodeCodexTurnStartParamsWithCollaborationMode = Schema.decodeUnknownEffe
 const isProviderAdapterRuntimeRequestResponseError = Schema.is(
   ProviderAdapter.ProviderAdapterRuntimeRequestResponseError,
 );
+const isCodexTurnError = Schema.is(CodexSchema.ServerNotification__TurnError);
+const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
+
+// turn/steer returns a serialized TurnError when a review or compaction refuses input.
+const isCodexSteerDeliveryRejected = (cause: unknown) =>
+  isCodexAppServerRequestError(cause) &&
+  cause.operation === "receive-response" &&
+  cause.method === "turn/steer" &&
+  isCodexTurnError(cause.data) &&
+  cause.data.codexErrorInfo !== null &&
+  typeof cause.data.codexErrorInfo === "object" &&
+  "activeTurnNotSteerable" in cause.data.codexErrorInfo;
 
 function codexRuntimeModeTurnDefaults(runtimeMode: RuntimeMode): {
   readonly approvalPolicy: CodexSchema.V2TurnStartParams__AskForApproval;
@@ -6663,6 +6676,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                     driver: CODEX_PROVIDER,
                     providerThreadId: turnInput.providerThread.id,
                     providerTurnId: turnInput.providerTurnId,
+                    ...(isCodexSteerDeliveryRejected(cause) ? { deliveryRejected: true } : {}),
                     cause,
                   }),
               ),
