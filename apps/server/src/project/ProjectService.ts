@@ -20,6 +20,7 @@ import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 
+import * as ServerSettings from "../serverSettings.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import {
   isGroupedCreatorThread,
@@ -163,6 +164,7 @@ export class ProjectService extends Context.Service<
 
 export const make = Effect.gen(function* () {
   const projects = yield* ProjectStore.ProjectStoreV2;
+  const settings = yield* ServerSettings.ServerSettingsService;
   const admission = yield* UpdateDrainAdmission;
   const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
   const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
@@ -608,6 +610,14 @@ export const make = Effect.gen(function* () {
             yield* deleteChildThreads(input);
           }
           yield* commit({ type: "project.delete", commandId: input.commandId, projectId });
+          // Terminal deletion removes grants; receipt replay retries interrupted cleanup.
+          yield* settings
+            .updateSettings({ projectSettingsOverrides: { [projectId]: null } })
+            .pipe(
+              Effect.catch((cause) =>
+                Effect.logError("Deleted project settings cleanup failed", { projectId, cause }),
+              ),
+            );
           yield* projectEnrichment.invalidate([existing.value.workspaceRoot]);
           return yield* readCommitted(projectId);
         }),

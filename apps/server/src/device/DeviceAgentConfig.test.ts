@@ -991,3 +991,89 @@ it.effect.each([false, true])(
       }
     }).pipe(Effect.provide(layer("127.0.0.1")), Effect.scoped),
 );
+
+it.effect("command inventory checks stay quiet until observable device state changes", () =>
+  Effect.gen(function* () {
+    let name = "Initial AVD";
+    let detail: string | undefined;
+    let agentInstalled = true;
+    const observedHost = Layer.effect(
+      DeviceHost.DeviceHost,
+      Effect.gen(function* () {
+        const base = yield* DeviceHost.DeviceHost;
+        const initial = yield* base.summary;
+        return DeviceHost.DeviceHost.of({
+          ...base,
+          summary: Effect.sync(() => ({ ...initial, agentDeviceInstalled: agentInstalled })),
+        });
+      }),
+    ).pipe(Layer.provide(host));
+    const http = HttpClient.make((request) =>
+      Effect.sync(() =>
+        HttpClientResponse.fromWeb(
+          request,
+          Response.json({
+            emulators: [
+              {
+                id: "emulator-5554",
+                name,
+                platform: "android",
+                version: "26",
+                booted: true,
+                physical: false,
+              },
+            ],
+            simulators: [],
+            ...(detail ? { errors: [{ message: detail }] } : {}),
+          }),
+        ),
+      ),
+    );
+    yield* Effect.gen(function* () {
+      const devices = yield* DeviceService.DeviceService;
+      const access = yield* DeviceAgentAccess.DeviceAgentAccess;
+      const fs = yield* FileSystem.FileSystem;
+      const opened = yield* devices.open({
+        threadId: ThreadId.make("thread-1"),
+        hostId: "local",
+        deviceId: DeviceId.make("emulator-5554"),
+        platform: "android",
+      });
+      const args = yield* devices.agentTarget({ openedSession: opened, agentAccessEnabled: true });
+      const token = decodeConfig(yield* fs.readFileString(args[1]!)).daemonAuthToken;
+      const ready = yield* devices.agentReadinessIfSupported("local", true);
+      expect(ready).not.toBeNull();
+      const changes = yield* devices.subscribe;
+      let revision = (yield* devices.state).revision;
+      for (let check = 0; check < 3; check++) yield* devices.refreshAgentDevice(ready!);
+      expect((yield* devices.state).revision).toBe(revision);
+      expect(yield* PubSub.takeUpTo(changes, Number.POSITIVE_INFINITY)).toEqual([]);
+      expect((yield* access.authorize(token)).deviceId).toBe(opened.deviceId);
+      for (const change of [
+        () => {
+          detail = "Discovery warning";
+        },
+        () => {
+          agentInstalled = false;
+        },
+        () => {
+          name = "Replacement AVD";
+        },
+      ]) {
+        change();
+        yield* devices.refreshAgentDevice(ready!);
+        const updated = yield* devices.state;
+        expect(updated.revision).toBe(++revision);
+        expect(yield* PubSub.takeUpTo(changes, Number.POSITIVE_INFINITY)).toEqual([updated]);
+        yield* devices.refreshAgentDevice(ready!);
+        expect((yield* devices.state).revision).toBe(revision);
+        expect(yield* PubSub.takeUpTo(changes, Number.POSITIVE_INFINITY)).toEqual([]);
+      }
+      expect((yield* devices.state).sessions).toEqual([]);
+      expect((yield* Effect.exit(access.authorize(token)))._tag).toBe("Failure");
+    }).pipe(
+      Effect.provide(layer("127.0.0.1", undefined, http, settings, observedHost)),
+      Effect.scoped,
+    );
+  }),
+);

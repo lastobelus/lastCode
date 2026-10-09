@@ -26,7 +26,7 @@ import {
   type DeviceOpenInput,
   type DevicePlatform,
   DevicePlatformUnavailableError,
-  type DeviceServiceState,
+  DeviceServiceState,
   type DeviceSession,
   type DeviceShutdownInput,
   type DeviceSummary,
@@ -78,6 +78,8 @@ export const DEVICE_HUB_ROUTE_PREFIX = "/api/device-hub";
 
 const BOOT_TIMEOUT = Duration.minutes(3);
 const SCREENSHOT_TIMEOUT = Duration.seconds(20);
+const sameDeviceState = Schema.toEquivalence(DeviceServiceState);
+const sameDevices = Schema.toEquivalence(DeviceServiceState.fields.devices);
 
 const HubDevice = Schema.Struct({
   id: Schema.String,
@@ -249,7 +251,9 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
 
   const publish = (update: (state: DeviceServiceState) => DeviceServiceState) =>
     SynchronizedRef.updateAndGetEffect(stateRef, ({ state }) => {
-      const next = { ...update(state), revision: state.revision + 1 };
+      const updated = update(state);
+      if (updated === state) return Effect.succeed({ state });
+      const next = { ...updated, revision: state.revision + 1 };
       return PubSub.publish(statePubSub, next).pipe(Effect.as({ state: next }));
     }).pipe(Effect.map(({ state }) => state));
 
@@ -489,25 +493,30 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
           (device) => retireDeviceAgentAccess(device.hostId, device.id),
           { discard: true },
         );
-        return yield* publish((state) => ({
-          ...state,
-          sessions: state.sessions.filter(
-            (session) =>
-              !retired.some(
-                (device) => device.hostId === session.hostId && device.id === session.deviceId,
-              ),
-          ),
-          hosts: hostSummaries,
-          ...(ready.hostId === LOCAL_DEVICE_HOST_ID ? { hostStatusDetail: detail } : {}),
-          devices: [
-            ...state.devices.filter((device) => device.hostId !== ready.hostId),
-            ...devices,
-          ],
-          hostStatuses: {
-            ...state.hostStatuses,
-            [ready.hostId]: { status: "ready", ...(detail ? { detail } : {}) },
-          },
-        }));
+        return yield* publish((state) => {
+          const next: DeviceServiceState = {
+            ...state,
+            sessions: state.sessions.filter(
+              (session) =>
+                !retired.some(
+                  (device) => device.hostId === session.hostId && device.id === session.deviceId,
+                ),
+            ),
+            hosts: hostSummaries,
+            ...(ready.hostId === LOCAL_DEVICE_HOST_ID ? { hostStatusDetail: detail } : {}),
+            devices: sameDevices(
+              state.devices.filter((device) => device.hostId === ready.hostId),
+              devices,
+            )
+              ? state.devices
+              : [...state.devices.filter((device) => device.hostId !== ready.hostId), ...devices],
+            hostStatuses: {
+              ...state.hostStatuses,
+              [ready.hostId]: { status: "ready", ...(detail ? { detail } : {}) },
+            },
+          };
+          return sameDeviceState(state, next) ? state : next;
+        });
       }),
     );
   });
