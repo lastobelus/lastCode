@@ -2504,6 +2504,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         cause: `Thread ${command.threadId} is already archived.`,
       });
     }
+    if (command.type === "thread.archive") {
+      const { runs } = yield* projectionStore
+        .getThreadRecords(command.threadId, ["runs"])
+        .pipe(mapDispatchError(command));
+      // A message may have started work since the client checked archive availability.
+      if (runs.some((run) => ["preparing", "starting", "running"].includes(run.status))) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `Thread ${command.threadId} has active work. Stop it before archiving.`,
+        });
+      }
+    }
     if (command.type === "thread.unarchive" && thread.archivedAt === null) {
       return yield* new OrchestratorDispatchError({
         commandId: command.commandId,
@@ -4561,6 +4574,34 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             payload: projection.thread,
           });
           return;
+        }
+      }
+
+      if (projection.thread.archivedAt !== null || projection.thread.deletedAt !== null) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `Thread ${command.threadId} is not active.`,
+        });
+      }
+      // A late steer can reroute an accepted message after its original sender archives.
+      if (
+        command.senderThreadId !== undefined &&
+        command.senderThreadId !== command.threadId &&
+        !projection.messages.some(
+          (message) =>
+            message.id === command.messageId && message.senderThreadId === command.senderThreadId,
+        )
+      ) {
+        const sender = yield* projectionStore
+          .getThread(command.senderThreadId)
+          .pipe(mapDispatchError(command));
+        if (sender.archivedAt !== null || sender.deletedAt !== null) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: `Sender thread ${command.senderThreadId} is not active.`,
+          });
         }
       }
 
@@ -10855,35 +10896,33 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
   const dispatchWithReceipt = (command: OrchestrationV2ServerCommand) =>
     Effect.gen(function* () {
-      const dispatch = threadDispatch.withLock(
-        commandThreadId(command),
-        dispatchWithReceiptEffect(command),
-      );
-      if (
-        command.type !== "message.dispatch" ||
-        (command.createdBy !== "user" && command.creationSource !== "mcp")
-      )
-        return yield* dispatch;
-      const parentThreadId = yield* appOwnedSubagentParentThreadId(command.threadId).pipe(
-        Effect.mapError(
-          (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
-        ),
-      );
-      // Follow-up intake and Stop serialize on the parent before taking the child lock.
-      return yield* parentThreadId === undefined
-        ? dispatch
-        : threadDispatch.withLock(parentThreadId, dispatch);
+      const threadIds = new Set([commandThreadId(command)]);
+      if (command.type === "message.dispatch") {
+        if (command.senderThreadId !== undefined) threadIds.add(command.senderThreadId);
+        if (command.createdBy === "user" || command.creationSource === "mcp") {
+          const parentThreadId = yield* appOwnedSubagentParentThreadId(command.threadId).pipe(
+            Effect.mapError(
+              (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+            ),
+          );
+          if (parentThreadId !== undefined) threadIds.add(parentThreadId);
+        }
+      }
+      // Sending, archiving, follow-up intake, and Stop share one participant order.
+      return yield* Array.from(threadIds)
+        .toSorted()
+        .reduceRight(
+          (effect, threadId) => threadDispatch.withLock(threadId, effect),
+          dispatchWithReceiptEffect(command),
+        );
     });
 
   const handleTerminalRun = (stored: OrchestrationV2StoredEvent) =>
     Effect.gen(function* () {
       const threadId = stored.event.threadId;
-      // finalize writes the parent thread and startNextQueuedRun writes this
-      // thread, so each takes its own thread's lock, sequentially and never
-      // nested: dispatchDelegatedTaskRequest already writes child events
-      // while holding the parent lock, so nesting the parent lock inside the
-      // child lock here would invert that order, and the keyed executor's
-      // semaphores are neither reentrant nor deadlock-aware.
+      // Finalization writes the parent and queue advancement writes the child.
+      // Take their locks sequentially so event handling cannot invert the
+      // shared participant order used by message dispatch.
       if (stored.event.type === "run.updated") {
         yield* threadDispatch.withLock(
           threadId,

@@ -646,18 +646,42 @@ it.effect("starts a steer that missed the turn on the saved next-turn selection"
         const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
         const threadId = yield* startFirstTurn;
         const first = started[0]!;
+        const senderThreadId = ThreadId.make("thread:late-steer-sender");
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("create:late-steer-sender"),
+          threadId: senderThreadId,
+          projectId: ProjectId.make("project:steering-selection-follow-up"),
+          title: "Late steer sender",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdBy: "user",
+          creationSource: "web",
+        });
         yield* orchestrator.dispatch({
           type: "message.dispatch",
           commandId: CommandId.make("steer"),
           threadId,
           messageId: MessageId.make("message:steer"),
           text: "late steer",
+          senderThreadId,
           attachments: [],
           modelSelection: composerSelection,
           dispatchMode: { type: "steer_active", targetRunId: first.runId },
-          createdBy: "user",
-          creationSource: "web",
+          createdBy: "agent",
+          creationSource: "mcp",
         });
+        yield* orchestrator.dispatch({
+          type: "thread.archive",
+          commandId: CommandId.make("archive:late-steer-sender"),
+          threadId: senderThreadId,
+        });
+        assert.isNotNull(
+          (yield* orchestrator.getThreadProjection(senderThreadId)).thread.archivedAt,
+        );
         // The turn ends before the worker delivers the steer, so the steer
         // becomes a follow-up turn.
         const settled = yield* orchestrator.streamDomainEvents.pipe(
@@ -696,6 +720,12 @@ it.effect("starts a steer that missed the turn on the saved next-turn selection"
         assert.deepEqual(steered, []);
         assert.equal(started.length, 2);
         assert.equal(started[1]?.message.messageId, MessageId.make("message:steer"));
+        assert.equal(started[1]?.message.senderThreadId, senderThreadId);
+        assert.equal(
+          projection.messages.find((item) => item.id === MessageId.make("message:steer"))
+            ?.senderThreadId,
+          senderThreadId,
+        );
         assert.deepEqual(started[1]?.modelSelection, composerSelection);
         assert.deepEqual(projection.thread.modelSelection, composerSelection);
       }).pipe(Effect.provide(layer));
