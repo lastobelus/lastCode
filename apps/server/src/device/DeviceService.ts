@@ -472,61 +472,73 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
     return { devices, detail: list.errors?.map((error) => error.message).join("\n") || undefined };
   });
 
-  let refreshVersion = 0;
-  const appliedRefreshVersions = new Map<DeviceHostId, number>();
+  const refreshLocks = new WeakMap<DeviceHost.DeviceHost["Service"], Semaphore.Semaphore>();
   const refresh = Effect.fn("DeviceService.refresh")(function* (ready: DeviceReadiness) {
-    const version = ++refreshVersion;
     const host = hosts.get(ready.hostId);
-    const { devices, detail } = yield* fetchDevices(ready);
-    const hostSummaries = yield* Effect.forEach(hosts.values(), (host) => host.summary);
-    return yield* lifecycleLock.withPermit(
+    if (!host) return (yield* SynchronizedRef.get(stateRef)).state;
+    let refreshLock = refreshLocks.get(host);
+    if (!refreshLock) {
+      refreshLock = Semaphore.makeUnsafe(1);
+      refreshLocks.set(host, refreshLock);
+    }
+    // Serialize observation as well as application: invocation order does not
+    // tell us which overlapping query observed the replacement runtime.
+    return yield* refreshLock.withPermit(
       Effect.gen(function* () {
-        if (!(yield* readDeviceSettings).enabled || !host || hosts.get(ready.hostId) !== host)
-          return (yield* SynchronizedRef.get(stateRef)).state;
-        const { state } = yield* SynchronizedRef.get(stateRef);
-        // A slow older discovery must not retire a runtime a newer open observed.
-        if (version < (appliedRefreshVersions.get(ready.hostId) ?? 0)) return state;
-        appliedRefreshVersions.set(ready.hostId, version);
-        const retired = state.devices.filter((previous) => {
-          if (previous.hostId !== ready.hostId || !previous.booted) return false;
-          const current = devices.find((device) => device.id === previous.id);
-          return (
-            !current?.booted ||
-            current.platform !== previous.platform ||
-            current.name !== previous.name ||
-            current.version !== previous.version ||
-            current.physical !== previous.physical
-          );
-        });
-        yield* Effect.forEach(
-          retired,
-          (device) => retireDeviceAgentAccess(device.hostId, device.id),
-          { discard: true },
-        );
-        return yield* publish((state) => {
-          const next: DeviceServiceState = {
-            ...state,
-            sessions: state.sessions.filter(
-              (session) =>
-                !retired.some(
-                  (device) => device.hostId === session.hostId && device.id === session.deviceId,
+        if (hosts.get(ready.hostId) !== host) return (yield* SynchronizedRef.get(stateRef)).state;
+        const { devices, detail } = yield* fetchDevices(ready);
+        const hostSummaries = yield* Effect.forEach(hosts.values(), (host) => host.summary);
+        return yield* lifecycleLock.withPermit(
+          Effect.gen(function* () {
+            if (!(yield* readDeviceSettings).enabled || hosts.get(ready.hostId) !== host)
+              return (yield* SynchronizedRef.get(stateRef)).state;
+            const { state } = yield* SynchronizedRef.get(stateRef);
+            const retired = state.devices.filter((previous) => {
+              if (previous.hostId !== ready.hostId || !previous.booted) return false;
+              const current = devices.find((device) => device.id === previous.id);
+              return (
+                !current?.booted ||
+                current.platform !== previous.platform ||
+                current.name !== previous.name ||
+                current.version !== previous.version ||
+                current.physical !== previous.physical
+              );
+            });
+            yield* Effect.forEach(
+              retired,
+              (device) => retireDeviceAgentAccess(device.hostId, device.id),
+              { discard: true },
+            );
+            return yield* publish((state) => {
+              const next: DeviceServiceState = {
+                ...state,
+                sessions: state.sessions.filter(
+                  (session) =>
+                    !retired.some(
+                      (device) =>
+                        device.hostId === session.hostId && device.id === session.deviceId,
+                    ),
                 ),
-            ),
-            hosts: hostSummaries,
-            ...(ready.hostId === LOCAL_DEVICE_HOST_ID ? { hostStatusDetail: detail } : {}),
-            devices: sameDevices(
-              state.devices.filter((device) => device.hostId === ready.hostId),
-              devices,
-            )
-              ? state.devices
-              : [...state.devices.filter((device) => device.hostId !== ready.hostId), ...devices],
-            hostStatuses: {
-              ...state.hostStatuses,
-              [ready.hostId]: { status: "ready", ...(detail ? { detail } : {}) },
-            },
-          };
-          return sameDeviceState(state, next) ? state : next;
-        });
+                hosts: hostSummaries,
+                ...(ready.hostId === LOCAL_DEVICE_HOST_ID ? { hostStatusDetail: detail } : {}),
+                devices: sameDevices(
+                  state.devices.filter((device) => device.hostId === ready.hostId),
+                  devices,
+                )
+                  ? state.devices
+                  : [
+                      ...state.devices.filter((device) => device.hostId !== ready.hostId),
+                      ...devices,
+                    ],
+                hostStatuses: {
+                  ...state.hostStatuses,
+                  [ready.hostId]: { status: "ready", ...(detail ? { detail } : {}) },
+                },
+              };
+              return sameDeviceState(state, next) ? state : next;
+            });
+          }),
+        );
       }),
     );
   });

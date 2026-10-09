@@ -636,11 +636,13 @@ it.effect.each(["missing", "off", "replacement"] as const)(
     }),
 );
 
-it.effect("an older discovery cannot retire a runtime observed by a newer request", () =>
+it.effect("overlapping command discoveries observe runtime replacement in order", () =>
   Effect.gen(function* () {
     const started = yield* Deferred.make<void>();
     const resume = yield* Deferred.make<void>();
-    let holdNext = false;
+    let overlapping = false;
+    let queries = 0;
+    let replaced = false;
     const inventory = {
       emulators: [
         {
@@ -656,16 +658,21 @@ it.effect("an older discovery cannot retire a runtime observed by a newer reques
     };
     const http = HttpClient.make((request) =>
       Effect.gen(function* () {
-        if (holdNext) {
-          holdNext = false;
+        if (overlapping && ++queries === 1) {
           yield* Deferred.succeed(started, undefined);
           yield* Deferred.await(resume);
-          return HttpClientResponse.fromWeb(
-            request,
-            Response.json({ emulators: [], simulators: [] }),
-          );
+          replaced = true;
         }
-        return HttpClientResponse.fromWeb(request, Response.json(inventory));
+        return HttpClientResponse.fromWeb(
+          request,
+          Response.json({
+            ...inventory,
+            emulators: inventory.emulators.map((device) => ({
+              ...device,
+              name: replaced ? "Replacement_AVD" : device.name,
+            })),
+          }),
+        );
       }),
     );
     yield* Effect.gen(function* () {
@@ -680,14 +687,25 @@ it.effect("an older discovery cannot retire a runtime observed by a newer reques
       });
       const args = yield* devices.agentTarget({ openedSession, agentAccessEnabled: true });
       const token = decodeConfig(yield* fs.readFileString(args[1]!)).daemonAuthToken;
-      holdNext = true;
-      const older = yield* devices.list.pipe(Effect.forkChild);
+      const ready = yield* devices.agentReadinessIfSupported("local", true);
+      expect(ready).not.toBeNull();
+      overlapping = true;
+      const older = yield* devices
+        .refreshAgentDevice(ready!)
+        .pipe(Effect.forkChild({ startImmediately: true }));
       yield* Deferred.await(started);
-      yield* devices.list;
+      const newer = yield* devices
+        .refreshAgentDevice(ready!)
+        .pipe(Effect.forkChild({ startImmediately: true }));
+      expect(queries).toBe(1);
       yield* Deferred.succeed(resume, undefined);
       yield* Fiber.join(older);
-      expect((yield* access.authorize(token)).deviceId).toBe(openedSession.deviceId);
-      expect((yield* devices.state).sessions).toEqual([openedSession]);
+      yield* Fiber.join(newer);
+      expect(queries).toBe(2);
+      expect((yield* Effect.exit(access.authorize(token)))._tag).toBe("Failure");
+      const state = yield* devices.state;
+      expect(state.devices[0]?.name).toBe("Replacement_AVD");
+      expect(state.sessions).toEqual([]);
     }).pipe(Effect.provide(layer("127.0.0.1", undefined, http)), Effect.scoped);
   }),
 );
