@@ -63,6 +63,7 @@ import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import * as DeviceHubProxy from "./device/DeviceHubProxy.ts";
 import * as DeviceAgentAccess from "./device/DeviceAgentAccess.ts";
+import * as DeviceAgentLifecycle from "./device/DeviceAgentLifecycle.ts";
 import * as AgentDeviceProxy from "./device/AgentDeviceProxy.ts";
 import * as PreviewManager from "./preview/Manager.ts";
 import * as PortScanner from "./preview/PortScanner.ts";
@@ -1076,6 +1077,9 @@ const layerMakeServer = Layer.unwrap(
       layerTailscaleServe,
       layerCloudDesiredLinkReconcile,
       HeapSnapshot.layer,
+      DeviceAgentLifecycle.layer.pipe(
+        Layer.provide(Layer.merge(ProjectionStoreV2.layer, RuntimeLayer.layerEventSink)),
+      ),
     );
 
     return layerServerApplication.pipe(

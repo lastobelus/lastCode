@@ -162,6 +162,8 @@ const handler = Effect.gen(function* () {
   const devices = yield* DeviceService.DeviceService;
   const ready = yield* devices.agentReadinessIfSupported(target.hostId, true);
   if (!ready) return HttpServerResponse.text("Device agent is not running", { status: 503 });
+  // Readiness may wait while this host is replaced or thread consent is revoked.
+  yield* access.authorize(token);
   const headers: Record<string, string> = {};
   const connectionHeaders = new Set(
     (request.headers.connection ?? "")
