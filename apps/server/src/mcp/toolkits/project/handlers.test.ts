@@ -41,22 +41,33 @@ it.effect(
       const projectId = ProjectId.make("project");
       const providerInstanceId = ProviderInstanceId.make("codex");
       const modelSelection = { instanceId: providerInstanceId, model: "gpt-5" };
-      const sourceMessageId = MessageId.make("source-message");
-      let sourceRun = {
-        id: RunId.make("active-run"),
-        userMessageId: sourceMessageId,
-        ordinal: 1,
-        status: "running",
-      };
-      const broker = yield* ThreadReadBroker.ThreadReadBroker.pipe(
-        Effect.provide(ThreadReadBroker.layer.pipe(Layer.provide(NodeCrypto.layer))),
-      );
-      yield* broker.authorize({
-        threadId: sourceThreadId,
-        messageId: sourceMessageId,
-        sessionId: "requester-session",
-        alreadyStored: false,
+      const runs = new Map<
+        ThreadId,
+        Array<{ id: RunId; userMessageId: MessageId; status: string }>
+      >();
+      const threads = Layer.mock(ThreadManagement.ThreadManagementService)({
+        getThreadShell: () => Effect.succeed(caller),
+        getThreadRecords: (threadId) =>
+          Effect.succeed({
+            thread: { id: threadId },
+            runs: runs.get(threadId) ?? [],
+            contextTransfers: [],
+          } as unknown as OrchestrationV2ThreadProjection),
       });
+      const broker = yield* ThreadReadBroker.ThreadReadBroker.pipe(
+        Effect.provide(ThreadReadBroker.layer.pipe(Layer.provide([NodeCrypto.layer, threads]))),
+      );
+      const submit = (sessionId: string, threadId: ThreadId, runId: string) =>
+        Effect.gen(function* () {
+          const messageId = MessageId.make(`${runId}-message`);
+          yield* broker.forSession(sessionId).authorize(threadId, messageId);
+          for (const run of runs.get(threadId) ?? []) run.status = "completed";
+          runs.set(threadId, [
+            ...(runs.get(threadId) ?? []),
+            { id: RunId.make(runId), userMessageId: messageId, status: "running" },
+          ]);
+        });
+      yield* submit("requester-session", sourceThreadId, "active-run");
       const caller = {
         id: sourceThreadId,
         projectId,
@@ -72,6 +83,7 @@ it.effect(
       const layerDependencies = Layer.mergeAll(
         NodeCrypto.layer,
         Layer.succeed(ThreadReadBroker.ThreadReadBroker, broker),
+        threads,
         Layer.succeed(McpInvocationContext.McpInvocationContext, {
           environmentId: EnvironmentId.make("environment"),
           requestNamespace: "session",
@@ -84,31 +96,12 @@ it.effect(
           issuedAt: 0,
           capabilities: new Set(["orchestration" as const]),
         }),
-        Layer.mock(ThreadManagement.ThreadManagementService)({
-          getThreadShell: () => Effect.succeed(caller),
-          getThreadRecords: (threadId) =>
-            Effect.succeed({
-              thread: { id: threadId },
-              runs: threadId === sourceThreadId ? [sourceRun] : [],
-              contextTransfers: [],
-            } as unknown as OrchestrationV2ThreadProjection),
-        }),
         Layer.mock(ThreadLaunch.ThreadLaunchService)({
           launch: (input) => {
             launched.push(input);
             return Effect.gen(function* () {
-              sourceRun = {
-                id: RunId.make("later-run"),
-                userMessageId: MessageId.make("later-message"),
-                ordinal: 2,
-                status: "running",
-              };
-              yield* broker.authorize({
-                threadId: sourceThreadId,
-                messageId: sourceRun.userMessageId,
-                sessionId: "another-client-session",
-                alreadyStored: false,
-              });
+              // Another client advances the parent while the launch prepares.
+              yield* submit("another-client-session", sourceThreadId, "later-run");
               if (input.initialMessage?.messageId !== undefined && input.threadId !== undefined) {
                 const authorization = yield* ThreadReadAuthorization;
                 yield* authorization.authorize(input.threadId, input.initialMessage.messageId);
@@ -146,16 +139,37 @@ it.effect(
       expect(launched[0]?.initialMessage?.senderThreadId).toBe(sourceThreadId);
       expect(launched[0]?.creatorThreadId).toBe(sourceThreadId);
       const prompted = launched[0]!;
+      runs.set(prompted.threadId!, [
+        {
+          id: RunId.make("launched-run"),
+          userMessageId: prompted.initialMessage!.messageId!,
+          status: "running",
+        },
+      ]);
+      // Only the requester's client is connected; reaching it yields a search miss.
+      yield* (yield* broker.connect("requester-session")).pipe(
+        Stream.runForEach((request) =>
+          broker.respond("requester-session", {
+            connectionId: request.connectionId,
+            requestId: request.requestId,
+            result: null,
+            unavailableEnvironmentIds: [],
+          }),
+        ),
+        Effect.forkScoped,
+      );
       expect(
-        yield* broker.authorizedSession(prompted.threadId!, prompted.initialMessage!.messageId!),
-      ).toBe("requester-session");
+        yield* broker
+          .read(prompted.threadId!, { threadId: ThreadId.make("remote-thread") })
+          .pipe(Effect.flip),
+      ).toMatchObject({ code: "thread_not_found" });
       const unprompted = { title: "Independent notes", creatorThreadId: "untrusted-creator" };
       yield* toolkit
         .handle("t3_thread_launch", unprompted)
         .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
       expect(launched[1]?.initialMessage).toBeUndefined();
       expect(launched[1]?.creatorThreadId).toBe(sourceThreadId);
-    }),
+    }).pipe(Effect.scoped),
 );
 
 it.effect("launches a scratch thread into the Scratch project", () =>

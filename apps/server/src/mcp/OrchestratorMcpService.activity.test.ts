@@ -360,10 +360,18 @@ it("taskStatus returns task.providerInstanceId rather than the driver kind", asy
 });
 
 it("readThread and sendToThread reach threads in other projects", async () => {
-  let parentRuns: ReadonlyArray<unknown> = [
-    makeRun({ id: RunId.make("run-parent-live"), ordinal: 1, status: "running" }),
-    makeRun({ id: RunId.make("run-parent-queued"), ordinal: 2, status: "queued" }),
-  ];
+  const parentLiveRun = makeRun({
+    id: RunId.make("run-parent-live"),
+    ordinal: 1,
+    status: "running",
+  });
+  const parentQueuedRun = makeRun({
+    id: RunId.make("run-parent-queued"),
+    ordinal: 2,
+    status: "queued",
+  });
+  let parentRuns: ReadonlyArray<unknown> = [];
+  let foreignRuns: ReadonlyArray<unknown> = [];
   const foreignProjectId = ProjectId.make("project-mcp-orchestrator-foreign");
   const foreignThreadId = ThreadId.make("thread-mcp-orchestrator-foreign");
   const parentProjection = {
@@ -394,7 +402,7 @@ it("readThread and sendToThread reach threads in other projects", async () => {
         }),
         projectId: foreignProjectId,
       },
-      runs: [],
+      runs: foreignRuns,
       visibleTurnItems: [
         {
           position: 0,
@@ -489,24 +497,20 @@ it("readThread and sendToThread reach threads in other projects", async () => {
 
   await Effect.gen(function* () {
     const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+    const broker = yield* ThreadReadBroker.ThreadReadBroker;
+    // Each input is bound to its submitting client before its run is stored.
+    yield* broker
+      .forSession("client-session")
+      .authorize(parentThreadId, parentLiveRun.userMessageId);
+    yield* broker
+      .forSession("other-client-session")
+      .authorize(parentThreadId, parentQueuedRun.userMessageId);
+    parentRuns = [parentLiveRun, parentQueuedRun];
     const foreign = yield* service.readThread(makeScope(), { threadId: foreignThreadId });
     expect(foreign.thread.threadId).toBe(foreignThreadId);
     expect(foreign.thread.projectId).toBe(foreignProjectId);
     expect(foreign.items.map((item) => item.text)).toEqual(["Foreign thread said hello"]);
 
-    const broker = yield* ThreadReadBroker.ThreadReadBroker;
-    yield* broker.authorize({
-      threadId: parentThreadId,
-      messageId: MessageId.make("message-run-parent-live"),
-      sessionId: "client-session",
-      alreadyStored: false,
-    });
-    yield* broker.authorize({
-      threadId: parentThreadId,
-      messageId: MessageId.make("message-run-parent-queued"),
-      sessionId: "other-client-session",
-      alreadyStored: false,
-    });
     let unrelatedForwarded = 0;
     yield* (yield* broker.connect("other-client-session")).pipe(
       Stream.runForEach(() =>
@@ -546,9 +550,6 @@ it("readThread and sendToThread reach threads in other projects", async () => {
     expect(forwarded).toBe(1);
     expect(unrelatedForwarded).toBe(0);
     expect(
-      yield* service.readThreadLocal(makeScope(), remoteInput).pipe(Effect.flip),
-    ).toMatchObject({ code: "thread_not_found" });
-    expect(
       yield* service
         .readThread({ ...makeScope(), thread: undefined }, remoteInput)
         .pipe(Effect.flip),
@@ -560,7 +561,13 @@ it("readThread and sendToThread reach threads in other projects", async () => {
       message: "hi",
     });
     expect(sent.threadId).toBe(foreignThreadId);
-    expect(yield* broker.authorizedSession(foreignThreadId, sent.messageId)).toBe("client-session");
+    // The forwarded message inherits the caller's requester once its run starts.
+    foreignRuns = [
+      { ...parentLiveRun, id: RunId.make("run-foreign"), userMessageId: sent.messageId },
+    ];
+    expect(yield* broker.read(foreignThreadId, remoteInput)).toEqual(remote);
+    expect(forwarded).toBe(2);
+    expect(unrelatedForwarded).toBe(0);
 
     // Once the caller's run ends, it can still read other threads but no longer write to them.
     parentRuns = [];

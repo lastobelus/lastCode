@@ -78,24 +78,12 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
             message:
               "scratch:true picks its own project and folder; omit projectId and workspaceStrategy.",
           });
-        const readSource = (sourceThreadId: ThreadId) =>
-          context.threads.getThreadRecords(sourceThreadId, ["runs", "contextTransfers"]);
-        const readAuthority = yield* Effect.gen(function* () {
-          if (caller === undefined) return undefined;
-          const broker = yield* Effect.serviceOption(ThreadReadBroker.ThreadReadBroker);
-          if (Option.isNone(broker)) return undefined;
-          const source = yield* readSource(caller.id);
-          const sourceRunId = caller.activeRunId ?? caller.latestRunId;
-          const authority = yield* ThreadReadBroker.resolveAuthority(
-            broker.value,
-            source,
-            source.runs.find((run) => run.id === sourceRunId),
-            readSource,
-          );
-          return authority === undefined
-            ? undefined
-            : { broker: broker.value, sessionId: authority.sessionId };
-        }).pipe(Effect.catch(() => Effect.succeed(undefined)));
+        // Resolved before preparation, so the launch keeps the requesting run's authority.
+        const broker = yield* Effect.serviceOption(ThreadReadBroker.ThreadReadBroker);
+        const readAuthorization =
+          caller === undefined || Option.isNone(broker)
+            ? ThreadReadAuthorization.defaultValue()
+            : yield* broker.value.inherit(caller.id);
         const projectId =
           input.scratch === true
             ? (yield* ManagedProjectFolders.ManagedProjectFolders.pipe(
@@ -157,19 +145,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           creationSource: "mcp",
           ...(caller === undefined ? {} : { creatorThreadId: caller.id }),
         }).pipe(
-          Effect.provideService(ThreadReadAuthorization, {
-            authorize: (targetThreadId, targetMessageId) =>
-              Effect.gen(function* () {
-                if (readAuthority === undefined) return;
-                const target = yield* readSource(targetThreadId);
-                yield* readAuthority.broker.authorize({
-                  threadId: targetThreadId,
-                  messageId: targetMessageId,
-                  sessionId: readAuthority.sessionId,
-                  alreadyStored: target.runs.some((run) => run.userMessageId === targetMessageId),
-                });
-              }).pipe(Effect.catch(() => Effect.void)),
-          }),
+          Effect.provideService(ThreadReadAuthorization, readAuthorization),
           Effect.mapError((error) =>
             error._tag === "AttachmentClaimError"
               ? new OrchestratorMcpFailure({ code: "orchestration_error", message: error.message })
