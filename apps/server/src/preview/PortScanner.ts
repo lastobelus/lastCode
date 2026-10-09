@@ -357,7 +357,7 @@ const parseWindowsNetstatOutput = (
   return parseWindowsListenerOutput(listeners.join("\n"), terminalByProcessId);
 };
 
-const isCompleteWindowsListenerProbe = (result: ProcessRunner.ProcessRunOutput): boolean =>
+const isCompleteListenerProbe = (result: ProcessRunner.ProcessRunOutput): boolean =>
   result.code === 0 && !result.timedOut && !result.stdoutTruncated && !result.stdoutInvalidUtf8;
 
 const parseSsListenerOutput = (
@@ -503,6 +503,13 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
   const processRunner = yield* ProcessRunner.ProcessRunner;
   const fileSystem = yield* FileSystem.FileSystem;
   const hostPlatform = yield* HostProcessPlatform;
+  // Daemons cannot assume an interactive shell's PATH includes macOS system tools.
+  // HTTP readiness alone never establishes terminal ownership; keep fallback probes unattributed.
+  const lsofCommand =
+    hostPlatform === "darwin" &&
+    (yield* fileSystem.exists("/usr/sbin/lsof").pipe(Effect.orElseSucceed(() => false)))
+      ? "/usr/sbin/lsof"
+      : "lsof";
   const httpClient = (yield* HttpClient.HttpClient).pipe(HttpClient.withScope);
   const loopbackHttpsAgent = yield* NodeHttpClient.makeAgent({ rejectUnauthorized: false });
   const loopbackHttpsClient = (yield* NodeHttpClient.makeNodeHttp.pipe(
@@ -861,7 +868,7 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
         })
         .pipe(
           Effect.map((result) =>
-            isCompleteWindowsListenerProbe(result)
+            isCompleteListenerProbe(result)
               ? parseWindowsListenerOutput(result.stdout, terminalByProcessId)
               : null,
           ),
@@ -885,7 +892,7 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
         })
         .pipe(
           Effect.map((result) =>
-            isCompleteWindowsListenerProbe(result)
+            isCompleteListenerProbe(result)
               ? parseWindowsNetstatOutput(result.stdout, terminalByProcessId)
               : null,
           ),
@@ -906,14 +913,19 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
       return yield* scanFallback(terminalByProcessId, configuredUrls);
     const lsofResult = yield* processRunner
       .run({
-        command: "lsof",
+        command: lsofCommand,
         args: ["-iTCP", "-sTCP:LISTEN", "-P", "-n", "-F", "pcn"],
         timeout: Duration.millis(LSOF_TIMEOUT_MS),
         maxOutputBytes: 1024 * 1024,
         outputMode: "truncate",
       })
       .pipe(
-        Effect.map((result) => parseLsofOutput(result.stdout, terminalByProcessId)),
+        // Partial output can omit a second owner of the same port.
+        Effect.map((result) =>
+          isCompleteListenerProbe(result)
+            ? parseLsofOutput(result.stdout, terminalByProcessId)
+            : null,
+        ),
         Effect.catchTags({
           // A missing lsof stays missing; later scans skip straight to the fallback.
           ProcessSpawnError: (error) =>

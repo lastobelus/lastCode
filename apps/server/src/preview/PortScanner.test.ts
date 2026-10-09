@@ -1,5 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - This fixture exercises a real self-signed Node TLS server and certificate files.
 import * as NodeNet from "node:net";
+import * as NodeFileSystem from "@effect/platform-node/NodeFileSystem";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeHttps from "node:https";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
@@ -106,13 +108,14 @@ const layerLsofScanner = (input: {
   readonly pid: () => number;
   readonly output?: () => string;
   readonly run?: ProcessRunner.ProcessRunner["Service"]["run"];
-  readonly platform?: "linux" | "win32";
+  readonly platform?: "linux" | "win32" | "darwin";
+  readonly fileSystem?: Layer.Layer<FileSystem.FileSystem>;
   readonly fetch: typeof globalThis.fetch;
 }) =>
   PortScanner.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
-        layerNoProc,
+        input.fileSystem ?? layerNoProc,
         Layer.succeed(ProcessRunner.ProcessRunner, {
           run:
             input.run ??
@@ -142,6 +145,95 @@ const layerLsofScanner = (input: {
       ),
     ),
   );
+
+// This fixture changes only the child probe environment, never the test runner's PATH.
+effectIt.live.skipIf(HostProcessPlatform.defaultValue() !== "darwin")(
+  "discovers an attributed macOS listener with an empty child PATH",
+  () =>
+    Effect.gen(function* () {
+      const server = yield* Effect.acquireRelease(
+        openServer(0, (socket) => {
+          socket.once("data", () => {
+            socket.end(
+              "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+            );
+          });
+        }).pipe(
+          Effect.flatMap((server) =>
+            server ? Effect.succeed(server) : Effect.die("Fixture listen failed"),
+          ),
+        ),
+        closeServer,
+      );
+      const address = server.address();
+      if (address === null || typeof address === "string")
+        return yield* Effect.die("Missing fixture address");
+      const runner = yield* ProcessRunner.ProcessRunner;
+      const bare = yield* Effect.result(
+        runner.run({ command: "lsof", args: ["-v"], env: { ...process.env, PATH: "" } }),
+      );
+      expect(bare._tag).toBe("Failure");
+      const layer = layerLsofScanner({
+        pid: () => process.pid,
+        platform: "darwin",
+        fileSystem: NodeFileSystem.layer,
+        run: (input) => runner.run({ ...input, env: { ...process.env, PATH: "" } }),
+        fetch: globalThis.fetch,
+      });
+      yield* Effect.gen(function* () {
+        const scanner = yield* PortScanner.PortDiscovery;
+        const owner = { threadId: "restricted-path-thread", terminalId: "fixture-terminal" };
+        yield* scanner.registerTerminalProcesses({ ...owner, processIds: [process.pid] });
+        const servers = yield* scanner.scan([`http://127.0.0.1:${address.port}/`]);
+        const discovered = servers.find((entry) => entry.port === address.port);
+        expect(discovered?.pid).toBe(process.pid);
+        expect(discovered?.terminal).toEqual(owner);
+      }).pipe(Effect.provide(layer));
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(ProcessRunner.layer.pipe(Layer.provide(NodeServices.layer))),
+    ),
+);
+
+for (const failure of ["missing", "exit", "timeout", "truncated", "invalid-utf8"] as const) {
+  effectIt.effect(`keeps macOS HTTP fallback unattributed after ${failure} lsof evidence`, () => {
+    const commands: string[] = [];
+    const layer = layerLsofScanner({
+      pid: () => 62_001,
+      platform: "darwin",
+      fileSystem: FileSystem.layerNoop({ exists: () => Effect.succeed(failure !== "missing") }),
+      run: (input) => {
+        commands.push(input.command);
+        if (failure === "missing") return processProbeFailure(input);
+        return Effect.succeed({
+          stdout: `p62001\ncnode\nn*:${LSOF_TEST_PORT}\n`,
+          stderr: "",
+          code: ChildProcessSpawner.ExitCode(failure === "exit" ? 2 : 0),
+          timedOut: failure === "timeout",
+          stdoutTruncated: failure === "truncated",
+          stderrTruncated: false,
+          stdoutInvalidUtf8: failure === "invalid-utf8",
+          stderrInvalidUtf8: false,
+        });
+      },
+      fetch: async () =>
+        new Response("<html>ready</html>", { headers: { "content-type": "text/html" } }),
+    });
+    return Effect.gen(function* () {
+      const scanner = yield* PortScanner.PortDiscovery;
+      yield* scanner.registerTerminalProcesses({
+        threadId: "restricted-path-thread",
+        terminalId: "fixture-terminal",
+        processIds: [62_001],
+      });
+      const servers = yield* scanner.scan([`http://localhost:${LSOF_TEST_PORT}/`]);
+      expect(servers).toHaveLength(1);
+      expect(servers[0]?.pid).toBeNull();
+      expect(servers[0]?.terminal).toBeNull();
+      expect(commands).toEqual([failure === "missing" ? "lsof" : "/usr/sbin/lsof"]);
+    }).pipe(Effect.provide(layer));
+  });
+}
 
 const makeLinuxSsScannerLayer = (input: {
   readonly ssOutput: string;
