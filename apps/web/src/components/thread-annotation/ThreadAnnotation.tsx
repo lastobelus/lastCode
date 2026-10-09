@@ -4,6 +4,7 @@ import {
   type ThreadAnnotation as ThreadAnnotationModel,
 } from "@t3tools/contracts";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
+import type { Popover as PopoverPrimitive } from "@base-ui/react/popover";
 import { ChevronDownIcon } from "lucide-react";
 import {
   useEffect,
@@ -350,8 +351,18 @@ export function ThreadAnnotationHoverPopover(props: {
 }) {
   const bodyChangePending = useThreadAnnotationBodyPending(props.threadRef);
   const popupRef = useRef<HTMLDivElement | null>(null);
+  const actionsRef = useRef<PopoverPrimitive.Root.Actions | null>(null);
+  useEffect(() => {
+    // The detached row outlives annotations removed or resolved by another client.
+    const actions = actionsRef.current;
+    return () => {
+      props.handle.close();
+      actions?.unmount();
+    };
+  }, [props.handle]);
   return (
     <Popover
+      actionsRef={actionsRef}
       handle={props.handle}
       onOpenChange={(open, details) => {
         // The detached trigger is the navigation row. Clicking it must not pin the hover card.

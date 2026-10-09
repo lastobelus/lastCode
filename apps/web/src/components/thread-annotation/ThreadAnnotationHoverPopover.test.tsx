@@ -217,6 +217,17 @@ describe("ThreadAnnotationHoverPopover", () => {
     }
   });
 
+  it("does not restore an old open card when an annotation disappears and returns", async () => {
+    const { setAnnotationActive } = await renderHoverCard();
+    await hoverNavigation();
+    await setAnnotationActive(false);
+    expect(popup()).toBeNull();
+    await leaveNavigation();
+    await setAnnotationActive(true);
+    expect(popup()).toBeNull();
+    expect(document.querySelector("[data-base-ui-focus-guard]")).toBeNull();
+  });
+
   it.each([
     { key: "Enter" },
     { key: " " },
