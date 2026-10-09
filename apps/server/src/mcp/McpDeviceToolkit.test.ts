@@ -89,6 +89,19 @@ new DataView(png.buffer).setUint32(12, 0x49484452);
 new DataView(png.buffer).setUint32(16, 1206);
 new DataView(png.buffer).setUint32(20, 2622);
 
+const agentReady: DeviceService.DeviceAgentReadiness = {
+  hostId: "local",
+  nodePath: "/node",
+  hub: { origin: "http://localhost:4100" },
+  run: () => Effect.die("not used"),
+  helpers: { serveSimAxSettings: null, serveSimCli: null },
+  agentDevice: {
+    baseUrl: "http://localhost:4101",
+    token: "test-agent-token",
+    entryPath: "/cli",
+  },
+};
+
 const layerDeviceServiceMock = Layer.mock(DeviceService.DeviceService)({
   state: Effect.succeed(state),
   list: Effect.succeed(state),
@@ -119,6 +132,7 @@ const layerDeviceServiceMock = Layer.mock(DeviceService.DeviceService)({
   close: () => Effect.void,
   agentCli: Effect.succeed("/cli"),
   testHost: () => Effect.die("not used"),
+  agentReadinessIfSupported: () => Effect.succeed(agentReady),
   agentTarget: () => Effect.succeed(["--config", "/host.json", "--session", "thread-device"]),
 });
 
@@ -199,10 +213,155 @@ it.effect("registers the device tools and returns the screenshot as image conten
   ).pipe(Effect.provide(layerTest)),
 );
 
+it.effect.each([
+  {
+    name: "stopped Android AVD",
+    selected: "Pixel_API_35",
+    opened: "emulator-5554",
+    platform: "android" as const,
+    refreshed: true,
+  },
+  {
+    name: "Android AVD with a stale device list",
+    selected: "Pixel_API_35",
+    opened: "emulator-5554",
+    platform: "android" as const,
+    refreshed: false,
+  },
+  {
+    name: "running Android emulator",
+    selected: "emulator-5554",
+    opened: "emulator-5554",
+    platform: "android" as const,
+    refreshed: true,
+  },
+  {
+    name: "iOS simulator",
+    selected: "UDID-1",
+    opened: "UDID-1",
+    platform: "ios" as const,
+    refreshed: true,
+  },
+])(
+  "issues the device credential for the opened $name",
+  ({ selected, opened, platform, refreshed }) => {
+    const selectedDevice = { ...device, id: selected, platform, booted: selected === opened };
+    const openedDevice = { ...selectedDevice, id: opened, booted: true };
+    const operations: string[] = [];
+    const scopedArgs = ["--config", "/host.json", "--session", "opened-device-session"];
+    const layerOpening = Layer.mock(DeviceService.DeviceService)({
+      list: Effect.succeed({ ...state, devices: [selectedDevice] }),
+      state: Effect.succeed({ ...state, devices: [refreshed ? openedDevice : selectedDevice] }),
+      agentReadinessIfSupported: (hostId, enabled) =>
+        Effect.sync(() => {
+          expect(hostId).toBe("local");
+          expect(enabled).toBe(true);
+          operations.push("ready");
+          return agentReady;
+        }),
+      open: (input) =>
+        Effect.sync(() => {
+          expect(operations).toEqual(["ready"]);
+          expect(input.deviceId).toBe(selected);
+          operations.push("open");
+          return {
+            threadId: input.threadId,
+            hostId: "local",
+            deviceId: DeviceId.make(opened),
+            platform,
+            openedAt: "2026-09-08T00:00:00.000Z",
+          };
+        }),
+      agentTarget: (input) =>
+        Effect.sync(() => {
+          expect(operations).toEqual(["ready", "open"]);
+          expect(input).toEqual({
+            threadId,
+            hostId: "local",
+            deviceId: opened,
+            agentAccessEnabled: true,
+          });
+          operations.push("credential");
+          return scopedArgs;
+        }),
+      agentCli: Effect.succeed("/cli"),
+    });
+    return Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const result = yield* server
+        .callTool({ name: "device_open", arguments: { platform } })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, invocation(["device"])),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+      expect(result.isError).toBe(false);
+      expect(operations).toEqual(["ready", "open", "credential"]);
+      const selector = platform === "android" ? "--serial" : "--udid";
+      expect(result.structuredContent).toMatchObject({
+        device: { id: opened, platform },
+        agentDevice: { targetArgs: ["--platform", platform, selector, opened, ...scopedArgs] },
+        quickStart: expect.stringContaining(`${selector} ${opened}`),
+      });
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        McpHttpServer.layerDeviceToolkit.pipe(
+          Layer.provideMerge(McpServer.McpServer.layer),
+          Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
+          Layer.provide(layerOpening),
+          Layer.provide(layerAccess),
+          Layer.provide(
+            ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-device-open-test-" }),
+          ),
+          Layer.provide(NodeServices.layer),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect("does not boot or issue a credential when agent readiness is unsupported", () => {
+  const layerUnsupported = Layer.mock(DeviceService.DeviceService)({
+    list: Effect.succeed(state),
+    agentReadinessIfSupported: () => Effect.succeed(null),
+    open: () => Effect.die("Must not boot without agent readiness"),
+    agentTarget: () => Effect.die("Must not issue a credential without agent readiness"),
+  });
+  return Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const result = yield* server
+      .callTool({ name: "device_open", arguments: { platform: "ios" } })
+      .pipe(
+        Effect.provideService(McpInvocationContext.McpInvocationContext, invocation(["device"])),
+        Effect.provideService(McpSchema.McpServerClient, client),
+      );
+    expect(result.isError).toBe(true);
+    expect(result.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "text",
+          text: expect.stringContaining("Agent device access requires"),
+        }),
+      ]),
+    );
+  }).pipe(
+    Effect.scoped,
+    Effect.provide(
+      McpHttpServer.layerDeviceToolkit.pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
+        Layer.provide(layerUnsupported),
+        Layer.provide(layerAccess),
+        Layer.provide(NodeServices.layer),
+      ),
+    ),
+  );
+});
+
 it.effect("rejects unavailable agent access before booting or opening a device", () => {
   const layerUnavailable = Layer.mock(DeviceService.DeviceService)({
     list: Effect.succeed(state),
-    agentTarget: () =>
+    agentReadinessIfSupported: () =>
       Effect.fail(
         new DeviceHostUnavailableError({ hostId: "local", reason: "Agent access is disabled." }),
       ),
@@ -262,6 +421,7 @@ it.effect.each([
           operations.push("list");
           return state;
         }),
+        agentReadinessIfSupported: () => Effect.succeed(agentReady),
         agentTarget: () =>
           Effect.sync(() => {
             operations.push("agent helper");
@@ -313,16 +473,16 @@ it.effect.each([
             Effect.provideService(McpSchema.McpServerClient, client),
           );
       expect((yield* call("device_open", { platform: "ios" })).isError).toBe(false);
-      expect(operations).toEqual(["list", "agent helper", "open"]);
+      expect(operations).toEqual(["list", "open", "agent helper"]);
       yield* Ref.set(availableProject, Option.none());
       expect((yield* call("device_open", { platform: "ios" })).isError).toBe(true);
-      expect(operations).toEqual(["list", "agent helper", "open"]);
+      expect(operations).toEqual(["list", "open", "agent helper"]);
       yield* Ref.set(
         availableProject,
         Option.some({ ...project, deletedAt: "2026-10-01T00:00:00.000Z" }),
       );
       expect((yield* call("device_open", { platform: "ios" })).isError).toBe(true);
-      expect(operations).toEqual(["list", "agent helper", "open"]);
+      expect(operations).toEqual(["list", "open", "agent helper"]);
       yield* Ref.set(availableProject, Option.some(project));
       yield* Ref.update(settings, (current) => ({
         ...current,
@@ -345,10 +505,13 @@ it.effect.each([
           ]),
         );
       }
-      expect(operations).toEqual(["list", "agent helper", "open"]);
+      expect(operations).toEqual(["list", "open", "agent helper"]);
     }),
   ).pipe(
-    Effect.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-device-revoke-" })),
-    Effect.provide(NodeServices.layer),
+    Effect.provide(
+      ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-device-revoke-" }).pipe(
+        Layer.provideMerge(NodeServices.layer),
+      ),
+    ),
   ),
 );
