@@ -10202,6 +10202,39 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       "orchestration_v2.thread_id": commandThreadId(command),
     });
 
+    const allowedWhileArchiving =
+      command.type === "thread.stop" ||
+      command.type === "thread.visit" ||
+      command.type === "thread.archive.complete" ||
+      command.type === "thread.archive.fail" ||
+      command.type === "thread.background-work.settle" ||
+      // These completions only settle retained metadata; they start no provider work.
+      command.type === "message.incoming-summary.complete" ||
+      (command.type === "thread.metadata.update" &&
+        command.actionResume !== undefined &&
+        Object.keys(command).every((key) =>
+          ["type", "commandId", "threadId", "actionResume"].includes(key),
+        )) ||
+      (command.type === "message.dispatch" && command.usageLimitContinuationOfRunId !== undefined);
+    if (!allowedWhileArchiving && command.type !== "thread.create") {
+      const current = yield* projectionStore
+        .getThread(commandThreadId(command))
+        .pipe(
+          Effect.catchTags({ ProjectionStoreThreadNotFoundError: () => Effect.succeed(null) }),
+          mapDispatchError(command),
+        );
+      if (
+        current?.archivePending?.status === "stopping" &&
+        (current.deletedAt === null || current.worktreeCleanup != null)
+      ) {
+        return yield* new OrchestratorThreadArchivingError({
+          commandId: command.commandId,
+          commandType: command.type,
+          threadId: current.id,
+        });
+      }
+    }
+
     const events = yield* Ref.make<Array<OrchestrationV2DomainEvent>>([]);
     const effects = yield* Ref.make<Array<PendingOrchestrationEffectV2>>([]);
     let cancelUnsettledEffects:

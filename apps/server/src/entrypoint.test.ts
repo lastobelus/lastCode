@@ -56,7 +56,7 @@ describe("isEntrypoint", () => {
 
       expect(
         isEntrypoint({
-          moduleUrl: NodeURL.pathToFileURL(real).href,
+          moduleUrl: NodeURL.pathToFileURL(NodeFS.realpathSync(real)).href,
           entryPath: link,
           runtimeMain: undefined,
         }),

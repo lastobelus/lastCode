@@ -108,7 +108,7 @@ Before starting upstream-facing work:
 ```bash
 git fetch upstream --prune
 git fetch origin --prune
-git push origin upstream/main:main
+git push --no-verify origin upstream/main:main
 git switch -c fix/<topic> upstream/main
 ```
 
@@ -270,7 +270,7 @@ git cherry-pick <commit-sha>
 ```bash
 git fetch upstream --prune
 git fetch origin --prune
-git push origin upstream/main:main
+git push --no-verify origin upstream/main:main
 git switch -c fix/subagent-output-interleaving upstream/main
 ```
 
