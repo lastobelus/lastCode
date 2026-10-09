@@ -13,6 +13,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as FileSystem from "effect/FileSystem";
+import * as PlatformError from "effect/PlatformError";
 
 import * as LocalDeviceHost from "./LocalDeviceHost.ts";
 import {
@@ -360,6 +361,10 @@ it.effect.each([
   { launcher: false, state: "dead", succeeds: true },
   { launcher: false, state: "alive", succeeds: false },
   { launcher: false, state: "unknown", succeeds: false },
+  { launcher: false, state: "missing", succeeds: true },
+  { launcher: false, state: "invalidJson", succeeds: false },
+  { launcher: false, state: "invalidSchema", succeeds: false },
+  { launcher: false, state: "unreadable", succeeds: false },
   { launcher: true, state: "deadAfterStop", succeeds: true },
   { launcher: true, state: "alive", succeeds: false },
   { launcher: true, state: "alive", succeeds: true },
@@ -380,7 +385,7 @@ it.effect.each([
       );
       // Use only a process captured by this test; no real daemon or arbitrary PID is stopped.
       const child =
-        state !== "unknown"
+        state !== "unknown" && state !== "missing"
           ? yield* spawner.spawn(
               ChildProcess.make(process.execPath, [
                 "-e",
@@ -399,15 +404,18 @@ it.effect.each([
       }
       const daemonFile = path.join(agentDeviceStateDir(path, config.stateDir), "daemon.json");
       yield* fs.makeDirectory(path.dirname(daemonFile), { recursive: true });
-      yield* fs.writeFileString(
-        daemonFile,
-        JSON.stringify({
-          httpPort: 1234,
-          token: "recovered-raw-token",
-          version,
-          ...(state === "unknown" ? {} : { pid: child?.pid ?? process.pid }),
-        }),
-      );
+      if (state !== "missing")
+        yield* fs.writeFileString(
+          daemonFile,
+          state === "invalidJson"
+            ? '{"httpPort":1234,"token":"recovered-raw-token"'
+            : JSON.stringify({
+                httpPort: state === "invalidSchema" ? "invalid" : 1234,
+                token: "recovered-raw-token",
+                version,
+                ...(state === "unknown" ? {} : { pid: child?.pid ?? process.pid }),
+              }),
+        );
       const commands: string[] = [];
       const runner: ProcessRunner.ProcessRunner["Service"] = {
         run: (input) =>
@@ -438,6 +446,20 @@ it.effect.each([
           }).pipe(Effect.orDie),
       };
       const host = yield* LocalDeviceHost.make().pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          readFileString: (file, options) =>
+            state === "unreadable" && file === daemonFile
+              ? Effect.fail(
+                  PlatformError.systemError({
+                    _tag: "PermissionDenied",
+                    module: "FileSystem",
+                    method: "readFileString",
+                    description: "denied",
+                  }),
+                )
+              : fs.readFileString(file, options),
+        }),
         Effect.provideService(ServerConfig.ServerConfig, config),
         Effect.provide(NetService.layer),
         Effect.provideService(HostProcessEnvironment, { HOME: directory, PATH: "" }),
