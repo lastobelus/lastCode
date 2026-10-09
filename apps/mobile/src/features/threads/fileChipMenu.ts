@@ -19,18 +19,19 @@ export interface FileChipTarget {
   readonly relativePath?: string;
 }
 
-/** Null when the link is not a file or resolves nowhere the feed can open, such as `~/x` or `../x`. */
+/** Null when the link is not a file or resolves nowhere the feed can open, such as `~/x` without the host home directory. */
 export function resolveFileChipTarget(
   href: string,
   workspaceRoot: string | null | undefined,
 ): FileChipTarget | null {
   const presentation = resolveMarkdownLinkPresentation(href);
   if (presentation.kind !== "file") return null;
+  if (/^~(?:[\\/]|$)/.test(presentation.path)) return null;
   const relativePath = resolveWorkspaceRelativeFilePath(workspaceRoot, presentation.path);
   const fullPath = isAbsolutePath(presentation.path)
     ? presentation.path
-    : workspaceRoot && relativePath
-      ? resolveWorkspaceFilePath(workspaceRoot, relativePath)
+    : workspaceRoot
+      ? resolveWorkspaceFilePath(workspaceRoot, relativePath ?? presentation.path)
       : undefined;
   if (!fullPath && !relativePath) return null;
   return {

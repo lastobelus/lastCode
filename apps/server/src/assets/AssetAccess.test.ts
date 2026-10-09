@@ -30,6 +30,7 @@ import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectFaviconResolver from "../project/ProjectFaviconResolver.ts";
 import * as T3ProjectFileLoader from "../project/T3ProjectFileLoader.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
+import * as ThreadLinkedFiles from "../workspace/ThreadLinkedFiles.ts";
 import { assetFileResponse } from "../http.ts";
 import { ASSET_ROUTE_PREFIX, issueAssetUrl, resolveAsset } from "./AssetAccess.ts";
 import * as NativeAppIconResolver from "./NativeAppIconResolver.ts";
@@ -104,6 +105,7 @@ const oversizedScreenshotItem = {
 };
 
 const layerTest = Layer.mergeAll(
+  Layer.mock(ThreadLinkedFiles.ThreadLinkedFiles)({}),
   NodeHttpPlatform.layer,
   Layer.mock(Orchestrator.OrchestratorV2)({
     getTurnItem: ({ itemId }) =>
@@ -126,6 +128,48 @@ const layerTest = Layer.mergeAll(
 ).pipe(Layer.provideMerge(NodeServices.layer));
 
 describe("AssetAccess", () => {
+  it.effect("requires linked-file validation before minting an exact media URL", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-linked-media-" });
+      const filePath = path.join(root, "report.html");
+      yield* fs.writeFileString(filePath, "<h1>Linked report</h1>");
+      const canonicalFile = yield* fs.realPath(filePath);
+      const linkedResolver = Layer.mock(ThreadLinkedFiles.ThreadLinkedFiles)({
+        resolveFile: (input) =>
+          input.path === "report.html" && input.threadId === ThreadId.make("thread-1")
+            ? Effect.succeed({
+                cwd: root,
+                relativePath: "report.html",
+                absolutePath: canonicalFile,
+              })
+            : Effect.fail(
+                new ThreadLinkedFiles.ThreadLinkedFileDeniedError({ threadId: input.threadId }),
+              ),
+      });
+      const resource = {
+        _tag: "media-file" as const,
+        threadId: ThreadId.make("thread-1"),
+        path: "report.html",
+        linkedThreadFile: true,
+      };
+      const result = yield* issueAssetUrl({ resource }).pipe(Effect.provide(linkedResolver));
+      const suffix = result.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+      const separator = suffix.indexOf("/");
+      expect(
+        yield* resolveAsset(suffix.slice(0, separator), suffix.slice(separator + 1)),
+      ).toMatchObject({ kind: "file", path: canonicalFile });
+      expect(yield* resolveAsset(suffix.slice(0, separator), "sibling.html")).toBeNull();
+      expect(
+        (yield* issueAssetUrl({ resource: { ...resource, path: "private.html" } }).pipe(
+          Effect.provide(linkedResolver),
+          Effect.flip,
+        ))._tag,
+      ).toBe("AssetWorkspaceResolutionError");
+    }).pipe(Effect.provide(layerTest)),
+  );
+
   it.effect("loads private media immediately after login with the GitHub credential", () => {
     let lookups = 0;
     const authorizations: Array<string | undefined> = [];

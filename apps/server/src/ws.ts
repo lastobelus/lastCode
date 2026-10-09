@@ -202,6 +202,7 @@ import { deletePendingAttachment, issueAttachmentUploadUrl } from "./assets/Atta
 import * as PortScanner from "./preview/PortScanner.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
+import * as ThreadLinkedFiles from "./workspace/ThreadLinkedFiles.ts";
 import { readWorkflowScript } from "./orchestration-v2/workflowScriptQuery.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
@@ -518,7 +519,9 @@ function filesystemBrowseFailureContext(error: WorkspaceEntries.WorkspaceEntries
 function projectFileFailureContext(
   error:
     | WorkspaceFileSystem.WorkspaceFileSystemError
-    | WorkspacePaths.WorkspacePathOutsideRootError,
+    | WorkspacePaths.WorkspacePathOutsideRootError
+    | ThreadLinkedFiles.ThreadLinkedFileDeniedError
+    | ThreadLinkedFiles.ThreadLinkedFileResolutionError,
 ): {
   readonly failure: ProjectFileFailure;
   readonly resolvedPath?: string;
@@ -527,6 +530,9 @@ function projectFileFailureContext(
   readonly operationPath?: string;
 } {
   switch (error._tag) {
+    case "ThreadLinkedFileDeniedError":
+    case "ThreadLinkedFileResolutionError":
+      return { failure: "operation_failed" };
     case "WorkspacePathOutsideRootError":
       return { failure: "workspace_path_outside_root" };
     case "WorkspaceFileSystemOperationError":
@@ -1327,6 +1333,7 @@ const layerWsRpc = (
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
       const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
       const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+      const threadLinkedFiles = yield* ThreadLinkedFiles.ThreadLinkedFiles;
       const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
       const backgroundPolicy = yield* BackgroundPolicy.BackgroundPolicy;
       const rpcClientIds = yield* Ref.make(new Set<RpcClientId>());
@@ -2749,7 +2756,10 @@ const layerWsRpc = (
             ),
           ),
         [WS_METHODS.projectsReadFile]: (input) =>
-          workspaceFileSystem.readFile(input).pipe(
+          (input.linkedThreadId === undefined
+            ? workspaceFileSystem.readFile(input)
+            : threadLinkedFiles.readFile({ ...input, linkedThreadId: input.linkedThreadId })
+          ).pipe(
             Effect.mapError(
               (cause) =>
                 new ProjectReadFileError({
@@ -2812,6 +2822,7 @@ const layerWsRpc = (
               input.resource._tag === "tool-output-image" ||
               // GitHub media names the repository it authenticates through itself.
               input.resource._tag === "github-media" ||
+              (input.resource._tag === "media-file" && input.resource.linkedThreadFile === true) ||
               (input.resource._tag === "media-file" && path.isAbsolute(input.resource.path))
             ) {
               return yield* issueAssetUrl({ resource: input.resource });

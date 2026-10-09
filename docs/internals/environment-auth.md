@@ -108,6 +108,13 @@ absolute paths outside a project. This lets clients display artifacts that an
 agent writes in a temporary directory. Relative paths and writes still follow
 the [workspace path rules](../../apps/server/src/workspace/WorkspaceFileSystem.ts).
 
+`orchestration:read` also permits opening an individual workspace file linked in
+a persisted assistant message or proposed plan. The server derives the workspace from the thread,
+matches the rendered file reference, and checks lexical and real-path containment.
+This lets a conversation reader open its reports without granting host-file
+browsing. It does not grant directory access, unlinked files, files outside the
+thread's workspace, or writes.
+
 Signed asset URLs are bearer credentials. A URL for media on the host grants
 access to one canonical file and its device/inode identity, not its containing directory.
 [Asset access](../../apps/server/src/assets/AssetAccess.ts) rechecks the opened
@@ -115,7 +122,8 @@ file's identity when serving it, so atomic replacement requires a new URL while
 editing the same file in place does not. An HTML file authorized this way cannot
 load sibling assets; directory-scoped workspace previews are a separate grant.
 Clients should share the authored file reference so they do not disclose the
-temporary URL's credential. `filesystem:read` is checked when the URL is minted,
+temporary URL's credential. File access is checked when the URL is minted
+(`filesystem:read`, or `orchestration:read` for a verified assistant-linked file),
 not when it is served: a URL issued before the grant was revoked keeps working
 until it expires, and it is not bound to the session that minted it.
 

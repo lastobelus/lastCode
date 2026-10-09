@@ -7,7 +7,7 @@ import {
   type ScopedThreadRef,
 } from "@t3tools/contracts";
 import { filePreviewDelimiter } from "@t3tools/shared/delimitedPreview";
-import { AuthFilesystemWriteScope } from "@t3tools/contracts";
+import { AuthFilesystemReadScope, AuthFilesystemWriteScope } from "@t3tools/contracts";
 import {
   isWorkspaceAudioPreviewPath,
   isWorkspaceImagePreviewPath,
@@ -69,7 +69,7 @@ import { assetEnvironment } from "~/state/assets";
 import { usePreviewAvailable } from "~/browser/previewRuntime";
 import { useEnvironmentHttpBaseUrl, usePrimaryEnvironmentId } from "~/state/environments";
 import { previewEnvironment } from "~/state/preview";
-import { useEnvironmentScope } from "~/state/session";
+import { readEnvironmentScope, useEnvironmentScope } from "~/state/session";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
 
@@ -969,7 +969,7 @@ export default function FilePreviewPanel({
   selectedFilePending,
   workspaceMutationId,
 }: FilePreviewPanelProps) {
-  const relativePath =
+  const queryPath =
     attachment === undefined ? resolveFilePreviewPath(requestedPath, cwd) : requestedPath;
   const { resolvedTheme } = useTheme();
   const wordWrap = useClientSettings((settings) => settings.wordWrap);
@@ -984,6 +984,23 @@ export default function FilePreviewPanel({
   const openPreview = useAtomCommand(previewEnvironment.open, {
     reportFailure: false,
   });
+  const fileAccess = useFilesystemReadAccess(environmentId);
+  const { canReadFiles, canReadThreadFiles } = fileAccess;
+  const canWriteFiles = useEnvironmentScope(environmentId, AuthFilesystemWriteScope);
+  // Media and PDFs render from their absolute path, so their contents are never
+  // shown. The read still runs: a folder named `assets.png` is only knowable as a
+  // folder from the read failure, and the server stats before reading, so a folder
+  // costs an open and a stat and returns no body.
+  const file = useProjectFileQuery(
+    environmentId,
+    cwd,
+    queryPath,
+    attachment === undefined && queryPath !== null,
+    threadRef.threadId,
+  );
+  // A published bare filename may resolve to a nested workspace file. Keep
+  // the query anchored to the requested path and render using the resolved one.
+  const relativePath = file.data?.relativePath ?? queryPath;
   const isVideo = relativePath !== null && isWorkspaceVideoPreviewPath(relativePath);
   const isAudio = relativePath !== null && !isVideo && isWorkspaceAudioPreviewPath(relativePath);
   const isImage = relativePath !== null && !isVideo && isWorkspaceImagePreviewPath(relativePath);
@@ -994,19 +1011,6 @@ export default function FilePreviewPanel({
   // A file outside the workspace (an absolute path) is shown, never edited.
   const isHostFile =
     attachment !== undefined || (relativePath !== null && isAbsolutePath(relativePath));
-  const fileAccess = useFilesystemReadAccess(environmentId);
-  const { canReadFiles } = fileAccess;
-  const canWriteFiles = useEnvironmentScope(environmentId, AuthFilesystemWriteScope);
-  // Media and PDFs render from their absolute path, so their contents are never
-  // shown. The read still runs: a folder named `assets.png` is only knowable as a
-  // folder from the read failure, and the server stats before reading, so a folder
-  // costs an open and a stat and returns no body.
-  const file = useProjectFileQuery(
-    environmentId,
-    cwd,
-    relativePath,
-    attachment === undefined && relativePath !== null,
-  );
   const attemptedPath = file.readError?.resolvedPath ?? file.readError?.operationPath;
   // A chat link cannot tell a folder from a file, so a folder arrives here as
   // a file surface and the read fails. Keep the breadcrumbs, drop the preview
@@ -1018,11 +1022,13 @@ export default function FilePreviewPanel({
   const previewPath = isDirectory ? null : relativePath;
   const [browserRevision, setBrowserRevision] = useState(0);
   const [explorerOpen, setExplorerOpen] = useState(initialExplorerOpen);
-  const showExplorer = shouldShowFileExplorer({
-    relativePath: previewPath,
-    explorerOpen,
-    attachmentOpen: attachment !== undefined,
-  });
+  const showExplorer =
+    canReadFiles &&
+    shouldShowFileExplorer({
+      relativePath: previewPath,
+      explorerOpen,
+      attachmentOpen: attachment !== undefined,
+    });
   // Reading markdown rendered is a preference, not a property of one file. Keeping
   // it on the panel meant a thread switch dropped it and forced source back.
   const [renderMarkdownPreferred, setRenderMarkdownPreferred] = useLocalStorage(
@@ -1082,6 +1088,7 @@ export default function FilePreviewPanel({
       ? setRenderTablePreferred
       : setRenderBrowserFilePreferred;
   const canOpenInBrowser =
+    (canReadFiles || canReadThreadFiles) &&
     canOperatePreview &&
     previewPath !== null &&
     attachment === undefined &&
@@ -1102,7 +1109,7 @@ export default function FilePreviewPanel({
       !selectedFilePending,
     mutationId: workspaceMutationId,
     refresh: file.refresh,
-    resourceKey: `file:${environmentId}:${cwd}:${relativePath ?? ""}`,
+    resourceKey: `file:${environmentId}:${cwd}:${queryPath ?? ""}`,
   });
 
   useEffect(() => {
@@ -1125,12 +1132,19 @@ export default function FilePreviewPanel({
   };
 
   const handleOpenInBrowser = useCallback(() => {
-    if (!canReadFiles || !canOperatePreview || !absolutePath || !environmentHttpBaseUrl) return;
+    if (
+      (!canReadFiles && !canReadThreadFiles) ||
+      !canOperatePreview ||
+      !absolutePath ||
+      !environmentHttpBaseUrl
+    )
+      return;
     void (async () => {
       const result = await openFileInPreview({
         threadRef,
         filePath: absolutePath,
         workspaceRoot: cwd,
+        canReadFiles: readEnvironmentScope(environmentId, AuthFilesystemReadScope),
         httpBaseUrl: environmentHttpBaseUrl,
         createAssetUrl,
         openPreview,
@@ -1155,15 +1169,17 @@ export default function FilePreviewPanel({
   }, [
     absolutePath,
     canReadFiles,
+    canReadThreadFiles,
     canOperatePreview,
     createAssetUrl,
     cwd,
     environmentHttpBaseUrl,
+    environmentId,
     openPreview,
     threadRef,
   ]);
 
-  if (attachment === undefined && !canReadFiles) {
+  if (attachment === undefined && !canReadFiles && !fileAccess.canReadThreadFiles) {
     if (fileAccess.isPending) {
       return (
         <div className="flex min-h-0 flex-1 items-center justify-center gap-2 text-sm text-muted-foreground">
@@ -1192,14 +1208,18 @@ export default function FilePreviewPanel({
             data-file-breadcrumbs
           >
             <div className="flex h-full w-max min-w-full items-center text-xs">
-              <FileBreadcrumbs
-                cwd={cwd}
-                environmentId={environmentId}
-                onOpenFile={onOpenFile}
-                projectName={projectName}
-                relativePath={relativePath}
-                workspaceMutationId={workspaceMutationId}
-              />
+              {canReadFiles ? (
+                <FileBreadcrumbs
+                  cwd={cwd}
+                  environmentId={environmentId}
+                  onOpenFile={onOpenFile}
+                  projectName={projectName}
+                  relativePath={relativePath}
+                  workspaceMutationId={workspaceMutationId}
+                />
+              ) : (
+                <span className="px-3">{relativePath}</span>
+              )}
             </div>
           </ScrollArea>
           {absolutePath &&
@@ -1257,7 +1277,7 @@ export default function FilePreviewPanel({
               <Globe2 className="size-3.5" />
             </FileSurfaceAction>
           ) : null}
-          {!isHostFile && previewPath !== null ? (
+          {canReadFiles && !isHostFile && previewPath !== null ? (
             <FileSurfaceAction
               label={explorerOpen ? "Hide file explorer" : "Show file explorer"}
               pressed={explorerOpen}

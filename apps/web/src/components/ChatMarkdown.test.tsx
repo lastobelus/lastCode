@@ -12,11 +12,16 @@ import { act, type ComponentProps, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { describe, expect, it, vi } from "vite-plus/test";
+import * as Cause from "effect/Cause";
 
 import { chatMarkdownClipboardPayload } from "../markdown-clipboard";
 
 const markdownOpenMocks = vi.hoisted(() => ({
   prepareHostedPreview: vi.fn(),
+  searchProjectEntries: vi.fn(),
+  createAssetUrl: vi.fn(),
+  denyFilesystemRead: false,
+  preparedConnection: undefined as unknown,
   localApi: undefined as unknown,
 }));
 
@@ -36,6 +41,7 @@ import { getSyntaxHighlighterPromise } from "../lib/syntaxHighlighting";
 import { GitHubIcon } from "./Icons";
 import { Button } from "./ui/button";
 import { MediaActions } from "./media/MediaActions";
+import { toastManager } from "./ui/toast";
 import { setMarkdownTaskChecked } from "../markdownTaskList";
 
 vi.mock("@effect/atom-react", async (importOriginal) => {
@@ -76,19 +82,32 @@ vi.mock("./ui/tooltip", async () => {
     TooltipPopup: () => null,
   };
 });
-vi.mock("../state/use-atom-query-runner", () => ({ useAtomQueryRunner: () => vi.fn() }));
+vi.mock("../state/use-atom-query-runner", async () => {
+  const { projectEnvironment } = await import("../state/projects");
+  const { assetEnvironment } = await import("../state/assets");
+  return {
+    useAtomQueryRunner: (query: unknown) =>
+      query === projectEnvironment.searchEntries
+        ? markdownOpenMocks.searchProjectEntries
+        : query === assetEnvironment.createUrl
+          ? markdownOpenMocks.createAssetUrl
+          : vi.fn(),
+  };
+});
 vi.mock("../state/use-atom-command", () => ({ useAtomCommand: () => vi.fn() }));
 vi.mock("../state/session", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../state/session")>();
-  const { AuthStandardClientScopes } = await import("@t3tools/contracts");
+  const { AuthStandardClientScopes, AuthFilesystemReadScope } = await import("@t3tools/contracts");
   const grantedScopes = new Set<AuthEnvironmentScope>(AuthStandardClientScopes);
   const hasScope = (environmentId: EnvironmentId | null, scope: AuthEnvironmentScope) =>
-    environmentId !== null && grantedScopes.has(scope);
+    environmentId !== null &&
+    !(markdownOpenMocks.denyFilesystemRead && scope === AuthFilesystemReadScope) &&
+    grantedScopes.has(scope);
   return {
     ...actual,
     useEnvironmentScope: hasScope,
     readEnvironmentScope: hasScope,
-    usePreparedConnection: () => ({ _tag: "Loading" }),
+    usePreparedConnection: () => markdownOpenMocks.preparedConnection ?? { _tag: "Loading" },
   };
 });
 vi.mock("../state/entities", () => ({
@@ -1913,4 +1932,158 @@ describe("chat file handoffs", () => {
       vi.unstubAllGlobals();
     }
   });
+});
+
+describe("chat file link destination ownership", () => {
+  it.each([
+    ["/repo/report.md:12", "report.md", false],
+    ["./report.md:12", "./report.md", false],
+    ["file:///repo/report.md#L12", "report.md", false],
+    ["report.md#L12", "nested/report.md", true],
+    ["report.md:12", "nested/report.md", true],
+    ["test_utils.py:12", "test_utils.py", true],
+    ["__init__.py:12", "__init__.py", true],
+    ["_config.yml:12", "_config.yml", true],
+    ["2024-notes.md:12", "2024-notes.md", true],
+  ])("opens %s without losing explicit path intent", async (href, expectedPath, shouldSearch) => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const ref = {
+      environmentId: EnvironmentId.make("file-link-env"),
+      threadId: ThreadId.make("file-link-thread"),
+    };
+    useRightPanelStore.setState({ byThreadKey: {} });
+    markdownOpenMocks.searchProjectEntries.mockReset();
+    markdownOpenMocks.searchProjectEntries.mockResolvedValue({
+      _tag: "Success",
+      value: { entries: [{ path: "nested/report.md", kind: "file" }] },
+    });
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(async () => {
+        renderer = create(
+          <ChatMarkdown cwd="/repo" threadRef={ref} text={`[report.md](${href})`} />,
+        );
+      });
+      const link = renderer!.root
+        .findAllByType("a")
+        .find((item) => item.props.className?.includes("chat-markdown-file-link"))!;
+      await act(async () => {
+        link.props.onClick({
+          preventDefault() {},
+          stopPropagation() {},
+          metaKey: false,
+          ctrlKey: false,
+        });
+      });
+      const panel = selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, ref);
+      expect(panel.activeSurfaceId).toBe(`file:${expectedPath}`);
+      expect(panel.surfaces.find((surface) => surface.id === panel.activeSurfaceId)).toMatchObject({
+        revealLine: 12,
+      });
+      expect(markdownOpenMocks.searchProjectEntries).toHaveBeenCalledTimes(shouldSearch ? 1 : 0);
+      if (shouldSearch) {
+        expect(markdownOpenMocks.searchProjectEntries).toHaveBeenCalledWith({
+          environmentId: ref.environmentId,
+          input: { cwd: "/repo", query: expectedPath.split("/").at(-1), limit: 25, kind: "file" },
+        });
+      }
+    } finally {
+      markdownOpenMocks.searchProjectEntries.mockReset();
+      await act(async () => renderer?.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("restricted chat media expansion", () => {
+  it.each([true, false])(
+    "scopes the fresh request and expands only granted media (%s)",
+    async (granted) => {
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      const ref = {
+        environmentId: EnvironmentId.make("restricted-media-env"),
+        threadId: ThreadId.make("restricted-media-thread"),
+      };
+      markdownOpenMocks.denyFilesystemRead = true;
+      markdownOpenMocks.preparedConnection = {
+        _tag: "Some",
+        value: { httpBaseUrl: "https://workstation.example" },
+      };
+      markdownOpenMocks.createAssetUrl.mockResolvedValue(
+        granted
+          ? { _tag: "Success", value: { relativeUrl: "/api/assets/linked-image" } }
+          : { _tag: "Failure", cause: Cause.fail(new Error("File is not published")) },
+      );
+      useHandoffsStore.setState({ byThreadKey: {} });
+      let opened!: () => void;
+      const didOpen = new Promise<void>((resolve) => {
+        opened = resolve;
+      });
+      const onImageExpand = vi.fn(() => opened());
+      const toast = vi.spyOn(toastManager, "add").mockImplementation(() => {
+        opened();
+        return "restricted-media-toast";
+      });
+      let renderer: ReactTestRenderer | undefined;
+      try {
+        await act(async () => {
+          renderer = create(
+            <ChatMarkdown
+              cwd="/repo"
+              text="[image](/tmp/linked.png)"
+              threadRef={ref}
+              onImageExpand={onImageExpand}
+            />,
+          );
+        });
+        await act(async () => {
+          renderer!.root.findByType("a").props.onClick({
+            preventDefault() {},
+            stopPropagation() {},
+            metaKey: false,
+            ctrlKey: false,
+          });
+          await didOpen;
+        });
+        expect(markdownOpenMocks.createAssetUrl).toHaveBeenCalledExactlyOnceWith({
+          environmentId: ref.environmentId,
+          input: {
+            resource: {
+              _tag: "media-file",
+              threadId: ref.threadId,
+              path: "/tmp/linked.png",
+              linkedThreadFile: true,
+            },
+          },
+        });
+        if (granted) {
+          expect(onImageExpand).toHaveBeenCalledWith({
+            index: 0,
+            images: [
+              expect.objectContaining({
+                src: "https://workstation.example/api/assets/linked-image",
+              }),
+            ],
+          });
+          expect(toast).not.toHaveBeenCalled();
+        } else {
+          expect(onImageExpand).not.toHaveBeenCalled();
+          expect(toast).toHaveBeenCalledWith(
+            expect.objectContaining({
+              title: "Media unavailable",
+              description: "File is not published",
+            }),
+          );
+          expect(readThreadHandoffs(ref)).toEqual([]);
+        }
+      } finally {
+        await act(async () => renderer?.unmount());
+        toast.mockRestore();
+        markdownOpenMocks.createAssetUrl.mockReset();
+        markdownOpenMocks.denyFilesystemRead = false;
+        markdownOpenMocks.preparedConnection = undefined;
+        vi.unstubAllGlobals();
+      }
+    },
+  );
 });

@@ -59,10 +59,6 @@
       "types": "./src/environment/index.ts",
       "default": "./src/environment/index.ts"
     },
-    "./markdown-images": {
-      "types": "./src/markdownImages.ts",
-      "default": "./src/markdownImages.ts"
-    },
     "./media-reference": {
       "types": "./src/mediaReference.ts",
       "default": "./src/mediaReference.ts"

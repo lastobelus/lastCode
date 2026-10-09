@@ -478,6 +478,18 @@
     "./mcpApp": {
       "types": "./src/mcpApp.ts",
       "import": "./src/mcpApp.ts"
+    },
+    "./markdownImages": {
+      "types": "./src/markdownImages.ts",
+      "import": "./src/markdownImages.ts"
+    },
+    "./assistantMarkdownFiles": {
+      "types": "./src/assistantMarkdownFiles.ts",
+      "import": "./src/assistantMarkdownFiles.ts"
+    },
+    "./workspaceBasenameLookup": {
+      "types": "./src/workspaceBasenameLookup.ts",
+      "import": "./src/workspaceBasenameLookup.ts"
     }
   },
   "scripts": {
