@@ -12,6 +12,7 @@ import {
   type ThreadReadResponse,
 } from "@t3tools/contracts";
 import type * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
@@ -57,20 +58,49 @@ const unavailable = () =>
       "The local thread was not found, and the other environments could not all be checked. Keep a T3 client connected to the environments and retry; this does not mean the thread is missing.",
   });
 
+const authorizationIdleMillis = 7 * 24 * 60 * 60 * 1000;
+const maxAuthorizations = 10_000;
+
 const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
-  const authorizations = new Map<ThreadId, Map<MessageId, string>>();
+  const authorizations = new Map<string, { sessionId: string; lastUsedAt: number }>();
+  const authorizationKey = (threadId: ThreadId, messageId: MessageId) =>
+    JSON.stringify([threadId, messageId]);
+  // Map order follows valid use, so stale entries and capacity eviction both
+  // remove the least recently used authority without extending rejected claims.
+  const pruneAuthorizations = (now: number) => {
+    for (const [key, entry] of authorizations) {
+      if (now - entry.lastUsedAt < authorizationIdleMillis) break;
+      authorizations.delete(key);
+    }
+  };
   const authorizedSession: ThreadReadBroker["Service"]["authorizedSession"] = (
     threadId,
     messageId,
-  ) => Effect.sync(() => authorizations.get(threadId)?.get(messageId));
+  ) =>
+    Effect.gen(function* () {
+      const now = yield* Clock.currentTimeMillis;
+      pruneAuthorizations(now);
+      const key = authorizationKey(threadId, messageId);
+      const entry = authorizations.get(key);
+      if (entry === undefined) return undefined;
+      authorizations.delete(key);
+      authorizations.set(key, { ...entry, lastUsedAt: now });
+      return entry.sessionId;
+    });
   const authorize: ThreadReadBroker["Service"]["authorize"] = (input) =>
-    Effect.sync(() => {
-      const messages = authorizations.get(input.threadId) ?? new Map<MessageId, string>();
-      // A replay cannot claim an existing execution, or replace its original requester.
-      if (input.alreadyStored || messages.has(input.messageId)) return;
-      messages.set(input.messageId, input.sessionId);
-      authorizations.set(input.threadId, messages);
+    Effect.gen(function* () {
+      const now = yield* Clock.currentTimeMillis;
+      pruneAuthorizations(now);
+      const key = authorizationKey(input.threadId, input.messageId);
+      // A replay cannot claim an existing execution, including after eviction,
+      // or replace its original requester while the binding remains present.
+      if (input.alreadyStored || authorizations.has(key)) return;
+      if (authorizations.size >= maxAuthorizations) {
+        const oldest = authorizations.keys().next().value;
+        if (oldest !== undefined) authorizations.delete(oldest);
+      }
+      authorizations.set(key, { sessionId: input.sessionId, lastUsedAt: now });
     });
   const clients = new Map<
     string,

@@ -136,6 +136,99 @@ describe("ThreadReadBroker", () => {
     }),
   );
 
+  it.effect("refreshes valid authority use while expiring idle bindings", () =>
+    Effect.gen(function* () {
+      const broker = yield* makeBroker;
+      const idleMessageId = MessageId.make("idle-message");
+      yield* broker.authorize({
+        threadId: sourceThreadId,
+        messageId: idleMessageId,
+        sessionId: "other-session",
+        alreadyStored: false,
+      });
+      yield* TestClock.adjust("6 days");
+      expect(yield* broker.authorizedSession(sourceThreadId, sourceMessageId)).toBe(
+        "client-session",
+      );
+      yield* TestClock.adjust("6 days");
+      expect(yield* broker.authorizedSession(sourceThreadId, idleMessageId)).toBeUndefined();
+      expect(yield* broker.authorizedSession(sourceThreadId, sourceMessageId)).toBe(
+        "client-session",
+      );
+      yield* TestClock.adjust("7 days");
+      expect(yield* broker.authorizedSession(sourceThreadId, sourceMessageId)).toBeUndefined();
+    }),
+  );
+
+  it.effect(
+    "does not let a replay claim expired authority or refresh another requester's binding",
+    () =>
+      Effect.gen(function* () {
+        const broker = yield* makeBroker;
+        yield* TestClock.adjust("6 days");
+        yield* broker.authorize({
+          threadId: sourceThreadId,
+          messageId: sourceMessageId,
+          sessionId: "other-session",
+          alreadyStored: false,
+        });
+        yield* TestClock.adjust("1 day");
+        // Lazy pruning on authorize must still reject the now-stored execution.
+        yield* broker.authorize({
+          threadId: sourceThreadId,
+          messageId: sourceMessageId,
+          sessionId: "other-session",
+          alreadyStored: true,
+        });
+        expect(yield* broker.authorizedSession(sourceThreadId, sourceMessageId)).toBeUndefined();
+        expect(
+          yield* broker.read(sourceThreadId, sourceMessageId, { threadId }).pipe(Effect.flip),
+        ).toMatchObject({ code: "environment_unavailable" });
+      }),
+  );
+
+  it.effect("evicts the least recently used binding at capacity and rejects its replay", () =>
+    Effect.gen(function* () {
+      const broker = yield* makeBroker;
+      for (let index = 0; index < 9_999; index++) {
+        yield* broker.authorize({
+          threadId: sourceThreadId,
+          messageId: MessageId.make(`capacity-message-${index}`),
+          sessionId: "other-session",
+          alreadyStored: false,
+        });
+      }
+      expect(yield* broker.authorizedSession(sourceThreadId, sourceMessageId)).toBe(
+        "client-session",
+      );
+      const newestMessageId = MessageId.make("newest-message");
+      yield* broker.authorize({
+        threadId: sourceThreadId,
+        messageId: newestMessageId,
+        sessionId: "other-session",
+        alreadyStored: false,
+      });
+      const evictedMessageId = MessageId.make("capacity-message-0");
+      expect(yield* broker.authorizedSession(sourceThreadId, evictedMessageId)).toBeUndefined();
+      expect(yield* broker.authorizedSession(sourceThreadId, sourceMessageId)).toBe(
+        "client-session",
+      );
+      expect(yield* broker.authorizedSession(sourceThreadId, newestMessageId)).toBe(
+        "other-session",
+      );
+      yield* broker.authorize({
+        threadId: sourceThreadId,
+        messageId: evictedMessageId,
+        sessionId: "client-session",
+        alreadyStored: true,
+      });
+      expect(yield* broker.authorizedSession(sourceThreadId, evictedMessageId)).toBeUndefined();
+      expect(
+        yield* broker.read(sourceThreadId, evictedMessageId, { threadId }).pipe(Effect.flip),
+      ).toMatchObject({ code: "environment_unavailable" });
+    }),
+  );
+
   it.effect(
     "inherits the exact delegated parent run and fails closed for absent or cyclic ancestry",
     () =>
