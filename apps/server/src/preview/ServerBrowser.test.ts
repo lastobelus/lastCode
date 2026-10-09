@@ -3362,7 +3362,11 @@ it.effect("native root acceptance failure retains the unavailable error classifi
       desktopRendersNext = true;
       rootAcceptanceFailure = new DesktopBrowserTransportError({ reason: "guest-unavailable" });
       const failure = yield* broker
-        .invoke({ scope, operation: "open", input: { reuseExistingTab: false, show: false } })
+        .invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { reuseExistingTab: false, show: false },
+        })
         .pipe(Effect.flip);
       expect(failure).toMatchObject({ _tag: "PreviewAutomationRemoteUnavailableError" });
       expect((yield* manager.list({})).sessions).toEqual([]);
