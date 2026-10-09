@@ -6,6 +6,18 @@ import * as NodePath from "node:path";
 
 export const MAIN_WRITE_LOCK_REF = "refs/lastcode/main-write-lock";
 
+// Preserve native result ordering: parse the report before classifying failed writes.
+// Only a hook receipt or a rejected-only ref report proves no write landed.
+function isRejectedPush(result: NodeChildProcess.SpawnSyncReturns<string>, hookRejected: boolean) {
+  const updates = result.stdout.split("\n").filter((line) => /^[!=*+ -]\t/u.test(line));
+  if (result.error) return false;
+  if (result.signal) return false;
+  if (result.status !== 1) return false;
+  if (hookRejected) return true;
+  if (!updates.some((line) => line.startsWith("!\t"))) return false;
+  return updates.every((line) => /^(?:!\t[^\n\t]*\t\[(?:remote )?rejected\]|=\t)/u.test(line));
+}
+
 export function acquireMainWriteLock(
   repoRoot: string,
   remote: string,
@@ -99,18 +111,7 @@ export function acquireMainWriteLock(
             // Missing proof leaves the write outcome uncertain.
           }
         }
-        const updates = result.stdout.split("\n").filter((line) => /^[!=*+ -]\t/u.test(line));
-        // A rejected local hook or rejected-only ref report proves no write landed.
-        if (
-          !result.error &&
-          !result.signal &&
-          result.status === 1 &&
-          (hookRejected ||
-            (updates.some((line) => line.startsWith("!\t")) &&
-              updates.every((line) =>
-                /^(?:!\t[^\n\t]*\t\[(?:remote )?rejected\]|=\t)/u.test(line),
-              )))
-        ) {
+        if (isRejectedPush(result, hookRejected)) {
           uncertain = false;
         }
         throw new Error(
@@ -129,6 +130,7 @@ export function acquireMainWriteLock(
           `PR merge outcome is uncertain under ${identity}.\n${result.error?.message ?? result.stderr.trim()}`,
         );
       }
+      // Decode metadata after the merge command; only exact terminal confirmation clears uncertainty.
       const repository = args[args.indexOf("--repo") + 1];
       const expectedHead = args[args.indexOf("--match-head-commit") + 1];
       const number = args[2];

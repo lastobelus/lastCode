@@ -54,6 +54,17 @@ function fixture() {
   };
 }
 
+function fakeGh(f: ReturnType<typeof fixture>, script: string) {
+  const bin = NodePath.join(f.root, "bin");
+  NodeFS.mkdirSync(bin);
+  NodeFS.writeFileSync(NodePath.join(bin, "gh"), `#!/bin/sh\n${script}\n`, { mode: 0o755 });
+  vi.stubEnv("PATH", `${bin}${NodePath.delimiter}${process.env.PATH ?? ""}`);
+}
+
+function mergeArgs(head: string) {
+  return ["pr", "merge", "1", "--repo", "example/repository", "--match-head-commit", head];
+}
+
 describe("main write lock", () => {
   it("acquires the lock without resending already published source objects", () => {
     const f = fixture();
@@ -283,4 +294,157 @@ describe("main write lock", () => {
       }
     },
   );
+  it.each([
+    ["malformed JSON", "echo invalid", "Unexpected token"],
+    ["missing head", `echo '{"state":"MERGED"}'`, "has not completed"],
+    ["wrong head", `echo '{"state":"MERGED","headRefOid":"wrong"}'`, "has not completed"],
+    ["failed confirmation", "exit 1", "Cannot confirm"],
+    ["signalled confirmation", "kill -TERM $$", "Cannot confirm"],
+  ])("retains exact ownership after %s", (_name, script, error) => {
+    const f = fixture();
+    fakeGh(f, `if [ "$2" = view ]; then ${script}; fi`);
+    const lock = acquireMainWriteLock(f.first, "origin", f.source, "merge");
+    const owner = f.owner();
+    expect(() => lock.merge(mergeArgs(f.source))).toThrow(error);
+    expect(() => lock.release()).toThrow("Retained main write lock");
+    expect(() => lock.merge(mergeArgs(f.source))).toThrow("not available");
+    expect(f.owner()).toBe(owner);
+  });
+
+  it("executes merge before rejecting unusable confirmation metadata", () => {
+    const f = fixture();
+    const log = NodePath.join(f.root, "commands");
+    fakeGh(f, `echo "$*" >> "${log}"`);
+    const lock = acquireMainWriteLock(f.first, "origin", f.source, "merge");
+    expect(() => lock.merge(["pr", "merge"])).toThrow("Cannot confirm");
+    expect(NodeFS.readFileSync(log, "utf8")).toBe("pr merge\n");
+    expect(() => lock.release()).toThrow("Retained main write lock");
+  });
+
+  it("keeps the existing missing-option interpretation and exact confirmation arguments", () => {
+    const f = fixture();
+    const log = NodePath.join(f.root, "commands");
+    fakeGh(
+      f,
+      `echo "$*" >> "${log}"\nif [ "$2" = view ]; then echo '{"state":"MERGED","headRefOid":"pr"}'; fi`,
+    );
+    const lock = acquireMainWriteLock(f.first, "origin", f.source, "merge");
+    lock.merge(["pr", "merge", "1"]);
+    expect(NodeFS.readFileSync(log, "utf8")).toBe(
+      "pr merge 1\npr view 1 --repo pr --json state,headRefOid\n",
+    );
+    lock.release();
+    lock.release();
+    expect(() => lock.merge(mergeArgs(f.source))).toThrow("not available");
+  });
+
+  it.each(["exit 127", "kill -TERM $$"])(
+    "retains ownership after merge child failure: %s",
+    (script) => {
+      const f = fixture();
+      fakeGh(f, script);
+      const lock = acquireMainWriteLock(f.first, "origin", f.source, "merge");
+      const owner = f.owner();
+      expect(() => lock.merge(mergeArgs(f.source))).toThrow("outcome is uncertain");
+      expect(() => lock.release()).toThrow("Retained main write lock");
+      expect(f.owner()).toBe(owner);
+    },
+  );
+
+  it.each([
+    ["only rejected", "!\tHEAD:refs/heads/lastcode/main\t[rejected]", 1, true],
+    ["remote rejected", "!\tHEAD:refs/heads/lastcode/main\t[remote rejected]", 1, true],
+    ["other rejected ref", "!\tHEAD:refs/heads/other\t[rejected]", 1, true],
+    [
+      "unchanged and rejected",
+      "=\tHEAD:refs/heads/other\t[up to date]\n!\tHEAD:refs/heads/lastcode/main\t[rejected]",
+      1,
+      true,
+    ],
+    [
+      "updated and rejected",
+      "*\tHEAD:refs/heads/other\t[new branch]\n!\tHEAD:refs/heads/lastcode/main\t[rejected]",
+      1,
+      false,
+    ],
+    ["no report", "", 1, false],
+    ["transport status with rejection", "!\tHEAD:refs/heads/lastcode/main\t[rejected]", 2, false],
+  ] as const)("requires definitive rejected-only evidence: %s", (_name, stdout, status, safe) => {
+    const f = fixture();
+    const lock = acquireMainWriteLock(f.first, "origin", f.source, "checkpoint");
+    const owner = f.owner();
+    const bin = NodePath.join(f.root, "bin");
+    NodeFS.mkdirSync(bin);
+    NodeFS.writeFileSync(
+      NodePath.join(bin, "git"),
+      `#!/bin/sh\nprintf '%s\\n' '${stdout}'\nexit ${status}\n`,
+      { mode: 0o755 },
+    );
+    const originalPath = process.env.PATH ?? "";
+    vi.stubEnv("PATH", bin);
+    expect(() =>
+      lock.push(["push", "--no-verify", "origin", "HEAD:refs/heads/lastcode/main"]),
+    ).toThrow("Checkpoint push failed");
+    vi.stubEnv("PATH", originalPath);
+    if (safe) {
+      lock.release();
+      acquireMainWriteLock(f.second, "origin", f.source, "checkpoint").release();
+    } else {
+      expect(() => lock.release()).toThrow("Retained main write lock");
+      expect(f.owner()).toBe(owner);
+    }
+  });
+
+  it.each(["push", "merge"])("retains ownership when %s cannot spawn", (operation) => {
+    const f = fixture();
+    const lock = acquireMainWriteLock(f.first, "origin", f.source, "checkpoint");
+    const owner = f.owner();
+    const originalPath = process.env.PATH ?? "";
+    vi.stubEnv("PATH", f.root);
+    expect(() =>
+      operation === "push"
+        ? lock.push(["push", "--no-verify", "origin"])
+        : lock.merge(mergeArgs(f.source)),
+    ).toThrow(operation === "push" ? TypeError : /ENOENT/u);
+    expect(() => lock.release()).toThrow("Retained main write lock");
+    vi.stubEnv("PATH", originalPath);
+    expect(f.owner()).toBe(owner);
+  });
+
+  it("does not reuse a rejected write's certainty for a later unknown push", () => {
+    const f = fixture();
+    const lock = acquireMainWriteLock(f.first, "origin", f.source, "checkpoint");
+    const owner = f.owner();
+    f.git(f.first, [
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.invalid",
+      "commit",
+      "--allow-empty",
+      "-m",
+      "next main",
+    ]);
+    const candidate = f.git(f.first, ["rev-parse", "HEAD"]);
+
+    expect(() =>
+      lock.push([
+        "push",
+        "--no-verify",
+        `--force-with-lease=refs/heads/lastcode/main:${"0".repeat(40)}`,
+        "origin",
+        `${candidate}:refs/heads/lastcode/main`,
+      ]),
+    ).toThrow("Checkpoint push failed");
+    expect(() =>
+      lock.push([
+        "push",
+        "--no-verify",
+        NodePath.join(f.root, "missing.git"),
+        `${candidate}:refs/heads/lastcode/main`,
+      ]),
+    ).toThrow("Checkpoint push failed");
+    expect(() => lock.release()).toThrow("Retained main write lock");
+    expect(f.owner()).toBe(owner);
+  });
 });
