@@ -51,6 +51,7 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("provider-turn.steer"),
+    nativeOnly: Schema.optional(Schema.Literal(true)),
     providerSessionId: ProviderSessionId,
     providerThreadId: ProviderThreadId,
     providerTurnId: ProviderTurnId,
@@ -202,6 +203,11 @@ export class EffectOutboxError extends Schema.TaggedError<EffectOutboxError>()(
 const isEffectOutboxError = Schema.is(EffectOutboxError);
 
 export interface EffectOutboxV2Shape {
+  /** Unfinished cleanup, including pending retry backoff, without decoding payloads. */
+  readonly pendingCleanup: Effect.Effect<
+    ReadonlyArray<{ readonly threadId: ThreadId }>,
+    EffectOutboxError
+  >;
   readonly awaitAvailable: Effect.Effect<void>;
   readonly notifyAvailable: (count?: number) => Effect.Effect<void>;
   /** Persist rows only. Notify workers after the surrounding transaction commits. */
@@ -371,6 +377,16 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
       );
 
     const service: EffectOutboxV2Shape = {
+      pendingCleanup: sql<{ thread_id: string }>`
+        SELECT DISTINCT thread_id
+        FROM orchestration_v2_effect_outbox
+        WHERE status IN ('pending', 'running')
+          AND effect_type IN ('provider-session.detach', 'terminal.cleanup', 'terminal.archive-cleanup')
+        ORDER BY thread_id
+      `.pipe(
+        Effect.map((rows) => rows.map((row) => ({ threadId: ThreadId.make(row.thread_id) }))),
+        Effect.mapError((cause) => new EffectOutboxError({ operation: "pending-cleanup", cause })),
+      ),
       enqueue: (effects) =>
         Effect.gen(function* () {
           const now = yield* DateTime.now;
