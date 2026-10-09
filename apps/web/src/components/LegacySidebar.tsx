@@ -133,6 +133,7 @@ import {
   runThreadAnnotationBodySave,
   ThreadAnnotationEditorDialog,
   ThreadAnnotationHoverPopover,
+  ThreadAnnotationNavigationTrigger,
 } from "./thread-annotation/ThreadAnnotation";
 import { PopoverCreateHandle as createAnnotationPopoverHandle, PopoverTrigger } from "./ui/popover";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
@@ -1077,18 +1078,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       style={{ paddingLeft: 12 + Math.min(family.depth, 6) * 12 }}
       data-thread-item
       {...fileDropHandlers}
-      onFocusCapture={(event) => {
-        if (hasActiveAnnotation) {
-          // Let Base UI's hidden focus guards move focus before changing the active trigger.
-          if (
-            event.currentTarget.contains(event.target) &&
-            event.target.getAttribute("aria-hidden") !== "true"
-          ) {
-            annotationPopoverHandle.open(annotationTriggerId);
-          }
-        } else {
-          setThreadRowActive(true);
-        }
+      onFocusCapture={() => {
+        if (!hasActiveAnnotation) setThreadRowActive(true);
       }}
       onMouseEnter={() => {
         if (!hasActiveAnnotation) setThreadRowActive(true);
@@ -1102,18 +1093,12 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       <TooltipTrigger
         handle={threadDetailsTooltipHandle}
         render={
-          hasActiveAnnotation ? (
-            <PopoverTrigger
-              delay={0}
-              handle={annotationPopoverHandle}
-              id={annotationTriggerId}
-              nativeButton={false}
-              openOnHover
-              render={threadRowElement}
-            />
-          ) : (
-            threadRowElement
-          )
+          <ThreadAnnotationNavigationTrigger
+            annotationActive={hasActiveAnnotation}
+            handle={annotationPopoverHandle}
+            id={annotationTriggerId}
+            render={threadRowElement}
+          />
         }
         role="button"
         tabIndex={0}

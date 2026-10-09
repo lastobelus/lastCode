@@ -11,6 +11,7 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
+  type ComponentProps,
   type FormEvent,
   type ReactNode,
 } from "react";
@@ -29,7 +30,7 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 import { Textarea } from "../ui/textarea";
-import { Popover, PopoverCreateHandle, PopoverPopup } from "../ui/popover";
+import { Popover, PopoverCreateHandle, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { ComposerBanner } from "../chat/ComposerBanner";
 import type { ComposerBannerStackItem } from "../chat/ComposerBannerStack";
 
@@ -296,6 +297,45 @@ export function ThreadAnnotationActions(props: {
   );
 }
 
+/** Adds native hover handling to a navigation row that already owns keyboard activation. */
+export function ThreadAnnotationNavigationTrigger({
+  annotationActive = true,
+  ...props
+}: ComponentProps<typeof PopoverTrigger> & { annotationActive?: boolean }) {
+  return (
+    <PopoverTrigger
+      {...props}
+      delay={0}
+      nativeButton={false}
+      openOnHover={annotationActive}
+      aria-haspopup={undefined}
+      aria-expanded={undefined}
+      aria-controls={undefined}
+      onFocusCapture={(event) => {
+        props.onFocusCapture?.(event);
+        // Pointer focus must not pin the card when clicking the already-active thread.
+        if (
+          annotationActive &&
+          props.id &&
+          event.currentTarget.contains(event.target) &&
+          event.target.getAttribute("aria-hidden") !== "true" &&
+          event.target.matches(":focus-visible")
+        ) {
+          props.handle?.open(props.id);
+        }
+      }}
+      onKeyDown={(event) => {
+        props.onKeyDown?.(event);
+        if (event.key === "Enter" || event.key === " ") event.preventBaseUIHandler();
+      }}
+      onKeyUp={(event) => {
+        props.onKeyUp?.(event);
+        if (event.key === "Enter" || event.key === " ") event.preventBaseUIHandler();
+      }}
+    />
+  );
+}
+
 export function ThreadAnnotationHoverPopover(props: {
   annotation: ThreadAnnotationModel;
   threadRef: ScopedThreadRef;
@@ -321,11 +361,14 @@ export function ThreadAnnotationHoverPopover(props: {
         ) {
           details.cancel();
         }
+        const navigationTrigger = document.getElementById(props.navigationTriggerId);
+        const activeElement = document.activeElement;
         if (
           !open &&
           details.reason === "trigger-hover" &&
-          (popupRef.current?.contains(document.activeElement) ||
-            document.getElementById(props.navigationTriggerId)?.contains(document.activeElement))
+          (popupRef.current?.contains(activeElement) ||
+            (navigationTrigger?.contains(activeElement) &&
+              activeElement?.matches(":focus-visible")))
         ) {
           details.cancel();
         }

@@ -1,13 +1,18 @@
 // @vitest-environment happy-dom
 
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { Tooltip as TooltipPrimitive } from "@base-ui/react/tooltip";
 import { EnvironmentId, MessageId, ThreadId, type ThreadAnnotation } from "@t3tools/contracts";
 import { act, useMemo } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vite-plus/test";
 
 import { PopoverCreateHandle as createPopoverHandle, PopoverTrigger } from "../ui/popover";
-import { ThreadAnnotationHoverPopover } from "./ThreadAnnotation";
+import { TooltipTrigger } from "../ui/tooltip";
+import {
+  ThreadAnnotationHoverPopover,
+  ThreadAnnotationNavigationTrigger,
+} from "./ThreadAnnotation";
 
 // Markdown rendering is unrelated to the popup interaction and requires a router.
 vi.mock("../ChatMarkdown", () => ({
@@ -27,41 +32,67 @@ const threadRef = scopeThreadRef(
 );
 const navigationTriggerId = "annotation-navigation";
 
-function HoverHarness({ onNavigate, onEdit }: { onNavigate: () => void; onEdit: () => void }) {
+function HoverHarness({
+  onNavigate,
+  onRowClick,
+  onEdit,
+  annotationActive = true,
+}: {
+  onNavigate: () => void;
+  onRowClick: () => void;
+  onEdit: () => void;
+  annotationActive?: boolean;
+}) {
   const handle = useMemo(() => createPopoverHandle(), []);
+  const tooltipHandle = useMemo(() => TooltipPrimitive.createHandle(), []);
   return (
     <>
-      <PopoverTrigger
-        delay={0}
-        handle={handle}
-        id={navigationTriggerId}
-        nativeButton={false}
-        openOnHover
-        render={<div />}
+      <TooltipTrigger
+        handle={tooltipHandle}
+        render={
+          <ThreadAnnotationNavigationTrigger
+            annotationActive={annotationActive}
+            handle={handle}
+            id={navigationTriggerId}
+            render={<div />}
+          />
+        }
         role="button"
         tabIndex={0}
-        onClick={onNavigate}
+        onClick={() => {
+          onRowClick();
+          onNavigate();
+        }}
+        onKeyDown={(event) => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          onNavigate();
+        }}
       >
         Navigate to thread
-        <PopoverTrigger
-          handle={handle}
-          onPointerDown={(event) => event.stopPropagation()}
-          onClick={(event) => event.stopPropagation()}
-        >
-          Show annotation
-        </PopoverTrigger>
-      </PopoverTrigger>
+        {annotationActive ? (
+          <PopoverTrigger
+            handle={handle}
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => event.stopPropagation()}
+          >
+            Show annotation
+          </PopoverTrigger>
+        ) : null}
+      </TooltipTrigger>
       <button type="button">Outside control</button>
-      <ThreadAnnotationHoverPopover
-        annotation={annotation}
-        threadRef={threadRef}
-        handle={handle}
-        navigationTriggerId={navigationTriggerId}
-        threadDetails={<div>Thread details</div>}
-        onEdit={onEdit}
-        onResolve={() => undefined}
-        onBodyChange={async () => true}
-      />
+      {annotationActive ? (
+        <ThreadAnnotationHoverPopover
+          annotation={annotation}
+          threadRef={threadRef}
+          handle={handle}
+          navigationTriggerId={navigationTriggerId}
+          threadDetails={<div>Thread details</div>}
+          onEdit={onEdit}
+          onResolve={() => undefined}
+          onBodyChange={async () => true}
+        />
+      ) : null}
     </>
   );
 }
@@ -98,12 +129,26 @@ afterEach(async () => {
 
 async function renderHoverCard() {
   const onNavigate = vi.fn();
+  const onRowClick = vi.fn();
   const onEdit = vi.fn();
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
-  await act(() => root?.render(<HoverHarness onNavigate={onNavigate} onEdit={onEdit} />));
-  return { onNavigate, onEdit };
+  await act(() =>
+    root?.render(<HoverHarness onNavigate={onNavigate} onRowClick={onRowClick} onEdit={onEdit} />),
+  );
+  const setAnnotationActive = (annotationActive: boolean) =>
+    act(() =>
+      root?.render(
+        <HoverHarness
+          onNavigate={onNavigate}
+          onRowClick={onRowClick}
+          onEdit={onEdit}
+          annotationActive={annotationActive}
+        />,
+      ),
+    );
+  return { onNavigate, onRowClick, onEdit, setAnnotationActive };
 }
 
 function button(label: string) {
@@ -143,6 +188,58 @@ async function leaveNavigation() {
 }
 
 describe("ThreadAnnotationHoverPopover", () => {
+  it("dismisses after pointer exit when a click leaves the navigation row focused", async () => {
+    await renderHoverCard();
+    await hoverNavigation();
+    // happy-dom does not infer pointer modality for :focus-visible.
+    const row = navigationTrigger();
+    const matches = row.matches.bind(row);
+    vi.spyOn(row, "matches").mockImplementation((selector) =>
+      selector === ":focus-visible" ? false : matches(selector),
+    );
+    await act(() => {
+      navigationTrigger().focus();
+      navigationTrigger().click();
+    });
+    expect(document.activeElement).toBe(navigationTrigger());
+    await leaveNavigation();
+    expect(popup()).toBeNull();
+  });
+
+  it("keeps the focused navigation row mounted when its annotation is resolved or reopened", async () => {
+    const { setAnnotationActive } = await renderHoverCard();
+    const row = navigationTrigger();
+    await act(() => row.focus());
+    for (const active of [false, true]) {
+      await setAnnotationActive(active);
+      expect(navigationTrigger()).toBe(row);
+      expect(document.activeElement).toBe(row);
+    }
+  });
+
+  it.each([
+    { key: "Enter" },
+    { key: " " },
+    { key: "Enter", ctrlKey: true },
+    { key: " ", ctrlKey: true },
+    { key: "Enter", shiftKey: true },
+    { key: " ", shiftKey: true },
+  ])(
+    "activates the composed navigation row once for $key with $ctrlKey/$shiftKey",
+    async (keys) => {
+      const { onNavigate, onRowClick } = await renderHoverCard();
+      await act(() => {
+        for (const type of ["keydown", "keyup"]) {
+          navigationTrigger().dispatchEvent(
+            new KeyboardEvent(type, { ...keys, bubbles: true, cancelable: true }),
+          );
+        }
+      });
+      expect(onNavigate).toHaveBeenCalledOnce();
+      expect(onRowClick).not.toHaveBeenCalled();
+    },
+  );
+
   it.each(["focus outside", "Escape"] as const)(
     "keeps a focused Edit control after hover ends, then dismisses on %s",
     async (dismissal) => {
