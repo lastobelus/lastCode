@@ -5129,17 +5129,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           FROM orchestration_v2_projection_turn_items item JOIN json_each(${sources}) wanted
           ON item.thread_id = json_extract(wanted.value, '$.threadId')
             AND item.turn_item_id = json_extract(wanted.value, '$.id')`;
+            const sourceKey = (sourceThreadId: string, sourceItemId: string) =>
+              `${sourceThreadId.length}:${sourceThreadId}${sourceItemId}`;
             const byIdentity = new Map(
-              payloads.map((row) => [
-                JSON.stringify([row.thread_id, row.turn_item_id]),
-                row.payload_json,
-              ]),
+              payloads.map((row) => [sourceKey(row.thread_id, row.turn_item_id), row.payload_json]),
             );
             return yield* Effect.forEach(inherited, (row) =>
               Effect.gen(function* () {
-                const payload = byIdentity.get(
-                  JSON.stringify([row.sourceThreadId, row.sourceItemId]),
-                );
+                const payload = byIdentity.get(sourceKey(row.sourceThreadId, row.sourceItemId));
                 if (payload === undefined) return yield* new ProjectionStoreReadError({ threadId });
                 const item = yield* decodeTurnItemPayload(payload);
                 if (item.type !== "assistant_message" && item.type !== "proposed_plan")
