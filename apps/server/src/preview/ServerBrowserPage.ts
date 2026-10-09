@@ -283,12 +283,15 @@ const captureViewportWithinBudget = async (
     options.scale < 1
       ? await read("Page.getLayoutMetrics", () => cdp.send("Page.getLayoutMetrics"))
       : undefined;
+  const viewport = page.viewportSize();
+  // CDP screenshot clips use DIP; native layout metrics use CSS pixels before page zoom.
+  const zoom = viewport ? 1 : (metrics?.cssVisualViewport.zoom ?? 1);
   const clip = metrics && {
-    x: metrics.cssVisualViewport.pageX,
-    y: metrics.cssVisualViewport.pageY,
-    ...(page.viewportSize() ?? {
-      width: Math.max(1, Math.round(metrics.cssVisualViewport.clientWidth)),
-      height: Math.max(1, Math.round(metrics.cssVisualViewport.clientHeight)),
+    x: metrics.cssVisualViewport.pageX * zoom,
+    y: metrics.cssVisualViewport.pageY * zoom,
+    ...(viewport ?? {
+      width: Math.max(1, metrics.cssVisualViewport.clientWidth * zoom),
+      height: Math.max(1, metrics.cssVisualViewport.clientHeight * zoom),
     }),
     scale: options.scale,
   };

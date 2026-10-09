@@ -71,7 +71,7 @@ vi.mock("./ServerBrowserContexts.ts", () => ({
       const creation = rootCreations.find((root) => endpoint === `ws://desktop/${root.tabId}`);
       if (creation)
         context.applyNativeRendering({
-          viewport: creation.viewport,
+          ...(creation.viewport === undefined ? {} : { viewport: creation.viewport }),
           viewportSize: { width: 1024, height: 768 },
         });
       await desktopPageSetup?.(context, endpoint);
@@ -91,6 +91,7 @@ vi.mock("./ServerBrowserContexts.ts", () => ({
 function makeSession(
   viewport?: () => { width: number; height: number },
   pixelRatio?: () => number,
+  zoom?: () => number,
 ) {
   return {
     on: vi.fn(),
@@ -108,6 +109,7 @@ function makeSession(
           cssVisualViewport: {
             pageX: 0,
             pageY: 0,
+            zoom: zoom?.() ?? 1,
             ...(size ? { clientWidth: size.width, clientHeight: size.height } : {}),
           },
         };
@@ -202,7 +204,11 @@ function makeContext(onClose?: (context: BrowserContext) => void) {
     }),
     addInitScript: vi.fn(async () => {}),
     newCDPSession: async () => {
-      const session = makeSession(cssViewport, () => 2 * zoomFactor);
+      const session = makeSession(
+        cssViewport,
+        () => 2 * zoomFactor,
+        () => zoomFactor,
+      );
       sessions.push(session);
       if (recordingCdpGate) recordingStageEntered?.resolve();
       await recordingCdpGate?.promise;
@@ -1153,7 +1159,7 @@ it.live("published root zoom keeps measured viewport, pointer and snapshot scale
       expect(session.send).toHaveBeenCalledWith(
         "Page.captureScreenshot",
         expect.objectContaining({
-          clip: expect.objectContaining({ width: 800, height: 600, scale: 0.64 }),
+          clip: expect.objectContaining({ width: 1000, height: 750, scale: 0.64 }),
         }),
       );
       expect(

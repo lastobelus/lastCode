@@ -290,6 +290,7 @@ export async function runNativeKeyboardFixture({
       });
       const measuredViewport = await ServerBrowserPage.viewportSize(root.page, root.cdp);
       NodeAssert.deepEqual(measuredViewport, { width: 800, height: 600 });
+      const layoutMetrics = await root.cdp.send("Page.getLayoutMetrics");
       const nativePixelRatio = await root.page.evaluate(() => devicePixelRatio);
       const zoomedSnapshot = await ServerBrowserPage.snapshot({
         page: root.page,
@@ -301,13 +302,29 @@ export async function runNativeKeyboardFixture({
         includeImage: true,
         timeoutMs: 5000,
       });
-      const pngSize = nativeImage
-        .createFromBuffer(Buffer.from(zoomedSnapshot.screenshot.data, "base64"))
-        .getSize();
-      NodeAssert.deepEqual(pngSize, {
+      const png = Buffer.from(zoomedSnapshot.screenshot.data, "base64");
+      const pngFile = `keyboard-root-${root.id}-zoomed.png`;
+      await NodeFSP.writeFile(NodePath.join(scratch, pngFile), png);
+      NodeAssert.equal(png.subarray(0, 8).toString("hex"), "89504e470d0a1a0a");
+      NodeAssert.equal(png.subarray(12, 16).toString(), "IHDR");
+      const pngSize = { width: png.readUInt32BE(16), height: png.readUInt32BE(20) };
+      const metadataSize = {
         width: zoomedSnapshot.screenshot.width,
         height: zoomedSnapshot.screenshot.height,
+      };
+      renderingMeasurements.push({
+        root: root.id,
+        physicalViewport: filled.viewport,
+        cssViewport: measuredViewport,
+        zoomFactor: root.window.webContents.getZoomFactor(),
+        nativePixelRatio,
+        layoutMetrics,
+        pngFile,
+        pngSize,
+        metadataSize,
+        decodedNativeSize: nativeImage.createFromBuffer(png).getSize(),
       });
+      NodeAssert.deepEqual(pngSize, metadataSize);
       NodeAssert.ok(pngSize.width <= 1280, "native zoomed snapshot honors its pixel-width limit");
       const point = await root.page.locator("#draft").boundingBox();
       await ServerBrowserPage.click(root.page, {
@@ -320,14 +337,6 @@ export async function runNativeKeyboardFixture({
         "CSS pointer coordinates hit the zoomed native element",
       );
       assertHost(await hostState());
-      renderingMeasurements.push({
-        root: root.id,
-        physicalViewport: filled.viewport,
-        cssViewport: measuredViewport,
-        zoomFactor: root.window.webContents.getZoomFactor(),
-        nativePixelRatio,
-        pngSize,
-      });
       await acknowledge({
         type: "surface",
         ...rootKey(root.id),
