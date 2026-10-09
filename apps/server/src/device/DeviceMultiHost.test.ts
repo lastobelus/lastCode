@@ -92,6 +92,12 @@ it.effect("keeps hosts independent when serials collide and another host fails",
     expect(state.sessions.map((session) => session.hostId)).toEqual(["b"]);
     expect(state.hostStatuses.a?.status).toBe("ready");
     expect(state.hostStatuses.offline?.status).toBe("failed");
+    for (const hostId of ["a", "b", "a", "b"]) {
+      const ready = yield* service.agentReadinessIfSupported(hostId, true);
+      expect(ready).not.toBeNull();
+      yield* service.refreshAgentDevice(ready!);
+    }
+    expect(yield* service.state).toBe(state);
     const resumeTargeting = yield* Deferred.make<void>();
     const staleTargeting = yield* Deferred.await(resumeTargeting).pipe(
       Effect.andThen(service.agentTarget({ openedSession: state.sessions[0]! })),
