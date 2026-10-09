@@ -121,9 +121,8 @@ export class DeviceService extends Context.Service<
       config: SshDeviceHostConfig,
     ) => Effect.Effect<DeviceHostSummary, DeviceError>;
     readonly agentTarget: (input: {
-      threadId: ThreadId;
-      hostId: DeviceHostId;
-      deviceId: DeviceId;
+      /** The exact session returned by open; replaced or closed sessions cannot issue access. */
+      openedSession: DeviceSession;
       /** Project access already authorized by the caller; omitted uses the global setting. */
       agentAccessEnabled?: boolean;
     }) => Effect.Effect<ReadonlyArray<string>, DeviceError>;
@@ -712,11 +711,6 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
         ),
       );
     }
-    if (hosts.get(host.id) !== host)
-      return yield* new DeviceHostUnavailableError({
-        hostId: host.id,
-        reason: "Host configuration changed. Retry the operation.",
-      });
     const openedAt = DateTime.formatIso(yield* DateTime.now);
     const session: DeviceSession = {
       threadId: input.threadId,
@@ -727,6 +721,11 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
     };
     yield* lifecycleLock.withPermit(
       Effect.gen(function* () {
+        if (hosts.get(host.id) !== host)
+          return yield* new DeviceHostUnavailableError({
+            hostId: host.id,
+            reason: "Host configuration changed. Retry the operation.",
+          });
         if (!(yield* readDeviceSettings).enabled)
           return yield* new DeviceHostUnavailableError({
             hostId: host.id,
@@ -777,38 +776,42 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
               ),
         ),
       );
-    // serve-sim's shutdown closes its in-process capture session before it runs
-    // `simctl shutdown`; the hub's generic shutdown can leave that session cached
-    // across a reboot. serve-sim runs simctl bare, though, so a simulator that is
-    // already off fails there. Accept that failure only when the hub confirms
-    // the simulator is off; a failure on a running one still surfaces.
-    yield* platform === "ios"
-      ? postShutdown(`${vendorPrefix("ios")}/grid/api/shutdown`, { udid: deviceId }).pipe(
-          Effect.catch((cause) =>
-            fetchDevices(ready).pipe(
-              Effect.flatMap(({ devices }) =>
-                devices.find((device) => device.id === deviceId)?.booted === false
-                  ? Effect.logInfo("iOS simulator was already shut down", { deviceId })
-                  : Effect.fail(cause),
+    yield* lifecycleLock.withPermit(
+      Effect.gen(function* () {
+        // serve-sim's shutdown closes its in-process capture session before it runs
+        // `simctl shutdown`; the hub's generic shutdown can leave that session cached
+        // across a reboot. serve-sim runs simctl bare, though, so a simulator that is
+        // already off fails there. Accept that failure only when the hub confirms
+        // the simulator is off; a failure on a running one still surfaces.
+        yield* platform === "ios"
+          ? postShutdown(`${vendorPrefix("ios")}/grid/api/shutdown`, { udid: deviceId }).pipe(
+              Effect.catch((cause) =>
+                fetchDevices(ready).pipe(
+                  Effect.flatMap(({ devices }) =>
+                    devices.find((device) => device.id === deviceId)?.booted === false
+                      ? Effect.logInfo("iOS simulator was already shut down", { deviceId })
+                      : Effect.fail(cause),
+                  ),
+                ),
               ),
-            ),
+            )
+          : postShutdown("/api/devices/shutdown", { platform, id: deviceId });
+        // Android can reuse an emulator serial for another AVD after shutdown.
+        // Retire every thread targeting this slot before exposing it as available.
+        yield* retireDeviceAgentAccess(ready.hostId, deviceId);
+        yield* publish((state) => ({
+          ...state,
+          devices: state.devices.map((device) =>
+            device.hostId === ready.hostId && device.id === deviceId
+              ? { ...device, booted: false }
+              : device,
           ),
-        )
-      : postShutdown("/api/devices/shutdown", { platform, id: deviceId });
-    // Android can reuse an emulator serial for another AVD after shutdown.
-    // Retire every thread targeting this slot before exposing it as available.
-    yield* retireDeviceAgentAccess(ready.hostId, deviceId);
-    yield* publish((state) => ({
-      ...state,
-      devices: state.devices.map((device) =>
-        device.hostId === ready.hostId && device.id === deviceId
-          ? { ...device, booted: false }
-          : device,
-      ),
-      sessions: state.sessions.filter(
-        (session) => !(session.hostId === ready.hostId && session.deviceId === deviceId),
-      ),
-    }));
+          sessions: state.sessions.filter(
+            (session) => !(session.hostId === ready.hostId && session.deviceId === deviceId),
+          ),
+        }));
+      }),
+    );
     // Discovery can stall while an emulator saves its snapshot. A failed
     // refresh must not turn an accepted shutdown into an action failure.
     yield* refresh(ready).pipe(
@@ -846,13 +849,6 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
     function* (input) {
       const host = yield* resolveHost(input.hostId);
       yield* shutdownDevice(host.id, input.deviceId, input.platform);
-      // Sessions on a powered-off device are stale in every thread.
-      yield* publish((current) => ({
-        ...current,
-        sessions: current.sessions.filter(
-          (session) => !(session.hostId === host.id && session.deviceId === input.deviceId),
-        ),
-      }));
     },
   );
 
@@ -947,19 +943,18 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
       ),
       agentTarget: (input) =>
         Effect.gen(function* () {
-          const host = yield* resolveHost(input.hostId);
-          const ready = yield* agentReadinessIfSupported(input.hostId, input.agentAccessEnabled);
+          const { threadId, hostId, deviceId } = input.openedSession;
+          const host = yield* resolveHost(hostId);
+          const ready = yield* agentReadinessIfSupported(hostId, input.agentAccessEnabled);
           if (!ready)
             return yield* new DeviceHostUnavailableError({
-              hostId: input.hostId,
+              hostId: hostId,
               reason:
                 "Agent device access requires enabled device support, agent access, and an available simulator platform on this host.",
             });
-          const session = yield* agentDeviceSession(
-            input.threadId,
-            input.hostId,
-            input.deviceId,
-          ).pipe(Effect.provideService(Crypto.Crypto, crypto));
+          const session = yield* agentDeviceSession(threadId, hostId, deviceId).pipe(
+            Effect.provideService(Crypto.Crypto, crypto),
+          );
           const configPath = yield* lifecycleLock.withPermit(
             Effect.gen(function* () {
               if (hosts.get(host.id) !== host)
@@ -967,9 +962,17 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
                   hostId: host.id,
                   reason: "Host configuration changed. Retry the operation.",
                 });
-              return yield* configureAgent(input.hostId, ready, {
-                threadId: input.threadId,
-                deviceId: input.deviceId,
+              const { state } = yield* SynchronizedRef.get(stateRef);
+              // Session identity pins this issuance to the particular open, even when
+              // a host or Android serial is reused before the request resumes.
+              if (
+                !state.sessions.includes(input.openedSession) ||
+                !findDevice(state, hostId, deviceId)?.booted
+              )
+                return yield* new DeviceNotFoundError({ hostId, deviceId });
+              return yield* configureAgent(hostId, ready, {
+                threadId,
+                deviceId,
                 session,
               });
             }),

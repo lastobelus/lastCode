@@ -176,9 +176,7 @@ const handlers = {
       });
       // Android boot resolves an AVD name to the serial used by subsequent CLI commands.
       const agentArgs = yield* devices.agentTarget({
-        threadId: scope.thread.threadId,
-        hostId: session.hostId,
-        deviceId: session.deviceId,
+        openedSession: session,
         agentAccessEnabled: true,
       });
       const after = yield* devices.state;

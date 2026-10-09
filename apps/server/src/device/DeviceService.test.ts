@@ -330,9 +330,11 @@ describe("device setup consent", () => {
       expect(yield* service.agentReadinessIfSupported()).toBeNull();
       expect(yield* service.agentReadinessIfSupported(LOCAL_DEVICE_HOST_ID, true)).not.toBeNull();
       const target = yield* service.agentTarget({
-        threadId: ThreadId.make("project-enabled-thread"),
-        hostId: LOCAL_DEVICE_HOST_ID,
-        deviceId: DeviceId.make("Pixel_API_35"),
+        openedSession: yield* service.open({
+          threadId: ThreadId.make("project-enabled-thread"),
+          deviceId: "Pixel_API_35",
+          platform: "android",
+        }),
         agentAccessEnabled: true,
       });
       expect(target.slice(0, 2)).toEqual(["--config", "/test/agent-device.json"]);
@@ -352,9 +354,11 @@ describe("device setup consent", () => {
       expect(yield* service.agentReadinessIfSupported(LOCAL_DEVICE_HOST_ID, false)).toBeNull();
       const result = yield* service
         .agentTarget({
-          threadId: ThreadId.make("project-denied-thread"),
-          hostId: LOCAL_DEVICE_HOST_ID,
-          deviceId: DeviceId.make("Pixel_API_35"),
+          openedSession: yield* service.open({
+            threadId: ThreadId.make("project-denied-thread"),
+            deviceId: "Pixel_API_35",
+            platform: "android",
+          }),
           agentAccessEnabled: false,
         })
         .pipe(Effect.result);
