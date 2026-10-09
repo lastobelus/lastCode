@@ -229,7 +229,6 @@ import {
   NumberFieldInput,
 } from "./ui/number-field";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "./ui/select";
-import { Tooltip as TooltipPrimitive } from "@base-ui/react/tooltip";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import {
   SidebarContent,
@@ -1042,7 +1041,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     },
     [attemptArchiveThread, thread.persistent, threadRef],
   );
-  const threadDetailsTooltipHandle = useMemo(() => TooltipPrimitive.createHandle(), []);
+  const threadNavigationRef = useRef<HTMLDivElement | null>(null);
+  const threadDetailsTooltipId = useId();
   const setFamilyCollapsed = useLegacySidebarFamiliesStore((state) => state.setCollapsed);
   const family = props.familyRow;
   const typedGroups = props.groupingStyle === "typed-groups";
@@ -1090,18 +1090,17 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       <LegacySidebarFamilyGuides depth={family.depth} />
       {/* A thread row is the legacy sidebar's own control (a focusable div that hosts nested
           links and buttons), not a SidebarMenuSubButton, so it owns its look here. */}
-      <TooltipTrigger
-        handle={threadDetailsTooltipHandle}
-        render={
-          <ThreadAnnotationNavigationTrigger
-            annotationActive={hasActiveAnnotation}
-            handle={annotationPopoverHandle}
-            id={annotationTriggerId}
-            render={threadRowElement}
-          />
-        }
+      <ThreadAnnotationNavigationTrigger
+        annotationActive={hasActiveAnnotation}
+        handle={annotationPopoverHandle}
+        id={annotationTriggerId}
+        ref={threadNavigationRef}
+        render={threadRowElement}
         role="button"
         tabIndex={0}
+        aria-describedby={
+          !hasActiveAnnotation && threadRowActive ? threadDetailsTooltipId : undefined
+        }
         data-active={isActive}
         aria-label={
           relationshipLabel
@@ -1535,7 +1534,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                   hasActiveAnnotation && annotation ? (
                     <PopoverTrigger
                       aria-label={`${jumpLabel}; show annotation for ${thread.title}`}
-                      className="pointer-events-auto"
                       handle={annotationPopoverHandle}
                       onPointerDown={stopPropagationOnPointerDown}
                       onClick={(event) => event.stopPropagation()}
@@ -1565,7 +1563,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                 ) : hasActiveAnnotation && annotation ? (
                   <PopoverTrigger
                     aria-label={`Show annotation for ${thread.title}`}
-                    className="pointer-events-auto"
                     handle={annotationPopoverHandle}
                     onPointerDown={stopPropagationOnPointerDown}
                     onClick={(event) => event.stopPropagation()}
@@ -1600,7 +1597,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             </span>
           </div>
         </div>
-      </TooltipTrigger>
+      </ThreadAnnotationNavigationTrigger>
       {hasActiveAnnotation && annotation ? (
         <ThreadAnnotationHoverPopover
           annotation={annotation}
@@ -1619,13 +1616,14 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       ) : null}
       <Tooltip
         disabled={hasActiveAnnotation}
-        handle={threadDetailsTooltipHandle}
         open={!hasActiveAnnotation && threadRowActive}
         onOpenChange={handleThreadDetailsTooltipOpenChange}
       >
         <TooltipPopup
           align="start"
           animated={false}
+          anchor={threadNavigationRef}
+          id={threadDetailsTooltipId}
           side="right"
           sideOffset={4}
           variant="glass"

@@ -1,14 +1,12 @@
 // @vitest-environment happy-dom
 
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
-import { Tooltip as TooltipPrimitive } from "@base-ui/react/tooltip";
 import { EnvironmentId, MessageId, ThreadId, type ThreadAnnotation } from "@t3tools/contracts";
 import { act, useMemo } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vite-plus/test";
 
 import { PopoverCreateHandle as createPopoverHandle, PopoverTrigger } from "../ui/popover";
-import { TooltipTrigger } from "../ui/tooltip";
 import {
   ThreadAnnotationHoverPopover,
   ThreadAnnotationNavigationTrigger,
@@ -44,19 +42,13 @@ function HoverHarness({
   annotationActive?: boolean;
 }) {
   const handle = useMemo(() => createPopoverHandle(), []);
-  const tooltipHandle = useMemo(() => TooltipPrimitive.createHandle(), []);
   return (
     <>
-      <TooltipTrigger
-        handle={tooltipHandle}
-        render={
-          <ThreadAnnotationNavigationTrigger
-            annotationActive={annotationActive}
-            handle={handle}
-            id={navigationTriggerId}
-            render={<div />}
-          />
-        }
+      <ThreadAnnotationNavigationTrigger
+        annotationActive={annotationActive}
+        handle={handle}
+        id={navigationTriggerId}
+        render={<div />}
         role="button"
         tabIndex={0}
         onClick={() => {
@@ -79,7 +71,7 @@ function HoverHarness({
             Show annotation
           </PopoverTrigger>
         ) : null}
-      </TooltipTrigger>
+      </ThreadAnnotationNavigationTrigger>
       <button type="button">Outside control</button>
       {annotationActive ? (
         <ThreadAnnotationHoverPopover
