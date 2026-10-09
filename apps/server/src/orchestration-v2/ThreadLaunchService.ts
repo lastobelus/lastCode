@@ -48,6 +48,7 @@ import type * as Orchestrator from "./Orchestrator.ts";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import { randomUuidV4 } from "@t3tools/provider-core/server/randomUuid";
 import * as ThreadManagement from "./ThreadManagementService.ts";
+import { ThreadReadAuthorization } from "./ThreadReadAuthorization.ts";
 
 export type ThreadLaunchWorkspaceStrategy =
   | { readonly type: "root"; readonly branch?: string | undefined }
@@ -816,6 +817,8 @@ const make = Effect.gen(function* () {
             (yield* ids.allocate
               .message({ threadId, ordinal: 1 })
               .pipe(Effect.mapError(mapError(input, "dispatch-message", threadId))));
+          const authorization = yield* ThreadReadAuthorization;
+          yield* authorization.authorize(threadId, messageId);
           const dispatched = yield* threads
             .dispatch({
               type: "message.dispatch",

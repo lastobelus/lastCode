@@ -24,6 +24,71 @@ import * as TestClock from "effect/testing/TestClock";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
+import { ThreadReadAuthorization } from "./ThreadReadAuthorization.ts";
+
+it.effect("binds a forwarded queued message's read authority before committing its run", () =>
+  Effect.gen(function* () {
+    const projectId = ProjectId.make("forwarded-project");
+    const threadId = ThreadId.make("forwarded-thread");
+    const messageId = MessageId.make("forwarded-message");
+    const runId = RunId.make("forwarded-run");
+    let authorized: { threadId: ThreadId; messageId: MessageId } | undefined;
+    let committed = false;
+    const projection = () =>
+      ({
+        thread: { id: threadId, projectId, deletedAt: null, archivedAt: null },
+        runs: committed
+          ? [{ id: runId, userMessageId: messageId, status: "queued", ordinal: 1 }]
+          : [],
+        providerTurns: [],
+        messages: committed ? [{ id: messageId, runId }] : [],
+        turnItems: [],
+      }) as unknown as OrchestrationV2ThreadProjection;
+    const layer = ThreadManagementService.layer.pipe(
+      Layer.provide(
+        Layer.mock(Orchestrator.OrchestratorV2)({
+          getThreadRecords: () => Effect.sync(projection),
+          dispatch: (command) =>
+            Effect.sync(() => {
+              expect(authorized).toEqual({ threadId, messageId });
+              expect(command).toMatchObject({
+                type: "message.dispatch",
+                messageId,
+                dispatchMode: { type: "queue_after_active" },
+              });
+              committed = true;
+              return { sequence: 1, storedEvents: [] };
+            }),
+        }),
+      ),
+    );
+    const sent = yield* ThreadManagementService.ThreadManagementService.pipe(
+      Effect.flatMap((threads) =>
+        threads.sendToThread({
+          projectId,
+          threadId,
+          messageId,
+          commandId: CommandId.make("forward-message"),
+          text: "Continue the investigation",
+          attachments: [],
+          mode: "queue",
+          createdBy: "agent",
+          creationSource: "mcp",
+        }),
+      ),
+      Effect.provideService(ThreadReadAuthorization, {
+        authorize: (threadId, messageId) =>
+          Effect.sync(() => {
+            expect(committed).toBe(false);
+            authorized = { threadId, messageId };
+          }),
+      }),
+      Effect.provide(layer),
+    );
+    expect(sent.run.userMessageId).toBe(messageId);
+    expect(sent.delivery).toBe("queued");
+  }),
+);
 
 it("stamps authoritative provenance on commands that create threads or messages", () => {
   const command: OrchestrationV2Command = {
