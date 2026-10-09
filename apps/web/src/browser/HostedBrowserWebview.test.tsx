@@ -9,7 +9,8 @@ import {
   type PreviewListResult,
 } from "@t3tools/contracts";
 import { AsyncResult, Atom } from "effect/reactivity";
-import { Effect } from "effect";
+import { Cause, Effect } from "effect";
+import type { OpenPreviewMutation } from "./openFileInPreview";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { act } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
@@ -22,6 +23,7 @@ const mocks = vi.hoisted(() => ({
   closeTab: vi.fn<DesktopPreviewBridge["closeTab"]>(),
   registerWebview: vi.fn<DesktopPreviewBridge["registerWebview"]>(),
   getPreviewConfig: vi.fn<DesktopPreviewBridge["getPreviewConfig"]>(),
+  openPreview: vi.fn<OpenPreviewMutation>(),
   activeRecordings: new Set<string>(),
 }));
 
@@ -53,8 +55,9 @@ vi.mock("~/state/primaryEnvironment", async () => {
 vi.mock("~/state/preview", () => ({
   previewEnvironment: {
     open: {
-      label: "environment-data:preview:open",
-      run: vi.fn<typeof import("~/state/preview").previewEnvironment.open.run>(),
+      label: "preview:open",
+      run: (_registry: unknown, input: Parameters<OpenPreviewMutation>[0]) =>
+        mocks.openPreview(input),
     },
     events: ({ environmentId }: { environmentId: string }) => previewEventsFor(environmentId),
     list: ({ environmentId, input }: { environmentId: string; input: { threadId?: string } }) => {
@@ -83,7 +86,14 @@ import * as desktopTabLifetime from "./desktopTabLifetime";
 import { HostedBrowserWebview } from "./HostedBrowserWebview";
 import { ElectronBrowserHost } from "./ElectronBrowserHost";
 import { previewRuntimeTabId } from "./previewRuntimeTabId";
-import { previewStateAtom, resetPreviewStateForTests } from "~/previewStateStore";
+import {
+  applyPreviewServerSnapshot,
+  previewStateAtom,
+  resetPreviewStateForTests,
+} from "~/previewStateStore";
+import * as hostingRecovery from "~/components/preview/previewHostingRecovery";
+import * as browserDefaults from "./browserDefaults";
+import { toastManager } from "~/components/ui/toast";
 import { usePreviewSession } from "~/components/preview/usePreviewSession";
 import { AppAtomRegistryProvider, appAtomRegistry } from "~/rpc/atomRegistry";
 
@@ -125,6 +135,7 @@ beforeEach(() => {
   __resetClientSettingsPersistenceForTests();
   useBrowserSurfaceStore.setState({ activityByTabId: {}, byTabId: {} });
   mocks.getClientSettings.mockReset();
+  mocks.openPreview.mockReset();
   mocks.setClientSettings.mockReset().mockResolvedValue(undefined);
   mocks.createTab.mockReset().mockResolvedValue(undefined);
   mocks.closeTab.mockReset().mockResolvedValue(undefined);
@@ -184,6 +195,160 @@ describe("Electron browser hosting outside the selected thread", () => {
     }
     expect(mocks.createTab).not.toHaveBeenCalled();
     expect(mocks.registerWebview).not.toHaveBeenCalled();
+  });
+
+  it.each(["settings", "rpc", "defect", "interruption"] as const)(
+    "handles a settled %s result without replacing the source tab",
+    async (failureKind) => {
+      const threadRef = scopeThreadRef(
+        EnvironmentId.make("desktop-primary"),
+        ThreadId.make("settled-link-source"),
+      );
+      const snapshot = {
+        threadId: threadRef.threadId,
+        tabId: "source-tab",
+        navStatus: { _tag: "Idle" as const },
+        canGoBack: false,
+        canGoForward: false,
+        updatedAt: "2026-10-07T00:00:00.000Z",
+      };
+      let onOpenLink!: Parameters<DesktopPreviewBridge["onOpenLink"]>[0];
+      vi.stubGlobal("desktopBridge", {
+        preview: {
+          onOpenLink: (listener: typeof onOpenLink) => {
+            onOpenLink = listener;
+            return () => undefined;
+          },
+          onPointerEvent: () => () => undefined,
+        },
+      });
+      const url = "http://localhost:5173/qa";
+      vi.spyOn(hostingRecovery, "prepareHostedPreview").mockResolvedValue({
+        url,
+        managed: false,
+        restored: false,
+      });
+      const failure = new Error("Preview open unavailable.");
+      mocks.openPreview.mockResolvedValue(
+        AsyncResult.failure(
+          failureKind === "interruption"
+            ? Cause.interrupt()
+            : failureKind === "defect"
+              ? Cause.die(failure)
+              : Cause.fail(failure),
+        ),
+      );
+      const report = vi.spyOn(toastManager, "add").mockReturnValue("open-error");
+      vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      mocks.getClientSettings.mockResolvedValue(DEFAULT_CLIENT_SETTINGS);
+      applyPreviewServerSnapshot(threadRef, snapshot);
+      await act(async () => {
+        await ensureClientSettingsHydrated();
+        renderer = create(
+          <AppAtomRegistryProvider>
+            <ElectronBrowserHost />
+          </AppAtomRegistryProvider>,
+          {
+            createNodeMock: (element) =>
+              element.type === "webview"
+                ? Object.assign(new EventTarget(), { getWebContentsId: () => 44 })
+                : { scrollLeft: 0, scrollTop: 0, scrollTo: () => undefined },
+          },
+        );
+      });
+      const createCount = mocks.createTab.mock.calls.length;
+      if (failureKind === "settings") {
+        vi.spyOn(browserDefaults, "resolveBrowserDefaults").mockRejectedValueOnce(failure);
+      }
+      await act(async () => {
+        onOpenLink({
+          tabId: previewRuntimeTabId(threadRef, null, snapshot.tabId),
+          url,
+          background: false,
+        });
+      });
+      if (failureKind === "interruption") {
+        expect(report).not.toHaveBeenCalled();
+      } else {
+        expect(report).toHaveBeenCalledExactlyOnceWith({
+          type: "error",
+          title: "Could not open the link in the browser",
+          description:
+            failureKind === "settings"
+              ? "Saved browser settings could not be loaded."
+              : failure.message,
+        });
+      }
+      expect(mocks.openPreview).toHaveBeenCalledTimes(failureKind === "settings" ? 0 : 1);
+      expect(mocks.createTab).toHaveBeenCalledTimes(createCount);
+      expect(appAtomRegistry.get(previewStateAtom(scopedThreadKey(threadRef)))).toMatchObject({
+        activeTabId: snapshot.tabId,
+        sessions: { [snapshot.tabId]: snapshot },
+      });
+      expect(
+        Object.keys(appAtomRegistry.get(previewStateAtom(scopedThreadKey(threadRef))).sessions),
+      ).toEqual([snapshot.tabId]);
+    },
+  );
+
+  it("reports rejected hosted-link recovery without replacing the source tab", async () => {
+    const threadRef = scopeThreadRef(
+      EnvironmentId.make("desktop-primary"),
+      ThreadId.make("link-source"),
+    );
+    const snapshot = {
+      threadId: threadRef.threadId,
+      tabId: "source-tab",
+      navStatus: { _tag: "Idle" as const },
+      canGoBack: false,
+      canGoForward: false,
+      updatedAt: "2026-10-07T00:00:00.000Z",
+    };
+    let onOpenLink!: Parameters<DesktopPreviewBridge["onOpenLink"]>[0];
+    vi.stubGlobal("desktopBridge", {
+      preview: {
+        onOpenLink: (listener: typeof onOpenLink) => {
+          onOpenLink = listener;
+          return () => undefined;
+        },
+        onPointerEvent: () => () => undefined,
+      },
+    });
+    const failure = new Error("Preview recovery unavailable.");
+    const prepare = vi.spyOn(hostingRecovery, "prepareHostedPreview").mockRejectedValue(failure);
+    const report = vi.spyOn(toastManager, "add").mockReturnValue("recovery-error");
+    mocks.getClientSettings.mockResolvedValue(DEFAULT_CLIENT_SETTINGS);
+    applyPreviewServerSnapshot(threadRef, snapshot);
+    await act(async () => {
+      await ensureClientSettingsHydrated();
+      renderer = create(
+        <AppAtomRegistryProvider>
+          <ElectronBrowserHost />
+        </AppAtomRegistryProvider>,
+        {
+          createNodeMock: (element) =>
+            element.type === "webview"
+              ? Object.assign(new EventTarget(), { getWebContentsId: () => 44 })
+              : { scrollLeft: 0, scrollTop: 0, scrollTo: () => undefined },
+        },
+      );
+    });
+    await act(async () => {
+      onOpenLink({
+        tabId: previewRuntimeTabId(threadRef, null, snapshot.tabId),
+        url: "http://localhost:5173/qa",
+        background: false,
+      });
+    });
+    expect(prepare).toHaveBeenCalledWith(threadRef, "http://localhost:5173/qa");
+    expect(report).toHaveBeenCalledExactlyOnceWith({
+      type: "error",
+      title: "Could not open the link in the browser",
+      description: failure.message,
+    });
+    expect(appAtomRegistry.get(previewStateAtom(scopedThreadKey(threadRef))).activeTabId).toBe(
+      snapshot.tabId,
+    );
   });
 
   it("applies primary events once and ignores retired lists while remote epochs advance", async () => {

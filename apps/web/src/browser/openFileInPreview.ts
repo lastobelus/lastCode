@@ -26,12 +26,13 @@ import {
 } from "~/browser/previewRuntime";
 import {
   applyPreviewServerSnapshot,
+  capturePreviewOpenFocus,
+  hiddenPreviewTabIds,
   readThreadPreviewState,
   rememberPreviewUrl,
-  setActivePreviewTab,
   updatePreviewServerSnapshot,
 } from "~/previewStateStore";
-import { selectSelectedRightPanelSurface, useRightPanelStore } from "~/rightPanelStore";
+import { useRightPanelStore } from "~/rightPanelStore";
 import { rememberHandoffBrowser } from "~/handoffs/handoffsStore";
 
 import {
@@ -66,18 +67,18 @@ interface OpenUrlInPreviewInput<E> {
   readonly threadRef: ScopedThreadRef;
   readonly url: string;
   readonly openPreview: OpenPreviewMutation<E>;
-  /** Profile to open under; omit for the configured default. */
-  readonly profileId?: PreviewOpenInput["profileId"];
-  /** Open the tab without switching the thread to it. */
-  readonly background?: boolean;
   readonly onOpened?: (tabId: string) => void;
+  /** Preserve the source tab's profile when opening a link from a page. */
+  readonly profileId?: PreviewOpenInput["profileId"];
+  readonly background?: boolean;
 }
 
 export async function openUrlInPreview<E>(
   input: OpenUrlInPreviewInput<E>,
+  focus = capturePreviewOpenFocus(input.threadRef, input.background),
 ): Promise<AtomCommandResult<void, E | BrowserSettingsReadError>> {
   const prepared = await prepareHostedPreview(input.threadRef, input.url);
-  return openPreparedUrlInPreview(input, prepared.url, prepared.navigationUrl);
+  return openPreparedUrlInPreview(input, prepared.url, prepared.navigationUrl, focus);
 }
 
 /** Open an already recovered destination while retaining the authored URL. */
@@ -85,7 +86,10 @@ export async function openPreparedUrlInPreview<E>(
   input: OpenUrlInPreviewInput<E>,
   destinationUrl: string,
   navigationUrl?: string,
+  focus = capturePreviewOpenFocus(input.threadRef, input.background),
 ): Promise<AtomCommandResult<void, E | BrowserSettingsReadError>> {
+  const panelRevision = focus.userActionRevision;
+  const handledOpenTabIds = readThreadPreviewState(input.threadRef).handledOpenTabIds;
   const defaults = await resolveBrowserDefaults().catch(
     (cause: unknown) => new BrowserSettingsReadError({ cause }),
   );
@@ -95,15 +99,6 @@ export async function openPreparedUrlInPreview<E>(
   const runtime = previewRuntimeFor(input.threadRef.environmentId);
   const desktopHostId =
     runtime === "server" ? desktopBrowserHostFor(input.threadRef.environmentId) : undefined;
-  const previousActiveTabId = input.background
-    ? readThreadPreviewState(input.threadRef).activeTabId
-    : null;
-  // The server's "opened" event switches the preview tab but not the panel's
-  // selection, so a changed selection means the user picked a tab themselves.
-  const selectedSurface = () =>
-    selectSelectedRightPanelSurface(useRightPanelStore.getState().byThreadKey, input.threadRef)
-      ?.id ?? null;
-  const surfaceBeforeOpen = input.background ? selectedSurface() : null;
   const result = await input.openPreview({
     environmentId: input.threadRef.environmentId,
     input: {
@@ -119,26 +114,41 @@ export async function openPreparedUrlInPreview<E>(
       profileId: input.profileId ?? browserDefaultOpenProfileId(defaults),
       ...(runtime === undefined ? {} : { runtime }),
       ...(desktopHostId === undefined ? {} : { desktopHostId }),
+      // Carry background intent through independently delivered/replayed events.
+      ...(input.background ? { background: true } : {}),
+      focus,
     },
   });
   return mapAtomCommandResult(result, (snapshot) => {
     rememberPreviewUrl(input.threadRef, input.url);
-    if (input.background) {
-      updatePreviewServerSnapshot(input.threadRef, snapshot);
-      // The server's "opened" event activates the new tab; hand focus back,
-      // unless the user picked a tab, this one included, while the open was in flight.
-      if (
-        previousActiveTabId &&
-        readThreadPreviewState(input.threadRef).activeTabId === snapshot.tabId &&
-        selectedSurface() === surfaceBeforeOpen
-      ) {
-        setActivePreviewTab(input.threadRef, previousActiveTabId);
-      }
+    const creationFocusHandled =
+      !handledOpenTabIds.has(snapshot.tabId) &&
+      readThreadPreviewState(input.threadRef).handledOpenTabIds.has(snapshot.tabId);
+    const panelChoiceChanged =
+      useRightPanelStore.getState().getUserActionRevision(input.threadRef) !== panelRevision;
+    if (input.background || creationFocusHandled || panelChoiceChanged) {
+      // A reply is metadata once creation focus was consumed or superseded.
+      // Consume pending focus too, so a later event cannot undo that choice.
+      updatePreviewServerSnapshot(input.threadRef, snapshot, { consumeOpenFocus: true });
       input.onOpened?.(snapshot.tabId);
       return;
     }
-    applyPreviewServerSnapshot(input.threadRef, snapshot);
-    useRightPanelStore.getState().openBrowser(input.threadRef, snapshot.tabId);
+    const existing = readThreadPreviewState(input.threadRef).sessions[snapshot.tabId];
+    applyPreviewServerSnapshot(
+      input.threadRef,
+      existing && existing.updatedAt > snapshot.updatedAt ? existing : snapshot,
+    );
+    const state = readThreadPreviewState(input.threadRef);
+    // Request start already recorded the user intent. Completion applies it
+    // automatically so another in-flight open keeps its own selection order.
+    useRightPanelStore
+      .getState()
+      .reconcileBrowserSurfaces(
+        input.threadRef,
+        Object.keys(state.sessions),
+        hiddenPreviewTabIds(state.sessions),
+        snapshot.tabId,
+      );
     input.onOpened?.(snapshot.tabId);
   });
 }
@@ -173,6 +183,7 @@ export async function openFileInPreview<AssetError, PreviewError>(input: {
       ),
     );
   }
+  const focus = capturePreviewOpenFocus(input.threadRef);
   const insideWorkspace =
     mediaFileReference(input.filePath, input.workspaceRoot).relativePath !== undefined;
   const assetResult = await input.createAssetUrl({
@@ -197,18 +208,21 @@ export async function openFileInPreview<AssetError, PreviewError>(input: {
       Cause.die(new Error("The environment returned an invalid asset URL.")),
     );
   }
-  const result = await openUrlInPreview({
-    threadRef: input.threadRef,
-    url: assetUrl,
-    openPreview: input.openPreview,
-    onOpened: (tabId) => {
-      rememberHandoffBrowser(
-        input.threadRef,
-        tabId,
-        { kind: "file", path: input.filePath },
-        assetUrl,
-      );
+  const result = await openUrlInPreview(
+    {
+      threadRef: input.threadRef,
+      url: assetUrl,
+      openPreview: input.openPreview,
+      onOpened: (tabId) => {
+        rememberHandoffBrowser(
+          input.threadRef,
+          tabId,
+          { kind: "file", path: input.filePath },
+          assetUrl,
+        );
+      },
     },
-  });
+    focus,
+  );
   return result;
 }

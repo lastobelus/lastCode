@@ -336,6 +336,8 @@ export const make = Effect.gen(function* PreviewManagerMake() {
             serverEpoch,
             revision,
             snapshot,
+            ...(input.background === undefined ? {} : { background: input.background }),
+            ...(input.focus === undefined ? {} : { focus: input.focus }),
           });
           return [snapshot, { sessions, revision }] as const;
         }),

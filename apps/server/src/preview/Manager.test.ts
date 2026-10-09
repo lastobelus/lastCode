@@ -472,6 +472,43 @@ it.layer(PreviewManagerTestLayer)("PreviewManager", (it) => {
     }),
   );
 
+  it.effect("carries background focus intent in the opened event without hiding the tab", () =>
+    Effect.gen(function* () {
+      const threadId = freshThreadId();
+      const manager = yield* PreviewManager.PreviewManager;
+      const collector = yield* collectEvents;
+      const opened = yield* manager.open({
+        threadId,
+        runtime: "server",
+        profileId: "source-profile",
+        desktopHostId: "desktop-local",
+        background: true,
+      });
+      expect(opened.reveal).toBeUndefined();
+      expect(opened.automationOwner).toBeUndefined();
+      expect(opened).toMatchObject({ profileId: "source-profile", desktopHostId: "desktop-local" });
+      expect((yield* manager.list({ threadId })).sessions).toEqual([opened]);
+      expect(yield* collector.drain).toEqual([
+        expect.objectContaining({ type: "opened", background: true, snapshot: opened }),
+      ]);
+    }),
+  );
+
+  it.effect("echoes originating selection only in the creation event", () =>
+    Effect.gen(function* () {
+      const manager = yield* PreviewManager.PreviewManager;
+      const collector = yield* collectEvents;
+      const focus = { clientId: "origin-client", userActionRevision: 7 };
+      const threadId = freshThreadId();
+      const opened = yield* manager.open({ threadId, focus });
+      expect(yield* collector.drain).toEqual([expect.objectContaining({ type: "opened", focus })]);
+      expect(opened).not.toHaveProperty("focus");
+      expect((yield* manager.list({ threadId })).sessions[0]).not.toHaveProperty("focus");
+      yield* manager.navigate({ threadId, tabId: opened.tabId, url: "https://example.test/" });
+      expect((yield* collector.drain)[0]).not.toHaveProperty("focus");
+    }),
+  );
+
   it.effect("reissues presentation requests without replaying them on navigation", () =>
     Effect.gen(function* () {
       const threadId = freshThreadId();
