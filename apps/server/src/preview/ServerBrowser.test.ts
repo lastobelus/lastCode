@@ -195,11 +195,12 @@ let encoderSetupGate: ReturnType<typeof Promise.withResolvers<void>> | null = nu
 let recordingCdpGate: ReturnType<typeof Promise.withResolvers<void>> | null = null;
 let recordingStageEntered: ReturnType<typeof Promise.withResolvers<void>> | null = null;
 const encoderPages: Array<ReturnType<typeof makeContext>["page"]> = [];
-let profileCatalogue: {
-  desktopHostId: string;
-  profiles: Array<{ id: string; name: string; kind: "persistent" }>;
-  defaultProfileId: string;
-} | null = null;
+type ProfileCatalogue = NonNullable<
+  Effect.Success<ReturnType<DesktopChannel.DesktopBrowserChannel["Service"]["getProfiles"]>>
+>;
+let profileCatalogue: ProfileCatalogue | null = null;
+const profileRequests: Array<{ desktopHostId?: string }> = [];
+const profileCatalogues = new Map<string, ProfileCatalogue>();
 /** Pages the fake desktop takes back or returns; the channel's streams emit them. */
 const desktopDetaches = new NodeEvents.EventEmitter();
 const desktopTabs = new Set<string>();
@@ -297,7 +298,14 @@ const dependencies = Layer.mergeAll(
   Layer.succeed(DesktopChannel.DesktopBrowserChannel, {
     // Only tabs a test marks render on the desktop; the rest stay headless.
     available: true,
-    getProfiles: () => Effect.sync(() => profileCatalogue),
+    getProfiles: (input) =>
+      Effect.sync(() => {
+        profileRequests.push(input);
+        return input.desktopHostId === undefined
+          ? profileCatalogue
+          : (profileCatalogues.get(input.desktopHostId) ??
+              (profileCatalogue?.desktopHostId === input.desktopHostId ? profileCatalogue : null));
+      }),
     resolveUrl: (input) =>
       Effect.promise(async () => {
         remoteUrlEntered?.resolve();
@@ -506,6 +514,8 @@ beforeEach(() => {
   desktopRendersNext = false;
   localDesktopAvailable = false;
   profileCatalogue = null;
+  profileRequests.length = 0;
+  profileCatalogues.clear();
   remoteUrlAvailable = true;
   releasedDesktopTabs.length = 0;
   desktopConnections.length = 0;
@@ -3038,6 +3048,7 @@ it.live(
           input: {},
         });
         expect(current).toMatchObject({ profileId: "work", profileName: "Work" });
+        expect(profileRequests.at(-1)).toMatchObject({ desktopHostId: "local" });
         expect(contexts).toHaveLength(0);
         expect(desktopConnections).toHaveLength(1);
         const mismatch = yield* broker
@@ -3061,6 +3072,145 @@ it.live(
         expect(fresh).toMatchObject({ profileId: "personal", profileName: "Personal" });
         expect(fresh.tabId).not.toBe(tabId);
         expect(desktopConnections).toHaveLength(2);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live("keeps profile discovery and new tabs on the caller's retained desktop owner", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      profileCatalogue = {
+        desktopHostId: "host-b",
+        profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+        defaultProfileId: "work",
+      };
+      desktopRendersNext = true;
+      const { broker, tabId } = yield* ready;
+      profileCatalogues.set("host-b", profileCatalogue);
+      profileCatalogue = {
+        desktopHostId: "local",
+        profiles: [{ id: "personal", name: "Personal", kind: "persistent" }],
+        defaultProfileId: "personal",
+      };
+      const current = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(current).toMatchObject({ profileId: "work", profileName: "Work" });
+      const catalogue = yield* broker.invoke({ scope, tabId, operation: "profiles", input: {} });
+      expect(catalogue).toMatchObject({ defaultProfileId: "work" });
+      expect(profileRequests.at(-1)).toMatchObject({ desktopHostId: "host-b" });
+      desktopRendersNext = true;
+      const fresh = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "openWithProfile",
+        input: { profileName: "Work", reuseExistingTab: false, show: false },
+      });
+      const manager = yield* Manager.PreviewManager;
+      expect(
+        (yield* manager.list({ threadId: scope.thread.threadId })).sessions.find(
+          (session) => session.tabId === fresh.tabId,
+        ),
+      ).toMatchObject({ desktopHostId: "host-b", profileId: "work" });
+      const requestedCatalogues = profileRequests.length;
+      const stale = yield* broker
+        .invoke<PreviewAutomationStatus>({
+          scope,
+          tabId: PreviewTabId.make("missing-tab"),
+          operation: "openWithProfile",
+          input: { profileName: "Personal", reuseExistingTab: false, show: false },
+        })
+        .pipe(Effect.flip);
+      expect(stale).toMatchObject({ _tag: "PreviewAutomationTabNotFoundError" });
+      expect(profileRequests).toHaveLength(requestedCatalogues);
+      profileCatalogues.clear();
+      const unavailable = yield* broker
+        .invoke<PreviewAutomationStatus>({
+          scope,
+          tabId,
+          operation: "open",
+          input: { reuseExistingTab: false, show: false },
+        })
+        .pipe(Effect.flip);
+      expect(unavailable).toMatchObject({ _tag: "PreviewAutomationRemoteUnavailableError" });
+      expect(desktopConnections).toHaveLength(2);
+      expect(contexts).toHaveLength(0);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live.each([false, true])(
+  "explicitly selects a user's desktop tab without implicitly adopting it (attached=%s)",
+  (attached) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const browser = yield* ServerBrowser.ServerBrowser;
+        const broker = yield* Broker.PreviewAutomationBroker;
+        const manager = yield* Manager.PreviewManager;
+        yield* Effect.yieldNow;
+        profileCatalogue = {
+          desktopHostId: "local",
+          profiles: [{ id: "personal", name: "Personal", kind: "persistent" }],
+          defaultProfileId: "personal",
+        };
+        profileCatalogues.set("host-b", {
+          desktopHostId: "host-b",
+          profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+          defaultProfileId: "work",
+        });
+        desktopRendersNext = true;
+        const opened = yield* manager.open({
+          threadId: scope.thread.threadId,
+          runtime: "server",
+          desktopHostId: "host-b",
+          profileId: "work",
+        });
+        const tabId = PreviewTabId.make(opened.tabId);
+        if (attached) yield* browser.attachViewer(viewerInput(tabId, false));
+        yield* broker.invoke({ scope, tabId, operation: "status", input: {} });
+        const implicit = yield* broker.invoke({ scope, operation: "profiles", input: {} });
+        expect(implicit).toMatchObject({ defaultProfileId: "personal" });
+        const explicit = yield* broker.invoke({ scope, tabId, operation: "profiles", input: {} });
+        expect(explicit).toMatchObject({ defaultProfileId: "work" });
+        const reused = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          tabId,
+          operation: "openWithProfile",
+          input: { profileId: "work", show: false },
+        });
+        expect(reused).toMatchObject({
+          tabId,
+          profileId: "work",
+          profileName: "Work",
+          control: { owner: "unclaimed", ownedByCaller: false },
+        });
+        yield* broker.invoke({
+          scope,
+          tabId,
+          operation: "navigate",
+          input: { url: "https://example.test/agent" },
+        });
+        expect(desktopConnections[0]!.context.page.goto).toHaveBeenLastCalledWith(
+          "https://example.test/agent",
+          expect.anything(),
+        );
+        yield* browser.attachViewer(viewerInput(tabId, true));
+        const controlled = yield* broker
+          .invoke<PreviewAutomationStatus>({
+            scope,
+            tabId,
+            operation: "openWithProfile",
+            input: { profileId: "work", show: false },
+          })
+          .pipe(Effect.flip);
+        expect(controlled).toMatchObject({
+          _tag: "PreviewAutomationControlInterruptedError",
+          reason: "humanControl",
+        });
+        expect(desktopConnections).toHaveLength(1);
+        expect(contexts).toHaveLength(0);
       }),
     ).pipe(Effect.provide(layer)),
 );

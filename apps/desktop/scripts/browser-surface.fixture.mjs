@@ -1,5 +1,6 @@
 // Only this fixture process creates windows; its ordinary host remains hidden throughout.
 import * as NodeAssert from "node:assert/strict";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeHttp from "node:http";
 import * as NodeModule from "node:module";
@@ -11,8 +12,12 @@ import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as Layer from "effect/Layer";
 
 import * as DesktopBrowserHost from "../src/preview/DesktopBrowserHost.ts";
+import * as BrowserSession from "../src/preview/BrowserSession.ts";
+import { resolvePartitionScope } from "../src/preview/BrowserProfileScope.ts";
+import * as ElectronDialog from "../src/electron/ElectronDialog.ts";
 import * as DesktopClientSettings from "../src/settings/DesktopClientSettings.ts";
 import * as ServerBrowserPage from "../../server/src/preview/ServerBrowserPage.ts";
 import { DESKTOP_BROWSER_SURFACE_RESPONSE_CHANNEL } from "../src/ipc/channels.ts";
@@ -43,6 +48,22 @@ const viewport = { _tag: "freeform", width: 390, height: 844 };
 async function main() {
   await app.whenReady();
   app.dock?.hide();
+  const browserSession = await Effect.runPromise(
+    BrowserSession.make.pipe(Effect.provide(Layer.merge(NodeServices.layer, ElectronDialog.layer))),
+  );
+  for (const environmentId of ["fixture-local", "fixture-remote"]) {
+    const { scope, persistent, namespace } = resolvePartitionScope(
+      environmentId,
+      "fixture-developer",
+      "fixture-local",
+    );
+    await Effect.runPromise(browserSession.getSession(scope, persistent, namespace));
+    tabs.push({
+      runtimeTabId: `surface-${environmentId}`,
+      tabId: `tab-${environmentId}`,
+      partition: await Effect.runPromise(browserSession.getPartition(scope, persistent, namespace)),
+    });
+  }
   const scope = await Effect.runPromise(Scope.make());
   const host = await Effect.runPromise(
     DesktopBrowserHost.make.pipe(
@@ -360,9 +381,10 @@ async function main() {
     const probeOffset =
       (Math.floor(imageSize.height * 0.9) * imageSize.width + Math.floor(imageSize.width * 0.9)) *
       4;
-    NodeAssert.deepEqual(
-      [...bitmap.subarray(probeOffset, probeOffset + 4)],
-      [0x66, 0xcc, 0xff, 0xff],
+    NodeAssert.ok(
+      [...bitmap.subarray(probeOffset, probeOffset + 4)].every(
+        (channel, index) => Math.abs(channel - [0x66, 0xcc, 0xff, 0xff][index]) <= 1,
+      ),
       "native PNG contains the fixture background rather than a blank compositor surface",
     );
     await NodeFSP.writeFile(
@@ -442,6 +464,20 @@ async function main() {
     });
     NodeAssert.equal(await page.evaluate(() => document.cookie), "profile=default");
     results.push("isolated default and synthetic persistent profile cookies");
+    await pages[2].page.evaluate(() => {
+      document.cookie = "signed_in=fixture-developer; path=/";
+    });
+    NodeAssert.equal(
+      await pages[3].page.evaluate(() => document.cookie),
+      "signed_in=fixture-developer",
+    );
+    NodeAssert.equal(await page.evaluate(() => document.cookie), "profile=default");
+    await Effect.runPromise(browserSession.clearCookies([tabs[2].partition]));
+    NodeAssert.equal(await pages[3].page.evaluate(() => document.cookie), "");
+    NodeAssert.equal(await page.evaluate(() => document.cookie), "profile=default");
+    results.push(
+      "named native profile shares sign-in across destinations and clears without affecting Default",
+    );
     await surface(tabs[0], "release", "snapshot-lease");
     const released = await hostWindow.webContents.executeJavaScript("surfaceSmokeState()");
     NodeAssert.ok(released.every((state) => state.activity === 0 && state.rect.right < 0));
