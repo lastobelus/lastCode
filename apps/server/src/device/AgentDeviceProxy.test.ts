@@ -47,6 +47,8 @@ const fixture = () => {
   let directUploadStatus = 200;
   let ndjson = false;
   let rpcStream: ReadableStream<Uint8Array> | undefined;
+  let retireOnDiscovery = false;
+  let retireDiscoveredDevice: (hostId: string) => Effect.Effect<void> = () => Effect.void;
   const project = ProjectId.make("project-1");
   const access = DeviceAgentAccess.layer.pipe(
     Layer.provide(
@@ -188,6 +190,7 @@ const fixture = () => {
       const request = yield* HttpServerRequest.HttpServerRequest;
       const url = HttpServerRequest.toURL(request);
       const service = yield* DeviceAgentAccess.DeviceAgentAccess;
+      retireDiscoveredDevice = (hostId) => service.retireDevice(hostId, DeviceId.make("device-1"));
       const threadId = ThreadId.make(
         Option.isSome(url) ? (url.value.searchParams.get("thread") ?? "thread-1") : "thread-1",
       );
@@ -223,6 +226,10 @@ const fixture = () => {
       Layer.provideMerge(access),
       Layer.provideMerge(
         Layer.mock(DeviceService.DeviceService)({
+          refreshAgentDevice: (ready) =>
+            Effect.suspend(() =>
+              retireOnDiscovery ? retireDiscoveredDevice(ready.hostId) : Effect.void,
+            ),
           agentReadinessIfSupported: (host) =>
             readinessGate.pipe(
               Effect.andThen(
@@ -294,6 +301,9 @@ const fixture = () => {
       readinessGate = gate;
     },
     retireHost: () => handler(new Request("http://t3.example/retire-host", { method: "POST" })),
+    retireOnDiscovery: () => {
+      retireOnDiscovery = true;
+    },
     requests,
     hostRequests,
     payloads,
@@ -552,6 +562,16 @@ it.each(["agent_device.command", "agent-device.command"])(
     expect((await rpc("snapshot", { udid: "device-1" })).status).toBe(200);
   },
 );
+
+it("rejects a retained credential when fresh discovery retires its device", async () => {
+  const f = fixture();
+  const token = await f.issue();
+  f.retireOnDiscovery();
+  const denied = await f.call(token);
+  expect(denied.status).toBe(403);
+  expect(f.requests).toEqual([]);
+  expect((await f.call(token, "/health", "GET")).status).toBe(403);
+});
 
 it("requires a concrete issued selector for commands while allowing device inventory", async () => {
   const f = fixture();

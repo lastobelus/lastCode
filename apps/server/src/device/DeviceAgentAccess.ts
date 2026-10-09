@@ -65,6 +65,11 @@ export class DeviceAgentAccess extends Context.Service<
     readonly retireThread: (threadId: ThreadId) => Effect.Effect<void>;
     readonly retireHost: (hostId: DeviceHostId) => Effect.Effect<void>;
     readonly retireDevice: (hostId: DeviceHostId, deviceId: DeviceId) => Effect.Effect<void>;
+    readonly retireThreadDevice: (
+      threadId: ThreadId,
+      hostId: DeviceHostId,
+      deviceId: DeviceId,
+    ) => Effect.Effect<void>;
     readonly issue: (target: Target) => Effect.Effect<string, DeviceAgentAccessDenied>;
     readonly authorize: (
       token: string,
@@ -132,6 +137,11 @@ const make = Effect.gen(function* () {
     retireHost: (hostId) => retire((target) => target.hostId === hostId),
     retireDevice: (hostId, deviceId) =>
       retire((target) => target.hostId === hostId && target.deviceId === deviceId),
+    retireThreadDevice: (threadId, hostId, deviceId) =>
+      retire(
+        (target) =>
+          target.threadId === threadId && target.hostId === hostId && target.deviceId === deviceId,
+      ),
     issue: Effect.fn("DeviceAgentAccess.issue")(function* (target) {
       if (!(yield* allowed(target))) {
         discard(target);

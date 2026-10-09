@@ -213,6 +213,8 @@ const handler = Effect.gen(function* () {
   const devices = yield* DeviceService.DeviceService;
   const ready = yield* devices.agentReadinessIfSupported(target.hostId, true);
   if (!ready) return HttpServerResponse.text("Device agent is not running", { status: 503 });
+  // Commands must observe external shutdown/replacement before using a retained credential.
+  if (rpc) yield* devices.refreshAgentDevice(ready);
   // Readiness may wait while this host is replaced or thread consent is revoked.
   yield* access.authorize(token);
   const headers: Record<string, string> = {};

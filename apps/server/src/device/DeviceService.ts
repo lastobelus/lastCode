@@ -137,6 +137,8 @@ export class DeviceService extends Context.Service<
     readonly inspect: Effect.Effect<DeviceServiceState>;
     readonly retryHost: (hostId: DeviceHostId) => Effect.Effect<DeviceServiceState, DeviceError>;
     readonly open: (input: DeviceOpenInput) => Effect.Effect<DeviceSession, DeviceError>;
+    readonly abortOpen: (openedSession: DeviceSession) => Effect.Effect<void, DeviceError>;
+    readonly refreshAgentDevice: (ready: DeviceAgentReadiness) => Effect.Effect<void, DeviceError>;
     readonly close: (input: DeviceCloseInput) => Effect.Effect<void, DeviceError>;
     readonly shutdown: (input: DeviceShutdownInput) => Effect.Effect<void, DeviceError>;
     /** Current settings and foreground app for one device. */
@@ -197,6 +199,11 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
     Effect.void,
   retireDeviceAgentAccess: (hostId: DeviceHostId, deviceId: DeviceId) => Effect.Effect<void> = () =>
     Effect.void,
+  retireThreadDeviceAgentAccess: (
+    threadId: ThreadId,
+    hostId: DeviceHostId,
+    deviceId: DeviceId,
+  ) => Effect.Effect<void> = () => Effect.void,
 ) {
   const settings = yield* ServerSettings.ServerSettingsService;
   const crypto = yield* Crypto.Crypto;
@@ -442,7 +449,10 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
     return { devices, detail: list.errors?.map((error) => error.message).join("\n") || undefined };
   });
 
+  let refreshVersion = 0;
+  const appliedRefreshVersions = new Map<DeviceHostId, number>();
   const refresh = Effect.fn("DeviceService.refresh")(function* (ready: DeviceReadiness) {
+    const version = ++refreshVersion;
     const host = hosts.get(ready.hostId);
     const { devices, detail } = yield* fetchDevices(ready);
     const hostSummaries = yield* Effect.forEach(hosts.values(), (host) => host.summary);
@@ -450,8 +460,34 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
       Effect.gen(function* () {
         if (!(yield* readDeviceSettings).enabled || !host || hosts.get(ready.hostId) !== host)
           return (yield* SynchronizedRef.get(stateRef)).state;
+        const { state } = yield* SynchronizedRef.get(stateRef);
+        // A slow older discovery must not retire a runtime a newer open observed.
+        if (version < (appliedRefreshVersions.get(ready.hostId) ?? 0)) return state;
+        appliedRefreshVersions.set(ready.hostId, version);
+        const retired = state.devices.filter((previous) => {
+          if (previous.hostId !== ready.hostId || !previous.booted) return false;
+          const current = devices.find((device) => device.id === previous.id);
+          return (
+            !current?.booted ||
+            current.platform !== previous.platform ||
+            current.name !== previous.name ||
+            current.version !== previous.version ||
+            current.physical !== previous.physical
+          );
+        });
+        yield* Effect.forEach(
+          retired,
+          (device) => retireDeviceAgentAccess(device.hostId, device.id),
+          { discard: true },
+        );
         return yield* publish((state) => ({
           ...state,
+          sessions: state.sessions.filter(
+            (session) =>
+              !retired.some(
+                (device) => device.hostId === session.hostId && device.id === session.deviceId,
+              ),
+          ),
           hosts: hostSummaries,
           ...(ready.hostId === LOCAL_DEVICE_HOST_ID ? { hostStatusDetail: detail } : {}),
           devices: [
@@ -941,6 +977,23 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
           reason: "Agent CLI installation is unavailable in this device service.",
         }),
       ),
+      refreshAgentDevice: (ready) => refresh(ready).pipe(Effect.asVoid),
+      abortOpen: (openedSession) =>
+        lifecycleLock.withPermit(
+          Effect.gen(function* () {
+            const { state } = yield* SynchronizedRef.get(stateRef);
+            if (!state.sessions.includes(openedSession)) return;
+            yield* retireThreadDeviceAgentAccess(
+              openedSession.threadId,
+              openedSession.hostId,
+              openedSession.deviceId,
+            );
+            yield* publish((current) => ({
+              ...current,
+              sessions: current.sessions.filter((session) => session !== openedSession),
+            }));
+          }),
+        ),
       agentTarget: (input) =>
         Effect.gen(function* () {
           const { threadId, hostId, deviceId } = input.openedSession;
@@ -1123,6 +1176,7 @@ export const make = Effect.gen(function* () {
         ),
       ),
     access.retireDevice,
+    access.retireThreadDevice,
   );
   const hostContext =
     yield* Effect.context<Effect.Services<ReturnType<typeof SshDeviceHost.make>>>();
