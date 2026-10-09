@@ -697,3 +697,90 @@ it.effect("rolls back the opened session when post-open credential issuance is i
     );
   }),
 );
+
+it.effect.each([
+  { name: "environment access", globalAccess: true, projectAccess: undefined },
+  { name: "project access", globalAccess: false, projectAccess: true },
+])(
+  "does not boot when $name is revoked during agent readiness",
+  ({ globalAccess, projectAccess }) =>
+    Effect.gen(function* () {
+      const readinessStarted = yield* Deferred.make<void>();
+      const resumeReadiness = yield* Deferred.make<void>();
+      const settings = yield* Ref.make({
+        ...allowedSettings,
+        enableAgentDeviceAccess: globalAccess,
+        projectSettingsOverrides:
+          projectAccess === undefined
+            ? {}
+            : { [projectId]: { enableAgentDeviceAccess: projectAccess } },
+      });
+      const sessions = yield* Ref.make<ReadonlyArray<DeviceSession>>([]);
+      let bootCalls = 0;
+      const devices = Layer.mock(DeviceService.DeviceService)({
+        list: Effect.succeed(state),
+        state: Ref.get(sessions).pipe(Effect.map((sessions) => ({ ...state, sessions }))),
+        agentReadinessIfSupported: () =>
+          Deferred.succeed(readinessStarted, undefined).pipe(
+            Effect.andThen(Deferred.await(resumeReadiness)),
+            Effect.as(agentReady),
+          ),
+        open: (input) =>
+          Effect.gen(function* () {
+            bootCalls++;
+            const session = {
+              threadId: input.threadId,
+              hostId: "local",
+              deviceId: input.deviceId,
+              platform: input.platform,
+              openedAt: "2026-09-08T00:00:00.000Z",
+            };
+            yield* Ref.update(sessions, (current) => [...current, session]);
+            return session;
+          }),
+        agentTarget: () =>
+          Effect.die("Revoked access must be rejected before boot or credential issuance"),
+        abortOpen: () => Effect.die("No session should be opened for revoked access"),
+      });
+      const access = Layer.mergeAll(
+        McpToolAccessTestkit.liveThreadsLayer,
+        McpToolAccessTestkit.liveThreadProjectionsLayer,
+        Layer.mock(ProjectStore.ProjectStoreV2)({
+          get: () => Effect.succeed(Option.some(project)),
+        }),
+        Layer.mock(ServerSettings.ServerSettingsService)({ getSettings: Ref.get(settings) }),
+      );
+      yield* Effect.gen(function* () {
+        const server = yield* McpServer.McpServer;
+        const opening = yield* server
+          .callTool({ name: "device_open", arguments: { platform: "ios" } })
+          .pipe(
+            Effect.provideService(
+              McpInvocationContext.McpInvocationContext,
+              invocation(["device"]),
+            ),
+            Effect.provideService(McpSchema.McpServerClient, client),
+            Effect.forkChild,
+          );
+        yield* Deferred.await(readinessStarted);
+        yield* Ref.update(settings, (current) => ({
+          ...current,
+          enableAgentDeviceAccess: false,
+          projectSettingsOverrides: { [projectId]: { enableAgentDeviceAccess: false } },
+        }));
+        yield* Deferred.succeed(resumeReadiness, undefined);
+        expect((yield* Fiber.join(opening)).isError).toBe(true);
+        expect(bootCalls).toBe(0);
+        expect(yield* Ref.get(sessions)).toEqual([]);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          McpHttpServer.layerDeviceToolkit.pipe(
+            Layer.provideMerge(McpServer.McpServer.layer),
+            Layer.provide(devices),
+            Layer.provide(access),
+          ),
+        ),
+      );
+    }),
+);

@@ -170,6 +170,8 @@ const handlers = {
             "Agent device access requires enabled device support, agent access, and an available simulator platform on this host.",
         });
       }
+      // Installing or starting agent tools can outlive the caller's consent.
+      yield* requireDeviceAccess;
       const session = yield* devices.open({
         threadId: scope.thread.threadId,
         hostId: target.hostId,

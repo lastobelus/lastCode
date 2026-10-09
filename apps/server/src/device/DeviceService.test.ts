@@ -380,7 +380,7 @@ describe("device setup consent", () => {
       expect((yield* service.state).agentAccessEnabled).toBe(true);
 
       yield* service.configure({ agentAccessEnabled: false, onboardingCompleted: true });
-      expect(agentStops).toEqual([]);
+      expect(agentStops).toEqual(["stop"]);
       expect(yield* service.agentReadinessIfSupported()).toBeNull();
       expect(yield* service.agentReadinessIfSupported(LOCAL_DEVICE_HOST_ID, true)).not.toBeNull();
       expect((yield* service.state).onboardingCompleted).toBe(true);
@@ -388,6 +388,52 @@ describe("device setup consent", () => {
     }).pipe(Effect.scoped),
   );
 });
+
+it.effect.each(["disabled", "removed"] as const)(
+  "stops active helpers only after the last project grant is %s",
+  (change) =>
+    Effect.gen(function* () {
+      const { service, agentStarts, agentStops, starts, settings } = yield* fixture();
+      yield* Ref.update(settings, (current) => ({
+        ...current,
+        enableDeviceSupport: true,
+        projectSettingsOverrides: { "project-1": { enableAgentDeviceAccess: true } },
+      }));
+      const opened = yield* service.open({
+        threadId: ThreadId.make("thread-1"),
+        deviceId: "Pixel_API_35",
+        platform: "android",
+      });
+      yield* service.agentReadinessIfSupported(LOCAL_DEVICE_HOST_ID, true);
+      yield* service.configure({ agentAccessEnabled: false });
+      yield* service.reconcileAgentAccess;
+      expect(agentStops).toEqual([]);
+      yield* Ref.update(settings, (current) => ({
+        ...current,
+        projectSettingsOverrides:
+          change === "removed" ? {} : { "project-1": { enableAgentDeviceAccess: false } },
+      }));
+      yield* service.reconcileAgentAccess;
+      expect(agentStops).toEqual(["stop"]);
+      expect(starts).not.toContain("stop");
+      expect((yield* service.state).sessions).toContain(opened);
+      // Unrelated settings changes do not contact an inactive host again.
+      yield* service.reconcileAgentAccess;
+      expect(agentStops).toEqual(["stop"]);
+      yield* service.configure({ agentAccessEnabled: true });
+      expect(agentStarts).toHaveLength(2);
+    }).pipe(Effect.scoped),
+);
+
+it.effect("does not start or stop inactive agent hosts for denied settings updates", () =>
+  Effect.gen(function* () {
+    const { service, agentStarts, agentStops } = yield* fixture();
+    yield* service.reconcileAgentAccess;
+    yield* service.reconcileAgentAccess;
+    expect(agentStarts).toEqual([]);
+    expect(agentStops).toEqual([]);
+  }).pipe(Effect.scoped),
+);
 
 it.effect("publishes boot progress and does not restore sessions after support is disabled", () =>
   Effect.gen(function* () {

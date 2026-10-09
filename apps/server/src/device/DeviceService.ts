@@ -331,6 +331,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
     return yield* readiness(host.id);
   });
 
+  const activeAgentHosts = new Set<DeviceHost.DeviceHost["Service"]>();
   const agentReadinessIfSupported: DeviceService["Service"]["agentReadinessIfSupported"] =
     Effect.fn("DeviceService.agentReadinessIfSupported")(function* (hostId, agentAccessEnabled) {
       const deviceSettings = yield* readDeviceSettings;
@@ -338,11 +339,14 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
         return null;
       const host = yield* resolveHost(hostId);
       const current = yield* host.current;
-      if (current?.agentDevice)
+      if (current?.agentDevice) {
+        activeAgentHosts.add(host);
         return { hostId: host.id, ...current, agentDevice: current.agentDevice };
+      }
       const summary = yield* host.summary;
       if (summary.kind === "local" && !summary.platforms.some((platform) => platform.available))
         return null;
+      activeAgentHosts.add(host);
       const ready = yield* host
         .ensureAgentReady((phase, detail) =>
           setHostStatus(host.id, { status: phase, detail }).pipe(Effect.asVoid),
@@ -576,6 +580,36 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
     },
   );
 
+  const stopUnusedAgents = Effect.gen(function* () {
+    const current = yield* settings.getSettings.pipe(
+      Effect.mapError(
+        (cause) =>
+          new DeviceOperationError({ operation: "settings", reason: "settings_failed", cause }),
+      ),
+    );
+    if (
+      current.enableAgentDeviceAccess ||
+      Object.values(current.projectSettingsOverrides).some(
+        (override) => override.enableAgentDeviceAccess === true,
+      )
+    )
+      return;
+    yield* Effect.forEach(
+      hosts.values(),
+      (host) =>
+        Effect.gen(function* () {
+          if (!activeAgentHosts.has(host) && !(yield* host.current)?.agentDevice) return;
+          yield* host.stopAgent;
+          activeAgentHosts.delete(host);
+        }).pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning("Could not stop unused device agent", { hostId: host.id, cause }),
+          ),
+        ),
+      { discard: true },
+    );
+  });
+
   const configure: DeviceService["Service"]["configure"] = Effect.fn("DeviceService.configure")(
     function* (input) {
       const currentSettings = yield* readDeviceSettings;
@@ -605,6 +639,9 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
             );
           if (!nextEnabled) {
             yield* Effect.forEach(hosts.values(), (host) => host.stop, { discard: true });
+            activeAgentHosts.clear();
+          } else {
+            yield* stopUnusedAgents;
           }
           yield* publish((state) => ({
             ...state,
@@ -1049,11 +1086,15 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
       sessionsForThread,
     }),
     setHostStatus,
+    reconcileAgentAccess: lifecycleLock.withPermit(stopUnusedAgents),
     withLifecycleLock: lifecycleLock.withPermit,
     refreshHosts: Effect.gen(function* () {
       const summaries = yield* Effect.forEach(hosts.values(), (host) => host.summary);
       const unchanged = (id: DeviceHostId) =>
         hosts.has(id) && hosts.get(id) === publishedHosts.get(id);
+      for (const host of activeAgentHosts) {
+        if (hosts.get(host.id) !== host) activeAgentHosts.delete(host);
+      }
       yield* publish((state) => ({
         ...state,
         hosts: summaries,
@@ -1246,7 +1287,9 @@ export const make = Effect.gen(function* () {
   const changes = yield* settings.subscribeChanges;
   yield* reconcile((yield* settings.getSettings).deviceHosts);
   yield* changes.pipe(
-    Stream.runForEach((value) => reconcile(value.deviceHosts)),
+    Stream.runForEach((value) =>
+      reconcile(value.deviceHosts).pipe(Effect.andThen(service.reconcileAgentAccess)),
+    ),
     Effect.forkIn(scope),
   );
   yield* Effect.addFinalizer(() =>
