@@ -1057,6 +1057,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     creatorDetails.unavailableLabel;
   const threadRowElement = (
     <div
+      ref={threadNavigationRef}
       className={cn(
         "relative isolate flex h-8 w-full min-w-0 cursor-pointer select-none items-center gap-1 overflow-hidden rounded-md pr-2 text-left text-xs outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring group-data-[collapsible=icon]:hidden [&>span:last-child]:truncate [&>svg:not([class*='size-'])]:size-4 [&>svg]:shrink-0 [&>svg]:text-sidebar-muted-foreground",
         isActive
@@ -1094,7 +1095,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         annotationActive={hasActiveAnnotation}
         handle={annotationPopoverHandle}
         id={annotationTriggerId}
-        ref={threadNavigationRef}
         render={threadRowElement}
         role="button"
         tabIndex={0}
