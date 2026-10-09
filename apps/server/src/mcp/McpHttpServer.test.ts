@@ -1,5 +1,6 @@
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import { expect, it } from "@effect/vitest";
 import { NodeHttpServer } from "@effect/platform-node";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -116,6 +117,7 @@ it.effect("isolates full and restricted tool discovery over HTTP", () =>
             }),
             Layer.mock(Orchestrator.OrchestratorV2)({}),
             Layer.mock(ProjectionStore.ProjectionStoreV2)({}),
+            Layer.mock(ProjectStore.ProjectStoreV2)({}),
             Layer.mock(DeviceService.DeviceService)({}),
             Layer.mock(PreviewBrowser.PreviewBrowser)({
               executable: Effect.die("tool discovery must not launch a browser"),

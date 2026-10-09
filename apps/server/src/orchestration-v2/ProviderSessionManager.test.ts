@@ -12,7 +12,6 @@ import {
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
-  type Project,
   NodeId,
   ProjectId,
   ProviderDriverKind,
@@ -41,7 +40,7 @@ import { HttpServer } from "effect/http";
 import { ProviderWorkspaceMissingError } from "../provider/Errors.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
-import * as ProjectService from "../project/ProjectService.ts";
+import * as ProjectStore from "./ProjectStore.ts";
 import * as McpProviderSession from "@t3tools/provider-core/server/mcpSession";
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -1047,7 +1046,7 @@ function layerTest(input: {
   readonly beforeClose?: Effect.Effect<void>;
   readonly inspectTurn?: ProviderAdapterV2SessionRuntime["inspectTurn"];
   readonly serverSettingsLayer?: ReturnType<typeof ServerSettings.layerTest>;
-  readonly layerProjectService?: Layer.Layer<ProjectService.ProjectService>;
+  readonly layerProjectStore?: Layer.Layer<ProjectStore.ProjectStoreV2>;
   readonly fileSystemLayer?: Layer.Layer<FileSystem.FileSystem>;
   readonly eventSinkLayer?: typeof layerTestEventSink;
   readonly configureMcp?: boolean;
@@ -1121,7 +1120,7 @@ function layerTest(input: {
           layerConfiguredMcpRegistry,
           layerTestStores,
           ...(input.serverSettingsLayer === undefined ? [] : [input.serverSettingsLayer]),
-          ...(input.layerProjectService === undefined ? [] : [input.layerProjectService]),
+          ...(input.layerProjectStore === undefined ? [] : [input.layerProjectStore]),
           ...(input.fileSystemLayer === undefined ? [] : [input.fileSystemLayer]),
         ),
       ),
@@ -1170,12 +1169,11 @@ const layerPausingMcpRegistry = (pause: {
     }),
   ).pipe(Layer.provide(layerTestMcpRegistry));
 
-function makeBrowserAccessProject(projectId: ProjectId): Project {
+function makeBrowserAccessProject(projectId: ProjectId): ProjectStore.ProjectRow {
   return {
-    id: projectId,
+    projectId,
     title: "Browser access project",
     workspaceRoot: process.cwd(),
-    repositoryIdentity: null,
     faviconPath: null,
     projectIcon: null,
     defaultModelSelection: null,
@@ -1202,8 +1200,8 @@ function runBrowserAccessScenario(input: {
     >([]);
     const projectId = ProjectId.make("project-provider-session-manager-browser-access");
     const threadId = ThreadId.make("thread-provider-session-manager-browser-access");
-    const layerProjectService = Layer.mock(ProjectService.ProjectService)({
-      getById: (requestedProjectId) =>
+    const layerProjectStore = Layer.mock(ProjectStore.ProjectStoreV2)({
+      get: (requestedProjectId) =>
         Effect.succeed(
           input.projectExists === false
             ? Option.none()
@@ -1234,7 +1232,7 @@ function runBrowserAccessScenario(input: {
           state,
           idleTimeoutMs: 1_000,
           mcpConfigs,
-          layerProjectService: layerProjectService,
+          layerProjectStore: layerProjectStore,
           serverSettingsLayer: ServerSettings.layerTest({
             enableAgentBrowserAccess: input.enableAgentBrowserAccess,
             projectSettingsOverrides: {
@@ -2065,8 +2063,8 @@ it.effect(
       // start marks the session busy.
       const holdProjectRead = yield* Ref.make(false);
       const projectReadHeld = yield* Deferred.make<void>();
-      const projectServiceLayer = Layer.mock(ProjectService.ProjectService)({
-        getById: (requestedProjectId) =>
+      const projectStoreLayer = Layer.mock(ProjectStore.ProjectStoreV2)({
+        get: (requestedProjectId) =>
           Ref.get(holdProjectRead).pipe(
             Effect.flatMap((hold) =>
               hold
@@ -2149,7 +2147,7 @@ it.effect(
           layerTest({
             state,
             idleTimeoutMs: 1000,
-            layerProjectService: projectServiceLayer,
+            layerProjectStore: projectStoreLayer,
             serverSettingsLayer: ServerSettings.layerTest({
               projectSettingsOverrides: { [projectId]: { enableAgentBrowserAccess: true } },
             }),

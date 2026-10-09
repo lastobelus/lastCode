@@ -33,6 +33,8 @@ import { Argument, Command, Flag, GlobalFlag } from "effect/cli";
 import { FetchHttpClient, HttpClient, HttpClientError } from "effect/http";
 import * as HttpApiClient from "effect/http-api/HttpApiClient";
 
+import * as ServerSettings from "../serverSettings.ts";
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 
 import * as ServerConfig from "../config.ts";
@@ -235,6 +237,7 @@ const projectCommandUuid = Crypto.Crypto.pipe(
 );
 
 const layerProjectCliRuntime = RuntimeLayer.layerProjectService.pipe(
+  Layer.provide(ServerSettings.layer.pipe(Layer.provide(ServerSecretStore.layer))),
   Layer.provide(
     UpdateDrainAdmission.layerOffline.pipe(
       Layer.provide(UpdateDrain.layer.pipe(Layer.provide(UpdateDrainRepository.layer))),

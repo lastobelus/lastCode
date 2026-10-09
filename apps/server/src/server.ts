@@ -64,6 +64,9 @@ import * as OrchestratorMcpService from "./mcp/OrchestratorMcpService.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import * as DeviceHubProxy from "./device/DeviceHubProxy.ts";
+import * as DeviceAgentAccess from "./device/DeviceAgentAccess.ts";
+import * as DeviceAgentLifecycle from "./device/DeviceAgentLifecycle.ts";
+import * as AgentDeviceProxy from "./device/AgentDeviceProxy.ts";
 import * as PreviewManager from "./preview/Manager.ts";
 import * as PortScanner from "./preview/PortScanner.ts";
 import * as ServerBrowser from "./preview/ServerBrowser.ts";
@@ -408,7 +411,14 @@ const layerPreview = Layer.empty.pipe(
   Layer.provideMerge(layerPortScanner),
 );
 
+const layerDeviceAgentAccess = DeviceAgentAccess.layer.pipe(
+  Layer.provide(ProjectionStoreV2.layer),
+  Layer.provide(ProjectStore.layer),
+  Layer.provide(layerServerSettings),
+);
+
 const layerDevice = DeviceService.layer.pipe(
+  Layer.provideMerge(layerDeviceAgentAccess),
   Layer.provide(layerServerSettings),
   Layer.provide(ProcessRunner.layer),
   Layer.provide(NetService.layer),
@@ -699,6 +709,7 @@ const layerMakeRoutes = Layer.mergeAll(
     ServerHttp.layerAssetRoute,
     ServerHttp.layerAttachmentUploadRoute,
     DeviceHubProxy.layer,
+    AgentDeviceProxy.layer,
     ServerBrowserStream.routeLayer,
     ServerHttp.layerStaticAndDevRoute,
     Ws.layer.pipe(
@@ -722,6 +733,7 @@ const layerMakeRoutes = Layer.mergeAll(
   // Both transports consume the same service instance, so caches single-flight across clients
   // and mutations observed on WebSocket invalidate patches subsequently read over HTTP.
   Layer.provide(layerPullRequestService),
+  Layer.provide(ProjectionStoreV2.layer),
   // The stream route and the WebSocket RPCs share one browser.
   Layer.provide(ServerBrowser.layer),
   Layer.provide(DesktopBrowserChannel.layer),
@@ -1096,6 +1108,9 @@ const layerMakeServer = Layer.unwrap(
       layerTailscaleServe,
       layerCloudDesiredLinkReconcile,
       HeapSnapshot.layer,
+      DeviceAgentLifecycle.layer.pipe(
+        Layer.provide(Layer.merge(ProjectionStoreV2.layer, RuntimeLayer.layerEventSink)),
+      ),
     );
 
     return layerServerApplication.pipe(

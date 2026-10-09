@@ -1,3 +1,4 @@
+import * as ServerSettings from "../serverSettings.ts";
 import * as UpdateDrainAdmissionTestkit from "../updateDrain/UpdateDrainAdmission.testkit.ts";
 import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
 import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
@@ -164,6 +165,7 @@ const readProjects = (baseDir: string) =>
   Effect.gen(function* () {
     const config = yield* makeConfig(baseDir);
     const layer = RuntimeLayer.layerProjectService.pipe(
+      Layer.provideMerge(ServerSettings.layerTest()),
       Layer.provide(UpdateDrainAdmissionTestkit.layerOpen),
       Layer.provideMerge(ProjectEnrichmentService.layer),
       Layer.provideMerge(RepositoryIdentityResolver.layer),
