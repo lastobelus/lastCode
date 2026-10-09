@@ -80,6 +80,7 @@ export const ProviderInstanceIcon = memo(function ProviderInstanceIcon(props: {
   badgeContent?: "initials" | "none";
   className?: string;
   iconClassName?: string;
+  fallbackFontSize?: string;
   badgeClassName?: string;
   statusDotClassName?: string;
   indicatorBackground?: string;
@@ -124,7 +125,10 @@ export const ProviderInstanceIcon = memo(function ProviderInstanceIcon(props: {
       ) : Icon ? (
         <Icon className={cn("size-5 shrink-0", props.iconClassName)} aria-hidden />
       ) : (
-        <span className={cn("text-3xs font-semibold leading-none", props.iconClassName)}>
+        <span
+          className={cn("text-3xs font-semibold leading-none", props.iconClassName)}
+          style={props.fallbackFontSize ? { fontSize: props.fallbackFontSize } : undefined}
+        >
           {providerInstanceInitials(props.displayName)}
         </span>
       )}
