@@ -125,8 +125,14 @@ Accept Codex as clean only when its result was produced after the latest relevan
 push, identifies the exact `headRefOid` (for a formal review, its `commit_id`
 matches), and gives an explicit no-issues result or terminal clean reaction. A
 generic review wrapper, silence, or absence of inline findings is insufficient by
-itself. After a push, request `@codex review` once unless a current request is
-already active.
+itself. After a push, request review once unless a current request is already
+active. Bind the request to the full current head SHA using exactly these two
+lines so resumable PR actions can distinguish it from an older request:
+
+```text
+@codex review
+<!-- lastcode-review-head: HEAD_SHA -->
+```
 
 Read all review threads with GraphQL pagination. `gh api --paginate` supplies the
 next `$endCursor`; keep `pageInfo` in the query so it cannot silently truncate at
@@ -181,9 +187,24 @@ gh api graphql \
   }'
 ```
 
+When a current-head finding exists only as a top-level issue comment or
+body-only formal review and the agent rejects it without pushing a fix, record
+that judgement with this exact single-line issue comment before relaunching
+`Wait for PR`. Use `comment:COMMENT_ID` for an issue comment or
+`review:REVIEW_ID` for a formal review, plus the full current head SHA:
+
+```text
+<!-- lastcode-review-handled: ARTIFACT_ID head: HEAD_SHA -->
+```
+
+The marker is unnecessary after a fix push because the new head invalidates the
+old finding, and unnecessary for inline findings because thread resolution is
+the durable handled state.
+
 Before merge, take a fresh snapshot and require all of these on the same head:
 
-- terminal-clean Codex result;
+- terminal-clean Codex result, or durable handled evidence for every exact-head
+  finding;
 - zero unresolved review threads, including outdated threads;
 - required checks and local validation are green;
 - mergeability is clean and the expected base SHA has not moved.

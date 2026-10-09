@@ -1,5 +1,6 @@
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { threadPullRequestsOf } from "@t3tools/shared/threadPullRequests";
+import { threadAnnotationOf } from "@t3tools/shared/threadAnnotation";
 import type {
   ThreadLinkedPullRequest,
   EnvironmentId,
@@ -87,6 +88,8 @@ function threadRunStatusIsActive(status: ThreadRuntimeSummary["status"]): boolea
 }
 
 export interface EnvironmentThreadShell {
+  readonly creatorThreadId?: ThreadId;
+  readonly creatorGrouping?: "grouped" | "independent";
   readonly environmentId: EnvironmentId;
   readonly id: ThreadId;
   readonly projectId: ProjectId;
@@ -120,11 +123,15 @@ export interface EnvironmentThreadShell {
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly archivedAt: string | null;
+  readonly archivedWith?: OrchestrationV2ThreadShell["archivedWith"];
+  readonly archivePending?: OrchestrationV2ThreadShell["archivePending"];
   readonly settledOverride: "settled" | "active" | null;
   readonly settledAt: string | null;
   readonly unsettledAt: string | null;
   readonly snoozedUntil: string | null;
   readonly snoozedAt: string | null;
+  readonly subagentPromotion?: import("@t3tools/contracts").OrchestrationV2SubagentPromotion | null;
+  readonly recovery?: import("@t3tools/contracts").OrchestrationV2ThreadRecovery | null;
   readonly limitRecovery?: import("@t3tools/contracts").OrchestrationV2LimitRecovery | null;
   readonly pinnedAt: string | null;
   readonly autoSettleDisabledAt?: string | null;
@@ -144,7 +151,28 @@ export interface EnvironmentThreadShell {
   /** Pending title regeneration marker; null when no request is in flight. */
   readonly titleRegeneration?: { readonly requestId: string; readonly startedAt: string } | null;
   readonly deletedAt: string | null;
+  readonly persistent?: boolean;
+  readonly annotation?: import("@t3tools/contracts").ThreadAnnotation | null;
+  readonly attention?: import("@t3tools/contracts").ThreadAttention | null;
+  readonly dashboardItems?: ReadonlyArray<import("@t3tools/contracts").ThreadDashboardItem>;
+  readonly actionResume?: import("@t3tools/contracts").ActionResumeState | null;
+  readonly worktreeCleanup?: import("@t3tools/contracts").ThreadWorktreeCleanup | null;
   readonly source: OrchestrationV2ThreadShell;
+}
+
+type ThreadShellVisibility =
+  | Pick<EnvironmentThreadShell, "archivedAt" | "deletedAt" | "worktreeCleanup">
+  | Pick<OrchestrationV2ThreadShell, "archivedAt" | "deletedAt" | "worktreeCleanup">;
+
+export function threadShellIsCleanupRecovery(thread: ThreadShellVisibility): boolean {
+  return thread.deletedAt !== null && thread.worktreeCleanup != null;
+}
+
+/** Deleted threads stay reachable until their worktree cleanup is resolved. */
+export function threadShellIsVisible(thread: ThreadShellVisibility): boolean {
+  return thread.deletedAt === null
+    ? thread.archivedAt === null
+    : threadShellIsCleanupRecovery(thread);
 }
 
 function iso(value: DateTime.Utc): string {
@@ -177,8 +205,13 @@ function shellRuntime(thread: OrchestrationV2ThreadShell): ThreadRuntimeSummary 
   const parkAtIdle =
     backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? []) &&
     thread.status !== "failed";
-  // A pull request watch can hold a thread that never ran.
-  if (thread.latestRunId === null && thread.activeProviderThreadId === null && !parkAtIdle) {
+  // Native children can be active without owning an app run or provider thread.
+  if (
+    thread.latestRunId === null &&
+    thread.activeProviderThreadId === null &&
+    thread.status === "idle" &&
+    !parkAtIdle
+  ) {
     return null;
   }
   const status = parkAtIdle ? "idle" : (thread.activityRunStatus ?? thread.status);
@@ -227,11 +260,13 @@ export function presentThreadShell(
           assistantMessageId: null,
         } satisfies ThreadRunSummary);
   return {
+    ...(thread.creatorThreadId === undefined ? {} : { creatorThreadId: thread.creatorThreadId }),
+    ...(thread.creatorGrouping === undefined ? {} : { creatorGrouping: thread.creatorGrouping }),
     environmentId,
     id: thread.id,
     projectId: thread.projectId,
     title:
-      thread.lineage.relationshipToParent === "subagent"
+      thread.lineage.relationshipToParent === "subagent" && thread.lineage.independent !== true
         ? formatSubagentDisplayTitle(thread.title)
         : thread.title,
     providerInstanceId: thread.providerInstanceId,
@@ -266,11 +301,18 @@ export function presentThreadShell(
     createdAt: iso(thread.createdAt),
     updatedAt,
     archivedAt: nullableIso(thread.archivedAt),
+    archivedWith: thread.archivedWith ?? null,
+    archivePending: thread.archivePending ?? null,
     settledOverride: thread.settledOverride,
     settledAt: nullableIso(thread.settledAt),
     unsettledAt: nullableIso(thread.unsettledAt ?? null),
     snoozedUntil: nullableIso(thread.snoozedUntil ?? null),
     snoozedAt: nullableIso(thread.snoozedAt ?? null),
+    subagentPromotion: thread.subagentPromotion ?? null,
+    recovery:
+      thread.activeRunId !== null && thread.activeRunId !== thread.recovery?.runId
+        ? null
+        : (thread.recovery ?? null),
     limitRecovery: thread.limitRecovery ?? null,
     pinnedAt: nullableIso(thread.pinnedAt ?? null),
     autoSettleDisabledAt: nullableIso(thread.autoSettleDisabledAt ?? null),
@@ -287,6 +329,13 @@ export function presentThreadShell(
             startedAt: iso(thread.titleRegeneration.startedAt),
           },
     deletedAt: nullableIso(thread.deletedAt),
+    ...(thread.persistent === undefined ? {} : { persistent: thread.persistent }),
+    annotation: threadAnnotationOf(thread),
+    attention: thread.attention ?? null,
+    dashboardItems: thread.dashboardItems ?? [],
+    // Cached shells and retained events can still carry a parent's Action.
+    actionResume: thread.actionResume?.threadId === thread.id ? thread.actionResume : null,
+    worktreeCleanup: thread.worktreeCleanup ?? null,
     source: thread,
   };
 }
