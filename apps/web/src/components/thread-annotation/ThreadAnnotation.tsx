@@ -4,14 +4,15 @@ import {
   type ThreadAnnotation as ThreadAnnotationModel,
 } from "@t3tools/contracts";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
+import type { Popover as PopoverPrimitive } from "@base-ui/react/popover";
 import { ChevronDownIcon } from "lucide-react";
 import {
-  useCallback,
   useEffect,
   useId,
   useRef,
   useState,
   useSyncExternalStore,
+  type ComponentProps,
   type FormEvent,
   type ReactNode,
 } from "react";
@@ -30,7 +31,7 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 import { Textarea } from "../ui/textarea";
-import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
+import { Popover, PopoverCreateHandle, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { ComposerBanner } from "../chat/ComposerBanner";
 import type { ComposerBannerStackItem } from "../chat/ComposerBannerStack";
 
@@ -297,12 +298,50 @@ export function ThreadAnnotationActions(props: {
   );
 }
 
+/** Adds native hover handling to a navigation row that already owns keyboard activation. */
+export function ThreadAnnotationNavigationTrigger({
+  annotationActive = true,
+  ...props
+}: ComponentProps<typeof PopoverTrigger> & { annotationActive?: boolean }) {
+  return (
+    <PopoverTrigger
+      {...props}
+      delay={0}
+      nativeButton={false}
+      openOnHover={annotationActive}
+      aria-haspopup={undefined}
+      aria-expanded={undefined}
+      aria-controls={undefined}
+      onFocusCapture={(event) => {
+        props.onFocusCapture?.(event);
+        // Only keyboard focus on the row opens its card; nested controls retain their trigger.
+        if (
+          annotationActive &&
+          props.id &&
+          event.target === event.currentTarget &&
+          event.target.matches(":focus-visible")
+        ) {
+          props.handle?.open(props.id);
+        }
+      }}
+      onKeyDown={(event) => {
+        props.onKeyDown?.(event);
+        if (event.key === "Enter" || event.key === " ") event.preventBaseUIHandler();
+      }}
+      onKeyUp={(event) => {
+        props.onKeyUp?.(event);
+        if (event.key === "Enter" || event.key === " ") event.preventBaseUIHandler();
+      }}
+    />
+  );
+}
+
 export function ThreadAnnotationHoverPopover(props: {
   annotation: ThreadAnnotationModel;
   threadRef: ScopedThreadRef;
   cwd?: string | undefined;
-  rowActive: boolean;
-  trigger: ReactNode;
+  handle: ReturnType<typeof PopoverCreateHandle>;
+  navigationTriggerId: string;
   threadDetails: ReactNode;
   trailingContent?: ReactNode;
   onEdit: () => void;
@@ -310,60 +349,47 @@ export function ThreadAnnotationHoverPopover(props: {
   onBodyChange: (body: string) => Promise<boolean>;
 }) {
   const bodyChangePending = useThreadAnnotationBodyPending(props.threadRef);
-  const [open, setOpen] = useState(false);
-  const closeTimerRef = useRef<number | null>(null);
-  const openRef = useRef(false);
-  const rowActiveRef = useRef(props.rowActive);
-  const popupHoveredRef = useRef(false);
-  const popupFocusedRef = useRef(false);
-  const setPopoverOpen = useCallback((nextOpen: boolean) => {
-    if (!nextOpen) {
-      popupHoveredRef.current = false;
-      popupFocusedRef.current = false;
-    }
-    openRef.current = nextOpen;
-    setOpen(nextOpen);
-  }, []);
-  const keepOpen = useCallback(() => {
-    if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current);
-    closeTimerRef.current = null;
-    setPopoverOpen(true);
-  }, [setPopoverOpen]);
-  const scheduleClose = useCallback(() => {
-    if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current);
-    closeTimerRef.current = window.setTimeout(() => {
-      closeTimerRef.current = null;
-      if (rowActiveRef.current || popupHoveredRef.current || popupFocusedRef.current) return;
-      setPopoverOpen(false);
-    }, 120);
-  }, [setPopoverOpen]);
-
+  const popupRef = useRef<HTMLDivElement | null>(null);
+  const actionsRef = useRef<PopoverPrimitive.Root.Actions | null>(null);
+  const openedByHover = useRef(false);
   useEffect(() => {
-    rowActiveRef.current = props.rowActive;
-    if (props.rowActive) {
-      keepOpen();
-    } else {
-      scheduleClose();
-    }
-  }, [keepOpen, props.rowActive, scheduleClose]);
-
-  useEffect(
-    () => () => {
-      if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current);
-    },
-    [],
-  );
-
+    // The detached row outlives annotations removed or resolved by another client.
+    const actions = actionsRef.current;
+    return () => {
+      props.handle.close();
+      actions?.unmount();
+    };
+  }, [props.handle]);
   return (
-    <Popover open={open} onOpenChange={setPopoverOpen}>
-      <PopoverTrigger
-        onPointerDown={(event) => event.stopPropagation()}
-        onClick={(event) => event.stopPropagation()}
-      >
-        {props.trigger}
-      </PopoverTrigger>
+    <Popover
+      actionsRef={actionsRef}
+      handle={props.handle}
+      onOpenChange={(open, details) => {
+        // The detached trigger is the navigation row. Clicking it must not pin the hover card.
+        if (
+          details.reason === "trigger-press" &&
+          details.trigger?.id === props.navigationTriggerId
+        ) {
+          details.cancel();
+        }
+        const navigationTrigger = document.getElementById(props.navigationTriggerId);
+        const activeElement = document.activeElement;
+        if (
+          !open &&
+          details.reason === "trigger-hover" &&
+          (popupRef.current?.contains(activeElement) ||
+            (navigationTrigger?.contains(activeElement) &&
+              activeElement?.matches(":focus-visible")))
+        ) {
+          details.cancel();
+        }
+        if (!details.isCanceled) openedByHover.current = open && details.reason === "trigger-hover";
+      }}
+    >
       <PopoverPopup
+        ref={popupRef}
         align="start"
+        animated={false}
         className="max-w-80 text-left whitespace-normal before:hidden"
         elevated
         finalFocus={false}
@@ -371,23 +397,24 @@ export function ThreadAnnotationHoverPopover(props: {
         side="right"
         tooltipStyle
         padding="none"
-        onMouseEnter={() => {
-          if (!openRef.current && !rowActiveRef.current) return;
-          popupHoveredRef.current = true;
-          keepOpen();
-        }}
-        onMouseLeave={() => {
-          popupHoveredRef.current = false;
-          scheduleClose();
-        }}
-        onFocusCapture={() => {
-          popupFocusedRef.current = true;
-          keepOpen();
+        onFocusCapture={(event) => {
+          if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+          // Keyboard interaction needs the popover's focus-out/Escape handling, unlike hover.
+          if (openedByHover.current) props.handle.open(props.navigationTriggerId);
         }}
         onBlurCapture={(event) => {
-          if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
-          popupFocusedRef.current = false;
-          scheduleClose();
+          const nextFocus = event.relatedTarget as Node | null;
+          const navigationTrigger = document.getElementById(props.navigationTriggerId);
+          // Base UI's hidden focus guards finish tab navigation and dismissal themselves.
+          if (nextFocus instanceof Element && nextFocus.getAttribute("aria-hidden") === "true") {
+            return;
+          }
+          if (event.currentTarget.contains(nextFocus) || navigationTrigger?.contains(nextFocus)) {
+            return;
+          }
+          // A focused card remains visible only while its row or popup is still hovered.
+          if (event.currentTarget.matches(":hover") || navigationTrigger?.matches(":hover")) return;
+          props.handle.close();
         }}
       >
         <div className="flex min-w-0 w-80 max-w-80 flex-col">
@@ -405,12 +432,12 @@ export function ThreadAnnotationHoverPopover(props: {
               <ThreadAnnotationActions
                 annotation={props.annotation}
                 onEdit={() => {
-                  setPopoverOpen(false);
+                  props.handle.close();
                   props.onEdit();
                 }}
                 onReopen={() => undefined}
                 onResolve={() => {
-                  setPopoverOpen(false);
+                  props.handle.close();
                   props.onResolve();
                 }}
                 pending={bodyChangePending}

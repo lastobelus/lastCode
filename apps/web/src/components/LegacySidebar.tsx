@@ -49,6 +49,7 @@ import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 import React, {
   useCallback,
   useEffect,
+  useId,
   memo,
   useMemo,
   useRef,
@@ -132,7 +133,9 @@ import {
   runThreadAnnotationBodySave,
   ThreadAnnotationEditorDialog,
   ThreadAnnotationHoverPopover,
+  ThreadAnnotationNavigationTrigger,
 } from "./thread-annotation/ThreadAnnotation";
+import { PopoverCreateHandle as createAnnotationPopoverHandle, PopoverTrigger } from "./ui/popover";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useThreadRunningTerminalIds } from "../state/terminalSessions";
 import {
@@ -226,7 +229,6 @@ import {
   NumberFieldInput,
 } from "./ui/number-field";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "./ui/select";
-import { Tooltip as TooltipPrimitive } from "@base-ui/react/tooltip";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import {
   SidebarContent,
@@ -758,6 +760,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     ? "grid shrink-0 grid-cols-[max-content] items-center max-sm:grid-cols-[max-content_calc(1.5rem*var(--legacy-sidebar-content-zoom))]"
     : "grid shrink-0 grid-cols-[repeat(2,calc(0.75rem*var(--legacy-sidebar-content-zoom)))_calc(3rem*var(--legacy-sidebar-content-zoom))] items-center gap-x-(--thread-metadata-gap) max-sm:grid-cols-[repeat(2,calc(0.75rem*var(--legacy-sidebar-content-zoom)))_calc(3rem*var(--legacy-sidebar-content-zoom))_calc(1.5rem*var(--legacy-sidebar-content-zoom))]";
   const [threadRowActive, setThreadRowActive] = useState(false);
+  const annotationPopoverHandle = useMemo(() => createAnnotationPopoverHandle(), []);
+  const annotationTriggerId = useId();
   const clearConfirmingArchive = useCallback(() => {
     setConfirmingArchiveThreadKey((current) => (current === threadKey ? null : current));
   }, [setConfirmingArchiveThreadKey, threadKey]);
@@ -1037,7 +1041,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     },
     [attemptArchiveThread, thread.persistent, threadRef],
   );
-  const threadDetailsTooltipHandle = useMemo(() => TooltipPrimitive.createHandle(), []);
+  const threadNavigationRef = useRef<HTMLDivElement | null>(null);
+  const threadDetailsTooltipId = useId();
   const setFamilyCollapsed = useLegacySidebarFamiliesStore((state) => state.setCollapsed);
   const family = props.familyRow;
   const typedGroups = props.groupingStyle === "typed-groups";
@@ -1050,6 +1055,22 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     family.unavailableParentLabel ??
     family.creatorGroupingWarning ??
     creatorDetails.unavailableLabel;
+  const threadRowElement = (
+    <div
+      ref={threadNavigationRef}
+      className={cn(
+        "relative isolate flex h-8 w-full min-w-0 cursor-pointer select-none items-center gap-1 overflow-hidden rounded-md pr-2 text-left text-xs outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring group-data-[collapsible=icon]:hidden [&>span:last-child]:truncate [&>svg:not([class*='size-'])]:size-4 [&>svg]:shrink-0 [&>svg]:text-sidebar-muted-foreground",
+        isActive
+          ? "bg-sidebar-row-active font-medium text-sidebar-foreground hover:bg-sidebar-row-active"
+          : isSelected
+            ? "bg-sidebar-row-selected text-sidebar-foreground hover:bg-sidebar-row-active"
+            : "text-sidebar-muted-foreground/80 hover:bg-sidebar-row-hover hover:text-sidebar-foreground",
+        typedGroups && family.descendantCount > 0 && !family.expanded && "h-10",
+        isCleanupPending && "cursor-not-allowed opacity-65",
+        isFileDragOver && "ring-1 ring-inset ring-primary/70",
+      )}
+    />
+  );
 
   return (
     <SidebarMenuSubItem
@@ -1058,19 +1079,28 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       style={{ paddingLeft: 12 + Math.min(family.depth, 6) * 12 }}
       data-thread-item
       {...fileDropHandlers}
-      onFocusCapture={() => setThreadRowActive(true)}
-      onMouseEnter={() => setThreadRowActive(true)}
+      onFocusCapture={() => {
+        if (!hasActiveAnnotation) setThreadRowActive(true);
+      }}
+      onMouseEnter={() => {
+        if (!hasActiveAnnotation) setThreadRowActive(true);
+      }}
       onMouseLeave={handleMouseLeave}
       onBlurCapture={handleBlurCapture}
     >
       <LegacySidebarFamilyGuides depth={family.depth} />
       {/* A thread row is the legacy sidebar's own control (a focusable div that hosts nested
           links and buttons), not a SidebarMenuSubButton, so it owns its look here. */}
-      <TooltipTrigger
-        handle={threadDetailsTooltipHandle}
-        render={<div />}
+      <ThreadAnnotationNavigationTrigger
+        annotationActive={hasActiveAnnotation}
+        handle={annotationPopoverHandle}
+        id={annotationTriggerId}
+        render={threadRowElement}
         role="button"
         tabIndex={0}
+        aria-describedby={
+          !hasActiveAnnotation && threadRowActive ? threadDetailsTooltipId : undefined
+        }
         data-active={isActive}
         aria-label={
           relationshipLabel
@@ -1084,17 +1114,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         data-cleanup-pending={isCleanupPending}
         data-file-drag-over={isFileDragOver}
         aria-disabled={isCleanupPending || undefined}
-        className={cn(
-          "relative isolate flex h-8 w-full min-w-0 cursor-pointer select-none items-center gap-1 overflow-hidden rounded-md pr-2 text-left text-xs outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring group-data-[collapsible=icon]:hidden [&>span:last-child]:truncate [&>svg:not([class*='size-'])]:size-4 [&>svg]:shrink-0 [&>svg]:text-sidebar-muted-foreground",
-          isActive
-            ? "bg-sidebar-row-active font-medium text-sidebar-foreground hover:bg-sidebar-row-active"
-            : isSelected
-              ? "bg-sidebar-row-selected text-sidebar-foreground hover:bg-sidebar-row-active"
-              : "text-sidebar-muted-foreground/80 hover:bg-sidebar-row-hover hover:text-sidebar-foreground",
-          typedGroups && family.descendantCount > 0 && !family.expanded && "h-10",
-          isCleanupPending && "cursor-not-allowed opacity-65",
-          isFileDragOver && "ring-1 ring-inset ring-primary/70",
-        )}
         onClick={handleRowClick}
         onDoubleClick={handleRowDoubleClick}
         onKeyDown={handleRowKeyDown}
@@ -1513,27 +1532,19 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               <span className="inline-flex items-center gap-1">
                 {jumpLabel ? (
                   hasActiveAnnotation && annotation ? (
-                    <ThreadAnnotationHoverPopover
-                      annotation={annotation}
-                      cwd={gitCwd ?? undefined}
-                      onBodyChange={(body) => onSaveAnnotationBody(thread, body)}
-                      onEdit={() => {
-                        if (checkTaskPermission(thread.environmentId)) onEditAnnotation(thread);
+                    <PopoverTrigger
+                      aria-label={`${jumpLabel}; show annotation for ${thread.title}`}
+                      handle={annotationPopoverHandle}
+                      onPointerDown={stopPropagationOnPointerDown}
+                      onClick={(event) => event.stopPropagation()}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") event.stopPropagation();
                       }}
-                      onResolve={() => onResolveAnnotation(thread)}
-                      rowActive={threadRowActive}
-                      threadDetails={threadHoverDetails}
-                      trailingContent={cleanupHoverDetails}
-                      threadRef={threadRef}
-                      trigger={
-                        <span
-                          aria-label={`${jumpLabel}; annotated`}
-                          className="inline-flex h-5 items-center rounded-full border border-dotted border-warning bg-warning/10 px-1.5 font-mono text-3xs font-medium tracking-tight text-warning-foreground shadow-sm"
-                        >
-                          {jumpLabel}
-                        </span>
-                      }
-                    />
+                    >
+                      <span className="inline-flex h-5 items-center rounded-full border border-dotted border-warning bg-warning/10 px-1.5 font-mono text-3xs font-medium tracking-tight text-warning-foreground shadow-sm">
+                        {jumpLabel}
+                      </span>
+                    </PopoverTrigger>
                   ) : (
                     <Tooltip>
                       <TooltipTrigger
@@ -1550,31 +1561,26 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                     </Tooltip>
                   )
                 ) : hasActiveAnnotation && annotation ? (
-                  <ThreadAnnotationHoverPopover
-                    annotation={annotation}
-                    cwd={gitCwd ?? undefined}
-                    onBodyChange={(body) => onSaveAnnotationBody(thread, body)}
-                    onEdit={() => {
-                      if (checkTaskPermission(thread.environmentId)) onEditAnnotation(thread);
+                  <PopoverTrigger
+                    aria-label={`Show annotation for ${thread.title}`}
+                    handle={annotationPopoverHandle}
+                    onPointerDown={stopPropagationOnPointerDown}
+                    onClick={(event) => event.stopPropagation()}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") event.stopPropagation();
                     }}
-                    onResolve={() => onResolveAnnotation(thread)}
-                    rowActive={threadRowActive}
-                    threadDetails={threadHoverDetails}
-                    trailingContent={cleanupHoverDetails}
-                    threadRef={threadRef}
-                    trigger={
-                      <span
-                        className={`border-b border-dotted border-warning text-3xs tabular-nums ${
-                          isHighlighted ? "text-foreground" : "text-secondary-label"
-                        }`}
-                        data-legacy-sidebar-unscaled-content
-                      >
-                        {formatRelativeTimeLabel(
-                          thread.latestUserMessageAt ?? thread.updatedAt ?? thread.createdAt,
-                        )}
-                      </span>
-                    }
-                  />
+                  >
+                    <span
+                      className={`border-b border-dotted border-warning text-3xs tabular-nums ${
+                        isHighlighted ? "text-foreground" : "text-secondary-label"
+                      }`}
+                      data-legacy-sidebar-unscaled-content
+                    >
+                      {formatRelativeTimeLabel(
+                        thread.latestUserMessageAt ?? thread.updatedAt ?? thread.createdAt,
+                      )}
+                    </span>
+                  </PopoverTrigger>
                 ) : (
                   <span
                     className={`text-3xs tabular-nums ${
@@ -1591,15 +1597,33 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             </span>
           </div>
         </div>
-      </TooltipTrigger>
+      </ThreadAnnotationNavigationTrigger>
+      {hasActiveAnnotation && annotation ? (
+        <ThreadAnnotationHoverPopover
+          annotation={annotation}
+          cwd={gitCwd ?? undefined}
+          handle={annotationPopoverHandle}
+          navigationTriggerId={annotationTriggerId}
+          onBodyChange={(body) => onSaveAnnotationBody(thread, body)}
+          onEdit={() => {
+            if (checkTaskPermission(thread.environmentId)) onEditAnnotation(thread);
+          }}
+          onResolve={() => onResolveAnnotation(thread)}
+          threadDetails={threadHoverDetails}
+          trailingContent={cleanupHoverDetails}
+          threadRef={threadRef}
+        />
+      ) : null}
       <Tooltip
         disabled={hasActiveAnnotation}
-        handle={threadDetailsTooltipHandle}
         open={!hasActiveAnnotation && threadRowActive}
         onOpenChange={handleThreadDetailsTooltipOpenChange}
       >
         <TooltipPopup
           align="start"
+          animated={false}
+          anchor={threadNavigationRef}
+          id={threadDetailsTooltipId}
           side="right"
           sideOffset={4}
           variant="glass"
