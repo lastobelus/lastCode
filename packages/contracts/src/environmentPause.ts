@@ -14,7 +14,8 @@ export const EnvironmentPauseTarget = Schema.Struct({
   projectId: ProjectId,
   title: Schema.String,
   pause: EnvironmentPauseDelivery,
-  resume: EnvironmentPauseDelivery,
+  /** An archived or deleted recipient can finish recovery without receiving Resume. */
+  resume: Schema.Literals(["pending", "sent", "failed", "unavailable"]),
   error: Schema.NullOr(Schema.String),
 });
 export type EnvironmentPauseTarget = typeof EnvironmentPauseTarget.Type;
@@ -26,6 +27,12 @@ export const EnvironmentPauseSession = Schema.Struct({
   targets: Schema.Array(EnvironmentPauseTarget),
 });
 export type EnvironmentPauseSession = typeof EnvironmentPauseSession.Type;
+
+export const environmentPauseResumeComplete = (session: EnvironmentPauseSession) =>
+  session.targets.every(
+    (target) =>
+      target.pause !== "sent" || target.resume === "sent" || target.resume === "unavailable",
+  );
 
 export const EnvironmentPauseStatus = Schema.Struct({
   session: Schema.NullOr(EnvironmentPauseSession),

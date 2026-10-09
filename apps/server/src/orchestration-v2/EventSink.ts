@@ -144,6 +144,7 @@ export interface EventSinkV2Shape {
       readonly effectTypes: ReadonlyArray<EffectOutbox.OrchestrationEffectRequestV2["type"]>;
       readonly threadIds?: ReadonlyArray<ThreadId>;
       readonly reason: string;
+      readonly preserveUnstartedAutomatic?: boolean;
     };
   }) => Effect.Effect<
     {
@@ -802,6 +803,9 @@ const layerBase: Layer.Layer<
                       threadId,
                       effectTypes: input.cancelUnsettledEffects!.effectTypes,
                       reason: input.cancelUnsettledEffects!.reason,
+                      ...(input.cancelUnsettledEffects!.preserveUnstartedAutomatic === true
+                        ? { preserveUnstartedAutomatic: true }
+                        : {}),
                     }),
                   { concurrency: 1 },
                 )).flat();

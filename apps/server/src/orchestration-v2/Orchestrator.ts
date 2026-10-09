@@ -104,7 +104,8 @@ import { CommandReceiptStoreV2 } from "./CommandReceiptStore.ts";
 import { ContextHandoffServiceV2 } from "./ContextHandoffService.ts";
 import { notificationTurnItem } from "./Notification.ts";
 import { isRestartNoteSource } from "./RestartBackgroundNote.ts";
-import { isUndeliveredMailboxSteer } from "./NotificationMailbox.ts";
+import { isAutomaticWakeMessage, isUndeliveredMailboxSteer } from "./NotificationMailbox.ts";
+import * as EnvironmentPauseStore from "../environment/EnvironmentPauseStore.ts";
 import { EventSinkV2 } from "./EventSink.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import type { OrchestrationEffectRequestV2, PendingOrchestrationEffectV2 } from "./EffectOutbox.ts";
@@ -691,12 +692,6 @@ function delegatedTaskTerminalStatus(
   }
 }
 
-function nextQueuedRun(
-  projection: Pick<OrchestrationV2ThreadProjection, "runs" | "messages">,
-): OrchestrationV2Run | undefined {
-  return queuedRunsInDeliveryOrder(projection)[0];
-}
-
 function latestStableRun(
   projection: Pick<OrchestrationV2ThreadProjection, "runs">,
 ): OrchestrationV2Run | null {
@@ -897,6 +892,28 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const projects = yield* ProjectStore.ProjectStoreV2;
   const projectionStore = yield* ProjectionStoreV2;
   const effectOutbox = yield* EffectOutbox.EffectOutboxV2;
+  const pauseStore = yield* Effect.serviceOption(EnvironmentPauseStore.EnvironmentPauseStore);
+  const automationPaused = Option.isSome(pauseStore)
+    ? pauseStore.value.get.pipe(
+        Effect.map((session) => session !== null && session.phase !== "resuming"),
+      )
+    : Effect.succeed(false);
+  const nextDeliverableQueuedRun = (
+    projection: Pick<OrchestrationV2ThreadProjection, "runs" | "messages">,
+    eligible: (run: OrchestrationV2Run) => boolean = () => true,
+  ) =>
+    automationPaused.pipe(
+      Effect.map((paused) =>
+        queuedRunsInDeliveryOrder(projection).find(
+          (run) =>
+            eligible(run) &&
+            (!paused ||
+              !projection.messages.some(
+                (message) => message.id === run.userMessageId && isAutomaticWakeMessage(message),
+              )),
+        ),
+      ),
+    );
   const nextTurnItemOrdinal = (
     projection: Pick<OrchestrationV2ThreadProjection, "thread"> &
       Partial<Pick<OrchestrationV2ThreadProjection, "turnItems">>,
@@ -1259,7 +1276,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ["runs", "nodes", "attempts", "providerThreads", "turnItems", "messages"],
         { turnItemTypes: [], messageRoles: ["user"] },
       );
-      const queuedRun = nextQueuedRun(projection);
+      const queuedRun = yield* nextDeliverableQueuedRun(projection);
       if (queuedRun === undefined) return;
       const now = yield* DateTime.now;
       const rootNode = projection.nodes.find((node) => node.id === queuedRun.rootNodeId);
@@ -1381,10 +1398,33 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             (left, right) =>
               DateTime.toEpochMillis(right.updatedAt) - DateTime.toEpochMillis(left.updatedAt),
           )[0]?.lastError ?? null;
-      if (usageLimitBlockedRun(projection.runs, projection.turnItems, sessionError) !== null) {
-        return;
+      const blockedRun = usageLimitBlockedRun(projection.runs, projection.turnItems, sessionError);
+      let limitRecoveryMessageId: string | null = null;
+      if (blockedRun !== null) {
+        const failure = latestRootProviderFailure(blockedRun, projection.turnItems);
+        const recovery = projection.thread.limitRecovery;
+        const now = yield* DateTime.now;
+        if (
+          failure?.class !== "usage_limit" ||
+          !recovery?.autoResume ||
+          recovery.runId !== blockedRun.id ||
+          recovery.resetAt !== failure.resetAt ||
+          Date.parse(recovery.resetAt) > DateTime.toEpochMillis(now) ||
+          projection.thread.settledOverride === "settled" ||
+          projection.thread.providerInstanceId !== blockedRun.providerInstanceId ||
+          projection.runtimeRequests.some((request) => request.status === "pending") ||
+          (projection.thread.snoozedUntil != null &&
+            DateTime.toEpochMillis(projection.thread.snoozedUntil) > DateTime.toEpochMillis(now))
+        )
+          return;
+        // Pause can queue a validated recovery that normally starts immediately.
+        // Only its original identity may pass the quota guard ahead of the queue.
+        limitRecoveryMessageId = `limit-resume:${threadId}:${blockedRun.id}:${Date.parse(recovery.resetAt)}:${recovery.requestId ?? "legacy"}`;
       }
-      const queuedRun = nextQueuedRun(projection);
+      const queuedRun = yield* nextDeliverableQueuedRun(
+        projection,
+        (run) => limitRecoveryMessageId === null || run.userMessageId === limitRecoveryMessageId,
+      );
       if (queuedRun === undefined) {
         return;
       }
@@ -1400,6 +1440,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (
         failureClass !== undefined &&
         failureClass !== "validation_error" &&
+        limitRecoveryMessageId === null &&
         failedRun?.providerInstanceId === queuedRun.providerInstanceId
       ) {
         const now = yield* DateTime.now;
@@ -5622,7 +5663,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
       // Route durable mailbox deliveries under the thread lock, using the live
       // session's capabilities. Never interrupt/restart a turn for a notification.
+      const pausedAutomaticWake =
+        isAutomaticWakeMessage({
+          ...command,
+          id: command.messageId,
+        }) && (yield* automationPaused);
+      if (pausedAutomaticWake) dispatchMode = { type: "queue_after_active" };
       if (
+        !pausedAutomaticWake &&
         delegatedCompletion !== undefined &&
         delegatedCompletion.taskIds.every(
           (id) => projection.subagents.find((task) => task.id === id)?.completionWake === "always",
@@ -5754,10 +5802,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const activeRun = projection.runs.find(isBlockingRun);
       const pendingMergeBackTransfers = pendingMergeBackTransfersForThread(projection);
       const shouldQueue =
-        activeRun !== undefined &&
-        (dispatchMode.type === "defer_start" ||
-          dispatchMode.type === "start_immediately" ||
-          dispatchMode.type === "queue_after_active");
+        pausedAutomaticWake ||
+        (activeRun !== undefined &&
+          (dispatchMode.type === "defer_start" ||
+            dispatchMode.type === "start_immediately" ||
+            dispatchMode.type === "queue_after_active"));
       if (shouldQueue) {
         if (pendingMergeBackTransfers.length > 0) {
           return yield* new OrchestratorDispatchError({
@@ -5769,20 +5818,20 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         const queueProviderThread =
           activeProviderThread ??
           projection.providerThreads.find(
-            (candidate) => candidate.id === activeRun.providerThreadId,
+            (candidate) => candidate.id === activeRun?.providerThreadId,
           );
-        if (queueProviderThread === undefined) {
+        if (queueProviderThread === undefined && !pausedAutomaticWake) {
           return yield* new OrchestratorDispatchError({
             commandId: command.commandId,
             commandType: command.type,
-            cause: `Active run ${activeRun.id} has no provider thread for queued dispatch.`,
+            cause: `Active run ${activeRun?.id} has no provider thread for queued dispatch.`,
           });
         }
         const now = yield* DateTime.now;
         const ordinal = nextRunOrdinal(projection);
         const runId = idAllocator.derive.run({ threadId: command.threadId, ordinal });
         const targetProviderThread =
-          modelSelection.instanceId === queueProviderThread.providerInstanceId
+          modelSelection.instanceId === queueProviderThread?.providerInstanceId
             ? queueProviderThread
             : rootProviderThreadsForProvider(projection, modelSelection.instanceId)[0];
         const queuedAdapter = yield* providerAdapters
@@ -5829,7 +5878,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         const attemptId = idAllocator.derive.runAttempt({ runId, attemptOrdinal: 1 });
         const rootNodeId = idAllocator.derive.rootNode({ runId });
         const checkpointScope =
-          activeRun.status === "preparing"
+          pausedAutomaticWake || activeRun?.status === "preparing"
             ? null
             : yield* runtimePolicy.resolve({ thread: projection.thread, modelSelection }).pipe(
                 Effect.flatMap((resolvedRuntimePolicy) =>

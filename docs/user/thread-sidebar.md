@@ -10,11 +10,16 @@ where you want it. It is off by default. Use the pause control in the sidebar
 header, choose an environment, and confirm to send “pause to go offline” to its
 active threads. The dialog counts down while the agents finish pausing and other
 thread work stops.
+If new work starts while you wait, choose **Pause remaining threads** to include it.
+
+Automatic thread wake-ups are blocked until you resume, including after
+reconnecting or restarting. PR watches also stop polling while paused. Scheduled
+tasks keep their usual missed-run policy when you return.
 
 Once the environment is quiet, leave the dialog available until you return, then
 choose **Resume** to send “resume” to the threads that received the pause request.
 You can reopen the dialog after closing it or reconnecting. Failed deliveries
-remain available to retry.
+remain available to retry. Deleted or archived threads cannot receive Resume.
 
 ## Start a thread
 

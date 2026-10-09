@@ -86,6 +86,8 @@ const make = Effect.gen(function* () {
           ),
         );
         yield* writeFileStringAtomically({ filePath, contents, mode: 0o600 }).pipe(
+          Effect.provideService(FileSystem.FileSystem, fs),
+          Effect.provideService(Path.Path, path),
           Effect.mapError(
             (cause) =>
               new EnvironmentPauseError({ operation: "persist", reason: "unavailable", cause }),
@@ -106,13 +108,15 @@ const make = Effect.gen(function* () {
           for (const direction of ["pause", "resume"] as const) {
             if (
               deliveryIdentity(session, target, direction).messageId !== messageId ||
-              target[direction] === "sent"
+              target[direction] === "sent" ||
+              target[direction] === "unavailable"
             )
               continue;
             changed = true;
             return {
               ...target,
               [direction]: delivered ? ("sent" as const) : ("failed" as const),
+              [`${direction}Accepted`]: true,
               error: delivered
                 ? null
                 : "The provider did not accept this message. Retry to send it again.",

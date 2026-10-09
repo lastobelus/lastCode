@@ -43,6 +43,34 @@ const availability = (
   });
 
 describe("mobile environment pause availability", () => {
+  it("can pause again after resume messages settle while released work is queued", () => {
+    const resuming: EnvironmentPauseStatus = {
+      ...paused,
+      quiet: false,
+      session: {
+        ...paused.session!,
+        phase: "resuming",
+        targets: [{ ...paused.session!.targets[0]!, resume: "sent" }],
+      },
+    };
+    expect(availability(resuming)).toMatchObject({
+      showPauseAgain: true,
+      canPauseAgain: true,
+      canStart: true,
+    });
+    expect(availability(resuming, { fresh: false }).canPauseAgain).toBe(false);
+    expect(availability(resuming, { enabled: false }).showPauseAgain).toBe(false);
+    expect(
+      availability({
+        ...resuming,
+        session: {
+          ...resuming.session!,
+          targets: [{ ...resuming.session!.targets[0]!, resume: "pending" }],
+        },
+      }).showPauseAgain,
+    ).toBe(false);
+  });
+
   it("keeps a saved pause session resumable when the setting is turned off", () => {
     expect(availability(paused, { enabled: false })).toMatchObject({
       visible: true,
@@ -175,5 +203,82 @@ describe("mobile environment pause availability", () => {
         },
       }),
     ).toMatchObject({ showCancelPause: false, canCancelPause: false, canResume: false });
+  });
+
+  it("can pause newly active threads when the saved targets have no delivery failures", () => {
+    const status: EnvironmentPauseStatus = {
+      ...paused,
+      quiet: false,
+      activeThreadCount: 1,
+      session: { ...paused.session!, phase: "pausing" },
+      blockers: [
+        {
+          type: "thread-turn",
+          threadId: ThreadId.make("newly-active-thread"),
+          turnId: null,
+          status: "running",
+        },
+      ],
+    };
+    expect(availability(status)).toMatchObject({
+      pauseFailed: false,
+      showPauseRemaining: true,
+      showRetryPause: true,
+      canRetryPause: true,
+    });
+    expect(availability(status, { enabled: false }).canRetryPause).toBe(true);
+    expect(availability(status, { connected: false }).canRetryPause).toBe(false);
+    expect(availability(status, { fresh: false }).canRetryPause).toBe(false);
+    expect(availability({ ...status, observation: "unknown" }).canRetryPause).toBe(false);
+  });
+
+  it("does not collect more pause targets after work becomes quiet or resuming starts", () => {
+    expect(availability(paused)).toMatchObject({
+      showPauseRemaining: false,
+      showRetryPause: false,
+      canRetryPause: false,
+    });
+    expect(availability({ ...paused, session: null })).toMatchObject({
+      showRetryPause: false,
+      canRetryPause: false,
+    });
+    expect(
+      availability({ ...paused, quiet: false, session: { ...paused.session!, phase: "resuming" } }),
+    ).toMatchObject({ showPauseRemaining: false, showRetryPause: false, canRetryPause: false });
+  });
+
+  it("does not retry unavailable resume recipients while another delivery is pending", () => {
+    const status: EnvironmentPauseStatus = {
+      ...paused,
+      session: {
+        ...paused.session!,
+        phase: "resuming",
+        targets: [
+          { ...paused.session!.targets[0]!, resume: "unavailable" },
+          {
+            ...paused.session!.targets[0]!,
+            threadId: ThreadId.make("pending-thread"),
+            resume: "pending",
+          },
+        ],
+      },
+    };
+    expect(availability(status)).toMatchObject({
+      resumeFailed: false,
+      canResume: false,
+      canCancelPause: false,
+    });
+    expect(
+      availability({
+        ...status,
+        session: {
+          ...status.session!,
+          targets: [
+            status.session!.targets[0]!,
+            { ...status.session!.targets[1]!, resume: "failed" },
+          ],
+        },
+      }),
+    ).toMatchObject({ resumeFailed: true, canResume: true });
   });
 });

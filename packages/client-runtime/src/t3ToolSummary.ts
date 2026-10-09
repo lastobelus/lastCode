@@ -355,6 +355,18 @@ export function summarizeT3ToolCalls(
     case "environment-update":
       label = phrase("Updated", "update", `environment preferences ${times}`);
       break;
+    case "environment-pause-status":
+      label = phrase("Checked", "check", `environment pause status ${times}`);
+      break;
+    case "environment-pause-start":
+      label = phrase("Requested", "request", `environment pause ${times}`);
+      break;
+    case "environment-pause-retry":
+      label = phrase("Retried", "retry", `environment pause deliveries ${times}`);
+      break;
+    case "environment-pause-resume":
+      label = phrase("Requested", "request", `environment resume ${times}`);
+      break;
     case "attachment-prepare":
       label = phrase(
         "Prepared",

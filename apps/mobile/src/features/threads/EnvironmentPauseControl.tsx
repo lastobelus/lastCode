@@ -191,7 +191,7 @@ function EnvironmentPauseDetails(props: {
         {entry.environmentLabel}
       </Text>
       {resumed && session === null ? (
-        <Text className="text-base text-foreground-secondary">Paused threads resumed.</Text>
+        <Text className="text-base text-foreground-secondary">Pause session finished.</Text>
       ) : !availability.known ? (
         <Text accessibilityRole="alert" className="text-base text-foreground-secondary">
           {!entry.connected
@@ -203,7 +203,8 @@ function EnvironmentPauseDetails(props: {
       ) : session === null ? (
         <Text className="text-base text-foreground-secondary">
           Send “pause to go offline” to every active thread in this environment, then wait until all
-          environment work is quiet.
+          environment work is quiet. Automatic thread wake-ups will wait until you resume, even if
+          the environment reconnects.
         </Text>
       ) : session.phase === "resuming" ? (
         <View className="flex-row items-center gap-3">
@@ -213,7 +214,8 @@ function EnvironmentPauseDetails(props: {
             <ActivityIndicator accessibilityLabel="Resuming paused threads" />
           ) : null}
           <Text className="flex-1 text-base text-foreground-secondary">
-            Resuming the original paused threads.
+            Resuming the original paused threads. Automatic thread wake-ups are enabled; held work
+            will continue as threads become available.
           </Text>
         </View>
       ) : availability.ready ? (
@@ -237,9 +239,14 @@ function EnvironmentPauseDetails(props: {
       {session && availability.known ? (
         <>
           <Text className="text-sm text-foreground-muted">
-            {session.targets.length} original {session.targets.length === 1 ? "thread" : "threads"}{" "}
-            tracked. Resume sends “resume” to the threads that received the pause message.
+            {session.targets.length} {session.targets.length === 1 ? "thread" : "threads"} tracked.
+            Resume sends “resume” to the threads that received the pause message.
           </Text>
+          {session.phase !== "resuming" ? (
+            <Text className="text-sm text-foreground-muted">
+              Automatic thread wake-ups are held until you resume.
+            </Text>
+          ) : null}
           {availability.showCancelPause ? (
             <Text className="text-sm text-foreground-muted">
               Cancel pause resumes those threads so you can deal with unfinished work.
@@ -264,6 +271,13 @@ function EnvironmentPauseDetails(props: {
                 {target.title}: {target.error ?? "Message could not be sent."}
               </Text>
             ))}
+          {session.targets
+            .filter((target) => target.resume === "unavailable")
+            .map((target) => (
+              <Text key={target.threadId} className="text-sm text-foreground-muted">
+                {target.title}: Archived or deleted threads cannot receive resume requests.
+              </Text>
+            ))}
         </>
       ) : null}
       {error ? (
@@ -282,9 +296,17 @@ function EnvironmentPauseDetails(props: {
           />
         ) : (
           <>
-            {availability.pauseFailed && session.phase !== "resuming" ? (
+            {availability.showPauseAgain ? (
               <ControlPill
-                label="Retry pause"
+                label={pending ? "Pausing…" : "Pause again"}
+                variant="primary"
+                disabled={pending || !entry.canStart || !availability.canPauseAgain}
+                onPress={() => void run("start")}
+              />
+            ) : null}
+            {availability.showRetryPause ? (
+              <ControlPill
+                label={availability.pauseFailed ? "Retry pause" : "Pause remaining threads"}
                 variant="pill"
                 disabled={pending || !entry.canRetry || !availability.canRetryPause}
                 onPress={() => void run("retry")}
@@ -298,7 +320,8 @@ function EnvironmentPauseDetails(props: {
                 onPress={() => void run("cancel")}
               />
             ) : null}
-            {availability.ready || session.phase === "resuming" ? (
+            {availability.ready ||
+            (session.phase === "resuming" && !availability.showPauseAgain) ? (
               <ControlPill
                 label={
                   pending ? "Sending…" : session.phase === "resuming" ? "Retry resume" : "Resume"

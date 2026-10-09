@@ -1,5 +1,5 @@
 import { useAtomRefresh, useAtomValue } from "@effect/atom-react";
-import type { EnvironmentId } from "@t3tools/contracts";
+import { environmentPauseResumeComplete, type EnvironmentId } from "@t3tools/contracts";
 import { AsyncResult, Atom } from "effect/reactivity";
 import * as Option from "effect/Option";
 import { CheckCircle2Icon, PauseIcon, PlayIcon } from "lucide-react";
@@ -150,6 +150,8 @@ function EnvironmentPauseDialog({
   const [error, setError] = useState<string | null>(null);
   const pauseFailures = session?.targets.filter((thread) => thread.pause === "failed") ?? [];
   const resumeFailures = session?.targets.filter((thread) => thread.resume === "failed") ?? [];
+  const unavailableRecipients =
+    session?.targets.filter((thread) => thread.resume === "unavailable") ?? [];
   const resuming = session?.phase === "resuming";
   const quiet = known && status.quiet && pauseFailures.length === 0;
   const canCancelPause =
@@ -204,8 +206,10 @@ function EnvironmentPauseDialog({
           </DialogTitle>
           <DialogDescription>
             {session
-              ? `Pause and resume requests for ${label}.`
-              : `Ask all active threads on ${label} to pause safely before you go offline. Resume will message those same threads when you return.`}
+              ? resuming
+                ? `Resume requests for ${label}.`
+                : `Automatic thread wake-ups on ${label} are held until you resume.`
+              : `Ask all active threads on ${label} to pause safely before you go offline. Automatic thread wake-ups will wait until you resume, even if the environment reconnects. Resume will message those same threads when you return.`}
           </DialogDescription>
         </DialogHeader>
         <DialogPanel>
@@ -253,16 +257,20 @@ function EnvironmentPauseDialog({
                 )}
                 <div>
                   <p className="font-medium tabular-nums">
-                    {quiet && !resuming
-                      ? "All threads are quiet"
-                      : `${status.activeThreadCount} active ${status.activeThreadCount === 1 ? "thread" : "threads"} remaining`}
+                    {resuming
+                      ? "Automatic thread wake-ups are enabled"
+                      : quiet
+                        ? "All threads are quiet"
+                        : `${status.activeThreadCount} active ${status.activeThreadCount === 1 ? "thread" : "threads"} remaining`}
                   </p>
                   <p className="text-sm text-muted-foreground">
-                    {quiet && !resuming
-                      ? "You can go offline. Return here to resume the paused threads."
-                      : status.activeThreadCount === 0 && status.blockers.length > 0
-                        ? "Waiting for background work to finish."
-                        : "Waiting for threads to finish their pause requests."}
+                    {resuming
+                      ? "Held work will continue as threads become available."
+                      : quiet
+                        ? "You can go offline. Return here to resume the paused threads."
+                        : status.activeThreadCount === 0 && status.blockers.length > 0
+                          ? "Waiting for background work to finish."
+                          : "Waiting for threads to finish their pause requests."}
                   </p>
                 </div>
               </div>
@@ -286,6 +294,16 @@ function EnvironmentPauseDialog({
                   ))}
                 </ul>
                 <p>Retry sends only the messages that are still missing.</p>
+              </div>
+            ) : null}
+            {resuming && unavailableRecipients.length > 0 ? (
+              <div className="space-y-1 text-sm text-muted-foreground">
+                <p>Archived or deleted threads cannot receive resume requests.</p>
+                <ul className="list-inside list-disc">
+                  {unavailableRecipients.map((thread) => (
+                    <li key={thread.threadId}>{thread.title}</li>
+                  ))}
+                </ul>
               </div>
             ) : null}
             {error ? (
@@ -321,6 +339,14 @@ function EnvironmentPauseDialog({
               {pending ? <Spinner /> : <PauseIcon />}
               Pause threads
             </Button>
+          ) : resuming && environmentPauseResumeComplete(session) ? (
+            <Button
+              disabled={pending || !known || !enabled || !canStart}
+              onClick={() => void execute("start")}
+            >
+              {pending ? <Spinner /> : <PauseIcon />}
+              Pause again
+            </Button>
           ) : resuming || quiet ? (
             <Button
               disabled={pending || !known || !canResume}
@@ -329,12 +355,12 @@ function EnvironmentPauseDialog({
               {pending ? <Spinner /> : <PlayIcon />}
               {resuming ? "Retry resume" : "Resume"}
             </Button>
-          ) : pauseFailures.length > 0 ? (
+          ) : (
             <Button disabled={pending || !known || !canRetry} onClick={() => void execute("retry")}>
               {pending ? <Spinner /> : <PauseIcon />}
-              Retry pause messages
+              {pauseFailures.length > 0 ? "Retry pause messages" : "Pause remaining threads"}
             </Button>
-          ) : null}
+          )}
         </DialogFooter>
       </DialogPopup>
     </Dialog>

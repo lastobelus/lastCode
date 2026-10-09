@@ -33,6 +33,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
 import { forkParked } from "../serverActivation.ts";
+import * as EnvironmentPauseStore from "../environment/EnvironmentPauseStore.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
@@ -272,6 +273,15 @@ const mapActionResumeError =
     );
 
 const make = Effect.gen(function* () {
+  const pauseStore = yield* Effect.serviceOption(EnvironmentPauseStore.EnvironmentPauseStore);
+  const automationPaused = Option.isSome(pauseStore)
+    ? pauseStore.value.get.pipe(
+        Effect.map((session) => session !== null && session.phase !== "resuming"),
+      )
+    : Effect.succeed(false);
+  const recoveringEnvironmentPause = Option.isSome(pauseStore)
+    ? pauseStore.value.get.pipe(Effect.map((session) => session !== null))
+    : Effect.succeed(false);
   const serviceScope = yield* Effect.scope;
   const clock = yield* Clock.Clock;
   const crypto = yield* Crypto.Crypto;
@@ -508,6 +518,13 @@ const make = Effect.gen(function* () {
       yield* persistState({ ...state, delivery: "delivered" });
       outputCaptureByRunId.delete(state.runId);
       protocolCaptureByRunId.delete(state.runId);
+      return;
+    }
+    // Completion is already retained in the Action ledger. Do not wake the
+    // provider merely to acknowledge the pause; Resume will retry this result.
+    if (yield* automationPaused) {
+      if (state.heldByEnvironmentPause !== true)
+        yield* persistState({ ...state, heldByEnvironmentPause: true });
       return;
     }
     const thread = yield* eligibleThreadForFollowUp(threadId);
@@ -1139,8 +1156,21 @@ const make = Effect.gen(function* () {
             delivery: "available",
             finishedAt,
           });
-        } else if (state.delivery === "pending" && shell.archivePending?.status !== "stopping") {
-          // A stopping archive keeps the completed result's delivery intent across restart.
+        } else if (
+          state.delivery === "pending" &&
+          state.heldByEnvironmentPause !== true &&
+          (yield* recoveringEnvironmentPause)
+        ) {
+          // Completion may have committed just before shutdown, before its
+          // live delivery saw the pause. Retain that hold before it can clear.
+          yield* persistState({ ...state, heldByEnvironmentPause: true });
+        } else if (
+          state.delivery === "pending" &&
+          state.heldByEnvironmentPause !== true &&
+          shell.archivePending?.status !== "stopping" &&
+          !(yield* recoveringEnvironmentPause)
+        ) {
+          // Environment pause and a stopping archive retain automatic delivery intent.
           yield* persistState({ ...state, delivery: "available" });
         } else if (
           shell.actionResume?.runId !== state.runId ||

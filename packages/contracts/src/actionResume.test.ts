@@ -123,6 +123,7 @@ describe("Action resume contracts", () => {
 
     expect(state.report).toBeUndefined();
     expect(state.progress).toBeUndefined();
+    expect(state.heldByEnvironmentPause).toBeUndefined();
   });
 
   it("decodes host-stamped running progress revisions", () => {

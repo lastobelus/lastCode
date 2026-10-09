@@ -1,8 +1,38 @@
 import {
   latestProviderTurnForAttempt,
   type MessageId,
+  type OrchestrationV2ConversationMessage,
   type OrchestrationV2ThreadProjection,
+  type RunId,
 } from "@t3tools/contracts";
+
+/** Explicit environment fanout is allowed while automatic follow-ups wait. */
+export function isAutomaticWakeMessage(
+  message: Pick<
+    OrchestrationV2ConversationMessage,
+    | "id"
+    | "createdBy"
+    | "creationSource"
+    | "notification"
+    | "delegatedCompletion"
+    | "scheduledTaskId"
+  > & {
+    readonly restartContinuationOfRunId?: RunId | undefined;
+    readonly usageLimitContinuationOfRunId?: RunId | undefined;
+  },
+): boolean {
+  return (
+    !message.id.startsWith("environment-pause:") &&
+    (message.notification !== undefined ||
+      message.delegatedCompletion !== undefined ||
+      message.scheduledTaskId !== undefined ||
+      message.restartContinuationOfRunId !== undefined ||
+      message.usageLimitContinuationOfRunId !== undefined ||
+      message.id.startsWith("message:restart-continuation:") ||
+      message.id.startsWith("limit-resume:") ||
+      (message.createdBy === "system" && message.creationSource === "server"))
+  );
+}
 
 /**
  * A persisted steer without an acceptance receipt can be retried as a continuation.

@@ -667,6 +667,7 @@ export const layerWithOptions = (
     Effect.gen(function* () {
       const outbox = yield* EffectOutbox.EffectOutboxV2;
       const executor = yield* OrchestrationEffectExecutorV2;
+      const pauseStore = yield* Effect.serviceOption(EnvironmentPauseStore.EnvironmentPauseStore);
       const workerId = options.workerId ?? `orchestration-v2:${process.pid}`;
       const leaseDurationMs = Math.max(1, options.leaseDurationMs ?? 30_000);
       const maxAttempts = Math.max(1, options.maxAttempts ?? 5);
@@ -817,6 +818,16 @@ export const layerWithOptions = (
             return false;
           }).pipe(Effect.onError((cause) => requeueClaim(effect, cause)));
           if (cancelledBeforeExecution) return true;
+
+          // Pause can commit while the SQL claim is in flight. Recheck before
+          // provider preparation, returning the untouched wake without a retry.
+          if (
+            Option.isSome(pauseStore) &&
+            (yield* outbox.deferIfEnvironmentPaused({ effectId: effect.id, workerId }))
+          ) {
+            yield* outbox.clearCancellation(effect.id);
+            return false;
+          }
 
           const execution = executor
             .execute(effect, { willRetry: effect.attemptCount < maxAttempts })

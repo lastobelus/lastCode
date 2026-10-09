@@ -562,10 +562,26 @@ const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 
 // Middleware added later wraps middleware added earlier, so instrumentation wraps authorization.
 const ServerWsRpcGroup = WsRpcGroup.middleware(RpcInstrumentation);
-const MainServerWsRpcGroup = ServerWsRpcGroup.omit(
+// Keep thread reads and Pause separate so the large handler table stays within
+// TypeScript's inference limit.
+const CoreServerWsRpcGroup = ServerWsRpcGroup.omit(
   WS_METHODS.threadReadLocal,
   WS_METHODS.threadReadConnect,
   WS_METHODS.threadReadRespond,
+  WS_METHODS.serverEnvironmentPauseStatus,
+  WS_METHODS.serverPauseEnvironment,
+  WS_METHODS.serverRetryEnvironmentPause,
+  WS_METHODS.serverResumeEnvironment,
+);
+const layerEnvironmentPauseRpc = Layer.unwrap(
+  Effect.map(EnvironmentPause.EnvironmentPause, (pause) =>
+    Layer.mergeAll(
+      ServerWsRpcGroup.toLayerHandler(WS_METHODS.serverEnvironmentPauseStatus, () => pause.status),
+      ServerWsRpcGroup.toLayerHandler(WS_METHODS.serverPauseEnvironment, () => pause.start),
+      ServerWsRpcGroup.toLayerHandler(WS_METHODS.serverRetryEnvironmentPause, () => pause.retry),
+      ServerWsRpcGroup.toLayerHandler(WS_METHODS.serverResumeEnvironment, () => pause.resume),
+    ),
+  ),
 );
 // When a resuming client's cursor is more than this many events behind the
 // current head, skip the per-event catch-up replay and send a fresh shell
@@ -1210,7 +1226,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
   },
 );
 
-const layerWsRpc = (
+const layerCoreWsRpc = (
   currentSession: EnvironmentAuth.AuthenticatedSession,
   clientOrigin: OrchestrationClientOrigin,
   clientAnalyticsProps: Readonly<Record<string, unknown>>,
@@ -1219,14 +1235,13 @@ const layerWsRpc = (
   threadReads: OrchestratorMcpService.OrchestratorMcpService["Service"],
   serverBrowser: ServerBrowser.ServerBrowser["Service"],
 ) =>
-  MainServerWsRpcGroup.toLayer(
+  CoreServerWsRpcGroup.toLayer(
     Effect.gen(function* () {
       const currentSessionId = currentSession.sessionId;
       const sql = yield* SqlClient.SqlClient;
       const threadManagement = yield* ThreadManagementService.ThreadManagementService;
       const actionResume = yield* Effect.serviceOption(ActionResume.ActionResume);
       const updateDrainAdmission = yield* UpdateDrainAdmission.UpdateDrainAdmission;
-      const environmentPause = yield* EnvironmentPause.EnvironmentPause;
       const intakeContext = yield* Effect.context<
         | ThreadManagementService.ThreadManagementService
         | ThreadLaunchService.ThreadLaunchService
@@ -1864,7 +1879,7 @@ const layerWsRpc = (
         return result;
       });
 
-      const handlers = MainServerWsRpcGroup.of({
+      const handlers = CoreServerWsRpcGroup.of({
         [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command) =>
           Effect.annotateCurrentSpan({
             "orchestration_v2.command_id": command.commandId,
@@ -2501,10 +2516,6 @@ const layerWsRpc = (
             const keybindingsConfig = yield* keybindings.removeKeybindingRule(rule);
             return { keybindings: keybindingsConfig, issues: [] };
           }),
-        [WS_METHODS.serverEnvironmentPauseStatus]: () => environmentPause.status,
-        [WS_METHODS.serverPauseEnvironment]: () => environmentPause.start,
-        [WS_METHODS.serverRetryEnvironmentPause]: () => environmentPause.retry,
-        [WS_METHODS.serverResumeEnvironment]: () => environmentPause.resume,
         [WS_METHODS.serverGetSettings]: (_input) =>
           serverSettings.getSettings.pipe(Effect.map(ServerSettings.redactServerSettingsForClient)),
         [WS_METHODS.serverUpdateSettings]: ({ patch, providerInstanceMutation }) =>
@@ -3367,6 +3378,9 @@ const layerWsRpc = (
       ),
     ),
   );
+
+const layerWsRpc = (...args: Parameters<typeof layerCoreWsRpc>) =>
+  Layer.merge(layerCoreWsRpc(...args), layerEnvironmentPauseRpc);
 
 // A defect in a handler's effect fails only its own request. RpcServer's default
 // sends a socket-level Defect frame instead, and the client ends every pending
