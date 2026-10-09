@@ -36,6 +36,7 @@ import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProviderSessions from "../orchestration-v2/ProviderSessionManager.ts";
 import * as Threads from "../orchestration-v2/ThreadManagementService.ts";
+import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import { TerminalManager } from "../terminal/Manager.ts";
 import * as Pause from "./EnvironmentPause.ts";
 import * as Store from "./EnvironmentPauseStore.ts";
@@ -214,6 +215,8 @@ const harness = Effect.gen(function* () {
   const terminals = yield* Ref.make<ReadonlyArray<TerminalSummary>>([]);
   const calls = yield* Ref.make<ReadonlyArray<Threads.ThreadManagementSendInput>>([]);
   const failures = yield* Ref.make(new Set<ThreadId>());
+  const inactiveRecipients = yield* Ref.make(new Set<ThreadId>());
+  const dispatchMilestone = yield* Ref.make<Deferred.Deferred<void> | null>(null);
   const committedFailures = yield* Ref.make(new Set<ThreadId>());
   const evidenceFailuresAfterCommit = yield* Ref.make(new Set<ThreadId>());
   const outboxEvidenceAfterCommit = yield* Ref.make(new Set<ThreadId>());
@@ -312,8 +315,15 @@ const harness = Effect.gen(function* () {
         Effect.gen(function* () {
           yield* Ref.update(calls, (previous) => [...previous, input]);
           yield* Deferred.succeed(entered, undefined);
+          const milestone = yield* Ref.get(dispatchMilestone);
+          if (milestone !== null) yield* Deferred.succeed(milestone, undefined);
           const block = yield* Ref.get(gate);
           if (block !== null) yield* Deferred.await(block);
+          if (input.pauseOnlyIfActive && (yield* Ref.get(inactiveRecipients)).has(input.threadId))
+            return yield* new Orchestrator.OrchestratorPauseRecipientInactiveError({
+              commandId: input.commandId,
+              threadId: input.threadId,
+            });
           if ((yield* Ref.get(failures)).has(input.threadId))
             return yield* new Threads.ThreadManagementThreadArchivedError({
               threadId: input.threadId,
@@ -392,6 +402,8 @@ const harness = Effect.gen(function* () {
     terminals,
     calls,
     failures,
+    inactiveRecipients,
+    dispatchMilestone,
     committedFailures,
     evidenceFailuresAfterCommit,
     outboxEvidenceAfterCommit,
@@ -1770,6 +1782,97 @@ it.effect("pauses a pending provider send even when its shell is idle", () =>
       ["pause to go offline", "resume"],
     );
   }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("retires a thread that finishes before Pause admission and waits only for cleanup", () =>
+  Effect.gen(function* () {
+    const h = yield* harness;
+    yield* Ref.set(h.snapshot, shell([thread(a)]));
+    const gate = yield* Deferred.make<void>();
+    yield* Ref.set(h.gate, gate);
+    const starting = yield* h.pause.start.pipe(Effect.forkChild);
+    yield* Deferred.await(h.entered);
+    yield* Ref.set(h.snapshot, shell([thread(a, "idle")]));
+    yield* Ref.set(h.inactiveRecipients, new Set([a]));
+    yield* Ref.set(h.pendingCleanup, [{ threadId: a }]);
+    yield* Deferred.succeed(gate, undefined);
+    const waiting = yield* Fiber.join(starting);
+    assert.strictEqual(waiting.session?.targets[0]?.pause, "unavailable");
+    assert.isFalse(waiting.quiet);
+    assert.isEmpty(yield* Ref.get(h.messages));
+    yield* h.pause.retry;
+    yield* h.pause.start;
+    assert.lengthOf(yield* Ref.get(h.calls), 1);
+    yield* Ref.set(h.pendingCleanup, []);
+    assert.isTrue((yield* h.pause.status).quiet);
+    assert.isNull((yield* h.pause.resume).session);
+    assert.isEmpty((yield* Ref.get(h.calls)).filter((call) => call.text === "resume"));
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect(
+  "retains an earlier Resume obligation when the re-Pause recipient finishes before admission",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      yield* Ref.set(h.snapshot, shell([thread(a)]));
+      yield* h.pause.start;
+      const original = (yield* Ref.get(h.runs))[0]!;
+      const later = {
+        ...run(RunId.make("later-manual-example"), MessageId.make("later-message-example")),
+        ordinal: original.ordinal + 1,
+        status: "running" as const,
+      };
+      yield* Ref.set(h.runs, [{ ...original, status: "completed", completedAt: now }, later]);
+      yield* Ref.set(h.snapshot, shell([{ ...thread(a), activeRunId: later.id }]));
+      const gate = yield* Deferred.make<void>();
+      const entered = yield* Deferred.make<void>();
+      yield* Ref.set(h.gate, gate);
+      yield* Ref.set(h.dispatchMilestone, entered);
+      const retrying = yield* h.pause.retry.pipe(Effect.forkChild);
+      yield* Deferred.await(entered);
+      yield* Ref.set(h.inactiveRecipients, new Set([a]));
+      yield* Ref.set(h.snapshot, shell([thread(a, "idle")]));
+      yield* Deferred.succeed(gate, undefined);
+      const skipped = yield* Fiber.join(retrying);
+      assert.strictEqual(skipped.session?.targets[0]?.pause, "unavailable");
+      assert.isTrue((yield* h.store.get)?.targets[0]?.resumeRequired);
+      assert.isTrue(skipped.quiet);
+      const recovered = yield* restart(h);
+      assert.isNull((yield* recovered.pause.resume).session);
+      assert.lengthOf(
+        (yield* Ref.get(h.calls)).filter((call) => call.text === "resume"),
+        1,
+      );
+      assert.lengthOf(yield* Ref.get(h.messages), 2);
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect(
+  "keeps an unconfirmed attempt pending when its recipient finishes during an evidence outage",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      yield* Ref.set(h.snapshot, shell([thread(a)]));
+      const gate = yield* Deferred.make<void>();
+      yield* Ref.set(h.gate, gate);
+      const starting = yield* h.pause.start.pipe(Effect.forkChild);
+      yield* Deferred.await(h.entered);
+      yield* Ref.set(h.inactiveRecipients, new Set([a]));
+      yield* Ref.set(h.snapshot, shell([thread(a, "idle")]));
+      yield* Ref.set(h.readFailures, new Set([a]));
+      yield* Deferred.succeed(gate, undefined);
+      const waiting = yield* Fiber.join(starting);
+      assert.strictEqual(waiting.session?.targets[0]?.pause, "pending");
+      assert.strictEqual(waiting.observation, "unknown");
+      assert.isFalse(waiting.quiet);
+      assert.strictEqual((yield* Effect.result(h.pause.resume))._tag, "Failure");
+      yield* h.pause.retry;
+      assert.lengthOf(yield* Ref.get(h.calls), 1);
+      yield* Ref.set(h.readFailures, new Set());
+      assert.isTrue((yield* h.pause.retry).quiet);
+      assert.isEmpty(yield* Ref.get(h.messages));
+    }).pipe(Effect.provide(testLayer)),
 );
 
 it.effect("defaults off and refuses starting a pause while preserving recovery operations", () =>

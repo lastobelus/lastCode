@@ -110,6 +110,7 @@ import {
   isUndeliveredMailboxSteer,
 } from "./NotificationMailbox.ts";
 import * as EnvironmentPauseStore from "../environment/EnvironmentPauseStore.ts";
+import { activeThread as activePauseRecipient } from "../environment/EnvironmentPauseActivity.ts";
 import { EventSinkV2 } from "./EventSink.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import type { OrchestrationEffectRequestV2, PendingOrchestrationEffectV2 } from "./EffectOutbox.ts";
@@ -186,6 +187,21 @@ export class OrchestratorThreadArchivingError extends Schema.TaggedError<Orchest
 ) {
   override get message(): string {
     return "This conversation is stopping before it is archived. Wait for the archive to finish.";
+  }
+}
+
+/** Only EnvironmentPause intake opts into this lock-time activity check. */
+export const PauseRecipientMustBeActive = Context.Reference<boolean>(
+  "t3/orchestration-v2/PauseRecipientMustBeActive",
+  { defaultValue: () => false },
+);
+
+export class OrchestratorPauseRecipientInactiveError extends Schema.TaggedError<OrchestratorPauseRecipientInactiveError>()(
+  "OrchestratorPauseRecipientInactiveError",
+  { commandId: CommandId, threadId: ThreadId },
+) {
+  override get message(): string {
+    return "This thread finished before Pause could be submitted.";
   }
 }
 
@@ -294,6 +310,7 @@ export const OrchestratorV2Error = Schema.Union([
   OrchestratorDispatchError,
   OrchestratorCommandRejectedError,
   OrchestratorThreadArchivingError,
+  OrchestratorPauseRecipientInactiveError,
   OrchestratorProjectionError,
   OrchestratorDomainEventStreamError,
   OrchestratorProviderAdapterError,
@@ -12440,6 +12457,25 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             commandId: command.commandId,
             threadId: command.threadId,
           });
+        }
+        if (yield* PauseRecipientMustBeActive) {
+          const shell = yield* projectionStore
+            .getThreadShell(command.threadId)
+            .pipe(mapDispatchError(command));
+          if (shell === null)
+            return yield* new OrchestratorProjectionError({ threadId: command.threadId });
+          const deferred = yield* effectOutbox.deferredAutomaticExecution.pipe(
+            mapDispatchError(command),
+          );
+          const pending = yield* effectOutbox.pendingExecution.pipe(mapDispatchError(command));
+          if (
+            !activePauseRecipient(shell, deferred, yield* automationPaused) &&
+            !pending.some((work) => work.threadId === command.threadId && work.providerMessage)
+          )
+            return yield* new OrchestratorPauseRecipientInactiveError({
+              commandId: command.commandId,
+              threadId: command.threadId,
+            });
         }
         yield* dispatchMessage(command, events, effects);
         break;

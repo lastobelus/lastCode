@@ -122,6 +122,8 @@ export interface ThreadManagementSendInput {
   readonly attachments: ReadonlyArray<ChatAttachment>;
   readonly modelSelection?: ModelSelection;
   readonly mode: ThreadManagementSendMode;
+  /** Environment Pause must not start a new turn after the recipient finishes. */
+  readonly pauseOnlyIfActive?: true;
   readonly createdBy: OrchestrationV2Actor;
   readonly creationSource: OrchestrationV2CreationSource;
 }
@@ -774,20 +776,29 @@ const make = Effect.gen(function* () {
 
       const authorization = yield* ThreadReadAuthorization;
       yield* authorization.authorize(input.threadId, input.messageId);
-      const dispatch = yield* orchestrator.dispatch({
-        type: "message.dispatch",
-        commandId: input.commandId,
-        threadId: input.threadId,
-        messageId: input.messageId,
-        ...(input.scheduledTaskId === undefined ? {} : { scheduledTaskId: input.scheduledTaskId }),
-        ...(input.senderThreadId === undefined ? {} : { senderThreadId: input.senderThreadId }),
-        text: input.text,
-        attachments: input.attachments,
-        ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
-        dispatchMode,
-        createdBy: input.createdBy,
-        creationSource: input.creationSource,
-      });
+      const dispatch = yield* orchestrator
+        .dispatch({
+          type: "message.dispatch",
+          commandId: input.commandId,
+          threadId: input.threadId,
+          messageId: input.messageId,
+          ...(input.scheduledTaskId === undefined
+            ? {}
+            : { scheduledTaskId: input.scheduledTaskId }),
+          ...(input.senderThreadId === undefined ? {} : { senderThreadId: input.senderThreadId }),
+          text: input.text,
+          attachments: input.attachments,
+          ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
+          dispatchMode,
+          createdBy: input.createdBy,
+          creationSource: input.creationSource,
+        })
+        .pipe(
+          Effect.provideService(
+            Orchestrator.PauseRecipientMustBeActive,
+            input.pauseOnlyIfActive === true,
+          ),
+        );
       const projection = yield* getProjectThreadRecords(input, ["runs", "messages", "turnItems"], {
         messageIds: [input.messageId],
         turnItemTypes: ["user_message"],

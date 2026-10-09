@@ -4,11 +4,8 @@ import {
   environmentPauseResumeComplete,
   isProviderNativeSubagentThread,
   type EnvironmentPauseStatus,
-  type OrchestrationV2ThreadShell,
-  type RunId,
   type ThreadId,
 } from "@t3tools/contracts";
-import { threadPullRequestKeyOf } from "@t3tools/shared/threadPullRequests";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -24,6 +21,11 @@ import { TerminalManager } from "../terminal/Manager.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { currentExecutionBlockers } from "../updateDrain/UpdateDrainAdmission.ts";
 import * as Store from "./EnvironmentPauseStore.ts";
+import {
+  activeThread,
+  activeBackgroundWork,
+  deferredActivity,
+} from "./EnvironmentPauseActivity.ts";
 
 export class EnvironmentPause extends Context.Service<
   EnvironmentPause,
@@ -34,44 +36,6 @@ export class EnvironmentPause extends Context.Service<
     readonly resume: Effect.Effect<EnvironmentPauseStatus, EnvironmentPauseError>;
   }
 >()("t3/environment/EnvironmentPause") {}
-
-const deferredActivity = (
-  thread: OrchestrationV2ThreadShell,
-  deferred: ReadonlyArray<{ readonly threadId: ThreadId; readonly runId: RunId }>,
-) =>
-  ["queued", "starting"].includes(thread.activityRunStatus ?? thread.status) &&
-  deferred.some(
-    (run) => run.threadId === thread.id && run.runId === (thread.activeRunId ?? thread.latestRunId),
-  );
-
-const activeBackgroundWork = (thread: OrchestrationV2ThreadShell, automationPaused: boolean) =>
-  (thread.pendingBackgroundTasks ?? []).some(
-    (task) =>
-      !(
-        automationPaused &&
-        task.kind === "monitor" &&
-        (thread.pullRequests ?? []).some(
-          (link) =>
-            link.watch != null &&
-            task.taskId === `pull-request-watch:${threadPullRequestKeyOf(link)}`,
-        )
-      ),
-  );
-
-const activeThread = (
-  thread: OrchestrationV2ThreadShell,
-  deferred: ReadonlyArray<{ readonly threadId: ThreadId; readonly runId: RunId }>,
-  automationPaused: boolean,
-) =>
-  thread.deletedAt == null &&
-  ((!deferredActivity(thread, deferred) &&
-    (["preparing", "queued", "starting", "running", "waiting"].includes(
-      thread.activityRunStatus ?? thread.status,
-    ) ||
-      thread.activeRunId !== null)) ||
-    thread.pendingRuntimeRequest !== null ||
-    activeBackgroundWork(thread, automationPaused) ||
-    thread.actionResume?.outcome === "running");
 
 const resumeComplete = environmentPauseResumeComplete;
 
@@ -613,6 +577,7 @@ const make = Effect.gen(function* () {
             return;
           const identity = Store.deliveryIdentity(snapshot, target, direction);
           let submission = yield* readSubmission(snapshot, target, direction);
+          let inactive = false;
           if (submission === "unsubmitted") {
             const result = yield* threads
               .sendToThread({
@@ -622,6 +587,7 @@ const make = Effect.gen(function* () {
                 text: direction === "pause" ? "pause to go offline" : "resume",
                 attachments: [],
                 mode: "cooperative",
+                ...(direction === "pause" ? { pauseOnlyIfActive: true as const } : {}),
                 createdBy: "user",
                 creationSource: "server",
               })
@@ -630,6 +596,11 @@ const make = Effect.gen(function* () {
               result._tag === "Success"
                 ? "accepted"
                 : yield* readSubmission(snapshot, target, direction);
+            inactive =
+              direction === "pause" &&
+              result._tag === "Failure" &&
+              result.failure._tag === "OrchestratorPauseRecipientInactiveError" &&
+              submission === "unsubmitted";
           }
           yield* store.update((current) =>
             current?.id !== snapshot.id
@@ -646,12 +617,14 @@ const make = Effect.gen(function* () {
                       : {
                           ...latest,
                           [`${direction}Accepted`]: submission === "accepted",
-                          [direction]:
-                            submission === "unsubmitted"
+                          [direction]: inactive
+                            ? ("unavailable" as const)
+                            : submission === "unsubmitted"
                               ? ("failed" as const)
                               : ("pending" as const),
-                          error:
-                            submission === "accepted"
+                          error: inactive
+                            ? "This thread finished before Pause was submitted."
+                            : submission === "accepted"
                               ? latest.error
                               : submission === "unknown"
                                 ? "The message submission could not be confirmed. Waiting for recovery."
