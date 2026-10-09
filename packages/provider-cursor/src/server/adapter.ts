@@ -2621,13 +2621,18 @@ export const CursorAdapterV2Driver: ProviderAdapterDriver<
   create: Effect.fn("CursorAdapterV2Driver.create")(
     function* (input: ProviderAdapterDriverCreateInput<CursorSettings>) {
       const hostEnvironment = yield* HostProcessEnvironment;
+      const host = yield* ProviderHost.ProviderHost;
       return yield* makeCursorAdapterV2({
         instanceId: input.instanceId,
         settings: {
           ...input.config,
           enabled: input.enabled,
         },
-        environment: mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
+        environment: mergeProviderInstanceEnvironment(
+          input.environment,
+          hostEnvironment,
+          host.paths.settingsPath,
+        ),
       });
     },
     (effect, input) =>

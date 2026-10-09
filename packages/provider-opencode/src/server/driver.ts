@@ -200,7 +200,11 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
       const latestVersions = yield* ProviderLatestVersions.ProviderLatestVersions;
       const crypto = yield* Crypto.Crypto;
       const host = yield* ProviderHost.ProviderHost;
-      const processEnv = mergeProviderInstanceEnvironment(environment);
+      const processEnv = mergeProviderInstanceEnvironment(
+        environment,
+        process.env,
+        host.paths.settingsPath,
+      );
       const continuationIdentity = defaultProviderContinuationIdentity({
         driverKind: DRIVER_KIND,
         instanceId,

@@ -146,6 +146,8 @@ patchedDependencies:
   expo-audio@58.0.4: c20cb927d6848c53e7bf6ec14fe12f19daae9210165d2dbaf4e0f97ce31e8742
   expo-blur@58.0.3: d0311b0c0b05bd94393bd9a84653cb42503d5f3c8a19eb2627c34ace08bedf18
   expo-glass-effect@58.0.3: f750041c45ab838a3530451dc7b50d6640a79141037a1b0499c5e3412a860c57
+  expo-modules-core@58.0.11: fcd559dd1aade02c3c8eeaecca8b36cfa99363d7f5b708cbf43c0315bd50a60a
+  expo-notifications@58.0.11: 54944d3d3a9a4d7ada4b22145c612299d826a7898bd2e4ffe8015601ac1dfd37
   expo-sharing@58.0.13: fe40d857765bcd6a77aac1fed275e5b8f9415c29b972decdce05fb96de5665e6
   expo-widgets@58.0.11: d00838b5b215a4c45f89b8b7d34878d158528756fbcf281bae1cbd6f0752deed
   node-pty@1.2.0-beta.15: f2fe901c61cde17986240002d05c172d5d0272d83ffaab8d0ebeb922763be414
@@ -180,6 +182,9 @@ importers:
       vite-plus:
         specifier: 1.0.0
         version: 1.0.0(@types/node@24.12.4)(@vitest/ui@5.0.1)(bufferutil@4.1.0)(esbuild@0.28.2)(jiti@2.7.0)(jsdom@30.1.0(@noble/hashes@1.8.0))(msw@2.12.11(@types/node@24.12.4)(typescript@7.0.2))(terser@5.48.0)(typescript@7.0.2)(unrun@0.2.39)(utf-8-validate@6.0.6)(yaml@2.9.0)
+      yaml:
+        specifier: ^2.9.0
+        version: 2.9.0
 
   apps/desktop:
     dependencies:
@@ -346,7 +351,7 @@ importers:
         version: link:../../packages/contracts
       '@t3tools/mobile-markdown-text':
         specifier: file:./modules/t3-markdown-text
-        version: file:apps/mobile/modules/t3-markdown-text(afae94297d61d3a65abc2214f9b05422)
+        version: file:apps/mobile/modules/t3-markdown-text(5ac1edb3c892783ecd5aa5256373f74e)
       '@t3tools/mobile-review-diff-native':
         specifier: file:./modules/t3-review-diff
         version: file:apps/mobile/modules/t3-review-diff
@@ -463,7 +468,7 @@ importers:
         version: 58.0.3(expo@58.0.2)(react@19.3.0)
       expo-notifications:
         specifier: ~58.0.11
-        version: 58.0.11(expo@58.0.2)(react-native@0.88.0-rc.3(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.3.0)(utf-8-validate@6.0.6))(react@19.3.0)(typescript@7.0.2)
+        version: 58.0.11(patch_hash=54944d3d3a9a4d7ada4b22145c612299d826a7898bd2e4ffe8015601ac1dfd37)(expo@58.0.2)(react-native@0.88.0-rc.3(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.3.0)(utf-8-validate@6.0.6))(react@19.3.0)(typescript@7.0.2)
       expo-paste-input:
         specifier: ^0.1.15
         version: 0.1.15(expo@58.0.2)(react-native@0.88.0-rc.3(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.3.0)(utf-8-validate@6.0.6))(react@19.3.0)
@@ -1204,13 +1209,13 @@ importers:
         version: 4.0.1(bufferutil@4.1.0)(effect@4.0.1(patch_hash=a33cba07c41f32374c2aaa86ea4a84d3ab9a872a78c94b65e929b19f8361856f))(redis@6.2.1)(utf-8-validate@6.0.6)
       '@effect/vitest':
         specifier: 4.0.1
-        version: 4.0.1(patch_hash=359f6fb2f7b3ec145bb72208edb9034f02489791aa2491a55cdbd69bd56ee0d2)(@types/node@24.12.4)(@vitest/ui@5.0.1)(bufferutil@4.1.0)(effect@4.0.1(patch_hash=a33cba07c41f32374c2aaa86ea4a84d3ab9a872a78c94b65e929b19f8361856f))(esbuild@0.28.2)(jiti@2.7.0)(jsdom@30.1.0(@noble/hashes@1.8.0))(msw@2.12.11(@types/node@24.12.4)(typescript@7.0.2))(terser@5.48.0)(typescript@7.0.2)(unrun@0.2.39)(utf-8-validate@6.0.6)(yaml@2.9.0)
+        version: 4.0.1(patch_hash=359f6fb2f7b3ec145bb72208edb9034f02489791aa2491a55cdbd69bd56ee0d2)(@types/node@24.12.4)(@vitest/ui@5.0.1)(bufferutil@4.1.0)(effect@4.0.1(patch_hash=a33cba07c41f32374c2aaa86ea4a84d3ab9a872a78c94b65e929b19f8361856f))(esbuild@0.28.2)(happy-dom@20.12.2(bufferutil@4.1.0)(utf-8-validate@6.0.6))(jiti@2.7.0)(jsdom@30.1.0(@noble/hashes@1.8.0))(msw@2.12.11(@types/node@24.12.4)(typescript@7.0.2))(terser@5.48.0)(typescript@7.0.2)(unrun@0.2.39)(utf-8-validate@6.0.6)(yaml@2.9.0)
       '@types/node':
         specifier: 24.12.4
         version: 24.12.4
       vite-plus:
         specifier: 1.0.0
-        version: 1.0.0(@types/node@24.12.4)(@vitest/ui@5.0.1(vitest@5.0.1))(bufferutil@4.1.0)(esbuild@0.28.2)(jiti@2.7.0)(jsdom@30.1.0(@noble/hashes@1.8.0))(msw@2.12.11(@types/node@24.12.4)(typescript@7.0.2))(terser@5.48.0)(typescript@7.0.2)(unrun@0.2.39)(utf-8-validate@6.0.6)(yaml@2.9.0)
+        version: 1.0.0(@types/node@24.12.4)(@vitest/ui@5.0.1(vitest@5.0.1))(bufferutil@4.1.0)(esbuild@0.28.2)(happy-dom@20.12.2(bufferutil@4.1.0)(utf-8-validate@6.0.6))(jiti@2.7.0)(jsdom@30.1.0(@noble/hashes@1.8.0))(msw@2.12.11(@types/node@24.12.4)(typescript@7.0.2))(terser@5.48.0)(typescript@7.0.2)(unrun@0.2.39)(utf-8-validate@6.0.6)(yaml@2.9.0)
 
   packages/provider-cursor:
     dependencies:
@@ -1386,7 +1391,7 @@ importers:
         version: 4.0.1(bufferutil@4.1.0)(effect@4.0.1(patch_hash=a33cba07c41f32374c2aaa86ea4a84d3ab9a872a78c94b65e929b19f8361856f))(redis@6.2.1)(utf-8-validate@6.0.6)
       '@effect/vitest':
         specifier: 4.0.1
-        version: 4.0.1(patch_hash=359f6fb2f7b3ec145bb72208edb9034f02489791aa2491a55cdbd69bd56ee0d2)(@types/node@24.12.4)(@vitest/ui@5.0.1)(bufferutil@4.1.0)(effect@4.0.1(patch_hash=a33cba07c41f32374c2aaa86ea4a84d3ab9a872a78c94b65e929b19f8361856f))(esbuild@0.28.2)(jiti@2.7.0)(jsdom@30.1.0(@noble/hashes@1.8.0))(msw@2.12.11(@types/node@24.12.4)(typescript@7.0.2))(terser@5.48.0)(typescript@7.0.2)(unrun@0.2.39)(utf-8-validate@6.0.6)(yaml@2.9.0)
+        version: 4.0.1(patch_hash=359f6fb2f7b3ec145bb72208edb9034f02489791aa2491a55cdbd69bd56ee0d2)(@types/node@24.12.4)(@vitest/ui@5.0.1)(bufferutil@4.1.0)(effect@4.0.1(patch_hash=a33cba07c41f32374c2aaa86ea4a84d3ab9a872a78c94b65e929b19f8361856f))(esbuild@0.28.2)(happy-dom@20.12.2(bufferutil@4.1.0)(utf-8-validate@6.0.6))(jiti@2.7.0)(jsdom@30.1.0(@noble/hashes@1.8.0))(msw@2.12.11(@types/node@24.12.4)(typescript@7.0.2))(terser@5.48.0)(typescript@7.0.2)(unrun@0.2.39)(utf-8-validate@6.0.6)(yaml@2.9.0)
       '@t3tools/provider-testing':
         specifier: workspace:*
         version: link:../provider-testing
@@ -1395,7 +1400,7 @@ importers:
         version: 24.12.4
       vite-plus:
         specifier: 1.0.0
-        version: 1.0.0(@types/node@24.12.4)(@vitest/ui@5.0.1(vitest@5.0.1))(bufferutil@4.1.0)(esbuild@0.28.2)(jiti@2.7.0)(jsdom@30.1.0(@noble/hashes@1.8.0))(msw@2.12.11(@types/node@24.12.4)(typescript@7.0.2))(terser@5.48.0)(typescript@7.0.2)(unrun@0.2.39)(utf-8-validate@6.0.6)(yaml@2.9.0)
+        version: 1.0.0(@types/node@24.12.4)(@vitest/ui@5.0.1(vitest@5.0.1))(bufferutil@4.1.0)(esbuild@0.28.2)(happy-dom@20.12.2(bufferutil@4.1.0)(utf-8-validate@6.0.6))(jiti@2.7.0)(jsdom@30.1.0(@noble/hashes@1.8.0))(msw@2.12.11(@types/node@24.12.4)(typescript@7.0.2))(terser@5.48.0)(typescript@7.0.2)(unrun@0.2.39)(utf-8-validate@6.0.6)(yaml@2.9.0)
 
   packages/provider-testing:
     dependencies:
@@ -1417,13 +1422,13 @@ importers:
     devDependencies:
       '@effect/vitest':
         specifier: 4.0.1
-        version: 4.0.1(patch_hash=359f6fb2f7b3ec145bb72208edb9034f02489791aa2491a55cdbd69bd56ee0d2)(@types/node@24.12.4)(@vitest/ui@5.0.1)(bufferutil@4.1.0)(effect@4.0.1(patch_hash=a33cba07c41f32374c2aaa86ea4a84d3ab9a872a78c94b65e929b19f8361856f))(esbuild@0.28.2)(jiti@2.7.0)(jsdom@30.1.0(@noble/hashes@1.8.0))(msw@2.12.11(@types/node@24.12.4)(typescript@7.0.2))(terser@5.48.0)(typescript@7.0.2)(unrun@0.2.39)(utf-8-validate@6.0.6)(yaml@2.9.0)
+        version: 4.0.1(patch_hash=359f6fb2f7b3ec145bb72208edb9034f02489791aa2491a55cdbd69bd56ee0d2)(@types/node@24.12.4)(@vitest/ui@5.0.1)(bufferutil@4.1.0)(effect@4.0.1(patch_hash=a33cba07c41f32374c2aaa86ea4a84d3ab9a872a78c94b65e929b19f8361856f))(esbuild@0.28.2)(happy-dom@20.12.2(bufferutil@4.1.0)(utf-8-validate@6.0.6))(jiti@2.7.0)(jsdom@30.1.0(@noble/hashes@1.8.0))(msw@2.12.11(@types/node@24.12.4)(typescript@7.0.2))(terser@5.48.0)(typescript@7.0.2)(unrun@0.2.39)(utf-8-validate@6.0.6)(yaml@2.9.0)
       '@types/node':
         specifier: 24.12.4
         version: 24.12.4
       vite-plus:
         specifier: 1.0.0
-        version: 1.0.0(@types/node@24.12.4)(@vitest/ui@5.0.1(vitest@5.0.1))(bufferutil@4.1.0)(esbuild@0.28.2)(jiti@2.7.0)(jsdom@30.1.0(@noble/hashes@1.8.0))(msw@2.12.11(@types/node@24.12.4)(typescript@7.0.2))(terser@5.48.0)(typescript@7.0.2)(unrun@0.2.39)(utf-8-validate@6.0.6)(yaml@2.9.0)
+        version: 1.0.0(@types/node@24.12.4)(@vitest/ui@5.0.1(vitest@5.0.1))(bufferutil@4.1.0)(esbuild@0.28.2)(happy-dom@20.12.2(bufferutil@4.1.0)(utf-8-validate@6.0.6))(jiti@2.7.0)(jsdom@30.1.0(@noble/hashes@1.8.0))(msw@2.12.11(@types/node@24.12.4)(typescript@7.0.2))(terser@5.48.0)(typescript@7.0.2)(unrun@0.2.39)(utf-8-validate@6.0.6)(yaml@2.9.0)
 
   packages/shared:
     dependencies:
@@ -1547,6 +1552,9 @@ importers:
       '@electron/osx-sign':
         specifier: 2.7.0
         version: 2.7.0
+      '@t3tools/contracts':
+        specifier: workspace:*
+        version: link:../packages/contracts
       '@t3tools/shared':
         specifier: workspace:*
         version: link:../packages/shared
@@ -15944,7 +15952,7 @@ snapshots:
     dependencies:
       defer-to-connect: 2.0.1
 
-  '@t3tools/mobile-markdown-text@file:apps/mobile/modules/t3-markdown-text(afae94297d61d3a65abc2214f9b05422)':
+  '@t3tools/mobile-markdown-text@file:apps/mobile/modules/t3-markdown-text(5ac1edb3c892783ecd5aa5256373f74e)':
     dependencies:
       '@t3tools/client-runtime': link:packages/client-runtime
       '@t3tools/shared': link:packages/shared
@@ -18821,7 +18829,7 @@ snapshots:
       - supports-color
       - typescript
 
-  expo-modules-core@58.0.11(react-native-worklets@0.13.0(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(react-native@0.88.0-rc.3(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.3.0)(utf-8-validate@6.0.6))(react@19.3.0))(react-native@0.88.0-rc.3(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.3.0)(utf-8-validate@6.0.6))(react@19.3.0):
+  expo-modules-core@58.0.11(patch_hash=fcd559dd1aade02c3c8eeaecca8b36cfa99363d7f5b708cbf43c0315bd50a60a)(react-native-worklets@0.13.0(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(react-native@0.88.0-rc.3(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.3.0)(utf-8-validate@6.0.6))(react@19.3.0))(react-native@0.88.0-rc.3(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.3.0)(utf-8-validate@6.0.6))(react@19.3.0):
     dependencies:
       expo-modules-jsi: 58.0.7(react-native@0.88.0-rc.3(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.3.0)(utf-8-validate@6.0.6))
       expo-modules-macros: 0.14.0
@@ -18842,7 +18850,7 @@ snapshots:
       expo: 58.0.2(bd4444e61fed72e958d45f73733b7f54)
       react: 19.3.0
 
-  expo-notifications@58.0.11(expo@58.0.2)(react-native@0.88.0-rc.3(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.3.0)(utf-8-validate@6.0.6))(react@19.3.0)(typescript@7.0.2):
+  expo-notifications@58.0.11(patch_hash=54944d3d3a9a4d7ada4b22145c612299d826a7898bd2e4ffe8015601ac1dfd37)(expo@58.0.2)(react-native@0.88.0-rc.3(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.3.0)(utf-8-validate@6.0.6))(react@19.3.0)(typescript@7.0.2):
     dependencies:
       '@expo/image-utils': 0.12.2(typescript@7.0.2)
       abort-controller: 3.0.0
@@ -18999,7 +19007,7 @@ snapshots:
       expo-font: 58.0.5(expo@58.0.2)(react-native@0.88.0-rc.3(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.3.0)(utf-8-validate@6.0.6))(react@19.3.0)
       expo-keep-awake: 58.0.3(expo@58.0.2)(react@19.3.0)
       expo-modules-autolinking: 58.0.7(typescript@7.0.2)
-      expo-modules-core: 58.0.11(react-native-worklets@0.13.0(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(react-native@0.88.0-rc.3(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.3.0)(utf-8-validate@6.0.6))(react@19.3.0))(react-native@0.88.0-rc.3(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.3.0)(utf-8-validate@6.0.6))(react@19.3.0)
+      expo-modules-core: 58.0.11(patch_hash=fcd559dd1aade02c3c8eeaecca8b36cfa99363d7f5b708cbf43c0315bd50a60a)(react-native-worklets@0.13.0(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(react-native@0.88.0-rc.3(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.3.0)(utf-8-validate@6.0.6))(react@19.3.0))(react-native@0.88.0-rc.3(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.3.0)(utf-8-validate@6.0.6))(react@19.3.0)
       pretty-format: 29.7.0
       react: 19.3.0
       react-native: 0.88.0-rc.3(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.3.0)(utf-8-validate@6.0.6)
