@@ -128,46 +128,53 @@ const layerTest = Layer.mergeAll(
 ).pipe(Layer.provideMerge(NodeServices.layer));
 
 describe("AssetAccess", () => {
-  it.effect("requires linked-file validation before minting an exact media URL", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-linked-media-" });
-      const filePath = path.join(root, "report.html");
-      yield* fs.writeFileString(filePath, "<h1>Linked report</h1>");
-      const canonicalFile = yield* fs.realPath(filePath);
-      const linkedResolver = Layer.mock(ThreadLinkedFiles.ThreadLinkedFiles)({
-        resolveFile: (input) =>
-          input.path === "report.html" && input.threadId === ThreadId.make("thread-1")
-            ? Effect.succeed({
-                cwd: root,
-                relativePath: "report.html",
-                absolutePath: canonicalFile,
-              })
-            : Effect.fail(
-                new ThreadLinkedFiles.ThreadLinkedFileDeniedError({ threadId: input.threadId }),
-              ),
-      });
-      const resource = {
-        _tag: "media-file" as const,
-        threadId: ThreadId.make("thread-1"),
-        path: "report.html",
-        linkedThreadFile: true,
-      };
-      const result = yield* issueAssetUrl({ resource }).pipe(Effect.provide(linkedResolver));
-      const suffix = result.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
-      const separator = suffix.indexOf("/");
-      expect(
-        yield* resolveAsset(suffix.slice(0, separator), suffix.slice(separator + 1)),
-      ).toMatchObject({ kind: "file", path: canonicalFile });
-      expect(yield* resolveAsset(suffix.slice(0, separator), "sibling.html")).toBeNull();
-      expect(
-        (yield* issueAssetUrl({ resource: { ...resource, path: "private.html" } }).pipe(
-          Effect.provide(linkedResolver),
-          Effect.flip,
-        ))._tag,
-      ).toBe("AssetWorkspaceResolutionError");
-    }).pipe(Effect.provide(layerTest)),
+  it.effect.each(["workspace", "external"])(
+    "requires linked-file validation before minting an exact %s media URL",
+    (location) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-linked-media-" });
+        const hostRoot =
+          location === "external"
+            ? yield* fs.makeTempDirectoryScoped({ prefix: "t3-linked-host-media-" })
+            : root;
+        const filePath = path.join(hostRoot, "report.html");
+        yield* fs.writeFileString(filePath, "<h1>Linked report</h1>");
+        const canonicalFile = yield* fs.realPath(filePath);
+        const publishedPath = location === "external" ? filePath : "report.html";
+        const linkedResolver = Layer.mock(ThreadLinkedFiles.ThreadLinkedFiles)({
+          resolveFile: (input) =>
+            input.path === publishedPath && input.threadId === ThreadId.make("thread-1")
+              ? Effect.succeed({
+                  cwd: root,
+                  relativePath: location === "external" ? canonicalFile : "report.html",
+                  absolutePath: canonicalFile,
+                })
+              : Effect.fail(
+                  new ThreadLinkedFiles.ThreadLinkedFileDeniedError({ threadId: input.threadId }),
+                ),
+        });
+        const resource = {
+          _tag: "media-file" as const,
+          threadId: ThreadId.make("thread-1"),
+          path: publishedPath,
+          linkedThreadFile: true,
+        };
+        const result = yield* issueAssetUrl({ resource }).pipe(Effect.provide(linkedResolver));
+        const suffix = result.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+        const separator = suffix.indexOf("/");
+        expect(
+          yield* resolveAsset(suffix.slice(0, separator), suffix.slice(separator + 1)),
+        ).toMatchObject({ kind: "file", path: canonicalFile });
+        expect(yield* resolveAsset(suffix.slice(0, separator), "sibling.html")).toBeNull();
+        expect(
+          (yield* issueAssetUrl({ resource: { ...resource, path: "private.html" } }).pipe(
+            Effect.provide(linkedResolver),
+            Effect.flip,
+          ))._tag,
+        ).toBe("AssetWorkspaceResolutionError");
+      }).pipe(Effect.provide(layerTest)),
   );
 
   it.effect("loads private media immediately after login with the GitHub credential", () => {

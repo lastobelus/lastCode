@@ -203,6 +203,99 @@ const addPlan = Effect.fn("addPlan")(function* (markdown: string, inTurnItem = f
 afterEach(() => vi.restoreAllMocks());
 
 describe("ThreadLinkedFiles", () => {
+  it.effect.each(["absolute", "relative-outside"])(
+    "reads an explicitly published host file using an %s destination",
+    (syntax) =>
+      withWorkspace((root, outside) =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const linked = yield* ThreadLinkedFiles.ThreadLinkedFiles;
+          const file = path.join(outside, "manual-qa.md");
+          yield* fs.writeFileString(file, "published QA steps");
+          const destination = syntax === "absolute" ? file : path.relative(root, file);
+          yield* addMessage(`[QA steps](${destination}:66)`);
+          const canonicalFile = yield* fs.realPath(file);
+          const result = yield* linked.readFile({
+            cwd: root,
+            relativePath: destination,
+            linkedThreadId: threadId,
+          });
+          expect(result.contents).toBe("published QA steps");
+          expect(result.relativePath).toBe(file);
+          expect(yield* linked.resolveFile({ threadId, path: file, cwd: root })).toEqual({
+            cwd: root,
+            relativePath: file,
+            absolutePath: canonicalFile,
+          });
+          yield* addMessage("The QA link was removed");
+          expect((yield* linked.resolveFile({ threadId, path: file }).pipe(Effect.flip))._tag).toBe(
+            "ThreadLinkedFileDeniedError",
+          );
+        }),
+      ),
+  );
+
+  it.effect.each(["same-basename", "bare-filename", "directory", "user-only", "cwd-spoof"])(
+    "denies an outside host file for %s",
+    (scenario) =>
+      withWorkspace((root, outside) =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const linked = yield* ThreadLinkedFiles.ThreadLinkedFiles;
+          const published = path.join(outside, "published", "report.md");
+          const requested =
+            scenario === "same-basename" ? path.join(outside, "private", "report.md") : published;
+          yield* fs.makeDirectory(path.dirname(published), { recursive: true });
+          yield* fs.makeDirectory(path.dirname(requested), { recursive: true });
+          if (scenario === "directory") yield* fs.makeDirectory(requested);
+          else yield* fs.writeFileString(requested, "private file");
+          yield* addMessage(
+            `[Report](${scenario === "bare-filename" ? "report.md" : published})`,
+            scenario === "user-only" ? "user" : "assistant",
+          );
+          const cwd = scenario === "cwd-spoof" ? outside : root;
+          expect(
+            (yield* linked
+              .readFile({ cwd, relativePath: requested, linkedThreadId: threadId })
+              .pipe(Effect.flip))._tag,
+          ).toBe("ThreadLinkedFileDeniedError");
+          expect(
+            (yield* linked.resolveFile({ cwd, threadId, path: requested }).pipe(Effect.flip))._tag,
+          ).toBe("ThreadLinkedFileDeniedError");
+        }),
+      ),
+  );
+
+  it.effect.skipIf(!symlinksSupported)(
+    "reads a published outside alias through its canonical file",
+    () =>
+      withWorkspace((root, outside) =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const linked = yield* ThreadLinkedFiles.ThreadLinkedFiles;
+          const target = path.join(outside, "artifact.md");
+          const alias = path.join(outside, "published.md");
+          yield* fs.writeFileString(target, "host artifact");
+          yield* fs.symlink(target, alias);
+          yield* addMessage(`[Artifact](${alias})`);
+          const canonicalFile = yield* fs.realPath(target);
+          const result = yield* linked.readFile({
+            cwd: root,
+            relativePath: alias,
+            linkedThreadId: threadId,
+          });
+          expect(result.contents).toBe("host artifact");
+          expect(result.relativePath).toBe(alias);
+          expect(
+            (yield* linked.resolveFile({ threadId, path: result.relativePath })).absolutePath,
+          ).toBe(canonicalFile);
+        }),
+      ),
+  );
+
   it.effect.each([false, true])(
     "reads a file published only in a stored plan (turn item: %s)",
     (inTurnItem) =>
@@ -592,7 +685,7 @@ describe("ThreadLinkedFiles", () => {
     "unused-definition",
     "html-comment",
     "directory",
-    "outside",
+    "outside-unlinked",
     "cwd-spoof",
   ])("denies %s files", (scenario) =>
     withWorkspace((root, outside) =>
@@ -600,28 +693,30 @@ describe("ThreadLinkedFiles", () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const linked = yield* ThreadLinkedFiles.ThreadLinkedFiles;
-        const file = path.join(scenario === "outside" ? outside : root, "report.md");
+        const file = path.join(scenario === "outside-unlinked" ? outside : root, "report.md");
         if (scenario === "directory") yield* fs.makeDirectory(file);
         else yield* fs.writeFileString(file, "private");
         const markdown = `[Report](${file}:66)`;
         yield* addMessage(
-          scenario === "unlinked"
-            ? "No linked report"
-            : scenario === "fenced"
-              ? `\`\`\`markdown\n${markdown}\n\`\`\``
-              : scenario === "tilde-fenced"
-                ? `~~~markdown\n${markdown}\n~~~`
-                : scenario === "inline-code"
-                  ? `\`${markdown}\``
-                  : scenario === "indented-code"
-                    ? `    ${markdown}`
-                    : scenario === "image-only"
-                      ? `!${markdown}`
-                      : scenario === "unused-definition"
-                        ? `[artifact]: ${file}`
-                        : scenario === "html-comment"
-                          ? `<!-- ${markdown} -->`
-                          : markdown,
+          scenario === "outside-unlinked"
+            ? `[Report](${path.join(root, "report.md")}:66)`
+            : scenario === "unlinked"
+              ? "No linked report"
+              : scenario === "fenced"
+                ? `\`\`\`markdown\n${markdown}\n\`\`\``
+                : scenario === "tilde-fenced"
+                  ? `~~~markdown\n${markdown}\n~~~`
+                  : scenario === "inline-code"
+                    ? `\`${markdown}\``
+                    : scenario === "indented-code"
+                      ? `    ${markdown}`
+                      : scenario === "image-only"
+                        ? `!${markdown}`
+                        : scenario === "unused-definition"
+                          ? `[artifact]: ${file}`
+                          : scenario === "html-comment"
+                            ? `<!-- ${markdown} -->`
+                            : markdown,
           scenario === "user-only" ? "user" : "assistant",
         );
         const error = yield* linked

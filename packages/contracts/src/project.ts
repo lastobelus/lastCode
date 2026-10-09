@@ -444,7 +444,7 @@ export class ProjectListEntriesError extends Schema.TaggedError<ProjectListEntri
 
 export const ProjectReadFileInput = Schema.Struct({
   cwd: TrimmedNonEmptyString,
-  /** Read only a file linked in this thread's stored assistant messages. */
+  /** Read only a file linked in this thread's stored assistant messages or plans. */
   linkedThreadId: Schema.optionalKey(ThreadId),
   // Workspace-relative, or an absolute host path for a file outside the
   // workspace. Only workspace-relative paths can be written back.

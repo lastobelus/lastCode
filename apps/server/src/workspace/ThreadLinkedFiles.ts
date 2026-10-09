@@ -29,7 +29,7 @@ export class ThreadLinkedFileDeniedError extends Schema.TaggedError<ThreadLinked
   { threadId: ThreadId },
 ) {
   override get message(): string {
-    return "This file is not linked by an assistant inside the thread's workspace.";
+    return "This file is not linked by an assistant in this thread.";
   }
 }
 
@@ -56,7 +56,7 @@ type Publication = {
 export class ThreadLinkedFiles extends Context.Service<
   ThreadLinkedFiles,
   {
-    /** Resolve exactly one linked file, never a directory or the host filesystem. */
+    /** Resolve exactly one published file, including an explicit host file destination. */
     readonly resolveFile: (input: {
       readonly threadId: ThreadId;
       readonly path: string;
@@ -175,8 +175,7 @@ const make = Effect.gen(function* () {
       relative === ".." ||
       relative.startsWith(`..${path.sep}`) ||
       path.isAbsolute(relative);
-    if (outside(path.relative(cwd, requestedPath)))
-      return yield* new ThreadLinkedFileDeniedError({ threadId: input.threadId });
+    const requestedOutside = outside(path.relative(cwd, requestedPath));
 
     const planItems = new Map(
       records.turnItems.flatMap((item) =>
@@ -223,6 +222,7 @@ const make = Effect.gen(function* () {
     }
 
     let absolutePath: string | undefined;
+    let explicitOutside = false;
     const checkedFilenames = new Set<string>();
     for (const publication of publications) {
       const references = publicationReferences(publication, input.threadId, cwd);
@@ -232,10 +232,12 @@ const make = Effect.gen(function* () {
         )
       ) {
         absolutePath = requestedPath;
+        explicitOutside = requestedOutside;
         break;
       }
       for (const linked of references) {
         if (
+          requestedOutside ||
           !linked.bareFilename ||
           checkedFilenames.has(linked.path) ||
           path.basename(requestedPath).toLowerCase() !== linked.path.toLowerCase()
@@ -283,7 +285,7 @@ const make = Effect.gen(function* () {
     if (absolutePath === undefined)
       return yield* new ThreadLinkedFileDeniedError({ threadId: input.threadId });
     const relativePath = path.relative(cwd, absolutePath);
-    if (outside(relativePath))
+    if (!explicitOutside && outside(relativePath))
       return yield* new ThreadLinkedFileDeniedError({ threadId: input.threadId });
     const [realRoot, realFile] = yield* Effect.all([
       fileSystem.realPath(cwd),
@@ -293,7 +295,9 @@ const make = Effect.gen(function* () {
         (cause) => new ThreadLinkedFileResolutionError({ threadId: input.threadId, cause }),
       ),
     );
-    if (outside(path.relative(realRoot, realFile)))
+    // A workspace link cannot escape through a symlink. Host files need their
+    // own explicit published destination; basename lookup never grants them.
+    if (!explicitOutside && outside(path.relative(realRoot, realFile)))
       return yield* new ThreadLinkedFileDeniedError({ threadId: input.threadId });
     const stat = yield* fileSystem
       .stat(realFile)
@@ -304,7 +308,11 @@ const make = Effect.gen(function* () {
       );
     if (stat.type !== "File")
       return yield* new ThreadLinkedFileDeniedError({ threadId: input.threadId });
-    return { cwd, relativePath, absolutePath: realFile };
+    return {
+      cwd,
+      relativePath: explicitOutside ? absolutePath : relativePath,
+      absolutePath: realFile,
+    };
   });
 
   const readFile: ThreadLinkedFiles["Service"]["readFile"] = Effect.fn(
@@ -315,11 +323,16 @@ const make = Effect.gen(function* () {
       path: input.relativePath,
       cwd: input.cwd,
     });
-    // Relative reads perform the filesystem's realpath sandbox check again at the read boundary.
-    return yield* workspaceFileSystem.readFile({
+    // Workspace reads repeat the sandbox check; published host reads use the
+    // canonical file so they do not follow the authored alias again.
+    const hostFile = path.isAbsolute(target.relativePath);
+    const result = yield* workspaceFileSystem.readFile({
       cwd: target.cwd,
-      relativePath: target.relativePath,
+      relativePath: hostFile ? target.absolutePath : target.relativePath,
     });
+    // Keep the published destination for fresh preview requests; the canonical
+    // target may have a different spelling or be reached through a host alias.
+    return hostFile ? { ...result, relativePath: target.relativePath } : result;
   });
   return ThreadLinkedFiles.of({ resolveFile, readFile });
 });
