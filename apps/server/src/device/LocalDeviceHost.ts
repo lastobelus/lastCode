@@ -487,6 +487,8 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
       Effect.catchCause((cause) => Effect.logWarning("Device hub supervisor failed", { cause })),
     );
 
+  let ownsAgentDaemon = false;
+
   const daemonFilePath = () => path.join(agentDeviceStateDir(path, config.stateDir), "daemon.json");
 
   const readDaemonFile = Effect.fn("LocalDeviceHost.readDaemonFile")(function* () {
@@ -502,7 +504,10 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
   const startAgentDeviceDaemon = Effect.fn("LocalDeviceHost.startAgentDeviceDaemon")(function* (
     agentTool: DeviceToolPaths,
     nodePath: string,
-  ): Effect.fn.Return<DeviceHost.AgentDeviceEndpoint, DeviceHost.DeviceHostTimeoutError> {
+  ): Effect.fn.Return<
+    DeviceHost.AgentDeviceEndpoint,
+    DeviceHost.DeviceHostTimeoutError | DeviceHost.DeviceHostError | NodeRuntimeUnavailableError
+  > {
     const stateDir = agentDeviceStateDir(path, config.stateDir);
     yield* fs.makeDirectory(stateDir, { recursive: true }).pipe(Effect.ignore);
     const existing = yield* readDaemonFile().pipe(Effect.option);
@@ -535,7 +540,8 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
           Effect.scoped,
           Effect.orElseSucceed(() => false),
         );
-      if (alive) return toEndpoint(existing.value);
+      if (alive && ownsAgentDaemon) return toEndpoint(existing.value);
+      yield* stopAgentDeviceDaemon({ entryPath: agentTool.entryPath, nodePath });
       yield* fs.remove(daemonFilePath(), { force: true }).pipe(Effect.ignore);
     }
     // There is no `daemon start`; the first command in a state dir spawns the
@@ -552,7 +558,16 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
     const deadline = (yield* Clock.currentTimeMillis) + DAEMON_READY_TIMEOUT_MS;
     while (true) {
       const file = yield* readDaemonFile().pipe(Effect.option);
-      if (file._tag === "Some") return toEndpoint(file.value);
+      if (file._tag === "Some") {
+        if (existing._tag === "Some" && file.value.token === existing.value.token)
+          return yield* new DeviceHost.DeviceHostError({
+            hostId,
+            step: "invalidating recovered agent access",
+            cause: new Error("Recovered daemon credential was not replaced."),
+          });
+        ownsAgentDaemon = true;
+        return toEndpoint(file.value);
+      }
       if ((yield* Clock.currentTimeMillis) > deadline) {
         return yield* new DeviceHost.DeviceHostTimeoutError({
           hostId,
@@ -563,26 +578,89 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
     }
   });
 
-  const stopAgentDeviceDaemon = (
+  const stopAgentDeviceDaemon = Effect.fn("LocalDeviceHost.stopAgentDeviceDaemon")(function* (
     agentTool: { readonly entryPath: string; readonly nodePath: string } | null,
-  ) =>
-    agentTool
-      ? runner
-          .run({
-            command: agentTool.nodePath,
-            args: [
-              agentTool.entryPath,
-              "daemon",
-              "stop",
-              "--state-dir",
-              agentDeviceStateDir(path, config.stateDir),
-            ],
-            env: { ...hostEnvironment, AGENT_DEVICE_NO_UPDATE_NOTIFIER: "1" },
-            timeout: Duration.seconds(10),
-            timeoutBehavior: "timedOutResult",
-          })
-          .pipe(Effect.ignore)
-      : Effect.void;
+  ) {
+    const existing = yield* readDaemonFile().pipe(Effect.option);
+    if (existing._tag === "None") return;
+    if (agentTool === null) {
+      // A crash can leave the daemon running before this host has activated in memory.
+      // Use an existing installation only: revoking access must never install or start tools.
+      if (
+        !(yield* isAgentDeviceInstalled(config.baseDir).pipe(
+          Effect.provideService(FileSystem.FileSystem, fs),
+          Effect.provideService(Path.Path, path),
+        ))
+      )
+        return yield* new DeviceHost.DeviceHostError({
+          hostId,
+          step: "invalidating recovered agent access",
+          cause: new Error("The installed agent-device launcher is unavailable."),
+        });
+      const installed = yield* ensureAgentDevice(config.baseDir).pipe(
+        Effect.provideService(FileSystem.FileSystem, fs),
+        Effect.provideService(Path.Path, path),
+        Effect.provideService(ProcessRunner.ProcessRunner, runner),
+        Effect.mapError(
+          (cause) =>
+            new DeviceHost.DeviceHostError({
+              hostId,
+              step: "invalidating recovered agent access",
+              cause,
+            }),
+        ),
+      );
+      agentTool = {
+        entryPath: installed.entryPath,
+        nodePath: yield* resolveNodeExecutable("Device automation", hostEnvironment).pipe(
+          Effect.provideService(FileSystem.FileSystem, fs),
+          Effect.provideService(Path.Path, path),
+          Effect.provideService(HostProcessPlatform, hostPlatform),
+        ),
+      };
+    }
+    const stopped = yield* runner
+      .run({
+        command: agentTool.nodePath,
+        args: [
+          agentTool.entryPath,
+          "daemon",
+          "stop",
+          "--state-dir",
+          agentDeviceStateDir(path, config.stateDir),
+        ],
+        env: { ...hostEnvironment, AGENT_DEVICE_NO_UPDATE_NOTIFIER: "1" },
+        timeout: Duration.seconds(10),
+        timeoutBehavior: "timedOutResult",
+      })
+      .pipe(
+        Effect.mapError(
+          (cause) =>
+            new DeviceHost.DeviceHostError({
+              hostId,
+              step: "invalidating recovered agent access",
+              cause,
+            }),
+        ),
+      );
+    if (stopped.code !== 0 || stopped.timedOut)
+      return yield* new DeviceHost.DeviceHostError({
+        hostId,
+        step: "invalidating recovered agent access",
+        cause: stopped,
+      });
+    yield* fs.remove(daemonFilePath(), { force: true }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new DeviceHost.DeviceHostError({
+            hostId,
+            step: "invalidating recovered agent access",
+            cause,
+          }),
+      ),
+    );
+    ownsAgentDaemon = false;
+  });
 
   let agentToolRef: { readonly entryPath: string; readonly nodePath: string } | null = null;
 
@@ -779,7 +857,7 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
       const running = yield* Ref.getAndSet(runningRef, null);
       yield* stopHub(running?.hub);
       yield* fs.remove(hubStatePath(), { force: true }).pipe(Effect.ignore);
-      yield* stopAgentDeviceDaemon(agentToolRef);
+      yield* stopAgentDeviceDaemon(agentToolRef).pipe(Effect.ignore);
     }),
   );
 
