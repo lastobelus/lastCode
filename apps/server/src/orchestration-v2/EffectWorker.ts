@@ -245,8 +245,10 @@ export const layerExecutor: Layer.Layer<
                 onMessageDelivery: recordPauseDelivery,
               })
               .pipe(
-                Effect.tapError(() =>
-                  !willRetry && effect.request.type === "provider-turn.start"
+                Effect.tapError((cause) =>
+                  !willRetry &&
+                  cause.deliveryRejected === true &&
+                  effect.request.type === "provider-turn.start"
                     ? recordPauseRunDelivery(effect.threadId, effect.request.runId, false)
                     : Effect.void,
                 ),

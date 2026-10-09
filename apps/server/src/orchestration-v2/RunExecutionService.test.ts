@@ -1091,6 +1091,7 @@ it.effect.each(["failure", "interruption", "stale-attempt", "start-guard"] as co
         id: CheckpointScopeId.make("checkpoint-scope:run-execution-settings-failure"),
       } as OrchestrationV2CheckpointScope;
       const providerStarts = yield* Ref.make(0);
+      const deliveries = yield* Ref.make<ReadonlyArray<boolean>>([]);
       const refreshes = yield* Ref.make(0);
       const guardedWrites = yield* Ref.make(0);
       const writes = yield* Ref.make<ReadonlyArray<ReadonlyArray<OrchestrationV2DomainEvent>>>([]);
@@ -1147,6 +1148,8 @@ it.effect.each(["failure", "interruption", "stale-attempt", "start-guard"] as co
       const result = yield* Effect.gen(function* () {
         const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
         yield* runExecution.startRootRun({
+          onMessageDelivery: (delivered) =>
+            Ref.update(deliveries, (values) => [...values, delivered]),
           commandId: CommandId.make("command:run-execution-settings-failure"),
           appThread: { id: threadId } as OrchestrationV2AppThread,
           providerSessionId,
@@ -1201,6 +1204,7 @@ it.effect.each(["failure", "interruption", "stale-attempt", "start-guard"] as co
       }).pipe(Effect.provide(layerTest), Effect.exit);
 
       assert.equal(yield* Ref.get(providerStarts), 0);
+      assert.deepEqual(yield* Ref.get(deliveries), scenario === "interruption" ? [] : [false]);
       const events = (yield* Ref.get(writes)).flat();
       if (scenario === "interruption") {
         assert.isTrue(Exit.isFailure(result));
@@ -3507,7 +3511,8 @@ it.effect("refreshes pull requests only once when startup failure closes its eve
     });
     assert.equal(observed.filter((item) => item === "pull-requests-refreshed").length, 1);
     assert.equal(observed[0], "run:failed");
-    assert.deepEqual(yield* Ref.get(deliveries), [false]);
+    // Native invocation may have accepted the prompt before this error.
+    assert.deepEqual(yield* Ref.get(deliveries), []);
     const error = written.find((item) => item.type === "error");
     assert.include(error?.failure.message ?? "", "provider could not start this turn");
   }),
