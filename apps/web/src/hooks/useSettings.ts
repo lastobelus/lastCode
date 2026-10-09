@@ -61,6 +61,9 @@ import { appAtomRegistry } from "~/rpc/atomRegistry";
 const CLIENT_SETTINGS_PERSISTENCE_ERROR_SCOPE = "[CLIENT_SETTINGS]";
 
 type UnifiedSettingsPatch = ServerSettingsPatch & ClientSettingsPatch;
+export type ClientSettingsUpdate =
+  | ClientSettingsPatch
+  | ((settings: ClientSettings) => ClientSettingsPatch);
 
 const clientSettingsListeners = new Set<() => void>();
 const clientSettingsHydrationListeners = new Set<() => void>();
@@ -213,6 +216,12 @@ export function persistClientSettingsPatch(
       ...safeErrorLogAttributes(error),
     });
   });
+}
+
+export function updateClientSettings(update: ClientSettingsUpdate): Promise<void> {
+  const currentSettings = getClientSettingsSnapshot();
+  const patch = typeof update === "function" ? update(currentSettings) : update;
+  return persistClientSettingsPatch(patch);
 }
 
 /**
@@ -627,9 +636,7 @@ export function useUpdatePrimarySettings() {
 }
 
 export function useUpdateClientSettings() {
-  return useCallback((patch: ClientSettingsPatch) => {
-    return persistClientSettingsPatch(patch);
-  }, []);
+  return useCallback(updateClientSettings, []);
 }
 export function __resetClientSettingsPersistenceForTests(): void {
   clientSettingsHydrationGeneration += 1;
