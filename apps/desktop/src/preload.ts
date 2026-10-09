@@ -109,6 +109,8 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     }
     return result as ReturnType<DesktopBridge["getLocalEnvironmentBootstraps"]>;
   },
+  reportRunningActionCount: (count) =>
+    ipcRenderer.invoke(IpcChannels.REPORT_RUNNING_ACTION_COUNT_CHANNEL, count),
   getLocalEnvironmentBearerToken: () =>
     ipcRenderer.invoke(IpcChannels.GET_LOCAL_ENVIRONMENT_BEARER_TOKEN_CHANNEL),
   getLocalEnvironmentEnabled: () =>
@@ -230,10 +232,15 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     };
   },
   onQuitShortcut: (listener) => {
-    const wrappedListener = (_event: Electron.IpcRendererEvent, hint: unknown) => {
+    const wrappedListener = (
+      _event: Electron.IpcRendererEvent,
+      hint: unknown,
+      runningActionCount: unknown,
+    ) => {
       if (typeof hint !== "object" || hint === null || !("state" in hint)) return;
+      const actionCount = typeof runningActionCount === "number" ? runningActionCount : 0;
       if (hint.state === "up") {
-        listener({ state: "up" });
+        listener({ state: "up" }, actionCount);
         return;
       }
       if (
@@ -241,7 +248,7 @@ contextBridge.exposeInMainWorld("desktopBridge", {
         "mode" in hint &&
         (hint.mode === "hold" || hint.mode === "double-click")
       ) {
-        listener({ state: "down", mode: hint.mode });
+        listener({ state: "down", mode: hint.mode }, actionCount);
       }
     };
 
@@ -264,6 +271,12 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     };
   },
   getUpdateState: () => ipcRenderer.invoke(IpcChannels.UPDATE_GET_STATE_CHANNEL),
+  getLastCodeSettings: () => ipcRenderer.invoke(IpcChannels.LASTCODE_SETTINGS_GET_CHANNEL),
+  setShowAndInstallLocalNightlies: (enabled) =>
+    ipcRenderer.invoke(IpcChannels.LASTCODE_SETTINGS_SET_LOCAL_NIGHTLIES_CHANNEL, enabled),
+  previewT3SettingsImport: () =>
+    ipcRenderer.invoke(IpcChannels.LASTCODE_SETTINGS_IMPORT_PREVIEW_CHANNEL),
+  importT3Settings: () => ipcRenderer.invoke(IpcChannels.LASTCODE_SETTINGS_IMPORT_CHANNEL),
   setUpdateChannel: (channel) =>
     ipcRenderer.invoke(IpcChannels.UPDATE_SET_CHANNEL_CHANNEL, channel),
   checkForUpdate: () => ipcRenderer.invoke(IpcChannels.UPDATE_CHECK_CHANNEL),
@@ -305,6 +318,33 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     },
   },
   preview: {
+    browserSurfaceResponse: (response) =>
+      ipcRenderer.invoke(IpcChannels.DESKTOP_BROWSER_SURFACE_RESPONSE_CHANNEL, response),
+    browserPresentation: (input) =>
+      ipcRenderer.invoke(IpcChannels.DESKTOP_BROWSER_PRESENTATION_CHANNEL, input),
+    onBrowserSurfaceRequest: (listener) => {
+      const wrappedListener = (
+        _event: Electron.IpcRendererEvent,
+        input: Parameters<typeof listener>[0],
+      ) => listener(input);
+      ipcRenderer.on(IpcChannels.DESKTOP_BROWSER_SURFACE_REQUEST_CHANNEL, wrappedListener);
+      return () =>
+        ipcRenderer.removeListener(
+          IpcChannels.DESKTOP_BROWSER_SURFACE_REQUEST_CHANNEL,
+          wrappedListener,
+        );
+    },
+    browserCommand: (input) =>
+      ipcRenderer.invoke(IpcChannels.DESKTOP_BROWSER_COMMAND_CHANNEL, input),
+    onBrowserEvent: (listener) => {
+      const wrappedListener = (
+        _event: Electron.IpcRendererEvent,
+        input: Parameters<typeof listener>[0],
+      ) => listener(input);
+      ipcRenderer.on(IpcChannels.DESKTOP_BROWSER_EVENT_CHANNEL, wrappedListener);
+      return () =>
+        ipcRenderer.removeListener(IpcChannels.DESKTOP_BROWSER_EVENT_CHANNEL, wrappedListener);
+    },
     setForwardedShortcuts: (shortcuts) =>
       ipcRenderer.invoke(IpcChannels.PREVIEW_SET_FORWARDED_SHORTCUTS_CHANNEL, shortcuts),
     createTab: (tabId, defaults) =>

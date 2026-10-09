@@ -57,7 +57,6 @@ import {
   RuntimeMode,
   ThreadLinkedPullRequest,
   ThreadId,
-  type TurnItemId,
 } from "@t3tools/contracts";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
 import {
@@ -423,6 +422,12 @@ function isGoalCommand(message: {
 }
 
 const threadPullRequestLinksEqual = Schema.toEquivalence(Schema.NullOr(ThreadLinkedPullRequest));
+
+/** Only the outbox's late-steer fallback may finish an already accepted delivery. */
+export const AcceptedSteeringContinuation = Context.Reference<MessageId | null>(
+  "t3/orchestration-v2/AcceptedSteeringContinuation",
+  { defaultValue: () => null },
+);
 
 function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
   switch (command.type) {
@@ -4556,6 +4561,41 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             payload: projection.thread,
           });
           return;
+        }
+      }
+
+      if (projection.thread.archivedAt !== null || projection.thread.deletedAt !== null) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `Thread ${command.threadId} is not active.`,
+        });
+      }
+      // A late steer can reroute an accepted message after its original sender archives.
+      if (
+        command.senderThreadId !== undefined &&
+        command.senderThreadId !== command.threadId &&
+        !(
+          (yield* AcceptedSteeringContinuation) === command.messageId &&
+          projection.messages.some(
+            (message) =>
+              message.id === command.messageId && message.senderThreadId === command.senderThreadId,
+          )
+        )
+      ) {
+        const sender = yield* projectionStore
+          .getThread(command.senderThreadId)
+          .pipe(mapDispatchError(command));
+        if (
+          sender.archivedAt !== null ||
+          sender.deletedAt !== null ||
+          sender.archivePending?.status === "stopping"
+        ) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: `Sender thread ${command.senderThreadId} is not active.`,
+          });
         }
       }
 
@@ -10624,8 +10664,21 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     } satisfies OrchestratorV2DispatchResult;
   });
 
-  const dispatchWithReceipt = (command: OrchestrationV2ServerCommand) =>
-    threadDispatch.withLock(commandThreadId(command), dispatchWithReceiptEffect(command));
+  const dispatchWithReceipt = (command: OrchestrationV2ServerCommand) => {
+    // Sending and archiving either participant must have one commit order.
+    const dispatch =
+      command.type === "message.dispatch" &&
+      command.senderThreadId !== undefined &&
+      command.senderThreadId !== command.threadId
+        ? [command.threadId, command.senderThreadId]
+            .toSorted()
+            .reduceRight(
+              (effect, threadId) => threadDispatch.withLock(threadId, effect),
+              dispatchWithReceiptEffect(command),
+            )
+        : threadDispatch.withLock(commandThreadId(command), dispatchWithReceiptEffect(command));
+    return dispatch;
+  };
 
   const handleTerminalRun = (stored: OrchestrationV2StoredEvent) =>
     Effect.gen(function* () {

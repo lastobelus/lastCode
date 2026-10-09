@@ -6,6 +6,10 @@ import {
   WorktreeSetupCard,
   type WorktreeSetupCardProps,
 } from "./worktree-setup-card";
+import {
+  markdownLinkHasImage,
+  markdownLinkLabelText,
+} from "@t3tools/mobile-markdown-text/markdown";
 import * as Haptics from "expo-haptics";
 import { KeyboardAwareLegendList } from "@legendapp/list/keyboard";
 import { useViewabilityAmount, type LegendListRef } from "@legendapp/list/react-native";
@@ -25,7 +29,11 @@ import {
 } from "@t3tools/contracts";
 import { renderAssistantCitationsAsText } from "@t3tools/shared/assistantCitations";
 import { encodeComposerContextFragment } from "@t3tools/shared/composerContextClipboard";
-import { parseThreadLinkHref } from "@t3tools/shared/threadLinks";
+import {
+  parseThreadLinkHref,
+  parseThreadLinkReference,
+  resolveThreadLinkReference,
+} from "@t3tools/shared/threadLinks";
 import {
   parseComposerContextHref,
   collectComposerContextReferences,
@@ -39,7 +47,7 @@ import {
 } from "@t3tools/shared/codexArtifactTemplates";
 import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
 import { isMarkdownFileLinkLabel } from "@t3tools/shared/markdownLinks";
-import { getTextContent, type MarkdownNode } from "react-native-nitro-markdown/headless";
+import type { MarkdownNode } from "react-native-nitro-markdown/headless";
 import { formatAttachmentSize } from "@t3tools/client-runtime/state/attachments";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import {
@@ -731,6 +739,22 @@ interface MarkdownStyleSet {
 
 const failedMarkdownFaviconHosts = new Set<string>();
 const MarkdownLinkLabelContext = createContext<"file" | "other" | null>(null);
+
+function MarkdownImageLinkBoundary({ children }: { children: React.ReactNode }) {
+  const insideLink = useContext(MarkdownLinkLabelContext);
+  return insideLink ? (
+    <View
+      pointerEvents="none"
+      accessibilityElementsHidden
+      importantForAccessibility="no-hide-descendants"
+    >
+      {children}
+    </View>
+  ) : (
+    children
+  );
+}
+
 const markdownLinkStyles = StyleSheet.create({
   inlineIcon: {
     width: 14,
@@ -826,16 +850,15 @@ function MarkdownImage(props: {
   readonly node: MarkdownNode;
   readonly renderImage: MarkdownImageRenderer;
 }) {
-  const insideLink = useContext(MarkdownLinkLabelContext);
-  if (insideLink === "file")
-    return <NativeText>{props.node.alt ?? props.node.title ?? ""}</NativeText>;
-  return props.node.href
-    ? props.renderImage({
+  return props.node.href ? (
+    <MarkdownImageLinkBoundary>
+      {props.renderImage({
         href: props.node.href,
         alt: props.node.alt ?? null,
         title: props.node.title ?? null,
-      })
-    : null;
+      })}
+    </MarkdownImageLinkBoundary>
+  ) : null;
 }
 
 const ARTIFACT_TEMPLATE_SYMBOL_BY_KIND: Record<
@@ -1207,24 +1230,68 @@ function useMarkdownStyles(
       preserveSoftBreaks: boolean,
       highlightCode: boolean,
     ): CustomRenderers => ({
-      link: ({ children, node, href = "" }) => {
+      link: ({ node, children, href = "" }) => {
         const presentation = resolveMarkdownLinkPresentation(href);
+        if (markdownLinkHasImage(node)) {
+          const linkHref = presentation.href;
+          return (
+            <MarkdownLinkLabelContext.Provider
+              value={presentation.kind === "file" ? "file" : "other"}
+            >
+              <Pressable
+                accessibilityRole="link"
+                accessibilityLabel={markdownLinkLabelText(node) || linkHref || href}
+                onPress={
+                  presentation.kind === "file"
+                    ? () => onLinkPress(href)
+                    : presentation.kind === "external"
+                      ? () => onLinkPress(presentation.href)
+                      : linkHref
+                        ? () => {
+                            void tryOpenExternalUrl(linkHref, "markdown-link");
+                          }
+                        : undefined
+                }
+              >
+                <View
+                  pointerEvents="none"
+                  accessibilityElementsHidden
+                  importantForAccessibility="no-hide-descendants"
+                  style={{ gap: 8 }}
+                >
+                  {children}
+                  {presentation.kind === "file" ? (
+                    <NativeText style={{ color: inlineTextColor }}>
+                      {"("}
+                      <NativeText className="font-t3-bold">
+                        <Image
+                          source={markdownFileIconSource(presentation.icon)}
+                          style={markdownLinkStyles.inlineIcon}
+                        />
+                        {presentation.label}
+                      </NativeText>
+                      {")"}
+                    </NativeText>
+                  ) : null}
+                </View>
+              </Pressable>
+            </MarkdownLinkLabelContext.Provider>
+          );
+        }
         if (presentation.kind === "file") {
+          const descriptive = !isMarkdownFileLinkLabel(markdownLinkLabelText(node), href);
           return (
             <MarkdownLinkLabelContext.Provider value="file">
               <NativeText onPress={() => onLinkPress(href)} style={{ color: inlineTextColor }}>
-                {!isMarkdownFileLinkLabel(getTextContent(node), href) && <>{children} </>}
-                <NativeText
-                  className="font-t3-bold"
-                  onPress={() => onLinkPress(href)}
-                  style={{ color: inlineTextColor }}
-                >
+                {descriptive ? <>{children} (</> : null}
+                <NativeText className="font-t3-bold">
                   <Image
                     source={markdownFileIconSource(presentation.icon)}
                     style={markdownLinkStyles.inlineIcon}
                   />
                   {presentation.label}
                 </NativeText>
+                {descriptive ? ")" : null}
               </NativeText>
             </MarkdownLinkLabelContext.Provider>
           );
@@ -2294,12 +2361,20 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   const userBubbleColor = theme["--color-user-bubble"];
   const onMarkdownLinkPress = useCallback(
     (href: string) => {
-      // A thread link names a thread in this feed's environment.
-      const linkedThreadId = parseThreadLinkHref(href);
-      if (linkedThreadId) {
+      const linkedThread = parseThreadLinkReference(href);
+      if (linkedThread) {
+        const resolved = resolveThreadLinkReference(
+          linkedThread,
+          (threadId, environmentId) =>
+            appAtomRegistry.get(
+              environmentThreadShells.threadShellAtom(
+                scopeThreadRef(environmentId ?? props.environmentId, threadId),
+              ),
+            ) ?? undefined,
+        );
         navigation.navigate("Thread", {
-          environmentId: String(props.environmentId),
-          threadId: String(linkedThreadId),
+          environmentId: String(resolved.environmentId ?? props.environmentId),
+          threadId: String(resolved.threadId),
         });
         return;
       }

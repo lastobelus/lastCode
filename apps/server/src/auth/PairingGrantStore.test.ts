@@ -122,6 +122,27 @@ it.layer(NodeServices.layer)("PairingGrantStore.layer", (it) => {
     }).pipe(Effect.provide(layerPairingGrantStore())),
   );
 
+  it.effect.each([
+    { label: "empty", requestedScopes: [] },
+    { label: "ungranted", requestedScopes: ["access:write"] },
+  ] as const)("preserves a one-time grant after an $label scope request", ({ requestedScopes }) =>
+    Effect.gen(function* () {
+      const bootstrapCredentials = yield* PairingGrantStore.PairingGrantStore;
+      const token = yield* bootstrapCredentials.issueOneTimeToken({
+        scopes: ["orchestration:read"],
+      });
+      const rejected = yield* Effect.flip(
+        bootstrapCredentials.consume(token.credential, { requestedScopes }),
+      );
+      expect(rejected._tag).toBe("BootstrapCredentialScopeNotGrantedError");
+
+      const consumed = yield* bootstrapCredentials.consume(token.credential);
+      expect(consumed.scopes).toEqual(["orchestration:read"]);
+      const reused = yield* Effect.flip(bootstrapCredentials.consume(token.credential));
+      expect(reused._tag).toBe("UnknownBootstrapCredentialError");
+    }).pipe(Effect.provide(layerPairingGrantStore())),
+  );
+
   it.effect("requires the bound proof key thumbprint when present", () =>
     Effect.gen(function* () {
       const bootstrapCredentials = yield* PairingGrantStore.PairingGrantStore;
