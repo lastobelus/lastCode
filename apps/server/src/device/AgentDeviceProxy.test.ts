@@ -28,6 +28,7 @@ afterEach(async () => {
 
 const fixture = () => {
   let readinessGate: Effect.Effect<void> = Effect.void;
+  let readinessAvailable = true;
   let permitted = true;
   let support = true;
   let threadState: "present" | "deleted" | "missing" = "present";
@@ -236,6 +237,7 @@ const fixture = () => {
               Effect.andThen(
                 Effect.sync(() => {
                   hostRequests.push(host ?? "local");
+                  if (!readinessAvailable) return null;
                   return {
                     hostId: host,
                     agentDevice: { baseUrl: origin, token: "raw-daemon-token" },
@@ -300,6 +302,9 @@ const fixture = () => {
     handler,
     pauseReadiness: (gate: Effect.Effect<void>) => {
       readinessGate = gate;
+    },
+    noReadiness: () => {
+      readinessAvailable = false;
     },
     retireHost: () => handler(new Request("http://t3.example/retire-host", { method: "POST" })),
     retireOnDiscovery: () => {
@@ -538,6 +543,8 @@ it.each(["agent_device.command", "agent-device.command"])(
       { udid: "device-2" },
       { serial: "device-2" },
       { deviceId: "device-2" },
+      { device: "Another emulator" },
+      { device: "device-1" },
     ]) {
       for (const step of [
         { command: "boot", flags: selectors },
@@ -545,6 +552,7 @@ it.each(["agent_device.command", "agent-device.command"])(
       ])
         expect((await rpc("batch", { serial: "device-1", batchSteps: [step] })).status).toBe(403);
       expect((await rpc("boot", { serial: "device-1" }, [], selectors)).status).toBe(403);
+      expect((await rpc("boot", { serial: "device-1", ...selectors })).status).toBe(403);
     }
     expect((await rpc("close", { serial: "device-1" }, [], { shutdown: true })).status).toBe(403);
     expect(f.requests).toEqual([]);
@@ -566,6 +574,49 @@ it.each(["agent_device.command", "agent-device.command"])(
     expect((await rpc("snapshot", { udid: "device-1" })).status).toBe(200);
   },
 );
+
+it("reports revoked access after a delayed request body and unavailable helper", async () => {
+  const f = fixture();
+  const token = await f.issue();
+  const reading = Promise.withResolvers<void>();
+  const resume = Promise.withResolvers<void>();
+  const body = new ReadableStream<Uint8Array>(
+    {
+      pull: async (controller) => {
+        reading.resolve();
+        await resume.promise;
+        controller.enqueue(
+          new TextEncoder().encode(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              method: "agent_device.command",
+              params: {
+                session: "session-thread-1",
+                command: "snapshot",
+                flags: { udid: "device-1" },
+              },
+            }),
+          ),
+        );
+        controller.close();
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  const init: RequestInit & { duplex: "half" } = {
+    method: "POST",
+    headers: { "x-agent-device-token": token, "content-type": "application/json" },
+    body,
+    duplex: "half",
+  };
+  const pending = f.handler(new Request("http://t3.example/api/agent-device/rpc", init));
+  await reading.promise;
+  f.revoke();
+  f.noReadiness();
+  resume.resolve();
+  expect((await pending).status).toBe(403);
+  expect(f.requests).toEqual([]);
+});
 
 it("rejects a retained credential when fresh discovery retires its device", async () => {
   const f = fixture();
