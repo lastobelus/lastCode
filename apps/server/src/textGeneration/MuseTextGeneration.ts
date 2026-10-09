@@ -21,6 +21,7 @@ import {
 } from "../provider/museSdk.ts";
 import { museModelCapabilities, resolveMuseReasoningEffort } from "../provider/museModelCatalog.ts";
 import type * as TextGeneration from "./TextGeneration.ts";
+import * as TextGenerationOperations from "@t3tools/provider-core/server/textGenerationOperations";
 import {
   buildBranchNamePrompt,
   buildCommitMessagePrompt,
@@ -341,7 +342,12 @@ export const makeMuseTextGeneration = Effect.fn("makeMuseTextGeneration")(functi
       });
       return { title: sanitizeThreadTitle(generated.title) };
     });
+  const { generateIncomingMessageSummary } = TextGenerationOperations.fromRunner(
+    "MuseTextGeneration",
+    runMuseJson,
+  );
   return {
+    generateIncomingMessageSummary,
     generateCommitMessage,
     generatePrContent,
     generateBranchName,

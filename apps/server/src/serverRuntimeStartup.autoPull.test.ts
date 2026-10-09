@@ -16,6 +16,9 @@ import * as ServerConfig from "./config.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as EffectWorker from "./orchestration-v2/EffectWorker.ts";
+import * as EventSink from "./orchestration-v2/EventSink.ts";
+import * as ThreadRecovery from "./orchestration-v2/ThreadRecoveryService.ts";
+import * as SqlitePersistence from "./persistence/Sqlite.ts";
 import * as LegacyV1ThreadImporter from "./orchestration-v2/legacy/LegacyV1ThreadImporter.ts";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
@@ -114,6 +117,11 @@ it.effect("parks automatic pull until activation without delaying command readin
           prepareForShutdown: Effect.void,
           reconcile: () => Effect.succeed(recovery),
         }),
+        SqlitePersistence.layerMemory.pipe(Layer.orDie),
+        Layer.mock(EventSink.EventSinkV2)({
+          write: () => Effect.die("The empty fixture has no historical creator repairs."),
+        }),
+        Layer.mock(ThreadRecovery.ThreadRecoveryService)({ reconcile: Effect.void }),
         Layer.mock(Orchestrator.OrchestratorV2)({ recoverDelegatedTasks: Effect.void }),
         Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({ shutdown: Effect.void }),
         Layer.mock(AgentAwarenessRelay.AgentAwarenessRelay)({ start: () => Effect.void }),

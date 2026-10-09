@@ -2729,3 +2729,78 @@ it.effect.each([false, true])(
       }
     }).pipe(Effect.provide(IdAllocator.layer), Effect.scoped),
 );
+
+it.effect.each(["read-only", "approval", "full-access", "update-failure"] as const)(
+  "OpenCode forks apply the destination policy before returning: %s",
+  (scenario) =>
+    Effect.gen(function* () {
+      const events = asyncEventStream();
+      const sourceId = "promotion-source";
+      const forkId = "promotion-fork";
+      const policy =
+        scenario === "approval"
+          ? runtimePolicy("approval-required")
+          : scenario === "full-access"
+            ? runtimePolicy("full-access")
+            : runtimePolicy("full-access", {
+                approvalPolicy: "never",
+                sandboxPolicy: {
+                  type: "readOnly",
+                  access: { type: "fullAccess" },
+                  networkAccess: false,
+                },
+              });
+      let permissions = openCodeChildPermissionRules(runtimePolicy("full-access"), [
+        { permission: "task", pattern: "*", action: "deny" },
+      ]);
+      const calls: string[] = [];
+      const harness = yield* makeOpenCodeRuntimeHarness(`promotion-${scenario}`, sourceId, {
+        event: {
+          subscribe: async (_input: unknown, options: { signal?: AbortSignal }) => {
+            options.signal?.addEventListener("abort", () => events.close(), { once: true });
+            return { stream: events.stream };
+          },
+        },
+        session: {
+          create: async () => ({ data: { id: sourceId, time: { created: 1, updated: 1 } } }),
+          fork: async ({ sessionID }: { sessionID: string }) => {
+            assert.equal(sessionID, sourceId);
+            calls.push("fork");
+            return {
+              data: { id: forkId, permission: permissions, time: { created: 1, updated: 2 } },
+            };
+          },
+          update: async (input: {
+            sessionID: string;
+            permission: ReturnType<typeof openCodePermissionRules>;
+          }) => {
+            assert.equal(input.sessionID, forkId);
+            calls.push("permissions");
+            if (scenario === "update-failure") throw new Error("Permission update rejected");
+            permissions = input.permission;
+            return { data: {} };
+          },
+        },
+      });
+      const fork = harness.runtime.forkThread({
+        sourceProviderThread: harness.providerThread,
+        targetThreadId: ThreadId.make("promoted-thread"),
+        runtimePolicy: policy,
+      });
+      if (scenario === "update-failure") {
+        const error = yield* fork.pipe(Effect.flip);
+        assert.equal(error._tag, "ProviderAdapterForkThreadError");
+      } else {
+        const result = yield* fork;
+        assert.equal(result.nativeThreadRef?.nativeId, forkId);
+        assert.deepEqual(permissions, openCodePermissionRules(policy));
+        assert.equal(
+          permissionAction(permissions, "bash"),
+          scenario === "read-only" ? "deny" : scenario === "approval" ? "ask" : "allow",
+        );
+        if (scenario === "full-access")
+          assert.equal(permissionAction(permissions, "task"), "allow");
+      }
+      assert.deepEqual(calls, ["fork", "permissions"]);
+    }).pipe(Effect.provide(IdAllocator.layer), Effect.scoped),
+);

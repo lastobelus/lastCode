@@ -29,7 +29,9 @@ import * as ProviderTurnControlService from "./ProviderTurnControlService.ts";
 import * as ProviderTurnStartService from "./ProviderTurnStartService.ts";
 import * as RuntimeRequestService from "./RuntimeRequestService.ts";
 import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationService.ts";
+import * as IncomingMessageSummaryService from "./IncomingMessageSummaryService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
+import * as SubagentPromotionService from "./SubagentPromotionService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 
 const threadId = ThreadId.make("thread:effect-worker-restart");
@@ -87,6 +89,10 @@ function layerExecutorFor(input: {
 }) {
   const record = (event: string) => Ref.update(input.events, (events) => [...events, event]);
   const layerDependencies = Layer.mergeAll(
+    Layer.mock(IncomingMessageSummaryService.IncomingMessageSummaryService)({
+      execute: () => Effect.void,
+    }),
+    Layer.mock(SubagentPromotionService.SubagentPromotionService)({ execute: () => Effect.void }),
     Layer.succeed(
       ProviderTurnControlService.ProviderTurnControlServiceV2,
       ProviderTurnControlService.ProviderTurnControlServiceV2.of({
@@ -111,6 +117,7 @@ function layerExecutorFor(input: {
         ownershipRevision: Effect.succeed(0),
         close: () => Effect.void,
         closeInstance: () => Effect.void,
+        teardownThread: () => Effect.die("unused teardownThread"),
         release: () => record("release"),
         detach: () => record("detach"),
       }),
@@ -765,6 +772,9 @@ it.effect("uses durable deadlines, notifications, and a slow liveness poll", () 
         if (count === 3) yield* Ref.set(nextClaimableAt, Option.none());
         return false;
       }),
+      awaitIncomingSummaryWork: Effect.never,
+      runIncomingSummaryOnce: Effect.succeed(false),
+      nextIncomingSummaryClaimableAt: Effect.succeed(Option.none()),
       nextClaimableAt: Ref.get(nextClaimableAt),
       drain: () => Effect.succeed(0),
     });
@@ -801,6 +811,43 @@ it.effect("uses durable deadlines, notifications, and a slow liveness poll", () 
   }).pipe(Effect.provide(TestClock.layer())),
 );
 
+it.effect("shares thread health checks across worker lanes without blocking effect work", () =>
+  Effect.gen(function* () {
+    const checks = yield* Ref.make(0);
+    const attempts = yield* Ref.make(0);
+    const checkStarted = yield* Deferred.make<void>();
+    const releaseCheck = yield* Deferred.make<void>();
+    const worker = EffectWorker.OrchestrationEffectWorkerV2.of({
+      awaitWork: Effect.never,
+      runRecoveryOnce: Effect.succeed(false),
+      runOnce: Ref.update(attempts, (count) => count + 1).pipe(Effect.as(false)),
+      awaitIncomingSummaryWork: Effect.never,
+      runIncomingSummaryOnce: Effect.succeed(false),
+      nextIncomingSummaryClaimableAt: Effect.succeed(Option.none()),
+      nextClaimableAt: Effect.succeed(Option.none()),
+      drain: () => Effect.succeed(0),
+    });
+    yield* EffectWorker.runDaemonWithOptions({
+      concurrency: 4,
+      livenessPollIntervalMs: 1_000,
+      reconcileThreadHealth: Ref.update(checks, (count) => count + 1).pipe(
+        Effect.andThen(Deferred.succeed(checkStarted, undefined)),
+        Effect.andThen(Deferred.await(releaseCheck)),
+      ),
+    }).pipe(
+      Effect.provideService(EffectWorker.OrchestrationEffectWorkerV2, worker),
+      Effect.forkScoped,
+    );
+    yield* Deferred.await(checkStarted);
+    yield* TestClock.adjust("2 seconds");
+    assert.equal(yield* Ref.get(checks), 1);
+    assert.isAtLeast(yield* Ref.get(attempts), 8);
+    yield* Deferred.succeed(releaseCheck, undefined);
+    yield* TestClock.adjust("1 second");
+    assert.equal(yield* Ref.get(checks), 2);
+  }).pipe(Effect.provide(TestClock.layer())),
+);
+
 it.effect("does not hot-loop when a claim fails", () =>
   Effect.gen(function* () {
     const attempts = yield* Ref.make(0);
@@ -816,6 +863,9 @@ it.effect("does not hot-loop when a claim fails", () =>
           }),
         ),
       ),
+      awaitIncomingSummaryWork: Effect.never,
+      runIncomingSummaryOnce: Effect.succeed(false),
+      nextIncomingSummaryClaimableAt: Effect.succeed(Option.none()),
       nextClaimableAt: Effect.succeed(Option.some(now)),
       drain: () => Effect.succeed(0),
     });
@@ -844,6 +894,9 @@ it.effect("backs off briefly when a due deadline loses a claim race", () =>
       awaitWork: Effect.never,
       runRecoveryOnce: Effect.succeed(false),
       runOnce: Ref.update(attempts, (count) => count + 1).pipe(Effect.as(false)),
+      awaitIncomingSummaryWork: Effect.never,
+      runIncomingSummaryOnce: Effect.succeed(false),
+      nextIncomingSummaryClaimableAt: Effect.succeed(Option.none()),
       nextClaimableAt: Effect.succeed(Option.some(now)),
       drain: () => Effect.succeed(0),
     });

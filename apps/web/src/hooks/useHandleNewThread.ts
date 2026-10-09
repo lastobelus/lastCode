@@ -5,7 +5,7 @@ import {
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
 import { DEFAULT_SERVER_SETTINGS, type ScopedProjectRef, type ThreadId } from "@t3tools/contracts";
-import { useParams, useRouter } from "@tanstack/react-router";
+import { useLocation, useParams, useRouter } from "@tanstack/react-router";
 import { useCallback, useMemo } from "react";
 import {
   composerDraftHasUserContent,
@@ -32,6 +32,7 @@ import {
 import { readT3ProjectFile } from "../lib/t3ProjectFileDefaults";
 import { environmentServerConfigsAtom } from "../state/server";
 import { resolveThreadRouteTarget } from "../threadRoutes";
+import { resolveDashboardProjectRef } from "../dashboardProjectScope";
 import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
 import { useClientSettings } from "./useSettings";
 
@@ -435,6 +436,7 @@ export function useNewThreadHandler() {
 }
 
 export function useHandleNewThread() {
+  const location = useLocation();
   const projectOrder = useUiStateStore((store) => store.projectOrder);
   const routeTarget = useParams({
     strict: false,
@@ -468,9 +470,11 @@ export function useHandleNewThread() {
   return {
     activeDraftThread,
     activeThread,
-    defaultProjectRef: orderedProjects[0]
-      ? scopeProjectRef(orderedProjects[0].environmentId, orderedProjects[0].id)
-      : null,
+    defaultProjectRef:
+      resolveDashboardProjectRef(location, projects) ??
+      (orderedProjects[0]
+        ? scopeProjectRef(orderedProjects[0].environmentId, orderedProjects[0].id)
+        : null),
     handleNewThread,
     routeDraftId,
     routeThreadRef,

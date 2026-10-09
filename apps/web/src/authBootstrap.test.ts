@@ -7,6 +7,7 @@ import {
   type DesktopBridge,
 } from "@t3tools/contracts";
 import { createBrowserHistory } from "@tanstack/react-router";
+import { setPreviewBootstrapTokenOnUrl } from "@t3tools/shared/remote";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import { HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/http";
@@ -376,6 +377,97 @@ describe("resolveInitialServerAuthGateState", () => {
     expect(testWindow.location.hash).toBe("");
     expect(testWindow.location.searchParams.get("token")).toBeNull();
   });
+
+  it.each(["", "#details", "#token=application-invite"])(
+    "bootstraps a prepared preview while preserving application tokens (%s)",
+    async (hash) => {
+      let authenticated = false;
+      const testApi = await installAuthApi({
+        session: () =>
+          authenticated
+            ? authenticatedSession(LOOPBACK_AUTH)
+            : unauthenticatedSession(LOOPBACK_AUTH),
+        browserSession: (credential) => {
+          if (
+            credential !== "one-time-credential" &&
+            credential !== "new-preview-credential" &&
+            credential !== "new-link-credential"
+          ) {
+            return Effect.fail(
+              new EnvironmentAuthInvalidError({
+                code: "auth_invalid",
+                reason: "invalid_credential",
+                traceId: "trace-unexpected-application-token",
+              }),
+            );
+          }
+          return Effect.sync(() => {
+            authenticated = true;
+            return browserSession(["orchestration:read", "access:write"]);
+          });
+        },
+      });
+      const destination = `http://localhost/threads/qa?token=application-reset&view=preview${hash}`;
+      const testWindow = installTestBrowser(
+        setPreviewBootstrapTokenOnUrl(new URL(destination), "one-time-credential").href,
+      );
+      testWindow.history.state = { routerState: "preserved" };
+      const {
+        resolveInitialServerAuthGateState,
+        __resetServerAuthBootstrapForTests,
+        takePairingTokenFromUrl,
+        submitServerAuthCredential,
+      } = await import("./environments/primary");
+      await expect(
+        Promise.all([resolveInitialServerAuthGateState(), resolveInitialServerAuthGateState()]),
+      ).resolves.toEqual([{ status: "authenticated" }, { status: "authenticated" }]);
+      expect(testWindow.location.href).toBe(destination);
+      await expect(resolveInitialServerAuthGateState()).resolves.toEqual({
+        status: "authenticated",
+      });
+      expect(testWindow.location.href).toBe(destination);
+      expect(testWindow.history.state).toMatchObject({ routerState: "preserved" });
+      expect(JSON.stringify(testWindow.history.state)).not.toContain("one-time-credential");
+      expect(testApi.calls.browserSession).toEqual([{ credential: "one-time-credential" }]);
+      // A page reload keeps this history entry while restarting auth module state.
+      const savedHistory = JSON.parse(JSON.stringify(testWindow.history.state));
+      __resetServerAuthBootstrapForTests();
+      testWindow.history.state = savedHistory;
+      await expect(resolveInitialServerAuthGateState()).resolves.toEqual({
+        status: "authenticated",
+      });
+      expect(testWindow.location.href).toBe(destination);
+      expect(testApi.calls.browserSession).toEqual([{ credential: "one-time-credential" }]);
+      testWindow.location = setPreviewBootstrapTokenOnUrl(
+        new URL(destination),
+        "new-preview-credential",
+      );
+      await expect(resolveInitialServerAuthGateState()).resolves.toEqual({
+        status: "authenticated",
+      });
+      expect(testWindow.location.href).toBe(destination);
+      expect(testApi.calls.browserSession).toEqual([
+        { credential: "one-time-credential" },
+        { credential: "new-preview-credential" },
+      ]);
+      testWindow.location = new URL("http://localhost/pair#token=new-link-credential");
+      await expect(resolveInitialServerAuthGateState()).resolves.toEqual({
+        status: "requires-auth",
+        auth: LOOPBACK_AUTH,
+      });
+      const explicitToken = takePairingTokenFromUrl();
+      expect(explicitToken).toBe("new-link-credential");
+      await submitServerAuthCredential(explicitToken!);
+      await expect(resolveInitialServerAuthGateState()).resolves.toEqual({
+        status: "authenticated",
+      });
+      expect(testApi.calls.browserSession).toEqual([
+        { credential: "one-time-credential" },
+        { credential: "new-preview-credential" },
+        { credential: "new-link-credential" },
+      ]);
+    },
+  );
 
   it("accepts query-string pairing tokens as a backward-compatible fallback", async () => {
     const testWindow = installTestBrowser("http://localhost/?token=pairing-token");

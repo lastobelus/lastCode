@@ -37,6 +37,7 @@ import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as ProviderRuntimeRecovery from "./orchestration-v2/ProviderRuntimeRecoveryService.ts";
 import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManager.ts";
 import * as ThreadLaunch from "./orchestration-v2/ThreadLaunchService.ts";
+import * as ThreadRecovery from "./orchestration-v2/ThreadRecoveryService.ts";
 import * as ThreadManagement from "./orchestration-v2/ThreadManagementService.ts";
 import * as ProjectService from "./project/ProjectService.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
@@ -281,7 +282,8 @@ const resolveAutoBootstrapWelcomeTargets = Effect.gen(function* () {
     const shell = yield* threads.getShellSnapshot();
     const existingThread = shell.threads.find(
       (thread) =>
-        thread.projectId === project.id && thread.lineage.relationshipToParent !== "subagent",
+        thread.projectId === project.id &&
+        (thread.lineage.relationshipToParent !== "subagent" || thread.lineage.independent === true),
     );
     if (existingThread === undefined) {
       const serverSettings = yield* ServerSettings.ServerSettingsService;
@@ -422,6 +424,7 @@ const make = (options?: StartupOptions) =>
     const providerRuntimeRecovery = yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService;
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+    const threadRecovery = yield* ThreadRecovery.ThreadRecoveryService;
     const agentAwarenessRelay = yield* AgentAwarenessRelay.AgentAwarenessRelay;
     const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
     const serverSettings = yield* ServerSettings.ServerSettingsService;
@@ -537,7 +540,9 @@ const make = (options?: StartupOptions) =>
         startEffectWorker: runStartupPhase(
           "orchestration-v2.effect-worker.start",
           startEffectWorkerWithRelay({
-            runWorker: EffectWorker.runDaemon,
+            runWorker: EffectWorker.runDaemonWithOptions({
+              reconcileThreadHealth: threadRecovery.reconcile,
+            }),
             startRelay: agentAwarenessRelay.start(),
             workerFiberRef: effectWorkerFiber,
           }),

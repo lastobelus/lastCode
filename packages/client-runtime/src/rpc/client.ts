@@ -6,6 +6,7 @@ import {
   type ClientGuardedRpcTag,
   ORCHESTRATION_V2_WS_METHODS,
   WS_METHODS,
+  type ServerConfig,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -60,7 +61,9 @@ export type EnvironmentSubscriptionRpcTag =
   | typeof WS_METHODS.scheduledTasksSubscribe
   | typeof WS_METHODS.subscribeTerminalEvents
   | typeof WS_METHODS.subscribeTerminalMetadata
+  | typeof WS_METHODS.subscribeDesktopBrowserCommands
   | typeof WS_METHODS.subscribePreviewEvents
+  | typeof WS_METHODS.subscribePreviewHosting
   | typeof WS_METHODS.subscribeDiscoveredLocalServers
   | typeof WS_METHODS.subscribeDeviceState
   | typeof WS_METHODS.subscribeResourceTelemetry
@@ -234,6 +237,11 @@ export function runStreamGuarded<TTag extends EnvironmentStreamCommandRpcTag>(
 }
 
 interface SubscriptionOptions<TTag extends EnvironmentSubscriptionRpcTag> {
+  /** Check each session's bootstrap config before opening a capability-dependent RPC. */
+  readonly capability?: {
+    readonly supports: (config: ServerConfig) => boolean;
+    readonly unsupportedValue: EnvironmentRpcStreamValue<TTag>;
+  };
   /** Reports protocol or programming defects without changing their recovery policy. */
   readonly onDefect?: (
     cause: Cause.Cause<EnvironmentRpcStreamFailure<TTag>>,
@@ -300,6 +308,18 @@ function subscribeDynamicMapped<TTag extends EnvironmentSubscriptionRpcTag, A>(
                 Stream.suspend(() =>
                   Stream.unwrap(
                     Effect.gen(function* () {
+                      if (options?.capability !== undefined) {
+                        // Connection setup owns bootstrap failures. Keep the
+                        // subscription alive for the supervisor's next session.
+                        const config = yield* Effect.option(session.initialConfig);
+                        if (Option.isNone(config)) return Stream.empty;
+                        if (!options.capability.supports(config.value)) {
+                          return mapStream(
+                            session,
+                            Stream.succeed(options.capability.unsupportedValue),
+                          );
+                        }
+                      }
                       const input = yield* makeInput(session);
                       const completeObservation = yield* observer.observe({
                         environmentId: supervisor.target.environmentId,
