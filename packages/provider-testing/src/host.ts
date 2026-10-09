@@ -40,7 +40,13 @@ export const layerTestProviderHost = (
       }
       const settings = options.settings ?? DEFAULT_SERVER_SETTINGS;
       return ProviderHost.of({
-        paths: { cwd: options.cwd ?? process.cwd(), baseDir, stateDir, providerStatusCacheDir },
+        paths: {
+          cwd: options.cwd ?? process.cwd(),
+          baseDir,
+          stateDir,
+          settingsPath: path.join(stateDir, "settings.json"),
+          providerStatusCacheDir,
+        },
         settings: {
           get: Effect.succeed(settings),
           changes: Stream.empty,

@@ -499,6 +499,43 @@ const expectModelFailure = (errorMessage: string) =>
   }).pipe(Effect.scoped, Effect.provide(layerTest));
 
 describe("PiAdapterV2", () => {
+  it.effect("binds spawned provider shells to the host's custom settings path", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const host = yield* ProviderHost;
+      const settingsPath = `${host.paths.stateDir}/custom-settings.json`;
+      const adapter = yield* PiAdapterV2Driver.create({
+        instanceId: PI_INSTANCE_ID,
+        displayName: undefined,
+        enabled: true,
+        environment: [
+          {
+            name: "T3CODE_LOCAL_CI_SETTINGS_PATH",
+            value: "/other-instance/settings.json",
+            sensitive: false,
+          },
+        ],
+        config: { enabled: true, binaryPath: "pi", launchArgs: "", customModels: [] },
+      }).pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, fake.spawner),
+        Effect.provideService(HostProcessEnvironment, {
+          T3CODE_LOCAL_CI_SETTINGS_PATH: "/inherited/settings.json",
+        }),
+        Effect.provideService(ProviderHost, {
+          ...host,
+          paths: { ...host.paths, settingsPath },
+        }),
+      );
+      yield* adapter.openSession({
+        threadId: THREAD_ID,
+        providerSessionId: SESSION_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      assert.equal(fake.lastSpawn().env.T3CODE_LOCAL_CI_SETTINGS_PATH, settingsPath);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect.each([false, true])(
     "serializes rollback fork hooks with native wake ownership, wake=%s",
     (nativeWake) =>

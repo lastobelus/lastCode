@@ -86,10 +86,14 @@ If the Action is absent or its reason says it has not been opted in, report the
 specific import or resume-permission setup needed. For another disabled reason,
 report that reason. Unavailability never authorizes a synchronous gate fallback.
 
-## Validate Before Each Push
+## Validate and Publish
 
 After focused validation and once the intended changes are committed on a clean
-worktree, use the independent Quick action:
+worktree, local Quick CI is optional and GitHub CI is required. Automatic mode
+uses free local capacity or defers to GitHub without waiting. Always local mode
+queues; GitHub-only mode permits publishing without the Quick Action. Do not
+replace a deferral with direct parallel workspace typechecks. When using the
+independent Quick Action:
 
 1. Require this thread's Action checkout to be the clean exact checkout being
    validated, then list Project Actions. A shell command's working directory
@@ -104,18 +108,21 @@ worktree, use the independent Quick action:
 If that action is absent or ineligible, follow **Handle an Unavailable Action**
 above. Do not run it synchronously as an agent fallback.
 
-After the action resumes, verify success and require its receipt to match the
-current clean head, selected workstream base ref and base commit, and Quick-gate
-version. If any identity changed, discard the result and re-evaluate. The agent
-then decides whether and what to push. The pre-push hook consumes the receipt;
-it remains a synchronous fallback for ordinary human command-line use.
+After the action resumes, verify its identity against the current clean head and
+selected workstream base commit. A local pass must have a receipt matching the
+head, base ref, base commit, and Quick-gate version. An attention result with
+`validation: github-only` permits publishing for required GitHub validation; it
+does not count as a local pass or produce a receipt. If any identity changed,
+discard the result and re-evaluate. The agent then decides whether and what to
+push. The pre-push hook reuses a matching receipt or follows the selected mode.
 
 After a successful fixing push, reply to each addressed finding with evidence
 from the new head and resolve only those addressed threads. Request review only
 after that durable review state matches the code now on the PR.
 
 For a transport-only retry, reuse the receipt only if the local head, worktree,
-base, and remote topic state are unchanged. Otherwise rerun Quick CI. Never use
+base, and remote topic state are unchanged. Otherwise re-evaluate the Quick CI
+policy against the current revision. Never use
 `--no-verify` as the ordinary agent push path.
 
 ## Wait for Remote Gates
