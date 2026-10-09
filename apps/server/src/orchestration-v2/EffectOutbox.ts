@@ -29,6 +29,11 @@ import { forkParked } from "../serverActivation.ts";
 import * as EnvironmentPauseStore from "../environment/EnvironmentPauseStore.ts";
 
 export const OrchestrationEffectRequestV2 = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("environment-pause.record-delivery"),
+    messageId: MessageId,
+    delivered: Schema.Boolean,
+  }),
   Schema.Struct({ type: Schema.Literal("thread.archive"), requestId: CommandId }),
   Schema.Struct({
     type: Schema.Literal("incoming-message.summarize"),
@@ -129,6 +134,7 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
 export type OrchestrationEffectRequestV2 = typeof OrchestrationEffectRequestV2.Type;
 
 export const REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS = [
+  "environment-pause.record-delivery",
   "thread.archive",
   "subagent.promote",
   "provider-runtime.continue",

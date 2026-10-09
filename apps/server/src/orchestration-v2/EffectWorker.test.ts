@@ -1,7 +1,10 @@
 import { assert, it } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   CommandId,
+  EnvironmentPauseError,
   MessageId,
+  ProjectId,
   ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
@@ -14,6 +17,7 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
@@ -33,6 +37,9 @@ import * as IncomingMessageSummaryService from "./IncomingMessageSummaryService.
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as SubagentPromotionService from "./SubagentPromotionService.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as ServerConfig from "../config.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as PauseStore from "../environment/EnvironmentPauseStore.ts";
 
 const threadId = ThreadId.make("thread:effect-worker-restart");
 const oldSessionId = ProviderSessionId.make("provider-session:effect-worker-restart:old");
@@ -86,6 +93,8 @@ function layerExecutorFor(input: {
   readonly continueAfterRestart?: boolean;
   readonly interrupt?: ProviderTurnControlService.ProviderTurnControlServiceV2Shape["interrupt"];
   readonly steer?: ProviderTurnControlService.ProviderTurnControlServiceV2Shape["steer"];
+  readonly outbox?: Partial<EffectOutbox.EffectOutboxV2Shape>;
+  readonly start?: ProviderTurnStartService.ProviderTurnStartServiceV2Shape["start"];
 }) {
   const record = (event: string) => Ref.update(input.events, (events) => [...events, event]);
   const layerDependencies = Layer.mergeAll(
@@ -125,19 +134,21 @@ function layerExecutorFor(input: {
     Layer.succeed(
       ProviderTurnStartService.ProviderTurnStartServiceV2,
       ProviderTurnStartService.ProviderTurnStartServiceV2.of({
-        start: () =>
-          Effect.gen(function* () {
-            yield* record("start");
-            if (
-              input.failFirstStart !== undefined &&
-              (yield* Ref.getAndSet(input.failFirstStart, false))
-            ) {
-              return yield* new ProviderTurnStartService.ProviderTurnStartError({
-                runId,
-                cause: "simulated first start failure",
-              });
-            }
-          }),
+        start:
+          input.start ??
+          (() =>
+            Effect.gen(function* () {
+              yield* record("start");
+              if (
+                input.failFirstStart !== undefined &&
+                (yield* Ref.getAndSet(input.failFirstStart, false))
+              ) {
+                return yield* new ProviderTurnStartService.ProviderTurnStartError({
+                  runId,
+                  cause: "simulated first start failure",
+                });
+              }
+            })),
       }),
     ),
     Layer.succeed(
@@ -163,6 +174,11 @@ function layerExecutorFor(input: {
     Layer.provide(
       Layer.mergeAll(
         layerDependencies,
+        Layer.mock(EffectOutbox.EffectOutboxV2)({
+          enqueue: () => Effect.void,
+          notifyAvailable: () => Effect.void,
+          ...input.outbox,
+        }),
         Layer.mock(ThreadManagementService.ThreadManagementService)(input.threads ?? {}),
         ServerSettings.layerTest(
           input.continueAfterRestart === true ? { continueThreadsAfterServerUpdate: true } : {},
@@ -171,6 +187,270 @@ function layerExecutorFor(input: {
     ),
   );
 }
+
+const layerReceiptTest = Layer.mergeAll(PauseStore.layer, EffectOutbox.layer).pipe(
+  Layer.provideMerge(SqlitePersistence.layerConfig),
+  Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "pause-receipt-test-" })),
+  Layer.provideMerge(NodeServices.layer),
+);
+
+const receiptHarness = Effect.fnUntraced(function* (
+  direction: "pause" | "resume",
+  delivered: boolean | null,
+) {
+  const store = yield* PauseStore.EnvironmentPauseStore;
+  const outbox = yield* EffectOutbox.EffectOutboxV2;
+  const now = yield* DateTime.now;
+  const timestamp = DateTime.formatIso(now);
+  const session: PauseStore.StoredSession = {
+    id: "session-example",
+    phase: direction === "pause" ? "pausing" : "resuming",
+    createdAt: timestamp,
+    targets: [
+      {
+        threadId,
+        projectId: ProjectId.make("project-example"),
+        title: "Example thread",
+        pause: direction === "pause" ? "pending" : "sent",
+        resume: "pending",
+        pauseAttempt: 0,
+        resumeAttempt: 0,
+        pauseAccepted: true,
+        resumeAccepted: direction === "resume",
+        error: null,
+      },
+    ],
+  };
+  yield* store.update(() => session);
+  const { commandId, messageId } = PauseStore.deliveryIdentity(
+    session,
+    session.targets[0]!,
+    direction,
+  );
+  const sourceId = "effect:pause-native-start";
+  yield* outbox.enqueue([
+    {
+      id: sourceId,
+      commandId,
+      threadId,
+      request: { type: "provider-turn.start", runId },
+    },
+  ]);
+  const events = yield* Ref.make<ReadonlyArray<string>>([]);
+  const outage = yield* Ref.make(true);
+  const persistenceFailed = yield* Deferred.make<void>();
+  const nativeCalls = yield* Ref.make(0);
+  const failingStore = PauseStore.EnvironmentPauseStore.of({
+    ...store,
+    recordDelivery: (id, received) =>
+      Ref.get(outage).pipe(
+        Effect.flatMap((failed) =>
+          failed
+            ? Deferred.succeed(persistenceFailed, undefined).pipe(
+                Effect.andThen(
+                  Effect.fail(
+                    new EnvironmentPauseError({ operation: "persist", reason: "unavailable" }),
+                  ),
+                ),
+              )
+            : store.recordDelivery(id, received),
+        ),
+      ),
+  });
+  const executorLayer = (receiptStore = failingStore, receiptOutbox = outbox) =>
+    layerExecutorFor({
+      events,
+      outbox: receiptOutbox,
+      start: (input) =>
+        Effect.gen(function* () {
+          yield* Ref.update(nativeCalls, (count) => count + 1);
+          if (delivered === null) {
+            return yield* new ProviderTurnStartService.ProviderTurnStartError({
+              runId,
+              cause: "Native acknowledgement was lost.",
+            });
+          }
+          yield* input.onMessageDelivery?.(messageId, delivered) ?? Effect.void;
+        }),
+    }).pipe(Layer.provide(Layer.succeed(PauseStore.EnvironmentPauseStore, receiptStore)));
+  const runOnce = (receiptStore = failingStore, receiptOutbox = outbox) =>
+    EffectWorker.OrchestrationEffectWorkerV2.pipe(
+      Effect.flatMap((worker) => worker.runOnce),
+      Effect.provide(
+        EffectWorker.layerWithOptions({ workerId: "receipt-worker", maxAttempts: 1 }).pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              Layer.succeed(EffectOutbox.EffectOutboxV2, receiptOutbox),
+              Layer.succeed(PauseStore.EnvironmentPauseStore, receiptStore),
+              executorLayer(receiptStore, receiptOutbox),
+            ),
+          ),
+        ),
+      ),
+    );
+  return {
+    store,
+    outbox,
+    outage,
+    persistenceFailed,
+    nativeCalls,
+    session,
+    messageId,
+    commandId,
+    sourceId,
+    runOnce,
+  };
+});
+
+it.effect.each([
+  { direction: "pause" as const, delivered: true },
+  { direction: "resume" as const, delivered: true },
+  { direction: "pause" as const, delivered: false },
+  { direction: "resume" as const, delivered: false },
+])(
+  "recovers $direction receipt ($delivered) after persistence failure and restart without another send",
+  (input) =>
+    Effect.gen(function* () {
+      const h = yield* receiptHarness(input.direction, input.delivered);
+      assert.isTrue(yield* h.runOnce());
+      assert.equal((yield* h.store.get)?.targets[0]?.[input.direction], "pending");
+      const journal = (yield* h.outbox.listByCommandId(h.commandId)).find(
+        (row) => row.request.type === "environment-pause.record-delivery",
+      );
+      assert.isDefined(journal);
+      assert.equal((yield* h.outbox.get(h.sourceId)).pipe(Option.getOrThrow).status, "succeeded");
+      // Even the final ordinary attempt must leave receipt-only work recoverable.
+      assert.isTrue(yield* h.runOnce());
+      const retry = (yield* h.outbox.get(journal!.id)).pipe(Option.getOrThrow);
+      assert.equal(retry.status, "pending");
+      assert.equal(retry.attemptCount, 1);
+      yield* TestClock.adjust("100 millis");
+      const claimed = yield* h.outbox.claimNext({
+        workerId: "ended-process",
+        leaseDurationMs: 30_000,
+      });
+      assert.equal(Option.getOrThrow(claimed).id, journal!.id);
+      // Construct fresh services from persisted state and reconcile the old lease.
+      yield* Effect.gen(function* () {
+        const restartedOutbox = yield* EffectOutbox.EffectOutboxV2;
+        const restartedStore = yield* PauseStore.EnvironmentPauseStore;
+        assert.equal((yield* restartedStore.get)?.targets[0]?.[input.direction], "pending");
+        assert.deepEqual(yield* restartedOutbox.reconcileAfterProcessLoss, {
+          requeued: 1,
+          cancelled: 0,
+        });
+        assert.isTrue(yield* h.runOnce(restartedStore, restartedOutbox));
+        assert.equal(
+          (yield* restartedStore.get)?.targets[0]?.[input.direction],
+          input.delivered ? "sent" : "failed",
+        );
+        assert.isFalse(yield* h.runOnce(restartedStore, restartedOutbox));
+      }).pipe(Effect.provide(Layer.fresh(Layer.mergeAll(PauseStore.layer, EffectOutbox.layer))));
+      const finalStore = yield* PauseStore.EnvironmentPauseStore.pipe(
+        Effect.provide(Layer.fresh(PauseStore.layer)),
+      );
+      assert.equal(
+        (yield* finalStore.get)?.targets[0]?.[input.direction],
+        input.delivered ? "sent" : "failed",
+      );
+      assert.equal(yield* Ref.get(h.nativeCalls), 1);
+    }).pipe(Effect.provide(layerReceiptTest)),
+);
+
+it.effect("does not turn an ambiguous native outcome into a durable receipt", () =>
+  Effect.gen(function* () {
+    const h = yield* receiptHarness("pause", null);
+    assert.isTrue(yield* h.runOnce());
+    yield* Ref.set(h.outage, false);
+    assert.isFalse(yield* h.runOnce());
+    assert.equal((yield* h.store.get)?.targets[0]?.pause, "pending");
+    assert.deepEqual(
+      (yield* h.outbox.listByCommandId(h.commandId)).map((row) => row.request.type),
+      ["provider-turn.start"],
+    );
+    assert.equal(yield* Ref.get(h.nativeCalls), 1);
+  }).pipe(Effect.provide(layerReceiptTest)),
+);
+
+it.effect("ignores a recovered receipt for an older pause attempt", () =>
+  Effect.gen(function* () {
+    const h = yield* receiptHarness("pause", true);
+    yield* h.runOnce();
+    yield* h.store.update((session) =>
+      session === null
+        ? session
+        : {
+            ...session,
+            targets: session.targets.map((target) => ({
+              ...target,
+              pauseAttempt: 1,
+              pauseAccepted: false,
+            })),
+          },
+    );
+    const restartedStore = yield* PauseStore.EnvironmentPauseStore.pipe(
+      Effect.provide(Layer.fresh(PauseStore.layer)),
+    );
+    yield* h.runOnce(restartedStore);
+    assert.equal((yield* restartedStore.get)?.targets[0]?.pause, "pending");
+    assert.isFalse((yield* restartedStore.get)?.targets[0]?.pauseAccepted);
+    assert.equal(yield* Ref.get(h.nativeCalls), 1);
+  }).pipe(Effect.provide(layerReceiptTest)),
+);
+
+it.effect("retries a failed receipt journal write without repeating the native start", () =>
+  Effect.gen(function* () {
+    const h = yield* receiptHarness("pause", true);
+    const failed = yield* Deferred.make<void>();
+    const attempts = yield* Ref.make(0);
+    const receiptOutbox = EffectOutbox.EffectOutboxV2.of({
+      ...h.outbox,
+      enqueue: (effects) =>
+        Effect.gen(function* () {
+          if ((yield* Ref.updateAndGet(attempts, (count) => count + 1)) === 1) {
+            yield* Deferred.succeed(failed, undefined);
+            return yield* new EffectOutbox.EffectOutboxError({
+              operation: "enqueue",
+              cause: "Temporary journal outage.",
+            });
+          }
+          yield* h.outbox.enqueue(effects);
+        }),
+    });
+    const running = yield* h.runOnce(undefined, receiptOutbox).pipe(Effect.forkChild);
+    yield* Deferred.await(failed);
+    yield* Deferred.await(h.persistenceFailed);
+    assert.equal((yield* h.store.get)?.targets[0]?.pause, "pending");
+    yield* Ref.set(h.outage, false);
+    yield* TestClock.adjust("1 second");
+    assert.isTrue(yield* Fiber.join(running));
+    assert.equal((yield* h.store.get)?.targets[0]?.pause, "sent");
+    assert.equal(yield* Ref.get(h.nativeCalls), 1);
+    assert.equal(yield* Ref.get(attempts), 2);
+  }).pipe(Effect.provide(layerReceiptTest)),
+);
+
+it.effect("persists the native receipt directly when only the journal write fails", () =>
+  Effect.gen(function* () {
+    const h = yield* receiptHarness("pause", true);
+    const receiptOutbox = EffectOutbox.EffectOutboxV2.of({
+      ...h.outbox,
+      enqueue: () =>
+        Effect.fail(
+          new EffectOutbox.EffectOutboxError({
+            operation: "enqueue",
+            cause: "Temporary journal outage.",
+          }),
+        ),
+    });
+    assert.isTrue(yield* h.runOnce(h.store, receiptOutbox));
+    const restartedStore = yield* PauseStore.EnvironmentPauseStore.pipe(
+      Effect.provide(Layer.fresh(PauseStore.layer)),
+    );
+    assert.equal((yield* restartedStore.get)?.targets[0]?.pause, "sent");
+    assert.equal(yield* Ref.get(h.nativeCalls), 1);
+  }).pipe(Effect.provide(layerReceiptTest)),
+);
 
 it.effect.each([
   { label: "the target completes", fields: { turnCompleted: true } },

@@ -388,6 +388,7 @@ const layerSubagentPromotionProvided = SubagentPromotionService.layer.pipe(
 const layerEffectExecutorProvided = EffectWorker.layerExecutor.pipe(
   Layer.provide(
     Layer.mergeAll(
+      EffectOutbox.layer,
       layerRunFinalizationServiceProvided,
       layerCheckpointRollbackServiceProvided,
       layerProviderSessionManagerProvided,

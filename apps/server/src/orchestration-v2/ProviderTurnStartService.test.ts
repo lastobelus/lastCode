@@ -896,6 +896,10 @@ effectIt.effect.each([
               getThreadRecords: () => Effect.succeed(harness.projection()),
             }),
             Layer.mock(SubagentPromotionService.SubagentPromotionService)({}),
+            Layer.mock(EffectOutbox.EffectOutboxV2)({
+              enqueue: () => Effect.void,
+              notifyAvailable: () => Effect.void,
+            }),
             ServerSettings.layerTest(),
             Layer.mock(PauseStore.EnvironmentPauseStore)({
               get: Effect.succeed(session),

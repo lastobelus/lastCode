@@ -10,6 +10,7 @@ import * as Layer from "effect/Layer";
 import * as Metric from "effect/Metric";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 
 import {
@@ -96,6 +97,7 @@ export const layerExecutor: Layer.Layer<
   | ThreadManagementService.ThreadManagementService
   | SubagentPromotionService.SubagentPromotionService
   | ServerSettings.ServerSettingsService
+  | EffectOutbox.EffectOutboxV2
 > = Layer.effect(
   OrchestrationEffectExecutorV2,
   Effect.gen(function* () {
@@ -113,14 +115,49 @@ export const layerExecutor: Layer.Layer<
     const threads = yield* ThreadManagementService.ThreadManagementService;
     const subagentPromotion = yield* SubagentPromotionService.SubagentPromotionService;
     const settings = yield* ServerSettings.ServerSettingsService;
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
     const environmentPauseStore = yield* Effect.serviceOption(
       EnvironmentPauseStore.EnvironmentPauseStore,
     );
-    const recordPauseDelivery = (messageId: MessageId, delivered: boolean) =>
+    const recordPauseDelivery = (threadId: ThreadId, messageId: MessageId, delivered: boolean) =>
       messageId.startsWith("environment-pause:") && Option.isSome(environmentPauseStore)
-        ? environmentPauseStore.value
-            .recordDelivery(messageId, delivered)
-            .pipe(Effect.ignore({ log: true }))
+        ? outbox
+            .enqueue([
+              {
+                id: `effect:environment-pause:receipt:${messageId}:${delivered}`,
+                commandId: CommandId.make(messageId),
+                threadId,
+                request: { type: "environment-pause.record-delivery", messageId, delivered },
+              },
+            ])
+            .pipe(
+              Effect.as(true),
+              Effect.catch((journalError) =>
+                environmentPauseStore.value.recordDelivery(messageId, delivered).pipe(
+                  Effect.as(false),
+                  Effect.mapError(() => journalError),
+                ),
+              ),
+              // Retry only journaling the known result, never the native send. If
+              // this process stops before any durable write, delivery stays unknown.
+              Effect.retry({ schedule: Schedule.spaced("1 second") }),
+              // This schedule has no terminal failure; interruption keeps its
+              // usual meaning while the native callback remains infallible.
+              Effect.orDie,
+              Effect.flatMap((journaled) =>
+                journaled
+                  ? outbox
+                      .notifyAvailable()
+                      .pipe(
+                        Effect.andThen(
+                          environmentPauseStore.value
+                            .recordDelivery(messageId, delivered)
+                            .pipe(Effect.ignore({ log: true })),
+                        ),
+                      )
+                  : Effect.void,
+              ),
+            )
         : Effect.void;
     const recordPauseRunDelivery = (threadId: ThreadId, runId: RunId, delivered: boolean) =>
       Option.isNone(environmentPauseStore)
@@ -134,7 +171,7 @@ export const layerExecutor: Layer.Layer<
                       const run = projection.runs.find((run) => run.id === runId);
                       return run === undefined
                         ? Effect.void
-                        : recordPauseDelivery(run.userMessageId, delivered);
+                        : recordPauseDelivery(threadId, run.userMessageId, delivered);
                     }),
                     Effect.ignore({ log: true }),
                   ),
@@ -144,6 +181,27 @@ export const layerExecutor: Layer.Layer<
       execute: (effect, options) => {
         const willRetry = options?.willRetry ?? false;
         switch (effect.request.type) {
+          case "environment-pause.record-delivery":
+            return Option.isNone(environmentPauseStore)
+              ? Effect.fail(
+                  new OrchestrationEffectExecutionError({
+                    effectId: effect.id,
+                    effectType: effect.request.type,
+                    cause: "The environment pause receipt store is unavailable.",
+                  }),
+                )
+              : environmentPauseStore.value
+                  .recordDelivery(effect.request.messageId, effect.request.delivered)
+                  .pipe(
+                    Effect.mapError(
+                      (cause) =>
+                        new OrchestrationEffectExecutionError({
+                          effectId: effect.id,
+                          effectType: effect.request.type,
+                          cause,
+                        }),
+                    ),
+                  );
           case "incoming-message.summarize":
             return incomingMessageSummary
               .execute({
@@ -242,7 +300,8 @@ export const layerExecutor: Layer.Layer<
                 threadId: effect.threadId,
                 runId: effect.request.runId,
                 willRetry,
-                onMessageDelivery: recordPauseDelivery,
+                onMessageDelivery: (messageId, delivered) =>
+                  recordPauseDelivery(effect.threadId, messageId, delivered),
               })
               .pipe(
                 Effect.tapError((cause) =>
@@ -314,7 +373,7 @@ export const layerExecutor: Layer.Layer<
                 Effect.tap(() =>
                   Effect.gen(function* () {
                     if (effect.request.type !== "provider-turn.steer") return;
-                    yield* recordPauseDelivery(effect.request.messageId, true);
+                    yield* recordPauseDelivery(effect.threadId, effect.request.messageId, true);
                     const messageId = effect.request.messageId;
                     const projection = yield* threads.getThreadRecords(
                       effect.threadId,
@@ -339,7 +398,7 @@ export const layerExecutor: Layer.Layer<
                       "deliveryRejected" in error &&
                       error.deliveryRejected === true
                     ) {
-                      yield* recordPauseDelivery(effect.request.messageId, false);
+                      yield* recordPauseDelivery(effect.threadId, effect.request.messageId, false);
                       // A provider's definite rejection is final non-delivery;
                       // retrying it must not strand cleanup or start another turn.
                       return;
@@ -354,7 +413,7 @@ export const layerExecutor: Layer.Layer<
                     // The target already finished. Strict steering must neither start
                     // a follow-up nor leave an expected delivery race blocking cleanup.
                     if (effect.request.nativeOnly === true) {
-                      yield* recordPauseDelivery(effect.request.messageId, false);
+                      yield* recordPauseDelivery(effect.threadId, effect.request.messageId, false);
                       return;
                     }
                     const projection = yield* threads.getThreadRecords(
@@ -870,7 +929,8 @@ export const layerWithOptions = (
             ? yield* outbox
                 .succeed({ effectId: effect.id, workerId })
                 .pipe(Effect.onError((cause) => terminalizeClaim(effect, cause)))
-            : effect.attemptCount >= maxAttempts
+            : effect.attemptCount >= maxAttempts &&
+                effect.request.type !== "environment-pause.record-delivery"
               ? yield* outbox
                   .fail({ effectId: effect.id, workerId, error })
                   .pipe(Effect.onError((cause) => terminalizeClaim(effect, cause)))
