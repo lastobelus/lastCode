@@ -198,7 +198,9 @@ const harness = Effect.gen(function* () {
   const runtimeWork = yield* Ref.make<
     ReadonlyArray<{ providerSessionId: ProviderSessionId; status: "running" | "stopping" }>
   >([]);
-  const pending = yield* Ref.make<ReadonlyArray<{ threadId: ThreadId }>>([]);
+  const pending = yield* Ref.make<
+    Effect.Success<EffectOutbox.EffectOutboxV2Shape["pendingExecution"]>
+  >([]);
   const pendingCleanup = yield* Ref.make<ReadonlyArray<{ threadId: ThreadId }>>([]);
   const deferred = yield* Ref.make<ReadonlyArray<{ threadId: ThreadId; runId: RunId }>>([]);
   const gateObservations = yield* Ref.make<ReadonlyArray<Store.StoredSession["phase"] | null>>([]);
@@ -440,7 +442,8 @@ it.effect.each(["archive-pending", "provider-running"] as const)(
       };
       yield* Ref.set(h.snapshot, { ...shell([thread(a)]), archivedThreads: [archived] });
       yield* Ref.set(h.failures, new Set([b]));
-      if (scenario === "archive-pending") yield* Ref.set(h.pending, [{ threadId: b }]);
+      if (scenario === "archive-pending")
+        yield* Ref.set(h.pending, [{ threadId: b, providerMessage: false }]);
       const started = yield* h.pause.start;
       assert.deepEqual(
         started.session?.targets.map((target) => target.threadId),
@@ -1475,7 +1478,7 @@ it.effect(
       ]);
       assert.isFalse((yield* h.pause.status).quiet);
       yield* Ref.set(h.runtimeWork, []);
-      yield* Ref.set(h.pending, [{ threadId: a }]);
+      yield* Ref.set(h.pending, [{ threadId: a, providerMessage: true }]);
       assert.isFalse((yield* h.pause.status).quiet);
       yield* Ref.set(h.pending, []);
       assert.isTrue((yield* h.pause.status).quiet);
@@ -1700,7 +1703,7 @@ it.effect("collects newly active threads on retry without repeating successful p
     const h = yield* harness;
     yield* h.pause.start;
     yield* Ref.set(h.snapshot, shell([thread(c, "idle")]));
-    yield* Ref.set(h.pending, [{ threadId: c }]);
+    yield* Ref.set(h.pending, [{ threadId: c, providerMessage: true }]);
     const result = yield* h.pause.retry;
     assert.deepEqual(
       result.session?.targets.map((target) => target.threadId),
@@ -1709,6 +1712,62 @@ it.effect("collects newly active threads on retry without repeating successful p
     assert.deepEqual(
       (yield* Ref.get(h.calls)).map((call) => call.threadId),
       [a, b, c],
+    );
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect.each(["checkpoint", "cleanup"] as const)(
+  "waits for idle %s work without sending Pause or enrolling Resume on rescans",
+  (work) =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      yield* Ref.set(h.snapshot, shell([thread(a, "idle")]));
+      if (work === "checkpoint")
+        yield* Ref.set(h.pending, [{ threadId: a, providerMessage: false }]);
+      else yield* Ref.set(h.pendingCleanup, [{ threadId: a }]);
+      const waiting = yield* h.pause.start;
+      assert.isFalse(waiting.quiet);
+      assert.strictEqual(waiting.activeThreadCount, 1);
+      assert.isEmpty(waiting.session?.targets ?? []);
+      assert.isTrue(
+        waiting.blockers.some(
+          (blocker) => blocker.type === (work === "checkpoint" ? "thread-turn" : "thread-cleanup"),
+        ),
+      );
+      for (const rescan of [h.pause.retry, h.pause.start]) {
+        const status = yield* rescan;
+        assert.isFalse(status.quiet);
+        assert.isEmpty(status.session?.targets ?? []);
+      }
+      assert.isEmpty(yield* Ref.get(h.calls));
+      yield* Ref.set(h.pending, []);
+      yield* Ref.set(h.pendingCleanup, []);
+      assert.isTrue((yield* h.pause.status).quiet);
+      assert.isNull((yield* h.pause.resume).session);
+      assert.isEmpty(yield* Ref.get(h.calls));
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("pauses a pending provider send even when its shell is idle", () =>
+  Effect.gen(function* () {
+    const h = yield* harness;
+    yield* Ref.set(h.snapshot, shell([thread(a, "idle")]));
+    yield* Ref.set(h.pending, [{ threadId: a, providerMessage: true }]);
+    const waiting = yield* h.pause.start;
+    assert.isFalse(waiting.quiet);
+    assert.deepEqual(
+      waiting.session?.targets.map((target) => target.threadId),
+      [a],
+    );
+    yield* h.pause.retry;
+    yield* h.pause.start;
+    assert.lengthOf(yield* Ref.get(h.calls), 1);
+    yield* Ref.set(h.pending, []);
+    assert.isTrue((yield* h.pause.status).quiet);
+    assert.isNull((yield* h.pause.resume).session);
+    assert.deepEqual(
+      (yield* Ref.get(h.calls)).map((call) => call.text),
+      ["pause to go offline", "resume"],
     );
   }).pipe(Effect.provide(testLayer)),
 );
@@ -1766,7 +1825,7 @@ it.effect(
       );
       yield* Ref.update(h.runs, (runs) => runs.map((run) => ({ ...run, status: "starting" })));
       yield* Ref.set(h.snapshot, shell([]));
-      yield* Ref.set(h.pending, [{ threadId: a }]);
+      yield* Ref.set(h.pending, [{ threadId: a, providerMessage: true }]);
       yield* Ref.set(h.effects, [startEffect]);
       const starting = yield* h.pause.status;
       assert.strictEqual(starting.observation, "known");

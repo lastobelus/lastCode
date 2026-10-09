@@ -233,7 +233,7 @@ export interface EffectOutboxV2Shape {
   >;
   /** Accepted execution that may start or continue after its shell appears idle. */
   readonly pendingExecution: Effect.Effect<
-    ReadonlyArray<{ readonly threadId: ThreadId }>,
+    ReadonlyArray<{ readonly threadId: ThreadId; readonly providerMessage: boolean }>,
     EffectOutboxError
   >;
   /** Unfinished cleanup, including pending retry backoff, without decoding payloads. */
@@ -576,8 +576,13 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
       pendingAutomaticRelease: automaticExecution(true),
       pendingExecution: Effect.gen(function* () {
         const paused = yield* automationPaused;
-        return yield* sql<{ thread_id: string }>`
-        SELECT DISTINCT candidate.thread_id FROM orchestration_v2_effect_outbox AS candidate
+        return yield* sql<{ thread_id: string; provider_message: number }>`
+        SELECT candidate.thread_id,
+          MAX(CASE WHEN candidate.effect_type IN (
+            'provider-turn.start', 'provider-turn.restart', 'provider-turn.steer',
+            'provider-runtime.continue', 'runtime-request.respond'
+          ) THEN 1 ELSE 0 END) AS provider_message
+        FROM orchestration_v2_effect_outbox AS candidate
         WHERE candidate.status IN ('pending', 'running')
           AND ${paused ? sql`(candidate.status = 'running' OR NOT ${automaticEffect("candidate")})` : sql`1 = 1`}
           AND candidate.effect_type IN (
@@ -585,10 +590,15 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
           'provider-turn.start', 'provider-turn.restart', 'provider-turn.steer',
           'runtime-request.respond', 'provider-thread.rollback', 'checkpoint.capture',
           'delegated-tasks.stop'
-        ) ORDER BY candidate.thread_id
+        ) GROUP BY candidate.thread_id ORDER BY candidate.thread_id
       `;
       }).pipe(
-        Effect.map((rows) => rows.map((row) => ({ threadId: ThreadId.make(row.thread_id) }))),
+        Effect.map((rows) =>
+          rows.map((row) => ({
+            threadId: ThreadId.make(row.thread_id),
+            providerMessage: row.provider_message === 1,
+          })),
+        ),
         Effect.mapError(
           (cause) => new EffectOutboxError({ operation: "pending-execution", cause }),
         ),

@@ -113,7 +113,9 @@ const make = Effect.gen(function* () {
         (cause) => new EnvironmentPauseError({ operation: "status", reason: "unavailable", cause }),
       ),
     );
-    const pendingIds = new Set(pending.map(({ threadId }) => threadId));
+    const pendingIds = new Set(
+      pending.filter(({ providerMessage }) => providerMessage).map(({ threadId }) => threadId),
+    );
     // Archived work still blocks quiet in status, but cannot accept messages.
     return {
       deferred,
