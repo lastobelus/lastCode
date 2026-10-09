@@ -123,13 +123,7 @@ describe("LastCodeSettingsImport", () => {
       },
     };
     const sourceServer = record(structuredClone(encodeServerSettings(DEFAULT_SERVER_SETTINGS)));
-    const sourceProviders = record(sourceServer.providers);
-    const sourceOpenCode = record(sourceProviders.opencode);
-    const sourceCodex = record(sourceProviders.codex);
     sourceServer.addProjectBaseDirectory = "/src/t3-projects";
-    sourceOpenCode.serverUrl = "http://127.0.0.1:4096";
-    sourceOpenCode.serverPassword = "source-secret";
-    sourceCodex.launchArgs = "--source-secret token";
     sourceServer.textGenerationModelSelection = {
       instanceId: "opencode",
       model: "source-model",
@@ -154,6 +148,13 @@ describe("LastCodeSettingsImport", () => {
         },
         environment: [{ name: "TOKEN", value: "source-default-token", sensitive: true }],
       },
+      opencode: {
+        driver: "opencode",
+        config: {
+          serverUrl: "http://127.0.0.1:4096",
+          serverPassword: "source-secret",
+        },
+      },
       personal: {
         driver: "codex",
         environment: [{ name: "TOKEN", value: "source-token", sensitive: true }],
@@ -163,13 +164,7 @@ describe("LastCodeSettingsImport", () => {
     const destinationServer = record(
       structuredClone(encodeServerSettings(DEFAULT_SERVER_SETTINGS)),
     );
-    const destinationProviders = record(destinationServer.providers);
-    const destinationOpenCode = record(destinationProviders.opencode);
-    const destinationCodex = record(destinationProviders.codex);
     destinationServer.addProjectBaseDirectory = "/src/lastcode-projects";
-    destinationOpenCode.serverUrl = "http://127.0.0.1:7777";
-    destinationOpenCode.serverPassword = "lastcode-secret";
-    destinationCodex.launchArgs = "--lastcode-only";
     destinationServer.textGenerationModelSelection = {
       instanceId: "codex",
       model: "lastcode-model",
@@ -189,6 +184,13 @@ describe("LastCodeSettingsImport", () => {
           launchArgs: "--lastcode-instance-only",
         },
         environment: [{ name: "TOKEN", value: "lastcode-default-token", sensitive: true }],
+      },
+      opencode: {
+        driver: "opencode",
+        config: {
+          serverUrl: "http://127.0.0.1:7777",
+          serverPassword: "lastcode-secret",
+        },
       },
       lastcode: {
         driver: "codex",
@@ -246,7 +248,6 @@ describe("LastCodeSettingsImport", () => {
       codex: { hiddenModels: ["hidden-source"], modelOrder: ["gpt-source"] },
     });
     assert.equal(importedServer.addProjectBaseDirectory, "/src/t3-projects");
-    assert.deepEqual(importedServer.providers, destinationServer.providers);
     assert.deepEqual(importedServer.providerInstances, destinationServer.providerInstances);
     assert.deepEqual(
       importedServer.textGenerationModelSelection,
