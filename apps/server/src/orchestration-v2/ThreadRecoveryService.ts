@@ -198,9 +198,19 @@ const make = Effect.gen(function* () {
       }),
     );
   const markFailed = Effect.fnUntraced(function* (input: ThreadRecoveryIdentity, detail: string) {
-    pendingFailures.set(incidentKey(input), detail);
-    yield* write(input, "failed", detail);
-    pendingFailures.delete(incidentKey(input));
+    const key = incidentKey(input);
+    const priorFailure = pendingFailures.get(key);
+    pendingFailures.set(key, detail);
+    yield* write(input, "failed", detail).pipe(
+      Effect.catchTags({
+        ThreadRecoveryAboveModeLimitError: (error) =>
+          Effect.sync(() => {
+            if (priorFailure === undefined) pendingFailures.delete(key);
+            else pendingFailures.set(key, priorFailure);
+          }).pipe(Effect.andThen(error)),
+      }),
+    );
+    pendingFailures.delete(key);
   });
   const recover = (input: ThreadRecoveryIdentity, manual: boolean, reportFailure = true) =>
     lock.withLock(

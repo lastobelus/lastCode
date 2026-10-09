@@ -400,7 +400,7 @@ it.effect.each(["mode-refusal", "unknown", "provider-failure"] as const)(
         payload: {
           id: providerTurnId,
           providerThreadId,
-          nodeId: run.rootNodeId,
+          nodeId: run.rootNodeId!,
           runAttemptId: attemptId,
           nativeTurnRef: null,
           ordinal: 1,

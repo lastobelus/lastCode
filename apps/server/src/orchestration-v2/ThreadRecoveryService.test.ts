@@ -442,6 +442,61 @@ it.effect("manual recovery does not turn a mode refusal into a pending provider 
     assert.deepEqual(test.statuses, ["recovering", "recovering", "recovered"]);
   }).pipe(Effect.provide(test.layer));
 });
+it.effect("refused unknown recovery does not block fresh terminal evidence", () => {
+  const test = harness();
+  const allowed = {
+    runtimeMode: "approval-required" as const,
+    interactionMode: "default" as const,
+  };
+  test.setModes(allowed);
+  test.inspect({ status: "unknown" });
+  test.beforeInspect(
+    Effect.sync(() => test.setModes({ runtimeMode: "full-access", interactionMode: "default" })),
+  );
+  return Effect.gen(function* () {
+    const service = yield* test.register;
+    const refusal = yield* service
+      .recover(identity)
+      .pipe(Effect.provideService(DispatchModeLimit, allowed), Effect.flip);
+    assert.equal(refusal._tag, "ThreadRecoveryAboveModeLimitError");
+    assert.deepEqual(test.statuses, []);
+    assert.equal(test.finalizations, 0);
+    assert.equal(test.run.status, "running");
+    test.beforeInspect(Effect.void);
+    test.inspect(terminal);
+    yield* service.recover(identity);
+    assert.deepEqual(test.statuses, ["recovering", "recovered"]);
+    assert.equal(test.finalizations, 1);
+    assert.equal(test.run.status, "completed");
+  }).pipe(Effect.provide(test.layer));
+});
+it.effect("refused recovery preserves a failure queued during a database outage", () => {
+  const test = harness();
+  const allowed = {
+    runtimeMode: "approval-required" as const,
+    interactionMode: "default" as const,
+  };
+  test.inspect({ status: "unknown" });
+  test.setFailedReceiptOutage(true);
+  return Effect.gen(function* () {
+    const service = yield* test.register;
+    assert.isTrue(Exit.isFailure(yield* service.recover(identity).pipe(Effect.exit)));
+    test.setFailedReceiptOutage(false);
+    test.inspect(terminal);
+    const refusal = yield* service
+      .recover(identity)
+      .pipe(Effect.provideService(DispatchModeLimit, allowed), Effect.flip);
+    assert.equal(refusal._tag, "ThreadRecoveryAboveModeLimitError");
+    assert.deepEqual(test.statuses, []);
+    yield* service.recover(identity);
+    assert.deepEqual(test.statuses, ["failed"]);
+    assert.equal(test.finalizations, 0);
+    yield* service.recover(identity);
+    assert.deepEqual(test.statuses, ["failed", "recovering", "recovered"]);
+    assert.equal(test.finalizations, 1);
+    assert.equal(test.run.status, "completed");
+  }).pipe(Effect.provide(test.layer));
+});
 it.effect("failed archive inspection does not write a recovery failure", () => {
   const test = harness();
   test.beforeInspect(Effect.die("inspection unavailable"));
