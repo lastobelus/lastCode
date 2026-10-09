@@ -11,6 +11,7 @@ import {
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NetService from "@t3tools/shared/Net";
+import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
@@ -798,4 +799,195 @@ it.effect("settings subscription stops the helper after the final project grant 
       Effect.scoped,
     );
   }),
+);
+
+it.effect(
+  "disabling device support retires access before a reused emulator serial is rediscovered",
+  () =>
+    Effect.gen(function* () {
+      const initial = {
+        ...DEFAULT_SERVER_SETTINGS,
+        enableDeviceSupport: true,
+        enableAgentDeviceAccess: false,
+        projectSettingsOverrides: { [projectId]: { enableAgentDeviceAccess: true } },
+      };
+      const current = yield* Ref.make<typeof DEFAULT_SERVER_SETTINGS>(initial);
+      const changingSettings = Layer.mock(ServerSettings.ServerSettingsService)({
+        getSettings: Ref.get(current),
+        updateSettings: (patch) =>
+          Ref.updateAndGet(current, (value) => applyServerSettingsPatch(value, patch)),
+        subscribeChanges: Effect.succeed(Stream.empty),
+      });
+      let onStop: Effect.Effect<void> = Effect.void;
+      const observedHost = Layer.effect(
+        DeviceHost.DeviceHost,
+        Effect.gen(function* () {
+          const base = yield* DeviceHost.DeviceHost;
+          return DeviceHost.DeviceHost.of({ ...base, stop: Effect.suspend(() => onStop) });
+        }),
+      ).pipe(Layer.provide(host));
+      const deviceId = DeviceId.make("emulator-5554");
+      let avdName = "Original AVD";
+      const http = HttpClient.make((request) =>
+        Effect.sync(() =>
+          HttpClientResponse.fromWeb(
+            request,
+            Response.json(
+              new URL(request.url).pathname === "/api/devices"
+                ? {
+                    emulators: [
+                      {
+                        id: deviceId,
+                        name: avdName,
+                        platform: "android",
+                        version: "26",
+                        booted: true,
+                        physical: false,
+                      },
+                    ],
+                    simulators: [],
+                  }
+                : { ok: true },
+            ),
+          ),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        const devices = yield* DeviceService.DeviceService;
+        const access = yield* DeviceAgentAccess.DeviceAgentAccess;
+        const fs = yield* FileSystem.FileSystem;
+        const input = {
+          threadId: ThreadId.make("thread-1"),
+          hostId: "local" as const,
+          deviceId,
+          platform: "android" as const,
+        };
+        const openedSession = yield* devices.open(input);
+        const args = yield* devices.agentTarget({ openedSession, agentAccessEnabled: true });
+        const oldToken = decodeConfig(yield* fs.readFileString(args[1]!)).daemonAuthToken;
+        const owner = yield* access.authorize(oldToken);
+        const artifact = { kind: "artifact" as const, id: "old-avd-artifact" };
+        yield* access.recordResource(owner, artifact);
+        onStop = Effect.gen(function* () {
+          expect((yield* devices.state).devices).toHaveLength(1);
+          expect(yield* access.ownsResource(owner, artifact)).toBe(false);
+        });
+        yield* devices.configure({ enabled: false });
+        expect((yield* devices.state).devices).toEqual([]);
+        expect((yield* devices.state).sessions).toEqual([]);
+        avdName = "Replacement AVD";
+        yield* devices.configure({ enabled: true });
+        expect((yield* devices.state).devices).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ id: deviceId, name: "Replacement AVD", booted: true }),
+          ]),
+        );
+        expect((yield* Effect.exit(access.authorize(oldToken)))._tag).toBe("Failure");
+        expect(yield* access.ownsResource(owner, artifact)).toBe(false);
+        const replacement = yield* devices.open(input);
+        const freshArgs = yield* devices.agentTarget({
+          openedSession: replacement,
+          agentAccessEnabled: true,
+        });
+        const freshToken = decodeConfig(yield* fs.readFileString(freshArgs[1]!)).daemonAuthToken;
+        expect(freshToken).not.toBe(oldToken);
+        expect((yield* access.authorize(freshToken)).deviceId).toBe(deviceId);
+        expect((yield* Effect.exit(access.authorize(freshToken, artifact)))._tag).toBe("Failure");
+      }).pipe(
+        Effect.provide(layer("127.0.0.1", undefined, http, changingSettings, observedHost)),
+        Effect.scoped,
+      );
+    }),
+);
+
+it.effect("aborting a repeated agent open restores the prior session and its usable access", () =>
+  Effect.gen(function* () {
+    const devices = yield* DeviceService.DeviceService;
+    const access = yield* DeviceAgentAccess.DeviceAgentAccess;
+    const fs = yield* FileSystem.FileSystem;
+    const input = {
+      threadId: ThreadId.make("thread-1"),
+      hostId: "local" as const,
+      deviceId: DeviceId.make("device-1"),
+      platform: "android" as const,
+    };
+    const original = yield* devices.open(input, { rollbackOnFailure: true });
+    const args = yield* devices.agentTarget({ openedSession: original, agentAccessEnabled: true });
+    const token = decodeConfig(yield* fs.readFileString(args[1]!)).daemonAuthToken;
+    yield* devices.completeOpen(original);
+    const target = yield* access.authorize(token);
+    const artifact = { kind: "artifact" as const, id: "good-session-artifact" };
+    yield* access.recordResource(target, artifact);
+    const failed = yield* devices.open(input, { rollbackOnFailure: true });
+    const repeatedArgs = yield* devices.agentTarget({
+      openedSession: failed,
+      agentAccessEnabled: true,
+    });
+    expect(decodeConfig(yield* fs.readFileString(repeatedArgs[1]!)).daemonAuthToken).toBe(token);
+    yield* devices.abortOpen(failed);
+    const restored = (yield* devices.state).sessions;
+    expect(restored).toHaveLength(1);
+    expect(restored[0]).toBe(original);
+    expect(yield* access.authorize(token, artifact)).toEqual(target);
+    const delayedFailure = yield* devices.open(input, { rollbackOnFailure: true });
+    const newer = yield* devices.open(input, { rollbackOnFailure: true });
+    yield* devices.completeOpen(newer);
+    yield* devices.abortOpen(delayedFailure);
+    const preserved = (yield* devices.state).sessions;
+    expect(preserved).toHaveLength(1);
+    expect(preserved[0]).toBe(newer);
+    expect(yield* access.authorize(token, artifact)).toEqual(target);
+  }).pipe(Effect.provide(layer("127.0.0.1")), Effect.scoped),
+);
+
+it.effect.each([false, true])(
+  "overlapping failed opens restore only a successful predecessor (prior success: %s)",
+  (hasPriorSuccess) =>
+    Effect.gen(function* () {
+      const devices = yield* DeviceService.DeviceService;
+      const access = yield* DeviceAgentAccess.DeviceAgentAccess;
+      const fs = yield* FileSystem.FileSystem;
+      const input = {
+        threadId: ThreadId.make("thread-1"),
+        hostId: "local" as const,
+        deviceId: DeviceId.make("device-1"),
+        platform: "android" as const,
+      };
+      const issue = (
+        openedSession: Effect.Success<ReturnType<DeviceService.DeviceService["Service"]["open"]>>,
+      ) =>
+        Effect.gen(function* () {
+          const args = yield* devices.agentTarget({ openedSession, agentAccessEnabled: true });
+          return decodeConfig(yield* fs.readFileString(args[1]!)).daemonAuthToken;
+        });
+      const artifact = { kind: "artifact" as const, id: "overlapping-open-artifact" };
+      const prior = hasPriorSuccess
+        ? yield* devices.open(input, { rollbackOnFailure: true })
+        : null;
+      const priorToken = prior ? yield* issue(prior) : null;
+      if (prior) yield* devices.completeOpen(prior);
+      if (priorToken) yield* access.recordResource(yield* access.authorize(priorToken), artifact);
+      const openingA = yield* devices.open(input, { rollbackOnFailure: true });
+      const token = yield* issue(openingA);
+      if (priorToken) expect(token).toBe(priorToken);
+      const target = yield* access.authorize(token);
+      if (!priorToken) yield* access.recordResource(target, artifact);
+      // A's post-open setup is pending when B replaces it; both later fail.
+      const openingB = yield* devices.open(input, { rollbackOnFailure: true });
+      expect(yield* issue(openingB)).toBe(token);
+      yield* devices.abortOpen(openingA);
+      expect((yield* devices.state).sessions[0]).toBe(openingB);
+      expect(yield* access.authorize(token, artifact)).toEqual(target);
+      yield* devices.abortOpen(openingB);
+      const sessions = (yield* devices.state).sessions;
+      if (prior) {
+        expect(sessions).toHaveLength(1);
+        expect(sessions[0]).toBe(prior);
+        expect(yield* access.authorize(token, artifact)).toEqual(target);
+      } else {
+        expect(sessions).toEqual([]);
+        expect((yield* Effect.exit(access.authorize(token)))._tag).toBe("Failure");
+        expect(yield* access.ownsResource(target, artifact)).toBe(false);
+      }
+    }).pipe(Effect.provide(layer("127.0.0.1")), Effect.scoped),
 );
