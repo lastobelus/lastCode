@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it } from "vite-plus/test";
+import { it as effectIt } from "@effect/vitest";
 import { DeviceId, ProjectId, ThreadId, DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as Clock from "effect/Clock";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -25,6 +27,7 @@ afterEach(async () => {
 });
 
 const fixture = () => {
+  let readinessGate: Effect.Effect<void> = Effect.void;
   let permitted = true;
   let support = true;
   let threadState: "present" | "deleted" | "missing" = "present";
@@ -204,18 +207,34 @@ const fixture = () => {
     ),
   );
   const { handler, dispose } = HttpRouter.toWebHandler(
-    Layer.merge(AgentDeviceProxy.layer, issueRoute).pipe(
+    Layer.mergeAll(
+      AgentDeviceProxy.layer,
+      issueRoute,
+      HttpRouter.add(
+        "POST",
+        "/retire-host",
+        Effect.gen(function* () {
+          const access = yield* DeviceAgentAccess.DeviceAgentAccess;
+          yield* access.retireHost("host-1");
+          return HttpServerResponse.empty();
+        }),
+      ),
+    ).pipe(
       Layer.provideMerge(access),
       Layer.provideMerge(
         Layer.mock(DeviceService.DeviceService)({
           agentReadinessIfSupported: (host) =>
-            Effect.sync(() => {
-              hostRequests.push(host ?? "local");
-              return {
-                hostId: host,
-                agentDevice: { baseUrl: origin, token: "raw-daemon-token" },
-              } as DeviceService.DeviceAgentReadiness;
-            }),
+            readinessGate.pipe(
+              Effect.andThen(
+                Effect.sync(() => {
+                  hostRequests.push(host ?? "local");
+                  return {
+                    hostId: host,
+                    agentDevice: { baseUrl: origin, token: "raw-daemon-token" },
+                  } as DeviceService.DeviceAgentReadiness;
+                }),
+              ),
+            ),
         }),
       ),
       Layer.provideMerge(Layer.succeed(HttpClient.HttpClient, client)),
@@ -271,6 +290,10 @@ const fixture = () => {
     issueResponse,
     call,
     handler,
+    pauseReadiness: (gate: Effect.Effect<void>) => {
+      readinessGate = gate;
+    },
+    retireHost: () => handler(new Request("http://t3.example/retire-host", { method: "POST" })),
     requests,
     hostRequests,
     payloads,
@@ -324,6 +347,33 @@ const fixture = () => {
 };
 
 describe("thread-scoped device CLI proxy", () => {
+  effectIt.effect(
+    "denies a retired host credential that was waiting for replacement readiness",
+    () =>
+      Effect.gen(function* () {
+        const f = fixture();
+        const token = yield* Effect.promise(() => f.issue());
+        const started = yield* Deferred.make<void>();
+        const resume = yield* Deferred.make<void>();
+        f.pauseReadiness(
+          Deferred.succeed(started, undefined).pipe(
+            Effect.andThen(Deferred.await(resume)),
+            Effect.asVoid,
+          ),
+        );
+        const pending = f.call(token);
+        yield* Deferred.await(started);
+        yield* Effect.promise(() => f.retireHost());
+        const fresh = yield* Effect.promise(() => f.issue());
+        expect(fresh).not.toBe(token);
+        f.remote();
+        yield* Deferred.succeed(resume, undefined);
+        expect((yield* Effect.promise(() => pending)).status).toBe(403);
+        expect(f.requests).toHaveLength(0);
+        expect((yield* Effect.promise(() => f.call(fresh))).status).toBe(200);
+        expect(f.requests).toHaveLength(1);
+      }),
+  );
   it("rechecks a copied credential after project revocation without touching unrelated access", async () => {
     const f = fixture();
     const token = await f.issue();

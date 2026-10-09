@@ -31,9 +31,28 @@ export const agentDeviceConfigPath = (
   path: Path.Path,
   target?: { readonly threadId: string; readonly deviceId: string },
 ) =>
-  key(
-    target === undefined ? hostId : JSON.stringify([target.threadId, hostId, target.deviceId]),
-  ).pipe(Effect.map((hash) => path.join(stateDir, "device", "hosts", `${hash}.json`)));
+  key(target === undefined ? hostId : JSON.stringify([hostId, target.deviceId])).pipe(
+    Effect.map((hash) =>
+      target === undefined
+        ? path.join(stateDir, "device", "hosts", `${hash}.json`)
+        : path.join(
+            agentDeviceThreadConfigDirectory(stateDir, target.threadId, path),
+            `${hash}.json`,
+          ),
+    ),
+  );
+
+export const agentDeviceThreadConfigDirectory = (
+  stateDir: string,
+  threadId: string,
+  path: Path.Path,
+) =>
+  path.join(
+    stateDir,
+    "device",
+    "agent-threads",
+    encodeURIComponent(threadId).replaceAll(".", "%2E"),
+  );
 
 export const agentDeviceSession = (threadId: string, hostId: string, deviceId: string) =>
   key(JSON.stringify([threadId, hostId, deviceId])).pipe(Effect.map((hash) => `t3-${hash}`));

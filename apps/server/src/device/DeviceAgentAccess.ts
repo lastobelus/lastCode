@@ -62,6 +62,8 @@ interface Target {
 export class DeviceAgentAccess extends Context.Service<
   DeviceAgentAccess,
   {
+    readonly retireThread: (threadId: ThreadId) => Effect.Effect<void>;
+    readonly retireHost: (hostId: DeviceHostId) => Effect.Effect<void>;
     readonly issue: (target: Target) => Effect.Effect<string, DeviceAgentAccessDenied>;
     readonly authorize: (
       token: string,
@@ -118,7 +120,15 @@ const make = Effect.gen(function* () {
     currentThreadDeviceAccess(threads.getThreadShell(target.threadId)).pipe(
       Effect.provide(consentContext),
     );
+  const retire = (matches: (target: Target) => boolean) =>
+    Effect.sync(() => {
+      for (const target of credentials.values()) {
+        if (matches(target)) discard(target);
+      }
+    }).pipe(credentialLock.withPermit);
   return DeviceAgentAccess.of({
+    retireThread: (threadId) => retire((target) => target.threadId === threadId),
+    retireHost: (hostId) => retire((target) => target.hostId === hostId),
     issue: Effect.fn("DeviceAgentAccess.issue")(function* (target) {
       if (!(yield* allowed(target))) {
         discard(target);
@@ -147,6 +157,9 @@ const make = Effect.gen(function* () {
     ownsResource: (target, resource) => Effect.sync(() => owns(target, resource)),
     recordResource: (target, resource) =>
       Effect.gen(function* () {
+        const token = slots.get(targetKey(target));
+        if (token === undefined || credentials.get(token) !== target)
+          return yield* new DeviceAgentAccessDenied({});
         const now = expireResources();
         const key = resourceKey(target, resource);
         const previous = resources.get(key);
@@ -161,7 +174,7 @@ const make = Effect.gen(function* () {
           const oldest = resources.keys().next().value;
           if (oldest !== undefined) resources.delete(oldest);
         }
-      }),
+      }).pipe(credentialLock.withPermit),
   });
 });
 

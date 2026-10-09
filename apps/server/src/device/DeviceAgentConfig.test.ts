@@ -6,6 +6,8 @@ import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NetService from "@t3tools/shared/Net";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -76,8 +78,23 @@ const host = Layer.mock(DeviceHost.DeviceHost)({
       },
     }),
 });
-const layer = (hostname: string) =>
-  Layer.effect(DeviceService.DeviceService, DeviceService.make).pipe(
+const layer = (
+  hostname: string,
+  beforeWrite: (content: string) => Effect.Effect<void> = () => Effect.void,
+) =>
+  Layer.effect(
+    DeviceService.DeviceService,
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const writeFileString: FileSystem.FileSystem["writeFileString"] = (file, content, options) =>
+        file.includes("/device/agent-threads/")
+          ? beforeWrite(content).pipe(Effect.andThen(fs.writeFileString(file, content, options)))
+          : fs.writeFileString(file, content, options);
+      return yield* DeviceService.make.pipe(
+        Effect.provideService(FileSystem.FileSystem, { ...fs, writeFileString }),
+      );
+    }),
+  ).pipe(
     Layer.provideMerge(access),
     Layer.provide(host),
     Layer.provide(settings),
@@ -142,4 +159,58 @@ it.effect.each(["127.0.0.1", "::1"])(
       expect(new Set([args[1], otherThread[1], otherDevice[1]]).size).toBe(3);
       expect(decodeConfig(yield* fs.readFileString(args[1]!))).toEqual(config);
     }).pipe(Effect.provide(layer(hostname)), Effect.scoped),
+);
+
+it.effect("thread deletion waits for an issued config write before removing it", () =>
+  Effect.gen(function* () {
+    const writing = yield* Deferred.make<void>();
+    const resume = yield* Deferred.make<void>();
+    let issuedToken = "";
+    const writeGate = (content: string) =>
+      Effect.sync(() => {
+        issuedToken = decodeConfig(content).daemonAuthToken;
+      }).pipe(
+        Effect.andThen(Deferred.succeed(writing, undefined)),
+        Effect.andThen(Deferred.await(resume)),
+        Effect.asVoid,
+      );
+    yield* Effect.gen(function* () {
+      const devices = yield* DeviceService.DeviceService;
+      const access = yield* DeviceAgentAccess.DeviceAgentAccess;
+      const fs = yield* FileSystem.FileSystem;
+      const threadId = ThreadId.make("thread-1");
+      const writer = yield* devices
+        .agentTarget({
+          threadId,
+          hostId: "local",
+          deviceId: DeviceId.make("device-1"),
+          agentAccessEnabled: true,
+        })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(writing);
+      let cleaned = false;
+      const cleanup = yield* devices.retireThreadAgentAccess(threadId).pipe(
+        Effect.tap(() =>
+          Effect.sync(() => {
+            cleaned = true;
+          }),
+        ),
+        Effect.forkChild({ startImmediately: true }),
+      );
+      expect(cleaned).toBe(false);
+      yield* Deferred.succeed(resume, undefined);
+      const args = yield* Fiber.join(writer);
+      yield* Fiber.join(cleanup);
+      expect(yield* fs.exists(args[1]!)).toBe(false);
+      expect((yield* Effect.exit(access.authorize(issuedToken)))._tag).toBe("Failure");
+      const fresh = yield* devices.agentTarget({
+        threadId,
+        hostId: "local",
+        deviceId: DeviceId.make("device-1"),
+        agentAccessEnabled: true,
+      });
+      const config = decodeConfig(yield* fs.readFileString(fresh[1]!));
+      expect((yield* access.authorize(config.daemonAuthToken)).threadId).toBe(threadId);
+    }).pipe(Effect.provide(layer("127.0.0.1", writeGate)), Effect.scoped);
+  }),
 );

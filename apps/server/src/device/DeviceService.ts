@@ -42,6 +42,7 @@ import { ensureAgentDevice, ensureDeviceHub } from "./DeviceToolchain.ts";
 import * as ServerConfig from "../config.ts";
 import {
   agentDeviceConfigPath,
+  agentDeviceThreadConfigDirectory,
   agentDeviceSession,
   retireLegacyAgentDeviceConfig,
   writeAgentDeviceConfig,
@@ -114,6 +115,7 @@ export interface DeviceAgentReadiness extends DeviceReadiness {
 export class DeviceService extends Context.Service<
   DeviceService,
   {
+    readonly retireThreadAgentAccess: (threadId: ThreadId) => Effect.Effect<void, DeviceError>;
     readonly agentCli: Effect.Effect<string, DeviceError>;
     readonly testHost: (
       config: SshDeviceHostConfig,
@@ -192,6 +194,8 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
       }),
     ),
   installTool?: (tool: "hub" | "agent") => Effect.Effect<unknown, DeviceError>,
+  retireThreadAgentAccess: (threadId: ThreadId) => Effect.Effect<void, DeviceError> = () =>
+    Effect.void,
 ) {
   const settings = yield* ServerSettings.ServerSettingsService;
   const crypto = yield* Crypto.Crypto;
@@ -913,6 +917,8 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
   return {
     ...DeviceService.of({
       testHost,
+      retireThreadAgentAccess: (threadId) =>
+        lifecycleLock.withPermit(retireThreadAgentAccess(threadId)),
       updateTool: (tool) =>
         lifecycleLock.withPermit(
           Effect.gen(function* () {
@@ -1091,6 +1097,23 @@ export const make = Effect.gen(function* () {
             }),
         ),
       ),
+    (threadId) =>
+      Effect.gen(function* () {
+        yield* access.retireThread(threadId);
+        yield* fs.remove(agentDeviceThreadConfigDirectory(config.stateDir, threadId, path), {
+          recursive: true,
+          force: true,
+        });
+      }).pipe(
+        Effect.mapError(
+          (cause) =>
+            new DeviceOperationError({
+              operation: "retire agent access",
+              reason: "settings_failed",
+              cause,
+            }),
+        ),
+      ),
   );
   const hostContext =
     yield* Effect.context<Effect.Services<ReturnType<typeof SshDeviceHost.make>>>();
@@ -1115,6 +1138,7 @@ export const make = Effect.gen(function* () {
               )
             )
               continue;
+            yield* access.retireHost(id);
             hosts.delete(id);
             configured.delete(id);
             removed.push({ id, scope: previous.scope });
