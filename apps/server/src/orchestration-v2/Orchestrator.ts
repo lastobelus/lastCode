@@ -63,6 +63,7 @@ import {
   derivePendingBackgroundWork,
   pendingBackgroundTurnItems,
 } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
+import { threadAnnotationOf } from "@t3tools/shared/threadAnnotation";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -2197,11 +2198,49 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       "orchestration_v2.driver": command.modelSelection.instanceId,
     });
 
+    const existing = yield* projectionStore.getThread(command.threadId).pipe(
+      Effect.catchTag("ProjectionStoreThreadNotFoundError", () => Effect.succeed(null)),
+      Effect.mapError(
+        (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+      ),
+    );
+    if (
+      existing !== null &&
+      (existing.creatorThreadId !== undefined || command.creatorThreadId !== undefined)
+    ) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause:
+          "An existing conversation's creator history cannot be replaced by another creation request.",
+      });
+    }
+    if (command.creatorThreadId !== undefined) {
+      const creatorThreadId = command.creatorThreadId;
+      if (command.createdBy !== "agent" || command.creatorThreadId === command.threadId) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause:
+            "A creator must be a different conversation that created this thread through an agent.",
+        });
+      }
+      yield* projectionStore
+        .getThread(command.creatorThreadId)
+        .pipe(
+          Effect.mapError(
+            (cause) => new OrchestratorProjectionError({ threadId: creatorThreadId, cause }),
+          ),
+        );
+    }
     const now = yield* DateTime.now;
     const emitEvent = emit(events, command);
     const thread: OrchestrationV2AppThread = {
       createdBy: command.createdBy,
       creationSource: command.creationSource,
+      ...(command.creatorThreadId === undefined
+        ? {}
+        : { creatorThreadId: command.creatorThreadId, creatorGrouping: "grouped" }),
       id: command.threadId,
       projectId: command.projectId,
       title: command.title,
@@ -2268,6 +2307,97 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         },
       });
     }
+  });
+
+  const dispatchThreadMetadata = Effect.fn("orchestrationV2.dispatch.threadMetadata")(function* (
+    command: Extract<
+      OrchestrationV2Command,
+      {
+        readonly type:
+          | "thread.annotation.upsert"
+          | "thread.annotation.resolve"
+          | "thread.annotation.reopen";
+      }
+    >,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ) {
+    const thread = yield* projectionStore
+      .getThread(command.threadId)
+      .pipe(mapDispatchError(command));
+    if (thread.deletedAt !== null || thread.archivedAt !== null) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: `Thread ${command.threadId} is not active.`,
+      });
+    }
+    const now = yield* DateTime.now;
+    const nowIso = DateTime.formatIso(now);
+    const emitThread = (
+      type:
+        | "thread.persistence-changed"
+        | "thread.annotation-upserted"
+        | "thread.annotation-resolved"
+        | "thread.annotation-reopened"
+        | "thread.attention-set"
+        | "thread.attention-cleared"
+        | "thread.metadata-updated",
+      payload: OrchestrationV2AppThread,
+    ) =>
+      emit(
+        events,
+        command,
+      )({
+        type,
+        threadId: payload.id,
+        providerInstanceId: payload.providerInstanceId,
+        occurredAt: now,
+        payload,
+      });
+    const records = yield* projectionStore
+      .getThreadRecords(thread.id, ["messages"], { messageRoles: ["user"] })
+      .pipe(mapDispatchError(command));
+    const latestUser = records.messages.toSorted(
+      (a, b) =>
+        DateTime.toEpochMillis(b.createdAt) - DateTime.toEpochMillis(a.createdAt) ||
+        String(b.id).localeCompare(String(a.id)),
+    )[0];
+    const previousAnnotation = threadAnnotationOf(thread);
+    const anchorMessageId = latestUser?.id ?? previousAnnotation?.anchorMessageId;
+    if (
+      anchorMessageId === undefined ||
+      (command.type !== "thread.annotation.upsert" && previousAnnotation === null)
+    ) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: `Thread ${command.threadId} has no annotation or user message to anchor a note.`,
+      });
+    }
+    const annotation = {
+      body: command.type === "thread.annotation.upsert" ? command.body : previousAnnotation!.body,
+      anchorMessageId,
+      createdAt: previousAnnotation?.createdAt ?? nowIso,
+      updatedAt: nowIso,
+      resolvedAt:
+        command.type === "thread.annotation.resolve"
+          ? nowIso
+          : command.type === "thread.annotation.reopen"
+            ? null
+            : (previousAnnotation?.resolvedAt ?? null),
+    };
+    yield* emitThread(
+      command.type === "thread.annotation.upsert"
+        ? "thread.annotation-upserted"
+        : command.type === "thread.annotation.resolve"
+          ? "thread.annotation-resolved"
+          : "thread.annotation-reopened",
+      {
+        ...thread,
+        annotation,
+        updatedAt: now,
+      },
+    );
   });
 
   const dispatchThreadVisit = Effect.fn("orchestrationV2.dispatch.threadVisit")(function* (
@@ -2418,6 +2548,22 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         commandId: command.commandId,
         commandType: command.type,
         cause: `Thread ${command.threadId} is deleted.`,
+      });
+    }
+    if (
+      command.type === "thread.metadata.update" &&
+      command.creatorGrouping !== undefined &&
+      (thread.creatorThreadId === undefined ||
+        thread.createdBy !== "agent" ||
+        thread.lineage.parentThreadId !== null ||
+        thread.lineage.relationshipToParent !== null ||
+        thread.forkedFrom !== null)
+    ) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause:
+          "Creator grouping is available only for ordinary agent-created conversations with a known creator.",
       });
     }
     if (
@@ -2977,6 +3123,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               : command.regenerateTitle === false || command.title !== undefined
                 ? { titleRegeneration: null }
                 : {}),
+            ...(command.creatorGrouping === undefined
+              ? {}
+              : { creatorGrouping: command.creatorGrouping }),
             updatedAt: now,
           };
         }

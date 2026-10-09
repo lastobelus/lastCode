@@ -7,6 +7,10 @@
       "types": "./src/authScopeOptions.ts",
       "import": "./src/authScopeOptions.ts"
     },
+    "./threadAnnotation": {
+      "types": "./src/threadAnnotation.ts",
+      "import": "./src/threadAnnotation.ts"
+    },
     "./orchestrationV2ThreadError": {
       "types": "./src/orchestrationV2ThreadError.ts",
       "import": "./src/orchestrationV2ThreadError.ts"

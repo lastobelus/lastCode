@@ -155,6 +155,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
               }),
           createdBy: "agent",
           creationSource: "mcp",
+          ...(caller === undefined ? {} : { creatorThreadId: caller.id }),
         }).pipe(
           Effect.provideService(ThreadReadAuthorization, {
             authorize: (targetThreadId, targetMessageId) =>
