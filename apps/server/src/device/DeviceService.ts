@@ -196,6 +196,8 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
   installTool?: (tool: "hub" | "agent") => Effect.Effect<unknown, DeviceError>,
   retireThreadAgentAccess: (threadId: ThreadId) => Effect.Effect<void, DeviceError> = () =>
     Effect.void,
+  retireDeviceAgentAccess: (hostId: DeviceHostId, deviceId: DeviceId) => Effect.Effect<void> = () =>
+    Effect.void,
 ) {
   const settings = yield* ServerSettings.ServerSettingsService;
   const crypto = yield* Crypto.Crypto;
@@ -793,6 +795,9 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
           ),
         )
       : postShutdown("/api/devices/shutdown", { platform, id: deviceId });
+    // Android can reuse an emulator serial for another AVD after shutdown.
+    // Retire every thread targeting this slot before exposing it as available.
+    yield* retireDeviceAgentAccess(ready.hostId, deviceId);
     yield* publish((state) => ({
       ...state,
       devices: state.devices.map((device) =>
@@ -1114,6 +1119,7 @@ export const make = Effect.gen(function* () {
             }),
         ),
       ),
+    access.retireDevice,
   );
   const hostContext =
     yield* Effect.context<Effect.Services<ReturnType<typeof SshDeviceHost.make>>>();

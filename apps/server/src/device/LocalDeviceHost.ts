@@ -57,6 +57,7 @@ import {
   ensureAgentDevice,
   ensureDeviceHub,
   isAgentDeviceInstalled,
+  installedAgentDevice,
   isDeviceHubInstalled,
   deviceToolVersions,
   DEVICE_HUB_VERSION,
@@ -599,40 +600,28 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
     yield* Effect.gen(function* () {
       // Dead state needs no launcher, including after a pinned tool upgrade.
       if (yield* daemonIsDead) return;
-      if (agentTool === null) {
-        // A crash can leave the daemon running before this host has activated in memory.
-        // Use an existing installation only: revoking access must never install or start tools.
-        if (
-          !(yield* isAgentDeviceInstalled(config.baseDir).pipe(
-            Effect.provideService(FileSystem.FileSystem, fs),
-            Effect.provideService(Path.Path, path),
-          ))
-        )
+      if (agentTool === null || !ownsAgentDaemon) {
+        // A recovered daemon may predate the current pin, even when activation has
+        // already resolved the new launcher. Retire with its completed recorded install.
+        const installed = yield* installedAgentDevice(config.baseDir, existing.value.version).pipe(
+          Effect.provideService(FileSystem.FileSystem, fs),
+          Effect.provideService(Path.Path, path),
+        );
+        if (installed === null)
           return yield* new DeviceHost.DeviceHostError({
             hostId,
             step: "invalidating recovered agent access",
             cause: new Error("The installed agent-device launcher is unavailable."),
           });
-        const installed = yield* ensureAgentDevice(config.baseDir).pipe(
-          Effect.provideService(FileSystem.FileSystem, fs),
-          Effect.provideService(Path.Path, path),
-          Effect.provideService(ProcessRunner.ProcessRunner, runner),
-          Effect.mapError(
-            (cause) =>
-              new DeviceHost.DeviceHostError({
-                hostId,
-                step: "invalidating recovered agent access",
-                cause,
-              }),
-          ),
-        );
         agentTool = {
           entryPath: installed.entryPath,
-          nodePath: yield* resolveNodeExecutable("Device automation", hostEnvironment).pipe(
-            Effect.provideService(FileSystem.FileSystem, fs),
-            Effect.provideService(Path.Path, path),
-            Effect.provideService(HostProcessPlatform, hostPlatform),
-          ),
+          nodePath:
+            agentTool?.nodePath ??
+            (yield* resolveNodeExecutable("Device automation", hostEnvironment).pipe(
+              Effect.provideService(FileSystem.FileSystem, fs),
+              Effect.provideService(Path.Path, path),
+              Effect.provideService(HostProcessPlatform, hostPlatform),
+            )),
         };
       }
       const stopped = yield* runner
