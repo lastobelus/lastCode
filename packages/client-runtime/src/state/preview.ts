@@ -16,7 +16,6 @@ export function createPreviewEnvironmentAtoms<R, E>(
 ) {
   const lifecycleScheduler = createAtomCommandScheduler();
   const statusScheduler = createAtomCommandScheduler();
-  const browserScheduler = createAtomCommandScheduler();
   const hostingScheduler = createAtomCommandScheduler();
   const lifecycleConcurrency = {
     mode: "serial" as const,
@@ -27,8 +26,8 @@ export function createPreviewEnvironmentAtoms<R, E>(
     browserEvent: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:preview:browser-event",
       tag: WS_METHODS.desktopBrowserEvent,
-      scheduler: browserScheduler,
-      concurrency: { mode: "serial", key: ({ environmentId }) => environmentId },
+      // CDP frames must reach the wire without one network round trip per event.
+      concurrency: { mode: "parallel" },
     }),
     hostingLeases: createEnvironmentSubscriptionAtomFamily(runtime, {
       label: "environment-data:preview:hosting-leases",
