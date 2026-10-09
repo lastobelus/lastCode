@@ -471,6 +471,88 @@ describe("thread-scoped device CLI proxy", () => {
   });
 });
 
+it.each(["agent_device.command", "agent-device.command"])(
+  "rejects CLI power-off through %s before contacting the host",
+  async (method) => {
+    const f = fixture();
+    const token = await f.issue();
+    const rpc = (
+      command: string,
+      flags: Record<string, unknown>,
+      positionals: string[] = [],
+      input?: Record<string, unknown>,
+    ) =>
+      f.call(
+        token,
+        "/rpc",
+        "POST",
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method,
+          params: { session: "session-thread-1", command, flags, positionals, input },
+        }),
+      );
+    for (const selector of [{ udid: "device-1" }, { serial: "device-1" }]) {
+      for (const command of ["close", "shutdown"]) {
+        const denied = await rpc(command, { ...selector, shutdown: true }, ["test.app"]);
+        expect(denied.status).toBe(403);
+        expect(await denied.text()).toContain("device_close with shutdown=true");
+      }
+    }
+    for (const command of ["shutdown", "replay", "test"])
+      expect((await rpc(command, { serial: "device-1" })).status).toBe(403);
+    for (const step of [
+      { command: "shutdown" },
+      { command: "close", flags: { shutdown: true } },
+      { command: " CLoSE ", input: { shutdown: true } },
+      { command: "replay" },
+      { command: "test" },
+      { command: "batch" },
+    ])
+      expect((await rpc("batch", { serial: "device-1", batchSteps: [step] })).status).toBe(403);
+    expect(
+      (
+        await rpc("batch", {
+          serial: "device-1",
+          shutdown: true,
+          batchSteps: [{ command: "close" }],
+        })
+      ).status,
+    ).toBe(403);
+    expect((await rpc("batch", { serial: "device-1", batchSteps: "invalid" })).status).toBe(403);
+    for (const selectors of [
+      { udid: "device-2" },
+      { serial: "device-2" },
+      { deviceId: "device-2" },
+    ]) {
+      for (const step of [
+        { command: "boot", flags: selectors },
+        { command: "boot", input: selectors },
+      ])
+        expect((await rpc("batch", { serial: "device-1", batchSteps: [step] })).status).toBe(403);
+      expect((await rpc("boot", { serial: "device-1" }, [], selectors)).status).toBe(403);
+    }
+    expect((await rpc("close", { serial: "device-1" }, [], { shutdown: true })).status).toBe(403);
+    expect(f.requests).toEqual([]);
+    expect(f.hostRequests).toEqual([]);
+    for (const flags of [{ udid: "device-1" }, { serial: "device-1", shutdown: false }])
+      expect((await rpc("close", flags)).status).toBe(200);
+    expect(
+      (
+        await rpc("batch", {
+          serial: "device-1",
+          batchSteps: [
+            { command: "snapshot" },
+            { command: "boot", flags: { serial: "device-1" } },
+            { command: "close", flags: { shutdown: false } },
+          ],
+        })
+      ).status,
+    ).toBe(200);
+    expect((await rpc("snapshot", { udid: "device-1" })).status).toBe(200);
+  },
+);
+
 it("requires a concrete issued selector for commands while allowing device inventory", async () => {
   const f = fixture();
   const token = await f.issue();

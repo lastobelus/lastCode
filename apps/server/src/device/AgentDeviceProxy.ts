@@ -54,6 +54,27 @@ const decodeUploadResult = Schema.decodeUnknownEffect(UploadResult);
 const decodeRpcRequest = Schema.decodeUnknownEffect(RpcRequest);
 const decodeObject = Schema.decodeUnknownEffect(JsonObject);
 const decodeUploadDescriptor = Schema.decodeUnknownEffect(UploadDescriptor);
+const decodeBatchSteps = Schema.decodeUnknownOption(
+  Schema.Array(
+    Schema.Struct({
+      command: Schema.String,
+      flags: Schema.optional(JsonObject),
+      input: Schema.optional(JsonObject),
+    }),
+  ),
+);
+const requiresDeviceLifecycle = (command: unknown, shutdown: unknown) => {
+  const name = typeof command === "string" ? command.trim().toLowerCase() : "";
+  // Replay/test scripts hide their actions from this scoped adapter.
+  return ["shutdown", "replay", "test"].includes(name) || (name === "close" && shutdown === true);
+};
+const targetsAnotherDevice = (
+  selectors: Readonly<Record<string, unknown>> | undefined,
+  deviceId: string,
+) =>
+  [selectors?.udid, selectors?.serial, selectors?.deviceId].some(
+    (id) => id !== undefined && id !== deviceId,
+  );
 const DROPPED_HEADERS = new Set([
   "host",
   "connection",
@@ -129,10 +150,40 @@ const handler = Effect.gen(function* () {
       yield* access.authorize(token, { kind: "upload", id: meta.uploadedArtifactId });
     }
     const flags = yield* decodeObject(rpc.params.flags ?? {});
+    const input = yield* decodeObject(rpc.params.input ?? {});
+    // Power-off must retire T3 sessions and credentials through DeviceService.
+    const command =
+      typeof rpc.params.command === "string" ? rpc.params.command.trim().toLowerCase() : "";
+    const steps = command === "batch" ? decodeBatchSteps(flags.batchSteps) : undefined;
     if (
-      [flags.udid, flags.serial, flags.deviceId].some(
-        (id) => id !== undefined && id !== target.deviceId,
-      ) ||
+      steps !== undefined &&
+      Option.isSome(steps) &&
+      steps.value.some(
+        (step) =>
+          targetsAnotherDevice(step.flags, target.deviceId) ||
+          targetsAnotherDevice(step.input, target.deviceId),
+      )
+    )
+      return HttpServerResponse.text("Forbidden", { status: 403 });
+    if (
+      requiresDeviceLifecycle(command, flags.shutdown) ||
+      requiresDeviceLifecycle(command, input.shutdown) ||
+      (steps !== undefined &&
+        (Option.isNone(steps) ||
+          steps.value.some(
+            (step) =>
+              step.command.trim().toLowerCase() === "batch" ||
+              requiresDeviceLifecycle(step.command, step.flags?.shutdown ?? flags.shutdown) ||
+              requiresDeviceLifecycle(step.command, step.input?.shutdown),
+          )))
+    )
+      return HttpServerResponse.text(
+        "Use device_close with shutdown=true to power off this device. Use explicit commands or batch steps instead of replay/test scripts.",
+        { status: 403 },
+      );
+    if (
+      targetsAnotherDevice(flags, target.deviceId) ||
+      targetsAnotherDevice(input, target.deviceId) ||
       (rpc.params.command !== "devices" &&
         flags.udid !== target.deviceId &&
         flags.serial !== target.deviceId)
