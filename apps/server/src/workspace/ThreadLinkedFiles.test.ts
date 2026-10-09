@@ -255,6 +255,145 @@ afterEach(() => vi.restoreAllMocks());
 
 describe("ThreadLinkedFiles", () => {
   it.effect.each(["memory", "sqlite"])(
+    "revokes cached publications when the active thread is deleted, preserving active forks (%s)",
+    (store) =>
+      withWorkspace(
+        (root, outside) =>
+          Effect.gen(function* () {
+            const fs = yield* FileSystem.FileSystem;
+            const path = yield* Path.Path;
+            const linked = yield* ThreadLinkedFiles.ThreadLinkedFiles;
+            const projections = yield* ProjectionStore.ProjectionStoreV2;
+            const base = yield* projections.getThread(threadId);
+            const now = yield* DateTime.now;
+            const runId = RunId.make("deletion-run");
+            yield* projections.apply({
+              id: EventId.make("deletion-run-created"),
+              type: "run.created",
+              threadId,
+              occurredAt: now,
+              payload: {
+                id: runId,
+                threadId,
+                ordinal: 1,
+                providerInstanceId: base.providerInstanceId,
+                modelSelection: base.modelSelection,
+                providerThreadId: null,
+                userMessageId: MessageId.make("deletion-user"),
+                rootNodeId: null,
+                activeAttemptId: null,
+                status: "completed",
+                requestedAt: now,
+                startedAt: now,
+                completedAt: now,
+                checkpointId: null,
+                contextHandoffId: null,
+              },
+            });
+            const hostFile = path.join(outside, "published.md");
+            yield* fs.writeFileString(hostFile, "published host file");
+            yield* fs.writeFileString(path.join(root, "plan.md"), "published plan file");
+            yield* addMessage(
+              `[Host file](${hostFile})`,
+              "assistant",
+              MessageId.make("deletion-assistant"),
+              runId,
+            );
+            yield* addPlan("[Plan file](./plan.md)", true, runId, PlanId.make("deletion-plan"));
+            const childId = ThreadId.make("deletion-fork");
+            yield* projections.apply({
+              id: EventId.make("deletion-fork-created"),
+              type: "thread.created",
+              threadId: childId,
+              occurredAt: now,
+              payload: {
+                ...base,
+                id: childId,
+                forkedFrom: { type: "run", threadId, runId },
+                lineage: {
+                  parentThreadId: threadId,
+                  relationshipToParent: "fork",
+                  rootThreadId: threadId,
+                },
+              },
+            });
+            const publications = [
+              [hostFile, "published host file"],
+              ["plan.md", "published plan file"],
+            ] as const;
+            for (const owner of [threadId, childId]) {
+              for (const [file, contents] of publications) {
+                expect(
+                  (yield* linked.readFile({ cwd: root, relativePath: file, linkedThreadId: owner }))
+                    .contents,
+                ).toBe(contents);
+                yield* linked.resolveFile({ cwd: root, threadId: owner, path: file });
+              }
+            }
+            // Archive keeps the conversation available; only deletion revokes its grants.
+            const archived = {
+              ...(yield* projections.getThread(threadId)),
+              archivedAt: now,
+              updatedAt: now,
+            };
+            yield* projections.apply({
+              id: EventId.make("deletion-thread-archived"),
+              type: "thread.archived",
+              threadId,
+              occurredAt: now,
+              payload: archived,
+            });
+            expect(
+              (yield* linked.readFile({
+                cwd: root,
+                relativePath: hostFile,
+                linkedThreadId: threadId,
+              })).contents,
+            ).toBe("published host file");
+            yield* projections.apply({
+              id: EventId.make("deletion-thread-deleted"),
+              type: "thread.deleted",
+              threadId,
+              occurredAt: now,
+              payload: { ...archived, deletedAt: now },
+            });
+            expect(
+              (yield* projections.getVisiblePublications(threadId).pipe(Effect.flip))._tag,
+            ).toBe("ProjectionStoreThreadNotFoundError");
+            for (const [file, contents] of publications) {
+              const readError = yield* linked
+                .readFile({ cwd: root, relativePath: file, linkedThreadId: threadId })
+                .pipe(Effect.flip);
+              expect(readError).toBeInstanceOf(ThreadLinkedFiles.ThreadLinkedFileResolutionError);
+              expect(
+                (yield* linked.resolveFile({ cwd: root, threadId, path: file }).pipe(Effect.flip))
+                  ._tag,
+              ).toBe("ThreadLinkedFileResolutionError");
+              // Deletion of an ancestor must not remove cards still displayed by its active fork.
+              expect(
+                (yield* linked.readFile({ cwd: root, relativePath: file, linkedThreadId: childId }))
+                  .contents,
+              ).toBe(contents);
+              expect(
+                (yield* linked.resolveFile({ cwd: root, threadId: childId, path: file }))
+                  .absolutePath,
+              ).toBe(yield* fs.realPath(path.resolve(root, file)));
+            }
+            const inherited = yield* projections.getVisiblePublications(childId);
+            expect(inherited.thread.deletedAt).toBeNull();
+            expect(inherited.publications).toHaveLength(2);
+            expect(inherited.publications.every((row) => row.sourceThreadId === threadId)).toBe(
+              true,
+            );
+          }),
+        undefined,
+        store === "sqlite"
+          ? ProjectionStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory))
+          : ProjectionStore.layerMemory,
+      ),
+  );
+
+  it.effect.each(["memory", "sqlite"])(
     "revokes cached assistant and plan links after persisted rollback (%s)",
     (store) =>
       withWorkspace(
@@ -1075,6 +1214,51 @@ describe("ThreadLinkedFiles", () => {
             .readFile({ cwd: root, relativePath: "report.md", linkedThreadId: threadId })
             .pipe(Effect.flip);
           expect(error._tag).toBe("ThreadLinkedFileDeniedError");
+        }),
+      ),
+  );
+
+  it.effect.each(["bare", "relative-explicit", "absolute-explicit"])(
+    "does not let a root directory retarget an authored %s path",
+    (syntax) =>
+      withWorkspace((root) =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const linked = yield* ThreadLinkedFiles.ThreadLinkedFiles;
+          const rootEntry = path.join(root, "report.md");
+          const nestedFile = path.join(root, "docs", "report.md");
+          yield* fs.makeDirectory(rootEntry);
+          yield* fs.makeDirectory(path.dirname(nestedFile));
+          yield* fs.writeFileString(nestedFile, "nested report");
+          yield* addMessage(
+            `[Report](${syntax === "bare" ? "report.md" : syntax === "relative-explicit" ? "./report.md" : rootEntry})`,
+          );
+          const read = linked.readFile({
+            cwd: root,
+            relativePath: "report.md",
+            linkedThreadId: threadId,
+          });
+          if (syntax === "bare") {
+            const result = yield* read;
+            expect(result.contents).toBe("nested report");
+            expect(result.relativePath).toBe("docs/report.md");
+            expect(
+              (yield* linked.resolveFile({ cwd: root, threadId, path: "report.md" })).absolutePath,
+            ).toBe(yield* fs.realPath(nestedFile));
+            expect(
+              (yield* linked.resolveFile({ cwd: root, threadId, path: result.relativePath }))
+                .absolutePath,
+            ).toBe(yield* fs.realPath(nestedFile));
+          } else {
+            expect((yield* read.pipe(Effect.flip))._tag).toBe("ThreadLinkedFileDeniedError");
+            for (const file of [rootEntry, nestedFile]) {
+              expect(
+                (yield* linked.resolveFile({ cwd: root, threadId, path: file }).pipe(Effect.flip))
+                  ._tag,
+              ).toBe("ThreadLinkedFileDeniedError");
+            }
+          }
         }),
       ),
   );

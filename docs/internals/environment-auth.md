@@ -110,10 +110,11 @@ the [workspace path rules](../../apps/server/src/workspace/WorkspaceFileSystem.t
 
 `orchestration:read` also permits opening an individual file linked in a visible
 assistant message or proposed plan. Local and inherited publications follow the
-conversation timeline, so rows hidden by rollback cannot mint new file URLs.
+conversation timeline. Deleted conversations and rows hidden by rollback cannot
+grant this access; active forks retain their displayed inherited publications.
 The server derives relative paths from the thread's workspace and matches the
-rendered reference. Explicit links may publish
-files outside the workspace; workspace links and bare filename lookup remain
+rendered reference. Explicit links may publish files outside the workspace;
+workspace links and bare filename lookup remain
 contained by lexical and real-path checks. This lets a conversation reader open
 its reports without granting host-file browsing. It does not grant access to the
 containing directory, unlinked files, or writes.

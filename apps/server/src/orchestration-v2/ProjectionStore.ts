@@ -5111,6 +5111,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         .withTransaction(
           Effect.gen(function* () {
             const index = yield* readTimelineIndex(threadId, new Set());
+            if (index.records.thread.deletedAt !== null)
+              return yield* new ProjectionStoreThreadNotFoundError({ threadId });
             const publications = index.visible.filter(
               (row) => row.item.type === "assistant_message" || row.item.type === "proposed_plan",
             );
@@ -6918,20 +6920,24 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
         ),
       getVisiblePublications: (threadId) =>
         service.getThreadProjection(threadId).pipe(
-          Effect.map((projection) => ({
-            thread: projection.thread,
-            publications: projection.visibleTurnItems.flatMap((row) =>
-              row.item.type === "assistant_message" || row.item.type === "proposed_plan"
-                ? [
-                    {
-                      sourceThreadId: row.sourceThreadId,
-                      sourceItemId: row.sourceItemId,
-                      item: row.item,
-                    },
-                  ]
-                : [],
-            ),
-          })),
+          Effect.flatMap((projection) =>
+            projection.thread.deletedAt !== null
+              ? Effect.fail(new ProjectionStoreThreadNotFoundError({ threadId }))
+              : Effect.succeed({
+                  thread: projection.thread,
+                  publications: projection.visibleTurnItems.flatMap((row) =>
+                    row.item.type === "assistant_message" || row.item.type === "proposed_plan"
+                      ? [
+                          {
+                            sourceThreadId: row.sourceThreadId,
+                            sourceItemId: row.sourceItemId,
+                            item: row.item,
+                          },
+                        ]
+                      : [],
+                  ),
+                }),
+          ),
         ),
       getThreadSnapshotWindow: (threadId, options) =>
         service.getThreadSnapshot(threadId).pipe(

@@ -243,7 +243,7 @@ const make = Effect.gen(function* () {
         // Resolve the authored filename before comparing the request: it publishes
         // the existing root file or one bounded picker result, never every sibling
         // with that basename. Accept the picked path for subsequent preview requests.
-        if (existing === null) {
+        if (existing?.type !== "File") {
           const results = yield* workspaceEntries
             .search({
               cwd,
