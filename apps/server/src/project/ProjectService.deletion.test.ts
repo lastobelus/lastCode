@@ -3,6 +3,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
+  ServerSettingsError,
   EventId,
   MessageId,
   NodeId,
@@ -1143,4 +1144,116 @@ it.effect("replays a forced project delete queued behind its commit and a closin
       ),
     );
   }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect.each([1, 3])(
+  "recovers cleanup after %i settings failures without duplicate deletion",
+  (failures) =>
+    Effect.gen(function* () {
+      const projectId = ProjectId.make("project:settings-retry");
+      const otherProjectId = ProjectId.make("project:other-grant");
+      const threadId = ThreadId.make("thread:settings-retry");
+      const commandId = CommandId.make("project-delete:settings-retry");
+      yield* seedProject(projectId);
+      yield* Effect.gen(function* () {
+        const settings = yield* ServerSettings.ServerSettingsService.pipe(
+          Effect.provide(
+            ServerSettings.layerTest({
+              enableAgentDeviceAccess: false,
+              projectSettingsOverrides: {
+                [projectId]: { enableAgentDeviceAccess: true, enableAgentBrowserAccess: true },
+                [otherProjectId]: { enableAgentDeviceAccess: true },
+              },
+              projectAgentBrowserAccessOverrides: { [projectId]: true },
+            }),
+          ),
+        );
+        const remainingFailures = yield* Ref.make(failures);
+        const attempts = yield* Ref.make(0);
+        const cleanupError = new ServerSettingsError({
+          settingsPath: "/test/settings.json",
+          operation: "write-file",
+          cause: "temporary failure",
+        });
+        const service = yield* ProjectService.make.pipe(
+          Effect.provideService(ServerSettings.ServerSettingsService, {
+            ...settings,
+            updateSettings: (patch) =>
+              Ref.modify(remainingFailures, (remaining) => [
+                remaining > 0,
+                Math.max(0, remaining - 1),
+              ]).pipe(
+                Effect.tap(() => Ref.update(attempts, (count) => count + 1)),
+                Effect.flatMap((fail) =>
+                  fail ? Effect.fail(cleanupError) : settings.updateSettings(patch),
+                ),
+              ),
+          }),
+        );
+        const sink = yield* EventSink.EventSinkV2;
+        yield* sink.write({ events: [nativeThreadCreated(projectId, threadId)] });
+        const input = { commandId, projectId, force: true };
+        if (failures === 3) {
+          const failure = yield* service.delete(input).pipe(Effect.flip);
+          assert.instanceOf(failure, ProjectService.ProjectOperationError);
+          if (failure._tag !== "ProjectOperationError")
+            return assert.fail("Expected settings cleanup failure");
+          assert.equal(failure.operation, "delete-project-settings");
+          assert.strictEqual(failure.cause, cleanupError);
+          assert.include(failure.message, "deletion committed");
+          assert.include(failure.message, "original command ID");
+          assert.equal(yield* Ref.get(attempts), 3);
+        } else {
+          const deleted = yield* service.delete(input);
+          assert.isNotNull(deleted.deletedAt);
+          assert.equal(yield* Ref.get(attempts), 2);
+        }
+        const committed = Option.getOrThrow(
+          yield* service.getById(projectId, { includeDeleted: true }),
+        );
+        assert.isNotNull(committed.deletedAt);
+        const firstResult = yield* settings.getSettings;
+        if (failures === 3) {
+          assert.isTrue(firstResult.projectSettingsOverrides[projectId]?.enableAgentDeviceAccess);
+          assert.isTrue(firstResult.projectAgentBrowserAccessOverrides[projectId]);
+        } else {
+          assert.isUndefined(firstResult.projectSettingsOverrides[projectId]);
+          assert.isUndefined(firstResult.projectAgentBrowserAccessOverrides[projectId]);
+          assert.isTrue(
+            firstResult.projectSettingsOverrides[otherProjectId]?.enableAgentDeviceAccess,
+          );
+        }
+        const sql = yield* SqlClient.SqlClient;
+        const readDeletes = sql<{ command_id: string; event_type: string; sequence: number }>`
+        SELECT command_id, event_type, sequence FROM orchestration_events
+        WHERE stream_id IN (${projectId}, ${threadId}) AND event_type IN ('project.deleted', 'thread.deleted')
+        ORDER BY sequence
+      `;
+        const readEffects = sql<{ effect_id: string; effect_type: string }>`
+        SELECT effect_id, effect_type FROM orchestration_v2_effect_outbox
+        WHERE thread_id = ${threadId} ORDER BY effect_id
+      `;
+        const eventsBefore = yield* readDeletes;
+        const effectsBefore = yield* readEffects;
+        assert.deepEqual(
+          eventsBefore.map((event) => [event.command_id, event.event_type]),
+          [
+            [`${commandId}:delete-thread:${threadId}`, "thread.deleted"],
+            [commandId, "project.deleted"],
+          ],
+        );
+        assert.sameMembers(
+          effectsBefore.map((effect) => effect.effect_type),
+          ["preview.cleanup", "terminal.cleanup"],
+        );
+        assert.deepEqual(yield* service.delete(input), committed);
+        assert.equal(yield* Ref.get(attempts), failures === 3 ? 4 : 3);
+        const repaired = yield* settings.getSettings;
+        assert.isUndefined(repaired.projectSettingsOverrides[projectId]);
+        assert.isUndefined(repaired.projectAgentBrowserAccessOverrides[projectId]);
+        assert.isTrue(repaired.projectSettingsOverrides[otherProjectId]?.enableAgentDeviceAccess);
+        assert.deepEqual(yield* readDeletes, eventsBefore);
+        assert.deepEqual(yield* readEffects, effectsBefore);
+      }).pipe(Effect.provide(layerServices));
+    }).pipe(Effect.provide(layerDatabase)),
 );

@@ -103,6 +103,7 @@ export class ProjectOperationError extends Schema.TaggedError<ProjectOperationEr
       "list-projects",
       "list-threads",
       "delete-thread",
+      "delete-project-settings",
       "dispatch-project-command",
     ]),
     projectId: Schema.optional(ProjectId),
@@ -111,6 +112,8 @@ export class ProjectOperationError extends Schema.TaggedError<ProjectOperationEr
   },
 ) {
   override get message(): string {
+    if (this.operation === "delete-project-settings")
+      return `Project deletion committed, but settings cleanup failed${this.projectId === undefined ? "" : ` for ${this.projectId}`}. Retry using the original command ID to finish cleanup.`;
     return `Project operation '${this.operation}' failed${this.projectId === undefined ? "" : ` for ${this.projectId}`}.`;
   }
 }
@@ -611,13 +614,17 @@ export const make = Effect.gen(function* () {
           }
           yield* commit({ type: "project.delete", commandId: input.commandId, projectId });
           // Terminal deletion removes grants; receipt replay retries interrupted cleanup.
-          yield* settings
-            .updateSettings({ projectSettingsOverrides: { [projectId]: null } })
-            .pipe(
-              Effect.catch((cause) =>
-                Effect.logError("Deleted project settings cleanup failed", { projectId, cause }),
-              ),
-            );
+          yield* settings.updateSettings({ projectSettingsOverrides: { [projectId]: null } }).pipe(
+            Effect.retry({ times: 2 }),
+            Effect.mapError(
+              (cause) =>
+                new ProjectOperationError({
+                  operation: "delete-project-settings",
+                  projectId,
+                  cause,
+                }),
+            ),
+          );
           yield* projectEnrichment.invalidate([existing.value.workspaceRoot]);
           return yield* readCommitted(projectId);
         }),
