@@ -12,7 +12,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import { currentThreadDeviceAccess } from "../device/DeviceAgentAccess.ts";
 
-import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 
 const ALL_MCP_CAPABILITIES = [
   "preview",
@@ -127,7 +127,7 @@ export const requireThreadMcpCapability = <const C extends "preview" | "device">
 /** A granted device credential still needs the calling project's current consent. */
 export const requireCurrentThreadDeviceAccess = Effect.gen(function* () {
   const scope = yield* requireThreadMcpCapability("device");
-  const threads = yield* ThreadManagement.ThreadManagementService;
+  const threads = yield* ProjectionStore.ProjectionStoreV2;
   const allowed = yield* currentThreadDeviceAccess(threads.getThreadShell(scope.thread.threadId));
   if (!allowed) return yield* missingCapability(scope, "device");
   return scope;
