@@ -23,6 +23,8 @@ const StoredTarget = Schema.Struct({
   resumeAttempt: NonNegativeInt,
   pauseAccepted: Schema.Boolean,
   resumeAccepted: Schema.Boolean,
+  /** An earlier successful Pause still needs Resume while another Pause is attempted. */
+  resumeRequired: Schema.optional(Schema.Literal(true)),
 });
 const StoredSession = Schema.Struct({
   ...EnvironmentPauseSession.fields,

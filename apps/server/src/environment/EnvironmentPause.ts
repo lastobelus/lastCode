@@ -115,13 +115,16 @@ const make = Effect.gen(function* () {
     );
     const pendingIds = new Set(pending.map(({ threadId }) => threadId));
     // Archived work still blocks quiet in status, but cannot accept messages.
-    return shell.threads.filter(
-      (thread) =>
-        thread.archivedAt == null &&
-        thread.deletedAt == null &&
-        !isProviderNativeSubagentThread(thread) &&
-        (activeThread(thread, deferred, automationPaused) || pendingIds.has(thread.id)),
-    );
+    return {
+      deferred,
+      threads: shell.threads.filter(
+        (thread) =>
+          thread.archivedAt == null &&
+          thread.deletedAt == null &&
+          !isProviderNativeSubagentThread(thread) &&
+          (activeThread(thread, deferred, automationPaused) || pendingIds.has(thread.id)),
+      ),
+    };
   });
 
   const readResumeRecipient = (
@@ -554,6 +557,7 @@ const make = Effect.gen(function* () {
                   resumeAttempt: _resumeAttempt,
                   pauseAccepted: _pauseAccepted,
                   resumeAccepted: _resumeAccepted,
+                  resumeRequired: _resumeRequired,
                   ...target
                 }) => target,
               ),
@@ -638,14 +642,76 @@ const make = Effect.gen(function* () {
     );
   });
   const collectNewTargets = Effect.gen(function* () {
-    const activeTargets = yield* readTargets;
+    const { threads: activeTargets, deferred } = yield* readTargets;
+    const snapshot = yield* store.get;
+    const activeById = new Map(activeTargets.map((thread) => [thread.id, thread]));
+    const laterRuns = new Map<ThreadId, number>();
+    if (snapshot !== null && snapshot.phase !== "resuming") {
+      for (const target of snapshot.targets) {
+        if (target.pause !== "sent") continue;
+        const thread = activeById.get(target.threadId);
+        if (thread === undefined) continue;
+        const activeRunId =
+          thread.activeRunId ??
+          (["preparing", "queued", "starting", "running", "waiting"].includes(
+            thread.activityRunStatus ?? thread.status,
+          )
+            ? thread.latestRunId
+            : null);
+        if (
+          activeRunId === null ||
+          deferred.some((run) => run.threadId === thread.id && run.runId === activeRunId)
+        )
+          continue;
+        const identity = Store.deliveryIdentity(snapshot, target, "pause");
+        const receipt = yield* projections
+          .getThreadRecords(thread.id, ["messages"], {
+            messageIds: [identity.messageId],
+          })
+          .pipe(Effect.result);
+        if (receipt._tag === "Failure") continue;
+        const pauseRunId = receipt.success.messages.find(
+          (message) => message.id === identity.messageId,
+        )?.runId;
+        if (pauseRunId == null || pauseRunId === activeRunId) continue;
+        const records = yield* projections
+          .getThreadRecords(thread.id, ["runs"], {
+            runIds: [pauseRunId, activeRunId],
+          })
+          .pipe(Effect.result);
+        if (records._tag === "Failure") continue;
+        const pauseRun = records.success.runs.find((run) => run.id === pauseRunId);
+        const activeRun = records.success.runs.find((run) => run.id === activeRunId);
+        if (pauseRun === undefined || activeRun === undefined) continue;
+        // A held run can be admitted before the Pause control but promoted only
+        // after it finishes. Active ownership and execution time prove that order.
+        const promotedAfterPause =
+          thread.activeRunId === activeRun.id &&
+          ["starting", "running"].includes(activeRun.status) &&
+          ["completed", "failed", "interrupted", "cancelled"].includes(pauseRun.status) &&
+          pauseRun.completedAt !== null &&
+          (activeRun.startedAt === null
+            ? activeRun.status === "starting"
+            : DateTime.toEpochMillis(activeRun.startedAt) >=
+              DateTime.toEpochMillis(pauseRun.completedAt));
+        // Checkpoint/background activity for the same run does not need another
+        // message. A later active run must be proved by durable conversation rows.
+        if (
+          (activeRun.ordinal > pauseRun.ordinal || promotedAfterPause) &&
+          ["queued", "starting", "running"].includes(activeRun.status)
+        )
+          laterRuns.set(target.threadId, target.pauseAttempt);
+      }
+    }
     yield* store.update((session) => {
       if (session === null || session.phase === "resuming") return session;
       const existing = new Set(session.targets.map((target) => target.threadId));
-      const activeById = new Map(activeTargets.map((thread) => [thread.id, thread]));
       const restored = session.targets.map((target) => {
         const thread = activeById.get(target.threadId);
-        return target.pause !== "unavailable" || thread === undefined
+        const reenroll =
+          target.pause === "unavailable" ||
+          (target.pause === "sent" && laterRuns.get(target.threadId) === target.pauseAttempt);
+        return !reenroll || thread === undefined
           ? target
           : {
               ...target,
@@ -654,6 +720,7 @@ const make = Effect.gen(function* () {
               pause: "pending" as const,
               pauseAttempt: target.pauseAttempt + 1,
               pauseAccepted: false,
+              ...(target.pause === "sent" ? { resumeRequired: true as const } : {}),
               error: null,
             };
       });
@@ -767,7 +834,16 @@ const make = Effect.gen(function* () {
         if (session.targets.some((target) => target.pause === "pending"))
           return yield* new EnvironmentPauseError({ operation: "resume", reason: "unavailable" });
         yield* store.update((current) =>
-          current === null ? current : { ...current, phase: "resuming" },
+          current === null
+            ? current
+            : {
+                ...current,
+                phase: "resuming",
+                // Settled re-Pause failures must not erase an earlier received Pause.
+                targets: current.targets.map((target) =>
+                  target.resumeRequired === true ? { ...target, pause: "sent" as const } : target,
+                ),
+              },
         );
         yield* retryDirection("resume");
         return yield* status;

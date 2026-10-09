@@ -305,7 +305,16 @@ const harness = Effect.gen(function* () {
           const isQueued = yield* Ref.get(queued);
           const runId = RunId.make(`queued-${input.messageId}`);
           const submittedMessage = message(input.messageId, runId, input.threadId);
-          const submittedRun = run(runId, input.messageId, input.threadId);
+          const submittedRun = {
+            ...run(runId, input.messageId, input.threadId),
+            ordinal:
+              Math.max(
+                0,
+                ...(yield* Ref.get(runs))
+                  .filter((run) => run.threadId === input.threadId)
+                  .map((run) => run.ordinal),
+              ) + 1,
+          };
           yield* Ref.update(messages, (previous) => [...previous, submittedMessage]);
           yield* Ref.update(runs, (previous) => [...previous, submittedRun]);
           if (!isQueued) {
@@ -553,6 +562,211 @@ it.effect("re-enrolls a restored active recipient with a fresh Pause delivery id
       [a],
     );
   }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect.each(["start", "retry"] as const)(
+  "explicit %s re-pauses a distinct later run with durable identities and one Resume",
+  (operation) =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      yield* Ref.set(h.snapshot, shell([thread(a)]));
+      yield* h.pause.start;
+      const initial = (yield* h.store.get)!;
+      const oldIdentity = Store.deliveryIdentity(initial, initial.targets[0]!, "pause");
+      const firstRun = (yield* Ref.get(h.runs))[0]!;
+      const laterRun = {
+        ...run(RunId.make("later-manual-run"), MessageId.make("later-manual-message")),
+        ordinal: firstRun.ordinal + 1,
+        status: "running" as const,
+        startedAt: now,
+      };
+      yield* Ref.update(h.runs, (runs) => [
+        ...runs.map((run) => ({ ...run, status: "completed" as const })),
+        laterRun,
+      ]);
+      yield* Ref.update(h.messages, (messages) => [
+        ...messages,
+        {
+          ...message(laterRun.userMessageId, laterRun.id),
+          text: "Continue the ordinary task",
+          creationSource: "web" as const,
+        },
+      ]);
+      yield* Ref.set(
+        h.snapshot,
+        shell([{ ...thread(a), activeRunId: laterRun.id, latestRunId: laterRun.id }]),
+      );
+      yield* h.pause.status;
+      assert.lengthOf(yield* Ref.get(h.calls), 1);
+      yield* Ref.set(h.queued, true);
+      const repausing = yield* h.pause[operation];
+      assert.strictEqual(repausing.session?.targets[0]?.pause, "pending");
+      assert.notProperty(repausing.session!.targets[0]!, "resumeRequired");
+      const saved = (yield* h.store.get)!;
+      assert.strictEqual(saved.targets[0]?.pauseAttempt, 1);
+      assert.isTrue(saved.targets[0]?.resumeRequired);
+      const fresh = Store.deliveryIdentity(saved, saved.targets[0]!, "pause");
+      assert.notStrictEqual(fresh.messageId, oldIdentity.messageId);
+      assert.notStrictEqual(fresh.commandId, oldIdentity.commandId);
+      yield* h.store.recordDelivery(oldIdentity.messageId, false);
+      assert.strictEqual((yield* h.store.get)?.targets[0]?.pause, "pending");
+      yield* h.pause.start;
+      yield* h.pause.retry;
+      assert.lengthOf(yield* Ref.get(h.calls), 2);
+      const recovered = yield* restart(h);
+      assert.isTrue((yield* recovered.store.get)?.targets[0]?.resumeRequired);
+      yield* recovered.pause.retry;
+      assert.lengthOf(yield* Ref.get(h.calls), 2);
+      yield* recovered.store.recordDelivery(fresh.messageId, true);
+      yield* recovered.pause.retry;
+      assert.lengthOf(yield* Ref.get(h.calls), 2);
+      yield* Ref.set(h.snapshot, shell([thread(a, "idle")]));
+      yield* Ref.set(h.queued, false);
+      assert.isNull((yield* recovered.pause.resume).session);
+      assert.lengthOf(
+        (yield* Ref.get(h.calls)).filter((call) => call.text === "resume"),
+        1,
+      );
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect.each([
+  "same-control",
+  "same-original",
+  "checkpoint",
+  "idle",
+  "deferred",
+  "missing-message",
+] as const)("does not re-pause %s activity without a proved later active run", (scenario) =>
+  Effect.gen(function* () {
+    const h = yield* harness;
+    yield* Ref.set(h.snapshot, shell([thread(a)]));
+    yield* h.pause.start;
+    const original = (yield* Ref.get(h.runs))[0]!;
+    const candidate = {
+      ...run(RunId.make("candidate-run"), MessageId.make("candidate-message")),
+      ordinal: original.ordinal + 1,
+      status:
+        scenario === "checkpoint"
+          ? ("completed" as const)
+          : scenario === "deferred"
+            ? ("queued" as const)
+            : ("running" as const),
+    };
+    yield* Ref.update(h.runs, (runs) => [...runs, candidate]);
+    if (scenario === "same-original")
+      yield* Ref.update(h.messages, (messages) =>
+        messages.map((message) => ({ ...message, runId: candidate.id })),
+      );
+    if (scenario === "missing-message") yield* Ref.set(h.messages, []);
+    if (scenario === "deferred") yield* Ref.set(h.deferred, [{ threadId: a, runId: candidate.id }]);
+    yield* Ref.set(
+      h.snapshot,
+      shell([
+        {
+          ...thread(
+            a,
+            scenario === "idle" ? "idle" : scenario === "deferred" ? "queued" : "running",
+          ),
+          activeRunId:
+            scenario === "idle" || scenario === "deferred"
+              ? null
+              : scenario === "same-control"
+                ? original.id
+                : candidate.id,
+          latestRunId: candidate.id,
+        },
+      ]),
+    );
+    yield* h.pause.retry;
+    yield* h.pause.start;
+    assert.lengthOf(yield* Ref.get(h.calls), 1);
+    assert.strictEqual((yield* h.store.get)?.targets[0]?.pauseAttempt, 0);
+    assert.strictEqual((yield* h.store.get)?.targets[0]?.pause, "sent");
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("retains the original Resume obligation after a failed re-Pause and restart", () =>
+  Effect.gen(function* () {
+    const h = yield* harness;
+    yield* Ref.set(h.snapshot, shell([thread(a)]));
+    yield* h.pause.start;
+    const original = (yield* Ref.get(h.runs))[0]!;
+    const laterRun = {
+      ...run(RunId.make("later-failure-run"), MessageId.make("later-failure-message")),
+      ordinal: original.ordinal + 1,
+      status: "running" as const,
+    };
+    yield* Ref.update(h.runs, (runs) => [...runs, laterRun]);
+    yield* Ref.update(h.messages, (messages) => [
+      ...messages,
+      {
+        ...message(laterRun.userMessageId, laterRun.id),
+        text: "Continue the ordinary task",
+        creationSource: "web" as const,
+      },
+    ]);
+    yield* Ref.set(h.snapshot, shell([{ ...thread(a), activeRunId: laterRun.id }]));
+    yield* Ref.set(h.receiptFailures, new Set([a]));
+    assert.strictEqual((yield* h.pause.retry).session?.targets[0]?.pause, "failed");
+    const recovered = yield* restart(h);
+    assert.isTrue((yield* recovered.store.get)?.targets[0]?.resumeRequired);
+    assert.strictEqual((yield* recovered.pause.status).session?.targets[0]?.pause, "failed");
+    yield* Ref.set(h.receiptFailures, new Set<ThreadId>());
+    assert.isNull((yield* recovered.pause.resume).session);
+    assert.lengthOf(
+      (yield* Ref.get(h.calls)).filter((call) => call.text === "resume"),
+      1,
+    );
+    assert.isNull((yield* recovered.pause.status).session);
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect.each(["queued", "starting", "running"] as const)(
+  "re-pauses a lower-ordinal held run only after promotion to %s",
+  (status) =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      yield* Ref.set(h.snapshot, shell([thread(a)]));
+      yield* h.pause.start;
+      const containing = (yield* Ref.get(h.runs))[0]!;
+      const held = {
+        ...run(RunId.make("earlier-held-run"), MessageId.make("earlier-held-message")),
+        ordinal: 2,
+        status,
+        queueHeld: status === "queued",
+        startedAt: status === "running" ? now : null,
+      };
+      yield* Ref.set(h.runs, [
+        held,
+        {
+          ...containing,
+          ordinal: 3,
+          status: "completed",
+          startedAt: now,
+          completedAt: now,
+        },
+      ]);
+      yield* Ref.set(
+        h.snapshot,
+        shell([
+          {
+            ...thread(a, status),
+            activeRunId: status === "queued" ? null : held.id,
+            latestRunId: held.id,
+          },
+        ]),
+      );
+      yield* h.pause.retry;
+      yield* h.pause.retry;
+      const expected = status === "queued" ? 1 : 2;
+      assert.lengthOf(yield* Ref.get(h.calls), expected);
+      assert.strictEqual((yield* h.store.get)?.targets[0]?.pauseAttempt, expected - 1);
+      assert.strictEqual(
+        (yield* h.store.get)?.targets[0]?.resumeRequired,
+        status === "queued" ? undefined : true,
+      );
+    }).pipe(Effect.provide(testLayer)),
 );
 
 it.effect("keeps a committed Pause with uncertain failure bookkeeping pending after deletion", () =>
