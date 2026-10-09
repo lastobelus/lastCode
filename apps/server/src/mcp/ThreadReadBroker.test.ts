@@ -73,6 +73,7 @@ type Spawn = {
 };
 
 const runId = (messageId: MessageId) => RunId.make(`run-${messageId}`);
+const sourceRunId = runId(MessageId.make("source-message"));
 
 /** A broker over in-memory thread records, with `source-thread` running for `client-session`. */
 const makeHarness = Effect.gen(function* () {
@@ -137,14 +138,22 @@ const makeHarness = Effect.gen(function* () {
         Effect.forkScoped,
       ),
     );
-  /** The session a read from `source` reached, or the failure code. */
-  const reader = (source: ThreadId) =>
-    broker.read(source, { threadId }).pipe(
+  /** The run a caller loading `thread` now would act from. */
+  const callerRun = (thread: ThreadId) => {
+    const loaded = { runs: runs.get(thread) ?? [] } as unknown as OrchestrationV2ThreadProjection;
+    return (
+      ThreadManagementService.latestActiveRun(loaded) ?? ThreadManagementService.latestRun(loaded)
+    )?.id;
+  };
+  /** The session a read acting from `run` of `source` reached, or the failure code. */
+  const readFrom = (source: ThreadId, run: RunId | undefined) =>
+    broker.read(source, run, { threadId }).pipe(
       Effect.map(() => answered.at(-1)),
       Effect.catch((error) => Effect.succeed(error.code)),
     );
+  const reader = (source: ThreadId) => readFrom(source, callerRun(source));
   yield* send("client-session", sourceThreadId, MessageId.make("source-message"));
-  return { broker, runs, transfers, start, send, answer, reader };
+  return { broker, runs, transfers, start, send, answer, callerRun, readFrom, reader };
 });
 
 const respondTo = (
@@ -164,17 +173,38 @@ describe("ThreadReadBroker", () => {
   it.effect("keeps running and queued inputs bound to their own authenticated clients", () =>
     Effect.scoped(
       Effect.gen(function* () {
-        const { send, answer, reader, runs } = yield* makeHarness;
+        const { broker, start, send, answer, callerRun, readFrom, reader, runs } =
+          yield* makeHarness;
         const queued = MessageId.make("queued-message");
         yield* send("other-session", sourceThreadId, queued, "queued");
         yield* answer("client-session");
         yield* answer("other-session");
+        const captured = callerRun(sourceThreadId);
         expect(yield* reader(sourceThreadId)).toBe("client-session");
         // The queued input starts once the running one finishes.
         const [running, waiting] = runs.get(sourceThreadId)!;
         running!.status = "completed";
         waiting!.status = "running";
         expect(yield* reader(sourceThreadId)).toBe("other-session");
+        // A caller that captured the earlier run keeps its authority after the source advances.
+        expect(yield* readFrom(sourceThreadId, captured)).toBe("client-session");
+        const launchedThreadId = ThreadId.make("launched-thread");
+        const launched = MessageId.make("launched-message");
+        yield* (yield* broker.inherit(sourceThreadId, captured)).authorize(
+          launchedThreadId,
+          launched,
+        );
+        start(launchedThreadId, launched);
+        expect(yield* reader(launchedThreadId)).toBe("client-session");
+        // Without a captured run there is no authority, even while the source is running.
+        expect(yield* readFrom(sourceThreadId, undefined)).toBe("environment_unavailable");
+        const unbound = MessageId.make("unbound-message");
+        yield* (yield* broker.inherit(sourceThreadId, undefined)).authorize(
+          launchedThreadId,
+          unbound,
+        );
+        start(launchedThreadId, unbound);
+        expect(yield* reader(launchedThreadId)).toBe("environment_unavailable");
       }),
     ),
   );
@@ -267,7 +297,7 @@ describe("ThreadReadBroker", () => {
     () =>
       Effect.scoped(
         Effect.gen(function* () {
-          const { broker, start, send, answer, reader, transfers } = yield* makeHarness;
+          const { broker, start, send, answer, callerRun, reader, transfers } = yield* makeHarness;
           const spawned = (child: ThreadId, parent: ThreadId, parentRunId: RunId) => {
             const message = MessageId.make(`${child}-message`);
             start(child, message);
@@ -291,7 +321,10 @@ describe("ThreadReadBroker", () => {
           // Threads launched by the child inherit the same requester.
           const launchedThreadId = ThreadId.make("launched-thread");
           const launched = MessageId.make("launched-message");
-          yield* (yield* broker.inherit(childThreadId)).authorize(launchedThreadId, launched);
+          yield* (yield* broker.inherit(childThreadId, callerRun(childThreadId))).authorize(
+            launchedThreadId,
+            launched,
+          );
           start(launchedThreadId, launched);
           expect(yield* reader(launchedThreadId)).toBe("client-session");
 
@@ -307,11 +340,9 @@ describe("ThreadReadBroker", () => {
 
   it.effect("reports unavailable routing instead of falsely claiming the thread is missing", () =>
     Effect.gen(function* () {
-      const { broker } = yield* makeHarness;
+      const { reader } = yield* makeHarness;
       for (const source of [sourceThreadId, ThreadId.make("unbound-thread")]) {
-        expect(yield* broker.read(source, { threadId }).pipe(Effect.flip)).toMatchObject({
-          code: "environment_unavailable",
-        });
+        expect(yield* reader(source)).toBe("environment_unavailable");
       }
     }),
   );
@@ -339,7 +370,7 @@ describe("ThreadReadBroker", () => {
           }),
           Effect.forkScoped,
         );
-        expect(yield* broker.read(sourceThreadId, input)).toEqual(result);
+        expect(yield* broker.read(sourceThreadId, sourceRunId, input)).toEqual(result);
         expect(forwarded).toEqual([input]);
       }),
     ),
@@ -371,7 +402,7 @@ describe("ThreadReadBroker", () => {
         ).pipe(Effect.forkScoped);
         yield* Deferred.await(connected);
         const reading = yield* broker
-          .read(sourceThreadId, { threadId })
+          .read(sourceThreadId, sourceRunId, { threadId })
           .pipe(Effect.flip, Effect.forkScoped);
         yield* Deferred.await(received);
         yield* Fiber.interrupt(consumer);
@@ -403,7 +434,7 @@ describe("ThreadReadBroker", () => {
           Effect.forkScoped,
         );
         const reading = yield* broker
-          .read(sourceThreadId, { threadId, environmentId })
+          .read(sourceThreadId, sourceRunId, { threadId, environmentId })
           .pipe(Effect.forkScoped);
         const request = yield* Deferred.await(received);
         expect(
@@ -432,7 +463,7 @@ describe("ThreadReadBroker", () => {
           Effect.forkScoped,
         );
         const reading = yield* broker
-          .read(sourceThreadId, { threadId })
+          .read(sourceThreadId, sourceRunId, { threadId })
           .pipe(Effect.flip, Effect.forkScoped);
         const request = yield* Deferred.await(received);
         yield* TestClock.adjust("15 seconds");

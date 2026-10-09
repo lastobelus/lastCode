@@ -45,14 +45,22 @@ it.effect(
         ThreadId,
         Array<{ id: RunId; userMessageId: MessageId; status: string }>
       >();
+      // When set, another client's input starts after the tool has loaded its caller.
+      let advanceAfterCallerLoads = false;
       const threads = Layer.mock(ThreadManagement.ThreadManagementService)({
         getThreadShell: () => Effect.succeed(caller),
         getThreadRecords: (threadId) =>
-          Effect.succeed({
-            thread: { id: threadId },
-            runs: runs.get(threadId) ?? [],
-            contextTransfers: [],
-          } as unknown as OrchestrationV2ThreadProjection),
+          Effect.gen(function* () {
+            if (threadId === sourceThreadId && advanceAfterCallerLoads) {
+              advanceAfterCallerLoads = false;
+              yield* submit("between-client-session", sourceThreadId, "between-run");
+            }
+            return {
+              thread: { id: threadId },
+              runs: runs.get(threadId) ?? [],
+              contextTransfers: [],
+            } as unknown as OrchestrationV2ThreadProjection;
+          }),
       });
       const broker = yield* ThreadReadBroker.ThreadReadBroker.pipe(
         Effect.provide(ThreadReadBroker.layer.pipe(Layer.provide([NodeCrypto.layer, threads]))),
@@ -132,6 +140,7 @@ it.effect(
           ),
         ),
       );
+      advanceAfterCallerLoads = true;
       const result = yield* toolkit
         .handle("t3_thread_launch", { title: "Audit", message: "Review the change" })
         .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
@@ -160,7 +169,9 @@ it.effect(
       );
       expect(
         yield* broker
-          .read(prompted.threadId!, { threadId: ThreadId.make("remote-thread") })
+          .read(prompted.threadId!, RunId.make("launched-run"), {
+            threadId: ThreadId.make("remote-thread"),
+          })
           .pipe(Effect.flip),
       ).toMatchObject({ code: "thread_not_found" });
       const unprompted = { title: "Independent notes", creatorThreadId: "untrusted-creator" };

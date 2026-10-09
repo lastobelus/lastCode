@@ -34,8 +34,14 @@ export class ThreadReadBroker extends Context.Service<
   {
     /** Binds each new input to the client session that submitted it. */
     readonly forSession: (sessionId: string) => Authorization;
-    /** Binds each new input to the session that authorized the source thread's current run. */
-    readonly inherit: (sourceThreadId: ThreadId) => Effect.Effect<Authorization>;
+    /**
+     * Binds each new input to the session that authorized the caller's captured run. Callers pass
+     * the run they already loaded, so a later run on the source never lends its authority.
+     */
+    readonly inherit: (
+      sourceThreadId: ThreadId,
+      sourceRunId: RunId | undefined,
+    ) => Effect.Effect<Authorization>;
     readonly connect: (
       sessionId: string,
     ) => Effect.Effect<Stream.Stream<ThreadReadRequest>, never, Scope.Scope>;
@@ -43,9 +49,10 @@ export class ThreadReadBroker extends Context.Service<
       sessionId: string,
       response: ThreadReadResponse,
     ) => Effect.Effect<void, OrchestratorMcpFailure>;
-    /** Reads through the clients of the session that authorized the source thread's current run. */
+    /** Reads through the clients of the session that authorized the caller's captured run. */
     readonly read: (
       sourceThreadId: ThreadId,
+      sourceRunId: RunId | undefined,
       input: OrchestratorMcpThreadReadInput,
     ) => Effect.Effect<OrchestratorMcpThreadReadResult, OrchestratorMcpFailure>;
   }
@@ -103,18 +110,15 @@ const make = Effect.gen(function* () {
   /** A delegated run inherits the exact run that spawned it, even after its parent moves on. */
   const runSession = (
     threadId: ThreadId,
-    runId: RunId | undefined,
+    runId: RunId,
     visited: Set<RunId>,
   ): Effect.Effect<string | undefined, OrchestratorV2Error> =>
     Effect.gen(function* () {
+      if (visited.has(runId)) return undefined;
+      visited.add(runId);
       const source = yield* threads.getThreadRecords(threadId, ["runs", "contextTransfers"]);
-      const run =
-        runId === undefined
-          ? (ThreadManagementService.latestActiveRun(source) ??
-            ThreadManagementService.latestRun(source))
-          : source.runs.find((candidate) => candidate.id === runId);
-      if (run === undefined || visited.has(run.id)) return undefined;
-      visited.add(run.id);
+      const run = source.runs.find((candidate) => candidate.id === runId);
+      if (run === undefined) return undefined;
       const now = yield* pruneBindings;
       const key = bindingKey(threadId, run.userMessageId);
       const entry = bindings.get(key);
@@ -129,11 +133,14 @@ const make = Effect.gen(function* () {
       if (spawn?.sourcePoint.runId === undefined) return undefined;
       return yield* runSession(spawn.sourceThreadId, spawn.sourcePoint.runId, visited);
     });
-  const currentSession = (threadId: ThreadId) =>
-    runSession(threadId, undefined, new Set()).pipe(Effect.orElseSucceed(() => undefined));
+  // Without a captured run there is no authority to inherit.
+  const sourceSession = (threadId: ThreadId, runId: RunId | undefined) =>
+    runId === undefined
+      ? Effect.succeed(undefined)
+      : runSession(threadId, runId, new Set()).pipe(Effect.orElseSucceed(() => undefined));
 
-  const inherit: ThreadReadBroker["Service"]["inherit"] = (sourceThreadId) =>
-    Effect.map(currentSession(sourceThreadId), (sessionId) =>
+  const inherit: ThreadReadBroker["Service"]["inherit"] = (sourceThreadId, sourceRunId) =>
+    Effect.map(sourceSession(sourceThreadId, sourceRunId), (sessionId) =>
       sessionId === undefined ? ThreadReadAuthorization.defaultValue() : forSession(sessionId),
     );
 
@@ -219,9 +226,9 @@ const make = Effect.gen(function* () {
       yield* finishMiss(response.requestId);
     });
 
-  const read: ThreadReadBroker["Service"]["read"] = (sourceThreadId, input) =>
+  const read: ThreadReadBroker["Service"]["read"] = (sourceThreadId, sourceRunId, input) =>
     Effect.gen(function* () {
-      const sessionId = yield* currentSession(sourceThreadId);
+      const sessionId = yield* sourceSession(sourceThreadId, sourceRunId);
       if (sessionId === undefined) {
         return yield* new OrchestratorMcpFailure({
           code: "environment_unavailable",

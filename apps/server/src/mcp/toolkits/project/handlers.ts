@@ -83,7 +83,10 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         const readAuthorization =
           caller === undefined || Option.isNone(broker)
             ? ThreadReadAuthorization.defaultValue()
-            : yield* broker.value.inherit(caller.id);
+            : yield* broker.value.inherit(
+                caller.id,
+                caller.activeRunId ?? caller.latestRunId ?? undefined,
+              );
         const projectId =
           input.scratch === true
             ? (yield* ManagedProjectFolders.ManagedProjectFolders.pipe(

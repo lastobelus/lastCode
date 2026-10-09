@@ -976,6 +976,11 @@ const make = Effect.gen(function* () {
       } as const;
     });
 
+  /** The run a loaded caller is acting from; remote read authority follows this run only. */
+  const callerRunId = (caller: Pick<OrchestrationV2ThreadProjection, "runs">) =>
+    (ThreadManagementService.latestActiveRun(caller) ?? ThreadManagementService.latestRun(caller))
+      ?.id;
+
   /** The caller's own thread, for operations that act as the caller. */
   const loadThreadCaller = (scope: McpInvocationScope, operation: string) =>
     Effect.gen(function* () {
@@ -2268,7 +2273,7 @@ const make = Effect.gen(function* () {
           );
         }
         const parentNodeId = parentRun.rootNodeId;
-        const readAuthorization = yield* threadReadBroker.inherit(parent.thread.id);
+        const readAuthorization = yield* threadReadBroker.inherit(parent.thread.id, parentRun.id);
         const providers = yield* loadProviders;
         const key = yield* requestKey(input.clientRequestId);
         const created = yield* Effect.forEach(
@@ -2462,7 +2467,7 @@ const make = Effect.gen(function* () {
             (error) =>
               parent === undefined
                 ? Effect.fail(error)
-                : threadReadBroker.read(parent.thread.id, input),
+                : threadReadBroker.read(parent.thread.id, callerRunId(parent), input),
           ),
         );
       }),
@@ -2483,7 +2488,7 @@ const make = Effect.gen(function* () {
         const readAuthorization =
           parent === undefined
             ? ThreadReadAuthorization.defaultValue()
-            : yield* threadReadBroker.inherit(parent.thread.id);
+            : yield* threadReadBroker.inherit(parent.thread.id, callerRunId(parent));
         const result = yield* threadManagement
           .sendToThread({
             projectId: target.thread.projectId,
