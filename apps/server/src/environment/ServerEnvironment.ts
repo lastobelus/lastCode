@@ -243,6 +243,7 @@ export const make = Effect.gen(function* () {
       threadPinning: true,
       threadPersistence: true,
       previewHostingProcessControl: true,
+      environmentPause: true,
       threadPinReorder: true,
       threadActiveReorder: true,
       threadAutoSettleOptOut: true,

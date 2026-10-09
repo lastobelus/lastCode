@@ -7,6 +7,7 @@ import {
   type OrchestrationV2RestartCancelledBackgroundWork,
   type OrchestrationV2Subagent,
   type OrchestrationV2ThreadProjection,
+  type RunId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -14,6 +15,7 @@ import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import * as EffectOutbox from "./EffectOutbox.ts";
@@ -21,6 +23,7 @@ import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as EnvironmentPauseStore from "../environment/EnvironmentPauseStore.ts";
 import { restartContinuationRun } from "./RestartContinuation.ts";
 import {
   cancelledRosterTaskWork,
@@ -185,16 +188,24 @@ export const make = Effect.gen(function* () {
   const eventSink = yield* EventSink.EventSinkV2;
   const ids = yield* IdAllocator.IdAllocatorV2;
   const outbox = yield* EffectOutbox.EffectOutboxV2;
+  const pauseStore = yield* Effect.serviceOption(EnvironmentPauseStore.EnvironmentPauseStore);
+  const pausedAutomaticRuns = Effect.gen(function* () {
+    const session = Option.isSome(pauseStore) ? yield* pauseStore.value.get : null;
+    if (session === null) return [];
+    return yield* outbox.pendingAutomaticRelease;
+  });
   const reconcileProjection = Effect.fn("ProviderRuntimeRecoveryService.reconcileProjection")(
     function* (
       projection: ProjectionStore.ProjectionRuntimeRecoveryState,
       trigger: "startup" | "shutdown",
       continueAfterRestart: boolean,
       inactiveFamily = false,
+      pauseHeldRunIds: ReadonlySet<RunId> = new Set(),
     ) {
       const now = yield* DateTime.now;
       const runs = [] as Array<OrchestrationV2ThreadProjection["runs"][number]>;
       for (const run of nonterminalRuns(projection)) {
+        if (pauseHeldRunIds.has(run.id)) continue;
         if (run.status === "waiting" && !inactiveFamily) {
           const checkpointEffects = yield* outbox
             .listByCommandId(CommandId.make(`command:effect:checkpoint.capture:${run.id}`))
@@ -328,10 +339,11 @@ export const make = Effect.gen(function* () {
           cancelledBackgroundNativeIds.add(item.nativeItemRef.nativeId);
         }
       };
-      // Queued runs have not started provider work. Preserve their execution
-      // identities and order, but require explicit consent before draining them.
+      // Ordinary queues need explicit restart consent. Pause-held automatic
+      // work retains its original identity for the environment's Resume action.
       for (const run of projection.runs) {
-        if (run.status !== "queued" || run.queueHeld === true) continue;
+        if (run.status !== "queued" || run.queueHeld === true || pauseHeldRunIds.has(run.id))
+          continue;
         events.push({
           id: yield* allocateEventId(),
           type: "run.updated",
@@ -720,9 +732,13 @@ export const make = Effect.gen(function* () {
           },
         });
       }
-      const continuationRun =
+      const continuationCandidate =
         continueAfterRestart && trigger === "startup"
           ? restartContinuationRun(projection)
+          : undefined;
+      const continuationRun =
+        continuationCandidate !== undefined && !pauseHeldRunIds.has(continuationCandidate.id)
+          ? continuationCandidate
           : undefined;
       const effects: Array<EffectOutbox.PendingOrchestrationEffectV2> = continuationRun
         ? [
@@ -744,6 +760,7 @@ export const make = Effect.gen(function* () {
             threadId: projection.thread.id,
             effectTypes: retiredEffectTypes,
             reason: detail,
+            ...(pauseHeldRunIds.size > 0 ? { preserveUnstartedAutomatic: true } : {}),
           })
           .pipe(
             Effect.mapError(
@@ -769,6 +786,7 @@ export const make = Effect.gen(function* () {
             cancelUnsettledEffects: {
               effectTypes: retiredEffectTypes,
               reason: detail,
+              ...(pauseHeldRunIds.size > 0 ? { preserveUnstartedAutomatic: true } : {}),
             },
           })
           .pipe(
@@ -800,6 +818,11 @@ export const make = Effect.gen(function* () {
       const continueAfterRestart = yield* settings.getSettings.pipe(
         Effect.orElseSucceed(() => null),
       );
+      const deferredAutomatic = yield* pausedAutomaticRuns.pipe(
+        Effect.mapError(
+          (cause) => new ProviderRuntimeRecoveryError({ operation: "read-projections", cause }),
+        ),
+      );
       const threadIds = yield* projections
         .getRecoveryThreadIds("runtime")
         .pipe(
@@ -827,11 +850,27 @@ export const make = Effect.gen(function* () {
           resolveProjectSettings(continueAfterRestart, projection.thread.projectId).settings
             .continueThreadsAfterServerUpdate;
         const inactiveFamily = inactiveFamilies.has(threadId);
+        const pauseHeldRunIds = new Set(
+          !inactiveFamily &&
+            projection.thread.archivedAt === null &&
+            projection.thread.deletedAt === null
+            ? deferredAutomatic
+                .filter(
+                  (candidate) =>
+                    candidate.threadId === threadId &&
+                    projection.runs.some(
+                      (run) => run.id === candidate.runId && run.queueHeld !== true,
+                    ),
+                )
+                .map((candidate) => candidate.runId)
+            : [],
+        );
         const result = yield* reconcileProjection(
           projection,
           trigger,
           enabled && !inactiveFamily,
           inactiveFamily,
+          pauseHeldRunIds,
         );
         terminalizedRuns += result.terminalizedRuns;
         stoppedSessions += result.stoppedSessions;
@@ -860,6 +899,7 @@ export const make = Effect.gen(function* () {
   const prepareForShutdown = Effect.gen(function* () {
     const enabled = yield* settings.getSettings.pipe(Effect.orElseSucceed(() => null));
     if (!enabled) return;
+    const deferredAutomatic = yield* pausedAutomaticRuns;
     const threadIds = yield* projections.getRecoveryThreadIds("runtime");
     for (const threadId of threadIds) {
       yield* Effect.gen(function* () {
@@ -871,6 +911,12 @@ export const make = Effect.gen(function* () {
           return;
         const run = restartContinuationRun(projection);
         if (!run) return;
+        if (
+          deferredAutomatic.some(
+            (candidate) => candidate.threadId === threadId && candidate.runId === run.id,
+          )
+        )
+          return;
         const commandId = CommandId.make(`command:restart-prepare:${run.id}`);
         yield* eventSink.writeWithEffects({
           commandId,

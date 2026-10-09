@@ -49,7 +49,7 @@ import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 
 const isThreadAboveModeLimitError = Schema.is(Orchestrator.OrchestratorThreadAboveModeLimitError);
 
-export type ThreadManagementSendMode = "auto" | "queue" | "steer" | "restart";
+export type ThreadManagementSendMode = "auto" | "queue" | "steer" | "restart" | "cooperative";
 
 export interface ThreadManagementProvenance {
   readonly createdBy: OrchestrationV2Actor;
@@ -122,6 +122,8 @@ export interface ThreadManagementSendInput {
   readonly attachments: ReadonlyArray<ChatAttachment>;
   readonly modelSelection?: ModelSelection;
   readonly mode: ThreadManagementSendMode;
+  /** Environment Pause must not start a new turn after the recipient finishes. */
+  readonly pauseOnlyIfActive?: true;
   readonly createdBy: OrchestrationV2Actor;
   readonly creationSource: OrchestrationV2CreationSource;
 }
@@ -716,7 +718,11 @@ const make = Effect.gen(function* () {
 
   const sendToThread: ThreadManagementServiceShape["sendToThread"] = (input) =>
     Effect.gen(function* () {
-      const target = yield* getProjectThreadRecords(input, ["runs", "providerTurns"]);
+      const target = yield* getProjectThreadRecords(input, [
+        "runs",
+        "providerTurns",
+        ...(input.mode === "cooperative" ? (["providerThreads", "providerSessions"] as const) : []),
+      ]);
       if (target.thread.archivedAt !== null) {
         return yield* new ThreadManagementThreadArchivedError({
           threadId: input.threadId,
@@ -724,6 +730,16 @@ const make = Effect.gen(function* () {
       }
 
       const steerableRun = latestSteerableRun(target);
+      const activeProviderThread =
+        input.mode === "cooperative"
+          ? target.providerThreads.find((thread) => thread.id === steerableRun?.providerThreadId)
+          : undefined;
+      const activeTurns =
+        input.mode === "cooperative"
+          ? target.providerSessions.find(
+              (session) => session.id === activeProviderThread?.providerSessionId,
+            )?.capabilities.turns
+          : undefined;
       let dispatchMode: Extract<
         OrchestrationV2Command,
         { readonly type: "message.dispatch" }
@@ -739,30 +755,50 @@ const make = Effect.gen(function* () {
           type: input.mode === "steer" ? "steer_active" : "restart_active",
           targetRunId: steerableRun.id,
         };
+      } else if (
+        input.mode === "cooperative" &&
+        steerableRun !== undefined &&
+        activeTurns?.supportsActiveSteering === true &&
+        activeTurns.supportsStrictActiveSteering === true &&
+        activeTurns.activeSteeringInterruptsTools !== true
+      ) {
+        dispatchMode = { type: "steer_active_native", targetRunId: steerableRun.id };
       } else if (input.mode === "auto" && steerableRun !== undefined) {
         dispatchMode = { type: "steer_active", targetRunId: steerableRun.id };
       } else {
         dispatchMode = {
-          type: input.mode === "queue" ? "queue_after_active" : "start_immediately",
+          type:
+            input.mode === "queue" || input.mode === "cooperative"
+              ? "queue_after_active"
+              : "start_immediately",
         };
       }
 
       const authorization = yield* ThreadReadAuthorization;
       yield* authorization.authorize(input.threadId, input.messageId);
-      const dispatch = yield* orchestrator.dispatch({
-        type: "message.dispatch",
-        commandId: input.commandId,
-        threadId: input.threadId,
-        messageId: input.messageId,
-        ...(input.scheduledTaskId === undefined ? {} : { scheduledTaskId: input.scheduledTaskId }),
-        ...(input.senderThreadId === undefined ? {} : { senderThreadId: input.senderThreadId }),
-        text: input.text,
-        attachments: input.attachments,
-        ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
-        dispatchMode,
-        createdBy: input.createdBy,
-        creationSource: input.creationSource,
-      });
+      const dispatch = yield* orchestrator
+        .dispatch({
+          type: "message.dispatch",
+          commandId: input.commandId,
+          threadId: input.threadId,
+          messageId: input.messageId,
+          ...(input.scheduledTaskId === undefined
+            ? {}
+            : { scheduledTaskId: input.scheduledTaskId }),
+          ...(input.senderThreadId === undefined ? {} : { senderThreadId: input.senderThreadId }),
+          text: input.text,
+          attachments: input.attachments,
+          ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
+          dispatchMode,
+          createdBy: input.createdBy,
+          creationSource: input.creationSource,
+        })
+        .pipe(
+          Effect.provideService(
+            Orchestrator.PauseRecipientMustBeActive,
+            input.pauseOnlyIfActive === true,
+          ),
+        );
       const projection = yield* getProjectThreadRecords(input, ["runs", "messages", "turnItems"], {
         messageIds: [input.messageId],
         turnItemTypes: ["user_message"],

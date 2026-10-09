@@ -530,6 +530,8 @@ export interface RunExecutionServiceV2StartRootRunInput {
   readonly shouldStartProviderTurn?: () => Effect.Effect<boolean, ProjectionStoreV2Error>;
   readonly shouldFinalizeRun?: () => Effect.Effect<boolean, ProjectionStoreV2Error>;
   readonly hasUnpairedRunInterruptRequest?: () => Effect.Effect<boolean, never>;
+  /** Records actual native acceptance rather than merely scheduling a start. */
+  readonly onMessageDelivery?: (delivered: boolean) => Effect.Effect<void>;
   readonly message: ProviderAdapterV2TurnMessage;
   readonly modelSelection: ModelSelection;
   readonly runtimePolicy: ProviderAdapterV2RuntimePolicy;
@@ -898,6 +900,7 @@ export const layer: Layer.Layer<
               input.shouldStartProviderTurn !== undefined &&
               !(yield* input.shouldStartProviderTurn())
             ) {
+              yield* input.onMessageDelivery?.(false) ?? Effect.void;
               return null;
             }
             return responseStreamingMode;
@@ -911,6 +914,7 @@ export const layer: Layer.Layer<
                   runId: input.run.id,
                   cause,
                 });
+                yield* input.onMessageDelivery?.(false) ?? Effect.void;
                 yield* writeFinalRunEvents({
                   run: input.run,
                   rootNode: input.rootNode,
@@ -1951,6 +1955,7 @@ export const layer: Layer.Layer<
               : yield* Effect.exit(input.shouldStartProviderTurn());
           if (Exit.isSuccess(shouldStart) && !shouldStart.value) {
             yield* startup.stop;
+            yield* input.onMessageDelivery?.(false) ?? Effect.void;
             return;
           }
 
@@ -2002,17 +2007,25 @@ export const layer: Layer.Layer<
             input.message.text.trim().toLowerCase() === "/compact";
           const startTurn = compact
             ? (input.session.compactThread?.(turnInput) ??
-              Effect.fail(
-                new ProviderAdapterTurnStartError({
-                  driver: input.session.driver,
-                  threadId: input.run.threadId,
-                  providerThreadId: input.providerThread.id,
-                  runId: input.run.id,
-                  cause: "This provider does not support context compaction.",
-                }),
+              Effect.andThen(
+                input.onMessageDelivery?.(false) ?? Effect.void,
+                Effect.fail(
+                  new ProviderAdapterTurnStartError({
+                    driver: input.session.driver,
+                    threadId: input.run.threadId,
+                    providerThreadId: input.providerThread.id,
+                    runId: input.run.id,
+                    cause: "This provider does not support context compaction.",
+                  }),
+                ),
               ))
             : input.session.startTurn(turnInput);
-          yield* Effect.andThen(shouldStart, startTurn).pipe(
+          yield* Effect.andThen(
+            shouldStart.pipe(
+              Effect.tapError(() => input.onMessageDelivery?.(false) ?? Effect.void),
+            ),
+            startTurn.pipe(Effect.tap(() => input.onMessageDelivery?.(true) ?? Effect.void)),
+          ).pipe(
             Effect.catchCause((cause) =>
               Effect.logError("orchestration V2 provider turn start failed", {
                 runId: input.run.id,

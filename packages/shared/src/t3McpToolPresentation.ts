@@ -56,6 +56,10 @@ export type T3McpToolSummaryAction =
   | "project-clone"
   | "environment-read"
   | "environment-update"
+  | "environment-pause-status"
+  | "environment-pause-start"
+  | "environment-pause-retry"
+  | "environment-pause-resume"
   | "attachment-prepare"
   | "attachment-discard"
   | "attachment-send"
@@ -333,6 +337,22 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
   t3_environment_preferences_update: tool(
     ["Update", "Updating", "Updated", "environment preferences"],
     "environment-update",
+  ),
+  t3_environment_pause_status: tool(
+    ["Check", "Checking", "Checked", "environment pause status"],
+    "environment-pause-status",
+  ),
+  t3_environment_pause_start: tool(
+    ["Pause", "Pausing", "Requested a pause of", "this environment"],
+    "environment-pause-start",
+  ),
+  t3_environment_pause_retry: tool(
+    ["Retry", "Retrying", "Retried", "environment pause deliveries"],
+    "environment-pause-retry",
+  ),
+  t3_environment_pause_resume: tool(
+    ["Resume", "Resuming", "Requested Resume for", "this environment"],
+    "environment-pause-resume",
   ),
   t3_thread_launch: tool(["Launch", "Launching", "Launched", "a project thread"], "thread-create"),
   t3_project_list: tool(["List", "Listing", "Listed", "projects"], "project-list"),

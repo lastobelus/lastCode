@@ -7,6 +7,17 @@ function completed(input: unknown, output?: unknown): T3ToolSummaryCall {
 }
 
 describe("summarizeT3ToolCalls", () => {
+  it.each([
+    ["environment-pause-status", "Checked environment pause status 1 time"],
+    ["environment-pause-start", "Requested environment pause 1 time"],
+    ["environment-pause-retry", "Retried environment pause deliveries 1 time"],
+    ["environment-pause-resume", "Requested environment resume 1 time"],
+  ] as const)("describes %s without claiming the environment is quiet", (action, label) => {
+    expect(summarizeT3ToolCalls(action, [completed({}, { quiet: false })])).toEqual({
+      label,
+      failedCount: 0,
+    });
+  });
   it("counts registered projects, repository destinations, and accepted thread launches", () => {
     expect(
       summarizeT3ToolCalls("project-create", [

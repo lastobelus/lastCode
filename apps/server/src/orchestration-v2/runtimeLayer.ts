@@ -1,3 +1,5 @@
+import * as EnvironmentPause from "../environment/EnvironmentPause.ts";
+import * as EnvironmentPauseStore from "../environment/EnvironmentPauseStore.ts";
 import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as Layer from "effect/Layer";
@@ -386,6 +388,7 @@ const layerSubagentPromotionProvided = SubagentPromotionService.layer.pipe(
 const layerEffectExecutorProvided = EffectWorker.layerExecutor.pipe(
   Layer.provide(
     Layer.mergeAll(
+      EffectOutbox.layer,
       layerRunFinalizationServiceProvided,
       layerCheckpointRollbackServiceProvided,
       layerProviderSessionManagerProvided,
@@ -439,12 +442,49 @@ export const layer = Layer.mergeAll(
   layerLegacyV1ThreadImporterProvided,
 );
 
+const layerEnvironmentPauseProvided = EnvironmentPause.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      EnvironmentPauseStore.layer,
+      layerThreadManagementProvided,
+      ProjectionStore.layer,
+      EffectOutbox.layer,
+      layerProviderSessionManagerProvided,
+    ),
+  ),
+);
+
+const layerEnvironmentAutomationResume = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const scheduler = yield* Scheduler.Scheduler;
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const actions = yield* ActionResume.ActionResume;
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    // Durable sources make missed transitions and restart recovery harmless.
+    // Scheduler holds this source while paused; no connectivity signal releases it.
+    yield* scheduler.register(
+      "environment-pause-resume",
+      Effect.gen(function* () {
+        yield* actions.retryPendingFollowUps;
+        yield* orchestrator.resumeQueuedRuns;
+        yield* outbox.notifyAvailable();
+      }),
+    );
+  }),
+).pipe(
+  Layer.provide(
+    Layer.mergeAll(layerOrchestratorProvided, layerActionResumeProvided, EffectOutbox.layer),
+  ),
+);
+
 export const layerProduction = Layer.mergeAll(
+  layerEnvironmentAutomationResume,
+  layerEnvironmentPauseProvided,
   layerThreadRecoveryRepairProvided,
   layerThreadWaitProvided,
   layerActionResumeProvided,
   layerWorktreeCleanupWorkerProvided,
-  layer.pipe(Layer.provide(layerProjectService)),
+  layer.pipe(Layer.provide(Layer.merge(layerProjectService, EnvironmentPauseStore.layer))),
   layerProjectService,
   layerManagedProjectFoldersProvided,
   layerThreadLaunchProvided,
@@ -460,5 +500,6 @@ export const layerProduction = Layer.mergeAll(
 ).pipe(
   Layer.provideMerge(layerUpdateDrainAdmission),
   Layer.provide(Scheduler.layer),
+  Layer.provideMerge(EnvironmentPauseStore.layer),
   Layer.provideMerge(layerEventInfrastructure),
 );

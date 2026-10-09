@@ -115,6 +115,7 @@ import { SettingsAboutRouteScreen } from "./features/settings/SettingsAboutRoute
 import { SettingsNotificationsRouteScreen } from "./features/settings/SettingsNotificationsRouteScreen";
 import { SettingsRouteScreen } from "./features/settings/SettingsRouteScreen";
 import { SettingsThreadsRouteScreen } from "./features/settings/SettingsThreadsRouteScreen";
+import { SettingsLastCodeRouteScreen } from "./features/settings/SettingsLastCodeRouteScreen";
 import { SettingsEnvironmentFilterProvider } from "./features/settings/settings-environment-filter";
 import { ShowcaseCaptureCoordinator } from "./features/showcase/ShowcaseCaptureCoordinator";
 import {
@@ -254,6 +255,11 @@ const SettingsContentStack = createV5SheetStackNavigator({
       screen: SettingsThreadsRouteScreen,
       linking: "thread-preferences",
       options: { title: "Thread behavior" },
+    }),
+    SettingsLastCode: createNativeStackScreen({
+      screen: SettingsLastCodeRouteScreen,
+      linking: "lastcode",
+      options: { title: "LastCode" },
     }),
     SettingsAbout: createNativeStackScreen({
       screen: SettingsAboutRouteScreen,
