@@ -216,6 +216,8 @@ export const OrchestrationV2TurnCapabilities = Schema.Struct({
   emitsTurnCompleted: Schema.Boolean,
   supportsInterrupt: Schema.Boolean,
   supportsActiveSteering: Schema.Boolean,
+  // Native delivery rejects a settled target instead of queuing or starting another turn.
+  supportsStrictActiveSteering: Schema.optional(Schema.Boolean),
   // Some native steering mechanisms cancel pending tools before consuming the message.
   activeSteeringInterruptsTools: Schema.optional(Schema.Boolean),
   supportsSteeringByInterruptRestart: Schema.Boolean,
@@ -2653,6 +2655,25 @@ export const OrchestrationV2Command = Schema.Union([
     type: Schema.Literal("thread.delete"),
     commandId: CommandId,
     threadId: ThreadId,
+    deleteWorktree: Schema.optional(Schema.Boolean),
+    repositoryKey: Schema.optional(TrimmedNonEmptyString),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.worktree-cleanup.retry"),
+    commandId: CommandId,
+    threadId: ThreadId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.worktree-cleanup.abandon"),
+    commandId: CommandId,
+    threadId: ThreadId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.worktree-cleanup.update"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    expectedCleanup: ThreadWorktreeCleanup,
+    cleanup: Schema.NullOr(ThreadWorktreeCleanup),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.settle"),
@@ -2876,6 +2897,8 @@ export const OrchestrationV2Command = Schema.Union([
         workspaceStrategy: Schema.optional(OrchestrationV2ThreadLaunchWorkspaceStrategy),
       }),
       Schema.Struct({ type: Schema.Literal("steer_active"), targetRunId: RunId }),
+      /** Cooperative delivery only: never queue, restart, or interrupt tools. */
+      Schema.Struct({ type: Schema.Literal("steer_active_native"), targetRunId: RunId }),
       Schema.Struct({ type: Schema.Literal("restart_active"), targetRunId: RunId }),
       Schema.Struct({ type: Schema.Literal("queue_after_active") }),
       Schema.Struct({ type: Schema.Literal("start_immediately") }),
@@ -3067,6 +3090,17 @@ export type OrchestrationV2Command = typeof OrchestrationV2Command.Type;
  * send them.
  */
 const OrchestrationV2InternalCommand = Schema.Union([
+  /** Records the workspace result of an accepted launch or preparation retry. */
+  Schema.Struct({
+    type: Schema.Literal("thread.workspace.complete"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    requestId: CommandId,
+    runId: Schema.NullOr(RunId),
+    expectedWorktreePath: Schema.NullOr(TrimmedNonEmptyString),
+    worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+    branch: Schema.NullOr(TrimmedNonEmptyString),
+  }),
   /**
    * Records what a pull request watch saw, and wakes the agent in the same transaction when
    * `wake` is set. Rejected once the watch started at `startedAt` has ended, and a wake is

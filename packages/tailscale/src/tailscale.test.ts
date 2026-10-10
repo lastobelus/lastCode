@@ -354,7 +354,7 @@ describe("tailscale", () => {
 
   it.effect("treats a null first-time serve status as unconfigured", () => {
     const commands: ReadonlyArray<string>[] = [];
-    const layer = mockSpawnerLayer((_command, args) => {
+    const layer = layerMockSpawner((_command, args) => {
       commands.push(args);
       return args[1] === "status" ? { stdout: "null" } : {};
     });
@@ -372,7 +372,7 @@ describe("tailscale", () => {
 
   it.effect("reuses only the exact existing handler", () => {
     const commands: ReadonlyArray<string>[] = [];
-    const layer = mockSpawnerLayer((_command, args) => {
+    const layer = layerMockSpawner((_command, args) => {
       commands.push(args);
       return { stdout: serveStatusJson(8443, "http://127.0.0.1:13773") };
     });
@@ -386,7 +386,7 @@ describe("tailscale", () => {
   });
 
   it.effect("refuses to replace a configured port even when its backend differs", () => {
-    const layer = mockSpawnerLayer(() => ({
+    const layer = layerMockSpawner(() => ({
       stdout: serveStatusJson(8443, "http://127.0.0.1:39831"),
     }));
 
@@ -402,7 +402,7 @@ describe("tailscale", () => {
 
   it.effect("replaces a handler only when its environment was already verified", () => {
     const commands: ReadonlyArray<string>[] = [];
-    const layer = mockSpawnerLayer((_command, args) => {
+    const layer = layerMockSpawner((_command, args) => {
       commands.push(args);
       return { stdout: serveStatusJson(8443, "http://127.0.0.1:13773") };
     });
@@ -424,7 +424,7 @@ describe("tailscale", () => {
     Effect.gen(function* () {
       for (const foregroundPort of [8443, 9443]) {
         const commands: ReadonlyArray<string>[] = [];
-        const layer = mockSpawnerLayer((_command, args) => {
+        const layer = layerMockSpawner((_command, args) => {
           commands.push(args);
           const status = JSON.parse(serveStatusJson(8443, "http://127.0.0.1:13773"));
           status.Foreground = {
@@ -447,7 +447,7 @@ describe("tailscale", () => {
 
   it.effect("does not replace a complex handler after an environment probe", () => {
     const commands: ReadonlyArray<string>[] = [];
-    const layer = mockSpawnerLayer((_command, args) => {
+    const layer = layerMockSpawner((_command, args) => {
       commands.push(args);
       const status = JSON.parse(serveStatusJson(8443, "http://127.0.0.1:13773")) as {
         Web: Record<string, { Handlers: Record<string, unknown> }>;
@@ -470,7 +470,7 @@ describe("tailscale", () => {
   });
 
   it.effect("treats a non-web listener on the selected port as occupied", () => {
-    const layer = mockSpawnerLayer(() => ({
+    const layer = layerMockSpawner(() => ({
       stdout: JSON.stringify({ TCP: { 8443: { TCPForward: "127.0.0.1:39831" } }, Web: {} }),
     }));
 
@@ -485,7 +485,7 @@ describe("tailscale", () => {
 
   it.effect("refuses to reuse or disable a Funnel-enabled handler", () => {
     const commands: ReadonlyArray<string>[] = [];
-    const layer = mockSpawnerLayer((_command, args) => {
+    const layer = layerMockSpawner((_command, args) => {
       commands.push(args);
       const status = JSON.parse(serveStatusJson(8443, "http://127.0.0.1:13773")) as Record<
         string,
@@ -578,7 +578,7 @@ describe("tailscale", () => {
 
   it.effect("refuses to disable a handler owned by another service", () => {
     const commands: ReadonlyArray<string>[] = [];
-    const layer = mockSpawnerLayer((_command, args) => {
+    const layer = layerMockSpawner((_command, args) => {
       commands.push(args);
       return { stdout: serveStatusJson(8443, "http://127.0.0.1:39831") };
     });
