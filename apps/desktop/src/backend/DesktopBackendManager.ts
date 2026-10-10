@@ -71,6 +71,25 @@ const BACKEND_READINESS_PATH = "/.well-known/t3/environment";
 const { logWarning: logBackendProcessWarning } =
   DesktopObservability.makeComponentLogger("desktop-backend-process");
 
+function recordDesktopBrowserStreamFailure<E>(
+  kind: "command" | "reply",
+  fd: number,
+  cause: Cause.Cause<E>,
+) {
+  // Both streams live until the backend run scope closes. Its cancellation
+  // is a normal stop, rather than evidence of a broken inherited pipe.
+  if (Cause.hasInterruptsOnly(cause)) return Effect.void;
+  return Effect.failCause(cause).pipe(
+    Effect.withSpan(`desktop.browser.${kind}Stream`, { attributes: { fd } }),
+    Effect.catchCause(() =>
+      logBackendProcessWarning(`desktop browser ${kind} stream stopped`, {
+        fd,
+        cause: Cause.pretty(cause),
+      }),
+    ),
+  );
+}
+
 type BackendProcessLayerServices = ChildProcessSpawner.ChildProcessSpawner | HttpClient.HttpClient;
 
 type BackendProcessRunRequirements = BackendProcessLayerServices | Scope.Scope;
@@ -532,14 +551,7 @@ export const runBackendProcess = Effect.fn("runBackendProcess")(function* (
     const browserFd = options.bootstrap.desktopBrowserFd;
     yield* options.desktopBrowserStream.pipe(
       Stream.run(handle.getInputFd(browserFd)),
-      // This span includes the pipe sink, so write failures are retained too.
-      Effect.withSpan("desktop.browser.replyStream", { attributes: { fd: browserFd } }),
-      Effect.catchCause((cause) =>
-        logBackendProcessWarning("desktop browser reply stream stopped", {
-          fd: browserFd,
-          cause: Cause.pretty(cause),
-        }),
-      ),
+      Effect.catchCause((cause) => recordDesktopBrowserStreamFailure("reply", browserFd, cause)),
       Effect.forkScoped,
     );
   }
@@ -593,15 +605,7 @@ export const runBackendProcess = Effect.fn("runBackendProcess")(function* (
       Stream.splitLines,
       Stream.filter((line) => line.length > 0),
       Stream.runForEach(handleCommand),
-      // Record termination before the warning handler consumes the failure.
-      // Packaged apps can have no usable console output.
-      Effect.withSpan("desktop.browser.commandStream", { attributes: { fd: browserFd } }),
-      Effect.catchCause((cause) =>
-        logBackendProcessWarning("desktop browser command stream stopped", {
-          fd: browserFd,
-          cause: Cause.pretty(cause),
-        }),
-      ),
+      Effect.catchCause((cause) => recordDesktopBrowserStreamFailure("command", browserFd, cause)),
       Effect.forkScoped,
     );
   }

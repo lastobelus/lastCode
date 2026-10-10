@@ -321,6 +321,13 @@ it.live(
       assert.equal(result.preparationCount, 1);
       assert.include(result.output, "received:profiles-first");
       assert.include(result.output, "received:profiles-second");
+      // The helper stops the live backend before flushing its trace. Neither
+      // indefinite transport stream should report that scoped stop as a fault.
+      for (const name of ["desktop.browser.replyStream", "desktop.browser.commandStream"])
+        assert.isFalse(
+          result.records.some((record) => record.name === name && record.exit._tag === "Failure"),
+          `${name} excludes ordinary backend shutdown`,
+        );
       for (const requestId of ["profiles-first", "profiles-second"]) {
         for (const name of [
           "commandReceived",
