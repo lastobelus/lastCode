@@ -1691,6 +1691,26 @@ describe("resolveComposerInteractionMode", () => {
 });
 
 describe("resolveBackgroundDraftWorkspaceOptions", () => {
+  it.each(["auto", "manual"] as const)(
+    "keeps the %s routing intent for the next background composer",
+    (environmentSelection) => {
+      expect(
+        resolveBackgroundDraftWorkspaceOptions({
+          envMode: "local",
+          branch: "main",
+          startFromOrigin: true,
+          environmentSelection,
+        }),
+      ).toEqual({
+        envMode: "local",
+        branch: "main",
+        worktreePath: null,
+        startFromOrigin: false,
+        environmentSelection,
+      });
+    },
+  );
+
   it("keeps New worktree selected without reusing the launched worktree", () => {
     expect(
       resolveBackgroundDraftWorkspaceOptions({

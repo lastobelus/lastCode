@@ -223,6 +223,7 @@ import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore"
 import {
   buildSidebarProjectPickerEntries,
   buildSidebarProjectSnapshots,
+  orderProjectMembersForPicker,
 } from "../sidebarProjectGrouping";
 import type { Project } from "../types";
 import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
@@ -1423,7 +1424,7 @@ function OpenCommandPaletteDialog(props: {
                     },
                   ]
                 : []),
-              ...group.memberProjects.map((member) => {
+              ...orderProjectMembersForPicker(group.memberProjects, project).map((member) => {
                 const location = projectEnvironmentLocationById.get(member.environmentId);
                 const hostLabel = environmentLabelById.get(member.environmentId) ?? "Remote";
                 return {
@@ -1453,8 +1454,8 @@ function OpenCommandPaletteDialog(props: {
     if (scratchTargetEnvironmentId === null) return projectItems;
 
     // "No project" goes right after the current project: visible without
-    // scrolling past every project, while Enter still starts in the current
-    // one. When the current thread has no project, it is the current entry and
+    // scrolling past every project. Shared projects open their host submenu.
+    // When the current thread has no project, it is the current entry and
     // goes first. It keeps its own shortcut, so the projects' mod+1..9 hold.
     const noProjectIndex = pickerProjects[0] !== undefined && isScratch(pickerProjects[0]) ? 0 : 1;
     return [

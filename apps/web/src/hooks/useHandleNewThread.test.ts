@@ -350,6 +350,35 @@ describe.each([
     );
   });
 
+  it("resamples an automatic background draft despite the previous host's branch", async () => {
+    testState.reset(draft);
+    const projectRef = {
+      environmentId: "environment-ssh",
+      projectId: "project-remote",
+    } as never;
+    const opened = await useNewThreadHandler()(projectRef, {
+      environmentSelection: "auto",
+      envMode: "worktree",
+      branch: "main",
+      worktreePath: null,
+      startFromOrigin: true,
+    });
+
+    expect(testState.draftStore.setLogicalProjectDraftThreadId).toHaveBeenCalledWith(
+      "remote-project",
+      projectRef,
+      opened!.draftId,
+      expect.objectContaining({
+        environmentSelection: "auto",
+        loadBalancedEnvironmentId: null,
+        branch: null,
+        worktreePath: null,
+        envMode: "worktree",
+        startFromOrigin: true,
+      }),
+    );
+  });
+
   it.each(["approval-required", "auto-accept-edits", "auto", "full-access"] as const)(
     "uses the target environment's %s permissions for new threads",
     async (runtimeMode) => {

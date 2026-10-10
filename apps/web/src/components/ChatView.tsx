@@ -10469,6 +10469,7 @@ export default function ChatView(props: ChatViewProps) {
                 envMode: sendEnvMode,
                 branch: activeThreadBranch,
                 startFromOrigin,
+                environmentSelection: draftThread?.environmentSelection,
               }),
             ),
           );

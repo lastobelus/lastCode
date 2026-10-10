@@ -826,17 +826,20 @@ export function resolveBackgroundDraftWorkspaceOptions(input: {
   envMode: DraftThreadEnvMode;
   branch: string | null;
   startFromOrigin: boolean;
+  environmentSelection?: DraftThreadState["environmentSelection"];
 }): {
   envMode: DraftThreadEnvMode;
   branch: string | null;
   worktreePath: null;
   startFromOrigin: boolean;
+  environmentSelection?: "auto" | "manual";
 } {
   return {
     envMode: input.envMode,
     branch: input.branch,
     worktreePath: null,
     startFromOrigin: input.envMode === "worktree" && input.startFromOrigin,
+    ...(input.environmentSelection ? { environmentSelection: input.environmentSelection } : {}),
   };
 }
 

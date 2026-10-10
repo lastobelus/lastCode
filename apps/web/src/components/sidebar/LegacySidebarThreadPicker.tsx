@@ -21,6 +21,7 @@ import { projectIconColorClassName } from "~/projectIconColors";
 import {
   buildSidebarProjectPickerEntries,
   NO_PROJECT_GROUP_KEY,
+  orderProjectMembersForPicker,
   projectGroupsSpanEnvironments,
   type SidebarProjectGroupMember,
   type SidebarProjectSnapshot,
@@ -198,14 +199,16 @@ export function LegacySidebarThreadPicker({
                       <MenuSeparator />
                     </>
                   ) : null}
-                  {group.memberProjects.map((member) => (
-                    <MenuItem
-                      key={member.physicalProjectKey}
-                      onClick={() => void createThread(member)}
-                    >
-                      {member.environmentLabel ?? "Remote"} — {member.workspaceRoot}
-                    </MenuItem>
-                  ))}
+                  {orderProjectMembersForPicker(group.memberProjects, targetProject).map(
+                    (member) => (
+                      <MenuItem
+                        key={member.physicalProjectKey}
+                        onClick={() => void createThread(member)}
+                      >
+                        {member.environmentLabel ?? "Remote"} — {member.workspaceRoot}
+                      </MenuItem>
+                    ),
+                  )}
                 </MenuSubPopup>
               </MenuSub>
             );
