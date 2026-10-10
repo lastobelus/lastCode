@@ -407,6 +407,16 @@ it.effect.each(["created", "accepted", "published"] as const)(
       if (stage === "published") yield* send({ type: "publishRoot", ...attempt });
       yield* send({ type: "disconnect" });
       expect(root.window.isDestroyed()).toBe(stage === "created");
+      if (stage !== "created") {
+        yield* send({ type: "announce" });
+        expect(yield* Queue.take(events)).toMatchObject({
+          type: "attached",
+          ...key,
+          supportsNativeSurface: true,
+        });
+        yield* send({ type: "reconcileRoots", serverEpoch: "server-epoch-a" });
+        expect(root.window.isDestroyed()).toBe(false);
+      }
       yield* send({
         type: "cancelRootCreation",
         ...key,
