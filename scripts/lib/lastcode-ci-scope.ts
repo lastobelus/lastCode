@@ -150,10 +150,13 @@ function readWorkspacePatterns(text: string): ReadonlyArray<string> {
   if (start < 0) throw new Error("Unsupported or missing workspace package list");
   const patterns: Array<string> = [];
   for (const line of lines.slice(start + 1)) {
-    if (/^\S/.test(line) && !line.startsWith("#")) break;
-    if (!line.trim() || line.trimStart().startsWith("#")) continue;
+    const content = line.trimStart();
+    if (!content || content.startsWith("#")) continue;
+    if (/^\S/.test(line)) break;
+    // This limited list grammar produces one nonempty capture. Keep capture order
+    // and validate before advancing: full-CI diagnostics depend on the first bad entry.
     const match = /^\s+-\s+(?:'([^']+)'|"([^"]+)"|([^#\s]+))\s*(?:#.*)?$/.exec(line);
-    const pattern = match?.[1] ?? match?.[2] ?? match?.[3];
+    const pattern = match?.slice(1).find(Boolean);
     if (!pattern) throw new Error("Unsupported workspace package pattern");
     patternRegex(pattern);
     patterns.push(pattern);

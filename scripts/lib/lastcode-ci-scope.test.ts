@@ -118,6 +118,85 @@ describe("resolveQuickCiScope", () => {
     ).toBe("/workspace/node_modules/astro/tsconfigs/base.json");
   });
 
+  it.each([
+    ["single quotes", "packages:\n  - 'packages/*'\n  - 'apps/*'"],
+    ["double quotes", 'packages:\n  - "packages/*"\n  - "apps/*"'],
+    [
+      "unquoted and inline comments",
+      "packages: # list\n  - packages/*# libraries\n  - apps/* # applications",
+    ],
+    [
+      "blank/comment lines and CRLF",
+      "packages:\r\n\r\n# comment\r\n  # comment\r\n  - packages/*\r\n  - apps/*\r\n",
+    ],
+    ["section boundary", "packages:\n  - packages/*\n  - apps/*\ncatalog:\n  unsupported: ignored"],
+    [
+      "first exact header",
+      " packages:\nignored: value\npackages:\n  - packages/*\n  - apps/*\npackages:\n  unsupported",
+    ],
+    ["duplicates and source order", "packages:\n  - apps/*\n  - packages/*\n  - apps/*"],
+  ])("narrows scope with supported workspace lists: %s", (_name, text) => {
+    const repo = fixture({ "pnpm-workspace.yaml": text });
+    repo.change("packages/library/src/index.ts", "export const value = 2;\n");
+    expect(repo.scope()).toEqual({
+      kind: "affected",
+      packages: ["@fixture/consumer", "@fixture/library"],
+      reason: "Changed workspaces and their source/configuration consumers",
+      changedFiles: ["packages/library/src/index.ts"],
+    });
+  });
+
+  it.each([
+    [
+      "indented header",
+      " packages:\n  - packages/*",
+      "Unsupported or missing workspace package list",
+    ],
+    ["inline list", "packages: [packages/*]", "Unsupported or missing workspace package list"],
+    ["empty list", "packages:", "Workspace package list is empty"],
+    [
+      "comments before section",
+      "packages:\n # comment\n\nother:\n  - apps/*",
+      "Workspace package list is empty",
+    ],
+    [
+      "unindented entry terminates section",
+      "packages:\n- packages/*",
+      "Workspace package list is empty",
+    ],
+    ["missing dash", "packages:\n  packages/*", "Unsupported workspace package pattern"],
+    ["empty entry", "packages:\n  - ", "Unsupported workspace package pattern"],
+    [
+      "unsupported trailing text",
+      "packages:\n  - 'packages/*' extra",
+      "Unsupported workspace package pattern",
+    ],
+    [
+      "unsupported glob",
+      "packages:\n  - 'packages/[ab]'",
+      "Unsupported scope pattern packages/[ab]",
+    ],
+    [
+      "validation precedes later extraction",
+      "packages:\n  - 'packages/[ab]'\n  malformed",
+      "Unsupported scope pattern packages/[ab]",
+    ],
+    [
+      "extraction precedes later validation",
+      "packages:\n  malformed\n  - 'packages/[ab]'",
+      "Unsupported workspace package pattern",
+    ],
+  ])("preserves full-CI diagnostics for workspace lists: %s", (_name, text, error) => {
+    const repo = fixture({ "pnpm-workspace.yaml": text });
+    repo.change("packages/library/src/index.ts", "export const value = 2;\n");
+    expect(repo.scope()).toEqual({
+      kind: "full",
+      packages: [],
+      reason: `Cannot safely narrow typecheck: ${error}`,
+      changedFiles: ["packages/library/src/index.ts"],
+    });
+  });
+
   it("covers the unchanged consumer when a public library type becomes incompatible", () => {
     const repo = fixture();
     repo.change("packages/library/src/index.ts", 'export const value = "no longer a number";\n');
