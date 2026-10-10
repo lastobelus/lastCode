@@ -336,6 +336,8 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     },
     browserCommand: (input) =>
       ipcRenderer.invoke(IpcChannels.DESKTOP_BROWSER_COMMAND_CHANNEL, input),
+    bindBrowserEnvironment: (input) =>
+      ipcRenderer.invoke(IpcChannels.DESKTOP_BROWSER_ENVIRONMENT_CHANNEL, input),
     onBrowserEvent: (listener) => {
       const wrappedListener = (
         _event: Electron.IpcRendererEvent,

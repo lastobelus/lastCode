@@ -1413,6 +1413,10 @@ export interface DesktopBridge {
 export const DESKTOP_PREVIEW_RECORDING_CAPTURE_TRIGGER = "__t3DesktopPreviewRecordingCapture";
 
 export interface DesktopPreviewBridge {
+  bindBrowserEnvironment: (input: {
+    readonly desktopHostId: string;
+    readonly environmentId: string;
+  }) => Promise<void>;
   onBrowserSurfaceRequest: (listener: (input: DesktopBrowserSurfaceRequest) => void) => () => void;
   browserSurfaceResponse: (input: DesktopBrowserSurfaceResponse) => Promise<void>;
   browserPresentation: (input: DesktopBrowserPresentationInput) => Promise<void>;

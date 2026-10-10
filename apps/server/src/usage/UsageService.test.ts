@@ -457,6 +457,7 @@ describe("UsageService", () => {
         assert.strictEqual(totalOutputTokens(yield* read(wide)), 60);
         assert.strictEqual(cursor.state.calls.length, 4);
         assert.strictEqual(cursorSource(yield* read(wide))?.fingerprint.volumeId, "account-b");
+        yield* service.awaitPersisted;
       }).pipe(
         Effect.provide(
           layerService({ prefix: "usage-service-cursor-incremental", home, settings }),

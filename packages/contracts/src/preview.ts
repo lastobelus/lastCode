@@ -221,7 +221,11 @@ export const PreviewSessionSnapshot = Schema.Struct({
   profileId: Schema.optional(BrowserProfileId),
   runtime: Schema.optional(PreviewRuntime),
   /** Server-selected page owner, fixed before the tab is published. Only server-runtime tabs set it. */
-  backingPage: Schema.optional(Schema.Literals(["desktop", "desktop-popup", "server"])),
+  backingPage: Schema.optional(
+    Schema.Literals(["desktop", "desktop-root", "desktop-popup", "server"]),
+  ),
+  /** Permanent hidden native page identity, fixed before this tab is published. */
+  desktopRootId: Schema.optional(Schema.String),
   /** Existing native popup identity; this tab streams its window instead of creating a guest. */
   desktopPopupId: Schema.optional(Schema.String),
   /** Desktop cookie jar selected for this tab; never fall back to another browser. */
@@ -514,11 +518,21 @@ export class PreviewNativeCloseError extends Schema.TaggedError<PreviewNativeClo
   }
 }
 
+export class PreviewNativeCreateError extends Schema.TaggedError<PreviewNativeCreateError>()(
+  "PreviewNativeCreateError",
+  { tabId: Schema.String, cause: Schema.Defect() },
+) {
+  override get message() {
+    return "The selected desktop could not create an independent browser page. Keep that desktop connected and retry; another browser was not substituted.";
+  }
+}
+
 export const PreviewError = Schema.Union([
   PreviewSessionLookupError,
   PreviewInvalidUrlError,
   PreviewControlRequiredError,
   PreviewRecoveryStorageError,
   PreviewNativeCloseError,
+  PreviewNativeCreateError,
 ]);
 export type PreviewError = typeof PreviewError.Type;

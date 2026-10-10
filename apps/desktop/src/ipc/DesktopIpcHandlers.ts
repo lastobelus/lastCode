@@ -1,5 +1,6 @@
 import {
   browserCommand,
+  browserEnvironment,
   browserSurfaceResponse,
   browserPresentation,
   installBrowserEventForwarding,
@@ -97,6 +98,7 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* PreviewIpc.installPreviewEventForwarding();
   yield* installBrowserEventForwarding;
   yield* ipc.handle(browserCommand);
+  yield* ipc.handle(browserEnvironment);
   yield* ipc.handle(browserSurfaceResponse);
   yield* ipc.handle(browserPresentation);
 

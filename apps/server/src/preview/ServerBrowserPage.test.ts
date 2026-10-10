@@ -37,6 +37,69 @@ describe("native viewport", () => {
       clip: { x: 20, y: 30, width: 390, height: 844, scale: 0.5 },
     });
   });
+
+  it.each([
+    {
+      zoom: 1.25,
+      css: { width: 800, height: 600 },
+      dip: { x: 25, y: 50, width: 1000, height: 750 },
+    },
+    {
+      zoom: 0.75,
+      css: { width: 800, height: 600 },
+      dip: { x: 15, y: 30, width: 600, height: 450 },
+    },
+  ])(
+    "converts a zoomed native capture and its document offsets to DIP ($zoom)",
+    async ({ zoom, css, dip }) => {
+      const page = { viewportSize: () => null } as unknown as Page;
+      const send = vi.fn(async (method: string) =>
+        method === "Page.getLayoutMetrics"
+          ? {
+              cssVisualViewport: {
+                clientWidth: css.width,
+                clientHeight: css.height,
+                pageX: 20,
+                pageY: 40,
+                zoom,
+              },
+            }
+          : { data: "image" },
+      );
+      const cdp = { send } as unknown as CDPSession;
+      expect(await ServerBrowserPage.viewportSize(page, cdp)).toEqual(css);
+      await ServerBrowserPage.captureViewport(page, cdp, { format: "png", scale: 0.5 });
+      expect(send).toHaveBeenLastCalledWith("Page.captureScreenshot", {
+        format: "png",
+        clip: { ...dip, scale: 0.5 },
+      });
+    },
+  );
+
+  it("retains the configured emulated viewport and offsets despite native zoom metrics", async () => {
+    const page = { viewportSize: () => ({ width: 1000, height: 750 }) } as unknown as Page;
+    const send = vi.fn(async (method: string) =>
+      method === "Page.getLayoutMetrics"
+        ? {
+            cssVisualViewport: {
+              clientWidth: 800,
+              clientHeight: 600,
+              pageX: 20,
+              pageY: 40,
+              zoom: 1.25,
+            },
+          }
+        : { data: "image" },
+    );
+    await ServerBrowserPage.captureViewport(page, { send } as unknown as CDPSession, {
+      format: "png",
+      scale: 0.5,
+    });
+    expect(send).toHaveBeenLastCalledWith("Page.captureScreenshot", {
+      format: "png",
+      clip: { x: 20, y: 40, width: 1000, height: 750, scale: 0.5 },
+    });
+  });
 });
 
 describe("server browser element refs", () => {
@@ -69,6 +132,62 @@ describe("server browser element refs", () => {
       networkEntries: [],
       actionTimeline: [],
     });
+
+  it("captures the full native DIP viewport with actual PNG pixels matching bounded snapshot metadata", async () => {
+    const nativeBrowser = await chromium.launch({
+      headless: true,
+      args: ["--force-device-scale-factor=2", "--window-size=1000,750"],
+    });
+    try {
+      const nativeContext = await nativeBrowser.newContext({ viewport: null });
+      const nativePage = await nativeContext.newPage();
+      const nativeSession = await nativeContext.newCDPSession(nativePage);
+      await nativePage.setContent('<p style="margin:0">native viewport</p>');
+      // Model native page zoom through its layout metrics; Chromium still encodes the real image.
+      expect(nativePage.viewportSize()).toBeNull();
+      const send = vi.fn(
+        async (
+          method: string,
+          options?: {
+            format: "png";
+            clip?: { x: number; y: number; width: number; height: number; scale: number };
+          },
+        ) => {
+          if (method === "Page.getLayoutMetrics")
+            return {
+              cssVisualViewport: {
+                clientWidth: 800,
+                clientHeight: 600,
+                pageX: 0,
+                pageY: 0,
+                zoom: 1.25,
+              },
+            };
+          expect(method).toBe("Page.captureScreenshot");
+          return nativeSession.send("Page.captureScreenshot", options);
+        },
+      );
+      const result = await ServerBrowserPage.snapshot({
+        page: nativePage,
+        cdp: { send } as unknown as CDPSession,
+        renderScale: 2.5,
+        consoleEntries: [],
+        networkEntries: [],
+        actionTimeline: [],
+      });
+      const png = Buffer.from(result.screenshot!.data, "base64");
+      expect(png.subarray(12, 16).toString()).toBe("IHDR");
+      const pixels = { width: png.readUInt32BE(16), height: png.readUInt32BE(20) };
+      expect(pixels).toEqual({ width: 1280, height: 960 });
+      expect(result.screenshot).toMatchObject(pixels);
+      expect(send).toHaveBeenLastCalledWith("Page.captureScreenshot", {
+        format: "png",
+        clip: { x: 0, y: 0, width: 1000, height: 750, scale: 0.64 },
+      });
+    } finally {
+      await nativeBrowser.close();
+    }
+  });
   const locators = (tree: unknown) => {
     expect(typeof tree).toBe("string");
     return Array.from(

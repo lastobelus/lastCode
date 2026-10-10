@@ -6,11 +6,15 @@ import { randomUUID } from "~/lib/utils";
 
 const hostIds = new Map<EnvironmentId, string>();
 
-/** A renderer owns one independent native browser channel per environment. */
+/** A desktop window owns one channel per environment, including after renderer reloads. */
 export function getDesktopBrowserHostId(environmentId: EnvironmentId): string {
   let id = hostIds.get(environmentId);
   if (!id) {
-    id = randomUUID();
+    // Session storage survives renderer reload/crash without sharing ownership across windows.
+    const storage = typeof window === "undefined" ? undefined : window.sessionStorage;
+    const storageKey = `t3:desktop-browser-host:${environmentId}`;
+    id = storage?.getItem(storageKey) || randomUUID();
+    storage?.setItem(storageKey, id);
     hostIds.set(environmentId, id);
   }
   return id;

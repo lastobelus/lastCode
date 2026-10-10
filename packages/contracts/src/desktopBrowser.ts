@@ -1,7 +1,7 @@
 import * as Schema from "effect/Schema";
 
 import { PreviewAutomationProfiles } from "./previewAutomation.ts";
-import { PreviewViewportSetting } from "./preview.ts";
+import { PreviewViewportSetting, PreviewZoomFactor } from "./preview.ts";
 
 import { TrimmedNonEmptyString } from "./baseSchemas.ts";
 
@@ -12,9 +12,18 @@ import { TrimmedNonEmptyString } from "./baseSchemas.ts";
  * The server runs automation; Electron relays only its own tab debugger.
  */
 
+/** Adapter-only input attribution, stripped before dispatch to Chromium. */
+export const DESKTOP_BROWSER_INPUT_SOURCE_PARAM = "__t3InputSource";
+
 const TabKey = {
   threadId: TrimmedNonEmptyString,
   tabId: TrimmedNonEmptyString,
+};
+const RootAttempt = {
+  ...TabKey,
+  rootId: TrimmedNonEmptyString,
+  requestId: TrimmedNonEmptyString,
+  profileId: TrimmedNonEmptyString,
 };
 
 const SurfaceViewport = Schema.Struct({
@@ -33,6 +42,8 @@ const SurfaceRequest = {
   leaseId: Schema.String,
   action: Schema.Literals(["acquire", "release"]),
   viewport: Schema.optionalKey(PreviewViewportSetting),
+  viewportSize: Schema.optionalKey(SurfaceViewport),
+  zoomFactor: Schema.optionalKey(PreviewZoomFactor),
   timeoutMs: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0))),
 };
 
@@ -57,6 +68,29 @@ export const DESKTOP_BROWSER_DOWNLOAD_MAX_BYTES = 64 * 1024 * 1024;
 export const DESKTOP_BROWSER_DOWNLOAD_CHUNK_BYTES = 192 * 1024;
 
 export const DesktopBrowserEvent = Schema.Union([
+  Schema.Struct({ type: Schema.Literal("rootAccepted"), ...RootAttempt, accepted: Schema.Boolean }),
+  Schema.Struct({
+    type: Schema.Literal("rootCreated"),
+    ...TabKey,
+    requestId: TrimmedNonEmptyString,
+    profileId: TrimmedNonEmptyString,
+    rootId: Schema.NullOr(TrimmedNonEmptyString),
+    reason: Schema.optionalKey(Schema.Literals(["guest-unavailable", "profile-unavailable"])),
+  }),
+  Schema.Struct({ type: Schema.Literal("rootClosed"), ...TabKey, rootId: TrimmedNonEmptyString }),
+  Schema.Struct({
+    type: Schema.Literal("rootPresence"),
+    ...TabKey,
+    rootId: TrimmedNonEmptyString,
+    requestId: TrimmedNonEmptyString,
+    present: Schema.Boolean,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("rootCloseCanceled"),
+    ...TabKey,
+    rootId: TrimmedNonEmptyString,
+    requestId: TrimmedNonEmptyString,
+  }),
   /** An actual child window opened by this source tab, awaiting a server tab identity. */
   Schema.Struct({
     type: Schema.Literal("popupCreated"),
@@ -97,6 +131,7 @@ export const DesktopBrowserEvent = Schema.Union([
     type: Schema.Literal("profiles"),
     requestId: Schema.String,
     profiles: Schema.NullOr(PreviewAutomationProfiles),
+    supportsNativeRoots: Schema.optionalKey(Schema.Boolean),
   }),
   /** A desktop `<webview>` for this server tab is attached and can be driven. */
   Schema.Struct({
@@ -116,6 +151,18 @@ export type DesktopBrowserEvent = typeof DesktopBrowserEvent.Type;
 
 /** Server -> desktop. */
 export const DesktopBrowserCommand = Schema.Union([
+  /** Authoritative root requests for this owner; older epochs and omitted requests are retired. */
+  Schema.Struct({
+    type: Schema.Literal("reconcileRoots"),
+    serverEpoch: TrimmedNonEmptyString,
+    retainedRootRequestIds: Schema.Array(TrimmedNonEmptyString),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("probeRoot"),
+    ...TabKey,
+    rootId: TrimmedNonEmptyString,
+    requestId: TrimmedNonEmptyString,
+  }),
   /** Checks one existing native identity without changing or closing its window. */
   Schema.Struct({
     type: Schema.Literal("probePopup"),
@@ -123,6 +170,32 @@ export const DesktopBrowserCommand = Schema.Union([
     popupId: TrimmedNonEmptyString,
     requestId: TrimmedNonEmptyString,
   }),
+  Schema.Struct({ type: Schema.Literal("acceptRoot"), ...RootAttempt }),
+  Schema.Struct({ type: Schema.Literal("publishRoot"), ...RootAttempt }),
+  /** Create one permanent hidden native page, independent of the shared renderer window. */
+  Schema.Struct({
+    type: Schema.Literal("createRoot"),
+    ...TabKey,
+    serverEpoch: TrimmedNonEmptyString,
+    requestId: TrimmedNonEmptyString,
+    profileId: TrimmedNonEmptyString,
+    url: Schema.String,
+    viewport: Schema.optionalKey(PreviewViewportSetting),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("cancelRootCreation"),
+    ...TabKey,
+    requestId: TrimmedNonEmptyString,
+    profileId: TrimmedNonEmptyString,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("closeRoot"),
+    ...TabKey,
+    rootId: TrimmedNonEmptyString,
+    requestId: TrimmedNonEmptyString,
+  }),
+  /** Retire an explicitly closed offline tab when its desktop reconnects. */
+  Schema.Struct({ type: Schema.Literal("discardRoot"), ...TabKey, rootId: TrimmedNonEmptyString }),
   /** Bind the existing child window; never create another page for it. */
   Schema.Struct({
     type: Schema.Literal("bindPopup"),
@@ -147,7 +220,12 @@ export const DesktopBrowserCommand = Schema.Union([
   Schema.Struct({ type: Schema.Literal("disconnect") }),
   Schema.Struct({ type: Schema.Literal("profiles"), requestId: Schema.String }),
   /** One CDP message for the tab's relay. */
-  Schema.Struct({ type: Schema.Literal("cdp"), ...TabKey, message: Schema.String }),
+  Schema.Struct({
+    type: Schema.Literal("cdp"),
+    ...TabKey,
+    message: Schema.String,
+    inputSource: Schema.optionalKey(Schema.Literal("viewer")),
+  }),
   /** The server stopped driving this tab, so the relay can drop its sessions. */
   Schema.Struct({ type: Schema.Literal("release"), ...TabKey }),
   /** Where an agent action is about to land, so the desktop draws its cursor there. */
@@ -169,12 +247,18 @@ export class DesktopBrowserTransportError extends Schema.TaggedError<DesktopBrow
       "download-transfer-failed",
       "layout-timeout",
       "guest-unavailable",
+      "profile-unavailable",
       "surface-unsupported",
+      "root-unsupported",
       "close-canceled",
     ]),
   },
 ) {
   override get message(): string {
+    if (this.reason === "root-unsupported")
+      return "This desktop app cannot create the native browser pages required by this server. Update the desktop app to a compatible release to run browser automation.";
+    if (this.reason === "profile-unavailable")
+      return "The selected native browser profile is unavailable.";
     if (this.reason === "close-canceled")
       return "The native browser window canceled the close request.";
     if (this.reason === "surface-unsupported")

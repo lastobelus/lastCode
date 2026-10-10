@@ -5,6 +5,7 @@ import { describe, expect, it } from "@effect/vitest";
 import { DesktopBrowserEvent, type DesktopBrowserSurfaceRequest } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as Deferred from "effect/Deferred";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
@@ -12,6 +13,10 @@ import * as NodeEvents from "node:events";
 import * as NodeFSP from "node:fs/promises";
 
 import * as DesktopBrowserHost from "./DesktopBrowserHost.ts";
+import { resolvePartitionScope } from "./BrowserProfileScope.ts";
+
+const profileResolver = (environmentId: string) => (profileId: string) =>
+  Effect.succeed(resolvePartitionScope(environmentId, profileId, "primary-environment"));
 
 const decodeEvent = Schema.decodeUnknownSync(Schema.fromJsonString(DesktopBrowserEvent));
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -34,8 +39,9 @@ const makePresentationWindow = (initialVisible = true) => {
   const events = new NodeEvents.EventEmitter();
   let visible = initialVisible;
   let minimized = false;
+  let destroyed = false;
   const window = Object.assign(events, {
-    isDestroyed: () => false,
+    isDestroyed: () => destroyed,
     isVisible: () => visible,
     isMinimized: () => minimized,
     webContents: { id: 77 },
@@ -57,6 +63,10 @@ const makePresentationWindow = (initialVisible = true) => {
     restore: () => {
       minimized = false;
       events.emit("restore");
+    },
+    close: () => {
+      destroyed = true;
+      events.emit("closed");
     },
   };
 };
@@ -187,6 +197,1210 @@ const makePopup = (initialVisible = true, initiallyAttached = false) => {
     },
   };
 };
+
+const makeRoot = () => {
+  const root = makePopup(false);
+  let size = [390, 844];
+  Object.assign(root.window, {
+    isFocused: () => false,
+    isFocusable: () => false,
+    loadURL: async () => undefined,
+    setContentSize: (width: number, height: number) => {
+      size = [width, height];
+    },
+    getContentSize: () => size,
+    destroy: root.window.close,
+  });
+  let zoomFactor = 1;
+  let windowOpenHandler:
+    | ((details: Electron.HandlerDetails) => Electron.WindowOpenHandlerResponse)
+    | undefined;
+  const contents = Object.assign(root.contents, {
+    setWindowOpenHandler: (handler: typeof windowOpenHandler) => {
+      windowOpenHandler = handler;
+    },
+    setZoomFactor: (value: number) => {
+      zoomFactor = value;
+    },
+    getZoomFactor: () => zoomFactor,
+  });
+  return {
+    ...root,
+    contents,
+    openWindow: (details: Electron.HandlerDetails) => windowOpenHandler?.(details),
+  };
+};
+
+it.effect.each(["foreground-tab", "background-tab"] as const)(
+  "%s navigation creates and registers a hidden child without replacing its native opener",
+  (disposition) =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      const events = yield* Queue.unbounded<DesktopBrowserEvent>();
+      yield* host.remoteEvents.pipe(
+        Stream.runForEach(({ event }) => Queue.offer(events, event)),
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      const root = makeRoot();
+      const navigations: string[] = [];
+      Object.assign(root.contents, { loadURL: async (url: string) => navigations.push(url) });
+      host.setRootFactory(() => Effect.succeed(root.window));
+      yield* host.bindEnvironment("host-a", "environment-a", profileResolver("environment-a"));
+      yield* host.handleRemoteCommand({
+        desktopHostId: "host-a",
+        command: {
+          type: "createRoot",
+          ...key,
+          serverEpoch: "epoch-a",
+          requestId: "create",
+          profileId: "default",
+          url: "about:blank",
+        },
+      });
+      yield* Queue.take(events);
+      expect((yield* Queue.take(events)).type).toBe("rootCreated");
+      expect(
+        root.openWindow({
+          url: "https://child.example/",
+          frameName: "",
+          features: "",
+          referrer: { url: "", policy: "default" },
+          disposition,
+        }),
+      ).toMatchObject({
+        action: "allow",
+        overrideBrowserWindowOptions: { show: false, focusable: false },
+      });
+      const child = makeRoot();
+      Object.assign(child.contents, { setIgnoreMenuShortcuts: () => undefined });
+      root.contents.emit("did-create-window", child.window);
+      const createdChild = yield* Queue.take(events);
+      if (createdChild.type !== "popupCreated") throw new Error("Expected child popup");
+      expect(createdChild).toMatchObject({ ...key });
+      expect(navigations).toEqual([]);
+      expect(root.window.isDestroyed()).toBe(false);
+      expect(child.attachCount()).toBe(1);
+      expect(child.window.isVisible()).toBe(false);
+      expect(child.window.isFocusable()).toBe(false);
+      const childKey = { ...key, tabId: "child-tab" };
+      yield* host.handleRemoteCommand({
+        desktopHostId: "host-a",
+        command: {
+          type: "bindPopup",
+          ...childKey,
+          openerTabId: key.tabId,
+          popupId: createdChild.popupId,
+        },
+      });
+      expect((yield* Queue.take(events)).type).toBe("attached");
+      expect(
+        child.openWindow({
+          url: "about:blank",
+          frameName: "",
+          features: "",
+          referrer: { url: "", policy: "default" },
+          disposition: "new-window",
+        }),
+      ).toMatchObject({
+        action: "allow",
+        overrideBrowserWindowOptions: { show: false, focusable: false },
+      });
+      const grandchild = makeRoot();
+      Object.assign(grandchild.contents, { setIgnoreMenuShortcuts: () => undefined });
+      child.contents.emit("did-create-window", grandchild.window);
+      expect(yield* Queue.take(events)).toMatchObject({ type: "popupCreated", ...childKey });
+      expect(grandchild.attachCount()).toBe(1);
+    }),
+);
+
+/** Observes actual attempt retirement without adding a production diagnostics API. */
+const observeCreationRecords = (marker: string) =>
+  Effect.gen(function* () {
+    const settlements: string[] = [];
+    let awaiting: ((value: string) => void) | undefined;
+    const settled = Effect.callback<string>((resume) => {
+      const value = settlements.shift();
+      if (value !== undefined) {
+        resume(Effect.succeed(value));
+        return;
+      }
+      const notify = (value: string) => resume(Effect.succeed(value));
+      awaiting = notify;
+      return Effect.sync(() => {
+        if (awaiting === notify) awaiting = undefined;
+      });
+    });
+    const pendingMaps = new Set<Map<unknown, unknown>>();
+    const cancellationSets = new Set<Set<unknown>>();
+    const deleting: string[] = [];
+    const set = Map.prototype.set;
+    const deleteMap = Map.prototype.delete;
+    const add = Set.prototype.add;
+    const deleteSet = Set.prototype.delete;
+    const matches = (value: unknown): value is string =>
+      typeof value === "string" && value.startsWith("[") && value.includes(marker);
+    yield* Effect.acquireRelease(
+      Effect.sync(() => {
+        // eslint-disable-next-line no-extend-native -- Scoped collection observation, restored on exit.
+        Map.prototype.set = function (this: Map<unknown, unknown>, key: unknown, value: unknown) {
+          if (matches(key)) pendingMaps.add(this);
+          return set.call(this, key, value);
+        };
+        // eslint-disable-next-line no-extend-native -- Observe the creation finalizer's pending deletion.
+        Map.prototype.delete = function (this: Map<unknown, unknown>, key: unknown) {
+          const deleted = deleteMap.call(this, key);
+          if (deleted && pendingMaps.has(this) && matches(key)) deleting.push(key);
+          return deleted;
+        };
+        // eslint-disable-next-line no-extend-native -- Observe cancellation records only for this fixture.
+        Set.prototype.add = function (this: Set<unknown>, value: unknown) {
+          if (matches(value)) cancellationSets.add(this);
+          return add.call(this, value);
+        };
+        // eslint-disable-next-line no-extend-native -- The final cancellation deletion marks settlement.
+        Set.prototype.delete = function (this: Set<unknown>, value: unknown) {
+          const deleted = deleteSet.call(this, value);
+          if (matches(value)) {
+            const index = deleting.indexOf(value);
+            if (index !== -1) {
+              deleting.splice(index, 1);
+              if (awaiting) {
+                const notify = awaiting;
+                awaiting = undefined;
+                notify(value);
+              } else settlements.push(value);
+            }
+          }
+          return deleted;
+        };
+      }),
+      () =>
+        Effect.sync(() => {
+          // eslint-disable-next-line no-extend-native -- Restore all original collection methods.
+          Map.prototype.set = set;
+          // eslint-disable-next-line no-extend-native -- Restore all original collection methods.
+          Map.prototype.delete = deleteMap;
+          // eslint-disable-next-line no-extend-native -- Restore all original collection methods.
+          Set.prototype.add = add;
+          // eslint-disable-next-line no-extend-native -- Restore all original collection methods.
+          Set.prototype.delete = deleteSet;
+        }),
+    );
+    return {
+      pending: () => [...pendingMaps].flatMap((records) => [...records.keys()].filter(matches)),
+      canceled: () => [...cancellationSets].flatMap((records) => [...records].filter(matches)),
+      settled,
+    };
+  });
+
+it.effect.each(["local", "remote"] as const)(
+  "%s serial transport handles profiles, existing-tab CDP and cancellation during root creation",
+  (transport) =>
+    Effect.gen(function* () {
+      const marker = `serial-root-${transport}`;
+      const records = yield* observeCreationRecords(marker);
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      const desktopHostId = transport === "local" ? "local" : "host-a";
+      const events = yield* Queue.unbounded<DesktopBrowserEvent>();
+      yield* (
+        transport === "local"
+          ? host.events.pipe(Stream.map((line) => decodeEvent(new TextDecoder().decode(line))))
+          : host.remoteEvents.pipe(Stream.map(({ event }) => event))
+      ).pipe(
+        Stream.runForEach((event) => Queue.offer(events, event)),
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      yield* host.bindEnvironment(desktopHostId, "environment-a", profileResolver("environment-a"));
+      const debuggee = makeDebuggee();
+      debuggee.tab.debugger.sendCommand = async (method) => ({ method });
+      host.attach({ ...key, desktopHostId }, debuggee.tab, "existing-runtime");
+      expect((yield* Queue.take(events)).type).toBe("attached");
+      const entered = yield* Deferred.make<void>();
+      const returned = yield* Deferred.make<Electron.BrowserWindow>();
+      const factorySettled = yield* Deferred.make<void>();
+      const root = makeRoot();
+      host.setRootFactory(() =>
+        Deferred.succeed(entered, undefined).pipe(
+          Effect.andThen(Deferred.await(returned)),
+          Effect.ensuring(Deferred.succeed(factorySettled, undefined)),
+        ),
+      );
+      type Command = Parameters<typeof host.handleRemoteCommand>[0]["command"];
+      const commands = yield* Queue.unbounded<Command>();
+      const input = Stream.fromQueue(commands).pipe(Stream.take(4));
+      // Match each production transport's sequential command consumer.
+      const consumer = yield* (
+        transport === "local"
+          ? input.pipe(Stream.runForEach((command) => host.handleCommandLine(encodeJson(command))))
+          : input.pipe(
+              Stream.mapEffect((command) => host.handleRemoteCommand({ desktopHostId, command })),
+              Stream.runDrain,
+            )
+      ).pipe(Effect.forkScoped({ startImmediately: true }));
+      const attempt = { ...key, tabId: "slow-root", requestId: marker, profileId: "default" };
+      yield* Queue.offer(commands, {
+        type: "createRoot",
+        ...attempt,
+        serverEpoch: "epoch-a",
+        url: "about:blank",
+      });
+      yield* Deferred.await(entered);
+      expect(records.pending()).toHaveLength(1);
+      yield* Queue.offer(commands, { type: "profiles", requestId: "profiles" });
+      yield* Queue.offer(commands, {
+        type: "cdp",
+        ...key,
+        message: encodeJson({
+          id: 1,
+          method: "Page.getLayoutMetrics",
+          sessionId: "t3-preview-page",
+        }),
+      });
+      yield* Queue.offer(commands, { type: "cancelRootCreation", ...attempt });
+      const replies = [
+        yield* Queue.take(events),
+        yield* Queue.take(events),
+        yield* Queue.take(events),
+      ];
+      expect(replies.find((event) => event.type === "profiles")).toMatchObject({
+        requestId: "profiles",
+        supportsNativeRoots: true,
+      });
+      const cdp = replies.find((event) => event.type === "cdp");
+      if (cdp?.type !== "cdp") throw new Error("Expected existing-tab CDP reply");
+      expect(decodeCdpReply(cdp.message).id).toBe(1);
+      expect(replies.find((event) => event.type === "rootCreated")).toMatchObject({
+        ...attempt,
+        rootId: null,
+      });
+      yield* Fiber.join(consumer);
+      expect(yield* Deferred.isDone(factorySettled)).toBe(false);
+      expect(root.window.isDestroyed()).toBe(false);
+      expect(records.pending()).toHaveLength(1);
+      expect(records.canceled()).toHaveLength(1);
+      yield* Deferred.succeed(returned, root.window);
+      yield* Deferred.await(factorySettled);
+      yield* records.settled;
+      expect(root.window.isDestroyed()).toBe(true);
+      expect(root.attachCount()).toBe(0);
+      expect(records.pending()).toHaveLength(0);
+      expect(records.canceled()).toHaveLength(0);
+      expect(yield* Queue.size(events)).toBe(0);
+    }),
+);
+
+it.effect.each([
+  ["epoch-a", true],
+  ["epoch-b", true],
+  ["epoch-a", false],
+] as const)(
+  "reconciles an in-flight root against owner epoch and inventory %s before its factory returns",
+  ([serverEpoch, retained]) =>
+    Effect.gen(function* () {
+      const survives = serverEpoch === "epoch-a" && retained;
+      const marker = `pending-epoch-${serverEpoch}-${retained}`;
+      const records = yield* observeCreationRecords(marker);
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      const main = makePresentationWindow();
+      host.setMainWindow(main.window);
+      const events = yield* Queue.unbounded<DesktopBrowserEvent>();
+      yield* host.remoteEvents.pipe(
+        Stream.runForEach(({ event }) => Queue.offer(events, event)),
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      yield* host.bindEnvironment("host-a", "environment-a", profileResolver("environment-a"));
+      const entered = yield* Deferred.make<void>();
+      const returned = yield* Deferred.make<Electron.BrowserWindow>();
+      const root = makeRoot();
+      host.setRootFactory(() =>
+        Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(returned))),
+      );
+      yield* host.handleRemoteCommand({
+        desktopHostId: "host-a",
+        command: {
+          type: "createRoot",
+          ...key,
+          serverEpoch: "epoch-a",
+          requestId: marker,
+          profileId: "default",
+          url: "about:blank",
+        },
+      });
+      yield* Deferred.await(entered);
+      // Another desktop's restart cannot cancel this pending window.
+      yield* host.handleRemoteCommand({
+        desktopHostId: "host-b",
+        command: { type: "reconcileRoots", serverEpoch: "epoch-b", retainedRootRequestIds: [] },
+      });
+      expect(records.canceled()).toHaveLength(0);
+      yield* host.handleRemoteCommand({
+        desktopHostId: "host-a",
+        command: {
+          type: "reconcileRoots",
+          serverEpoch,
+          retainedRootRequestIds: retained ? [marker] : [],
+        },
+      });
+      expect(records.pending()).toHaveLength(1);
+      expect(records.canceled()).toHaveLength(survives ? 0 : 1);
+      expect(main.window.isDestroyed()).toBe(false);
+      yield* Deferred.succeed(returned, root.window);
+      yield* records.settled;
+      expect(records.pending()).toHaveLength(0);
+      expect(records.canceled()).toHaveLength(0);
+      expect(root.window.isDestroyed()).toBe(!survives);
+      expect(root.attachCount()).toBe(survives ? 1 : 0);
+      if (survives) {
+        expect((yield* Queue.take(events)).type).toBe("attached");
+        expect(yield* Queue.take(events)).toMatchObject({
+          type: "rootCreated",
+          requestId: marker,
+          rootId: expect.any(String),
+        });
+      }
+      expect(yield* Queue.size(events)).toBe(0);
+    }),
+);
+
+it.effect(
+  "keeps native root profile/environment ownership fixed across simultaneous transports",
+  () =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      const events = yield* Queue.unbounded<{
+        desktopHostId: string;
+        event: DesktopBrowserEvent;
+      }>();
+      yield* host.remoteEvents.pipe(
+        Stream.runForEach((event) => Queue.offer(events, event)),
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      const created: Array<{ environmentId: string; profileId: string }> = [];
+      const windows: Array<ReturnType<typeof makeRoot>> = [];
+      host.setRootFactory((input) =>
+        Effect.sync(() => {
+          created.push({ environmentId: input.environmentId, profileId: input.profileId });
+          const root = makeRoot();
+          windows.push(root);
+          return root.window;
+        }),
+      );
+      for (const [desktopHostId, environmentId] of [
+        ["host-a", "environment-a"],
+        ["host-b", "environment-b"],
+      ]) {
+        yield* host.bindEnvironment(
+          desktopHostId!,
+          environmentId!,
+          profileResolver(environmentId!),
+        );
+        yield* host.handleRemoteCommand({
+          desktopHostId: desktopHostId!,
+          command: {
+            type: "createRoot",
+            serverEpoch: "server-epoch-a",
+            ...key,
+            requestId: "create",
+            profileId: "default",
+            url: "https://fixture.example/",
+          },
+        });
+        expect((yield* Queue.take(events)).event.type).toBe("attached");
+        const acknowledged = yield* Queue.take(events);
+        expect(acknowledged.desktopHostId).toBe(desktopHostId);
+        expect(acknowledged.event.type).toBe("rootCreated");
+        if (acknowledged.event.type !== "rootCreated") throw new Error("Expected root identity");
+        expect(acknowledged.event.rootId).not.toBeNull();
+        const rootId = acknowledged.event.rootId!;
+        yield* host.handleRemoteCommand({
+          desktopHostId: desktopHostId!,
+          command: {
+            type: "createRoot",
+            serverEpoch: "server-epoch-a",
+            ...key,
+            requestId: "create",
+            profileId: "default",
+            url: "https://fixture.example/",
+          },
+        });
+        expect((yield* Queue.take(events)).event).toMatchObject({ type: "rootCreated", rootId });
+        yield* host.handleRemoteCommand({
+          desktopHostId: desktopHostId!,
+          command: {
+            type: "createRoot",
+            serverEpoch: "server-epoch-a",
+            ...key,
+            requestId: "retry",
+            profileId: "default",
+            url: "https://fixture.example/",
+          },
+        });
+        expect((yield* Queue.take(events)).event).toMatchObject({
+          type: "rootCreated",
+          rootId: null,
+        });
+        yield* host.handleRemoteCommand({
+          desktopHostId: desktopHostId!,
+          command: { type: "cancelRootCreation", ...key, requestId: "retry", profileId: "default" },
+        });
+        expect((yield* Queue.take(events)).event).toMatchObject({
+          type: "rootCreated",
+          rootId: null,
+        });
+        expect(windows.at(-1)!.window.isDestroyed()).toBe(false);
+        const rebound = yield* host
+          .bindEnvironment(
+            desktopHostId!,
+            "another-environment",
+            profileResolver("another-environment"),
+          )
+          .pipe(Effect.flip);
+        expect(rebound.reason).toBe("host-unavailable");
+      }
+      expect(created).toEqual([
+        { environmentId: "environment-a", profileId: "default" },
+        { environmentId: "environment-b", profileId: "default" },
+      ]);
+      expect(windows).toHaveLength(2);
+    }),
+);
+
+it.effect("discards a published offline root only for its exact desktop, tab and identity", () =>
+  Effect.gen(function* () {
+    const host = yield* DesktopBrowserHost.make.pipe(
+      Effect.provide(DesktopClientSettings.layerTest()),
+    );
+    const events = yield* Queue.unbounded<DesktopBrowserEvent>();
+    yield* host.remoteEvents.pipe(
+      Stream.runForEach(({ event }) => Queue.offer(events, event)),
+      Effect.forkScoped({ startImmediately: true }),
+    );
+    const root = makeRoot();
+    host.setRootFactory(() => Effect.succeed(root.window));
+    yield* host.bindEnvironment("host-a", "environment-a", profileResolver("environment-a"));
+    const send = (
+      command: Parameters<typeof host.handleRemoteCommand>[0]["command"],
+      desktopHostId = "host-a",
+    ) => host.handleRemoteCommand({ desktopHostId, command });
+    yield* send({
+      type: "createRoot",
+      serverEpoch: "server-epoch-a",
+      ...key,
+      requestId: "create",
+      profileId: "default",
+      url: "about:blank",
+    });
+    yield* Queue.take(events);
+    const created = yield* Queue.take(events);
+    if (created.type !== "rootCreated" || created.rootId === null) throw new Error("Expected root");
+    const attempt = { ...key, rootId: created.rootId, requestId: "create", profileId: "default" };
+    yield* send({ type: "acceptRoot", ...attempt });
+    yield* Queue.take(events);
+    yield* send({ type: "publishRoot", ...attempt });
+    yield* send({ type: "discardRoot", ...key, rootId: created.rootId }, "host-b");
+    yield* send({ type: "discardRoot", ...key, tabId: "other-tab", rootId: created.rootId });
+    yield* send({ type: "discardRoot", ...key, rootId: "other-root" });
+    expect(root.window.isDestroyed()).toBe(false);
+    // A disconnected tab's explicit retirement is destruction, not a vetoable close.
+    root.window.close = () => undefined;
+    yield* send({ type: "discardRoot", ...key, rootId: created.rootId });
+    expect(root.window.isDestroyed()).toBe(true);
+    expect(root.closeCount()).toBe(1);
+  }),
+);
+
+it.effect(
+  "cancels only its in-flight root creation without announcing or retaining a late window",
+  () =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      const events = yield* Queue.unbounded<DesktopBrowserEvent>();
+      yield* host.remoteEvents.pipe(
+        Stream.runForEach(({ event }) => Queue.offer(events, event)),
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      yield* host.bindEnvironment("host-a", "environment-a", profileResolver("environment-a"));
+      const entered = yield* Deferred.make<void>();
+      const created = yield* Deferred.make<Electron.BrowserWindow>();
+      host.setRootFactory(() =>
+        Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(created))),
+      );
+      const root = makeRoot();
+      const closed = Promise.withResolvers<void>();
+      root.window.once("closed", () => closed.resolve());
+      yield* host.handleRemoteCommand({
+        desktopHostId: "host-a",
+        command: {
+          type: "createRoot",
+          serverEpoch: "server-epoch-a",
+          ...key,
+          requestId: "create",
+          profileId: "default",
+          url: "https://fixture.example/",
+        },
+      });
+      yield* Deferred.await(entered);
+      yield* host.handleRemoteCommand({
+        desktopHostId: "host-a",
+        command: { type: "cancelRootCreation", ...key, requestId: "create", profileId: "default" },
+      });
+      expect(yield* Queue.take(events)).toMatchObject({ type: "rootCreated", rootId: null });
+      yield* Deferred.succeed(created, root.window);
+      yield* Effect.promise(() => closed.promise);
+      expect(root.window.isDestroyed()).toBe(true);
+      expect(root.attachCount()).toBe(0);
+      expect(yield* Queue.size(events)).toBe(0);
+    }),
+);
+
+it.effect(
+  "retires cancellation records after late creation settles or a completed root is destroyed",
+  () =>
+    Effect.gen(function* () {
+      const marker = "cancellation-retirement";
+      const records = yield* observeCreationRecords(marker);
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      yield* host.bindEnvironment("host-a", "environment-a", profileResolver("environment-a"));
+      const events = yield* Queue.unbounded<DesktopBrowserEvent>();
+      yield* host.remoteEvents.pipe(
+        Stream.runForEach(({ event }) => Queue.offer(events, event)),
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      const send = (command: Parameters<typeof host.handleRemoteCommand>[0]["command"]) =>
+        host.handleRemoteCommand({ desktopHostId: "host-a", command });
+      for (const [index, mode] of ["cancel", "disconnect"].entries()) {
+        const entered = yield* Deferred.make<void>();
+        const returned = yield* Deferred.make<Electron.BrowserWindow>();
+        const root = makeRoot();
+        host.setRootFactory(() =>
+          Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(returned))),
+        );
+        const attempt = { ...key, requestId: `${marker}-${index}`, profileId: "default" };
+        yield* send({
+          type: "createRoot",
+          ...attempt,
+          serverEpoch: "epoch-a",
+          url: "about:blank",
+        });
+        yield* Deferred.await(entered);
+        yield* send(
+          mode === "cancel" ? { type: "cancelRootCreation", ...attempt } : { type: "disconnect" },
+        );
+        if (mode === "cancel") yield* Queue.take(events);
+        expect(records.pending()).toHaveLength(1);
+        expect(records.canceled()).toHaveLength(1);
+        yield* Deferred.succeed(returned, root.window);
+        yield* records.settled;
+        expect(root.window.isDestroyed()).toBe(true);
+        expect(root.attachCount()).toBe(0);
+        expect(records.pending()).toHaveLength(0);
+        expect(records.canceled()).toHaveLength(0);
+        // A repeated cancellation acknowledgment has no late creation left to guard.
+        yield* send({ type: "cancelRootCreation", ...attempt });
+        yield* Queue.take(events);
+        expect(records.canceled()).toHaveLength(0);
+      }
+      for (const mode of ["cancel", "disconnect"]) {
+        const root = makeRoot();
+        const attempt = { ...key, requestId: `${marker}-${mode}-completed`, profileId: "default" };
+        host.setRootFactory(() => Effect.succeed(root.window));
+        yield* send({ type: "createRoot", ...attempt, serverEpoch: "epoch-a", url: "about:blank" });
+        expect((yield* Queue.take(events)).type).toBe("attached");
+        expect((yield* Queue.take(events)).type).toBe("rootCreated");
+        yield* records.settled;
+        yield* send(
+          mode === "cancel" ? { type: "cancelRootCreation", ...attempt } : { type: "disconnect" },
+        );
+        expect((yield* Queue.take(events)).type).toBe("detached");
+        expect((yield* Queue.take(events)).type).toBe("rootClosed");
+        if (mode === "cancel") yield* Queue.take(events);
+        expect(root.window.isDestroyed()).toBe(true);
+        expect(records.pending()).toHaveLength(0);
+        expect(records.canceled()).toHaveLength(0);
+      }
+    }),
+);
+
+it.effect.each(["created", "accepted", "published"] as const)(
+  "disconnect and stale creation cancellation respect native root ownership (%s)",
+  (stage) =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      const events = yield* Queue.unbounded<DesktopBrowserEvent>();
+      yield* host.remoteEvents.pipe(
+        Stream.runForEach(({ event }) => Queue.offer(events, event)),
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      const root = makeRoot();
+      host.setRootFactory(() => Effect.succeed(root.window));
+      yield* host.bindEnvironment("host-a", "environment-a", profileResolver("environment-a"));
+      const send = (command: Parameters<typeof host.handleRemoteCommand>[0]["command"]) =>
+        host.handleRemoteCommand({ desktopHostId: "host-a", command });
+      yield* send({
+        type: "createRoot",
+        serverEpoch: "server-epoch-a",
+        ...key,
+        requestId: "create",
+        profileId: "default",
+        url: "about:blank",
+      });
+      yield* Queue.take(events);
+      const created = yield* Queue.take(events);
+      if (created.type !== "rootCreated" || created.rootId === null)
+        throw new Error("Expected root");
+      const attempt = { ...key, rootId: created.rootId, requestId: "create", profileId: "default" };
+      yield* send({ type: "acceptRoot", ...attempt, profileId: "different-profile" });
+      expect(yield* Queue.take(events)).toMatchObject({ type: "rootAccepted", accepted: false });
+      if (stage !== "created") {
+        yield* send({ type: "acceptRoot", ...attempt });
+        expect(yield* Queue.take(events)).toMatchObject({ type: "rootAccepted", accepted: true });
+      }
+      if (stage === "published") yield* send({ type: "publishRoot", ...attempt });
+      yield* send({ type: "disconnect" });
+      expect(root.window.isDestroyed()).toBe(stage === "created");
+      if (stage !== "created") {
+        yield* send({ type: "announce" });
+        expect(yield* Queue.take(events)).toMatchObject({
+          type: "attached",
+          ...key,
+          supportsNativeSurface: true,
+        });
+        yield* send({
+          type: "reconcileRoots",
+          serverEpoch: "server-epoch-a",
+          retainedRootRequestIds: ["create"],
+        });
+        expect(root.window.isDestroyed()).toBe(false);
+      }
+      yield* send({
+        type: "cancelRootCreation",
+        ...key,
+        requestId: "create",
+        profileId: "default",
+      });
+      expect(root.window.isDestroyed()).toBe(stage !== "published");
+      if (stage === "published") {
+        yield* send({ type: "acceptRoot", ...attempt });
+        expect(yield* Queue.take(events)).toMatchObject({ type: "rootAccepted", accepted: true });
+      }
+    }),
+);
+
+it.effect(
+  "same-epoch reconnect destroys omitted roots and preserves retained and foreign roots",
+  () =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      const events = yield* Queue.unbounded<{
+        desktopHostId: string;
+        event: DesktopBrowserEvent;
+      }>();
+      yield* host.remoteEvents.pipe(
+        Stream.runForEach((event) => Queue.offer(events, event)),
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      const roots: Array<ReturnType<typeof makeRoot>> = [];
+      host.setRootFactory(() =>
+        Effect.sync(() => {
+          const root = makeRoot();
+          roots.push(root);
+          return root.window;
+        }),
+      );
+      const definitions = [
+        { desktopHostId: "host-a", tabId: "discarded", requestId: "discarded-request" },
+        { desktopHostId: "host-a", tabId: "retained", requestId: "retained-request" },
+        { desktopHostId: "host-b", tabId: "foreign", requestId: "discarded-request" },
+      ];
+      for (const { desktopHostId, tabId, requestId } of definitions) {
+        yield* host.bindEnvironment(desktopHostId, desktopHostId, profileResolver(desktopHostId));
+        const send = (command: Parameters<typeof host.handleRemoteCommand>[0]["command"]) =>
+          host.handleRemoteCommand({ desktopHostId, command });
+        yield* send({
+          type: "createRoot",
+          ...key,
+          tabId,
+          requestId,
+          profileId: "default",
+          serverEpoch: "same-epoch",
+          url: "about:blank",
+        });
+        yield* Queue.take(events);
+        const created = (yield* Queue.take(events)).event;
+        if (created.type !== "rootCreated" || created.rootId === null)
+          throw new Error("Expected native root");
+        const attempt = { ...key, tabId, requestId, rootId: created.rootId, profileId: "default" };
+        yield* send({ type: "acceptRoot", ...attempt });
+        yield* Queue.take(events);
+        yield* send({ type: "publishRoot", ...attempt });
+        yield* send({ type: "disconnect" });
+      }
+      yield* TestClock.adjust("365 days");
+      yield* host.handleRemoteCommand({
+        desktopHostId: "host-a",
+        command: {
+          type: "reconcileRoots",
+          serverEpoch: "same-epoch",
+          retainedRootRequestIds: ["retained-request"],
+        },
+      });
+      expect(roots.map((root) => root.window.isDestroyed())).toEqual([true, false, false]);
+      expect((yield* Queue.take(events)).event).toMatchObject({
+        type: "detached",
+        tabId: "discarded",
+      });
+      expect(yield* Queue.take(events)).toMatchObject({
+        desktopHostId: "host-a",
+        event: { type: "rootClosed", tabId: "discarded" },
+      });
+      expect(yield* Queue.size(events)).toBe(0);
+    }),
+);
+
+it.effect.each(["host-a", "host-b"])(
+  "a new owner epoch destroys stale roots only on that host (%s)",
+  (restartedHost) =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      const events = yield* Queue.unbounded<{
+        desktopHostId: string;
+        event: DesktopBrowserEvent;
+      }>();
+      yield* host.remoteEvents.pipe(
+        Stream.runForEach((event) => Queue.offer(events, event)),
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      const windows = new Map<string, ReturnType<typeof makeRoot>>();
+      const identities = new Map<string, string>();
+      host.setRootFactory(({ environmentId }) =>
+        Effect.sync(() => {
+          const root = makeRoot();
+          windows.set(environmentId, root);
+          return root.window;
+        }),
+      );
+      for (const desktopHostId of ["host-a", "host-b"]) {
+        yield* host.bindEnvironment(desktopHostId, desktopHostId, profileResolver(desktopHostId));
+        const send = (command: Parameters<typeof host.handleRemoteCommand>[0]["command"]) =>
+          host.handleRemoteCommand({ desktopHostId, command });
+        yield* send({
+          type: "createRoot",
+          ...key,
+          serverEpoch: `epoch:${desktopHostId}`,
+          requestId: "create",
+          profileId: "default",
+          url: "about:blank",
+        });
+        yield* Queue.take(events);
+        const created = (yield* Queue.take(events)).event;
+        if (created.type !== "rootCreated" || created.rootId === null)
+          throw new Error("Expected root");
+        identities.set(desktopHostId, created.rootId);
+        const attempt = {
+          ...key,
+          rootId: created.rootId,
+          requestId: "create",
+          profileId: "default",
+        };
+        yield* send({ type: "acceptRoot", ...attempt });
+        yield* Queue.take(events);
+        yield* send({ type: "publishRoot", ...attempt });
+        yield* send({ type: "disconnect" });
+        yield* send({ type: "announce" });
+        expect((yield* Queue.take(events)).event.type).toBe("attached");
+        yield* send({
+          type: "reconcileRoots",
+          serverEpoch: `epoch:${desktopHostId}`,
+          retainedRootRequestIds: ["create"],
+        });
+        expect(windows.get(desktopHostId)!.window.isDestroyed()).toBe(false);
+      }
+      yield* host.handleRemoteCommand({
+        desktopHostId: restartedHost,
+        command: {
+          type: "reconcileRoots",
+          serverEpoch: "replacement-server-epoch",
+          retainedRootRequestIds: [],
+        },
+      });
+      expect((yield* Queue.take(events)).event.type).toBe("detached");
+      expect(yield* Queue.take(events)).toEqual({
+        desktopHostId: restartedHost,
+        event: { type: "rootClosed", ...key, rootId: identities.get(restartedHost)! },
+      });
+      for (const [desktopHostId, root] of windows)
+        expect(root.window.isDestroyed()).toBe(desktopHostId === restartedHost);
+      yield* host.handleRemoteCommand({
+        desktopHostId: restartedHost,
+        command: { type: "announce" },
+      });
+      expect(yield* Queue.size(events)).toBe(0);
+    }),
+);
+
+it.effect("root presence survives transport disconnect and detects an ordinary lost close", () =>
+  Effect.gen(function* () {
+    const host = yield* DesktopBrowserHost.make.pipe(
+      Effect.provide(DesktopClientSettings.layerTest()),
+    );
+    const events = yield* Queue.unbounded<DesktopBrowserEvent>();
+    yield* host.remoteEvents.pipe(
+      Stream.runForEach(({ event }) => Queue.offer(events, event)),
+      Effect.forkScoped({ startImmediately: true }),
+    );
+    const root = makeRoot();
+    host.setRootFactory(() => Effect.succeed(root.window));
+    yield* host.bindEnvironment("host-a", "environment-a", profileResolver("environment-a"));
+    const send = (command: Parameters<typeof host.handleRemoteCommand>[0]["command"]) =>
+      host.handleRemoteCommand({ desktopHostId: "host-a", command });
+    yield* send({
+      type: "createRoot",
+      ...key,
+      serverEpoch: "server-epoch-a",
+      requestId: "create",
+      profileId: "default",
+      url: "about:blank",
+    });
+    yield* Queue.take(events);
+    const created = yield* Queue.take(events);
+    if (created.type !== "rootCreated" || created.rootId === null) throw new Error("Expected root");
+    const attempt = { ...key, rootId: created.rootId, requestId: "create", profileId: "default" };
+    yield* send({ type: "acceptRoot", ...attempt });
+    yield* Queue.take(events);
+    yield* send({ type: "publishRoot", ...attempt });
+    yield* send({ type: "disconnect" });
+    const probe = {
+      type: "probeRoot" as const,
+      ...key,
+      rootId: created.rootId,
+      requestId: "probe",
+    };
+    yield* host.handleRemoteCommand({ desktopHostId: "other-host", command: probe });
+    yield* send({ ...probe, threadId: "other-thread" });
+    yield* send({ ...probe, tabId: "other-tab" });
+    expect(yield* Queue.size(events)).toBe(0);
+    yield* send(probe);
+    expect(yield* Queue.take(events)).toEqual({
+      type: "rootPresence",
+      ...key,
+      rootId: created.rootId,
+      requestId: "probe",
+      present: true,
+    });
+    expect(root.closeCount()).toBe(0);
+    root.window.close();
+    expect((yield* Queue.take(events)).type).toBe("detached");
+    expect((yield* Queue.take(events)).type).toBe("rootClosed");
+    yield* send({ ...probe, requestId: "after-offline-close" });
+    expect(yield* Queue.take(events)).toEqual({
+      type: "rootPresence",
+      ...key,
+      rootId: created.rootId,
+      requestId: "after-offline-close",
+      present: false,
+    });
+    expect(root.closeCount()).toBe(1);
+  }),
+);
+
+it.effect("main-window closure destroys published automation roots and their children only", () =>
+  Effect.gen(function* () {
+    const host = yield* DesktopBrowserHost.make.pipe(
+      Effect.provide(DesktopClientSettings.layerTest()),
+    );
+    const events = yield* Queue.unbounded<DesktopBrowserEvent>();
+    yield* host.remoteEvents.pipe(
+      Stream.runForEach(({ event }) => Queue.offer(events, event)),
+      Effect.forkScoped({ startImmediately: true }),
+    );
+    const main = makePresentationWindow();
+    host.setMainWindow(main.window);
+    const root = makeRoot();
+    host.setRootFactory(() => Effect.succeed(root.window));
+    yield* host.bindEnvironment("host-a", "environment-a", profileResolver("environment-a"));
+    const send = (command: Parameters<typeof host.handleRemoteCommand>[0]["command"]) =>
+      host.handleRemoteCommand({ desktopHostId: "host-a", command });
+    yield* send({
+      type: "createRoot",
+      ...key,
+      serverEpoch: "server-epoch-a",
+      requestId: "create",
+      profileId: "default",
+      url: "about:blank",
+    });
+    yield* Queue.take(events);
+    const created = yield* Queue.take(events);
+    if (created.type !== "rootCreated" || created.rootId === null) throw new Error("Expected root");
+    const attempt = { ...key, rootId: created.rootId, requestId: "create", profileId: "default" };
+    yield* send({ type: "acceptRoot", ...attempt });
+    yield* Queue.take(events);
+    yield* send({ type: "publishRoot", ...attempt });
+    const child = makeRoot();
+    Object.assign(child.contents, { setIgnoreMenuShortcuts: () => undefined });
+    root.contents.emit("did-create-window", child.window);
+    expect((yield* Queue.take(events)).type).toBe("popupCreated");
+    const sharedKey = { ...key, tabId: "human-tab", desktopHostId: "host-a" };
+    host.attach(sharedKey, makeDebuggee().tab, "human-runtime");
+    yield* Queue.take(events);
+    const humanPopup = makePopup();
+    host.registerPopup(sharedKey, humanPopup.window);
+    yield* Queue.take(events);
+
+    main.hide();
+    main.minimize();
+    main.restore();
+    yield* send({ type: "disconnect" });
+    expect(root.window.isDestroyed()).toBe(false);
+    expect(child.window.isDestroyed()).toBe(false);
+    main.close();
+    expect(root.window.isDestroyed()).toBe(true);
+    expect(child.window.isDestroyed()).toBe(true);
+    expect(humanPopup.window.isDestroyed()).toBe(false);
+    const closed = [
+      yield* Queue.take(events),
+      yield* Queue.take(events),
+      yield* Queue.take(events),
+    ];
+    expect(closed.map((event) => event.type).sort()).toEqual([
+      "detached",
+      "popupClosed",
+      "rootClosed",
+    ]);
+    // A child delivered after owner closure is destroyed before registration.
+    const lateChild = makeRoot();
+    root.contents.emit("did-create-window", lateChild.window);
+    expect(lateChild.window.isDestroyed()).toBe(true);
+    expect(lateChild.attachCount()).toBe(0);
+  }),
+);
+
+it.effect.each(["factory", "navigation"] as const)(
+  "main-window closure discards in-flight %s and queued root creations across replacement",
+  (stage) =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      const events = yield* Queue.unbounded<DesktopBrowserEvent>();
+      yield* host.remoteEvents.pipe(
+        Stream.runForEach(({ event }) => Queue.offer(events, event)),
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      const main = makePresentationWindow();
+      host.setMainWindow(main.window);
+      yield* host.bindEnvironment("host-a", "environment-a", profileResolver("environment-a"));
+      const entered = yield* Deferred.make<void>();
+      const returned = yield* Deferred.make<Electron.BrowserWindow>();
+      const loadEntered = Promise.withResolvers<void>();
+      const loadCompleted = Promise.withResolvers<void>();
+      const root = makeRoot();
+      let factoryCalls = 0;
+      let loads = 0;
+      Object.assign(root.window, {
+        loadURL: () => {
+          loads += 1;
+          loadEntered.resolve();
+          return loadCompleted.promise;
+        },
+      });
+      host.setRootFactory(() => {
+        factoryCalls += 1;
+        return stage === "factory"
+          ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(returned)))
+          : Effect.succeed(root.window);
+      });
+      const create = (tabId: string) =>
+        host.handleRemoteCommand({
+          desktopHostId: "host-a",
+          command: {
+            type: "createRoot",
+            ...key,
+            tabId,
+            serverEpoch: "server-epoch-a",
+            requestId: `create-${tabId}`,
+            profileId: "default",
+            url: "about:blank",
+          },
+        });
+      yield* create("first");
+      yield* stage === "factory"
+        ? Deferred.await(entered)
+        : Effect.promise(() => loadEntered.promise);
+      yield* create("queued");
+      main.close();
+      host.setMainWindow(makePresentationWindow().window);
+      yield* Deferred.succeed(returned, root.window);
+      loadCompleted.resolve();
+      for (let index = 0; index < 2; index += 1)
+        expect(yield* Queue.take(events)).toMatchObject({
+          type: "rootCreated",
+          rootId: null,
+          reason: "guest-unavailable",
+        });
+      expect(root.window.isDestroyed()).toBe(true);
+      expect(root.attachCount()).toBe(0);
+      expect(factoryCalls).toBe(1);
+      expect(loads).toBe(stage === "factory" ? 0 : 1);
+    }),
+);
+
+it.effect(
+  "native root leases apply fill size and native zoom while preserving fixed settings and release",
+  () =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      const events = yield* Queue.unbounded<DesktopBrowserEvent>();
+      yield* host.remoteEvents.pipe(
+        Stream.runForEach(({ event }) => Queue.offer(events, event)),
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      const root = makeRoot();
+      host.setRootFactory(() => Effect.succeed(root.window));
+      yield* host.bindEnvironment("host-a", "environment-a", profileResolver("environment-a"));
+      const send = (command: Parameters<typeof host.handleRemoteCommand>[0]["command"]) =>
+        host.handleRemoteCommand({ desktopHostId: "host-a", command });
+      yield* send({
+        type: "createRoot",
+        ...key,
+        serverEpoch: "epoch-a",
+        requestId: "create",
+        profileId: "default",
+        url: "about:blank",
+      });
+      yield* Queue.take(events);
+      yield* Queue.take(events);
+      const render = {
+        type: "surface" as const,
+        ...key,
+        requestId: "render",
+        leaseId: "viewer",
+        action: "acquire" as const,
+        viewport: { _tag: "fill" as const },
+        viewportSize: { width: 720, height: 480 },
+        zoomFactor: 1.25 as const,
+      };
+      yield* send(render);
+      expect(yield* Queue.take(events)).toMatchObject({
+        type: "surfaceReady",
+        viewport: { width: 720, height: 480 },
+      });
+      expect(root.window.getContentSize()).toEqual([720, 480]);
+      expect(root.contents.getZoomFactor()).toBe(1.25);
+      expect(root.window.isVisible()).toBe(false);
+      expect(root.window.isFocused()).toBe(false);
+      yield* send({
+        ...render,
+        action: "release",
+        viewportSize: { width: 999, height: 999 },
+        zoomFactor: 0.5,
+      });
+      yield* Queue.take(events);
+      expect(root.window.getContentSize()).toEqual([720, 480]);
+      expect(root.contents.getZoomFactor()).toBe(1.25);
+      yield* send({
+        ...render,
+        viewport: { _tag: "freeform", width: 390, height: 844 },
+        zoomFactor: 1,
+      });
+      expect(yield* Queue.take(events)).toMatchObject({
+        type: "surfaceReady",
+        viewport: { width: 390, height: 844 },
+      });
+      expect(root.contents.getZoomFactor()).toBe(1);
+    }),
+);
+
+it.effect("disconnect retires pending native creation before its factory returns", () =>
+  Effect.gen(function* () {
+    const host = yield* DesktopBrowserHost.make.pipe(
+      Effect.provide(DesktopClientSettings.layerTest()),
+    );
+    const entered = yield* Deferred.make<void>();
+    const returned = yield* Deferred.make<Electron.BrowserWindow>();
+    const root = makeRoot();
+    const closed = Promise.withResolvers<void>();
+    root.window.once("closed", () => closed.resolve());
+    host.setRootFactory(() =>
+      Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(returned))),
+    );
+    yield* host.bindEnvironment("host-a", "environment-a", profileResolver("environment-a"));
+    yield* host.handleRemoteCommand({
+      desktopHostId: "host-a",
+      command: {
+        type: "createRoot",
+        serverEpoch: "server-epoch-a",
+        ...key,
+        requestId: "create",
+        profileId: "default",
+        url: "about:blank",
+      },
+    });
+    yield* Deferred.await(entered);
+    yield* host.handleRemoteCommand({ desktopHostId: "host-a", command: { type: "disconnect" } });
+    yield* Deferred.succeed(returned, root.window);
+    yield* Effect.promise(() => closed.promise);
+    expect(root.window.isDestroyed()).toBe(true);
+    expect(root.attachCount()).toBe(0);
+  }),
+);
+
+it.effect.each(["Input.insertText", "Input.dispatchKeyEvent"])(
+  "relays remote viewer keyboard input to its shared guest (%s)",
+  (method) =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      const events = yield* Queue.unbounded<DesktopBrowserEvent>();
+      yield* host.remoteEvents.pipe(
+        Stream.runForEach(({ event }) => Queue.offer(events, event)),
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      const debuggee = makeDebuggee();
+      const commands: Array<{ method: string; params: unknown; sessionId: string | undefined }> =
+        [];
+      debuggee.tab.debugger.sendCommand = async (method, params, sessionId) => {
+        commands.push({ method, params, sessionId });
+        return { method };
+      };
+      host.attach({ ...key, desktopHostId: "host-a" }, debuggee.tab, "shared-guest");
+      yield* Queue.take(events);
+      const params =
+        method === "Input.insertText" ? { text: "viewer text" } : { type: "keyDown", key: "a" };
+      yield* host.handleRemoteCommand({
+        desktopHostId: "host-a",
+        command: {
+          type: "cdp",
+          ...key,
+          message: JSON.stringify({ id: 1, method, sessionId: "t3-preview-page", params }),
+        },
+      });
+      const event = yield* Queue.take(events);
+      if (event.type !== "cdp") throw new Error("Expected keyboard response");
+      expect(JSON.parse(event.message)).toMatchObject({ id: 1, result: { method } });
+      expect(commands).toEqual([{ method, params, sessionId: undefined }]);
+    }),
+);
 
 it.effect.each(["window", "unload"] as const)(
   "reports a canceled native popup close and leaves its window live (%s)",
@@ -1079,11 +2293,60 @@ describe("DesktopBrowserHost", () => {
         }),
       );
       expect(host.humanStartedDownload(debuggee.tab.webContents)).toBe(false);
+      // A viewer action takes attribution back immediately, even after agent input.
+      yield* host.handleCommandLine(
+        encodeJson({
+          type: "cdp",
+          ...key,
+          inputSource: "viewer",
+          message: encodeJson({ id: 3, method: "Input.insertText", params: { text: "viewer" } }),
+        }),
+      );
+      expect(host.humanStartedDownload(debuggee.tab.webContents)).toBe(true);
+      yield* host.handleCommandLine(
+        encodeJson({
+          type: "cdp",
+          ...key,
+          message: encodeJson({ id: 4, method: "Input.insertText", params: { text: "agent" } }),
+        }),
+      );
+      expect(host.humanStartedDownload(debuggee.tab.webContents)).toBe(false);
     }),
   );
 });
 
 describe("remote desktop browser host", () => {
+  it.effect("viewer input changes download attribution only for its exact desktop owner", () =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      const local = makeDebuggee();
+      const remote = makeDebuggee();
+      host.attach(key, local.tab, "runtime-local");
+      host.attach({ ...key, desktopHostId: "host-a" }, remote.tab, "runtime-remote");
+      const message = encodeJson({ id: 1, method: "Input.insertText", params: { text: "input" } });
+      yield* host.handleCommandLine(encodeJson({ type: "cdp", ...key, message }));
+      yield* host.handleRemoteCommand({
+        desktopHostId: "host-a",
+        command: { type: "cdp", ...key, message },
+      });
+      expect(host.humanStartedDownload(local.tab.webContents)).toBe(false);
+      expect(host.humanStartedDownload(remote.tab.webContents)).toBe(false);
+      yield* host.handleRemoteCommand({
+        desktopHostId: "host-b",
+        command: { type: "cdp", ...key, message, inputSource: "viewer" },
+      });
+      expect(host.humanStartedDownload(remote.tab.webContents)).toBe(false);
+      yield* host.handleRemoteCommand({
+        desktopHostId: "host-a",
+        command: { type: "cdp", ...key, message, inputSource: "viewer" },
+      });
+      expect(host.humanStartedDownload(remote.tab.webContents)).toBe(true);
+      expect(host.humanStartedDownload(local.tab.webContents)).toBe(false);
+    }),
+  );
+
   it.effect("isolates native tab commands and announcements by desktop host", () =>
     Effect.gen(function* () {
       const host = yield* DesktopBrowserHost.make.pipe(
@@ -1126,6 +2389,7 @@ describe("remote desktop browser host", () => {
           type: "profiles",
           requestId: "profiles-a",
           profiles: { defaultProfileId: "default" },
+          supportsNativeRoots: true,
         },
       });
     }).pipe(Effect.scoped),
