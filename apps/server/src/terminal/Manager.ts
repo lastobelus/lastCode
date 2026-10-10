@@ -730,18 +730,21 @@ function processTableSnapshotFromProcesses(
 }
 
 function startupShellIdentity(
-  observedName: string | null,
+  rawObservedName: string,
   spawnedShellName: string | null,
   platform: NodeJS.Platform,
 ): string | null {
+  const observedName = normalizeChildCommandName(rawObservedName, platform);
   // A truncated Linux name cannot distinguish a long shell from another
-  // executable with the same prefix. Preserve that ambiguity as active.
+  // executable with the same prefix. Count bytes before stripping a login
+  // shell's dash, which occupies one of the 15 comm bytes.
   if (
     observedName === null ||
     (platform === "linux" &&
       spawnedShellName !== null &&
       observedName !== spawnedShellName &&
-      (Buffer.byteLength(observedName) === 15 ||
+      (Buffer.byteLength(rawObservedName.trim()) === 15 ||
+        Buffer.byteLength(observedName) === 15 ||
         (Buffer.byteLength(spawnedShellName) > 15 &&
           observedName === Buffer.from(spawnedShellName).subarray(0, 15).toString("utf8"))))
   ) {
@@ -759,19 +762,22 @@ function deriveSubprocessInspectResult(
 ): TerminalSubprocessInspectResult {
   const commandName = (pid: number) =>
     normalizeChildCommandName(snapshot.commandById.get(pid) ?? "", platform);
+  const rawShellName = snapshot.commandById.get(terminalPid) ?? "";
   const shellName = commandName(terminalPid);
   // POSIX exec replaces the shell while retaining the PTY root PID. It can
   // run real work without any child processes. Linux comm can truncate names
   // to 15 bytes, so matching a long shell's truncated prefix cannot prove it
   // is still the shell. Keep ambiguous roots active until a full name matches.
   const shellIdentity = beforeFirstInput
-    ? startupShellIdentity(shellName, spawnedShellName, platform)
+    ? startupShellIdentity(rawShellName, spawnedShellName, platform)
     : spawnedShellName;
   const rootWasReplaced =
     platform !== "win32" &&
     shellIdentity !== null &&
     shellName !== null &&
-    (shellName !== shellIdentity || (platform === "linux" && Buffer.byteLength(shellName) === 15));
+    (shellName !== shellIdentity ||
+      (platform === "linux" &&
+        (Buffer.byteLength(rawShellName.trim()) === 15 || Buffer.byteLength(shellName) === 15)));
   // Async prompt themes fork the shell into a helper that waits with no
   // children of its own. That copy is not a command the user started.
   const childPid = (snapshot.childrenByParent.get(terminalPid) ?? []).find(
@@ -2388,10 +2394,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
                     fetchProcessTableSnapshot.pipe(
                       Effect.map(({ snapshot }) =>
                         startupShellIdentity(
-                          normalizeChildCommandName(
-                            snapshot.commandById.get(processPid) ?? "",
-                            platform,
-                          ),
+                          snapshot.commandById.get(processPid) ?? "",
                           spawnResult.shellName,
                           platform,
                         ),
