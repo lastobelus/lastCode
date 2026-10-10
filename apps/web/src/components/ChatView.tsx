@@ -10469,6 +10469,8 @@ export default function ChatView(props: ChatViewProps) {
                 envMode: sendEnvMode,
                 branch: activeThreadBranch,
                 startFromOrigin,
+                canAutoBalance:
+                  canAutoBalanceEnvironments && loadBalancingSettings.loadBalancingEnabled,
                 environmentSelection: draftThread?.environmentSelection,
               }),
             ),
