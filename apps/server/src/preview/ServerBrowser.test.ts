@@ -279,6 +279,7 @@ let desktopPopupHostConnected = true;
 let nativePopupCloseFailure: "close-canceled" | null = null;
 let nativeCloseChannel: DesktopChannel.DesktopBrowserChannel["Service"] | null = null;
 let nativeRootCloseChannel: DesktopChannel.DesktopBrowserChannel["Service"] | null = null;
+let nativeRootCreationChannel: DesktopChannel.DesktopBrowserChannel["Service"] | null = null;
 let nativeCloseRejected: PromiseWithResolvers<void> | null = null;
 const nativePopupPresence = new Map<string, boolean>();
 let nativePopupProbeUnavailable = false;
@@ -321,6 +322,9 @@ const rootPublications: Array<DesktopChannel.DesktopTabKey & { rootId: string }>
 let rootAcceptanceGate: PromiseWithResolvers<void> | null = null;
 let rootAcceptanceEntered: PromiseWithResolvers<void> | null = null;
 let rootAcceptanceFailure: DesktopBrowserTransportError | null = null;
+let rootPublicationGate: PromiseWithResolvers<void> | null = null;
+let rootPublicationEntered: PromiseWithResolvers<void> | null = null;
+let rootPublicationFailure: DesktopBrowserTransportError | null = null;
 let rootCloseFailure: "close-canceled" | "host-unavailable" | null = null;
 let rootCloseAttempted: PromiseWithResolvers<void> | null = null;
 let releasedDesktopSeen: PromiseWithResolvers<void> | null = null;
@@ -488,6 +492,7 @@ const dependencies = Layer.mergeAll(
     createRoot: (key, input) =>
       Effect.suspend(() => {
         rootCreations.push({ ...key, ...input });
+        if (nativeRootCreationChannel) return nativeRootCreationChannel.createRoot(key, input);
         return desktopRenders(key.tabId)
           ? Effect.succeed(`root-${key.tabId}`)
           : Effect.fail(new DesktopBrowserTransportError({ reason: "guest-unavailable" }));
@@ -500,14 +505,26 @@ const dependencies = Layer.mergeAll(
       }).pipe(
         Effect.andThen(
           Effect.suspend(() =>
-            rootAcceptanceFailure ? Effect.fail(rootAcceptanceFailure) : Effect.void,
+            rootAcceptanceFailure
+              ? Effect.fail(rootAcceptanceFailure)
+              : (nativeRootCreationChannel?.acceptRoot(key, rootId) ?? Effect.void),
           ),
         ),
       ),
     publishRoot: (key, rootId) =>
-      Effect.sync(() => {
+      Effect.promise(async () => {
         rootPublications.push({ ...key, rootId });
-      }),
+        rootPublicationEntered?.resolve();
+        await rootPublicationGate?.promise;
+      }).pipe(
+        Effect.andThen(
+          Effect.suspend(() =>
+            rootPublicationFailure
+              ? Effect.fail(rootPublicationFailure)
+              : (nativeRootCreationChannel?.publishRoot(key, rootId) ?? Effect.void),
+          ),
+        ),
+      ),
     closeRoot: (key, rootId, options) =>
       Effect.suspend(() => {
         rootClosures.push({ ...key, rootId });
@@ -531,16 +548,21 @@ const dependencies = Layer.mergeAll(
         rootDiscards.push({ ...key, rootId });
       }).pipe(
         Effect.andThen(
-          Effect.suspend(() =>
-            nativeRootCloseChannel ? nativeRootCloseChannel.discardRoot(key, rootId) : Effect.void,
+          Effect.suspend(
+            () =>
+              (nativeRootCreationChannel ?? nativeRootCloseChannel)?.discardRoot(key, rootId) ??
+              Effect.void,
           ),
         ),
       ),
     cancelRootCreation: (key, rootId) =>
-      Effect.sync(() => {
+      Effect.suspend(() => {
         rootClosures.push({ ...key, rootId });
         rootCloseAttempted?.resolve();
+        if (nativeRootCreationChannel)
+          return nativeRootCreationChannel.cancelRootCreation(key, rootId);
         desktopPopupEvents.emit("root-closed", { ...key, rootId });
+        return Effect.void;
       }),
     bindPopup: (key, input) =>
       Effect.sync(() => {
@@ -722,6 +744,9 @@ beforeEach(() => {
   rootAcceptanceGate = null;
   rootAcceptanceEntered = null;
   rootAcceptanceFailure = null;
+  rootPublicationGate = null;
+  rootPublicationEntered = null;
+  rootPublicationFailure = null;
   rootCloseFailure = null;
   rootDiscards.length = 0;
   rootCloseAttempted = null;
@@ -733,6 +758,7 @@ beforeEach(() => {
   nativePopupCloseFailure = null;
   nativeCloseChannel = null;
   nativeRootCloseChannel = null;
+  nativeRootCreationChannel = null;
   nativeCloseRejected = null;
   nativePopupPresence.clear();
   nativePopupProbeUnavailable = false;
@@ -3810,6 +3836,140 @@ it.effect("native root acceptance failure retains the unavailable error classifi
   ).pipe(Effect.provide(layer)),
 );
 
+it.live.each(["acceptance", "publication"] as const)(
+  "failed native root %s releases capacity and reconnect ownership without an acknowledgment",
+  (stage) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        profileCatalogue = {
+          desktopHostId: "host-a",
+          profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+          defaultProfileId: "work",
+        };
+        desktopRendersNext = true;
+        const { broker, browser, tabId: retainedTabId } = yield* ready;
+        const manager = yield* Manager.PreviewManager;
+        const retained = (yield* manager.list({})).sessions[0]!;
+        const serverEpoch = (yield* manager.list({})).serverEpoch;
+        const viewer = yield* browser.attachViewer(viewerInput(retainedTabId, false));
+        desktopDetaches.emit("detach", {
+          threadId: scope.thread.threadId,
+          tabId: retainedTabId,
+          desktopHostId: "host-a",
+        });
+        let ending = yield* Queue.take(viewer.output);
+        while (ending._tag !== "reconnect") ending = yield* Queue.take(viewer.output);
+        const context = yield* Layer.build(
+          DesktopChannel.layer.pipe(
+            Layer.provide(
+              ServerConfig.layerTest(process.cwd(), { prefix: "t3-failed-root-channel-" }),
+            ),
+          ),
+        );
+        const channel = Context.get(context, DesktopChannel.DesktopBrowserChannel);
+        const connect = (owner: string) =>
+          Effect.gen(function* () {
+            const commands = yield* Queue.unbounded<DesktopBrowserCommand>();
+            const fiber = yield* channel.subscribeCommands(owner, "host-a").pipe(
+              Stream.runForEach((command) => Queue.offer(commands, command)),
+              Effect.forkScoped,
+            );
+            expect(yield* Queue.take(commands)).toEqual({ type: "announce" });
+            return { commands, fiber, owner };
+          });
+        nativeRootCreationChannel = channel;
+        let connection = yield* connect("socket-0");
+        // More than the eight-tab agent limit must fail for the original reason,
+        // even though this owner never acknowledges destruction of a failed root.
+        for (let index = 0; index < 9; index++) {
+          desktopRendersNext = true;
+          if (stage === "publication") {
+            rootPublicationEntered = Promise.withResolvers<void>();
+            rootPublicationGate = Promise.withResolvers<void>();
+            rootPublicationFailure = new DesktopBrowserTransportError({
+              reason: "host-unavailable",
+            });
+          }
+          const opening = yield* broker
+            .invoke<PreviewAutomationStatus>({
+              scope,
+              operation: "open",
+              input: { reuseExistingTab: false, show: false },
+            })
+            .pipe(Effect.flip, Effect.forkChild);
+          const create = yield* Queue.take(connection.commands).pipe(
+            Effect.raceFirst(
+              Fiber.join(opening).pipe(
+                Effect.flatMap((failure) => Effect.die(new Error(failure.message))),
+              ),
+            ),
+          );
+          if (create.type !== "createRoot") throw new Error("Expected native root creation");
+          const rootId = `root-${create.tabId}`;
+          const source = {
+            threadId: create.threadId,
+            tabId: create.tabId,
+            desktopHostId: "host-a",
+          };
+          yield* channel.receiveEvent(connection.owner, "host-a", {
+            type: "rootCreated",
+            ...source,
+            rootId,
+            requestId: create.requestId,
+            profileId: create.profileId,
+          });
+          const accept = yield* Queue.take(connection.commands);
+          if (accept.type !== "acceptRoot") throw new Error("Expected native root acceptance");
+          if (stage === "publication") {
+            yield* channel.receiveEvent(connection.owner, "host-a", {
+              type: "rootAccepted",
+              ...source,
+              rootId,
+              requestId: accept.requestId,
+              profileId: accept.profileId,
+              accepted: true,
+            });
+            yield* Effect.promise(() => rootPublicationEntered!.promise);
+          }
+          yield* Fiber.interrupt(connection.fiber);
+          rootPublicationGate?.resolve();
+          const failure = yield* Fiber.join(opening);
+          expect(failure).toMatchObject({ _tag: "PreviewAutomationRemoteUnavailableError" });
+          expect((yield* manager.list({})).sessions).toEqual([retained]);
+          connection = yield* connect(`socket-${index + 1}`);
+          // No cancel replay or hidden owned root remains on the returning host.
+          yield* channel.reconcileRoots("host-a", serverEpoch);
+          expect(yield* Queue.take(connection.commands)).toEqual({
+            type: "reconcileRoots",
+            serverEpoch,
+            retainedRootRequestIds: [],
+          });
+          expect(rootDiscards).toContainEqual({ ...source, rootId });
+          expect(rootClosures).toEqual([]);
+        }
+        expect(rootDiscards).toHaveLength(9);
+        nativeRootCreationChannel = null;
+        rootPublicationFailure = null;
+        rootPublicationGate = null;
+        desktopRendersNext = true;
+        const replacement = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { reuseExistingTab: false, show: false },
+        });
+        expect(replacement.tabId).not.toBe(retainedTabId);
+        expect((yield* manager.list({})).sessions).toHaveLength(2);
+        // The unrelated published offline root remains discoverable and closable.
+        desktopTabs.delete(retainedTabId);
+        rootCloseFailure = "host-unavailable";
+        yield* broker.invoke({ scope, tabId: retainedTabId, operation: "close", input: {} });
+        expect((yield* manager.list({})).sessions.map((session) => session.tabId)).toEqual([
+          replacement.tabId,
+        ]);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
 it.effect("canceled root connection closes its attempted page and never publishes a late tab", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -3824,7 +3984,6 @@ it.effect("canceled root connection closes its attempted page and never publishe
         setupEntered.resolve();
         await setupGate.promise;
       };
-      rootCloseAttempted = Promise.withResolvers<void>();
       rootCloseFailure = "close-canceled";
       releasedDesktopSeen = Promise.withResolvers<void>();
       const events = yield* manager.subscribeEvents;
@@ -3839,12 +3998,12 @@ it.effect("canceled root connection closes its attempted page and never publishe
       yield* Effect.promise(() => setupEntered.promise);
       yield* TestClock.adjust("201 millis");
       expect(yield* Fiber.join(opening)).toMatchObject({ _tag: "PreviewAutomationTimeoutError" });
-      yield* Effect.promise(() => rootCloseAttempted!.promise);
       setupGate.resolve();
       yield* Effect.promise(() => releasedDesktopSeen!.promise);
       expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toEqual([]);
       expect(yield* PubSub.takeUpTo(events, 100)).toEqual([]);
-      expect(rootClosures).toEqual([
+      expect(rootClosures).toEqual([]);
+      expect(rootDiscards).toEqual([
         expect.objectContaining({ rootId: `root-${rootCreations[0]!.tabId}` }),
       ]);
     }),

@@ -1586,6 +1586,24 @@ const make = Effect.gen(function* () {
           published: false,
         };
         nativeRoots.set(tabKey(snapshot.threadId, snapshot.tabId), root);
+        let discarded = false;
+        const retireUnpublished = () =>
+          Effect.suspend(() => {
+            if (root.published) return Effect.void;
+            root.closeRequested = true;
+            const id = tabKey(snapshot.threadId, snapshot.tabId);
+            if (nativeRoots.get(id) === root) nativeRoots.delete(id);
+            if (!nativeRoots.has(id)) {
+              if (pendingTabs.has(id)) closedPendingTabs.add(id);
+              const tab = tabs.get(id);
+              if (tab) dropTab(tab, false);
+            }
+            if (root.rootId === null || root.closed || discarded) return Effect.void;
+            discarded = true;
+            // Creation already returned this exact native page. Relinquish it without
+            // retaining cancellation history or waiting for a disconnected owner's ack.
+            return desktopChannel.discardRoot(key, root.rootId);
+          });
         try {
           root.rootId = await Effect.runPromise(
             desktopChannel.createRoot(key, {
@@ -1597,8 +1615,7 @@ const make = Effect.gen(function* () {
             { signal },
           );
           const cancel = () => {
-            root.closeRequested = true;
-            runFork(desktopChannel.cancelRootCreation(key, root.rootId!));
+            runFork(retireUnpublished());
           };
           signal.addEventListener("abort", cancel, { once: true });
           try {
@@ -1638,9 +1655,9 @@ const make = Effect.gen(function* () {
               ),
             close: () =>
               Effect.suspend(() => {
+                if (!root.published) return retireUnpublished();
                 if (root.closed) return Effect.void;
                 root.closeRequested = true;
-                if (!root.published) return desktopChannel.cancelRootCreation(key, root.rootId!);
                 return desktopChannel.closeRoot(key, root.rootId!, { discardIfOffline: true }).pipe(
                   Effect.tap((outcome) =>
                     Effect.sync(() => {
@@ -1674,13 +1691,7 @@ const make = Effect.gen(function* () {
               }),
           };
         } catch (cause) {
-          root.closeRequested = true;
-          const tab = tabs.get(tabKey(snapshot.threadId, snapshot.tabId));
-          if (tab) dropTab(tab, false);
-          if (root.rootId !== null && !root.closed)
-            runFork(desktopChannel.cancelRootCreation(key, root.rootId));
-          if (root.rootId === null || root.closed)
-            nativeRoots.delete(tabKey(snapshot.threadId, snapshot.tabId));
+          await Effect.runPromise(retireUnpublished());
           throw cause;
         }
       },
