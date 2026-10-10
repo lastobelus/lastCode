@@ -3329,14 +3329,22 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         session.pendingInputCount += 1;
       }),
       () =>
-        session.captureShellIdentity === null
-          ? writeToSession(input, session)
-          : withThreadLock(
-              input.threadId,
-              requireSession(input.threadId, input.terminalId).pipe(
-                Effect.flatMap((current) => writeToSession(input, current)),
-              ),
+        Effect.gen(function* () {
+          const captureShellIdentity = session.captureShellIdentity;
+          if (captureShellIdentity === null) return yield* writeToSession(input, session);
+          // Start each terminal's capture before the thread lock serializes
+          // writes, so terminals in one thread share the same pending scan.
+          // Keep queuing input immediately; the child ends with this request.
+          const captureFiber = yield* captureShellIdentity.pipe(
+            Effect.forkChild({ startImmediately: true }),
+          );
+          return yield* withThreadLock(
+            input.threadId,
+            requireSession(input.threadId, input.terminalId).pipe(
+              Effect.flatMap((current) => writeToSession(input, current)),
             ),
+          ).pipe(Effect.ensuring(Fiber.interrupt(captureFiber)));
+        }),
       () =>
         Effect.sync(() => {
           session.pendingInputCount -= 1;
