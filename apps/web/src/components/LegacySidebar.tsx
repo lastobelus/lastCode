@@ -92,6 +92,7 @@ import { useSidebarPendingFileDropStore } from "../sidebarPendingFileDropStore";
 import { makeWorkspaceFileDropHandlers } from "./chat/workspaceFileDrop";
 import {
   readThreadShell,
+  readEnvironmentSupportsPersistence,
   useProjects,
   useThreadShells,
   useThreadShellsForProjectRefs,
@@ -107,6 +108,11 @@ import {
 } from "../state/use-orchestration-command";
 import { previewEnvironment } from "../state/preview";
 import { readEnvironmentScope, useEnvironmentScope } from "../state/session";
+import {
+  lastcodeThreadPersistenceAction,
+  protectLegacyThreadActions,
+} from "./lastcodeThreadPersistence.logic";
+import { projectsContainPersistentThread } from "./projectPersistence.logic";
 import {
   legacyProjectCwdPreferenceKey,
   resolveProjectExpanded,
@@ -913,7 +919,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               isRemoteThread ? "max-sm:min-w-24" : "max-sm:min-w-20"
             }`}
           >
-            {isConfirmingArchive ? (
+            {isConfirmingArchive && !thread.persistent ? (
               <button
                 ref={handleConfirmArchiveRef}
                 type="button"
@@ -926,7 +932,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               >
                 Confirm
               </button>
-            ) : canOperateThread && cleanup === null ? (
+            ) : canOperateThread && !thread.persistent && cleanup === null ? (
               appSettingsConfirmThreadArchive ? (
                 <div className="pointer-events-none absolute top-1/2 right-0.5 -translate-y-1/2 opacity-0 transition-opacity duration-150 max-sm:pointer-events-auto max-sm:opacity-100 group-hover/menu-sub-item:pointer-events-auto group-hover/menu-sub-item:opacity-100 group-focus-within/menu-sub-item:pointer-events-auto group-focus-within/menu-sub-item:opacity-100">
                   <button
@@ -1275,6 +1281,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const updateThreadMetadata = useOrchestrationCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
+  const setThreadPersistence = useOrchestrationCommand(threadEnvironment.setPersistence, {
+    reportFailure: false,
+  });
   const updateSettings = useUpdateClientSettings();
   const sidebarThreadPreviewCount = useClientSettings<SidebarThreadPreviewCount>(
     (settings) => settings.sidebarThreadPreviewCount,
@@ -1599,6 +1608,22 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const removeProject = useCallback(
     async (member: SidebarProjectGroupMember) => {
       const memberProjectRef = scopeProjectRef(member.environmentId, member.id);
+      if (
+        projectsContainPersistentThread({
+          members: [member],
+          threads: Array.from(sidebarThreadByKeyRef.current.values()),
+        })
+      ) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Persistent thread protected",
+            description:
+              "Disable persistence or move it to another thread before removing this project.",
+          }),
+        );
+        return null;
+      }
       const result = await deleteProject({
         environmentId: member.environmentId,
         input: {
@@ -1693,7 +1718,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                   }
 
                   const result = await removeProject(member);
-                  if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+                  if (result?._tag === "Failure" && !isAtomCommandInterrupted(result)) {
                     const error = squashAtomCommandFailure(result);
                     toastManager.add(
                       stackedThreadToast({
@@ -1742,7 +1767,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       }
 
       const result = await removeProject(member);
-      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+      if (result?._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
         const message = error instanceof Error ? error.message : "Unknown error removing project.";
         console.error("Failed to remove project", {
@@ -1997,14 +2022,22 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         readEnvironmentScope(threadRef.environmentId, AuthOrchestrationOperateScope),
       );
 
+      const hasPersistentThread = selectedThreadEntries.some(
+        ({ thread }) => thread.persistent === true,
+      );
       const clicked = await api.contextMenu.show(
-        buildMultiSelectThreadContextMenuItems({ count }).map((item) =>
+        protectLegacyThreadActions(
+          buildMultiSelectThreadContextMenuItems({ count }),
+          hasPersistentThread,
+        ).map((item) =>
           item.id === "archive" || item.id === "delete"
             ? { ...item, disabled: item.disabled || !canOperateSelection }
             : item,
         ),
         position,
       );
+
+      if (hasPersistentThread && (clicked === "archive" || clicked === "delete")) return;
 
       if (clicked === "mark-unread") {
         for (const { threadRef } of selectedThreadEntries) {
@@ -2219,6 +2252,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const attemptArchiveThread = useCallback(
     async (threadRef: ScopedThreadRef) => {
       if (!checkTaskPermission(threadRef.environmentId)) return;
+      if (readThreadShell(threadRef)?.persistent === true) return;
       const result = await archiveThread(threadRef);
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
@@ -2385,24 +2419,32 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         thread.environmentId,
         AuthOrchestrationOperateScope,
       );
+      const persistenceAction = lastcodeThreadPersistenceAction({
+        persistent: thread.persistent === true,
+        supported: readEnvironmentSupportsPersistence(thread.environmentId),
+      });
       const clicked = await api.contextMenu.show(
-        [
-          ...(thread.branch
-            ? [{ id: "new-thread-on-branch", label: `New thread on ${thread.branch}` }]
-            : []),
-          { id: "rename", label: "Rename thread", disabled: !canOperateThread },
-          { id: "mark-unread", label: "Mark unread" },
-          { id: "copy-path", label: "Copy Path" },
-          { id: "copy-thread-id", label: "Copy Thread ID" },
-          { id: "project-settings", label: "Project settings" },
-          {
-            id: "delete",
-            label: "Delete",
-            destructive: true,
-            icon: "trash",
-            disabled: !canOperateThread,
-          },
-        ],
+        protectLegacyThreadActions(
+          [
+            ...(thread.branch
+              ? [{ id: "new-thread-on-branch", label: `New thread on ${thread.branch}` }]
+              : []),
+            { id: "rename", label: "Rename thread", disabled: !canOperateThread },
+            { id: "mark-unread", label: "Mark unread" },
+            ...(persistenceAction ? [{ ...persistenceAction, disabled: !canOperateThread }] : []),
+            { id: "copy-path", label: "Copy Path" },
+            { id: "copy-thread-id", label: "Copy Thread ID" },
+            { id: "project-settings", label: "Project settings" },
+            {
+              id: "delete",
+              label: "Delete",
+              destructive: true,
+              icon: "trash",
+              disabled: !canOperateThread,
+            },
+          ],
+          thread.persistent === true,
+        ),
         position,
       );
 
@@ -2448,6 +2490,23 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         markThreadUnread(threadRef);
         return;
       }
+      if (clicked === "mark-persistent" || clicked === "disable-persistence") {
+        const result = await setThreadPersistence({
+          environmentId: threadRef.environmentId,
+          input: { threadId: threadRef.threadId, persistent: clicked === "mark-persistent" },
+        });
+        if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+          const error = squashAtomCommandFailure(result);
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Failed to update persistent thread",
+              description: error instanceof Error ? error.message : "An error occurred.",
+            }),
+          );
+        }
+        return;
+      }
       if (clicked === "copy-path") {
         if (!threadWorkspacePath) {
           toastManager.add(
@@ -2466,7 +2525,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         copyThreadIdToClipboard(thread.id, { threadId: thread.id });
         return;
       }
-      if (clicked !== "delete") return;
+      if (clicked !== "delete" || readThreadShell(threadRef)?.persistent === true) return;
       if (!checkTaskPermission(threadRef.environmentId)) return;
       if (appSettingsConfirmThreadDelete) {
         const confirmed = await api.dialogs.confirm(
@@ -2507,6 +2566,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       router,
       setOpenMobile,
       startThreadRename,
+      setThreadPersistence,
     ],
   );
 
