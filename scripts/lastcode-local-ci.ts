@@ -505,18 +505,19 @@ export function writeFullCiStamp(
   return stampPath;
 }
 
+// Keep validation lazy and ordered; array contexts are valid stamp objects.
+function isFullCiStampValid(value: Partial<FullCiStamp>, commit: string): boolean {
+  if (value.schemaVersion !== 2 || value.commit !== commit) return false;
+  if (typeof value.context !== "object" || value.context === null) return false;
+  return typeof value.completedAt === "string";
+}
+
 export function readFullCiStamp(commonGitDir: string, commit: string): FullCiStamp | undefined {
   const stampPath = resolveFullCiStampPath(commonGitDir, commit);
   if (!NodeFS.existsSync(stampPath)) return undefined;
 
   const value = JSON.parse(NodeFS.readFileSync(stampPath, "utf8")) as Partial<FullCiStamp>;
-  if (
-    value.schemaVersion !== 2 ||
-    value.commit !== commit ||
-    typeof value.context !== "object" ||
-    value.context === null ||
-    typeof value.completedAt !== "string"
-  ) {
+  if (!isFullCiStampValid(value, commit)) {
     throw new Error(`Invalid LastCode CI stamp at ${stampPath}.`);
   }
   return value as FullCiStamp;
