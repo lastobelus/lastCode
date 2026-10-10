@@ -1164,11 +1164,24 @@ export const make = Effect.gen(function* () {
             return { profiles, defaultProfileId };
           }),
           Effect.orElseSucceed(() => null),
+          // Read warnings may contain profile data. The marker executes after
+          // the read, outside its logging scope, and records availability only.
+          Effect.tap((profiles) =>
+            Effect.void.pipe(
+              Effect.withSpan("desktop.browser.readProfileSettings", {
+                attributes: { requestId, desktopHostId, available: profiles !== null },
+              }),
+            ),
+          ),
           Effect.flatMap((profiles) =>
             PubSub.publish(outbox, {
               desktopHostId,
               event: { type: "profiles", requestId, profiles, supportsNativeRoots: true },
-            }),
+            }).pipe(
+              Effect.withSpan("desktop.browser.publishProfiles", {
+                attributes: { requestId, desktopHostId, available: profiles !== null },
+              }),
+            ),
           ),
           Effect.asVoid,
         );
@@ -1519,6 +1532,15 @@ export const make = Effect.gen(function* () {
       }),
     ).pipe(
       Stream.filter((entry) => entry.desktopHostId === "local"),
+      Stream.tap(({ event }) =>
+        event.type === "profiles"
+          ? Effect.void.pipe(
+              Effect.withSpan("desktop.browser.dequeueProfiles", {
+                attributes: { requestId: event.requestId, desktopHostId: "local" },
+              }),
+            )
+          : Effect.void,
+      ),
       Stream.map(({ event }) => lineEncoder.encode(`${encodeEvent(event)}\n`)),
     ),
     remoteEvents: Stream.fromPubSub(outbox).pipe(
@@ -1528,7 +1550,21 @@ export const make = Effect.gen(function* () {
       desktopHostId === "local" ? Effect.void : handleCommand(command, desktopHostId),
     handleCommandLine: (line) => {
       const decoded = decodeCommand(line);
-      return Option.isSome(decoded) ? handleCommand(decoded.value) : Effect.void;
+      if (Option.isNone(decoded))
+        return Effect.void.pipe(Effect.withSpan("desktop.browser.invalidCommand"));
+      const command = decoded.value;
+      return command.type === "profiles" || command.type === "reconcileRoots"
+        ? Effect.void.pipe(
+            Effect.withSpan("desktop.browser.commandReceived", {
+              attributes: {
+                commandType: command.type,
+                ...(command.type === "profiles" ? { requestId: command.requestId } : {}),
+                desktopHostId: "local",
+              },
+            }),
+            Effect.andThen(handleCommand(command)),
+          )
+        : handleCommand(command);
     },
     attach,
     registerPopup,
