@@ -1873,7 +1873,7 @@ it.layer(
       (["output", "write"] as const).map((boundary) => ({ source, boundary })),
     ),
   )(
-    "preserves exec ownership and activity after $boundary invalidates a held $source poll",
+    "retains exec activity after $boundary invalidates a held $source poll",
     ({ source, boundary }) =>
       Effect.gen(function* () {
         const active = yield* Deferred.make<void>();
@@ -1980,12 +1980,10 @@ it.layer(
           processIds: ownershipAfterOldCompletion,
           metadata: metadataAfterOldCompletion,
         }).toEqual({
-          processIds: [process.pid],
+          processIds: boundary === "output" ? [] : [process.pid],
           metadata: metadataBeforeOldCompletion,
         });
-        expect(
-          updatesAfterOldCompletion.every((processIds) => processIds.includes(process.pid)),
-        ).toBe(true);
+        expect(updatesAfterOldCompletion).toEqual(boundary === "output" ? [[]] : []);
         expect(freshProcessIds).toEqual([process.pid]);
         expect(freshMetadata).toContainEqual(
           expect.objectContaining({ pid: process.pid, hasRunningSubprocess: true, label: "node" }),
@@ -1999,13 +1997,13 @@ it.layer(
       (["exec", "descendant"] as const).map((command) => ({ source, command })),
     ),
   )(
-    "tracks an active $command through successive output-invalidated $source polls without losing known processes or its label",
+    "tracks an active $command and prunes exited or reused child PIDs through successive output-invalidated $source polls",
     ({ source, command }) =>
       Effect.gen(function* () {
-        const scans = yield* Effect.forEach([0, 1, 2, 3], () =>
+        const scans = yield* Effect.forEach([0, 1, 2, 3, 4], () =>
           Effect.all({ started: Deferred.make<void>(), release: Deferred.make<void>() }),
         );
-        const outputs = yield* Effect.forEach([0, 1, 2], () => Deferred.make<void>());
+        const outputs = yield* Effect.forEach([0, 1, 2, 3], () => Deferred.make<void>());
         const ptyAdapter = new FakePtyAdapter();
         const terminal = openInput();
         const root = { pid: 9000, ppid: 1, name: command === "exec" ? "node" : "zsh" };
@@ -2025,6 +2023,11 @@ it.layer(
           ...entry,
           name: entry.name === "node" ? "python" : entry.name,
         }));
+        const reused = [
+          ...initial,
+          { pid: command === "exec" ? 9100 : 9101, ppid: 1, name: "unrelated" },
+          { pid: 9200, ppid: command === "exec" ? 9000 : 9100, name: "worker" },
+        ];
         let observed = [{ pid: 9000, ppid: 1, name: "zsh" }];
         let heldScan = 0;
         let holdPolling = false;
@@ -2089,7 +2092,7 @@ it.layer(
         const metadataBeforeSmallerCompletion = yield* readIdleInspectionMetadata(manager);
         const updatesBeforeSmallerCompletion = ownershipUpdates.length;
         yield* Deferred.succeed(scans[2]!.release, undefined);
-        observed = expanded;
+        observed = reused;
         yield* TestClock.adjust("60 seconds");
         yield* Deferred.await(scans[3]!.started);
         const ownershipAfterSmallerCompletion = [...ownedProcessIds];
@@ -2097,7 +2100,17 @@ it.layer(
         const updatesAfterSmallerCompletion = ownershipUpdates.slice(
           updatesBeforeSmallerCompletion,
         );
+        // A formerly owned PID can now belong to an unrelated process. The
+        // next output-invalidated table must exclude it and include new work.
+        process.emitData("scan 3\n");
+        yield* Deferred.await(outputs[3]!);
+        const metadataBeforeReusedCompletion = yield* readIdleInspectionMetadata(manager);
         yield* Deferred.succeed(scans[3]!.release, undefined);
+        yield* TestClock.adjust("60 seconds");
+        yield* Deferred.await(scans[4]!.started);
+        const ownershipAfterReusedCompletion = [...ownedProcessIds];
+        const metadataAfterReusedCompletion = yield* readIdleInspectionMetadata(manager);
+        yield* Deferred.succeed(scans[4]!.release, undefined);
         yield* exitSnapshotTestProcesses(manager, ptyAdapter, [terminal]);
 
         const expectedInitial = initial.map(({ pid }) => pid).sort((left, right) => left - right);
@@ -2113,12 +2126,15 @@ it.layer(
         expect({
           processIds: ownershipAfterSmallerCompletion,
           metadata: metadataAfterSmallerCompletion,
-        }).toEqual({ processIds: expectedExpanded, metadata: metadataBeforeSmallerCompletion });
-        expect(
-          updatesAfterSmallerCompletion.every((processIds) =>
-            expectedExpanded.every((pid) => processIds.includes(pid)),
-          ),
-        ).toBe(true);
+        }).toEqual({ processIds: expectedInitial, metadata: metadataBeforeSmallerCompletion });
+        expect(updatesAfterSmallerCompletion).toEqual([expectedInitial]);
+        expect({
+          processIds: ownershipAfterReusedCompletion,
+          metadata: metadataAfterReusedCompletion,
+        }).toEqual({
+          processIds: [...expectedInitial, 9200],
+          metadata: metadataBeforeReusedCompletion,
+        });
         expect(process.killSignals).toEqual([]);
       }).pipe(Effect.provide(TestClock.layer())),
   );

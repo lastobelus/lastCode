@@ -2652,22 +2652,16 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           }
           const outputInvalidated = () =>
             generation !== undefined && generation < session.processOutputGeneration;
-          const observedProcessIds = () =>
-            outputInvalidated()
-              ? [...new Set([...session.observedProcessIds, ...next.processIds])]
-              : next.processIds;
           const register = (processIds: ReadonlyArray<number>) =>
             registerTerminalProcesses({
               threadId: session.threadId,
               terminalId: session.terminalId,
               processIds,
             });
-          const registeredProcessIds = observedProcessIds();
-          yield* register(registeredProcessIds);
+          yield* register(next.processIds);
 
-          // Registration may yield while output or input arrives. Restore
-          // partial ownership before committing metadata; continued output
-          // cannot invalidate this union because it only adds observed PIDs.
+          // Registration may yield while input arrives. A hard-invalidated
+          // scan must restore the last accepted ownership before returning.
           const live = yield* getSession(session.threadId, session.terminalId);
           if (
             Option.isNone(live) ||
@@ -2676,17 +2670,6 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             live.value.pid !== terminalPid
           ) {
             return Option.none();
-          }
-          if (!isCurrentProcessTableSnapshot(session, generation)) {
-            yield* register(session.observedProcessIds);
-            return Option.none();
-          }
-          const processIds = observedProcessIds();
-          if (
-            processIds.length !== registeredProcessIds.length ||
-            processIds.some((pid, index) => pid !== registeredProcessIds[index])
-          ) {
-            yield* register(processIds);
           }
           if (!isCurrentProcessTableSnapshot(session, generation)) {
             yield* register(session.observedProcessIds);
@@ -2705,10 +2688,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
               return [Option.none(), state] as const;
             }
             // A newer applied scan or input supersedes this observation.
-            // Output alone permits positive evidence without dropping known
-            // ownership, activity, or an active command label.
+            // Output can preserve activity and its label, but ownership must
+            // reflect this scan's command tree so exited PIDs do not accumulate.
             if (generation !== undefined) liveSession.processSnapshotGeneration = generation;
-            liveSession.observedProcessIds = processIds;
+            liveSession.observedProcessIds = next.processIds;
             const preserveActivity = outputInvalidated() && liveSession.hasRunningSubprocess;
             const hasRunningSubprocess = preserveActivity ? true : next.hasRunningSubprocess;
             const childCommandLabel = preserveActivity
