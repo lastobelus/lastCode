@@ -170,6 +170,7 @@ export class TerminalManager extends Context.Service<
     readonly attachStream: (
       input: TerminalAttachInput,
       listener: (event: TerminalAttachStreamEvent) => Effect.Effect<void>,
+      startIfNeeded?: boolean,
     ) => Effect.Effect<() => void, TerminalError>;
 
     /** Observe an existing session without starting or changing its process. */
@@ -237,6 +238,12 @@ export class TerminalManager extends Context.Service<
     readonly subscribeMetadata: (
       listener: (event: TerminalMetadataStreamEvent) => Effect.Effect<void>,
     ) => Effect.Effect<() => void>;
+
+    /** Read current terminal metadata without subscribing to runtime events. */
+    readonly metadata: Effect.Effect<ReadonlyArray<TerminalSummary>>;
+
+    /** Refresh subprocess activity, then read current terminal metadata. */
+    readonly refreshMetadata: Effect.Effect<ReadonlyArray<TerminalSummary>>;
   }
 >()("t3/terminal/Manager/TerminalManager") {}
 
@@ -362,6 +369,7 @@ type DrainProcessEventAction =
 interface TerminalManagerState {
   sessions: Map<string, TerminalSessionState>;
   killFibers: Map<PtyAdapter.PtyProcess, Fiber.Fiber<void, never>>;
+  terminatingProcesses: Map<PtyAdapter.PtyProcess, TerminalSummary>;
 }
 
 function truncateTerminalWireLabel(value: string): string {
@@ -1719,6 +1727,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const managerStateRef = yield* SynchronizedRef.make<TerminalManagerState>({
     sessions: new Map(),
     killFibers: new Map(),
+    terminatingProcesses: new Map(),
   });
   const threadLocks = yield* KeyedLock.make<string>();
   const terminalEventListeners = new Set<(event: TerminalEvent) => Effect.Effect<void>>();
@@ -1812,12 +1821,12 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       ),
     );
     if (!terminated) {
-      return;
+      return false;
     }
 
     yield* Effect.sleep(processKillGraceMs);
 
-    yield* Effect.try({
+    return yield* Effect.try({
       try: () => process.kill("SIGKILL"),
       catch: (cause) =>
         new TerminalProcessSignalError({
@@ -1826,13 +1835,14 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           terminalPid: process.pid,
         }),
     }).pipe(
+      Effect.as(true),
       Effect.catch((error) =>
         Effect.logWarning("failed to force-kill terminal process", {
           threadId,
           terminalId,
           signal: "SIGKILL",
           cause: error,
-        }),
+        }).pipe(Effect.as(false)),
       ),
     );
   });
@@ -1843,6 +1853,19 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     terminalId: string,
   ) {
     const fiber = yield* runKillEscalation(process, threadId, terminalId).pipe(
+      Effect.tap((completed) =>
+        completed
+          ? modifyManagerState((state) => {
+              if (!state.terminatingProcesses.has(process)) {
+                return [undefined, state] as const;
+              }
+              const terminatingProcesses = new Map(state.terminatingProcesses);
+              terminatingProcesses.delete(process);
+              return [undefined, { ...state, terminatingProcesses }] as const;
+            })
+          : Effect.void,
+      ),
+      Effect.asVoid,
       Effect.ensuring(
         modifyManagerState((state) => {
           if (!state.killFibers.has(process)) {
@@ -2274,6 +2297,12 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
 
     const updatedAt = yield* nowIso;
     yield* modifyManagerState((state) => {
+      const terminatingProcesses = new Map(state.terminatingProcesses);
+      terminatingProcesses.set(process, {
+        ...summary(session),
+        status: "running",
+        hasRunningSubprocess: true,
+      });
       cleanupProcessHandles(session);
       session.process = null;
       session.pid = null;
@@ -2285,7 +2314,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       session.pendingProcessEventIndex = 0;
       session.processEventDrainRunning = false;
       session.updatedAt = updatedAt;
-      return [undefined, state] as const;
+      return [undefined, { ...state, terminatingProcesses }] as const;
     });
 
     yield* clearKillFiber(process);
@@ -2859,13 +2888,17 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
 
   yield* Effect.addFinalizer(() =>
     Effect.gen(function* () {
-      const sessions = yield* modifyManagerState(
+      const { sessions, terminatingProcesses } = yield* modifyManagerState(
         (state) =>
           [
-            [...state.sessions.values()],
+            {
+              sessions: [...state.sessions.values()],
+              terminatingProcesses: [...state.terminatingProcesses.entries()],
+            },
             {
               ...state,
               sessions: new Map(),
+              terminatingProcesses: new Map(),
             },
           ] as const,
       );
@@ -2883,6 +2916,14 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         concurrency: "unbounded",
         discard: true,
       });
+      yield* Effect.forEach(
+        terminatingProcesses,
+        ([process, terminal]) =>
+          clearKillFiber(process).pipe(
+            Effect.andThen(runKillEscalation(process, terminal.threadId, terminal.terminalId)),
+          ),
+        { concurrency: "unbounded", discard: true },
+      );
     }).pipe(Effect.ignoreCause({ log: true })),
   );
 
@@ -3035,7 +3076,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       resolveLaunchInputEnvironment(input).pipe(Effect.flatMap(openLocked)),
     );
 
-  const openOrAttachForStream = (input: TerminalAttachInput) =>
+  const openOrAttachForStream = (input: TerminalAttachInput, startIfNeeded = true) =>
     withThreadLock(
       input.threadId,
       Effect.gen(function* () {
@@ -3043,7 +3084,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         const existing = yield* getSession(input.threadId, terminalId);
 
         if (Option.isNone(existing)) {
-          if (!input.cwd) {
+          if (!input.cwd || !startIfNeeded) {
             return yield* new TerminalSessionLookupError({
               threadId: input.threadId,
               terminalId,
@@ -3062,7 +3103,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         const targetCols = input.cols ?? session.cols;
         const targetRows = input.rows ?? session.rows;
 
-        if (!session.process && input.cwd && input.restartIfNotRunning === true) {
+        if (!session.process && input.cwd && input.restartIfNotRunning === true && startIfNeeded) {
           const resolvedInput = yield* resolveLaunchInputEnvironment({
             ...input,
             terminalId,
@@ -3100,6 +3141,27 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
               left.terminalId.localeCompare(right.terminalId),
           ),
       ),
+    );
+
+  const readDrainTerminalMetadata = () =>
+    readManagerState.pipe(
+      Effect.map((state) => {
+        const terminals = new Map(
+          [...state.sessions.values()].map((session) => [
+            toSessionKey(session.threadId, session.terminalId),
+            summary(session),
+          ]),
+        );
+        for (const terminal of state.terminatingProcesses.values()) {
+          terminals.set(toSessionKey(terminal.threadId, terminal.terminalId), terminal);
+        }
+        return [...terminals.values()].sort(
+          (left, right) =>
+            right.updatedAt.localeCompare(left.updatedAt) ||
+            left.threadId.localeCompare(right.threadId) ||
+            left.terminalId.localeCompare(right.terminalId),
+        );
+      }),
     );
 
   const readTerminalMetadata = (input: {
@@ -3179,8 +3241,11 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     );
   };
 
-  const attachStream: TerminalManager["Service"]["attachStream"] = (input, listener) =>
-    streamSession(input, openOrAttachForStream(input), listener);
+  const attachStream: TerminalManager["Service"]["attachStream"] = (
+    input,
+    listener,
+    startIfNeeded,
+  ) => streamSession(input, openOrAttachForStream(input, startIfNeeded), listener);
 
   const observeStream: TerminalManager["Service"]["observeStream"] = (input, listener) =>
     streamSession(
@@ -3635,6 +3700,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     closeIdle,
     subscribe,
     subscribeMetadata,
+    metadata: readAllTerminalMetadata(),
+    refreshMetadata: pollSubprocessActivity().pipe(Effect.andThen(readDrainTerminalMetadata())),
   });
 });
 

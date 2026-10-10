@@ -21,7 +21,7 @@ vi.mock("./projectFilesQueryState", () => ({
   getUnsavedProjectFileQueryData: getUnsavedFile,
 }));
 
-import { setMarkdownTaskChecked } from "./filePreviewMode";
+import { setMarkdownTaskChecked } from "~/markdownTaskList";
 import { useFileSaveCoordinator } from "./useFileSaveCoordinator";
 
 const environmentId = EnvironmentId.make("save-lifecycle-audit");
