@@ -107,19 +107,17 @@ function configDirectory(file: string): string {
 
 function patternRegex(pattern: string): RegExp {
   if (/[[\]{}!\\]/.test(pattern)) throw new Error(`Unsupported scope pattern ${pattern}`);
-  let regex = "";
-  for (let index = 0; index < pattern.length; index++) {
-    const char = pattern[index]!;
-    if (char === "*" && pattern[index + 1] === "*") {
-      index++;
-      if (pattern[index + 1] === "/") {
-        index++;
-        regex += "(?:.*/)?";
-      } else regex += ".*";
-    } else if (char === "*") regex += "[^/]*";
-    else if (char === "?") regex += "[^/]";
-    else regex += char.replace(/[.+^$()|]/g, "\\$&");
-  }
+  // This limited grammar consumes **/ before ** and *; repeated stars remain separate tokens.
+  const wildcards: Readonly<Record<string, string>> = {
+    "**/": "(?:.*/)?",
+    "**": ".*",
+    "*": "[^/]*",
+    "?": "[^/]",
+  };
+  const regex = pattern.replace(
+    /\*\*\/|\*\*|\*|\?|[.+^$()|]/g,
+    (token) => wildcards[token] ?? `\\${token}`,
+  );
   return new RegExp(`^${regex}$`);
 }
 
