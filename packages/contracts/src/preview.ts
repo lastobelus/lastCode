@@ -236,6 +236,11 @@ export const PreviewSessionSnapshot = Schema.Struct({
 });
 export type PreviewSessionSnapshot = typeof PreviewSessionSnapshot.Type;
 
+const PreviewOpenFocus = Schema.Struct({
+  clientId: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
+  userActionRevision: NonNegativeInt,
+});
+
 export const PreviewOpenInput = Schema.Struct({
   threadId: ThreadId,
   /** Omit to create an empty (Idle) tab the user can type into. */
@@ -253,6 +258,10 @@ export const PreviewOpenInput = Schema.Struct({
   runtime: Schema.optional(PreviewRuntime),
   /** Desktop cookie jar selected for this tab; never fall back to another browser. */
   desktopHostId: Schema.optional(Schema.String),
+  /** Create a visible tab without selecting it when its opened event arrives. */
+  background: Schema.optional(Schema.Boolean),
+  /** Originating client's selection when the open began; echoed only in its creation event. */
+  focus: Schema.optional(PreviewOpenFocus),
   /** Set by agent opens that should float for viewers; see the snapshot field. */
   reveal: Schema.optional(Schema.Boolean),
 });
@@ -375,6 +384,9 @@ const PreviewOpenedEvent = Schema.Struct({
   ...PreviewEventBaseSchema.fields,
   type: Schema.Literal("opened"),
   snapshot: PreviewSessionSnapshot,
+  /** Creation focus intent, independent of hidden automation-tab visibility. */
+  background: Schema.optional(Schema.Boolean),
+  focus: Schema.optional(PreviewOpenFocus),
 });
 
 const PreviewNavigatedEvent = Schema.Struct({

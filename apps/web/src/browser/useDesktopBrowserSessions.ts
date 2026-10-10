@@ -32,6 +32,8 @@ const desktopBrowserSessionsAtom = Atom.family((environmentId: EnvironmentId) =>
       }
       serverEpoch = nextEpoch;
     };
+    // PubSub delivers live events; only the retained mount value is a replay.
+    const initialEvent = get.once(eventsAtom);
     get.subscribe(eventsAtom, (result) => {
       if (!AsyncResult.isSuccess(result)) return;
       const event = result.value;
@@ -40,7 +42,9 @@ const desktopBrowserSessionsAtom = Atom.family((environmentId: EnvironmentId) =>
         adoptServerEpoch(event.serverEpoch);
         get.refresh(sessionsAtom);
       }
-      applyPreviewServerEvent(scopeThreadRef(environmentId, ThreadId.make(event.threadId)), event);
+      applyPreviewServerEvent(scopeThreadRef(environmentId, ThreadId.make(event.threadId)), event, {
+        replay: AsyncResult.isSuccess(initialEvent) && event === initialEvent.value,
+      });
     });
     // List queries re-run when the connection changes. Hydrate all existing tabs
     // as well as live events, including ones opened before the renderer attached.

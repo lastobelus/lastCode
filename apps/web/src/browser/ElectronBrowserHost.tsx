@@ -5,9 +5,11 @@ import { DesktopCdpRelay } from "./DesktopCdpRelay";
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
 import { AuthPreviewOperateScope, FILL_PREVIEW_VIEWPORT } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
+import * as Cause from "effect/Cause";
 import { type ComponentProps, useEffect, useMemo, useRef, useState } from "react";
 
 import { primaryEnvironmentIdAtom } from "~/state/primaryEnvironment";
+import { toastManager } from "~/components/ui/toast";
 
 import { isElectron } from "~/env";
 import { useClientSettingsHydrated } from "~/hooks/useSettings";
@@ -25,6 +27,14 @@ import { openUrlInPreview } from "./openFileInPreview";
 import { rendersServerTabNatively } from "./previewRuntime";
 import { previewRuntimeTabId } from "./previewRuntimeTabId";
 import { useDesktopBrowserSessions } from "./useDesktopBrowserSessions";
+
+function reportLinkOpenFailure(cause: unknown) {
+  toastManager.add({
+    type: "error",
+    title: "Could not open the link in the browser",
+    description: cause instanceof Error ? cause.message : undefined,
+  });
+}
 
 export function ElectronBrowserHost() {
   const { resolvedTheme } = useTheme();
@@ -123,7 +133,13 @@ export function ElectronBrowserHost() {
         openPreview,
         profileId: source.snapshot.profileId,
         background,
-      });
+      })
+        .then((result) => {
+          if (result._tag === "Failure" && !Cause.hasInterruptsOnly(result.cause)) {
+            reportLinkOpenFailure(Cause.squash(result.cause));
+          }
+        })
+        .catch(reportLinkOpenFailure);
     });
   }, [openPreview]);
 
