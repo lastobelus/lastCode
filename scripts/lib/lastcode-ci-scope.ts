@@ -505,15 +505,17 @@ export function resolveQuickCiScope(
           }
         }
       }
+      // Import keys may be aliases: keep first registered name and recursive value order.
       const addImportTargets = (value: unknown): void => {
-        if (typeof value === "string") {
-          const target = value.startsWith(".")
-            ? owner(normalize(NodePath.posix.join(workspace.directory, value)))
-            : [...byName].find(([name]) => value === name || value.startsWith(`${name}/`))?.[1];
-          if (target) edges.add(target.name);
-        } else if (value && typeof value === "object") {
+        if (value && typeof value === "object") {
           for (const target of Object.values(value)) addImportTargets(target);
+          return;
         }
+        if (typeof value !== "string") return;
+        const target = value.startsWith(".")
+          ? owner(normalize(NodePath.posix.join(workspace.directory, value)))
+          : [...byName].find(([name]) => value === name || value.startsWith(`${name}/`))?.[1];
+        if (target) edges.add(target.name);
       };
       addImportTargets(workspace.manifest.imports);
       if (!workspace.typecheck) continue;
