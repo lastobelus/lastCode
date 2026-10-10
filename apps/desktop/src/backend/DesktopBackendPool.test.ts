@@ -264,16 +264,16 @@ describe("DesktopBackendPool", () => {
               assert.isTrue(factoryInstalled);
               if (process._tag !== "StandardCommand") throw new Error("Expected standard command");
               const browserEvents = process.options.additionalFds?.fd6;
-              if (browserEvents?.type !== "input" || !browserEvents.stream)
-                throw new Error("Expected inherited browser event stream");
-              yield* browserEvents.stream.pipe(
-                Stream.decodeText(),
-                Stream.splitLines,
-                Stream.mapEffect((line) => decodeBrowserEvent(line)),
-                Stream.runForEach((event) =>
-                  event.type === "rootCreated" ? Queue.offer(roots, event) : Effect.void,
+              if (browserEvents?.type !== "input")
+                throw new Error("Expected inherited browser input fd");
+              const browserSink = Sink.forEach((chunk: Uint8Array) =>
+                decodeBrowserEvent(new TextDecoder().decode(chunk).trim()).pipe(
+                  Effect.flatMap((event) =>
+                    event.type === "rootCreated" ? Queue.offer(roots, event) : Effect.void,
+                  ),
+                  Effect.asVoid,
+                  Effect.orDie,
                 ),
-                Effect.forkScoped({ startImmediately: true }),
               );
               return ChildProcessSpawner.makeHandle({
                 pid: ChildProcessSpawner.ProcessId(123),
@@ -284,7 +284,7 @@ describe("DesktopBackendPool", () => {
                 isRunning: Effect.succeed(false),
                 kill: () => Effect.void,
                 stdin: Sink.drain,
-                getInputFd: () => Sink.drain,
+                getInputFd: (fd) => (fd === 6 ? browserSink : Sink.drain),
                 getOutputFd: (fd) =>
                   fd === 7
                     ? Stream.encodeText(Stream.make(`${JSON.stringify(command)}\n`))

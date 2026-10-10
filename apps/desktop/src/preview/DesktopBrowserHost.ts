@@ -1535,7 +1535,7 @@ export const make = Effect.gen(function* () {
       Stream.tap(({ event }) =>
         event.type === "profiles"
           ? Effect.void.pipe(
-              Effect.withSpan("desktop.browser.forwardProfiles", {
+              Effect.withSpan("desktop.browser.dequeueProfiles", {
                 attributes: { requestId: event.requestId, desktopHostId: "local" },
               }),
             )

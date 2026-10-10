@@ -1,4 +1,9 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeSink from "@effect/platform-node/NodeSink";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- This test injects a native Writable callback error into NodeSink.
+import * as NodeStream from "node:stream";
+import * as PlatformError from "effect/PlatformError";
+import { ChildProcessSpawner } from "effect/process";
 import * as NodeURL from "node:url";
 import { assert, it } from "@effect/vitest";
 import { DEFAULT_CLIENT_SETTINGS, EnvironmentId } from "@t3tools/contracts";
@@ -49,6 +54,7 @@ function makeTestInstance(input: {
   readonly config: DesktopBackendManager.DesktopBackendStartConfig;
   readonly desktopBrowserHost: DesktopBrowserHost.DesktopBrowserHost["Service"];
   readonly prepareDesktopBrowser: Effect.Effect<void>;
+  readonly spawnerLayer?: Layer.Layer<ChildProcessSpawner.ChildProcessSpawner>;
   readonly backendOutputLog: Pick<
     DesktopObservability.DesktopBackendOutputLogShape,
     "writeOutputChunk"
@@ -62,7 +68,7 @@ function makeTestInstance(input: {
   }).pipe(
     Effect.provide(
       Layer.mergeAll(
-        NodeServices.layer,
+        input.spawnerLayer ?? NodeServices.layer,
         Layer.succeed(
           HttpClient.HttpClient,
           HttpClient.make((request) =>
@@ -112,7 +118,9 @@ const decodeTraceRecord = Schema.decodeSync(
   ),
 );
 
-function runNativeBrowser(mode: "healthy" | "preparation-failure" | "catalogue-failure") {
+function runNativeBrowser(
+  mode: "healthy" | "preparation-failure" | "catalogue-failure" | "sink-failure",
+) {
   let output = "";
   let preparationCount = 0;
   return Effect.gen(function* () {
@@ -154,7 +162,10 @@ function runNativeBrowser(mode: "healthy" | "preparation-failure" | "catalogue-f
           sink.push(record);
           if (
             record.type === "effect-span" &&
-            record.name === "desktop.browser.commandStream" &&
+            record.name ===
+              (mode === "sink-failure"
+                ? "desktop.browser.replyStream"
+                : "desktop.browser.commandStream") &&
             record.exit._tag === "Failure"
           ) {
             Deferred.doneUnsafe(stoppedReader, Effect.void);
@@ -199,8 +210,45 @@ function runNativeBrowser(mode: "healthy" | "preparation-failure" | "catalogue-f
       const fixture = NodeURL.fileURLToPath(
         new URL("./testing/NativeBrowserReplies.fixture.mjs", import.meta.url),
       );
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      // Inject an actual Writable callback error at the production sink boundary.
+      // Other descriptors and the child lifecycle still use the real Node spawner.
+      const failingSpawner = Layer.succeed(
+        ChildProcessSpawner.ChildProcessSpawner,
+        ChildProcessSpawner.make((command) =>
+          spawner.spawn(command).pipe(
+            Effect.map((handle) =>
+              ChildProcessSpawner.makeHandle({
+                ...handle,
+                getInputFd: (fd) =>
+                  fd === 6
+                    ? NodeSink.fromWritable({
+                        evaluate: () =>
+                          new NodeStream.Writable({
+                            write(_chunk, _encoding, callback) {
+                              callback(new Error("fixture-reply-write-failure"));
+                            },
+                          }),
+                        onError: (cause) =>
+                          new PlatformError.PlatformError(
+                            new PlatformError.SystemError({
+                              _tag: "Unknown",
+                              module: "ChildProcess",
+                              method: "fixtureWrite",
+                              description: "fixture-reply-write-failure",
+                              cause,
+                            }),
+                          ),
+                      })
+                    : handle.getInputFd(fd),
+              }),
+            ),
+          ),
+        ),
+      );
       const instance = yield* makeTestInstance({
         desktopBrowserHost: host,
+        ...(mode === "sink-failure" ? { spawnerLayer: failingSpawner } : {}),
         config: {
           ...baseConfig,
           args: [fixture, mode],
@@ -227,15 +275,21 @@ function runNativeBrowser(mode: "healthy" | "preparation-failure" | "catalogue-f
           writeOutputChunk: (_stream, chunk) =>
             Effect.gen(function* () {
               output += chunk;
-              if (output.includes("verified")) yield* Deferred.succeed(verified, void 0);
+              if (
+                output.includes("verified") ||
+                (mode === "sink-failure" && output.includes("sink-failure-ready"))
+              )
+                yield* Deferred.succeed(verified, void 0);
             }),
         },
       });
       yield* instance.start;
       // Completion is a completed span milestone or the child's verified replies, never a delay.
-      yield* Deferred.await(mode === "preparation-failure" ? stoppedReader : verified).pipe(
-        Effect.timeout("7 seconds"),
-      );
+      yield* Deferred.await(
+        mode === "preparation-failure" || mode === "sink-failure" ? stoppedReader : verified,
+      ).pipe(Effect.timeout("7 seconds"));
+      if (mode === "sink-failure")
+        yield* Deferred.await(verified).pipe(Effect.timeout("7 seconds"));
       yield* instance.stop();
     }).pipe(
       Effect.provideService(Tracer.Tracer, tracer),
@@ -272,7 +326,7 @@ it.live(
           "commandReceived",
           "readProfileSettings",
           "publishProfiles",
-          "forwardProfiles",
+          "dequeueProfiles",
         ]) {
           const record = result.records.find(
             (record) =>
@@ -298,6 +352,38 @@ it.live(
           assert.include(["fd", "commandType", "requestId", "desktopHostId", "available"], key);
       }
     }),
+);
+
+it.live("persists the native reply-stream failure from its actual Writable sink boundary", () =>
+  Effect.gen(function* () {
+    const result = yield* runNativeBrowser("sink-failure");
+    assert.include(result.output, "sink-failure-ready");
+    assert.equal(result.preparationCount, 1);
+    const failure = result.records.find((record) => record.name === "desktop.browser.replyStream");
+    assert.equal(failure?.exit._tag, "Failure");
+    assert.include(failure?.exit.cause ?? "", "fixture-reply-write-failure");
+    assert.isTrue(
+      result.records.some(
+        (record) =>
+          record.name === "desktop.browser.dequeueProfiles" &&
+          record.attributes.requestId === "profiles-first" &&
+          record.exit._tag === "Success",
+      ),
+    );
+    assert.isFalse(
+      result.records.some(
+        (record) =>
+          record.name === "desktop.browser.forwardProfiles" && record.exit._tag === "Success",
+      ),
+    );
+    for (const forbidden of [
+      "private-profile-name-sentinel",
+      "fixture-profile-id",
+      "retainedRootRequestIds",
+      "fixture-epoch",
+    ])
+      assert.notInclude(result.trace, forbidden);
+  }),
 );
 
 it.live("keeps settings warnings outside native browser diagnostics", () =>

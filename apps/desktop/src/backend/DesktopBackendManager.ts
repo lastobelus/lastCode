@@ -487,7 +487,6 @@ export const runBackendProcess = Effect.fn("runBackendProcess")(function* (
     ) {
       additionalFds[`fd${options.bootstrap.desktopBrowserFd}`] = {
         type: "input",
-        stream: options.desktopBrowserStream,
       };
     }
     if (options.bootstrap.desktopBrowserControlFd !== undefined) {
@@ -524,6 +523,26 @@ export const runBackendProcess = Effect.fn("runBackendProcess")(function* (
     ),
   );
   const outputFibers: Array<Fiber.Fiber<void, never>> = [];
+
+  if (
+    options.bootstrapDelivery === "fd3" &&
+    options.bootstrap.desktopBrowserFd !== undefined &&
+    options.desktopBrowserStream !== undefined
+  ) {
+    const browserFd = options.bootstrap.desktopBrowserFd;
+    yield* options.desktopBrowserStream.pipe(
+      Stream.run(handle.getInputFd(browserFd)),
+      // This span includes the pipe sink, so write failures are retained too.
+      Effect.withSpan("desktop.browser.replyStream", { attributes: { fd: browserFd } }),
+      Effect.catchCause((cause) =>
+        logBackendProcessWarning("desktop browser reply stream stopped", {
+          fd: browserFd,
+          cause: Cause.pretty(cause),
+        }),
+      ),
+      Effect.forkScoped,
+    );
+  }
 
   yield* options.onStarted?.(handle.pid) ?? Effect.void;
   if (

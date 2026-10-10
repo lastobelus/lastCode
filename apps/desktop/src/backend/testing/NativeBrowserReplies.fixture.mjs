@@ -4,18 +4,20 @@ import * as NodeReadline from "node:readline";
 import * as NodeAssert from "node:assert/strict";
 
 const send = (command) => NodeFS.writeSync(7, `${JSON.stringify(command)}\n`);
+const sinkFailure = process.argv[2] === "sink-failure";
 const replies = NodeReadline.createInterface({
   input: new NodeNet.Socket({ fd: 6, readable: true, writable: false }),
 });
 const preparationFailure = process.argv[2] === "preparation-failure";
 const catalogueFailure = process.argv[2] === "catalogue-failure";
 let expected = "profiles-first";
-const watchdog = preparationFailure
-  ? undefined
-  : setTimeout(() => {
-      console.error(`native browser fixture stalled awaiting ${expected}`);
-      process.exit(1);
-    }, 5_000);
+const watchdog =
+  preparationFailure || sinkFailure
+    ? undefined
+    : setTimeout(() => {
+        console.error(`native browser fixture stalled awaiting ${expected}`);
+        process.exit(1);
+      }, 5_000);
 replies.on("line", (line) => {
   const event = JSON.parse(line);
   NodeAssert.equal(event.type, "profiles");
@@ -43,6 +45,7 @@ const bootstrap = NodeReadline.createInterface({
 });
 bootstrap.once("line", () => {
   console.log("bootstrap-received");
+  if (sinkFailure) console.log("sink-failure-ready");
   send({ type: "reconcileRoots", serverEpoch: "fixture-epoch", retainedRootRequestIds: [] });
   if (!preparationFailure) send({ type: "profiles", requestId: expected });
 });
