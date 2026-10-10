@@ -16,12 +16,14 @@ import {
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
+import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import type { BrowserContext, Page } from "playwright-core";
@@ -1105,6 +1107,68 @@ it.live.each(["local", "host-a"])(
         expect((yield* manager.list({})).sessions[0]!.viewport).toEqual({ _tag: "fill" });
         expect(page.setViewportSize).not.toHaveBeenCalled();
         yield* active.input({ type: "releaseControl" });
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live.each(
+  ["headless", "local", "host-a"].flatMap((host) =>
+    [false, true].map((fixed) => ({ host, fixed })),
+  ),
+)(
+  "viewer disconnect restores connected fill sizes without changing fixed sizes ($host, $fixed)",
+  ({ host, fixed }) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        if (host !== "headless") {
+          profileCatalogue = {
+            desktopHostId: host,
+            profiles: [{ id: "default", name: "Default", kind: "persistent" }],
+            defaultProfileId: "default",
+          };
+          desktopRendersNext = true;
+        }
+        const { browser, broker, tabId } = yield* ready;
+        const firstScope = yield* Effect.acquireRelease(Scope.make(), (scope) =>
+          Scope.close(scope, Exit.void),
+        );
+        const first = yield* browser
+          .attachViewer(viewerInput(tabId, true))
+          .pipe(Effect.provideService(Scope.Scope, firstScope));
+        yield* first.input({ type: "takeControl" });
+        yield* first.input({ type: "resize", width: 640, height: 480 });
+        if (fixed)
+          yield* first.input({
+            type: "viewport",
+            setting: { _tag: "freeform", width: 390, height: 844 },
+          });
+        yield* first.input({ type: "releaseControl" });
+        const latestScope = yield* Effect.acquireRelease(Scope.make(), (scope) =>
+          Scope.close(scope, Exit.void),
+        );
+        const latest = yield* browser
+          .attachViewer(viewerInput(tabId, true))
+          .pipe(Effect.provideService(Scope.Scope, latestScope));
+        yield* latest.input({ type: "takeControl" });
+        yield* latest.input({ type: "resize", width: 1200, height: 720 });
+        const status = () =>
+          broker.invoke<PreviewAutomationStatus>({ scope, tabId, operation: "status", input: {} });
+        expect((yield* status()).viewport).toEqual(
+          fixed ? { width: 390, height: 844 } : { width: 1200, height: 720 },
+        );
+        yield* Queue.takeAll(first.output);
+        yield* Scope.close(latestScope, Exit.void);
+        const remainingSize = fixed ? { width: 390, height: 844 } : { width: 640, height: 480 };
+        expect((yield* status()).viewport).toEqual(remainingSize);
+        if (!fixed)
+          expect(yield* Queue.takeAll(first.output)).toContainEqual({
+            _tag: "viewport",
+            ...remainingSize,
+          });
+        yield* Scope.close(firstScope, Exit.void);
+        expect((yield* status()).viewport).toEqual(
+          fixed ? { width: 390, height: 844 } : { width: 1280, height: 800 },
+        );
       }),
     ).pipe(Effect.provide(layer)),
 );

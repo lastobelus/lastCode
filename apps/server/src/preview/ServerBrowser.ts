@@ -276,7 +276,7 @@ interface ViewerState {
   scrolledAt: number;
   /** Last input from this viewer; page copies reach its clipboard only right after. */
   inputAt: number;
-  /** Panel bounds, retained in fixed mode; passive viewers never request a size. */
+  /** Panel bounds survive fixed mode and control release; passive viewers never request a size. */
   requestedSize: { width: number; height: number; order: number } | null;
 }
 
@@ -3160,7 +3160,6 @@ const make = Effect.gen(function* () {
         .catch(constVoid);
     }
     viewer.pressedButtons.clear();
-    viewer.requestedSize = null;
   };
 
   const dispatchViewerInput = async (
@@ -3399,6 +3398,8 @@ const make = Effect.gen(function* () {
             tab.viewers.delete(viewer);
             broadcastControl(tab);
             reportLiveTabs();
+            if (!tab.closing && viewer.requestedSize !== null && tab.setting._tag === "fill")
+              await applySetting(tab, tab.setting).catch(constVoid);
           }),
       );
       if (input.canOperate && tab.control.agentId === null && tab.control.controller === null) {
