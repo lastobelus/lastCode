@@ -158,7 +158,10 @@ through the pages you have visited, like a browser's back and forward buttons.
 `sidebar.mode.toggle` switches between the inbox and legacy sidebars by updating
 the same persisted preference as **Settings → General → Legacy features → Sidebar
 (legacy)**. It has no default shortcut, so add one in **Settings → Keybindings**
-if you want to use it.
+if you want to use it. While **Settings → LastCode → Appearance → LastCode sidebar**
+is enabled, that sidebar overrides both upstream choices and the shortcut does
+nothing. Turn off **LastCode sidebar** to restore switching; your upstream
+sidebar preference stays independent.
 
 ## Reserved shortcuts
 
