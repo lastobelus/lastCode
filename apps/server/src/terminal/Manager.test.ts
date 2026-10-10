@@ -1668,6 +1668,7 @@ it.layer(
     source: "native" | "fallback",
     ptyAdapter: FakePtyAdapter,
     processTable: NonNullable<CreateManagerOptions["processTable"]>,
+    options: CreateManagerOptions = {},
   ) => {
     const processRunner: ProcessRunner.ProcessRunner["Service"] = {
       run: (input) =>
@@ -1691,6 +1692,7 @@ it.layer(
       ptyAdapter,
       shellResolver: () => "/opt/tools/my-shell",
       subprocessPollIntervalMs: 60_000,
+      ...options,
       ...(source === "native" ? { processTable } : {}),
     }).pipe(
       Effect.provideService(ProcessRunner.ProcessRunner, processRunner),
@@ -3301,6 +3303,118 @@ it.layer(
           expect(ptyAdapter.processes[1]?.writes).toEqual(["exec node\r"]);
         }
       }),
+  );
+
+  it.effect.each(["native", "fallback"] as const)(
+    "skips reserved first input when %s idle cleanup queues before its writer",
+    (source) =>
+      Effect.gen(function* () {
+        const holderEntered = yield* Deferred.make<void>();
+        const releaseHolder = yield* Deferred.make<void>();
+        const captureEntered = yield* Deferred.make<void>();
+        const releaseCapture = yield* Deferred.make<void>();
+        let holdNextHistoryWrite = false;
+        const fs = yield* FileSystem.FileSystem;
+        const holderFileSystem = {
+          ...fs,
+          writeFileString: () =>
+            Effect.gen(function* () {
+              if (holdNextHistoryWrite) {
+                holdNextHistoryWrite = false;
+                yield* Deferred.succeed(holderEntered, undefined);
+                yield* Deferred.await(releaseHolder);
+              }
+            }),
+        };
+        let pauseCleanup = false;
+        const resumedCleanup: Array<() => void> = [];
+        const defaultDispatcher = (yield* Scheduler.Scheduler).makeDispatcher();
+        const cleanupScheduler: Scheduler.Scheduler = {
+          executionMode: "async",
+          shouldYield: () => pauseCleanup,
+          makeDispatcher: () => ({
+            scheduleTask: (task, priority) => {
+              if (pauseCleanup) resumedCleanup.push(task);
+              else defaultDispatcher.scheduleTask(task, priority);
+            },
+            flush: () => {},
+          }),
+        };
+        const resumeCleanup = () => {
+          pauseCleanup = false;
+          for (const task of resumedCleanup.splice(0)) task();
+        };
+        yield* Effect.addFinalizer(() => Effect.sync(resumeCleanup));
+        const ptyAdapter = new FakePtyAdapter();
+        let holdNextSnapshot = true;
+        let ownershipReleases = 0;
+        const processTable = Effect.gen(function* () {
+          if (holdNextSnapshot) {
+            holdNextSnapshot = false;
+            yield* Deferred.succeed(captureEntered, undefined);
+            yield* Deferred.await(releaseCapture);
+          }
+          return [{ pid: 9000, ppid: 1, name: "zsh" }];
+        });
+        const { manager } = yield* createSnapshotBoundaryManager(source, ptyAdapter, processTable, {
+          shellResolver: () => "/bin/zsh",
+          unregisterTerminal: () =>
+            Effect.sync(() => {
+              ownershipReleases += 1;
+            }),
+        }).pipe(Effect.provideService(FileSystem.FileSystem, holderFileSystem));
+        yield* TestClock.adjust(0);
+        const terminal = openInput();
+        yield* manager.open(terminal);
+        const process = ptyAdapter.processes[0]!;
+        process.exitOnKill = "SIGTERM";
+        holdNextHistoryWrite = true;
+        const holder = yield* manager.clear(terminal).pipe(Effect.forkScoped);
+        yield* Deferred.await(holderEntered);
+        const closing = yield* manager
+          .closeIdle(terminal)
+          .pipe(
+            Effect.provideService(Scheduler.Scheduler, cleanupScheduler),
+            Effect.forkScoped({ startImmediately: true }),
+          );
+        const writing = yield* manager
+          .write({ ...terminal, data: "noop\r" })
+          .pipe(Effect.forkScoped({ startImmediately: true }));
+        yield* Deferred.await(captureEntered);
+        yield* TestClock.adjust(0);
+        yield* Deferred.succeed(releaseHolder, undefined);
+        yield* Fiber.join(holder);
+        yield* TestClock.adjust(0);
+        // Cleanup was queued first, so its candidate capture happens after
+        // reservation but before forwarding. Hold its scan resumption until
+        // the writer has also released its pending-input reservation.
+        pauseCleanup = true;
+        yield* Deferred.succeed(releaseCapture, undefined);
+        yield* Fiber.join(writing);
+        resumeCleanup();
+        yield* Fiber.join(closing);
+        const staleKillSignals = [...process.killSignals];
+        const staleOwnershipReleases = ownershipReleases;
+        const metadataAfterQueuedCleanup = yield* readIdleInspectionMetadata(manager);
+        // The submitted no-op is now idle; skipping one reserved candidate
+        // must not keep the shell immune to a later cleanup.
+        yield* manager.closeIdle(terminal);
+        yield* TestClock.adjust("1 millis");
+        const metadataAfterFreshCleanup = yield* readIdleInspectionMetadata(manager);
+        const freshKillSignals = [...process.killSignals];
+        if (metadataAfterFreshCleanup.some(({ status }) => status === "running")) {
+          yield* exitSnapshotTestProcesses(manager, ptyAdapter, [terminal]);
+        }
+        expect(process.writes).toEqual(["noop\r"]);
+        expect(staleKillSignals).toEqual([]);
+        expect(staleOwnershipReleases).toBe(0);
+        expect(metadataAfterQueuedCleanup).toEqual([
+          expect.objectContaining({ pid: process.pid, status: "running" }),
+        ]);
+        expect(freshKillSignals).toContain("SIGTERM");
+        expect(metadataAfterFreshCleanup).toEqual([]);
+        expect(ptyAdapter.spawnInputs).toHaveLength(1);
+      }).pipe(Effect.provide(TestClock.layer())),
   );
 
   it.effect.each(["deliver", "cancel", "fail"] as const)(

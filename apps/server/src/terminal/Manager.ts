@@ -3605,6 +3605,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
               .filter(
                 (session): session is TerminalSessionState & { pid: number } =>
                   session.status === "running" &&
+                  session.pendingInputCount === 0 &&
                   Number.isInteger(session.pid) &&
                   (input.terminalId === undefined || session.terminalId === input.terminalId) &&
                   !excludedTerminalIds.has(session.terminalId),
