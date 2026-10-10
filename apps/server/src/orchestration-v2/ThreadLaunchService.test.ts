@@ -478,6 +478,70 @@ it.effect.each(["archive", "delete"] as const)(
   },
 );
 
+it.effect(
+  "preserves an interrupted launch's initial message retry while its target is archived",
+  () => {
+    const harness = makeHarness({ runSetup: () => Effect.never });
+    return Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const { threadId: _unusedThreadId, ...input } = launchInput({
+        command: "launch-interrupted-after-create",
+        thread: "unused",
+        message: "Deliver after reopening",
+      });
+      const created = yield* Deferred.make<void>();
+      const commitCommand = eventSink.commitCommand;
+      const commitSpy = vi.spyOn(eventSink, "commitCommand").mockImplementation((command) =>
+        command.commandId === input.commandId
+          ? commitCommand(command).pipe(
+              Effect.tap(() => Deferred.succeed(created, undefined)),
+              Effect.andThen(Effect.never),
+            )
+          : commitCommand(command),
+      );
+      yield* Effect.gen(function* () {
+        const launchFiber = yield* launches.launch(input).pipe(Effect.forkChild());
+        yield* Deferred.await(created);
+        yield* Fiber.interrupt(launchFiber);
+        const claimReceipt = Option.getOrThrow(yield* receipts.getByCommandId(input.commandId));
+        assert.equal(claimReceipt.status, "accepted");
+        const threadId = claimReceipt.threadId;
+        assert.isEmpty((yield* threads.getThreadProjection(threadId)).messages);
+        yield* threads.dispatch({
+          type: "thread.archive",
+          commandId: CommandId.make("archive-interrupted-launch"),
+          threadId,
+        });
+        const failed = yield* launches.launch(input).pipe(Effect.flip);
+        assert.equal(failed.operation, "dispatch-message");
+        assert.ok(isDispatchError(failed.cause));
+        assert.include(String(failed.cause.cause), "not active");
+        const messageCommandId = CommandId.make(`${input.commandId}:initial-message`);
+        assert.isTrue(Option.isNone(yield* receipts.getByCommandId(messageCommandId)));
+        assert.isEmpty(yield* outbox.listByCommandId(messageCommandId));
+        yield* threads.dispatch({
+          type: "thread.unarchive",
+          commandId: CommandId.make("unarchive-interrupted-launch"),
+          threadId,
+        });
+        const retried = yield* launches.launch(input);
+        assert.equal(retried.threadId, threadId);
+        assert.isTrue(retried.resumed);
+        assert.lengthOf(retried.projection.messages, 1);
+        assert.lengthOf(retried.projection.runs, 1);
+        assert.equal(
+          Option.getOrThrow(yield* receipts.getByCommandId(messageCommandId)).status,
+          "accepted",
+        );
+      }).pipe(Effect.ensuring(Effect.sync(() => commitSpy.mockRestore())));
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
+
 it.effect("holds the sender through launch acceptance and replays after it archives", () => {
   const setupEntered = Deferred.makeUnsafe<void>();
   const harness = makeHarness({

@@ -13594,11 +13594,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         // still go through the normal receipt validation after the sender archives.
         if (Option.isNone(receipt)) yield* ensureMessageSenderActive(initialMessage);
         if (
-          claim.type === "thread.metadata.update" &&
+          (claim.type === "thread.metadata.update" ||
+            (Option.isSome(claimReceipt) && claimReceipt.value.status === "accepted")) &&
           !(Option.isSome(receipt) && receipt.value.status === "accepted")
         ) {
-          // The reuse preflight runs before these locks. Refuse a target that
-          // became inactive without consuming either launch command receipt.
+          // Reuse preflight and a previous create can precede these locks.
+          // Refuse an inactive target without consuming the pending message receipt.
           const target = yield* projectionStore
             .getThread(claim.threadId)
             .pipe(mapDispatchError(initialMessage));
