@@ -2298,6 +2298,173 @@ it.layer(
       }).pipe(Effect.provide(TestClock.layer())),
   );
 
+  it.effect.each(
+    (["native", "fallback"] as const).flatMap((source) =>
+      (["output", "write", "spawn"] as const).map((boundary) => ({ source, boundary })),
+    ),
+  )(
+    "preserves fresh exec ownership and activity after $boundary invalidates an older $source poll",
+    ({ source, boundary }) =>
+      Effect.gen(function* () {
+        const staleSnapshotStarted = yield* Deferred.make<void>();
+        const releaseStaleSnapshot = yield* Deferred.make<void>();
+        const outputProcessed = yield* Deferred.make<void>();
+        const ptyAdapter = new FakePtyAdapter();
+        let holdNextSnapshot = false;
+        let commandStarted = false;
+        let ownedProcessIds: ReadonlyArray<number> = [];
+        const ownershipUpdates: Array<ReadonlyArray<number>> = [];
+        const processTable = Effect.gen(function* () {
+          // Freeze the idle shell table before the same PID execs its command.
+          const entries = ptyAdapter.processes.map((process) => ({
+            pid: process.pid,
+            ppid: 1,
+            name: process.pid === 9000 && commandStarted ? "node" : "zsh",
+          }));
+          if (holdNextSnapshot) {
+            holdNextSnapshot = false;
+            yield* Deferred.succeed(staleSnapshotStarted, undefined);
+            yield* Deferred.await(releaseStaleSnapshot);
+          }
+          return entries;
+        });
+        const terminal = openInput();
+        const { manager } = yield* createSnapshotBoundaryManager(source, ptyAdapter, processTable, {
+          registerTerminalProcesses: ({ threadId, terminalId, processIds }) =>
+            Effect.sync(() => {
+              if (threadId !== terminal.threadId || terminalId !== terminal.terminalId) return;
+              ownedProcessIds = [...processIds];
+              ownershipUpdates.push(ownedProcessIds);
+            }),
+        });
+        yield* TestClock.adjust(0);
+        yield* manager.open(terminal);
+        const process = ptyAdapter.processes[0]!;
+        // Capture the startup shell identity before the held poll, so later
+        // input does not need to wait for that snapshot before forwarding.
+        yield* manager.write({ ...terminal, data: "prepare\r" });
+        holdNextSnapshot = true;
+        const oldPoll = yield* manager.refreshMetadata.pipe(Effect.forkScoped);
+        yield* Deferred.await(staleSnapshotStarted);
+
+        const terminals = [terminal];
+        commandStarted = true;
+        if (boundary === "output") {
+          const unsubscribe = yield* manager.subscribe((event) =>
+            event.type === "output"
+              ? Deferred.succeed(outputProcessed, undefined).pipe(Effect.asVoid)
+              : Effect.void,
+          );
+          yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+          process.emitData("command started\n");
+          yield* Deferred.await(outputProcessed);
+        } else if (boundary === "write") {
+          yield* manager.write({ ...terminal, data: "exec node\r" });
+        } else {
+          const spawned = openInput({ threadId: "spawn-boundary" });
+          yield* manager.open(spawned);
+          terminals.push(spawned);
+        }
+
+        // Explicit refresh runs the same poll as the background worker. Join
+        // both calls to prove the fresh result was applied before the old one.
+        const freshMetadata = yield* manager.refreshMetadata;
+        const freshOwnedProcessIds = [...ownedProcessIds];
+        const updatesBeforeOldCompletion = ownershipUpdates.length;
+        yield* Deferred.succeed(releaseStaleSnapshot, undefined);
+        yield* Fiber.join(oldPoll);
+        const metadataAfterOldCompletion = yield* readIdleInspectionMetadata(manager);
+        const ownershipAfterOldCompletion = [...ownedProcessIds];
+        const updatesAfterOldCompletion = ownershipUpdates.slice(updatesBeforeOldCompletion);
+        yield* exitSnapshotTestProcesses(manager, ptyAdapter, terminals);
+        expect(freshOwnedProcessIds).toEqual([process.pid]);
+        expect(freshMetadata).toContainEqual(
+          expect.objectContaining({
+            pid: process.pid,
+            status: "running",
+            hasRunningSubprocess: true,
+            label: "node",
+          }),
+        );
+        expect({
+          processIds: ownershipAfterOldCompletion,
+          metadata: metadataAfterOldCompletion,
+        }).toEqual({ processIds: [process.pid], metadata: freshMetadata });
+        expect(
+          updatesAfterOldCompletion.every((processIds) => processIds.includes(process.pid)),
+        ).toBe(true);
+        expect(process.killSignals).toEqual([]);
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect.each(["native", "fallback"] as const)(
+    "keeps a quiet terminal's exec ownership and activity when another terminal invalidates a held %s poll",
+    (source) =>
+      Effect.gen(function* () {
+        const snapshotStarted = yield* Deferred.make<void>();
+        const releaseSnapshot = yield* Deferred.make<void>();
+        const outputProcessed = yield* Deferred.make<void>();
+        const ptyAdapter = new FakePtyAdapter();
+        let holdNextSnapshot = false;
+        let commandStarted = false;
+        let quietOwnedProcessIds: ReadonlyArray<number> = [];
+        const quiet = openInput({ terminalId: "quiet" });
+        const noisy = openInput({ terminalId: "noisy" });
+        const processTable = Effect.gen(function* () {
+          const entries = ptyAdapter.processes.map((process) => ({
+            pid: process.pid,
+            ppid: 1,
+            name: process.pid === 9000 && commandStarted ? "node" : "zsh",
+          }));
+          if (holdNextSnapshot) {
+            holdNextSnapshot = false;
+            yield* Deferred.succeed(snapshotStarted, undefined);
+            yield* Deferred.await(releaseSnapshot);
+          }
+          return entries;
+        });
+        const { manager } = yield* createSnapshotBoundaryManager(source, ptyAdapter, processTable, {
+          registerTerminalProcesses: ({ terminalId, processIds }) =>
+            Effect.sync(() => {
+              if (terminalId === quiet.terminalId) quietOwnedProcessIds = [...processIds];
+            }),
+        });
+        yield* TestClock.adjust(0);
+        yield* manager.open(quiet);
+        yield* manager.open(noisy);
+        yield* manager.write({ ...quiet, data: "exec node\r" });
+        commandStarted = true;
+        holdNextSnapshot = true;
+        const oldPoll = yield* manager.refreshMetadata.pipe(Effect.forkScoped);
+        yield* Deferred.await(snapshotStarted);
+        const unsubscribe = yield* manager.subscribe((event) =>
+          event.type === "output" && event.terminalId === noisy.terminalId
+            ? Deferred.succeed(outputProcessed, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+        ptyAdapter.processes[1]!.emitData("background output\n");
+        yield* Deferred.await(outputProcessed);
+        // No replacement scan runs: the held table still contains a valid
+        // observation of the quiet terminal's same-PID exec.
+        yield* Deferred.succeed(releaseSnapshot, undefined);
+        yield* Fiber.join(oldPoll);
+        const metadata = yield* readIdleInspectionMetadata(manager);
+        const processIds = [...quietOwnedProcessIds];
+        yield* exitSnapshotTestProcesses(manager, ptyAdapter, [quiet, noisy]);
+        expect(processIds).toEqual([ptyAdapter.processes[0]!.pid]);
+        expect(metadata).toContainEqual(
+          expect.objectContaining({
+            terminalId: quiet.terminalId,
+            pid: ptyAdapter.processes[0]!.pid,
+            status: "running",
+            hasRunningSubprocess: true,
+            label: "node",
+          }),
+        );
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
   it.effect.each(["native", "fallback"] as const)(
     "coalesces cleanup callers on one fresh %s snapshot after drained output invalidates a held poll",
     (source) =>

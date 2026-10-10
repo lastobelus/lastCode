@@ -348,6 +348,7 @@ interface TerminalSessionState {
   inputCount: number;
   /** Successful opens/attachments invalidate earlier idle inspections. */
   attachmentGeneration: number;
+  processSnapshotGeneration: number;
   /** Queued or executing writes keep automatic cleanup away from the terminal. */
   pendingInputCount: number;
   /** Reservations preserve input order independently of thread-lock scheduling. */
@@ -1683,12 +1684,27 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   // Share overlapping requests only until a spawn, write, or output changes activity.
   // Replacing the cache keeps new callers out of a pre-change scan; its older
   // callers can still finish or interrupt it when the last waiter leaves.
-  let sharedProcessTableSnapshot: typeof processTableSnapshot | undefined;
+  let processTableGeneration = 0;
+  const processTableSnapshotWithGeneration = Effect.suspend(() => {
+    const generation = processTableGeneration;
+    return processTableSnapshot.pipe(Effect.map((result) => ({ ...result, generation })));
+  });
+  let sharedProcessTableSnapshot: typeof processTableSnapshotWithGeneration | undefined;
+  const invalidateProcessTableSnapshot = (session: TerminalSessionState) => {
+    processTableGeneration += 1;
+    session.processSnapshotGeneration = processTableGeneration;
+    sharedProcessTableSnapshot = undefined;
+  };
+  const isCurrentProcessTableSnapshot = (
+    session: TerminalSessionState,
+    generation: number | undefined,
+  ) => generation === undefined || generation >= session.processSnapshotGeneration;
   const fetchProcessTableSnapshot = Effect.suspend(() => {
     if (sharedProcessTableSnapshot !== undefined) return sharedProcessTableSnapshot;
-    return Effect.cachedWithTTL(processTableSnapshot, 0).pipe(
+    const generation = processTableGeneration;
+    return Effect.cachedWithTTL(processTableSnapshotWithGeneration, 0).pipe(
       Effect.flatMap((cached) => {
-        sharedProcessTableSnapshot = cached;
+        if (generation === processTableGeneration) sharedProcessTableSnapshot = cached;
         return cached;
       }),
     );
@@ -1698,19 +1714,26 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     {
       readonly inspector: TerminalSubprocessInspector;
       readonly snapshotSucceeded: boolean;
+      readonly generation: number | undefined;
     },
     TerminalSubprocessCheckError
   > =
     customSubprocessInspector !== undefined
-      ? Effect.succeed({ inspector: customSubprocessInspector, snapshotSucceeded: true })
+      ? Effect.succeed({
+          inspector: customSubprocessInspector,
+          snapshotSucceeded: true,
+          generation: undefined,
+        })
       : Effect.map(
           fetchProcessTableSnapshot,
           ({
             snapshot,
             snapshotSucceeded,
+            generation,
           }): {
             readonly inspector: TerminalSubprocessInspector;
             readonly snapshotSucceeded: boolean;
+            readonly generation: number | undefined;
           } => ({
             inspector: (terminalPid, spawnedShellName, beforeFirstInput) =>
               Effect.succeed(
@@ -1723,6 +1746,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
                 ),
               ),
             snapshotSucceeded,
+            generation,
           }),
         );
   const subprocessPollIntervalMs =
@@ -1731,6 +1755,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const processExitWaitMs = options.processExitWaitMs ?? DEFAULT_PROCESS_EXIT_WAIT_MS;
   const maxRetainedInactiveSessions =
     options.maxRetainedInactiveSessions ?? DEFAULT_MAX_RETAINED_INACTIVE_SESSIONS;
+  const processSnapshotApplicationLock = yield* Semaphore.make(1);
   const registerTerminalProcesses = options.registerTerminalProcesses ?? (() => Effect.void);
   const unregisterTerminal = options.unregisterTerminal ?? (() => Effect.void);
 
@@ -2274,7 +2299,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             session.history.append(sanitized.visibleText);
           }
           // Output can prove a command started after an unfinished scan sampled it.
-          sharedProcessTableSnapshot = undefined;
+          invalidateProcessTableSnapshot(session);
           const eventStamp = advanceEventSequence(session);
 
           return {
@@ -2553,7 +2578,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
               }
             }
             const spawnResult = yield* trySpawn(shellCandidates, terminalEnv, session);
-            sharedProcessTableSnapshot = undefined;
+            invalidateProcessTableSnapshot(session);
             ptyProcess = spawnResult.process;
             startedShell = spawnResult.shellLabel;
             startedShellFamily = spawnResult.shellFamily;
@@ -2740,6 +2765,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             Option.none<{
               readonly inspector: TerminalSubprocessInspector;
               readonly snapshotSucceeded: boolean;
+              readonly generation: number | undefined;
             }>(),
           ),
         ),
@@ -2750,7 +2776,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       return false;
     }
 
-    const { inspector: subprocessInspector, snapshotSucceeded } = inspectorOption.value;
+    const { inspector: subprocessInspector, snapshotSucceeded, generation } = inspectorOption.value;
 
     const checkSubprocessActivity = Effect.fn("terminal.checkSubprocessActivity")(function* (
       session: TerminalSessionState & { pid: number },
@@ -2777,42 +2803,66 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       }
 
       const next = inspectResult.value;
-      yield* registerTerminalProcesses({
-        threadId: session.threadId,
-        terminalId: session.terminalId,
-        processIds: next.processIds,
-      });
       const nextChildLabel = next.hasRunningSubprocess ? next.childCommand : null;
-      const event = yield* modifyManagerState((state) => {
-        const liveSession: Option.Option<TerminalSessionState> = Option.fromNullishOr(
-          state.sessions.get(toSessionKey(session.threadId, session.terminalId)),
-        );
-        if (
-          Option.isNone(liveSession) ||
-          liveSession.value.status !== "running" ||
-          liveSession.value.pid !== terminalPid ||
-          (liveSession.value.hasRunningSubprocess === next.hasRunningSubprocess &&
-            liveSession.value.childCommandLabel === nextChildLabel)
-        ) {
-          return [Option.none(), state] as const;
-        }
+      // Serialize ownership and metadata application, not process inspection.
+      // A replaced scan must never overwrite a newer refresh's owned PIDs.
+      const event = yield* processSnapshotApplicationLock.withPermit(
+        Effect.gen(function* () {
+          if (!isCurrentProcessTableSnapshot(session, generation)) return Option.none();
+          const current = yield* getSession(session.threadId, session.terminalId);
+          if (
+            Option.isNone(current) ||
+            current.value !== session ||
+            current.value.status !== "running" ||
+            current.value.pid !== terminalPid
+          ) {
+            return Option.none();
+          }
+          yield* registerTerminalProcesses({
+            threadId: session.threadId,
+            terminalId: session.terminalId,
+            processIds: next.processIds,
+          });
+          return yield* modifyManagerState((state) => {
+            const liveSession = state.sessions.get(
+              toSessionKey(session.threadId, session.terminalId),
+            );
+            if (
+              !isCurrentProcessTableSnapshot(session, generation) ||
+              liveSession !== session ||
+              liveSession.status !== "running" ||
+              liveSession.pid !== terminalPid
+            ) {
+              return [Option.none(), state] as const;
+            }
+            // Unrelated terminals may have invalidated the shared cache. Only
+            // this terminal's activity or a newer applied scan obsoletes it.
+            if (generation !== undefined) liveSession.processSnapshotGeneration = generation;
+            if (
+              liveSession.hasRunningSubprocess === next.hasRunningSubprocess &&
+              liveSession.childCommandLabel === nextChildLabel
+            ) {
+              return [Option.none(), state] as const;
+            }
 
-        liveSession.value.hasRunningSubprocess = next.hasRunningSubprocess;
-        liveSession.value.childCommandLabel = nextChildLabel;
-        const eventStamp = advanceEventSequence(liveSession.value);
+            liveSession.hasRunningSubprocess = next.hasRunningSubprocess;
+            liveSession.childCommandLabel = nextChildLabel;
+            const eventStamp = advanceEventSequence(liveSession);
 
-        return [
-          Option.some({
-            type: "activity" as const,
-            threadId: liveSession.value.threadId,
-            terminalId: liveSession.value.terminalId,
-            sequence: eventStamp.sequence,
-            hasRunningSubprocess: next.hasRunningSubprocess,
-            label: terminalWireLabel(liveSession.value),
-          }),
-          state,
-        ] as const;
-      });
+            return [
+              Option.some({
+                type: "activity" as const,
+                threadId: liveSession.threadId,
+                terminalId: liveSession.terminalId,
+                sequence: eventStamp.sequence,
+                hasRunningSubprocess: next.hasRunningSubprocess,
+                label: terminalWireLabel(liveSession),
+              }),
+              state,
+            ] as const;
+          });
+        }),
+      );
 
       if (Option.isSome(event)) {
         yield* publishEvent(event.value);
@@ -2930,6 +2980,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         eventSequence: 0,
         inputCount: 0,
         attachmentGeneration: 0,
+        processSnapshotGeneration: 0,
         pendingInputCount: 0,
         inputWaiters: [],
         cols,
@@ -3328,7 +3379,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     yield* Effect.try({
       try: () => {
         process.write(input.data);
-        sharedProcessTableSnapshot = undefined;
+        invalidateProcessTableSnapshot(session);
         // Complete forwarding and the gate transition synchronously: a writer
         // canceled after sending its bytes must not look like untouched input.
         if (
@@ -3471,6 +3522,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           eventSequence: 0,
           inputCount: 0,
           attachmentGeneration: 0,
+          processSnapshotGeneration: 0,
           pendingInputCount: 0,
           inputWaiters: [],
           cols,
