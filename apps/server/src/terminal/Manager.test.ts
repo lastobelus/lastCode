@@ -2213,7 +2213,7 @@ it.layer(
         expect(process.killed).toBe(false);
         yield* TestClock.adjust("60 seconds");
         expect(yield* Deferred.await(ownedProcessIds)).toEqual([9000]);
-        process.emitExit({ exitCode: 0 });
+        process.emitExit({ exitCode: 0, signal: null });
         yield* Deferred.await(exited);
       }).pipe(Effect.provide(TestClock.layer())),
   );
