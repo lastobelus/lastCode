@@ -136,7 +136,10 @@ export class DesktopBrowserChannel extends Context.Service<
     readonly closeRoot: (
       key: DesktopTabKey,
       rootId: string,
-    ) => Effect.Effect<void, DesktopBrowserTransportError>;
+      options?: { readonly discardIfOffline?: boolean },
+    ) => Effect.Effect<"closed" | "discarded", DesktopBrowserTransportError>;
+    /** Ends ownership of an offline tab and retains destruction for its host's reconnect. */
+    readonly discardRoot: (key: DesktopTabKey, rootId: string) => Effect.Effect<void>;
     /** Discards this creation attempt before its tab is published; a page cannot veto it. */
     readonly cancelRootCreation: (key: DesktopTabKey, rootId: string) => Effect.Effect<void>;
     readonly bindPopup: (
@@ -228,6 +231,7 @@ const make = Effect.gen(function* () {
     string,
     { readonly key: DesktopTabKey; readonly profileId: string }
   >();
+  const discardedRoots = new Map<string, DesktopTabKey & { readonly rootId: string }>();
   const popupAnnouncements = new Map<
     string,
     DesktopTabKey & { readonly popupId: string; readonly url: string }
@@ -460,14 +464,19 @@ const make = Effect.gen(function* () {
       }
       case "rootClosed":
       case "popupClosed": {
-        if (event.type === "rootClosed" && roots.get(id)?.rootId !== event.rootId)
-          return Effect.void;
         const closeId =
           event.type === "popupClosed"
             ? nativeIdOf(key, "popup", event.popupId)
             : nativeIdOf(key, "root", event.rootId);
+        if (
+          event.type === "rootClosed" &&
+          roots.get(id)?.rootId !== event.rootId &&
+          !discardedRoots.has(closeId)
+        )
+          return Effect.void;
+        discardedRoots.delete(closeId);
         if (event.type === "popupClosed") popupAnnouncements.delete(popupIdOf(key, event.popupId));
-        else roots.delete(id);
+        else if (roots.get(id)?.rootId === event.rootId) roots.delete(id);
         nativeCloseAttempts.delete(closeId);
         canceledNativeCloses.delete(closeId);
         const pending = nativeCloseRequests.get(closeId);
@@ -783,6 +792,21 @@ const make = Effect.gen(function* () {
       return `ws://127.0.0.1:${address.port}/${secret}`;
     });
 
+  const discardRoot = (key: DesktopTabKey, rootId: string) =>
+    Effect.suspend(() => {
+      const root = roots.get(keyOf(key));
+      if (root?.rootId !== rootId) return Effect.void;
+      roots.delete(keyOf(key));
+      const id = nativeIdOf(key, "root", rootId);
+      nativeCloseAttempts.delete(id);
+      canceledNativeCloses.delete(id);
+      discardedRoots.set(id, { ...key, rootId });
+      return command(
+        { type: "discardRoot", threadId: key.threadId, tabId: key.tabId, rootId },
+        key.desktopHostId,
+      );
+    });
+
   const closeNative = Effect.fnUntraced(function* (
     key: DesktopTabKey,
     kind: "popup" | "root",
@@ -874,6 +898,14 @@ const make = Effect.gen(function* () {
                 tabId: abandoned.key.tabId,
                 requestId,
                 profileId: abandoned.profileId,
+              });
+          for (const root of discardedRoots.values())
+            if ((root.desktopHostId ?? "local") === desktopHostId)
+              yield* Queue.offer(queue, {
+                type: "discardRoot",
+                threadId: root.threadId,
+                tabId: root.tabId,
+                rootId: root.rootId,
               });
           yield* PubSub.publish(connectedHosts, desktopHostId);
           return Stream.fromQueue(queue);
@@ -1008,7 +1040,25 @@ const make = Effect.gen(function* () {
           key.desktopHostId,
         );
       }),
-    closeRoot: (key, rootId) => closeNative(key, "root", rootId),
+    closeRoot: (key, rootId, options) =>
+      Effect.gen(function* () {
+        const desktopHostId = key.desktopHostId ?? "local";
+        const id = nativeIdOf(key, "root", rootId);
+        // A later deliberate offline close can retire ownership. Decide before sending
+        // so a connection lost during an online close still preserves its veto.
+        if (
+          options?.discardIfOffline &&
+          (desktopHostId === "local" ? !localAvailable : !hosts.has(desktopHostId)) &&
+          roots.get(keyOf(key))?.rootId === rootId &&
+          !canceledNativeCloses.has(id)
+        ) {
+          yield* discardRoot(key, rootId);
+          return "discarded" as const;
+        }
+        yield* closeNative(key, "root", rootId);
+        return "closed" as const;
+      }),
+    discardRoot,
     cancelRootCreation: (key, rootId) =>
       Effect.suspend(() => {
         const root = roots.get(keyOf(key));

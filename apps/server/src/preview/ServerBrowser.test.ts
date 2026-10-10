@@ -275,6 +275,7 @@ let nativePopupCloseAttempted: PromiseWithResolvers<void> | null = null;
 let desktopPopupHostConnected = true;
 let nativePopupCloseFailure: "close-canceled" | null = null;
 let nativeCloseChannel: DesktopChannel.DesktopBrowserChannel["Service"] | null = null;
+let nativeRootCloseChannel: DesktopChannel.DesktopBrowserChannel["Service"] | null = null;
 let nativeCloseRejected: PromiseWithResolvers<void> | null = null;
 const nativePopupPresence = new Map<string, boolean>();
 let nativePopupProbeUnavailable = false;
@@ -311,12 +312,13 @@ let nativeRootProbeEntered: PromiseWithResolvers<void> | null = null;
 let nativeRootProbeGate: PromiseWithResolvers<void> | null = null;
 let nativeRootProbeProcessed: PromiseWithResolvers<void> | null = null;
 const rootClosures: Array<DesktopChannel.DesktopTabKey & { rootId: string }> = [];
+const rootDiscards: Array<DesktopChannel.DesktopTabKey & { rootId: string }> = [];
 const rootAcceptances: Array<DesktopChannel.DesktopTabKey & { rootId: string }> = [];
 const rootPublications: Array<DesktopChannel.DesktopTabKey & { rootId: string }> = [];
 let rootAcceptanceGate: PromiseWithResolvers<void> | null = null;
 let rootAcceptanceEntered: PromiseWithResolvers<void> | null = null;
 let rootAcceptanceFailure: DesktopBrowserTransportError | null = null;
-let rootCloseFailure: "close-canceled" | null = null;
+let rootCloseFailure: "close-canceled" | "host-unavailable" | null = null;
 let rootCloseAttempted: PromiseWithResolvers<void> | null = null;
 let releasedDesktopSeen: PromiseWithResolvers<void> | null = null;
 const nativePopupEvents = <T>(name: string) =>
@@ -464,6 +466,7 @@ const dependencies = Layer.mergeAll(
     probeRoot: (key, rootId) =>
       Effect.suspend(() => {
         nativeRootProbes.push({ ...key, rootId });
+        if (nativeRootCloseChannel) return nativeRootCloseChannel.probeRoot(key, rootId);
         return Effect.promise(async () => {
           nativeRootProbeEntered?.resolve();
           await nativeRootProbeGate?.promise;
@@ -500,15 +503,34 @@ const dependencies = Layer.mergeAll(
       Effect.sync(() => {
         rootPublications.push({ ...key, rootId });
       }),
-    closeRoot: (key, rootId) =>
+    closeRoot: (key, rootId, options) =>
       Effect.suspend(() => {
         rootClosures.push({ ...key, rootId });
         rootCloseAttempted?.resolve();
+        if (nativeRootCloseChannel) return nativeRootCloseChannel.closeRoot(key, rootId, options);
+        if (
+          options?.discardIfOffline &&
+          rootCloseFailure === "host-unavailable" &&
+          !desktopRenders(key.tabId)
+        ) {
+          rootDiscards.push({ ...key, rootId });
+          return Effect.succeed("discarded" as const);
+        }
         if (rootCloseFailure)
           return Effect.fail(new DesktopBrowserTransportError({ reason: rootCloseFailure }));
         desktopPopupEvents.emit("root-closed", { ...key, rootId });
-        return Effect.void;
+        return Effect.succeed("closed" as const);
       }),
+    discardRoot: (key, rootId) =>
+      Effect.sync(() => {
+        rootDiscards.push({ ...key, rootId });
+      }).pipe(
+        Effect.andThen(
+          Effect.suspend(() =>
+            nativeRootCloseChannel ? nativeRootCloseChannel.discardRoot(key, rootId) : Effect.void,
+          ),
+        ),
+      ),
     cancelRootCreation: (key, rootId) =>
       Effect.sync(() => {
         rootClosures.push({ ...key, rootId });
@@ -696,6 +718,7 @@ beforeEach(() => {
   rootAcceptanceEntered = null;
   rootAcceptanceFailure = null;
   rootCloseFailure = null;
+  rootDiscards.length = 0;
   rootCloseAttempted = null;
   releasedDesktopSeen = null;
   nativePopupCreatedSeen = null;
@@ -704,6 +727,7 @@ beforeEach(() => {
   desktopPopupHostConnected = true;
   nativePopupCloseFailure = null;
   nativeCloseChannel = null;
+  nativeRootCloseChannel = null;
   nativeCloseRejected = null;
   nativePopupPresence.clear();
   nativePopupProbeUnavailable = false;
@@ -1881,6 +1905,255 @@ it.live("a native veto lost offline clears pending close intent without replacin
       ).toBe(false);
     }),
   ).pipe(Effect.provide(layer)),
+);
+
+it.live.each(["reconnect", "deliberate-offline-close"] as const)(
+  "an interrupted online native root close handles %s without losing user intent",
+  (nextAction) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        profileCatalogue = {
+          desktopHostId: "host-a",
+          profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+          defaultProfileId: "work",
+        };
+        desktopRendersNext = true;
+        const { broker, tabId } = yield* ready;
+        const manager = yield* Manager.PreviewManager;
+        const before = yield* manager.list({ threadId: scope.thread.threadId });
+        const snapshot = before.sessions[0]!;
+        const source = {
+          threadId: scope.thread.threadId,
+          tabId,
+          desktopHostId: "host-a",
+          rootId: snapshot.desktopRootId!,
+        };
+        expect(snapshot.backingPage).toBe("desktop-root");
+        if (nextAction === "deliberate-offline-close") {
+          for (let index = 1; index < 8; index++) {
+            desktopRendersNext = true;
+            yield* broker.invoke({
+              scope,
+              operation: "open",
+              input: { reuseExistingTab: false, show: false },
+            });
+          }
+          expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toHaveLength(
+            8,
+          );
+        }
+        const context = yield* Layer.build(
+          DesktopChannel.layer.pipe(
+            Layer.provide(
+              ServerConfig.layerTest(process.cwd(), { prefix: "t3-native-root-veto-channel-" }),
+            ),
+          ),
+        );
+        const channel = Context.get(context, DesktopChannel.DesktopBrowserChannel);
+        const connect = (owner: string) =>
+          Effect.gen(function* () {
+            const commands = yield* Queue.unbounded<DesktopBrowserCommand>();
+            const fiber = yield* channel.subscribeCommands(owner, "host-a").pipe(
+              Stream.runForEach((command) => Queue.offer(commands, command)),
+              Effect.forkScoped,
+            );
+            expect(yield* Queue.take(commands)).toEqual({ type: "announce" });
+            return { commands, fiber };
+          });
+        const first = yield* connect("socket-a");
+        // Mirror the mock-created server tab into the real channel's published-root registry.
+        const creating = yield* channel
+          .createRoot(source, {
+            profileId: "work",
+            serverEpoch: before.serverEpoch,
+            url: "about:blank",
+          })
+          .pipe(Effect.forkScoped);
+        const create = yield* Queue.take(first.commands);
+        if (create.type !== "createRoot") throw new Error("Expected native root creation");
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          type: "rootCreated",
+          ...source,
+          requestId: create.requestId,
+          profileId: "work",
+        });
+        expect(yield* Fiber.join(creating)).toBe(source.rootId);
+        const accepting = yield* channel.acceptRoot(source, source.rootId).pipe(Effect.forkScoped);
+        const accept = yield* Queue.take(first.commands);
+        if (accept.type !== "acceptRoot") throw new Error("Expected native root acceptance");
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          type: "rootAccepted",
+          ...source,
+          requestId: accept.requestId,
+          profileId: "work",
+          accepted: true,
+        });
+        yield* Fiber.join(accepting);
+        yield* channel.publishRoot(source, source.rootId);
+        expect((yield* Queue.take(first.commands)).type).toBe("publishRoot");
+        nativeRootCloseChannel = channel;
+        const closing = yield* manager
+          .close({ threadId: scope.thread.threadId, tabId })
+          .pipe(Effect.flip, Effect.forkScoped);
+        const original = yield* Queue.take(first.commands);
+        if (original.type !== "closeRoot") throw new Error("Expected native root close");
+        // The native beforeunload veto happened after delivery, but its reply was lost offline.
+        desktopTabs.delete(tabId);
+        yield* Fiber.interrupt(first.fiber);
+        expect((yield* Fiber.join(closing))._tag).toBe("PreviewNativeCloseError");
+        expect(rootDiscards).toEqual([]);
+        if (nextAction === "deliberate-offline-close") {
+          // A fresh deliberate close can release ownership while the host remains offline.
+          yield* manager.close({ threadId: scope.thread.threadId, tabId });
+          const retained = (yield* manager.list({ threadId: scope.thread.threadId })).sessions;
+          expect(retained).toHaveLength(7);
+          expect(retained.some((session) => session.tabId === tabId)).toBe(false);
+          desktopRendersNext = true;
+          const replacement = yield* broker.invoke<PreviewAutomationStatus>({
+            scope,
+            operation: "open",
+            input: { reuseExistingTab: false, show: false },
+          });
+          expect(replacement.tabId).not.toBe(tabId);
+          expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toHaveLength(
+            8,
+          );
+          const reconnected = yield* connect("socket-b");
+          expect(yield* Queue.take(reconnected.commands)).toEqual({
+            type: "discardRoot",
+            threadId: scope.thread.threadId,
+            tabId,
+            rootId: source.rootId,
+          });
+          expect(yield* Queue.size(reconnected.commands)).toBe(0);
+          return;
+        }
+        expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toHaveLength(1);
+        const reconnected = yield* connect("socket-b");
+        expect(yield* Queue.take(reconnected.commands)).toMatchObject({
+          type: "publishRoot",
+          rootId: source.rootId,
+        });
+        desktopTabs.add(tabId);
+        nativeCloseRejected = Promise.withResolvers<void>();
+        desktopPopupEvents.emit("host-connected", "host-a");
+        const probe = yield* Queue.take(reconnected.commands);
+        if (probe.type !== "probeRoot") throw new Error("Expected native root presence probe");
+        yield* channel.receiveEvent("socket-b", "host-a", {
+          type: "rootPresence",
+          ...source,
+          requestId: probe.requestId,
+          present: true,
+        });
+        expect(yield* Queue.take(reconnected.commands)).toEqual(original);
+        yield* channel.receiveEvent("socket-b", "host-a", {
+          type: "rootCloseCanceled",
+          ...source,
+          requestId: original.requestId,
+        });
+        yield* Effect.promise(() => nativeCloseRejected!.promise);
+        expect(rootDiscards).toEqual([]);
+        expect(yield* Queue.size(reconnected.commands)).toBe(0);
+        expect(
+          (yield* manager.list({ threadId: scope.thread.threadId })).sessions[0],
+        ).toMatchObject({
+          tabId,
+          backingPage: "desktop-root",
+          desktopRootId: source.rootId,
+          desktopHostId: "host-a",
+          profileId: "work",
+          automationOwner: snapshot.automationOwner,
+        });
+        expect(
+          yield* broker.invoke({
+            scope,
+            tabId,
+            operation: "evaluate",
+            input: { expression: "stillOpen()" },
+          }),
+        ).toBe("evaluated");
+        const explicit = yield* manager
+          .close({ threadId: scope.thread.threadId, tabId })
+          .pipe(Effect.forkScoped);
+        const fresh = yield* Queue.take(reconnected.commands);
+        if (fresh.type !== "closeRoot") throw new Error("Expected deliberate native close");
+        expect(fresh.requestId).not.toBe(original.requestId);
+        yield* channel.receiveEvent("socket-b", "host-a", { type: "rootClosed", ...source });
+        yield* Fiber.join(explicit);
+        desktopPopupEvents.emit("root-closed", source);
+        expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toEqual([]);
+        expect(rootDiscards).toEqual([]);
+        expect(yield* Queue.size(reconnected.commands)).toBe(0);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live.each(["agent", "client"] as const)(
+  "explicit %s close retires an offline root without reopening it or consuming tab capacity",
+  (entry) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        profileCatalogue = {
+          desktopHostId: "host-a",
+          profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+          defaultProfileId: "work",
+        };
+        desktopRendersNext = true;
+        const { broker, browser, tabId } = yield* ready;
+        const manager = yield* Manager.PreviewManager;
+        const viewer = yield* browser.attachViewer(viewerInput(tabId, false));
+        desktopTabs.delete(tabId);
+        desktopDetaches.emit("detach", {
+          threadId: scope.thread.threadId,
+          tabId,
+          desktopHostId: "host-a",
+        });
+        let ending = yield* Queue.take(viewer.output);
+        while (ending._tag !== "reconnect") ending = yield* Queue.take(viewer.output);
+        for (let index = 1; index < 8; index++) {
+          desktopRendersNext = true;
+          yield* broker.invoke({
+            scope,
+            operation: "open",
+            input: { reuseExistingTab: false, show: false },
+          });
+        }
+        rootCloseFailure = "host-unavailable";
+        const mismatch = yield* broker
+          .invoke<void>({
+            scope: { ...scope, thread: { ...scope.thread, providerSessionId: "other-agent" } },
+            tabId,
+            operation: "close",
+            input: {},
+          })
+          .pipe(Effect.flip);
+        expect(mismatch.message).toContain("another agent session");
+        expect(rootDiscards).toEqual([]);
+        const connectionsBefore = desktopConnections.length;
+        if (entry === "agent")
+          yield* broker.invoke({ scope, tabId, operation: "close", input: {} });
+        else yield* manager.close({ threadId: scope.thread.threadId, tabId });
+        expect(desktopConnections).toHaveLength(connectionsBefore);
+        expect(rootDiscards).toEqual([
+          {
+            threadId: scope.thread.threadId,
+            tabId,
+            desktopHostId: "host-a",
+            rootId: `root-${tabId}`,
+          },
+        ]);
+        expect((yield* manager.list({})).sessions).toHaveLength(7);
+        rootCloseFailure = null;
+        desktopRendersNext = true;
+        const replacement = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { reuseExistingTab: false, show: false },
+        });
+        expect(replacement.tabId).not.toBe(tabId);
+        expect((yield* manager.list({})).sessions).toHaveLength(8);
+      }),
+    ).pipe(Effect.provide(layer)),
 );
 
 it.live.each(["absent", "present", "unavailable"] as const)(

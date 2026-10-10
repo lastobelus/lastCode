@@ -565,6 +565,74 @@ it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
       }).pipe(Effect.scoped),
   );
 
+  it.effect(
+    "an explicit offline discard is replayed only to its owner until destruction acknowledges",
+    () =>
+      Effect.gen(function* () {
+        const channel = yield* remoteChannel;
+        const host = yield* connectHost(channel, "socket-a", "host-a");
+        const source = { ...key, desktopHostId: "host-a" };
+        const opening = yield* channel
+          .createRoot(source, {
+            serverEpoch: "server-epoch-a",
+            profileId: "default",
+            url: "about:blank",
+          })
+          .pipe(Effect.forkScoped);
+        const creation = yield* Queue.take(host.commands);
+        if (creation.type !== "createRoot") throw new Error("Expected native root creation");
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          type: "rootCreated",
+          ...key,
+          rootId: "root-a",
+          requestId: creation.requestId,
+          profileId: "default",
+        });
+        yield* Fiber.join(opening);
+        const accepting = yield* channel.acceptRoot(source, "root-a").pipe(Effect.forkScoped);
+        const acceptance = yield* Queue.take(host.commands);
+        if (acceptance.type !== "acceptRoot") throw new Error("Expected native root acceptance");
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          ...acceptance,
+          type: "rootAccepted",
+          accepted: true,
+        });
+        yield* Fiber.join(accepting);
+        yield* channel.publishRoot(source, "root-a");
+        expect((yield* Queue.take(host.commands)).type).toBe("publishRoot");
+        yield* Fiber.interrupt(host.fiber);
+        yield* channel.discardRoot(source, "wrong-root");
+        expect(yield* channel.closeRoot(source, "root-a", { discardIfOffline: true })).toBe(
+          "discarded",
+        );
+        const other = yield* connectHost(channel, "socket-b", "host-b");
+        expect(yield* Queue.size(other.commands)).toBe(0);
+        let reconnected = yield* connectHost(channel, "socket-c", "host-a");
+        expect(yield* Queue.take(reconnected.commands)).toEqual({
+          type: "discardRoot",
+          ...key,
+          rootId: "root-a",
+        });
+        expect(yield* Queue.size(reconnected.commands)).toBe(0);
+        yield* channel.receiveEvent("socket-c", "host-a", {
+          type: "rootClosed",
+          ...key,
+          rootId: "wrong-root",
+        });
+        yield* Fiber.interrupt(reconnected.fiber);
+        reconnected = yield* connectHost(channel, "socket-d", "host-a");
+        expect((yield* Queue.take(reconnected.commands)).type).toBe("discardRoot");
+        yield* channel.receiveEvent("socket-d", "host-a", {
+          type: "rootClosed",
+          ...key,
+          rootId: "root-a",
+        });
+        yield* Fiber.interrupt(reconnected.fiber);
+        reconnected = yield* connectHost(channel, "socket-e", "host-a");
+        expect(yield* Queue.size(reconnected.commands)).toBe(0);
+      }).pipe(Effect.scoped),
+  );
+
   it.effect("disconnect fails an outstanding root probe and ignores its old response", () =>
     Effect.gen(function* () {
       const channel = yield* remoteChannel;

@@ -24,6 +24,7 @@ import * as DesktopClientSettings from "../src/settings/DesktopClientSettings.ts
 import * as ServerBrowserPage from "../../server/src/preview/ServerBrowserPage.ts";
 import { DESKTOP_BROWSER_SURFACE_RESPONSE_CHANNEL } from "../src/ipc/channels.ts";
 import { runNativeKeyboardFixture } from "./browser-keyboard-root.fixture.mjs";
+import { runNativeKeyboardChannelFixture } from "./browser-keyboard-channel.fixture.mjs";
 
 const [scratch, wsModulePath] = process.argv.slice(2);
 NodeAssert.ok(scratch && wsModulePath, "isolated fixture arguments required");
@@ -328,22 +329,29 @@ async function main() {
     }
     const { page, cdp } = pages[0];
     const childOrigin = `http://localhost:${fixtureServer.address().port}`;
-    await page.evaluate((origin) => {
-      window.childFrameRan = false;
-      const frame = document.createElement("iframe");
-      frame.hidden = true;
-      window.addEventListener("message", (event) => {
-        if (
-          event.source === frame.contentWindow &&
-          event.origin === origin &&
-          event.data === "child-frame-ran"
-        )
-          window.childFrameRan = true;
-      });
-      frame.src = `${origin}/child-frame`;
-      document.body.append(frame);
-    }, childOrigin);
-    await page.waitForFunction(() => window.childFrameRan === true, null, { timeout: 5000 });
+    await milestone("cross-site child frame", () =>
+      page.evaluate(
+        (origin) =>
+          new Promise((resolve) => {
+            const frame = document.createElement("iframe");
+            frame.hidden = true;
+            const ready = (event) => {
+              if (
+                event.source === frame.contentWindow &&
+                event.origin === origin &&
+                event.data === "child-frame-ran"
+              ) {
+                window.removeEventListener("message", ready);
+                resolve();
+              }
+            };
+            window.addEventListener("message", ready);
+            frame.src = `${origin}/child-frame`;
+            document.body.append(frame);
+          }),
+        childOrigin,
+      ),
+    );
     NodeAssert.ok(
       resumedChildSessions.size > 0,
       "cross-site child resumed through the native CDP relay",
@@ -376,25 +384,6 @@ async function main() {
       width: 390,
       height: 844,
     });
-    await hostWindow.webContents.executeJavaScript("surfaceSmokeResetKeyboard()");
-    await NodeAssert.rejects(
-      ServerBrowserPage.type(page, {
-        selector: "#draft",
-        text: "must not reach host",
-        clear: false,
-      }),
-      /reuseExistingTab:false/,
-    );
-    await NodeAssert.rejects(ServerBrowserPage.press(page, { key: "q" }), /reuseExistingTab:false/);
-    const protectedHost = await hostWindow.webContents.executeJavaScript(
-      "surfaceSmokeKeyboardState()",
-    );
-    NodeAssert.equal(protectedHost.value, protectedHost.expected);
-    NodeAssert.equal(protectedHost.activeElement, "host-sentinel");
-    NodeAssert.deepEqual(protectedHost.events, []);
-    results.push(
-      "shared guest rejects text/key input before native injection and leaves host unchanged",
-    );
     results.push(
       await runNativeKeyboardFixture({
         scratch,
@@ -403,6 +392,16 @@ async function main() {
         nativeGuests,
         tabs,
         WebSocketServer,
+        host,
+        browserSessions: browserSession,
+        environmentId,
+      }),
+    );
+    results.push(
+      await runNativeKeyboardChannelFixture({
+        scratch,
+        fixtureOrigin,
+        hostWindow,
         host,
         browserSessions: browserSession,
         environmentId,
@@ -761,7 +760,7 @@ async function main() {
       passed: true,
       results,
       scope:
-        "production native host/CDP relay, actual hidden-window presentation registry and window.open popup binding, surface helpers, ServerBrowserPage; fixture bridge bypasses DesktopBrowserChannel and orchestration broker; no React hydration, visible-window transitions, OS-minimized-window, Windows, or WSL proof",
+        "production native host/CDP relay, hidden-window presentation registry, window.open popup binding, surface helpers and ServerBrowserPage; the channel keyboard case also exercises the real automation broker, server browser, manager and DesktopBrowserChannel CDP endpoint; other cases use a fixture bridge; no React hydration, visible-window transitions, OS-minimized-window, Windows, or WSL proof",
     };
     await NodeFSP.writeFile(NodePath.join(scratch, "result.json"), JSON.stringify(report, null, 2));
     console.log(JSON.stringify(report));

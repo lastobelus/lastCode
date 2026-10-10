@@ -287,6 +287,30 @@ export const make = Effect.gen(function* () {
     runFork(PubSub.publish(outbox, { desktopHostId, event }));
   let mainWindow: Electron.BrowserWindow | null = null;
   let releaseMainWindow: (() => void) | undefined;
+  const makeAutomationLifetime = () => ({
+    closed: false,
+    windows: new Set<Electron.BrowserWindow>(),
+  });
+  let automationLifetime = makeAutomationLifetime();
+  const closeAutomationLifetime = (lifetime: ReturnType<typeof makeAutomationLifetime>) => {
+    lifetime.closed = true;
+    for (const window of lifetime.windows) {
+      if (!window.isDestroyed()) window.destroy();
+    }
+    lifetime.windows.clear();
+  };
+  const ownAutomationWindow = (
+    lifetime: ReturnType<typeof makeAutomationLifetime>,
+    window: Electron.BrowserWindow,
+  ) => {
+    if (lifetime.closed) {
+      if (!window.isDestroyed()) window.destroy();
+      return false;
+    }
+    lifetime.windows.add(window);
+    window.once("closed", () => lifetime.windows.delete(window));
+    return true;
+  };
   const pictureInPictureWindows = new Map<
     string,
     { window: Electron.BrowserWindow; release: () => void }
@@ -332,6 +356,7 @@ export const make = Effect.gen(function* () {
   yield* Effect.addFinalizer(() =>
     Effect.sync(() => {
       releaseMainWindow?.();
+      closeAutomationLifetime(automationLifetime);
       for (const entry of pictureInPictureWindows.values()) entry.release();
       for (const popup of popups.values()) {
         if (popup.boundKey) detach(popup.boundKey);
@@ -810,6 +835,9 @@ export const make = Effect.gen(function* () {
     desktopHostId: string,
   ) =>
     Effect.suspend(() => {
+      // Capture the owner before waiting on profile resolution or window creation.
+      // A replacement main window must not adopt an old owner's late result.
+      const lifetime = automationLifetime;
       const key = { threadId: command.threadId, tabId: command.tabId, desktopHostId };
       const attempt = creationKey(key, command.requestId, command.profileId);
       pendingRootCreations.set(attempt, key);
@@ -833,7 +861,7 @@ export const make = Effect.gen(function* () {
                 desktopHostId,
               );
             if (canceledCreations.has(attempt)) return;
-            if (!binding || !createRootWindow) {
+            if (lifetime.closed || !binding || !createRootWindow) {
               respond(null, "guest-unavailable");
               return;
             }
@@ -868,6 +896,10 @@ export const make = Effect.gen(function* () {
               respond(null, "profile-unavailable");
               return;
             }
+            if (lifetime.closed) {
+              respond(null, "guest-unavailable");
+              return;
+            }
             let window: Electron.BrowserWindow | undefined;
             const created = yield* createRootWindow({
               environmentId,
@@ -877,11 +909,18 @@ export const make = Effect.gen(function* () {
             }).pipe(
               Effect.flatMap((value) => {
                 window = value;
-                return Effect.tryPromise(() => value.loadURL("about:blank"));
+                if (!ownAutomationWindow(lifetime, value))
+                  return Effect.fail(
+                    new DesktopBrowserTransportError({ reason: "host-unavailable" }),
+                  );
+                return Effect.tryPromise({
+                  try: () => value.loadURL("about:blank"),
+                  catch: () => new DesktopBrowserTransportError({ reason: "guest-unavailable" }),
+                });
               }),
               Effect.option,
             );
-            if (Option.isNone(created) || canceledCreations.has(attempt)) {
+            if (Option.isNone(created) || canceledCreations.has(attempt) || lifetime.closed) {
               if (window && !window.isDestroyed()) window.destroy();
               if (!canceledCreations.has(attempt)) respond(null, "guest-unavailable");
               return;
@@ -917,6 +956,8 @@ export const make = Effect.gen(function* () {
               root,
             );
             root.contents.setWindowOpenHandler((details) => {
+              // A denied blank popup must leave its opener intact for auth fallback.
+              if (details.url === "" || details.url === "about:blank") return { action: "deny" };
               try {
                 if (
                   details.disposition === "new-window" &&
@@ -942,6 +983,7 @@ export const make = Effect.gen(function* () {
               return { action: "deny" };
             });
             root.contents.on("did-create-window", (child) => {
+              if (!ownAutomationWindow(lifetime, child)) return;
               child.webContents.setIgnoreMenuShortcuts(true);
               child.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
               registerPopup(key, child);
@@ -1016,6 +1058,18 @@ export const make = Effect.gen(function* () {
           },
           desktopHostId,
         );
+        return Effect.void;
+      }
+      if (command.type === "discardRoot") {
+        const key = { threadId: command.threadId, tabId: command.tabId, desktopHostId };
+        const root = popups.get(command.rootId);
+        if (
+          root?.kind === "root" &&
+          keyOf(root.source) === keyOf(key) &&
+          !root.window.isDestroyed()
+        )
+          root.window.destroy();
+        else emit({ type: "rootClosed", ...key, rootId: command.rootId }, desktopHostId);
         return Effect.void;
       }
       if (command.type === "reconcileRoots") {
@@ -1454,11 +1508,23 @@ export const make = Effect.gen(function* () {
     setMainWindow: (window) => {
       if (mainWindow === window) return;
       releaseMainWindow?.();
+      if (mainWindow !== null) {
+        closeAutomationLifetime(automationLifetime);
+        automationLifetime = makeAutomationLifetime();
+      }
       mainWindow = window;
+      const lifetime = automationLifetime;
       const changed = () => {
         for (const tab of tabs.values()) updatePresentation(tab);
       };
-      releaseMainWindow = observeWindow(window, changed);
+      const closed = () => closeAutomationLifetime(lifetime);
+      window.on("closed", closed);
+      const stopObserving = observeWindow(window, changed);
+      releaseMainWindow = () => {
+        stopObserving();
+        window.off("closed", closed);
+      };
+      if (window.isDestroyed()) closed();
       changed();
     },
     setPictureInPictureWindow: (runtimeTabId, window) => {

@@ -39,8 +39,9 @@ const makePresentationWindow = (initialVisible = true) => {
   const events = new NodeEvents.EventEmitter();
   let visible = initialVisible;
   let minimized = false;
+  let destroyed = false;
   const window = Object.assign(events, {
-    isDestroyed: () => false,
+    isDestroyed: () => destroyed,
     isVisible: () => visible,
     isMinimized: () => minimized,
     webContents: { id: 77 },
@@ -62,6 +63,10 @@ const makePresentationWindow = (initialVisible = true) => {
     restore: () => {
       minimized = false;
       events.emit("restore");
+    },
+    close: () => {
+      destroyed = true;
+      events.emit("closed");
     },
   };
 };
@@ -322,6 +327,50 @@ it.effect(
     }),
 );
 
+it.effect("discards a published offline root only for its exact desktop, tab and identity", () =>
+  Effect.gen(function* () {
+    const host = yield* DesktopBrowserHost.make.pipe(
+      Effect.provide(DesktopClientSettings.layerTest()),
+    );
+    const events = yield* Queue.unbounded<DesktopBrowserEvent>();
+    yield* host.remoteEvents.pipe(
+      Stream.runForEach(({ event }) => Queue.offer(events, event)),
+      Effect.forkScoped({ startImmediately: true }),
+    );
+    const root = makeRoot();
+    host.setRootFactory(() => Effect.succeed(root.window));
+    yield* host.bindEnvironment("host-a", "environment-a", profileResolver("environment-a"));
+    const send = (
+      command: Parameters<typeof host.handleRemoteCommand>[0]["command"],
+      desktopHostId = "host-a",
+    ) => host.handleRemoteCommand({ desktopHostId, command });
+    yield* send({
+      type: "createRoot",
+      serverEpoch: "server-epoch-a",
+      ...key,
+      requestId: "create",
+      profileId: "default",
+      url: "about:blank",
+    });
+    yield* Queue.take(events);
+    const created = yield* Queue.take(events);
+    if (created.type !== "rootCreated" || created.rootId === null) throw new Error("Expected root");
+    const attempt = { ...key, rootId: created.rootId, requestId: "create", profileId: "default" };
+    yield* send({ type: "acceptRoot", ...attempt });
+    yield* Queue.take(events);
+    yield* send({ type: "publishRoot", ...attempt });
+    yield* send({ type: "discardRoot", ...key, rootId: created.rootId }, "host-b");
+    yield* send({ type: "discardRoot", ...key, tabId: "other-tab", rootId: created.rootId });
+    yield* send({ type: "discardRoot", ...key, rootId: "other-root" });
+    expect(root.window.isDestroyed()).toBe(false);
+    // A disconnected tab's explicit retirement is destruction, not a vetoable close.
+    root.window.close = () => undefined;
+    yield* send({ type: "discardRoot", ...key, rootId: created.rootId });
+    expect(root.window.isDestroyed()).toBe(true);
+    expect(root.closeCount()).toBe(1);
+  }),
+);
+
 it.effect(
   "cancels only its in-flight root creation without announcing or retaining a late window",
   () =>
@@ -569,6 +618,149 @@ it.effect("root presence survives transport disconnect and detects an ordinary l
     });
     expect(root.closeCount()).toBe(1);
   }),
+);
+
+it.effect("main-window closure destroys published automation roots and their children only", () =>
+  Effect.gen(function* () {
+    const host = yield* DesktopBrowserHost.make.pipe(
+      Effect.provide(DesktopClientSettings.layerTest()),
+    );
+    const events = yield* Queue.unbounded<DesktopBrowserEvent>();
+    yield* host.remoteEvents.pipe(
+      Stream.runForEach(({ event }) => Queue.offer(events, event)),
+      Effect.forkScoped({ startImmediately: true }),
+    );
+    const main = makePresentationWindow();
+    host.setMainWindow(main.window);
+    const root = makeRoot();
+    host.setRootFactory(() => Effect.succeed(root.window));
+    yield* host.bindEnvironment("host-a", "environment-a", profileResolver("environment-a"));
+    const send = (command: Parameters<typeof host.handleRemoteCommand>[0]["command"]) =>
+      host.handleRemoteCommand({ desktopHostId: "host-a", command });
+    yield* send({
+      type: "createRoot",
+      ...key,
+      serverEpoch: "server-epoch-a",
+      requestId: "create",
+      profileId: "default",
+      url: "about:blank",
+    });
+    yield* Queue.take(events);
+    const created = yield* Queue.take(events);
+    if (created.type !== "rootCreated" || created.rootId === null) throw new Error("Expected root");
+    const attempt = { ...key, rootId: created.rootId, requestId: "create", profileId: "default" };
+    yield* send({ type: "acceptRoot", ...attempt });
+    yield* Queue.take(events);
+    yield* send({ type: "publishRoot", ...attempt });
+    const child = makeRoot();
+    Object.assign(child.contents, { setIgnoreMenuShortcuts: () => undefined });
+    root.contents.emit("did-create-window", child.window);
+    expect((yield* Queue.take(events)).type).toBe("popupCreated");
+    const sharedKey = { ...key, tabId: "human-tab", desktopHostId: "host-a" };
+    host.attach(sharedKey, makeDebuggee().tab, "human-runtime");
+    yield* Queue.take(events);
+    const humanPopup = makePopup();
+    host.registerPopup(sharedKey, humanPopup.window);
+    yield* Queue.take(events);
+
+    main.hide();
+    main.minimize();
+    main.restore();
+    yield* send({ type: "disconnect" });
+    expect(root.window.isDestroyed()).toBe(false);
+    expect(child.window.isDestroyed()).toBe(false);
+    main.close();
+    expect(root.window.isDestroyed()).toBe(true);
+    expect(child.window.isDestroyed()).toBe(true);
+    expect(humanPopup.window.isDestroyed()).toBe(false);
+    const closed = [
+      yield* Queue.take(events),
+      yield* Queue.take(events),
+      yield* Queue.take(events),
+    ];
+    expect(closed.map((event) => event.type).sort()).toEqual([
+      "detached",
+      "popupClosed",
+      "rootClosed",
+    ]);
+    // A child delivered after owner closure is destroyed before registration.
+    const lateChild = makeRoot();
+    root.contents.emit("did-create-window", lateChild.window);
+    expect(lateChild.window.isDestroyed()).toBe(true);
+    expect(lateChild.attachCount()).toBe(0);
+  }),
+);
+
+it.effect.each(["factory", "navigation"] as const)(
+  "main-window closure discards in-flight %s and queued root creations across replacement",
+  (stage) =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      const events = yield* Queue.unbounded<DesktopBrowserEvent>();
+      yield* host.remoteEvents.pipe(
+        Stream.runForEach(({ event }) => Queue.offer(events, event)),
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      const main = makePresentationWindow();
+      host.setMainWindow(main.window);
+      yield* host.bindEnvironment("host-a", "environment-a", profileResolver("environment-a"));
+      const entered = yield* Deferred.make<void>();
+      const returned = yield* Deferred.make<Electron.BrowserWindow>();
+      const loadEntered = Promise.withResolvers<void>();
+      const loadCompleted = Promise.withResolvers<void>();
+      const root = makeRoot();
+      let factoryCalls = 0;
+      let loads = 0;
+      Object.assign(root.window, {
+        loadURL: () => {
+          loads += 1;
+          loadEntered.resolve();
+          return loadCompleted.promise;
+        },
+      });
+      host.setRootFactory(() => {
+        factoryCalls += 1;
+        return stage === "factory"
+          ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(returned)))
+          : Effect.succeed(root.window);
+      });
+      const create = (tabId: string) =>
+        host.handleRemoteCommand({
+          desktopHostId: "host-a",
+          command: {
+            type: "createRoot",
+            ...key,
+            tabId,
+            serverEpoch: "server-epoch-a",
+            requestId: `create-${tabId}`,
+            profileId: "default",
+            url: "about:blank",
+          },
+        });
+      const creating = yield* create("first").pipe(Effect.forkScoped);
+      yield* stage === "factory"
+        ? Deferred.await(entered)
+        : Effect.promise(() => loadEntered.promise);
+      const queued = yield* create("queued").pipe(Effect.forkScoped({ startImmediately: true }));
+      main.close();
+      host.setMainWindow(makePresentationWindow().window);
+      yield* Deferred.succeed(returned, root.window);
+      loadCompleted.resolve();
+      yield* Fiber.join(creating);
+      yield* Fiber.join(queued);
+      expect(root.window.isDestroyed()).toBe(true);
+      expect(root.attachCount()).toBe(0);
+      expect(factoryCalls).toBe(1);
+      expect(loads).toBe(stage === "factory" ? 0 : 1);
+      for (let index = 0; index < 2; index += 1)
+        expect(yield* Queue.take(events)).toMatchObject({
+          type: "rootCreated",
+          rootId: null,
+          reason: "guest-unavailable",
+        });
+    }),
 );
 
 it.effect(

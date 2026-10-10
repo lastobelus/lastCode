@@ -1641,7 +1641,16 @@ const make = Effect.gen(function* () {
                 if (root.closed) return Effect.void;
                 root.closeRequested = true;
                 if (!root.published) return desktopChannel.cancelRootCreation(key, root.rootId!);
-                return desktopChannel.closeRoot(key, root.rootId!).pipe(
+                return desktopChannel.closeRoot(key, root.rootId!, { discardIfOffline: true }).pipe(
+                  Effect.tap((outcome) =>
+                    Effect.sync(() => {
+                      if (outcome !== "discarded") return;
+                      // Explicit offline close ends server ownership. Native destruction
+                      // waits for reconnect; don't claim a native close acknowledgment.
+                      root.closed = true;
+                      nativeRoots.delete(tabKey(key.threadId, key.tabId));
+                    }),
+                  ),
                   Effect.tapError((error) =>
                     Effect.sync(() => {
                       if (error.reason !== "close-canceled") return;
@@ -1660,6 +1669,7 @@ const make = Effect.gen(function* () {
                         reason: error.reason === "close-canceled" ? "canceled" : "unavailable",
                       }),
                   ),
+                  Effect.asVoid,
                 );
               }),
           };
@@ -2667,6 +2677,25 @@ const make = Effect.gen(function* () {
             ),
           signal,
         );
+      }
+    }
+    if (request.operation === "close" && request.tabId !== undefined) {
+      const key = tabKey(request.threadId, request.tabId);
+      const root = nativeRoots.get(key);
+      if (
+        root?.published &&
+        !tabs.has(key) &&
+        !(await Effect.runPromise(desktopChannel.isAttached(root.key)))
+      ) {
+        if (root.automationOwner !== request.agentSessionId)
+          throw new BrowserControlInterrupted(
+            "Only the agent session that opened this tab can close it.",
+            "agentMismatch",
+          );
+        await Effect.runPromise(
+          manager.close({ threadId: request.threadId, tabId: request.tabId }),
+        );
+        return {};
       }
     }
     const tab = await requireTab(request);

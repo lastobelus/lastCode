@@ -186,6 +186,8 @@ export const DesktopBrowserCommand = Schema.Union([
     rootId: TrimmedNonEmptyString,
     requestId: TrimmedNonEmptyString,
   }),
+  /** Retire an explicitly closed offline tab when its desktop reconnects. */
+  Schema.Struct({ type: Schema.Literal("discardRoot"), ...TabKey, rootId: TrimmedNonEmptyString }),
   /** Bind the existing child window; never create another page for it. */
   Schema.Struct({
     type: Schema.Literal("bindPopup"),

@@ -33,14 +33,23 @@ async function bundle(entry, format, output, native = false) {
     logLevel: "error",
     // Library builds retain React's environment probe unless explicitly replaced for a browser.
     ...(!native ? { define: { "process.env.NODE_ENV": JSON.stringify("production") } } : {}),
+    ...(native ? { resolve: { conditions: ["node"], mainFields: ["module", "main"] } } : {}),
     build: {
       write: false,
       minify: false,
       target: native ? "node24" : "chrome144",
       lib: { entry: NodePath.join(directory, entry), formats: [format], name: "SurfaceSmoke" },
       rolldownOptions: {
+        ...(native ? { platform: "node" } : {}),
         external: native
-          ? [/^node:/, "electron", "playwright-core", "ffi-rs", "@napi-rs/keyring"]
+          ? [
+              ...NodeModule.builtinModules,
+              /^node:/,
+              "electron",
+              "playwright-core",
+              "ffi-rs",
+              "@napi-rs/keyring",
+            ]
           : [],
       },
     },
