@@ -574,6 +574,9 @@ export const runBackendProcess = Effect.fn("runBackendProcess")(function* (
       Stream.splitLines,
       Stream.filter((line) => line.length > 0),
       Stream.runForEach(handleCommand),
+      // Record termination before the warning handler consumes the failure.
+      // Packaged apps can have no usable console output.
+      Effect.withSpan("desktop.browser.commandStream", { attributes: { fd: browserFd } }),
       Effect.catchCause((cause) =>
         logBackendProcessWarning("desktop browser command stream stopped", {
           fd: browserFd,
@@ -956,7 +959,12 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
         });
 
         const prepareDesktopBrowser = yield* Effect.cached(
-          spec.prepareDesktopBrowser ?? Effect.void,
+          Effect.void.pipe(
+            // A completed marker survives even when preparation never completes.
+            Effect.withSpan("desktop.browser.prepareStarted"),
+            Effect.andThen(spec.prepareDesktopBrowser ?? Effect.void),
+            Effect.withSpan("desktop.browser.prepare"),
+          ),
         );
         const program = runBackendProcess({
           ...config.value,

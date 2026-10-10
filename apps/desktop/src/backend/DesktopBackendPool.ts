@@ -306,16 +306,25 @@ export const layer = Layer.effect(
       prepareDesktopBrowser: Effect.gen(function* () {
         const environmentId = yield* fileSystem
           .readFileString(environment.path.join(environment.stateDir, "environment-id"))
-          .pipe(Effect.flatMap((raw) => decodeEnvironmentId(raw.trim())));
-        yield* browserHost.bindEnvironment("local", environmentId, (profileId) =>
-          BrowserProfileScope.browserProfileScope(environmentId, profileId).pipe(
-            Effect.provide(browserProfileContext),
-            Effect.provideService(DesktopBackendPool, pool),
-            Effect.mapError(
-              () => new DesktopBrowserTransportError({ reason: "profile-unavailable" }),
+          .pipe(
+            Effect.withSpan("desktop.browser.readLocalIdentity"),
+            Effect.flatMap((raw) =>
+              decodeEnvironmentId(raw.trim()).pipe(
+                Effect.withSpan("desktop.browser.decodeLocalIdentity"),
+              ),
             ),
-          ),
-        );
+          );
+        yield* browserHost
+          .bindEnvironment("local", environmentId, (profileId) =>
+            BrowserProfileScope.browserProfileScope(environmentId, profileId).pipe(
+              Effect.provide(browserProfileContext),
+              Effect.provideService(DesktopBackendPool, pool),
+              Effect.mapError(
+                () => new DesktopBrowserTransportError({ reason: "profile-unavailable" }),
+              ),
+            ),
+          )
+          .pipe(Effect.withSpan("desktop.browser.bindLocalEnvironment"));
       }).pipe(Effect.orDie),
       // Window creation errors propagating out of handleBackendReady must
       // not block the readiness callback (that would prevent restartAttempt
