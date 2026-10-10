@@ -2927,6 +2927,96 @@ it.layer(
       }),
   );
 
+  it.effect.each(
+    (["native", "fallback"] as const).flatMap((source) =>
+      (
+        [
+          {
+            scenario: "truncated ASCII name",
+            shellName: "custom-login-shell",
+            startupName: "-custom-login-s",
+            commandName: "custom-login-s",
+            active: true,
+          },
+          {
+            scenario: "truncated UTF-8 name",
+            shellName: "custom-é-login-shell",
+            startupName: "-custom-é-logi",
+            commandName: "custom-é-logi",
+            active: true,
+          },
+          {
+            scenario: "full short name",
+            shellName: "zsh",
+            startupName: "-zsh",
+            commandName: "-zsh",
+            active: false,
+          },
+        ] as const
+      ).map((scenario) => ({ source, ...scenario })),
+    ),
+  )(
+    "Linux login-shell $scenario stays safe through $source first input and cleanup",
+    ({ source, shellName, startupName, commandName, active }) =>
+      Effect.gen(function* () {
+        const registered = yield* Deferred.make<ReadonlyArray<number>>();
+        const ptyAdapter = new FakePtyAdapter();
+        let observedName: string = startupName;
+        let ownershipReleases = 0;
+        const { manager } = yield* createSnapshotBoundaryManager(
+          source,
+          ptyAdapter,
+          Effect.sync(() => [{ pid: 9000, ppid: 1, name: observedName }]),
+          {
+            shellResolver: () => `/opt/tools/${shellName}`,
+            registerTerminalProcesses: ({ processIds }) =>
+              Deferred.succeed(registered, processIds).pipe(Effect.asVoid),
+            unregisterTerminal: () =>
+              Effect.sync(() => {
+                ownershipReleases += 1;
+              }),
+          },
+        );
+        yield* TestClock.adjust(0);
+        const terminal = openInput();
+        yield* manager.open(terminal);
+        const process = ptyAdapter.processes[0]!;
+        process.exitOnKill = "SIGTERM";
+        yield* manager.write({ ...terminal, data: active ? `exec ${commandName}\r` : "noop\r" });
+        // These long login-shell comm values are 15 UTF-8 bytes before the
+        // leading dash is removed; their normalized names are only 14 bytes.
+        // A childless exec can use that shorter full name, keeping its PID.
+        observedName = commandName;
+        yield* TestClock.adjust("60 seconds");
+        const processIds = yield* Deferred.await(registered);
+        const metadataBeforeCleanup = yield* readIdleInspectionMetadata(manager);
+        yield* manager.closeIdle(terminal);
+        yield* TestClock.adjust("1 millis");
+        const metadataAfterCleanup = yield* readIdleInspectionMetadata(manager);
+        const killedByCleanup = process.killed;
+        const ownershipReleasedByCleanup = ownershipReleases;
+        if (!process.killed) yield* exitSnapshotTestProcesses(manager, ptyAdapter, [terminal]);
+        expect(processIds).toEqual(active ? [process.pid] : []);
+        expect(metadataBeforeCleanup).toEqual([
+          expect.objectContaining({
+            pid: process.pid,
+            status: "running",
+            hasRunningSubprocess: active,
+            ...(active ? { label: commandName } : {}),
+          }),
+        ]);
+        expect(killedByCleanup).toBe(!active);
+        if (active) {
+          expect(metadataAfterCleanup).toEqual(metadataBeforeCleanup);
+          expect(ownershipReleasedByCleanup).toBe(0);
+        } else {
+          expect(metadataAfterCleanup).toEqual([]);
+          expect(ownershipReleasedByCleanup).toBeGreaterThan(0);
+        }
+        expect(ptyAdapter.spawnInputs).toHaveLength(1);
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
   it.effect.each(["custom-login-shell", "my-shell", "custom-login-sh"])(
     "retains a childless matching-prefix exec and ownership when configured shell is %s",
     (shellName) =>
