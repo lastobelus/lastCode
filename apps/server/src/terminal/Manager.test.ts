@@ -1994,6 +1994,135 @@ it.layer(
       }).pipe(Effect.provide(TestClock.layer())),
   );
 
+  it.effect.each(
+    (["native", "fallback"] as const).flatMap((source) =>
+      (["exec", "descendant"] as const).map((command) => ({ source, command })),
+    ),
+  )(
+    "tracks an active $command through successive output-invalidated $source polls without losing known processes or its label",
+    ({ source, command }) =>
+      Effect.gen(function* () {
+        const scans = yield* Effect.forEach([0, 1, 2, 3], () =>
+          Effect.all({ started: Deferred.make<void>(), release: Deferred.make<void>() }),
+        );
+        const outputs = yield* Effect.forEach([0, 1, 2], () => Deferred.make<void>());
+        const ptyAdapter = new FakePtyAdapter();
+        const terminal = openInput();
+        const root = { pid: 9000, ppid: 1, name: command === "exec" ? "node" : "zsh" };
+        const initial = [
+          root,
+          ...(command === "descendant" ? [{ pid: 9100, ppid: 9000, name: "node" }] : []),
+        ];
+        const expanded = [
+          ...initial,
+          {
+            pid: command === "exec" ? 9100 : 9101,
+            ppid: command === "exec" ? 9000 : 9100,
+            name: "worker",
+          },
+        ];
+        const smaller = initial.map((entry) => ({
+          ...entry,
+          name: entry.name === "node" ? "python" : entry.name,
+        }));
+        let observed = [{ pid: 9000, ppid: 1, name: "zsh" }];
+        let heldScan = 0;
+        let holdPolling = false;
+        let ownedProcessIds: ReadonlyArray<number> = [];
+        const ownershipUpdates: Array<ReadonlyArray<number>> = [];
+        const processTable = Effect.gen(function* () {
+          const entries = observed.map((entry) => ({ ...entry }));
+          if (holdPolling) {
+            const scan = scans[heldScan++];
+            if (scan !== undefined) {
+              yield* Deferred.succeed(scan.started, undefined);
+              yield* Deferred.await(scan.release);
+            }
+          }
+          return entries;
+        });
+        const { manager } = yield* createSnapshotBoundaryManager(source, ptyAdapter, processTable, {
+          registerTerminalProcesses: ({ processIds }) =>
+            Effect.sync(() => {
+              ownedProcessIds = [...processIds].sort((left, right) => left - right);
+              ownershipUpdates.push(ownedProcessIds);
+            }),
+        });
+        yield* TestClock.adjust(0);
+        const unsubscribe = yield* manager.subscribe((event) => {
+          const output =
+            event.type === "output"
+              ? outputs.find((_, index) => event.data === `scan ${index}\n`)
+              : undefined;
+          return output !== undefined
+            ? Deferred.succeed(output, undefined).pipe(Effect.asVoid)
+            : Effect.void;
+        });
+        yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+        yield* manager.open(terminal);
+        const process = ptyAdapter.processes[0]!;
+        yield* manager.write({ ...terminal, data: "prepare\r" });
+        holdPolling = true;
+        observed = initial;
+        yield* TestClock.adjust("60 seconds");
+        yield* Deferred.await(scans[0]!.started);
+        process.emitData("scan 0\n");
+        yield* Deferred.await(outputs[0]!);
+        yield* Deferred.succeed(scans[0]!.release, undefined);
+        observed = expanded;
+        yield* TestClock.adjust("60 seconds");
+        // The next held scan proves the previous background poll has applied
+        // its result. Output must not hide a positive process observation.
+        yield* Deferred.await(scans[1]!.started);
+        const firstOwned = [...ownedProcessIds];
+        const firstMetadata = yield* readIdleInspectionMetadata(manager);
+        process.emitData("scan 1\n");
+        yield* Deferred.await(outputs[1]!);
+        yield* Deferred.succeed(scans[1]!.release, undefined);
+        observed = smaller;
+        yield* TestClock.adjust("60 seconds");
+        yield* Deferred.await(scans[2]!.started);
+        const expandedOwned = [...ownedProcessIds];
+        const expandedMetadata = yield* readIdleInspectionMetadata(manager);
+        process.emitData("scan 2\n");
+        yield* Deferred.await(outputs[2]!);
+        const metadataBeforeSmallerCompletion = yield* readIdleInspectionMetadata(manager);
+        const updatesBeforeSmallerCompletion = ownershipUpdates.length;
+        yield* Deferred.succeed(scans[2]!.release, undefined);
+        observed = expanded;
+        yield* TestClock.adjust("60 seconds");
+        yield* Deferred.await(scans[3]!.started);
+        const ownershipAfterSmallerCompletion = [...ownedProcessIds];
+        const metadataAfterSmallerCompletion = yield* readIdleInspectionMetadata(manager);
+        const updatesAfterSmallerCompletion = ownershipUpdates.slice(
+          updatesBeforeSmallerCompletion,
+        );
+        yield* Deferred.succeed(scans[3]!.release, undefined);
+        yield* exitSnapshotTestProcesses(manager, ptyAdapter, [terminal]);
+
+        const expectedInitial = initial.map(({ pid }) => pid).sort((left, right) => left - right);
+        const expectedExpanded = expanded.map(({ pid }) => pid).sort((left, right) => left - right);
+        expect(firstOwned).toEqual(expectedInitial);
+        expect(firstMetadata).toContainEqual(
+          expect.objectContaining({ pid: process.pid, hasRunningSubprocess: true, label: "node" }),
+        );
+        expect(expandedOwned).toEqual(expectedExpanded);
+        expect(expandedMetadata).toContainEqual(
+          expect.objectContaining({ pid: process.pid, hasRunningSubprocess: true, label: "node" }),
+        );
+        expect({
+          processIds: ownershipAfterSmallerCompletion,
+          metadata: metadataAfterSmallerCompletion,
+        }).toEqual({ processIds: expectedExpanded, metadata: metadataBeforeSmallerCompletion });
+        expect(
+          updatesAfterSmallerCompletion.every((processIds) =>
+            expectedExpanded.every((pid) => processIds.includes(pid)),
+          ),
+        ).toBe(true);
+        expect(process.killSignals).toEqual([]);
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
   it.effect.each(["native", "fallback"] as const)(
     "keeps a quiet terminal's exec ownership and activity when another terminal invalidates a held %s poll",
     (source) =>
