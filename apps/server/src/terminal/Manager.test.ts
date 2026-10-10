@@ -2296,6 +2296,64 @@ it.layer(
     }),
   );
 
+  it.effect.each(["deliver", "cancel", "fail"] as const)(
+    "preserves three-chunk input order when the queued middle chunk must %s",
+    (outcome) =>
+      Effect.gen(function* () {
+        const captureEntered = yield* Deferred.make<void>();
+        const finishCapture = yield* Deferred.make<void>();
+        const startThird = yield* Deferred.make<void>();
+        const { manager, ptyAdapter } = yield* createManager(5, {
+          shellResolver: () => "/bin/zsh",
+          subprocessPollIntervalMs: 60_000,
+          processTable: Effect.gen(function* () {
+            yield* Deferred.succeed(captureEntered, undefined);
+            yield* Deferred.await(finishCapture);
+            return [{ pid: 9000, ppid: 1, name: "zsh" }];
+          }),
+        }).pipe(Effect.provide(layerWithHostPlatform("linux")));
+        yield* manager.open(openInput());
+        const process = ptyAdapter.processes[0]!;
+        const originalWrite = process.write.bind(process);
+        process.write = (data) => {
+          if (outcome === "fail" && data === "middle\r") throw new Error("middle write failed");
+          originalWrite(data);
+        };
+        const write = (data: string) =>
+          manager.write({ threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, data });
+        const third = yield* Deferred.await(startThird).pipe(
+          Effect.andThen(write("third\r")),
+          Effect.forkScoped({ startImmediately: true }),
+        );
+        const first = yield* write("first\r").pipe(
+          // This continuation runs after successful forwarding clears the
+          // first-input gate, while the earlier middle request is queued.
+          Effect.andThen(Deferred.succeed(startThird, undefined)),
+          Effect.forkScoped({ startImmediately: true }),
+        );
+        yield* Deferred.await(captureEntered);
+        const middle = yield* write("middle\r").pipe(
+          Effect.result,
+          Effect.forkScoped({ startImmediately: true }),
+        );
+        expect(middle.pollUnsafe()).toBeUndefined();
+        if (outcome === "cancel") yield* Fiber.interrupt(middle);
+        expect(process.writes).toEqual([]);
+        yield* Deferred.succeed(finishCapture, undefined);
+        yield* Fiber.join(first);
+        if (outcome !== "cancel") {
+          expect((yield* Fiber.join(middle))._tag).toBe(
+            outcome === "deliver" ? "Success" : "Failure",
+          );
+        }
+        yield* Fiber.join(third);
+        expect(process.writes).toEqual(
+          outcome === "deliver" ? ["first\r", "middle\r", "third\r"] : ["first\r", "third\r"],
+        );
+        yield* exitSnapshotTestProcesses(manager, ptyAdapter, [openInput()]);
+      }),
+  );
+
   it.effect("keeps forwarded exec active when its writer is canceled before resuming", () =>
     Effect.gen(function* () {
       const captureEntered = yield* Deferred.make<void>();

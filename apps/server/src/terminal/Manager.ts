@@ -348,6 +348,8 @@ interface TerminalSessionState {
   inputCount: number;
   /** Queued or executing writes keep automatic cleanup away from the terminal. */
   pendingInputCount: number;
+  /** Reservations preserve input order independently of thread-lock scheduling. */
+  inputWaiters: Array<Deferred.Deferred<void>>;
   cols: number;
   rows: number;
   process: PtyAdapter.PtyProcess | null;
@@ -2911,6 +2913,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         eventSequence: 0,
         inputCount: 0,
         pendingInputCount: 0,
+        inputWaiters: [],
         cols,
         rows,
         process: null,
@@ -3327,27 +3330,44 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       Effect.sync(() => {
         session.inputCount += 1;
         session.pendingInputCount += 1;
+        const waiter = Deferred.makeUnsafe<void>();
+        session.inputWaiters.push(waiter);
+        if (session.inputWaiters.length === 1) Deferred.doneUnsafe(waiter, Effect.void);
+        return waiter;
       }),
-      () =>
+      (waiter) =>
         Effect.gen(function* () {
           const captureShellIdentity = session.captureShellIdentity;
-          if (captureShellIdentity === null) return yield* writeToSession(input, session);
+          if (captureShellIdentity === null) {
+            yield* Deferred.await(waiter);
+            return yield* writeToSession(input, session);
+          }
           // Start each terminal's capture before the thread lock serializes
           // writes, so terminals in one thread share the same pending scan.
           // Keep queuing input immediately; the child ends with this request.
           const captureFiber = yield* captureShellIdentity.pipe(
             Effect.forkChild({ startImmediately: true }),
           );
-          return yield* withThreadLock(
-            input.threadId,
-            requireSession(input.threadId, input.terminalId).pipe(
-              Effect.flatMap((current) => writeToSession(input, current)),
+          return yield* Deferred.await(waiter).pipe(
+            Effect.andThen(
+              withThreadLock(
+                input.threadId,
+                requireSession(input.threadId, input.terminalId).pipe(
+                  Effect.flatMap((current) => writeToSession(input, current)),
+                ),
+              ),
             ),
-          ).pipe(Effect.ensuring(Fiber.interrupt(captureFiber)));
+            Effect.ensuring(Fiber.interrupt(captureFiber)),
+          );
         }),
-      () =>
+      (waiter) =>
         Effect.sync(() => {
           session.pendingInputCount -= 1;
+          const index = session.inputWaiters.indexOf(waiter);
+          session.inputWaiters.splice(index, 1);
+          if (index === 0 && session.inputWaiters[0] !== undefined) {
+            Deferred.doneUnsafe(session.inputWaiters[0], Effect.void);
+          }
         }),
     );
   });
@@ -3423,6 +3443,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           eventSequence: 0,
           inputCount: 0,
           pendingInputCount: 0,
+          inputWaiters: [],
           cols,
           rows,
           process: null,
