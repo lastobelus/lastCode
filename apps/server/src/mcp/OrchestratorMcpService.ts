@@ -2304,62 +2304,67 @@ const make = Effect.gen(function* () {
                 title: request.title,
                 index,
               });
-              yield* threadManagement
-                .dispatch({
-                  type: "thread.create",
-                  createdBy: "agent",
-                  creationSource: "mcp",
-                  creatorThreadId: scope.thread.threadId,
-                  commandId: stableCommandId({
-                    scope,
-                    requestKey: key,
-                    operation: "create-thread",
-                    index,
-                  }),
-                  threadId,
-                  projectId: parent.thread.projectId,
-                  title,
-                  modelSelection: target.modelSelection,
-                  runtimeMode,
-                  interactionMode,
-                  branch: parent.thread.branch,
-                  worktreePath: parent.thread.worktreePath,
-                })
-                .pipe(
-                  Effect.mapError((error) =>
-                    failure(
-                      "orchestration_error",
-                      `Unable to create thread ${index + 1}: ${errorMessage(error)}`,
-                    ),
-                  ),
-                );
-              if (request.prompt !== undefined) {
-                const messageId = stableMessageId({ scope, requestKey: key, index });
-                yield* readAuthorization.authorize(threadId, messageId);
+              const claim = {
+                type: "thread.create",
+                createdBy: "agent",
+                creationSource: "mcp",
+                creatorThreadId: scope.thread.threadId,
+                commandId: stableCommandId({
+                  scope,
+                  requestKey: key,
+                  operation: "create-thread",
+                  index,
+                }),
+                threadId,
+                projectId: parent.thread.projectId,
+                title,
+                modelSelection: target.modelSelection,
+                runtimeMode,
+                interactionMode,
+                branch: parent.thread.branch,
+                worktreePath: parent.thread.worktreePath,
+              } as const;
+              if (request.prompt === undefined) {
                 yield* threadManagement
-                  .dispatch({
-                    type: "message.dispatch",
-                    createdBy: "agent",
-                    creationSource: "mcp",
-                    commandId: stableCommandId({
-                      scope,
-                      requestKey: key,
-                      operation: "dispatch-thread",
-                      index,
-                    }),
-                    threadId,
-                    senderThreadId: scope.thread.threadId,
-                    messageId,
-                    text: request.prompt,
-                    attachments: [],
-                    modelSelection: target.modelSelection,
-                    dispatchMode: { type: "start_immediately" },
+                  .dispatch(claim)
+                  .pipe(
+                    Effect.mapError((error) =>
+                      failure(
+                        "orchestration_error",
+                        `Unable to create thread ${index + 1}: ${errorMessage(error)}`,
+                      ),
+                    ),
+                  );
+              } else {
+                const messageId = stableMessageId({ scope, requestKey: key, index });
+                yield* threadManagement
+                  .dispatchLaunch({
+                    claim,
+                    beforeInitialMessage: readAuthorization.authorize(threadId, messageId),
+                    initialMessage: {
+                      type: "message.dispatch",
+                      createdBy: "agent",
+                      creationSource: "mcp",
+                      commandId: stableCommandId({
+                        scope,
+                        requestKey: key,
+                        operation: "dispatch-thread",
+                        index,
+                      }),
+                      threadId,
+                      senderThreadId: scope.thread.threadId,
+                      messageId,
+                      text: request.prompt,
+                      attachments: [],
+                      modelSelection: target.modelSelection,
+                      dispatchMode: { type: "start_immediately" },
+                    },
                   })
                   .pipe(
                     Effect.mapError((error) =>
                       failure(
                         "orchestration_error",
-                        `Unable to start thread ${index + 1}: ${errorMessage(error)}`,
+                        `Unable to ${"commandId" in error && error.commandId === claim.commandId ? "create" : "start"} thread ${index + 1}: ${errorMessage(error)}`,
                       ),
                     ),
                   );
