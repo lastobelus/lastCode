@@ -959,6 +959,7 @@ const make = Effect.gen(function* () {
       tab.viewerNavigation?.abort(new BrowserControlInterrupted());
       ServerBrowserPage.invalidateRefs(page);
     });
+    const openerTabId = adopted?.openerTabId ?? nativePopup?.source.tabId;
     const tab: ServerTab = {
       threadId: ThreadId.make(snapshot.threadId),
       tabId: snapshot.tabId,
@@ -978,10 +979,15 @@ const make = Effect.gen(function* () {
       backingPage: snapshot.backingPage,
       nativePresented: false,
       revealRequested: snapshot.reveal === true,
-      openerTabId: adopted?.openerTabId ?? nativePopup?.source.tabId,
+      openerTabId,
       downloads: [],
       hostedOrigins:
-        sessionHostedOrigins.get(tabKey(snapshot.threadId, snapshot.tabId)) ?? new Map(),
+        sessionHostedOrigins.get(tabKey(snapshot.threadId, snapshot.tabId)) ??
+        new Map(
+          openerTabId === undefined
+            ? undefined
+            : sessionHostedOrigins.get(tabKey(snapshot.threadId, openerTabId)),
+        ),
       viewerNavigation: null,
       fileChooser: null,
       dialog: null,

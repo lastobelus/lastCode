@@ -2248,6 +2248,84 @@ it.live.each([false, true])(
     ).pipe(Effect.provide(layer)),
 );
 
+it.live(
+  "a managed remote native popup recovers navigation and reload after its opener closes",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        profileCatalogue = {
+          desktopHostId: "fixture-desktop",
+          profiles: [{ id: "fixture-profile", name: "Fixture profile", kind: "persistent" }],
+          defaultProfileId: "fixture-profile",
+        };
+        desktopRendersNext = true;
+        const { browser, broker, tabId } = yield* ready;
+        const prepared: Array<{ threadId: string; url: string; browserUrl?: string }> = [];
+        hostingPreparation = (input) =>
+          Effect.sync(() => {
+            prepared.push(input);
+            return new URL(input.url).origin === "http://localhost:5173"
+              ? { managed: true, bootstrapToken: "fixture-one-use-credential" }
+              : { managed: false };
+          });
+        const localUrl = "http://localhost:5173/qa/opener";
+        yield* broker.invoke({ scope, tabId, operation: "navigate", input: { url: localUrl } });
+        const popupLocalUrl = "http://localhost:5173/qa/popup?mode=two#popup";
+        const popupBrowserUrl = popupLocalUrl.replace("localhost", "environment.example.test");
+        desktopPageSetup = async (context) => context.page.goto(popupBrowserUrl);
+        const manager = yield* Manager.PreviewManager;
+        const events = yield* manager.subscribeEvents;
+        desktopPopupEvents.emit("created", {
+          threadId: scope.thread.threadId,
+          tabId,
+          desktopHostId: "fixture-desktop",
+          popupId: "managed-native-popup",
+          url: popupBrowserUrl,
+        });
+        const opened = Option.getOrThrow(
+          yield* Stream.fromSubscription(events).pipe(
+            Stream.filter((event) => event.type === "opened" && event.tabId !== tabId),
+            Stream.runHead,
+          ),
+        );
+        if (opened.type !== "opened") throw new Error("Expected managed popup opening");
+        const popupTabId = opened.tabId;
+        yield* broker.invoke({ scope, tabId, operation: "close", input: {} });
+        yield* broker.invoke({
+          scope,
+          tabId: popupTabId,
+          operation: "navigate",
+          input: { url: popupBrowserUrl },
+        });
+        const actualPopup = desktopConnections[1]!.context;
+        const viewer = yield* browser.attachViewer(viewerInput(popupTabId, true));
+        yield* viewer.input({ type: "takeControl" });
+        const reloaded = Promise.withResolvers<void>();
+        actualPopup.page.reload.mockImplementationOnce(async () => reloaded.resolve());
+        yield* viewer.input({ type: "reload", ignoreCache: false });
+        yield* Effect.promise(() => reloaded.promise);
+        expect(actualPopup.page.url()).toBe(popupBrowserUrl);
+        expect(prepared).toEqual([
+          {
+            threadId: scope.thread.threadId,
+            url: localUrl,
+            browserUrl: localUrl.replace("localhost", "environment.example.test"),
+          },
+          ...Array.from({ length: 2 }, () => ({
+            threadId: scope.thread.threadId,
+            url: popupLocalUrl,
+            browserUrl: popupBrowserUrl,
+          })),
+        ]);
+        expect(actualPopup.request.post).toHaveBeenCalledTimes(2);
+        expect(actualPopup.request.post).toHaveBeenLastCalledWith(
+          "http://environment.example.test:5173/api/auth/browser-session",
+          expect.objectContaining({ data: { credential: "fixture-one-use-credential" } }),
+        );
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
 it.live("an unbound native popup reconnects its retained opener without a pending tab", () =>
   Effect.scoped(
     Effect.gen(function* () {
