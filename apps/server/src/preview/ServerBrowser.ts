@@ -514,12 +514,20 @@ const make = Effect.gen(function* () {
   /** Sessions closed while their tab was still opening; the open discards its page. */
   const closedPendingTabs = new Set<string>();
   /** Popup pages waiting for the tab their `opened` event creates. */
-  const adoptedPages = new Map<string, { readonly page: Page; readonly openerTabId: string }>();
+  const adoptedPages = new Map<
+    string,
+    {
+      readonly page: Page;
+      readonly openerTabId: string;
+      readonly hostedOrigins: Map<string, string>;
+    }
+  >();
   const nativePopups = new Map<
     string,
     {
       readonly source: DesktopBrowserChannel.DesktopTabKey;
       readonly popupId: string;
+      hostedOrigins: Map<string, string>;
       snapshot: PreviewSessionSnapshot | null;
       closed: boolean;
       closeRequested: boolean;
@@ -893,6 +901,11 @@ const make = Effect.gen(function* () {
     const adopted = adoptedPages.get(tabKey(snapshot.threadId, snapshot.tabId));
     adoptedPages.delete(tabKey(snapshot.threadId, snapshot.tabId));
     const nativePopup = nativePopupForTab(snapshot.threadId, snapshot.tabId);
+    const hostedOrigins =
+      sessionHostedOrigins.get(tabKey(snapshot.threadId, snapshot.tabId)) ??
+      adopted?.hostedOrigins ??
+      nativePopup?.hostedOrigins ??
+      new Map<string, string>();
     if (snapshot.backingPage === "desktop-root") {
       const root = nativeRoots.get(tabKey(snapshot.threadId, snapshot.tabId));
       if (!root || root.closed || root.rootId !== snapshot.desktopRootId)
@@ -981,13 +994,7 @@ const make = Effect.gen(function* () {
       revealRequested: snapshot.reveal === true,
       openerTabId,
       downloads: [],
-      hostedOrigins:
-        sessionHostedOrigins.get(tabKey(snapshot.threadId, snapshot.tabId)) ??
-        new Map(
-          openerTabId === undefined
-            ? undefined
-            : sessionHostedOrigins.get(tabKey(snapshot.threadId, openerTabId)),
-        ),
+      hostedOrigins,
       viewerNavigation: null,
       fileChooser: null,
       dialog: null,
@@ -1398,6 +1405,8 @@ const make = Effect.gen(function* () {
       return;
     }
     const url = popup.url();
+    // Opening a tab awaits setup; its opener can close before publication or attachment.
+    const hostedOrigins = new Map(opener.hostedOrigins);
     // Captured now: the person whose click opened the popup gets switched to it.
     const controller = [...opener.viewers].find(
       (viewer) => viewer.id === opener.control.controller,
@@ -1417,6 +1426,7 @@ const make = Effect.gen(function* () {
           adoptedPages.set(tabKey(snapshot.threadId, snapshot.tabId), {
             page: popup,
             openerTabId: opener.tabId,
+            hostedOrigins,
           }),
       }),
     ).then(
@@ -1459,6 +1469,7 @@ const make = Effect.gen(function* () {
     const popup = {
       source,
       popupId: source.popupId,
+      hostedOrigins: new Map<string, string>(),
       snapshot: null as PreviewSessionSnapshot | null,
       closed: false,
       closeRequested: false,
@@ -1496,6 +1507,7 @@ const make = Effect.gen(function* () {
       if (popup.closed) nativePopups.delete(id);
       return;
     }
+    popup.hostedOrigins = new Map(opener.hostedOrigins);
     try {
       const snapshot = await Effect.runPromise(
         manager.open({

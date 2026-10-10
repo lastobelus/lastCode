@@ -2396,9 +2396,9 @@ it.live.each([false, true])(
     ).pipe(Effect.provide(layer)),
 );
 
-it.live(
-  "a managed remote native popup recovers navigation and reload after its opener closes",
-  () =>
+it.live.each(["desktop attachment", "CDP setup"])(
+  "a managed remote native popup retains routing when its opener closes during %s",
+  (stage) =>
     Effect.scoped(
       Effect.gen(function* () {
         profileCatalogue = {
@@ -2420,7 +2420,20 @@ it.live(
         yield* broker.invoke({ scope, tabId, operation: "navigate", input: { url: localUrl } });
         const popupLocalUrl = "http://localhost:5173/qa/popup?mode=two#popup";
         const popupBrowserUrl = popupLocalUrl.replace("localhost", "environment.example.test");
-        desktopPageSetup = async (context) => context.page.goto(popupBrowserUrl);
+        const setupEntered = Promise.withResolvers<void>();
+        const setupGate = Promise.withResolvers<void>();
+        yield* Effect.addFinalizer(() => Effect.sync(() => setupGate.resolve()));
+        if (stage === "CDP setup") {
+          recordingStageEntered = setupEntered;
+          recordingCdpGate = setupGate;
+        }
+        desktopPageSetup = async (context) => {
+          await context.page.goto(popupBrowserUrl);
+          if (stage === "desktop attachment") {
+            setupEntered.resolve();
+            await setupGate.promise;
+          }
+        };
         const manager = yield* Manager.PreviewManager;
         const events = yield* manager.subscribeEvents;
         desktopPopupEvents.emit("created", {
@@ -2430,6 +2443,9 @@ it.live(
           popupId: "managed-native-popup",
           url: popupBrowserUrl,
         });
+        yield* Effect.promise(() => setupEntered.promise);
+        yield* Effect.promise(() => desktopConnections[0]!.context.page.close());
+        setupGate.resolve();
         const opened = Option.getOrThrow(
           yield* Stream.fromSubscription(events).pipe(
             Stream.filter((event) => event.type === "opened" && event.tabId !== tabId),
@@ -2438,7 +2454,6 @@ it.live(
         );
         if (opened.type !== "opened") throw new Error("Expected managed popup opening");
         const popupTabId = opened.tabId;
-        yield* broker.invoke({ scope, tabId, operation: "close", input: {} });
         yield* broker.invoke({
           scope,
           tabId: popupTabId,
