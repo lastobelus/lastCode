@@ -1868,6 +1868,210 @@ it.layer(
       }).pipe(Effect.provide(TestClock.layer())),
   );
 
+  it.effect.each(
+    (["native", "fallback"] as const).flatMap((source) =>
+      (["output", "write"] as const).map((boundary) => ({ source, boundary })),
+    ),
+  )(
+    "preserves exec ownership and activity after $boundary invalidates a held $source poll",
+    ({ source, boundary }) =>
+      Effect.gen(function* () {
+        const active = yield* Deferred.make<void>();
+        const staleSnapshotStarted = yield* Deferred.make<void>();
+        const releaseStaleSnapshot = yield* Deferred.make<void>();
+        const freshSnapshotStarted = yield* Deferred.make<void>();
+        const releaseFreshSnapshot = yield* Deferred.make<void>();
+        const freshOwned = yield* Deferred.make<void>();
+        const freshActivity = yield* Deferred.make<void>();
+        const outputProcessed = yield* Deferred.make<void>();
+        const ptyAdapter = new FakePtyAdapter();
+        let holdNextSnapshot = false;
+        let holdFreshSnapshot = false;
+        let commandStarted = false;
+        let ownedProcessIds: ReadonlyArray<number> = [];
+        let awaitFreshOwnership = false;
+        const ownershipUpdates: Array<ReadonlyArray<number>> = [];
+        const terminal = openInput();
+        const processTable = Effect.gen(function* () {
+          const entries = ptyAdapter.processes.map((process) => ({
+            pid: process.pid,
+            ppid: 1,
+            name: process.pid === 9000 && commandStarted ? "node" : "zsh",
+          }));
+          if (holdNextSnapshot) {
+            holdNextSnapshot = false;
+            yield* Deferred.succeed(staleSnapshotStarted, undefined);
+            yield* Deferred.await(releaseStaleSnapshot);
+          } else if (holdFreshSnapshot) {
+            holdFreshSnapshot = false;
+            yield* Deferred.succeed(freshSnapshotStarted, undefined);
+            yield* Deferred.await(releaseFreshSnapshot);
+          }
+          return entries;
+        });
+        const { manager } = yield* createSnapshotBoundaryManager(source, ptyAdapter, processTable, {
+          registerTerminalProcesses: ({ threadId, terminalId, processIds }) =>
+            Effect.gen(function* () {
+              if (threadId !== terminal.threadId || terminalId !== terminal.terminalId) return;
+              ownedProcessIds = [...processIds];
+              ownershipUpdates.push(ownedProcessIds);
+              if (awaitFreshOwnership && processIds.includes(9000)) {
+                yield* Deferred.succeed(freshOwned, undefined);
+              }
+            }),
+        });
+        yield* TestClock.adjust(0);
+        const unsubscribe = yield* manager.subscribe((event) =>
+          Effect.gen(function* () {
+            if (event.type === "output") yield* Deferred.succeed(outputProcessed, undefined);
+            if (event.type === "activity" && event.hasRunningSubprocess && event.label === "node") {
+              yield* Deferred.succeed(active, undefined);
+              if (awaitFreshOwnership) yield* Deferred.succeed(freshActivity, undefined);
+            }
+          }),
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+        yield* manager.open(terminal);
+        const process = ptyAdapter.processes[0]!;
+        yield* manager.write({ ...terminal, data: "prepare\r" });
+        commandStarted = true;
+        yield* TestClock.adjust("60 seconds");
+        yield* Deferred.await(active);
+        const initialOwned = [...ownedProcessIds];
+        // A transient shell observation becomes obsolete when the same PID
+        // starts its next command before the pending poll applies the table.
+        commandStarted = false;
+        holdNextSnapshot = true;
+        yield* TestClock.adjust("60 seconds");
+        yield* Deferred.await(staleSnapshotStarted);
+        commandStarted = true;
+        if (boundary === "output") {
+          process.emitData("command started\n");
+          yield* Deferred.await(outputProcessed);
+        } else {
+          yield* manager.write({ ...terminal, data: "exec node\r" });
+        }
+        const metadataBeforeOldCompletion = yield* readIdleInspectionMetadata(manager);
+        const updatesBeforeOldCompletion = ownershipUpdates.length;
+        holdFreshSnapshot = true;
+        yield* Deferred.succeed(releaseStaleSnapshot, undefined);
+        yield* TestClock.adjust("60 seconds");
+        // The single background worker cannot begin its next scan until the
+        // old poll has finished applying ownership and activity.
+        yield* Deferred.await(freshSnapshotStarted);
+        const metadataAfterOldCompletion = yield* readIdleInspectionMetadata(manager);
+        const ownershipAfterOldCompletion = [...ownedProcessIds];
+        const updatesAfterOldCompletion = ownershipUpdates.slice(updatesBeforeOldCompletion);
+        awaitFreshOwnership = true;
+        yield* Deferred.succeed(releaseFreshSnapshot, undefined);
+        yield* Deferred.await(freshOwned);
+        if (
+          !metadataAfterOldCompletion.some(
+            (entry) => entry.pid === process.pid && entry.hasRunningSubprocess,
+          )
+        ) {
+          yield* Deferred.await(freshActivity);
+        }
+        const freshMetadata = yield* readIdleInspectionMetadata(manager);
+        const freshProcessIds = [...ownedProcessIds];
+        yield* exitSnapshotTestProcesses(manager, ptyAdapter, [terminal]);
+        expect(initialOwned).toEqual([process.pid]);
+        expect({
+          processIds: ownershipAfterOldCompletion,
+          metadata: metadataAfterOldCompletion,
+        }).toEqual({
+          processIds: [process.pid],
+          metadata: metadataBeforeOldCompletion,
+        });
+        expect(
+          updatesAfterOldCompletion.every((processIds) => processIds.includes(process.pid)),
+        ).toBe(true);
+        expect(freshProcessIds).toEqual([process.pid]);
+        expect(freshMetadata).toContainEqual(
+          expect.objectContaining({ pid: process.pid, hasRunningSubprocess: true, label: "node" }),
+        );
+        expect(process.killSignals).toEqual([]);
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect.each(["native", "fallback"] as const)(
+    "keeps a quiet terminal's exec ownership and activity when another terminal invalidates a held %s poll",
+    (source) =>
+      Effect.gen(function* () {
+        const snapshotStarted = yield* Deferred.make<void>();
+        const releaseSnapshot = yield* Deferred.make<void>();
+        const nextSnapshotStarted = yield* Deferred.make<void>();
+        const releaseNextSnapshot = yield* Deferred.make<void>();
+        const outputProcessed = yield* Deferred.make<void>();
+        const ptyAdapter = new FakePtyAdapter();
+        let holdNextSnapshot = false;
+        let holdCompletionWitness = false;
+        let commandStarted = false;
+        let quietOwnedProcessIds: ReadonlyArray<number> = [];
+        const quiet = openInput({ terminalId: "quiet" });
+        const noisy = openInput({ terminalId: "noisy" });
+        const processTable = Effect.gen(function* () {
+          const entries = ptyAdapter.processes.map((process) => ({
+            pid: process.pid,
+            ppid: 1,
+            name: process.pid === 9000 && commandStarted ? "node" : "zsh",
+          }));
+          if (holdNextSnapshot) {
+            holdNextSnapshot = false;
+            yield* Deferred.succeed(snapshotStarted, undefined);
+            yield* Deferred.await(releaseSnapshot);
+          } else if (holdCompletionWitness) {
+            holdCompletionWitness = false;
+            yield* Deferred.succeed(nextSnapshotStarted, undefined);
+            yield* Deferred.await(releaseNextSnapshot);
+          }
+          return entries;
+        });
+        const { manager } = yield* createSnapshotBoundaryManager(source, ptyAdapter, processTable, {
+          registerTerminalProcesses: ({ terminalId, processIds }) =>
+            Effect.sync(() => {
+              if (terminalId === quiet.terminalId) quietOwnedProcessIds = [...processIds];
+            }),
+        });
+        yield* TestClock.adjust(0);
+        yield* manager.open(quiet);
+        yield* manager.open(noisy);
+        yield* manager.write({ ...quiet, data: "exec node\r" });
+        commandStarted = true;
+        holdNextSnapshot = true;
+        yield* TestClock.adjust("60 seconds");
+        yield* Deferred.await(snapshotStarted);
+        const unsubscribe = yield* manager.subscribe((event) =>
+          event.type === "output" && event.terminalId === noisy.terminalId
+            ? Deferred.succeed(outputProcessed, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+        ptyAdapter.processes[1]!.emitData("background output\n");
+        yield* Deferred.await(outputProcessed);
+        holdCompletionWitness = true;
+        yield* Deferred.succeed(releaseSnapshot, undefined);
+        yield* TestClock.adjust("60 seconds");
+        yield* Deferred.await(nextSnapshotStarted);
+        // The next scan stays held, proving these values came from the old
+        // poll's still-valid observation of the quiet terminal.
+        const metadata = yield* readIdleInspectionMetadata(manager);
+        const processIds = [...quietOwnedProcessIds];
+        yield* Deferred.succeed(releaseNextSnapshot, undefined);
+        yield* exitSnapshotTestProcesses(manager, ptyAdapter, [quiet, noisy]);
+        expect(processIds).toEqual([ptyAdapter.processes[0]!.pid]);
+        expect(metadata).toContainEqual(
+          expect.objectContaining({
+            terminalId: quiet.terminalId,
+            pid: ptyAdapter.processes[0]!.pid,
+            status: "running",
+            hasRunningSubprocess: true,
+            label: "node",
+          }),
+        );
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
   it.effect.each(["native", "fallback"] as const)(
     "coalesces cleanup callers on one fresh %s snapshot after drained output invalidates a held poll",
     (source) =>
