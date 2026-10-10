@@ -3438,6 +3438,296 @@ it.layer(
       }),
   );
 
+  it.effect.each(
+    (["native", "fallback"] as const).flatMap((source) =>
+      (
+        [
+          {
+            scenario: "timeout after an idle startup observation",
+            capture: "timeout",
+            priorObservation: true,
+            observedName: "zsh",
+            active: false,
+          },
+          {
+            scenario: "error after an idle startup observation",
+            capture: "error",
+            priorObservation: true,
+            observedName: "zsh",
+            active: false,
+          },
+          {
+            scenario: "error before an exec matching the configured wrapper",
+            capture: "error",
+            priorObservation: true,
+            observedName: "my-shell",
+            active: true,
+          },
+          {
+            scenario: "error before an unobserved childless exec",
+            capture: "error",
+            priorObservation: false,
+            observedName: "node",
+            active: true,
+          },
+          {
+            scenario: "error before a later snapshot missing the root",
+            capture: "error",
+            priorObservation: false,
+            observedName: "",
+            active: true,
+          },
+          {
+            scenario: "missing root before an unobserved idle wrapper",
+            capture: "missing",
+            priorObservation: false,
+            observedName: "zsh",
+            active: true,
+          },
+        ] as const
+      ).map((scenario) => ({ source, ...scenario })),
+    ),
+  )(
+    "uses only pre-input wrapper identity after $source capture $scenario",
+    ({ source, capture, priorObservation, observedName, active }) =>
+      Effect.gen(function* () {
+        const captureEntered = yield* Deferred.make<void>();
+        const releaseCapture = yield* Deferred.make<void>();
+        const recoveredPollCompleted = yield* Deferred.make<void>();
+        const releaseCompletionWitness = yield* Deferred.make<void>();
+        const ptyAdapter = new FakePtyAdapter();
+        let phase: "pre-input" | "capture" | "recovered" = priorObservation
+          ? "pre-input"
+          : "capture";
+        let preInputSnapshots = 0;
+        let recoveredSnapshots = 0;
+        let ownedProcessIds: ReadonlyArray<number> = [];
+        const readSnapshot = Effect.gen(function* () {
+          if (phase === "pre-input") {
+            preInputSnapshots += 1;
+            if (preInputSnapshots === 1) {
+              return { entries: [{ pid: 9000, ppid: 1, name: "zsh" }], failed: false };
+            }
+            // Beginning the next background scan proves the earlier startup
+            // observation was applied before first input can be forwarded.
+            phase = "capture";
+          }
+          if (phase === "capture") {
+            const entries = capture === "missing" ? [] : [{ pid: 9000, ppid: 1, name: "zsh" }];
+            yield* Deferred.succeed(captureEntered, undefined);
+            yield* Deferred.await(releaseCapture);
+            return { entries, failed: capture === "error" };
+          }
+          recoveredSnapshots += 1;
+          if (recoveredSnapshots === 2) {
+            yield* Deferred.succeed(recoveredPollCompleted, undefined);
+            yield* Deferred.await(releaseCompletionWitness);
+          }
+          return {
+            entries: observedName ? [{ pid: 9000, ppid: 1, name: observedName }] : [],
+            failed: false,
+          };
+        });
+        const processTable = readSnapshot.pipe(
+          Effect.flatMap(({ entries, failed }) =>
+            failed
+              ? Effect.fail("sidecar unavailable").pipe(Effect.mapError((cause) => cause as never))
+              : Effect.succeed(entries),
+          ),
+        );
+        const processRunner: ProcessRunner.ProcessRunner["Service"] = {
+          run: (input) =>
+            readSnapshot.pipe(
+              Effect.map(({ entries, failed }) => {
+                expect(input.args).toEqual(["-eo", "pid=,ppid=,comm="]);
+                return {
+                  stdout: entries.map(({ pid, ppid, name }) => `${pid} ${ppid} ${name}`).join("\n"),
+                  stderr: "",
+                  code: ChildProcessSpawner.ExitCode(failed ? 1 : 0),
+                  timedOut: false,
+                  stdoutTruncated: false,
+                  stderrTruncated: false,
+                  stdoutInvalidUtf8: false,
+                  stderrInvalidUtf8: false,
+                };
+              }),
+            ),
+        };
+        const { manager } = yield* createManager(5, {
+          ptyAdapter,
+          shellResolver: () => "/opt/tools/my-shell",
+          subprocessPollIntervalMs: 60_000,
+          registerTerminalProcesses: ({ processIds }) =>
+            Effect.sync(() => {
+              ownedProcessIds = [...processIds];
+            }),
+          ...(source === "native" ? { processTable } : {}),
+        }).pipe(
+          Effect.provideService(ProcessRunner.ProcessRunner, processRunner),
+          Effect.provide(layerWithHostPlatform("linux")),
+        );
+        yield* TestClock.adjust(0);
+        const terminal = openInput();
+        yield* manager.open(terminal);
+        const process = ptyAdapter.processes[0]!;
+        process.exitOnKill = "SIGTERM";
+        if (priorObservation) {
+          yield* TestClock.adjust("120 seconds");
+          yield* Deferred.await(captureEntered);
+        }
+        const writing = yield* manager
+          .write({ ...terminal, data: "noop\r" })
+          .pipe(Effect.forkScoped({ startImmediately: true }));
+        yield* Deferred.await(captureEntered);
+        if (capture === "timeout") yield* TestClock.adjust("100 millis");
+        else yield* Deferred.succeed(releaseCapture, undefined);
+        yield* Fiber.join(writing);
+        phase = "recovered";
+        yield* Deferred.succeed(releaseCapture, undefined);
+        yield* TestClock.adjust("3 minutes");
+        // Hold a second recovered scan so the metadata and ownership below
+        // can only have come from the completed first recovered poll.
+        yield* Deferred.await(recoveredPollCompleted);
+        const metadataBeforeCleanup = yield* readIdleInspectionMetadata(manager);
+        const processIdsBeforeCleanup = [...ownedProcessIds];
+        yield* Deferred.succeed(releaseCompletionWitness, undefined);
+        yield* manager.closeIdle(terminal);
+        yield* TestClock.adjust("1 millis");
+        const metadataAfterCleanup = yield* readIdleInspectionMetadata(manager);
+        const killSignals = [...process.killSignals];
+        if (!process.killed) yield* exitSnapshotTestProcesses(manager, ptyAdapter, [terminal]);
+        expect(process.writes).toEqual(["noop\r"]);
+        expect(processIdsBeforeCleanup).toEqual(active ? [process.pid] : []);
+        expect(metadataBeforeCleanup).toEqual([
+          expect.objectContaining({
+            pid: process.pid,
+            status: "running",
+            hasRunningSubprocess: active,
+            ...(active && observedName ? { label: observedName } : {}),
+          }),
+        ]);
+        expect(metadataAfterCleanup).toEqual(active ? metadataBeforeCleanup : []);
+        if (active) expect(killSignals).toEqual([]);
+        else expect(killSignals).toContain("SIGTERM");
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect.each(
+    (["native", "fallback"] as const).flatMap((source) =>
+      [
+        { scenario: "complete idle shell", startupName: "zsh", nextName: "zsh", active: false },
+        {
+          scenario: "ambiguous truncated login shell",
+          startupName: "-custom-login-s",
+          nextName: "custom-login-s",
+          active: true,
+        },
+      ].map((scenario) => ({ source, ...scenario })),
+    ),
+  )(
+    "uses a late pre-input $source observation while the first writer queues: $scenario",
+    ({ source, startupName, nextName, active }) =>
+      Effect.gen(function* () {
+        const holderEntered = yield* Deferred.make<void>();
+        const releaseHolder = yield* Deferred.make<void>();
+        const captureEntered = yield* Deferred.make<void>();
+        const releaseCapture = yield* Deferred.make<void>();
+        const lateObservationApplied = yield* Deferred.make<void>();
+        const releaseLateWitness = yield* Deferred.make<void>();
+        const recoveredPollCompleted = yield* Deferred.make<void>();
+        const releaseRecoveredWitness = yield* Deferred.make<void>();
+        let holdNextHistoryWrite = false;
+        const fs = yield* FileSystem.FileSystem;
+        const holderFileSystem = {
+          ...fs,
+          writeFileString: () =>
+            Effect.gen(function* () {
+              if (holdNextHistoryWrite) {
+                holdNextHistoryWrite = false;
+                yield* Deferred.succeed(holderEntered, undefined);
+                yield* Deferred.await(releaseHolder);
+              }
+            }),
+        };
+        const ptyAdapter = new FakePtyAdapter();
+        let phase: "capture" | "late" | "recovered" = "capture";
+        let lateScans = 0;
+        let recoveredScans = 0;
+        let ownedProcessIds: ReadonlyArray<number> = [];
+        const processTable = Effect.gen(function* () {
+          if (phase === "capture") {
+            yield* Deferred.succeed(captureEntered, undefined);
+            yield* Deferred.await(releaseCapture);
+            return [];
+          }
+          const name = phase === "late" ? startupName : nextName;
+          if (phase === "late" && ++lateScans === 2) {
+            // The poller cannot begin this scan until it has applied the
+            // previous pre-input observation while the writer was queued.
+            yield* Deferred.succeed(lateObservationApplied, undefined);
+            yield* Deferred.await(releaseLateWitness);
+          } else if (phase === "recovered" && ++recoveredScans === 2) {
+            yield* Deferred.succeed(recoveredPollCompleted, undefined);
+            yield* Deferred.await(releaseRecoveredWitness);
+          }
+          return [{ pid: 9000, ppid: 1, name }];
+        });
+        const { manager } = yield* createSnapshotBoundaryManager(source, ptyAdapter, processTable, {
+          registerTerminalProcesses: ({ processIds }) =>
+            Effect.sync(() => {
+              ownedProcessIds = [...processIds];
+            }),
+        }).pipe(Effect.provideService(FileSystem.FileSystem, holderFileSystem));
+        yield* TestClock.adjust(0);
+        const terminal = openInput();
+        yield* manager.open(terminal);
+        const process = ptyAdapter.processes[0]!;
+        process.exitOnKill = "SIGTERM";
+        holdNextHistoryWrite = true;
+        const holder = yield* manager.clear(terminal).pipe(Effect.forkScoped);
+        yield* Deferred.await(holderEntered);
+        const writing = yield* manager
+          .write({ ...terminal, data: "noop\r" })
+          .pipe(Effect.forkScoped({ startImmediately: true }));
+        yield* Deferred.await(captureEntered);
+        yield* TestClock.adjust("100 millis");
+        phase = "late";
+        yield* Deferred.succeed(releaseCapture, undefined);
+        yield* TestClock.adjust("3 minutes");
+        yield* Deferred.await(lateObservationApplied);
+        const writesWhileQueued = [...process.writes];
+        yield* Deferred.succeed(releaseHolder, undefined);
+        yield* Fiber.join(holder);
+        yield* Fiber.join(writing);
+        phase = "recovered";
+        yield* Deferred.succeed(releaseLateWitness, undefined);
+        yield* TestClock.adjust("3 minutes");
+        yield* Deferred.await(recoveredPollCompleted);
+        const metadata = yield* readIdleInspectionMetadata(manager);
+        const processIds = [...ownedProcessIds];
+        yield* Deferred.succeed(releaseRecoveredWitness, undefined);
+        yield* manager.closeIdle(terminal);
+        yield* TestClock.adjust("1 millis");
+        const metadataAfterCleanup = yield* readIdleInspectionMetadata(manager);
+        const killSignals = [...process.killSignals];
+        if (!process.killed) yield* exitSnapshotTestProcesses(manager, ptyAdapter, [terminal]);
+        expect(writesWhileQueued).toEqual([]);
+        expect(process.writes).toEqual(["noop\r"]);
+        expect(processIds).toEqual(active ? [process.pid] : []);
+        expect(metadata).toEqual([
+          expect.objectContaining({
+            pid: process.pid,
+            status: "running",
+            hasRunningSubprocess: active,
+            ...(active ? { label: nextName } : {}),
+          }),
+        ]);
+        expect(metadataAfterCleanup).toEqual(active ? metadata : []);
+        if (active) expect(killSignals).toEqual([]);
+        else expect(killSignals).toContain("SIGTERM");
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
   it.effect("closes an idle shell started through a differently named wrapper", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter } = yield* createManager(5, {

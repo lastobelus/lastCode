@@ -289,6 +289,8 @@ interface TerminalSubprocessInspectResult {
   readonly hasRunningSubprocess: boolean;
   readonly childCommand: string | null;
   readonly processIds: ReadonlyArray<number>;
+  /** Present only for process-table inspections before the first input. */
+  readonly startupShellName?: string | null;
 }
 
 interface TerminalSubprocessInspector {
@@ -364,8 +366,10 @@ interface TerminalSessionState {
   /** Normalized active command name when `hasRunningSubprocess`; cleared when idle. */
   childCommandLabel: string | null;
   shellFamily: TerminalShellFamily | null;
-  /** Configured or observed startup identity, frozen before the first input. */
+  /** Startup identity; null when first-input capture could not verify it. */
   spawnedShellName: string | null;
+  /** Last accepted root identity observed before input reached the PTY. */
+  observedShellName: string | null;
   /** Shared capture freezes startup identity before concurrent first writes. */
   captureShellIdentity: Effect.Effect<void> | null;
   runtimeEnv: Record<string, string> | null;
@@ -815,18 +819,18 @@ function startupShellIdentity(
   platform: NodeJS.Platform,
 ): string | null {
   const observedName = normalizeChildCommandName(rawObservedName, platform);
+  if (observedName === null) return null;
   // A truncated Linux name cannot distinguish a long shell from another
   // executable with the same prefix. Count bytes before stripping a login
   // shell's dash, which occupies one of the 15 comm bytes.
   if (
-    observedName === null ||
-    (platform === "linux" &&
-      spawnedShellName !== null &&
-      observedName !== spawnedShellName &&
-      (Buffer.byteLength(rawObservedName.trim()) === 15 ||
-        Buffer.byteLength(observedName) === 15 ||
-        (Buffer.byteLength(spawnedShellName) > 15 &&
-          observedName === Buffer.from(spawnedShellName).subarray(0, 15).toString("utf8"))))
+    platform === "linux" &&
+    observedName !== spawnedShellName &&
+    (Buffer.byteLength(rawObservedName.trim()) === 15 ||
+      Buffer.byteLength(observedName) === 15 ||
+      (spawnedShellName !== null &&
+        Buffer.byteLength(spawnedShellName) > 15 &&
+        observedName === Buffer.from(spawnedShellName).subarray(0, 15).toString("utf8")))
   ) {
     return spawnedShellName;
   }
@@ -851,13 +855,17 @@ function deriveSubprocessInspectResult(
   const shellIdentity = beforeFirstInput
     ? startupShellIdentity(rawShellName, spawnedShellName, platform)
     : spawnedShellName;
-  const rootWasReplaced =
+  // Without a pre-input observation, an idle wrapper and a childless exec
+  // cannot be distinguished. Keep the root owned instead of closing it,
+  // including when a later snapshot omits its name.
+  const rootIsActive =
     platform !== "win32" &&
-    shellIdentity !== null &&
-    shellName !== null &&
-    (shellName !== shellIdentity ||
-      (platform === "linux" &&
-        (Buffer.byteLength(rawShellName.trim()) === 15 || Buffer.byteLength(shellName) === 15)));
+    ((!beforeFirstInput && shellIdentity === null) ||
+      (shellName !== null &&
+        (shellName !== shellIdentity ||
+          (platform === "linux" &&
+            (Buffer.byteLength(rawShellName.trim()) === 15 ||
+              Buffer.byteLength(shellName) === 15)))));
   // Async prompt themes fork the shell into a helper that waits with no
   // children of its own. That copy is not a command the user started.
   const childPid = (snapshot.childrenByParent.get(terminalPid) ?? []).find(
@@ -866,9 +874,15 @@ function deriveSubprocessInspectResult(
       commandName(pid) !== shellName ||
       (snapshot.childrenByParent.get(pid)?.length ?? 0) > 0,
   );
-  const activePid = rootWasReplaced ? terminalPid : childPid;
+  const activePid = rootIsActive ? terminalPid : childPid;
+  const startupIdentity = beforeFirstInput ? { startupShellName: shellIdentity } : {};
   if (activePid === undefined) {
-    return { hasRunningSubprocess: false, childCommand: null, processIds: [] };
+    return {
+      hasRunningSubprocess: false,
+      childCommand: null,
+      processIds: [],
+      ...startupIdentity,
+    };
   }
   const processIds = new Set<number>([terminalPid]);
   const pending = [terminalPid];
@@ -886,6 +900,7 @@ function deriveSubprocessInspectResult(
     hasRunningSubprocess: true,
     childCommand: normalized ? truncateTerminalWireLabel(normalized) : null,
     processIds: [...processIds],
+    ...startupIdentity,
   };
 }
 
@@ -2527,6 +2542,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       session.childCommandLabel = null;
       session.shellFamily = null;
       session.spawnedShellName = null;
+      session.observedShellName = null;
       session.pendingProcessEvents = [];
       session.pendingProcessEventIndex = 0;
       session.processEventDrainRunning = false;
@@ -2605,12 +2621,15 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
                       // Identity is best effort; never hold typing behind the
                       // resource monitor's health timeout and fallback probe.
                       Effect.timeoutOption("100 millis"),
-                      Effect.map(Option.getOrElse(() => spawnResult.shellName)),
-                      Effect.orElseSucceed(() => spawnResult.shellName),
+                      // A configured wrapper name is not evidence of the
+                      // shell that actually started. After input, a later scan
+                      // might see an exec command, so do not learn identity then.
+                      Effect.map(Option.getOrElse(() => session.observedShellName)),
+                      Effect.orElseSucceed(() => session.observedShellName),
                       Effect.flatMap((identity) =>
                         Effect.sync(() => {
                           if (session.process !== spawnResult.process) return;
-                          session.spawnedShellName = identity;
+                          session.spawnedShellName = identity ?? session.observedShellName;
                         }),
                       ),
                     ),
@@ -2679,6 +2698,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         session.childCommandLabel = null;
         session.shellFamily = null;
         session.spawnedShellName = null;
+        session.observedShellName = null;
         session.pendingProcessEvents = [];
         session.pendingProcessEventIndex = 0;
         session.processEventDrainRunning = false;
@@ -2866,6 +2886,13 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             // reflect this scan's command tree so exited PIDs do not accumulate.
             if (generation !== undefined) liveSession.processSnapshotGeneration = generation;
             liveSession.observedProcessIds = next.processIds;
+            if (
+              liveSession.captureShellIdentity !== null &&
+              next.startupShellName !== undefined &&
+              next.startupShellName !== null
+            ) {
+              liveSession.observedShellName = next.startupShellName;
+            }
             const preserveActivity = outputInvalidated() && liveSession.hasRunningSubprocess;
             const hasRunningSubprocess = preserveActivity ? true : next.hasRunningSubprocess;
             const childCommandLabel = preserveActivity
@@ -3027,6 +3054,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         childCommandLabel: null,
         shellFamily: null,
         spawnedShellName: null,
+        observedShellName: null,
         captureShellIdentity: null,
         runtimeEnv: normalizedRuntimeEnv(input.env),
       };
@@ -3413,6 +3441,11 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     }
     yield* Effect.try({
       try: () => {
+        // Capture may have timed out while this chunk waited for the lock.
+        // Use any observation accepted before forwarding, never one after it.
+        if (captureShellIdentity !== null && session.spawnedShellName === null) {
+          session.spawnedShellName = session.observedShellName;
+        }
         process.write(input.data);
         invalidateProcessTableSnapshot(session);
         // Complete forwarding and the gate transition synchronously: a writer
@@ -3571,6 +3604,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           childCommandLabel: null,
           shellFamily: null,
           spawnedShellName: null,
+          observedShellName: null,
           captureShellIdentity: null,
           runtimeEnv: normalizedRuntimeEnv(input.env),
         };
