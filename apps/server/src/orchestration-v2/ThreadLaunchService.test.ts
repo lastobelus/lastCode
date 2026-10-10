@@ -479,7 +479,10 @@ it.effect.each(["archive", "delete"] as const)(
 );
 
 it.effect("holds the sender through launch acceptance and replays after it archives", () => {
-  const harness = makeHarness({ runSetup: () => Effect.never });
+  const setupEntered = Deferred.makeUnsafe<void>();
+  const harness = makeHarness({
+    runSetup: () => Deferred.succeed(setupEntered, undefined).pipe(Effect.andThen(Effect.never)),
+  });
   return Effect.gen(function* () {
     const launches = yield* ThreadLaunch.ThreadLaunchService;
     const threads = yield* ThreadManagement.ThreadManagementService;
@@ -487,6 +490,8 @@ it.effect("holds the sender through launch acceptance and replays after it archi
     const executor = yield* ThreadCommandExecutor.ThreadCommandExecutor;
     const senderThreadId = ThreadId.make("thread:z-launch-sender");
     yield* launches.launch(launchInput({ command: "create-race-sender", thread: senderThreadId }));
+    // Finish the sender's background workspace update before observing its locks.
+    yield* Deferred.await(setupEntered);
     const input = {
       ...launchInput({ command: "launch-race", thread: "thread:a-launch-target" }),
       initialMessage: {
@@ -503,7 +508,7 @@ it.effect("holds the sender through launch acceptance and replays after it archi
     const archiveQueued = yield* Deferred.make<void>();
     const commitCommand = eventSink.commitCommand;
     const withLock = executor.withLock;
-    let senderLockRequests = 0;
+    let archiveStarted = false;
     const commitSpy = vi.spyOn(eventSink, "commitCommand").mockImplementation((command) =>
       command.commandId === input.commandId
         ? commitCommand(command).pipe(
@@ -516,7 +521,7 @@ it.effect("holds the sender through launch acceptance and replays after it archi
       key,
       effect,
     ) =>
-      key === senderThreadId && ++senderLockRequests === 2
+      key === senderThreadId && archiveStarted
         ? Deferred.succeed(archiveQueued, undefined).pipe(Effect.andThen(withLock(key, effect)))
         : withLock(key, effect);
     const lockSpy = vi.spyOn(executor, "withLock").mockImplementation(observeLock);
@@ -530,6 +535,7 @@ it.effect("holds the sender through launch acceptance and replays after it archi
           Effect.andThen(Effect.die("Launch missed the creation barrier.")),
         ),
       );
+      archiveStarted = true;
       const archiveFiber = yield* threads
         .dispatch({
           type: "thread.archive",
