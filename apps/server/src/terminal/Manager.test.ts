@@ -2926,12 +2926,14 @@ it.layer(
         };
         yield* manager.open(openInput(laterTerminal));
         yield* write(laterTerminal);
-        expect(snapshotCalls).toBe(2);
+        const callsAfterLaterTerminal = snapshotCalls;
         ptyAdapter.processes[0]!.exitOnKill = "SIGTERM";
         yield* manager.restart(restartInput(terminals[0]!));
         yield* write(terminals[0]!);
-        expect(snapshotCalls).toBe(3);
+        const callsAfterRestart = snapshotCalls;
         yield* exitSnapshotTestProcesses(manager, ptyAdapter, [...terminals, laterTerminal]);
+        expect(callsAfterLaterTerminal).toBe(6);
+        expect(callsAfterRestart).toBe(8);
       }).pipe(Effect.provide(TestClock.layer())),
   );
 
@@ -3130,6 +3132,65 @@ it.layer(
       );
       expect(snapshotCalls).toBeGreaterThan(0);
     }),
+  );
+
+  it.effect.each(
+    (["native", "fallback"] as const).flatMap((source) =>
+      (["-zsh", "zsh"] as const).map((childName) => ({ source, childName })),
+    ),
+  )(
+    "keeps the real $source child basename $childName distinct from its login-shell root",
+    ({ source, childName }) =>
+      Effect.gen(function* () {
+        const captureStarted = yield* Deferred.make<void>();
+        const ownershipRegistered = yield* Deferred.make<ReadonlyArray<number>>();
+        const ptyAdapter = new FakePtyAdapter();
+        const processTable = Effect.gen(function* () {
+          yield* Deferred.succeed(captureStarted, undefined);
+          return [
+            { pid: 9000, ppid: 1, name: "-zsh" },
+            { pid: 100, ppid: 9000, name: childName },
+          ];
+        });
+        const { manager } = yield* createSnapshotBoundaryManager(source, ptyAdapter, processTable, {
+          shellResolver: () => "/bin/zsh",
+          registerTerminalProcesses: ({ processIds }) =>
+            Deferred.succeed(ownershipRegistered, processIds).pipe(Effect.asVoid),
+        });
+        yield* TestClock.adjust(0);
+        const terminal = openInput();
+        yield* manager.open(terminal);
+        const process = ptyAdapter.processes[0]!;
+        process.exitOnKill = "SIGTERM";
+        const writing = yield* manager
+          .write({ ...terminal, data: "run child\r" })
+          .pipe(Effect.forkScoped({ startImmediately: true }));
+        yield* Deferred.await(captureStarted);
+        yield* TestClock.adjust("100 millis");
+        yield* Fiber.join(writing);
+        yield* TestClock.adjust("60 seconds");
+        const processIds = yield* Deferred.await(ownershipRegistered);
+        const metadata = yield* readIdleInspectionMetadata(manager);
+        yield* manager.closeIdle(terminal);
+        yield* TestClock.adjust("1 millis");
+        const metadataAfterCleanup = yield* readIdleInspectionMetadata(manager);
+        const killSignals = [...process.killSignals];
+        if (!process.killed) yield* exitSnapshotTestProcesses(manager, ptyAdapter, [terminal]);
+        const active = childName === "-zsh";
+        expect(process.writes).toEqual(["run child\r"]);
+        expect(processIds).toEqual(active ? [9000, 100] : []);
+        expect(metadata).toEqual([
+          expect.objectContaining({
+            pid: process.pid,
+            status: "running",
+            hasRunningSubprocess: active,
+            ...(active ? { label: "-zsh" } : {}),
+          }),
+        ]);
+        expect(metadataAfterCleanup).toEqual(active ? metadata : []);
+        if (active) expect(killSignals).toEqual([]);
+        else expect(killSignals).toContain("SIGTERM");
+      }).pipe(Effect.provide(TestClock.layer())),
   );
 
   it.effect("closes only a thread's idle shells, ignoring a helper forked from the shell", () =>
@@ -3362,7 +3423,7 @@ it.layer(
     { shellName: "custom-login-shell", commName: "custom-login-sh" },
     { shellName: "custom-é-shell-name", commName: "custom-é-shell" },
   ])(
-    "closes full shell names but keeps ambiguous Linux comm names for $shellName",
+    "closes full custom shells before input and protects ambiguous or changed roots after input for $shellName",
     ({ shellName, commName }) =>
       Effect.gen(function* () {
         let commandsStarted = false;
@@ -3386,7 +3447,9 @@ it.layer(
         }).pipe(Effect.provide(layerWithHostPlatform("linux")));
         for (const terminalId of ["full", "comm", "exec", "short-prefix", "different-full"]) {
           yield* manager.open(openInput({ terminalId }));
-          yield* manager.write({ threadId: "thread-1", terminalId, data: "exec command\r" });
+          if (terminalId !== "full") {
+            yield* manager.write({ threadId: "thread-1", terminalId, data: "exec command\r" });
+          }
         }
 
         commandsStarted = true;
@@ -3457,7 +3520,11 @@ it.layer(
         yield* manager.open(terminal);
         const process = ptyAdapter.processes[0]!;
         process.exitOnKill = "SIGTERM";
-        yield* manager.write({ ...terminal, data: active ? `exec ${commandName}\r` : "noop\r" });
+        const writing = yield* manager
+          .write({ ...terminal, data: active ? `exec ${commandName}\r` : "noop\r" })
+          .pipe(Effect.forkScoped({ startImmediately: true }));
+        yield* TestClock.adjust("100 millis");
+        yield* Fiber.join(writing);
         // These long login-shell comm values are 15 UTF-8 bytes before the
         // leading dash is removed; their normalized names are only 14 bytes.
         // A childless exec can use that shorter full name, keeping its PID.
@@ -3663,6 +3730,7 @@ it.layer(
         yield* Deferred.await(captureEntered);
         if (capture === "timeout") yield* TestClock.adjust("100 millis");
         else yield* Deferred.succeed(releaseCapture, undefined);
+        if (capture === "missing") yield* TestClock.adjust("100 millis");
         yield* Fiber.join(writing);
         phase = "recovered";
         yield* Deferred.succeed(releaseCapture, undefined);
@@ -3807,6 +3875,131 @@ it.layer(
         expect(metadataAfterCleanup).toEqual(active ? metadata : []);
         if (active) expect(killSignals).toEqual([]);
         else expect(killSignals).toContain("SIGTERM");
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect.each(
+    (["native", "fallback"] as const).flatMap((source) =>
+      (["my-shell", "bash"] as const).flatMap((startupName) =>
+        ([true, false] as const).map((resolves) => ({ source, startupName, resolves })),
+      ),
+    ),
+  )(
+    "settles $source wrapper identity from $startupName before forwarding when resolved=$resolves",
+    ({ source, startupName, resolves }) =>
+      Effect.gen(function* () {
+        const firstSampleStarted = yield* Deferred.make<void>();
+        const releaseFirstSample = yield* Deferred.make<void>();
+        const releaseUnsettledSample = yield* Deferred.make<void>();
+        const firstPollCompleted = yield* Deferred.make<void>();
+        const releaseFirstPollWitness = yield* Deferred.make<void>();
+        const execPollCompleted = yield* Deferred.make<void>();
+        const releaseExecPollWitness = yield* Deferred.make<void>();
+        const ptyAdapter = new FakePtyAdapter();
+        let phase: "capture" | "poll" | "exec" = "capture";
+        let captureSamples = 0;
+        let pollSamples = 0;
+        let execSamples = 0;
+        let rootName: string = startupName;
+        let ownedProcessIds: ReadonlyArray<number> = [];
+        const processTable = Effect.gen(function* () {
+          const name = rootName;
+          if (phase === "capture") {
+            captureSamples += 1;
+            if (captureSamples === 1) {
+              // This table was taken while the configured wrapper or its
+              // interpreter was still the root, before the real shell began.
+              yield* Deferred.succeed(firstSampleStarted, undefined);
+              yield* Deferred.await(releaseFirstSample);
+            } else if (!resolves) {
+              yield* Deferred.await(releaseUnsettledSample);
+            }
+          } else if (phase === "poll" && ++pollSamples === 2) {
+            yield* Deferred.succeed(firstPollCompleted, undefined);
+            yield* Deferred.await(releaseFirstPollWitness);
+          } else if (phase === "exec" && ++execSamples === 2) {
+            yield* Deferred.succeed(execPollCompleted, undefined);
+            yield* Deferred.await(releaseExecPollWitness);
+          }
+          return [{ pid: 9000, ppid: 1, name }];
+        });
+        const { manager } = yield* createSnapshotBoundaryManager(source, ptyAdapter, processTable, {
+          registerTerminalProcesses: ({ processIds }) =>
+            Effect.sync(() => {
+              ownedProcessIds = [...processIds];
+            }),
+        });
+        yield* TestClock.adjust(0);
+        const terminal = openInput();
+        yield* manager.open(terminal);
+        const process = ptyAdapter.processes[0]!;
+        process.exitOnKill = "SIGTERM";
+        const writing = yield* manager
+          .write({ ...terminal, data: "noop\r" })
+          .pipe(Effect.forkScoped({ startImmediately: true }));
+        yield* Deferred.await(firstSampleStarted);
+        const writesBeforeSample = [...process.writes];
+        if (resolves) rootName = "zsh";
+        yield* Deferred.succeed(releaseFirstSample, undefined);
+        // Exercise the real typing deadline. An unsettled confirmation must
+        // not hold input longer, or freeze a wrapper as the permanent shell.
+        yield* TestClock.adjust("100 millis");
+        yield* Fiber.join(writing);
+        phase = "poll";
+        yield* Deferred.succeed(releaseUnsettledSample, undefined);
+        yield* TestClock.adjust("3 minutes");
+        yield* Deferred.await(firstPollCompleted);
+        const initialMetadata = yield* readIdleInspectionMetadata(manager);
+        const initialOwnership = [...ownedProcessIds];
+        yield* Deferred.succeed(releaseFirstPollWitness, undefined);
+        yield* manager.closeIdle(terminal);
+        yield* TestClock.adjust("1 millis");
+        const initialKillSignals = [...process.killSignals];
+        const metadataAfterInitialCleanup = yield* readIdleInspectionMetadata(manager);
+        let execMetadata = metadataAfterInitialCleanup;
+        let execOwnership: ReadonlyArray<number> = [];
+        if (!resolves && !process.killed) {
+          // A later childless exec is evidence of activity, never a new shell
+          // identity learned after the first bytes were forwarded.
+          phase = "exec";
+          rootName = "node";
+          yield* TestClock.adjust("3 minutes");
+          yield* Deferred.await(execPollCompleted);
+          execMetadata = yield* readIdleInspectionMetadata(manager);
+          execOwnership = [...ownedProcessIds];
+          yield* Deferred.succeed(releaseExecPollWitness, undefined);
+          yield* manager.closeIdle(terminal);
+        }
+        const finalKillSignals = [...process.killSignals];
+        if (!process.killed) yield* exitSnapshotTestProcesses(manager, ptyAdapter, [terminal]);
+        expect(writesBeforeSample).toEqual([]);
+        expect(process.writes).toEqual(["noop\r"]);
+        expect(initialOwnership).toEqual(resolves ? [] : [process.pid]);
+        expect(initialMetadata).toEqual([
+          expect.objectContaining({
+            pid: process.pid,
+            status: "running",
+            hasRunningSubprocess: !resolves,
+            ...(!resolves ? { label: startupName } : {}),
+          }),
+        ]);
+        if (resolves) {
+          expect(initialKillSignals).toContain("SIGTERM");
+          expect(metadataAfterInitialCleanup).toEqual([]);
+        } else {
+          expect(initialKillSignals).toEqual([]);
+          expect(metadataAfterInitialCleanup).toEqual(initialMetadata);
+          expect(execOwnership).toEqual([process.pid]);
+          expect(execMetadata).toEqual([
+            expect.objectContaining({
+              pid: process.pid,
+              status: "running",
+              hasRunningSubprocess: true,
+              label: "node",
+            }),
+          ]);
+          expect(finalKillSignals).toEqual([]);
+        }
       }).pipe(Effect.provide(TestClock.layer())),
   );
 
