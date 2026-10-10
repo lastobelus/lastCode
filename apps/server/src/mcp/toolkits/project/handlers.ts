@@ -1,8 +1,10 @@
+import { ThreadReadAuthorization } from "../../../orchestration-v2/ThreadReadAuthorization.ts";
 import { MessageId, ThreadId, OrchestratorMcpFailure, ProjectId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as ThreadMessageIntake from "../../../orchestration-v2/ThreadMessageIntake.ts";
+import * as ThreadReadBroker from "../../ThreadReadBroker.ts";
 import * as Claims from "../../../orchestration-v2/AttachmentClaims.ts";
 import * as Project from "../../../project/ProjectService.ts";
 import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.ts";
@@ -76,6 +78,24 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
             message:
               "scratch:true picks its own project and folder; omit projectId and workspaceStrategy.",
           });
+        const readSource = (sourceThreadId: ThreadId) =>
+          context.threads.getThreadRecords(sourceThreadId, ["runs", "contextTransfers"]);
+        const readAuthority = yield* Effect.gen(function* () {
+          if (caller === undefined) return undefined;
+          const broker = yield* Effect.serviceOption(ThreadReadBroker.ThreadReadBroker);
+          if (Option.isNone(broker)) return undefined;
+          const source = yield* readSource(caller.id);
+          const sourceRunId = caller.activeRunId ?? caller.latestRunId;
+          const authority = yield* ThreadReadBroker.resolveAuthority(
+            broker.value,
+            source,
+            source.runs.find((run) => run.id === sourceRunId),
+            readSource,
+          );
+          return authority === undefined
+            ? undefined
+            : { broker: broker.value, sessionId: authority.sessionId };
+        }).pipe(Effect.catch(() => Effect.succeed(undefined)));
         const projectId =
           input.scratch === true
             ? (yield* ManagedProjectFolders.ManagedProjectFolders.pipe(
@@ -136,6 +156,19 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           createdBy: "agent",
           creationSource: "mcp",
         }).pipe(
+          Effect.provideService(ThreadReadAuthorization, {
+            authorize: (targetThreadId, targetMessageId) =>
+              Effect.gen(function* () {
+                if (readAuthority === undefined) return;
+                const target = yield* readSource(targetThreadId);
+                yield* readAuthority.broker.authorize({
+                  threadId: targetThreadId,
+                  messageId: targetMessageId,
+                  sessionId: readAuthority.sessionId,
+                  alreadyStored: target.runs.some((run) => run.userMessageId === targetMessageId),
+                });
+              }).pipe(Effect.catch(() => Effect.void)),
+          }),
           Effect.mapError((error) =>
             error._tag === "AttachmentClaimError"
               ? new OrchestratorMcpFailure({ code: "orchestration_error", message: error.message })
