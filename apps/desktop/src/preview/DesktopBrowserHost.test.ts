@@ -247,7 +247,7 @@ const observeCreationRecords = (marker: string) =>
     const add = Set.prototype.add;
     const deleteSet = Set.prototype.delete;
     const matches = (value: unknown): value is string =>
-      typeof value === "string" && value.includes(marker);
+      typeof value === "string" && value.startsWith("[") && value.includes(marker);
     yield* Effect.acquireRelease(
       Effect.sync(() => {
         // eslint-disable-next-line no-extend-native -- Scoped collection observation, restored on exit.
@@ -400,11 +400,16 @@ it.effect.each(["local", "remote"] as const)(
     }),
 );
 
-it.effect.each(["epoch-a", "epoch-b"])(
-  "reconciles an in-flight root against owner epoch %s before its factory returns",
-  (serverEpoch) =>
+it.effect.each([
+  ["epoch-a", true],
+  ["epoch-b", true],
+  ["epoch-a", false],
+] as const)(
+  "reconciles an in-flight root against owner epoch and inventory %s before its factory returns",
+  ([serverEpoch, retained]) =>
     Effect.gen(function* () {
-      const marker = `pending-epoch-${serverEpoch}`;
+      const survives = serverEpoch === "epoch-a" && retained;
+      const marker = `pending-epoch-${serverEpoch}-${retained}`;
       const records = yield* observeCreationRecords(marker);
       const host = yield* DesktopBrowserHost.make.pipe(
         Effect.provide(DesktopClientSettings.layerTest()),
@@ -438,23 +443,27 @@ it.effect.each(["epoch-a", "epoch-b"])(
       // Another desktop's restart cannot cancel this pending window.
       yield* host.handleRemoteCommand({
         desktopHostId: "host-b",
-        command: { type: "reconcileRoots", serverEpoch: "epoch-b" },
+        command: { type: "reconcileRoots", serverEpoch: "epoch-b", retainedRootRequestIds: [] },
       });
       expect(records.canceled()).toHaveLength(0);
       yield* host.handleRemoteCommand({
         desktopHostId: "host-a",
-        command: { type: "reconcileRoots", serverEpoch },
+        command: {
+          type: "reconcileRoots",
+          serverEpoch,
+          retainedRootRequestIds: retained ? [marker] : [],
+        },
       });
       expect(records.pending()).toHaveLength(1);
-      expect(records.canceled()).toHaveLength(serverEpoch === "epoch-a" ? 0 : 1);
+      expect(records.canceled()).toHaveLength(survives ? 0 : 1);
       expect(main.window.isDestroyed()).toBe(false);
       yield* Deferred.succeed(returned, root.window);
       yield* records.settled;
       expect(records.pending()).toHaveLength(0);
       expect(records.canceled()).toHaveLength(0);
-      expect(root.window.isDestroyed()).toBe(serverEpoch !== "epoch-a");
-      expect(root.attachCount()).toBe(serverEpoch === "epoch-a" ? 1 : 0);
-      if (serverEpoch === "epoch-a") {
+      expect(root.window.isDestroyed()).toBe(!survives);
+      expect(root.attachCount()).toBe(survives ? 1 : 0);
+      if (survives) {
         expect((yield* Queue.take(events)).type).toBe("attached");
         expect(yield* Queue.take(events)).toMatchObject({
           type: "rootCreated",
@@ -777,7 +786,11 @@ it.effect.each(["created", "accepted", "published"] as const)(
           ...key,
           supportsNativeSurface: true,
         });
-        yield* send({ type: "reconcileRoots", serverEpoch: "server-epoch-a" });
+        yield* send({
+          type: "reconcileRoots",
+          serverEpoch: "server-epoch-a",
+          retainedRootRequestIds: ["create"],
+        });
         expect(root.window.isDestroyed()).toBe(false);
       }
       yield* send({
@@ -791,6 +804,79 @@ it.effect.each(["created", "accepted", "published"] as const)(
         yield* send({ type: "acceptRoot", ...attempt });
         expect(yield* Queue.take(events)).toMatchObject({ type: "rootAccepted", accepted: true });
       }
+    }),
+);
+
+it.effect(
+  "same-epoch reconnect destroys omitted roots and preserves retained and foreign roots",
+  () =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      const events = yield* Queue.unbounded<{
+        desktopHostId: string;
+        event: DesktopBrowserEvent;
+      }>();
+      yield* host.remoteEvents.pipe(
+        Stream.runForEach((event) => Queue.offer(events, event)),
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      const roots: Array<ReturnType<typeof makeRoot>> = [];
+      host.setRootFactory(() =>
+        Effect.sync(() => {
+          const root = makeRoot();
+          roots.push(root);
+          return root.window;
+        }),
+      );
+      const definitions = [
+        { desktopHostId: "host-a", tabId: "discarded", requestId: "discarded-request" },
+        { desktopHostId: "host-a", tabId: "retained", requestId: "retained-request" },
+        { desktopHostId: "host-b", tabId: "foreign", requestId: "discarded-request" },
+      ];
+      for (const { desktopHostId, tabId, requestId } of definitions) {
+        yield* host.bindEnvironment(desktopHostId, desktopHostId, profileResolver(desktopHostId));
+        const send = (command: Parameters<typeof host.handleRemoteCommand>[0]["command"]) =>
+          host.handleRemoteCommand({ desktopHostId, command });
+        yield* send({
+          type: "createRoot",
+          ...key,
+          tabId,
+          requestId,
+          profileId: "default",
+          serverEpoch: "same-epoch",
+          url: "about:blank",
+        });
+        yield* Queue.take(events);
+        const created = (yield* Queue.take(events)).event;
+        if (created.type !== "rootCreated" || created.rootId === null)
+          throw new Error("Expected native root");
+        const attempt = { ...key, tabId, requestId, rootId: created.rootId, profileId: "default" };
+        yield* send({ type: "acceptRoot", ...attempt });
+        yield* Queue.take(events);
+        yield* send({ type: "publishRoot", ...attempt });
+        yield* send({ type: "disconnect" });
+      }
+      yield* TestClock.adjust("365 days");
+      yield* host.handleRemoteCommand({
+        desktopHostId: "host-a",
+        command: {
+          type: "reconcileRoots",
+          serverEpoch: "same-epoch",
+          retainedRootRequestIds: ["retained-request"],
+        },
+      });
+      expect(roots.map((root) => root.window.isDestroyed())).toEqual([true, false, false]);
+      expect((yield* Queue.take(events)).event).toMatchObject({
+        type: "detached",
+        tabId: "discarded",
+      });
+      expect(yield* Queue.take(events)).toMatchObject({
+        desktopHostId: "host-a",
+        event: { type: "rootClosed", tabId: "discarded" },
+      });
+      expect(yield* Queue.size(events)).toBe(0);
     }),
 );
 
@@ -847,12 +933,20 @@ it.effect.each(["host-a", "host-b"])(
         yield* send({ type: "disconnect" });
         yield* send({ type: "announce" });
         expect((yield* Queue.take(events)).event.type).toBe("attached");
-        yield* send({ type: "reconcileRoots", serverEpoch: `epoch:${desktopHostId}` });
+        yield* send({
+          type: "reconcileRoots",
+          serverEpoch: `epoch:${desktopHostId}`,
+          retainedRootRequestIds: ["create"],
+        });
         expect(windows.get(desktopHostId)!.window.isDestroyed()).toBe(false);
       }
       yield* host.handleRemoteCommand({
         desktopHostId: restartedHost,
-        command: { type: "reconcileRoots", serverEpoch: "replacement-server-epoch" },
+        command: {
+          type: "reconcileRoots",
+          serverEpoch: "replacement-server-epoch",
+          retainedRootRequestIds: [],
+        },
       });
       expect((yield* Queue.take(events)).event.type).toBe("detached");
       expect(yield* Queue.take(events)).toEqual({

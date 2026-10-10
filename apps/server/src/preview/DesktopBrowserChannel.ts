@@ -144,7 +144,7 @@ export class DesktopBrowserChannel extends Context.Service<
       rootId: string,
       options?: { readonly discardIfOffline?: boolean },
     ) => Effect.Effect<"closed" | "discarded", DesktopBrowserTransportError>;
-    /** Ends ownership of an offline tab and retains destruction for its host's reconnect. */
+    /** Ends offline ownership; reconnect reconciliation destroys the relinquished native page. */
     readonly discardRoot: (key: DesktopTabKey, rootId: string) => Effect.Effect<void>;
     /** Discards this creation attempt before its tab is published; a page cannot veto it. */
     readonly cancelRootCreation: (key: DesktopTabKey, rootId: string) => Effect.Effect<void>;
@@ -237,7 +237,6 @@ const make = Effect.gen(function* () {
     string,
     { readonly key: DesktopTabKey; readonly profileId: string }
   >();
-  const discardedRoots = new Map<string, DesktopTabKey & { readonly rootId: string }>();
   const popupAnnouncements = new Map<
     string,
     DesktopTabKey & { readonly popupId: string; readonly url: string }
@@ -300,17 +299,27 @@ const make = Effect.gen(function* () {
     }
   >();
 
-  const command = (message: DesktopBrowserCommandType, desktopHostId = "local") => {
+  const command = (
+    message: DesktopBrowserCommandType | (() => DesktopBrowserCommandType),
+    desktopHostId = "local",
+  ) => {
+    // Evaluate inventory snapshots at dispatch, behind the local write lock,
+    // so a newer creation cannot overtake an older reconciliation snapshot.
+    const currentMessage = () => (typeof message === "function" ? message() : message);
     if (desktopHostId !== "local") {
       const host = hosts.get(desktopHostId);
-      return host ? Queue.offer(host.queue, message).pipe(Effect.asVoid) : Effect.void;
+      return host
+        ? Effect.suspend(() => Queue.offer(host.queue, currentMessage()).pipe(Effect.asVoid))
+        : Effect.void;
     }
     if (controlFd === undefined) return Effect.void;
     return writeLock.withPermits(1)(
-      encodeCommand(message).pipe(
-        Effect.flatMap((line) => writeAllToFileDescriptor(controlFd, Buffer.from(`${line}\n`))),
-        Effect.catchCause((cause) =>
-          Effect.logWarning("desktop browser command failed", { cause }),
+      Effect.suspend(() =>
+        encodeCommand(currentMessage()).pipe(
+          Effect.flatMap((line) => writeAllToFileDescriptor(controlFd, Buffer.from(`${line}\n`))),
+          Effect.catchCause((cause) =>
+            Effect.logWarning("desktop browser command failed", { cause }),
+          ),
         ),
       ),
     );
@@ -484,13 +493,8 @@ const make = Effect.gen(function* () {
           event.type === "popupClosed"
             ? nativeIdOf(key, "popup", event.popupId)
             : nativeIdOf(key, "root", event.rootId);
-        if (
-          event.type === "rootClosed" &&
-          roots.get(id)?.rootId !== event.rootId &&
-          !discardedRoots.has(closeId)
-        )
+        if (event.type === "rootClosed" && roots.get(id)?.rootId !== event.rootId)
           return Effect.void;
-        discardedRoots.delete(closeId);
         if (event.type === "popupClosed") popupAnnouncements.delete(popupIdOf(key, event.popupId));
         else if (roots.get(id)?.rootId === event.rootId) roots.delete(id);
         nativeCloseAttempts.delete(closeId);
@@ -816,7 +820,6 @@ const make = Effect.gen(function* () {
       const id = nativeIdOf(key, "root", rootId);
       nativeCloseAttempts.delete(id);
       canceledNativeCloses.delete(id);
-      discardedRoots.set(id, { ...key, rootId });
       return command(
         { type: "discardRoot", threadId: key.threadId, tabId: key.tabId, rootId },
         key.desktopHostId,
@@ -915,14 +918,6 @@ const make = Effect.gen(function* () {
                 requestId,
                 profileId: abandoned.profileId,
               });
-          for (const root of discardedRoots.values())
-            if ((root.desktopHostId ?? "local") === desktopHostId)
-              yield* Queue.offer(queue, {
-                type: "discardRoot",
-                threadId: root.threadId,
-                tabId: root.tabId,
-                rootId: root.rootId,
-              });
           yield* PubSub.publish(connectedHosts, desktopHostId);
           return Stream.fromQueue(queue);
         }),
@@ -949,7 +944,21 @@ const make = Effect.gen(function* () {
     probePopup: (key, popupId) => probeNative(key, "popup", popupId),
     probeRoot: (key, rootId) => probeNative(key, "root", rootId),
     reconcileRoots: (desktopHostId, serverEpoch) =>
-      command({ type: "reconcileRoots", serverEpoch }, desktopHostId),
+      command(() => {
+        const retainedRootRequestIds = new Set<string>();
+        for (const root of roots.values())
+          if ((root.key.desktopHostId ?? "local") === desktopHostId)
+            retainedRootRequestIds.add(root.requestId);
+        // A desktop can receive reconciliation before acknowledging a newly created root.
+        for (const [requestId, pending] of rootCreateRequests)
+          if (pending.active && (pending.key.desktopHostId ?? "local") === desktopHostId)
+            retainedRootRequestIds.add(requestId);
+        return {
+          type: "reconcileRoots",
+          serverEpoch,
+          retainedRootRequestIds: [...retainedRootRequestIds],
+        };
+      }, desktopHostId),
     closedRoots: Stream.fromPubSub(closedRoots),
     createRoot: (key, input) =>
       Effect.gen(function* () {

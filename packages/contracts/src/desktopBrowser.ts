@@ -148,8 +148,12 @@ export type DesktopBrowserEvent = typeof DesktopBrowserEvent.Type;
 
 /** Server -> desktop. */
 export const DesktopBrowserCommand = Schema.Union([
-  /** A new server lifetime cannot own roots retained from its previous process. */
-  Schema.Struct({ type: Schema.Literal("reconcileRoots"), serverEpoch: TrimmedNonEmptyString }),
+  /** Authoritative root requests for this owner; older epochs and omitted requests are retired. */
+  Schema.Struct({
+    type: Schema.Literal("reconcileRoots"),
+    serverEpoch: TrimmedNonEmptyString,
+    retainedRootRequestIds: Schema.Array(TrimmedNonEmptyString),
+  }),
   Schema.Struct({
     type: Schema.Literal("probeRoot"),
     ...TabKey,

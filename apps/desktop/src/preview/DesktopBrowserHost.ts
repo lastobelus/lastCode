@@ -281,7 +281,7 @@ export const make = Effect.gen(function* () {
   const canceledCreations = new Set<string>();
   const pendingRootCreations = new Map<
     string,
-    DesktopBrowserTabKey & { readonly serverEpoch: string }
+    DesktopBrowserTabKey & { readonly serverEpoch: string; readonly requestId: string }
   >();
   const creationKey = (key: DesktopBrowserTabKey, requestId: string, profileId: string) =>
     JSON.stringify([keyOf(key), requestId, profileId]);
@@ -843,7 +843,11 @@ export const make = Effect.gen(function* () {
       const lifetime = automationLifetime;
       const key = { threadId: command.threadId, tabId: command.tabId, desktopHostId };
       const attempt = creationKey(key, command.requestId, command.profileId);
-      pendingRootCreations.set(attempt, { ...key, serverEpoch: command.serverEpoch });
+      pendingRootCreations.set(attempt, {
+        ...key,
+        serverEpoch: command.serverEpoch,
+        requestId: command.requestId,
+      });
       return rootCreationLock
         .withPermits(1)(
           Effect.gen(function* () {
@@ -1011,7 +1015,7 @@ export const make = Effect.gen(function* () {
       if (command.type === "createRoot") {
         // Register the attempt before the next serial command can cancel it.
         // Completion is acknowledged by rootCreated, not by command dispatch.
-        runFork(createRoot(command, desktopHostId), { startImmediately: true });
+        runFork(createRoot(command, desktopHostId));
         return Effect.void;
       }
       if (command.type === "acceptRoot" || command.type === "publishRoot") {
@@ -1091,17 +1095,20 @@ export const make = Effect.gen(function* () {
         return Effect.void;
       }
       if (command.type === "reconcileRoots") {
+        const retained = new Set(command.retainedRootRequestIds);
         for (const [attempt, key] of pendingRootCreations)
           if (
             (key.desktopHostId ?? "local") === desktopHostId &&
-            key.serverEpoch !== command.serverEpoch
+            (key.serverEpoch !== command.serverEpoch || !retained.has(key.requestId))
           )
             canceledCreations.add(attempt);
         for (const root of popups.values())
           if (
             root.kind === "root" &&
             (root.source.desktopHostId ?? "local") === desktopHostId &&
-            root.creation?.serverEpoch !== command.serverEpoch &&
+            (root.creation === undefined ||
+              root.creation.serverEpoch !== command.serverEpoch ||
+              !retained.has(root.creation.requestId)) &&
             !root.window.isDestroyed()
           )
             root.window.destroy();

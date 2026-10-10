@@ -2024,11 +2024,12 @@ it.live.each(["reconnect", "deliberate-offline-close"] as const)(
             8,
           );
           const reconnected = yield* connect("socket-b");
+          expect(yield* Queue.size(reconnected.commands)).toBe(0);
+          yield* channel.reconcileRoots("host-a", before.serverEpoch);
           expect(yield* Queue.take(reconnected.commands)).toEqual({
-            type: "discardRoot",
-            threadId: scope.thread.threadId,
-            tabId,
-            rootId: source.rootId,
+            type: "reconcileRoots",
+            serverEpoch: before.serverEpoch,
+            retainedRootRequestIds: [],
           });
           expect(yield* Queue.size(reconnected.commands)).toBe(0);
           return;

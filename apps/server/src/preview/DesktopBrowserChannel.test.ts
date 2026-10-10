@@ -79,6 +79,7 @@ it("receives desktop messages and exits while the parent keeps both input pipes 
     expect(controlCommands).toContainEqual({
       type: "reconcileRoots",
       serverEpoch: "fixture-server-epoch",
+      retainedRootRequestIds: [],
     });
     expect(result).toEqual({ code: 0, signal: null });
   } finally {
@@ -473,6 +474,7 @@ it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
         expect(yield* Queue.take(host.commands)).toEqual({
           type: "reconcileRoots",
           serverEpoch: "server-epoch-a",
+          retainedRootRequestIds: [],
         });
         expect(yield* Queue.size(other.commands)).toBe(0);
         const checking = yield* channel.probeRoot(source, "root-a").pipe(Effect.forkScoped);
@@ -566,7 +568,76 @@ it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
   );
 
   it.effect(
-    "an explicit offline discard is replayed only to its owner until destruction acknowledges",
+    "inventory snapshots include current and pending requests only for their exact owner",
+    () =>
+      Effect.gen(function* () {
+        const channel = yield* remoteChannel;
+        const host = yield* connectHost(channel, "socket-a", "host-a");
+        const other = yield* connectHost(channel, "socket-b", "host-b");
+        // Constructing reconciliation early must not capture an obsolete inventory.
+        const reconcile = channel.reconcileRoots("host-a", "server-epoch-a");
+        const pendingKey = { ...key, tabId: "pending", desktopHostId: "host-a" };
+        const pending = yield* channel
+          .createRoot(pendingKey, {
+            serverEpoch: "server-epoch-a",
+            profileId: "default",
+            url: "about:blank",
+          })
+          .pipe(Effect.forkScoped);
+        const pendingCommand = yield* Queue.take(host.commands);
+        if (pendingCommand.type !== "createRoot") throw new Error("Expected pending creation");
+        const retainedKey = { ...key, tabId: "retained", desktopHostId: "host-a" };
+        const retained = yield* channel
+          .createRoot(retainedKey, {
+            serverEpoch: "server-epoch-a",
+            profileId: "default",
+            url: "about:blank",
+          })
+          .pipe(Effect.forkScoped);
+        const retainedCommand = yield* Queue.take(host.commands);
+        if (retainedCommand.type !== "createRoot") throw new Error("Expected retained creation");
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          type: "rootCreated",
+          ...retainedKey,
+          requestId: retainedCommand.requestId,
+          rootId: "retained-root",
+          profileId: "default",
+        });
+        yield* Fiber.join(retained);
+        const foreign = yield* channel
+          .createRoot(
+            { ...key, desktopHostId: "host-b" },
+            { serverEpoch: "server-epoch-a", profileId: "default", url: "about:blank" },
+          )
+          .pipe(Effect.forkScoped);
+        const foreignCommand = yield* Queue.take(other.commands);
+        if (foreignCommand.type !== "createRoot") throw new Error("Expected foreign creation");
+        yield* reconcile;
+        expect(yield* Queue.take(host.commands)).toEqual({
+          type: "reconcileRoots",
+          serverEpoch: "server-epoch-a",
+          retainedRootRequestIds: [retainedCommand.requestId, pendingCommand.requestId],
+        });
+        expect(yield* Queue.size(other.commands)).toBe(0);
+        yield* Fiber.interrupt(pending);
+        expect((yield* Queue.take(host.commands)).type).toBe("cancelRootCreation");
+        yield* channel.reconcileRoots("host-a", "server-epoch-a");
+        expect(yield* Queue.take(host.commands)).toMatchObject({
+          retainedRootRequestIds: [retainedCommand.requestId],
+        });
+        yield* channel.discardRoot(retainedKey, "retained-root");
+        expect(yield* Queue.take(host.commands)).toMatchObject({
+          type: "discardRoot",
+          rootId: "retained-root",
+        });
+        yield* channel.reconcileRoots("host-a", "server-epoch-a");
+        expect(yield* Queue.take(host.commands)).toMatchObject({ retainedRootRequestIds: [] });
+        yield* Fiber.interrupt(foreign);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    "reconnect inventories omit offline discards without requiring a destruction acknowledgment",
     () =>
       Effect.gen(function* () {
         const channel = yield* remoteChannel;
@@ -606,14 +677,24 @@ it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
           "discarded",
         );
         const other = yield* connectHost(channel, "socket-b", "host-b");
+        yield* channel.reconcileRoots("host-b", "server-epoch-a");
+        expect(yield* Queue.take(other.commands)).toEqual({
+          type: "reconcileRoots",
+          serverEpoch: "server-epoch-a",
+          retainedRootRequestIds: [],
+        });
         expect(yield* Queue.size(other.commands)).toBe(0);
+        yield* TestClock.adjust("365 days");
         let reconnected = yield* connectHost(channel, "socket-c", "host-a");
+        expect(yield* Queue.size(reconnected.commands)).toBe(0);
+        yield* channel.reconcileRoots("host-a", "server-epoch-a");
         expect(yield* Queue.take(reconnected.commands)).toEqual({
-          type: "discardRoot",
-          ...key,
-          rootId: "root-a",
+          type: "reconcileRoots",
+          serverEpoch: "server-epoch-a",
+          retainedRootRequestIds: [],
         });
         expect(yield* Queue.size(reconnected.commands)).toBe(0);
+        const closures = yield* channel.closedRoots.pipe(Stream.toQueue({ capacity: "unbounded" }));
         yield* channel.receiveEvent("socket-c", "host-a", {
           type: "rootClosed",
           ...key,
@@ -621,12 +702,19 @@ it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
         });
         yield* Fiber.interrupt(reconnected.fiber);
         reconnected = yield* connectHost(channel, "socket-d", "host-a");
-        expect((yield* Queue.take(reconnected.commands)).type).toBe("discardRoot");
+        expect(yield* Queue.size(reconnected.commands)).toBe(0);
+        yield* channel.reconcileRoots("host-a", "server-epoch-a");
+        expect(yield* Queue.take(reconnected.commands)).toEqual({
+          type: "reconcileRoots",
+          serverEpoch: "server-epoch-a",
+          retainedRootRequestIds: [],
+        });
         yield* channel.receiveEvent("socket-d", "host-a", {
           type: "rootClosed",
           ...key,
           rootId: "root-a",
         });
+        expect(yield* Queue.size(closures)).toBe(0);
         yield* Fiber.interrupt(reconnected.fiber);
         reconnected = yield* connectHost(channel, "socket-e", "host-a");
         expect(yield* Queue.size(reconnected.commands)).toBe(0);
