@@ -235,34 +235,41 @@ const PRELOAD_EXPECTED_EXPORTS = [
 
 export function parseLocalCiOptions(argv: ReadonlyArray<string>): LocalCiOptions {
   let mode: LocalCiMode = "full";
-  let dryRun = false;
-  let prePush = false;
+  const flags = { dryRun: false, prePush: false, requireLocal: false };
+  const booleanFlags = new Map<string | undefined, keyof typeof flags>([
+    ["--dry-run", "dryRun"],
+    ["--pre-push", "prePush"],
+    ["--require-local", "requireLocal"],
+  ]);
   let checkpointTag: string | undefined;
-  let requireLocal = false;
 
+  // Checkpoint consumes the next token even when it looks like a flag. Scan errors
+  // take precedence over the final mode restrictions, whose order is intentional.
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
-    if (arg === "--") {
-      continue;
-    } else if (arg === "--full") {
-      mode = "full";
-    } else if (arg === "--quick") {
-      mode = "quick";
-    } else if (arg === "--dry-run") {
-      dryRun = true;
-    } else if (arg === "--pre-push") {
-      prePush = true;
-    } else if (arg === "--require-local") {
-      requireLocal = true;
-    } else if (arg === "--checkpoint") {
-      checkpointTag = argv[index + 1];
-      if (!checkpointTag) throw new Error("Missing value for --checkpoint.");
-      index += 1;
-    } else {
-      throw new Error(`Unknown argument '${arg}'.`);
+    switch (arg) {
+      case "--":
+        break;
+      case "--full":
+        mode = "full";
+        break;
+      case "--quick":
+        mode = "quick";
+        break;
+      case "--checkpoint":
+        checkpointTag = argv[index + 1];
+        if (!checkpointTag) throw new Error("Missing value for --checkpoint.");
+        index += 1;
+        break;
+      default: {
+        const flag = booleanFlags.get(arg);
+        if (!flag) throw new Error(`Unknown argument '${arg}'.`);
+        flags[flag] = true;
+      }
     }
   }
 
+  const { dryRun, prePush, requireLocal } = flags;
   if (prePush && mode !== "quick") {
     throw new Error("--pre-push is only supported with --quick.");
   }
