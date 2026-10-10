@@ -10913,6 +10913,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         detail: committed.receipt.error ?? "Previously rejected.",
       });
     }
+    // Another target can claim this command after our receipt lookup. Its
+    // stored events cannot authorize follow-up work against this target.
+    if (!canReplayCommandReceipt(committed.receipt.threadId, commandThreadId(command))) {
+      return yield* new OrchestratorCommandIdConflictError({
+        commandId: command.commandId,
+        commandType: command.type,
+        receiptThreadId: committed.receipt.threadId,
+        commandThreadId: commandThreadId(command),
+      });
+    }
     if (command.type === "queue.resume") {
       yield* mapDispatchError(command)(startNextQueuedRun(command.threadId));
     }
@@ -11013,6 +11023,23 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         // Refuse an inactive sender before claiming a target. Accepted retries
         // still go through the normal receipt validation after the sender archives.
         if (Option.isNone(receipt)) yield* ensureMessageSenderActive(initialMessage);
+        if (
+          claim.type === "thread.metadata.update" &&
+          !(Option.isSome(receipt) && receipt.value.status === "accepted")
+        ) {
+          // The reuse preflight runs before these locks. Refuse a target that
+          // became inactive without consuming either launch command receipt.
+          const target = yield* projectionStore
+            .getThread(claim.threadId)
+            .pipe(mapDispatchError(initialMessage));
+          if (target.archivedAt !== null || target.deletedAt !== null) {
+            return yield* new OrchestratorDispatchError({
+              commandId: initialMessage.commandId,
+              commandType: initialMessage.type,
+              cause: `Thread ${claim.threadId} is not active.`,
+            });
+          }
+        }
         const claimed = yield* dispatchWithReceiptEffect(claim);
         const dispatched = yield* dispatchWithReceiptEffect(initialMessage);
         return { claimed, initialMessage: dispatched };

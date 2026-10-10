@@ -358,6 +358,84 @@ it.effect.each([false, true])(
   },
 );
 
+it.effect.each(["archive", "delete"] as const)(
+  "rejects a reused launch target that changes after preflight (%s)",
+  (change) => {
+    const harness = makeHarness({ runSetup: () => Effect.never });
+    return Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const input = {
+        ...launchInput({
+          command: "launch-reused-target-race",
+          thread: "thread:reused-target-race",
+          message: "Start work",
+        }),
+        reuseExistingThread: true,
+      };
+      yield* launches.launch(
+        launchInput({ command: "create-reused-target-race", thread: input.threadId }),
+      );
+      const preflightDone = yield* Deferred.make<void>();
+      const allowDispatch = yield* Deferred.make<void>();
+      const dispatchLaunch = threads.dispatchLaunch;
+      const dispatchSpy = vi
+        .spyOn(threads, "dispatchLaunch")
+        .mockImplementation((command) =>
+          Deferred.succeed(preflightDone, undefined).pipe(
+            Effect.andThen(Deferred.await(allowDispatch)),
+            Effect.andThen(dispatchLaunch(command)),
+          ),
+        );
+      yield* Effect.gen(function* () {
+        const launchFiber = yield* launches.launch(input).pipe(Effect.forkChild());
+        yield* Deferred.await(preflightDone);
+        yield* threads.dispatch({
+          type: change === "archive" ? "thread.archive" : "thread.delete",
+          commandId: CommandId.make("change-reused-target-race"),
+          threadId: input.threadId,
+        });
+        yield* Deferred.succeed(allowDispatch, undefined);
+        const failed = yield* Fiber.join(launchFiber).pipe(Effect.flip);
+        assert.equal(failed.operation, "dispatch-message");
+        assert.ok(isDispatchError(failed.cause));
+        assert.include(String(failed.cause.cause), "not active");
+        for (const commandId of [
+          input.commandId,
+          CommandId.make(`${input.commandId}:initial-message`),
+        ]) {
+          assert.isTrue(Option.isNone(yield* receipts.getByCommandId(commandId)));
+          assert.isEmpty(yield* outbox.listByCommandId(commandId));
+        }
+        if (change === "archive") {
+          yield* threads.dispatch({
+            type: "thread.unarchive",
+            commandId: CommandId.make("unarchive-reused-target-race"),
+            threadId: input.threadId,
+          });
+          const retried = yield* launches.launch(input);
+          assert.lengthOf(retried.projection.messages, 1);
+          yield* threads.dispatch({
+            type: "thread.stop",
+            commandId: CommandId.make("stop-reused-target-race"),
+            threadId: input.threadId,
+          });
+          yield* threads.dispatch({
+            type: "thread.archive",
+            commandId: CommandId.make("rearchive-reused-target-race"),
+            threadId: input.threadId,
+          });
+          const replayed = yield* launches.launch(input);
+          assert.isTrue(replayed.resumed);
+          assert.lengthOf(replayed.projection.messages, 1);
+        }
+      }).pipe(Effect.ensuring(Effect.sync(() => dispatchSpy.mockRestore())));
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
+
 it.effect("holds the sender through launch acceptance and replays after it archives", () => {
   const harness = makeHarness({ runSetup: () => Effect.never });
   return Effect.gen(function* () {
@@ -1947,6 +2025,66 @@ it.effect("bounds concurrent first launches to one thread per command", () =>
     }).pipe(Effect.provide(harness.layer));
   }),
 );
+
+it.effect("keeps a losing allocated launch from rejecting the winner's initial message", () => {
+  const harness = makeHarness({ runSetup: () => Effect.never });
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+    const eventSink = yield* EventSink.EventSinkV2;
+    const { threadId: _unusedThreadId, ...input } = launchInput({
+      command: "command:launch:claim-race",
+      thread: "unused",
+      message: "Race the initial message",
+    });
+    const firstClaimPlanned = yield* Deferred.make<void>();
+    const secondClaimPlanned = yield* Deferred.make<void>();
+    const winnerCommitted = yield* Deferred.make<void>();
+    const allowWinnerMessage = yield* Deferred.make<void>();
+    const commitCommand = eventSink.commitCommand;
+    let claimCount = 0;
+    const commitSpy = vi.spyOn(eventSink, "commitCommand").mockImplementation((command) =>
+      command.commandId !== input.commandId
+        ? commitCommand(command)
+        : Effect.gen(function* () {
+            if (++claimCount === 1) {
+              yield* Deferred.succeed(firstClaimPlanned, undefined);
+              yield* Deferred.await(secondClaimPlanned);
+              const committed = yield* commitCommand(command);
+              yield* Deferred.succeed(winnerCommitted, undefined);
+              yield* Deferred.await(allowWinnerMessage);
+              return committed;
+            }
+            yield* Deferred.succeed(secondClaimPlanned, undefined);
+            yield* Deferred.await(winnerCommitted);
+            return yield* commitCommand(command);
+          }),
+    );
+    yield* Effect.gen(function* () {
+      const winner = yield* launches.launch(input).pipe(Effect.forkChild());
+      yield* Deferred.await(firstClaimPlanned);
+      const loser = yield* launches.launch(input).pipe(Effect.flip);
+      assert.equal(loser.operation, "create-thread");
+      assert.include(String(loser.cause), "cannot be replayed");
+      const messageCommandId = CommandId.make(`${input.commandId}:initial-message`);
+      assert.isTrue(Option.isNone(yield* receipts.getByCommandId(messageCommandId)));
+      yield* Deferred.succeed(allowWinnerMessage, undefined);
+      const launched = yield* Fiber.join(winner);
+      assert.lengthOf(launched.projection.messages, 1);
+      const replayed = yield* launches.launch(input);
+      assert.equal(replayed.threadId, launched.threadId);
+      assert.isTrue(replayed.resumed);
+      assert.lengthOf(replayed.projection.messages, 1);
+      assert.lengthOf(replayed.projection.runs, 1);
+      assert.lengthOf(yield* threads.listProjectThreads({ projectId, includeSubagents: false }), 1);
+      assert.equal(
+        Option.getOrThrow(yield* receipts.getByCommandId(messageCommandId)).status,
+        "accepted",
+      );
+    }).pipe(Effect.ensuring(Effect.sync(() => commitSpy.mockRestore())));
+  }).pipe(Effect.provide(harness.layer));
+});
 
 it.effect("deduplicates retried launch side effects in-process", () =>
   Effect.gen(function* () {
