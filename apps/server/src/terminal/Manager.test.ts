@@ -246,7 +246,10 @@ interface CreateManagerOptions {
   shellResolver?: () => string;
   env?: NodeJS.ProcessEnv;
   localCiSettingsPath?: string;
-  subprocessInspector?: (terminalPid: number) => Effect.Effect<{
+  subprocessInspector?: (
+    terminalPid: number,
+    spawnedShellName: string | null,
+  ) => Effect.Effect<{
     readonly hasRunningSubprocess: boolean;
     readonly childCommand: string | null;
     readonly processIds: ReadonlyArray<number>;
@@ -1920,7 +1923,7 @@ it.layer(
     { shellName: "custom-login-shell", commName: "custom-login-sh" },
     { shellName: "custom-é-shell-name", commName: "custom-é-shell" },
   ])(
-    "recognizes full and Linux comm names for $shellName without hiding exec",
+    "closes full shell names but keeps ambiguous Linux comm names for $shellName",
     ({ shellName, commName }) =>
       Effect.gen(function* () {
         const { manager, ptyAdapter } = yield* createManager(5, {
@@ -1945,11 +1948,34 @@ it.layer(
 
         expect(ptyAdapter.processes.map((process) => process.killed)).toEqual([
           true,
-          true,
+          false,
           false,
           false,
           false,
         ]);
+      }),
+  );
+
+  it.effect(
+    "retains a childless exec with the shell's truncated Linux name and its ownership",
+    () =>
+      Effect.gen(function* () {
+        const ownedProcessIds = yield* Deferred.make<ReadonlyArray<number>>();
+        const { manager, ptyAdapter } = yield* createManager(5, {
+          shellResolver: () => "/opt/tools/custom-login-shell",
+          // custom-login-shell-worker has the same 15-byte comm as the shell.
+          processTable: Effect.succeed([{ pid: 9000, ppid: 1, name: "custom-login-sh" }]),
+          registerTerminalProcesses: ({ processIds }) =>
+            processIds.length > 0
+              ? Deferred.succeed(ownedProcessIds, processIds).pipe(Effect.asVoid)
+              : Effect.void,
+        }).pipe(Effect.provide(layerWithHostPlatform("linux")));
+        yield* manager.open(openInput());
+
+        expect(yield* Deferred.await(ownedProcessIds)).toEqual([9000]);
+        yield* manager.closeIdle({ threadId: "thread-1" });
+
+        expect(ptyAdapter.processes[0]?.killed).toBe(false);
       }),
   );
 
