@@ -2520,7 +2520,7 @@ const make = Effect.gen(function* () {
     url: string,
     signal?: AbortSignal,
   ) => {
-    if (!/^https?:/i.test(url)) return;
+    if (!/^https?:/i.test(url)) return url;
     const destination = tab.hostedOrigins.has(new URL(url).origin)
       ? await browserNavigationUrl(tab, url, signal)
       : {
@@ -2531,6 +2531,7 @@ const make = Effect.gen(function* () {
           localUrl: url,
         };
     await prepareBrowserCredential(tab, destination, signal);
+    return destination.url;
   };
 
   const startViewerNavigation = (
@@ -3367,8 +3368,19 @@ const make = Effect.gen(function* () {
             if (request?.clear === "cookies") await tab.cdp.send("Network.clearBrowserCookies");
             if (request?.clear === "cache") await tab.cdp.send("Network.clearBrowserCache");
             if (request?.hardReload) {
-              await prepareExistingBrowserNavigation(tab, tab.page.url());
-              await tab.cdp.send("Page.reload", { ignoreCache: true });
+              const url = tab.page.url();
+              const destination = await prepareExistingBrowserNavigation(tab, url);
+              await ServerBrowserPage.navigateWithRedirect(
+                tab.page,
+                url,
+                destination,
+                async (redirected) => {
+                  // Routing disables HTTP cache; Playwright also waits for the redirected commit.
+                  if (redirected)
+                    await tab.page.reload({ ...VIEWER_NAVIGATION_OPTIONS, waitUntil: "load" });
+                  else await tab.cdp.send("Page.reload", { ignoreCache: true });
+                },
+              );
             }
           })
           .catch((cause: unknown) =>
@@ -3536,20 +3548,44 @@ const make = Effect.gen(function* () {
           const delta = num(message.delta) < 0 ? -1 : 1;
           const history = await session.send("Page.getNavigationHistory");
           const url = history.entries[history.currentIndex + delta]?.url;
-          if (typeof url === "string") await prepareExistingBrowserNavigation(tab, url, signal);
-          signal.throwIfAborted();
-          if (delta < 0) await tab.page.goBack(VIEWER_NAVIGATION_OPTIONS);
-          else await tab.page.goForward(VIEWER_NAVIGATION_OPTIONS);
+          const navigate = async () => {
+            signal.throwIfAborted();
+            if (delta < 0) await tab.page.goBack(VIEWER_NAVIGATION_OPTIONS);
+            else await tab.page.goForward(VIEWER_NAVIGATION_OPTIONS);
+          };
+          if (typeof url !== "string") await navigate();
+          else {
+            const destination = await prepareExistingBrowserNavigation(tab, url, signal);
+            await ServerBrowserPage.navigateWithRedirect(
+              tab.page,
+              url,
+              destination,
+              navigate,
+              signal,
+            );
+          }
         });
         return;
       case "reload":
         startViewerNavigation(tab, async (signal) => {
-          await prepareExistingBrowserNavigation(tab, tab.page.url(), signal);
-          signal.throwIfAborted();
-          // A hard reload fetches everything again, as Chrome's Shift+Reload does.
-          if (message.ignoreCache === true)
-            await session.send("Page.reload", { ignoreCache: true });
-          else await tab.page.reload(VIEWER_NAVIGATION_OPTIONS);
+          const url = tab.page.url();
+          const destination = await prepareExistingBrowserNavigation(tab, url, signal);
+          await ServerBrowserPage.navigateWithRedirect(
+            tab.page,
+            url,
+            destination,
+            async (redirected) => {
+              // A redirect route disables HTTP cache and must remain through the navigation commit.
+              if (message.ignoreCache === true && !redirected)
+                await session.send("Page.reload", { ignoreCache: true });
+              else
+                await tab.page.reload({
+                  ...VIEWER_NAVIGATION_OPTIONS,
+                  ...(message.ignoreCache === true ? { waitUntil: "load" as const } : {}),
+                });
+            },
+            signal,
+          );
         });
         return;
       case "probe": {

@@ -26,7 +26,7 @@ import * as Queue from "effect/Queue";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
-import type { BrowserContext, Page } from "playwright-core";
+import type { BrowserContext, Page, Route } from "playwright-core";
 import { beforeEach, expect, vi } from "vite-plus/test";
 
 import * as ServerConfig from "../config.ts";
@@ -142,6 +142,26 @@ function makeContext(onClose?: (context: BrowserContext) => void) {
   });
   let closed = false;
   let contextClosed = false;
+  const routes = new Map<(url: URL) => boolean, (route: Route) => Promise<void>>();
+  const routedUrl = async (next: string) => {
+    let destination = next;
+    const url = new URL(next);
+    url.hash = "";
+    for (const [matches, handler] of routes) {
+      if (!matches(url)) continue;
+      await handler({
+        request: () => ({ isNavigationRequest: () => true, frame: () => page }),
+        fulfill: async ({ headers }: { headers: { location: string } }) => {
+          destination = headers.location;
+        },
+        fallback: async () => {},
+        abort: async () => {
+          throw new Error("Navigation aborted");
+        },
+      } as unknown as Route);
+    }
+    return destination;
+  };
   const page = {
     on: (name: string, callback: (...args: unknown[]) => void) => events.on(name, callback),
     once: (name: string, callback: (...args: unknown[]) => void) => events.once(name, callback),
@@ -166,13 +186,21 @@ function makeContext(onClose?: (context: BrowserContext) => void) {
     }),
     goBack: vi.fn(async () => {
       historyIndex = Math.max(0, historyIndex - 1);
-      url = history[historyIndex]!;
+      url = history[historyIndex] = await routedUrl(history[historyIndex]!);
     }),
     goForward: vi.fn(async () => {
       historyIndex = Math.min(history.length - 1, historyIndex + 1);
-      url = history[historyIndex]!;
+      url = history[historyIndex] = await routedUrl(history[historyIndex]!);
     }),
-    reload: vi.fn(async () => {}),
+    reload: vi.fn(async () => {
+      url = history[historyIndex] = await routedUrl(url);
+    }),
+    route: async (matches: (url: URL) => boolean, handler: (route: Route) => Promise<void>) => {
+      routes.set(matches, handler);
+    },
+    unroute: async (matches: (url: URL) => boolean) => {
+      routes.delete(matches);
+    },
     emulateMedia: vi.fn(async () => {}),
     waitForLoadState: vi.fn(async () => {}),
     evaluate: vi.fn(async (expression?: unknown) =>
@@ -259,6 +287,7 @@ let contextFailure: Error | null = null;
 let desktopRendersNext = false;
 let localDesktopAvailable = false;
 let remoteUrlAvailable = true;
+let remoteUrlHostname = "environment.example.test";
 let remoteUrlGate: ReturnType<typeof Promise.withResolvers<void>> | null = null;
 let remoteUrlEntered: ReturnType<typeof Promise.withResolvers<void>> | null = null;
 let encoderAcquireGate: ReturnType<typeof Promise.withResolvers<void>> | null = null;
@@ -437,9 +466,7 @@ const dependencies = Layer.mergeAll(
       Effect.promise(async () => {
         remoteUrlEntered?.resolve();
         await remoteUrlGate?.promise;
-        return remoteUrlAvailable
-          ? input.url.replace("localhost", "environment.example.test")
-          : null;
+        return remoteUrlAvailable ? input.url.replace("localhost", remoteUrlHostname) : null;
       }),
     subscribeCommands: () => Stream.empty,
     connectedHosts: nativePopupEvents<string>("host-connected"),
@@ -753,6 +780,7 @@ beforeEach(() => {
   profileRequests.length = 0;
   profileCatalogues.clear();
   remoteUrlAvailable = true;
+  remoteUrlHostname = "environment.example.test";
   releasedDesktopTabs.length = 0;
   desktopConnections.length = 0;
   desktopPageSetup = null;
@@ -1018,11 +1046,12 @@ it.live("reload recovers both owned remote origins after returning through publi
   ).pipe(Effect.provide(layer)),
 );
 
-it.live.each([false, true])(
-  "client hard reload prepares managed access before reloading (remote: %s)",
-  (remote) =>
+it.live.each(["local", "remote", "changed address"])(
+  "client hard reload prepares managed access before reloading (%s)",
+  (connection) =>
     Effect.scoped(
       Effect.gen(function* () {
+        const remote = connection !== "local";
         if (remote) {
           profileCatalogue = {
             desktopHostId: "fixture-desktop",
@@ -1036,6 +1065,8 @@ it.live.each([false, true])(
         const url = "http://localhost:5173/qa/reload?mode=dark#anchor";
         hostingPreparation = () => Effect.succeed({ managed: true });
         yield* broker.invoke({ scope, tabId, operation: "navigate", input: { url } });
+        if (connection === "changed address")
+          remoteUrlHostname = "updated-environment.example.test";
         const events: string[] = [];
         const prepared: Array<{ threadId: string; url: string; browserUrl?: string }> = [];
         hostingPreparation = (input) =>
@@ -1050,6 +1081,12 @@ it.live.each([false, true])(
           return post(...args);
         });
         const reloaded = Promise.withResolvers<void>();
+        const reload = context.page.reload.getMockImplementation()!;
+        context.page.reload.mockImplementationOnce(async () => {
+          await reload();
+          events.push("reloaded");
+          reloaded.resolve();
+        });
         const cdp = context.sessions[0]!;
         const send = cdp.send.getMockImplementation()!;
         cdp.send.mockImplementation(async (method, input) => {
@@ -1068,7 +1105,7 @@ it.live.each([false, true])(
           hardReload: true,
         });
         yield* Effect.promise(() => reloaded.promise);
-        const browserUrl = remote ? url.replace("localhost", "environment.example.test") : url;
+        const browserUrl = remote ? url.replace("localhost", remoteUrlHostname) : url;
         expect(prepared).toEqual([
           { threadId: scope.thread.threadId, url, ...(remote ? { browserUrl } : {}) },
         ]);
@@ -1077,14 +1114,23 @@ it.live.each([false, true])(
           new URL("/api/auth/browser-session", browserUrl).href,
           expect.objectContaining({ data: { credential: "fixture-one-use-credential" } }),
         );
-        expect(cdp.send).toHaveBeenCalledWith("Page.reload", { ignoreCache: true });
+        if (connection === "changed address") {
+          expect(context.page.url()).toBe(browserUrl);
+          expect(context.page.reload).toHaveBeenCalledOnce();
+          expect(cdp.send).not.toHaveBeenCalledWith("Page.reload", expect.anything());
+        } else expect(cdp.send).toHaveBeenCalledWith("Page.reload", { ignoreCache: true });
       }),
     ).pipe(Effect.provide(layer)),
 );
 
-it.live.each([-1, 1])(
-  "history delta %s prepares the managed destination before navigation",
-  (delta) =>
+it.live.each([
+  [-1, false],
+  [1, false],
+  [-1, true],
+  [1, true],
+] as const)(
+  "history delta %s prepares the managed destination before navigation (address changed: %s)",
+  ([delta, changed]) =>
     Effect.scoped(
       Effect.gen(function* () {
         profileCatalogue = {
@@ -1109,6 +1155,7 @@ it.live.each([-1, 1])(
           yield* Effect.promise(() => context.page.goBack());
           yield* Effect.promise(() => context.page.goBack());
         }
+        if (changed) remoteUrlHostname = "updated-environment.example.test";
         const events: string[] = [];
         const prepared: Array<{ threadId: string; url: string; browserUrl?: string }> = [];
         hostingPreparation = (input) =>
@@ -1134,7 +1181,7 @@ it.live.each([-1, 1])(
         yield* viewer.input({ type: "takeControl" });
         yield* viewer.input({ type: "history", delta });
         yield* Effect.promise(() => committed.promise);
-        const browserUrl = url.replace("localhost", "environment.example.test");
+        const browserUrl = url.replace("localhost", remoteUrlHostname);
         expect(context.page.url()).toBe(browserUrl);
         expect(prepared).toEqual([{ threadId: scope.thread.threadId, url, browserUrl }]);
         expect(events).toEqual(["recovered", "authenticated", "navigated"]);
@@ -1217,9 +1264,14 @@ it.live.each(["open", "openWithProfile", "navigate", "viewer"] as const)(
     ).pipe(Effect.provide(layer)),
 );
 
-it.live.each([false, true])(
-  "reattached desktop sessions retain verified origins for reload (ignoreCache=%s)",
-  (ignoreCache) =>
+it.live.each([
+  [false, false],
+  [true, false],
+  [false, true],
+  [true, true],
+] as const)(
+  "reattached desktop sessions retain verified origins for reload (ignoreCache=%s, address changed=%s)",
+  ([ignoreCache, changed]) =>
     Effect.scoped(
       Effect.gen(function* () {
         profileCatalogue = {
@@ -1261,6 +1313,8 @@ it.live.each([false, true])(
         const reattached = yield* browser.attachViewer(viewerInput(tabId, true));
         yield* reattached.input({ type: "takeControl" });
         const current = desktopConnections[1]!.context;
+        if (changed) remoteUrlHostname = "updated-environment.example.test";
+        const resolvedUrl = localUrl.replace("localhost", remoteUrlHostname);
         const reloaded = Promise.withResolvers<void>();
         if (ignoreCache) {
           const cdp = current.sessions.at(-1)!;
@@ -1269,16 +1323,21 @@ it.live.each([false, true])(
             if (method === "Page.reload") reloaded.resolve();
             return send(method, input);
           });
-        } else current.page.reload.mockImplementationOnce(async () => reloaded.resolve());
+        }
+        const reload = current.page.reload.getMockImplementation()!;
+        current.page.reload.mockImplementationOnce(async () => {
+          await reload();
+          reloaded.resolve();
+        });
         yield* reattached.input({ type: "reload", ignoreCache });
         yield* Effect.promise(() => reloaded.promise);
-        expect(current.page.url()).toBe(browserUrl);
+        expect(current.page.url()).toBe(resolvedUrl);
         expect(prepared).toEqual([
           { threadId: testThread.threadId, url: localUrl, browserUrl },
-          { threadId: testThread.threadId, url: localUrl, browserUrl },
+          { threadId: testThread.threadId, url: localUrl, browserUrl: resolvedUrl },
         ]);
         expect(current.request.post).toHaveBeenCalledExactlyOnceWith(
-          "http://environment.example.test:5173/api/auth/browser-session",
+          new URL("/api/auth/browser-session", resolvedUrl).href,
           expect.objectContaining({ data: { credential: "fixture-one-use-credential" } }),
         );
         expect(previous.page.close).not.toHaveBeenCalled();
