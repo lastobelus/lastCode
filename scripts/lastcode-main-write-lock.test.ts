@@ -244,7 +244,13 @@ describe("main write lock", () => {
       const hooks = NodePath.join(f.first, ".git", "hooks");
       NodeFS.copyFileSync(
         NodePath.join(import.meta.dirname, "..", ".vite-hooks", "pre-push"),
+        NodePath.join(hooks, "lastcode-pre-push"),
+      );
+      // The installed Vite+ wrapper invokes the hook with errexit enabled.
+      NodeFS.writeFileSync(
         NodePath.join(hooks, "pre-push"),
+        '#!/bin/sh\nexec /bin/sh -e "$(dirname "$0")/lastcode-pre-push" "$@"\n',
+        { mode: 0o755 },
       );
       if (outcome === "unreported") {
         NodeFS.writeFileSync(NodePath.join(hooks, "pre-push"), "#!/bin/sh\nexit 1\n", {
