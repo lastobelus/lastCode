@@ -1658,6 +1658,181 @@ it.layer(
     unsubscribe();
   });
 
+  const createSnapshotBoundaryManager = (
+    source: "native" | "fallback",
+    ptyAdapter: FakePtyAdapter,
+    processTable: NonNullable<CreateManagerOptions["processTable"]>,
+  ) => {
+    const processRunner: ProcessRunner.ProcessRunner["Service"] = {
+      run: (input) =>
+        processTable.pipe(
+          Effect.map((entries) => {
+            expect(input.args).toEqual(["-eo", "pid=,ppid=,comm="]);
+            return {
+              stdout: entries.map(({ pid, ppid, name }) => `${pid} ${ppid} ${name}`).join("\n"),
+              stderr: "",
+              code: ChildProcessSpawner.ExitCode(0),
+              timedOut: false,
+              stdoutTruncated: false,
+              stderrTruncated: false,
+              stdoutInvalidUtf8: false,
+              stderrInvalidUtf8: false,
+            };
+          }),
+        ),
+    };
+    return createManager(5, {
+      ptyAdapter,
+      shellResolver: () => "/opt/tools/my-shell",
+      subprocessPollIntervalMs: 60_000,
+      ...(source === "native" ? { processTable } : {}),
+    }).pipe(
+      Effect.provideService(ProcessRunner.ProcessRunner, processRunner),
+      Effect.provide(layerWithHostPlatform("linux")),
+    );
+  };
+
+  it.effect.each([
+    { source: "native", boundary: "open" },
+    { source: "fallback", boundary: "open" },
+    { source: "native", boundary: "restart" },
+    { source: "fallback", boundary: "restart" },
+  ] as const)(
+    "captures the actual wrapper shell after $boundary during an older $source snapshot",
+    ({ source, boundary }) =>
+      Effect.gen(function* () {
+        const staleSnapshotStarted = yield* Deferred.make<void>();
+        const releaseStaleSnapshot = yield* Deferred.make<void>();
+        const ptyAdapter = new FakePtyAdapter();
+        let holdNextSnapshot = false;
+        const processTable = Effect.gen(function* () {
+          // Freeze the table before suspending so a newly spawned PID is absent.
+          const entries = ptyAdapter.processes
+            .filter((process) => !process.killed)
+            .map((process) => ({
+              pid: process.pid,
+              ppid: 1,
+              name: process.writes.includes("exec command\r") ? "node" : "zsh",
+            }));
+          if (holdNextSnapshot) {
+            holdNextSnapshot = false;
+            yield* Deferred.succeed(staleSnapshotStarted, undefined);
+            yield* Deferred.await(releaseStaleSnapshot);
+          }
+          return entries;
+        });
+        const { manager } = yield* createSnapshotBoundaryManager(source, ptyAdapter, processTable);
+        yield* TestClock.adjust(0);
+        const holder = { threadId: "snapshot-holder", terminalId: "idle" };
+        const idle = { threadId: "thread-1", terminalId: "idle" };
+        const exec = { threadId: "thread-1", terminalId: "exec" };
+        yield* manager.open(openInput(holder));
+        ptyAdapter.processes.at(-1)!.exitOnKill = "SIGTERM";
+        yield* manager.open(openInput(exec));
+        yield* manager.write({ ...exec, data: "exec command\r" });
+        const execProcess = ptyAdapter.processes.at(-1)!;
+        if (boundary === "restart") {
+          yield* manager.open(openInput(idle));
+          ptyAdapter.processes.at(-1)!.exitOnKill = "SIGTERM";
+        }
+        holdNextSnapshot = true;
+        const checkingHolder = yield* manager.closeIdle(holder).pipe(Effect.forkScoped);
+        yield* Deferred.await(staleSnapshotStarted);
+
+        if (boundary === "restart") yield* manager.restart(restartInput(idle));
+        else yield* manager.open(openInput(idle));
+        const idleProcess = ptyAdapter.processes.at(-1)!;
+        idleProcess.exitOnKill = "SIGTERM";
+        const writing = yield* manager.write({ ...idle, data: "noop\r" }).pipe(Effect.forkScoped);
+        yield* TestClock.adjust(0);
+        yield* Deferred.succeed(releaseStaleSnapshot, undefined);
+        yield* Fiber.join(writing);
+        yield* Fiber.join(checkingHolder);
+        yield* manager.closeIdle({ threadId: "thread-1" });
+
+        const remaining = [
+          { terminal: idle, process: idleProcess },
+          { terminal: exec, process: execProcess },
+        ]
+          .filter(({ process }) => !process.killed)
+          .map(({ terminal }) => terminal);
+        if (remaining.length > 0) {
+          yield* exitSnapshotTestProcesses(manager, ptyAdapter, remaining);
+        }
+        expect(idleProcess.writes).toEqual(["noop\r"]);
+        expect(idleProcess.killSignals).toEqual(["SIGTERM"]);
+        expect(execProcess.killSignals).toEqual([]);
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect.each(["native", "fallback"] as const)(
+    "retains a childless exec after input succeeds during an older %s snapshot",
+    (source) =>
+      Effect.gen(function* () {
+        const staleSnapshotStarted = yield* Deferred.make<void>();
+        const releaseStaleSnapshot = yield* Deferred.make<void>();
+        const ptyAdapter = new FakePtyAdapter();
+        let holdNextSnapshot = false;
+        const processTable = Effect.gen(function* () {
+          // The held scan observes an idle shell before its next successful write.
+          const entries = ptyAdapter.processes
+            .filter((process) => !process.killed)
+            .map((process) => ({
+              pid: process.pid,
+              ppid: 1,
+              name: process.writes.includes("exec command\r") ? "node" : "zsh",
+            }));
+          if (holdNextSnapshot) {
+            holdNextSnapshot = false;
+            yield* Deferred.succeed(staleSnapshotStarted, undefined);
+            yield* Deferred.await(releaseStaleSnapshot);
+          }
+          return entries;
+        });
+        const { manager } = yield* createSnapshotBoundaryManager(source, ptyAdapter, processTable);
+        yield* TestClock.adjust(0);
+        const holder = { threadId: "snapshot-holder", terminalId: "idle" };
+        const exec = { threadId: "thread-1", terminalId: "exec" };
+        const idle = { threadId: "thread-1", terminalId: "idle" };
+        yield* manager.open(openInput(holder));
+        ptyAdapter.processes.at(-1)!.exitOnKill = "SIGTERM";
+        yield* manager.open(openInput(exec));
+        const execProcess = ptyAdapter.processes.at(-1)!;
+        yield* manager.open(openInput(idle));
+        const idleProcess = ptyAdapter.processes.at(-1)!;
+        execProcess.exitOnKill = "SIGTERM";
+        idleProcess.exitOnKill = "SIGTERM";
+        // Finish identity capture before starting the stale scan, so the next
+        // write forwards immediately while the old process table is pending.
+        yield* manager.write({ ...exec, data: "prepare\r" });
+        holdNextSnapshot = true;
+        const checkingHolder = yield* manager.closeIdle(holder).pipe(Effect.forkScoped);
+        yield* Deferred.await(staleSnapshotStarted);
+        yield* manager.write({ ...exec, data: "exec command\r" });
+        expect(execProcess.writes).toEqual(["prepare\r", "exec command\r"]);
+
+        const checkingThread = yield* manager
+          .closeIdle({ threadId: "thread-1" })
+          .pipe(Effect.forkScoped);
+        yield* TestClock.adjust(0);
+        yield* Deferred.succeed(releaseStaleSnapshot, undefined);
+        yield* Fiber.join(checkingThread);
+        yield* Fiber.join(checkingHolder);
+
+        const remaining = [
+          { terminal: idle, process: idleProcess },
+          { terminal: exec, process: execProcess },
+        ]
+          .filter(({ process }) => !process.killed)
+          .map(({ terminal }) => terminal);
+        if (remaining.length > 0) {
+          yield* exitSnapshotTestProcesses(manager, ptyAdapter, remaining);
+        }
+        expect(execProcess.killSignals).toEqual([]);
+        expect(idleProcess.killSignals).toEqual(["SIGTERM"]);
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
   it.effect.each([
     { source: "native", grouping: "threads" },
     { source: "fallback", grouping: "threads" },
