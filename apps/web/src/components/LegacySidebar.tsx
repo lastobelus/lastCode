@@ -1993,6 +1993,11 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const isNoProjectGroup = project.projectKey === NO_PROJECT_GROUP_KEY;
+  const loadBalancingEnabled = useClientSettings((settings) => settings.loadBalancingEnabled);
+  const canAutoBalance =
+    loadBalancingEnabled &&
+    !isNoProjectGroup &&
+    new Set(project.memberProjects.map((member) => member.environmentId)).size > 1;
   const projectSettingsKey = resolveSidebarProjectSettingsKey({
     sidebarProjectKey: project.projectKey,
     targetProject: project,
@@ -2934,15 +2939,15 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   );
 
   const createThreadForProjectMember = useCallback(
-    (member: SidebarProjectGroupMember) => {
+    (member: SidebarProjectGroupMember, environmentSelection: "auto" | "manual" = "manual") => {
       if (isMobile) {
         setOpenMobile(false);
       }
       void (async () => {
-        // No options: branch, worktree, and env mode come from the user's
-        // configured defaults, never from the currently viewed thread.
         const result = await settlePromise(() =>
-          handleNewThread(scopeProjectRef(member.environmentId, member.id)),
+          handleNewThread(scopeProjectRef(member.environmentId, member.id), {
+            environmentSelection,
+          }),
         );
         if (result._tag === "Failure") {
           const error = squashAtomCommandFailure(result);
@@ -2976,10 +2981,13 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         }
         const clickedResult = await settlePromise(() =>
           api.contextMenu.show(
-            project.memberProjects.map((member) => ({
-              id: member.physicalProjectKey,
-              label: formatProjectMemberActionLabel(member, project.groupedProjectCount),
-            })),
+            [
+              ...(canAutoBalance ? [{ id: "auto", label: "Auto balance" }] : []),
+              ...project.memberProjects.map((member) => ({
+                id: member.physicalProjectKey,
+                label: formatProjectMemberActionLabel(member, project.groupedProjectCount),
+              })),
+            ],
             {
               x: event.clientX,
               y: event.clientY,
@@ -3001,6 +3009,10 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         if (!clicked) {
           return;
         }
+        if (clicked === "auto") {
+          createThreadForProjectMember(project.memberProjects[0]!, "auto");
+          return;
+        }
         const targetMember = project.memberProjects.find(
           (member) => member.physicalProjectKey === clicked,
         );
@@ -3010,7 +3022,12 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         createThreadForProjectMember(targetMember);
       })();
     },
-    [createThreadForProjectMember, project.groupedProjectCount, project.memberProjects],
+    [
+      canAutoBalance,
+      createThreadForProjectMember,
+      project.groupedProjectCount,
+      project.memberProjects,
+    ],
   );
 
   const attemptArchiveThread = useCallback(

@@ -41,6 +41,10 @@ import {
   rememberCheckoutIsRepo,
 } from "./ChatView.logic";
 import { useLoadBalancedEnvironment } from "../hooks/useLoadBalancedEnvironment";
+import {
+  loadBalancingDecisionLog,
+  loadBalancingExclusionReason,
+} from "../lib/loadBalancingDiagnostics";
 import { useScratchProject } from "../hooks/useScratchProject";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
@@ -4406,29 +4410,26 @@ export default function ChatView(props: ChatViewProps) {
   }, [activeThreadRef, diffOpen, isServerThread, onDiffPanelOpen]);
 
   const needsLoadBalancing = automaticEnvironment && !draftThread?.loadBalancedEnvironmentId;
-  const loadBalancingCandidates = useMemo(
+  const loadBalancingHosts = useMemo(
     () =>
       needsLoadBalancing
-        ? logicalProjectEnvironments
-            .filter((candidate) => {
-              const environment = environmentById.get(candidate.environmentId);
-              return (
-                environment?.connection.phase === "connected" &&
-                (loadBalancingSettings.loadBalancingWeights[candidate.environmentId] ?? 50) > 0 &&
-                environment.serverConfig?.providers.some(
-                  (provider) =>
-                    (activeProviderInstanceId === null ||
-                      provider.instanceId === activeProviderInstanceId) &&
-                    provider.driver === selectedProvider &&
-                    provider.enabled &&
-                    provider.installed &&
-                    provider.status !== "error" &&
-                    provider.auth.status !== "unauthenticated" &&
-                    provider.availability !== "unavailable",
-                )
-              );
-            })
-            .map((candidate) => candidate.environmentId)
+        ? logicalProjectEnvironments.map((candidate) => {
+            const environment = environmentById.get(candidate.environmentId);
+            const weight =
+              loadBalancingSettings.loadBalancingWeights[candidate.environmentId] ?? 50;
+            return {
+              environmentId: candidate.environmentId,
+              label: candidate.label,
+              weight,
+              exclusionReason: loadBalancingExclusionReason({
+                connectionPhase: environment?.connection.phase,
+                weight,
+                providers: environment?.serverConfig?.providers,
+                providerInstanceId: activeProviderInstanceId,
+                providerDriver: selectedProvider,
+              }),
+            };
+          })
         : [],
     [
       needsLoadBalancing,
@@ -4439,12 +4440,51 @@ export default function ChatView(props: ChatViewProps) {
       selectedProvider,
     ],
   );
+  const loadBalancingCandidates = useMemo(
+    () =>
+      loadBalancingHosts
+        .filter((host) => host.exclusionReason === null)
+        .map((host) => host.environmentId),
+    [loadBalancingHosts],
+  );
   const loadBalancing = useLoadBalancedEnvironment(
     loadBalancingCandidates,
     loadBalancingSettings.loadBalancingWeights,
   );
   useEffect(() => {
     if (!needsLoadBalancing || loadBalancing.pending || !draftId || sendInFlightRef.current) return;
+    try {
+      loadBalancingDecisionLog.record({
+        draftId,
+        threadId: draftThread?.threadId ?? null,
+        providerInstanceId: activeProviderInstanceId,
+        providerDriver: selectedProvider,
+        selectedEnvironmentId: loadBalancing.environmentId,
+        candidates: loadBalancingHosts.map((host) => {
+          const evaluation = loadBalancing.decision.candidates.find(
+            (candidate) => candidate.environmentId === host.environmentId,
+          );
+          return evaluation
+            ? { ...evaluation, label: host.label }
+            : {
+                environmentId: host.environmentId,
+                label: host.label,
+                weight: host.weight,
+                receivedAt: null,
+                sampleAgeMs: null,
+                resources: null,
+                score: null,
+                reason: host.exclusionReason,
+              };
+        }),
+      });
+    } catch {
+      toastManager.add({
+        type: "error",
+        id: "auto-balance-log-failed",
+        title: "Could not save Auto balance decision logs",
+      });
+    }
     const target = logicalProjectEnvironments.find(
       (environment) => environment.environmentId === loadBalancing.environmentId,
     );
@@ -4458,6 +4498,11 @@ export default function ChatView(props: ChatViewProps) {
     needsLoadBalancing,
     loadBalancing.pending,
     loadBalancing.environmentId,
+    loadBalancing.decision,
+    loadBalancingHosts,
+    draftThread?.threadId,
+    activeProviderInstanceId,
+    selectedProvider,
     draftId,
     logicalProjectEnvironments,
     setDraftThreadContext,
@@ -4493,7 +4538,7 @@ export default function ChatView(props: ChatViewProps) {
   ]);
   const autoEnvironmentLabel = automaticEnvironment
     ? draftThread?.loadBalancedEnvironmentId
-      ? "Auto balance"
+      ? `Auto balance · ${logicalProjectEnvironments.find((environment) => environment.environmentId === draftThread.loadBalancedEnvironmentId)?.label ?? "Selected machine"}`
       : loadBalancing.pending
         ? "Checking machines…"
         : loadBalancing.failed

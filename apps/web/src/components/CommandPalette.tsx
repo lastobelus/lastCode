@@ -63,6 +63,7 @@ import {
   MoonIcon,
   PaletteIcon,
   RotateCcwIcon,
+  ScaleIcon,
   SettingsIcon,
   SquarePenIcon,
   SunIcon,
@@ -1333,10 +1334,11 @@ function OpenCommandPaletteDialog(props: {
   const projectThreadItems = useMemo(() => {
     const isScratch = (project: CommandPaletteProject) =>
       isScratchProject(project, scratchWorkspaceRootFor(project.environmentId));
+    const ordinaryProjects = pickerProjects.filter((project) => !isScratch(project));
     const projectItems = enumerateCommandPaletteItems(
       buildProjectActionItems({
         // The no-project home shows once, as the "No project" item below.
-        projects: pickerProjects.filter((project) => !isScratch(project)),
+        projects: ordinaryProjects,
         valuePrefix: "new-thread-in",
         searchTerms: (project) => {
           const group = projectGroupByTargetKey.get(`${project.environmentId}:${project.id}`);
@@ -1384,10 +1386,70 @@ function OpenCommandPaletteDialog(props: {
             contextualRefBelongsToGroup
               ? contextualProjectRef
               : scopeProjectRef(project.environmentId, project.id),
+            { environmentSelection: "manual" },
           );
         },
       }),
-    );
+    ).map((item, index) => {
+      const project = ordinaryProjects[index]!;
+      const group = projectGroupByTargetKey.get(`${project.environmentId}:${project.id}`);
+      if (!group || group.memberProjects.length === 1) return item;
+      const { run: _run, ...projectItem } = item;
+      const canAutoBalance =
+        clientSettings.loadBalancingEnabled &&
+        new Set(group.memberProjects.map((member) => member.environmentId)).size > 1;
+      return {
+        ...projectItem,
+        kind: "submenu" as const,
+        addonIcon: <ChevronRightIcon className={ADDON_ICON_CLASS} />,
+        groups: [
+          {
+            value: `${item.value}:hosts`,
+            label: "Run on",
+            items: [
+              ...(canAutoBalance
+                ? [
+                    {
+                      kind: "action" as const,
+                      value: `${item.value}:auto`,
+                      title: "Auto balance",
+                      searchTerms: ["auto balance", "automatic"],
+                      icon: <ScaleIcon className={ITEM_ICON_CLASS} />,
+                      run: async () => {
+                        await handleNewThread(scopeProjectRef(project.environmentId, project.id), {
+                          environmentSelection: "auto",
+                        });
+                      },
+                    },
+                  ]
+                : []),
+              ...group.memberProjects.map((member) => {
+                const location = projectEnvironmentLocationById.get(member.environmentId);
+                const hostLabel = environmentLabelById.get(member.environmentId) ?? "Remote";
+                return {
+                  kind: "action" as const,
+                  value: `${item.value}:${member.physicalProjectKey}`,
+                  title: hostLabel,
+                  description: member.workspaceRoot,
+                  searchTerms: [member.workspaceRoot, hostLabel],
+                  icon: (
+                    <EnvironmentMachineIcon
+                      kind={location?.machine ?? "server"}
+                      className={ITEM_ICON_CLASS}
+                    />
+                  ),
+                  run: async () => {
+                    await handleNewThread(scopeProjectRef(member.environmentId, member.id), {
+                      environmentSelection: "manual",
+                    });
+                  },
+                };
+              }),
+            ],
+          },
+        ],
+      };
+    });
     if (scratchTargetEnvironmentId === null) return projectItems;
 
     // "No project" goes right after the current project: visible without
@@ -1409,7 +1471,9 @@ function OpenCommandPaletteDialog(props: {
       ...projectItems.slice(noProjectIndex),
     ];
   }, [
+    clientSettings.loadBalancingEnabled,
     contextualProjectRef,
+    environmentLabelById,
     handleNewThread,
     pickerProjects,
     projectEnvironmentLocationById,
