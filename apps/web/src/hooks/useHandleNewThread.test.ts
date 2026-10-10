@@ -17,6 +17,7 @@ const testState = vi.hoisted(() => {
     readonly threadId: string;
     readonly branch?: string | null;
     readonly worktreePath?: string | null;
+    readonly environmentSelection?: "auto" | "manual";
   } | null = null;
   const router = {
     state: {
@@ -186,7 +187,7 @@ vi.mock("../uiStateStore", () => ({
 }));
 vi.mock("./useSettings", () => ({
   useClientSettings: (select: (settings: { loadBalancingEnabled: boolean }) => unknown) =>
-    select({ loadBalancingEnabled: true }),
+    select({ loadBalancingEnabled: false }),
 }));
 
 import { useNewThreadHandler } from "./useHandleNewThread";
@@ -201,6 +202,30 @@ it.each([
     promotedTo: null,
     threadId: "thread-existing",
     ...workspace,
+  });
+  testState.router.state.matches[0]!.params = { draftId: "draft-existing" };
+  testState.router.state.location.href = "/draft/draft-existing";
+  const projectRef = { environmentId: "environment-ssh", projectId: "project-remote" } as never;
+
+  await useNewThreadHandler()(projectRef);
+
+  expect(testState.draftStore.setLogicalProjectDraftThreadId).toHaveBeenCalledWith(
+    "remote-project",
+    projectRef,
+    "draft-existing",
+    expect.objectContaining({ environmentSelection: "manual", loadBalancedEnvironmentId: null }),
+  );
+});
+
+it("keeps a manual host pick when an open empty draft is reused without a host override", async () => {
+  testState.reset({
+    draftId: "draft-existing",
+    environmentId: "environment-ssh",
+    promotedTo: null,
+    threadId: "thread-existing",
+    environmentSelection: "manual",
+    branch: null,
+    worktreePath: null,
   });
   testState.router.state.matches[0]!.params = { draftId: "draft-existing" };
   testState.router.state.location.href = "/draft/draft-existing";
@@ -281,7 +306,7 @@ describe.each([
     },
   );
 
-  it("starts a fresh automatic selection when no host override was given", async () => {
+  it("defaults to automatic intent before the load-balancing setting is hydrated", async () => {
     testState.reset(draft);
     const projectRef = {
       environmentId: "environment-ssh",

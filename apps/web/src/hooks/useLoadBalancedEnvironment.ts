@@ -28,7 +28,8 @@ export function useLoadBalancedEnvironment(
           return {
             environmentId,
             resources: result._tag === "Success" ? result.value : null,
-            receivedAt: result._tag === "Success" ? result.timestamp : 0,
+            ...(result._tag === "Success" ? { receivedAt: result.timestamp } : {}),
+            resourcesRequestFailed: result._tag === "Failure",
             pending: result._tag === "Initial" || result.waiting,
             failed: result._tag === "Failure",
           };

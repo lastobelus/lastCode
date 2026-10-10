@@ -63,8 +63,8 @@ export function createLoadBalancingDecisionLog(storage: Pick<Storage, "getItem" 
   let state: LogState | undefined;
   let lastDecision: string | undefined;
   const listeners = new Set<() => void>();
-  const getSnapshot = (): LogState => {
-    if (state) return state;
+  const refresh = (): LogState => {
+    let next: LogState = { expiresAt: 0, records: [] };
     try {
       const saved: unknown = JSON.parse(storage.getItem(STORAGE_KEY) ?? "null");
       if (
@@ -76,14 +76,26 @@ export function createLoadBalancingDecisionLog(storage: Pick<Storage, "getItem" 
         Array.isArray(saved.records) &&
         saved.records.every((entry) => typeof entry === "string")
       ) {
-        state = { expiresAt: saved.expiresAt, records: saved.records.slice(-MAX_DECISIONS) };
+        next = { expiresAt: saved.expiresAt, records: saved.records.slice(-MAX_DECISIONS) };
       }
     } catch {
-      /* An absent or unreadable log starts empty. */
+      // A transient read failure must not discard an already loaded log.
+      next = state ?? next;
     }
-    state ??= { expiresAt: 0, records: [] };
+    if (
+      state &&
+      state.expiresAt === next.expiresAt &&
+      state.records.length === next.records.length &&
+      state.records.every((record, index) => record === next.records[index])
+    ) {
+      return state;
+    }
+    if (state?.expiresAt !== next.expiresAt) lastDecision = undefined;
+    state = next;
+    for (const listener of listeners) listener();
     return state;
   };
+  const getSnapshot = (): LogState => state ?? refresh();
   const save = (next: LogState) => {
     storage.setItem(STORAGE_KEY, JSON.stringify(next));
     state = next;
@@ -91,6 +103,7 @@ export function createLoadBalancingDecisionLog(storage: Pick<Storage, "getItem" 
   };
   return {
     getSnapshot,
+    refresh,
     subscribe: (listener: () => void) => {
       listeners.add(listener);
       return () => {
@@ -98,12 +111,12 @@ export function createLoadBalancingDecisionLog(storage: Pick<Storage, "getItem" 
       };
     },
     start: (now = Date.now()) => {
-      save({ ...getSnapshot(), expiresAt: now + LOG_DURATION_MS });
+      save({ ...refresh(), expiresAt: now + LOG_DURATION_MS });
       lastDecision = undefined;
     },
-    stop: () => save({ ...getSnapshot(), expiresAt: 0 }),
+    stop: () => save({ ...refresh(), expiresAt: 0 }),
     record: (decision: LoadBalancingDecisionRecord, now = Date.now()) => {
-      const current = getSnapshot();
+      const current = refresh();
       if (now >= current.expiresAt) return;
       // Re-renders can age the same sample without making another routing decision.
       const signature = JSON.stringify({
@@ -120,8 +133,10 @@ export function createLoadBalancingDecisionLog(storage: Pick<Storage, "getItem" 
       });
       lastDecision = signature;
     },
-    export: () =>
-      `{"expiresAt":${getSnapshot().expiresAt},"decisions":[${getSnapshot().records.join(",")}]}\n`,
+    export: () => {
+      const current = refresh();
+      return `{"expiresAt":${current.expiresAt},"decisions":[${current.records.join(",")}]}\n`;
+    },
   };
 }
 
@@ -129,3 +144,9 @@ export const loadBalancingDecisionLog = createLoadBalancingDecisionLog({
   getItem: (key) => localStorage.getItem(key),
   setItem: (key, value) => localStorage.setItem(key, value),
 });
+
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (event) => {
+    if (event.key === STORAGE_KEY || event.key === null) loadBalancingDecisionLog.refresh();
+  });
+}

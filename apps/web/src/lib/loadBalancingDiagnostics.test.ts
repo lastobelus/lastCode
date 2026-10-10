@@ -1,5 +1,5 @@
 import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@t3tools/contracts";
-import { describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   createLoadBalancingDecisionLog,
@@ -109,6 +109,80 @@ function storage() {
 }
 
 describe("Auto balance decision logging", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("shares start, append, and stop state between two existing tabs", () => {
+    const disk = storage();
+    const first = createLoadBalancingDecisionLog(disk);
+    const second = createLoadBalancingDecisionLog(disk);
+    expect(second.getSnapshot().expiresAt).toBe(0);
+
+    first.start(1_000);
+    second.record({ ...decision, draftId: "from-second" }, 1_001);
+    first.record({ ...decision, draftId: "from-first" }, 1_002);
+    expect(
+      JSON.parse(first.export()).decisions.map(
+        (record: LoadBalancingDecisionRecord) => record.draftId,
+      ),
+    ).toEqual(["from-second", "from-first"]);
+
+    first.stop();
+    second.record({ ...decision, draftId: "after-stop" }, 1_003);
+    expect(second.getSnapshot().expiresAt).toBe(0);
+    expect(JSON.parse(second.export()).decisions).toHaveLength(2);
+    expect(JSON.parse(disk.getItem("t3:auto-balance-decisions")!).expiresAt).toBe(0);
+
+    second.start(2_000);
+    expect(JSON.parse(second.export()).decisions).toHaveLength(2);
+    first.record({ ...decision, draftId: "after-restart" }, 2_001);
+    expect(JSON.parse(first.export()).decisions).toHaveLength(3);
+  });
+
+  it("preserves snapshot identity unless shared storage changes", () => {
+    const disk = storage();
+    const first = createLoadBalancingDecisionLog(disk);
+    const second = createLoadBalancingDecisionLog(disk);
+    const snapshot = second.getSnapshot();
+    const listener = vi.fn();
+    second.subscribe(listener);
+    expect(second.refresh()).toBe(snapshot);
+    expect(listener).not.toHaveBeenCalled();
+    first.start(1_000);
+    const changed = second.refresh();
+    expect(changed).not.toBe(snapshot);
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(second.getSnapshot()).toBe(changed);
+    expect(second.refresh()).toBe(changed);
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  it("refreshes and notifies settings subscribers on a browser storage event", async () => {
+    const disk = storage();
+    const browser = new EventTarget();
+    vi.stubGlobal("localStorage", disk);
+    vi.stubGlobal("window", browser);
+    vi.resetModules();
+    const { loadBalancingDecisionLog: currentTab } = await import("./loadBalancingDiagnostics");
+    const snapshot = currentTab.getSnapshot();
+    const listener = vi.fn();
+    currentTab.subscribe(listener);
+    const otherTab = createLoadBalancingDecisionLog(disk);
+    otherTab.start(1_000);
+    browser.dispatchEvent(Object.assign(new Event("storage"), { key: "unrelated-setting" }));
+    expect(currentTab.getSnapshot()).toBe(snapshot);
+    browser.dispatchEvent(
+      Object.assign(new Event("storage"), { key: "t3:auto-balance-decisions" }),
+    );
+    expect(currentTab.getSnapshot().expiresAt).toBe(1_000 + 24 * 60 * 60 * 1_000);
+    expect(listener).toHaveBeenCalledTimes(1);
+    otherTab.stop();
+    browser.dispatchEvent(
+      Object.assign(new Event("storage"), { key: "t3:auto-balance-decisions" }),
+    );
+    expect(currentTab.getSnapshot().expiresAt).toBe(0);
+    expect(listener).toHaveBeenCalledTimes(2);
+  });
+
   it("writes nothing while disabled and stops exactly at the 24-hour deadline", () => {
     const disk = storage();
     const log = createLoadBalancingDecisionLog(disk);

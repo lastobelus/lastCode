@@ -63,7 +63,6 @@ function pickExplicitWorkspaceOptions(options: NewThreadWorkspaceOptions | undef
 export function useNewThreadHandler() {
   const environmentServerConfigs = useAtomValue(environmentServerConfigsAtom);
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
-  const loadBalancingEnabled = useClientSettings((settings) => settings.loadBalancingEnabled);
   const router = useRouter();
   const getCurrentRouteTarget = useCallback(() => {
     const currentRouteParams = router.state.matches[router.state.matches.length - 1]?.params ?? {};
@@ -169,16 +168,23 @@ export function useNewThreadHandler() {
       const hasWorktreePathOption = options?.worktreePath !== undefined;
       const hasEnvModeOption = options?.envMode !== undefined;
       const hasStartFromOriginOption = options?.startFromOrigin !== undefined;
+      const hasExplicitWorkspaceOption =
+        hasBranchOption || hasWorktreePathOption || hasEnvModeOption || hasStartFromOriginOption;
       // A host picked at creation is the same manual override as a composer
       // pick. Each new automatic request must sample again, including when it
       // reuses an empty draft that previously resolved to a machine.
-      const resolveRoutingContext = (workspace: NewThreadWorkspaceOptions | undefined) =>
+      const resolveRoutingContext = (
+        workspace: NewThreadWorkspaceOptions | undefined,
+        retainedSelection?: "auto" | "manual",
+      ) =>
         ({
           environmentSelection:
             options?.environmentSelection ??
-            (loadBalancingEnabled && !workspace?.branch && !workspace?.worktreePath
-              ? "auto"
-              : "manual"),
+            (!hasExplicitWorkspaceOption && retainedSelection === "manual"
+              ? "manual"
+              : workspace?.branch || workspace?.worktreePath
+                ? "manual"
+                : "auto"),
           loadBalancedEnvironmentId: null,
           ...(options?.environmentSelection === "auto" ? { branch: null, worktreePath: null } : {}),
         }) as const;
@@ -217,11 +223,6 @@ export function useNewThreadHandler() {
           const isDraftAlreadyOpen =
             currentRouteTarget?.kind === "draft" &&
             currentRouteTarget.draftId === emptyStoredDraftThread.draftId;
-          const hasExplicitWorkspaceOption =
-            hasBranchOption ||
-            hasWorktreePathOption ||
-            hasEnvModeOption ||
-            hasStartFromOriginOption;
           // Resurrecting an empty stored draft must not resurrect its stale
           // context: explicit workspace options win outright; otherwise the
           // env context resets to the configured defaults so drafts seeded
@@ -273,10 +274,10 @@ export function useNewThreadHandler() {
               }),
             };
           }
-          const routingContext = resolveRoutingContext({
-            ...emptyStoredDraftThread,
-            ...workspaceContext,
-          });
+          const routingContext = resolveRoutingContext(
+            { ...emptyStoredDraftThread, ...workspaceContext },
+            isDraftAlreadyOpen ? emptyStoredDraftThread.environmentSelection : undefined,
+          );
           setDraftThreadContext(emptyStoredDraftThread.draftId, {
             ...workspaceContext,
             ...routingContext,
@@ -367,10 +368,10 @@ export function useNewThreadHandler() {
           runtimeMode: latestActiveDraftThread.runtimeMode,
           interactionMode: latestActiveDraftThread.interactionMode,
           ...pickExplicitWorkspaceOptions(options),
-          ...resolveRoutingContext({
-            ...latestActiveDraftThread,
-            ...pickExplicitWorkspaceOptions(options),
-          }),
+          ...resolveRoutingContext(
+            { ...latestActiveDraftThread, ...pickExplicitWorkspaceOptions(options) },
+            latestActiveDraftThread.environmentSelection,
+          ),
         });
         return Promise.resolve({
           draftId: currentRouteTarget.draftId,
@@ -414,7 +415,10 @@ export function useNewThreadHandler() {
             runtimeMode: racedDraft.runtimeMode,
             interactionMode: racedDraft.interactionMode,
             ...pickExplicitWorkspaceOptions(options),
-            ...resolveRoutingContext({ ...racedDraft, ...pickExplicitWorkspaceOptions(options) }),
+            ...resolveRoutingContext(
+              { ...racedDraft, ...pickExplicitWorkspaceOptions(options) },
+              racedDraft.environmentSelection,
+            ),
           });
           await router.navigate({
             to: "/draft/$draftId",
@@ -454,13 +458,7 @@ export function useNewThreadHandler() {
         return { draftId, threadId };
       })();
     },
-    [
-      environmentServerConfigs,
-      getCurrentRouteTarget,
-      loadBalancingEnabled,
-      projectGroupingSettings,
-      router,
-    ],
+    [environmentServerConfigs, getCurrentRouteTarget, projectGroupingSettings, router],
   );
 }
 
