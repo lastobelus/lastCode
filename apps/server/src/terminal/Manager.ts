@@ -3585,49 +3585,71 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     );
 
   const closeIdle: TerminalManager["Service"]["closeIdle"] = (input) =>
-    withThreadLock(
-      input.threadId,
-      Effect.gen(function* () {
-        const excludedTerminalIds = new Set(input.excludedTerminalIds ?? []);
-        const running = (yield* sessionsForThread(input.threadId)).filter(
-          (session): session is TerminalSessionState & { pid: number } =>
-            session.status === "running" &&
-            Number.isInteger(session.pid) &&
-            (input.terminalId === undefined || session.terminalId === input.terminalId) &&
-            !excludedTerminalIds.has(session.terminalId),
-        );
-        if (running.length === 0) return;
-        // A command started during the process check can miss the snapshot,
-        // but its input or echo still lands. Both counters only grow, so the
-        // sum changes when either one does.
-        const activityMark = (session: TerminalSessionState) =>
-          session.eventSequence + session.inputCount;
-        const marks = new Map(
-          running.map((session) => [session.terminalId, activityMark(session)]),
-        );
-        // Inspect now instead of trusting the last poll, so a command started
-        // since then keeps its terminal.
-        const { inspector } = yield* acquireSubprocessInspector;
-        yield* Effect.forEach(
-          running,
-          (session) =>
-            inspector(
-              session.pid,
-              session.spawnedShellName,
-              session.captureShellIdentity !== null,
-            ).pipe(
-              Effect.flatMap((result) =>
-                result.hasRunningSubprocess ||
-                session.pendingInputCount > 0 ||
-                activityMark(session) !== marks.get(session.terminalId)
+    Effect.gen(function* () {
+      const activityMark = (session: TerminalSessionState) =>
+        session.eventSequence + session.inputCount;
+      const excludedTerminalIds = new Set(input.excludedTerminalIds ?? []);
+      const candidates = yield* withThreadLock(
+        input.threadId,
+        sessionsForThread(input.threadId).pipe(
+          Effect.map((sessions) =>
+            sessions
+              .filter(
+                (session): session is TerminalSessionState & { pid: number } =>
+                  session.status === "running" &&
+                  Number.isInteger(session.pid) &&
+                  (input.terminalId === undefined || session.terminalId === input.terminalId) &&
+                  !excludedTerminalIds.has(session.terminalId),
+              )
+              .map((session) => ({
+                session,
+                process: session.process,
+                pid: session.pid,
+                spawnedShellName: session.spawnedShellName,
+                beforeFirstInput: session.captureShellIdentity !== null,
+                activityMark: activityMark(session),
+              })),
+          ),
+        ),
+      );
+      if (candidates.length === 0) return;
+
+      // Process inspection can stall. Release the thread lock while it runs,
+      // so input and lifecycle operations do not wait for the monitor.
+      const { inspector } = yield* acquireSubprocessInspector;
+      const inspected = yield* Effect.forEach(candidates, (candidate) =>
+        inspector(candidate.pid, candidate.spawnedShellName, candidate.beforeFirstInput).pipe(
+          Effect.map((result) => ({
+            candidate,
+            hasRunningSubprocess: result.hasRunningSubprocess,
+          })),
+        ),
+      );
+      yield* withThreadLock(
+        input.threadId,
+        Effect.forEach(
+          inspected,
+          ({ candidate, hasRunningSubprocess }) =>
+            getSession(input.threadId, candidate.session.terminalId).pipe(
+              Effect.flatMap((current) => {
+                if (Option.isNone(current)) return Effect.void;
+                const session = current.value;
+                // Input, output, or a replacement process makes the captured
+                // idle result obsolete, even when the terminal ID is reused.
+                return hasRunningSubprocess ||
+                  session !== candidate.session ||
+                  session.process !== candidate.process ||
+                  session.status !== "running" ||
+                  session.pendingInputCount > 0 ||
+                  activityMark(session) !== candidate.activityMark
                   ? Effect.void
-                  : closeSession(input.threadId, session.terminalId, false),
-              ),
+                  : closeSession(input.threadId, session.terminalId, false);
+              }),
             ),
           { discard: true },
-        );
-      }),
-    ).pipe(
+        ),
+      );
+    }).pipe(
       // The process check failed, so every terminal stays open.
       Effect.catch((error) =>
         Effect.logWarning("failed to close idle terminals", {

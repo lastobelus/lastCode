@@ -596,31 +596,35 @@ it.layer(
       }).pipe(Effect.provide(TestClock.layer())),
   );
 
-  it.effect("does not auto-open a session observed alive before concurrent idle close", () =>
+  it.effect("does not auto-open an attachment queued behind a committed idle close", () =>
     Effect.gen(function* () {
-      const checking = yield* Deferred.make<void>();
-      const finishCheck = yield* Deferred.make<void>();
+      const removing = yield* Deferred.make<void>();
+      const finishRemoval = yield* Deferred.make<void>();
       const { manager, ptyAdapter } = yield* createManager(5, {
         processKillGraceMs: 0,
         subprocessInspector: () =>
-          Deferred.succeed(checking, undefined).pipe(
-            Effect.andThen(Deferred.await(finishCheck)),
-            Effect.as({ hasRunningSubprocess: false, childCommand: null, processIds: [] }),
-          ),
+          Effect.succeed({ hasRunningSubprocess: false, childCommand: null, processIds: [] }),
+        unregisterTerminal: () =>
+          Deferred.succeed(removing, undefined).pipe(Effect.andThen(Deferred.await(finishRemoval))),
       });
       yield* manager.open(openInput());
+      ptyAdapter.processes[0]!.exitOnKill = "SIGTERM";
       const closing = yield* manager.closeIdle({ threadId: "thread-1" }).pipe(Effect.forkScoped);
-      yield* Deferred.await(checking);
+      // Inspection releases the thread lock. Hold actual closure before it
+      // removes the observed session, so attachment queues behind that close.
+      yield* Deferred.await(removing);
       const attaching = yield* manager
         .attachStream(openInput(), () => Effect.void)
         .pipe(Effect.result, Effect.forkScoped({ startImmediately: true }));
-      expect(attaching.pollUnsafe()).toBeUndefined();
-      expect(ptyAdapter.processes[0]?.killSignals).toEqual([]);
+      const attachmentWhileClosing = attaching.pollUnsafe();
+      const signalsWhileClosing = [...ptyAdapter.processes[0]!.killSignals];
 
-      yield* Deferred.succeed(finishCheck, undefined);
+      yield* Deferred.succeed(finishRemoval, undefined);
       yield* Fiber.join(closing);
       yield* manager.waitForThreadShutdown("thread-1");
       const result = yield* Fiber.join(attaching);
+      expect(attachmentWhileClosing).toBeUndefined();
+      expect(signalsWhileClosing).toEqual([]);
       expect(result._tag === "Failure" ? result.failure._tag : null).toBe(
         "TerminalNotRunningError",
       );
@@ -630,6 +634,7 @@ it.layer(
       const unsubscribe = yield* manager.attachStream(openInput(), () => Effect.void);
       yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
       expect(ptyAdapter.spawnInputs).toHaveLength(2);
+      ptyAdapter.processes[1]!.exitOnKill = "SIGTERM";
       yield* manager.shutdownThread("thread-1");
     }).pipe(Effect.provide(TestClock.layer())),
   );
@@ -1692,6 +1697,199 @@ it.layer(
       Effect.provide(layerWithHostPlatform("linux")),
     );
   };
+
+  it.effect.each(["native", "fallback"] as const)(
+    "forwards first input at 100 ms while the same thread's %s idle snapshot is stalled",
+    (source) =>
+      Effect.gen(function* () {
+        const inspectionEntered = yield* Deferred.make<void>();
+        const finishInspection = yield* Deferred.make<void>();
+        const ptyAdapter = new FakePtyAdapter();
+        let holdNextSnapshot = false;
+        const processTable = Effect.gen(function* () {
+          const entries = ptyAdapter.processes.map((process) => ({
+            pid: process.pid,
+            ppid: 1,
+            name: process.writes.includes("exec node\r") ? "node" : "zsh",
+          }));
+          if (holdNextSnapshot) {
+            holdNextSnapshot = false;
+            yield* Deferred.succeed(inspectionEntered, undefined);
+            yield* Deferred.await(finishInspection);
+          }
+          return entries;
+        });
+        const { manager } = yield* createSnapshotBoundaryManager(source, ptyAdapter, processTable);
+        yield* TestClock.adjust(0);
+        const terminal = openInput();
+        yield* manager.open(terminal);
+        const process = ptyAdapter.processes[0]!;
+        process.exitOnKill = "SIGTERM";
+        holdNextSnapshot = true;
+        const closing = yield* manager.closeIdle(terminal).pipe(Effect.forkScoped);
+        yield* Deferred.await(inspectionEntered);
+        const writing = yield* manager
+          .write({ ...terminal, data: "exec node\r" })
+          .pipe(Effect.forkScoped);
+        yield* TestClock.adjust("100 millis");
+        const writesAtDeadline = [...process.writes];
+        const writerFinishedAtDeadline = writing.pollUnsafe() !== undefined;
+        const cleanupStillPending = closing.pollUnsafe() === undefined;
+        // Release and retire every fake before assertions, including when the
+        // old locking behavior prevents input from reaching the PTY on time.
+        yield* Deferred.succeed(finishInspection, undefined);
+        yield* Fiber.join(writing);
+        yield* Fiber.join(closing);
+        const killedByStaleCleanup = process.killed;
+        yield* manager.closeIdle(terminal);
+        const killedByFreshCleanup = process.killed;
+        if (!process.killed) yield* exitSnapshotTestProcesses(manager, ptyAdapter, [terminal]);
+
+        expect(writesAtDeadline).toEqual(["exec node\r"]);
+        expect(writerFinishedAtDeadline).toBe(true);
+        expect(cleanupStillPending).toBe(true);
+        expect(killedByStaleCleanup).toBe(false);
+        expect(killedByFreshCleanup).toBe(false);
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect.each(["native", "fallback", "custom"] as const)(
+    "keeps newly active input after a same-thread %s idle inspection returns its stale result",
+    (source) =>
+      Effect.gen(function* () {
+        const inspectionEntered = yield* Deferred.make<void>();
+        const finishInspection = yield* Deferred.make<void>();
+        const ptyAdapter = new FakePtyAdapter();
+        let holdNextInspection = false;
+        const gateInspection = Effect.gen(function* () {
+          if (holdNextInspection) {
+            holdNextInspection = false;
+            yield* Deferred.succeed(inspectionEntered, undefined);
+            yield* Deferred.await(finishInspection);
+          }
+        });
+        const processTable = Effect.gen(function* () {
+          const entries = ptyAdapter.processes.map((process) => ({
+            pid: process.pid,
+            ppid: 1,
+            name: process.writes.includes("exec node\r") ? "node" : "zsh",
+          }));
+          yield* gateInspection;
+          return entries;
+        });
+        const { manager } = yield* source === "custom"
+          ? createManager(5, {
+              ptyAdapter,
+              subprocessPollIntervalMs: 60_000,
+              subprocessInspector: () =>
+                gateInspection.pipe(
+                  Effect.as({ hasRunningSubprocess: false, childCommand: null, processIds: [] }),
+                ),
+            })
+          : createSnapshotBoundaryManager(source, ptyAdapter, processTable);
+        yield* TestClock.adjust(0);
+        const terminal = openInput();
+        yield* manager.open(terminal);
+        const process = ptyAdapter.processes[0]!;
+        process.exitOnKill = "SIGTERM";
+        // Capture the actual shell before the scan, so its stale idle result
+        // really would close this PTY unless successful input invalidates it.
+        yield* manager.write({ ...terminal, data: "prepare\r" });
+        holdNextInspection = true;
+        const closing = yield* manager.closeIdle(terminal).pipe(Effect.forkScoped);
+        yield* Deferred.await(inspectionEntered);
+        yield* manager.write({ ...terminal, data: "exec node\r" });
+        yield* Deferred.succeed(finishInspection, undefined);
+        yield* Fiber.join(closing);
+        const killSignals = [...process.killSignals];
+        if (!process.killed) yield* exitSnapshotTestProcesses(manager, ptyAdapter, [terminal]);
+        expect(process.writes).toEqual(["prepare\r", "exec node\r"]);
+        expect(killSignals).toEqual([]);
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect.each([
+    { source: "native", replacement: "restart" },
+    { source: "fallback", replacement: "restart" },
+    { source: "custom", replacement: "restart" },
+    { source: "native", replacement: "close and reopen" },
+    { source: "fallback", replacement: "close and reopen" },
+    { source: "custom", replacement: "close and reopen" },
+  ] as const)(
+    "keeps the replacement PTY after $replacement during a same-thread $source idle inspection",
+    ({ source, replacement }) =>
+      Effect.gen(function* () {
+        const inspectionEntered = yield* Deferred.make<void>();
+        const finishInspection = yield* Deferred.make<void>();
+        const ptyAdapter = new FakePtyAdapter();
+        let holdNextInspection = false;
+        const gateInspection = Effect.gen(function* () {
+          if (holdNextInspection) {
+            holdNextInspection = false;
+            yield* Deferred.succeed(inspectionEntered, undefined);
+            yield* Deferred.await(finishInspection);
+          }
+        });
+        const processTable = Effect.gen(function* () {
+          const entries = ptyAdapter.processes.map((process) => ({
+            pid: process.pid,
+            ppid: 1,
+            name: "zsh",
+          }));
+          yield* gateInspection;
+          return entries;
+        });
+        const fs = yield* FileSystem.FileSystem;
+        const cwdStat = yield* fs.stat(process.cwd());
+        // Restart/reopen should suspend only on the held inspection, rather
+        // than real filesystem promises outside TestClock's scheduler.
+        const replacementFileSystem = {
+          ...fs,
+          stat: (path: string) =>
+            path === process.cwd() ? Effect.succeed(cwdStat) : fs.stat(path),
+          exists: () => Effect.succeed(false),
+          remove: () => Effect.void,
+          writeFileString: () => Effect.void,
+        };
+        const { manager } = yield* (
+          source === "custom"
+            ? createManager(5, {
+                ptyAdapter,
+                subprocessPollIntervalMs: 60_000,
+                subprocessInspector: () =>
+                  gateInspection.pipe(
+                    Effect.as({ hasRunningSubprocess: false, childCommand: null, processIds: [] }),
+                  ),
+              })
+            : createSnapshotBoundaryManager(source, ptyAdapter, processTable)
+        ).pipe(Effect.provideService(FileSystem.FileSystem, replacementFileSystem));
+        yield* TestClock.adjust(0);
+        const terminal = openInput();
+        yield* manager.open(terminal);
+        ptyAdapter.processes[0]!.exitOnKill = "SIGTERM";
+        yield* manager.write({ ...terminal, data: "prepare\r" });
+        holdNextInspection = true;
+        const closing = yield* manager.closeIdle(terminal).pipe(Effect.forkScoped);
+        yield* Deferred.await(inspectionEntered);
+        const replacing = yield* (
+          replacement === "restart"
+            ? manager.restart(restartInput())
+            : manager.close(terminal).pipe(Effect.andThen(manager.open(terminal)))
+        ).pipe(Effect.forkScoped({ startImmediately: true }));
+        yield* TestClock.adjust("100 millis");
+        const replacedWhileInspectionPending = ptyAdapter.processes.length === 2;
+        yield* Deferred.succeed(finishInspection, undefined);
+        yield* Fiber.join(replacing);
+        yield* Fiber.join(closing);
+        const replacementProcess = ptyAdapter.processes[1]!;
+        const replacementKillSignals = [...replacementProcess.killSignals];
+        if (!replacementProcess.killed) {
+          yield* exitSnapshotTestProcesses(manager, ptyAdapter, [terminal]);
+        }
+        expect(replacedWhileInspectionPending).toBe(true);
+        expect(replacementKillSignals).toEqual([]);
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
 
   it.effect.each([
     { source: "native", boundary: "open" },
