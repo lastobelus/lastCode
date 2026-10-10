@@ -833,6 +833,47 @@ export const make = Effect.gen(function* () {
     registerNativePage(source, window);
   };
 
+  const configureAutomationPage = (
+    page: NativePopup,
+    lifetime: ReturnType<typeof makeAutomationLifetime>,
+  ) => {
+    page.contents.setWindowOpenHandler((details) => {
+      // Auth callers may obtain their URL after creating a blank child with an opener.
+      try {
+        if (
+          details.url === "" ||
+          details.url === "about:blank" ||
+          (["new-window", "foreground-tab", "background-tab"].includes(details.disposition) &&
+            ["https:", "http:"].includes(new URL(details.url).protocol))
+        )
+          return {
+            action: "allow",
+            overrideBrowserWindowOptions: {
+              show: false,
+              focusable: false,
+              skipTaskbar: true,
+              webPreferences: {
+                contextIsolation: true,
+                nodeIntegration: false,
+                sandbox: true,
+              },
+            },
+          };
+      } catch {
+        /* Invalid native navigation is rejected below. */
+      }
+      void page.contents.loadURL(details.url).catch(() => undefined);
+      return { action: "deny" };
+    });
+    page.contents.on("did-create-window", (child) => {
+      if (!ownAutomationWindow(lifetime, child)) return;
+      child.webContents.setIgnoreMenuShortcuts(true);
+      const registered = registerNativePage(page.boundKey ?? page.source, child);
+      if (registered) configureAutomationPage(registered, lifetime);
+      else child.destroy();
+    });
+  };
+
   const createRoot = (
     command: Extract<DesktopBrowserCommand, { type: "createRoot" }>,
     desktopHostId: string,
@@ -962,40 +1003,7 @@ export const make = Effect.gen(function* () {
               `root:${root.id}`,
               root,
             );
-            root.contents.setWindowOpenHandler((details) => {
-              // Auth callers may obtain their URL after creating a blank child with an opener.
-              try {
-                if (
-                  details.url === "" ||
-                  details.url === "about:blank" ||
-                  (details.disposition === "new-window" &&
-                    ["https:", "http:"].includes(new URL(details.url).protocol))
-                )
-                  return {
-                    action: "allow",
-                    overrideBrowserWindowOptions: {
-                      show: false,
-                      focusable: false,
-                      skipTaskbar: true,
-                      webPreferences: {
-                        contextIsolation: true,
-                        nodeIntegration: false,
-                        sandbox: true,
-                      },
-                    },
-                  };
-              } catch {
-                /* Invalid native navigation is rejected below. */
-              }
-              void root.contents.loadURL(details.url).catch(() => undefined);
-              return { action: "deny" };
-            });
-            root.contents.on("did-create-window", (child) => {
-              if (!ownAutomationWindow(lifetime, child)) return;
-              child.webContents.setIgnoreMenuShortcuts(true);
-              child.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-              registerPopup(key, child);
-            });
+            configureAutomationPage(root, lifetime);
             respond(root.id);
           }),
         )

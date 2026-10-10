@@ -212,15 +212,108 @@ const makeRoot = () => {
     destroy: root.window.close,
   });
   let zoomFactor = 1;
+  let windowOpenHandler:
+    | ((details: Electron.HandlerDetails) => Electron.WindowOpenHandlerResponse)
+    | undefined;
   const contents = Object.assign(root.contents, {
-    setWindowOpenHandler: () => undefined,
+    setWindowOpenHandler: (handler: typeof windowOpenHandler) => {
+      windowOpenHandler = handler;
+    },
     setZoomFactor: (value: number) => {
       zoomFactor = value;
     },
     getZoomFactor: () => zoomFactor,
   });
-  return { ...root, contents };
+  return {
+    ...root,
+    contents,
+    openWindow: (details: Electron.HandlerDetails) => windowOpenHandler?.(details),
+  };
 };
+
+it.effect.each(["foreground-tab", "background-tab"] as const)(
+  "%s navigation creates and registers a hidden child without replacing its native opener",
+  (disposition) =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      const events = yield* Queue.unbounded<DesktopBrowserEvent>();
+      yield* host.remoteEvents.pipe(
+        Stream.runForEach(({ event }) => Queue.offer(events, event)),
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      const root = makeRoot();
+      const navigations: string[] = [];
+      Object.assign(root.contents, { loadURL: async (url: string) => navigations.push(url) });
+      host.setRootFactory(() => Effect.succeed(root.window));
+      yield* host.bindEnvironment("host-a", "environment-a", profileResolver("environment-a"));
+      yield* host.handleRemoteCommand({
+        desktopHostId: "host-a",
+        command: {
+          type: "createRoot",
+          ...key,
+          serverEpoch: "epoch-a",
+          requestId: "create",
+          profileId: "default",
+          url: "about:blank",
+        },
+      });
+      yield* Queue.take(events);
+      expect((yield* Queue.take(events)).type).toBe("rootCreated");
+      expect(
+        root.openWindow({
+          url: "https://child.example/",
+          frameName: "",
+          features: "",
+          referrer: { url: "", policy: "default" },
+          disposition,
+        }),
+      ).toMatchObject({
+        action: "allow",
+        overrideBrowserWindowOptions: { show: false, focusable: false },
+      });
+      const child = makeRoot();
+      Object.assign(child.contents, { setIgnoreMenuShortcuts: () => undefined });
+      root.contents.emit("did-create-window", child.window);
+      const createdChild = yield* Queue.take(events);
+      if (createdChild.type !== "popupCreated") throw new Error("Expected child popup");
+      expect(createdChild).toMatchObject({ ...key });
+      expect(navigations).toEqual([]);
+      expect(root.window.isDestroyed()).toBe(false);
+      expect(child.attachCount()).toBe(1);
+      expect(child.window.isVisible()).toBe(false);
+      expect(child.window.isFocusable()).toBe(false);
+      const childKey = { ...key, tabId: "child-tab" };
+      yield* host.handleRemoteCommand({
+        desktopHostId: "host-a",
+        command: {
+          type: "bindPopup",
+          ...childKey,
+          openerTabId: key.tabId,
+          popupId: createdChild.popupId,
+        },
+      });
+      expect((yield* Queue.take(events)).type).toBe("attached");
+      expect(
+        child.openWindow({
+          url: "about:blank",
+          frameName: "",
+          features: "",
+          referrer: { url: "", policy: "default" },
+          disposition: "new-window",
+        }),
+      ).toMatchObject({
+        action: "allow",
+        overrideBrowserWindowOptions: { show: false, focusable: false },
+      });
+      const grandchild = makeRoot();
+      Object.assign(grandchild.contents, { setIgnoreMenuShortcuts: () => undefined });
+      child.contents.emit("did-create-window", grandchild.window);
+      expect(yield* Queue.take(events)).toMatchObject({ type: "popupCreated", ...childKey });
+      expect(grandchild.attachCount()).toBe(1);
+    }),
+);
 
 /** Observes actual attempt retirement without adding a production diagnostics API. */
 const observeCreationRecords = (marker: string) =>

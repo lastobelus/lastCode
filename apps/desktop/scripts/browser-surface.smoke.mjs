@@ -112,6 +112,7 @@ if (!process.argv.includes("--build-only")) {
       encoding: "utf8",
       env: environment,
       timeout: 60000,
+      killSignal: "SIGKILL",
     },
   );
   if (child.stdout) process.stdout.write(child.stdout);

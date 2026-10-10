@@ -255,6 +255,89 @@ export async function runNativeKeyboardChannelFixture({
           }
           NodeAssert.deepEqual(navigations, [], "blank popup requests never navigate the opener");
           steps.push({ operation: "blank popups", host: yield* Effect.promise(assertHost) });
+          const linkUrl = `${fixtureOrigin}/keyboard-channel-link`;
+          const openedLink = yield* Deferred.make();
+          yield* manager.events.pipe(
+            Stream.filter(
+              (event) => event.type === "opened" && event.snapshot.backingPage === "desktop-popup",
+            ),
+            Stream.take(1),
+            Stream.runForEach((event) => Deferred.succeed(openedLink, event.snapshot)),
+            Effect.forkScoped({ startImmediately: true }),
+          );
+          const linkChild = new Promise((resolve) =>
+            roots[0].webContents.once("did-create-window", resolve),
+          );
+          yield* invoke("evaluate", {
+            expression: `const link = document.createElement('a'); link.id = 'new-tab-link'; link.href = ${JSON.stringify(linkUrl)}; link.target = '_blank'; link.textContent = 'Open another tab'; document.body.prepend(link); true`,
+          });
+          yield* invoke("click", { selector: "#new-tab-link" });
+          const linkSnapshot = yield* Deferred.await(openedLink).pipe(Effect.timeout(10_000));
+          const child = yield* Effect.promise(() => linkChild);
+          NodeAssert.notEqual(linkSnapshot.tabId, tabId);
+          NodeAssert.equal(linkSnapshot.backingPage, "desktop-popup");
+          NodeAssert.equal(
+            linkSnapshot.profileId,
+            sessions.sessions.find((tab) => tab.tabId === tabId).profileId,
+          );
+          NodeAssert.equal(child.webContents.session, roots[0].webContents.session);
+          NodeAssert.equal(child.isVisible(), false);
+          NodeAssert.equal(child.isFocused(), false);
+          NodeAssert.equal(child.isFocusable(), false);
+          NodeAssert.equal(roots[0].webContents.getURL(), `${fixtureOrigin}/keyboard-channel`);
+          NodeAssert.equal(
+            yield* invoke("evaluate", { expression: "document.querySelector('#draft').value" }),
+            "channel keyboard αq",
+            "new-tab link preserves the opener document",
+          );
+          NodeAssert.deepEqual(navigations, [], "new-tab link never navigates the opener");
+          const childText = yield* broker.invoke({
+            scope,
+            tabId: linkSnapshot.tabId,
+            operation: "evaluate",
+            input: { expression: "document.querySelector('h1').textContent" },
+            timeoutMs: 10_000,
+          });
+          NodeAssert.equal(childText, "Native surface fixture");
+          const nestedChildCreated = new Promise((resolve) =>
+            child.webContents.once("did-create-window", resolve),
+          );
+          const nestedOpened = yield* broker.invoke({
+            scope,
+            tabId: linkSnapshot.tabId,
+            operation: "evaluate",
+            input: {
+              expression:
+                "window.signIn = window.open('about:blank', 'child-sign-in', 'width=500,height=600'); window.signIn !== null",
+            },
+            timeoutMs: 10_000,
+          });
+          NodeAssert.equal(nestedOpened, true, "new tab supports its own sign-in popup");
+          const nestedChild = yield* Effect.promise(() => nestedChildCreated);
+          NodeAssert.equal(nestedChild.isVisible(), false);
+          NodeAssert.equal(nestedChild.isFocused(), false);
+          NodeAssert.equal(nestedChild.isFocusable(), false);
+          NodeAssert.equal(nestedChild.webContents.session, child.webContents.session);
+          NodeAssert.equal(
+            yield* Effect.promise(() =>
+              nestedChild.webContents.executeJavaScript("window.opener !== null"),
+            ),
+            true,
+          );
+          const nestedClosed = new Promise((resolve) => nestedChild.once("closed", resolve));
+          nestedChild.close();
+          yield* Effect.promise(() => nestedClosed);
+          const linkClosed = new Promise((resolve) => child.once("closed", resolve));
+          yield* broker.invoke({
+            scope,
+            tabId: linkSnapshot.tabId,
+            operation: "close",
+            input: {},
+            timeoutMs: 10_000,
+          });
+          yield* Effect.promise(() => linkClosed);
+          NodeAssert.equal(child.isDestroyed(), true);
+          steps.push({ operation: "new-tab link", host: yield* Effect.promise(assertHost) });
           yield* invoke("click", { selector: "#draft" });
           NodeAssert.equal(
             host.humanStartedDownload(roots[0].webContents),
@@ -310,7 +393,7 @@ export async function runNativeKeyboardChannelFixture({
         }),
       ).pipe(Effect.provide(NodeServices.layer)),
     );
-    return "production broker/viewer → server → channel CDP endpoint → independent native root: trusted typing, viewer/agent download attribution, preserved blank-popup opener, unchanged host ownership and confirmed close";
+    return "production broker/viewer → server → channel CDP endpoint → independent native root: trusted typing, viewer/agent download attribution, preserved blank-popup and new-tab link openers, unchanged host ownership and confirmed close";
   } finally {
     await Effect.runPromise(
       host.handleRemoteCommand({ desktopHostId, command: { type: "disconnect" } }),
