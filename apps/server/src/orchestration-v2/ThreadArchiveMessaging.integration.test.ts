@@ -1,6 +1,7 @@
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
+  EventId,
   MessageId,
   ProjectId,
   ProviderDriverKind,
@@ -10,6 +11,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
@@ -18,6 +20,7 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EffectWorker from "./EffectWorker.ts";
+import * as EventSink from "./EventSink.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
@@ -207,41 +210,81 @@ it.effect("keeps live, self, opposite-direction sends and committed receipt repl
   }).pipe(Effect.provide(fixture())),
 );
 
-it.effect("requires stopping an admitted turn before archive and never starts it afterward", () => {
-  let opens = 0;
-  return Effect.gen(function* () {
-    const orchestrator = yield* Orchestrator.OrchestratorV2;
-    const target = ThreadId.make("pending-start-recipient");
-    yield* create(target);
-    yield* orchestrator.dispatch(message(target, "admitted-start"));
-    const before = yield* orchestrator.getThreadProjection(target);
-    assert.equal(before.runs[0]?.status, "starting");
-    const attempt = yield* Effect.exit(
-      orchestrator.dispatch({
-        type: "thread.archive",
-        commandId: CommandId.make("archive:while-starting"),
-        threadId: target,
-      }),
+it.effect.each(["starting", "waiting"] as const)(
+  "blocks archive while a %s run is unfinished and never starts it afterward",
+  (status) => {
+    let opens = 0;
+    return Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const target = ThreadId.make(`pending-${status}-recipient`);
+      yield* create(target);
+      yield* orchestrator.dispatch(message(target, "admitted-start"));
+      const recordFinalizationStatus = (runStatus: "waiting" | "completed") =>
+        Effect.gen(function* () {
+          const eventSink = yield* EventSink.EventSinkV2;
+          const projection = yield* orchestrator.getThreadProjection(target);
+          const run = projection.runs[0]!;
+          const now = yield* DateTime.now;
+          const commandId = CommandId.make(`fixture:run-${runStatus}`);
+          yield* eventSink.commitCommand({
+            commandId,
+            threadId: target,
+            commandType: "checkpoint.capture",
+            acceptedAt: now,
+            events: [
+              {
+                id: EventId.make(`fixture:run-${runStatus}`),
+                type: "run.updated",
+                threadId: target,
+                runId: run.id,
+                occurredAt: now,
+                payload: {
+                  ...run,
+                  status: runStatus,
+                  completedAt: runStatus === "completed" ? now : null,
+                },
+              },
+            ],
+            effects: [],
+          });
+        });
+      if (status === "waiting") {
+        // A completed provider turn stays blocking while its post-terminal work drains.
+        yield* recordFinalizationStatus("waiting");
+      }
+      const before = yield* orchestrator.getThreadProjection(target);
+      assert.equal(before.runs[0]?.status, status);
+      const attempt = yield* Effect.exit(
+        orchestrator.dispatch({
+          type: "thread.archive",
+          commandId: CommandId.make(`archive:while-${status}`),
+          threadId: target,
+        }),
+      );
+      assert.isTrue(Exit.isFailure(attempt));
+      assert.deepEqual(yield* orchestrator.getThreadProjection(target), before);
+      if (status === "waiting") {
+        yield* recordFinalizationStatus("completed");
+      } else {
+        yield* orchestrator.dispatch({
+          type: "thread.stop",
+          commandId: CommandId.make("stop:pending-start"),
+          threadId: target,
+        });
+      }
+      yield* archive(target);
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      yield* worker.drain();
+      assert.equal(opens, 0);
+      const after = yield* orchestrator.getThreadProjection(target);
+      assert.isNotNull(after.thread.archivedAt);
+      assert.equal(after.runs[0]?.status, status === "waiting" ? "completed" : "interrupted");
+    }).pipe(
+      Effect.provide(
+        fixture(() => {
+          opens += 1;
+        }),
+      ),
     );
-    assert.isTrue(Exit.isFailure(attempt));
-    assert.deepEqual(yield* orchestrator.getThreadProjection(target), before);
-    yield* orchestrator.dispatch({
-      type: "thread.stop",
-      commandId: CommandId.make("stop:pending-start"),
-      threadId: target,
-    });
-    yield* archive(target);
-    const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
-    yield* worker.drain();
-    assert.equal(opens, 0);
-    const after = yield* orchestrator.getThreadProjection(target);
-    assert.isNotNull(after.thread.archivedAt);
-    assert.equal(after.runs[0]?.status, "interrupted");
-  }).pipe(
-    Effect.provide(
-      fixture(() => {
-        opens += 1;
-      }),
-    ),
-  );
-});
+  },
+);

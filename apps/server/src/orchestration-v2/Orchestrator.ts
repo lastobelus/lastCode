@@ -2515,7 +2515,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         .getThreadRecords(command.threadId, ["runs"])
         .pipe(mapDispatchError(command));
       // A message may have started work since the client checked archive availability.
-      if (runs.some((run) => ["preparing", "starting", "running"].includes(run.status))) {
+      if (runs.some(isBlockingRun)) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
