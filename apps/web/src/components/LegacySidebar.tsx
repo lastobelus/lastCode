@@ -1,3 +1,5 @@
+import { threadShellIsVisible } from "@t3tools/client-runtime/state/models";
+import { WorktreeCleanupFailureDialog } from "./WorktreeCleanupFailureDialog";
 import { ProjectSidebarDraftList } from "./sidebar/ProjectSidebarDraftList";
 import { useSupportsMultiplePullRequests } from "~/hooks/useSupportsMultiplePullRequests";
 import { resolveThreadCurrentPullRequestLink } from "@t3tools/shared/threadPullRequests";
@@ -409,6 +411,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const canOperatePreview = useEnvironmentScope(thread.environmentId, AuthPreviewOperateScope);
   const threadRef = scopeThreadRef(thread.environmentId, thread.id);
   const threadKey = scopedThreadKey(threadRef);
+  const cleanup = thread.worktreeCleanup ?? null;
+  const isCleanupPending = cleanup?.status === "deleting" || cleanup?.status === "queued";
+  const isCleanupFailed = cleanup?.status === "failed";
+  const [cleanupFailureOpen, setCleanupFailureOpen] = useState(false);
   const [isFileDragOver, setIsFileDragOver] = useState(false);
   const fileDropHandlers = useMemo(
     () =>
@@ -506,7 +512,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     : null;
   const prStatus = prStatusIndicator(pr, linkedPullRequestStatus?.sourceControlProvider);
   const terminalStatus = terminalStatusFromRunningIds(runningTerminalIds);
-  const isConfirmingArchive = canOperateThread && confirmingArchiveThreadKey === threadKey;
+  const isConfirmingArchive =
+    canOperateThread && cleanup === null && confirmingArchiveThreadKey === threadKey;
   const threadMetaClassName = isConfirmingArchive
     ? "pointer-events-none opacity-0"
     : canOperateThread
@@ -532,12 +539,19 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   );
   const handleRowClick = useCallback(
     (event: React.MouseEvent) => {
+      if (isCleanupFailed) {
+        event.preventDefault();
+        setCleanupFailureOpen(true);
+        return;
+      }
+      if (isCleanupPending) return;
       handleThreadClick(event, threadRef, orderedProjectThreadKeys);
     },
-    [handleThreadClick, orderedProjectThreadKeys, threadRef],
+    [handleThreadClick, isCleanupFailed, isCleanupPending, orderedProjectThreadKeys, threadRef],
   );
   const handleRowDoubleClick = useCallback(
     (event: React.MouseEvent) => {
+      if (cleanup !== null) return;
       if (!readEnvironmentScope(thread.environmentId, AuthOrchestrationOperateScope)) return;
       // Already renaming this row: a double-click on the row chrome (outside the
       // input) must not restart and discard the in-progress edit.
@@ -553,19 +567,36 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       event.preventDefault();
       startThreadRename(threadKey, thread.title);
     },
-    [isMobile, renamingThreadKey, startThreadRename, threadKey, thread.environmentId, thread.title],
+    [
+      cleanup,
+      isMobile,
+      renamingThreadKey,
+      startThreadRename,
+      threadKey,
+      thread.environmentId,
+      thread.title,
+    ],
   );
   const handleRowKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
       if (event.key !== "Enter" && event.key !== " ") return;
       event.preventDefault();
+      if (isCleanupFailed) {
+        setCleanupFailureOpen(true);
+        return;
+      }
+      if (isCleanupPending) return;
       navigateToThread(threadRef);
     },
-    [navigateToThread, threadRef],
+    [isCleanupFailed, isCleanupPending, navigateToThread, threadRef],
   );
   const handleRowContextMenu = useCallback(
     (event: React.MouseEvent) => {
       event.preventDefault();
+      if (cleanup !== null) {
+        if (isCleanupFailed) setCleanupFailureOpen(true);
+        return;
+      }
       const hasSelection = useThreadSelectionStore.getState().hasSelection();
       if (hasSelection && isSelected) {
         void (async () => {
@@ -611,7 +642,15 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         }
       })();
     },
-    [clearSelection, handleMultiSelectContextMenu, handleThreadContextMenu, isSelected, threadRef],
+    [
+      cleanup,
+      isCleanupFailed,
+      clearSelection,
+      handleMultiSelectContextMenu,
+      handleThreadContextMenu,
+      isSelected,
+      threadRef,
+    ],
   );
   const handlePrClick = useCallback(
     (event: React.MouseEvent<HTMLAnchorElement>) => {
@@ -729,7 +768,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       ref={rowRef}
       className="w-full"
       data-thread-item
-      {...fileDropHandlers}
+      {...(cleanup === null ? fileDropHandlers : {})}
       onMouseLeave={handleMouseLeave}
       onBlurCapture={handleBlurCapture}
     >
@@ -739,6 +778,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         role="button"
         tabIndex={0}
         data-active={isActive}
+        data-cleanup-pending={isCleanupPending}
+        aria-disabled={isCleanupPending || undefined}
         data-slot="sidebar-menu-sub-button"
         data-sidebar="menu-sub-button"
         data-size="sm"
@@ -751,6 +792,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               ? "bg-sidebar-row-selected text-sidebar-foreground hover:bg-sidebar-row-active"
               : "text-sidebar-muted-foreground/80 hover:bg-sidebar-row-hover hover:text-sidebar-foreground",
           isFileDragOver && "ring-1 ring-inset ring-primary/70",
+          isCleanupPending && "cursor-not-allowed opacity-65",
         )}
         onClick={handleRowClick}
         onDoubleClick={handleRowDoubleClick}
@@ -758,7 +800,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         onContextMenu={handleRowContextMenu}
       >
         <div className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
-          {prStatus && pr && (
+          {cleanup === null && prStatus && pr && (
             <Tooltip>
               <TooltipTrigger
                 render={
@@ -784,7 +826,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               </TooltipPopup>
             </Tooltip>
           )}
-          {!pr && currentLinkedPr ? (
+          {cleanup === null && !pr && currentLinkedPr ? (
             <a
               href={currentLinkedPr.url}
               target="_blank"
@@ -826,7 +868,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
           )}
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-1.5">
-          {canOperatePreview && discoveredPorts.length > 0 && (
+          {canOperatePreview && cleanup === null && discoveredPorts.length > 0 && (
             <Tooltip>
               <TooltipTrigger
                 render={
@@ -884,7 +926,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               >
                 Confirm
               </button>
-            ) : canOperateThread ? (
+            ) : canOperateThread && cleanup === null ? (
               appSettingsConfirmThreadArchive ? (
                 <div className="pointer-events-none absolute top-1/2 right-0.5 -translate-y-1/2 opacity-0 transition-opacity duration-150 max-sm:pointer-events-auto max-sm:opacity-100 group-hover/menu-sub-item:pointer-events-auto group-hover/menu-sub-item:opacity-100 group-focus-within/menu-sub-item:pointer-events-auto group-focus-within/menu-sub-item:opacity-100">
                   <button
@@ -972,6 +1014,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
           </div>
         </div>
       </div>
+      <WorktreeCleanupFailureDialog
+        thread={thread}
+        open={cleanupFailureOpen}
+        onOpenChange={setCleanupFailureOpen}
+      />
     </SidebarMenuSubItem>
   );
 });
@@ -1378,16 +1425,16 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       });
     };
     const visibleProjectThreads = sortThreads(
-      projectThreads.filter((thread) => thread.archivedAt === null),
+      projectThreads.filter(threadShellIsVisible),
       threadSortOrder,
     );
     const projectStatus = resolveProjectStatusIndicator(
       visibleProjectThreads.map((thread) => resolveProjectThreadStatus(thread)),
     );
     return {
-      orderedProjectThreadKeys: visibleProjectThreads.map((thread) =>
-        scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
-      ),
+      orderedProjectThreadKeys: visibleProjectThreads
+        .filter((thread) => thread.worktreeCleanup == null)
+        .map((thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))),
       projectStatus,
       visibleProjectThreads,
     };
@@ -1942,7 +1989,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       const selectedThreadEntries = threadKeys.flatMap((threadKey) => {
         const threadRef = parseScopedThreadKey(threadKey);
         const thread = threadRef ? readThreadShell(threadRef) : null;
-        return threadRef && thread ? [{ threadKey, threadRef, thread }] : [];
+        return threadRef && thread && thread.worktreeCleanup == null
+          ? [{ threadKey, threadRef, thread }]
+          : [];
       });
       const canOperateSelection = selectedThreadEntries.every(({ threadRef }) =>
         readEnvironmentScope(threadRef.environmentId, AuthOrchestrationOperateScope),
@@ -3299,6 +3348,17 @@ export default function LegacySidebar() {
       ),
     [environments],
   );
+  const scratchWorkspaceRootsByEnvironmentId = useMemo(
+    () =>
+      new Map(
+        environments.flatMap((environment) =>
+          environment.serverConfig?.scratchWorkspaceRoot
+            ? [[environment.environmentId, environment.serverConfig.scratchWorkspaceRoot] as const]
+            : [],
+        ),
+      ),
+    [environments],
+  );
   const desktopLocalEnvironmentIds = useMemo(
     () =>
       new Set(
@@ -3337,8 +3397,14 @@ export default function LegacySidebar() {
       projects: orderedProjects,
       settings: projectGroupingSettings,
       primaryEnvironmentId,
+      scratchWorkspaceRootsByEnvironmentId,
     });
-  }, [orderedProjects, projectGroupingSettings, primaryEnvironmentId]);
+  }, [
+    orderedProjects,
+    projectGroupingSettings,
+    primaryEnvironmentId,
+    scratchWorkspaceRootsByEnvironmentId,
+  ]);
   const projectPhysicalKeyByScopedRef = useMemo(
     () =>
       new Map(
@@ -3355,6 +3421,7 @@ export default function LegacySidebar() {
       projects: orderedProjects,
       settings: projectGroupingSettings,
       primaryEnvironmentId,
+      scratchWorkspaceRootsByEnvironmentId,
       resolveEnvironmentLabel: (environmentId) => environmentLabelById.get(environmentId) ?? null,
       isDesktopLocalEnvironment: (environmentId) => desktopLocalEnvironmentIds.has(environmentId),
       isWslEnvironment: (environmentId) => wslEnvironmentIds.has(environmentId),
@@ -3366,6 +3433,7 @@ export default function LegacySidebar() {
     orderedProjects,
     projectGroupingSettings,
     primaryEnvironmentId,
+    scratchWorkspaceRootsByEnvironmentId,
   ]);
 
   const sidebarProjectByKey = useMemo(
@@ -3524,7 +3592,7 @@ export default function LegacySidebar() {
   }, []);
 
   const visibleThreads = useMemo(
-    () => sidebarThreads.filter((thread) => thread.archivedAt === null),
+    () => sidebarThreads.filter(threadShellIsVisible),
     [sidebarThreads],
   );
   const sortedProjects = useMemo(() => {
@@ -3563,9 +3631,7 @@ export default function LegacySidebar() {
     () =>
       sortedProjects.flatMap((project) => {
         const projectThreads = sortThreads(
-          (threadsByProjectKey.get(project.projectKey) ?? []).filter(
-            (thread) => thread.archivedAt === null,
-          ),
+          (threadsByProjectKey.get(project.projectKey) ?? []).filter(threadShellIsVisible),
           sidebarThreadSortOrder,
         );
         const projectExpanded = resolveProjectExpanded(
@@ -3592,9 +3658,9 @@ export default function LegacySidebar() {
             ? projectThreads
             : projectThreads.slice(0, sidebarThreadPreviewCount);
         const renderedThreads = pinnedCollapsedThread ? [pinnedCollapsedThread] : previewThreads;
-        return renderedThreads.map((thread) =>
-          scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
-        );
+        return renderedThreads
+          .filter((thread) => thread.worktreeCleanup == null)
+          .map((thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)));
       }),
     [
       sidebarThreadSortOrder,
