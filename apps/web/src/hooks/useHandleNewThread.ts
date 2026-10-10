@@ -180,6 +180,7 @@ export function useNewThreadHandler() {
               ? "auto"
               : "manual"),
           loadBalancedEnvironmentId: null,
+          ...(options?.environmentSelection === "auto" ? { branch: null, worktreePath: null } : {}),
         }) as const;
       const storedDraftThread = getDraftSessionByLogicalProjectKey(logicalProjectKey);
       const storedDraftThreadRef = storedDraftThread

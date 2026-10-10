@@ -216,6 +216,34 @@ it.each([
   );
 });
 
+it("clears an open empty draft's checkout when Auto balance is explicitly selected", async () => {
+  testState.reset({
+    draftId: "draft-existing",
+    environmentId: "environment-ssh",
+    promotedTo: null,
+    threadId: "thread-existing",
+    branch: "feature",
+    worktreePath: "/workspace/feature",
+  });
+  testState.router.state.matches[0]!.params = { draftId: "draft-existing" };
+  testState.router.state.location.href = "/draft/draft-existing";
+  const projectRef = { environmentId: "environment-ssh", projectId: "project-remote" } as never;
+
+  await useNewThreadHandler()(projectRef, { environmentSelection: "auto" });
+
+  expect(testState.draftStore.setLogicalProjectDraftThreadId).toHaveBeenCalledWith(
+    "remote-project",
+    projectRef,
+    "draft-existing",
+    expect.objectContaining({
+      environmentSelection: "auto",
+      loadBalancedEnvironmentId: null,
+      branch: null,
+      worktreePath: null,
+    }),
+  );
+});
+
 describe.each([
   ["new", null],
   [
