@@ -956,12 +956,13 @@ export const make = Effect.gen(function* () {
               root,
             );
             root.contents.setWindowOpenHandler((details) => {
-              // A denied blank popup must leave its opener intact for auth fallback.
-              if (details.url === "" || details.url === "about:blank") return { action: "deny" };
+              // Auth callers may obtain their URL after creating a blank child with an opener.
               try {
                 if (
-                  details.disposition === "new-window" &&
-                  ["https:", "http:"].includes(new URL(details.url).protocol)
+                  details.url === "" ||
+                  details.url === "about:blank" ||
+                  (details.disposition === "new-window" &&
+                    ["https:", "http:"].includes(new URL(details.url).protocol))
                 )
                   return {
                     action: "allow",

@@ -193,17 +193,64 @@ export async function runNativeKeyboardChannelFixture({
           NodeAssert.ok(commands.includes("Input.dispatchKeyEvent"));
           const navigations = [];
           roots[0].webContents.on("did-start-navigation", (_event, url) => navigations.push(url));
-          for (const url of ["", "about:blank"]) {
+          for (const [index, url] of ["", "about:blank"].entries()) {
+            const created = new Promise((resolve) =>
+              roots[0].webContents.once("did-create-window", resolve),
+            );
             const popup = yield* invoke("evaluate", {
-              expression: `window.open(${JSON.stringify(url)}, 'auth', 'width=500,height=600') === null`,
+              expression: `window.authPopup = window.open(${JSON.stringify(url)}, 'auth-${index}', 'width=500,height=600'); window.authPopup !== null`,
             });
-            NodeAssert.equal(popup, true, "blank popup is denied");
+            NodeAssert.equal(popup, true, "blank popup returns a usable child window");
+            const child = yield* Effect.promise(() => created);
+            NodeAssert.equal(child.isVisible(), false);
+            NodeAssert.equal(child.isFocusable(), false);
+            NodeAssert.equal(child.webContents.session, roots[0].webContents.session);
+            NodeAssert.equal(
+              child.webContents.debugger.isAttached(),
+              true,
+              "native host registers the child",
+            );
+            const authUrl = `${fixtureOrigin}/keyboard-channel-popup-${index}`;
+            const loaded = new Promise((resolve) => {
+              const finished = () => {
+                if (child.webContents.getURL() !== authUrl) return;
+                child.webContents.off("did-finish-load", finished);
+                resolve();
+              };
+              child.webContents.on("did-finish-load", finished);
+            });
+            // Obtain and assign the destination after window.open has returned to its caller.
+            yield* invoke("evaluate", {
+              expression: `window.authPopup.location = ${JSON.stringify(authUrl)}; true`,
+            });
+            yield* Effect.promise(() => loaded);
+            NodeAssert.equal(child.webContents.getURL(), authUrl);
+            NodeAssert.equal(
+              yield* Effect.promise(() =>
+                child.webContents.executeJavaScript(`
+                window.opener.authCompleted = ${JSON.stringify(index)};
+                window.opener.document.querySelector('#draft').value
+              `),
+              ),
+              "channel keyboard αq",
+              "navigated child retains its usable JavaScript opener",
+            );
+            NodeAssert.equal(
+              yield* invoke("evaluate", { expression: "window.authCompleted" }),
+              index,
+              "authentication result returns through the opener",
+            );
             NodeAssert.equal(roots[0].webContents.getURL(), `${fixtureOrigin}/keyboard-channel`);
             NodeAssert.equal(
               yield* invoke("evaluate", { expression: "document.querySelector('#draft').value" }),
               "channel keyboard αq",
-              "denying a blank popup preserves its opener document",
+              "blank child navigation preserves its opener document",
             );
+            NodeAssert.equal(child.isVisible(), false);
+            NodeAssert.equal(child.isFocused(), false);
+            const closed = new Promise((resolve) => child.once("closed", resolve));
+            child.close();
+            yield* Effect.promise(() => closed);
           }
           NodeAssert.deepEqual(navigations, [], "blank popup requests never navigate the opener");
           steps.push({ operation: "blank popups", host: yield* Effect.promise(assertHost) });
