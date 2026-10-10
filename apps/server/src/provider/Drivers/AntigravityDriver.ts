@@ -113,7 +113,11 @@ export const AntigravityDriver: ProviderDriver<
         gcpLocation: settings.gcpLocation,
       };
       const authConfigIssue = antigravityAuthConfigIssue(auth);
-      const processEnvironment = yield* mergeProviderInstanceEnvironment(environment);
+      const processEnvironment = yield* mergeProviderInstanceEnvironment(
+        environment,
+        process.env,
+        host.paths.settingsPath,
+      );
       const userHome = resolveAntigravityUserHome(
         yield* HostProcess.Platform,
         processEnvironment,

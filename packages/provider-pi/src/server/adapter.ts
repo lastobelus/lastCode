@@ -3281,11 +3281,16 @@ export const PiAdapterV2Driver: ProviderAdapterDriver<PiSettings, PiAdapterV2Dri
   create: Effect.fn("PiAdapterV2Driver.create")(
     function* (input: ProviderAdapterDriverCreateInput<PiSettings>) {
       const hostEnvironment = yield* HostProcess.Environment;
+      const host = yield* ProviderHost.ProviderHost;
       const continuationRequests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
       return yield* makePiAdapterV2({
         instanceId: input.instanceId,
         settings: { ...input.config, enabled: input.enabled },
-        environment: yield* mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
+        environment: yield* mergeProviderInstanceEnvironment(
+          input.environment,
+          hostEnvironment,
+          host.paths.settingsPath,
+        ),
         continuationRequests,
       });
     },
@@ -3309,11 +3314,16 @@ const layer: Layer.Layer<ProviderAdapter.ProviderAdapterV2, never, PiAdapterV2Dr
     ProviderAdapter.ProviderAdapterV2,
     Effect.gen(function* () {
       const hostEnvironment = yield* HostProcess.Environment;
+      const host = yield* ProviderHost.ProviderHost;
       const continuationRequests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
       return yield* makePiAdapterV2({
         instanceId: PI_DEFAULT_INSTANCE_ID,
         settings: DEFAULT_PI_SETTINGS,
-        environment: hostEnvironment,
+        environment: yield* mergeProviderInstanceEnvironment(
+          undefined,
+          hostEnvironment,
+          host.paths.settingsPath,
+        ),
         continuationRequests,
       });
     }),
