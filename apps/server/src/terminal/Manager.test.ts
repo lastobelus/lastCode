@@ -2371,6 +2371,124 @@ it.layer(
       }).pipe(Effect.provide(TestClock.layer())),
   );
 
+  it.effect.each(
+    (["native", "fallback"] as const).flatMap((source) =>
+      (["threads", "terminals"] as const).map((grouping) => ({ source, grouping })),
+    ),
+  )(
+    "shares a held fresh $source wrapper confirmation round across $grouping",
+    ({ source, grouping }) =>
+      Effect.gen(function* () {
+        const initialStarted = yield* Deferred.make<void>();
+        const releaseInitial = yield* Deferred.make<void>();
+        const confirmationStarted = yield* Deferred.make<void>();
+        const releaseConfirmation = yield* Deferred.make<void>();
+        const laterStarted = yield* Deferred.make<void>();
+        const releaseLater = yield* Deferred.make<void>();
+        const ptyAdapter = new FakePtyAdapter();
+        let snapshotCalls = 0;
+        let holdLater = false;
+        let confirmationReleased = false;
+        let laterSnapshotPids: ReadonlyArray<number> = [];
+        const processTable = Effect.gen(function* () {
+          snapshotCalls += 1;
+          const entries = ptyAdapter.processes.map((process) => ({
+            pid: process.pid,
+            ppid: 1,
+            name: "zsh",
+          }));
+          if (snapshotCalls === 1) {
+            yield* Deferred.succeed(initialStarted, undefined);
+            yield* Deferred.await(releaseInitial);
+          } else if (!confirmationReleased) {
+            yield* Deferred.succeed(confirmationStarted, undefined);
+            yield* Deferred.await(releaseConfirmation);
+          } else if (holdLater) {
+            holdLater = false;
+            laterSnapshotPids = entries.map(({ pid }) => pid);
+            yield* Deferred.succeed(laterStarted, undefined);
+            yield* Deferred.await(releaseLater);
+          }
+          return entries;
+        });
+        const { manager } = yield* createSnapshotBoundaryManager(source, ptyAdapter, processTable);
+        yield* TestClock.adjust(0);
+        const terminals = [1, 2, 3].map((index) =>
+          openInput({
+            threadId: grouping === "threads" ? `thread-${index}` : "thread-1",
+            terminalId: grouping === "threads" ? DEFAULT_TERMINAL_ID : `terminal-${index}`,
+          }),
+        );
+        yield* Effect.forEach(terminals, (terminal) => manager.open(terminal));
+        for (const process of ptyAdapter.processes) process.exitOnKill = "SIGTERM";
+        const writing = yield* Effect.forEach(
+          terminals,
+          (terminal) => manager.write({ ...terminal, data: "noop\r" }),
+          { concurrency: "unbounded" },
+        ).pipe(Effect.forkScoped({ startImmediately: true }));
+        yield* Deferred.await(initialStarted);
+        yield* TestClock.adjust(0);
+        const initialCalls = snapshotCalls;
+        const writesDuringInitial = ptyAdapter.processes.map((process) => [...process.writes]);
+        yield* Deferred.succeed(releaseInitial, undefined);
+        yield* Deferred.await(confirmationStarted);
+        yield* TestClock.adjust("10 millis");
+        const callsDuringConfirmation = snapshotCalls;
+        const writesDuringConfirmation = ptyAdapter.processes.map((process) => [...process.writes]);
+        const firstWritersPending = writing.pollUnsafe() === undefined;
+        confirmationReleased = true;
+        yield* Deferred.succeed(releaseConfirmation, undefined);
+        yield* Fiber.join(writing);
+        const callsAfterFirstWrites = snapshotCalls;
+        const laterTerminal = openInput({
+          threadId: grouping === "threads" ? "thread-4" : "thread-1",
+          terminalId: grouping === "threads" ? DEFAULT_TERMINAL_ID : "terminal-4",
+        });
+        yield* manager.open(laterTerminal);
+        const laterProcess = ptyAdapter.processes[3]!;
+        laterProcess.exitOnKill = "SIGTERM";
+        holdLater = true;
+        const laterWriting = yield* manager
+          .write({ ...laterTerminal, data: "later noop\r" })
+          .pipe(Effect.forkScoped({ startImmediately: true }));
+        yield* Deferred.await(laterStarted);
+        const callsDuringLaterSample = snapshotCalls;
+        const laterWritesBeforeSample = [...laterProcess.writes];
+        yield* Deferred.succeed(releaseLater, undefined);
+        yield* Fiber.join(laterWriting);
+        const callsAfterLaterWrite = snapshotCalls;
+        const writesAfterConfirmation = ptyAdapter.processes.map((process) => [...process.writes]);
+        yield* Effect.forEach([...terminals, laterTerminal], (terminal) =>
+          manager.closeIdle(terminal),
+        );
+        yield* TestClock.adjust("1 millis");
+        const metadataAfterCleanup = yield* readIdleInspectionMetadata(manager);
+        const killSignals = ptyAdapter.processes.map((process) => [...process.killSignals]);
+        const remaining = [...terminals, laterTerminal].filter(
+          (_, index) => !ptyAdapter.processes[index]!.killed,
+        );
+        if (remaining.length > 0) yield* exitSnapshotTestProcesses(manager, ptyAdapter, remaining);
+        expect(initialCalls).toBe(1);
+        expect(writesDuringInitial).toEqual([[], [], []]);
+        expect(callsDuringConfirmation).toBe(2);
+        expect(writesDuringConfirmation).toEqual([[], [], []]);
+        expect(firstWritersPending).toBe(true);
+        expect(callsAfterFirstWrites).toBe(2);
+        expect(callsDuringLaterSample).toBe(3);
+        expect(laterWritesBeforeSample).toEqual([]);
+        expect(laterSnapshotPids).toContain(laterProcess.pid);
+        expect(callsAfterLaterWrite).toBe(4);
+        expect(writesAfterConfirmation).toEqual([
+          ["noop\r"],
+          ["noop\r"],
+          ["noop\r"],
+          ["later noop\r"],
+        ]);
+        expect(metadataAfterCleanup).toEqual([]);
+        for (const signals of killSignals) expect(signals).toContain("SIGTERM");
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
   it.effect.each([
     { source: "native", grouping: "threads" },
     { source: "fallback", grouping: "threads" },
@@ -2564,13 +2682,15 @@ it.layer(
               };
         if (outcome === "timeout") yield* manager.open(openInput(nextTerminal));
         yield* write(nextTerminal);
-        expect(snapshotCalls).toBe(2);
-        expect(activeRequests).toBe(0);
+        const callsAfterNewWrite = snapshotCalls;
+        const activeRequestsAfterNewWrite = activeRequests;
         yield* exitSnapshotTestProcesses(
           manager,
           ptyAdapter,
           outcome === "timeout" ? [...terminals, nextTerminal] : terminals,
         );
+        expect(callsAfterNewWrite).toBe(3);
+        expect(activeRequestsAfterNewWrite).toBe(0);
       }).pipe(Effect.provide(TestClock.layer())),
   );
 
@@ -3333,13 +3453,22 @@ it.layer(
 
   it.effect.each(
     (["native", "fallback"] as const).flatMap((source) =>
-      (["my-shell", "bash"] as const).flatMap((startupName) =>
-        ([true, false] as const).map((resolves) => ({ source, startupName, resolves })),
+      [
+        { startupName: "my-shell", configuredName: "my-shell" },
+        { startupName: "bash", configuredName: "my-shell" },
+        { startupName: "bash", configuredName: "bash" },
+      ].flatMap(({ startupName, configuredName }) =>
+        ([true, false] as const).map((resolves) => ({
+          source,
+          startupName,
+          configuredName,
+          resolves,
+        })),
       ),
     ),
   )(
-    "settles $source wrapper identity from $startupName before forwarding when resolved=$resolves",
-    ({ source, startupName, resolves }) =>
+    "settles $source wrapper identity from $startupName configured as $configuredName before forwarding when resolved=$resolves",
+    ({ source, startupName, configuredName, resolves }) =>
       Effect.gen(function* () {
         const firstSampleStarted = yield* Deferred.make<void>();
         const releaseFirstSample = yield* Deferred.make<void>();
@@ -3377,6 +3506,7 @@ it.layer(
           return [{ pid: 9000, ppid: 1, name }];
         });
         const { manager } = yield* createSnapshotBoundaryManager(source, ptyAdapter, processTable, {
+          shellResolver: () => `/opt/tools/${configuredName}`,
           registerTerminalProcesses: ({ processIds }) =>
             Effect.sync(() => {
               ownedProcessIds = [...processIds];

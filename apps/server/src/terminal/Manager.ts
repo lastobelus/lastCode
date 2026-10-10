@@ -2451,33 +2451,30 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
                 ? null
                 : yield* Effect.cached(
                     Effect.gen(function* () {
-                      const readIdentity = (fresh: boolean) =>
-                        (fresh
-                          ? processTableSnapshotWithGeneration
-                          : fetchProcessTableSnapshot
-                        ).pipe(
-                          Effect.map(({ snapshot }) =>
-                            startupShellIdentity(
-                              snapshot.commandById.get(processPid) ?? "",
-                              spawnResult.shellName,
-                              platform,
-                            ),
+                      const readIdentity = fetchProcessTableSnapshot.pipe(
+                        Effect.map(({ snapshot, generation }) => ({
+                          identity: startupShellIdentity(
+                            snapshot.commandById.get(processPid) ?? "",
+                            spawnResult.shellName,
+                            platform,
                           ),
-                        );
-                      const first = yield* readIdentity(false);
-                      if (first === spawnResult.shellName && isRecognizedPosixShell(first)) {
-                        return first;
-                      }
-                      // A wrapper or its interpreter can still be starting.
-                      // Confirm a differently named shell with fresh evidence;
-                      // unfamiliar roots remain unresolved, never idle proof.
-                      let previous = first;
+                          generation,
+                        })),
+                      );
+                      // Even a matching name can be a wrapper still starting.
+                      // Share each in-flight confirmation round, but never use
+                      // a scan predating the observation being confirmed.
+                      let previous = yield* readIdentity;
                       while (true) {
-                        const identity = yield* readIdentity(true);
-                        if (identity === previous && isRecognizedPosixShell(identity)) {
-                          return identity;
+                        const next = yield* readIdentity;
+                        if (next.generation <= previous.generation) continue;
+                        if (
+                          next.identity === previous.identity &&
+                          isRecognizedPosixShell(next.identity)
+                        ) {
+                          return next.identity;
                         }
-                        previous = identity;
+                        previous = next;
                         yield* Effect.sleep("10 millis");
                       }
                     }).pipe(
