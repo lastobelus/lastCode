@@ -272,13 +272,18 @@ export const AcpRegistryAdapterV2Driver: ProviderAdapterDriver<
   create: Effect.fn("AcpRegistryAdapterV2Driver.create")(
     function* (input: ProviderAdapterDriverCreateInput<AcpRegistrySettings>) {
       const hostEnvironment = yield* HostProcess.Environment;
+      const host = yield* ProviderHost.ProviderHost;
       const selfInvocation = yield* resolveSelfInvocation();
       const providerEventLoggers = yield* ProviderEventLoggers.ProviderEventLoggers;
       const makeNativeLogger = yield* makeAcpNativeLoggerFactory();
       return yield* makeAcpRegistryAdapterV2({
         instanceId: input.instanceId,
         settings: { ...input.config, enabled: input.enabled },
-        environment: yield* mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
+        environment: yield* mergeProviderInstanceEnvironment(
+          input.environment,
+          hostEnvironment,
+          host.paths.settingsPath,
+        ),
         selfInvocation,
         nativeLogging: (threadId) =>
           makeNativeLogger({

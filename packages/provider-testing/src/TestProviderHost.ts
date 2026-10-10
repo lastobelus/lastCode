@@ -58,6 +58,7 @@ export const layer = (
           cwd: options.cwd ?? process.cwd(),
           baseDir,
           stateDir,
+          settingsPath: path.join(stateDir, "settings.json"),
           providerStatusCacheDir,
           attachmentsDir,
         },
