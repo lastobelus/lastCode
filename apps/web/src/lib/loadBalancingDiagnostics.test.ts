@@ -109,7 +109,82 @@ function storage() {
 }
 
 describe("Auto balance decision logging", () => {
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("does not touch storage for unchanged decisions or while logging is stopped", () => {
+    const disk = storage();
+    const log = createLoadBalancingDecisionLog(disk);
+    log.start(1_000);
+    for (let index = 0; index < 200; index++) {
+      log.record({ ...decision, draftId: `draft-${index}` }, 1_000 + index);
+    }
+    const getItem = vi.spyOn(disk, "getItem");
+    const parse = vi.spyOn(JSON, "parse");
+    const setItem = vi.spyOn(disk, "setItem");
+    const sameDecision = { ...decision, draftId: "draft-199" };
+    for (let index = 0; index < 100; index++) {
+      log.record(sameDecision, 2_000 + index);
+    }
+    expect(getItem).not.toHaveBeenCalled();
+    expect(parse).not.toHaveBeenCalled();
+    expect(setItem).not.toHaveBeenCalled();
+
+    log.stop();
+    getItem.mockClear();
+    setItem.mockClear();
+    const stringify = vi.spyOn(JSON, "stringify");
+    for (let index = 0; index < 100; index++) log.record(decision, 3_000 + index);
+    expect(getItem).not.toHaveBeenCalled();
+    expect(parse).not.toHaveBeenCalled();
+    expect(setItem).not.toHaveBeenCalled();
+    expect(stringify).not.toHaveBeenCalled();
+  });
+
+  it("parses peer changes once while preserving cached snapshots on unchanged reads", () => {
+    const disk = storage();
+    const first = createLoadBalancingDecisionLog(disk);
+    const second = createLoadBalancingDecisionLog(disk);
+    second.getSnapshot();
+    first.start(1_000);
+    const parse = vi.spyOn(JSON, "parse");
+    // Other tabs receive the equivalent refresh from the browser storage event.
+    second.refresh();
+    second.record({ ...decision, draftId: "from-second" }, 1_001);
+    expect(parse).toHaveBeenCalledTimes(1);
+    second.refresh();
+    expect(parse).toHaveBeenCalledTimes(1);
+    first.stop();
+    const readsBeforeStop = parse.mock.calls.length;
+    second.record({ ...decision, draftId: "after-stop" }, 1_002);
+    expect(parse).toHaveBeenCalledTimes(readsBeforeStop + 1);
+    expect(second.getSnapshot().expiresAt).toBe(0);
+    second.refresh();
+    expect(parse).toHaveBeenCalledTimes(readsBeforeStop + 1);
+  });
+
+  it("reports a failed write once per decision and retries a new decision or logging period", () => {
+    const disk = storage();
+    const log = createLoadBalancingDecisionLog(disk);
+    log.start(1_000);
+    const setItem = vi.spyOn(disk, "setItem").mockImplementation(() => {
+      throw new Error("Storage full");
+    });
+    expect(() => log.record(decision, 1_001)).toThrow("Storage full");
+    expect(() => log.record(decision, 1_002)).not.toThrow();
+    expect(setItem).toHaveBeenCalledTimes(1);
+    expect(log.getSnapshot().records).toHaveLength(0);
+    expect(() => log.record({ ...decision, draftId: "another-decision" }, 1_003)).toThrow(
+      "Storage full",
+    );
+    expect(setItem).toHaveBeenCalledTimes(2);
+    setItem.mockRestore();
+    log.start(2_000);
+    log.record({ ...decision, draftId: "another-decision" }, 2_001);
+    expect(log.getSnapshot().records).toHaveLength(1);
+  });
 
   it("shares start, append, and stop state between two existing tabs", () => {
     const disk = storage();
@@ -118,6 +193,7 @@ describe("Auto balance decision logging", () => {
     expect(second.getSnapshot().expiresAt).toBe(0);
 
     first.start(1_000);
+    second.refresh();
     second.record({ ...decision, draftId: "from-second" }, 1_001);
     first.record({ ...decision, draftId: "from-first" }, 1_002);
     expect(
@@ -133,6 +209,7 @@ describe("Auto balance decision logging", () => {
     expect(JSON.parse(disk.getItem("t3:auto-balance-decisions")!).expiresAt).toBe(0);
 
     second.start(2_000);
+    first.refresh();
     expect(JSON.parse(second.export()).decisions).toHaveLength(2);
     first.record({ ...decision, draftId: "after-restart" }, 2_001);
     expect(JSON.parse(first.export()).decisions).toHaveLength(3);

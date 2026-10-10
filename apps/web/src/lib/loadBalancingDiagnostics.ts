@@ -61,12 +61,16 @@ interface LogState {
 /** Local, bounded diagnostics survive restarts without recording prompts or credentials. */
 export function createLoadBalancingDecisionLog(storage: Pick<Storage, "getItem" | "setItem">) {
   let state: LogState | undefined;
-  let lastDecision: string | undefined;
+  let storedValue: string | null | undefined;
+  let lastAttemptedDecision: string | undefined;
   const listeners = new Set<() => void>();
   const refresh = (): LogState => {
     let next: LogState = { expiresAt: 0, records: [] };
     try {
-      const saved: unknown = JSON.parse(storage.getItem(STORAGE_KEY) ?? "null");
+      const raw = storage.getItem(STORAGE_KEY);
+      if (state && raw === storedValue) return state;
+      storedValue = raw;
+      const saved: unknown = raw === null ? null : JSON.parse(raw);
       if (
         saved &&
         typeof saved === "object" &&
@@ -90,14 +94,16 @@ export function createLoadBalancingDecisionLog(storage: Pick<Storage, "getItem" 
     ) {
       return state;
     }
-    if (state?.expiresAt !== next.expiresAt) lastDecision = undefined;
+    if (state?.expiresAt !== next.expiresAt) lastAttemptedDecision = undefined;
     state = next;
     for (const listener of listeners) listener();
     return state;
   };
   const getSnapshot = (): LogState => state ?? refresh();
   const save = (next: LogState) => {
-    storage.setItem(STORAGE_KEY, JSON.stringify(next));
+    const raw = JSON.stringify(next);
+    storage.setItem(STORAGE_KEY, raw);
+    storedValue = raw;
     state = next;
     for (const listener of listeners) listener();
   };
@@ -112,18 +118,24 @@ export function createLoadBalancingDecisionLog(storage: Pick<Storage, "getItem" 
     },
     start: (now = Date.now()) => {
       save({ ...refresh(), expiresAt: now + LOG_DURATION_MS });
-      lastDecision = undefined;
+      lastAttemptedDecision = undefined;
     },
     stop: () => save({ ...refresh(), expiresAt: 0 }),
     record: (decision: LoadBalancingDecisionRecord, now = Date.now()) => {
-      const current = refresh();
-      if (now >= current.expiresAt) return;
+      // Storage events keep this snapshot current across browser tabs.
+      if (now >= getSnapshot().expiresAt) return;
       // Re-renders can age the same sample without making another routing decision.
       const signature = JSON.stringify({
         ...decision,
         candidates: decision.candidates.map(({ sampleAgeMs: _age, ...candidate }) => candidate),
       });
-      if (signature === lastDecision) return;
+      if (signature === lastAttemptedDecision) return;
+      // Before appending, merge any peer records and recheck a concurrent Stop.
+      const current = refresh();
+      if (now >= current.expiresAt) return;
+      // A failed write should surface once per decision, rather than on every render.
+      // New decisions and a new logging period still make another write attempt.
+      lastAttemptedDecision = signature;
       save({
         ...current,
         records: [
@@ -131,7 +143,6 @@ export function createLoadBalancingDecisionLog(storage: Pick<Storage, "getItem" 
           JSON.stringify({ ...decision, decidedAt: new Date(now).toISOString() }),
         ].slice(-MAX_DECISIONS),
       });
-      lastDecision = signature;
     },
     export: () => {
       const current = refresh();

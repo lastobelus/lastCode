@@ -217,29 +217,37 @@ it.each([
   );
 });
 
-it("keeps a manual host pick when an open empty draft is reused without a host override", async () => {
-  testState.reset({
-    draftId: "draft-existing",
-    environmentId: "environment-ssh",
-    promotedTo: null,
-    threadId: "thread-existing",
-    environmentSelection: "manual",
-    branch: null,
-    worktreePath: null,
-  });
-  testState.router.state.matches[0]!.params = { draftId: "draft-existing" };
-  testState.router.state.location.href = "/draft/draft-existing";
-  const projectRef = { environmentId: "environment-ssh", projectId: "project-remote" } as never;
+it.each([
+  { environmentSelection: "manual", branch: null },
+  { environmentSelection: "auto", branch: "main" },
+] as const)(
+  "keeps an open empty draft's routing intent without an override: %j",
+  async (routing) => {
+    testState.reset({
+      draftId: "draft-existing",
+      environmentId: "environment-ssh",
+      promotedTo: null,
+      threadId: "thread-existing",
+      ...routing,
+      worktreePath: null,
+    });
+    testState.router.state.matches[0]!.params = { draftId: "draft-existing" };
+    testState.router.state.location.href = "/draft/draft-existing";
+    const projectRef = { environmentId: "environment-ssh", projectId: "project-remote" } as never;
 
-  await useNewThreadHandler()(projectRef);
+    await useNewThreadHandler()(projectRef);
 
-  expect(testState.draftStore.setLogicalProjectDraftThreadId).toHaveBeenCalledWith(
-    "remote-project",
-    projectRef,
-    "draft-existing",
-    expect.objectContaining({ environmentSelection: "manual", loadBalancedEnvironmentId: null }),
-  );
-});
+    expect(testState.draftStore.setLogicalProjectDraftThreadId).toHaveBeenCalledWith(
+      "remote-project",
+      projectRef,
+      "draft-existing",
+      expect.objectContaining({
+        environmentSelection: routing.environmentSelection,
+        loadBalancedEnvironmentId: null,
+      }),
+    );
+  },
+);
 
 it("clears an open empty draft's checkout when Auto balance is explicitly selected", async () => {
   testState.reset({

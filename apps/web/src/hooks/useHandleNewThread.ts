@@ -180,8 +180,8 @@ export function useNewThreadHandler() {
         ({
           environmentSelection:
             options?.environmentSelection ??
-            (!hasExplicitWorkspaceOption && retainedSelection === "manual"
-              ? "manual"
+            (!hasExplicitWorkspaceOption && retainedSelection
+              ? retainedSelection
               : workspace?.branch || workspace?.worktreePath
                 ? "manual"
                 : "auto"),
