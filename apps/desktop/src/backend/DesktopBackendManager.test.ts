@@ -139,6 +139,8 @@ interface MakeInstanceInput {
     DesktopTelemetryPublisher.DesktopTelemetryPublisher["Service"]
   >;
   readonly pruneRuntimes?: (distro: string | null, runtimeId: string) => Effect.Effect<void>;
+  readonly prepareDesktopBrowser?: Effect.Effect<void>;
+  readonly desktopBrowserHost?: Partial<DesktopBrowserHost.DesktopBrowserHost["Service"]>;
 }
 
 // Helper that constructs a primary backend instance using the factory
@@ -176,7 +178,12 @@ function makeTestInstance(input: MakeInstanceInput) {
       updateCancellations: Stream.empty,
       ...input.desktopTelemetryPublisher,
     }),
-    DesktopBrowserHost.layer.pipe(Layer.provide(DesktopClientSettings.layerTest())),
+    Layer.effect(
+      DesktopBrowserHost.DesktopBrowserHost,
+      DesktopBrowserHost.make.pipe(
+        Effect.map((host) => ({ ...host, ...input.desktopBrowserHost })),
+      ),
+    ).pipe(Layer.provide(DesktopClientSettings.layerTest())),
     DesktopWslEnvironment.layerTest(
       input.pruneRuntimes === undefined ? {} : { pruneRuntimes: input.pruneRuntimes },
     ),
@@ -190,12 +197,69 @@ function makeTestInstance(input: MakeInstanceInput) {
     ...(input.onShutdown ? { onShutdown: () => input.onShutdown! } : {}),
     ...(input.onStartupFailure ? { onStartupFailure: input.onStartupFailure } : {}),
     ...(input.onPreflightFailed ? { onPreflightFailed: input.onPreflightFailed } : {}),
+    ...(input.prepareDesktopBrowser ? { prepareDesktopBrowser: input.prepareDesktopBrowser } : {}),
   });
 
   return instance.pipe(Effect.provide(layerServices));
 }
 
 describe("DesktopBackendManager", () => {
+  it.effect("prepares the local browser before commands and prepares again after restart", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const preparing = yield* Deferred.make<void>();
+        const prepared = yield* Deferred.make<void>();
+        const commands = yield* Queue.unbounded<string>();
+        let preparationCount = 0;
+        const instance = yield* makeTestInstance({
+          config: {
+            ...baseConfig,
+            bootstrap: {
+              ...baseConfig.bootstrap,
+              desktopBrowserFd: 6,
+              desktopBrowserControlFd: 7,
+            },
+          },
+          spawnerLayer: Layer.succeed(
+            ChildProcessSpawner.ChildProcessSpawner,
+            ChildProcessSpawner.make(() =>
+              Effect.gen(function* () {
+                const closed = yield* Deferred.make<void>();
+                yield* Effect.addFinalizer(() => Deferred.succeed(closed, void 0));
+                return makeProcess({
+                  exitCode: Deferred.await(closed).pipe(Effect.as(ChildProcessSpawner.ExitCode(0))),
+                  getOutputFd: (fd) =>
+                    fd === 7 ? Stream.encodeText(Stream.make("first\nsecond\n")) : Stream.empty,
+                });
+              }),
+            ),
+          ),
+          prepareDesktopBrowser: Effect.sync(() => {
+            preparationCount += 1;
+          }).pipe(
+            Effect.andThen(Deferred.succeed(preparing, void 0)),
+            Effect.andThen(Deferred.await(prepared)),
+          ),
+          desktopBrowserHost: {
+            handleCommandLine: (line) => Queue.offer(commands, line).pipe(Effect.asVoid),
+          },
+        });
+        yield* instance.start;
+        yield* Deferred.await(preparing);
+        assert.equal(yield* Queue.size(commands), 0);
+        yield* Deferred.succeed(prepared, void 0);
+        assert.equal(yield* Queue.take(commands), "first");
+        assert.equal(yield* Queue.take(commands), "second");
+        assert.equal(preparationCount, 1);
+        yield* instance.stop();
+        yield* instance.start;
+        assert.equal(yield* Queue.take(commands), "first");
+        assert.equal(yield* Queue.take(commands), "second");
+        assert.equal(preparationCount, 2);
+      }),
+    ),
+  );
+
   it.effect("spawns the backend with fd3 bootstrap and fd4 telemetry", () =>
     Effect.scoped(
       Effect.gen(function* () {

@@ -90,6 +90,7 @@ import * as Scope from "effect/Scope";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 
 import * as FileSystem from "effect/FileSystem";
+import { DesktopBrowserTransportError, EnvironmentId } from "@t3tools/contracts";
 import { HttpClient } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 
@@ -100,12 +101,14 @@ import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopTelemetryPublisher from "../telemetry/DesktopTelemetryPublisher.ts";
 import * as DesktopBrowserHost from "../preview/DesktopBrowserHost.ts";
+import * as BrowserProfileScope from "../preview/BrowserProfileScope.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
 import * as DesktopWslEnvironment from "../wsl/DesktopWslEnvironment.ts";
 import * as ElectronDialog from "../electron/ElectronDialog.ts";
 
 const { logWarning: logBackendPoolWarning } =
   DesktopObservability.makeComponentLogger("desktop-backend-pool");
+const decodeEnvironmentId = Schema.decodeEffect(EnvironmentId);
 
 export type BackendInstanceId = DesktopBackendManager.BackendInstanceId;
 export const BackendInstanceId = DesktopBackendManager.BackendInstanceId;
@@ -218,6 +221,15 @@ export const layer = Layer.effect(
     const electronDialog = yield* ElectronDialog.ElectronDialog;
     const environment = yield* DesktopEnvironment.DesktopEnvironment;
     const appSettings = yield* DesktopAppSettings.DesktopAppSettings;
+    const browserHost = yield* DesktopBrowserHost.DesktopBrowserHost;
+    const fileSystem = yield* FileSystem.FileSystem;
+    const browserProfileContext =
+      yield* Effect.context<
+        Exclude<
+          Effect.Services<ReturnType<typeof BrowserProfileScope.browserProfileScope>>,
+          DesktopBackendPool
+        >
+      >();
     // Anchor the pool's lifetime to its layer scope so registered
     // instance scopes can be forked off it. Without this, instance
     // scopes are orphaned: they only close via explicit unregister()
@@ -289,6 +301,22 @@ export const layer = Layer.effect(
       // primaries as Windows.
       label: configuration.resolvePrimaryLabel,
       configResolve: configuration.resolvePrimary,
+      // The server publishes its identity before it can send browser commands.
+      // Bind here so scheduled work does not depend on the renderer mounting.
+      prepareDesktopBrowser: Effect.gen(function* () {
+        const environmentId = yield* fileSystem
+          .readFileString(environment.path.join(environment.stateDir, "environment-id"))
+          .pipe(Effect.flatMap((raw) => decodeEnvironmentId(raw.trim())));
+        yield* browserHost.bindEnvironment("local", environmentId, (profileId) =>
+          BrowserProfileScope.browserProfileScope(environmentId, profileId).pipe(
+            Effect.provide(browserProfileContext),
+            Effect.provideService(DesktopBackendPool, pool),
+            Effect.mapError(
+              () => new DesktopBrowserTransportError({ reason: "profile-unavailable" }),
+            ),
+          ),
+        );
+      }).pipe(Effect.orDie),
       // Window creation errors propagating out of handleBackendReady must
       // not block the readiness callback (that would prevent restartAttempt
       // from being reset), so we absorb them here. The window service only
@@ -430,7 +458,7 @@ export const layer = Layer.effect(
         }).pipe(Effect.ensuring(finish));
       });
 
-    return DesktopBackendPool.of({
+    const pool = DesktopBackendPool.of({
       get: (id) =>
         SynchronizedRef.get(instancesRef).pipe(
           Effect.map((instances) => {
@@ -449,6 +477,7 @@ export const layer = Layer.effect(
       register,
       unregister,
     });
+    return pool;
   }),
 );
 

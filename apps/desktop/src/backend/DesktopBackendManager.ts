@@ -299,6 +299,8 @@ export interface BackendInstanceSpec {
   // 127.0.0.1). Splitting this off from configResolve avoids races
   // between "fired onReady" and "currentConfig already advanced".
   readonly onReady?: (httpBaseUrl: URL) => Effect.Effect<void>;
+  /** Runs once per backend run before its first inherited-fd browser command. */
+  readonly prepareDesktopBrowser?: Effect.Effect<void>;
   readonly onShutdown?: () => Effect.Effect<void>;
   // Report an unexpected exit before the first successful startup, once per instance.
   readonly onStartupFailure?: (reason: string) => Effect.Effect<void>;
@@ -953,12 +955,16 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
           );
         });
 
+        const prepareDesktopBrowser = yield* Effect.cached(
+          spec.prepareDesktopBrowser ?? Effect.void,
+        );
         const program = runBackendProcess({
           ...config.value,
           desktopTelemetryStream: desktopTelemetryPublisher.encoded,
           // Only a bootstrap that names the browser fds (the local primary) gets them.
           desktopBrowserStream: desktopBrowserHost.events,
-          onDesktopBrowserCommand: desktopBrowserHost.handleCommandLine,
+          onDesktopBrowserCommand: (line) =>
+            prepareDesktopBrowser.pipe(Effect.andThen(desktopBrowserHost.handleCommandLine(line))),
           onDesktopTelemetryControl: (message) =>
             desktopTelemetryPublisher.handleControlForSource(spec.id, message),
           onStarted: Effect.fn("desktop.backendInstance.onStarted")(function* (pid) {

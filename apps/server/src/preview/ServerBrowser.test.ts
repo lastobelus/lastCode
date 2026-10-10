@@ -2088,6 +2088,99 @@ it.live.each(["reconnect", "deliberate-offline-close"] as const)(
     ).pipe(Effect.provide(layer)),
 );
 
+it.live("status exposes detached roots so their owner can close them and recover capacity", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      profileCatalogue = {
+        desktopHostId: "host-a",
+        profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+        defaultProfileId: "work",
+      };
+      desktopRendersNext = true;
+      const { broker, browser, tabId } = yield* ready;
+      const tabIds = [tabId];
+      for (let index = 1; index < 8; index++) {
+        desktopRendersNext = true;
+        const opened = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { reuseExistingTab: false, show: false },
+        });
+        tabIds.push(opened.tabId!);
+      }
+      for (const detachedTabId of tabIds) {
+        const viewer = yield* browser.attachViewer(viewerInput(detachedTabId, false));
+        desktopTabs.delete(detachedTabId);
+        desktopDetaches.emit("detach", {
+          threadId: scope.thread.threadId,
+          tabId: detachedTabId,
+          desktopHostId: "host-a",
+        });
+        let ending = yield* Queue.take(viewer.output);
+        while (ending._tag !== "reconnect") ending = yield* Queue.take(viewer.output);
+      }
+      const connectionsBefore = desktopConnections.length;
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "status",
+        input: {},
+      });
+      expect(status.available).toBe(false);
+      expect(status.tabs).toHaveLength(8);
+      expect(status.tabs?.map((tab) => tab.tabId)).toEqual(tabIds);
+      expect(status.tabs?.every((tab) => tab.ownedByCaller && tab.owner === "agent")).toBe(true);
+      expect(status.tabs?.every((tab) => tab.profileId === "work" && !tab.visible)).toBe(true);
+      expect(desktopConnections).toHaveLength(connectionsBefore);
+      const otherScope = {
+        ...scope,
+        thread: { ...scope.thread, providerSessionId: "other-agent" },
+      };
+      const observed = yield* broker.invoke<PreviewAutomationStatus>({
+        scope: otherScope,
+        operation: "status",
+        input: {},
+      });
+      expect(observed.tabs?.every((tab) => !tab.ownedByCaller)).toBe(true);
+      profileCatalogue = { ...profileCatalogue, desktopHostId: "host-b" };
+      expect(
+        (yield* broker
+          .invoke<void>({
+            scope,
+            operation: "open",
+            input: { reuseExistingTab: false, show: false },
+          })
+          .pipe(Effect.flip)).message,
+      ).toContain("Too many");
+      rootCloseFailure = "host-unavailable";
+      const closableTabId = status.tabs![0]!.tabId;
+      expect(
+        (yield* broker
+          .invoke<void>({ scope: otherScope, tabId: closableTabId, operation: "close", input: {} })
+          .pipe(Effect.flip)).message,
+      ).toContain("another agent session");
+      yield* broker.invoke({ scope, tabId: closableTabId, operation: "close", input: {} });
+      rootCloseFailure = null;
+      desktopRendersNext = true;
+      const replacement = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { reuseExistingTab: false, show: false },
+      });
+      expect(replacement.tabId).not.toBe(closableTabId);
+      expect(replacement.tabs).toHaveLength(8);
+      expect(replacement.tabs?.some((tab) => tab.tabId === closableTabId)).toBe(false);
+      expect(rootDiscards).toEqual([
+        {
+          threadId: scope.thread.threadId,
+          tabId: closableTabId,
+          desktopHostId: "host-a",
+          rootId: `root-${closableTabId}`,
+        },
+      ]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live.each(["agent", "client"] as const)(
   "explicit %s close retires an offline root without reopening it or consuming tab capacity",
   (entry) =>

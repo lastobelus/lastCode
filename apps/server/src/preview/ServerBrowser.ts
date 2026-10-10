@@ -1814,7 +1814,48 @@ const make = Effect.gen(function* () {
   const statusWithTitle = async (
     tab: ServerTab | undefined,
     agentSessionId?: string,
+    requestedThreadId?: string,
   ): Promise<PreviewAutomationStatus> => {
+    const threadId = tab?.threadId ?? requestedThreadId;
+    const listedTabs = [...tabs.values()]
+      .filter((candidate) => candidate.threadId === threadId)
+      .map((candidate) => ({
+        tabId: candidate.tabId,
+        url: candidate.page.url() === "about:blank" ? null : candidate.page.url(),
+        ...(candidate.openerTabId === undefined ? {} : { openerTabId: candidate.openerTabId }),
+        owner: tabOwner(candidate),
+        ownedByCaller: candidate.control.agentId === agentSessionId,
+        visible: candidate.viewers.size > 0,
+        ...(candidate.profileId === undefined ? {} : { profileId: candidate.profileId }),
+      }));
+    // Detached roots still occupy capacity and support an explicit offline close.
+    // Keep them discoverable even when the thread has no connected page at all.
+    const detachedRoots = [...nativeRoots.values()].filter(
+      (root) =>
+        root.published &&
+        !root.closed &&
+        root.key.threadId === threadId &&
+        !tabs.has(tabKey(root.key.threadId, root.key.tabId)),
+    );
+    if (threadId !== undefined && detachedRoots.length > 0) {
+      const { sessions } = await Effect.runPromise(
+        manager.list({ threadId: ThreadId.make(threadId) }),
+      );
+      for (const root of detachedRoots) {
+        const snapshot = sessions.find(
+          (session) => session.tabId === root.key.tabId && session.desktopRootId === root.rootId,
+        );
+        if (!snapshot) continue;
+        listedTabs.push({
+          tabId: snapshot.tabId,
+          url: snapshot.navStatus._tag === "Idle" ? null : snapshot.navStatus.url,
+          owner: "agent",
+          ownedByCaller: root.automationOwner === agentSessionId,
+          visible: false,
+          ...(snapshot.profileId === undefined ? {} : { profileId: snapshot.profileId }),
+        });
+      }
+    }
     if (!tab) {
       return {
         available: false,
@@ -1826,6 +1867,7 @@ const make = Effect.gen(function* () {
         url: null,
         title: null,
         loading: false,
+        tabs: listedTabs,
         ...profileStatus(),
       };
     }
@@ -1876,17 +1918,7 @@ const make = Effect.gen(function* () {
         : null,
       viewportSetting: tab.setting,
       ...(viewport ? { viewport } : {}),
-      tabs: [...tabs.values()]
-        .filter((candidate) => candidate.threadId === tab.threadId)
-        .map((candidate) => ({
-          tabId: candidate.tabId,
-          url: candidate.page.url() === "about:blank" ? null : candidate.page.url(),
-          ...(candidate.openerTabId === undefined ? {} : { openerTabId: candidate.openerTabId }),
-          owner: tabOwner(candidate),
-          ownedByCaller: candidate.control.agentId === agentSessionId,
-          visible: candidate.viewers.size > 0,
-          ...(candidate.profileId === undefined ? {} : { profileId: candidate.profileId }),
-        })),
+      tabs: listedTabs,
       ...profileStatus(),
       downloads: tab.downloads.map(({ fileName, path, sizeBytes, url, completedAt }) => ({
         fileName,
@@ -2419,6 +2451,7 @@ const make = Effect.gen(function* () {
             ? latestThreadTab(request.threadId, request.agentSessionId)
             : tabs.get(tabKey(request.threadId, request.tabId)),
           request.agentSessionId,
+          request.threadId,
         );
       case "profiles": {
         const desktopHostId = await profileDesktopHost(request);
