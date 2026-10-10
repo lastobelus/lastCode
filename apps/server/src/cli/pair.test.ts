@@ -13,6 +13,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as TestConsole from "effect/testing/TestConsole";
 import { Command, CliError } from "effect/cli";
+import type { QuitError } from "effect/Terminal";
 
 import { cli } from "../binCli.ts";
 import {
@@ -92,7 +93,20 @@ describe("pair tailscale local target", () => {
   });
 });
 
-const runCli = (args: ReadonlyArray<string>) => Command.runWith(cli, { version: "0.0.0" })(args);
+const runCommand: (
+  args: ReadonlyArray<string>,
+) => Effect.Effect<
+  void,
+  Exclude<Command.Error<typeof cli>, QuitError> | CliError.CliError,
+  NodeServices.NodeServices | NetService.NetService
+> = Command.runWith(cli, { version: "0.0.0" });
+const runCli = (
+  args: ReadonlyArray<string>,
+): Effect.Effect<
+  void,
+  Effect.Error<ReturnType<typeof runCommand>>,
+  NodeServices.NodeServices | NetService.NetService
+> => runCommand(args);
 
 const provideCliTestLayers = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   Effect.provide(effect, Layer.mergeAll(layerCliRuntime, TestConsole.layer));
