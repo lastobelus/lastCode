@@ -324,9 +324,10 @@ interface TerminalSessionState {
   childCommandLabel: string | null;
   /** Startup identity; null when first-input capture could not verify it. */
   spawnedShellName: string | null;
-  /** Last accepted root identity observed before input reached the PTY. */
+  /** Consecutively confirmed root identity observed before input reached the PTY. */
   observedShellName: string | null;
-  /** Shared capture freezes startup identity before concurrent first writes. */
+  observedShellSample: { readonly name: string; readonly generation: number } | null;
+  /** Final capture runs under the thread lock immediately before first input. */
   captureShellIdentity: Effect.Effect<void> | null;
   runtimeEnv: Record<string, string> | null;
 }
@@ -1629,9 +1630,9 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     : fallbackProcessTableSnapshot.pipe(
         Effect.map((snapshot) => ({ snapshot, snapshotSucceeded: true })),
       );
-  // Share overlapping requests only until a spawn, write, or output changes activity.
-  // Replacing the cache keeps new callers out of a pre-change scan; its older
-  // callers can still finish or interrupt it when the last waiter leaves.
+  // Spawn and input require a new table. Output invalidates only its session
+  // so unrelated terminals can still share pending inspection; a completed
+  // zero-TTL table expires before the next call.
   let processTableGeneration = 0;
   const processTableSnapshotWithGeneration = Effect.suspend(() => {
     const generation = ++processTableGeneration;
@@ -1641,8 +1642,14 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const invalidateProcessTableSnapshot = (session: TerminalSessionState, outputOnly = false) => {
     processTableGeneration += 1;
     if (outputOnly) session.processOutputGeneration = processTableGeneration;
-    else session.processSnapshotGeneration = processTableGeneration;
-    sharedProcessTableSnapshot = undefined;
+    else {
+      session.processSnapshotGeneration = processTableGeneration;
+      sharedProcessTableSnapshot = undefined;
+    }
+    if (session.captureShellIdentity !== null) {
+      session.observedShellName = null;
+      session.observedShellSample = null;
+    }
   };
   const isCurrentProcessTableSnapshot = (
     session: TerminalSessionState,
@@ -2383,6 +2390,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       session.childCommandLabel = null;
       session.spawnedShellName = null;
       session.observedShellName = null;
+      session.observedShellSample = null;
       session.pendingProcessEvents = [];
       session.pendingProcessEventIndex = 0;
       session.processEventDrainRunning = false;
@@ -2449,49 +2457,57 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             const captureShellIdentity =
               platform === "win32" || customSubprocessInspector !== undefined
                 ? null
-                : yield* Effect.cached(
-                    Effect.gen(function* () {
-                      const readIdentity = fetchProcessTableSnapshot.pipe(
-                        Effect.map(({ snapshot, generation }) => ({
-                          identity: startupShellIdentity(
-                            snapshot.commandById.get(processPid) ?? "",
-                            spawnResult.shellName,
-                            platform,
-                          ),
-                          generation,
-                        })),
-                      );
-                      // Even a matching name can be a wrapper still starting.
-                      // Share each in-flight confirmation round, but never use
-                      // a scan predating the observation being confirmed.
-                      let previous = yield* readIdentity;
-                      while (true) {
-                        const next = yield* readIdentity;
-                        if (next.generation <= previous.generation) continue;
-                        if (
-                          next.identity === previous.identity &&
-                          isRecognizedPosixShell(next.identity)
-                        ) {
-                          return next.identity;
-                        }
-                        previous = next;
-                        yield* Effect.sleep("10 millis");
+                : Effect.gen(function* () {
+                    const readIdentity = fetchProcessTableSnapshot.pipe(
+                      Effect.map(({ snapshot, generation }) => ({
+                        identity: startupShellIdentity(
+                          snapshot.commandById.get(processPid) ?? "",
+                          spawnResult.shellName,
+                          platform,
+                        ),
+                        generation,
+                      })),
+                    );
+                    let previous: { identity: string | null; generation: number } | undefined;
+                    while (true) {
+                      const next = yield* readIdentity;
+                      if (
+                        previous !== undefined &&
+                        (previous.generation < session.processSnapshotGeneration ||
+                          previous.generation < session.processOutputGeneration)
+                      ) {
+                        previous = undefined;
                       }
-                    }).pipe(
-                      // Identity is best effort; never hold typing behind the
-                      // resource monitor's health timeout and fallback probe.
-                      Effect.timeoutOption("100 millis"),
-                      // A configured wrapper name is not evidence of the
-                      // shell that actually started. After input, a later scan
-                      // might see an exec command, so do not learn identity then.
-                      Effect.map(Option.getOrElse(() => session.observedShellName)),
-                      Effect.orElseSucceed(() => session.observedShellName),
-                      Effect.flatMap((identity) =>
-                        Effect.sync(() => {
-                          if (session.process !== spawnResult.process) return;
-                          session.spawnedShellName = identity ?? session.observedShellName;
-                        }),
-                      ),
+                      // Output from this terminal can make a shared pending
+                      // table too old, without discarding it for other callers.
+                      if (
+                        next.generation < session.processSnapshotGeneration ||
+                        next.generation < session.processOutputGeneration ||
+                        (previous !== undefined && next.generation <= previous.generation)
+                      ) {
+                        continue;
+                      }
+                      if (
+                        previous !== undefined &&
+                        next.identity === previous.identity &&
+                        isRecognizedPosixShell(next.identity)
+                      ) {
+                        return next.identity;
+                      }
+                      const hadPrevious = previous !== undefined;
+                      previous = next;
+                      if (hadPrevious) yield* Effect.sleep("10 millis");
+                    }
+                  }).pipe(
+                    // Keep one typing bound, after acquiring the lifecycle lock.
+                    Effect.timeoutOption("100 millis"),
+                    Effect.map(Option.getOrElse(() => session.observedShellName)),
+                    Effect.orElseSucceed(() => session.observedShellName),
+                    Effect.flatMap((identity) =>
+                      Effect.sync(() => {
+                        if (session.process !== spawnResult.process) return;
+                        session.spawnedShellName = identity ?? session.observedShellName;
+                      }),
                     ),
                   );
             let eventsActivated = false;
@@ -2557,6 +2573,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         session.childCommandLabel = null;
         session.spawnedShellName = null;
         session.observedShellName = null;
+        session.observedShellSample = null;
         session.pendingProcessEvents = [];
         session.pendingProcessEventIndex = 0;
         session.processEventDrainRunning = false;
@@ -2743,12 +2760,25 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             // reflect this scan's command tree so exited PIDs do not accumulate.
             if (generation !== undefined) liveSession.processSnapshotGeneration = generation;
             liveSession.observedProcessIds = next.processIds;
-            if (
-              liveSession.captureShellIdentity !== null &&
-              next.startupShellName !== undefined &&
-              isRecognizedPosixShell(next.startupShellName)
-            ) {
-              liveSession.observedShellName = next.startupShellName;
+            if (liveSession.captureShellIdentity !== null) {
+              const name = next.startupShellName;
+              if (
+                generation !== undefined &&
+                !outputInvalidated() &&
+                name !== undefined &&
+                isRecognizedPosixShell(name)
+              ) {
+                const previous = liveSession.observedShellSample;
+                if (previous !== null && previous.name === name) {
+                  if (generation > previous.generation) liveSession.observedShellName = name;
+                } else {
+                  liveSession.observedShellName = null;
+                }
+                liveSession.observedShellSample = { name, generation };
+              } else {
+                liveSession.observedShellName = null;
+                liveSession.observedShellSample = null;
+              }
             }
             const preserveActivity = outputInvalidated() && liveSession.hasRunningSubprocess;
             const hasRunningSubprocess = preserveActivity ? true : next.hasRunningSubprocess;
@@ -2897,6 +2927,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         childCommandLabel: null,
         spawnedShellName: null,
         observedShellName: null,
+        observedShellSample: null,
         captureShellIdentity: null,
         runtimeEnv: normalizedRuntimeEnv(input.env),
       };
@@ -3265,8 +3296,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     }
     yield* Effect.try({
       try: () => {
-        // Capture may have timed out while this chunk waited for the lock.
-        // Use any observation accepted before forwarding, never one after it.
+        // A timed-out capture can use only confirmed pre-input observations,
+        // never the command that starts after forwarding.
         if (captureShellIdentity !== null && session.spawnedShellName === null) {
           session.spawnedShellName = session.observedShellName;
         }
@@ -3313,10 +3344,12 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             yield* Deferred.await(waiter);
             return yield* writeToSession(input, session, process);
           }
-          // Start each terminal's capture before the thread lock serializes
-          // writes, so terminals in one thread share the same pending scan.
-          // Keep queuing input immediately; the child ends with this request.
-          const captureFiber = yield* captureShellIdentity.pipe(
+          // Prefetch only the table before the lock so overlapping first
+          // writes share pending I/O. Freeze no identity until the lifecycle
+          // lock is held: a wrapper can exec its shell while input is queued.
+          const prefetchFiber = yield* fetchProcessTableSnapshot.pipe(
+            Effect.ignore,
+            Effect.timeoutOption("100 millis"),
             Effect.forkChild({ startImmediately: true }),
           );
           return yield* Deferred.await(waiter).pipe(
@@ -3328,7 +3361,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
                 ),
               ),
             ),
-            Effect.ensuring(Fiber.interrupt(captureFiber)),
+            Effect.ensuring(Fiber.interrupt(prefetchFiber)),
           );
         }),
       (waiter) =>
@@ -3428,6 +3461,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           childCommandLabel: null,
           spawnedShellName: null,
           observedShellName: null,
+          observedShellSample: null,
           captureShellIdentity: null,
           runtimeEnv: normalizedRuntimeEnv(input.env),
         };
