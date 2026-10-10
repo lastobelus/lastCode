@@ -28,6 +28,7 @@ import * as PlatformError from "effect/PlatformError";
 import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
+import * as Scheduler from "effect/Scheduler";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -1966,6 +1967,117 @@ it.layer(
       yield* Fiber.join(laterWrite);
       expect(process.writes).toEqual(["first input\r", "later input\r"]);
     }),
+  );
+
+  it.effect.each(["restart", "context-changing open"] as const)(
+    "rejects queued input from the original process after %s",
+    (operation) =>
+      Effect.gen(function* () {
+        const captureEntered = yield* Deferred.make<void>();
+        const finishCapture = yield* Deferred.make<void>();
+        const replacementStarted = yield* Deferred.make<void>();
+        const finishReplacement = yield* Deferred.make<void>();
+        const resumedInput: Array<() => void> = [];
+        let pauseInput = false;
+        const defaultDispatcher = (yield* Scheduler.Scheduler).makeDispatcher();
+        const inputScheduler: Scheduler.Scheduler = {
+          executionMode: "async",
+          shouldYield: () => pauseInput,
+          makeDispatcher: () => ({
+            scheduleTask: (task, priority) => {
+              if (pauseInput) resumedInput.push(task);
+              else defaultDispatcher.scheduleTask(task, priority);
+            },
+            flush: () => {},
+          }),
+        };
+        const resumeInput = () => {
+          pauseInput = false;
+          for (const task of resumedInput.splice(0)) task();
+        };
+        const ptyAdapter = new FakePtyAdapter();
+        const { manager } = yield* createManager(5, {
+          ptyAdapter,
+          shellResolver: () => "/bin/zsh",
+          subprocessPollIntervalMs: 60_000,
+          processTable: Effect.gen(function* () {
+            yield* Deferred.succeed(captureEntered, undefined);
+            yield* Deferred.await(finishCapture);
+            return ptyAdapter.processes
+              .filter((process) => !process.killed)
+              .map(({ pid }) => ({ pid, ppid: 1, name: "zsh" }));
+          }),
+        }).pipe(Effect.provide(layerWithHostPlatform("linux")));
+        yield* manager.open(openInput());
+        const original = ptyAdapter.processes[0]!;
+        original.exitOnKill = "SIGTERM";
+        const write = (data: string) =>
+          manager.write({ threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, data });
+        const first = yield* write("first\r").pipe(Effect.forkScoped({ startImmediately: true }));
+        yield* Deferred.await(captureEntered);
+        yield* TestClock.adjust(0);
+        const second = yield* write("stale second\r").pipe(
+          Effect.provideService(Scheduler.Scheduler, inputScheduler),
+          Effect.result,
+          Effect.forkScoped({ startImmediately: true }),
+        );
+        const third = yield* write("stale third\r").pipe(
+          Effect.provideService(Scheduler.Scheduler, inputScheduler),
+          Effect.result,
+          Effect.forkScoped({ startImmediately: true }),
+        );
+        yield* TestClock.adjust(0);
+        expect(original.writes).toEqual([]);
+        expect(second.pollUnsafe()).toBeUndefined();
+        expect(third.pollUnsafe()).toBeUndefined();
+
+        const unsubscribe = yield* manager.subscribe((event) =>
+          (event.type === "started" || event.type === "restarted") &&
+          event.snapshot.pid !== original.pid
+            ? Deferred.succeed(replacementStarted, undefined).pipe(
+                Effect.andThen(Deferred.await(finishReplacement)),
+              )
+            : Effect.void,
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+        // Hold later writers' Deferred resumptions until the replacement owns
+        // the thread lock; lock wakeups need not outrun newly runnable input.
+        const replacing = yield* (
+          operation === "restart"
+            ? manager.restart(restartInput())
+            : manager.open(openInput({ env: { TERMINAL_CONTEXT: "replacement" } }))
+        ).pipe(Effect.forkScoped({ startImmediately: true }));
+        yield* Effect.addFinalizer(() => Effect.sync(resumeInput));
+        yield* TestClock.adjust(0);
+        expect(replacing.pollUnsafe()).toBeUndefined();
+        pauseInput = true;
+        yield* Deferred.succeed(finishCapture, undefined);
+        yield* Deferred.await(replacementStarted);
+        yield* Fiber.join(first);
+        const replacement = ptyAdapter.processes[1]!;
+        replacement.exitOnKill = "SIGTERM";
+        expect(original.killed).toBe(true);
+        expect(original.writes).toEqual(["first\r"]);
+        expect(replacement.writes).toEqual([]);
+        expect(second.pollUnsafe()).toBeUndefined();
+        expect(third.pollUnsafe()).toBeUndefined();
+
+        resumeInput();
+        yield* TestClock.adjust(0);
+        yield* Deferred.succeed(finishReplacement, undefined);
+        yield* Fiber.join(replacing);
+        const queuedResults = yield* Effect.forEach([second, third], Fiber.join);
+        yield* write("fresh input\r");
+        yield* exitSnapshotTestProcesses(manager, ptyAdapter, [openInput()]);
+        for (const result of queuedResults) {
+          expect(result._tag === "Failure" ? result.failure._tag : null).toBe(
+            "TerminalNotRunningError",
+          );
+        }
+        expect(replacement.writes).toEqual(["fresh input\r"]);
+        expect(original.writes).toEqual(["first\r"]);
+        expect(ptyAdapter.processes).toHaveLength(2);
+      }).pipe(Effect.provide(TestClock.layer())),
   );
 
   it.effect.each(["deliver", "cancel", "fail"] as const)(

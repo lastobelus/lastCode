@@ -3086,9 +3086,15 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const writeToSession = Effect.fn("terminal.writeToSession")(function* (
     input: TerminalWriteInput,
     session: TerminalSessionState,
+    expectedProcess: TerminalSessionState["process"],
   ) {
     const terminalId = input.terminalId;
     const process = session.process;
+    // A queued chunk belongs to the process that accepted its reservation.
+    // Restart or a context-changing open must not forward it to a new shell.
+    if (process !== expectedProcess) {
+      return yield* new TerminalNotRunningError({ threadId: input.threadId, terminalId });
+    }
     if (!process || session.status !== "running") {
       if (session.status === "exited") return;
       return yield* new TerminalNotRunningError({
@@ -3127,6 +3133,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
 
   const write: TerminalManager["Service"]["write"] = Effect.fn("terminal.write")(function* (input) {
     const session = yield* requireSession(input.threadId, input.terminalId);
+    const process = session.process;
     // Record requested input before queuing for the lock: an idle check can
     // already be running, or acquire the lock before this write does.
     return yield* Effect.acquireUseRelease(
@@ -3143,7 +3150,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           const captureShellIdentity = session.captureShellIdentity;
           if (captureShellIdentity === null) {
             yield* Deferred.await(waiter);
-            return yield* writeToSession(input, session);
+            return yield* writeToSession(input, session, process);
           }
           // Start each terminal's capture before the thread lock serializes
           // writes, so terminals in one thread share the same pending scan.
@@ -3156,7 +3163,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
               withThreadLock(
                 input.threadId,
                 requireSession(input.threadId, input.terminalId).pipe(
-                  Effect.flatMap((current) => writeToSession(input, current)),
+                  Effect.flatMap((current) => writeToSession(input, current, process)),
                 ),
               ),
             ),
