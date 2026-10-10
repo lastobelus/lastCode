@@ -12,6 +12,9 @@ import { TrimmedNonEmptyString } from "./baseSchemas.ts";
  * The server runs automation; Electron relays only its own tab debugger.
  */
 
+/** Adapter-only input attribution, stripped before dispatch to Chromium. */
+export const DESKTOP_BROWSER_INPUT_SOURCE_PARAM = "__t3InputSource";
+
 const TabKey = {
   threadId: TrimmedNonEmptyString,
   tabId: TrimmedNonEmptyString,
@@ -217,7 +220,12 @@ export const DesktopBrowserCommand = Schema.Union([
   Schema.Struct({ type: Schema.Literal("disconnect") }),
   Schema.Struct({ type: Schema.Literal("profiles"), requestId: Schema.String }),
   /** One CDP message for the tab's relay. */
-  Schema.Struct({ type: Schema.Literal("cdp"), ...TabKey, message: Schema.String }),
+  Schema.Struct({
+    type: Schema.Literal("cdp"),
+    ...TabKey,
+    message: Schema.String,
+    inputSource: Schema.optionalKey(Schema.Literal("viewer")),
+  }),
   /** The server stopped driving this tab, so the relay can drop its sessions. */
   Schema.Struct({ type: Schema.Literal("release"), ...TabKey }),
   /** Where an agent action is about to land, so the desktop draws its cursor there. */

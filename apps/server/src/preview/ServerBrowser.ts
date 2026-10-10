@@ -34,6 +34,7 @@ import {
   type PreviewAutomationUploadInput,
   type PreviewAutomationWaitForInput,
   DesktopBrowserTransportError,
+  DESKTOP_BROWSER_INPUT_SOURCE_PARAM,
   PreviewClearProfileError,
   PreviewNativeCloseError,
   PreviewNativeCreateError,
@@ -3223,20 +3224,28 @@ const make = Effect.gen(function* () {
       }
     });
 
-  const releaseViewerInput = async (viewer: ViewerState, session: CDPSession) => {
+  const viewerInputParams = <const P extends object>(tab: ServerTab, params: P): P =>
+    tab.desktop ? { ...params, [DESKTOP_BROWSER_INPUT_SOURCE_PARAM]: "viewer" } : params;
+
+  const releaseViewerInput = async (tab: ServerTab, viewer: ViewerState, session: CDPSession) => {
     for (const { key, code } of viewer.pressedKeys.values()) {
-      await session.send("Input.dispatchKeyEvent", { type: "keyUp", key, code }).catch(constVoid);
+      await session
+        .send("Input.dispatchKeyEvent", viewerInputParams(tab, { type: "keyUp", key, code }))
+        .catch(constVoid);
     }
     viewer.pressedKeys.clear();
     for (const [button, point] of viewer.pressedButtons) {
       await session
-        .send("Input.dispatchMouseEvent", {
-          type: "mouseReleased",
-          button,
-          ...point,
-          buttons: 0,
-          clickCount: 1,
-        })
+        .send(
+          "Input.dispatchMouseEvent",
+          viewerInputParams(tab, {
+            type: "mouseReleased",
+            button,
+            ...point,
+            buttons: 0,
+            clickCount: 1,
+          }),
+        )
         .catch(constVoid);
     }
     viewer.pressedButtons.clear();
@@ -3260,15 +3269,18 @@ const make = Effect.gen(function* () {
         const button = ["none", "left", "middle", "right"].includes(String(message.button))
           ? (message.button as "none" | "left" | "middle" | "right")
           : "none";
-        await session.send("Input.dispatchMouseEvent", {
-          type,
-          x: num(message.x),
-          y: num(message.y),
-          button,
-          buttons: num(message.buttons),
-          clickCount: num(message.clickCount, type === "mouseMoved" ? 0 : 1),
-          modifiers,
-        });
+        await session.send(
+          "Input.dispatchMouseEvent",
+          viewerInputParams(tab, {
+            type,
+            x: num(message.x),
+            y: num(message.y),
+            button,
+            buttons: num(message.buttons),
+            clickCount: num(message.clickCount, type === "mouseMoved" ? 0 : 1),
+            modifiers,
+          }),
+        );
         if (button !== "none") {
           if (action === "down")
             viewer.pressedButtons.set(button, { x: num(message.x), y: num(message.y) });
@@ -3278,42 +3290,54 @@ const make = Effect.gen(function* () {
       }
       case "wheel":
         viewer.scrolledAt = Date.now();
-        await session.send("Input.dispatchMouseEvent", {
-          type: "mouseWheel",
-          x: num(message.x),
-          y: num(message.y),
-          deltaX: num(message.deltaX),
-          deltaY: num(message.deltaY),
-          modifiers,
-        });
+        await session.send(
+          "Input.dispatchMouseEvent",
+          viewerInputParams(tab, {
+            type: "mouseWheel",
+            x: num(message.x),
+            y: num(message.y),
+            deltaX: num(message.deltaX),
+            deltaY: num(message.deltaY),
+            modifiers,
+          }),
+        );
         return;
       case "key": {
         const key = typeof message.key === "string" ? message.key : "";
         const code = typeof message.code === "string" ? message.code : "";
         const text = typeof message.text === "string" ? message.text : undefined;
         if (message.action === "up") {
-          await session.send("Input.dispatchKeyEvent", { type: "keyUp", key, code, modifiers });
+          await session.send(
+            "Input.dispatchKeyEvent",
+            viewerInputParams(tab, { type: "keyUp", key, code, modifiers }),
+          );
           viewer.pressedKeys.delete(code || key);
           return;
         }
-        await session.send("Input.dispatchKeyEvent", {
-          type: text ? "keyDown" : "rawKeyDown",
-          key,
-          code,
-          modifiers,
-          ...(text ? { text, unmodifiedText: text } : {}),
-          ...editingCommand(key, modifiers),
-          windowsVirtualKeyCode: num(
-            message.keyCode,
-            key.length === 1 ? key.toUpperCase().charCodeAt(0) : 0,
-          ),
-        });
+        await session.send(
+          "Input.dispatchKeyEvent",
+          viewerInputParams(tab, {
+            type: text ? "keyDown" : "rawKeyDown",
+            key,
+            code,
+            modifiers,
+            ...(text ? { text, unmodifiedText: text } : {}),
+            ...editingCommand(key, modifiers),
+            windowsVirtualKeyCode: num(
+              message.keyCode,
+              key.length === 1 ? key.toUpperCase().charCodeAt(0) : 0,
+            ),
+          }),
+        );
         viewer.pressedKeys.set(code || key, { key, code });
         return;
       }
       case "text":
         if (typeof message.text === "string" && message.text.length > 0) {
-          await session.send("Input.insertText", { text: message.text.slice(0, 10_000) });
+          await session.send(
+            "Input.insertText",
+            viewerInputParams(tab, { text: message.text.slice(0, 10_000) }),
+          );
         }
         return;
       case "resize": {
@@ -3474,7 +3498,7 @@ const make = Effect.gen(function* () {
         }),
         () =>
           Effect.promise(async () => {
-            await tab.control.disconnect(viewer.id, () => releaseViewerInput(viewer, session));
+            await tab.control.disconnect(viewer.id, () => releaseViewerInput(tab, viewer, session));
             tab.viewers.delete(viewer);
             broadcastControl(tab);
             reportLiveTabs();
@@ -3571,7 +3595,7 @@ const make = Effect.gen(function* () {
                 pushFileChooser(tab);
               } else if (message.type === "releaseControl") {
                 const releasing = tab.control.release(viewer.id, () =>
-                  releaseViewerInput(viewer, session),
+                  releaseViewerInput(tab, viewer, session),
                 );
                 broadcastControl(tab);
                 await releasing;

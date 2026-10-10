@@ -11,6 +11,7 @@ import * as NodeStream from "@effect/platform-node/NodeStream";
 import * as NodeSocketServer from "@effect/platform-node/NodeSocketServer";
 import {
   DESKTOP_BROWSER_DOWNLOAD_MAX_BYTES,
+  DESKTOP_BROWSER_INPUT_SOURCE_PARAM,
   DesktopBrowserCommand,
   DesktopBrowserEvent,
   DesktopBrowserTransportError,
@@ -724,13 +725,28 @@ const make = Effect.gen(function* () {
   }
 
   const relayFrame = (key: DesktopTabKey, message: string) => {
-    if (key.desktopHostId && key.desktopHostId !== "local") {
+    let inputSource: "viewer" | undefined;
+    if (
+      message.includes(DESKTOP_BROWSER_INPUT_SOURCE_PARAM) ||
+      (key.desktopHostId && key.desktopHostId !== "local")
+    ) {
       try {
         const frame = JSON.parse(message) as {
           method?: string;
-          params?: { downloadPath?: unknown; behavior?: string };
+          params?: Record<string, unknown>;
         };
-        if (frame.method === "Browser.setDownloadBehavior") {
+        if (frame.method?.startsWith("Input.") && frame.params) {
+          if (frame.params[DESKTOP_BROWSER_INPUT_SOURCE_PARAM] === "viewer") inputSource = "viewer";
+          if (DESKTOP_BROWSER_INPUT_SOURCE_PARAM in frame.params) {
+            delete frame.params[DESKTOP_BROWSER_INPUT_SOURCE_PARAM];
+            message = JSON.stringify(frame);
+          }
+        }
+        if (
+          key.desktopHostId &&
+          key.desktopHostId !== "local" &&
+          frame.method === "Browser.setDownloadBehavior"
+        ) {
           const directory = frame.params?.downloadPath;
           if (
             typeof directory === "string" &&
@@ -745,7 +761,13 @@ const make = Effect.gen(function* () {
       }
     }
     return command(
-      { type: "cdp", threadId: key.threadId, tabId: key.tabId, message },
+      {
+        type: "cdp",
+        threadId: key.threadId,
+        tabId: key.tabId,
+        message,
+        ...(inputSource ? { inputSource } : {}),
+      },
       key.desktopHostId,
     );
   };

@@ -1437,7 +1437,9 @@ export const make = Effect.gen(function* () {
         tab.relay = null;
         return Effect.void;
       }
-      if (AGENT_INPUT_COMMAND.test(command.message)) tab.agentInputAt = performance.now();
+      if (AGENT_INPUT_COMMAND.test(command.message))
+        tab.agentInputAt =
+          command.inputSource === "viewer" ? Number.NEGATIVE_INFINITY : performance.now();
       relayFor(tab).receive(command.message);
       return Effect.void;
     });

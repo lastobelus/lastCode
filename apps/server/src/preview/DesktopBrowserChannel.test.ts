@@ -1446,6 +1446,43 @@ it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
         (socket) => Effect.sync(() => socket.close()),
       );
       yield* Effect.promise(() => opened.promise);
+      socket.send(
+        JSON.stringify({
+          id: 10,
+          sessionId: "viewer-session",
+          method: "Input.insertText",
+          params: { text: "viewer text", __t3InputSource: "viewer" },
+        }),
+      );
+      expect(yield* Queue.take(first.commands)).toEqual({
+        type: "cdp",
+        ...key,
+        inputSource: "viewer",
+        message: JSON.stringify({
+          id: 10,
+          sessionId: "viewer-session",
+          method: "Input.insertText",
+          params: { text: "viewer text" },
+        }),
+      });
+      socket.send(
+        JSON.stringify({
+          id: 11,
+          sessionId: "agent-session",
+          method: "Input.insertText",
+          params: { text: "agent text" },
+        }),
+      );
+      expect(yield* Queue.take(first.commands)).toEqual({
+        type: "cdp",
+        ...key,
+        message: JSON.stringify({
+          id: 11,
+          sessionId: "agent-session",
+          method: "Input.insertText",
+          params: { text: "agent text" },
+        }),
+      });
       socket.send('{"id":1,"method":"Browser.getVersion"}');
       expect(yield* Queue.take(first.commands)).toEqual({
         type: "cdp",

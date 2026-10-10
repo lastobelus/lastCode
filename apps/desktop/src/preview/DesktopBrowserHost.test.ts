@@ -2200,11 +2200,60 @@ describe("DesktopBrowserHost", () => {
         }),
       );
       expect(host.humanStartedDownload(debuggee.tab.webContents)).toBe(false);
+      // A viewer action takes attribution back immediately, even after agent input.
+      yield* host.handleCommandLine(
+        encodeJson({
+          type: "cdp",
+          ...key,
+          inputSource: "viewer",
+          message: encodeJson({ id: 3, method: "Input.insertText", params: { text: "viewer" } }),
+        }),
+      );
+      expect(host.humanStartedDownload(debuggee.tab.webContents)).toBe(true);
+      yield* host.handleCommandLine(
+        encodeJson({
+          type: "cdp",
+          ...key,
+          message: encodeJson({ id: 4, method: "Input.insertText", params: { text: "agent" } }),
+        }),
+      );
+      expect(host.humanStartedDownload(debuggee.tab.webContents)).toBe(false);
     }),
   );
 });
 
 describe("remote desktop browser host", () => {
+  it.effect("viewer input changes download attribution only for its exact desktop owner", () =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      const local = makeDebuggee();
+      const remote = makeDebuggee();
+      host.attach(key, local.tab, "runtime-local");
+      host.attach({ ...key, desktopHostId: "host-a" }, remote.tab, "runtime-remote");
+      const message = encodeJson({ id: 1, method: "Input.insertText", params: { text: "input" } });
+      yield* host.handleCommandLine(encodeJson({ type: "cdp", ...key, message }));
+      yield* host.handleRemoteCommand({
+        desktopHostId: "host-a",
+        command: { type: "cdp", ...key, message },
+      });
+      expect(host.humanStartedDownload(local.tab.webContents)).toBe(false);
+      expect(host.humanStartedDownload(remote.tab.webContents)).toBe(false);
+      yield* host.handleRemoteCommand({
+        desktopHostId: "host-b",
+        command: { type: "cdp", ...key, message, inputSource: "viewer" },
+      });
+      expect(host.humanStartedDownload(remote.tab.webContents)).toBe(false);
+      yield* host.handleRemoteCommand({
+        desktopHostId: "host-a",
+        command: { type: "cdp", ...key, message, inputSource: "viewer" },
+      });
+      expect(host.humanStartedDownload(remote.tab.webContents)).toBe(true);
+      expect(host.humanStartedDownload(local.tab.webContents)).toBe(false);
+    }),
+  );
+
   it.effect("isolates native tab commands and announcements by desktop host", () =>
     Effect.gen(function* () {
       const host = yield* DesktopBrowserHost.make.pipe(

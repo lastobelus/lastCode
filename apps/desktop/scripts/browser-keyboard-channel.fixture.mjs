@@ -148,6 +148,7 @@ export async function runNativeKeyboardChannelFixture({
           );
           const broker = Context.get(services, Broker.PreviewAutomationBroker);
           const manager = Context.get(services, Manager.PreviewManager);
+          const browser = Context.get(services, ServerBrowser.ServerBrowser);
           yield* Effect.yieldNow;
           const opened = yield* broker.invoke({
             scope,
@@ -254,6 +255,46 @@ export async function runNativeKeyboardChannelFixture({
           }
           NodeAssert.deepEqual(navigations, [], "blank popup requests never navigate the opener");
           steps.push({ operation: "blank popups", host: yield* Effect.promise(assertHost) });
+          yield* invoke("click", { selector: "#draft" });
+          NodeAssert.equal(
+            host.humanStartedDownload(roots[0].webContents),
+            false,
+            "recent agent input keeps agent downloads out of the human Downloads folder",
+          );
+          const viewer = yield* browser.attachViewer({
+            threadId: scope.thread.threadId,
+            tabId,
+            canOperate: true,
+            maxWidth: 720,
+            maxHeight: 480,
+            quality: 70,
+          });
+          yield* viewer.input({ type: "takeControl" });
+          yield* viewer.input({ type: "text", text: "viewer attribution" });
+          NodeAssert.equal(
+            host.humanStartedDownload(roots[0].webContents),
+            true,
+            "production viewer input immediately restores human download attribution",
+          );
+          const viewerState = yield* Effect.promise(() =>
+            roots[0].webContents.executeJavaScript(`({
+              text: document.querySelector('#draft').value,
+              input: window.keyboardEvents.at(-1)
+            })`),
+          );
+          NodeAssert.ok(viewerState.text.includes("viewer attribution"));
+          NodeAssert.equal(viewerState.input.type, "input");
+          NodeAssert.equal(viewerState.input.target, "draft");
+          NodeAssert.equal(viewerState.input.trusted, true);
+          steps.push({ operation: "viewer attribution", host: yield* Effect.promise(assertHost) });
+          yield* viewer.input({ type: "releaseControl" });
+          yield* invoke("press", { key: "v" });
+          NodeAssert.equal(
+            host.humanStartedDownload(roots[0].webContents),
+            false,
+            "later agent input restores agent download attribution",
+          );
+          steps.push({ operation: "agent attribution", host: yield* Effect.promise(assertHost) });
           yield* invoke("close", {});
           NodeAssert.equal(
             roots[0].isDestroyed(),
@@ -269,7 +310,7 @@ export async function runNativeKeyboardChannelFixture({
         }),
       ).pipe(Effect.provide(NodeServices.layer)),
     );
-    return "production broker → server → channel CDP endpoint → independent native root: trusted typing, key press, preserved blank-popup opener, unchanged host ownership and confirmed close";
+    return "production broker/viewer → server → channel CDP endpoint → independent native root: trusted typing, viewer/agent download attribution, preserved blank-popup opener, unchanged host ownership and confirmed close";
   } finally {
     await Effect.runPromise(
       host.handleRemoteCommand({ desktopHostId, command: { type: "disconnect" } }),

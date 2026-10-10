@@ -915,6 +915,7 @@ it.live.each(
         );
         expect(context.sessions.at(-1)!.send).toHaveBeenCalledWith("Input.insertText", {
           text: "hello",
+          ...(native ? { __t3InputSource: "viewer" } : {}),
         });
         if (native) {
           // Viewer navigation keeps the existing native lease until the viewer disconnects.
@@ -4053,14 +4054,36 @@ it.live("shared native pages reject agent keyboard input while allowing a contro
       );
       expect(commands).toEqual(
         expect.arrayContaining([
-          ["Input.insertText", { text: "viewer text" }],
+          ["Input.insertText", { text: "viewer text", __t3InputSource: "viewer" }],
           [
             "Input.dispatchKeyEvent",
-            expect.objectContaining({ type: "rawKeyDown", key: "Enter", code: "Enter" }),
+            expect.objectContaining({
+              type: "rawKeyDown",
+              key: "Enter",
+              code: "Enter",
+              __t3InputSource: "viewer",
+            }),
           ],
         ]),
       );
+      yield* viewer.input({ type: "mouse", action: "down", button: "left", x: 10, y: 20 });
       yield* viewer.input({ type: "releaseControl" });
+      expect(desktopConnections[0]!.context.sessions.at(-1)!.send).toHaveBeenCalledWith(
+        "Input.dispatchKeyEvent",
+        { type: "keyUp", key: "Enter", code: "Enter", __t3InputSource: "viewer" },
+      );
+      expect(desktopConnections[0]!.context.sessions.at(-1)!.send).toHaveBeenCalledWith(
+        "Input.dispatchMouseEvent",
+        {
+          type: "mouseReleased",
+          button: "left",
+          x: 10,
+          y: 20,
+          buttons: 0,
+          clickCount: 1,
+          __t3InputSource: "viewer",
+        },
+      );
     }),
   ).pipe(Effect.provide(layer)),
 );
