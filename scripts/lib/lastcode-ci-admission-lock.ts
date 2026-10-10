@@ -102,6 +102,17 @@ function removeOwner(lockPath: string, filename: string) {
   removeEmptyDirectory(lockPath);
 }
 
+// Preserve the ordered, lazy error probes; only Windows EPERM needs an
+// existence check. Other publication failures must remain admission failures.
+function isPublicationContention(error: unknown, lockPath: string) {
+  if (hasErrorCode(error, "EEXIST")) return true;
+  if (hasErrorCode(error, "ENOTEMPTY")) return true;
+  // Windows reports EPERM when renaming over an existing directory.
+  if (NodeProcess.platform !== "win32") return false;
+  if (!hasErrorCode(error, "EPERM")) return false;
+  return NodeFS.existsSync(lockPath);
+}
+
 /**
  * Acquires the brief admission mutex. Directory locking publishes a complete
  * unique ownership record atomically and reclaims only an exited owner's file.
@@ -136,14 +147,7 @@ export async function acquireLocalCiAdmissionLock(
         NodeFS.renameSync(candidatePath, lockPath);
         return true;
       } catch (error) {
-        if (hasErrorCode(error, "EEXIST") || hasErrorCode(error, "ENOTEMPTY")) return false;
-        // Windows reports EPERM when renaming over an existing directory.
-        if (
-          NodeProcess.platform === "win32" &&
-          hasErrorCode(error, "EPERM") &&
-          NodeFS.existsSync(lockPath)
-        )
-          return false;
+        if (isPublicationContention(error, lockPath)) return false;
         throw error;
       }
     };
