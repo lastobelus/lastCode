@@ -60,6 +60,7 @@ class FakePtyProcess implements PtyAdapter.PtyProcess {
   private readonly exitListeners = new Set<(event: PtyAdapter.PtyExitEvent) => void>();
   killed = false;
   exitOnSubscribe: PtyAdapter.PtyExitEvent | undefined;
+  exitOnKill: string | undefined;
 
   constructor(pid: number) {
     this.pid = pid;
@@ -82,6 +83,9 @@ class FakePtyProcess implements PtyAdapter.PtyProcess {
   kill(signal?: string): void {
     this.killed = true;
     this.killSignals.push(signal);
+    if (this.exitOnKill !== undefined && signal === this.exitOnKill) {
+      this.emitExit({ exitCode: 0, signal: signal === "SIGKILL" ? 9 : null });
+    }
   }
 
   onData(callback: (data: string) => void): () => void {
@@ -1706,7 +1710,7 @@ it.layer(
         expect(process.killed).toBe(false);
         yield* TestClock.adjust("60 seconds");
         expect(yield* Deferred.await(ownedProcessIds)).toEqual([9000]);
-        process.emitExit({ exitCode: 0 });
+        process.emitExit({ exitCode: 0, signal: null });
         yield* Deferred.await(exited);
       }).pipe(Effect.provide(TestClock.layer())),
   );
