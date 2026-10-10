@@ -123,6 +123,68 @@ describe("lastcode-local-ci", () => {
     });
   });
 
+  describe("local CI option parsing", () => {
+    it("uses the last mode and tolerates repeated booleans and separators", () => {
+      expect(parseLocalCiOptions(["--quick", "--dry-run", "--full", "--", "--dry-run"])).toEqual({
+        mode: "full",
+        dryRun: true,
+        prePush: false,
+      });
+      expect(
+        parseLocalCiOptions(["--pre-push", "--require-local", "--quick", "--pre-push"]),
+      ).toEqual({ mode: "quick", dryRun: false, prePush: true, requireLocal: true });
+    });
+
+    it("consumes exactly one checkpoint token, including flag-shaped values", () => {
+      expect(parseLocalCiOptions(["--checkpoint", "--quick"])).toEqual({
+        mode: "full",
+        dryRun: false,
+        prePush: false,
+        checkpointTag: "--quick",
+      });
+      expect(
+        parseLocalCiOptions(["--checkpoint", "--", "--quick", "--checkpoint", "final"]),
+      ).toEqual({ mode: "quick", dryRun: false, prePush: false, checkpointTag: "final" });
+      expect(() => parseLocalCiOptions(["--checkpoint", "tag", "extra"])).toThrow(
+        "Unknown argument 'extra'.",
+      );
+    });
+
+    it("reports scan errors before final mode restrictions", () => {
+      expect(() => parseLocalCiOptions(["--pre-push", "--require-local"])).toThrow(
+        "--pre-push is only supported with --quick.",
+      );
+      expect(() => parseLocalCiOptions(["--pre-push", "--checkpoint"])).toThrow(
+        "Missing value for --checkpoint.",
+      );
+      expect(() => parseLocalCiOptions(["--pre-push", "--checkpoint", ""])).toThrow(
+        "Missing value for --checkpoint.",
+      );
+      expect(() => parseLocalCiOptions(["--pre-push", "unknown", "--checkpoint"])).toThrow(
+        "Unknown argument 'unknown'.",
+      );
+      expect(() => parseLocalCiOptions(["--checkpoint", "--pre-push", "--require-local"])).toThrow(
+        "--require-local is only supported with --quick.",
+      );
+    });
+
+    it("keeps optional keys omitted and returned keys in contract order", () => {
+      expect(Object.keys(parseLocalCiOptions(Object.freeze([])))).toEqual([
+        "mode",
+        "dryRun",
+        "prePush",
+      ]);
+      expect(
+        Object.keys(
+          parseLocalCiOptions(Object.freeze(["--require-local", "--checkpoint", "tag", "--quick"])),
+        ),
+      ).toEqual(["mode", "dryRun", "prePush", "checkpointTag", "requireLocal"]);
+      for (const token of ["constructor", "__proto__", "toString", ""]) {
+        expect(() => parseLocalCiOptions([token])).toThrow(`Unknown argument '${token}'.`);
+      }
+    });
+  });
+
   it("keeps Quick cheap without removing comprehensive checks from the full gate", () => {
     const quickSteps = resolveLocalCiSteps("quick");
     const quickLabels = quickSteps.map(({ label }) => label);
