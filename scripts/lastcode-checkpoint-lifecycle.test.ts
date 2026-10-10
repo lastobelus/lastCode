@@ -232,6 +232,13 @@ if [ "$1" = install ] && [ "$FIXTURE_MERGE_PHASE" = smoke ] && [ -n "$FIXTURE_ME
   git --git-dir="$FIXTURE_ORIGIN" update-ref refs/heads/lastcode/main "$FIXTURE_MERGE_COMMIT" "$FIXTURE_SOURCE" || exit 1
   touch "$FIXTURE_MERGE_MARKER"
 fi
+if [ "$1" = install ] && [ -n "$FIXTURE_MOVED_NIGHTLY" ]; then
+  if [ -n "$FIXTURE_MOVED_UPSTREAM_REMOTE" ]; then
+    git --git-dir="$FIXTURE_MOVED_UPSTREAM_REMOTE" update-ref "refs/tags/$FIXTURE_MOVED_NIGHTLY" "$FIXTURE_NEW_UPSTREAM" || exit 1
+  else
+    git update-ref "refs/tags/$FIXTURE_MOVED_NIGHTLY" "$FIXTURE_NEW_UPSTREAM" || exit 1
+  fi
+fi
 exit 0
 `,
   );
@@ -677,6 +684,73 @@ describe("mandatory migration validation", () => {
 });
 
 describe("checkpoint publication with open PRs", () => {
+  it("publishes an unchanged annotated upstream nightly using its peeled commit", () => {
+    const { fixture, environment } = historicalFixture();
+    try {
+      const upstreamCommit = git(fixture.repo, ["rev-parse", `${NIGHTLY_B}^{commit}`]);
+      git(fixture.repo, [
+        "tag",
+        "--force",
+        "--annotate",
+        NIGHTLY_B,
+        upstreamCommit,
+        "-m",
+        "nightly",
+      ]);
+      git(fixture.repo, ["push", "--force", "upstream", `refs/tags/${NIGHTLY_B}`]);
+      assert.notEqual(git(fixture.repo, ["rev-parse", NIGHTLY_B]), upstreamCommit);
+      const result = checkpoint(fixture, ["--push-tags"], environment);
+      assert.equal(result.status, 0, result.stderr);
+      const contents = git(fixture.origin, [
+        "for-each-ref",
+        "--format=%(contents)",
+        `refs/tags/lastcode/checkpoint/${NIGHTLY_B}`,
+      ]);
+      assert.include(contents, `Upstream-Commit: ${upstreamCommit}`);
+    } finally {
+      NodeFS.rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["local", "remote"] as const)(
+    "retains the pinned candidate after tag movement: %s",
+    (location) => {
+      const { fixture, source, environment } = historicalFixture();
+      try {
+        const pinnedUpstream = git(fixture.repo, ["rev-parse", NIGHTLY_B]);
+        if (location === "remote") {
+          git(fixture.repo, ["push", "upstream", `${source}:refs/heads/fixture-moved-tag`]);
+        }
+        const result = checkpoint(fixture, ["--push-tags", "--promote"], {
+          ...environment,
+          FIXTURE_MOVED_NIGHTLY: NIGHTLY_B,
+          FIXTURE_NEW_UPSTREAM: source,
+          ...(location === "remote" ? { FIXTURE_MOVED_UPSTREAM_REMOTE: fixture.upstream } : {}),
+        });
+        assert.notEqual(result.status, 0);
+        assert.include(result.stderr, `Upstream nightly ${NIGHTLY_B} changed after selection`);
+        assert.equal(
+          remoteMissing(fixture.origin, `refs/tags/lastcode/checkpoint/${NIGHTLY_B}`),
+          true,
+        );
+        assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), source);
+        const retained = recoveryWorktree(fixture.repo);
+        assert.equal(NodeFS.existsSync(retained), true);
+        assert.equal(
+          gitResult(retained, ["merge-base", "--is-ancestor", pinnedUpstream, "HEAD"]).status,
+          0,
+        );
+        assert.equal(remoteMissing(fixture.origin, "refs/lastcode/main-write-lock"), true);
+        if (location === "remote") {
+          assert.equal(git(fixture.repo, ["rev-parse", `${NIGHTLY_B}^{commit}`]), pinnedUpstream);
+          assert.equal(remoteCommit(fixture.upstream, `refs/tags/${NIGHTLY_B}`), source);
+        }
+      } finally {
+        NodeFS.rmSync(fixture.root, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("publishes ordinary tags but reports an unavailable promotion lock, then promotes after release", () => {
     const { fixture, source, merged, queryMarker, environment } = historicalFixture();
     try {
@@ -879,7 +953,7 @@ exec "$FIXTURE_REAL_GIT" "$@"
       assert.equal(git(fixture.repo, ["show", `${candidate}:upstream.txt`]), "upstream behavior");
       if (concurrentMerge) {
         assert.equal(result.status, 0, result.stderr || result.stdout);
-        assert.match(result.stdout, /leaving promotion to the next run/u);
+        assert.match(result.stdout, /leaving promotion to a later admitted run/u);
         assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), merged);
         const retry = checkpoint(fixture, ["--push-tags", "--promote"], environment);
         assert.equal(retry.status, 0, retry.stderr || retry.stdout);
@@ -936,7 +1010,7 @@ exec "$FIXTURE_REAL_GIT" "$@"
         );
         assert.notEqual(result.status, 0, result.stderr || result.stdout);
         assert.match(result.stderr, /refusing stale promotion/u);
-        assert.notMatch(result.stdout, /leaving promotion to the next run/u);
+        assert.notMatch(result.stdout, /leaving promotion to a later admitted run/u);
         assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), rewritten);
         assert.equal(remoteMissing(fixture.origin, "refs/lastcode/main-write-lock"), true);
       } finally {
@@ -1080,7 +1154,7 @@ exec "$FIXTURE_REAL_GIT" "$@"
       });
       assert.equal(NodeFS.existsSync(raceEnvironment.FIXTURE_MERGE_MARKER), true);
       assert.equal(result.status, 0, result.stderr || result.stdout);
-      assert.match(result.stdout, /leaving promotion to the next run/u);
+      assert.match(result.stdout, /leaving promotion to a later admitted run/u);
       assert.equal(
         remoteMissing(fixture.origin, `refs/tags/lastcode/checkpoint/${NIGHTLY_B}`),
         false,
@@ -1095,9 +1169,9 @@ exec "$FIXTURE_REAL_GIT" "$@"
   it.each(
     (["none", "selected", "smoke", "push"] as const).map((phase) => ({
       phase,
-      name: `publishes selected recovery with open PRs${phase !== "none" ? ` and folds a merge made ${phase === "selected" ? "after selection" : `during ${phase}`} into a revision` : ""}`,
+      name: `publishes selected recovery with open PRs${phase !== "none" ? ` and retains pending promotion after a merge made ${phase === "selected" ? "after selection" : `during ${phase}`}` : ""}`,
     })),
-  )("$name", ({ phase }) => {
+  )("selected repair: $name", ({ phase }) => {
     const concurrentMerge = phase !== "none";
     const { fixture, source, merged, queryMarker, environment, raceEnvironment } =
       historicalFixture(true);
@@ -1137,27 +1211,56 @@ exec "$FIXTURE_REAL_GIT" "$@"
       );
       const tag = `lastcode/checkpoint/${NIGHTLY_B}`;
       if (concurrentMerge) {
-        // The validated repair is published as soon as it passes; main waits for a revision.
+        // Publication succeeds, but the selected repair cannot discard the new main work.
         assert.equal(result.status, 0, result.stderr || result.stdout);
-        assert.match(result.stdout, /leaving promotion to the next run/u);
+        assert.match(result.stdout, /promotion is still pending/u);
         assert.equal(remoteCommit(fixture.origin, `refs/tags/${tag}`), repaired);
         assert.equal(remoteCommit(fixture.origin, `refs/lastcode/sources/${NIGHTLY_B}`), source);
         assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), merged);
-        assert.equal(NodeFS.existsSync(retained), false);
-        assert.equal(NodeFS.existsSync(selectionPath), false);
+        assert.equal(NodeFS.existsSync(retained), true);
+        const pendingSelection = NodeFS.readFileSync(selectionPath, "utf8");
+        const immutableTag = git(fixture.origin, ["rev-parse", `refs/tags/${tag}`]);
         const retry = checkpoint(fixture, ["--push-tags", "--promote"], environment);
         assert.equal(retry.status, 0, retry.stderr || retry.stdout);
-        const promoted = remoteCommit(fixture.origin, "refs/heads/lastcode/main");
-        assert.equal(remoteCommit(fixture.origin, `refs/lastcode/sources/${NIGHTLY_B}.1`), merged);
+        assert.match(retry.stdout, /promotion is still pending/u);
+        assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), merged);
         assert.equal(
-          git(fixture.repo, ["show", `${promoted}:merged-during-checkpoint.txt`]),
-          "concurrent merge must survive",
+          remoteMissing(fixture.origin, `refs/tags/lastcode/revision/${NIGHTLY_B}.1`),
+          true,
         );
-        assert.equal(
-          git(fixture.repo, ["show", `${promoted}:downstream.txt`]),
-          "upstream behavior\ndownstream behavior",
-        );
+        assert.equal(NodeFS.readFileSync(selectionPath, "utf8"), pendingSelection);
+        assert.equal(git(retained, ["rev-parse", "HEAD"]), repaired);
+        assert.equal(git(fixture.origin, ["rev-parse", `refs/tags/${tag}`]), immutableTag);
         assert.equal(remoteCommit(fixture.origin, `refs/tags/${tag}`), repaired);
+        if (phase === "selected") {
+          // The operator incorporates the later source, then explicitly selects the revised target.
+          git(retained, ["cherry-pick", merged]);
+          const incorporated = git(retained, ["rev-parse", "HEAD"]);
+          const reselected = checkpoint(
+            fixture,
+            ["--select-recovery", incorporated, "--recovery-source", merged],
+            environment,
+          );
+          assert.equal(reselected.status, 0, reselected.stderr || reselected.stdout);
+          const resumed = checkpoint(fixture, ["--push-tags", "--promote"], environment);
+          assert.equal(resumed.status, 0, resumed.stderr || resumed.stdout);
+          assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), incorporated);
+          assert.equal(
+            remoteCommit(fixture.origin, `refs/tags/lastcode/revision/${NIGHTLY_B}.1`),
+            incorporated,
+          );
+          assert.equal(
+            remoteCommit(fixture.origin, `refs/lastcode/sources/${NIGHTLY_B}.1`),
+            merged,
+          );
+          assert.equal(git(fixture.origin, ["rev-parse", `refs/tags/${tag}`]), immutableTag);
+          assert.equal(
+            git(fixture.repo, ["show", `${incorporated}:merged-during-checkpoint.txt`]),
+            "concurrent merge must survive",
+          );
+          assert.equal(NodeFS.existsSync(retained), false);
+          assert.equal(NodeFS.existsSync(selectionPath), false);
+        }
       } else {
         assert.equal(result.status, 0, result.stderr || result.stdout);
         assert.equal(remoteCommit(fixture.origin, `refs/tags/${tag}`), repaired);
@@ -1174,8 +1277,8 @@ exec "$FIXTURE_REAL_GIT" "$@"
 });
 
 describe("checkpoint carry lifecycle", () => {
-  // This complete lifecycle executes ten checkpoint subprocesses and two repair rebases.
-  it("publishes compact revisions, folds a new source PR, and completes retained conflict recovery", () => {
+  // This complete lifecycle publishes checkpoints and resumes operator-repaired rebases.
+  it("publishes compact revisions, folds source PRs, and reselects retained recovery after main advances", () => {
     const fixture = initFixture();
     try {
       const { repo } = fixture;
@@ -1323,8 +1426,33 @@ describe("checkpoint carry lifecycle", () => {
       git(repo, ["push", "--quiet", "upstream", `HEAD:refs/heads/main`, NIGHTLY_C]);
       checkout(repo, "lastcode-source", mainA);
 
-      const changedUpstream = checkpoint(fixture, ["--push-tags"]);
+      const concurrentMain = commitTree(
+        repo,
+        git(repo, ["rev-parse", `${mainA}^{tree}`]),
+        mainA,
+        "concurrent carry source merge",
+      );
+      git(repo, ["push", "--quiet", "origin", `${concurrentMain}:refs/test/concurrent-main`]);
+      const raceHook = NodePath.join(fixture.origin, "hooks", "pre-receive");
+      NodeFS.writeFileSync(
+        raceHook,
+        `#!/bin/sh
+while read old new ref; do
+  if [ "$ref" = refs/tags/lastcode/checkpoint/${NIGHTLY_C} ]; then
+    unset GIT_QUARANTINE_PATH
+    git update-ref refs/heads/lastcode/main ${concurrentMain} ${mainA} || exit 1
+  fi
+done
+`,
+        { mode: 0o755 },
+      );
+      const changedUpstream = checkpoint(fixture, ["--push-tags", "--promote"]);
       assert.equal(changedUpstream.status, 0, changedUpstream.stderr || changedUpstream.stdout);
+      assert.match(changedUpstream.stdout, /leaving promotion to a later admitted run/u);
+      assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), concurrentMain);
+      assert.equal(remoteCommit(fixture.origin, `refs/lastcode/sources/${NIGHTLY_C}`), mainA);
+      assert.equal(remoteMissing(fixture.origin, "refs/lastcode/main-write-lock"), true);
+      NodeFS.unlinkSync(raceHook);
       const compactC = remoteCommit(fixture.origin, `refs/tags/lastcode/checkpoint/${NIGHTLY_C}`);
       assert.equal(readCarryGroupChain(repo, compactC, upstreamC).length, 6);
       quietProvenance(compactC, upstreamC);
@@ -1336,7 +1464,8 @@ describe("checkpoint carry lifecycle", () => {
         git(repo, ["show", `${compactC}:lifecycle-skipped-upstream.txt`]),
         "included without an intermediate checkpoint",
       );
-      assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), mainA);
+      // The remaining scenarios use their original fixture source, without deleting its tag.
+      git(fixture.origin, ["update-ref", "refs/heads/lastcode/main", mainA, concurrentMain]);
 
       checkout(repo, "source-pr-2", mainA);
       write(repo, "lifecycle-conflict.txt", "downstream build behavior\n");
@@ -1561,6 +1690,73 @@ describe("checkpoint carry lifecycle", () => {
         mainWithPr,
       ]);
       assert.equal(selected.status, 0, selected.stderr || selected.stdout);
+      const selectionPath = NodePath.join(
+        git(repo, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+        "lastcode-recovery-selection.json",
+      );
+      const selectedRecovery = JSON.parse(NodeFS.readFileSync(selectionPath, "utf8")) as {
+        head: string;
+      };
+      const selectedHead = selectedRecovery.head;
+
+      checkout(repo, "source-pr-after-repair", mainWithPr);
+      write(repo, "lifecycle-new-tooling.txt", "tooling merged during recovery publication\n");
+      const laterToolingHead = commit(
+        repo,
+        "extend tooling while recovery is selected",
+        [
+          "Carry-Group: tooling",
+          "Carry-Fix: fixture#later-tooling",
+          "Carry-Observation: source work merged during publication must survive reselection",
+          "Carry-Evidence: fixture://source-pr-after-repair/tooling",
+          `Carry-Applies-To: ${NIGHTLY_D}`,
+        ].join("\n"),
+      );
+      write(repo, "lifecycle-new-build.txt", "build work merged during recovery publication\n");
+      const laterBuildHead = commit(
+        repo,
+        "extend build behavior while recovery is selected",
+        [
+          "Carry-Group: build-ci",
+          "Carry-Fix: fixture#later-build",
+          "Carry-Observation: newly merged build work belongs in the repaired generation",
+          "Carry-Evidence: fixture://source-pr-after-repair/build",
+          `Carry-Applies-To: ${NIGHTLY_D}`,
+        ].join("\n"),
+      );
+      const laterSourceRef = `refs/lastcode/carry-sources/pr-4/${laterBuildHead}`;
+      const laterMain = commitTree(
+        repo,
+        git(repo, ["rev-parse", `${laterBuildHead}^{tree}`]),
+        mainWithPr,
+        [
+          "extend tooling and build behavior (#4)",
+          "",
+          `Carry-Source-Ref: ${laterSourceRef}`,
+          `Carry-Source-Base: ${mainWithPr}`,
+          `Carry-Source-Head: ${laterBuildHead}`,
+        ].join("\n"),
+      );
+      git(repo, [
+        "push",
+        "--quiet",
+        "origin",
+        `${laterBuildHead}:${laterSourceRef}`,
+        `${laterMain}:refs/test/main-after-repair`,
+      ]);
+      checkout(repo, "lastcode-source", mainWithPr);
+      NodeFS.writeFileSync(
+        raceHook,
+        `#!/bin/sh
+while read old new ref; do
+  if [ "$ref" = refs/tags/lastcode/checkpoint/${NIGHTLY_D} ]; then
+    unset GIT_QUARANTINE_PATH
+    git update-ref refs/heads/lastcode/main ${laterMain} ${mainWithPr} || exit 1
+  fi
+done
+`,
+        { mode: 0o755 },
+      );
 
       // A newer release arriving during repair must not replace the selected target.
       const newerDuringRepair = "v9.9.9-nightly.20990104.5";
@@ -1569,16 +1765,141 @@ describe("checkpoint carry lifecycle", () => {
 
       const published = checkpoint(fixture, ["--push-tags", "--promote"]);
       assert.equal(published.status, 0, published.stderr || published.stdout);
+      assert.match(published.stdout, /promotion is still pending/u);
+      NodeFS.unlinkSync(raceHook);
       const tagD = `lastcode/checkpoint/${NIGHTLY_D}`;
-      const compactD = remoteCommit(fixture.origin, `refs/tags/${tagD}`);
-      assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), compactD);
+      const publishedRepair = remoteCommit(fixture.origin, `refs/tags/${tagD}`);
+      const immutableTagD = git(fixture.origin, ["rev-parse", `refs/tags/${tagD}`]);
+      assert.equal(publishedRepair, selectedHead);
+      assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), laterMain);
       assert.equal(remoteCommit(fixture.origin, `refs/lastcode/sources/${NIGHTLY_D}`), mainWithPr);
-      assert.equal(NodeFS.existsSync(retained), false);
+      assert.equal(NodeFS.existsSync(retained), true);
+      const pendingSelection = NodeFS.readFileSync(selectionPath, "utf8");
+      const pendingRetry = checkpoint(fixture, ["--push-tags", "--promote"]);
+      assert.equal(pendingRetry.status, 0, pendingRetry.stderr || pendingRetry.stdout);
+      assert.match(pendingRetry.stdout, /promotion is still pending/u);
+      assert.equal(git(retained, ["rev-parse", "HEAD"]), selectedHead);
+      assert.equal(NodeFS.readFileSync(selectionPath, "utf8"), pendingSelection);
+      assert.equal(git(fixture.origin, ["rev-parse", `refs/tags/${tagD}`]), immutableTagD);
+      assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), laterMain);
+      const revisionD = `lastcode/revision/${NIGHTLY_D}.1`;
+      assert.equal(remoteMissing(fixture.origin, `refs/tags/${revisionD}`), true);
+      assert.equal(
+        remoteMissing(fixture.origin, `refs/tags/lastcode/checkpoint/${newerDuringRepair}`),
+        true,
+      );
+
+      // The operator incorporates the partitioned PR commits into the exact repaired tree.
+      git(retained, ["cherry-pick", laterToolingHead]);
+      const incorporatedTooling = git(retained, ["rev-parse", "HEAD"]);
+      git(retained, ["cherry-pick", laterBuildHead]);
+      const incorporatedHead = git(retained, ["rev-parse", "HEAD"]);
+      const incorporatedTree = git(retained, ["rev-parse", "HEAD^{tree}"]);
+      const unselectedRetry = checkpoint(fixture, ["--push-tags", "--promote"]);
+      assert.notEqual(unselectedRetry.status, 0);
+      assert.equal(git(retained, ["rev-parse", "HEAD"]), incorporatedHead);
+      assert.equal(NodeFS.readFileSync(selectionPath, "utf8"), pendingSelection);
+      assert.equal(remoteMissing(fixture.origin, `refs/tags/${revisionD}`), true);
+      assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), laterMain);
+
+      const recoveryPlanPath = NodePath.join(
+        git(retained, ["rev-parse", "--absolute-git-dir"]),
+        "lastcode-carry-replay-plan.json",
+      );
+      const reselectionState = () => ({
+        head: git(retained, ["rev-parse", "HEAD"]),
+        tree: git(retained, ["rev-parse", "HEAD^{tree}"]),
+        status: git(retained, ["status", "--porcelain=v2", "--branch", "--untracked-files=all"]),
+        selection: NodeFS.readFileSync(selectionPath, "utf8"),
+        plan: NodeFS.readFileSync(recoveryPlanPath, "utf8"),
+        refs: git(repo, ["for-each-ref", "--format=%(refname) %(objectname)"]),
+        remoteRefs: git(fixture.origin, ["for-each-ref", "--format=%(refname) %(objectname)"]),
+      });
+      const beforeReselectionPreview = reselectionState();
+      const reselectionPreview = checkpoint(fixture, [
+        "--dry-run",
+        "--select-recovery",
+        incorporatedHead,
+        "--recovery-source",
+        laterMain,
+      ]);
+      assert.equal(
+        reselectionPreview.status,
+        0,
+        reselectionPreview.stderr || reselectionPreview.stdout,
+      );
+      assert.deepStrictEqual(reselectionState(), beforeReselectionPreview);
+      const reselected = checkpoint(fixture, [
+        "--select-recovery",
+        incorporatedHead,
+        "--recovery-source",
+        laterMain,
+      ]);
+      assert.equal(reselected.status, 0, reselected.stderr || reselected.stdout);
+      const compactD = git(retained, ["rev-parse", "HEAD"]);
+      assert.notEqual(compactD, incorporatedHead);
+      assert.equal(git(retained, ["rev-parse", "HEAD^{tree}"]), incorporatedTree);
+      assert.deepStrictEqual(JSON.parse(NodeFS.readFileSync(selectionPath, "utf8")), {
+        head: compactD,
+        sourceCommit: laterMain,
+        nightlyTag: NIGHTLY_D,
+        replayMode: "carry",
+      });
       assert.equal(readCarryGroupChain(repo, compactD, upstreamD).length, 6);
+      const repairedContributions = readCarryGroupChain(repo, compactD, upstreamD).flatMap(
+        ({ contributions }) => contributions,
+      );
+      assert.equal(
+        repairedContributions.find(({ sourceCommit }) => sourceCommit === sourceHead)?.group,
+        "build-ci",
+      );
+      assert.deepStrictEqual(
+        repairedContributions.find(({ sourceCommit }) => sourceCommit === incorporatedTooling)
+          ?.metadata["Carry-Fix"],
+        ["fixture#later-tooling"],
+      );
+      assert.deepStrictEqual(
+        repairedContributions.find(({ sourceCommit }) => sourceCommit === incorporatedHead)
+          ?.metadata["Carry-Evidence"],
+        ["fixture://source-pr-after-repair/build"],
+      );
       quietProvenance(compactD, upstreamD);
       assert.equal(
         git(repo, ["show", `${compactD}:lifecycle-conflict.txt`]),
         "upstream build behavior\ndownstream build behavior",
+      );
+      assert.equal(
+        git(repo, ["show", `${compactD}:checkpoint-only-resolution.txt`]),
+        "manual integration resolution on B",
+      );
+      assert.equal(
+        git(repo, ["show", `${compactD}:lifecycle-new-tooling.txt`]),
+        "tooling merged during recovery publication",
+      );
+      assert.equal(
+        git(repo, ["show", `${compactD}:lifecycle-new-build.txt`]),
+        "build work merged during recovery publication",
+      );
+
+      const resumed = checkpoint(fixture, ["--push-tags", "--promote"]);
+      assert.equal(resumed.status, 0, resumed.stderr || resumed.stdout);
+      assert.equal(remoteCommit(fixture.origin, `refs/tags/${revisionD}`), compactD);
+      assert.equal(remoteCommit(fixture.origin, `refs/lastcode/sources/${NIGHTLY_D}.1`), laterMain);
+      assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), compactD);
+      assert.equal(git(fixture.origin, ["rev-parse", `refs/tags/${tagD}`]), immutableTagD);
+      assert.equal(remoteCommit(fixture.origin, `refs/tags/${tagD}`), publishedRepair);
+      assert.equal(remoteCommit(fixture.origin, `refs/lastcode/sources/${NIGHTLY_D}`), mainWithPr);
+      assert.equal(remoteCommit(fixture.origin, laterSourceRef), laterBuildHead);
+      assert.equal(NodeFS.existsSync(retained), false);
+      assert.equal(NodeFS.existsSync(selectionPath), false);
+      assert.equal(remoteMissing(fixture.origin, "refs/lastcode/main-write-lock"), true);
+      assert.equal(
+        remoteMissing(fixture.origin, `refs/tags/lastcode/revision/${NIGHTLY_D}.2`),
+        true,
+      );
+      assert.equal(
+        remoteMissing(fixture.origin, `refs/tags/lastcode/checkpoint/${newerDuringRepair}`),
+        true,
       );
 
       checkout(repo, "upstream-main", upstreamD);

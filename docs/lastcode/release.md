@@ -167,13 +167,13 @@ stale bases, draft or non-clean PRs, and PRs that do not target
 `lastcode/main`. The wrapper and checkpoint publisher share a short exclusive
 Git ref lock on the remote. After acquiring it, the wrapper checks the exact PR
 head, base, and CI result again, then squash-merges with the exact-head guard.
-The lock is released before requesting an immediate
-checkpoint-daemon run when that service is installed on the current host. Hosts
-without the optional service skip the request silently. The daemon publishes a
-new installable LastCode revision when no new upstream
-nightly is waiting. Failure to start the service is reported without lying about
-the already-completed GitHub merge; the managed checkpoint service remains the
-repair path. The request never terminates a daemon run already in progress.
+The lock protects only the final main write, not preparation or CI waits.
+Ordinary merges request no checkpoint; `--skip-checkpoint` explicitly selects
+that default. Use `--checkpoint` only with separate user authorization for an
+extra service run. Permission to merge or a request for a dependent feature is
+not that authorization. The opt-in skips hosts without the optional service and
+never interrupts an active run. Failure to request the service does not undo the
+completed GitHub merge. Service admission still owns schedule and batch spacing.
 
 ## Checkpoint CI
 
@@ -212,7 +212,13 @@ disabled, report that setup problem rather than reverting to a sleep loop.
 When a retained nightly rebase is complete but validation required additional
 commits, do not delete the worktree and rely on rerere: Git only remembers
 conflict resolutions, not subsequent repairs. Commit the repairs and incorporate
-any downstream merges made since that attempt before selecting its exact head:
+any downstream merges made since that attempt before selecting its exact head.
+
+In carry mode, append the incorporated PR's partitioned source commits and any
+repair commits to the retained head. Each appended commit must name its owning
+`Carry-Group`; do not append an unpartitioned merge or squash. Explicit selection
+recompacts those commits into the six groups and checks that the repaired tree
+is unchanged. Ordinary retries cannot refresh a completed carry plan.
 
 ```bash
 pnpm lastcode:checkpoint -- --select-recovery <full-repaired-head> --recovery-source <full-current-main-commit>
@@ -228,19 +234,22 @@ nightly's rebase and reruns the full checkpoint smoke gate. It publishes the
 immutable tag and source ref, then promotes main with a lease against the selected
 source commit. Open PRs do not block publication or promotion. Merges made after
 selection or during validation do not invalidate it: the tag still publishes,
-promotion waits, and the next run publishes a revision replaying those merges
-onto the repaired tag. Failure to acquire the promotion lock still fails the run
-after tag publication and requires inspection before retrying. Build that tag
-right away; the revision follows. Selected recovery cannot disable validation or
-be automatically superseded. A changed head,
+promotion waits, and the exact selection and recovery worktree remain retained.
+A retry recognizes the published tag and retries only its promotion; it does not
+create a successor or clear unfinished promotion. Inspect current main and the
+repair before explicitly selecting an incorporated repair or releasing the
+selection. Failure to acquire the promotion lock still fails the run after tag
+publication and requires inspection before retrying. The published tag remains
+available for an independently authorized build. Selected recovery cannot disable
+validation or be automatically superseded. A changed head,
 or a main that no longer descends from the selected source, requires inspection
 and selection again. Failed validation retains the worktree and selection.
 
 Use **Wait for Checkpoint** immediately after requesting the service run, and
 end the turn. After publication, use **Build Local Package** on the exact new
 installable tag; selection and publication do not install or restart the app.
-Selected recovery processes only its selected nightly. Request another service
-run afterward to continue remaining nightlies from the repaired main branch.
+Selected recovery processes only its selected nightly. Later nightlies belong
+to a separately admitted run after the selected repair is reconciled.
 If publication succeeded but cleanup was interrupted, a retry recognizes the
 matching immutable tag represented on main and finishes cleanup without
 republishing.

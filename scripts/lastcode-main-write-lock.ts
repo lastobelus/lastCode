@@ -1,6 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Host-side Git coordination uses synchronous subprocesses.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
 
 export const MAIN_WRITE_LOCK_REF = "refs/lastcode/main-write-lock";
 
@@ -10,7 +12,11 @@ export function acquireMainWriteLock(
   sourceCommit: string,
   operation: "checkpoint" | "merge",
 ) {
-  const command = (program: string, args: ReadonlyArray<string>) =>
+  const command = (
+    program: string,
+    args: ReadonlyArray<string>,
+    environment: Readonly<Record<string, string | undefined>> = {},
+  ) =>
     NodeChildProcess.spawnSync(program, args, {
       cwd: repoRoot,
       encoding: "utf8",
@@ -21,6 +27,7 @@ export function acquireMainWriteLock(
         GIT_AUTHOR_EMAIL: "automation@example.invalid",
         GIT_COMMITTER_NAME: "LastCode automation",
         GIT_COMMITTER_EMAIL: "automation@example.invalid",
+        ...environment,
       },
       maxBuffer: 8 * 1024 * 1024,
     });
@@ -41,6 +48,9 @@ export function acquireMainWriteLock(
     "commit.gpgsign=false",
     "commit-tree",
     tree,
+    // The remote already has this source. An orphan owner resends its entire tree.
+    "-p",
+    sourceCommit,
     "-m",
     `LastCode main write: ${operation}\nSource: ${sourceCommit}\nOwner: ${NodeCrypto.randomUUID()}`,
   ]);
@@ -66,23 +76,49 @@ export function acquireMainWriteLock(
     push(args: ReadonlyArray<string>): void {
       assertActive();
       if (args[0] !== "push") throw new Error("Main write lock push requires git push arguments.");
+      const hookReceipt = args.includes("--no-verify")
+        ? undefined
+        : NodePath.join(
+            git(["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+            `lastcode-main-write-hook-${owner}-${NodeCrypto.randomUUID()}`,
+          );
       uncertain = true;
-      const result = command("git", ["push", "--porcelain", ...args.slice(1)]);
-      if (!result.error && result.status === 0) {
-        uncertain = false;
-        return;
+      try {
+        const result = command("git", ["push", "--porcelain", ...args.slice(1)], {
+          LASTCODE_MAIN_WRITE_HOOK_RECEIPT: hookReceipt,
+        });
+        if (!result.error && result.status === 0) {
+          uncertain = false;
+          return;
+        }
+        let hookRejected = false;
+        if (hookReceipt) {
+          try {
+            hookRejected = NodeFS.readFileSync(hookReceipt, "utf8") === "rejected\n";
+          } catch {
+            // Missing proof leaves the write outcome uncertain.
+          }
+        }
+        const updates = result.stdout.split("\n").filter((line) => /^[!=*+ -]\t/u.test(line));
+        // A rejected local hook or rejected-only ref report proves no write landed.
+        if (
+          !result.error &&
+          !result.signal &&
+          result.status === 1 &&
+          (hookRejected ||
+            (updates.some((line) => line.startsWith("!\t")) &&
+              updates.every((line) =>
+                /^(?:!\t[^\n\t]*\t\[(?:remote )?rejected\]|=\t)/u.test(line),
+              )))
+        ) {
+          uncertain = false;
+        }
+        throw new Error(
+          `Checkpoint push failed under ${identity}.\n${result.error?.message ?? result.stderr.trim()}\n${result.stdout ?? ""}`,
+        );
+      } finally {
+        if (hookReceipt) NodeFS.rmSync(hookReceipt, { force: true });
       }
-      // A reported rejection proves this main write did not land. Transport errors do not.
-      if (
-        !result.error &&
-        result.status === 1 &&
-        /^!\t[^\n\t]*:refs\/heads\/lastcode\/main\t\[(?:remote )?rejected\]/mu.test(result.stdout)
-      ) {
-        uncertain = false;
-      }
-      throw new Error(
-        `Checkpoint push failed under ${identity}.\n${result.error?.message ?? result.stderr.trim()}\n${result.stdout ?? ""}`,
-      );
     },
     merge(args: ReadonlyArray<string>): void {
       assertActive();

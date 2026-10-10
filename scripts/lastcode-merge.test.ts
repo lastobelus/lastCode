@@ -22,6 +22,12 @@ const mergeablePullRequest = {
 } as const;
 
 describe("lastcode-merge", () => {
+  it("does not request a checkpoint for an ordinary merge", () => {
+    const options = parseMergeOptions([]);
+    expect(options).toEqual({ dryRun: false, skipCheckpoint: true });
+    expect(postMergeCheckpointArguments(options.skipCheckpoint)).toBeNull();
+    expect(postMergeCheckpointArguments()).toBeNull();
+  });
   it("allows an explicit merge without requesting a checkpoint", () => {
     const options = parseMergeOptions(["--skip-checkpoint"]);
     expect(options.dryRun).toBe(false);
@@ -32,12 +38,15 @@ describe("lastcode-merge", () => {
     });
     expect(() => parseMergeOptions(["--skip-ci"])).toThrow("Usage:");
   });
-  it("silently skips the optional checkpoint request on hosts without the service", () => {
-    expect(postMergeCheckpointArguments()).toEqual([
+  it("requests the optional service only with an explicit checkpoint opt-in", () => {
+    const options = parseMergeOptions(["--checkpoint"]);
+    expect(options.skipCheckpoint).toBe(false);
+    expect(postMergeCheckpointArguments(options.skipCheckpoint)).toEqual([
       "scripts/lastcode-nightly-service.ts",
       "run-now",
       "--if-installed",
     ]);
+    expect(() => parseMergeOptions(["--checkpoint", "--skip-checkpoint"])).toThrow("Usage:");
   });
 
   it("uses an exact temporary body file with the existing squash guards", () => {

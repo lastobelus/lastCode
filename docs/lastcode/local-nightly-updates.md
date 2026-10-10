@@ -157,8 +157,8 @@ checkpoint daemon publishes an ordered tag such as:
 lastcode/revision/v0.0.34-nightly.20260816.1105.1
 ```
 
-The guarded PR merge command requests an immediate daemon run. If that request
-is missed because the service is unavailable, a later managed run repairs it.
+Ordinary guarded PR merges do not request a daemon run. New merged work is
+included by a later admitted run; an extra run requires separate user authorization.
 The daemon replays only the newly merged LastCode commits onto the newest
 checkpoint, smoke-tests the result, publishes the revision, and promotes it
 independently of open PRs when main still matches the incorporated source. The running app then discovers version

@@ -298,26 +298,27 @@ git fetch origin --prune
 git switch -c lastcode/markover/review-handoff origin/lastcode/main
 ```
 
-Target `lastcode/main`. Pushing runs the quick local gate. Before merge, require
-a clean current-head Codex review, no unresolved threads, and a full local-CI
-stamp for the exact head and current base. Use the guarded LastCode merge command
-rather than merging directly in the GitHub UI. After the squash merge succeeds,
-the guard notifies the checkpoint service. Interval schedules run immediately;
-daily schedules retain their configured cadence. The next run can publish the
-merged change as an installable `lastcode/revision/...` without waiting for
-another upstream nightly.
+Target `lastcode/main`. Pushing follows the local Quick CI policy. Before merge,
+require a clean current-head Codex review, no unresolved threads, and successful
+GitHub CI for the exact head and current base. Use the guarded LastCode merge
+command rather than merging directly in the GitHub UI. Ordinary merges request
+no checkpoint; `--skip-checkpoint` explicitly selects that default. Use
+`--checkpoint` only when the user separately authorizes an extra service run.
+Permission to merge or a dependency request does not authorize one. Later
+admitted runs can include merged work in an installable revision without waiting
+for another upstream nightly.
 
 Open PRs do not pause checkpoint creation, repaired-checkpoint publication, or
-promotion to `lastcode/main`. The daemon publishes immutable LastCode revisions
-for merged work and repairs missed merge triggers on later runs. Candidates pin
-the source they incorporate, and promotion leases against that source so a
-concurrent merge cannot be overwritten. When a merge advances main during a run,
-the validated tag still publishes, promotion waits, and the merge's service
-request publishes a revision that replays the merge onto that tag. PRs whose
-base changes need fresh validation against the current base before merging,
-even when their head is unchanged. Failure to acquire the promotion lock still
-fails the run after tag publication, so abandoned locks and connection failures
-remain visible and can be repaired before retrying promotion.
+promotion to `lastcode/main`. Candidates pin source and upstream commits, and
+promotion leases against the incorporated source so a concurrent merge cannot
+be overwritten. When main advances during a run, the validated immutable tag
+still publishes and promotion defers. New merges belong to a later admitted
+batch; they do not automatically revise the selected release. A selected repair
+retains its exact target and worktree until promotion or source incorporation
+is confirmed. PRs whose base changes need fresh validation against the current
+base before merging, even when their head is unchanged. Failure to acquire the
+promotion lock still fails the run after tag publication, so abandoned locks
+and connection failures remain visible and can be inspected before retrying.
 
 ### Inspect a specific pull request
 
