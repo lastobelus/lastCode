@@ -1322,28 +1322,35 @@ it.layer(
     "keeps a childless exec command while closing idle shells on %s",
     (platform) =>
       Effect.gen(function* () {
+        let commandsStarted = false;
         const { manager, ptyAdapter } = yield* createManager(5, {
           shellResolver: () => "/bin/zsh",
           subprocessPollIntervalMs: 60_000,
-          processTable: Effect.succeed([
-            { pid: 9000, ppid: 1, name: "node" },
-            { pid: 9001, ppid: 1, name: "/bin/zsh" },
-            { pid: 9002, ppid: 1, name: "-zsh" },
-            // A login shell's async prompt helper is still idle.
-            { pid: 100, ppid: 9002, name: "zsh" },
-            { pid: 9003, ppid: 1, name: "zsh" },
-            { pid: 200, ppid: 9003, name: "node" },
-            { pid: 9004, ppid: 1, name: "zsh" },
-            { pid: 300, ppid: 9004, name: "zsh" },
-            { pid: 301, ppid: 300, name: "sleep" },
-            // A missing process name alone is not evidence of exec.
-            { pid: 9005, ppid: 1, name: "" },
-          ]),
+          processTable: Effect.sync(() =>
+            [
+              { pid: 9000, ppid: 1, name: "node" },
+              { pid: 9001, ppid: 1, name: "/bin/zsh" },
+              { pid: 9002, ppid: 1, name: "-zsh" },
+              // A login shell's async prompt helper is still idle.
+              { pid: 100, ppid: 9002, name: "zsh" },
+              { pid: 9003, ppid: 1, name: "zsh" },
+              { pid: 200, ppid: 9003, name: "node" },
+              { pid: 9004, ppid: 1, name: "zsh" },
+              { pid: 300, ppid: 9004, name: "zsh" },
+              { pid: 301, ppid: 300, name: "sleep" },
+              // A missing process name alone is not evidence of exec.
+              { pid: 9005, ppid: 1, name: "" },
+            ].map((entry) =>
+              entry.ppid === 1 && !commandsStarted ? { ...entry, name: "zsh" } : entry,
+            ),
+          ),
         }).pipe(Effect.provide(layerWithHostPlatform(platform)));
         for (const terminalId of ["exec", "idle", "login", "child", "subshell", "unknown"]) {
           yield* manager.open(openInput({ terminalId }));
+          yield* manager.write({ threadId: "thread-1", terminalId, data: "exec command\r" });
         }
 
+        commandsStarted = true;
         yield* manager.closeIdle({ threadId: "thread-1" });
 
         expect(ptyAdapter.processes.map((process) => process.killed)).toEqual([
@@ -1359,10 +1366,13 @@ it.layer(
 
   it.effect("reports the command that replaced the shell through terminal activity", () =>
     Effect.gen(function* () {
+      let commandsStarted = false;
       const activity = yield* Deferred.make<TerminalEvent>();
       const { manager } = yield* createManager(5, {
         shellResolver: () => "/bin/zsh",
-        processTable: Effect.succeed([{ pid: 9000, ppid: 1, name: "/usr/bin/node" }]),
+        processTable: Effect.sync(() => [
+          { pid: 9000, ppid: 1, name: commandsStarted ? "/usr/bin/node" : "zsh" },
+        ]),
       }).pipe(Effect.provide(layerWithHostPlatform("linux")));
       const unsubscribe = yield* manager.subscribe((event) =>
         event.type === "activity"
@@ -1371,6 +1381,12 @@ it.layer(
       );
       yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
       yield* manager.open(openInput());
+      yield* manager.write({
+        threadId: "thread-1",
+        terminalId: DEFAULT_TERMINAL_ID,
+        data: "exec node\r",
+      });
+      commandsStarted = true;
 
       expect(yield* Deferred.await(activity)).toEqual(
         expect.objectContaining({ type: "activity", hasRunningSubprocess: true, label: "node" }),
@@ -1428,24 +1444,31 @@ it.layer(
     "closes full shell names but keeps ambiguous Linux comm names for $shellName",
     ({ shellName, commName }) =>
       Effect.gen(function* () {
+        let commandsStarted = false;
         const { manager, ptyAdapter } = yield* createManager(5, {
           shellResolver: () => `/opt/tools/${shellName}`,
           subprocessPollIntervalMs: 60_000,
-          processTable: Effect.succeed([
-            { pid: 9000, ppid: 1, name: `-${shellName}` },
-            { pid: 100, ppid: 9000, name: shellName },
-            { pid: 9001, ppid: 1, name: commName },
-            { pid: 200, ppid: 9001, name: commName },
-            { pid: 9002, ppid: 1, name: "node" },
-            // Neither a shorter prefix nor a different full name is the shell.
-            { pid: 9003, ppid: 1, name: "custom" },
-            { pid: 9004, ppid: 1, name: `${shellName}-worker` },
-          ]),
+          processTable: Effect.sync(() =>
+            [
+              { pid: 9000, ppid: 1, name: `-${shellName}` },
+              { pid: 100, ppid: 9000, name: shellName },
+              { pid: 9001, ppid: 1, name: commName },
+              { pid: 200, ppid: 9001, name: commName },
+              { pid: 9002, ppid: 1, name: "node" },
+              // Neither a shorter prefix nor a different full name is the shell.
+              { pid: 9003, ppid: 1, name: "custom" },
+              { pid: 9004, ppid: 1, name: `${shellName}-worker` },
+            ].map((entry) =>
+              entry.ppid === 1 && !commandsStarted ? { ...entry, name: shellName } : entry,
+            ),
+          ),
         }).pipe(Effect.provide(layerWithHostPlatform("linux")));
         for (const terminalId of ["full", "comm", "exec", "short-prefix", "different-full"]) {
           yield* manager.open(openInput({ terminalId }));
+          yield* manager.write({ threadId: "thread-1", terminalId, data: "exec command\r" });
         }
 
+        commandsStarted = true;
         yield* manager.closeIdle({ threadId: "thread-1" });
 
         expect(ptyAdapter.processes.map((process) => process.killed)).toEqual([
@@ -1458,13 +1481,13 @@ it.layer(
       }),
   );
 
-  it.effect(
-    "retains a childless exec with the shell's truncated Linux name and its ownership",
-    () =>
+  it.effect.each(["custom-login-shell", "my-shell", "custom-login-sh"])(
+    "retains a childless matching-prefix exec and ownership when configured shell is %s",
+    (shellName) =>
       Effect.gen(function* () {
         const ownedProcessIds = yield* Deferred.make<ReadonlyArray<number>>();
         const { manager, ptyAdapter } = yield* createManager(5, {
-          shellResolver: () => "/opt/tools/custom-login-shell",
+          shellResolver: () => `/opt/tools/${shellName}`,
           // custom-login-shell-worker has the same 15-byte comm as the shell.
           processTable: Effect.succeed([{ pid: 9000, ppid: 1, name: "custom-login-sh" }]),
           registerTerminalProcesses: ({ processIds }) =>
@@ -1475,9 +1498,115 @@ it.layer(
         yield* manager.open(openInput());
 
         expect(yield* Deferred.await(ownedProcessIds)).toEqual([9000]);
+        yield* manager.write({
+          threadId: "thread-1",
+          terminalId: DEFAULT_TERMINAL_ID,
+          data: "exec custom-login-shell-worker\r",
+        });
         yield* manager.closeIdle({ threadId: "thread-1" });
 
         expect(ptyAdapter.processes[0]?.killed).toBe(false);
+      }),
+  );
+
+  it.effect("closes an idle shell started through a differently named wrapper", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        shellResolver: () => "/opt/tools/my-shell",
+        processTable: Effect.succeed([{ pid: 9000, ppid: 1, name: "zsh" }]),
+      }).pipe(Effect.provide(layerWithHostPlatform("linux")));
+      yield* manager.open(openInput());
+      yield* manager.closeIdle({ threadId: "thread-1" });
+      expect(ptyAdapter.processes[0]?.killed).toBe(true);
+    }),
+  );
+
+  it.effect.each(["close", "restart"] as const)(
+    "freezes wrapper identity while first input and %s overlap",
+    (operation) =>
+      Effect.gen(function* () {
+        const captureEntered = yield* Deferred.make<void>();
+        const releaseCapture = yield* Deferred.make<void>();
+        const secondStarted = yield* Deferred.make<void>();
+        const closeStarted = yield* Deferred.make<void>();
+        let commandName = "zsh";
+        let snapshotCalls = 0;
+        let capturing = false;
+        const { manager, ptyAdapter } = yield* createManager(5, {
+          shellResolver: () => "/opt/tools/my-shell",
+          subprocessPollIntervalMs: 60_000,
+          processTable: Effect.gen(function* () {
+            snapshotCalls += 1;
+            const name = commandName;
+            if (capturing) {
+              yield* Deferred.succeed(captureEntered, undefined);
+              yield* Deferred.await(releaseCapture);
+            }
+            return [
+              { pid: 9000, ppid: 1, name },
+              { pid: 9001, ppid: 1, name },
+            ];
+          }),
+        }).pipe(Effect.provide(layerWithHostPlatform("linux")));
+        yield* manager.open(openInput());
+        const process = ptyAdapter.processes[0]!;
+        const originalWrite = process.write.bind(process);
+        process.write = (data) => {
+          originalWrite(data);
+          commandName = "node";
+        };
+        capturing = true;
+        const first = yield* manager
+          .write({ threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, data: "exec node\r" })
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(captureEntered);
+        const second = yield* Deferred.succeed(secondStarted, undefined).pipe(
+          Effect.andThen(
+            operation === "close"
+              ? manager.write({
+                  threadId: "thread-1",
+                  terminalId: DEFAULT_TERMINAL_ID,
+                  data: "second input\r",
+                })
+              : Effect.void,
+          ),
+          Effect.forkScoped,
+        );
+        yield* Deferred.await(secondStarted);
+        const close = yield* Deferred.succeed(closeStarted, undefined).pipe(
+          Effect.andThen(
+            operation === "close"
+              ? manager.closeIdle({ threadId: "thread-1" })
+              : manager.restart(restartInput()),
+          ),
+          Effect.forkScoped,
+        );
+        yield* Deferred.await(closeStarted);
+        expect(process.killed).toBe(false);
+        expect(process.writes).toEqual([]);
+        yield* Deferred.succeed(releaseCapture, undefined);
+        yield* Fiber.join(first);
+        yield* Fiber.join(second);
+        expect(snapshotCalls).toBeLessThanOrEqual(3);
+        capturing = false;
+        yield* Fiber.join(close);
+        expect(process.writes).toEqual(
+          operation === "close" ? ["exec node\r", "second input\r"] : ["exec node\r"],
+        );
+        expect(process.killed).toBe(operation === "restart");
+        if (operation === "restart") {
+          // Restart must capture the new shell, rather than retaining old identity.
+          commandName = "zsh";
+          yield* manager.write({
+            threadId: "thread-1",
+            terminalId: DEFAULT_TERMINAL_ID,
+            data: "exec node\r",
+          });
+          commandName = "node";
+          yield* manager.closeIdle({ threadId: "thread-1" });
+          expect(ptyAdapter.processes[1]?.killed).toBe(false);
+          expect(ptyAdapter.processes[1]?.writes).toEqual(["exec node\r"]);
+        }
       }),
   );
 
