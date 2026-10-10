@@ -286,6 +286,46 @@ export function parseLocalCiOptions(argv: ReadonlyArray<string>): LocalCiOptions
   };
 }
 
+function resolveTypecheckStep(
+  step: CommandStep,
+  mode: LocalCiMode,
+  scope: QuickCiScope | undefined,
+  policy: LastCodeLocalCiSettings,
+): LocalCiStep[] {
+  if (mode === "quick" && scope?.kind === "none") return [];
+  const filters =
+    mode === "quick" && scope?.kind === "affected"
+      ? scope.packages.flatMap((name) => ["--filter", name])
+      : [];
+  return [
+    {
+      ...step,
+      command: "vp",
+      args: [
+        "run",
+        ...(filters.length === 0 ? ["--recursive"] : []),
+        "--concurrency-limit",
+        String(policy.packageConcurrency),
+        ...filters,
+        "typecheck",
+      ],
+    },
+  ];
+}
+
+function resolveChangedPathsStep(
+  step: CommandStep,
+  scope: QuickCiScope,
+  repoRoot: string,
+): LocalCiStep[] {
+  // Keep changed-path order and duplicates; omit the step when no paths still exist.
+  const paths = scope.changedFiles
+    .filter((path) => NodeFS.existsSync(NodePath.join(repoRoot, path)))
+    .map((path) => `./${path}`);
+  if (paths.length === 0) return [];
+  return [{ ...step, args: ["check", "--no-error-on-unmatched-pattern", ...paths] }];
+}
+
 export function resolveLocalCiSteps(
   mode: LocalCiMode,
   scope?: QuickCiScope,
@@ -296,34 +336,13 @@ export function resolveLocalCiSteps(
   return steps.flatMap((step): LocalCiStep[] => {
     if (step.kind !== "command") return [step];
     if (step.label === "Workspace typecheck") {
-      if (mode === "quick" && scope?.kind === "none") return [];
-      const filters =
-        mode === "quick" && scope?.kind === "affected"
-          ? scope.packages.flatMap((name) => ["--filter", name])
-          : [];
-      return [
-        {
-          ...step,
-          command: "vp",
-          args: [
-            "run",
-            ...(filters.length === 0 ? ["--recursive"] : []),
-            "--concurrency-limit",
-            String(policy.packageConcurrency),
-            ...filters,
-            "typecheck",
-          ],
-        },
-      ];
+      return resolveTypecheckStep(step, mode, scope, policy);
     }
-    if (mode === "quick" && scope && scope.kind !== "full" && step.label === "Format and lint") {
-      const paths = scope.changedFiles
-        .filter((path) => NodeFS.existsSync(NodePath.join(repoRoot, path)))
-        .map((path) => `./${path}`);
-      if (paths.length === 0) return [];
-      return [{ ...step, args: ["check", "--no-error-on-unmatched-pattern", ...paths] }];
-    }
-    return [step];
+    if (mode !== "quick") return [step];
+    if (!scope) return [step];
+    if (scope.kind === "full") return [step];
+    if (step.label !== "Format and lint") return [step];
+    return resolveChangedPathsStep(step, scope, repoRoot);
   });
 }
 
