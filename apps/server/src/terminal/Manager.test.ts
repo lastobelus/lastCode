@@ -2397,6 +2397,223 @@ it.layer(
       }).pipe(Effect.provide(TestClock.layer())),
   );
 
+  it.effect.each(
+    (["native", "fallback"] as const).flatMap((source) =>
+      (["exec", "descendant"] as const).map((command) => ({ source, command })),
+    ),
+  )(
+    "records $command ownership despite output during every $source refresh",
+    ({ source, command }) =>
+      Effect.gen(function* () {
+        const ptyAdapter = new FakePtyAdapter();
+        let commandStarted = false;
+        let heldScan:
+          | { started: Deferred.Deferred<void>; release: Deferred.Deferred<void> }
+          | undefined;
+        let outputProcessed: Deferred.Deferred<void> | undefined;
+        let ownedProcessIds: ReadonlyArray<number> = [];
+        const processTable = Effect.gen(function* () {
+          const entries = [
+            { pid: 9000, ppid: 1, name: commandStarted && command === "exec" ? "node" : "zsh" },
+            ...(commandStarted && command === "descendant"
+              ? [{ pid: 100, ppid: 9000, name: "node" }]
+              : []),
+          ];
+          const scan = heldScan;
+          if (scan !== undefined) {
+            heldScan = undefined;
+            yield* Deferred.succeed(scan.started, undefined);
+            yield* Deferred.await(scan.release);
+          }
+          return entries;
+        });
+        const terminal = openInput();
+        const { manager } = yield* createSnapshotBoundaryManager(source, ptyAdapter, processTable, {
+          registerTerminalProcesses: ({ processIds }) =>
+            Effect.sync(() => {
+              ownedProcessIds = [...processIds];
+            }),
+        });
+        yield* TestClock.adjust(0);
+        yield* manager.open(terminal);
+        yield* manager.write({ ...terminal, data: "prepare\r" });
+        const unsubscribe = yield* manager.subscribe((event) =>
+          event.type === "output" && outputProcessed !== undefined
+            ? Deferred.succeed(outputProcessed, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+        commandStarted = true;
+        const observations = [];
+        // Every scan is invalidated before completion. No quiet scan repairs
+        // ownership or activity between these observations.
+        for (let index = 0; index < 3; index += 1) {
+          const started = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          outputProcessed = yield* Deferred.make<void>();
+          heldScan = { started, release };
+          const poll = yield* manager.refreshMetadata.pipe(Effect.forkScoped);
+          yield* Deferred.await(started);
+          ptyAdapter.processes[0]!.emitData(`output ${index}\n`);
+          yield* Deferred.await(outputProcessed);
+          yield* Deferred.succeed(release, undefined);
+          const metadata = yield* Fiber.join(poll);
+          observations.push({ processIds: [...ownedProcessIds], metadata });
+        }
+        yield* exitSnapshotTestProcesses(manager, ptyAdapter, [terminal]);
+        for (const observation of observations) {
+          expect(observation.processIds).toEqual(command === "exec" ? [9000] : [9000, 100]);
+          expect(observation.metadata).toContainEqual(
+            expect.objectContaining({ pid: 9000, hasRunningSubprocess: true, label: "node" }),
+          );
+        }
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect.each(["native", "fallback"] as const)(
+    "preserves known ownership and activity through smaller output-invalidated %s scans",
+    (source) =>
+      Effect.gen(function* () {
+        const ptyAdapter = new FakePtyAdapter();
+        let entries = [{ pid: 9000, ppid: 1, name: "zsh" }];
+        let heldScan:
+          | { started: Deferred.Deferred<void>; release: Deferred.Deferred<void> }
+          | undefined;
+        let outputProcessed: Deferred.Deferred<void> | undefined;
+        let ownedProcessIds: ReadonlyArray<number> = [];
+        const processTable = Effect.gen(function* () {
+          const sampled = entries;
+          const scan = heldScan;
+          if (scan !== undefined) {
+            heldScan = undefined;
+            yield* Deferred.succeed(scan.started, undefined);
+            yield* Deferred.await(scan.release);
+          }
+          return sampled;
+        });
+        const terminal = openInput();
+        const { manager } = yield* createSnapshotBoundaryManager(source, ptyAdapter, processTable, {
+          registerTerminalProcesses: ({ processIds }) =>
+            Effect.sync(() => {
+              ownedProcessIds = [...processIds];
+            }),
+        });
+        yield* TestClock.adjust(0);
+        yield* manager.open(terminal);
+        yield* manager.write({ ...terminal, data: "prepare\r" });
+        entries = [
+          { pid: 9000, ppid: 1, name: "zsh" },
+          { pid: 100, ppid: 9000, name: "node" },
+          { pid: 101, ppid: 100, name: "worker" },
+        ];
+        yield* manager.refreshMetadata;
+        const unsubscribe = yield* manager.subscribe((event) =>
+          event.type === "output" && outputProcessed !== undefined
+            ? Deferred.succeed(outputProcessed, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+        const observations = [];
+        for (const sampled of [
+          [
+            { pid: 9000, ppid: 1, name: "zsh" },
+            { pid: 100, ppid: 9000, name: "sleep" },
+          ],
+          [{ pid: 9000, ppid: 1, name: "zsh" }],
+        ]) {
+          entries = sampled;
+          const started = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          outputProcessed = yield* Deferred.make<void>();
+          heldScan = { started, release };
+          const poll = yield* manager.refreshMetadata.pipe(Effect.forkScoped);
+          yield* Deferred.await(started);
+          ptyAdapter.processes[0]!.emitData("still producing output\n");
+          yield* Deferred.await(outputProcessed);
+          yield* Deferred.succeed(release, undefined);
+          const metadata = yield* Fiber.join(poll);
+          observations.push({ processIds: [...ownedProcessIds], metadata });
+        }
+        // Once a scan completes without intervening output, obsolete PIDs and
+        // activity can be cleared normally.
+        const quietMetadata = yield* manager.refreshMetadata;
+        const quietOwnership = [...ownedProcessIds];
+        yield* exitSnapshotTestProcesses(manager, ptyAdapter, [terminal]);
+        for (const observation of observations) {
+          expect(observation.processIds).toEqual([9000, 100, 101]);
+          expect(observation.metadata).toContainEqual(
+            expect.objectContaining({ pid: 9000, hasRunningSubprocess: true, label: "node" }),
+          );
+        }
+        expect(quietOwnership).toEqual([]);
+        expect(quietMetadata).toContainEqual(
+          expect.objectContaining({ pid: 9000, hasRunningSubprocess: false, label: "Terminal 1" }),
+        );
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect.each(
+    (["native", "fallback"] as const).flatMap((source) =>
+      (["output", "write"] as const).map((boundary) => ({ source, boundary })),
+    ),
+  )(
+    "restores ownership when $boundary invalidates a $source scan during registration",
+    ({ source, boundary }) =>
+      Effect.gen(function* () {
+        const registrationStarted = yield* Deferred.make<void>();
+        const releaseRegistration = yield* Deferred.make<void>();
+        const outputProcessed = yield* Deferred.make<void>();
+        const ptyAdapter = new FakePtyAdapter();
+        let commandStarted = false;
+        let holdNextRegistration = false;
+        let ownedProcessIds: ReadonlyArray<number> = [];
+        const processTable = Effect.sync(() => [
+          { pid: 9000, ppid: 1, name: commandStarted ? "node" : "zsh" },
+        ]);
+        const terminal = openInput();
+        const { manager } = yield* createSnapshotBoundaryManager(source, ptyAdapter, processTable, {
+          registerTerminalProcesses: ({ processIds }) =>
+            Effect.gen(function* () {
+              if (holdNextRegistration) {
+                holdNextRegistration = false;
+                yield* Deferred.succeed(registrationStarted, undefined);
+                yield* Deferred.await(releaseRegistration);
+              }
+              ownedProcessIds = [...processIds];
+            }),
+        });
+        yield* TestClock.adjust(0);
+        yield* manager.open(terminal);
+        yield* manager.write({ ...terminal, data: "prepare\r" });
+        commandStarted = true;
+        yield* manager.refreshMetadata;
+        commandStarted = false;
+        holdNextRegistration = true;
+        const poll = yield* manager.refreshMetadata.pipe(Effect.forkScoped);
+        yield* Deferred.await(registrationStarted);
+        if (boundary === "output") {
+          const unsubscribe = yield* manager.subscribe((event) =>
+            event.type === "output"
+              ? Deferred.succeed(outputProcessed, undefined).pipe(Effect.asVoid)
+              : Effect.void,
+          );
+          yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+          ptyAdapter.processes[0]!.emitData("still running\n");
+          yield* Deferred.await(outputProcessed);
+        } else {
+          yield* manager.write({ ...terminal, data: "next command\r" });
+        }
+        yield* Deferred.succeed(releaseRegistration, undefined);
+        const metadata = yield* Fiber.join(poll);
+        const ownership = [...ownedProcessIds];
+        yield* exitSnapshotTestProcesses(manager, ptyAdapter, [terminal]);
+        expect(ownership).toEqual([9000]);
+        expect(metadata).toContainEqual(
+          expect.objectContaining({ pid: 9000, hasRunningSubprocess: true, label: "node" }),
+        );
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
   it.effect.each(["native", "fallback"] as const)(
     "keeps a quiet terminal's exec ownership and activity when another terminal invalidates a held %s poll",
     (source) =>
