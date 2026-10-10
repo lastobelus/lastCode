@@ -257,10 +257,18 @@ and copying a thread reference. A copied reference uses the thread's pull reques
 link when available, otherwise its thread ID. See [keybindings](./keybindings.md)
 for custom configuration.
 
+## Choose the LastCode sidebar
+
+On web and desktop, enable **Settings → LastCode → Appearance → LastCode sidebar**
+for the LastCode project tree, annotations, and family controls. It is off by default.
+While enabled, it overrides the upstream sidebar choice without changing that preference.
+Turn it off to return to the sidebar selected by **Legacy sidebar** in General settings.
+The quick sidebar-mode control changes the upstream choice only while LastCode sidebar is off.
+
 ## Thread annotations in LastCode
 
 A thread can have one Markdown annotation for notes, headings, lists, task lists, and tags. In the
-legacy sidebar, open a thread's context menu and choose **Annotate thread…**. An active annotation
+LastCode sidebar, open a thread's context menu and choose **Annotate thread…**. An active annotation
 adds a short dotted yellow underline to the thread timestamp; hover it to read, edit, or resolve
 the note without opening the thread.
 
@@ -304,10 +312,10 @@ To generate a fresh title from the conversation, open a thread's context menu an
 **Regenerate title**. While T3 Code is generating it, the action reads **Regenerating…** and cannot
 be selected again. The option is hidden when the connected environment needs a server update.
 
-## Legacy sidebar scale in LastCode
+## LastCode sidebar scale
 
-When the legacy sidebar is enabled, LastCode can make its project and thread rows more compact.
-Open **Settings → LastCode → Appearance** and adjust **Scale legacy sidebar** from 50% through 100%. The 75%
+When the LastCode sidebar is enabled, LastCode can make its project and thread rows more compact.
+Open **Settings → LastCode → Appearance** and adjust **Scale LastCode sidebar** from 50% through 100%. The 75%
 mark is labeled as a useful compact reference point. The default is 100%, and your selection is
 stored locally and retained when LastCode restarts.
 
@@ -315,9 +323,9 @@ This setting compacts project headings and thread rows while keeping project fav
 status icons, remote cloud indicators, and relative timestamps at their standard size. The
 LastCode header, Search field, Projects heading, drafts, status notices, and footer also stay at
 their standard size. On desktop, **View → Actual Size**, **Zoom In**, and **Zoom Out** continue to
-zoom the whole application and compose with the legacy sidebar scale.
+zoom the whole application and compose with the LastCode sidebar scale.
 To keep the same status colors while using less horizontal space, enable **Compact status
-indicators** in **Settings → LastCode → Appearance**. Legacy thread rows then show only the
+indicators** in **Settings → LastCode → Appearance**. LastCode thread rows then show only the
 colored status dot; the full status remains available as a tooltip. This preference is off by
 default.
 
@@ -332,8 +340,8 @@ a custom color is shown at full strength in sidebar rows, project headings, and 
 icon beside each environment name previews the selection.
 
 Remote environments use a Server icon. The primary machine uses a Laptop icon, which can be shown
-or hidden in thread cards and legacy thread rows with **Show local icon**. Legacy rows reserve the
-same icon space either way so their columns stay aligned. Mixed legacy project groups always show
+or hidden in thread cards and LastCode thread rows with **Show local icon**. LastCode rows reserve the
+same icon space either way so their columns stay aligned. Mixed LastCode project groups always show
 one icon for every environment in the group, including the primary machine, with duplicate
 environments collapsed to one icon.
 

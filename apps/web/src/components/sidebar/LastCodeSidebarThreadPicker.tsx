@@ -48,7 +48,7 @@ import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { SidebarHeaderIconButton } from "./SidebarThreadHeader";
 
-export function LegacySidebarThreadPicker({
+export function LastCodeSidebarThreadPicker({
   projectGroups,
 }: {
   readonly projectGroups: readonly SidebarProjectSnapshot[];

@@ -17,7 +17,7 @@ function readCollapsedFamilies(): Record<string, boolean> {
 }
 
 /** Collapse preferences are client-local and scoped by environment/thread, like other sidebar UI state. */
-export const useLegacySidebarFamiliesStore = create<{
+export const useLastCodeSidebarFamiliesStore = create<{
   collapsedByKey: Record<string, boolean>;
   setCollapsed: (key: string, collapsed: boolean) => void;
 }>((set) => ({
@@ -37,8 +37,8 @@ export const useLegacySidebarFamiliesStore = create<{
 }));
 
 /** Keep project projections stable when another project's family is toggled. */
-export function useCollapsedLegacySidebarFamilies(threadKeys: readonly string[]) {
-  return useLegacySidebarFamiliesStore(
+export function useCollapsedLastCodeSidebarFamilies(threadKeys: readonly string[]) {
+  return useLastCodeSidebarFamiliesStore(
     useShallow((state) => {
       const collapsedByKey: Record<string, boolean> = {};
       for (const key of threadKeys) {

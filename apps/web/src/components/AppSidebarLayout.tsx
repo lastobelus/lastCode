@@ -33,10 +33,12 @@ import {
 import {
   useClientSettingsHydrated,
   useEnvironmentIdentificationMode,
-  useLegacySidebarEnabled,
+  useSidebarMode,
   useUpdateClientSettings,
 } from "../hooks/useSettings";
 import LegacyThreadSidebar from "./LegacySidebar";
+import LastCodeSidebar from "./LastCodeSidebar";
+import { toggleUpstreamSidebar } from "../sidebarMode";
 import { useThreadVisitedMigration } from "../hooks/useThreadVisitedMigration";
 import ThreadSidebar from "./Sidebar";
 import { SettingsSidebarNav } from "./settings/SettingsSidebarNav";
@@ -153,9 +155,7 @@ function SidebarControl() {
         toggleSidebar();
         return;
       }
-      updateClientSettings((settings) => ({
-        legacySidebarEnabled: !settings.legacySidebarEnabled,
-      }));
+      updateClientSettings(toggleUpstreamSidebar);
     };
 
     // Capture before focused editors consume commands such as Mod+B for rich-text formatting.
@@ -272,7 +272,7 @@ function ProjectProjectionRetention() {
 
 export function AppSidebarLayout({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
-  const legacySidebarEnabled = useLegacySidebarEnabled();
+  const sidebarMode = useSidebarMode();
   const { active: panelAnimationsActive, durationMs: panelAnimationDurationMs } =
     usePanelAnimationSettings();
   // Settings routes show the settings nav in place of whichever thread
@@ -382,7 +382,9 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
               <SidebarChromeHeader isElectron={isElectron} />
               <SettingsSidebarNav pathname={pathname} />
             </>
-          ) : legacySidebarEnabled ? (
+          ) : sidebarMode === "lastcode" ? (
+            <LastCodeSidebar />
+          ) : sidebarMode === "legacy" ? (
             <LegacyThreadSidebar />
           ) : (
             <ThreadSidebar />

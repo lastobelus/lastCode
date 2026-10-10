@@ -963,8 +963,15 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/lastcode",
   },
   {
+    id: "lastcode-sidebar",
+    title: "LastCode sidebar",
+    to: "/settings/lastcode",
+    searchTerms: ["navigation project tree override upstream legacy inbox"],
+  },
+  {
     id: "scale-legacy-sidebar",
-    title: "Scale legacy sidebar",
+    title: "Scale LastCode sidebar",
+    searchTerms: ["scale legacy sidebar zoom compact rows"],
     to: "/settings/lastcode",
   },
   {
@@ -1006,7 +1013,7 @@ export const SETTINGS_SEARCH_ITEMS = [
     id: "thread-grouping-style",
     title: "Thread grouping style",
     to: "/settings/lastcode",
-    searchTerms: ["legacy sidebar subagents agent-created minimal typed groups relationships"],
+    searchTerms: ["LastCode sidebar subagents agent-created minimal typed groups relationships"],
   },
   {
     id: "compact-status-indicators",
@@ -1015,7 +1022,7 @@ export const SETTINGS_SEARCH_ITEMS = [
   },
   {
     id: "show-worktree-indicators",
-    title: "Show worktree indicators (legacy sidebar)",
+    title: "Show worktree indicators (LastCode sidebar)",
     to: "/settings/lastcode",
   },
   {

@@ -326,7 +326,7 @@ describe("searchSettings", () => {
     expect(searchableSetting("archive")).toEqual({ id: "archive", title: "Archived threads" });
     expect(searchableSetting("show-worktree-indicators")).toEqual({
       id: "show-worktree-indicators",
-      title: "Show worktree indicators (legacy sidebar)",
+      title: "Show worktree indicators (LastCode sidebar)",
     });
   });
 
@@ -585,9 +585,16 @@ describe("settings sidebar scope", () => {
     expect(isSettingsOverviewVisible({ project: "project", checkout: "checkout" })).toBe(true);
   });
 
-  it("routes legacy sidebar scaling to LastCode settings", () => {
-    expect(searchSettings("scale legacy sidebar")[0]).toMatchObject({
+  it("routes LastCode sidebar scaling to LastCode settings", () => {
+    expect(searchSettings("scale LastCode sidebar")[0]).toMatchObject({
       id: "scale-legacy-sidebar",
+      to: "/settings/lastcode",
+    });
+  });
+
+  it("finds the independent LastCode sidebar override", () => {
+    expect(searchSettings("LastCode sidebar")[0]).toMatchObject({
+      id: "lastcode-sidebar",
       to: "/settings/lastcode",
     });
   });
