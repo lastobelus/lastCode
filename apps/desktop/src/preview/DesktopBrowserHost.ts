@@ -1138,7 +1138,7 @@ export const make = Effect.gen(function* () {
           Effect.flatMap((profiles) =>
             PubSub.publish(outbox, {
               desktopHostId,
-              event: { type: "profiles", requestId, profiles },
+              event: { type: "profiles", requestId, profiles, supportsNativeRoots: true },
             }),
           ),
           Effect.asVoid,

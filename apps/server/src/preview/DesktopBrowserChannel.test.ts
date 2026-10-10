@@ -1236,21 +1236,26 @@ it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
       const command = yield* Queue.take(first.commands);
       if (command.type !== "profiles") throw new Error("Expected profile catalogue request");
       const second = yield* connectHost(channel, "socket-b", "host-b");
-      yield* channel.receiveEvent("socket-b", "host-b", {
-        type: "profiles",
-        requestId: command.requestId,
-        profiles: null,
-      });
       const catalogue = {
         profiles: [{ id: "work", name: "Work", kind: "persistent" as const }],
         defaultProfileId: "work",
       };
+      yield* channel.receiveEvent("socket-b", "host-b", {
+        type: "profiles",
+        requestId: command.requestId,
+        profiles: catalogue,
+        supportsNativeRoots: true,
+      });
       yield* channel.receiveEvent("socket-a", "host-a", {
         type: "profiles",
         requestId: command.requestId,
         profiles: catalogue,
       });
-      expect(yield* Fiber.join(request)).toEqual({ ...catalogue, desktopHostId: "host-a" });
+      expect(yield* Fiber.join(request)).toEqual({
+        ...catalogue,
+        desktopHostId: "host-a",
+        supportsNativeRoots: false,
+      });
       expect(yield* profiles).toBeNull();
       yield* Fiber.interrupt(first.fiber);
       yield* Fiber.interrupt(second.fiber);
@@ -1259,9 +1264,9 @@ it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
     }).pipe(Effect.scoped),
   );
 
-  it.effect(
-    "selects an exact catalogue owner with two desktops and never substitutes a disconnected owner",
-    () =>
+  it.effect.each([undefined, false, true])(
+    "uses the exact catalogue owner's native-root support (%s), never another desktop's",
+    (supportsNativeRoots) =>
       Effect.gen(function* () {
         const channel = yield* remoteChannel;
         const first = yield* connectHost(channel, "socket-a", "host-a");
@@ -1275,12 +1280,23 @@ it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
           profiles: [{ id: "work", name: "Work", kind: "persistent" as const }],
           defaultProfileId: "work",
         };
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          type: "profiles",
+          requestId: command.requestId,
+          profiles: catalogue,
+          supportsNativeRoots: supportsNativeRoots !== true,
+        });
         yield* channel.receiveEvent("socket-b", "host-b", {
           type: "profiles",
           requestId: command.requestId,
           profiles: catalogue,
+          ...(supportsNativeRoots === undefined ? {} : { supportsNativeRoots }),
         });
-        expect(yield* Fiber.join(request)).toEqual({ ...catalogue, desktopHostId: "host-b" });
+        expect(yield* Fiber.join(request)).toEqual({
+          ...catalogue,
+          desktopHostId: "host-b",
+          supportsNativeRoots: supportsNativeRoots === true,
+        });
         yield* Fiber.interrupt(second.fiber);
         expect(yield* channel.getProfiles(input)).toBeNull();
         expect(yield* Queue.size(first.commands)).toBe(0);

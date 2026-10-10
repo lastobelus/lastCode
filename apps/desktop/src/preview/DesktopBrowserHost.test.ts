@@ -1915,6 +1915,7 @@ describe("remote desktop browser host", () => {
           type: "profiles",
           requestId: "profiles-a",
           profiles: { defaultProfileId: "default" },
+          supportsNativeRoots: true,
         },
       });
     }).pipe(Effect.scoped),

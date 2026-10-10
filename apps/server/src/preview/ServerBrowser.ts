@@ -2583,6 +2583,13 @@ const make = Effect.gen(function* () {
           }
           existing = undefined;
         }
+        if (
+          !existing &&
+          newTabProfileId !== undefined &&
+          catalogue !== null &&
+          !catalogue.supportsNativeRoots
+        )
+          throw new DesktopBrowserTransportError({ reason: "root-unsupported" });
         if (url !== undefined)
           url = await browserNavigationUrl(
             {

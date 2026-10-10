@@ -128,6 +128,7 @@ export const DesktopBrowserEvent = Schema.Union([
     type: Schema.Literal("profiles"),
     requestId: Schema.String,
     profiles: Schema.NullOr(PreviewAutomationProfiles),
+    supportsNativeRoots: Schema.optionalKey(Schema.Boolean),
   }),
   /** A desktop `<webview>` for this server tab is attached and can be driven. */
   Schema.Struct({
@@ -236,11 +237,14 @@ export class DesktopBrowserTransportError extends Schema.TaggedError<DesktopBrow
       "guest-unavailable",
       "profile-unavailable",
       "surface-unsupported",
+      "root-unsupported",
       "close-canceled",
     ]),
   },
 ) {
   override get message(): string {
+    if (this.reason === "root-unsupported")
+      return "This desktop app cannot create the native browser pages required by this server. Update the desktop app to a compatible release to run browser automation.";
     if (this.reason === "profile-unavailable")
       return "The selected native browser profile is unavailable.";
     if (this.reason === "close-canceled")

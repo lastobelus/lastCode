@@ -244,9 +244,12 @@ let encoderSetupGate: ReturnType<typeof Promise.withResolvers<void>> | null = nu
 let recordingCdpGate: ReturnType<typeof Promise.withResolvers<void>> | null = null;
 let recordingStageEntered: ReturnType<typeof Promise.withResolvers<void>> | null = null;
 const encoderPages: Array<ReturnType<typeof makeContext>["page"]> = [];
-type ProfileCatalogue = NonNullable<
-  Effect.Success<ReturnType<DesktopChannel.DesktopBrowserChannel["Service"]["getProfiles"]>>
->;
+type ProfileCatalogue = Omit<
+  NonNullable<
+    Effect.Success<ReturnType<DesktopChannel.DesktopBrowserChannel["Service"]["getProfiles"]>>
+  >,
+  "supportsNativeRoots"
+> & { readonly supportsNativeRoots?: boolean };
 let profileCatalogue: ProfileCatalogue | null = null;
 let profileCatalogueUnavailable = false;
 const profileRequests: Array<{ desktopHostId?: string }> = [];
@@ -384,7 +387,7 @@ const dependencies = Layer.mergeAll(
             ? profileCatalogue
             : (profileCatalogues.get(input.desktopHostId) ??
               (profileCatalogue?.desktopHostId === input.desktopHostId ? profileCatalogue : null));
-        return (
+        const catalogue: ProfileCatalogue | null =
           selected ??
           (!profileCatalogueUnavailable &&
           (input.desktopHostId === undefined || input.desktopHostId === "local") &&
@@ -394,8 +397,10 @@ const dependencies = Layer.mergeAll(
                 profiles: [{ id: "default", name: "Default", kind: "persistent" as const }],
                 defaultProfileId: "default",
               }
-            : null)
-        );
+            : null);
+        return catalogue
+          ? { ...catalogue, supportsNativeRoots: catalogue.supportsNativeRoots ?? true }
+          : null;
       }),
     resolveUrl: (input) =>
       Effect.promise(async () => {
@@ -4452,6 +4457,53 @@ it.live("never substitutes a headless page when the selected desktop does not at
         .pipe(Effect.flip);
       expect(contexts).toHaveLength(0);
       expect(desktopConnections).toHaveLength(0);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("an older desktop fails new native opens before creating or publishing a tab", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      yield* ServerBrowser.ServerBrowser;
+      const manager = yield* Manager.PreviewManager;
+      const broker = yield* Broker.PreviewAutomationBroker;
+      yield* Effect.yieldNow;
+      for (const desktopHostId of ["local", "remote-host"]) {
+        profileCatalogue = {
+          desktopHostId,
+          supportsNativeRoots: false,
+          profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+          defaultProfileId: "work",
+        };
+        expect(yield* broker.invoke({ scope, operation: "profiles", input: {} })).toMatchObject({
+          defaultProfileId: "work",
+        });
+        for (const operation of ["open", "openWithProfile"] as const) {
+          const failure = yield* broker
+            .invoke<void>({
+              scope,
+              operation,
+              input: {
+                ...(operation === "openWithProfile" ? { profileId: "work" } : {}),
+                url: "https://auth.example.test/start",
+                reuseExistingTab: false,
+                show: false,
+              },
+            })
+            .pipe(Effect.flip);
+          expect(failure).toMatchObject({
+            _tag: "PreviewAutomationRemoteUnavailableError",
+            cause: {
+              message: expect.stringContaining("Update the desktop app"),
+              detail: { reason: "root-unsupported" },
+            },
+          });
+          expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toEqual([]);
+          expect(rootCreations).toEqual([]);
+          expect(contexts).toHaveLength(0);
+          expect(desktopConnections).toHaveLength(0);
+        }
+      }
     }),
   ).pipe(Effect.provide(layer)),
 );

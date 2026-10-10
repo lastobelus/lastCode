@@ -76,7 +76,13 @@ export class DesktopBrowserChannel extends Context.Service<
       readonly threadId: string;
       readonly agentSessionId: string;
       readonly desktopHostId?: string;
-    }) => Effect.Effect<(PreviewAutomationProfiles & { readonly desktopHostId: string }) | null>;
+    }) => Effect.Effect<
+      | (PreviewAutomationProfiles & {
+          readonly desktopHostId: string;
+          readonly supportsNativeRoots: boolean;
+        })
+      | null
+    >;
     readonly subscribeCommands: (
       owner: string,
       desktopHostId: string,
@@ -259,7 +265,12 @@ const make = Effect.gen(function* () {
       readonly deferred: Deferred.Deferred<void, DesktopBrowserTransportError>;
     }
   >();
-  const profileRequests = new Map<string, Deferred.Deferred<PreviewAutomationProfiles | null>>();
+  const profileRequests = new Map<
+    string,
+    Deferred.Deferred<
+      (PreviewAutomationProfiles & { readonly supportsNativeRoots: boolean }) | null
+    >
+  >();
   /** CDP frames from the desktop, per tab, for the endpoint connected to it. */
   const inbound = new Map<string, Queue.Queue<string>>();
   const writeLock = yield* Semaphore.make(1);
@@ -329,7 +340,12 @@ const make = Effect.gen(function* () {
     if (event.type === "profiles") {
       const pending = profileRequests.get(event.requestId);
       return pending && profileOwners.get(event.requestId) === desktopHostId
-        ? Deferred.succeed(pending, event.profiles).pipe(Effect.asVoid)
+        ? Deferred.succeed(
+            pending,
+            event.profiles === null
+              ? null
+              : { ...event.profiles, supportsNativeRoots: event.supportsNativeRoots === true },
+          ).pipe(Effect.asVoid)
         : Effect.void;
     }
     const key = { threadId: event.threadId, tabId: event.tabId, desktopHostId };
@@ -1153,7 +1169,9 @@ const make = Effect.gen(function* () {
         )
           return null;
         const requestId = NodeCrypto.randomUUID();
-        const deferred = yield* Deferred.make<PreviewAutomationProfiles | null>();
+        const deferred = yield* Deferred.make<
+          (PreviewAutomationProfiles & { readonly supportsNativeRoots: boolean }) | null
+        >();
         profileRequests.set(requestId, deferred);
         profileOwners.set(requestId, desktopHostId);
         return yield* command({ type: "profiles", requestId }, desktopHostId).pipe(
