@@ -3,7 +3,7 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
-import { describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { DEFAULT_LASTCODE_LOCAL_CI_SETTINGS } from "@t3tools/contracts/settings";
 
 import {
@@ -786,5 +786,161 @@ describe("lastcode-local-ci", () => {
       assertCheckpointCiStamp(commonGitDir, stamp.commit, checkpointTag, "new-upstream-sha"),
     ).toThrow("does not match installable");
     NodeFS.rmSync(commonGitDir, { recursive: true, force: true });
+  });
+});
+
+describe("Quick CI receipt reader", () => {
+  const roots: string[] = [];
+  function fixture(raw?: string) {
+    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "receipt-reader-test-"));
+    roots.push(root);
+    const path = resolveQuickCiReceiptPath(root, "head");
+    if (raw !== undefined) {
+      NodeFS.mkdirSync(NodePath.dirname(path), { recursive: true });
+      NodeFS.writeFileSync(path, raw);
+    }
+    return { root, path };
+  }
+  const valid = {
+    schemaVersion: 1,
+    gateVersion: QUICK_CI_GATE_VERSION,
+    commit: "head",
+    baseCommit: "",
+    baseRef: "",
+    completedAt: "",
+    extra: { retained: true },
+  };
+  afterEach(() => {
+    vi.restoreAllMocks();
+    for (const root of roots.splice(0)) NodeFS.rmSync(root, { recursive: true, force: true });
+  });
+  it("returns a miss for an absent file", () => {
+    expect(readQuickCiReceipt(fixture().root, "head")).toBeUndefined();
+  });
+  it("keeps extra keys and accepts empty string fields", () => {
+    expect(readQuickCiReceipt(fixture(JSON.stringify(valid)).root, "head")).toEqual(valid);
+  });
+  it.each([undefined, null, 0, "2"])(
+    "treats obsolete gate %s as a miss before malformed fields",
+    (gateVersion) => {
+      const { root } = fixture(JSON.stringify({ schemaVersion: 1, gateVersion, baseCommit: null }));
+      expect(readQuickCiReceipt(root, "head")).toBeUndefined();
+    },
+  );
+  it.each(["schemaVersion", "commit", "baseCommit", "baseRef", "completedAt"] as const)(
+    "rejects malformed current %s with the exact path",
+    (field) => {
+      const { root, path } = fixture(JSON.stringify({ ...valid, [field]: null }));
+      expect(() => readQuickCiReceipt(root, "head")).toThrow(
+        new Error(`Invalid Quick CI receipt at ${path}.`),
+      );
+    },
+  );
+  it.each(["null", "true", "0", '"text"', "[]", "{}"])(
+    "preserves native property access or validation failure for %s",
+    (raw) => {
+      const { root, path } = fixture(raw);
+      if (raw === "null") expect(() => readQuickCiReceipt(root, "head")).toThrow(TypeError);
+      else
+        expect(() => readQuickCiReceipt(root, "head")).toThrow(
+          `Invalid Quick CI receipt at ${path}.`,
+        );
+    },
+  );
+  it.each(["{", "", "\ufeff{}"])("propagates the native JSON error for %s", (raw) => {
+    const { root } = fixture(raw);
+    let expected: unknown;
+    try {
+      JSON.parse(raw);
+    } catch (error) {
+      expected = error;
+    }
+    expect(() => readQuickCiReceipt(root, "head")).toThrow(expected as Error);
+  });
+  it("propagates a native file read error", () => {
+    const { root, path } = fixture("{}");
+    NodeFS.unlinkSync(path);
+    NodeFS.mkdirSync(path);
+    expect(() => readQuickCiReceipt(root, "head")).toThrow(/EISDIR/);
+  });
+  it("retains parsed identity and exact lazy field read order with injected getters", () => {
+    const { root } = fixture("{}");
+    const reads: PropertyKey[] = [];
+    const parsed = new Proxy(valid, {
+      get(target, key) {
+        reads.push(key);
+        return Reflect.get(target, key);
+      },
+    });
+    vi.spyOn(JSON, "parse").mockReturnValueOnce(parsed);
+    expect(readQuickCiReceipt(root, "head")).toBe(parsed);
+    expect(reads).toEqual([
+      "schemaVersion",
+      "gateVersion",
+      "schemaVersion",
+      "gateVersion",
+      "commit",
+      "baseCommit",
+      "baseRef",
+      "completedAt",
+    ]);
+  });
+  it("does not read remaining fields after an obsolete gate with injected getters", () => {
+    const { root } = fixture("{}");
+    const reads: PropertyKey[] = [];
+    const parsed = new Proxy(
+      { schemaVersion: 1, gateVersion: 0 },
+      {
+        get(target, key) {
+          reads.push(key);
+          if (key === "commit") throw new Error("must stay lazy");
+          return Reflect.get(target, key);
+        },
+      },
+    );
+    vi.spyOn(JSON, "parse").mockReturnValueOnce(parsed);
+    expect(readQuickCiReceipt(root, "head")).toBeUndefined();
+    expect(reads).toEqual(["schemaVersion", "gateVersion"]);
+  });
+  it("does not read fields after the first invalid current field with injected getters", () => {
+    const { root, path } = fixture("{}");
+    const sentinel = new Error("baseRef must stay lazy");
+    vi.spyOn(JSON, "parse").mockReturnValueOnce({
+      ...valid,
+      baseCommit: null,
+      get baseRef() {
+        throw sentinel;
+      },
+    });
+    expect(() => readQuickCiReceipt(root, "head")).toThrow(`Invalid Quick CI receipt at ${path}.`);
+  });
+  it("propagates the same thrown property error object", () => {
+    const { root } = fixture("{}");
+    const sentinel = new Error("injected property error");
+    vi.spyOn(JSON, "parse").mockReturnValueOnce({
+      ...valid,
+      get completedAt() {
+        throw sentinel;
+      },
+    });
+    let caught: unknown;
+    try {
+      readQuickCiReceipt(root, "head");
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBe(sentinel);
+  });
+  it("rereads gateVersion rather than caching a getter result", () => {
+    const { root, path } = fixture("{}");
+    let reads = 0;
+    vi.spyOn(JSON, "parse").mockReturnValueOnce({
+      ...valid,
+      get gateVersion() {
+        return ++reads === 1 ? QUICK_CI_GATE_VERSION : 0;
+      },
+    });
+    expect(() => readQuickCiReceipt(root, "head")).toThrow(`Invalid Quick CI receipt at ${path}.`);
+    expect(reads).toBe(2);
   });
 });

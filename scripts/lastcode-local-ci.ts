@@ -452,6 +452,15 @@ export function writeQuickCiReceipt(
   return receiptPath;
 }
 
+function hasQuickCiReceiptFields(value: Partial<QuickCiReceipt>, commit: string): boolean {
+  if (value.schemaVersion !== 1) return false;
+  if (value.gateVersion !== QUICK_CI_GATE_VERSION) return false;
+  if (value.commit !== commit) return false;
+  if (typeof value.baseCommit !== "string") return false;
+  if (typeof value.baseRef !== "string") return false;
+  return typeof value.completedAt === "string";
+}
+
 export function readQuickCiReceipt(
   commonGitDir: string,
   commit: string,
@@ -460,16 +469,10 @@ export function readQuickCiReceipt(
   if (!NodeFS.existsSync(receiptPath)) return undefined;
 
   const value = JSON.parse(NodeFS.readFileSync(receiptPath, "utf8")) as Partial<QuickCiReceipt>;
-  // A gate change invalidates previously successful checks; it is a cache miss.
+  // Obsolete gates are cache misses before remaining validation.
+  // Current malformed receipts and native file/JSON/property errors must still propagate.
   if (value.schemaVersion === 1 && value.gateVersion !== QUICK_CI_GATE_VERSION) return undefined;
-  if (
-    value.schemaVersion !== 1 ||
-    value.gateVersion !== QUICK_CI_GATE_VERSION ||
-    value.commit !== commit ||
-    typeof value.baseCommit !== "string" ||
-    typeof value.baseRef !== "string" ||
-    typeof value.completedAt !== "string"
-  ) {
+  if (!hasQuickCiReceiptFields(value, commit)) {
     throw new Error(`Invalid Quick CI receipt at ${receiptPath}.`);
   }
   return value as QuickCiReceipt;
