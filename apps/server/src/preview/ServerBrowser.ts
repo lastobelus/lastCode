@@ -83,6 +83,7 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as PreviewAutomationBroker from "../mcp/PreviewAutomationBroker.ts";
 import * as DesktopBrowserChannel from "./DesktopBrowserChannel.ts";
 import * as PreviewManager from "./Manager.ts";
+import * as PreviewHosting from "./Hosting.ts";
 import * as ServerBrowserPage from "./ServerBrowserPage.ts";
 import * as PreviewBrowser from "./PreviewBrowser.ts";
 import * as PreviewBrowserHost from "./PreviewBrowserHost.ts";
@@ -324,6 +325,10 @@ interface ServerTab {
   readonly openerTabId: string | undefined;
   /** Finished downloads, newest last; files live until the tab closes. */
   readonly downloads: Array<ServerDownload>;
+  /** Browser destinations mapped to the owned local listener for later navigation. */
+  readonly hostedOrigins: Map<string, string>;
+  /** Pending viewer preparation; replacement and control handoff cancel it. */
+  viewerNavigation: AbortController | null;
   /** A page's open file picker, waiting for the controlling viewer's files. */
   fileChooser: {
     readonly id: string;
@@ -491,6 +496,7 @@ const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const host = { platform: yield* HostProcess.Platform, arch: yield* HostProcess.Architecture };
   const manager = yield* PreviewManager.PreviewManager;
+  const hosting = yield* PreviewHosting.PreviewHosting;
   const { serverEpoch } = yield* manager.list({});
   const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
   const environment = yield* ServerEnvironment.ServerEnvironment;
@@ -503,15 +509,25 @@ const make = Effect.gen(function* () {
 
   const tabs = new Map<string, ServerTab>();
   const pendingTabs = new Map<string, Promise<ServerTab>>();
+  /** Verified origins belong to the preview session, which can outlive its attachment. */
+  const sessionHostedOrigins = new Map<string, Map<string, string>>();
   /** Sessions closed while their tab was still opening; the open discards its page. */
   const closedPendingTabs = new Set<string>();
   /** Popup pages waiting for the tab their `opened` event creates. */
-  const adoptedPages = new Map<string, { readonly page: Page; readonly openerTabId: string }>();
+  const adoptedPages = new Map<
+    string,
+    {
+      readonly page: Page;
+      readonly openerTabId: string;
+      readonly hostedOrigins: Map<string, string>;
+    }
+  >();
   const nativePopups = new Map<
     string,
     {
       readonly source: DesktopBrowserChannel.DesktopTabKey;
       readonly popupId: string;
+      hostedOrigins: Map<string, string>;
       snapshot: PreviewSessionSnapshot | null;
       closed: boolean;
       closeRequested: boolean;
@@ -812,7 +828,9 @@ const make = Effect.gen(function* () {
     const key = tabKey(tab.threadId, tab.tabId);
     if (tabs.get(key) !== tab) return;
     tabs.delete(key);
+    if (closeSession || !sessionOpen(tab)) sessionHostedOrigins.delete(key);
     tab.closing = true;
+    tab.viewerNavigation?.abort(new BrowserControlInterrupted());
     clearAbortedNavigation(tab);
     // A desktop page outlives the connection unless its session closed with it.
     const end = tab.desktop && !closeSession && sessionOpen(tab) ? "reconnect" : "gone";
@@ -883,6 +901,11 @@ const make = Effect.gen(function* () {
     const adopted = adoptedPages.get(tabKey(snapshot.threadId, snapshot.tabId));
     adoptedPages.delete(tabKey(snapshot.threadId, snapshot.tabId));
     const nativePopup = nativePopupForTab(snapshot.threadId, snapshot.tabId);
+    const hostedOrigins =
+      sessionHostedOrigins.get(tabKey(snapshot.threadId, snapshot.tabId)) ??
+      adopted?.hostedOrigins ??
+      nativePopup?.hostedOrigins ??
+      new Map<string, string>();
     if (snapshot.backingPage === "desktop-root") {
       const root = nativeRoots.get(tabKey(snapshot.threadId, snapshot.tabId));
       if (!root || root.closed || root.rootId !== snapshot.desktopRootId)
@@ -945,9 +968,11 @@ const make = Effect.gen(function* () {
     if (!desktop) await presentAsChrome(cdp, host);
     page.setDefaultTimeout(NAVIGATION_TIMEOUT_MS);
     page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS);
-    const control = new SessionControl(snapshot.automationOwner ?? null, () =>
-      ServerBrowserPage.invalidateRefs(page),
-    );
+    const control = new SessionControl(snapshot.automationOwner ?? null, () => {
+      tab.viewerNavigation?.abort(new BrowserControlInterrupted());
+      ServerBrowserPage.invalidateRefs(page);
+    });
+    const openerTabId = adopted?.openerTabId ?? nativePopup?.source.tabId;
     const tab: ServerTab = {
       threadId: ThreadId.make(snapshot.threadId),
       tabId: snapshot.tabId,
@@ -967,8 +992,10 @@ const make = Effect.gen(function* () {
       backingPage: snapshot.backingPage,
       nativePresented: false,
       revealRequested: snapshot.reveal === true,
-      openerTabId: adopted?.openerTabId ?? nativePopup?.source.tabId,
+      openerTabId,
       downloads: [],
+      hostedOrigins,
+      viewerNavigation: null,
       fileChooser: null,
       dialog: null,
       setting: snapshot.viewport ?? FILL_PREVIEW_VIEWPORT,
@@ -1099,6 +1126,7 @@ const make = Effect.gen(function* () {
         tabId: tab.tabId,
         desktopHostId: tab.desktopHostId,
       });
+    sessionHostedOrigins.set(key, tab.hostedOrigins);
     tabs.set(key, tab);
     reportLiveTabs();
     // Native/adopted pages may have finished before their listeners were installed.
@@ -1377,6 +1405,8 @@ const make = Effect.gen(function* () {
       return;
     }
     const url = popup.url();
+    // Opening a tab awaits setup; its opener can close before publication or attachment.
+    const hostedOrigins = new Map(opener.hostedOrigins);
     // Captured now: the person whose click opened the popup gets switched to it.
     const controller = [...opener.viewers].find(
       (viewer) => viewer.id === opener.control.controller,
@@ -1396,6 +1426,7 @@ const make = Effect.gen(function* () {
           adoptedPages.set(tabKey(snapshot.threadId, snapshot.tabId), {
             page: popup,
             openerTabId: opener.tabId,
+            hostedOrigins,
           }),
       }),
     ).then(
@@ -1438,6 +1469,7 @@ const make = Effect.gen(function* () {
     const popup = {
       source,
       popupId: source.popupId,
+      hostedOrigins: new Map<string, string>(),
       snapshot: null as PreviewSessionSnapshot | null,
       closed: false,
       closeRequested: false,
@@ -1475,6 +1507,7 @@ const make = Effect.gen(function* () {
       if (popup.closed) nativePopups.delete(id);
       return;
     }
+    popup.hostedOrigins = new Map(opener.hostedOrigins);
     try {
       const snapshot = await Effect.runPromise(
         manager.open({
@@ -2388,27 +2421,131 @@ const make = Effect.gen(function* () {
   };
 
   const browserNavigationUrl = async (
-    target: { readonly threadId: string; readonly desktopHostId?: string | undefined },
+    target: {
+      readonly threadId: string;
+      readonly desktopHostId?: string | undefined;
+      readonly hostedOrigins?: ReadonlyMap<string, string>;
+    },
     url: string,
     signal?: AbortSignal,
   ) => {
     signal?.throwIfAborted();
-    if (target.desktopHostId === undefined || target.desktopHostId === "local") return url;
-    const resolved = await Effect.runPromise(
-      desktopChannel.resolveUrl({
-        desktopHostId: target.desktopHostId,
-        threadId: target.threadId,
-        url,
-      }),
+    let localUrl = url;
+    const requested = new URL(url);
+    const localOrigin = target.hostedOrigins?.get(requested.origin);
+    if (localOrigin !== undefined) {
+      const local = new URL(localOrigin);
+      requested.protocol = local.protocol;
+      requested.host = local.host;
+      localUrl = requested.href;
+    }
+    let destination = url;
+    if (target.desktopHostId !== undefined && target.desktopHostId !== "local") {
+      const resolved = await Effect.runPromise(
+        desktopChannel.resolveUrl({
+          desktopHostId: target.desktopHostId,
+          threadId: target.threadId,
+          url: localUrl,
+        }),
+        { signal },
+      );
+      signal?.throwIfAborted();
+      if (resolved === null)
+        throw new ServerBrowserPage.ServerBrowserOperationError(
+          "PreviewAutomationRemoteUnavailableError",
+          "The connected desktop cannot resolve this environment URL. Check the environment connection before retrying; the desktop's localhost was not opened.",
+        );
+      destination = normalizePreviewUrl(resolved);
+    }
+    const prepared = await Effect.runPromise(
+      hosting
+        .prepareNavigation({
+          threadId: target.threadId,
+          url: localUrl,
+          ...(destination === localUrl ? {} : { browserUrl: destination }),
+        })
+        .pipe(
+          Effect.mapError(
+            () =>
+              new ServerBrowserPage.ServerBrowserOperationError(
+                "PreviewAutomationExecutionError",
+                "The saved development preview could not be prepared for browser navigation.",
+              ),
+          ),
+        ),
       { signal },
     );
     signal?.throwIfAborted();
-    if (resolved === null)
+    return { ...prepared, url: destination, localUrl };
+  };
+
+  const prepareBrowserCredential = async (
+    tab: ServerTab,
+    destination: Awaited<ReturnType<typeof browserNavigationUrl>>,
+    signal?: AbortSignal,
+    timeoutMs = NAVIGATION_TIMEOUT_MS,
+  ) => {
+    signal?.throwIfAborted();
+    if (destination.managed)
+      tab.hostedOrigins.set(new URL(destination.url).origin, new URL(destination.localUrl).origin);
+    if (destination.bootstrapToken === undefined) return;
+    // The context request installs the session cookie in this page's profile.
+    // Credentials never enter its URL, manager events, history, or navigation errors.
+    // Playwright does not abort this HTTP request with our signal. Await its
+    // actual completion so the control queue cannot hand off before cookie writes drain.
+    try {
+      const response = await tab.page
+        .context()
+        .request.post(new URL("/api/auth/browser-session", destination.url).href, {
+          data: { credential: destination.bootstrapToken },
+          maxRedirects: 0,
+          timeout: Math.max(1, Math.min(timeoutMs, 5_000)),
+        });
+      try {
+        if (!response.ok()) throw new Error("Browser session exchange was rejected.");
+      } finally {
+        await response.dispose();
+      }
+    } catch {
       throw new ServerBrowserPage.ServerBrowserOperationError(
-        "PreviewAutomationRemoteUnavailableError",
-        "The connected desktop cannot resolve this environment URL. Check the environment connection before retrying; the desktop's localhost was not opened.",
+        "PreviewAutomationExecutionError",
+        "Could not prepare browser access to this development preview.",
       );
-    return normalizePreviewUrl(resolved);
+    }
+    signal?.throwIfAborted();
+  };
+
+  const prepareExistingBrowserNavigation = async (
+    tab: ServerTab,
+    url: string,
+    signal?: AbortSignal,
+  ) => {
+    if (!/^https?:/i.test(url)) return url;
+    const destination = tab.hostedOrigins.has(new URL(url).origin)
+      ? await browserNavigationUrl(tab, url, signal)
+      : {
+          ...(await Effect.runPromise(hosting.prepareNavigation({ threadId: tab.threadId, url }), {
+            signal,
+          })),
+          url,
+          localUrl: url,
+        };
+    await prepareBrowserCredential(tab, destination, signal);
+    return destination.url;
+  };
+
+  const startViewerNavigation = (
+    tab: ServerTab,
+    run: (signal: AbortSignal) => Promise<unknown>,
+  ) => {
+    tab.viewerNavigation?.abort(new BrowserControlInterrupted());
+    const controller = new AbortController();
+    tab.viewerNavigation = controller;
+    const work = Promise.resolve().then(() => run(controller.signal));
+    tab.control.trackUntilHandoff(work);
+    void work.catch(constVoid).finally(() => {
+      if (tab.viewerNavigation === controller) tab.viewerNavigation = null;
+    });
   };
 
   const profileDesktopHost = async (request: PreviewAutomationRequest) => {
@@ -2537,7 +2674,7 @@ const make = Effect.gen(function* () {
         }
         const newTabProfileId =
           selectedProfileId ?? catalogue?.defaultProfileId ?? reportedProfileId;
-        let url = open.url === undefined ? undefined : normalizePreviewUrl(open.url);
+        const initialUrl = open.url === undefined ? undefined : normalizePreviewUrl(open.url);
         const reuse = open.reuseExistingTab ?? true;
         if (
           reuse &&
@@ -2598,16 +2735,19 @@ const make = Effect.gen(function* () {
           !catalogue.supportsNativeRoots
         )
           throw new DesktopBrowserTransportError({ reason: "root-unsupported" });
-        if (url !== undefined)
-          url = await browserNavigationUrl(
-            {
-              threadId: request.threadId,
-              desktopHostId:
-                existing?.desktopHostId ??
-                (newTabProfileId === undefined ? undefined : catalogue?.desktopHostId),
-            },
-            url,
-          );
+        const destination =
+          initialUrl === undefined
+            ? undefined
+            : await browserNavigationUrl(
+                existing ?? {
+                  threadId: request.threadId,
+                  desktopHostId:
+                    newTabProfileId === undefined ? undefined : catalogue?.desktopHostId,
+                },
+                initialUrl,
+                signal,
+              );
+        const url = destination?.url;
         signal.throwIfAborted();
         const navigationTimeout = Math.min(remainingTimeoutMs(), NAVIGATION_TIMEOUT_MS);
         if (!existing) {
@@ -2620,7 +2760,7 @@ const make = Effect.gen(function* () {
             await Effect.runPromise(
               manager.open({
                 threadId: request.threadId,
-                ...(url ? { url } : {}),
+                ...(url && !destination?.managed ? { url } : {}),
                 ...(reportedProfileId === undefined ? {} : { profileId: reportedProfileId }),
                 runtime: "server",
                 reveal: false,
@@ -2661,8 +2801,17 @@ const make = Effect.gen(function* () {
                 );
               }
               try {
-                if (existing) {
-                  if (url) await navigate(tab, url, "load", navigationTimeout);
+                if (destination)
+                  await prepareBrowserCredential(tab, destination, signal, remainingTimeoutMs());
+                signal.throwIfAborted();
+                if (existing || destination?.managed) {
+                  if (url)
+                    await navigate(
+                      tab,
+                      url,
+                      "load",
+                      Math.min(navigationTimeout, remainingTimeoutMs()),
+                    );
                 } else {
                   // Await the original navigation failure even though background creation keeps the tab.
                   await tab.initialNavigation;
@@ -2979,11 +3128,16 @@ const make = Effect.gen(function* () {
       case "navigate": {
         const navigateInput = input as PreviewAutomationNavigateInput;
         await recordAction(tab, "navigate", async () => {
-          const url = await browserNavigationUrl(tab, resolveNavigationUrl(navigateInput), signal);
+          const destination = await browserNavigationUrl(
+            tab,
+            resolveNavigationUrl(navigateInput),
+            signal,
+          );
+          await prepareBrowserCredential(tab, destination, signal, remainingTimeoutMs());
           signal.throwIfAborted();
           return navigate(
             tab,
-            url,
+            destination.url,
             navigateInput.readiness ?? "load",
             Math.min(originalInput.timeoutMs ?? request.timeoutMs, remainingTimeoutMs()),
           );
@@ -3184,6 +3338,7 @@ const make = Effect.gen(function* () {
       const key = tabKey(event.threadId, event.tabId);
       const tab = tabs.get(key);
       if (event.type === "closed") {
+        sessionHostedOrigins.delete(key);
         const popup = nativePopupForTab(event.threadId, event.tabId);
         if (popup) {
           popup.closeRequested = true;
@@ -3212,7 +3367,21 @@ const make = Effect.gen(function* () {
             const request = event.request;
             if (request?.clear === "cookies") await tab.cdp.send("Network.clearBrowserCookies");
             if (request?.clear === "cache") await tab.cdp.send("Network.clearBrowserCache");
-            if (request?.hardReload) await tab.cdp.send("Page.reload", { ignoreCache: true });
+            if (request?.hardReload) {
+              const url = tab.page.url();
+              const destination = await prepareExistingBrowserNavigation(tab, url);
+              await ServerBrowserPage.navigateWithRedirect(
+                tab.page,
+                url,
+                destination,
+                async (redirected) => {
+                  // Routing disables HTTP cache; Playwright also waits for the redirected commit.
+                  if (redirected)
+                    await tab.page.reload({ ...VIEWER_NAVIGATION_OPTIONS, waitUntil: "load" });
+                  else await tab.cdp.send("Page.reload", { ignoreCache: true });
+                },
+              );
+            }
           })
           .catch((cause: unknown) =>
             runFork(Effect.logWarning("server preview could not apply a tab setting", { cause })),
@@ -3365,24 +3534,59 @@ const make = Effect.gen(function* () {
       // viewer's next input. A newer navigation replaces it, as in Chrome.
       case "navigate":
         if (typeof message.url === "string") {
-          const url = await browserNavigationUrl(tab, normalizePreviewUrl(message.url));
-          tab.control.trackUntilHandoff(tab.page.goto(url, VIEWER_NAVIGATION_OPTIONS));
+          const url = normalizePreviewUrl(message.url);
+          startViewerNavigation(tab, async (signal) => {
+            const destination = await browserNavigationUrl(tab, url, signal);
+            await prepareBrowserCredential(tab, destination, signal);
+            signal.throwIfAborted();
+            await tab.page.goto(destination.url, VIEWER_NAVIGATION_OPTIONS);
+          });
         }
         return;
       case "history":
-        tab.control.trackUntilHandoff(
-          num(message.delta) < 0
-            ? tab.page.goBack(VIEWER_NAVIGATION_OPTIONS)
-            : tab.page.goForward(VIEWER_NAVIGATION_OPTIONS),
-        );
+        startViewerNavigation(tab, async (signal) => {
+          const delta = num(message.delta) < 0 ? -1 : 1;
+          const history = await session.send("Page.getNavigationHistory");
+          const url = history.entries[history.currentIndex + delta]?.url;
+          const navigate = async () => {
+            signal.throwIfAborted();
+            if (delta < 0) await tab.page.goBack(VIEWER_NAVIGATION_OPTIONS);
+            else await tab.page.goForward(VIEWER_NAVIGATION_OPTIONS);
+          };
+          if (typeof url !== "string") await navigate();
+          else {
+            const destination = await prepareExistingBrowserNavigation(tab, url, signal);
+            await ServerBrowserPage.navigateWithRedirect(
+              tab.page,
+              url,
+              destination,
+              navigate,
+              signal,
+            );
+          }
+        });
         return;
       case "reload":
-        // A hard reload fetches everything again, as Chrome's Shift+Reload does.
-        if (message.ignoreCache === true) {
-          await session.send("Page.reload", { ignoreCache: true });
-          return;
-        }
-        tab.control.trackUntilHandoff(tab.page.reload(VIEWER_NAVIGATION_OPTIONS));
+        startViewerNavigation(tab, async (signal) => {
+          const url = tab.page.url();
+          const destination = await prepareExistingBrowserNavigation(tab, url, signal);
+          await ServerBrowserPage.navigateWithRedirect(
+            tab.page,
+            url,
+            destination,
+            async (redirected) => {
+              // A redirect route disables HTTP cache and must remain through the navigation commit.
+              if (message.ignoreCache === true && !redirected)
+                await session.send("Page.reload", { ignoreCache: true });
+              else
+                await tab.page.reload({
+                  ...VIEWER_NAVIGATION_OPTIONS,
+                  ...(message.ignoreCache === true ? { waitUntil: "load" as const } : {}),
+                });
+            },
+            signal,
+          );
+        });
         return;
       case "probe": {
         const x = num(message.x);

@@ -1,3 +1,6 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- An ephemeral HTTP fixture verifies real Chromium redirects across origins.
+import * as NodeHttp from "node:http";
+
 import {
   chromium,
   type Browser,
@@ -132,6 +135,67 @@ describe("server browser element refs", () => {
       networkEntries: [],
       actionTimeline: [],
     });
+
+  it.each(["back", "forward", "reload", "same-document back"])(
+    "redirects a changed origin during %s without adding a history entry",
+    async (operation) => {
+      const requests: string[] = [];
+      const server = NodeHttp.createServer((request, response) => {
+        requests.push(`http://${request.headers.host}${request.url}`);
+        response.setHeader("Content-Type", "text/html");
+        response.end("<p>report</p>");
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      try {
+        const address = server.address();
+        if (address === null || typeof address === "string")
+          throw new Error("Missing test listener");
+        const origin = `http://127.0.0.1:${address.port}`;
+        const before = `${origin}/before`;
+        const after = `${origin}/after`;
+        const stored = `${origin}/report?mode=dark#anchor`;
+        const target =
+          operation === "same-document back" ? stored.replace("#anchor", "#first") : stored;
+        const destination = target.replace("127.0.0.1", "localhost");
+        await page.goto(before);
+        if (operation === "same-document back") await page.goto(target);
+        await page.goto(stored);
+        if (operation === "back" || operation === "forward") await page.goto(after);
+        if (operation === "forward") {
+          await page.goBack();
+          await page.goBack();
+        }
+        const history = await cdp.send("Page.getNavigationHistory");
+        requests.length = 0;
+        await ServerBrowserPage.navigateWithRedirect(page, target, destination, async () => {
+          if (operation === "forward") await page.goForward({ waitUntil: "commit" });
+          else if (operation === "reload") await page.reload({ waitUntil: "commit" });
+          else await page.goBack({ waitUntil: "commit" });
+        });
+        const navigated = await cdp.send("Page.getNavigationHistory");
+        expect(page.url()).toBe(destination);
+        expect(navigated.entries).toHaveLength(history.entries.length);
+        expect(navigated.currentIndex).toBe(
+          history.currentIndex + (operation === "forward" ? 1 : operation === "reload" ? 0 : -1),
+        );
+        expect(requests.filter((url) => new URL(url).pathname === "/report")).toEqual([
+          destination.split("#")[0],
+        ]);
+        await page.goBack();
+        expect(page.url()).toBe(before);
+        await page.goForward();
+        expect(page.url()).toBe(destination);
+        if (operation === "back" || operation === "forward") {
+          await page.goForward();
+          expect(page.url()).toBe(after);
+        }
+      } finally {
+        await new Promise<void>((resolve, reject) =>
+          server.close((error) => (error ? reject(error) : resolve())),
+        );
+      }
+    },
+  );
 
   it("captures the full native DIP viewport with actual PNG pixels matching bounded snapshot metadata", async () => {
     const nativeBrowser = await chromium.launch({
