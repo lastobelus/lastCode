@@ -40,6 +40,16 @@ it("receives desktop messages and exits while the parent keeps both input pipes 
     if (!stream || !("write" in stream)) throw new Error(`Missing pipe ${fd}`);
     stream.write(`${JSON.stringify(value)}\n`);
   };
+  const controlCommands: Array<unknown> = [];
+  let controlBuffer = "";
+  child.stdio[4]?.on("data", (chunk: Buffer) => {
+    controlBuffer += chunk.toString();
+    let end: number;
+    while ((end = controlBuffer.indexOf("\n")) >= 0) {
+      controlCommands.push(JSON.parse(controlBuffer.slice(0, end)));
+      controlBuffer = controlBuffer.slice(end + 1);
+    }
+  });
   const key = { threadId: "thread-1", tabId: "tab-1" };
   child.stdout?.on("data", (chunk: Buffer) => {
     output += chunk.toString();
@@ -66,6 +76,11 @@ it("receives desktop messages and exits while the parent keeps both input pipes 
     );
     expect(errors).not.toContain("Error");
     expect(verified).toBe(true);
+    expect(controlCommands).toContainEqual({
+      type: "reconcileRoots",
+      serverEpoch: "fixture-server-epoch",
+      retainedRootRequestIds: [],
+    });
     expect(result).toEqual({ code: 0, signal: null });
   } finally {
     clearTimeout(watchdog);
@@ -149,6 +164,260 @@ it.effect(
 );
 
 it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
+  it.effect(
+    "root creation requires the owning host, tab, request, and profile acknowledgment",
+    () =>
+      Effect.gen(function* () {
+        const channel = yield* remoteChannel;
+        const host = yield* connectHost(channel, "socket-a", "host-a");
+        const other = yield* connectHost(channel, "socket-b", "host-b");
+        const opening = yield* channel
+          .createRoot(
+            { ...key, desktopHostId: "host-a" },
+            {
+              serverEpoch: "server-epoch-a",
+              profileId: "work",
+              url: "https://example.test/start",
+              viewport: { _tag: "freeform", width: 900, height: 600 },
+            },
+          )
+          .pipe(Effect.forkScoped);
+        const command = yield* Queue.take(host.commands);
+        expect(command).toMatchObject({
+          type: "createRoot",
+          ...key,
+          profileId: "work",
+          url: "https://example.test/start",
+        });
+        if (command.type !== "createRoot") throw new Error("Expected root creation");
+        const response = {
+          type: "rootCreated" as const,
+          ...key,
+          requestId: command.requestId,
+          profileId: "work",
+          rootId: "root-a",
+        };
+        expect(
+          (yield* channel.receiveEvent("socket-b", "host-a", response).pipe(Effect.flip)).reason,
+        ).toBe("host-unavailable");
+        yield* channel.receiveEvent("socket-b", "host-b", response);
+        yield* channel.receiveEvent("socket-a", "host-a", { ...response, tabId: "other-tab" });
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          ...response,
+          requestId: "other-request",
+        });
+        yield* channel.receiveEvent("socket-a", "host-a", { ...response, profileId: "default" });
+        expect(opening.pollUnsafe()).toBeUndefined();
+        expect(yield* Queue.size(other.commands)).toBe(0);
+        yield* channel.receiveEvent("socket-a", "host-a", response);
+        expect(yield* Fiber.join(opening)).toBe("root-a");
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect.each(["timeout", "interrupted", "disconnected"] as const)(
+    "a %s root creation retries cleanup only for its original creation request",
+    (failure) =>
+      Effect.gen(function* () {
+        const channel = yield* remoteChannel;
+        const host = yield* connectHost(channel, "socket-a", "host-a");
+        const opening = yield* channel
+          .createRoot(
+            { ...key, desktopHostId: "host-a" },
+            { serverEpoch: "server-epoch-a", profileId: "work", url: "about:blank" },
+          )
+          .pipe(Effect.flip, Effect.forkScoped);
+        const creation = yield* Queue.take(host.commands);
+        if (creation.type !== "createRoot") throw new Error("Expected root creation");
+        if (failure === "timeout") {
+          yield* TestClock.adjust("10 seconds");
+          expect((yield* Fiber.join(opening)).reason).toBe("host-unavailable");
+        } else if (failure === "interrupted") yield* Fiber.interrupt(opening);
+        else {
+          yield* Fiber.interrupt(host.fiber);
+          expect((yield* Fiber.join(opening)).reason).toBe("host-unavailable");
+        }
+        const connected =
+          failure === "disconnected" ? yield* connectHost(channel, "socket-c", "host-a") : host;
+        expect(yield* Queue.take(connected.commands)).toEqual({
+          type: "cancelRootCreation",
+          ...key,
+          requestId: creation.requestId,
+          profileId: "work",
+        });
+        const owner = failure === "disconnected" ? "socket-c" : "socket-a";
+        yield* channel.receiveEvent(owner, "host-a", {
+          type: "rootCreated",
+          ...key,
+          requestId: creation.requestId,
+          profileId: "other",
+          rootId: "unrelated-root",
+        });
+        expect(yield* Queue.size(connected.commands)).toBe(0);
+        yield* channel.receiveEvent(owner, "host-a", {
+          type: "rootCreated",
+          ...key,
+          requestId: creation.requestId,
+          profileId: "work",
+          rootId: "late-root",
+        });
+        expect(yield* Queue.take(connected.commands)).toEqual({
+          type: "cancelRootCreation",
+          ...key,
+          requestId: creation.requestId,
+          profileId: "work",
+        });
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect("a cancellation acknowledgment retires reconnect cancellation replay", () =>
+    Effect.gen(function* () {
+      const channel = yield* remoteChannel;
+      const host = yield* connectHost(channel, "socket-a", "host-a");
+      const opening = yield* channel
+        .createRoot(
+          { ...key, desktopHostId: "host-a" },
+          { serverEpoch: "server-epoch-a", profileId: "default", url: "about:blank" },
+        )
+        .pipe(Effect.forkScoped);
+      const creation = yield* Queue.take(host.commands);
+      if (creation.type !== "createRoot") throw new Error("Expected root creation");
+      yield* Fiber.interrupt(opening);
+      expect((yield* Queue.take(host.commands)).type).toBe("cancelRootCreation");
+      yield* channel.receiveEvent("socket-a", "host-a", {
+        type: "rootCreated",
+        ...key,
+        requestId: creation.requestId,
+        profileId: "default",
+        rootId: null,
+        reason: "guest-unavailable",
+      });
+      yield* Fiber.interrupt(host.fiber);
+      const replacement = yield* connectHost(channel, "socket-b", "host-a");
+      expect(yield* Queue.size(replacement.commands)).toBe(0);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    "discarding an acknowledged but unpublished root cancels its original request after reconnect",
+    () =>
+      Effect.gen(function* () {
+        const channel = yield* remoteChannel;
+        const host = yield* connectHost(channel, "socket-a", "host-a");
+        const source = { ...key, desktopHostId: "host-a" };
+        const opening = yield* channel
+          .createRoot(source, {
+            serverEpoch: "server-epoch-a",
+            profileId: "work",
+            url: "about:blank",
+          })
+          .pipe(Effect.forkScoped);
+        const creation = yield* Queue.take(host.commands);
+        if (creation.type !== "createRoot") throw new Error("Expected root creation");
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          type: "rootCreated",
+          ...key,
+          requestId: creation.requestId,
+          profileId: "work",
+          rootId: "root-a",
+        });
+        yield* Fiber.join(opening);
+        yield* channel.cancelRootCreation(source, "other-root");
+        expect(yield* Queue.size(host.commands)).toBe(0);
+        yield* Fiber.interrupt(host.fiber);
+        yield* channel.cancelRootCreation(source, "root-a");
+        const next = yield* connectHost(channel, "socket-b", "host-a");
+        expect(yield* Queue.take(next.commands)).toEqual({
+          type: "cancelRootCreation",
+          ...key,
+          profileId: "work",
+          requestId: creation.requestId,
+        });
+        const closed = yield* channel.closedRoots.pipe(Stream.toQueue({ capacity: "unbounded" }));
+        yield* Effect.yieldNow;
+        yield* channel.receiveEvent("socket-b", "host-a", {
+          type: "rootCreated",
+          ...key,
+          profileId: "work",
+          requestId: creation.requestId,
+          rootId: null,
+          reason: "guest-unavailable",
+        });
+        yield* channel.receiveEvent("socket-b", "host-a", {
+          type: "rootClosed",
+          ...key,
+          rootId: "root-a",
+        });
+        expect(yield* Queue.take(closed)).toEqual({ ...source, rootId: "root-a" });
+        expect(yield* Queue.size(next.commands)).toBe(0);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    "root close veto retains ownership and destruction only follows the matching root",
+    () =>
+      Effect.gen(function* () {
+        const channel = yield* remoteChannel;
+        const host = yield* connectHost(channel, "socket-a", "host-a");
+        yield* connectHost(channel, "socket-b", "host-b");
+        const source = { ...key, desktopHostId: "host-a" };
+        const opening = yield* channel
+          .createRoot(source, {
+            serverEpoch: "server-epoch-a",
+            profileId: "default",
+            url: "about:blank",
+          })
+          .pipe(Effect.forkScoped);
+        const creation = yield* Queue.take(host.commands);
+        if (creation.type !== "createRoot") throw new Error("Expected root creation");
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          type: "rootCreated",
+          ...key,
+          requestId: creation.requestId,
+          profileId: "default",
+          rootId: "root-a",
+        });
+        yield* Fiber.join(opening);
+        const closed = yield* channel.closedRoots.pipe(Stream.toQueue({ capacity: "unbounded" }));
+        const canceled = yield* channel
+          .closeRoot(source, "root-a")
+          .pipe(Effect.flip, Effect.forkScoped);
+        const attempt = yield* Queue.take(host.commands);
+        if (attempt.type !== "closeRoot") throw new Error("Expected root close");
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          type: "rootCloseCanceled",
+          ...key,
+          rootId: "root-a",
+          requestId: attempt.requestId,
+        });
+        expect((yield* Fiber.join(canceled)).reason).toBe("close-canceled");
+        expect(yield* Queue.size(closed)).toBe(0);
+        const closing = yield* channel.closeRoot(source, "root-a").pipe(Effect.forkScoped);
+        const deliberate = yield* Queue.take(host.commands);
+        expect(deliberate).toMatchObject({ type: "closeRoot", rootId: "root-a" });
+        if (deliberate.type !== "closeRoot") throw new Error("Expected root close");
+        expect(deliberate.requestId).not.toBe(attempt.requestId);
+        yield* channel.receiveEvent("socket-b", "host-b", {
+          type: "rootClosed",
+          ...key,
+          rootId: "root-a",
+        });
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          type: "rootClosed",
+          ...key,
+          rootId: "other-root",
+        });
+        expect(closing.pollUnsafe()).toBeUndefined();
+        expect(yield* Queue.size(closed)).toBe(0);
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          type: "rootClosed",
+          ...key,
+          rootId: "root-a",
+        });
+        yield* Fiber.join(closing);
+        expect(yield* Queue.take(closed)).toEqual({ ...source, rootId: "root-a" });
+      }).pipe(Effect.scoped),
+  );
+
   it.effect.each([false, true])(
     "correlates native popup presence without closing a window (%s)",
     (present) =>
@@ -191,6 +460,300 @@ it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
         expect(yield* Fiber.join(probe)).toBe(present);
         expect(yield* Queue.size(host.commands)).toBe(0);
       }).pipe(Effect.scoped),
+  );
+
+  it.effect.each([false, true])(
+    "correlates native root presence with its exact owner, tab, root, request and kind (%s)",
+    (present) =>
+      Effect.gen(function* () {
+        const channel = yield* remoteChannel;
+        const host = yield* connectHost(channel, "socket-a", "host-a");
+        const other = yield* connectHost(channel, "socket-b", "host-b");
+        const source = { ...key, desktopHostId: "host-a" };
+        yield* channel.reconcileRoots("host-a", "server-epoch-a");
+        expect(yield* Queue.take(host.commands)).toEqual({
+          type: "reconcileRoots",
+          serverEpoch: "server-epoch-a",
+          retainedRootRequestIds: [],
+        });
+        expect(yield* Queue.size(other.commands)).toBe(0);
+        const checking = yield* channel.probeRoot(source, "root-a").pipe(Effect.forkScoped);
+        const command = yield* Queue.take(host.commands);
+        if (command.type !== "probeRoot") throw new Error("Expected native root presence probe");
+        const response = {
+          type: "rootPresence" as const,
+          ...key,
+          rootId: command.rootId,
+          requestId: command.requestId,
+          present,
+        };
+        yield* channel.receiveEvent("socket-b", "host-b", response);
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          ...response,
+          threadId: "other-thread",
+        });
+        yield* channel.receiveEvent("socket-a", "host-a", { ...response, tabId: "other-tab" });
+        yield* channel.receiveEvent("socket-a", "host-a", { ...response, rootId: "other-root" });
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          ...response,
+          requestId: "other-request",
+        });
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          type: "popupPresence",
+          ...key,
+          popupId: command.rootId,
+          requestId: command.requestId,
+          present,
+        });
+        expect(checking.pollUnsafe()).toBeUndefined();
+        yield* channel.receiveEvent("socket-a", "host-a", response);
+        expect(yield* Fiber.join(checking)).toBe(present);
+        expect(yield* Queue.size(host.commands)).toBe(0);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    "an absent root completes a lost close and retires its published reconnect replay",
+    () =>
+      Effect.gen(function* () {
+        const channel = yield* remoteChannel;
+        const host = yield* connectHost(channel, "socket-a", "host-a");
+        const source = { ...key, desktopHostId: "host-a" };
+        const opening = yield* channel
+          .createRoot(source, {
+            serverEpoch: "server-epoch-a",
+            profileId: "default",
+            url: "about:blank",
+          })
+          .pipe(Effect.forkScoped);
+        const creation = yield* Queue.take(host.commands);
+        if (creation.type !== "createRoot") throw new Error("Expected native root creation");
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          type: "rootCreated",
+          ...key,
+          rootId: "root-a",
+          requestId: creation.requestId,
+          profileId: "default",
+        });
+        yield* Fiber.join(opening);
+        const accepting = yield* channel.acceptRoot(source, "root-a").pipe(Effect.forkScoped);
+        const acceptance = yield* Queue.take(host.commands);
+        if (acceptance.type !== "acceptRoot") throw new Error("Expected native root acceptance");
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          ...acceptance,
+          type: "rootAccepted",
+          accepted: true,
+        });
+        yield* Fiber.join(accepting);
+        yield* channel.publishRoot(source, "root-a");
+        expect((yield* Queue.take(host.commands)).type).toBe("publishRoot");
+        const closing = yield* channel.closeRoot(source, "root-a").pipe(Effect.forkScoped);
+        expect((yield* Queue.take(host.commands)).type).toBe("closeRoot");
+        const checking = yield* channel.probeRoot(source, "root-a").pipe(Effect.forkScoped);
+        const probe = yield* Queue.take(host.commands);
+        if (probe.type !== "probeRoot") throw new Error("Expected native root probe");
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          type: "rootPresence",
+          ...key,
+          rootId: "root-a",
+          requestId: probe.requestId,
+          present: false,
+        });
+        expect(yield* Fiber.join(checking)).toBe(false);
+        yield* Fiber.join(closing);
+        yield* Fiber.interrupt(host.fiber);
+        const reconnected = yield* connectHost(channel, "socket-b", "host-a");
+        expect(yield* Queue.size(reconnected.commands)).toBe(0);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    "inventory snapshots include current and pending requests only for their exact owner",
+    () =>
+      Effect.gen(function* () {
+        const channel = yield* remoteChannel;
+        const host = yield* connectHost(channel, "socket-a", "host-a");
+        const other = yield* connectHost(channel, "socket-b", "host-b");
+        // Constructing reconciliation early must not capture an obsolete inventory.
+        const reconcile = channel.reconcileRoots("host-a", "server-epoch-a");
+        const pendingKey = { ...key, tabId: "pending", desktopHostId: "host-a" };
+        const pending = yield* channel
+          .createRoot(pendingKey, {
+            serverEpoch: "server-epoch-a",
+            profileId: "default",
+            url: "about:blank",
+          })
+          .pipe(Effect.forkScoped);
+        const pendingCommand = yield* Queue.take(host.commands);
+        if (pendingCommand.type !== "createRoot") throw new Error("Expected pending creation");
+        const retainedKey = { ...key, tabId: "retained", desktopHostId: "host-a" };
+        const retained = yield* channel
+          .createRoot(retainedKey, {
+            serverEpoch: "server-epoch-a",
+            profileId: "default",
+            url: "about:blank",
+          })
+          .pipe(Effect.forkScoped);
+        const retainedCommand = yield* Queue.take(host.commands);
+        if (retainedCommand.type !== "createRoot") throw new Error("Expected retained creation");
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          type: "rootCreated",
+          ...retainedKey,
+          requestId: retainedCommand.requestId,
+          rootId: "retained-root",
+          profileId: "default",
+        });
+        yield* Fiber.join(retained);
+        const foreign = yield* channel
+          .createRoot(
+            { ...key, desktopHostId: "host-b" },
+            { serverEpoch: "server-epoch-a", profileId: "default", url: "about:blank" },
+          )
+          .pipe(Effect.forkScoped);
+        const foreignCommand = yield* Queue.take(other.commands);
+        if (foreignCommand.type !== "createRoot") throw new Error("Expected foreign creation");
+        yield* reconcile;
+        expect(yield* Queue.take(host.commands)).toEqual({
+          type: "reconcileRoots",
+          serverEpoch: "server-epoch-a",
+          retainedRootRequestIds: [retainedCommand.requestId, pendingCommand.requestId],
+        });
+        expect(yield* Queue.size(other.commands)).toBe(0);
+        yield* Fiber.interrupt(pending);
+        expect((yield* Queue.take(host.commands)).type).toBe("cancelRootCreation");
+        yield* channel.reconcileRoots("host-a", "server-epoch-a");
+        expect(yield* Queue.take(host.commands)).toMatchObject({
+          retainedRootRequestIds: [retainedCommand.requestId],
+        });
+        yield* channel.discardRoot(retainedKey, "retained-root");
+        expect(yield* Queue.take(host.commands)).toMatchObject({
+          type: "discardRoot",
+          rootId: "retained-root",
+        });
+        yield* channel.reconcileRoots("host-a", "server-epoch-a");
+        expect(yield* Queue.take(host.commands)).toMatchObject({ retainedRootRequestIds: [] });
+        yield* Fiber.interrupt(foreign);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    "reconnect inventories omit offline discards without requiring a destruction acknowledgment",
+    () =>
+      Effect.gen(function* () {
+        const channel = yield* remoteChannel;
+        const host = yield* connectHost(channel, "socket-a", "host-a");
+        const source = { ...key, desktopHostId: "host-a" };
+        const opening = yield* channel
+          .createRoot(source, {
+            serverEpoch: "server-epoch-a",
+            profileId: "default",
+            url: "about:blank",
+          })
+          .pipe(Effect.forkScoped);
+        const creation = yield* Queue.take(host.commands);
+        if (creation.type !== "createRoot") throw new Error("Expected native root creation");
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          type: "rootCreated",
+          ...key,
+          rootId: "root-a",
+          requestId: creation.requestId,
+          profileId: "default",
+        });
+        yield* Fiber.join(opening);
+        const accepting = yield* channel.acceptRoot(source, "root-a").pipe(Effect.forkScoped);
+        const acceptance = yield* Queue.take(host.commands);
+        if (acceptance.type !== "acceptRoot") throw new Error("Expected native root acceptance");
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          ...acceptance,
+          type: "rootAccepted",
+          accepted: true,
+        });
+        yield* Fiber.join(accepting);
+        yield* channel.publishRoot(source, "root-a");
+        expect((yield* Queue.take(host.commands)).type).toBe("publishRoot");
+        yield* Fiber.interrupt(host.fiber);
+        yield* channel.discardRoot(source, "wrong-root");
+        expect(yield* channel.closeRoot(source, "root-a", { discardIfOffline: true })).toBe(
+          "discarded",
+        );
+        const other = yield* connectHost(channel, "socket-b", "host-b");
+        yield* channel.reconcileRoots("host-b", "server-epoch-a");
+        expect(yield* Queue.take(other.commands)).toEqual({
+          type: "reconcileRoots",
+          serverEpoch: "server-epoch-a",
+          retainedRootRequestIds: [],
+        });
+        expect(yield* Queue.size(other.commands)).toBe(0);
+        yield* TestClock.adjust("365 days");
+        let reconnected = yield* connectHost(channel, "socket-c", "host-a");
+        expect(yield* Queue.size(reconnected.commands)).toBe(0);
+        yield* channel.reconcileRoots("host-a", "server-epoch-a");
+        expect(yield* Queue.take(reconnected.commands)).toEqual({
+          type: "reconcileRoots",
+          serverEpoch: "server-epoch-a",
+          retainedRootRequestIds: [],
+        });
+        expect(yield* Queue.size(reconnected.commands)).toBe(0);
+        const closures = yield* channel.closedRoots.pipe(Stream.toQueue({ capacity: "unbounded" }));
+        yield* channel.receiveEvent("socket-c", "host-a", {
+          type: "rootClosed",
+          ...key,
+          rootId: "wrong-root",
+        });
+        yield* Fiber.interrupt(reconnected.fiber);
+        reconnected = yield* connectHost(channel, "socket-d", "host-a");
+        expect(yield* Queue.size(reconnected.commands)).toBe(0);
+        yield* channel.reconcileRoots("host-a", "server-epoch-a");
+        expect(yield* Queue.take(reconnected.commands)).toEqual({
+          type: "reconcileRoots",
+          serverEpoch: "server-epoch-a",
+          retainedRootRequestIds: [],
+        });
+        yield* channel.receiveEvent("socket-d", "host-a", {
+          type: "rootClosed",
+          ...key,
+          rootId: "root-a",
+        });
+        expect(yield* Queue.size(closures)).toBe(0);
+        yield* Fiber.interrupt(reconnected.fiber);
+        reconnected = yield* connectHost(channel, "socket-e", "host-a");
+        expect(yield* Queue.size(reconnected.commands)).toBe(0);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect("disconnect fails an outstanding root probe and ignores its old response", () =>
+    Effect.gen(function* () {
+      const channel = yield* remoteChannel;
+      const host = yield* connectHost(channel, "socket-a", "host-a");
+      const source = { ...key, desktopHostId: "host-a" };
+      const checking = yield* channel
+        .probeRoot(source, "root-a")
+        .pipe(Effect.flip, Effect.forkScoped);
+      const old = yield* Queue.take(host.commands);
+      if (old.type !== "probeRoot") throw new Error("Expected root probe");
+      yield* Fiber.interrupt(host.fiber);
+      expect((yield* Fiber.join(checking)).reason).toBe("host-unavailable");
+      const reconnected = yield* connectHost(channel, "socket-b", "host-a");
+      const retry = yield* channel.probeRoot(source, "root-a").pipe(Effect.forkScoped);
+      const command = yield* Queue.take(reconnected.commands);
+      if (command.type !== "probeRoot") throw new Error("Expected replacement root probe");
+      yield* channel.receiveEvent("socket-b", "host-a", {
+        type: "rootPresence",
+        ...key,
+        rootId: "root-a",
+        requestId: old.requestId,
+        present: false,
+      });
+      expect(retry.pollUnsafe()).toBeUndefined();
+      yield* channel.receiveEvent("socket-b", "host-a", {
+        type: "rootPresence",
+        ...key,
+        rootId: "root-a",
+        requestId: command.requestId,
+        present: true,
+      });
+      expect(yield* Fiber.join(retry)).toBe(true);
+    }).pipe(Effect.scoped),
   );
 
   it.effect(
@@ -573,12 +1136,19 @@ it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
           {
             action: "acquire",
             leaseId: "lease-a",
-            viewport: { _tag: "freeform", width: 390, height: 844 },
+            viewport: { _tag: "fill" },
+            viewportSize: { width: 390, height: 844 },
+            zoomFactor: 1.25,
           },
         )
         .pipe(Effect.forkScoped);
       const command = yield* Queue.take(first.commands);
       if (command.type !== "surface") throw new Error("Expected surface request");
+      expect(command).toMatchObject({
+        viewport: { _tag: "fill" },
+        viewportSize: { width: 390, height: 844 },
+        zoomFactor: 1.25,
+      });
       const response = {
         type: "surfaceReady" as const,
         ...key,
@@ -754,27 +1324,72 @@ it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
       const command = yield* Queue.take(first.commands);
       if (command.type !== "profiles") throw new Error("Expected profile catalogue request");
       const second = yield* connectHost(channel, "socket-b", "host-b");
-      yield* channel.receiveEvent("socket-b", "host-b", {
-        type: "profiles",
-        requestId: command.requestId,
-        profiles: null,
-      });
       const catalogue = {
         profiles: [{ id: "work", name: "Work", kind: "persistent" as const }],
         defaultProfileId: "work",
       };
+      yield* channel.receiveEvent("socket-b", "host-b", {
+        type: "profiles",
+        requestId: command.requestId,
+        profiles: catalogue,
+        supportsNativeRoots: true,
+      });
       yield* channel.receiveEvent("socket-a", "host-a", {
         type: "profiles",
         requestId: command.requestId,
         profiles: catalogue,
       });
-      expect(yield* Fiber.join(request)).toEqual({ ...catalogue, desktopHostId: "host-a" });
+      expect(yield* Fiber.join(request)).toEqual({
+        ...catalogue,
+        desktopHostId: "host-a",
+        supportsNativeRoots: false,
+      });
       expect(yield* profiles).toBeNull();
       yield* Fiber.interrupt(first.fiber);
       yield* Fiber.interrupt(second.fiber);
       expect(channel.available).toBe(false);
       expect(yield* profiles).toBeNull();
     }).pipe(Effect.scoped),
+  );
+
+  it.effect.each([undefined, false, true])(
+    "uses the exact catalogue owner's native-root support (%s), never another desktop's",
+    (supportsNativeRoots) =>
+      Effect.gen(function* () {
+        const channel = yield* remoteChannel;
+        const first = yield* connectHost(channel, "socket-a", "host-a");
+        const second = yield* connectHost(channel, "socket-b", "host-b");
+        const input = { threadId: "thread-1", agentSessionId: "agent-1", desktopHostId: "host-b" };
+        const request = yield* channel.getProfiles(input).pipe(Effect.forkScoped);
+        const command = yield* Queue.take(second.commands);
+        if (command.type !== "profiles") throw new Error("Expected profile catalogue request");
+        expect(yield* Queue.size(first.commands)).toBe(0);
+        const catalogue = {
+          profiles: [{ id: "work", name: "Work", kind: "persistent" as const }],
+          defaultProfileId: "work",
+        };
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          type: "profiles",
+          requestId: command.requestId,
+          profiles: catalogue,
+          supportsNativeRoots: supportsNativeRoots !== true,
+        });
+        yield* channel.receiveEvent("socket-b", "host-b", {
+          type: "profiles",
+          requestId: command.requestId,
+          profiles: catalogue,
+          ...(supportsNativeRoots === undefined ? {} : { supportsNativeRoots }),
+        });
+        expect(yield* Fiber.join(request)).toEqual({
+          ...catalogue,
+          desktopHostId: "host-b",
+          supportsNativeRoots: supportsNativeRoots === true,
+        });
+        yield* Fiber.interrupt(second.fiber);
+        expect(yield* channel.getProfiles(input)).toBeNull();
+        expect(yield* Queue.size(first.commands)).toBe(0);
+        expect(yield* channel.getProfiles({ ...input, desktopHostId: "local" })).toBeNull();
+      }).pipe(Effect.scoped),
   );
 
   it.effect("releases only the disconnected host's tabs and pending catalogue requests", () =>
@@ -831,6 +1446,43 @@ it.layer(NodeServices.layer)("remote desktop browser transport", (it) => {
         (socket) => Effect.sync(() => socket.close()),
       );
       yield* Effect.promise(() => opened.promise);
+      socket.send(
+        JSON.stringify({
+          id: 10,
+          sessionId: "viewer-session",
+          method: "Input.insertText",
+          params: { text: "viewer text", __t3InputSource: "viewer" },
+        }),
+      );
+      expect(yield* Queue.take(first.commands)).toEqual({
+        type: "cdp",
+        ...key,
+        inputSource: "viewer",
+        message: JSON.stringify({
+          id: 10,
+          sessionId: "viewer-session",
+          method: "Input.insertText",
+          params: { text: "viewer text" },
+        }),
+      });
+      socket.send(
+        JSON.stringify({
+          id: 11,
+          sessionId: "agent-session",
+          method: "Input.insertText",
+          params: { text: "agent text" },
+        }),
+      );
+      expect(yield* Queue.take(first.commands)).toEqual({
+        type: "cdp",
+        ...key,
+        message: JSON.stringify({
+          id: 11,
+          sessionId: "agent-session",
+          method: "Input.insertText",
+          params: { text: "agent text" },
+        }),
+      });
       socket.send('{"id":1,"method":"Browser.getVersion"}');
       expect(yield* Queue.take(first.commands)).toEqual({
         type: "cdp",

@@ -1,5 +1,6 @@
 import { limitRecoveryCommand } from "./UsageLimitRecoveryWorker.ts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import * as UpdateDrainAdmissionTestkit from "../updateDrain/UpdateDrainAdmission.testkit.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
@@ -79,6 +80,8 @@ import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import { makePausedEnvironment } from "./EnvironmentAutomation.testkit.ts";
+import * as Ref from "effect/Ref";
 
 const layerPlatformTest = Layer.merge(
   NodeServices.layer,
@@ -278,6 +281,7 @@ const layerTest = Layer.mergeAll(
 ).pipe(
   Layer.provide(McpSessionRegistryTestkit.layer),
   Layer.provide(McpProviderSessions.layer),
+  Layer.provide(UpdateDrainAdmissionTestkit.layerOpen),
   Layer.provide(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
@@ -288,9 +292,321 @@ const layerTest = Layer.mergeAll(
   Layer.provide(layerPlatformTest),
 );
 
+it.effect.each(
+  (["queued", "starting"] as const).flatMap((scenario) =>
+    (["notification", "restart", "usage-limit"] as const).map((wake) => ({ scenario, wake })),
+  ),
+)(
+  "holds a $scenario $wake automatic wake through server recovery and releases it once after Resume",
+  ({ scenario, wake }) =>
+    Effect.gen(function* () {
+      const pause = yield* makePausedEnvironment;
+      if (scenario === "starting") yield* Ref.set(pause.state, null);
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const id = ThreadId.make(`environment-pause-${scenario}-${wake}`);
+        const messageId = MessageId.make(
+          wake === "restart"
+            ? `message:restart-continuation:${id}`
+            : wake === "usage-limit"
+              ? `limit-resume:${id}:request`
+              : `${id}:notification`,
+        );
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`${id}:create`),
+          threadId: id,
+          projectId: ProjectId.make(`${id}:project`),
+          title: "Paused notification",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: process.cwd(),
+          createdBy: "user",
+          creationSource: "web",
+        });
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(`${id}:notification`),
+          threadId: id,
+          messageId,
+          text: "Checks finished",
+          attachments: [],
+          createdBy: "agent",
+          creationSource: "server",
+          dispatchMode: { type: "queue_after_active" },
+          notification: {
+            source: { kind: "monitor" },
+            outcome: "updated",
+            summary: "Checks finished",
+          },
+        });
+        if (wake !== "notification") {
+          const sql = yield* SqlClient.SqlClient;
+          // Restore the durable message shape emitted by these automatic sources,
+          // independently of the effect that may already have admitted its run.
+          yield* sql`UPDATE orchestration_v2_projection_messages
+            SET payload_json = json_set(json_remove(payload_json, '$.notification'),
+              '$.createdBy', ${wake === "restart" ? "agent" : "user"})
+            WHERE thread_id = ${id} AND message_id = ${messageId}`;
+        }
+        yield* pause.pause;
+        yield* orchestrator.dispatch({
+          type: "thread.pull-request.watch",
+          commandId: CommandId.make(`${id}:watch`),
+          threadId: id,
+          host: "github.com",
+          repository: "pingdotgg/t3code",
+          number: 9,
+          watching: true,
+          link: { url: "https://github.com/pingdotgg/t3code/pull/9", source: "agent" },
+        });
+        yield* orchestrator.dispatch({
+          type: "thread.pull-request.watch",
+          commandId: CommandId.make(`${id}:unwatch`),
+          threadId: id,
+          host: "github.com",
+          repository: "pingdotgg/t3code",
+          number: 9,
+          watching: false,
+        });
+        assert.isUndefined((yield* orchestrator.getThreadShell(id))?.pullRequests?.[0]?.watch);
+        const before = yield* orchestrator.getThreadProjection(id);
+        const run = before.runs[0]!;
+        assert.equal(run.status, scenario);
+        assert.deepEqual(yield* outbox.deferredAutomaticExecution, [
+          { threadId: id, runId: run.id },
+        ]);
+        if (scenario === "starting") {
+          // A pause committed while the SQL claim was in flight must win before
+          // execution, without consuming a delivery attempt.
+          yield* pause.resume;
+          const claimed = Option.getOrThrow(
+            yield* outbox.claimNext({ workerId: "claim-race-fixture", leaseDurationMs: 30_000 }),
+          );
+          yield* pause.pause;
+          assert.isTrue(
+            yield* outbox.deferIfEnvironmentPaused({
+              effectId: claimed.id,
+              workerId: "claim-race-fixture",
+            }),
+          );
+          yield* outbox.clearCancellation(claimed.id);
+          const held = Option.getOrThrow(yield* outbox.get(claimed.id));
+          assert.equal(held.status, "pending");
+          assert.equal(held.attemptCount, 0);
+        }
+        if (scenario === "queued") {
+          yield* orchestrator.resumeQueuedRuns;
+          assert.equal((yield* orchestrator.getThreadProjection(id)).runs[0]?.status, "queued");
+          assert.equal(before.turnItems.length, 0);
+        }
+        const recovery = yield* ProviderRuntimeRecoveryService.ProviderRuntimeRecoveryService;
+        yield* recovery.prepareForShutdown;
+        yield* recovery.reconcile("shutdown");
+        yield* recovery.recover;
+        const recoveredRun = (yield* orchestrator.getThreadProjection(id)).runs[0]!;
+        assert.equal(recoveredRun.status, scenario);
+        assert.notEqual(recoveredRun.queueHeld, true);
+        assert.deepEqual(yield* outbox.deferredAutomaticExecution, [
+          { threadId: id, runId: run.id },
+        ]);
+        const executions: EffectOutbox.OrchestrationEffectV2[] = [];
+        const workerLayer = EffectWorker.layerWithOptions({
+          workerId: "pause-fixture-worker",
+        }).pipe(
+          Layer.provide(
+            Layer.merge(
+              Layer.succeed(EffectOutbox.EffectOutboxV2, outbox),
+              Layer.succeed(EffectWorker.OrchestrationEffectExecutorV2, {
+                execute: (effect) =>
+                  Effect.sync(() => {
+                    executions.push(effect);
+                  }),
+              }),
+            ),
+          ),
+          Layer.provide(pause.layer),
+        );
+        yield* outbox.enqueue([
+          {
+            id: `${id}:cleanup`,
+            commandId: CommandId.make(`${id}:cleanup`),
+            threadId: id,
+            request: { type: "terminal.cleanup" },
+          },
+        ]);
+        yield* Effect.gen(function* () {
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          yield* worker.drain();
+          assert.deepEqual(
+            executions.map((effect) => effect.request.type),
+            ["terminal.cleanup"],
+          );
+          assert.deepEqual(yield* outbox.pendingExecution, []);
+          const automatic = yield* outbox.listByCommandId(CommandId.make(`${id}:notification`));
+          assert.isTrue(
+            automatic.every((effect) => effect.status === "pending" && effect.attemptCount === 0),
+          );
+          assert.isTrue(Option.isNone(yield* outbox.nextClaimableAt));
+          yield* pause.resume;
+          yield* orchestrator.resumeQueuedRuns;
+          yield* orchestrator.resumeQueuedRuns;
+          yield* worker.drain();
+          yield* worker.drain();
+          assert.equal(
+            executions.filter((effect) => effect.request.type === "provider-turn.start").length,
+            1,
+          );
+          const after = yield* orchestrator.getThreadProjection(id);
+          assert.equal(after.runs.length, 1);
+          assert.equal(after.messages.length, 1);
+          assert.equal(after.messages[0]?.id, messageId);
+        }).pipe(Effect.provide(workerLayer));
+      }).pipe(
+        Effect.provide(
+          layerTest.pipe(
+            Layer.provideMerge(SqlitePersistence.layerMemory),
+            Layer.provide(pause.layer),
+          ),
+        ),
+      );
+    }),
+);
+
+it.effect("suspends PR polling while paused without advancing its watch", () =>
+  Effect.gen(function* () {
+    const pause = yield* makePausedEnvironment;
+    yield* Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threadId = ThreadId.make("environment-pause-pr-watch");
+      const projectId = ProjectId.make("environment-pause-pr-watch-project");
+      yield* seedProject({
+        projectId,
+        title: "Watch",
+        workspaceRoot: "/workspace/watch",
+        defaultModelSelection: null,
+        createdAt: "2026-10-01T00:00:00.000Z",
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make(`${threadId}:create`),
+        threadId,
+        projectId,
+        title: "Paused PR watch",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: process.cwd(),
+        createdBy: "user",
+        creationSource: "web",
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.pull-request.watch",
+        commandId: CommandId.make(`${threadId}:watch`),
+        threadId,
+        host: "github.com",
+        repository: "pingdotgg/t3code",
+        number: 9,
+        watching: true,
+        link: { url: "https://github.com/pingdotgg/t3code/pull/9", source: "agent" },
+      });
+      const watchedShell = yield* orchestrator.getThreadShell(threadId);
+      const before = watchedShell?.pullRequests;
+      assert.deepEqual(watchedShell?.pendingBackgroundTasks, [
+        {
+          taskId: "pull-request-watch:github.com/pingdotgg/t3code#9",
+          description: "Watching pull request #9",
+          kind: "monitor",
+        },
+      ]);
+      yield* Ref.set(pause.state, null);
+      const environment = yield* Effect.gen(function* () {
+        const environment = yield* EnvironmentPause.EnvironmentPause;
+        assert.equal((yield* environment.status).activeThreadCount, 1);
+        const paused = yield* environment.start;
+        assert.isTrue(paused.quiet);
+        assert.equal(paused.activeThreadCount, 0);
+        assert.isEmpty(paused.blockers);
+        assert.isEmpty(paused.session?.targets ?? []);
+        assert.deepEqual((yield* orchestrator.getThreadShell(threadId))?.pullRequests, before);
+        return environment;
+      }).pipe(
+        Effect.provide(
+          EnvironmentPause.layer.pipe(
+            Layer.provide(
+              Layer.mergeAll(
+                NodeServices.layer,
+                ServerSettings.layerTest({ environmentPauseEnabled: true }),
+                Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+                  pendingExecution: Effect.succeed([]),
+                }),
+                Layer.mock(TerminalManager)({ refreshMetadata: Effect.succeed([]) }),
+                pause.layer,
+              ),
+            ),
+          ),
+        ),
+      );
+      let reads = 0;
+      const detail = watchedPullRequestDetail({
+        projectId,
+        number: 9,
+        at: "2026-10-01T00:00:00.000Z",
+      });
+      const reactor = yield* PullRequestWatchReactor.make.pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            NodeServices.layer,
+            Layer.mock(PullRequestService.PullRequestService)({
+              watchFingerprint: () => Effect.succeed(null),
+              detail: () =>
+                Effect.sync(() => {
+                  reads += 1;
+                  return detail;
+                }),
+              activity: () =>
+                Effect.succeed({
+                  comments: [],
+                  commentCount: 0,
+                  commits: [],
+                  reviewThreads: [],
+                  commentsTruncated: false,
+                  reviewThreadsTruncated: false,
+                }),
+            }),
+            pause.layer,
+          ),
+        ),
+      );
+      yield* reactor.sweep;
+      yield* reactor.sweep;
+      assert.equal(reads, 0);
+      assert.deepEqual((yield* orchestrator.getThreadShell(threadId))?.pullRequests, before);
+      assert.equal((yield* orchestrator.getThreadRecords(threadId, ["runs"])).runs.length, 0);
+      yield* environment.resume;
+      yield* reactor.sweep;
+      assert.equal(reads, 1);
+      assert.equal(
+        (yield* orchestrator.getThreadRecords(threadId, ["messages"])).messages.length,
+        1,
+      );
+      yield* reactor.sweep;
+      assert.equal(
+        (yield* orchestrator.getThreadRecords(threadId, ["messages"])).messages.length,
+        1,
+      );
+    }).pipe(Effect.provide(layerTest.pipe(Layer.provide(pause.layer))));
+  }),
+);
+
 const layerLegacyImportTest = RuntimeLayer.layer.pipe(
   Layer.provide(McpSessionRegistryTestkit.layer),
   Layer.provide(McpProviderSessions.layer),
+  Layer.provide(UpdateDrainAdmissionTestkit.layerOpen),
   Layer.provideMerge(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
@@ -331,6 +647,7 @@ const layerProjectDeletionTest = Layer.mergeAll(
   ),
   Layer.provide(McpSessionRegistryTestkit.layer),
   Layer.provide(McpProviderSessions.layer),
+  Layer.provide(UpdateDrainAdmissionTestkit.layerOpen),
   Layer.provide(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
@@ -476,6 +793,7 @@ const layerSharedApplicationDataPlaneTest = Layer.mergeAll(
   ),
   Layer.provide(McpSessionRegistryTestkit.layer),
   Layer.provide(McpProviderSessions.layer),
+  Layer.provide(UpdateDrainAdmissionTestkit.layerOpen),
   Layer.provideMerge(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
@@ -598,7 +916,7 @@ it.layer(layerDeviceAccessTest)("production manager device access", (it) => {
   );
 });
 
-it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
+it.layer(layerTest)("RuntimeLayer.layer", (it) => {
   it.effect("emits model updates separately from provider switches", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -1129,7 +1447,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
                     },
                   },
                 },
-              } as ProviderAdapterV2SessionRuntime),
+              } as ProviderAdapter.ProviderAdapterV2SessionRuntime),
             ),
           );
         }
@@ -1155,7 +1473,9 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
         assert.equal(yield* orchestrator.getThreadEventSequence(threadId), sequence);
         assert.deepEqual(yield* outbox.listByCommandId(commandId), []);
         sessionSpy.mockReturnValue(
-          Effect.succeed(Option.some({ providerSession } as ProviderAdapterV2SessionRuntime)),
+          Effect.succeed(
+            Option.some({ providerSession } as ProviderAdapter.ProviderAdapterV2SessionRuntime),
+          ),
         );
       }
 
@@ -1339,7 +1659,9 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
         const sessionSpy = vi
           .spyOn(sessions, "get")
           .mockReturnValue(
-            Effect.succeed(Option.some({ providerSession } as ProviderAdapterV2SessionRuntime)),
+            Effect.succeed(
+              Option.some({ providerSession } as ProviderAdapter.ProviderAdapterV2SessionRuntime),
+            ),
           );
         yield* Effect.addFinalizer(() => Effect.sync(() => sessionSpy.mockRestore()));
         const nextModelSelection = { ...modelSelection, model: "other-model" };
@@ -2145,7 +2467,7 @@ it.layer(layerLegacyImportTest)("OrchestrationV2 legacy import", (it) => {
   );
 });
 
-it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
+it.layer(layerTest)("RuntimeLayer.layer lifecycle", (it) => {
   it.effect("applies lifecycle commands idempotently and emits archive/removal shell deltas", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -3033,6 +3355,25 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
             });
           });
         for (const threadId of threadIds) yield* watchFrom(threadId);
+        // Released ownership keeps a conversation's existing watch independent.
+        const promotedId = threadIds[1]!;
+        const promoted = yield* orchestrator.getThreadProjection(promotedId);
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        yield* projections.apply({
+          id: EventId.make("pr-watch-promoted-lineage"),
+          type: "thread.metadata-updated",
+          threadId: promotedId,
+          occurredAt: DateTime.makeUnsafe("2026-10-02T12:00:00.000Z"),
+          payload: {
+            ...promoted.thread,
+            lineage: {
+              rootThreadId: threadIds[0]!,
+              parentThreadId: threadIds[0]!,
+              relationshipToParent: "subagent",
+              independent: true,
+            },
+          },
+        });
         const rateLimited = new PullRequestOperationError({
           operation: "getChangeRequest",
           detail: "github requests are paused until the rate limit resets",
@@ -4105,11 +4446,47 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       assert.isDefined(activeRun);
       assert.isDefined(queuedRun);
 
+      const refusal = yield* orchestrator
+        .dispatch({
+          type: "thread.archive",
+          commandId: CommandId.make("runtime-layer-archive-queued-refuse-active"),
+          threadId,
+        })
+        .pipe(Effect.flip);
+      assert.equal(refusal._tag, "OrchestratorDispatchError");
+      assert.include(String(refusal.cause), "unfinished work");
+      const afterRefusal = yield* orchestrator.getThreadProjection(threadId);
+      assert.isNull(afterRefusal.thread.archivedAt);
+      assert.isNull(afterRefusal.thread.archivePending ?? null);
+      assert.equal(afterRefusal.runs.find((run) => run.id === activeRun.id)?.status, "starting");
+      assert.equal(afterRefusal.runs.find((run) => run.id === queuedRun.id)?.status, "queued");
+
+      yield* orchestrator.dispatch({
+        type: "run.interrupt",
+        commandId: CommandId.make("runtime-layer-archive-queued-stop-active"),
+        threadId,
+        runId: activeRun.id,
+        holdQueue: true,
+      });
+      yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain();
+      const stopped = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(stopped.runs.find((run) => run.id === activeRun.id)?.status, "interrupted");
+      assert.equal(stopped.runs.find((run) => run.id === queuedRun.id)?.status, "queued");
+      assert.isTrue(stopped.runs.find((run) => run.id === queuedRun.id)?.queueHeld);
+
       yield* orchestrator.dispatch({
         type: "thread.archive",
         commandId: CommandId.make("runtime-layer-archive-queued-archive"),
         threadId,
+        childDisposition: "stop_and_archive",
+        expectedChildThreadIds: [],
       });
+      const stopping = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(stopping.runs.find((run) => run.id === activeRun.id)?.status, "interrupted");
+      assert.isNull(stopping.thread.archivedAt);
+      assert.equal(stopping.thread.archivePending?.status, "stopping");
+      assert.equal(stopping.runs.find((run) => run.id === queuedRun.id)?.status, "cancelled");
+      yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain();
 
       const archived = yield* orchestrator.getThreadProjection(threadId);
       assert.isNotNull(archived.thread.archivedAt);
@@ -5781,12 +6158,17 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
           threadId,
           limitRecovery: { runId: run.id, resetAt, autoResume: false },
         });
-      if (scenario === "archive")
+      if (scenario === "archive") {
         yield* orchestrator.dispatch({
           type: "thread.archive",
           commandId: CommandId.make(`recovery:archive:${scenario}`),
           threadId,
+          childDisposition: "stop_and_archive",
+          expectedChildThreadIds: [],
         });
+        yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain();
+        assert.isNotNull((yield* orchestrator.getThreadProjection(threadId)).thread.archivedAt);
+      }
       if (scenario === "new-message")
         yield* orchestrator.dispatch({
           type: "message.dispatch",

@@ -5,6 +5,8 @@
  * storage are isolated between them: a tab opened under "Work" cannot see
  * "Personal"'s logins. Profiles are client-local, like the other browser
  * defaults, because the Chromium guest they configure is desktop-local.
+ * Named identities share their session across environments on the same desktop;
+ * Default and Incognito keep environment-local storage.
  *
  * Two profiles are built in and cannot be edited or removed:
  * - `default` keeps the partition scope the browser used before profiles

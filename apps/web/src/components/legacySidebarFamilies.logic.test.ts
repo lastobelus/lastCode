@@ -52,6 +52,25 @@ const keys = (projection: ReturnType<typeof project>) =>
   projection.renderedRows.map((row) => row.thread.id);
 
 describe("legacy sidebar subagent families", () => {
+  it("shows released subagents as independent roots while preserving their owned descendants", () => {
+    const released = thread("helper", "archived-parent", {
+      lineage: {
+        rootThreadId: ThreadId.make("archived-parent"),
+        parentThreadId: ThreadId.make("archived-parent"),
+        relationshipToParent: "subagent",
+        independent: true,
+      },
+    });
+    const nested = thread("nested", "helper");
+    const result = project([released, nested]);
+    expect(
+      result.renderedRows.map((row) => [row.thread.id, row.depth, row.unavailableParentLabel]),
+    ).toEqual([
+      ["helper", 0, null],
+      ["nested", 1, null],
+    ]);
+    expect(released.lineage.parentThreadId).toBe("archived-parent");
+  });
   it("collapses families by default and keeps the subagent section separately collapsed", () => {
     const parent = thread("parent");
     const helper = thread("helper", "parent");

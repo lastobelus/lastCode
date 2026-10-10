@@ -826,17 +826,27 @@ export function resolveBackgroundDraftWorkspaceOptions(input: {
   envMode: DraftThreadEnvMode;
   branch: string | null;
   startFromOrigin: boolean;
+  canAutoBalance: boolean;
+  environmentSelection?: DraftThreadState["environmentSelection"];
 }): {
   envMode: DraftThreadEnvMode;
   branch: string | null;
   worktreePath: null;
   startFromOrigin: boolean;
+  environmentSelection?: "auto" | "manual";
 } {
+  // Default automatic intent also exists on single-host drafts. Keep their
+  // carried base branch when opening the next draft cannot rebalance it.
+  const environmentSelection =
+    input.environmentSelection === "auto" && !input.canAutoBalance
+      ? undefined
+      : input.environmentSelection;
   return {
     envMode: input.envMode,
     branch: input.branch,
     worktreePath: null,
     startFromOrigin: input.envMode === "worktree" && input.startFromOrigin,
+    ...(environmentSelection ? { environmentSelection } : {}),
   };
 }
 

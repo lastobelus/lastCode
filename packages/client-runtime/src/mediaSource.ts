@@ -5,7 +5,7 @@ import {
   classifyMarkdownImageSource,
   markdownImageSourceFragment,
   type MarkdownImageSource,
-} from "./markdownImages.ts";
+} from "@t3tools/shared/markdownImages";
 import { fileBasename } from "@t3tools/shared/path";
 import { splitFilePathPosition } from "@t3tools/shared/fileLinks";
 import { splitMarkdownLinkSearchAndHash } from "@t3tools/shared/markdownLinks";

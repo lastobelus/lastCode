@@ -7,6 +7,7 @@ import * as NodePath from "node:path";
 import { assert, describe, it } from "@effect/vitest";
 
 import { readCarryGroupChain } from "./lastcode-carry-replay.ts";
+import { acquireMainWriteLock } from "./lastcode-main-write-lock.ts";
 import { normalizeCheckpointCommits } from "./lastcode-quiet-references.ts";
 
 const NIGHTLY_A = "v9.9.9-nightly.20990101.1";
@@ -39,6 +40,7 @@ const FIXTURE_RUNTIME_PATHS = [
   "scripts/lastcode-migration-history.ts",
   "scripts/lastcode-migration-validation.ts",
   "scripts/lastcode-lock.mjs",
+  "scripts/lastcode-main-write-lock.ts",
   "scripts/lastcode-build-mac.ts",
   "scripts/lastcode-nightly.ts",
   "scripts/lib/lastcode-installable-tag.ts",
@@ -149,6 +151,7 @@ function initFixture(): Fixture {
 function checkpoint(
   fixture: Fixture,
   args: ReadonlyArray<string>,
+  environment: NodeJS.ProcessEnv = {},
 ): NodeChildProcess.SpawnSyncReturns<string> {
   const fakeBin = NodePath.join(fixture.root, "bin");
   return NodeChildProcess.spawnSync(process.execPath, ["scripts/lastcode-checkpoint.ts", ...args], {
@@ -157,6 +160,7 @@ function checkpoint(
     env: {
       ...process.env,
       HOME: fixture.home,
+      ...environment,
       PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
     },
   });
@@ -958,43 +962,19 @@ exec "$FIXTURE_REAL_GIT" "$@"
           git(fixture.repo, ["show", `${promoted}:merged-during-checkpoint.txt`]),
           "concurrent merge must survive",
         );
-        assert.equal(
-          remoteMissing(fixture.origin, `refs/tags/lastcode/checkpoint/${NIGHTLY_B}`),
-          false,
-          result.stderr || result.stdout,
-        );
-        const tag = `lastcode/checkpoint/${NIGHTLY_B}`;
-        const candidate = remoteCommit(fixture.origin, `refs/tags/${tag}`);
-        assert.equal(
-          git(fixture.repo, ["show", `${candidate}:downstream.txt`]),
-          "downstream behavior",
-        );
-        assert.equal(git(fixture.repo, ["show", `${candidate}:upstream.txt`]), "upstream behavior");
-        if (concurrentMerge) {
-          assert.equal(result.status, 0, result.stderr || result.stdout);
-          assert.match(result.stdout, /leaving promotion to the next run/u);
-          assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), merged);
-          const retry = checkpoint(fixture, ["--push-tags", "--promote"], environment);
-          assert.equal(retry.status, 0, retry.stderr || retry.stdout);
-          const promoted = remoteCommit(fixture.origin, "refs/heads/lastcode/main");
-          assert.equal(
-            git(fixture.repo, ["show", `${promoted}:merged-during-checkpoint.txt`]),
-            "concurrent merge must survive",
-          );
-          assert.equal(git(fixture.repo, ["show", `${promoted}:upstream.txt`]), "upstream behavior");
-          assert.equal(remoteCommit(fixture.origin, `refs/tags/${tag}`), candidate);
-          assert.equal(remoteCommit(fixture.origin, `refs/lastcode/sources/${NIGHTLY_B}.1`), merged);
-        } else {
-          assert.equal(result.status, 0, result.stderr || result.stdout);
-          assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), candidate);
-          assert.equal(remoteCommit(fixture.origin, `refs/lastcode/sources/${NIGHTLY_B}`), source);
-        }
-        assert.equal(NodeFS.existsSync(queryMarker), false, "checkpoint must not query the PR queue");
-      } finally {
-        NodeFS.rmSync(fixture.root, { recursive: true, force: true });
+        assert.equal(git(fixture.repo, ["show", `${promoted}:upstream.txt`]), "upstream behavior");
+        assert.equal(remoteCommit(fixture.origin, `refs/tags/${tag}`), candidate);
+        assert.equal(remoteCommit(fixture.origin, `refs/lastcode/sources/${NIGHTLY_B}.1`), merged);
+      } else {
+        assert.equal(result.status, 0, result.stderr || result.stdout);
+        assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), candidate);
+        assert.equal(remoteCommit(fixture.origin, `refs/lastcode/sources/${NIGHTLY_B}`), source);
       }
-    });
-  }
+      assert.equal(NodeFS.existsSync(queryMarker), false, "checkpoint must not query the PR queue");
+    } finally {
+      NodeFS.rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
 
   it.each(["smoke", "push"] as const)(
     "publishes the checkpoint but rejects promotion after main is rewritten during %s",
@@ -1289,9 +1269,13 @@ exec "$FIXTURE_REAL_GIT" "$@"
         assert.equal(NodeFS.existsSync(retained), false);
         assert.equal(NodeFS.existsSync(selectionPath), false);
       }
-    });
-  }
+      assert.equal(NodeFS.existsSync(queryMarker), false, "recovery must not query the PR queue");
+    } finally {
+      NodeFS.rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
 });
+
 describe("checkpoint carry lifecycle", () => {
   // This complete lifecycle publishes checkpoints and resumes operator-repaired rebases.
   it("publishes compact revisions, folds source PRs, and reselects retained recovery after main advances", () => {
@@ -1427,6 +1411,15 @@ describe("checkpoint carry lifecycle", () => {
       quietProvenance(compactB, upstreamB);
 
       checkout(repo, "upstream-main", upstreamB);
+      const skippedNightly = "v9.9.9-nightly.20990103.2";
+      write(
+        repo,
+        "lifecycle-skipped-upstream.txt",
+        "included without an intermediate checkpoint\n",
+      );
+      const skippedUpstream = commit(repo, "intermediate upstream");
+      git(repo, ["tag", skippedNightly, skippedUpstream]);
+      git(repo, ["push", "--quiet", "upstream", skippedNightly]);
       write(repo, "lifecycle-upstream-next.txt", "upstream C\n");
       const upstreamC = commit(repo, "upstream C");
       git(repo, ["tag", NIGHTLY_C, upstreamC]);
@@ -1764,6 +1757,11 @@ done
 `,
         { mode: 0o755 },
       );
+
+      // A newer release arriving during repair must not replace the selected target.
+      const newerDuringRepair = "v9.9.9-nightly.20990104.5";
+      git(repo, ["tag", newerDuringRepair, upstreamD]);
+      git(repo, ["push", "--quiet", "upstream", newerDuringRepair]);
 
       const published = checkpoint(fixture, ["--push-tags", "--promote"]);
       assert.equal(published.status, 0, published.stderr || published.stdout);

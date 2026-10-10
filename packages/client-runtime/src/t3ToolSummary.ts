@@ -209,11 +209,27 @@ export function summarizeT3ToolCalls(
     case "thread-configuration":
       label = phrase("Checked", "check", `thread configuration ${times}`);
       break;
+    case "thread-archive-family":
+      label = phrase("Inspected", "inspect", `thread archive choices ${times}`);
+      break;
     case "thread-configure":
       label = phrase("Set", "set", `thread model ${times}`);
       break;
     case "thread-fork":
       label = phrase("Requested", "request", quantity(selected.length, "thread fork"));
+      break;
+    case "subagent-promote":
+      label = phrase("Requested", "request", quantity(selected.length, "subagent promotion"));
+      break;
+    case "subagent-promotion-status":
+      label = phrase("Checked", "check", `subagent promotion ${times}`);
+      break;
+    case "subagent-promotion-cancel":
+      label = phrase(
+        "Requested cancellation of",
+        "cancel",
+        quantity(selected.length, "subagent promotion"),
+      );
       break;
     case "thread-merge":
       label = phrase("Requested", "request", quantity(selected.length, "context merge"));
@@ -226,6 +242,16 @@ export function summarizeT3ToolCalls(
       break;
     case "thread-organize":
       label = phrase("Organized", "organize", `threads ${times}`);
+      break;
+    case "thread-recover":
+      label = phrase(
+        "Requested recovery of",
+        "request recovery of",
+        quantity(countEntities(threadIds), "thread"),
+      );
+      break;
+    case "thread-repair":
+      label = phrase("Opened", "open", `repair conversations ${times}`);
       break;
     case "thread-update":
       label = phrase("Updated", "update", quantity(countEntities(threadIds), "thread"));
@@ -328,6 +354,18 @@ export function summarizeT3ToolCalls(
       break;
     case "environment-update":
       label = phrase("Updated", "update", `environment preferences ${times}`);
+      break;
+    case "environment-pause-status":
+      label = phrase("Checked", "check", `environment pause status ${times}`);
+      break;
+    case "environment-pause-start":
+      label = phrase("Requested", "request", `environment pause ${times}`);
+      break;
+    case "environment-pause-retry":
+      label = phrase("Retried", "retry", `environment pause deliveries ${times}`);
+      break;
+    case "environment-pause-resume":
+      label = phrase("Requested", "request", `environment resume ${times}`);
       break;
     case "attachment-prepare":
       label = phrase(

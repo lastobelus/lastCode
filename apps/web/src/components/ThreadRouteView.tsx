@@ -1,3 +1,4 @@
+import { purgeThreadHandoffs } from "../handoffs/handoffsStore";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import type { ScopedThreadRef } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
@@ -71,6 +72,10 @@ export function ThreadRouteView({ target }: { target: ThreadRouteTarget }) {
     serverThreadRef === null ? null : environmentShell.stateAtom(serverThreadRef.environmentId),
   );
   const serverThreadShell = serverThread;
+  useEffect(() => {
+    if (serverThreadRef && serverThreadShell?.deletedAt != null)
+      purgeThreadHandoffs(serverThreadRef);
+  }, [serverThreadRef, serverThreadShell?.deletedAt]);
   const environmentThreadRefs = useEnvironmentThreadRefs(serverThreadRef?.environmentId ?? null);
   const bootstrapComplete = shell.data?.snapshot._tag === "Some";
   const draftThread = useComposerDraftStore((store) =>

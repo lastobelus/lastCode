@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 // @effect-diagnostics nodeBuiltinImport:off globalConsole:off globalDate:off -- Host launchd setup uses the platform filesystem and process APIs.
 import * as NodeChildProcess from "node:child_process";
@@ -6,7 +7,6 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 
 import {
@@ -351,7 +351,7 @@ function main(argv: ReadonlyArray<string>): void {
     !shouldRunNightlyServiceCommand(
       command,
       ifInstalled === true,
-      Effect.runSync(HostProcessPlatform),
+      Effect.runSync(HostProcess.Platform),
     )
   )
     return;

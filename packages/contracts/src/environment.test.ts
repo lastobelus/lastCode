@@ -14,6 +14,36 @@ const descriptor = {
 } as const;
 
 describe("ExecutionEnvironmentDescriptor", () => {
+  it.each([undefined, false, true])(
+    "requires explicit archive family support (%s)",
+    (supported) => {
+      const decoded = decodeDescriptor({
+        ...descriptor,
+        capabilities: {
+          ...descriptor.capabilities,
+          ...(supported === undefined ? {} : { threadArchiveFamilies: supported }),
+        },
+      });
+      expect(decoded.capabilities.threadArchiveFamilies).toBe(supported);
+      expect(decoded.capabilities.threadArchiveFamilies === true).toBe(supported === true);
+    },
+  );
+  it.each([undefined, false, true])(
+    "requires explicit support for the current archive family policy (V2=%s)",
+    (supported) => {
+      const decoded = decodeDescriptor({
+        ...descriptor,
+        capabilities: {
+          ...descriptor.capabilities,
+          threadArchiveFamilies: true,
+          ...(supported === undefined ? {} : { threadArchiveFamiliesV2: supported }),
+        },
+      });
+      expect(decoded.capabilities.threadArchiveFamilies).toBe(true);
+      expect(decoded.capabilities.threadArchiveFamiliesV2).toBe(supported);
+      expect(decoded.capabilities.threadArchiveFamiliesV2 === true).toBe(supported === true);
+    },
+  );
   it("decodes old, recognized and future manual installation descriptors", () => {
     expect(decodeDescriptor(descriptor).capabilities.serverInstallation).toBeUndefined();
     for (const installation of [{ kind: "npx" }, { kind: "npm-global", prefix: "/opt/node" }]) {
