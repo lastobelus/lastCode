@@ -2366,8 +2366,8 @@ it.layer(
           terminals.push(spawned);
         }
 
-        // Explicit refresh runs the same poll as the background worker. Join
-        // both calls to prove the fresh result was applied before the old one.
+        // Explicit refresh uses a fresh table with the background worker's
+        // ownership and activity logic. Apply it before the held old result.
         const freshMetadata = yield* manager.refreshMetadata;
         const freshOwnedProcessIds = [...ownedProcessIds];
         const updatesBeforeOldCompletion = ownershipUpdates.length;
@@ -2845,6 +2845,389 @@ it.layer(
       }).pipe(Effect.provide(TestClock.layer())),
   );
 
+  it.effect.each(["native", "fallback"] as const)(
+    "revalidates a queued %s shell snapshot when the first writer acquires its thread lock",
+    (source) =>
+      Effect.gen(function* () {
+        const holderEntered = yield* Deferred.make<void>();
+        const releaseHolder = yield* Deferred.make<void>();
+        const prefetchStarted = yield* Deferred.make<void>();
+        const execPollCompleted = yield* Deferred.make<void>();
+        const releaseExecWitness = yield* Deferred.make<void>();
+        let execPollCalls = 0;
+        let witnessExecPoll = false;
+        let ownedProcessIds: ReadonlyArray<number> = [];
+        const ptyAdapter = new FakePtyAdapter();
+        let rootName = "bash";
+        let snapshotCalls = 0;
+        const sampledNames: string[] = [];
+        const processTable = Effect.gen(function* () {
+          if (witnessExecPoll && ++execPollCalls === 2) {
+            yield* Deferred.succeed(execPollCompleted, undefined);
+            yield* Deferred.await(releaseExecWitness);
+          }
+          snapshotCalls += 1;
+          sampledNames.push(rootName);
+          if (snapshotCalls === 1) yield* Deferred.succeed(prefetchStarted, undefined);
+          return ptyAdapter.processes.map(({ pid }) => ({ pid, ppid: 1, name: rootName }));
+        });
+        const { manager } = yield* createSnapshotBoundaryManager(source, ptyAdapter, processTable, {
+          shellResolver: () => "/opt/tools/bash",
+          registerTerminalProcesses: ({ threadId, terminalId, processIds }) =>
+            Effect.sync(() => {
+              if (threadId === "thread-1" && terminalId === DEFAULT_TERMINAL_ID)
+                ownedProcessIds = [...processIds];
+            }),
+        });
+        yield* TestClock.adjust(0);
+        const terminal = openInput();
+        yield* manager.open(terminal);
+        const process = ptyAdapter.processes[0]!;
+        process.exitOnKill = "SIGTERM";
+        const holderTerminal = openInput({ terminalId: "holder" });
+        const unsubscribe = yield* manager.subscribe((event) =>
+          event.type === "started" && event.snapshot.terminalId === "holder"
+            ? Deferred.succeed(holderEntered, undefined).pipe(
+                Effect.andThen(Deferred.await(releaseHolder)),
+              )
+            : Effect.void,
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+        const opening = yield* manager.open(holderTerminal).pipe(Effect.forkScoped);
+        yield* Deferred.await(holderEntered);
+        const writing = yield* manager
+          .write({ ...terminal, data: "noop\r" })
+          .pipe(Effect.forkScoped({ startImmediately: true }));
+        yield* Deferred.await(prefetchStarted);
+        yield* TestClock.adjust(0);
+        const writesWhileQueued = [...process.writes];
+        const samplesBeforeRelease = [...sampledNames];
+        rootName = "zsh";
+        yield* Deferred.succeed(releaseHolder, undefined);
+        yield* Fiber.join(opening);
+        yield* TestClock.adjust("100 millis");
+        yield* Fiber.join(writing);
+        const samplesAtForwarding = [...sampledNames];
+        // Once input has been forwarded, an exec is activity rather than a
+        // replacement baseline. Returning to the settled shell is idle.
+        rootName = "node";
+        witnessExecPoll = true;
+        yield* TestClock.adjust("3 minutes");
+        yield* Deferred.await(execPollCompleted);
+        yield* Deferred.succeed(releaseExecWitness, undefined);
+        yield* manager.closeIdle(terminal);
+        const metadataDuringExec = yield* readIdleInspectionMetadata(manager);
+        const signalsDuringExec = [...process.killSignals];
+        const ownershipDuringExec = [...ownedProcessIds];
+        rootName = "zsh";
+        yield* manager.closeIdle(terminal);
+        yield* TestClock.adjust("1 millis");
+        const remainingMetadata = yield* readIdleInspectionMetadata(manager);
+        const signalsAfterIdle = [...process.killSignals];
+        yield* exitSnapshotTestProcesses(manager, ptyAdapter, [
+          holderTerminal,
+          ...(!process.killed ? [terminal] : []),
+        ]);
+        expect(signalsAfterIdle).toContain("SIGTERM");
+        expect(samplesBeforeRelease).toEqual(["bash"]);
+        expect(writesWhileQueued).toEqual([]);
+        expect(process.writes).toEqual(["noop\r"]);
+        expect(samplesAtForwarding.slice(-2)).toEqual(["zsh", "zsh"]);
+        expect(signalsDuringExec).toEqual([]);
+        expect(ownershipDuringExec).toEqual([process.pid]);
+        expect(metadataDuringExec).toContainEqual(
+          expect.objectContaining({ pid: process.pid, hasRunningSubprocess: true, label: "node" }),
+        );
+        expect(remainingMetadata.some(({ pid }) => pid === process.pid)).toBe(false);
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect.each(["native", "fallback"] as const)(
+    "keeps overlapping %s shell scans shared while an unrelated terminal drains output",
+    (source) =>
+      Effect.gen(function* () {
+        const initialStarted = yield* Deferred.make<void>();
+        const releaseInitial = yield* Deferred.make<void>();
+        const confirmationStarted = yield* Deferred.make<void>();
+        const releaseConfirmation = yield* Deferred.make<void>();
+        const initialOutputProcessed = yield* Deferred.make<void>();
+        const confirmationOutputProcessed = yield* Deferred.make<void>();
+        const outputPollCompleted = yield* Deferred.make<void>();
+        const releaseOutputWitness = yield* Deferred.make<void>();
+        let outputPollCalls = 0;
+        let witnessOutputPoll = false;
+        let noisyOwnership: ReadonlyArray<number> = [];
+        const ptyAdapter = new FakePtyAdapter();
+        let snapshotCalls = 0;
+        let releasedConfirmation = false;
+        const processTable = Effect.gen(function* () {
+          if (witnessOutputPoll && ++outputPollCalls === 2) {
+            yield* Deferred.succeed(outputPollCompleted, undefined);
+            yield* Deferred.await(releaseOutputWitness);
+          }
+          snapshotCalls += 1;
+          const entries = [
+            ...ptyAdapter.processes.map(({ pid }) => ({ pid, ppid: 1, name: "zsh" })),
+            { pid: 100, ppid: ptyAdapter.processes[3]!.pid, name: "node" },
+          ];
+          if (snapshotCalls === 1) {
+            yield* Deferred.succeed(initialStarted, undefined);
+            yield* Deferred.await(releaseInitial);
+          } else if (!releasedConfirmation) {
+            yield* Deferred.succeed(confirmationStarted, undefined);
+            yield* Deferred.await(releaseConfirmation);
+          }
+          return entries;
+        });
+        const { manager } = yield* createSnapshotBoundaryManager(source, ptyAdapter, processTable, {
+          registerTerminalProcesses: ({ threadId, processIds }) =>
+            Effect.sync(() => {
+              if (threadId === "thread-output") noisyOwnership = [...processIds];
+            }),
+        });
+        yield* TestClock.adjust(0);
+        const terminals = [1, 2, 3].map((index) => openInput({ threadId: `thread-${index}` }));
+        const noisyTerminal = openInput({ threadId: "thread-output" });
+        yield* Effect.forEach([...terminals, noisyTerminal], (terminal) => manager.open(terminal));
+        const noisyProcess = ptyAdapter.processes[3]!;
+        const unsubscribe = yield* manager.subscribe((event) => {
+          if (event.type !== "output" || event.threadId !== noisyTerminal.threadId)
+            return Effect.void;
+          return Deferred.succeed(
+            event.data === "initial output\n"
+              ? initialOutputProcessed
+              : confirmationOutputProcessed,
+            undefined,
+          ).pipe(Effect.asVoid);
+        });
+        yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+        const write = (terminal: TerminalOpenInput) =>
+          manager
+            .write({ ...terminal, data: "noop\r" })
+            .pipe(Effect.forkScoped({ startImmediately: true }));
+        const first = yield* write(terminals[0]!);
+        yield* Deferred.await(initialStarted);
+        noisyProcess.emitData("initial output\n");
+        yield* Deferred.await(initialOutputProcessed);
+        const second = yield* write(terminals[1]!);
+        yield* TestClock.adjust(0);
+        const callsDuringInitial = snapshotCalls;
+        const writesDuringInitial = ptyAdapter.processes.map(({ writes }) => [...writes]);
+        yield* Deferred.succeed(releaseInitial, undefined);
+        yield* Deferred.await(confirmationStarted);
+        noisyProcess.emitData("confirmation output\n");
+        yield* Deferred.await(confirmationOutputProcessed);
+        const third = yield* write(terminals[2]!);
+        yield* TestClock.adjust("10 millis");
+        const callsDuringConfirmation = snapshotCalls;
+        const writesDuringConfirmation = ptyAdapter.processes.map(({ writes }) => [...writes]);
+        releasedConfirmation = true;
+        yield* Deferred.succeed(releaseConfirmation, undefined);
+        yield* TestClock.adjust("100 millis");
+        yield* Effect.forEach([first, second, third], Fiber.join);
+        const writesAfterConfirmation = ptyAdapter.processes.map(({ writes }) => [...writes]);
+        // The output-producing command still owns its active descendant,
+        // while its output does not evict scans other terminals can share.
+        witnessOutputPoll = true;
+        yield* TestClock.adjust("3 minutes");
+        yield* Deferred.await(outputPollCompleted);
+        yield* Deferred.succeed(releaseOutputWitness, undefined);
+        yield* manager.closeIdle(noisyTerminal);
+        const noisySignals = [...noisyProcess.killSignals];
+        const outputMetadata = yield* readIdleInspectionMetadata(manager);
+        const outputOwnership = [...noisyOwnership];
+        yield* exitSnapshotTestProcesses(manager, ptyAdapter, [...terminals, noisyTerminal]);
+        expect(callsDuringInitial).toBe(1);
+        expect(writesDuringInitial).toEqual([[], [], [], []]);
+        expect(callsDuringConfirmation).toBe(2);
+        expect(writesDuringConfirmation).toEqual([[], [], [], []]);
+        expect(writesAfterConfirmation).toEqual([["noop\r"], ["noop\r"], ["noop\r"], []]);
+        expect(outputMetadata).toContainEqual(
+          expect.objectContaining({ pid: noisyProcess.pid, hasRunningSubprocess: true }),
+        );
+        expect(noisySignals).toEqual([]);
+        expect(outputOwnership).toEqual([noisyProcess.pid, 100]);
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect.each(
+    (["native", "fallback"] as const).flatMap((source) =>
+      ([false, true] as const).map((confirmed) => ({ source, confirmed })),
+    ),
+  )(
+    "requires consecutive pre-input $source shell observations before failed capture fallback when confirmed=$confirmed",
+    ({ source, confirmed }) =>
+      Effect.gen(function* () {
+        const captureStarted = yield* Deferred.make<void>();
+        const releaseCapture = yield* Deferred.make<void>();
+        const recoveredPollCompleted = yield* Deferred.make<void>();
+        const releaseRecoveredWitness = yield* Deferred.make<void>();
+        const ptyAdapter = new FakePtyAdapter();
+        let phase: "pre-input" | "capture" | "recovered" = "pre-input";
+        let preInputCalls = 0;
+        let recoveredCalls = 0;
+        let rootName = "bash";
+        let ownedProcessIds: ReadonlyArray<number> = [];
+        const processTable = Effect.gen(function* () {
+          const name = rootName;
+          if (phase === "pre-input" && ++preInputCalls > (confirmed ? 2 : 1)) phase = "capture";
+          if (phase === "capture") {
+            yield* Deferred.succeed(captureStarted, undefined);
+            yield* Deferred.await(releaseCapture);
+          } else if (phase === "recovered" && ++recoveredCalls === 2) {
+            yield* Deferred.succeed(recoveredPollCompleted, undefined);
+            yield* Deferred.await(releaseRecoveredWitness);
+          }
+          return [{ pid: 9000, ppid: 1, name }];
+        });
+        const { manager } = yield* createSnapshotBoundaryManager(source, ptyAdapter, processTable, {
+          registerTerminalProcesses: ({ processIds }) =>
+            Effect.sync(() => {
+              ownedProcessIds = [...processIds];
+            }),
+        });
+        yield* TestClock.adjust(0);
+        const terminal = openInput();
+        yield* manager.open(terminal);
+        const process = ptyAdapter.processes[0]!;
+        process.exitOnKill = "SIGTERM";
+        yield* TestClock.adjust(confirmed ? "3 minutes" : "2 minutes");
+        // This next held poll proves the preceding one or two observations
+        // were applied before any first-input capture starts.
+        yield* Deferred.await(captureStarted);
+        const writing = yield* manager
+          .write({ ...terminal, data: "noop\r" })
+          .pipe(Effect.forkScoped({ startImmediately: true }));
+        yield* TestClock.adjust("100 millis");
+        yield* Fiber.join(writing);
+        rootName = confirmed ? "node" : "bash";
+        phase = "recovered";
+        yield* Deferred.succeed(releaseCapture, undefined);
+        yield* TestClock.adjust("3 minutes");
+        yield* Deferred.await(recoveredPollCompleted);
+        const metadataAfterExec = yield* readIdleInspectionMetadata(manager);
+        const ownershipAfterExec = [...ownedProcessIds];
+        yield* Deferred.succeed(releaseRecoveredWitness, undefined);
+        yield* manager.closeIdle(terminal);
+        const signalsAfterExec = [...process.killSignals];
+        rootName = "bash";
+        yield* manager.closeIdle(terminal);
+        yield* TestClock.adjust("1 millis");
+        const finalMetadata = yield* readIdleInspectionMetadata(manager);
+        const finalSignals = [...process.killSignals];
+        if (!process.killed) yield* exitSnapshotTestProcesses(manager, ptyAdapter, [terminal]);
+        expect(process.writes).toEqual(["noop\r"]);
+        expect(ownershipAfterExec).toEqual([process.pid]);
+        expect(metadataAfterExec).toEqual([
+          expect.objectContaining({
+            pid: process.pid,
+            hasRunningSubprocess: true,
+            label: confirmed ? "node" : "bash",
+          }),
+        ]);
+        expect(signalsAfterExec).toEqual([]);
+        if (confirmed) {
+          expect(finalSignals).toContain("SIGTERM");
+          expect(finalMetadata).toEqual([]);
+        } else {
+          expect(finalSignals).toEqual([]);
+          expect(finalMetadata).toEqual(metadataAfterExec);
+        }
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect.each(["native", "fallback"] as const)(
+    "restarts %s shell confirmation when this terminal outputs between accepted samples",
+    (source) =>
+      Effect.gen(function* () {
+        const secondSampleStarted = yield* Deferred.make<void>();
+        const releaseSecondSample = yield* Deferred.make<void>();
+        const outputProcessed = yield* Deferred.make<void>();
+        const execPollCompleted = yield* Deferred.make<void>();
+        const releaseExecWitness = yield* Deferred.make<void>();
+        const ptyAdapter = new FakePtyAdapter();
+        let phase: "capture" | "exec" | "idle" = "capture";
+        let captureCalls = 0;
+        let execCalls = 0;
+        let ownedProcessIds: ReadonlyArray<number> = [];
+        const captureNames: string[] = [];
+        const processTable = Effect.gen(function* () {
+          let name: string;
+          if (phase === "capture") {
+            captureCalls += 1;
+            // Prefetch is first. The next bash sample is accepted by capture,
+            // and output makes its held confirmation and prior pair stale.
+            name = captureCalls <= 4 ? "bash" : "zsh";
+            captureNames.push(name);
+            if (captureCalls === 3) {
+              yield* Deferred.succeed(secondSampleStarted, undefined);
+              yield* Deferred.await(releaseSecondSample);
+            }
+          } else {
+            name = phase === "exec" ? "node" : "zsh";
+            if (phase === "exec" && ++execCalls === 2) {
+              yield* Deferred.succeed(execPollCompleted, undefined);
+              yield* Deferred.await(releaseExecWitness);
+            }
+          }
+          return [{ pid: 9000, ppid: 1, name }];
+        });
+        const { manager } = yield* createSnapshotBoundaryManager(source, ptyAdapter, processTable, {
+          shellResolver: () => "/opt/tools/bash",
+          registerTerminalProcesses: ({ processIds }) =>
+            Effect.sync(() => {
+              ownedProcessIds = [...processIds];
+            }),
+        });
+        yield* TestClock.adjust(0);
+        const terminal = openInput();
+        yield* manager.open(terminal);
+        const process = ptyAdapter.processes[0]!;
+        process.exitOnKill = "SIGTERM";
+        const unsubscribe = yield* manager.subscribe((event) =>
+          event.type === "output"
+            ? Deferred.succeed(outputProcessed, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+        const writing = yield* manager
+          .write({ ...terminal, data: "noop\r" })
+          .pipe(Effect.forkScoped({ startImmediately: true }));
+        yield* Deferred.await(secondSampleStarted);
+        const writesBeforeOutput = [...process.writes];
+        process.emitData("wrapper startup\n");
+        yield* Deferred.await(outputProcessed);
+        yield* Deferred.succeed(releaseSecondSample, undefined);
+        yield* TestClock.adjust("100 millis");
+        yield* Fiber.join(writing);
+        const sampledAtForwarding = [...captureNames];
+        phase = "exec";
+        yield* TestClock.adjust("3 minutes");
+        yield* Deferred.await(execPollCompleted);
+        const metadataDuringExec = yield* readIdleInspectionMetadata(manager);
+        const ownershipDuringExec = [...ownedProcessIds];
+        yield* Deferred.succeed(releaseExecWitness, undefined);
+        yield* manager.closeIdle(terminal);
+        const signalsDuringExec = [...process.killSignals];
+        phase = "idle";
+        yield* manager.closeIdle(terminal);
+        yield* TestClock.adjust("1 millis");
+        const metadataAfterIdle = yield* readIdleInspectionMetadata(manager);
+        const signalsAfterIdle = [...process.killSignals];
+        if (!process.killed) yield* exitSnapshotTestProcesses(manager, ptyAdapter, [terminal]);
+        expect(signalsAfterIdle).toContain("SIGTERM");
+        expect(writesBeforeOutput).toEqual([]);
+        expect(process.writes).toEqual(["noop\r"]);
+        expect(sampledAtForwarding.slice(-2)).toEqual(["zsh", "zsh"]);
+        expect(ownershipDuringExec).toEqual([process.pid]);
+        expect(metadataDuringExec).toEqual([
+          expect.objectContaining({ pid: process.pid, hasRunningSubprocess: true, label: "node" }),
+        ]);
+        expect(signalsDuringExec).toEqual([]);
+        expect(metadataAfterIdle).toEqual([]);
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
   it.effect.each(
     (["native", "fallback"] as const).flatMap((source) =>
       (["threads", "terminals"] as const).map((grouping) => ({ source, grouping })),
@@ -2947,11 +3330,11 @@ it.layer(
         expect(callsDuringConfirmation).toBe(2);
         expect(writesDuringConfirmation).toEqual([[], [], []]);
         expect(firstWritersPending).toBe(true);
-        expect(callsAfterFirstWrites).toBe(2);
-        expect(callsDuringLaterSample).toBe(3);
+        expect(callsAfterFirstWrites).toBe(grouping === "threads" ? 2 : 6);
+        expect(callsDuringLaterSample).toBe(grouping === "threads" ? 3 : 7);
         expect(laterWritesBeforeSample).toEqual([]);
         expect(laterSnapshotPids).toContain(laterProcess.pid);
-        expect(callsAfterLaterWrite).toBe(4);
+        expect(callsAfterLaterWrite).toBe(grouping === "threads" ? 4 : 8);
         expect(writesAfterConfirmation).toEqual([
           ["noop\r"],
           ["noop\r"],
@@ -3050,8 +3433,8 @@ it.layer(
         yield* write(terminals[0]!);
         const callsAfterRestart = snapshotCalls;
         yield* exitSnapshotTestProcesses(manager, ptyAdapter, [...terminals, laterTerminal]);
-        expect(callsAfterLaterTerminal).toBe(6);
-        expect(callsAfterRestart).toBe(8);
+        expect(callsAfterLaterTerminal).toBe(grouping === "threads" ? 7 : 9);
+        expect(callsAfterRestart).toBe(grouping === "threads" ? 10 : 12);
       }).pipe(Effect.provide(TestClock.layer())),
   );
 
@@ -3137,10 +3520,14 @@ it.layer(
           yield* Fiber.interrupt(writers[1]!);
         } else {
           yield* TestClock.adjust("100 millis");
+          if (grouping === "terminals") {
+            yield* Fiber.join(writers[0]!);
+            yield* TestClock.adjust("100 millis");
+          }
           yield* Effect.forEach(writers, Fiber.join);
         }
         yield* Deferred.await(requestStopped);
-        expect(snapshotCalls).toBe(1);
+        expect(snapshotCalls).toBe(outcome === "timeout" && grouping === "terminals" ? 3 : 1);
         expect(activeRequests).toBe(0);
         expect(ptyAdapter.processes.map((process) => process.writes)).toEqual(
           outcome === "cancel" ? [[], []] : [["command\r"], ["command\r"]],
@@ -3163,7 +3550,7 @@ it.layer(
           ptyAdapter,
           outcome === "timeout" ? [...terminals, nextTerminal] : terminals,
         );
-        expect(callsAfterNewWrite).toBe(3);
+        expect(callsAfterNewWrite).toBe(outcome === "timeout" && grouping === "terminals" ? 6 : 4);
         expect(activeRequestsAfterNewWrite).toBe(0);
       }).pipe(Effect.provide(TestClock.layer())),
   );
@@ -3774,7 +4161,7 @@ it.layer(
         const readSnapshot = Effect.gen(function* () {
           if (phase === "pre-input") {
             preInputSnapshots += 1;
-            if (preInputSnapshots === 1) {
+            if (preInputSnapshots <= 2) {
               return { entries: [{ pid: 9000, ppid: 1, name: "zsh" }], failed: false };
             }
             // Beginning the next background scan proves the earlier startup
@@ -3841,7 +4228,7 @@ it.layer(
         const process = ptyAdapter.processes[0]!;
         process.exitOnKill = "SIGTERM";
         if (priorObservation) {
-          yield* TestClock.adjust("120 seconds");
+          yield* TestClock.adjust("180 seconds");
           yield* Deferred.await(captureEntered);
         }
         const writing = yield* manager
@@ -3931,7 +4318,7 @@ it.layer(
             return [];
           }
           const name = phase === "late" ? startupName : nextName;
-          if (phase === "late" && ++lateScans === 2) {
+          if (phase === "late" && ++lateScans === 3) {
             // The poller cannot begin this scan until it has applied the
             // previous pre-input observation while the writer was queued.
             yield* Deferred.succeed(lateObservationApplied, undefined);
@@ -3966,8 +4353,10 @@ it.layer(
         yield* TestClock.adjust("3 minutes");
         yield* Deferred.await(lateObservationApplied);
         const writesWhileQueued = [...process.writes];
+        yield* Deferred.succeed(releaseLateWitness, undefined);
         yield* Deferred.succeed(releaseHolder, undefined);
         yield* Fiber.join(holder);
+        yield* TestClock.adjust("100 millis");
         yield* Fiber.join(writing);
         phase = "recovered";
         yield* Deferred.succeed(releaseLateWitness, undefined);
