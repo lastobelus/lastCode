@@ -10459,6 +10459,39 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       "orchestration_v2.thread_id": commandThreadId(command),
     });
 
+    const allowedWhileArchiving =
+      command.type === "thread.stop" ||
+      command.type === "thread.visit" ||
+      command.type === "thread.archive.complete" ||
+      command.type === "thread.archive.fail" ||
+      command.type === "thread.background-work.settle" ||
+      // These completions only settle retained metadata; they start no provider work.
+      command.type === "message.incoming-summary.complete" ||
+      (command.type === "thread.metadata.update" &&
+        command.actionResume !== undefined &&
+        Object.keys(command).every((key) =>
+          ["type", "commandId", "threadId", "actionResume"].includes(key),
+        )) ||
+      (command.type === "message.dispatch" && command.usageLimitContinuationOfRunId !== undefined);
+    if (!allowedWhileArchiving && command.type !== "thread.create") {
+      const current = yield* projectionStore
+        .getThread(commandThreadId(command))
+        .pipe(
+          Effect.catchTags({ ProjectionStoreThreadNotFoundError: () => Effect.succeed(null) }),
+          mapDispatchError(command),
+        );
+      if (
+        current?.archivePending?.status === "stopping" &&
+        (current.deletedAt === null || current.worktreeCleanup != null)
+      ) {
+        return yield* new OrchestratorThreadArchivingError({
+          commandId: command.commandId,
+          commandType: command.type,
+          threadId: current.id,
+        });
+      }
+    }
+
     const events = yield* Ref.make<Array<OrchestrationV2DomainEvent>>([]);
     const effects = yield* Ref.make<Array<PendingOrchestrationEffectV2>>([]);
     let cancelUnsettledEffects:
@@ -10885,6 +10918,26 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         sequence: receipt.resultSequence,
         storedEvents,
       } satisfies OrchestratorV2DispatchResult;
+    }
+
+    // Action results retain their delivery identity while an unanswered request holds intake.
+    // This check shares the provider request's thread lock and precedes rejection receipts.
+    if (
+      command.type === "message.dispatch" &&
+      command.createdBy === "system" &&
+      command.creationSource === "server" &&
+      command.messageId.startsWith("action-resume:") &&
+      command.dispatchMode.type === "queue_after_active"
+    ) {
+      const records = yield* projectionStore
+        .getThreadRecords(command.threadId, ["runtimeRequests"])
+        .pipe(mapDispatchError(command));
+      if (records.runtimeRequests.some((request) => request.status === "pending"))
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "The Action follow-up is held until this thread's unanswered request is resolved.",
+        });
     }
 
     // A limited sender checked these modes before dispatching; the thread's
