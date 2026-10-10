@@ -417,6 +417,80 @@ it.effect(
     }),
 );
 
+it.effect(
+  "retires cancellation records after late creation settles or a completed root is destroyed",
+  () =>
+    Effect.gen(function* () {
+      const marker = "cancellation-retirement";
+      const cancellationSets = new Set<Set<unknown>>();
+      const add = Set.prototype.add;
+      yield* Effect.acquireRelease(
+        Effect.sync(() => {
+          // Observe retained string records without adding a production diagnostics API.
+          // eslint-disable-next-line no-extend-native -- Scoped memory observation, restored on every exit.
+          Set.prototype.add = function (this: Set<unknown>, value: unknown) {
+            if (typeof value === "string" && value.includes(marker)) cancellationSets.add(this);
+            return add.call(this, value);
+          };
+        }),
+        () =>
+          Effect.sync(() => {
+            // eslint-disable-next-line no-extend-native -- Restore the original collection method.
+            Set.prototype.add = add;
+          }),
+      );
+      const retained = () =>
+        [...cancellationSets].flatMap((records) =>
+          [...records].filter((value) => typeof value === "string" && value.includes(marker)),
+        );
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      yield* host.bindEnvironment("host-a", "environment-a", profileResolver("environment-a"));
+      const send = (command: Parameters<typeof host.handleRemoteCommand>[0]["command"]) =>
+        host.handleRemoteCommand({ desktopHostId: "host-a", command });
+      for (const [index, mode] of ["cancel", "disconnect"].entries()) {
+        const entered = yield* Deferred.make<void>();
+        const returned = yield* Deferred.make<Electron.BrowserWindow>();
+        const root = makeRoot();
+        host.setRootFactory(() =>
+          Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(returned))),
+        );
+        const attempt = { ...key, requestId: `${marker}-${index}`, profileId: "default" };
+        const creating = yield* send({
+          type: "createRoot",
+          ...attempt,
+          serverEpoch: "epoch-a",
+          url: "about:blank",
+        }).pipe(Effect.forkScoped);
+        yield* Deferred.await(entered);
+        yield* send(
+          mode === "cancel" ? { type: "cancelRootCreation", ...attempt } : { type: "disconnect" },
+        );
+        expect(retained()).toHaveLength(1);
+        yield* Deferred.succeed(returned, root.window);
+        yield* Fiber.join(creating);
+        expect(root.window.isDestroyed()).toBe(true);
+        expect(root.attachCount()).toBe(0);
+        expect(retained()).toHaveLength(0);
+        // A repeated cancellation acknowledgment has no late creation left to guard.
+        yield* send({ type: "cancelRootCreation", ...attempt });
+        expect(retained()).toHaveLength(0);
+      }
+      for (const mode of ["cancel", "disconnect"]) {
+        const root = makeRoot();
+        const attempt = { ...key, requestId: `${marker}-${mode}-completed`, profileId: "default" };
+        host.setRootFactory(() => Effect.succeed(root.window));
+        yield* send({ type: "createRoot", ...attempt, serverEpoch: "epoch-a", url: "about:blank" });
+        yield* send(
+          mode === "cancel" ? { type: "cancelRootCreation", ...attempt } : { type: "disconnect" },
+        );
+        expect(root.window.isDestroyed()).toBe(true);
+        expect(retained()).toHaveLength(0);
+      }
+    }),
+);
+
 it.effect.each(["created", "accepted", "published"] as const)(
   "disconnect and stale creation cancellation respect native root ownership (%s)",
   (stage) =>

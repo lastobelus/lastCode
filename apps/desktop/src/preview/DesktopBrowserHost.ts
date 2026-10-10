@@ -991,7 +991,14 @@ export const make = Effect.gen(function* () {
             respond(root.id);
           }),
         )
-        .pipe(Effect.ensuring(Effect.sync(() => pendingRootCreations.delete(attempt))));
+        .pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              pendingRootCreations.delete(attempt);
+              canceledCreations.delete(attempt);
+            }),
+          ),
+        );
     });
 
   const handleCommand = (command: DesktopBrowserCommand, desktopHostId = "local") =>
@@ -1038,7 +1045,9 @@ export const make = Effect.gen(function* () {
           root.creation.stage === "published"
         )
           return Effect.void;
-        canceledCreations.add(creationKey(key, command.requestId, command.profileId));
+        const attempt = creationKey(key, command.requestId, command.profileId);
+        // Only an in-flight creation can still return a window after this acknowledgment.
+        if (pendingRootCreations.has(attempt)) canceledCreations.add(attempt);
         if (
           root?.kind === "root" &&
           root.creation?.requestId === command.requestId &&
@@ -1094,9 +1103,6 @@ export const make = Effect.gen(function* () {
             root.creation?.stage === "created" &&
             !root.window.isDestroyed()
           ) {
-            canceledCreations.add(
-              creationKey(root.source, root.creation.requestId, root.creation.profileId),
-            );
             root.window.destroy();
           }
         for (const tab of tabs.values()) {
