@@ -1,3 +1,5 @@
+import type { IntelBuildTriggerResult } from "./lib/lastcode-intel-build-trigger.mjs";
+
 export interface ParsedNightlyVersion {
   readonly tag: string;
   readonly nightlyTag: string;
@@ -117,6 +119,19 @@ export function prepareBuildWorktree(
   logFd: number | undefined,
 ): void;
 export function acquireBuildLock(updateRoot: string, options?: LocalBuildLockOptions): () => void;
+export function completeLocalBuild(
+  options: Pick<LocalUpdateOptions, "home" | "repoRoot"> & { readonly checkpointTag: string },
+  checkpointCommit: string,
+  artifact: ExistingBuild,
+  overrides?: Parameters<
+    typeof import("./lib/lastcode-intel-build-trigger.mjs").triggerIntelBuild
+  >[1],
+): ExistingBuild & {
+  readonly schemaVersion: 1;
+  readonly status: "built";
+  readonly checkpointTag: string;
+  readonly intelTrigger: IntelBuildTriggerResult;
+};
 export function boundedLocalBuildDiagnostic(raw: string): string;
 export function localBuildFailureFingerprint(failure: {
   readonly checkpointTag: string;

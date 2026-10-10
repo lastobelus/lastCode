@@ -24,6 +24,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as References from "effect/References";
@@ -877,6 +878,9 @@ const projectReconcileActionsCommand = Command.make("reconcile-actions", {
           ...reconciled.report,
         });
       }),
+    ).pipe(
+      // Include layer initialization so migration logs cannot corrupt the JSON result.
+      Effect.provideService(Logger.LogToStderr, true),
     ),
   ),
 );
