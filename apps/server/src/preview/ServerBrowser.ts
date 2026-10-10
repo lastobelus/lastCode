@@ -2503,6 +2503,24 @@ const make = Effect.gen(function* () {
     signal?.throwIfAborted();
   };
 
+  const prepareExistingBrowserNavigation = async (
+    tab: ServerTab,
+    url: string,
+    signal?: AbortSignal,
+  ) => {
+    if (!/^https?:/i.test(url)) return;
+    const destination = tab.hostedOrigins.has(new URL(url).origin)
+      ? await browserNavigationUrl(tab, url, signal)
+      : {
+          ...(await Effect.runPromise(hosting.prepareNavigation({ threadId: tab.threadId, url }), {
+            signal,
+          })),
+          url,
+          localUrl: url,
+        };
+    await prepareBrowserCredential(tab, destination, signal);
+  };
+
   const startViewerNavigation = (
     tab: ServerTab,
     run: (signal: AbortSignal) => Promise<unknown>,
@@ -3336,7 +3354,10 @@ const make = Effect.gen(function* () {
             const request = event.request;
             if (request?.clear === "cookies") await tab.cdp.send("Network.clearBrowserCookies");
             if (request?.clear === "cache") await tab.cdp.send("Network.clearBrowserCache");
-            if (request?.hardReload) await tab.cdp.send("Page.reload", { ignoreCache: true });
+            if (request?.hardReload) {
+              await prepareExistingBrowserNavigation(tab, tab.page.url());
+              await tab.cdp.send("Page.reload", { ignoreCache: true });
+            }
           })
           .catch((cause: unknown) =>
             runFork(Effect.logWarning("server preview could not apply a tab setting", { cause })),
@@ -3500,28 +3521,18 @@ const make = Effect.gen(function* () {
         return;
       case "history":
         startViewerNavigation(tab, async (signal) => {
+          const delta = num(message.delta) < 0 ? -1 : 1;
+          const history = await session.send("Page.getNavigationHistory");
+          const url = history.entries[history.currentIndex + delta]?.url;
+          if (typeof url === "string") await prepareExistingBrowserNavigation(tab, url, signal);
           signal.throwIfAborted();
-          if (num(message.delta) < 0) await tab.page.goBack(VIEWER_NAVIGATION_OPTIONS);
+          if (delta < 0) await tab.page.goBack(VIEWER_NAVIGATION_OPTIONS);
           else await tab.page.goForward(VIEWER_NAVIGATION_OPTIONS);
         });
         return;
       case "reload":
         startViewerNavigation(tab, async (signal) => {
-          if (/^https?:/i.test(tab.page.url())) {
-            const current = new URL(tab.page.url());
-            const localOrigin = tab.hostedOrigins.get(current.origin);
-            let destination;
-            if (localOrigin !== undefined) {
-              destination = await browserNavigationUrl(tab, current.href, signal);
-            } else {
-              const prepared = await Effect.runPromise(
-                hosting.prepareNavigation({ threadId: tab.threadId, url: current.href }),
-                { signal },
-              );
-              destination = { ...prepared, url: current.href, localUrl: current.href };
-            }
-            await prepareBrowserCredential(tab, destination, signal);
-          }
+          await prepareExistingBrowserNavigation(tab, tab.page.url(), signal);
           signal.throwIfAborted();
           // A hard reload fetches everything again, as Chrome's Shift+Reload does.
           if (message.ignoreCache === true)

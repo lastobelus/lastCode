@@ -96,6 +96,7 @@ function makeSession(
   viewport?: () => { width: number; height: number },
   pixelRatio?: () => number,
   zoom?: () => number,
+  history?: () => { currentIndex: number; entries: Array<{ url: string }> },
 ) {
   return {
     on: vi.fn(),
@@ -106,7 +107,8 @@ function makeSession(
         (_input as { expression?: string } | undefined)?.expression === "devicePixelRatio"
       )
         return { result: { value: pixelRatio?.() ?? 2 } };
-      if (method === "Page.getNavigationHistory") return { currentIndex: 0, entries: [{}] };
+      if (method === "Page.getNavigationHistory")
+        return history?.() ?? { currentIndex: 0, entries: [{}] };
       if (method === "Page.getLayoutMetrics") {
         const size = viewport?.();
         return {
@@ -229,6 +231,7 @@ function makeContext(onClose?: (context: BrowserContext) => void) {
         cssViewport,
         () => 2 * zoomFactor,
         () => zoomFactor,
+        () => ({ currentIndex: historyIndex, entries: history.map((url) => ({ url })) }),
       );
       sessions.push(session);
       if (recordingCdpGate) recordingStageEntered?.resolve();
@@ -989,7 +992,14 @@ it.live("reload recovers both owned remote origins after returning through publi
       const viewer = yield* browser.attachViewer(viewerInput(tabId, true));
       yield* viewer.input({ type: "takeControl" });
       for (const url of destinations.slice(0, 2).toReversed()) {
+        const wentBack = Promise.withResolvers<void>();
+        const goBack = context.page.goBack.getMockImplementation()!;
+        context.page.goBack.mockImplementationOnce(async () => {
+          await goBack();
+          wentBack.resolve();
+        });
         yield* viewer.input({ type: "history", delta: -1 });
+        yield* Effect.promise(() => wentBack.promise);
         const reloaded = Promise.withResolvers<void>();
         context.page.reload.mockImplementationOnce(async () => reloaded.resolve());
         yield* viewer.input({ type: "reload" });
@@ -999,11 +1009,141 @@ it.live("reload recovers both owned remote origins after returning through publi
       expect(prepared).toEqual([
         ...destinations,
         "http://localhost:5180/qa/second?mode=light#second",
+        "http://localhost:5180/qa/second?mode=light#second",
+        "http://localhost:5173/qa/first?mode=dark#first",
         "http://localhost:5173/qa/first?mode=dark#first",
       ]);
       expect(context.page.reload).toHaveBeenCalledTimes(2);
     }),
   ).pipe(Effect.provide(layer)),
+);
+
+it.live.each([false, true])(
+  "client hard reload prepares managed access before reloading (remote: %s)",
+  (remote) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        if (remote) {
+          profileCatalogue = {
+            desktopHostId: "fixture-desktop",
+            profiles: [{ id: "fixture-profile", name: "Fixture profile", kind: "persistent" }],
+            defaultProfileId: "fixture-profile",
+          };
+          desktopRendersNext = true;
+        }
+        const { broker, tabId } = yield* ready;
+        const context = remote ? desktopConnections[0]!.context : contexts[0]!;
+        const url = "http://localhost:5173/qa/reload?mode=dark#anchor";
+        hostingPreparation = () => Effect.succeed({ managed: true });
+        yield* broker.invoke({ scope, tabId, operation: "navigate", input: { url } });
+        const events: string[] = [];
+        const prepared: Array<{ threadId: string; url: string; browserUrl?: string }> = [];
+        hostingPreparation = (input) =>
+          Effect.sync(() => {
+            events.push("recovered");
+            prepared.push(input);
+            return { managed: true, bootstrapToken: "fixture-one-use-credential" };
+          });
+        const post = context.request.post.getMockImplementation()!;
+        context.request.post.mockImplementationOnce(async (...args) => {
+          events.push("authenticated");
+          return post(...args);
+        });
+        const reloaded = Promise.withResolvers<void>();
+        const cdp = context.sessions[0]!;
+        const send = cdp.send.getMockImplementation()!;
+        cdp.send.mockImplementation(async (method, input) => {
+          if (method === "Network.clearBrowserCookies") events.push("cleared");
+          if (method === "Page.reload") {
+            events.push("reloaded");
+            reloaded.resolve();
+          }
+          return send(method, input);
+        });
+        const manager = yield* Manager.PreviewManager;
+        yield* manager.adjust({
+          threadId: scope.thread.threadId,
+          tabId,
+          clear: "cookies",
+          hardReload: true,
+        });
+        yield* Effect.promise(() => reloaded.promise);
+        const browserUrl = remote ? url.replace("localhost", "environment.example.test") : url;
+        expect(prepared).toEqual([
+          { threadId: scope.thread.threadId, url, ...(remote ? { browserUrl } : {}) },
+        ]);
+        expect(events).toEqual(["cleared", "recovered", "authenticated", "reloaded"]);
+        expect(context.request.post).toHaveBeenCalledExactlyOnceWith(
+          new URL("/api/auth/browser-session", browserUrl).href,
+          expect.objectContaining({ data: { credential: "fixture-one-use-credential" } }),
+        );
+        expect(cdp.send).toHaveBeenCalledWith("Page.reload", { ignoreCache: true });
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live.each([-1, 1])(
+  "history delta %s prepares the managed destination before navigation",
+  (delta) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        profileCatalogue = {
+          desktopHostId: "fixture-desktop",
+          profiles: [{ id: "fixture-profile", name: "Fixture profile", kind: "persistent" }],
+          defaultProfileId: "fixture-profile",
+        };
+        desktopRendersNext = true;
+        const { browser, broker, tabId } = yield* ready;
+        const context = desktopConnections[0]!.context;
+        const url = "http://localhost:5173/qa/history?mode=dark#anchor";
+        hostingPreparation = ({ url }) =>
+          Effect.succeed({ managed: new URL(url).hostname === "localhost" });
+        yield* broker.invoke({ scope, tabId, operation: "navigate", input: { url } });
+        yield* broker.invoke({
+          scope,
+          tabId,
+          operation: "navigate",
+          input: { url: "https://public.example/other" },
+        });
+        if (delta > 0) {
+          yield* Effect.promise(() => context.page.goBack());
+          yield* Effect.promise(() => context.page.goBack());
+        }
+        const events: string[] = [];
+        const prepared: Array<{ threadId: string; url: string; browserUrl?: string }> = [];
+        hostingPreparation = (input) =>
+          Effect.sync(() => {
+            events.push("recovered");
+            prepared.push(input);
+            return { managed: true, bootstrapToken: "fixture-one-use-credential" };
+          });
+        const post = context.request.post.getMockImplementation()!;
+        context.request.post.mockImplementationOnce(async (...args) => {
+          events.push("authenticated");
+          return post(...args);
+        });
+        const method = delta < 0 ? "goBack" : "goForward";
+        const navigate = context.page[method].getMockImplementation()!;
+        const committed = Promise.withResolvers<void>();
+        context.page[method].mockImplementationOnce(async () => {
+          await navigate();
+          events.push("navigated");
+          committed.resolve();
+        });
+        const viewer = yield* browser.attachViewer(viewerInput(tabId, true));
+        yield* viewer.input({ type: "takeControl" });
+        yield* viewer.input({ type: "history", delta });
+        yield* Effect.promise(() => committed.promise);
+        const browserUrl = url.replace("localhost", "environment.example.test");
+        expect(context.page.url()).toBe(browserUrl);
+        expect(prepared).toEqual([{ threadId: scope.thread.threadId, url, browserUrl }]);
+        expect(events).toEqual(["recovered", "authenticated", "navigated"]);
+        expect(context.request.post).toHaveBeenCalledExactlyOnceWith(
+          new URL("/api/auth/browser-session", browserUrl).href,
+          expect.objectContaining({ data: { credential: "fixture-one-use-credential" } }),
+        );
+      }),
+    ).pipe(Effect.provide(layer)),
 );
 
 it.live.each(["open", "openWithProfile", "navigate", "viewer"] as const)(
@@ -1248,7 +1388,7 @@ it.live.each(["navigate", "history"] as const)(
     ).pipe(Effect.provide(layer)),
 );
 
-it.live.each(["navigate", "reload"] as const)(
+it.live.each(["navigate", "reload", "history"] as const)(
   "control handoff cancels pending viewer %s preparation before page mutation",
   (type) =>
     Effect.scoped(
@@ -1257,6 +1397,13 @@ it.live.each(["navigate", "reload"] as const)(
         const url = "http://localhost:5173/qa?mode=dark#anchor";
         hostingPreparation = () => Effect.succeed({ managed: true });
         yield* broker.invoke({ scope, tabId, operation: "navigate", input: { url } });
+        if (type === "history")
+          yield* broker.invoke({
+            scope,
+            tabId,
+            operation: "navigate",
+            input: { url: "https://public.example/other" },
+          });
         const viewer = yield* browser.attachViewer(viewerInput(tabId, true));
         yield* viewer.input({ type: "takeControl" });
         const entered = Promise.withResolvers<void>();
@@ -1266,12 +1413,13 @@ it.live.each(["navigate", "reload"] as const)(
             Effect.andThen(Effect.never),
             Effect.onInterrupt(() => Effect.sync(() => interrupted.resolve())),
           );
-        yield* viewer.input({ type, url });
+        yield* viewer.input({ type, url, delta: -1 });
         yield* Effect.promise(() => entered.promise);
         yield* viewer.input({ type: "releaseControl" });
         yield* Effect.promise(() => interrupted.promise);
-        expect(contexts[0]!.page.goto).toHaveBeenCalledOnce();
+        expect(contexts[0]!.page.goto).toHaveBeenCalledTimes(type === "history" ? 2 : 1);
         expect(contexts[0]!.page.reload).not.toHaveBeenCalled();
+        expect(contexts[0]!.page.goBack).not.toHaveBeenCalled();
         expect(
           yield* broker.invoke({
             scope,
