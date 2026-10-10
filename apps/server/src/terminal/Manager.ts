@@ -728,20 +728,15 @@ function deriveSubprocessInspectResult(
   const commandName = (pid: number) =>
     normalizeChildCommandName(snapshot.commandById.get(pid) ?? "", platform);
   const shellName = commandName(terminalPid);
-  // Linux comm holds 15 bytes plus NUL; other process tables may retain the
-  // full name. Accept exactly that kernel representation, never any prefix.
-  const linuxShellName =
-    platform === "linux" && spawnedShellName !== null
-      ? Buffer.from(spawnedShellName, "utf8").subarray(0, 15).toString("utf8")
-      : null;
   // POSIX exec replaces the shell while retaining the PTY root PID. It can
-  // run real work without any child processes.
+  // run real work without any child processes. Linux comm can truncate names
+  // to 15 bytes, so matching a long shell's truncated prefix cannot prove it
+  // is still the shell. Keep ambiguous roots active until a full name matches.
   const rootWasReplaced =
     platform !== "win32" &&
     spawnedShellName !== null &&
     shellName !== null &&
-    shellName !== spawnedShellName &&
-    shellName !== linuxShellName;
+    shellName !== spawnedShellName;
   // Async prompt themes fork the shell into a helper that waits with no
   // children of its own. That copy is not a command the user started.
   const childPid = (snapshot.childrenByParent.get(terminalPid) ?? []).find(
