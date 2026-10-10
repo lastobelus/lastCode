@@ -194,7 +194,6 @@ import {
 } from "../threadSelectionStore";
 import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
 import {
-  archiveSelectedThreadEntries,
   buildMultiSelectThreadContextMenuItems,
   deleteSelectedThreadEntries,
   getSidebarThreadIdsToPrewarm,
@@ -1220,6 +1219,8 @@ interface SidebarProjectItemProps {
   archiveThread: ReturnType<typeof useThreadActions>["archiveThread"];
   deleteThread: ReturnType<typeof useThreadActions>["deleteThread"];
   markThreadUnread: ReturnType<typeof useThreadActions>["markThreadUnread"];
+  unarchiveThread: ReturnType<typeof useThreadActions>["unarchiveThread"];
+  archiveThreads: ReturnType<typeof useThreadActions>["archiveThreads"];
   threadJumpLabelByKey: ReadonlyMap<string, string>;
   attachThreadListAutoAnimateRef: (node: HTMLElement | null) => void;
   expandThreadListForProject: (projectKey: string) => void;
@@ -1242,6 +1243,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     archiveThread,
     deleteThread,
     markThreadUnread,
+    unarchiveThread,
+    archiveThreads,
     threadJumpLabelByKey,
     attachThreadListAutoAnimateRef,
     expandThreadListForProject,
@@ -2057,12 +2060,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       }
 
       if (clicked === "archive") {
-        if (appSettingsConfirmThreadArchive) {
-          const confirmed = await api.dialogs.confirm(
-            `Archive ${count} thread${count === 1 ? "" : "s"}?`,
-          );
-          if (!confirmed) return;
-        }
         if (
           !selectedThreadEntries.every(({ threadRef }) =>
             checkTaskPermission(threadRef.environmentId),
@@ -2071,10 +2068,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
           return;
         }
 
-        const archiveOutcome = await archiveSelectedThreadEntries({
-          entries: selectedThreadEntries,
-          archive: ({ threadRef }, onArchived) => archiveThread(threadRef, { onArchived }),
-        });
+        const archiveOutcome = await archiveThreads(selectedThreadEntries);
+        if (archiveOutcome === null) return;
         for (const failure of archiveOutcome.followupFailures) {
           if (isAtomCommandInterrupted(failure)) continue;
           const error = squashAtomCommandFailure(failure);
@@ -2147,9 +2142,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       );
     },
     [
-      appSettingsConfirmThreadArchive,
       appSettingsConfirmThreadDelete,
-      archiveThread,
+      archiveThreads,
       clearSelection,
       deleteThread,
       markThreadUnread,
@@ -2253,7 +2247,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     async (threadRef: ScopedThreadRef) => {
       if (!checkTaskPermission(threadRef.environmentId)) return;
       if (readThreadShell(threadRef)?.persistent === true) return;
-      const result = await archiveThread(threadRef);
+      const result = await archiveThread(threadRef, { confirmed: true });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
         toastManager.add(
@@ -2435,6 +2429,15 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             { id: "copy-path", label: "Copy Path" },
             { id: "copy-thread-id", label: "Copy Thread ID" },
             { id: "project-settings", label: "Project settings" },
+            ...(thread.archivePending?.status === "failed"
+              ? [
+                  {
+                    id: "dismiss-archive-failure",
+                    label: "Dismiss archive failure",
+                    disabled: !canOperateThread,
+                  },
+                ]
+              : []),
             {
               id: "delete",
               label: "Delete",
@@ -2488,6 +2491,26 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
       if (clicked === "mark-unread") {
         markThreadUnread(threadRef);
+        return;
+      }
+      if (clicked === "dismiss-archive-failure") {
+        if (!checkTaskPermission(threadRef.environmentId)) return;
+        const pending = thread.archivePending;
+        if (pending?.status !== "failed") return;
+        const result = await unarchiveThread(
+          scopeThreadRef(thread.environmentId, pending.threadId),
+          { expectedArchiveCommandId: pending.commandId },
+        );
+        if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+          const error = squashAtomCommandFailure(result);
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Couldn't dismiss archive failure",
+              description: error instanceof Error ? error.message : "An error occurred.",
+            }),
+          );
+        }
         return;
       }
       if (clicked === "mark-persistent" || clicked === "disable-persistence") {
@@ -2567,6 +2590,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       setOpenMobile,
       startThreadRename,
       setThreadPersistence,
+      unarchiveThread,
     ],
   );
 
@@ -3107,6 +3131,8 @@ interface SidebarProjectsContentProps {
   archiveThread: ReturnType<typeof useThreadActions>["archiveThread"];
   deleteThread: ReturnType<typeof useThreadActions>["deleteThread"];
   markThreadUnread: ReturnType<typeof useThreadActions>["markThreadUnread"];
+  unarchiveThread: ReturnType<typeof useThreadActions>["unarchiveThread"];
+  archiveThreads: ReturnType<typeof useThreadActions>["archiveThreads"];
   sortedProjects: readonly SidebarProjectSnapshot[];
   expandedThreadListsByProject: ReadonlySet<string>;
   activeRouteProjectKey: string | null;
@@ -3150,6 +3176,8 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     archiveThread,
     deleteThread,
     markThreadUnread,
+    unarchiveThread,
+    archiveThreads,
     sortedProjects,
     expandedThreadListsByProject,
     activeRouteProjectKey,
@@ -3292,6 +3320,8 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                         archiveThread={archiveThread}
                         deleteThread={deleteThread}
                         markThreadUnread={markThreadUnread}
+                        unarchiveThread={unarchiveThread}
+                        archiveThreads={archiveThreads}
                         threadJumpLabelByKey={threadJumpLabelByKey}
                         attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
                         expandThreadListForProject={expandThreadListForProject}
@@ -3326,6 +3356,8 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                 archiveThread={archiveThread}
                 deleteThread={deleteThread}
                 markThreadUnread={markThreadUnread}
+                unarchiveThread={unarchiveThread}
+                archiveThreads={archiveThreads}
                 threadJumpLabelByKey={threadJumpLabelByKey}
                 attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
                 expandThreadListForProject={expandThreadListForProject}
@@ -3361,7 +3393,8 @@ export default function LegacySidebar() {
   const sidebarThreadPreviewCount = useClientSettings((s) => s.sidebarThreadPreviewCount);
   const updateSettings = useUpdateClientSettings();
   const handleNewThread = useNewThreadHandler();
-  const { archiveThread, deleteThread, markThreadUnread } = useThreadActions();
+  const { archiveThread, deleteThread, markThreadUnread, unarchiveThread, archiveThreads } =
+    useThreadActions();
   const { isMobile, setOpenMobile } = useSidebar();
   const routeTarget = useParams({
     strict: false,
@@ -4031,6 +4064,8 @@ export default function LegacySidebar() {
         archiveThread={archiveThread}
         deleteThread={deleteThread}
         markThreadUnread={markThreadUnread}
+        unarchiveThread={unarchiveThread}
+        archiveThreads={archiveThreads}
         sortedProjects={sortedProjects}
         expandedThreadListsByProject={expandedThreadListsByProject}
         activeRouteProjectKey={activeRouteProjectKey}
