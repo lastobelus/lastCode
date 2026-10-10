@@ -12993,6 +12993,26 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       } satisfies OrchestratorV2DispatchResult;
     }
 
+    // Action results retain their delivery identity while an unanswered request holds intake.
+    // This check shares the provider request's thread lock and precedes rejection receipts.
+    if (
+      command.type === "message.dispatch" &&
+      command.createdBy === "system" &&
+      command.creationSource === "server" &&
+      command.messageId.startsWith("action-resume:") &&
+      command.dispatchMode.type === "queue_after_active"
+    ) {
+      const records = yield* projectionStore
+        .getThreadRecords(command.threadId, ["runtimeRequests"])
+        .pipe(mapDispatchError(command));
+      if (records.runtimeRequests.some((request) => request.status === "pending"))
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "The Action follow-up is held until this thread's unanswered request is resolved.",
+        });
+    }
+
     // A limited sender checked these modes before dispatching; the thread's
     // user may have raised them since, and only here can they not change.
     const limit = yield* DispatchModeLimit;

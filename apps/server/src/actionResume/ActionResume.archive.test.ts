@@ -4,6 +4,9 @@ import {
   CommandId,
   EventId,
   MessageId,
+  NodeId,
+  RuntimeRequestId,
+  type OrchestrationV2RuntimeRequest,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -36,6 +39,10 @@ import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterReg
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProviderReplayHarness from "../orchestration-v2/testkit/ProviderReplayHarness.ts";
+import * as ProviderEventIngestor from "../orchestration-v2/ProviderEventIngestor.ts";
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ActionRunStore from "./ActionRunStore.ts";
 import * as ActionResume from "./ActionResume.ts";
 
@@ -101,11 +108,22 @@ const makeHarness = Effect.fn("ActionArchiveTest.makeHarness")(function* (
     { databaseLayer: database, runEffectWorker: false },
   );
   const threads = ThreadManagement.layer.pipe(Layer.provide(replay));
+  const ingestor = ProviderEventIngestor.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        replay,
+        ProjectionStore.layer.pipe(Layer.provide(database)),
+        IdAllocator.layer,
+        ThreadCommandExecutor.layer,
+      ),
+    ),
+  );
   const receipts = CommandReceipts.layer.pipe(Layer.provide(database));
   const runs = ActionRunStore.layer.pipe(Layer.provide(database));
   const attempted = yield* Deferred.make<void>();
   let raced = false;
   let archiveAtOpen: Effect.Effect<void> = Effect.void;
+  let beforeDelivery: Effect.Effect<void> = Effect.void;
   let beforeEligibilityRead: Effect.Effect<void> = Effect.void;
   const actionThreads = Layer.effect(
     ThreadManagement.ThreadManagementService,
@@ -135,6 +153,11 @@ const makeHarness = Effect.fn("ActionArchiveTest.makeHarness")(function* (
           }),
         dispatch: (command) =>
           Effect.gen(function* () {
+            if (command.type === "message.dispatch") {
+              const before = beforeDelivery;
+              beforeDelivery = Effect.void;
+              yield* before;
+            }
             if (raceDelivery && !raced && command.type === "message.dispatch") {
               raced = true;
               // The eligibility read passed; archive wins the authoritative dispatch lock.
@@ -207,8 +230,11 @@ const makeHarness = Effect.fn("ActionArchiveTest.makeHarness")(function* (
     Layer.provide(NodeServices.layer),
   );
   return {
-    layer: Layer.mergeAll(replay, threads, receipts, runs, actions),
+    layer: Layer.mergeAll(replay, threads, receipts, runs, actions, ingestor),
     attempted,
+    beforeDelivery: (effect: Effect.Effect<void>) => {
+      beforeDelivery = effect;
+    },
     beforeEligibilityRead: (effect: Effect.Effect<void>) => {
       beforeEligibilityRead = effect;
     },
@@ -348,6 +374,119 @@ it.effect("queues one Action result when notification promotion wins the eligibi
       );
     }).pipe(Effect.provide(harness.layer));
   }),
+);
+
+it.effect.each(["command", "user_input"] as const)(
+  "retains one Action result when a %s request wins serialized delivery",
+  (kind) =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness(false);
+      yield* Effect.gen(function* () {
+        const threads = yield* ThreadManagement.ThreadManagementService;
+        const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+        const receipts = yield* CommandReceipts.CommandReceiptStoreV2;
+        const actions = yield* ActionResume.ActionResume;
+        const runs = yield* ActionRunStore.ActionRunStore;
+        yield* threads.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("request-race:create"),
+          threadId,
+          projectId,
+          title: "Request race",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdBy: "user",
+          creationSource: "web",
+        });
+        yield* threads.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("request-race:active"),
+          threadId,
+          messageId: MessageId.make("request-race:active"),
+          text: "Active turn",
+          attachments: [],
+          modelSelection,
+          dispatchMode: { type: "defer_start" },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        const now = yield* DateTime.now;
+        const request: OrchestrationV2RuntimeRequest = {
+          id: RuntimeRequestId.make("request-race:request"),
+          nodeId: NodeId.make("request-race:node"),
+          providerTurnId: null,
+          nativeRequestRef: null,
+          kind,
+          status: "pending",
+          responseCapability: { type: "message" },
+          createdAt: now,
+          resolvedAt: null,
+        };
+        const ingest = (runtimeRequest: OrchestrationV2RuntimeRequest) =>
+          ingestor
+            .ingestNormalized({
+              providerSessionId: ProviderSessionId.make("request-race:session"),
+              providerInstanceId: instanceId,
+              threadId,
+              event: {
+                type: "runtime_request.updated",
+                driver: provider.driver,
+                threadId,
+                runtimeRequest,
+              },
+            })
+            .pipe(Effect.asVoid, Effect.orDie);
+        const action = yield* actions.runProjectActionAndResume(
+          { threadId, providerInstanceId: instanceId },
+          "qa",
+        );
+        // The preliminary read sees no request. Real provider ingestion commits before dispatch locks.
+        harness.beforeDelivery(ingest(request));
+        yield* harness.emit({
+          type: "exited",
+          threadId,
+          terminalId: action.terminalId,
+          exitCode: 0,
+          exitSignal: null,
+        });
+        const deliveryId = CommandId.make(`server:action-resume:${action.runId}:delivery`);
+        const followUpId = MessageId.make(`action-resume:${action.runId}:follow-up`);
+        yield* actions.retryPendingFollowUps;
+        assert.equal(
+          Option.getOrThrow(yield* runs.get(threadId, action.runId)).state.delivery,
+          "pending",
+        );
+        assert.isTrue(Option.isNone(yield* receipts.getByCommandId(deliveryId)));
+        assert.lengthOf(
+          (yield* threads.getThreadRecords(threadId, ["messages"])).messages.filter(
+            (m) => m.id === followUpId,
+          ),
+          0,
+        );
+        yield* ingest({ ...request, status: "resolved", resolvedAt: now });
+        yield* actions.retryPendingFollowUps;
+        yield* actions.retryPendingFollowUps;
+        const after = yield* threads.getThreadRecords(threadId, ["runs", "messages"]);
+        assert.lengthOf(
+          after.messages.filter((m) => m.id === followUpId),
+          1,
+        );
+        const followUps = after.runs.filter((r) => r.userMessageId === followUpId);
+        assert.lengthOf(followUps, 1);
+        assert.equal(followUps[0]?.status, "queued");
+        assert.equal(
+          Option.getOrThrow(yield* receipts.getByCommandId(deliveryId)).status,
+          "accepted",
+        );
+        assert.equal(
+          Option.getOrThrow(yield* runs.get(threadId, action.runId)).state.delivery,
+          "delivered",
+        );
+      }).pipe(Effect.provide(harness.layer));
+    }),
 );
 
 it.effect.each([false, true])(
