@@ -1728,14 +1728,16 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     );
   });
   const customSubprocessInspector = options.subprocessInspector;
-  const acquireSubprocessInspector: Effect.Effect<
+  const acquireSubprocessInspector = (
+    freshSnapshot = false,
+  ): Effect.Effect<
     {
       readonly inspector: TerminalSubprocessInspector;
       readonly snapshotSucceeded: boolean;
       readonly generation: number | undefined;
     },
     TerminalSubprocessCheckError
-  > =
+  > =>
     customSubprocessInspector !== undefined
       ? Effect.succeed({
           inspector: customSubprocessInspector,
@@ -1743,7 +1745,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           generation: undefined,
         })
       : Effect.map(
-          fetchProcessTableSnapshot,
+          freshSnapshot ? processTableSnapshotWithGeneration : fetchProcessTableSnapshot,
           ({
             snapshot,
             snapshotSucceeded,
@@ -2781,7 +2783,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       return true;
     }
 
-    const inspectorOption = yield* acquireSubprocessInspector.pipe(
+    const inspectorOption = yield* acquireSubprocessInspector().pipe(
       Effect.asSome,
       Effect.catch((reason) =>
         Effect.logWarning("failed to snapshot processes for terminal subprocess polling", {
@@ -3752,7 +3754,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
 
       // Process inspection can stall. Release the thread lock while it runs,
       // so input and lifecycle operations do not wait for the monitor.
-      const { inspector } = yield* acquireSubprocessInspector;
+      // A poll started after the last write may still have sampled the shell
+      // before a quiet command began. Cleanup needs a scan started after its
+      // candidates were captured, even when no output invalidated the poll.
+      const { inspector } = yield* acquireSubprocessInspector(true);
       const inspected = yield* Effect.forEach(candidates, (candidate) =>
         inspector(candidate.pid, candidate.spawnedShellName, candidate.beforeFirstInput).pipe(
           Effect.map((result) => ({

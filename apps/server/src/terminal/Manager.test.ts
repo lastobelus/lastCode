@@ -2691,8 +2691,91 @@ it.layer(
       }).pipe(Effect.provide(TestClock.layer())),
   );
 
+  it.effect.each(
+    (["native", "fallback"] as const).flatMap((source) =>
+      (["quiet exec", "idle shell"] as const).map((state) => ({ source, state })),
+    ),
+  )(
+    "takes independent fresh $source cleanup snapshots after an older idle poll before $state",
+    ({ source, state }) =>
+      Effect.gen(function* () {
+        const oldPollStarted = yield* Deferred.make<void>();
+        const releaseOldPoll = yield* Deferred.make<void>();
+        const freshScanStarted = yield* Deferred.make<void>();
+        const releaseFreshScans = yield* Deferred.make<void>();
+        const ptyAdapter = new FakePtyAdapter();
+        let nextScan: "startup" | "old poll" | "cleanup" = "startup";
+        let commandStarted = false;
+        let snapshotCalls = 0;
+        const freshNames: string[] = [];
+        const processTable = Effect.gen(function* () {
+          snapshotCalls += 1;
+          // Freeze this scan's table before the quiet command begins.
+          const name = commandStarted ? "sleep" : "zsh";
+          const entries = [{ pid: 9000, ppid: 1, name }];
+          if (nextScan === "old poll") {
+            nextScan = "cleanup";
+            yield* Deferred.succeed(oldPollStarted, undefined);
+            yield* Deferred.await(releaseOldPoll);
+          } else if (nextScan === "cleanup") {
+            freshNames.push(name);
+            yield* Deferred.succeed(freshScanStarted, undefined);
+            yield* Deferred.await(releaseFreshScans);
+          }
+          return entries;
+        });
+        const { manager } = yield* createSnapshotBoundaryManager(source, ptyAdapter, processTable);
+        yield* TestClock.adjust(0);
+        const terminal = openInput();
+        yield* manager.open(terminal);
+        const process = ptyAdapter.processes[0]!;
+        process.exitOnKill = "SIGTERM";
+        yield* manager.write({ ...terminal, data: "exec sleep 60\r" });
+        nextScan = "old poll";
+        yield* TestClock.adjust("60 seconds");
+        yield* Deferred.await(oldPollStarted);
+        const callsBeforeCleanup = snapshotCalls;
+        // No further input or PTY output invalidates the idle table. Cleanup
+        // must inspect after its own candidates were collected nevertheless.
+        commandStarted = state === "quiet exec";
+        const callers = yield* Effect.forEach([1, 2, 3], () =>
+          manager.closeIdle(terminal).pipe(Effect.forkScoped({ startImmediately: true })),
+        );
+        yield* TestClock.adjust(0);
+        const freshStarted = yield* Deferred.isDone(freshScanStarted);
+        const freshCalls = snapshotCalls - callsBeforeCleanup;
+        const callersPending = callers.every((caller) => caller.pollUnsafe() === undefined);
+        // Open both gates even if the published implementation reused the
+        // older poll, so the negative run ends with observable assertions.
+        yield* Deferred.succeed(releaseFreshScans, undefined);
+        yield* Deferred.succeed(releaseOldPoll, undefined);
+        yield* Effect.forEach(callers, Fiber.join);
+        yield* TestClock.adjust("1 millis");
+        const metadata = yield* readIdleInspectionMetadata(manager);
+        const killSignals = [...process.killSignals];
+        if (!process.killed) yield* exitSnapshotTestProcesses(manager, ptyAdapter, [terminal]);
+        expect(process.writes).toEqual(["exec sleep 60\r"]);
+        if (commandStarted) {
+          expect(killSignals).toEqual([]);
+          expect(metadata).toEqual([
+            expect.objectContaining({ pid: process.pid, status: "running" }),
+          ]);
+        } else {
+          expect(killSignals).toContain("SIGTERM");
+          expect(metadata).toEqual([]);
+        }
+        expect(freshStarted).toBe(true);
+        expect(freshCalls).toBe(3);
+        expect(freshNames).toEqual(
+          Array.from({ length: 3 }, () => (commandStarted ? "sleep" : "zsh")),
+        );
+        expect(callersPending).toBe(true);
+        expect(ptyAdapter.spawnInputs).toHaveLength(1);
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
   it.effect.each(["native", "fallback"] as const)(
-    "coalesces cleanup callers on one fresh %s snapshot after drained output invalidates a held poll",
+    "gives overlapping cleanup callers independent fresh %s snapshots after drained output invalidates a held poll",
     (source) =>
       Effect.gen(function* () {
         const staleSnapshotStarted = yield* Deferred.make<void>();
@@ -2713,7 +2796,6 @@ it.layer(
             yield* Deferred.succeed(staleSnapshotStarted, undefined);
             yield* Deferred.await(releaseStaleSnapshot);
           } else if (holdNextFreshSnapshot) {
-            holdNextFreshSnapshot = false;
             yield* Deferred.succeed(freshSnapshotStarted, undefined);
             yield* Deferred.await(releaseFreshSnapshot);
           }
@@ -2755,8 +2837,8 @@ it.layer(
         const killSignals = [...process.killSignals];
         if (!process.killed) yield* exitSnapshotTestProcesses(manager, ptyAdapter, [terminal]);
         expect(freshStarted).toBe(true);
-        expect(callsWhileBothSnapshotsPending).toBe(callsBeforeOutput + 1);
-        expect(snapshotCalls).toBe(callsBeforeOutput + 1);
+        expect(callsWhileBothSnapshotsPending).toBe(callsBeforeOutput + 3);
+        expect(snapshotCalls).toBe(callsBeforeOutput + 3);
         expect(callersStillPending).toBe(true);
         expect(killSignals).toEqual([]);
         expect(ptyAdapter.spawnInputs).toHaveLength(1);
