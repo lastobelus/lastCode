@@ -2,8 +2,8 @@
 
 A resumable Project Action runs in its own terminal and can arrange for LastCode to return to the
 same agent thread when the command finishes. The Action keeps running independently if you send
-another message to the agent. LastCode waits until both the Action has finished and the thread is
-idle before delivering the automatic follow-up.
+another message to the agent. When the Action finishes, LastCode queues its automatic follow-up.
+The agent handles it after its current turn finishes.
 
 To design and operate these workflows with less prompting, see the
 [agent-assisted workflow](./resumable-project-actions-for-agents.md). Agents and maintainers can
@@ -32,6 +32,6 @@ disclosure also provides these controls:
 On mobile, the thread shows a **Waiting for _Action name_** notice above the composer with a
 **Cancel** control.
 
-If LastCode restarts after an Action finished but before its follow-up was delivered, the thread
+If LastCode restarts after an Action finished but before its follow-up was queued, the thread
 explains that the Action was interrupted. Choose **Resume agent** to deliver only the saved
 follow-up, or **Discard** to remove it. LastCode does not restart the command automatically.

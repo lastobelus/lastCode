@@ -2,8 +2,8 @@
 
 Use a resumable Project Action when a workflow has reached a passive or uninterrupted command that
 may take long enough that keeping an agent turn open would be wasteful. The Action runs in a
-dedicated terminal. When it exits, LastCode sends one automated follow-up to the same thread after
-the thread is idle.
+dedicated terminal. When it exits, LastCode queues one automated follow-up in the same thread for
+the agent to handle after its current turn finishes.
 
 Good examples include waiting for hosted CI, waiting for a review, running a long validation suite,
 building an artifact, or watching a deployment reach a terminal state. Ordinary commands that
@@ -31,8 +31,9 @@ An agent should use the two LastCode Action tools in this order:
    `inspect_action_run` with the supplied run ID only when the compact result is insufficient.
 
 Only one resumable Action continuation can be active for a thread. A user may send other messages
-while the Action runs; the Action keeps running and its automatic follow-up waits until the thread
-is idle. A user may also inspect or cancel it from the composer.
+while the Action runs; the Action keeps running and its automatic follow-up queues behind the
+active turn. Unanswered requests and an environment pause still hold admission. A user may also
+inspect or cancel it from the composer.
 
 Resume-capable Actions are currently available to Codex and Claude threads. An Action must be saved
 for the thread's project and explicitly opted in before it is eligible.
@@ -175,8 +176,9 @@ verbose transcript into every resumed agent turn. Branch on the reason the comma
   retry. Inspection is limited to runs in the current thread and returns a bounded retained tail.
 - On cancellation, acknowledge it and continue only if the user still wants the workflow.
 
-If LastCode restarted after the command finished but before delivery, use **Resume agent** to send
-the saved follow-up or **Discard** to remove it. LastCode does not rerun the command automatically.
+If LastCode restarted after the command finished but before the follow-up was queued, use
+**Resume agent** to send the saved follow-up or **Discard** to remove it. LastCode does not rerun
+the command automatically.
 
 ## Adapt an existing PR babysitting skill
 

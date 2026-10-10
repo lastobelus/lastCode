@@ -106,6 +106,7 @@ const makeHarness = Effect.fn("ActionArchiveTest.makeHarness")(function* (
   const attempted = yield* Deferred.make<void>();
   let raced = false;
   let archiveAtOpen: Effect.Effect<void> = Effect.void;
+  let beforeEligibilityRead: Effect.Effect<void> = Effect.void;
   const actionThreads = Layer.effect(
     ThreadManagement.ThreadManagementService,
     Effect.gen(function* () {
@@ -123,6 +124,15 @@ const makeHarness = Effect.fn("ActionArchiveTest.makeHarness")(function* (
           .pipe(Effect.asVoid, Effect.orDie);
       return ThreadManagement.ThreadManagementService.of({
         ...delegate,
+        getThreadRecords: (id, collections, filter) =>
+          Effect.gen(function* () {
+            if (collections.some((collection) => collection === "runtimeRequests")) {
+              const before = beforeEligibilityRead;
+              beforeEligibilityRead = Effect.void;
+              yield* before;
+            }
+            return yield* delegate.getThreadRecords(id, collections, filter);
+          }),
         dispatch: (command) =>
           Effect.gen(function* () {
             if (raceDelivery && !raced && command.type === "message.dispatch") {
@@ -199,12 +209,146 @@ const makeHarness = Effect.fn("ActionArchiveTest.makeHarness")(function* (
   return {
     layer: Layer.mergeAll(replay, threads, receipts, runs, actions),
     attempted,
+    beforeEligibilityRead: (effect: Effect.Effect<void>) => {
+      beforeEligibilityRead = effect;
+    },
     terminalWrites: () => terminalWrites,
     terminalCloses: () => terminalCloses,
     emit: (event: TerminalEvent) =>
       Effect.suspend(() => listener?.(event) ?? Effect.die("Action terminal is not subscribed")),
   };
 });
+
+it.effect("queues one Action result when notification promotion wins the eligibility read", () =>
+  Effect.gen(function* () {
+    const harness = yield* makeHarness(false);
+    yield* Effect.gen(function* () {
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const receipts = yield* CommandReceipts.CommandReceiptStoreV2;
+      const actions = yield* ActionResume.ActionResume;
+      const runs = yield* ActionRunStore.ActionRunStore;
+      yield* threads.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("action-queue:create"),
+        threadId,
+        projectId,
+        title: "Action queue",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      yield* threads.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("action-queue:active"),
+        threadId,
+        messageId: MessageId.make("action-queue:active"),
+        text: "Active turn",
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: "defer_start" },
+        createdBy: "user",
+        creationSource: "web",
+      });
+      const notificationId = MessageId.make("action-queue:notification");
+      yield* threads.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("action-queue:notification"),
+        threadId,
+        messageId: notificationId,
+        text: "Pull request review updated",
+        attachments: [],
+        notification: {
+          source: { kind: "monitor" },
+          outcome: "updated",
+          summary: "Pull request review updated",
+        },
+        dispatchMode: { type: "queue_after_active" },
+        createdBy: "agent",
+        creationSource: "server",
+      });
+      const before = yield* threads.getThreadRecords(threadId, ["runs"]);
+      const active = before.runs.find((run) => run.status === "preparing")!;
+      assert.isDefined(active);
+      assert.equal(
+        before.runs.find((run) => run.userMessageId === notificationId)?.status,
+        "queued",
+      );
+      const action = yield* actions.runProjectActionAndResume(
+        { threadId, providerInstanceId: instanceId },
+        "qa",
+      );
+      harness.beforeEligibilityRead(
+        Effect.gen(function* () {
+          const now = yield* DateTime.now;
+          // Complete the old turn and promote the notification through the real queue
+          // before Action delivery reads the current projection. No idle gap is observed.
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make("action-queue:completed"),
+                type: "run.updated",
+                threadId,
+                runId: active.id,
+                occurredAt: now,
+                payload: { ...active, status: "completed", completedAt: now },
+              },
+            ],
+          });
+          yield* orchestrator.resumeQueuedRuns;
+          const promoted = yield* threads.getThreadRecords(threadId, ["runs"]);
+          assert.equal(
+            promoted.runs.find((run) => run.userMessageId === notificationId)?.status,
+            "starting",
+          );
+        }).pipe(Effect.orDie),
+      );
+      yield* harness.emit({
+        type: "exited",
+        threadId,
+        terminalId: action.terminalId,
+        exitCode: 0,
+        exitSignal: null,
+      });
+      yield* actions.retryPendingFollowUps;
+      yield* actions.retryPendingFollowUps;
+      const after = yield* threads.getThreadRecords(threadId, ["runs", "messages"]);
+      const followUpId = MessageId.make(`action-resume:${action.runId}:follow-up`);
+      const followUps = after.runs.filter((run) => run.userMessageId === followUpId);
+      assert.lengthOf(followUps, 1);
+      assert.equal(followUps[0]?.status, "queued");
+      assert.lengthOf(
+        after.messages.filter((message) => message.id === followUpId),
+        1,
+      );
+      assert.equal(
+        after.runs.find((run) => run.userMessageId === notificationId)?.status,
+        "starting",
+      );
+      assert.equal(
+        Option.getOrThrow(yield* runs.get(threadId, action.runId)).state.delivery,
+        "delivered",
+      );
+      assert.equal(
+        Option.getOrThrow(
+          yield* receipts.getByCommandId(
+            CommandId.make(`server:action-resume:${action.runId}:delivery`),
+          ),
+        ).status,
+        "accepted",
+      );
+      assert.isTrue(
+        (yield* actions.listProjectActions({ threadId, providerInstanceId: instanceId }))[0]
+          ?.resumeEligible,
+      );
+    }).pipe(Effect.provide(harness.layer));
+  }),
+);
 
 it.effect.each([false, true])(
   "refuses a new Action and closes its unused terminal during archive stopping (launch race: %s)",

@@ -456,7 +456,7 @@ const make = Effect.gen(function* () {
   const eligibleThreadForFollowUp = Effect.fn("ActionResume.eligibleThreadForFollowUp")(function* (
     threadId: ThreadId,
   ) {
-    const projection = yield* threads.getThreadRecords(threadId, ["runs", "runtimeRequests"]);
+    const projection = yield* threads.getThreadRecords(threadId, ["runtimeRequests"]);
     const thread = projection.thread;
     if (
       thread.archivedAt !== null ||
@@ -464,10 +464,11 @@ const make = Effect.gen(function* () {
       thread.archivePending?.status === "stopping"
     )
       return null;
-    const busy =
-      projection.runs.some(ThreadManagement.isActiveRun) ||
-      projection.runtimeRequests.some((request) => request.status === "pending");
-    return busy ? null : thread;
+    // Queue behind active turns so notification promotion cannot starve a retained result.
+    // Requests still need the user's response before this automatic follow-up is admitted.
+    return projection.runtimeRequests.some((request) => request.status === "pending")
+      ? null
+      : thread;
   });
 
   const deliveryAlreadyAccepted = Effect.fn("ActionResume.deliveryAlreadyAccepted")(function* (

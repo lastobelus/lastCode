@@ -13,7 +13,6 @@ import {
   EnvironmentId,
   UpdateDrainRequestId,
   UpdateDrainTargetVersion,
-  type OrchestrationV2Run,
   type OrchestrationV2RuntimeRequest,
   type OrchestrationV2ServerCommand,
   type OrchestrationV2ThreadProjection,
@@ -194,7 +193,6 @@ const makeHarness = Effect.gen(function* () {
   const shellReads: ThreadId[] = [];
   let listener: ((event: TerminalEvent) => Effect.Effect<void>) | undefined;
   const state = {
-    busy: false,
     callerRunId: null as RunId | null,
     missingShell: false,
     deleted: false,
@@ -224,7 +222,7 @@ const makeHarness = Effect.gen(function* () {
   });
   const projection = (): OrchestrationV2ThreadProjection => ({
     thread: appThread(),
-    runs: state.busy ? [{ status: "running" } as OrchestrationV2Run] : [],
+    runs: [],
     runtimeRequests:
       state.request === null
         ? []
@@ -474,7 +472,7 @@ const makeHarness = Effect.gen(function* () {
     emit: (event: TerminalEvent) =>
       Effect.suspend(() => listener?.(event) ?? Effect.die("not subscribed")),
     pendingResultBarrier: Effect.gen(function* () {
-      // A busy, pending result checks admission after preceding queued events.
+      // A request-held result checks admission after preceding queued events.
       const receipt = yield* Deferred.make<void>();
       state.recordsReceipt = receipt;
       yield* PubSub.publish(events, {
@@ -620,14 +618,14 @@ it.effect.each(["command", "user_input"] as const)(
 );
 
 it.effect(
-  "cancels the exact process while busy, ignores late exit, and disposes archive results",
+  "cancels the exact process while a request is pending, ignores late exit, and disposes archive results",
   () =>
     Effect.gen(function* () {
       const h = yield* makeHarness;
       yield* Effect.gen(function* () {
         const actions = yield* ActionResume.ActionResume;
         const run = yield* actions.runProjectActionAndResume(invocation, "qa");
-        h.state.busy = true;
+        h.state.request = "command";
         yield* actions.cancelByUser(threadId);
         yield* h.emit({
           type: "exited",
@@ -639,7 +637,7 @@ it.effect(
         assert.include(h.closed, run.terminalId);
         assert.equal(h.state.latest?.outcome, "cancelled_by_user");
         assert.equal(h.followUps().length, 0);
-        h.state.busy = false;
+        h.state.request = null;
         yield* actions.retryPendingFollowUps;
         assert.equal(h.followUps().length, 1);
         const replacement = yield* actions.runProjectActionAndResume(invocation, "qa");
@@ -675,10 +673,10 @@ it.effect("recovers running and pending states only after explicit resume", () =
       assert.equal(h.state.latest?.delivery, "available");
       assert.equal(h.followUps().length, 0);
       assert.equal(h.opened.length, 0);
-      h.state.busy = true;
+      h.state.request = "command";
       assert.equal((yield* Effect.result(actions.resumeInterrupted(threadId)))._tag, "Failure");
       assert.equal(h.state.latest?.delivery, "available");
-      h.state.busy = false;
+      h.state.request = null;
       yield* actions.resumeInterrupted(threadId);
       assert.equal(h.followUps().length, 1);
       assert.equal(
@@ -1093,7 +1091,7 @@ it.effect.each(["failed", "running", "archive-race"] as const)(
         );
         assert.equal(h.otherThreads.get(blockedId)?.archivePending?.status, "stopping");
         const run = yield* actions.runProjectActionAndResume(invocation, "qa");
-        h.state.busy = true;
+        h.state.request = "command";
         yield* h.emit({
           type: "exited",
           threadId,
@@ -1102,7 +1100,7 @@ it.effect.each(["failed", "running", "archive-race"] as const)(
           exitSignal: null,
         });
         assert.lengthOf(h.followUps(), 0);
-        h.state.busy = false;
+        h.state.request = null;
         yield* PubSub.publish(h.events, {
           id: EventId.make("event:action-after-refused-restart"),
           threadId,
@@ -1156,7 +1154,7 @@ it.effect.each([
         assert.equal(heldShell.actionResume?.outcome, "running");
         assert.equal(saved.outcome, outcome === "running" ? "process_lost" : "failed");
         const barrierRun = yield* actions.runProjectActionAndResume(invocation, "qa");
-        h.state.busy = true;
+        h.state.request = "command";
         yield* h.emit({
           type: "exited",
           threadId,
@@ -1265,7 +1263,7 @@ it.effect.each(["archived", "deleted"] as const)(
         const actions = yield* ActionResume.ActionResume;
         yield* Deferred.await(h.state.metadataReceipt!);
         const barrierRun = yield* actions.runProjectActionAndResume(invocation, "qa");
-        h.state.busy = true;
+        h.state.request = "command";
         yield* h.emit({
           type: "exited",
           threadId,
@@ -1338,7 +1336,7 @@ it.effect.each([
         const actions = yield* ActionResume.ActionResume;
         yield* Deferred.await(h.state.metadataReceipt!);
         const barrierRun = yield* actions.runProjectActionAndResume(invocation, "qa");
-        h.state.busy = true;
+        h.state.request = "command";
         yield* h.emit({
           type: "exited",
           threadId,
@@ -1421,7 +1419,7 @@ it.effect(
       yield* Effect.gen(function* () {
         const actions = yield* ActionResume.ActionResume;
         const run = yield* actions.runProjectActionAndResume(invocation, "qa");
-        h.state.busy = true;
+        h.state.request = "command";
         yield* h.emit({
           type: "exited",
           threadId,
@@ -1430,7 +1428,7 @@ it.effect(
           exitSignal: null,
         });
         assert.equal(h.followUps().length, 0);
-        h.state.busy = false;
+        h.state.request = null;
         yield* Deferred.await(h.subscribed);
         yield* PubSub.publish(h.events, {
           id: EventId.make("event:action-thread-idle"),
