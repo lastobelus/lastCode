@@ -1,11 +1,11 @@
 ---
-name: report
+name: user-report
 description: Prepare user-facing reports for opted-in persistent maintenance and automation coordinators, or clarify a previous report when the user says "report skill", "retry with report skill", "wut", "what?", "what now?", or "uhh...". Also use for complaints about unclear wording, requests for plain English or ELI5, and questions about what a passage actually means. Ordinary PR and implementation work keeps its existing reporting rules unless the user requests this clarification.
 ---
 
-# Report
+# User Report
 
-Use this skill when explicitly requested in ordinary language, when the user signals that agent prose is unclear, or when an opted-in persistent maintenance or automation coordinator needs to report to the user. A prompt or CLI-delivered message may reference `report` directly. Read this file anew when invoked after a resumed turn or compaction; conversation summaries are not the authoritative instructions.
+Use this skill when explicitly requested in ordinary language, when the user signals that agent prose is unclear, or when an opted-in persistent maintenance or automation coordinator needs to report to the user. A prompt or CLI-delivered message may reference `user-report` directly. Read this file anew when invoked after a resumed turn or compaction; conversation summaries are not the authoritative instructions.
 
 Treat "wut", "what?", "what now?", "uhh...", "wtf", "say again?", "plain English", "better language", "ELI5", and "what does that actually mean?" as clarification signals when they refer to agent prose. An ordinary factual question containing "what" does not by itself activate this skill. An explicit clarification can apply in any thread; automatic coordinator reporting remains scoped to opted-in persistent maintenance and automation work.
 
