@@ -1205,31 +1205,38 @@ it.layer(
   const exitSnapshotTestProcesses = Effect.fnUntraced(function* (
     manager: ManagerFixture["manager"],
     ptyAdapter: FakePtyAdapter,
-    threadIds: ReadonlyArray<string>,
+    terminals: ReadonlyArray<Pick<TerminalOpenInput, "threadId" | "terminalId">>,
   ) {
-    const remainingThreads = new Set(threadIds);
+    const remainingTerminals = new Set(
+      terminals.map(({ threadId, terminalId }) => JSON.stringify([threadId, terminalId])),
+    );
     const exited = yield* Deferred.make<void>();
     const unsubscribe = yield* manager.subscribe((event) =>
       Effect.gen(function* () {
         if (
           event.type === "exited" &&
-          remainingThreads.delete(event.threadId) &&
-          remainingThreads.size === 0
+          remainingTerminals.delete(JSON.stringify([event.threadId, event.terminalId])) &&
+          remainingTerminals.size === 0
         ) {
           yield* Deferred.succeed(exited, undefined);
         }
       }),
     );
     // Restarted processes have no live manager listener; wait for one exit
-    // per current thread rather than counting every historical fake process.
+    // per current terminal rather than counting every historical fake process.
     for (const process of ptyAdapter.processes) process.emitExit({ exitCode: 0, signal: null });
     yield* Deferred.await(exited);
     unsubscribe();
   });
 
-  it.effect.each(["native", "fallback"] as const)(
-    "shares overlapping first-input %s snapshots across threads and refreshes later shells",
-    (source) =>
+  it.effect.each([
+    { source: "native", grouping: "threads" },
+    { source: "fallback", grouping: "threads" },
+    { source: "native", grouping: "terminals" },
+    { source: "fallback", grouping: "terminals" },
+  ] as const)(
+    "shares overlapping first-input $source snapshots across $grouping and refreshes later shells",
+    ({ source, grouping }) =>
       Effect.gen(function* () {
         const requestStarted = yield* Deferred.make<void>();
         const releaseRequest = yield* Deferred.make<void>();
@@ -1275,11 +1282,14 @@ it.layer(
         );
         // Let the empty-session poll park before opening any terminals.
         yield* TestClock.adjust(0);
-        const threadIds = ["thread-1", "thread-2", "thread-3"];
-        yield* Effect.forEach(threadIds, (threadId) => manager.open(openInput({ threadId })));
-        const write = (threadId: string) =>
-          manager.write({ threadId, terminalId: DEFAULT_TERMINAL_ID, data: "command\r" });
-        const writing = yield* Effect.forEach(threadIds, write, {
+        const terminals = [1, 2, 3].map((index) => ({
+          threadId: grouping === "threads" ? `thread-${index}` : "thread-1",
+          terminalId: grouping === "threads" ? DEFAULT_TERMINAL_ID : `terminal-${index}`,
+        }));
+        yield* Effect.forEach(terminals, (terminal) => manager.open(openInput(terminal)));
+        const write = (terminal: (typeof terminals)[number]) =>
+          manager.write({ ...terminal, data: "command\r" });
+        const writing = yield* Effect.forEach(terminals, write, {
           concurrency: "unbounded",
         }).pipe(Effect.forkScoped);
         yield* Deferred.await(requestStarted);
@@ -1294,25 +1304,33 @@ it.layer(
           ["command\r"],
         ]);
 
-        yield* manager.open(openInput({ threadId: "thread-4" }));
-        yield* write("thread-4");
+        const laterTerminal = {
+          threadId: grouping === "threads" ? "thread-4" : "thread-1",
+          terminalId: grouping === "threads" ? DEFAULT_TERMINAL_ID : "terminal-4",
+        };
+        yield* manager.open(openInput(laterTerminal));
+        yield* write(laterTerminal);
         expect(snapshotCalls).toBe(2);
         ptyAdapter.processes[0]!.exitOnKill = "SIGTERM";
-        yield* manager.restart(restartInput({ threadId: "thread-1" }));
-        yield* write("thread-1");
+        yield* manager.restart(restartInput(terminals[0]!));
+        yield* write(terminals[0]!);
         expect(snapshotCalls).toBe(3);
-        yield* exitSnapshotTestProcesses(manager, ptyAdapter, [...threadIds, "thread-4"]);
+        yield* exitSnapshotTestProcesses(manager, ptyAdapter, [...terminals, laterTerminal]);
       }).pipe(Effect.provide(TestClock.layer())),
   );
 
   it.effect.each([
-    { source: "native", outcome: "cancel" },
-    { source: "native", outcome: "timeout" },
-    { source: "fallback", outcome: "cancel" },
-    { source: "fallback", outcome: "timeout" },
+    { source: "native", outcome: "cancel", grouping: "threads" },
+    { source: "native", outcome: "timeout", grouping: "threads" },
+    { source: "fallback", outcome: "cancel", grouping: "threads" },
+    { source: "fallback", outcome: "timeout", grouping: "threads" },
+    { source: "native", outcome: "cancel", grouping: "terminals" },
+    { source: "native", outcome: "timeout", grouping: "terminals" },
+    { source: "fallback", outcome: "cancel", grouping: "terminals" },
+    { source: "fallback", outcome: "timeout", grouping: "terminals" },
   ] as const)(
-    "abandons a shared $source snapshot after its last first-input waiter leaves via $outcome",
-    ({ source, outcome }) =>
+    "abandons a shared $source snapshot across $grouping after its last waiter leaves via $outcome",
+    ({ source, outcome, grouping }) =>
       Effect.gen(function* () {
         const requestStarted = yield* Deferred.make<void>();
         const releaseRequest = yield* Deferred.make<void>();
@@ -1364,12 +1382,15 @@ it.layer(
           Effect.provide(layerWithHostPlatform("linux")),
         );
         yield* TestClock.adjust(0);
-        const threadIds = ["thread-1", "thread-2"];
-        yield* Effect.forEach(threadIds, (threadId) => manager.open(openInput({ threadId })));
-        const write = (threadId: string) =>
-          manager.write({ threadId, terminalId: DEFAULT_TERMINAL_ID, data: "command\r" });
-        const writers = yield* Effect.forEach(threadIds, (threadId) =>
-          write(threadId).pipe(Effect.forkScoped),
+        const terminals = [1, 2].map((index) => ({
+          threadId: grouping === "threads" ? `thread-${index}` : "thread-1",
+          terminalId: grouping === "threads" ? DEFAULT_TERMINAL_ID : `terminal-${index}`,
+        }));
+        yield* Effect.forEach(terminals, (terminal) => manager.open(openInput(terminal)));
+        const write = (terminal: (typeof terminals)[number]) =>
+          manager.write({ ...terminal, data: "command\r" });
+        const writers = yield* Effect.forEach(terminals, (terminal) =>
+          write(terminal).pipe(Effect.forkScoped),
         );
         yield* Deferred.await(requestStarted);
         yield* TestClock.adjust(0);
@@ -1383,21 +1404,28 @@ it.layer(
           yield* Effect.forEach(writers, Fiber.join);
         }
         yield* Deferred.await(requestStopped);
+        expect(snapshotCalls).toBe(1);
         expect(activeRequests).toBe(0);
         expect(ptyAdapter.processes.map((process) => process.writes)).toEqual(
           outcome === "cancel" ? [[], []] : [["command\r"], ["command\r"]],
         );
         // Releasing an abandoned source cannot publish a reusable result.
         yield* Deferred.succeed(releaseRequest, undefined);
-        const nextThreadId = outcome === "cancel" ? "thread-1" : "thread-3";
-        if (outcome === "timeout") yield* manager.open(openInput({ threadId: nextThreadId }));
-        yield* write(nextThreadId);
+        const nextTerminal =
+          outcome === "cancel"
+            ? terminals[0]!
+            : {
+                threadId: grouping === "threads" ? "thread-3" : "thread-1",
+                terminalId: grouping === "threads" ? DEFAULT_TERMINAL_ID : "terminal-3",
+              };
+        if (outcome === "timeout") yield* manager.open(openInput(nextTerminal));
+        yield* write(nextTerminal);
         expect(snapshotCalls).toBe(2);
         expect(activeRequests).toBe(0);
         yield* exitSnapshotTestProcesses(
           manager,
           ptyAdapter,
-          outcome === "timeout" ? [...threadIds, "thread-3"] : threadIds,
+          outcome === "timeout" ? [...terminals, nextTerminal] : terminals,
         );
       }).pipe(Effect.provide(TestClock.layer())),
   );
