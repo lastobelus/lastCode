@@ -346,6 +346,8 @@ interface TerminalSessionState {
   eventSequence: number;
   /** Counts writes, so closeIdle can see input that has not echoed yet. */
   inputCount: number;
+  /** Successful opens/attachments invalidate earlier idle inspections. */
+  attachmentGeneration: number;
   /** Queued or executing writes keep automatic cleanup away from the terminal. */
   pendingInputCount: number;
   /** Reservations preserve input order independently of thread-lock scheduling. */
@@ -2922,6 +2924,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         updatedAt: yield* nowIso,
         eventSequence: 0,
         inputCount: 0,
+        attachmentGeneration: 0,
         pendingInputCount: 0,
         inputWaiters: [],
         cols,
@@ -3020,6 +3023,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       liveSession.updatedAt = yield* nowIso;
     }
 
+    liveSession.attachmentGeneration += 1;
     return openSnapshot(liveSession);
   });
 
@@ -3134,6 +3138,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           session.updatedAt = yield* nowIso;
         }
 
+        session.attachmentGeneration += 1;
         return snapshot(session);
       }),
     );
@@ -3460,6 +3465,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           updatedAt: yield* nowIso,
           eventSequence: 0,
           inputCount: 0,
+          attachmentGeneration: 0,
           pendingInputCount: 0,
           inputWaiters: [],
           cols,
@@ -3608,6 +3614,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
                 spawnedShellName: session.spawnedShellName,
                 beforeFirstInput: session.captureShellIdentity !== null,
                 activityMark: activityMark(session),
+                attachmentGeneration: session.attachmentGeneration,
               })),
           ),
         ),
@@ -3634,13 +3641,14 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
               Effect.flatMap((current) => {
                 if (Option.isNone(current)) return Effect.void;
                 const session = current.value;
-                // Input, output, or a replacement process makes the captured
+                // Input, output, attachment, or replacement makes the captured
                 // idle result obsolete, even when the terminal ID is reused.
                 return hasRunningSubprocess ||
                   session !== candidate.session ||
                   session.process !== candidate.process ||
                   session.status !== "running" ||
                   session.pendingInputCount > 0 ||
+                  session.attachmentGeneration !== candidate.attachmentGeneration ||
                   activityMark(session) !== candidate.activityMark
                   ? Effect.void
                   : closeSession(input.threadId, session.terminalId, false);
