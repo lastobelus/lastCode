@@ -44,7 +44,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
-import type * as Orchestrator from "./Orchestrator.ts";
+import * as Orchestrator from "./Orchestrator.ts";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import { randomUuidV4 } from "@t3tools/provider-core/server/randomUuid";
 import * as ThreadManagement from "./ThreadManagementService.ts";
@@ -704,6 +704,11 @@ const make = Effect.gen(function* () {
       }
 
       const launchReceipt = yield* readReceipt(input, input.commandId);
+      const messageCommandId = CommandId.make(`${input.commandId}:initial-message`);
+      const messageReceipt =
+        input.initialMessage === undefined
+          ? Option.none()
+          : yield* readReceipt(input, messageCommandId);
       return yield* Effect.gen(function* () {
         // A retried launch has no client-supplied id to replay against, so
         // recover the thread id its accepted create was recorded under before
@@ -741,6 +746,32 @@ const make = Effect.gen(function* () {
 
         if (input.reuseExistingThread === true && Option.isNone(launchReceipt)) {
           yield* validateReusableThread(input, candidateThreadId);
+        }
+
+        const senderThreadId = input.initialMessage?.senderThreadId;
+        if (
+          Option.isNone(messageReceipt) &&
+          senderThreadId !== undefined &&
+          senderThreadId !== candidateThreadId
+        ) {
+          // Avoid allocating a Scratch folder for a refused send. Dispatch rechecks
+          // the sender under its lock before accepting the claim and message.
+          const sender = yield* threads
+            .getThreadShell(senderThreadId)
+            .pipe(Effect.mapError(mapError(input, "dispatch-message", candidateThreadId)));
+          if (sender === null || sender.archivedAt !== null || sender.deletedAt !== null) {
+            return yield* mapError(
+              input,
+              "dispatch-message",
+              candidateThreadId,
+            )(
+              new Orchestrator.OrchestratorDispatchError({
+                commandId: messageCommandId,
+                commandType: "message.dispatch",
+                cause: `Sender thread ${senderThreadId} is not active.`,
+              }),
+            );
+          }
         }
 
         // A Scratch thread launched at the project root runs in a folder of its
@@ -793,11 +824,8 @@ const make = Effect.gen(function* () {
           input.reuseExistingThread === true ? "update-thread" : "create-thread";
         let claimed: Orchestrator.OrchestratorV2DispatchResult;
         let dispatched: Orchestrator.OrchestratorV2DispatchResult | undefined;
-        let messageWasAlreadyAccepted = false;
+        const messageWasAlreadyAccepted = Option.isSome(messageReceipt);
         if (input.initialMessage !== undefined) {
-          const messageCommandId = CommandId.make(`${input.commandId}:initial-message`);
-          const messageReceipt = yield* readReceipt(input, messageCommandId);
-          messageWasAlreadyAccepted = Option.isSome(messageReceipt);
           const messageId =
             input.initialMessage.messageId ??
             (yield* ids.allocate
