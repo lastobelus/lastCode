@@ -831,6 +831,7 @@ describe("ClientSettings sidebar", () => {
     expect(settings.legacySidebarScale).toBe(100);
     expect(settings.legacySidebarThreadGroupingStyle).toBe("minimal");
     expect(settings.legacySidebarEnabled).toBe(false);
+    expect(settings.lastcodeSidebarEnabled).toBe(false);
   });
 
   it("preserves an explicit thread grouping choice", () => {
@@ -861,6 +862,24 @@ describe("ClientSettings sidebar", () => {
     expect(decoded).not.toHaveProperty("sidebarCompactThreadRows");
     expect(decodeClientSettingsPatch(stored)).toEqual({});
   });
+
+  it.each([false, true])(
+    "decodes the independent LastCode choice with legacy=%s",
+    (legacySidebarEnabled) => {
+      const input = { lastcodeSidebarEnabled: true, legacySidebarEnabled, legacySidebarScale: 75 };
+      expect(decodeClientSettings(input)).toMatchObject(input);
+      expect(decodeClientSettingsPatch(input)).toEqual(input);
+      expect(decodeClientSettings({ legacySidebarEnabled }).lastcodeSidebarEnabled).toBe(false);
+    },
+  );
+
+  it.each(["yes", 1, null])(
+    "rejects an invalid LastCode sidebar choice: %s",
+    (lastcodeSidebarEnabled) => {
+      expect(() => decodeClientSettings({ lastcodeSidebarEnabled })).toThrow();
+      expect(() => decodeClientSettingsPatch({ lastcodeSidebarEnabled })).toThrow();
+    },
+  );
 
   it("preserves an explicit legacy sidebar opt-in", () => {
     expect(decodeClientSettings({ legacySidebarEnabled: true }).legacySidebarEnabled).toBe(true);

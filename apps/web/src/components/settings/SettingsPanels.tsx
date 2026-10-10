@@ -2161,7 +2161,7 @@ function LegacyFeaturesSection() {
             />
             <SettingsRow
               {...searchableSetting("legacy-sidebar")}
-              description="Restore per-project thread trees instead of the default flat sidebar."
+              description="Choose the upstream per-project thread tree instead of the v2 inbox. Applies when LastCode sidebar is off."
               control={
                 <Switch
                   checked={settings.legacySidebarEnabled}

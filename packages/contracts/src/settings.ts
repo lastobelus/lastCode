@@ -549,6 +549,8 @@ export const ClientSettingsSchema = Schema.Struct({
   // old keys, so everyone, including prior beta opt-outs, resets to the new
   // default sidebar.
   legacySidebarEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  // LastCode overrides either upstream sidebar without changing the fallback preference.
+  lastcodeSidebarEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   // Beta: working and monitoring threads fold into a Working shelf and return
   // to the top of the inbox once they need the user. The inbox then orders by
   // time, so manual placement there is ignored (and kept) while it is on.
@@ -1773,6 +1775,7 @@ export const ClientSettingsPatch = Schema.Struct({
   showSkillsInSlashMenu: Schema.optionalKey(Schema.Boolean),
   legacySidebarThreadGroupingStyle: Schema.optionalKey(LegacySidebarThreadGroupingStyle),
   legacySidebarEnabled: Schema.optionalKey(Schema.Boolean),
+  lastcodeSidebarEnabled: Schema.optionalKey(Schema.Boolean),
   sidebarWorkingShelfEnabled: Schema.optionalKey(Schema.Boolean),
   legacySidebarScale: Schema.optionalKey(LegacySidebarScale),
   largerScrollbarsEnabled: Schema.optionalKey(Schema.Boolean),

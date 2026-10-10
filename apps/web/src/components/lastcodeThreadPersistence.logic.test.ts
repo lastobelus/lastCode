@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
-  legacyThreadPersistenceAction,
+  lastcodeThreadPersistenceAction,
   protectLegacyThreadActions,
-} from "./legacyThreadPersistence.logic.ts";
+} from "./lastcodeThreadPersistence.logic.ts";
 
 describe("legacy thread persistence actions", () => {
   it("offers the reverse persistence action", () => {
-    expect(legacyThreadPersistenceAction({ persistent: true, supported: true })).toMatchObject({
+    expect(lastcodeThreadPersistenceAction({ persistent: true, supported: true })).toMatchObject({
       id: "disable-persistence",
       label: "Disable persistent thread",
     });

@@ -2,15 +2,15 @@ import { describe, expect, it } from "vite-plus/test";
 import { EnvironmentId, ProjectId, RunId, ThreadId } from "@t3tools/contracts";
 import { makeThreadFixture, type ThreadFixtureOverrides } from "../test-fixtures";
 import {
-  legacySidebarFamilySummary,
-  legacySidebarCreatorDetails,
-  legacySidebarCreatorGroupingEligible,
-  legacySidebarIsAgentCreated,
-  legacySidebarSubagentStatusLabel,
-  legacySidebarThreadKey,
-  legacySidebarSubagentGroupKey,
-  projectLegacySidebarFamilies,
-} from "./legacySidebarFamilies.logic";
+  lastcodeSidebarFamilySummary,
+  lastcodeSidebarCreatorDetails,
+  lastcodeSidebarCreatorGroupingEligible,
+  lastcodeSidebarIsAgentCreated,
+  lastcodeSidebarSubagentStatusLabel,
+  lastcodeSidebarThreadKey,
+  lastcodeSidebarSubagentGroupKey,
+  projectLastCodeSidebarFamilies,
+} from "./lastcodeSidebarFamilies.logic";
 import { resolveThreadStatusPill } from "./Sidebar.logic";
 
 function thread(id: string, parentId?: string, overrides: ThreadFixtureOverrides = {}) {
@@ -28,14 +28,14 @@ function thread(id: string, parentId?: string, overrides: ThreadFixtureOverrides
 
 function project(
   threads: ReturnType<typeof thread>[],
-  options: Partial<Parameters<typeof projectLegacySidebarFamilies>[0]> = {},
+  options: Partial<Parameters<typeof projectLastCodeSidebarFamilies>[0]> = {},
 ) {
-  return projectLegacySidebarFamilies({
+  return projectLastCodeSidebarFamilies({
     threads,
     collapsedByKey: Object.fromEntries(
       threads.flatMap((value) => [
-        [legacySidebarThreadKey(value), false],
-        [legacySidebarSubagentGroupKey(legacySidebarThreadKey(value)), false],
+        [lastcodeSidebarThreadKey(value), false],
+        [lastcodeSidebarSubagentGroupKey(lastcodeSidebarThreadKey(value)), false],
       ]),
     ),
     activeThreadKey: null,
@@ -76,7 +76,7 @@ describe("legacy sidebar subagent families", () => {
     const helper = thread("helper", "parent");
     const ordinary = created("ordinary", parent.id);
     const threads = [helper, parent, ordinary];
-    const parentKey = legacySidebarThreadKey(parent);
+    const parentKey = lastcodeSidebarThreadKey(parent);
     expect(keys(project(threads, { collapsedByKey: {} }))).toEqual(["parent"]);
     const expanded = project(threads, {
       collapsedByKey: { [parentKey]: false },
@@ -89,20 +89,20 @@ describe("legacy sidebar subagent families", () => {
       "subagents",
     ]);
     expect(expanded.renderedItems.at(-1)).toMatchObject({ expanded: false, count: 1 });
-    expect(expanded.orderedThreadKeys).toEqual([parentKey, legacySidebarThreadKey(ordinary)]);
+    expect(expanded.orderedThreadKeys).toEqual([parentKey, lastcodeSidebarThreadKey(ordinary)]);
     expect(
       keys(
         project(threads, {
           collapsedByKey: {
             [parentKey]: false,
-            [legacySidebarSubagentGroupKey(parentKey)]: false,
+            [lastcodeSidebarSubagentGroupKey(parentKey)]: false,
           },
         }),
       ),
     ).toEqual(["parent", "ordinary", "helper"]);
     const selected = project(threads, {
       collapsedByKey: {},
-      activeThreadKey: legacySidebarThreadKey(helper),
+      activeThreadKey: lastcodeSidebarThreadKey(helper),
     });
     expect(keys(selected)).toEqual(["parent", "ordinary", "helper"]);
     expect(selected.renderedItems.find((item) => item.type === "subagents")).toMatchObject({
@@ -143,7 +143,7 @@ describe("legacy sidebar subagent families", () => {
     const parent = thread("parent");
     const helper = thread("helper", "parent", overrides);
     const result = project([parent, helper], {
-      collapsedByKey: { [legacySidebarThreadKey(parent)]: false },
+      collapsedByKey: { [lastcodeSidebarThreadKey(parent)]: false },
     });
     expect(keys(result)).toEqual(["parent"]);
     expect(result.renderedItems.at(-1)).toMatchObject({
@@ -161,7 +161,7 @@ describe("legacy sidebar subagent families", () => {
       runtime: { ...helper.runtime!, status: "running" },
     });
     const threads = [parent, ordinary, helper, nested];
-    const options = { collapsedByKey: { [legacySidebarThreadKey(parent)]: false } };
+    const options = { collapsedByKey: { [lastcodeSidebarThreadKey(parent)]: false } };
     const working = project(threads, options);
     expect(keys(working)).toEqual(["parent", "ordinary"]);
     expect(working.renderedItems.at(-1)).toMatchObject({ status: { label: "Working" } });
@@ -213,7 +213,7 @@ describe("legacy sidebar subagent families", () => {
     const child = thread("child", "second");
     const result = project([thread("first"), thread("second"), child], {
       previewCount: 1,
-      activeThreadKey: legacySidebarThreadKey(child),
+      activeThreadKey: lastcodeSidebarThreadKey(child),
     });
     expect(keys(result)).toEqual(["first", "second", "child"]);
   });
@@ -222,11 +222,11 @@ describe("legacy sidebar subagent families", () => {
     const parent = thread("parent");
     const child = thread("child", "parent", { runtime: { ...parent.runtime!, status: "running" } });
     const result = project([parent, child], {
-      collapsedByKey: { [legacySidebarThreadKey(parent)]: true },
+      collapsedByKey: { [lastcodeSidebarThreadKey(parent)]: true },
     });
     expect(keys(result)).toEqual(["parent"]);
-    expect(result.orderedThreadKeys).toEqual([legacySidebarThreadKey(parent)]);
-    expect(legacySidebarFamilySummary(result.renderedRows[0]!)).toBe("1 subagent (1 working)");
+    expect(result.orderedThreadKeys).toEqual([lastcodeSidebarThreadKey(parent)]);
+    expect(lastcodeSidebarFamilySummary(result.renderedRows[0]!)).toBe("1 subagent (1 working)");
     expect(resolveThreadStatusPill({ thread: parent })).toBeNull();
   });
 
@@ -246,7 +246,9 @@ describe("legacy sidebar subagent families", () => {
     expect(keys(result)).toEqual(["parent"]);
     expect(result.renderedItems.map((item) => item.type)).toEqual(["thread"]);
     expect(result.renderedRows[0]?.descendantsStatus?.label).toBe("Failed");
-    expect(legacySidebarFamilySummary(result.renderedRows[0]!)).toBe("1 created thread (1 failed)");
+    expect(lastcodeSidebarFamilySummary(result.renderedRows[0]!)).toBe(
+      "1 created thread (1 failed)",
+    );
     expect(resolveThreadStatusPill({ thread: parent })).toBeNull();
   });
 
@@ -255,8 +257,8 @@ describe("legacy sidebar subagent families", () => {
     const child = thread("child", "parent");
     const grandchild = thread("grandchild", "child");
     const collapsedByKey = {
-      [legacySidebarThreadKey(parent)]: true,
-      [legacySidebarThreadKey(child)]: true,
+      [lastcodeSidebarThreadKey(parent)]: true,
+      [lastcodeSidebarThreadKey(child)]: true,
     };
     const threads = [
       parent,
@@ -268,7 +270,7 @@ describe("legacy sidebar subagent families", () => {
     ];
     const selected = project(threads, {
       collapsedByKey,
-      activeThreadKey: legacySidebarThreadKey(grandchild),
+      activeThreadKey: lastcodeSidebarThreadKey(grandchild),
     });
     expect(keys(selected)).toEqual(["parent", "child", "grandchild", "next-root"]);
     expect(
@@ -284,17 +286,17 @@ describe("legacy sidebar subagent families", () => {
     const child = thread("child", "parent");
     const grandchild = thread("grandchild", "child");
     const threads = [parent, created("conversation", "parent"), child, grandchild];
-    const collapsedByKey = { [legacySidebarThreadKey(parent)]: true };
+    const collapsedByKey = { [lastcodeSidebarThreadKey(parent)]: true };
     const selected = project(threads, {
       collapsedByKey,
-      activeThreadKey: legacySidebarThreadKey(grandchild),
+      activeThreadKey: lastcodeSidebarThreadKey(grandchild),
     });
     expect(selected.renderedRows[0]).toMatchObject({
       expanded: false,
       collapseNavigatesToParent: true,
     });
     expect(
-      keys(project(threads, { collapsedByKey, activeThreadKey: legacySidebarThreadKey(parent) })),
+      keys(project(threads, { collapsedByKey, activeThreadKey: lastcodeSidebarThreadKey(parent) })),
     ).toEqual(["parent"]);
   });
 
@@ -305,12 +307,12 @@ describe("legacy sidebar subagent families", () => {
     const ordinary = created("ordinary", "parent");
     const threads = [parent, ordinary, thread("other-helper", "parent"), helper, nested];
     const collapsedByKey = {
-      [legacySidebarThreadKey(parent)]: false,
-      [legacySidebarSubagentGroupKey(legacySidebarThreadKey(parent))]: true,
+      [lastcodeSidebarThreadKey(parent)]: false,
+      [lastcodeSidebarSubagentGroupKey(lastcodeSidebarThreadKey(parent))]: true,
     };
     const selected = project(threads, {
       collapsedByKey,
-      activeThreadKey: legacySidebarThreadKey(nested),
+      activeThreadKey: lastcodeSidebarThreadKey(nested),
     });
     expect(keys(selected)).toEqual(["parent", "ordinary", "helper", "nested"]);
     expect(selected.renderedItems.find((item) => item.type === "subagents")).toMatchObject({
@@ -319,7 +321,7 @@ describe("legacy sidebar subagent families", () => {
       count: 2,
     });
     expect(
-      keys(project(threads, { collapsedByKey, activeThreadKey: legacySidebarThreadKey(parent) })),
+      keys(project(threads, { collapsedByKey, activeThreadKey: lastcodeSidebarThreadKey(parent) })),
     ).toEqual(["parent", "ordinary"]);
   });
 
@@ -327,7 +329,7 @@ describe("legacy sidebar subagent families", () => {
     const selected = thread("selected", "parent");
     const result = project(
       [thread("other"), thread("parent"), thread("sibling", "parent"), selected],
-      { projectExpanded: false, activeThreadKey: legacySidebarThreadKey(selected) },
+      { projectExpanded: false, activeThreadKey: lastcodeSidebarThreadKey(selected) },
     );
     expect(keys(result)).toEqual(["parent", "selected"]);
     expect(result.shouldShowThreadPanel).toBe(true);
@@ -364,7 +366,7 @@ describe("legacy sidebar subagent families", () => {
       [remoteParent.environmentId, 0],
       [remoteParent.environmentId, 1],
     ]);
-    expect(result.renderedRows[2]?.parentKey).toBe(legacySidebarThreadKey(remoteParent));
+    expect(result.renderedRows[2]?.parentKey).toBe(lastcodeSidebarThreadKey(remoteParent));
   });
 
   it("detaches cycles defensively and leaves their descendants reachable", () => {
@@ -395,11 +397,11 @@ describe("legacy sidebar subagent families", () => {
       },
     });
     const result = project([parent, child], {
-      collapsedByKey: { [legacySidebarThreadKey(parent)]: true },
+      collapsedByKey: { [lastcodeSidebarThreadKey(parent)]: true },
     });
-    expect(legacySidebarSubagentStatusLabel(child, null)).toBe("Stopped");
+    expect(lastcodeSidebarSubagentStatusLabel(child, null)).toBe("Stopped");
     expect(keys(result)).toEqual(["parent"]);
-    expect(legacySidebarFamilySummary(result.renderedRows[0]!)).toContain("1 stopped");
+    expect(lastcodeSidebarFamilySummary(result.renderedRows[0]!)).toContain("1 stopped");
   });
 
   it("keeps finished children and cleanup recovery rows, excluding only recovery from navigation", () => {
@@ -427,11 +429,11 @@ describe("legacy sidebar subagent families", () => {
     const result = project([parent, done, cleanup]);
     expect(keys(result)).toEqual(["parent", "done", "cleanup"]);
     expect(result.orderedThreadKeys).toEqual([
-      legacySidebarThreadKey(parent),
-      legacySidebarThreadKey(done),
+      lastcodeSidebarThreadKey(parent),
+      lastcodeSidebarThreadKey(done),
     ]);
-    expect(legacySidebarSubagentStatusLabel(done, null)).toBe("Done");
-    expect(legacySidebarFamilySummary(result.renderedRows[0]!)).toContain("1 done");
+    expect(lastcodeSidebarSubagentStatusLabel(done, null)).toBe("Done");
+    expect(lastcodeSidebarFamilySummary(result.renderedRows[0]!)).toContain("1 done");
   });
 });
 
@@ -466,8 +468,8 @@ describe("legacy sidebar creator grouping", () => {
     expect(project([historical, thread("creator")]).renderedRows.map((row) => row.depth)).toEqual([
       0, 0,
     ]);
-    expect(legacySidebarIsAgentCreated(historical)).toBe(true);
-    expect(legacySidebarCreatorGroupingEligible(historical)).toBe(false);
+    expect(lastcodeSidebarIsAgentCreated(historical)).toBe(true);
+    expect(lastcodeSidebarCreatorGroupingEligible(historical)).toBe(false);
   });
 
   it("promotes and regroups using saved server metadata alone", () => {
@@ -480,8 +482,8 @@ describe("legacy sidebar creator grouping", () => {
         ?.depth,
     ).toBe(1);
     expect(independent.creatorThreadId).toBe(child.creatorThreadId);
-    expect(legacySidebarCreatorGroupingEligible(independent)).toBe(true);
-    expect(legacySidebarCreatorDetails(independent, thread("creator"))).toEqual({
+    expect(lastcodeSidebarCreatorGroupingEligible(independent)).toBe(true);
+    expect(lastcodeSidebarCreatorDetails(independent, thread("creator"))).toEqual({
       description: "Created by creator",
       unavailableLabel: null,
       groupingEligible: true,
@@ -522,10 +524,10 @@ describe("legacy sidebar creator grouping", () => {
   it("separates subagent and created-conversation counts in collapsed summaries", () => {
     const parent = thread("creator");
     const result = project([parent, thread("helper", "creator"), created("ordinary", "creator")], {
-      collapsedByKey: { [legacySidebarThreadKey(parent)]: true },
+      collapsedByKey: { [lastcodeSidebarThreadKey(parent)]: true },
     });
     expect(keys(result)).toEqual(["creator"]);
-    expect(legacySidebarFamilySummary(result.renderedRows[0]!)).toBe(
+    expect(lastcodeSidebarFamilySummary(result.renderedRows[0]!)).toBe(
       "1 subagent (1 idle) · 1 created thread (1 idle)",
     );
     expect(result.renderedRows[0]?.descendantCount).toBe(2);
@@ -539,10 +541,10 @@ describe("legacy sidebar creator grouping", () => {
     const creator = thread("creator");
     const result = project([creator, missing, remote]);
     expect(result.renderedRows.map((row) => row.depth)).toEqual([0, 0, 0]);
-    expect(legacySidebarCreatorDetails(missing, null).unavailableLabel).toBe(
+    expect(lastcodeSidebarCreatorDetails(missing, null).unavailableLabel).toBe(
       "Creator unavailable (missing)",
     );
-    const remoteDetails = legacySidebarCreatorDetails(remote, creator);
+    const remoteDetails = lastcodeSidebarCreatorDetails(remote, creator);
     expect(remoteDetails.description).toBe("Creator unavailable (creator)");
     expect(remoteDetails.unavailableLabel).toBe("Creator unavailable (creator)");
     expect(remoteDetails.canOpen).toBe(false);
@@ -561,7 +563,7 @@ describe("legacy sidebar creator grouping", () => {
       expect(result.renderedRows[0]?.depth).toBe(0);
       expect(result.renderedRows[0]?.parentKey).toBeNull();
       expect(result.renderedRows[0]?.creatorGroupingWarning).toBeNull();
-      expect(legacySidebarCreatorDetails(child, creator)).toEqual({
+      expect(lastcodeSidebarCreatorDetails(child, creator)).toEqual({
         description: "Created by creator",
         unavailableLabel: null,
         groupingEligible: false,
@@ -581,7 +583,7 @@ describe("legacy sidebar creator grouping", () => {
       const creator = thread("creator", undefined, { [field]: "2026-01-01T00:00:00Z" });
       const result = project([child]);
       expect(result.renderedRows[0]?.depth).toBe(0);
-      expect(legacySidebarCreatorDetails(child, creator)).toEqual({
+      expect(lastcodeSidebarCreatorDetails(child, creator)).toEqual({
         description: "Creator unavailable (creator)",
         unavailableLabel: "Creator unavailable (creator)",
         groupingEligible: true,
@@ -592,9 +594,9 @@ describe("legacy sidebar creator grouping", () => {
 
   it("keeps regrouping available for missing creators and omits warnings for independent rows", () => {
     const child = created("conversation", "missing");
-    expect(legacySidebarCreatorDetails(child, null).groupingEligible).toBe(true);
+    expect(lastcodeSidebarCreatorDetails(child, null).groupingEligible).toBe(true);
     const independent = { ...child, creatorGrouping: "independent" as const };
-    const details = legacySidebarCreatorDetails(independent, null);
+    const details = lastcodeSidebarCreatorDetails(independent, null);
     expect(details.description).toBe("Creator unavailable (missing)");
     expect(details.unavailableLabel).toBeNull();
     expect(details.canOpen).toBe(false);
@@ -617,12 +619,12 @@ describe("legacy sidebar creator grouping", () => {
     });
     const result = project([thread("creator"), thread("real-parent"), fork, subagent]);
     expect(keys(result)).toEqual(["creator", "real-parent", "helper", "fork"]);
-    expect(result.renderedRows[2]?.parentKey).toBe(legacySidebarThreadKey(thread("real-parent")));
-    expect(legacySidebarIsAgentCreated(fork)).toBe(false);
-    expect(legacySidebarIsAgentCreated(subagent)).toBe(false);
-    expect(legacySidebarIsAgentCreated(thread("user-created"))).toBe(false);
-    expect(legacySidebarCreatorGroupingEligible(fork)).toBe(false);
-    expect(legacySidebarCreatorGroupingEligible(subagent)).toBe(false);
+    expect(result.renderedRows[2]?.parentKey).toBe(lastcodeSidebarThreadKey(thread("real-parent")));
+    expect(lastcodeSidebarIsAgentCreated(fork)).toBe(false);
+    expect(lastcodeSidebarIsAgentCreated(subagent)).toBe(false);
+    expect(lastcodeSidebarIsAgentCreated(thread("user-created"))).toBe(false);
+    expect(lastcodeSidebarCreatorGroupingEligible(fork)).toBe(false);
+    expect(lastcodeSidebarCreatorGroupingEligible(subagent)).toBe(false);
   });
 
   it("detaches creator cycles without discarding true subagent ownership in mixed cycles", () => {
@@ -638,7 +640,7 @@ describe("legacy sidebar creator grouping", () => {
     const parent = created("parent", "helper");
     const mixed = project([helper, parent]);
     expect(keys(mixed)).toEqual(["parent", "helper"]);
-    expect(mixed.renderedRows[1]?.parentKey).toBe(legacySidebarThreadKey(parent));
+    expect(mixed.renderedRows[1]?.parentKey).toBe(lastcodeSidebarThreadKey(parent));
     expect(mixed.renderedRows[0]?.creatorGroupingWarning).toContain("invalid grouping");
   });
 
@@ -647,8 +649,8 @@ describe("legacy sidebar creator grouping", () => {
     const child = created("ordinary", "creator");
     const result = project([thread("first"), parent, child], {
       previewCount: 1,
-      activeThreadKey: legacySidebarThreadKey(child),
-      collapsedByKey: { [legacySidebarThreadKey(parent)]: true },
+      activeThreadKey: lastcodeSidebarThreadKey(child),
+      collapsedByKey: { [lastcodeSidebarThreadKey(parent)]: true },
     });
     expect(keys(result)).toEqual(["first", "creator", "ordinary"]);
     expect(result.renderedRows[1]?.expanded).toBe(false);
@@ -671,8 +673,8 @@ describe("legacy sidebar creator grouping", () => {
       ];
       const options = {
         groupingStyle,
-        collapsedByKey: { [legacySidebarThreadKey(parent)]: true },
-        activeThreadKey: legacySidebarThreadKey(grandchild),
+        collapsedByKey: { [lastcodeSidebarThreadKey(parent)]: true },
+        activeThreadKey: lastcodeSidebarThreadKey(grandchild),
       };
       const result = project(threads, options);
       expect(keys(result)).toEqual(["creator", "conversation", "nested-conversation", "next-root"]);
@@ -703,11 +705,11 @@ describe("legacy sidebar creator grouping", () => {
     ];
     const result = project(threads, {
       collapsedByKey: {
-        [legacySidebarThreadKey(parent)]: false,
-        [legacySidebarThreadKey(helper)]: false,
-        [legacySidebarSubagentGroupKey(legacySidebarThreadKey(parent))]: true,
+        [lastcodeSidebarThreadKey(parent)]: false,
+        [lastcodeSidebarThreadKey(helper)]: false,
+        [lastcodeSidebarSubagentGroupKey(lastcodeSidebarThreadKey(parent))]: true,
       },
-      activeThreadKey: legacySidebarThreadKey(selected),
+      activeThreadKey: lastcodeSidebarThreadKey(selected),
     });
     expect(keys(result)).toEqual(["parent", "ordinary-sibling", "helper", "conversation"]);
     expect(result.renderedItems.find((item) => item.type === "subagents")).toMatchObject({
@@ -722,11 +724,11 @@ describe("legacy sidebar creator grouping", () => {
     const parent = thread("parent");
     const result = project([parent, thread("helper", "parent")], {
       projectExpanded: false,
-      activeThreadKey: legacySidebarThreadKey(parent),
+      activeThreadKey: lastcodeSidebarThreadKey(parent),
     });
     expect(keys(result)).toEqual(["parent"]);
     expect(result.renderedRows[0]?.projectExpanded).toBe(false);
     expect(result.renderedRows[0]?.descendantCount).toBe(1);
-    expect(result.orderedThreadKeys).toEqual([legacySidebarThreadKey(parent)]);
+    expect(result.orderedThreadKeys).toEqual([lastcodeSidebarThreadKey(parent)]);
   });
 });

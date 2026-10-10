@@ -1,3 +1,4 @@
+import { shouldChooseNewThreadProject } from "../sidebarMode";
 import { AuthPreviewOperateScope } from "@t3tools/contracts";
 import { Outlet, createFileRoute, redirect, useParams } from "@tanstack/react-router";
 import { useAtomValue } from "@effect/atom-react";
@@ -6,7 +7,7 @@ import { useEffect, useMemo } from "react";
 import { isCommandPaletteOpen } from "../commandPaletteBus";
 import { ThreadRouteView } from "../components/ThreadRouteView";
 import { resolveThreadRouteTarget } from "../threadRoutes";
-import { useClientSettings, useLegacySidebarEnabled } from "../hooks/useSettings";
+import { useClientSettings, useSidebarMode } from "../hooks/useSettings";
 import { openCommandPalette } from "../commandPaletteBus";
 import { useProjects } from "../state/entities";
 import { isPreviewAvailableFor } from "../browser/previewRuntime";
@@ -40,7 +41,7 @@ function ChatRouteGlobalShortcuts() {
     AuthPreviewOperateScope,
   );
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
-  const legacySidebarEnabled = useLegacySidebarEnabled();
+  const sidebarMode = useSidebarMode();
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
   const projects = useProjects();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
@@ -128,9 +129,9 @@ function ChatRouteGlobalShortcuts() {
         event.preventDefault();
         event.stopPropagation();
         // The default sidebar routes creation through the command palette
-        // whenever there is a real choice to make; the legacy sidebar (and
+        // whenever there is a real choice to make; the project-tree sidebars (and
         // single-project setups) keep the immediate contextual create.
-        if (!legacySidebarEnabled && projectGroupCount > 1) {
+        if (shouldChooseNewThreadProject(sidebarMode, projectGroupCount)) {
           openCommandPalette({ open: "new-thread-in" });
           return;
         }
@@ -207,7 +208,7 @@ function ChatRouteGlobalShortcuts() {
     scratchEnvironmentId,
     selectedThreadKeysSize,
     startScratchThread,
-    legacySidebarEnabled,
+    sidebarMode,
     terminalOpen,
   ]);
 
