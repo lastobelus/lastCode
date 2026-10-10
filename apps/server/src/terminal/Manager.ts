@@ -249,6 +249,7 @@ interface TerminalSubprocessInspectResult {
 interface TerminalSubprocessInspector {
   (
     terminalPid: number,
+    spawnedShellName: string | null,
   ): Effect.Effect<TerminalSubprocessInspectResult, TerminalSubprocessCheckError>;
 }
 
@@ -305,8 +306,10 @@ interface TerminalSessionState {
   unsubscribeData: (() => void) | null;
   unsubscribeExit: (() => void) | null;
   hasRunningSubprocess: boolean;
-  /** Normalized child command name when `hasRunningSubprocess`; cleared when idle. */
+  /** Normalized active command name when `hasRunningSubprocess`; cleared when idle. */
   childCommandLabel: string | null;
+  /** Identity of the shell that successfully spawned, before any POSIX exec. */
+  spawnedShellName: string | null;
   runtimeEnv: Record<string, string> | null;
 }
 
@@ -362,9 +365,14 @@ function normalizeChildCommandName(raw: string, platform: NodeJS.Platform): stri
   if (firstToken.length === 0) return null;
   const separators = platform === "win32" ? /[\\/]/ : /\//;
   const base = firstToken.split(separators).at(-1) ?? firstToken;
-  const withoutExe =
-    platform === "win32" && base.toLowerCase().endsWith(".exe") ? base.slice(0, -4) : base;
-  return withoutExe.length > 0 ? withoutExe : null;
+  // Login shells may appear in the process table with a leading dash.
+  const normalized =
+    platform === "win32"
+      ? base.toLowerCase().endsWith(".exe")
+        ? base.slice(0, -4)
+        : base
+      : base.replace(/^-/, "");
+  return normalized.length > 0 ? normalized : null;
 }
 
 function terminalWireLabel(session: TerminalSessionState): string {
@@ -715,10 +723,25 @@ function deriveSubprocessInspectResult(
   snapshot: TerminalProcessTableSnapshot,
   terminalPid: number,
   platform: NodeJS.Platform,
+  spawnedShellName: string | null,
 ): TerminalSubprocessInspectResult {
   const commandName = (pid: number) =>
     normalizeChildCommandName(snapshot.commandById.get(pid) ?? "", platform);
   const shellName = commandName(terminalPid);
+  // Linux comm holds 15 bytes plus NUL; other process tables may retain the
+  // full name. Accept exactly that kernel representation, never any prefix.
+  const linuxShellName =
+    platform === "linux" && spawnedShellName !== null
+      ? Buffer.from(spawnedShellName, "utf8").subarray(0, 15).toString("utf8")
+      : null;
+  // POSIX exec replaces the shell while retaining the PTY root PID. It can
+  // run real work without any child processes.
+  const rootWasReplaced =
+    platform !== "win32" &&
+    spawnedShellName !== null &&
+    shellName !== null &&
+    shellName !== spawnedShellName &&
+    shellName !== linuxShellName;
   // Async prompt themes fork the shell into a helper that waits with no
   // children of its own. That copy is not a command the user started.
   const childPid = (snapshot.childrenByParent.get(terminalPid) ?? []).find(
@@ -727,7 +750,8 @@ function deriveSubprocessInspectResult(
       commandName(pid) !== shellName ||
       (snapshot.childrenByParent.get(pid)?.length ?? 0) > 0,
   );
-  if (childPid === undefined) {
+  const activePid = rootWasReplaced ? terminalPid : childPid;
+  if (activePid === undefined) {
     return { hasRunningSubprocess: false, childCommand: null, processIds: [] };
   }
   const processIds = new Set<number>([terminalPid]);
@@ -741,7 +765,7 @@ function deriveSubprocessInspectResult(
       pending.push(pid);
     }
   }
-  const normalized = commandName(childPid);
+  const normalized = commandName(activePid);
   return {
     hasRunningSubprocess: true,
     childCommand: normalized ? truncateTerminalWireLabel(normalized) : null,
@@ -1560,8 +1584,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             readonly inspector: TerminalSubprocessInspector;
             readonly snapshotSucceeded: boolean;
           } => ({
-            inspector: (terminalPid) =>
-              Effect.succeed(deriveSubprocessInspectResult(snapshot, terminalPid, platform)),
+            inspector: (terminalPid, spawnedShellName) =>
+              Effect.succeed(
+                deriveSubprocessInspectResult(snapshot, terminalPid, platform, spawnedShellName),
+              ),
             snapshotSucceeded,
           }),
         );
@@ -2160,7 +2186,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     index = 0,
     lastError: PtyAdapter.PtySpawnError | null = null,
   ): Effect.fn.Return<
-    { process: PtyAdapter.PtyProcess; shellLabel: string },
+    { process: PtyAdapter.PtyProcess; shellLabel: string; shellName: string | null },
     PtyAdapter.PtySpawnError
   > {
     if (index >= shellCandidates.length) {
@@ -2203,6 +2229,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       return {
         process: attempt.success,
         shellLabel: formatShellCandidate(candidate),
+        shellName: normalizeChildCommandName(
+          basenameForPlatform(candidate.shell, platform),
+          platform,
+        ),
       };
     }
 
@@ -2238,6 +2268,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       session.exitSignal = null;
       session.hasRunningSubprocess = false;
       session.childCommandLabel = null;
+      session.spawnedShellName = null;
       session.pendingProcessEvents = [];
       session.pendingProcessEventIndex = 0;
       session.processEventDrainRunning = false;
@@ -2308,6 +2339,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
               session.process = ptyProcess;
               session.pid = processPid;
               session.status = "running";
+              session.spawnedShellName = spawnResult.shellName;
               // onExit may replay an exit immediately; accept it before subscribing.
               session.unsubscribeData = spawnResult.process.onData((data) => {
                 if (!enqueueProcessEvent(session, processPid, { type: "output", data })) {
@@ -2357,6 +2389,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         session.process = null;
         session.hasRunningSubprocess = false;
         session.childCommandLabel = null;
+        session.spawnedShellName = null;
         session.pendingProcessEvents = [];
         session.pendingProcessEventIndex = 0;
         session.processEventDrainRunning = false;
@@ -2464,7 +2497,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       session: TerminalSessionState & { pid: number },
     ) {
       const terminalPid = session.pid;
-      const inspectResult = yield* subprocessInspector(terminalPid).pipe(
+      const inspectResult = yield* subprocessInspector(terminalPid, session.spawnedShellName).pipe(
         Effect.asSome,
         Effect.catch((reason) =>
           Effect.logWarning("failed to check terminal subprocess activity", {
@@ -2626,6 +2659,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         unsubscribeExit: null,
         hasRunningSubprocess: false,
         childCommandLabel: null,
+        spawnedShellName: null,
         runtimeEnv: normalizedRuntimeEnv(input.env),
       };
 
@@ -3066,6 +3100,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           unsubscribeExit: null,
           hasRunningSubprocess: false,
           childCommandLabel: null,
+          spawnedShellName: null,
           runtimeEnv: normalizedRuntimeEnv(input.env),
         };
         const createdSession = session;
@@ -3168,7 +3203,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         yield* Effect.forEach(
           running,
           (session) =>
-            inspector(session.pid).pipe(
+            inspector(session.pid, session.spawnedShellName).pipe(
               Effect.flatMap((result) =>
                 result.hasRunningSubprocess ||
                 activityMark(session) !== marks.get(session.terminalId)

@@ -1279,6 +1279,7 @@ it.layer(
     Effect.gen(function* () {
       // FakePtyAdapter assigns pids from 9000 in open order.
       const { manager, ptyAdapter } = yield* createManager(5, {
+        shellResolver: () => "/bin/zsh",
         processTable: Effect.succeed([
           { pid: 9000, ppid: 1, name: "zsh" },
           // An async prompt worker: a copy of the shell with no children.
@@ -1305,6 +1306,166 @@ it.layer(
         false,
         false,
       ]);
+    }),
+  );
+
+  it.effect.each(["darwin", "linux"] as const)(
+    "keeps a childless exec command while closing idle shells on %s",
+    (platform) =>
+      Effect.gen(function* () {
+        const { manager, ptyAdapter } = yield* createManager(5, {
+          shellResolver: () => "/bin/zsh",
+          subprocessPollIntervalMs: 60_000,
+          processTable: Effect.succeed([
+            { pid: 9000, ppid: 1, name: "node" },
+            { pid: 9001, ppid: 1, name: "/bin/zsh" },
+            { pid: 9002, ppid: 1, name: "-zsh" },
+            // A login shell's async prompt helper is still idle.
+            { pid: 100, ppid: 9002, name: "zsh" },
+            { pid: 9003, ppid: 1, name: "zsh" },
+            { pid: 200, ppid: 9003, name: "node" },
+            { pid: 9004, ppid: 1, name: "zsh" },
+            { pid: 300, ppid: 9004, name: "zsh" },
+            { pid: 301, ppid: 300, name: "sleep" },
+            // A missing process name alone is not evidence of exec.
+            { pid: 9005, ppid: 1, name: "" },
+          ]),
+        }).pipe(Effect.provide(layerWithHostPlatform(platform)));
+        for (const terminalId of ["exec", "idle", "login", "child", "subshell", "unknown"]) {
+          yield* manager.open(openInput({ terminalId }));
+        }
+
+        yield* manager.closeIdle({ threadId: "thread-1" });
+
+        expect(ptyAdapter.processes.map((process) => process.killed)).toEqual([
+          false,
+          true,
+          true,
+          false,
+          false,
+          true,
+        ]);
+      }),
+  );
+
+  it.effect("reports the command that replaced the shell through terminal activity", () =>
+    Effect.gen(function* () {
+      const activity = yield* Deferred.make<TerminalEvent>();
+      const { manager } = yield* createManager(5, {
+        shellResolver: () => "/bin/zsh",
+        processTable: Effect.succeed([{ pid: 9000, ppid: 1, name: "/usr/bin/node" }]),
+      }).pipe(Effect.provide(layerWithHostPlatform("linux")));
+      const unsubscribe = yield* manager.subscribe((event) =>
+        event.type === "activity"
+          ? Deferred.succeed(activity, event).pipe(Effect.asVoid)
+          : Effect.void,
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+      yield* manager.open(openInput());
+
+      expect(yield* Deferred.await(activity)).toEqual(
+        expect.objectContaining({ type: "activity", hasRunningSubprocess: true, label: "node" }),
+      );
+    }),
+  );
+
+  it.effect("uses the successful fallback shell identity when checking idle terminals", () =>
+    Effect.gen(function* () {
+      const ptyAdapter = new FakePtyAdapter();
+      ptyAdapter.spawnFailures.push(new Error("posix_spawnp failed."));
+      const { manager } = yield* createManager(5, {
+        ptyAdapter,
+        shellResolver: () => "/missing/preferred-shell",
+        env: { SHELL: "/bin/zsh" },
+        subprocessPollIntervalMs: 60_000,
+        processTable: Effect.succeed([{ pid: 9000, ppid: 1, name: "zsh" }]),
+      }).pipe(Effect.provide(layerWithHostPlatform("linux")));
+      yield* manager.open(openInput());
+      expect(ptyAdapter.spawnInputs.map((input) => input.shell)).toEqual([
+        "/missing/preferred-shell",
+        "/bin/zsh",
+      ]);
+      // zsh's spawn arguments must not be included in its captured identity.
+      expect(ptyAdapter.spawnInputs[1]?.args).toEqual(["-o", "nopromptsp"]);
+
+      yield* manager.closeIdle({ threadId: "thread-1" });
+
+      expect(ptyAdapter.processes[0]?.killed).toBe(true);
+    }),
+  );
+
+  it.effect("recognizes an idle custom shell without a shell-name allowlist", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        shellResolver: () => "/opt/tools/custom-shell",
+        subprocessPollIntervalMs: 60_000,
+        processTable: Effect.succeed([
+          { pid: 9000, ppid: 1, name: "custom-shell" },
+          { pid: 100, ppid: 9000, name: "custom-shell" },
+        ]),
+      }).pipe(Effect.provide(layerWithHostPlatform("linux")));
+      yield* manager.open(openInput());
+
+      yield* manager.closeIdle({ threadId: "thread-1" });
+
+      expect(ptyAdapter.processes[0]?.killed).toBe(true);
+    }),
+  );
+
+  it.effect.each([
+    { shellName: "custom-login-shell", commName: "custom-login-sh" },
+    { shellName: "custom-é-shell-name", commName: "custom-é-shell" },
+  ])(
+    "recognizes full and Linux comm names for $shellName without hiding exec",
+    ({ shellName, commName }) =>
+      Effect.gen(function* () {
+        const { manager, ptyAdapter } = yield* createManager(5, {
+          shellResolver: () => `/opt/tools/${shellName}`,
+          subprocessPollIntervalMs: 60_000,
+          processTable: Effect.succeed([
+            { pid: 9000, ppid: 1, name: `-${shellName}` },
+            { pid: 100, ppid: 9000, name: shellName },
+            { pid: 9001, ppid: 1, name: commName },
+            { pid: 200, ppid: 9001, name: commName },
+            { pid: 9002, ppid: 1, name: "node" },
+            // Neither a shorter prefix nor a different full name is the shell.
+            { pid: 9003, ppid: 1, name: "custom" },
+            { pid: 9004, ppid: 1, name: `${shellName}-worker` },
+          ]),
+        }).pipe(Effect.provide(layerWithHostPlatform("linux")));
+        for (const terminalId of ["full", "comm", "exec", "short-prefix", "different-full"]) {
+          yield* manager.open(openInput({ terminalId }));
+        }
+
+        yield* manager.closeIdle({ threadId: "thread-1" });
+
+        expect(ptyAdapter.processes.map((process) => process.killed)).toEqual([
+          true,
+          true,
+          false,
+          false,
+          false,
+        ]);
+      }),
+  );
+
+  it.effect("keeps Windows root detection based on child processes", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        shellResolver: () => "pwsh.exe",
+        subprocessPollIntervalMs: 60_000,
+        processTable: Effect.succeed([
+          { pid: 9000, ppid: 1, name: "node.exe" },
+          { pid: 9001, ppid: 1, name: "pwsh.exe" },
+          { pid: 100, ppid: 9001, name: "node.exe" },
+        ]),
+      }).pipe(Effect.provide(layerWithHostPlatform("win32")));
+      yield* manager.open(openInput({ terminalId: "root" }));
+      yield* manager.open(openInput({ terminalId: "child" }));
+
+      yield* manager.closeIdle({ threadId: "thread-1" });
+
+      expect(ptyAdapter.processes.map((process) => process.killed)).toEqual([true, false]);
     }),
   );
 
