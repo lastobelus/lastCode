@@ -159,11 +159,19 @@ function markdownThreadFindText(
       const target = candidate ? resolveMarkdownFileLinkTarget(candidate, cwd) : null;
       if (target) {
         const labelText = (node: TextTree): string =>
-          node.value ?? (node.children ?? []).map(labelText).join("");
+          node.tagName === "br"
+            ? "\n"
+            : node.value?.replace(/\r?\n/g, " ") ??
+              (node.children ?? []).map(labelText).join("");
+        const hasImage = (node: TextTree): boolean =>
+          node.tagName === "img" || (node.children ?? []).some(hasImage);
         const label = labelText(node);
-        if (node.tagName === "a" && candidate && !isMarkdownFileLinkLabel(label, candidate))
-          text += `${label} `;
-        text += fileLinkLabel(splitFilePathPosition(target), parentSuffixes);
+        const chip = fileLinkLabel(splitFilePathPosition(target), parentSuffixes);
+        const customLabel =
+          node.tagName === "a" &&
+          candidate &&
+          (hasImage(node) || !isMarkdownFileLinkLabel(label, candidate));
+        text += customLabel ? `${label} (${chip})` : chip;
         return;
       }
     }

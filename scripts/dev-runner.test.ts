@@ -1109,6 +1109,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
         Effect.gen(function* () {
           const env = yield* shareSpawnedEnv({ ambientBundledDev: undefined });
           assert.equal(env?.T3CODE_BUNDLED_DEV, "1");
+          assert.equal(env?.T3CODE_WEB_BIND_HOST, "127.0.0.1");
         }),
       );
 
@@ -1145,6 +1146,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           );
 
           assert.equal(captured?.T3CODE_BUNDLED_DEV, undefined);
+          assert.equal(captured?.T3CODE_WEB_BIND_HOST, "");
         }),
       );
     });
