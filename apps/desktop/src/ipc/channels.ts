@@ -131,6 +131,7 @@ export const TAKE_LEGACY_LOCAL_STORAGE_CHANNEL = "desktop:take-legacy-local-stor
 export const COMPLETE_LEGACY_LOCAL_STORAGE_CHANNEL = "desktop:complete-legacy-local-storage";
 
 export const DESKTOP_BROWSER_COMMAND_CHANNEL = "desktop:browser:command";
+export const DESKTOP_BROWSER_ENVIRONMENT_CHANNEL = "desktop:browser:environment";
 export const DESKTOP_BROWSER_EVENT_CHANNEL = "desktop:browser:event";
 export const DESKTOP_BROWSER_SURFACE_REQUEST_CHANNEL = "desktop:browser:surface-request";
 export const DESKTOP_BROWSER_SURFACE_RESPONSE_CHANNEL = "desktop:browser:surface-response";

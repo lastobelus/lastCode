@@ -2,6 +2,7 @@ import type {
   OrchestrationV2Command,
   OrchestrationV2DomainEvent,
   OrchestrationV2ThreadProjection,
+  ThreadId,
 } from "@t3tools/contracts";
 import type * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -14,12 +15,49 @@ export interface ThreadDeletionPlan {
   readonly effects: ReadonlyArray<PendingOrchestrationEffectV2>;
 }
 
+/** Native subagents reference shared sessions without attaching as app-owned threads. */
+export function threadTerminalSessionTargets(
+  input: Pick<OrchestrationV2ThreadProjection, "providerSessions" | "providerThreads"> & {
+    readonly threadId: ThreadId;
+  },
+) {
+  const knownSessions = new Set(input.providerSessions.map((session) => session.id));
+  const targets = new Map(
+    input.providerSessions
+      .filter((session) => session.status !== "stopped" && session.status !== "error")
+      .map(
+        (session) =>
+          [
+            session.id,
+            {
+              id: session.id,
+              driver: session.driver,
+              providerInstanceId: session.providerInstanceId,
+            },
+          ] as const,
+      ),
+  );
+  for (const thread of input.providerThreads) {
+    const id = thread.providerSessionId;
+    if (thread.appThreadId !== input.threadId || id === null || knownSessions.has(id)) continue;
+    targets.set(id, { id, driver: thread.driver, providerInstanceId: thread.providerInstanceId });
+  }
+  return [...targets.values()];
+}
+
 /** Plan the same durable cleanup for direct thread deletion and project removal. */
 export const planThreadDeletion = Effect.fn("ThreadDeletion.planThreadDeletion")(function* (input: {
   readonly command: Extract<OrchestrationV2Command, { readonly type: "thread.delete" }>;
   readonly projection: Pick<
     OrchestrationV2ThreadProjection,
-    "thread" | "runs" | "attempts" | "nodes" | "runtimeRequests" | "subagents" | "providerSessions"
+    | "thread"
+    | "runs"
+    | "attempts"
+    | "nodes"
+    | "runtimeRequests"
+    | "subagents"
+    | "providerSessions"
+    | "providerThreads"
   >;
   readonly attachmentIds: ReadonlyArray<string>;
   readonly now: DateTime.Utc;
@@ -183,8 +221,10 @@ export const planThreadDeletion = Effect.fn("ThreadDeletion.planThreadDeletion")
     }
   }
 
-  for (const session of projection.providerSessions) {
-    if (session.status === "stopped" || session.status === "error") continue;
+  for (const session of threadTerminalSessionTargets({
+    ...projection,
+    threadId: command.threadId,
+  })) {
     yield* emitEvent({
       type: "provider-session.detached",
       threadId: command.threadId,
@@ -198,7 +238,7 @@ export const planThreadDeletion = Effect.fn("ThreadDeletion.planThreadDeletion")
       },
     });
     effects.push({
-      id: `effect:${command.commandId}:provider-session.detach:${session.id}`,
+      id: `effect:${command.commandId}:provider-session.detach:${session.id}:${command.threadId}`,
       commandId: command.commandId,
       threadId: command.threadId,
       request: {
@@ -210,13 +250,13 @@ export const planThreadDeletion = Effect.fn("ThreadDeletion.planThreadDeletion")
     });
   }
   effects.push({
-    id: `effect:${command.commandId}:terminal.cleanup`,
+    id: `effect:${command.commandId}:terminal.cleanup:${command.threadId}`,
     commandId: command.commandId,
     threadId: command.threadId,
     request: { type: "terminal.cleanup" },
   });
   effects.push({
-    id: `effect:${command.commandId}:preview.cleanup`,
+    id: `effect:${command.commandId}:preview.cleanup:${command.threadId}`,
     commandId: command.commandId,
     threadId: command.threadId,
     request: { type: "preview.cleanup" },
@@ -224,7 +264,7 @@ export const planThreadDeletion = Effect.fn("ThreadDeletion.planThreadDeletion")
   const attachmentIds = Array.from(new Set(input.attachmentIds));
   if (attachmentIds.length > 0) {
     effects.push({
-      id: `effect:${command.commandId}:attachment.cleanup`,
+      id: `effect:${command.commandId}:attachment.cleanup:${command.threadId}`,
       commandId: command.commandId,
       threadId: command.threadId,
       request: { type: "attachment.cleanup", attachmentIds },

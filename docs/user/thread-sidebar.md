@@ -3,6 +3,26 @@
 Use a new thread for a separate task. Choose **New worktree** when its code changes
 need a separate branch and working directory.
 
+## Pause before going offline
+
+Enable **Environment pause button** in **Settings → LastCode** for each environment
+where you want it. It is off by default. Use the pause control in the sidebar
+header, choose an environment, and confirm to send “pause to go offline” to its
+active threads. The dialog counts down while the agents finish pausing and other
+thread work stops.
+If new work starts while you wait, choose **Pause remaining threads** to include it.
+
+Automatic thread wake-ups are blocked until you resume, including after
+reconnecting or restarting. PR watches also stop polling while paused. Scheduled
+tasks keep their usual missed-run policy when you return.
+
+Once the environment is quiet, leave the dialog available until you return, then
+choose **Resume** to send “resume” to the threads that received the pause request.
+You can reopen the dialog after closing it or reconnecting. Failed deliveries
+remain available to retry. A thread archived or deleted before receiving Pause
+no longer blocks the dialog once its work stops. Deleted or archived threads
+cannot receive Resume.
+
 ## Start a thread
 
 On web and desktop, a new thread keeps the current project and carries your model
@@ -43,6 +63,28 @@ in a new thread's model picker to add or remove them. A regular click returns to
 single model. Choose a base branch and send. Each selection starts a separate thread
 and worktree while you stay in the new thread composer. This requires a Git project.
 
+## See a project dashboard
+
+On web and desktop, choose **Open dashboard** from a project or thread menu, or
+**Open project dashboard** in the command palette. Choose the project's environment
+in the dashboard's project picker when it exists on several machines.
+
+The dashboard shows active and waiting threads alongside questions, reviews, QA,
+and progress reported by your agents. Threads with reported items have a small
+dashboard indicator in the sidebar. Each item links to its source thread and shows
+when it was raised or updated. Expand an item for context. Choose **Message** to
+send a text follow-up without leaving the dashboard; messages queue after any
+current turn. Drafts remain if delivery fails, and **Retry send** confirms the same
+message. Use **Open thread** for approvals, structured questions, full reviews,
+and QA. Sending a message does not resolve a reported dashboard item.
+
+**Quick** and **Focused** describe effort; **Computer** describes a requirement.
+These filters can overlap. **On my phone** hides requests marked as requiring a
+computer. Opening a request does not resolve it or clear another request. Open
+items remain visible after their thread settles, and settled or snoozed contexts
+remain available under **Parked contexts**. A disconnected environment shows its
+last known state until it reconnects.
+
 ## Pin and reorder threads
 
 Pin a thread from its menu to keep it above your active work.
@@ -53,6 +95,19 @@ state, including its pinned position, and reopens an archived thread you were
 viewing. Discarding an unsent draft from the sidebar works the same way: Undo brings
 back its text and attachments. `mod+z` triggers the most recent Undo when no text field is focused; see
 [Keybindings](./keybindings.md#commands-with-special-behavior).
+
+Archiving includes grouped interactive children and subagents, recursively.
+If any family member is working or has unread replies, a confirmation lists it.
+**Stop active threads & archive** stops unfinished work, cancels pending approvals
+and queued messages, and archives the family. **Archive unread threads** preserves
+replies in archived history. Cancel to inspect children or make eligible threads
+independent before archiving again. Forks and independent threads stay separate.
+
+Persistent children must be made independent or have their protection removed
+before the family can be archived. If stopping fails, the family remains visible;
+some work may already have stopped. Undo or restoring the archived family brings
+its conversations back without restarting work. Promoted conversations remain
+independent.
 
 On web and desktop, you can also drag files from your computer onto any thread row:
 the thread opens and the files are attached in its composer, ready for
@@ -123,6 +178,19 @@ device keeps its own choice.
 
 While this is on, the active list is ordered by when each thread last came back to you, so you
 cannot drag or move threads within it. Your saved order returns when you turn it off.
+
+## Questions from agents
+
+Agents can mark a thread when their latest response contains a question that blocks further work.
+The sidebar shows a violet `?`, or **Question** when long status labels are enabled, so the thread
+does not get lost among other conversations. Sending a reply clears the marker automatically.
+Settling the thread yourself also dismisses it; automatic settlement waits until the question has
+been answered or cleared.
+
+This marker is separate from a provider's structured approval and input prompts. Those keep their
+existing, higher-priority status. The agent can currently raise only the `question` attention kind;
+the stored attention record is typed so future user-actionable kinds can be added without treating
+terminal output as an API.
 
 ## Settle finished work
 
@@ -196,8 +264,10 @@ legacy sidebar, open a thread's context menu and choose **Annotate thread…**. 
 adds a short dotted yellow underline to the thread timestamp; hover it to read, edit, or resolve
 the note without opening the thread.
 
-Opening an annotated thread shows the active note as a pale-yellow card above the composer. You
-can dismiss the card for the current visit without deleting or resolving the note. The
+Opening an annotated thread shows a compact yellow note above the composer, with its first line
+and edit timestamp. Expand it to read the full Markdown; your expanded or collapsed choice is
+remembered for that thread across navigation and reloads. Choose **Edit** to open the existing
+Markdown in the editor. You can dismiss the note for the current visit without deleting or resolving it. The
 conversation minimap marks the message that was newest when the annotation was created or last
 changed. Editing, resolving, or reopening the annotation moves that marker to the newest message.
 Resolved annotations disappear from the sidebar and composer but remain available from their
@@ -295,9 +365,20 @@ retry and the normal snooze choices.
 On web and desktop, use **Agents** to follow work delegated to subagents.
 Stop on a thread also stops the subagents it delegated to.
 
+Archiving a thread also archives its grouped children. Restoring the parent restores
+children archived with it, without restarting stopped work. Deleting the parent
+deletes its subagents too. Restore the parent before restoring children archived with it. Independent
+conversations stay separate.
+
 Subagent threads started by the agent can't take messages; message the parent
 thread instead. When such a subagent needs an approval or an answer, the parent
 thread asks for it.
+
+For providers that support it, choose **Promote to interactive thread** to continue
+a subagent's conversation yourself. If it is still working, promotion waits until
+it finishes; you can cancel the wait without stopping the subagent. Once ready,
+open the interactive thread from the same control. The original conversation stays
+available, and the parent is told to direct further messages to the new thread.
 
 Expand a tool call in the conversation to see its full command and output.
 Summaries shorten shell wrappers and can still describe the latest call after it
@@ -309,3 +390,18 @@ Choose **Snooze → Custom…** from a thread's menu to pick a date and time in 
 local time zone, or a duration in minutes, hours, or days. Durations start when
 you confirm; one day means 24 hours. On web and desktop, you can also snooze
 several selected threads together. Choose **Wake thread** to bring a thread back early.
+
+## Reopen handoffs in LastCode
+
+LastCode remembers links and file chips you explicitly open from chat into the right pane,
+and destinations opened there by an agent. Find them under **Handoffs** in the thread menu
+or the right-pane **+** menu. Each entry keeps its Markdown label and reopens in its usual
+file, browser, or pull-request tab. Files opened from the Files navigator are not added.
+
+The menus show seven entries by default. Change **Handoffs shown in menus** in
+**Settings → LastCode** to show 1–50. When more entries exist, **Show all…** opens a
+searchable list; the menu limit does not delete older entries.
+
+History stays on this client and survives closing tabs or archiving threads. Known local HTML
+files receive fresh preview authorization when reopened. A saved URL still needs its original
+server, and moved or deleted files must be restored before they can open again.

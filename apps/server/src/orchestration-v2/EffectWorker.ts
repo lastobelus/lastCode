@@ -1,4 +1,5 @@
-import { CommandId } from "@t3tools/contracts";
+import * as EnvironmentPauseStore from "../environment/EnvironmentPauseStore.ts";
+import { CommandId, type MessageId, type ThreadId, type RunId } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -8,6 +9,8 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Metric from "effect/Metric";
 import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 
 import {
@@ -25,8 +28,10 @@ import * as ProviderTurnControlService from "./ProviderTurnControlService.ts";
 import * as ProviderTurnStartService from "./ProviderTurnStartService.ts";
 import * as RuntimeRequestService from "./RuntimeRequestService.ts";
 import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationService.ts";
+import * as IncomingMessageSummaryService from "./IncomingMessageSummaryService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import { AcceptedSteeringContinuation } from "./Orchestrator.ts";
+import * as SubagentPromotionService from "./SubagentPromotionService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
 
@@ -89,8 +94,11 @@ export const layerExecutor: Layer.Layer<
   | ProviderTurnStartService.ProviderTurnStartServiceV2
   | RuntimeRequestService.RuntimeRequestServiceV2
   | ThreadTitleRegenerationService.ThreadTitleRegenerationService
+  | IncomingMessageSummaryService.IncomingMessageSummaryService
   | ThreadManagementService.ThreadManagementService
+  | SubagentPromotionService.SubagentPromotionService
   | ServerSettings.ServerSettingsService
+  | EffectOutbox.EffectOutboxV2
 > = Layer.effect(
   OrchestrationEffectExecutorV2,
   Effect.gen(function* () {
@@ -103,12 +111,149 @@ export const layerExecutor: Layer.Layer<
     const runtimeRequests = yield* RuntimeRequestService.RuntimeRequestServiceV2;
     const threadTitleRegeneration =
       yield* ThreadTitleRegenerationService.ThreadTitleRegenerationService;
+    const incomingMessageSummary =
+      yield* IncomingMessageSummaryService.IncomingMessageSummaryService;
     const threads = yield* ThreadManagementService.ThreadManagementService;
+    const subagentPromotion = yield* SubagentPromotionService.SubagentPromotionService;
     const settings = yield* ServerSettings.ServerSettingsService;
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    const environmentPauseStore = yield* Effect.serviceOption(
+      EnvironmentPauseStore.EnvironmentPauseStore,
+    );
+    const recordPauseDelivery = (threadId: ThreadId, messageId: MessageId, delivered: boolean) =>
+      messageId.startsWith("environment-pause:") && Option.isSome(environmentPauseStore)
+        ? outbox
+            .enqueue([
+              {
+                id: `effect:environment-pause:receipt:${messageId}:${delivered}`,
+                commandId: CommandId.make(messageId),
+                threadId,
+                request: { type: "environment-pause.record-delivery", messageId, delivered },
+              },
+            ])
+            .pipe(
+              Effect.as(true),
+              Effect.catch((journalError) =>
+                environmentPauseStore.value.recordDelivery(messageId, delivered).pipe(
+                  Effect.as(false),
+                  Effect.mapError(() => journalError),
+                ),
+              ),
+              // Retry only journaling the known result, never the native send. If
+              // this process stops before any durable write, delivery stays unknown.
+              Effect.retry({ schedule: Schedule.spaced("1 second") }),
+              // This schedule has no terminal failure; interruption keeps its
+              // usual meaning while the native callback remains infallible.
+              Effect.orDie,
+              Effect.flatMap((journaled) =>
+                journaled
+                  ? outbox
+                      .notifyAvailable()
+                      .pipe(
+                        Effect.andThen(
+                          environmentPauseStore.value
+                            .recordDelivery(messageId, delivered)
+                            .pipe(Effect.ignore({ log: true })),
+                        ),
+                      )
+                  : Effect.void,
+              ),
+            )
+        : Effect.void;
+    const recordPauseRunDelivery = (threadId: ThreadId, runId: RunId, delivered: boolean) =>
+      Option.isNone(environmentPauseStore)
+        ? Effect.void
+        : environmentPauseStore.value.get.pipe(
+            Effect.flatMap((session) =>
+              session === null
+                ? Effect.void
+                : threads.getThreadRecords(threadId, ["runs"], { runIds: [runId] }).pipe(
+                    Effect.flatMap((projection) => {
+                      const run = projection.runs.find((run) => run.id === runId);
+                      return run === undefined
+                        ? Effect.void
+                        : recordPauseDelivery(threadId, run.userMessageId, delivered);
+                    }),
+                    Effect.ignore({ log: true }),
+                  ),
+            ),
+          );
     return OrchestrationEffectExecutorV2.of({
       execute: (effect, options) => {
         const willRetry = options?.willRetry ?? false;
         switch (effect.request.type) {
+          case "environment-pause.record-delivery":
+            return Option.isNone(environmentPauseStore)
+              ? Effect.fail(
+                  new OrchestrationEffectExecutionError({
+                    effectId: effect.id,
+                    effectType: effect.request.type,
+                    cause: "The environment pause receipt store is unavailable.",
+                  }),
+                )
+              : environmentPauseStore.value
+                  .recordDelivery(effect.request.messageId, effect.request.delivered)
+                  .pipe(
+                    Effect.mapError(
+                      (cause) =>
+                        new OrchestrationEffectExecutionError({
+                          effectId: effect.id,
+                          effectType: effect.request.type,
+                          cause,
+                        }),
+                    ),
+                  );
+          case "incoming-message.summarize":
+            return incomingMessageSummary
+              .execute({
+                threadId: effect.threadId,
+                messageId: effect.request.messageId,
+                attemptCount: effect.attemptCount,
+              })
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationEffectExecutionError({
+                      effectId: effect.id,
+                      effectType: effect.request.type,
+                      cause,
+                    }),
+                ),
+              );
+          case "thread.archive":
+            return threads
+              .executeArchive({ threadId: effect.threadId, requestId: effect.request.requestId })
+              .pipe(
+                Effect.provideService(
+                  ProviderSessionManager.ProviderSessionManagerV2,
+                  providerSessions,
+                ),
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationEffectExecutionError({
+                      effectId: effect.id,
+                      effectType: effect.request.type,
+                      cause,
+                    }),
+                ),
+              );
+          case "subagent.promote":
+            return subagentPromotion
+              .execute({
+                threadId: effect.threadId,
+                requestId: effect.request.requestId,
+                willRetry,
+              })
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationEffectExecutionError({
+                      effectId: effect.id,
+                      effectType: effect.request.type,
+                      cause,
+                    }),
+                ),
+              );
           case "provider-runtime.continue": {
             const sourceRunId = effect.request.sourceRunId;
             return continueRestartedRun({ threadId: effect.threadId, sourceRunId }).pipe(
@@ -152,8 +297,21 @@ export const layerExecutor: Layer.Layer<
               );
           case "provider-turn.start":
             return providerTurnStart
-              .start({ threadId: effect.threadId, runId: effect.request.runId, willRetry })
+              .start({
+                threadId: effect.threadId,
+                runId: effect.request.runId,
+                willRetry,
+                onMessageDelivery: (messageId, delivered) =>
+                  recordPauseDelivery(effect.threadId, messageId, delivered),
+              })
               .pipe(
+                Effect.tapError((cause) =>
+                  !willRetry &&
+                  cause.deliveryRejected === true &&
+                  effect.request.type === "provider-turn.start"
+                    ? recordPauseRunDelivery(effect.threadId, effect.request.runId, false)
+                    : Effect.void,
+                ),
                 Effect.mapError(
                   (cause) =>
                     new OrchestrationEffectExecutionError({
@@ -216,6 +374,7 @@ export const layerExecutor: Layer.Layer<
                 Effect.tap(() =>
                   Effect.gen(function* () {
                     if (effect.request.type !== "provider-turn.steer") return;
+                    yield* recordPauseDelivery(effect.threadId, effect.request.messageId, true);
                     const messageId = effect.request.messageId;
                     const projection = yield* threads.getThreadRecords(
                       effect.threadId,
@@ -240,6 +399,7 @@ export const layerExecutor: Layer.Layer<
                       "deliveryRejected" in error &&
                       error.deliveryRejected === true
                     ) {
+                      yield* recordPauseDelivery(effect.threadId, effect.request.messageId, false);
                       // A provider's definite rejection is final non-delivery;
                       // retrying it must not strand cleanup or start another turn.
                       return;
@@ -253,7 +413,10 @@ export const layerExecutor: Layer.Layer<
                     }
                     // The target already finished. Strict steering must neither start
                     // a follow-up nor leave an expected delivery race blocking cleanup.
-                    if (effect.request.nativeOnly === true) return;
+                    if (effect.request.nativeOnly === true) {
+                      yield* recordPauseDelivery(effect.threadId, effect.request.messageId, false);
+                      return;
+                    }
                     const projection = yield* threads.getThreadRecords(
                       effect.threadId,
                       ["messages", "runs"],
@@ -467,6 +630,17 @@ export const layerExecutor: Layer.Layer<
                   }),
               ),
             );
+          case "terminal.archive-cleanup":
+            return resourceCleanup.cleanupArchivedTerminals(effect.threadId).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationEffectExecutionError({
+                    effectId: effect.id,
+                    effectType: effect.request.type,
+                    cause,
+                  }),
+              ),
+            );
           case "attachment.cleanup":
             return resourceCleanup.cleanupAttachments(effect.request.attachmentIds).pipe(
               Effect.mapError(
@@ -531,8 +705,14 @@ const isOrchestrationEffectWorkerError = Schema.is(OrchestrationEffectWorkerErro
 
 export interface OrchestrationEffectWorkerV2Shape {
   readonly awaitWork: Effect.Effect<void>;
+  readonly awaitIncomingSummaryWork: Effect.Effect<void>;
   readonly runOnce: Effect.Effect<boolean, OrchestrationEffectWorkerError>;
   readonly runRecoveryOnce: Effect.Effect<boolean, OrchestrationEffectWorkerError>;
+  readonly runIncomingSummaryOnce: Effect.Effect<boolean, OrchestrationEffectWorkerError>;
+  readonly nextIncomingSummaryClaimableAt: Effect.Effect<
+    Option.Option<DateTime.Utc>,
+    OrchestrationEffectWorkerError
+  >;
   readonly nextClaimableAt: Effect.Effect<
     Option.Option<DateTime.Utc>,
     OrchestrationEffectWorkerError
@@ -563,6 +743,7 @@ export const layerWithOptions = (
     Effect.gen(function* () {
       const outbox = yield* EffectOutbox.EffectOutboxV2;
       const executor = yield* OrchestrationEffectExecutorV2;
+      const pauseStore = yield* Effect.serviceOption(EnvironmentPauseStore.EnvironmentPauseStore);
       const workerId = options.workerId ?? `orchestration-v2:${process.pid}`;
       const leaseDurationMs = Math.max(1, options.leaseDurationMs ?? 30_000);
       const maxAttempts = Math.max(1, options.maxAttempts ?? 5);
@@ -656,10 +837,18 @@ export const layerWithOptions = (
           ? requeueClaim(effect, cause)
           : terminalizeClaim(effect, cause);
 
-      const runOnce = (excludeRestartContinuations = false) =>
+      const runOnce = (
+        excludeRestartContinuations = false,
+        incomingSummaryLane?: "only" | "exclude",
+      ) =>
         Effect.gen(function* () {
           const claimExit = yield* Effect.exit(
-            outbox.claimNext({ workerId, leaseDurationMs, excludeRestartContinuations }),
+            outbox.claimNext({
+              workerId,
+              leaseDurationMs,
+              excludeRestartContinuations,
+              ...(incomingSummaryLane === undefined ? {} : { incomingSummaryLane }),
+            }),
           );
           yield* increment(orchestrationEffectClaimsTotal, {
             result: Exit.isFailure(claimExit)
@@ -706,6 +895,16 @@ export const layerWithOptions = (
           }).pipe(Effect.onError((cause) => requeueClaim(effect, cause)));
           if (cancelledBeforeExecution) return true;
 
+          // Pause can commit while the SQL claim is in flight. Recheck before
+          // provider preparation, returning the untouched wake without a retry.
+          if (
+            Option.isSome(pauseStore) &&
+            (yield* outbox.deferIfEnvironmentPaused({ effectId: effect.id, workerId }))
+          ) {
+            yield* outbox.clearCancellation(effect.id);
+            return false;
+          }
+
           const execution = executor
             .execute(effect, { willRetry: effect.attemptCount < maxAttempts })
             .pipe(Effect.as("executed" as const));
@@ -745,7 +944,8 @@ export const layerWithOptions = (
             ? yield* outbox
                 .succeed({ effectId: effect.id, workerId })
                 .pipe(Effect.onError((cause) => terminalizeClaim(effect, cause)))
-            : effect.attemptCount >= maxAttempts
+            : effect.attemptCount >= maxAttempts &&
+                effect.request.type !== "environment-pause.record-delivery"
               ? yield* outbox
                   .fail({ effectId: effect.id, workerId, error })
                   .pipe(Effect.onError((cause) => terminalizeClaim(effect, cause)))
@@ -776,8 +976,15 @@ export const layerWithOptions = (
 
       return OrchestrationEffectWorkerV2.of({
         awaitWork: outbox.awaitAvailable,
-        runOnce: runOnce(),
-        runRecoveryOnce: runOnce(true),
+        awaitIncomingSummaryWork: outbox.awaitIncomingSummaryAvailable,
+        runOnce: runOnce(false, "exclude"),
+        runRecoveryOnce: runOnce(true, "exclude"),
+        runIncomingSummaryOnce: runOnce(false, "only"),
+        nextIncomingSummaryClaimableAt: outbox.nextIncomingSummaryClaimableAt.pipe(
+          Effect.mapError(
+            (cause) => new OrchestrationEffectWorkerError({ operation: "next-claimable", cause }),
+          ),
+        ),
         nextClaimableAt: outbox.nextClaimableAt.pipe(
           Effect.mapError(
             (cause) =>
@@ -804,6 +1011,8 @@ export const layer = layerWithOptions();
 export interface OrchestrationEffectDaemonOptions {
   readonly concurrency?: number;
   readonly livenessPollIntervalMs?: number;
+  /** Shares the existing wake-up cadence; runs once across all worker lanes. */
+  readonly reconcileThreadHealth?: Effect.Effect<void>;
 }
 
 const DEFAULT_EFFECT_WORKER_CONCURRENCY = 4;
@@ -822,56 +1031,79 @@ export const runDaemonWithOptions = (options: OrchestrationEffectDaemonOptions =
       const livenessPollIntervalMs = Number.isFinite(requestedLivenessPollIntervalMs)
         ? Math.max(1, Math.floor(requestedLivenessPollIntervalMs))
         : DEFAULT_EFFECT_WORKER_LIVENESS_POLL_INTERVAL_MS;
+      const nextHealthCheck = yield* Ref.make(0);
+      const healthCheckRunning = yield* Ref.make(false);
+      const reconcileThreadHealth = Effect.gen(function* () {
+        if (options.reconcileThreadHealth === undefined) return;
+        const now = DateTime.toEpochMillis(yield* DateTime.now);
+        const due = yield* Ref.modify(nextHealthCheck, (next) =>
+          now < next ? [false, next] : [true, now + livenessPollIntervalMs],
+        );
+        if (!due || (yield* Ref.getAndSet(healthCheckRunning, true))) return;
+        yield* options.reconcileThreadHealth.pipe(
+          Effect.catchCause((cause) => Effect.logWarning("Thread health check failed", cause)),
+          Effect.ensuring(Ref.set(healthCheckRunning, false)),
+          Effect.forkScoped,
+        );
+      });
       // Post-commit notifications are the low-latency path. `availableAt` is the
       // durable retry schedule, and the long liveness poll only recovers from a
       // missed in-process notification or work inserted by another process.
-      const runWorker = Effect.gen(function* () {
-        while (true) {
-          const outcome = yield* worker.runOnce.pipe(
-            Effect.map((worked) => (worked ? ("worked" as const) : ("idle" as const))),
-            Effect.catchCause((cause) =>
-              Effect.logWarning("Orchestration effect worker failed", cause).pipe(
-                Effect.as("failed" as const),
+      const runWorker = (incomingSummaryLane = false) =>
+        Effect.gen(function* () {
+          while (true) {
+            yield* reconcileThreadHealth;
+            const outcome = yield* (
+              incomingSummaryLane ? worker.runIncomingSummaryOnce : worker.runOnce
+            ).pipe(
+              Effect.map((worked) => (worked ? ("worked" as const) : ("idle" as const))),
+              Effect.catchCause((cause) =>
+                Effect.logWarning("Orchestration effect worker failed", cause).pipe(
+                  Effect.as("failed" as const),
+                ),
               ),
-            ),
-          );
-          if (outcome === "worked") {
-            yield* Effect.yieldNow;
-            continue;
-          }
-          if (outcome === "failed") {
-            // A due row can remain visible when a claim UPDATE fails. Do not
-            // feed that past deadline back into the scheduler and retry at the
-            // one-millisecond floor; let transient database failures cool off.
-            yield* Effect.sleep(Duration.millis(Math.min(1_000, livenessPollIntervalMs)));
-            continue;
-          }
+            );
+            if (outcome === "worked") {
+              yield* Effect.yieldNow;
+              continue;
+            }
+            if (outcome === "failed") {
+              // A due row can remain visible when a claim UPDATE fails. Do not
+              // feed that past deadline back into the scheduler and retry at the
+              // one-millisecond floor; let transient database failures cool off.
+              yield* Effect.sleep(Duration.millis(Math.min(1_000, livenessPollIntervalMs)));
+              continue;
+            }
 
-          const nextClaimableAt = yield* worker.nextClaimableAt.pipe(
-            Effect.catchCause((cause) =>
-              Effect.logWarning(
-                "Failed to read the next orchestration effect deadline",
-                cause,
-              ).pipe(Effect.as(Option.none<DateTime.Utc>())),
-            ),
-          );
-          const now = DateTime.toEpochMillis(yield* DateTime.now);
-          const sleepMs = Option.match(nextClaimableAt, {
-            onNone: () => livenessPollIntervalMs,
-            onSome: (availableAt) => {
-              const untilAvailable = DateTime.toEpochMillis(availableAt) - now;
-              return Math.min(livenessPollIntervalMs, untilAvailable > 0 ? untilAvailable : 25);
-            },
-          });
-          yield* Effect.raceFirst(
-            worker.awaitWork.pipe(Effect.as("notified" as const)),
-            Effect.sleep(Duration.millis(sleepMs)).pipe(Effect.as("scheduled" as const)),
-          );
-        }
-      });
+            const nextClaimableAt = yield* (
+              incomingSummaryLane ? worker.nextIncomingSummaryClaimableAt : worker.nextClaimableAt
+            ).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning(
+                  "Failed to read the next orchestration effect deadline",
+                  cause,
+                ).pipe(Effect.as(Option.none<DateTime.Utc>())),
+              ),
+            );
+            const now = DateTime.toEpochMillis(yield* DateTime.now);
+            const sleepMs = Option.match(nextClaimableAt, {
+              onNone: () => livenessPollIntervalMs,
+              onSome: (availableAt) => {
+                const untilAvailable = DateTime.toEpochMillis(availableAt) - now;
+                return Math.min(livenessPollIntervalMs, untilAvailable > 0 ? untilAvailable : 25);
+              },
+            });
+            yield* Effect.raceFirst(
+              (incomingSummaryLane ? worker.awaitIncomingSummaryWork : worker.awaitWork).pipe(
+                Effect.as("notified" as const),
+              ),
+              Effect.sleep(Duration.millis(sleepMs)).pipe(Effect.as("scheduled" as const)),
+            );
+          }
+        });
 
       return yield* Effect.all(
-        Array.from({ length: concurrency }, () => runWorker),
+        [...Array.from({ length: concurrency }, () => runWorker()), runWorker(true)],
         {
           concurrency: "unbounded",
           discard: true,

@@ -1,4 +1,5 @@
 import { resolveEnvironmentMachineKind } from "@t3tools/contracts";
+import { useEffect, useState, useSyncExternalStore } from "react";
 
 import {
   useClientSettings,
@@ -6,6 +7,9 @@ import {
   useUpdateClientSettings,
 } from "~/hooks/useSettings";
 import type { EnvironmentPresentation } from "~/state/environments";
+import { loadBalancingDecisionLog } from "~/lib/loadBalancingDiagnostics";
+import { Button } from "../ui/button";
+import { toastManager } from "../ui/toast";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
 import { EnvironmentRow, environmentTransportLabel } from "./EnvironmentRow";
@@ -63,6 +67,38 @@ export function LoadBalancingSettings({
   const settings = useClientSettings();
   const settingsHydrated = useClientSettingsHydrated();
   const updateSettings = useUpdateClientSettings();
+  const decisionLog = useSyncExternalStore(
+    loadBalancingDecisionLog.subscribe,
+    loadBalancingDecisionLog.getSnapshot,
+  );
+  const [now, setNow] = useState(Date.now);
+  const logging = decisionLog.expiresAt > now;
+  useEffect(() => {
+    if (decisionLog.expiresAt === 0) return;
+    const timeout = window.setTimeout(
+      () => setNow(Date.now()),
+      Math.max(0, decisionLog.expiresAt - Date.now()),
+    );
+    return () => window.clearTimeout(timeout);
+  }, [decisionLog.expiresAt]);
+  const changeLogging = () => {
+    try {
+      if (logging) loadBalancingDecisionLog.stop();
+      else loadBalancingDecisionLog.start();
+    } catch {
+      toastManager.add({ type: "error", title: "Could not save Auto balance logging settings" });
+    }
+  };
+  const downloadDecisions = () => {
+    const url = URL.createObjectURL(
+      new Blob([loadBalancingDecisionLog.export()], { type: "application/json" }),
+    );
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "auto-balance-decisions.json";
+    anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+  };
 
   if (environments.length < 2) return null;
 
@@ -86,8 +122,9 @@ export function LoadBalancingSettings({
       }
     >
       <p className="px-3 py-2.5 text-xs text-muted-foreground sm:px-4">
-        New threads in shared projects start on the machine with the most free CPU and memory,
-        weighted by each machine's preference.
+        New threads in shared projects go to the highest score: spare CPU capacity ×
+        available-memory percentage × preference. Prefer gives a machine twice the weight of Normal.
+        CPU capacity includes logical core count. Existing threads stay on their machine.
       </p>
       {environments.map((environment) => (
         <EnvironmentRow
@@ -129,6 +166,24 @@ export function LoadBalancingSettings({
           </Select>
         </EnvironmentRow>
       ))}
+      <div className="flex flex-wrap items-center gap-2 px-3 py-2.5 sm:px-4">
+        <Button variant="outline" size="sm" onClick={changeLogging}>
+          {logging ? "Stop logging" : "Log decisions for 24 hours"}
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={downloadDecisions}
+          disabled={decisionLog.records.length === 0}
+        >
+          Download decision logs
+        </Button>
+        <p className="w-full text-xs text-muted-foreground">
+          {logging ? `Logging until ${new Date(decisionLog.expiresAt).toLocaleString()}. ` : ""}
+          {decisionLog.records.length} decisions saved on this device. Keeps the latest 200,
+          including scores and excluded machines.
+        </p>
+      </div>
     </FoldedSettingsSection>
   );
 }

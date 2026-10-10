@@ -25,6 +25,7 @@ import {
   OrchestratorCommandRejectedError,
   OrchestratorDispatchError,
   OrchestratorProjectionError,
+  OrchestratorThreadArchivingError,
 } from "../../orchestration-v2/Orchestrator.ts";
 
 import * as ServerSecretStore from "../../auth/ServerSecretStore.ts";
@@ -33,6 +34,8 @@ import * as ProviderAdapterRegistry from "../../orchestration-v2/ProviderAdapter
 import * as ThreadManagement from "../../orchestration-v2/ThreadManagementService.ts";
 import * as ThreadSearch from "../../orchestration-v2/ThreadSearch.ts";
 import * as PreviewBrowser from "../../preview/PreviewBrowser.ts";
+import * as ThreadRecoveryRepair from "../../orchestration-v2/ThreadRecoveryRepairService.ts";
+import * as ThreadRecovery from "../../orchestration-v2/ThreadRecoveryService.ts";
 import * as ProjectService from "../../project/ProjectService.ts";
 import * as ProviderRegistry from "../../provider/ProviderRegistry.ts";
 import * as SecretRequests from "../../secrets/SecretRequests.ts";
@@ -73,6 +76,8 @@ const decodeMcpAttachmentInput = Schema.decodeUnknownEffect(McpAttachmentInput);
 
 // Registration asks for every service the thread tools declare; these cases call none that use them.
 const layerThreadToolkit = McpHttpServer.layerThreadToolkit.pipe(
+  Layer.provide(Layer.mock(ThreadRecovery.ThreadRecoveryService)({})),
+  Layer.provide(Layer.mock(ThreadRecoveryRepair.ThreadRecoveryRepairService)({})),
   Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
   Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
 );
@@ -231,6 +236,17 @@ it("bounds public command rejections and redacts internal dispatch causes", () =
       new OrchestratorCommandRejectedError({ ...command, cause: "Run is not queued." }),
     ).message,
   ).toBe("Run is not queued.");
+  expect(
+    dispatchFailure(
+      new OrchestratorThreadArchivingError({
+        ...command,
+        threadId: ThreadId.make("mcp-archive-hold"),
+      }),
+    ),
+  ).toMatchObject({
+    code: "orchestration_error",
+    message: "This conversation is stopping before it is archived. Wait for the archive to finish.",
+  });
   for (const cause of [
     undefined,
     "",
@@ -553,6 +569,90 @@ it.effect("a read-only client reads threads and is refused every write before it
   ),
 );
 const dispatched: Array<string> = [];
+
+it.effect(
+  "repair accepts a full-access client but refuses limited clients and stale agents",
+  () => {
+    let launches = 0;
+    let targetRuntimeMode: "auto" | "full-access" = "full-access";
+    return Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const call = (invocation: McpInvocationContext.McpInvocationScope) =>
+        server
+          .callTool({
+            name: "t3_thread_repair",
+            arguments: {
+              threadId: "repair-target",
+              runId: "repair-run",
+              attemptId: "repair-attempt",
+            },
+          })
+          .pipe(
+            Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+            Effect.provideService(McpSchema.McpServerClient, client),
+          );
+      const escalation = yield* call(clientScope("auto"));
+      expect(declaredFailure(escalation)).toMatchObject({
+        code: "runtime_mode_escalation_denied",
+      });
+      expect(launches).toBe(0);
+      targetRuntimeMode = "auto";
+      const limited = yield* call(clientScope("auto"));
+      expect(declaredFailure(limited)).toMatchObject({ code: "capability_denied" });
+      expect(launches).toBe(0);
+      targetRuntimeMode = "full-access";
+      const stale = yield* call(scope);
+      expect(declaredFailure(stale)).toMatchObject({ code: "parent_not_active" });
+      expect(launches).toBe(0);
+      const accepted = yield* call(clientScope("full-access"));
+      expect(accepted.isError).toBe(false);
+      expect(accepted.structuredContent).toEqual({ threadId: "repair-conversation" });
+      expect(launches).toBe(1);
+    }).pipe(
+      Effect.provide(
+        McpHttpServer.layerThreadToolkit.pipe(
+          Layer.provide(Layer.mock(ThreadRecovery.ThreadRecoveryService)({})),
+          Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
+          Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
+          Layer.provideMerge(McpServer.McpServer.layer),
+          Layer.provide(NodeCrypto.layer),
+          Layer.provide(
+            Layer.mock(ThreadRecoveryRepair.ThreadRecoveryRepairService)({
+              launch: () =>
+                Effect.sync(() => {
+                  launches++;
+                  return { threadId: ThreadId.make("repair-conversation") };
+                }),
+            }),
+          ),
+          Layer.provide(
+            Layer.mock(ThreadManagement.ThreadManagementService)({
+              getThreadShell: () =>
+                Effect.succeed({
+                  id: ThreadId.make("repair-target"),
+                  projectId: "repair-project",
+                  runtimeMode: targetRuntimeMode,
+                  interactionMode: "default",
+                  archivedAt: null,
+                  deletedAt: null,
+                  activeRunId: null,
+                  providerInstanceId: ProviderInstanceId.make("codex"),
+                } as never),
+              getProjectThreadRecords: () =>
+                Effect.succeed({
+                  thread: {
+                    id: ThreadId.make("repair-target"),
+                    runtimeMode: targetRuntimeMode,
+                    interactionMode: "default",
+                  },
+                } as never),
+            }),
+          ),
+        ),
+      ),
+    );
+  },
+);
 
 it.effect("refuses act-as-caller tools to a client caller", () =>
   Effect.gen(function* () {

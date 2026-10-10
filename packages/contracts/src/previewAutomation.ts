@@ -9,16 +9,14 @@ import {
   PreviewViewportSetting,
   PreviewViewportSize,
 } from "./preview.ts";
+import { BrowserProfile, BrowserProfileId, BrowserProfileName } from "./browserProfile.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
-import { BrowserProfileId } from "./browserProfile.ts";
 
 const BoundedUrl = Schema.String.check(Schema.isTrimmed())
   .check(Schema.isNonEmpty())
   .check(Schema.isMaxLength(2048));
 const URL_GUIDANCE =
   "Absolute http(s) URL or a schemeless host such as t3.chat or localhost:5173. Schemeless public hosts use https; loopback hosts use http.";
-const PROFILE_GUIDANCE =
-  "Browser profile for a new tab, by id or name (case-insensitive) from preview_status profiles. Omit to use the user's default profile. A tab keeps the profile it opened with.";
 const OptionalTimeoutMs = Schema.optional(
   Schema.Int.check(Schema.isGreaterThan(0))
     .check(Schema.isLessThanOrEqualTo(60_000))
@@ -50,6 +48,8 @@ const PREVIEW_AUTOMATION_OPERATIONS = [
 
 export const PREVIEW_AUTOMATION_SERVER_OPERATIONS = [
   ...PREVIEW_AUTOMATION_OPERATIONS,
+  "profiles",
+  "openWithProfile",
   "dialog",
   "close",
   "upload",
@@ -85,6 +85,12 @@ export const PreviewAutomationProfile = Schema.Struct({
 });
 export type PreviewAutomationProfile = typeof PreviewAutomationProfile.Type;
 
+export const PreviewAutomationProfiles = Schema.Struct({
+  profiles: Schema.Array(BrowserProfile),
+  defaultProfileId: BrowserProfileId,
+});
+export type PreviewAutomationProfiles = typeof PreviewAutomationProfiles.Type;
+
 export const PreviewAutomationStatus = Schema.Struct({
   available: Schema.Boolean,
   visible: Schema.Boolean,
@@ -114,6 +120,10 @@ export const PreviewAutomationStatus = Schema.Struct({
       }),
     ),
   ),
+  /** Actual profile of the desktop page used by this tab. */
+  profileId: Schema.optional(Schema.NullOr(BrowserProfileId)),
+  /** Null when there is no tab or its profile has since been deleted. */
+  profileName: Schema.optional(Schema.NullOr(BrowserProfileName)),
   /** Optional for compatibility with desktop hosts predating viewport sizing. */
   viewportSetting: Schema.optional(PreviewViewportSetting),
   /** Measured guest-page viewport in CSS pixels when a webview is ready. */
@@ -172,6 +182,14 @@ export type PreviewAutomationDialogInput = typeof PreviewAutomationDialogInput.T
 
 export const PreviewAutomationOpenInput = Schema.Struct({
   ...PreviewAutomationTabTargetFields,
+  profileId: Schema.optional(BrowserProfileId).annotate({
+    description:
+      "Existing desktop browser profile ID from preview_profiles. Mutually exclusive with profileName. Omit both to use the configured default for new tabs; reused tabs retain their profile.",
+  }),
+  profileName: Schema.optional(BrowserProfileName).annotate({
+    description:
+      "Exact, case-sensitive existing profile name from preview_profiles. Mutually exclusive with profileId. Unknown or duplicate names fail; use profileId to disambiguate.",
+  }),
   url: Schema.optional(BoundedUrl).annotate({
     description: `Optional initial page URL. ${URL_GUIDANCE} Omit to open a blank tab.`,
   }),
@@ -190,15 +208,18 @@ export const PreviewAutomationOpenInput = Schema.Struct({
   reuseExistingTab: Schema.optional(
     Schema.Boolean.annotate({
       description:
-        "Reuse tabId when supplied, otherwise this agent session's current tab. Defaults to true; set false to create a new tab.",
+        "Reuse tabId when supplied, otherwise this agent session's current tab. Defaults to true; set false to create a new tab. An explicit profile mismatch creates a new tab when tabId is omitted; an exact tabId mismatch fails. Existing tabs never switch profiles.",
     }),
   ),
-  profileId: Schema.optional(
-    TrimmedNonEmptyString.check(Schema.isMaxLength(64)).annotate({
-      description: PROFILE_GUIDANCE,
-    }),
-  ).annotate({ description: PROFILE_GUIDANCE }),
 })
+  .check(
+    Schema.makeFilter(
+      (input) =>
+        input.profileId === undefined ||
+        input.profileName === undefined ||
+        "Provide only one of profileId or profileName.",
+    ),
+  )
   .check(
     Schema.makeFilter(
       (input) =>
@@ -933,6 +954,9 @@ export class PreviewAutomationNoAvailableHostError extends Schema.TaggedError<Pr
   },
 ) {
   override get message(): string {
+    if (this.operation === "profiles" || this.operation === "openWithProfile") {
+      return "Browser profile selection requires an available environment browser and the connected desktop that owns the requested profile. Call preview_profiles to inspect the available profiles. The requested profile was not opened.";
+    }
     return `No preview automation host is available for ${this.operation} in environment ${this.environmentId}. The server-owned browser may be starting or reconnecting. Retry preview_status, then call preview_open if no tab is available. If it remains unavailable, report the browser connection failure.`;
   }
 }
@@ -1029,6 +1053,18 @@ export class PreviewAutomationExecutionError extends Schema.TaggedError<PreviewA
     return this.reason === undefined
       ? `Preview automation ${this.operation} failed on client ${this.clientId}.`
       : `Preview automation ${this.operation} failed: ${this.reason}`;
+  }
+}
+
+export class PreviewAutomationProfileError extends Schema.TaggedError<PreviewAutomationProfileError>()(
+  "PreviewAutomationProfileError",
+  {
+    reason: Schema.Literals(["unknown", "ambiguous", "tab-mismatch"]),
+    detail: Schema.String,
+  },
+) {
+  override get message(): string {
+    return this.detail;
   }
 }
 
@@ -1181,6 +1217,7 @@ export const PreviewAutomationError = Schema.Union([
   PreviewAutomationControlInterruptedError,
   PreviewAutomationExecutionError,
   PreviewAutomationInvalidSelectorError,
+  PreviewAutomationProfileError,
   PreviewAutomationTargetNotEditableError,
   PreviewAutomationResultTooLargeError,
   PreviewAutomationClientDisconnectedError,

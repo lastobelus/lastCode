@@ -1691,12 +1691,55 @@ describe("resolveComposerInteractionMode", () => {
 });
 
 describe("resolveBackgroundDraftWorkspaceOptions", () => {
+  it.each(["auto", "manual"] as const)(
+    "keeps the %s routing intent for the next background composer",
+    (environmentSelection) => {
+      expect(
+        resolveBackgroundDraftWorkspaceOptions({
+          envMode: "local",
+          branch: "main",
+          startFromOrigin: true,
+          canAutoBalance: true,
+          environmentSelection,
+        }),
+      ).toEqual({
+        envMode: "local",
+        branch: "main",
+        worktreePath: null,
+        startFromOrigin: false,
+        environmentSelection,
+      });
+    },
+  );
+
+  it.each(["auto", "manual"] as const)(
+    "preserves the worktree base when balancing is unavailable and intent is %s",
+    (environmentSelection) => {
+      expect(
+        resolveBackgroundDraftWorkspaceOptions({
+          envMode: "worktree",
+          branch: "feature-work",
+          startFromOrigin: true,
+          canAutoBalance: false,
+          environmentSelection,
+        }),
+      ).toEqual({
+        envMode: "worktree",
+        branch: "feature-work",
+        worktreePath: null,
+        startFromOrigin: true,
+        ...(environmentSelection === "manual" ? { environmentSelection } : {}),
+      });
+    },
+  );
+
   it("keeps New worktree selected without reusing the launched worktree", () => {
     expect(
       resolveBackgroundDraftWorkspaceOptions({
         envMode: "worktree",
         branch: "main",
         startFromOrigin: true,
+        canAutoBalance: false,
       }),
     ).toEqual({
       envMode: "worktree",

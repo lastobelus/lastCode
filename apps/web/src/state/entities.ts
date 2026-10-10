@@ -287,6 +287,14 @@ export function readEnvironmentSupportsSettlement(environmentId: EnvironmentId):
   );
 }
 
+/** Current family payload and consent policy; the original capability is insufficient. */
+export function readEnvironmentSupportsArchiveFamilies(environmentId: EnvironmentId): boolean {
+  return (
+    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
+      .threadArchiveFamiliesV2 === true
+  );
+}
+
 /** Whether the environment's server understands thread.snooze/unsnooze.
     Same version-skew contract as settlement. */
 export function readEnvironmentSupportsSnooze(environmentId: EnvironmentId): boolean {

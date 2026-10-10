@@ -74,8 +74,18 @@ export interface ThreadTitleGenerationResult {
   needsRefinement?: boolean | undefined;
 }
 
-/** Commit, change request, branch, and title generation backed by one provider instance. */
+export interface IncomingMessageSummaryGenerationInput {
+  cwd: string;
+  message: string;
+  modelSelection: ModelSelection;
+}
+
+/** Commit, change request, branch, title, and summary generation backed by one provider instance. */
 export interface ProviderTextGeneration {
+  readonly generateIncomingMessageSummary: (
+    input: IncomingMessageSummaryGenerationInput,
+  ) => Effect.Effect<{ text: string }, TextGenerationError>;
+
   /**
    * Generate a commit message from staged change context.
    */
