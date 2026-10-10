@@ -247,16 +247,16 @@ function changedPaths(repoRoot: string, base: string, head: string): ReadonlyArr
     .toString()
     .split("\0");
   const paths = new Set<string>();
-  for (let index = 0; index < fields.length && fields[index];) {
+  // R/C records consume two paths; never interpret their destination as the next status.
+  for (let index = 0; fields[index];) {
     const status = fields[index++]!;
     const path = fields[index++];
     if (!path || !/^[ACDMRTUXB]\d*$/.test(status)) throw new Error("Unsupported Git diff status");
     paths.add(path);
-    if (/^[RC]/.test(status)) {
-      const destination = fields[index++];
-      if (!destination) throw new Error("Missing rename destination");
-      paths.add(destination);
-    }
+    if (!/^[RC]/.test(status)) continue;
+    const destination = fields[index++];
+    if (!destination) throw new Error("Missing rename destination");
+    paths.add(destination);
   }
   return [...paths].sort();
 }
