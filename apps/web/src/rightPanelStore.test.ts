@@ -30,6 +30,26 @@ beforeEach(() => {
 });
 
 describe("rightPanelStore", () => {
+  it("orders asynchronous selection intents without changing the displayed surface", () => {
+    const store = useRightPanelStore.getState();
+    store.openBrowser(refA, "source");
+    const chosen = selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA);
+    const initialRevision = store.getUserActionRevision(refA);
+    expect(store.recordSelectionIntent(refA)).toBe(initialRevision + 1);
+    expect(store.recordSelectionIntent(refA)).toBe(initialRevision + 2);
+    expect(selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)).toBe(
+      chosen,
+    );
+    expect(store.getUserActionRevision(refB)).toBe(0);
+    store.reconcileBrowserSurfaces(refA, ["source", "destination"], new Set(), "destination");
+    expect(selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, refA)).toEqual({
+      id: "browser:destination",
+      kind: "preview",
+      resourceId: "destination",
+    });
+    expect(store.getUserActionRevision(refA)).toBe(initialRevision + 2);
+  });
+
   it("records single and bulk tab closes, newest first", () => {
     const store = useRightPanelStore.getState();
     const pr = pullRequestSurface({
