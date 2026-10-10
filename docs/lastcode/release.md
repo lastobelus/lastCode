@@ -212,7 +212,13 @@ disabled, report that setup problem rather than reverting to a sleep loop.
 When a retained nightly rebase is complete but validation required additional
 commits, do not delete the worktree and rely on rerere: Git only remembers
 conflict resolutions, not subsequent repairs. Commit the repairs and incorporate
-any downstream merges made since that attempt before selecting its exact head:
+any downstream merges made since that attempt before selecting its exact head.
+
+In carry mode, append the incorporated PR's partitioned source commits and any
+repair commits to the retained head. Each appended commit must name its owning
+`Carry-Group`; do not append an unpartitioned merge or squash. Explicit selection
+recompacts those commits into the six groups and checks that the repaired tree
+is unchanged. Ordinary retries cannot refresh a completed carry plan.
 
 ```bash
 pnpm lastcode:checkpoint -- --select-recovery <full-repaired-head> --recovery-source <full-current-main-commit>

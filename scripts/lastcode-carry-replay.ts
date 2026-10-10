@@ -87,6 +87,7 @@ export interface CompileCarrySetInput {
   readonly previousCompactHead?: string;
   readonly representedSource?: string;
   readonly preparedPartition?: CarryPreparedPartition;
+  readonly partitionedTail?: boolean;
 }
 
 export interface CarryPreparedPartition {
@@ -513,6 +514,7 @@ export function expandCarrySource(input: {
   readonly previousCompactHead?: string;
   readonly representedSource?: string;
   readonly preparedPartition?: CarryPreparedPartition;
+  readonly partitionedTail?: boolean;
 }): ExpandedCarrySource {
   const grouped = new Map(
     CARRY_REPLAY_GROUPS.map((group) => [group, [] as CarryContributionMetadata[]]),
@@ -599,9 +601,14 @@ export function expandCarrySource(input: {
     }
     const tail = firstParentCommits(input.repo, tailBase, source);
     assertLinearRange(input.repo, tailBase, tail);
-    for (const squashCommit of tail) {
-      for (const entry of expandSquashCommit(input.repo, squashCommit))
+    if (input.partitionedTail) {
+      for (const entry of verifyPartitionRange(input.repo, tailBase, source))
         add(entry.commit, entry.metadata);
+    } else {
+      for (const squashCommit of tail) {
+        for (const entry of expandSquashCommit(input.repo, squashCommit))
+          add(entry.commit, entry.metadata);
+      }
     }
   }
 
@@ -738,7 +745,10 @@ function finishPlan(worktree: string, plan: CarryReplayPlan, resultHead: string)
   writeCarryReplayPlan(worktree, { ...plan, status: "complete", resultHead });
 }
 
-export function completeCarryReplay(worktree: string): CarryReplayResult {
+export function completeCarryReplay(
+  worktree: string,
+  options: { readonly reselect?: boolean } = {},
+): CarryReplayResult {
   const plan = readCarryReplayPlan(worktree);
   if (!plan) throw new Error("Carry replay worktree has no persisted plan.");
   if (rebaseInProgress(worktree))
@@ -749,6 +759,18 @@ export function completeCarryReplay(worktree: string): CarryReplayResult {
     (!plan.resultHead ||
       !isCheckpointMessageRewrite(worktree, plan.onto, plan.resultHead, previousHead))
   ) {
+    // Only explicit selection may fold committed repairs into the owning groups.
+    // Ordinary retries still reject a head that differs from the saved plan.
+    if (options.reselect && plan.resultHead && plan.phase !== "historical") {
+      return compileCarrySetSameBase({
+        repo: worktree,
+        worktree,
+        base: plan.onto,
+        source: previousHead,
+        previousCompactHead: plan.resultHead,
+        partitionedTail: true,
+      });
+    }
     throw new Error(
       `Completed carry replay recorded ${plan.resultHead ?? "no head"}, found ${previousHead}.`,
     );
@@ -794,6 +816,7 @@ export function compileCarrySetSameBase(input: CompileCarrySetInput): CarryRepla
     ...(input.previousCompactHead ? { previousCompactHead: input.previousCompactHead } : {}),
     ...(input.representedSource ? { representedSource: input.representedSource } : {}),
     ...(input.preparedPartition ? { preparedPartition: input.preparedPartition } : {}),
+    ...(input.partitionedTail ? { partitionedTail: true } : {}),
   });
   const anchors = new Map(
     CARRY_REPLAY_GROUPS.map((group) => [

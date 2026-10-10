@@ -436,6 +436,65 @@ describe("carry replay core", () => {
     }
   });
 
+  it.each([true, false])(
+    "reselects only explicitly partitioned committed carry repairs (partitioned=%s)",
+    (partitioned) => {
+      const { repo, cleanup } = initRepo();
+      try {
+        const bootstrap = prepareBootstrap(repo);
+        checkout(repo, "selected-repair", bootstrap.historicalSource);
+        const initial = compileCarrySetSameBase({
+          repo,
+          worktree: repo,
+          base: bootstrap.base,
+          source: bootstrap.historicalSource,
+          preparedPartition: {
+            base: bootstrap.base,
+            source: bootstrap.historicalSource,
+            head: bootstrap.partition,
+          },
+        });
+        write(repo, "committed-repair.txt", "preserve the operator's repair\n");
+        const repaired = commit(
+          repo,
+          "repair the selected carry release",
+          partitioned ? "Carry-Group: tooling\nCarry-Fix: fixture#committed-repair" : undefined,
+        );
+        const savedPlan = readCarryReplayPlan(repo);
+        const repairedTree = git(repo, ["rev-parse", `${repaired}^{tree}`]);
+        assert.throws(() => completeCarryReplay(repo), /Completed carry replay recorded/u);
+        assert.deepStrictEqual(readCarryReplayPlan(repo), savedPlan);
+        assert.equal(git(repo, ["rev-parse", "HEAD"]), repaired);
+        if (!partitioned) {
+          assert.throws(
+            () => completeCarryReplay(repo, { reselect: true }),
+            /missing Carry-Group/u,
+          );
+          assert.deepStrictEqual(readCarryReplayPlan(repo), savedPlan);
+          assert.equal(git(repo, ["rev-parse", "HEAD"]), repaired);
+          return;
+        }
+        const refreshed = completeCarryReplay(repo, { reselect: true });
+        assert.equal(git(repo, ["rev-parse", `${refreshed.head}^{tree}`]), repairedTree);
+        const groups = readCarryGroupChain(repo, refreshed.head, bootstrap.base);
+        assert.equal(groups.length, CARRY_REPLAY_GROUPS.length);
+        const repair = groups
+          .find(({ group }) => group === "tooling")
+          ?.contributions.find(({ sourceCommit }) => sourceCommit === repaired);
+        assert.deepStrictEqual(repair?.metadata["Carry-Fix"], ["fixture#committed-repair"]);
+        assert.equal(
+          groups.find(({ group }) => group === "resumable-actions")?.contributions[0]?.sourceCommit,
+          bootstrap.partition,
+        );
+        assert.equal(readCarryReplayPlan(repo)?.resultHead, refreshed.head);
+        assert.equal(completeCarryReplay(repo).head, refreshed.head);
+        assert.equal(git(repo, ["show", `${initial.head}:new-name.txt`]), "rename me");
+      } finally {
+        cleanup();
+      }
+    },
+  );
+
   it("retains nested provenance when recompiling a prepared compact bootstrap", () => {
     const { repo, cleanup } = initRepo();
     try {

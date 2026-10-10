@@ -2266,6 +2266,7 @@ export function continueCarryRecovery(input: {
   readonly worktree: string;
   readonly selectedHead: string;
   readonly nightlyTag: string;
+  readonly reselect?: boolean;
 }): string {
   const plan = readCarryReplayPlan(input.worktree);
   if (
@@ -2279,7 +2280,7 @@ export function continueCarryRecovery(input: {
     throw new Error("Retained carry recovery head changed; inspect and select its exact head.");
   }
   if (!plan) return normalizeCheckpointCommits(input.worktree, input.nightlyTag);
-  const completed = completeCarryReplay(input.worktree);
+  const completed = completeCarryReplay(input.worktree, { reselect: input.reselect ?? false });
   if (completed.phase !== "compile") return completed.head;
   console.log(
     `[lastcode:checkpoint] Carry compilation repaired; replaying it onto ${input.nightlyTag}...`,
@@ -2359,6 +2360,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
             worktree,
             selectedHead: selected.head,
             nightlyTag: selected.nightlyTag,
+            reselect: true,
           })
         : normalizeCheckpointCommits(worktree, selected.nightlyTag);
     const selection = {
@@ -2462,6 +2464,10 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
   // A crash after pushing but before clearing the selection must not republish or
   // rebase the repaired commit. The published immutable tag now preserves it.
   if (selection && publishedRecoveryInstallable(installables, selection)) {
+    const worktree = automationWorktree();
+    if (NodeFS.existsSync(worktree)) {
+      assertRecoverySelection(worktree, selection, selection.sourceCommit);
+    }
     if (
       !isAncestor(repoRoot, selection.head, sourceCommit) &&
       !isAncestor(repoRoot, selection.sourceCommit, sourceCommit)
@@ -2473,7 +2479,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       const promoted =
         isAncestor(repoRoot, selection.head, sourceCommit) ||
         promoteCheckpoint(repoRoot, selection.head, options, selection.sourceCommit, true);
-      finishPublishedRecovery(repoRoot, automationWorktree(), selectionPath, selection, promoted);
+      finishPublishedRecovery(repoRoot, worktree, selectionPath, selection, promoted);
     }
     console.log(
       "[lastcode:checkpoint] Selected recovery was already published; no new checkpoint or revision created.",
