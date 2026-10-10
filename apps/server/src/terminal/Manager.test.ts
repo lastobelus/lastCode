@@ -1610,6 +1610,107 @@ it.layer(
       }),
   );
 
+  it.effect.each(["deliver", "cancel", "fail"] as const)(
+    "protects first input queued behind idle cleanup and releases pending input after %s",
+    (outcome) =>
+      Effect.gen(function* () {
+        const inspectionEntered = yield* Deferred.make<void>();
+        const finishInspection = yield* Deferred.make<void>();
+        let checking = false;
+        const { manager, ptyAdapter } = yield* createManager(5, {
+          shellResolver: () => "/bin/zsh",
+          subprocessPollIntervalMs: 60_000,
+          processKillGraceMs: 0,
+          processTable: Effect.gen(function* () {
+            if (checking) {
+              yield* Deferred.succeed(inspectionEntered, undefined);
+              yield* Deferred.await(finishInspection);
+            }
+            return [{ pid: 9000, ppid: 1, name: "zsh" }];
+          }),
+        }).pipe(Effect.provide(layerWithHostPlatform("linux")));
+        yield* manager.open(openInput());
+        const process = ptyAdapter.processes[0]!;
+        process.exitOnKill = "SIGTERM";
+        if (outcome === "fail") process.writeFailure = new Error("write failed");
+        checking = true;
+        const closing = yield* manager
+          .closeIdle({ threadId: "thread-1" })
+          .pipe(Effect.forkScoped({ startImmediately: true }));
+        yield* Deferred.await(inspectionEntered);
+        const writing = yield* manager
+          .write({ threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, data: "command\r" })
+          .pipe(Effect.result, Effect.forkScoped({ startImmediately: true }));
+        expect(writing.pollUnsafe()).toBeUndefined();
+        if (outcome === "cancel") yield* Fiber.interrupt(writing);
+        checking = false;
+        yield* Deferred.succeed(finishInspection, undefined);
+        yield* Fiber.join(closing);
+        if (outcome !== "cancel") {
+          expect((yield* Fiber.join(writing))._tag).toBe(
+            outcome === "deliver" ? "Success" : "Failure",
+          );
+        }
+        expect(process.killed).toBe(false);
+        expect(process.writes).toEqual(outcome === "deliver" ? ["command\r"] : []);
+        // Failed/canceled requests must not leave a permanent cleanup blocker.
+        yield* manager.closeIdle({ threadId: "thread-1" });
+        expect(process.killed).toBe(true);
+      }),
+  );
+
+  it.effect(
+    "bounds first input when the process monitor stalls without adopting the later exec",
+    () =>
+      Effect.gen(function* () {
+        const captureEntered = yield* Deferred.make<void>();
+        const stalledMonitor = yield* Deferred.make<void>();
+        const ownedProcessIds = yield* Deferred.make<ReadonlyArray<number>>();
+        const exited = yield* Deferred.make<void>();
+        let stalled = true;
+        const { manager, ptyAdapter } = yield* createManager(5, {
+          shellResolver: () => "/bin/zsh",
+          subprocessPollIntervalMs: 60_000,
+          processTable: Effect.gen(function* () {
+            if (stalled) {
+              yield* Deferred.succeed(captureEntered, undefined);
+              yield* Deferred.await(stalledMonitor);
+            }
+            return [{ pid: 9000, ppid: 1, name: "node" }];
+          }),
+          registerTerminalProcesses: ({ processIds }) =>
+            processIds.length > 0
+              ? Deferred.succeed(ownedProcessIds, processIds).pipe(Effect.asVoid)
+              : Effect.void,
+        }).pipe(Effect.provide(layerWithHostPlatform("linux")));
+        const unsubscribe = yield* manager.subscribe((event) =>
+          event.type === "exited"
+            ? Deferred.succeed(exited, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+        yield* manager.open(openInput());
+        const process = ptyAdapter.processes[0]!;
+        process.exitOnKill = "SIGTERM";
+        const writing = yield* manager
+          .write({ threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, data: "exec node\r" })
+          .pipe(Effect.forkScoped({ startImmediately: true }));
+        yield* Deferred.await(captureEntered);
+        expect(process.writes).toEqual([]);
+        yield* TestClock.adjust("100 millis");
+        yield* Fiber.join(writing);
+        expect(process.writes).toEqual(["exec node\r"]);
+        stalled = false;
+        yield* Deferred.succeed(stalledMonitor, undefined);
+        yield* manager.closeIdle({ threadId: "thread-1" });
+        expect(process.killed).toBe(false);
+        yield* TestClock.adjust("60 seconds");
+        expect(yield* Deferred.await(ownedProcessIds)).toEqual([9000]);
+        process.emitExit({ exitCode: 0 });
+        yield* Deferred.await(exited);
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
   it.effect("keeps Windows root detection based on child processes", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter } = yield* createManager(5, {
