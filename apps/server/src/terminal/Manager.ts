@@ -383,14 +383,16 @@ function normalizeChildCommandName(raw: string, platform: NodeJS.Platform): stri
   if (firstToken.length === 0) return null;
   const separators = platform === "win32" ? /[\\/]/ : /\//;
   const base = firstToken.split(separators).at(-1) ?? firstToken;
-  // Login shells may appear in the process table with a leading dash.
   const normalized =
-    platform === "win32"
-      ? base.toLowerCase().endsWith(".exe")
-        ? base.slice(0, -4)
-        : base
-      : base.replace(/^-/, "");
+    platform === "win32" && base.toLowerCase().endsWith(".exe") ? base.slice(0, -4) : base;
   return normalized.length > 0 ? normalized : null;
+}
+
+function normalizeRootCommandName(raw: string, platform: NodeJS.Platform): string | null {
+  const name = normalizeChildCommandName(raw, platform);
+  // Only the PTY root can carry a login-shell marker. A child executable
+  // named `-zsh` is real work, not a forked `zsh` prompt helper.
+  return platform === "win32" ? name : name?.replace(/^-/, "") || null;
 }
 
 function terminalWireLabel(session: TerminalSessionState): string {
@@ -742,7 +744,7 @@ function startupShellIdentity(
   spawnedShellName: string | null,
   platform: NodeJS.Platform,
 ): string | null {
-  const observedName = normalizeChildCommandName(rawObservedName, platform);
+  const observedName = normalizeRootCommandName(rawObservedName, platform);
   if (observedName === null) return null;
   // A truncated Linux name cannot distinguish a long shell from another
   // executable with the same prefix. Count bytes before stripping a login
@@ -761,6 +763,13 @@ function startupShellIdentity(
   return observedName;
 }
 
+function isRecognizedPosixShell(name: string | null): name is string {
+  return (
+    name !== null &&
+    /^(?:sh|ash|dash|bash|zsh|ksh|mksh|pdksh|fish|csh|tcsh|yash|nu|pwsh)$/.test(name)
+  );
+}
+
 function deriveSubprocessInspectResult(
   snapshot: TerminalProcessTableSnapshot,
   terminalPid: number,
@@ -771,7 +780,7 @@ function deriveSubprocessInspectResult(
   const commandName = (pid: number) =>
     normalizeChildCommandName(snapshot.commandById.get(pid) ?? "", platform);
   const rawShellName = snapshot.commandById.get(terminalPid) ?? "";
-  const shellName = commandName(terminalPid);
+  const shellName = normalizeRootCommandName(rawShellName, platform);
   // POSIX exec replaces the shell while retaining the PTY root PID. It can
   // run real work without any child processes. Linux comm can truncate names
   // to 15 bytes, so matching a long shell's truncated prefix cannot prove it
@@ -819,7 +828,7 @@ function deriveSubprocessInspectResult(
       pending.push(pid);
     }
   }
-  const normalized = commandName(activePid);
+  const normalized = activePid === terminalPid ? shellName : commandName(activePid);
   return {
     hasRunningSubprocess: true,
     childCommand: normalized ? truncateTerminalWireLabel(normalized) : null,
@@ -2441,14 +2450,37 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
               platform === "win32" || customSubprocessInspector !== undefined
                 ? null
                 : yield* Effect.cached(
-                    fetchProcessTableSnapshot.pipe(
-                      Effect.map(({ snapshot }) =>
-                        startupShellIdentity(
-                          snapshot.commandById.get(processPid) ?? "",
-                          spawnResult.shellName,
-                          platform,
-                        ),
-                      ),
+                    Effect.gen(function* () {
+                      const readIdentity = (fresh: boolean) =>
+                        (fresh
+                          ? processTableSnapshotWithGeneration
+                          : fetchProcessTableSnapshot
+                        ).pipe(
+                          Effect.map(({ snapshot }) =>
+                            startupShellIdentity(
+                              snapshot.commandById.get(processPid) ?? "",
+                              spawnResult.shellName,
+                              platform,
+                            ),
+                          ),
+                        );
+                      const first = yield* readIdentity(false);
+                      if (first === spawnResult.shellName && isRecognizedPosixShell(first)) {
+                        return first;
+                      }
+                      // A wrapper or its interpreter can still be starting.
+                      // Confirm a differently named shell with fresh evidence;
+                      // unfamiliar roots remain unresolved, never idle proof.
+                      let previous = first;
+                      while (true) {
+                        const identity = yield* readIdentity(true);
+                        if (identity === previous && isRecognizedPosixShell(identity)) {
+                          return identity;
+                        }
+                        previous = identity;
+                        yield* Effect.sleep("10 millis");
+                      }
+                    }).pipe(
                       // Identity is best effort; never hold typing behind the
                       // resource monitor's health timeout and fallback probe.
                       Effect.timeoutOption("100 millis"),
@@ -2717,7 +2749,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             if (
               liveSession.captureShellIdentity !== null &&
               next.startupShellName !== undefined &&
-              next.startupShellName !== null
+              isRecognizedPosixShell(next.startupShellName)
             ) {
               liveSession.observedShellName = next.startupShellName;
             }
