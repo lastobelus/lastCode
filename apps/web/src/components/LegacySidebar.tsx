@@ -92,6 +92,7 @@ import { useSidebarPendingFileDropStore } from "../sidebarPendingFileDropStore";
 import { makeWorkspaceFileDropHandlers } from "./chat/workspaceFileDrop";
 import {
   readThreadShell,
+  readProject,
   readEnvironmentSupportsPersistence,
   useProjects,
   useThreadShells,
@@ -228,6 +229,7 @@ import type { SidebarThreadSummary } from "../types";
 import {
   buildPhysicalToLogicalProjectKeyMap,
   buildSidebarProjectSnapshots,
+  resolveSidebarProjectSettingsKey,
   NO_PROJECT_GROUP_KEY,
   type SidebarProjectGroupMember,
   type SidebarProjectSnapshot,
@@ -1270,6 +1272,11 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     (settings) => settings.confirmThreadArchive,
   );
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
+  const projectSettingsKey = resolveSidebarProjectSettingsKey({
+    sidebarProjectKey: project.projectKey,
+    targetProject: project,
+    settings: projectGroupingSettings,
+  });
   const loadBalancingEnabled = useClientSettings((settings) => settings.loadBalancingEnabled);
   const canAutoBalance =
     loadBalancingEnabled &&
@@ -1869,7 +1876,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
           if (isMobile) setOpenMobile(false);
           void router.navigate({
             to: "/projects/$projectKey",
-            params: { projectKey: project.projectKey },
+            params: { projectKey: projectSettingsKey },
           });
         });
 
@@ -1909,7 +1916,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       openProjectRenameDialog,
       project.groupedProjectCount,
       project.memberProjects,
-      project.projectKey,
+      projectSettingsKey,
       router,
       setOpenMobile,
       suppressProjectClickForContextMenuRef,
@@ -2105,7 +2112,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         const confirmed = await api.dialogs.confirm(
           [
             `Delete ${count} thread${count === 1 ? "" : "s"}?`,
-            "This permanently clears conversation history for these threads.",
+            `This also deletes any of ${count === 1 ? "its" : "their"} subagents, including archived ones; unselected forks and independent threads are kept. This cannot be undone.`,
           ].join("\n"),
           { variant: "destructive" },
         );
@@ -2404,9 +2411,19 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       const threadKey = scopedThreadKey(threadRef);
       const thread = sidebarThreadByKeyRef.current.get(threadKey) ?? null;
       if (!thread) return;
-      const threadProject = memberProjectByScopedKey.get(
-        scopedProjectKey(scopeProjectRef(thread.environmentId, thread.projectId)),
-      );
+      const threadProjectRef = scopeProjectRef(thread.environmentId, thread.projectId);
+      const threadProject =
+        readProject(threadProjectRef) ??
+        memberProjectByScopedKey.get(scopedProjectKey(threadProjectRef));
+      const threadProjectSettingsKey = threadProject
+        ? resolveSidebarProjectSettingsKey({
+            sidebarProjectKey: project.projectKey,
+            targetProject: threadProject,
+            settings: projectGroupingSettings,
+          })
+        : project.projectKey === NO_PROJECT_GROUP_KEY
+          ? null
+          : project.projectKey;
       const threadWorkspacePath =
         thread.worktreePath ?? threadProject?.workspaceRoot ?? project.workspaceRoot ?? null;
       const canOperateThread = readEnvironmentScope(
@@ -2428,7 +2445,11 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             ...(persistenceAction ? [{ ...persistenceAction, disabled: !canOperateThread }] : []),
             { id: "copy-path", label: "Copy Path" },
             { id: "copy-thread-id", label: "Copy Thread ID" },
-            { id: "project-settings", label: "Project settings" },
+            {
+              id: "project-settings",
+              label: "Project settings",
+              disabled: threadProjectSettingsKey === null,
+            },
             ...(thread.archivePending?.status === "failed"
               ? [
                   {
@@ -2452,10 +2473,11 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       );
 
       if (clicked === "project-settings") {
+        if (threadProjectSettingsKey === null) return;
         if (isMobile) setOpenMobile(false);
         void router.navigate({
           to: "/projects/$projectKey",
-          params: { projectKey: project.projectKey },
+          params: { projectKey: threadProjectSettingsKey },
         });
         return;
       }
@@ -2554,7 +2576,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         const confirmed = await api.dialogs.confirm(
           [
             `Delete thread "${thread.title}"?`,
-            "This permanently clears conversation history for this thread.",
+            "This also deletes any of its subagents, including archived ones; other forks and independent threads are kept. This cannot be undone.",
           ].join("\n"),
           { variant: "destructive" },
         );
@@ -2585,6 +2607,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       markThreadUnread,
       memberProjectByScopedKey,
       project.projectKey,
+      projectGroupingSettings,
       project.workspaceRoot,
       router,
       setOpenMobile,
