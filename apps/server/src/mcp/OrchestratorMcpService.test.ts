@@ -1906,4 +1906,60 @@ describe("OrchestratorMcpService provider resolution", () => {
       }),
     );
   });
+
+  it.effect("records the scoped creator for unprompted ordinary batch threads", () =>
+    Effect.gen(function* () {
+      const commands: Array<
+        Parameters<ThreadManagementService.ThreadManagementService["Service"]["dispatch"]>[0]
+      > = [];
+      let createdProjection = childProjection;
+      const dependencies = Layer.mergeAll(
+        NodeServices.layer,
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          getThreadRecords: (threadId) =>
+            Effect.succeed(threadId === parentThreadId ? parentProjection([]) : createdProjection),
+          dispatch: (command) => {
+            commands.push(command);
+            if (command.type === "thread.create") {
+              createdProjection = {
+                ...childProjection,
+                thread: {
+                  ...childProjection.thread,
+                  id: command.threadId,
+                  title: command.title,
+                  createdBy: command.createdBy,
+                  creationSource: command.creationSource,
+                  creatorThreadId: command.creatorThreadId,
+                },
+              };
+            }
+            return Effect.succeed({ sequence: 1, storedEvents: [] });
+          },
+        }),
+        providerRegistryLayer([
+          providerSnapshot({
+            instanceId: codexInstanceId,
+            driver: ProviderDriverKind.make("codex"),
+            model: "gpt-5.4",
+          }),
+        ]),
+        adapterRegistryLayer([codexInstanceId]),
+        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+      );
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const result = yield* service.createThreads(scope, {
+          threads: [{ title: "Notes" }],
+          clientRequestId: "creator-unprompted-batch",
+        });
+        const command = commands.find((command) => command.type === "thread.create");
+        assert.equal(command?.creatorThreadId, scope.thread!.threadId);
+        assert.equal(result.threads[0]?.creatorThreadId, scope.thread!.threadId);
+        assert.isFalse(commands.some((command) => command.type === "message.dispatch"));
+        assert.isFalse(commands.some((command) => command.type === "delegated_task.request"));
+      }).pipe(Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(dependencies))));
+    }),
+  );
 });
