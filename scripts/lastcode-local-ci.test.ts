@@ -4,6 +4,7 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { describe, expect, it } from "vite-plus/test";
+import { DEFAULT_LASTCODE_LOCAL_CI_SETTINGS } from "@t3tools/contracts/settings";
 
 import {
   assertCheckpointCiStamp,
@@ -226,6 +227,150 @@ describe("lastcode-local-ci", () => {
       "Workspace typecheck",
       "Workspace tests",
     ]);
+  });
+
+  it("plans scoped checks with existing paths and ordered duplicate package filters", () => {
+    const repoRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "ci-planner-test-"));
+    try {
+      NodeFS.mkdirSync(NodePath.join(repoRoot, "src"));
+      NodeFS.writeFileSync(NodePath.join(repoRoot, "src/file.ts"), "fixture");
+      NodeFS.writeFileSync(NodePath.join(repoRoot, "--flag.ts"), "fixture");
+      const steps = resolveLocalCiSteps(
+        "quick",
+        {
+          kind: "affected",
+          reason: "fixture",
+          changedFiles: ["src/file.ts", "missing.ts", "--flag.ts", "src/file.ts"],
+          packages: ["@example/b", "@example/a", "@example/b"],
+        },
+        { ...DEFAULT_LASTCODE_LOCAL_CI_SETTINGS, packageConcurrency: 3 },
+        repoRoot,
+      );
+      expect(steps).toEqual([
+        { kind: "diff-whitespace", label: "Diff whitespace" },
+        {
+          kind: "command",
+          label: "Format and lint",
+          command: "vp",
+          args: [
+            "check",
+            "--no-error-on-unmatched-pattern",
+            "./src/file.ts",
+            "./--flag.ts",
+            "./src/file.ts",
+          ],
+        },
+        {
+          kind: "command",
+          label: "Workspace typecheck",
+          command: "vp",
+          args: [
+            "run",
+            "--concurrency-limit",
+            "3",
+            "--filter",
+            "@example/b",
+            "--filter",
+            "@example/a",
+            "--filter",
+            "@example/b",
+            "typecheck",
+          ],
+        },
+      ]);
+      const none = resolveLocalCiSteps(
+        "quick",
+        {
+          kind: "none",
+          reason: "fixture",
+          changedFiles: ["src/file.ts"],
+          packages: [],
+        },
+        DEFAULT_LASTCODE_LOCAL_CI_SETTINGS,
+        repoRoot,
+      );
+      expect(none.map(({ label }) => label)).toEqual(["Diff whitespace", "Format and lint"]);
+    } finally {
+      NodeFS.rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("plans recursive typecheck for empty affected package filters", () => {
+    const empty = resolveLocalCiSteps(
+      "quick",
+      {
+        kind: "affected",
+        reason: "fixture",
+        changedFiles: [],
+        packages: [],
+      },
+      DEFAULT_LASTCODE_LOCAL_CI_SETTINGS,
+      process.cwd(),
+    );
+    expect(empty.map(({ label }) => label)).toEqual(["Diff whitespace", "Workspace typecheck"]);
+    expect(empty[1]).toMatchObject({
+      args: ["run", "--recursive", "--concurrency-limit", "1", "typecheck"],
+    });
+  });
+
+  it("plans full and unscoped checks without reading unused scope fields", () => {
+    const scope = {
+      get kind(): "none" {
+        throw new Error("unused scope");
+      },
+      get changedFiles(): string[] {
+        throw new Error("unused paths");
+      },
+      get packages(): string[] {
+        throw new Error("unused packages");
+      },
+      reason: "fixture",
+    };
+    const original = resolveLocalCiSteps("full");
+    const scoped = resolveLocalCiSteps("full", scope);
+    expect(scoped).toEqual(original);
+    for (let index = 0; index < original.length; index++) {
+      if (original[index]?.label !== "Workspace typecheck")
+        expect(scoped[index]).toBe(original[index]);
+    }
+    const quick = resolveLocalCiSteps("quick");
+    expect(quick[0]).toBe(resolveLocalCiSteps("quick")[0]);
+    expect(quick[1]).toBe(resolveLocalCiSteps("quick")[1]);
+  });
+
+  it("plans no typecheck for none scope without reading concurrency and propagates failures", () => {
+    const failure = new Error("policy unavailable");
+    const policy = {
+      ...DEFAULT_LASTCODE_LOCAL_CI_SETTINGS,
+      get packageConcurrency(): number {
+        throw failure;
+      },
+    };
+    expect(
+      resolveLocalCiSteps(
+        "quick",
+        {
+          kind: "none",
+          reason: "fixture",
+          changedFiles: [],
+          packages: [],
+        },
+        policy,
+      ).map(({ label }) => label),
+    ).toEqual(["Diff whitespace"]);
+    expect(() => resolveLocalCiSteps("quick", undefined, policy)).toThrow(failure);
+    expect(() =>
+      resolveLocalCiSteps(
+        "full",
+        {
+          kind: "none",
+          reason: "fixture",
+          changedFiles: [],
+          packages: [],
+        },
+        policy,
+      ),
+    ).toThrow(failure);
   });
 
   it("selects the validation base from the documented workstream", () => {
