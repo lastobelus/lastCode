@@ -105,16 +105,21 @@ export function validateGithubCiForMerge(evidence: GithubCiEvidence): {
   );
 }
 
-export function postMergeCheckpointArguments(skipCheckpoint = false): ReadonlyArray<string> | null {
+export function postMergeCheckpointArguments(skipCheckpoint = true): ReadonlyArray<string> | null {
   if (skipCheckpoint) return null;
   return ["scripts/lastcode-nightly-service.ts", "run-now", "--if-installed"];
 }
 
 export function parseMergeOptions(argv: ReadonlyArray<string>) {
-  if (argv.some((argument) => argument !== "--dry-run" && argument !== "--skip-checkpoint")) {
-    throw new Error("Usage: pnpm lastcode:merge [--dry-run] [--skip-checkpoint]");
+  if (
+    argv.some(
+      (argument) => !["--dry-run", "--skip-checkpoint", "--checkpoint"].includes(argument),
+    ) ||
+    (argv.includes("--skip-checkpoint") && argv.includes("--checkpoint"))
+  ) {
+    throw new Error("Usage: pnpm lastcode:merge [--dry-run] [--skip-checkpoint | --checkpoint]");
   }
-  return { dryRun: argv.includes("--dry-run"), skipCheckpoint: argv.includes("--skip-checkpoint") };
+  return { dryRun: argv.includes("--dry-run"), skipCheckpoint: !argv.includes("--checkpoint") };
 }
 
 export function squashMergeArguments(
@@ -274,7 +279,7 @@ function main(argv: ReadonlyArray<string>): void {
   }
   const checkpointArguments = postMergeCheckpointArguments(skipCheckpoint);
   if (checkpointArguments === null) {
-    console.log("[lastcode:merge] Checkpoint request skipped by --skip-checkpoint.");
+    console.log("[lastcode:merge] Merge complete. No checkpoint requested.");
     return;
   }
   try {

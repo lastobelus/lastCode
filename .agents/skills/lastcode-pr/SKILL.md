@@ -76,9 +76,14 @@ Open PRs do not pause checkpoint creation, repaired-checkpoint publication, or
 promotion to `lastcode/main`. Never close, merge, or retarget an unrelated PR to
 unblock checkpoints. A candidate must incorporate its pinned source, and its
 promotion lease must protect that source against concurrent merges. Merging
-while a checkpoint runs is safe: the validated tag still publishes and the
-merge's service request follows with a revision. Reselect a recovery only when
-main no longer descends from its selected source.
+while a checkpoint prepares is safe: the validated tag still publishes and
+promotion defers if main advances. Ordinary merges request no checkpoint.
+`--skip-checkpoint` makes that default explicit; use `--checkpoint` only when
+the user separately authorizes an extra service run. A dependency request or
+permission to merge does not authorize one. New merged work belongs to a later
+admitted batch, without automatically revising the selected release.
+A repaired recovery retains its exact selection and worktree until promotion
+is confirmed; deferred promotion does not authorize cleanup or a successor.
 
 Failure to acquire the promotion lock still fails the run after tag publication.
 Inspect its owner and the connection error before retrying; a lock ref alone

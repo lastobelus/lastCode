@@ -184,8 +184,75 @@ describe("main write lock", () => {
     ).toThrow("Checkpoint push failed");
     expect(() => first.release()).toThrow("Retained main write lock");
     expect(f.owner()).toBe(owner);
+    expect(() => first.push(["push", "origin", `${f.source}:refs/heads/lastcode/main`])).toThrow(
+      "Main write lock is not available",
+    );
     expect(() => acquireMainWriteLock(f.second, "origin", f.source, "merge")).toThrow(
       "Could not acquire",
     );
   });
+
+  it.each(["rejected", "unreported", "signaled"] as const)(
+    "releases only proven local hook rejection: %s",
+    (outcome) => {
+      const f = fixture();
+      const lock = acquireMainWriteLock(f.first, "origin", f.source, "checkpoint");
+      const owner = f.owner();
+      f.git(f.first, [
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "candidate",
+      ]);
+      const candidate = f.git(f.first, ["rev-parse", "HEAD"]);
+      const bin = NodePath.join(f.root, "bin");
+      NodeFS.mkdirSync(bin);
+      NodeFS.writeFileSync(
+        NodePath.join(bin, "vp"),
+        "#!/bin/sh\necho fixture local validation rejected >&2\nexit 1\n",
+        { mode: 0o755 },
+      );
+      const realGit = NodeChildProcess.execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+      vi.stubEnv("FIXTURE_REAL_GIT", realGit);
+      vi.stubEnv("PATH", `${bin}${NodePath.delimiter}${process.env.PATH ?? ""}`);
+      const hooks = NodePath.join(f.first, ".git", "hooks");
+      NodeFS.copyFileSync(
+        NodePath.join(import.meta.dirname, "..", ".vite-hooks", "pre-push"),
+        NodePath.join(hooks, "pre-push"),
+      );
+      if (outcome === "unreported") {
+        NodeFS.writeFileSync(NodePath.join(hooks, "pre-push"), "#!/bin/sh\nexit 1\n", {
+          mode: 0o755,
+        });
+      } else if (outcome === "signaled") {
+        NodeFS.writeFileSync(
+          NodePath.join(bin, "git"),
+          '#!/bin/sh\nif [ "$1" = push ]; then printf "rejected\\n" > "$LASTCODE_MAIN_WRITE_HOOK_RECEIPT"; kill -TERM $$; fi\nexec "$FIXTURE_REAL_GIT" "$@"\n',
+          { mode: 0o755 },
+        );
+      }
+      expect(() => lock.push(["push", "origin", `${candidate}:refs/heads/lastcode/main`])).toThrow(
+        "Checkpoint push failed",
+      );
+      expect(f.git(f.root, ["--git-dir", f.remote, "rev-parse", "refs/heads/lastcode/main"])).toBe(
+        f.source,
+      );
+      expect(
+        NodeFS.readdirSync(NodePath.join(f.first, ".git")).filter((name) =>
+          name.startsWith("lastcode-main-write-hook-"),
+        ),
+      ).toEqual([]);
+      if (outcome === "rejected") {
+        lock.release();
+        acquireMainWriteLock(f.second, "origin", f.source, "merge").release();
+      } else {
+        expect(() => lock.release()).toThrow("Retained main write lock");
+        expect(f.owner()).toBe(owner);
+      }
+    },
+  );
 });

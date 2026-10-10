@@ -984,6 +984,18 @@ export function resolveCheckpointPlan(input: {
   readonly supersedeThroughNightlyTag?: string;
   readonly selectedNightlyTag?: string;
 }): CheckpointPlan {
+  const selectedCheckpoint = input.selectedNightlyTag
+    ? input.checkpointRefs.find((checkpoint) => checkpoint.nightly.tag === input.selectedNightlyTag)
+    : undefined;
+  if (selectedCheckpoint) {
+    // An explicitly incorporated repair is a revision of the same published nightly.
+    return {
+      baseNightly: selectedCheckpoint.nightly,
+      bootstrapCheckpoint: false,
+      candidateRef: input.sourceRef,
+      missingNightlies: [],
+    };
+  }
   const latestCheckpoint = input.checkpointRefs.at(-1);
   const sourceCheckpoint = input.checkpointRefs.find(
     (checkpoint) => checkpoint.checkpointTag === input.sourceCheckpointTag,
@@ -1403,6 +1415,8 @@ export function revisionMessage(input: {
 function createCheckpointTag(
   repoRoot: string,
   nightly: NightlyTag,
+  upstreamCommit: string,
+  upstreamRemote: string | undefined,
   commit: string,
   sourceRef: string,
   sourceCommit: string,
@@ -1415,13 +1429,16 @@ function createCheckpointTag(
   },
 ): string {
   const checkpointTag = checkpointTagFromNightlyTag(nightly.tag);
+  assertPinnedNightly(repoRoot, nightly.tag, upstreamCommit);
   validateInstallableMigrations({
     repoRoot,
     candidateRef: commit,
-    upstreamRef: nightly.tag,
+    upstreamRef: upstreamCommit,
     installableTag: checkpointTag,
     sourceRef: sourceCommit,
   });
+  if (upstreamRemote)
+    assertRemotePinnedNightly(repoRoot, upstreamRemote, nightly.tag, upstreamCommit);
   const canonicalSourceRef = sourceObjectRef(checkpointTag);
   const sourceRefCreated = ensureLocalSourceObjectRef(repoRoot, checkpointTag, sourceCommit);
   try {
@@ -1433,7 +1450,7 @@ function createCheckpointTag(
       "--message",
       checkpointMessage({
         upstreamTag: nightly.tag,
-        upstreamCommit: git(repoRoot, ["rev-parse", `${nightly.tag}^{commit}`]),
+        upstreamCommit,
         commit,
         sourceRef,
         sourceCommit,
@@ -1452,18 +1469,24 @@ function createCheckpointTag(
 function createRevisionTag(
   repoRoot: string,
   plan: Extract<RevisionPlan, { kind: "create" }>,
+  upstreamCommit: string,
+  upstreamRemote: string | undefined,
   commit: string,
   sourceRef: string,
   sourceCommit: string,
   replay: EffectiveReplayConfiguration,
 ): string {
+  assertPinnedNightly(repoRoot, plan.nightly.tag, upstreamCommit);
   validateInstallableMigrations({
     repoRoot,
     candidateRef: commit,
-    upstreamRef: plan.nightly.tag,
+    upstreamRef: upstreamCommit,
     installableTag: plan.installableTag,
     sourceRef: sourceCommit,
   });
+  if (upstreamRemote) {
+    assertRemotePinnedNightly(repoRoot, upstreamRemote, plan.nightly.tag, upstreamCommit);
+  }
   const canonicalSourceRef = sourceObjectRef(plan.installableTag);
   const sourceRefCreated = ensureLocalSourceObjectRef(repoRoot, plan.installableTag, sourceCommit);
   try {
@@ -1481,7 +1504,7 @@ function createRevisionTag(
         replay,
         sourceObjectRef: canonicalSourceRef,
         sourceRef,
-        upstreamCommit: git(repoRoot, ["rev-parse", `${plan.nightly.tag}^{commit}`]),
+        upstreamCommit,
         upstreamTag: plan.nightly.tag,
       }),
     ]);
@@ -1490,6 +1513,36 @@ function createRevisionTag(
     throw error;
   }
   return plan.installableTag;
+}
+
+function assertPinnedNightly(repoRoot: string, tag: string, expectedCommit: string): void {
+  if (git(repoRoot, ["rev-parse", `${tag}^{commit}`]) !== expectedCommit) {
+    throw new Error(
+      `Upstream nightly ${tag} changed after selection. Retain and inspect the pinned target ${expectedCommit}; do not publish a different base under this tag.`,
+    );
+  }
+}
+
+function assertRemotePinnedNightly(
+  repoRoot: string,
+  remote: string,
+  tag: string,
+  expectedCommit: string,
+): void {
+  const ref = `refs/tags/${tag}`;
+  const refs = new Map(
+    git(repoRoot, ["ls-remote", remote, ref, `${ref}^{}`])
+      .split("\n")
+      .map((line) => {
+        const [commit, name] = line.split("\t");
+        return [name, commit] as const;
+      }),
+  );
+  if ((refs.get(`${ref}^{}`) ?? refs.get(ref)) !== expectedCommit) {
+    throw new Error(
+      `Upstream nightly ${tag} changed after selection on ${remote}. Retain and inspect the pinned target ${expectedCommit}; do not publish a different base under this tag.`,
+    );
+  }
 }
 
 function assertForkInvariants(worktree: string): void {
@@ -1637,6 +1690,8 @@ function publishRevisionIfNeeded(
     return { handled: true };
   }
 
+  const upstreamCommit = git(repoRoot, ["rev-parse", `${plan.nightly.tag}^{commit}`]);
+
   const worktree = resolveAutomationWorktree(repoRoot, automationWorktreeName);
   if (NodeFS.existsSync(worktree)) {
     throw new Error(
@@ -1681,6 +1736,7 @@ function publishRevisionIfNeeded(
     // Keep that history (which may contain merges) rather than manufacturing new commits.
     failurePhase = "smoke";
     if (options.smoke) runSmokeGate(repoRoot, worktree);
+    assertPinnedNightly(repoRoot, plan.nightly.tag, upstreamCommit);
     if (
       git(worktree, ["rev-parse", "HEAD"]) !== candidateCommit ||
       git(worktree, ["status", "--porcelain", "--untracked-files=all"])
@@ -1691,6 +1747,8 @@ function publishRevisionIfNeeded(
     pendingTag = createRevisionTag(
       repoRoot,
       plan,
+      upstreamCommit,
+      options.pushTags ? options.upstreamRemote : undefined,
       candidateCommit,
       sourceRef,
       sourceCommit,
@@ -1787,8 +1845,8 @@ function publishRevisionIfNeeded(
 
 /**
  * A merge that lands while a candidate is validated leaves main ahead of the candidate's source.
- * The published tag stays installable; the merge's own service request (or the next scheduled run)
- * publishes a revision that replays the merge onto it and promotes that instead.
+ * The published tag stays installable. New merged work belongs to a later admitted batch;
+ * it does not restart this preparation or authorize a follow-up run.
  */
 function deferPromotion(repoRoot: string, sourceCommit: string, current: string): void {
   if (!isAncestor(repoRoot, sourceCommit, current)) {
@@ -1797,7 +1855,7 @@ function deferPromotion(repoRoot: string, sourceCommit: string, current: string)
     );
   }
   console.log(
-    `[lastcode:checkpoint] LastCode main advanced from candidate source ${sourceCommit} to ${current}; leaving promotion to the next run, which publishes a revision including it.`,
+    `[lastcode:checkpoint] LastCode main advanced from candidate source ${sourceCommit} to ${current}; leaving promotion to a later admitted run. Published artifacts remain valid.`,
   );
 }
 
@@ -1807,8 +1865,8 @@ function promoteCheckpoint(
   options: CheckpointOptions,
   sourceCommit: string,
   validated: boolean,
-): void {
-  if (options.promotion === "never") return;
+): boolean {
+  if (options.promotion === "never") return false;
   // The lock ref does not prove its writer is still active. Propagate acquisition failures
   // so an abandoned lock or transport failure cannot silently leave main behind the tag.
   const lock = acquireMainWriteLock(repoRoot, options.pushRemote, sourceCommit, "checkpoint");
@@ -1822,11 +1880,11 @@ function promoteCheckpoint(
       console.log(
         `[lastcode:checkpoint] ${options.pushRemote}/lastcode/main is already at ${commit}.`,
       );
-      return;
+      return true;
     }
     if (expected !== sourceCommit) {
       deferPromotion(repoRoot, sourceCommit, expected);
-      return;
+      return false;
     }
 
     try {
@@ -1849,11 +1907,31 @@ function promoteCheckpoint(
       ]);
       if (current === sourceCommit || current === commit) throw error;
       deferPromotion(repoRoot, sourceCommit, current);
-      return;
+      return false;
     }
     console.log(`[lastcode:checkpoint] Promoted ${commit} to ${options.pushRemote}/lastcode/main.`);
+    return true;
   } finally {
     lock.release();
+  }
+}
+
+function finishPublishedRecovery(
+  repoRoot: string,
+  worktree: string,
+  selectionPath: string,
+  selection: RecoverySelection,
+  promoted: boolean,
+): void {
+  if (promoted) {
+    releasePublishedRecovery(repoRoot, worktree, selectionPath, selection);
+    console.log(
+      "[lastcode:checkpoint] Repaired checkpoint published and promoted; recovery released.",
+    );
+  } else {
+    console.log(
+      `[lastcode:checkpoint] Repaired checkpoint ${selection.head} published; promotion is still pending. Retained the selected target and recovery worktree. Inspect before selecting an incorporated repair or releasing this selection.`,
+    );
   }
 }
 
@@ -2392,18 +2470,18 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         "Published recovery is not represented on main; inspect before releasing it.",
       );
     if (!options.dryRun) {
-      if (!isAncestor(repoRoot, selection.head, sourceCommit)) {
+      const promoted =
+        isAncestor(repoRoot, selection.head, sourceCommit) ||
         promoteCheckpoint(repoRoot, selection.head, options, selection.sourceCommit, true);
-      }
-      releasePublishedRecovery(repoRoot, automationWorktree(), selectionPath, selection);
+      finishPublishedRecovery(repoRoot, automationWorktree(), selectionPath, selection, promoted);
     }
     console.log(
-      "[lastcode:checkpoint] Selected recovery was already published; released its retained worktree. Run the service again to continue.",
+      "[lastcode:checkpoint] Selected recovery was already published; no new checkpoint or revision created.",
     );
     return;
   }
   if (selection) {
-    // Merges since selection are published afterwards as a revision on top of the repair.
+    // Merges do not retarget a selected repair or authorize a successor.
     if (!isAncestor(repoRoot, selection.sourceCommit, sourceCommit)) {
       throw new Error("Recovery source changed; incorporate new main commits and select again.");
     }
@@ -2431,7 +2509,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       enabled: options.supersedeFailedRecovery && !selection,
     }),
   );
-  const plan =
+  const selectedPlan =
     replay.configuredMode === "carry"
       ? {
           ...resolveCarryCheckpointPlan({
@@ -2454,6 +2532,15 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
           sourceRef: options.sourceRef,
           ...(supersededNightly ? { supersedeThroughNightlyTag: supersededNightly.tag } : {}),
         });
+  const pinNightly = (nightly: NightlyTag) => ({
+    ...nightly,
+    commit: git(repoRoot, ["rev-parse", `${nightly.tag}^{commit}`]),
+  });
+  const plan = {
+    ...selectedPlan,
+    baseNightly: pinNightly(selectedPlan.baseNightly),
+    missingNightlies: selectedPlan.missingNightlies.map(pinNightly),
+  };
   if (
     options.revisionOnly &&
     (plan.baseNightly.tag !== options.revisionOnly ||
@@ -2468,9 +2555,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
     selection &&
     (plan.bootstrapCheckpoint
       ? plan.baseNightly.tag
-      : (plan.missingNightlies[0]?.tag ??
-        (replay.configuredMode === "carry" ? plan.baseNightly.tag : undefined))) !==
-      selection.nightlyTag
+      : (plan.missingNightlies[0]?.tag ?? plan.baseNightly.tag)) !== selection.nightlyTag
   ) {
     throw new Error(
       "Selected recovery is not the next unpublished checkpoint; inspect before selecting again.",
@@ -2525,6 +2610,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
     let pendingTag: string | undefined;
     let shadowTag: string | undefined;
     let failurePhase: "publication" | "smoke" = "smoke";
+    const upstreamCommit = git(repoRoot, ["rev-parse", `${selection.nightlyTag}^{commit}`]);
     try {
       const normalizedHead =
         replay.mode === "carry"
@@ -2540,6 +2626,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         writeRecoverySelection(selectionPath, selection);
       }
       runSmokeGate(repoRoot, worktree);
+      assertPinnedNightly(repoRoot, selection.nightlyTag, upstreamCommit);
       if (
         git(worktree, ["rev-parse", "HEAD"]) !== selection.head ||
         git(worktree, ["status", "--porcelain", "--untracked-files=all"])
@@ -2560,6 +2647,8 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         ? createRevisionTag(
             repoRoot,
             nextRevisionPlan(nightly, installables),
+            upstreamCommit,
+            options.upstreamRemote,
             selection.head,
             options.sourceRef,
             selection.sourceCommit,
@@ -2568,6 +2657,8 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         : createCheckpointTag(
             repoRoot,
             nightly,
+            upstreamCommit,
+            options.upstreamRemote,
             selection.head,
             options.sourceRef,
             selection.sourceCommit,
@@ -2628,22 +2719,19 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
     const repairedSelection = selection;
     runPromotionThenShadow(
       () => {
-        promoteCheckpoint(
+        const promoted = promoteCheckpoint(
           repoRoot,
           repairedSelection.head,
           options,
           repairedSelection.sourceCommit,
           true,
         );
-        releasePublishedRecovery(repoRoot, worktree, selectionPath, repairedSelection);
+        finishPublishedRecovery(repoRoot, worktree, selectionPath, repairedSelection, promoted);
       },
       () =>
         runHistoricalShadowIfNeeded(repoRoot, shadowTag, replay, (record) =>
           appendCheckpointRunForOptions(options, record),
         ),
-    );
-    console.log(
-      "[lastcode:checkpoint] Repaired checkpoint published. Run the service again for later nightlies.",
     );
     return;
   }
@@ -2715,7 +2803,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
           ? compileCarrySetSameBase({
               repo: repoRoot,
               worktree,
-              base: plan.baseNightly.tag,
+              base: plan.baseNightly.commit,
               source: sourceCommit,
               previousCompactHead: previousCompact.commit,
               representedSource: representedSourceFor(previousCompact),
@@ -2775,6 +2863,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       if (carryWorktreePrepared) {
         const worktree = automationWorktree();
         if (options.smoke) runSmokeGate(repoRoot, worktree);
+        assertPinnedNightly(repoRoot, plan.baseNightly.tag, plan.baseNightly.commit);
         if (
           git(worktree, ["rev-parse", "HEAD"]) !== candidateCommit ||
           git(worktree, ["status", "--porcelain", "--untracked-files=all"])
@@ -2795,6 +2884,8 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       const checkpointTag = createCheckpointTag(
         repoRoot,
         plan.baseNightly,
+        plan.baseNightly.commit,
+        options.pushTags ? options.upstreamRemote : undefined,
         candidateCommit,
         options.sourceRef,
         sourceCommit,
@@ -2915,6 +3006,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       let carryRevisionFailurePhase: "publication" | "smoke" = "smoke";
       try {
         if (options.smoke) runSmokeGate(repoRoot, worktree);
+        assertPinnedNightly(repoRoot, plan.baseNightly.tag, plan.baseNightly.commit);
         if (
           git(worktree, ["rev-parse", "HEAD"]) !== candidateCommit ||
           git(worktree, ["status", "--porcelain", "--untracked-files=all"])
@@ -2927,6 +3019,8 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         pendingTag = createRevisionTag(
           repoRoot,
           revisionPlan,
+          plan.baseNightly.commit,
+          options.pushTags ? options.upstreamRemote : undefined,
           candidateCommit,
           options.sourceRef,
           sourceCommit,
@@ -3084,6 +3178,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
   let historicalCompactFallback = replay.mode === "historical" && replay.configuredMode === "carry";
   try {
     let baseTag = plan.baseNightly.tag;
+    let baseCommit = plan.baseNightly.commit;
     for (const nightly of plan.missingNightlies) {
       const recoveryBranch = `sync/nightly/${nightly.tag}`;
       if (branch !== recoveryBranch) {
@@ -3092,7 +3187,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       }
       attempt = {
         commitsRebased: Number(
-          git(repoRoot, ["rev-list", "--count", `${baseTag}..${candidateRef}^{commit}`]),
+          git(repoRoot, ["rev-list", "--count", `${baseCommit}..${candidateRef}^{commit}`]),
         ),
         nightly,
         startedAtMs: Date.now(),
@@ -3103,25 +3198,25 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         replayCarrySetOnto({
           repo: repoRoot,
           worktree,
-          sourceBase: baseTag,
+          sourceBase: baseCommit,
           compactHead: git(worktree, ["rev-parse", "HEAD"]),
-          onto: nightly.tag,
+          onto: nightly.commit,
         });
       } else if (historicalCompactFallback && previousCompact) {
         replayUngroupedOnto({
           repo: repoRoot,
           worktree,
-          sourceBase: baseTag,
+          sourceBase: baseCommit,
           currentSource: git(worktree, ["rev-parse", "HEAD"]),
-          onto: nightly.tag,
+          onto: nightly.commit,
           representedCompactHead: previousCompact.commit,
           representedSource: representedSourceFor(previousCompact),
         });
         historicalCompactFallback = false;
       } else {
-        rebaseOnto(worktree, nightly.tag, baseTag);
+        rebaseOnto(worktree, nightly.commit, baseCommit);
       }
-      candidateCommit = normalizeCheckpointCommits(worktree, nightly.tag);
+      candidateCommit = normalizeCheckpointCommits(worktree, nightly.commit);
       const historicalInstallable = !previousCompact
         ? installables.findLast(
             (installable) =>
@@ -3149,6 +3244,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       }
       failurePhase = "smoke";
       if (options.smoke) runSmokeGate(repoRoot, worktree);
+      assertPinnedNightly(repoRoot, nightly.tag, nightly.commit);
       if (
         git(worktree, ["rev-parse", "HEAD"]) !== candidateCommit ||
         git(worktree, ["status", "--porcelain", "--untracked-files=all"])
@@ -3167,6 +3263,8 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         ? createRevisionTag(
             repoRoot,
             nextRevisionPlan(nightly, installables),
+            nightly.commit,
+            options.pushTags ? options.upstreamRemote : undefined,
             candidateCommit,
             options.sourceRef,
             sourceCommit,
@@ -3175,6 +3273,8 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         : createCheckpointTag(
             repoRoot,
             nightly,
+            nightly.commit,
+            options.pushTags ? options.upstreamRemote : undefined,
             candidateCommit,
             options.sourceRef,
             sourceCommit,
@@ -3220,6 +3320,7 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       });
       newestProducedInstallableTag = checkpointTag;
       baseTag = nightly.tag;
+      baseCommit = nightly.commit;
       candidateRef = checkpointTag;
       attempt = undefined;
       failurePhase = undefined;

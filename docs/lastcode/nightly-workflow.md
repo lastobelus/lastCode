@@ -109,10 +109,10 @@ Each candidate is prepared from a pinned `lastcode/main` source commit.
 Promotion uses that incorporated source as its exact `--force-with-lease`
 value, rather than adopting a newer remote head at publication time. When a
 merge advances main during the run, the validated tag still publishes and
-promotion is deferred instead of failing the run. The merge's own service request
-then publishes a revision that replays the
-merged work onto that tag and promotes it; a newer lease alone never makes a
-stale candidate safe.
+promotion is deferred instead of failing the run. The published tag remains
+installable. New merged work belongs to a later admitted batch; it does not
+restart this run or automatically revise the selected release. A newer lease
+alone never makes a stale candidate safe.
 
 Deferral requires current main to descend from the candidate's pinned source.
 A rewrite that drops that source still fails promotion after tag publication;
@@ -166,16 +166,15 @@ source commit as the ancestry boundary. If the metadata or ancestry cannot
 establish a safe boundary, LastCode changes are reported as unavailable rather
 than inferred from commit titles.
 
-When a LastCode PR merges after a checkpoint was created, the daemon replays
-only the newly merged commits onto that checkpoint. It publishes the result as
-the next immutable
-`lastcode/revision/...` tag. Repeated daemon runs recognize the revision's source
-metadata and cannot manufacture duplicate revisions. The guarded merge command
-requests an immediate daemon run without interrupting one already in progress.
-When checkpoint creation is explicitly deferred, use `pnpm lastcode:merge --skip-checkpoint`.
-This skips the merge's request without changing the service's existing schedule or stopping a run.
-Hosts without the optional service skip that request silently; the managed
-checkpoint service repairs a missed request where it is installed.
+A later admitted checkpoint run can replay newly merged work onto a published
+checkpoint as an immutable `lastcode/revision/...` tag. Repeated runs recognize
+the revision's source metadata and cannot manufacture duplicate revisions.
+Ordinary `pnpm lastcode:merge` requests no service run; `--skip-checkpoint`
+explicitly selects the same behavior. `--checkpoint` requests an extra run only
+when separately authorized by the user. Merge authority and dependency requests
+do not authorize it. These options do not change the service schedule or stop an
+active run. Closing other start paths and enforcing batch spacing belongs in
+the service's admission policy, not the merge flag.
 
 ### Carry replay ownership
 
