@@ -48,6 +48,9 @@ export function acquireMainWriteLock(
     "commit.gpgsign=false",
     "commit-tree",
     tree,
+    // The remote already has this source. An orphan owner resends its entire tree.
+    "-p",
+    sourceCommit,
     "-m",
     `LastCode main write: ${operation}\nSource: ${sourceCommit}\nOwner: ${NodeCrypto.randomUUID()}`,
   ]);

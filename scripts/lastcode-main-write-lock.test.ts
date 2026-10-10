@@ -55,6 +55,28 @@ function fixture() {
 }
 
 describe("main write lock", () => {
+  it("acquires the lock without resending already published source objects", () => {
+    const f = fixture();
+    NodeFS.writeFileSync(NodePath.join(f.first, "source.txt"), "already published source\n");
+    f.git(f.first, ["add", "source.txt"]);
+    f.git(f.first, [
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.invalid",
+      "commit",
+      "-m",
+      "publish source content",
+    ]);
+    const source = f.git(f.first, ["rev-parse", "HEAD"]);
+    f.git(f.first, ["push", "origin", "HEAD:refs/heads/lastcode/main"]);
+    const lock = acquireMainWriteLock(f.first, "origin", source, "merge");
+    const owner = f.owner();
+    const transmittedObjects = f.git(f.first, ["rev-list", "--objects", owner, `^${source}`]);
+    expect(transmittedObjects).toBe(owner);
+    lock.release();
+  });
+
   it("releases after a confirmed successful main push", () => {
     const f = fixture();
     const lock = acquireMainWriteLock(f.first, "origin", f.source, "checkpoint");
