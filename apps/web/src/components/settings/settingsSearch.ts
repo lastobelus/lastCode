@@ -154,12 +154,45 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["storage cleanup run now results report removed kept failed"],
   },
   {
+    id: "import-t3-settings",
+    title: "Import settings from T3 Code",
+    to: "/settings/lastcode",
+  },
+  {
+    id: "larger-scrollbars",
+    title: "Larger scrollbars",
+    to: "/settings/lastcode",
+    searchTerms: ["width margin resize handle pane drag thumb"],
+  },
+  {
+    id: "incoming-message-style",
+    title: "Incoming message style",
+    to: "/settings/lastcode",
+    searchTerms: ["agent assistant messages neutral fill outline bubble background appearance"],
+  },
+  {
+    id: "incoming-message-fill-color",
+    title: "Incoming message fill color",
+    to: "/settings/lastcode",
+    // The color row is hidden for Outline, so always land on the style control.
+    targetId: "incoming-message-style",
+    searchTerms: [
+      "agent assistant messages neutral background color automatic experimental picker",
+    ],
+  },
+  {
+    id: "handoffs-menu-limit",
+    title: "Handoffs shown in menus",
+    to: "/settings/lastcode",
+    searchTerms: ["handoffs history recent links files menu count"],
+  },
+  {
     id: "storage-worktrees",
     title: "Worktree cleanup",
     to: "/settings/storage",
     scope: "project-defaults",
     searchTerms: [
-      "disk storage delete deleted archived threads old inactive merged unchanged worktrees retention days project inherit off custom",
+      "disk storage delete deleted archived threads old inactive merged unchanged worktrees dependencies npm pnpm node_modules retention days project inherit off custom",
     ],
   },
   {
@@ -443,6 +476,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/general",
     searchTerms: ["installed cli versions newer available codex claude cursor grok opencode"],
     scope: "environment-defaults",
+  },
+  {
+    id: "environment-pause",
+    title: "Environment pause button",
+    to: "/settings/lastcode",
+    scope: "environment-defaults",
+    searchTerms: ["pause resume offline active threads sidebar environment"],
   },
   {
     id: "continue-threads-after-server-update",
@@ -1041,6 +1081,7 @@ const SEARCH_ITEMS_BY_ID = new Map(SETTINGS_SEARCH_ITEMS.map((item) => [item.id,
 const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScope | null>> = {
   "/settings/projects": "project",
   "/settings/general": null,
+  "/settings/lastcode": null,
   "/settings/appearance": null,
   "/settings/snap-shot": null,
   // Keybindings fan out to the selection; Providers shows the representative

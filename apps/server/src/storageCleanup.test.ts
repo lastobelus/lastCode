@@ -18,6 +18,9 @@ import {
 import * as ServerConfig from "./config.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
+import * as VcsProcess from "./vcs/VcsProcess.ts";
+import * as PreviewHosting from "./preview/Hosting.ts";
+import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManager.ts";
 import * as GitManager from "./git/GitManager.ts";
 import * as Settings from "./serverSettings.ts";
 import * as ProjectionStore from "./orchestration-v2/ProjectionStore.ts";
@@ -37,6 +40,7 @@ import {
 import * as DateTime from "effect/DateTime";
 import {
   storageCleanupActivityAt,
+  storageCleanupDeletedActivityAt,
   storageCleanupPullRequestMerged,
   storageCleanupThreadIdle,
 } from "./storageCleanup.ts";
@@ -174,6 +178,16 @@ describe("V2 storage cleanup eligibility", () => {
     ).toBe(DateTime.toEpochMillis(runTime));
   });
 
+  it("uses deletion and later durable events as the deleted-thread inactivity boundary", () => {
+    const thread = { deletedAt: at(-10 * DAY_MS), updatedAt: at(-12 * DAY_MS) };
+    expect(storageCleanupDeletedActivityAt(thread, null)).toBe(NOW_MS - 10 * DAY_MS);
+    expect(storageCleanupDeletedActivityAt(thread, DateTime.formatIso(at(-DAY_MS)))).toBe(
+      NOW_MS - DAY_MS,
+    );
+    expect(storageCleanupDeletedActivityAt({ ...thread, deletedAt: null }, null)).toBeNull();
+    expect(storageCleanupDeletedActivityAt(thread, "invalid")).toBeNull();
+  });
+
   function candidateWithStatus(status: OrchestrationV2ThreadShell["status"]) {
     return { ...candidate(), status };
   }
@@ -227,7 +241,15 @@ describe("merged pull request cleanup", () => {
 
 const cleanupFixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
-  const config = yield* ServerConfig.ServerConfig;
+  const initialConfig = yield* ServerConfig.ServerConfig;
+  // macOS temporary directories can be reached through /var's symlink. Use
+  // canonical roots so these tests exercise cleanup rather than its link guard.
+  const baseDir = yield* fs.realPath(initialConfig.baseDir);
+  const config = {
+    ...initialConfig,
+    baseDir,
+    ...(yield* ServerConfig.deriveServerPaths(baseDir, undefined)),
+  };
   const git = yield* GitVcsDriver.GitVcsDriver;
   const repo = yield* fs.makeTempDirectoryScoped({ prefix: "cleanup-repo-" });
   const command = (cwd: string, args: string[]) =>
@@ -248,7 +270,10 @@ const cleanupFixture = Effect.gen(function* () {
   };
   let threads = [shell({ branch: "feature", worktreePath: worktree })];
   let editBeforeRemoval = false;
+  let previewPaths: ReadonlyArray<string> = [];
+  let ownershipRevision = 0;
   const context = yield* Layer.build(StorageCleanup.layer).pipe(
+    Effect.provideService(ServerConfig.ServerConfig, config),
     Effect.provideService(GitVcsDriver.GitVcsDriver, {
       ...git,
       execute: (input) =>
@@ -267,13 +292,25 @@ const cleanupFixture = Effect.gen(function* () {
     } as unknown as ProjectStore.ProjectStoreV2["Service"]),
     Effect.provideService(ProjectionStore.ProjectionStoreV2, {
       getShellSnapshot: (input?: { location?: string }) =>
-        Effect.sync(() => ({ threads: input?.location === "archive" ? [] : threads })),
+        Effect.sync(() => ({
+          threads: input?.location === "archive" ? [] : threads,
+          archivedThreads: [],
+        })),
     } as unknown as ProjectionStore.ProjectionStoreV2["Service"]),
     Effect.provideService(Orchestrator.OrchestratorV2, {
       streamDomainEvents: Stream.empty,
     } as unknown as Orchestrator.OrchestratorV2["Service"]),
-    Effect.provideService(SqlClient.SqlClient, (() =>
-      Effect.succeed([])) as unknown as SqlClient.SqlClient),
+    Effect.provideService(SqlClient.SqlClient, ((parts: TemplateStringsArray) =>
+      Effect.succeed(
+        parts.join("").includes("COALESCE(MAX(sequence)") ? [{ sequence: 0 }] : [],
+      )) as unknown as SqlClient.SqlClient),
+    Effect.provideService(ProviderSessionManager.ProviderSessionManagerV2, {
+      ownershipRevision: Effect.sync(() => ownershipRevision),
+      isLive: () => Effect.succeed(false),
+    } as unknown as ProviderSessionManager.ProviderSessionManagerV2["Service"]),
+    Effect.provideService(PreviewHosting.PreviewHosting, {
+      protectedWorkspacePaths: () => Effect.sync(() => previewPaths),
+    } as unknown as PreviewHosting.PreviewHosting["Service"]),
     Effect.provideService(GitManager.GitManager, {
       invalidateStatus: () => Effect.void,
     } as unknown as GitManager.GitManager["Service"]),
@@ -284,6 +321,12 @@ const cleanupFixture = Effect.gen(function* () {
   );
   return {
     service: Context.get(context, StorageCleanup.StorageCleanup),
+    setPreviewPaths: (paths: ReadonlyArray<string>) => {
+      previewPaths = paths;
+    },
+    acquireProviderOwnership: () => {
+      ownershipRevision++;
+    },
     editBeforeRemoval: () => {
       editBeforeRemoval = true;
     },
@@ -316,6 +359,7 @@ const cleanupFixture = Effect.gen(function* () {
   };
 });
 const cleanupTestLayer = GitVcsDriver.layer.pipe(
+  Layer.provide(VcsProcess.layer),
   Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "storage-cleanup-" })),
   Layer.provideMerge(NodeServices.layer),
 );
@@ -372,7 +416,11 @@ describe("storage cleanup reports and local file policies", () => {
       }),
     ),
   );
-  it.live("keeps a worktree when its thread starts during size measurement", () =>
+  it.live.each([
+    ["thread", "Thread activity or shared worktree changed since check"],
+    ["preview", "Preview is still using the worktree"],
+    ["provider", "Provider session is still open"],
+  ] as const)("keeps a worktree when %s ownership changes during measurement", ([owner, reason]) =>
     runCleanupTest(
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
@@ -397,14 +445,17 @@ describe("storage cleanup reports and local file policies", () => {
         yield* fs.writeFileString(`${fixture.worktree}/notes.txt`, "untracked\n");
         const cleanup = yield* fixture.service.runNow.pipe(Effect.forkChild);
         yield* Deferred.await(measuring);
-        fixture.setThreads([
-          shell({ branch: "feature", worktreePath: fixture.worktree, status: "running" }),
-        ]);
+        if (owner === "thread")
+          fixture.setThreads([
+            shell({ branch: "feature", worktreePath: fixture.worktree, status: "running" }),
+          ]);
+        else if (owner === "preview") fixture.setPreviewPaths([fixture.worktree]);
+        else fixture.acquireProviderOwnership();
         yield* Deferred.succeed(resume, undefined);
         const report = yield* Fiber.join(cleanup);
         expect(report.entries[0]).toMatchObject({
           outcome: "kept",
-          reason: "Thread activity or shared worktree changed since check",
+          reason,
           bytes: null,
         });
         expect(report.bytesFreed).toBe(0);

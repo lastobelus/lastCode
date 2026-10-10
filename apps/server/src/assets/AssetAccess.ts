@@ -56,6 +56,7 @@ import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import * as ProjectFaviconResolver from "../project/ProjectFaviconResolver.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
+import * as ThreadLinkedFiles from "../workspace/ThreadLinkedFiles.ts";
 import * as NativeAppIconResolver from "./NativeAppIconResolver.ts";
 import { openMediaFile, readMediaFileHeader, type OpenMediaFile } from "./MediaFile.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -471,7 +472,20 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
   switch (input.resource._tag) {
     case "media-file": {
       let requestedPath = expandHomePath(input.resource.path, yield* HostProcess.HomeDirectory);
-      if (!path.isAbsolute(requestedPath)) {
+      if (input.resource.linkedThreadFile === true) {
+        const linkedFiles = yield* ThreadLinkedFiles.ThreadLinkedFiles;
+        const target = yield* linkedFiles
+          .resolveFile({
+            threadId: input.resource.threadId,
+            path: input.resource.path,
+          })
+          .pipe(
+            Effect.mapError(
+              (cause) => new AssetWorkspaceResolutionError({ resource: input.resource, cause }),
+            ),
+          );
+        requestedPath = target.absolutePath;
+      } else if (!path.isAbsolute(requestedPath)) {
         if (!input.workspaceRoot) {
           return yield* new AssetWorkspaceContextNotFoundError({ resource: input.resource });
         }

@@ -63,7 +63,7 @@ describe("remote helper lifecycle", () => {
     ),
   )("retires only readable runtime state ($mode, $record, $state)", ({ mode, state, record }) =>
     Effect.gen(function* () {
-      if ((yield* HostProcessPlatform) === "win32") return;
+      if ((yield* HostProcess.Platform) === "win32") return;
       yield* Effect.promise(async () => {
         const home = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-ssh-retirement-"));
         try {

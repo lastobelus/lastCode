@@ -13,7 +13,7 @@ import {
   type T3McpToolDefinition,
   type T3McpToolSummaryAction,
 } from "@t3tools/shared/t3McpToolPresentation";
-import { classifyMarkdownImageSource } from "@t3tools/client-runtime/markdown-images";
+import { classifyMarkdownImageSource } from "@t3tools/shared/markdownImages";
 import { resolveMediaSource } from "@t3tools/client-runtime/media-source";
 import { parseChangeRequestUrl } from "@t3tools/shared/changeRequestUrl";
 import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
@@ -615,6 +615,8 @@ function summaryActionPriority(action: ToolGroupAction | T3McpToolSummaryAction)
     case "schedule-run":
     case "thread-configure":
     case "thread-fork":
+    case "subagent-promote":
+    case "subagent-promotion-cancel":
     case "thread-merge":
     case "thread-organize":
     case "thread-update":

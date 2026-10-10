@@ -299,7 +299,11 @@ export interface BackendInstanceSpec {
   // 127.0.0.1). Splitting this off from configResolve avoids races
   // between "fired onReady" and "currentConfig already advanced".
   readonly onReady?: (httpBaseUrl: URL) => Effect.Effect<void>;
+  /** Runs once per backend run before its first inherited-fd browser command. */
+  readonly prepareDesktopBrowser?: Effect.Effect<void>;
   readonly onShutdown?: () => Effect.Effect<void>;
+  // Report an unexpected exit before the first successful startup, once per instance.
+  readonly onStartupFailure?: (reason: string) => Effect.Effect<void>;
   // Fired once when a fatal or bounded preflight failure has exhausted its
   // retries. Returns true when the callback changed configuration and the
   // manager should resolve once more; false stops the failed instance.
@@ -693,6 +697,7 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const httpClient = yield* HttpClient.HttpClient;
   const state = yield* Ref.make(initialState);
+  const startupSettled = yield* Ref.make(false);
   const mutex = yield* Semaphore.make(1);
 
   const { logWarning: logInstanceWarning, logError: logInstanceError } =
@@ -933,6 +938,13 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
                 }
                 if (wasReady) {
                   yield* spec.onShutdown?.() ?? Effect.void;
+                } else if (
+                  exitObserved &&
+                  !stopRequested &&
+                  nextState.desiredRunning &&
+                  !(yield* Ref.getAndSet(startupSettled, true))
+                ) {
+                  yield* spec.onStartupFailure?.(reason) ?? Effect.void;
                 }
               }
 
@@ -943,12 +955,16 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
           );
         });
 
+        const prepareDesktopBrowser = yield* Effect.cached(
+          spec.prepareDesktopBrowser ?? Effect.void,
+        );
         const program = runBackendProcess({
           ...config.value,
           desktopTelemetryStream: desktopTelemetryPublisher.encoded,
           // Only a bootstrap that names the browser fds (the local primary) gets them.
           desktopBrowserStream: desktopBrowserHost.events,
-          onDesktopBrowserCommand: desktopBrowserHost.handleCommandLine,
+          onDesktopBrowserCommand: (line) =>
+            prepareDesktopBrowser.pipe(Effect.andThen(desktopBrowserHost.handleCommandLine(line))),
           onDesktopTelemetryControl: (message) =>
             desktopTelemetryPublisher.handleControlForSource(spec.id, message),
           onStarted: Effect.fn("desktop.backendInstance.onStarted")(function* (pid) {
@@ -985,6 +1001,7 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
               return;
             }
 
+            yield* Ref.set(startupSettled, true);
             yield* spec.onReady?.(config.value.httpBaseUrl) ?? Effect.void;
             if (
               config.value.runningDistro !== undefined &&

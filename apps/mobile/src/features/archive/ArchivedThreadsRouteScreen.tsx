@@ -1,4 +1,5 @@
 import type { EnvironmentId } from "@t3tools/contracts";
+import { scopeThreadShell } from "@t3tools/client-runtime/state/shell";
 import * as Arr from "effect/Array";
 import * as Order from "effect/Order";
 import { useFocusEffect } from "@react-navigation/native";
@@ -46,6 +47,13 @@ export function ArchivedThreadsRouteScreen() {
     [environments],
   );
   const { error, isLoading, refresh, snapshots } = useArchivedThreadSnapshots(environmentIds);
+  const archivedThreads = useMemo(
+    () =>
+      snapshots.flatMap((entry) =>
+        entry.snapshot.threads.map((thread) => scopeThreadShell(entry.environmentId, thread)),
+      ),
+    [snapshots],
+  );
   const groups = useMemo(
     () =>
       buildArchivedThreadGroups({
@@ -63,8 +71,10 @@ export function ArchivedThreadsRouteScreen() {
     },
     [],
   );
-  const { unarchiveThread, confirmDeleteThread } =
-    useArchivedThreadListActions(refreshChangedEnvironment);
+  const { unarchiveThread, confirmDeleteThread } = useArchivedThreadListActions(
+    refreshChangedEnvironment,
+    archivedThreads,
+  );
 
   useFocusEffect(
     useCallback(() => {
@@ -74,6 +84,7 @@ export function ArchivedThreadsRouteScreen() {
 
   return (
     <ArchivedThreadsScreen
+      archivedThreads={archivedThreads}
       environments={environments}
       error={error}
       groups={groups}

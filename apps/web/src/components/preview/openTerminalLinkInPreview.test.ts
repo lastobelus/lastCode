@@ -8,6 +8,15 @@ import {
   TerminalLinkPreviewOpenError,
 } from "./openTerminalLinkInPreview";
 
+const hostingMocks = vi.hoisted(() => ({
+  prepare: vi.fn(async (_ref: ScopedThreadRef, url: string) => ({
+    url,
+    managed: false,
+    restored: false,
+  })),
+}));
+vi.mock("./previewHostingRecovery", () => ({ prepareHostedPreview: hostingMocks.prepare }));
+
 vi.mock("~/previewStateStore", () => ({
   applyPreviewServerSnapshot: vi.fn(),
   isPreviewSupportedInRuntime: () => true,
@@ -58,6 +67,9 @@ const snapshot: PreviewSessionSnapshot = {
 };
 
 beforeEach(() => {
+  hostingMocks.prepare
+    .mockReset()
+    .mockImplementation(async (_ref, url) => ({ url, managed: false, restored: false }));
   browserDefaultsMocks.resolve.mockReset();
   browserDefaultsMocks.resolve.mockResolvedValue(hydratedDefaults);
   linkTargetMocks.preference.mockReturnValue("app");
@@ -68,6 +80,72 @@ afterEach(() => {
 });
 
 describe("openTerminalLinkInPreview", () => {
+  it("waits for owning-thread recovery before opening a stopped terminal link", async () => {
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let finish!: (prepared: { url: string; managed: boolean; restored: boolean }) => void;
+    hostingMocks.prepare.mockImplementationOnce(
+      () =>
+        new Promise<{ url: string; managed: boolean; restored: boolean }>((resolve) => {
+          finish = resolve;
+          entered();
+        }),
+    );
+    const openPreview = vi.fn(async () => AsyncResult.success(snapshot));
+    const url = "http://localhost:5173/qa?case=terminal#first";
+    const opening = openTerminalLinkInPreview({
+      url,
+      threadRef,
+      openPreview,
+      fallbackToBrowser: vi.fn(),
+      forceBrowser: false,
+    });
+    await started;
+    expect(openPreview).not.toHaveBeenCalled();
+    expect(hostingMocks.prepare).toHaveBeenCalledWith(threadRef, url);
+    finish({ url, managed: true, restored: true });
+    await opening;
+    expect(openPreview).toHaveBeenCalledOnce();
+  });
+
+  it.each([false, true])(
+    "prepares the remote owned destination before external opening (modifier=%s)",
+    async (forceBrowser) => {
+      linkTargetMocks.preference.mockReturnValue("system");
+      const url = "http://localhost:5173/qa?case=remote#first";
+      const resolved = "http://managed-server.local:5173/qa?case=remote#first";
+      let finish!: (value: { url: string; managed: boolean; restored: boolean }) => void;
+      let entered!: () => void;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      hostingMocks.prepare.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+            entered();
+          }),
+      );
+      const fallbackToBrowser = vi.fn();
+      const openPreview = vi.fn(async () => AsyncResult.success(snapshot));
+      const opening = openTerminalLinkInPreview({
+        url,
+        threadRef,
+        openPreview,
+        fallbackToBrowser,
+        forceBrowser,
+      });
+      await started;
+      expect(fallbackToBrowser).not.toHaveBeenCalled();
+      finish({ url: resolved, managed: true, restored: true });
+      await opening;
+      expect(fallbackToBrowser).toHaveBeenCalledExactlyOnceWith(resolved);
+      expect(openPreview).not.toHaveBeenCalled();
+    },
+  );
+
   it.each(["target", "defaults"] as const)(
     "does not open either browser when reading %s fails",
     async (setting) => {

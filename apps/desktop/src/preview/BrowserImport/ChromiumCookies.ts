@@ -328,7 +328,9 @@ export const readChromiumCookies = Effect.fn("ChromiumCookies.readChromiumCookie
 > {
   const keys = yield* (
     source.platform === "win32" && source.windowsLocalStatePath
-      ? readWindowsKey(source.windowsLocalStatePath).pipe(Effect.map((gcmV10) => ({ gcmV10 })))
+      ? readWindowsKey(source.windowsLocalStatePath).pipe(
+          Effect.map((gcmV10): ChromiumKeyMaterial => ({ gcmV10 })),
+        )
       : resolveChromiumKeys({
           platform: source.platform,
           keychainService: source.keychainService,

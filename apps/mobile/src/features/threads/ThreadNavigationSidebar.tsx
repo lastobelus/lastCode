@@ -5,6 +5,7 @@ import type {
   EnvironmentProject,
   EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
+import { threadShellIsVisible } from "@t3tools/client-runtime/state/models";
 import {
   threadSearchMatchKey,
   type EnvironmentThreadSearchMatch,
@@ -49,6 +50,7 @@ import {
   WorkspaceConnectionTitle,
 } from "../home/WorkspaceConnectionTitle";
 import { SidebarHeaderActions } from "./sidebar-header-actions";
+import { useEnvironmentPauseControl } from "./EnvironmentPauseControl";
 import { MaterialThreadListToolbar } from "../home/MaterialThreadListToolbar";
 import { useMaterialToolbarLayout } from "../../components/useMaterialToolbarLayout";
 import { useMaterialFabScroll } from "../home/MaterialFabScrollContext";
@@ -140,6 +142,7 @@ function ThreadNavigationSidebarPane(
   const threads = useNavigationThreadShells();
   const { environments: workspaceEnvironments, state: catalogState } = useWorkspaceState();
   const { savedConnectionsById } = useSavedRemoteConnections();
+  const pauseControl = useEnvironmentPauseControl();
   const searchInputRef = useRef<TextInputInstance>(null);
   const searchBarRef = useRef<SearchBarCommands>(null);
   const openSwipeableRef = useRef<SwipeableMethods | null>(null);
@@ -324,6 +327,7 @@ function ThreadNavigationSidebarPane(
     pinReorderEnvironmentIds,
     activeReorderEnvironmentIds,
     titleRegenerationEnvironmentIds,
+    persistenceEnvironmentIds,
   } = listEnvironments;
   const resolveProviderInstance = useThreadRowProviderInstanceResolver(providersByEnvironmentId);
   const pendingOrder = usePendingThreadOrder(nowMinute, snoozeWakeTick);
@@ -369,7 +373,7 @@ function ThreadNavigationSidebarPane(
     threadListInboxReturns.observe(workingShelfEnabled ? threads : null);
     return buildThreadListV2Items({
       pendingOrder,
-      threads: threads.filter((thread) => thread.archivedAt === null),
+      threads: threads.filter(threadShellIsVisible),
       environmentId: options.selectedEnvironmentId,
       projectRefs: selectedProjectScope === null ? null : selectedProjectScope.projectRefs,
       searchQuery: props.searchQuery,
@@ -727,6 +731,7 @@ function ThreadNavigationSidebarPane(
               onRenameThread={renameThread}
               onRegenerateThreadTitle={regenerateThreadTitle}
               titleRegenerationSupported={titleRegenerationEnvironmentIds.has(thread.environmentId)}
+              persistenceSupported={persistenceEnvironmentIds.has(thread.environmentId)}
               settlementSupported={settlementEnvironmentIds.has(thread.environmentId)}
               onSettleThread={settleThread}
               snoozeSupported={snoozeEnvironmentIds.has(thread.environmentId)}
@@ -822,6 +827,7 @@ function ThreadNavigationSidebarPane(
       providersByEnvironmentId,
       threadSearchMatchByKey,
       titleRegenerationEnvironmentIds,
+      persistenceEnvironmentIds,
       settleThread,
       settlementEnvironmentIds,
       showMoreSettled,
@@ -861,8 +867,17 @@ function ThreadNavigationSidebarPane(
         filterIcon,
         filterMenu,
         onOpenSettings: props.onOpenSettings,
+        onOpenPause: pauseControl.visible ? pauseControl.onPress : undefined,
+        hasPauseSession: pauseControl.hasSession,
       }),
-    [filterIcon, filterMenu, props.onOpenSettings],
+    [
+      filterIcon,
+      filterMenu,
+      props.onOpenSettings,
+      pauseControl.visible,
+      pauseControl.onPress,
+      pauseControl.hasSession,
+    ],
   );
   // Snoozed threads need no special case: the shelf header is a list row
   // even while collapsed.
@@ -891,6 +906,7 @@ function ThreadNavigationSidebarPane(
   if (props.nativeChrome) {
     return (
       <>
+        {pauseControl.modal}
         <NativeStackScreenOptions
           optionsVersion={[nativeHeaderItems, props.width]}
           options={{
@@ -971,6 +987,7 @@ function ThreadNavigationSidebarPane(
       }
       style={{ width: props.width }}
     >
+      {pauseControl.modal}
       <View
         className="flex-1"
         style={
@@ -1036,6 +1053,8 @@ function ThreadNavigationSidebarPane(
           filterCustomized={filterCustomized}
           onFilterAction={handleListMenuAction}
           onOpenSettings={props.onOpenSettings}
+          onOpenPause={pauseControl.visible ? pauseControl.onPress : undefined}
+          hasPauseSession={pauseControl.hasSession}
           onOpenEnvironments={props.onOpenEnvironmentSettings}
           onRequestVisibility={props.onRequestVisibility}
         />
@@ -1065,7 +1084,11 @@ function ThreadNavigationSidebarPane(
               <ControlPillMenu actions={listMenuActions} onPressAction={handleListMenuAction}>
                 <SidebarFilterButton accessibilityLabel="Filter threads" icon={filterIcon} />
               </ControlPillMenu>
-              <SidebarHeaderActions onOpenSettings={props.onOpenSettings} />
+              <SidebarHeaderActions
+                onOpenSettings={props.onOpenSettings}
+                onOpenPause={pauseControl.visible ? pauseControl.onPress : undefined}
+                hasPauseSession={pauseControl.hasSession}
+              />
             </View>
           </View>
 

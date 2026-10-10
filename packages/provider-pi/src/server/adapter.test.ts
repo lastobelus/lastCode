@@ -37,6 +37,7 @@ import * as ProviderContinuationRequests from "@t3tools/provider-core/server/Pro
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import { ProviderHost } from "@t3tools/provider-core/server/ProviderHost";
 import { handoffBudget } from "@t3tools/provider-core/server/handoffBudget";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import {
@@ -500,7 +501,7 @@ describe("PiAdapterV2", () => {
         config: { enabled: true, binaryPath: "pi", launchArgs: "", customModels: [] },
       }).pipe(
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, fake.spawner),
-        Effect.provideService(HostProcessEnvironment, {
+        Effect.provideService(HostProcess.Environment, {
           T3CODE_LOCAL_CI_SETTINGS_PATH: "/inherited/settings.json",
         }),
         Effect.provideService(ProviderHost, {

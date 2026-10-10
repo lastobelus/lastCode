@@ -132,19 +132,22 @@ describe("authoritative server page selection", () => {
     ).toBe(false);
   });
 
-  it("streams existing native popups without creating another guest", () => {
-    for (const [environment, host] of [
-      [primary, "local"],
-      [remote, "host-remote"],
-    ] as const)
-      expect(
-        rendersServerTabNatively(environment, primary, {
-          runtime: "server",
-          backingPage: "desktop-popup",
-          desktopHostId: host,
-        }),
-      ).toBe(false);
-  });
+  it.each(["desktop-popup", "desktop-root"] as const)(
+    "streams %s pages without creating another guest",
+    (backingPage) => {
+      for (const [environment, host] of [
+        [primary, "local"],
+        [remote, "host-remote"],
+      ] as const)
+        expect(
+          rendersServerTabNatively(environment, primary, {
+            runtime: "server",
+            backingPage,
+            desktopHostId: host,
+          }),
+        ).toBe(false);
+    },
+  );
 
   it("renders only the selected remote desktop, including a primary server using RPC", () => {
     state.localDesktopBrowser = false;

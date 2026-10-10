@@ -162,38 +162,45 @@ export function applyShellStreamEvent(
         projects: snapshot.projects.filter((project) => project.id !== event.projectId),
         snapshotSequence: event.sequence,
       };
-    case "thread.updated": {
-      // An unchanged shell keeps its object and the list, so subscribers that
-      // compare by reference skip the update. Only the cursor moves.
-      const existing =
-        event.location === "active"
-          ? snapshot.threads.find((thread) => thread.id === event.thread.id)
-          : undefined;
-      if (existing !== undefined && sameThreadShell(existing, event.thread)) {
-        return { ...snapshot, snapshotSequence: event.sequence };
+    case "thread.updated":
+    case "thread.removed": {
+      const updates = [
+        ...(event.kind === "thread.updated" && event.location === "active" ? [event.thread] : []),
+        ...(event.relatedThreads ?? []),
+      ];
+      const removedIds = new Set([
+        ...(event.kind === "thread.removed"
+          ? [event.threadId]
+          : event.location === "archive"
+            ? [event.thread.id]
+            : []),
+        ...(event.relatedRemovedThreadIds ?? []),
+      ]);
+      const withoutIds = (
+        threads: OrchestrationV2ShellSnapshot["threads"],
+        ids: ReadonlySet<OrchestrationV2ThreadShell["id"]>,
+      ) =>
+        ids.size > 0 && threads.some((thread) => ids.has(thread.id))
+          ? threads.filter((thread) => !ids.has(thread.id))
+          : threads;
+      let threads = withoutIds(snapshot.threads, removedIds);
+      for (const update of updates) {
+        const existing = threads.find((thread) => thread.id === update.id);
+        // Unchanged shells retain their objects and list; only the cursor moves.
+        if (existing === undefined || !sameThreadShell(existing, update))
+          threads = upsertById(threads, update);
       }
-      const withoutThread = (threads: OrchestrationV2ShellSnapshot["threads"]) =>
-        threads.filter((thread) => thread.id !== event.thread.id);
+      const archiveRemovedIds = new Set([...removedIds, ...updates.map((thread) => thread.id)]);
       return {
         ...snapshot,
-        threads:
-          event.location === "active"
-            ? upsertById(snapshot.threads, event.thread)
-            : withoutThread(snapshot.threads),
+        threads,
         // The archive has its own bounded query/subscription. Older servers may
         // still send archive-located deltas here; remove them from the normal
         // shell instead of growing its persisted cache again.
-        archivedThreads: withoutThread(snapshot.archivedThreads),
+        archivedThreads: withoutIds(snapshot.archivedThreads, archiveRemovedIds),
         snapshotSequence: event.sequence,
       };
     }
-    case "thread.removed":
-      return {
-        ...snapshot,
-        threads: snapshot.threads.filter((thread) => thread.id !== event.threadId),
-        archivedThreads: snapshot.archivedThreads.filter((thread) => thread.id !== event.threadId),
-        snapshotSequence: event.sequence,
-      };
     default:
       return snapshot;
   }

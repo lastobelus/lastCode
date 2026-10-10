@@ -168,6 +168,8 @@ export const ActionResumeState = Schema.Struct({
   terminalId: TrimmedNonEmptyString,
   outcome: ActionResumeOutcome,
   delivery: ActionResumeDelivery,
+  /** Retains automatic delivery intent across restart after environment Resume. */
+  heldByEnvironmentPause: Schema.optional(Schema.Boolean),
   startedAt: IsoDateTime,
   finishedAt: Schema.NullOr(IsoDateTime),
   exitCode: Schema.NullOr(Schema.Int),

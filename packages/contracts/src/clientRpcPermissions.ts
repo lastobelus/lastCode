@@ -7,10 +7,15 @@ import {
   type AuthEnvironmentScope,
 } from "./auth.ts";
 import { WS_METHODS } from "./rpc.ts";
+import { ORCHESTRATION_V2_WS_METHODS } from "./orchestrationV2.ts";
 
 /** Incremental client enforcement; the server still authorizes every request. */
 export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.serverRunStorageCleanup]: AuthSettingsWriteScope,
+  [ORCHESTRATION_V2_WS_METHODS.getThreadArchiveFamily]: AuthOrchestrationOperateScope,
+  [WS_METHODS.serverPauseEnvironment]: AuthOrchestrationOperateScope,
+  [WS_METHODS.serverRetryEnvironmentPause]: AuthOrchestrationOperateScope,
+  [WS_METHODS.serverResumeEnvironment]: AuthOrchestrationOperateScope,
   [WS_METHODS.pullRequestsRunAction]: AuthSourceControlWriteScope,
   [WS_METHODS.pullRequestsUpdate]: AuthSourceControlWriteScope,
   [WS_METHODS.pullRequestsComment]: AuthSourceControlWriteScope,
