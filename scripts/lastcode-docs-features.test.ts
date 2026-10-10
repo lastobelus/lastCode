@@ -126,7 +126,7 @@ it.layer(NodeServices.layer)("LastCode docs feature registry", (it) => {
         },
         {
           id: "legacy-sidebar",
-          title: "Legacy sidebar conveniences",
+          title: "LastCode sidebar conveniences",
           readmeSummary:
             "Use the compact project-and-thread layout with adjustable scale, status indicators, and worktree context.",
           pagePath: "/features/legacy-sidebar/",
@@ -151,7 +151,7 @@ it.layer(NodeServices.layer)("LastCode docs feature registry", (it) => {
         {
           captureId: "workspace-overview",
           fileStem: "workspace",
-          alt: "LastCode in the Ocean theme with a scaled legacy sidebar, a thread annotation, and a resumable action running in the active chat.",
+          alt: "LastCode in the Ocean theme with a scaled LastCode sidebar, a thread annotation, and a resumable action running in the active chat.",
         },
         {
           captureId: "local-nightly-updates",

@@ -43,7 +43,7 @@
       "sourcePrefixes": [
         "docs/user/thread-sidebar.md",
         "apps/web/src/components/thread-annotation/",
-        "apps/web/src/components/LegacySidebar.tsx",
+        "apps/web/src/components/LastCodeSidebar.tsx",
         "apps/server/src/orchestration-v2/ThreadLifecycleService.ts",
         "apps/server/src/orchestration-v2/ProjectionStore.ts",
         "packages/contracts/src/orchestrationV2.ts"
@@ -52,7 +52,7 @@
     },
     {
       "id": "legacy-sidebar",
-      "title": "Legacy sidebar conveniences",
+      "title": "LastCode sidebar conveniences",
       "readmeSummary": "Use the compact project-and-thread layout with adjustable scale, status indicators, and worktree context.",
       "pagePath": "/features/legacy-sidebar/",
       "supportedClients": ["web", "desktop"],
@@ -60,8 +60,8 @@
         "docs/user/thread-sidebar.md",
         "docs/user/keybindings.md",
         "apps/web/src/components/settings/LastCodeSettings.tsx",
-        "apps/web/src/components/LegacySidebar.tsx",
-        "apps/web/src/legacySidebarScale.ts",
+        "apps/web/src/components/LastCodeSidebar.tsx",
+        "apps/web/src/lastcodeSidebarScale.ts",
         "packages/contracts/src/settings.ts"
       ],
       "captureRecipeIds": ["workspace-overview"]
@@ -97,7 +97,7 @@
       {
         "captureId": "workspace-overview",
         "fileStem": "workspace",
-        "alt": "LastCode in the Ocean theme with a scaled legacy sidebar, a thread annotation, and a resumable action running in the active chat."
+        "alt": "LastCode in the Ocean theme with a scaled LastCode sidebar, a thread annotation, and a resumable action running in the active chat."
       },
       {
         "captureId": "local-nightly-updates",
