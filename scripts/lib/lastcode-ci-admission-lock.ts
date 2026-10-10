@@ -80,12 +80,9 @@ function removeEmptyDirectory(path: string) {
   } catch (error) {
     // A fresh owner may have replaced the empty directory after the old unique
     // record was removed. Never remove a directory containing that new owner.
-    if (
-      hasErrorCode(error, "ENOENT") ||
-      hasErrorCode(error, "ENOTEMPTY") ||
-      hasErrorCode(error, "EEXIST")
-    )
-      return;
+    if (hasErrorCode(error, "ENOENT")) return;
+    if (hasErrorCode(error, "ENOTEMPTY")) return;
+    if (hasErrorCode(error, "EEXIST")) return;
     throw error;
   }
 }
