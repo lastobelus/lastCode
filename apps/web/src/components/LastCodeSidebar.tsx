@@ -36,13 +36,11 @@ import {
   useLinkedThreadPullRequest,
 } from "./ThreadStatusIndicators";
 import { ProjectFavicon } from "./ProjectFavicon";
-import { SidebarDraftBlock } from "./Sidebar";
+import { ProjectSidebarDraftList } from "./sidebar/ProjectSidebarDraftList";
 import {
-  buildDraftActionMenuItems,
   buildStopThreadProcessesMenuItem,
   withThreadActionMenuDividers,
 } from "./threadActionMenu.logic";
-import { discardComposerDraft } from "../lib/discardComposerDraft";
 import { useAtomValue } from "@effect/atom-react";
 import { autoAnimate } from "@formkit/auto-animate";
 import { actionRunningPresentation } from "@t3tools/shared/actionResume";
@@ -170,7 +168,7 @@ import {
 import { isModelPickerOpen } from "../modelPickerVisibility";
 import { useShortcutModifierState } from "../shortcutModifierState";
 import { ensureLocalApi, readLocalApi } from "../localApi";
-import { type DraftId, useComposerDraftStore } from "../composerDraftStore";
+import { useComposerDraftStore } from "../composerDraftStore";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { useDesktopUpdateState } from "../state/desktopUpdate";
 import { lastcodeSidebarScaleStyle } from "../lastcodeSidebarScale";
@@ -4273,98 +4271,6 @@ interface SidebarProjectsContentProps {
   providerBadgePreferences: SidebarProviderBadgePreferences;
 }
 
-// Drafts the user typed into but never sent, rendered above the projects
-// list so the LastCode sidebar reaches parity with the v2 sidebar: without
-// these rows a draft started under this sidebar has no way back in and
-// silently piles up in the v2 list. Self-contained (own store and route
-// subscriptions) so per-keystroke composer updates re-render only this
-// block and SidebarProjectsContent's memo stays intact. SidebarDraftBlock
-// renders nothing at count 0, so the wrapping menu collapses to zero
-// height and costs the empty sidebar no space.
-function LastCodeSidebarDraftList() {
-  const projects = useProjects();
-  const { copyToClipboard } = useCopyToClipboard({ target: "draft details" });
-  const navigate = useNavigate();
-  const { isMobile, setOpenMobile } = useSidebar();
-  const clearSelection = useThreadSelectionStore((s) => s.clearSelection);
-  const routeTarget = useParams({
-    strict: false,
-    select: (params) => resolveThreadRouteTarget(params),
-  });
-  const routeDraftId = routeTarget?.kind === "draft" ? routeTarget.draftId : null;
-  // The legacy list has no grouped display names on draft rows; the
-  // project's own title is what its header shows for local projects.
-  const projectTitleByKey = useMemo(
-    () =>
-      new Map(projects.map((project) => [`${project.environmentId}:${project.id}`, project.title])),
-    [projects],
-  );
-  const projectByKey = useMemo(
-    () => new Map(projects.map((project) => [`${project.environmentId}:${project.id}`, project])),
-    [projects],
-  );
-  const navigateToDraft = useCallback(
-    (draftId: DraftId) => {
-      clearSelection();
-      if (isMobile) {
-        setOpenMobile(false);
-      }
-      void navigate({ to: "/draft/$draftId", params: { draftId } });
-    },
-    [clearSelection, isMobile, navigate, setOpenMobile],
-  );
-  const handleDraftContextMenu = useCallback(
-    (draftId: DraftId, position: { x: number; y: number }) => {
-      void (async () => {
-        const api = readLocalApi();
-        const session = useComposerDraftStore.getState().getDraftSession(draftId);
-        if (!api || !session || session.promotedTo) return;
-        const workspacePath =
-          session.worktreePath ??
-          projectByKey.get(`${session.environmentId}:${session.projectId}`)?.workspaceRoot;
-        const clicked = await settlePromise(() =>
-          api.contextMenu.show(
-            buildDraftActionMenuItems({
-              hasPath: Boolean(workspacePath),
-              hasBranch: Boolean(session.branch),
-              hasProject: false,
-            }),
-            position,
-          ),
-        );
-        if (clicked._tag === "Failure") return;
-        switch (clicked.value) {
-          case "copy-path":
-            if (workspacePath) copyToClipboard(workspacePath);
-            return;
-          case "copy-branch":
-            if (session.branch) copyToClipboard(session.branch);
-            return;
-          case "discard": {
-            // Sending can promote the draft while its menu is open.
-            const current = useComposerDraftStore.getState().getDraftSession(draftId);
-            if (current && !current.promotedTo) discardComposerDraft(draftId);
-            return;
-          }
-        }
-      })();
-    },
-    [copyToClipboard, projectByKey],
-  );
-  return (
-    <SidebarMenu>
-      <SidebarDraftBlock
-        projectByKey={projectByKey}
-        projectDisplayNameByKey={projectTitleByKey}
-        scopedProjectKeys={null}
-        routeDraftId={routeDraftId}
-        onNavigateToDraft={navigateToDraft}
-        onDraftContextMenu={handleDraftContextMenu}
-      />
-    </SidebarMenu>
-  );
-}
-
 const SidebarProjectsContent = memo(function SidebarProjectsContent(
   props: SidebarProjectsContentProps,
 ) {
@@ -4490,7 +4396,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
       ) : null}
       <LocalSecondaryStatus />
       <SidebarGroup>
-        <LastCodeSidebarDraftList />
+        <ProjectSidebarDraftList />
         <div className="mb-1 flex items-center justify-between pl-2 pr-1.5">
           <span className="text-xs font-medium text-sidebar-muted-foreground/80">Projects</span>
           <div className="flex items-center gap-1">
