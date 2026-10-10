@@ -222,6 +222,250 @@ const makeRoot = () => {
   return { ...root, contents };
 };
 
+/** Observes actual attempt retirement without adding a production diagnostics API. */
+const observeCreationRecords = (marker: string) =>
+  Effect.gen(function* () {
+    const settlements: string[] = [];
+    let awaiting: ((value: string) => void) | undefined;
+    const settled = Effect.callback<string>((resume) => {
+      const value = settlements.shift();
+      if (value !== undefined) {
+        resume(Effect.succeed(value));
+        return;
+      }
+      const notify = (value: string) => resume(Effect.succeed(value));
+      awaiting = notify;
+      return Effect.sync(() => {
+        if (awaiting === notify) awaiting = undefined;
+      });
+    });
+    const pendingMaps = new Set<Map<unknown, unknown>>();
+    const cancellationSets = new Set<Set<unknown>>();
+    const deleting: string[] = [];
+    const set = Map.prototype.set;
+    const deleteMap = Map.prototype.delete;
+    const add = Set.prototype.add;
+    const deleteSet = Set.prototype.delete;
+    const matches = (value: unknown): value is string =>
+      typeof value === "string" && value.includes(marker);
+    yield* Effect.acquireRelease(
+      Effect.sync(() => {
+        // eslint-disable-next-line no-extend-native -- Scoped collection observation, restored on exit.
+        Map.prototype.set = function (this: Map<unknown, unknown>, key: unknown, value: unknown) {
+          if (matches(key)) pendingMaps.add(this);
+          return set.call(this, key, value);
+        };
+        // eslint-disable-next-line no-extend-native -- Observe the creation finalizer's pending deletion.
+        Map.prototype.delete = function (this: Map<unknown, unknown>, key: unknown) {
+          const deleted = deleteMap.call(this, key);
+          if (deleted && pendingMaps.has(this) && matches(key)) deleting.push(key);
+          return deleted;
+        };
+        // eslint-disable-next-line no-extend-native -- Observe cancellation records only for this fixture.
+        Set.prototype.add = function (this: Set<unknown>, value: unknown) {
+          if (matches(value)) cancellationSets.add(this);
+          return add.call(this, value);
+        };
+        // eslint-disable-next-line no-extend-native -- The final cancellation deletion marks settlement.
+        Set.prototype.delete = function (this: Set<unknown>, value: unknown) {
+          const deleted = deleteSet.call(this, value);
+          if (matches(value)) {
+            const index = deleting.indexOf(value);
+            if (index !== -1) {
+              deleting.splice(index, 1);
+              if (awaiting) {
+                const notify = awaiting;
+                awaiting = undefined;
+                notify(value);
+              } else settlements.push(value);
+            }
+          }
+          return deleted;
+        };
+      }),
+      () =>
+        Effect.sync(() => {
+          // eslint-disable-next-line no-extend-native -- Restore all original collection methods.
+          Map.prototype.set = set;
+          // eslint-disable-next-line no-extend-native -- Restore all original collection methods.
+          Map.prototype.delete = deleteMap;
+          // eslint-disable-next-line no-extend-native -- Restore all original collection methods.
+          Set.prototype.add = add;
+          // eslint-disable-next-line no-extend-native -- Restore all original collection methods.
+          Set.prototype.delete = deleteSet;
+        }),
+    );
+    return {
+      pending: () => [...pendingMaps].flatMap((records) => [...records.keys()].filter(matches)),
+      canceled: () => [...cancellationSets].flatMap((records) => [...records].filter(matches)),
+      settled,
+    };
+  });
+
+it.effect.each(["local", "remote"] as const)(
+  "%s serial transport handles profiles, existing-tab CDP and cancellation during root creation",
+  (transport) =>
+    Effect.gen(function* () {
+      const marker = `serial-root-${transport}`;
+      const records = yield* observeCreationRecords(marker);
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      const desktopHostId = transport === "local" ? "local" : "host-a";
+      const events = yield* Queue.unbounded<DesktopBrowserEvent>();
+      yield* (
+        transport === "local"
+          ? host.events.pipe(Stream.map((line) => decodeEvent(new TextDecoder().decode(line))))
+          : host.remoteEvents.pipe(Stream.map(({ event }) => event))
+      ).pipe(
+        Stream.runForEach((event) => Queue.offer(events, event)),
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      yield* host.bindEnvironment(desktopHostId, "environment-a", profileResolver("environment-a"));
+      const debuggee = makeDebuggee();
+      debuggee.tab.debugger.sendCommand = async (method) => ({ method });
+      host.attach({ ...key, desktopHostId }, debuggee.tab, "existing-runtime");
+      expect((yield* Queue.take(events)).type).toBe("attached");
+      const entered = yield* Deferred.make<void>();
+      const returned = yield* Deferred.make<Electron.BrowserWindow>();
+      const factorySettled = yield* Deferred.make<void>();
+      const root = makeRoot();
+      host.setRootFactory(() =>
+        Deferred.succeed(entered, undefined).pipe(
+          Effect.andThen(Deferred.await(returned)),
+          Effect.ensuring(Deferred.succeed(factorySettled, undefined)),
+        ),
+      );
+      type Command = Parameters<typeof host.handleRemoteCommand>[0]["command"];
+      const commands = yield* Queue.unbounded<Command>();
+      const input = Stream.fromQueue(commands).pipe(Stream.take(4));
+      // Match each production transport's sequential command consumer.
+      const consumer = yield* (
+        transport === "local"
+          ? input.pipe(Stream.runForEach((command) => host.handleCommandLine(encodeJson(command))))
+          : input.pipe(
+              Stream.mapEffect((command) => host.handleRemoteCommand({ desktopHostId, command })),
+              Stream.runDrain,
+            )
+      ).pipe(Effect.forkScoped({ startImmediately: true }));
+      const attempt = { ...key, tabId: "slow-root", requestId: marker, profileId: "default" };
+      yield* Queue.offer(commands, {
+        type: "createRoot",
+        ...attempt,
+        serverEpoch: "epoch-a",
+        url: "about:blank",
+      });
+      yield* Deferred.await(entered);
+      expect(records.pending()).toHaveLength(1);
+      yield* Queue.offer(commands, { type: "profiles", requestId: "profiles" });
+      yield* Queue.offer(commands, {
+        type: "cdp",
+        ...key,
+        message: encodeJson({
+          id: 1,
+          method: "Page.getLayoutMetrics",
+          sessionId: "t3-preview-page",
+        }),
+      });
+      yield* Queue.offer(commands, { type: "cancelRootCreation", ...attempt });
+      const replies = [
+        yield* Queue.take(events),
+        yield* Queue.take(events),
+        yield* Queue.take(events),
+      ];
+      expect(replies.find((event) => event.type === "profiles")).toMatchObject({
+        requestId: "profiles",
+        supportsNativeRoots: true,
+      });
+      const cdp = replies.find((event) => event.type === "cdp");
+      if (cdp?.type !== "cdp") throw new Error("Expected existing-tab CDP reply");
+      expect(decodeCdpReply(cdp.message).id).toBe(1);
+      expect(replies.find((event) => event.type === "rootCreated")).toMatchObject({
+        ...attempt,
+        rootId: null,
+      });
+      yield* Fiber.join(consumer);
+      expect(yield* Deferred.isDone(factorySettled)).toBe(false);
+      expect(root.window.isDestroyed()).toBe(false);
+      expect(records.pending()).toHaveLength(1);
+      expect(records.canceled()).toHaveLength(1);
+      yield* Deferred.succeed(returned, root.window);
+      yield* Deferred.await(factorySettled);
+      yield* records.settled;
+      expect(root.window.isDestroyed()).toBe(true);
+      expect(root.attachCount()).toBe(0);
+      expect(records.pending()).toHaveLength(0);
+      expect(records.canceled()).toHaveLength(0);
+      expect(yield* Queue.size(events)).toBe(0);
+    }),
+);
+
+it.effect.each(["epoch-a", "epoch-b"])(
+  "reconciles an in-flight root against owner epoch %s before its factory returns",
+  (serverEpoch) =>
+    Effect.gen(function* () {
+      const marker = `pending-epoch-${serverEpoch}`;
+      const records = yield* observeCreationRecords(marker);
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      const main = makePresentationWindow();
+      host.setMainWindow(main.window);
+      const events = yield* Queue.unbounded<DesktopBrowserEvent>();
+      yield* host.remoteEvents.pipe(
+        Stream.runForEach(({ event }) => Queue.offer(events, event)),
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      yield* host.bindEnvironment("host-a", "environment-a", profileResolver("environment-a"));
+      const entered = yield* Deferred.make<void>();
+      const returned = yield* Deferred.make<Electron.BrowserWindow>();
+      const root = makeRoot();
+      host.setRootFactory(() =>
+        Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(returned))),
+      );
+      yield* host.handleRemoteCommand({
+        desktopHostId: "host-a",
+        command: {
+          type: "createRoot",
+          ...key,
+          serverEpoch: "epoch-a",
+          requestId: marker,
+          profileId: "default",
+          url: "about:blank",
+        },
+      });
+      yield* Deferred.await(entered);
+      // Another desktop's restart cannot cancel this pending window.
+      yield* host.handleRemoteCommand({
+        desktopHostId: "host-b",
+        command: { type: "reconcileRoots", serverEpoch: "epoch-b" },
+      });
+      expect(records.canceled()).toHaveLength(0);
+      yield* host.handleRemoteCommand({
+        desktopHostId: "host-a",
+        command: { type: "reconcileRoots", serverEpoch },
+      });
+      expect(records.pending()).toHaveLength(1);
+      expect(records.canceled()).toHaveLength(serverEpoch === "epoch-a" ? 0 : 1);
+      expect(main.window.isDestroyed()).toBe(false);
+      yield* Deferred.succeed(returned, root.window);
+      yield* records.settled;
+      expect(records.pending()).toHaveLength(0);
+      expect(records.canceled()).toHaveLength(0);
+      expect(root.window.isDestroyed()).toBe(serverEpoch !== "epoch-a");
+      expect(root.attachCount()).toBe(serverEpoch === "epoch-a" ? 1 : 0);
+      if (serverEpoch === "epoch-a") {
+        expect((yield* Queue.take(events)).type).toBe("attached");
+        expect(yield* Queue.take(events)).toMatchObject({
+          type: "rootCreated",
+          requestId: marker,
+          rootId: expect.any(String),
+        });
+      }
+      expect(yield* Queue.size(events)).toBe(0);
+    }),
+);
+
 it.effect(
   "keeps native root profile/environment ownership fixed across simultaneous transports",
   () =>
@@ -390,19 +634,19 @@ it.effect(
         Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(created))),
       );
       const root = makeRoot();
-      const creating = yield* host
-        .handleRemoteCommand({
-          desktopHostId: "host-a",
-          command: {
-            type: "createRoot",
-            serverEpoch: "server-epoch-a",
-            ...key,
-            requestId: "create",
-            profileId: "default",
-            url: "https://fixture.example/",
-          },
-        })
-        .pipe(Effect.forkScoped);
+      const closed = Promise.withResolvers<void>();
+      root.window.once("closed", () => closed.resolve());
+      yield* host.handleRemoteCommand({
+        desktopHostId: "host-a",
+        command: {
+          type: "createRoot",
+          serverEpoch: "server-epoch-a",
+          ...key,
+          requestId: "create",
+          profileId: "default",
+          url: "https://fixture.example/",
+        },
+      });
       yield* Deferred.await(entered);
       yield* host.handleRemoteCommand({
         desktopHostId: "host-a",
@@ -410,7 +654,7 @@ it.effect(
       });
       expect(yield* Queue.take(events)).toMatchObject({ type: "rootCreated", rootId: null });
       yield* Deferred.succeed(created, root.window);
-      yield* Fiber.join(creating);
+      yield* Effect.promise(() => closed.promise);
       expect(root.window.isDestroyed()).toBe(true);
       expect(root.attachCount()).toBe(0);
       expect(yield* Queue.size(events)).toBe(0);
@@ -422,31 +666,16 @@ it.effect(
   () =>
     Effect.gen(function* () {
       const marker = "cancellation-retirement";
-      const cancellationSets = new Set<Set<unknown>>();
-      const add = Set.prototype.add;
-      yield* Effect.acquireRelease(
-        Effect.sync(() => {
-          // Observe retained string records without adding a production diagnostics API.
-          // eslint-disable-next-line no-extend-native -- Scoped memory observation, restored on every exit.
-          Set.prototype.add = function (this: Set<unknown>, value: unknown) {
-            if (typeof value === "string" && value.includes(marker)) cancellationSets.add(this);
-            return add.call(this, value);
-          };
-        }),
-        () =>
-          Effect.sync(() => {
-            // eslint-disable-next-line no-extend-native -- Restore the original collection method.
-            Set.prototype.add = add;
-          }),
-      );
-      const retained = () =>
-        [...cancellationSets].flatMap((records) =>
-          [...records].filter((value) => typeof value === "string" && value.includes(marker)),
-        );
+      const records = yield* observeCreationRecords(marker);
       const host = yield* DesktopBrowserHost.make.pipe(
         Effect.provide(DesktopClientSettings.layerTest()),
       );
       yield* host.bindEnvironment("host-a", "environment-a", profileResolver("environment-a"));
+      const events = yield* Queue.unbounded<DesktopBrowserEvent>();
+      yield* host.remoteEvents.pipe(
+        Stream.runForEach(({ event }) => Queue.offer(events, event)),
+        Effect.forkScoped({ startImmediately: true }),
+      );
       const send = (command: Parameters<typeof host.handleRemoteCommand>[0]["command"]) =>
         host.handleRemoteCommand({ desktopHostId: "host-a", command });
       for (const [index, mode] of ["cancel", "disconnect"].entries()) {
@@ -457,36 +686,47 @@ it.effect(
           Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(returned))),
         );
         const attempt = { ...key, requestId: `${marker}-${index}`, profileId: "default" };
-        const creating = yield* send({
+        yield* send({
           type: "createRoot",
           ...attempt,
           serverEpoch: "epoch-a",
           url: "about:blank",
-        }).pipe(Effect.forkScoped);
+        });
         yield* Deferred.await(entered);
         yield* send(
           mode === "cancel" ? { type: "cancelRootCreation", ...attempt } : { type: "disconnect" },
         );
-        expect(retained()).toHaveLength(1);
+        if (mode === "cancel") yield* Queue.take(events);
+        expect(records.pending()).toHaveLength(1);
+        expect(records.canceled()).toHaveLength(1);
         yield* Deferred.succeed(returned, root.window);
-        yield* Fiber.join(creating);
+        yield* records.settled;
         expect(root.window.isDestroyed()).toBe(true);
         expect(root.attachCount()).toBe(0);
-        expect(retained()).toHaveLength(0);
+        expect(records.pending()).toHaveLength(0);
+        expect(records.canceled()).toHaveLength(0);
         // A repeated cancellation acknowledgment has no late creation left to guard.
         yield* send({ type: "cancelRootCreation", ...attempt });
-        expect(retained()).toHaveLength(0);
+        yield* Queue.take(events);
+        expect(records.canceled()).toHaveLength(0);
       }
       for (const mode of ["cancel", "disconnect"]) {
         const root = makeRoot();
         const attempt = { ...key, requestId: `${marker}-${mode}-completed`, profileId: "default" };
         host.setRootFactory(() => Effect.succeed(root.window));
         yield* send({ type: "createRoot", ...attempt, serverEpoch: "epoch-a", url: "about:blank" });
+        expect((yield* Queue.take(events)).type).toBe("attached");
+        expect((yield* Queue.take(events)).type).toBe("rootCreated");
+        yield* records.settled;
         yield* send(
           mode === "cancel" ? { type: "cancelRootCreation", ...attempt } : { type: "disconnect" },
         );
+        expect((yield* Queue.take(events)).type).toBe("detached");
+        expect((yield* Queue.take(events)).type).toBe("rootClosed");
+        if (mode === "cancel") yield* Queue.take(events);
         expect(root.window.isDestroyed()).toBe(true);
-        expect(retained()).toHaveLength(0);
+        expect(records.pending()).toHaveLength(0);
+        expect(records.canceled()).toHaveLength(0);
       }
     }),
 );
@@ -813,27 +1053,25 @@ it.effect.each(["factory", "navigation"] as const)(
             url: "about:blank",
           },
         });
-      const creating = yield* create("first").pipe(Effect.forkScoped);
+      yield* create("first");
       yield* stage === "factory"
         ? Deferred.await(entered)
         : Effect.promise(() => loadEntered.promise);
-      const queued = yield* create("queued").pipe(Effect.forkScoped({ startImmediately: true }));
+      yield* create("queued");
       main.close();
       host.setMainWindow(makePresentationWindow().window);
       yield* Deferred.succeed(returned, root.window);
       loadCompleted.resolve();
-      yield* Fiber.join(creating);
-      yield* Fiber.join(queued);
-      expect(root.window.isDestroyed()).toBe(true);
-      expect(root.attachCount()).toBe(0);
-      expect(factoryCalls).toBe(1);
-      expect(loads).toBe(stage === "factory" ? 0 : 1);
       for (let index = 0; index < 2; index += 1)
         expect(yield* Queue.take(events)).toMatchObject({
           type: "rootCreated",
           rootId: null,
           reason: "guest-unavailable",
         });
+      expect(root.window.isDestroyed()).toBe(true);
+      expect(root.attachCount()).toBe(0);
+      expect(factoryCalls).toBe(1);
+      expect(loads).toBe(stage === "factory" ? 0 : 1);
     }),
 );
 
@@ -913,27 +1151,27 @@ it.effect("disconnect retires pending native creation before its factory returns
     const entered = yield* Deferred.make<void>();
     const returned = yield* Deferred.make<Electron.BrowserWindow>();
     const root = makeRoot();
+    const closed = Promise.withResolvers<void>();
+    root.window.once("closed", () => closed.resolve());
     host.setRootFactory(() =>
       Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(returned))),
     );
     yield* host.bindEnvironment("host-a", "environment-a", profileResolver("environment-a"));
-    const creating = yield* host
-      .handleRemoteCommand({
-        desktopHostId: "host-a",
-        command: {
-          type: "createRoot",
-          serverEpoch: "server-epoch-a",
-          ...key,
-          requestId: "create",
-          profileId: "default",
-          url: "about:blank",
-        },
-      })
-      .pipe(Effect.forkScoped);
+    yield* host.handleRemoteCommand({
+      desktopHostId: "host-a",
+      command: {
+        type: "createRoot",
+        serverEpoch: "server-epoch-a",
+        ...key,
+        requestId: "create",
+        profileId: "default",
+        url: "about:blank",
+      },
+    });
     yield* Deferred.await(entered);
     yield* host.handleRemoteCommand({ desktopHostId: "host-a", command: { type: "disconnect" } });
     yield* Deferred.succeed(returned, root.window);
-    yield* Fiber.join(creating);
+    yield* Effect.promise(() => closed.promise);
     expect(root.window.isDestroyed()).toBe(true);
     expect(root.attachCount()).toBe(0);
   }),

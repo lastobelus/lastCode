@@ -279,7 +279,10 @@ export const make = Effect.gen(function* () {
   let createRootWindow: Parameters<DesktopBrowserHost["Service"]["setRootFactory"]>[0] | undefined;
   const rootCreationLock = yield* Semaphore.make(1);
   const canceledCreations = new Set<string>();
-  const pendingRootCreations = new Map<string, DesktopBrowserTabKey>();
+  const pendingRootCreations = new Map<
+    string,
+    DesktopBrowserTabKey & { readonly serverEpoch: string }
+  >();
   const creationKey = (key: DesktopBrowserTabKey, requestId: string, profileId: string) =>
     JSON.stringify([keyOf(key), requestId, profileId]);
   const presentedSlots = new Map<string, number>();
@@ -840,7 +843,7 @@ export const make = Effect.gen(function* () {
       const lifetime = automationLifetime;
       const key = { threadId: command.threadId, tabId: command.tabId, desktopHostId };
       const attempt = creationKey(key, command.requestId, command.profileId);
-      pendingRootCreations.set(attempt, key);
+      pendingRootCreations.set(attempt, { ...key, serverEpoch: command.serverEpoch });
       return rootCreationLock
         .withPermits(1)(
           Effect.gen(function* () {
@@ -1005,7 +1008,12 @@ export const make = Effect.gen(function* () {
   const handleCommand = (command: DesktopBrowserCommand, desktopHostId = "local") =>
     Effect.suspend(() => {
       if (command.type === "resolveUrl") return Effect.void;
-      if (command.type === "createRoot") return createRoot(command, desktopHostId);
+      if (command.type === "createRoot") {
+        // Register the attempt before the next serial command can cancel it.
+        // Completion is acknowledged by rootCreated, not by command dispatch.
+        runFork(createRoot(command, desktopHostId), { startImmediately: true });
+        return Effect.void;
+      }
       if (command.type === "acceptRoot" || command.type === "publishRoot") {
         const key = { threadId: command.threadId, tabId: command.tabId, desktopHostId };
         const root = tabs.get(keyOf(key))?.popup;
@@ -1083,6 +1091,12 @@ export const make = Effect.gen(function* () {
         return Effect.void;
       }
       if (command.type === "reconcileRoots") {
+        for (const [attempt, key] of pendingRootCreations)
+          if (
+            (key.desktopHostId ?? "local") === desktopHostId &&
+            key.serverEpoch !== command.serverEpoch
+          )
+            canceledCreations.add(attempt);
         for (const root of popups.values())
           if (
             root.kind === "root" &&
