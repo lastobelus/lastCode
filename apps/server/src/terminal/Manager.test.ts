@@ -1202,6 +1202,206 @@ it.layer(
     }),
   );
 
+  const exitSnapshotTestProcesses = Effect.fnUntraced(function* (
+    manager: ManagerFixture["manager"],
+    ptyAdapter: FakePtyAdapter,
+    threadIds: ReadonlyArray<string>,
+  ) {
+    const remainingThreads = new Set(threadIds);
+    const exited = yield* Deferred.make<void>();
+    const unsubscribe = yield* manager.subscribe((event) =>
+      Effect.gen(function* () {
+        if (
+          event.type === "exited" &&
+          remainingThreads.delete(event.threadId) &&
+          remainingThreads.size === 0
+        ) {
+          yield* Deferred.succeed(exited, undefined);
+        }
+      }),
+    );
+    // Restarted processes have no live manager listener; wait for one exit
+    // per current thread rather than counting every historical fake process.
+    for (const process of ptyAdapter.processes) process.emitExit({ exitCode: 0, signal: null });
+    yield* Deferred.await(exited);
+    unsubscribe();
+  });
+
+  it.effect.each(["native", "fallback"] as const)(
+    "shares overlapping first-input %s snapshots across threads and refreshes later shells",
+    (source) =>
+      Effect.gen(function* () {
+        const requestStarted = yield* Deferred.make<void>();
+        const releaseRequest = yield* Deferred.make<void>();
+        const ptyAdapter = new FakePtyAdapter();
+        let snapshotCalls = 0;
+        const processTable = Effect.gen(function* () {
+          snapshotCalls += 1;
+          const entries = ptyAdapter.processes.map((process) => ({
+            pid: process.pid,
+            ppid: 1,
+            name: "zsh",
+          }));
+          yield* Deferred.succeed(requestStarted, undefined);
+          yield* Deferred.await(releaseRequest);
+          return entries;
+        });
+        const processRunner: ProcessRunner.ProcessRunner["Service"] = {
+          run: (input) =>
+            processTable.pipe(
+              Effect.map((entries) => {
+                expect(input.args).toEqual(["-eo", "pid=,ppid=,comm="]);
+                return {
+                  stdout: entries.map(({ pid, ppid, name }) => `${pid} ${ppid} ${name}`).join("\n"),
+                  stderr: "",
+                  code: ChildProcessSpawner.ExitCode(0),
+                  timedOut: false,
+                  stdoutTruncated: false,
+                  stderrTruncated: false,
+                  stdoutInvalidUtf8: false,
+                  stderrInvalidUtf8: false,
+                };
+              }),
+            ),
+        };
+        const { manager } = yield* createManager(5, {
+          ptyAdapter,
+          shellResolver: () => "/opt/tools/my-shell",
+          subprocessPollIntervalMs: 60_000,
+          ...(source === "native" ? { processTable } : {}),
+        }).pipe(
+          Effect.provideService(ProcessRunner.ProcessRunner, processRunner),
+          Effect.provide(layerWithHostPlatform("linux")),
+        );
+        // Let the empty-session poll park before opening any terminals.
+        yield* TestClock.adjust(0);
+        const threadIds = ["thread-1", "thread-2", "thread-3"];
+        yield* Effect.forEach(threadIds, (threadId) => manager.open(openInput({ threadId })));
+        const write = (threadId: string) =>
+          manager.write({ threadId, terminalId: DEFAULT_TERMINAL_ID, data: "command\r" });
+        const writing = yield* Effect.forEach(threadIds, write, {
+          concurrency: "unbounded",
+        }).pipe(Effect.forkScoped);
+        yield* Deferred.await(requestStarted);
+        yield* TestClock.adjust(0);
+        expect(snapshotCalls).toBe(1);
+        expect(ptyAdapter.processes.map((process) => process.writes)).toEqual([[], [], []]);
+        yield* Deferred.succeed(releaseRequest, undefined);
+        yield* Fiber.join(writing);
+        expect(ptyAdapter.processes.map((process) => process.writes)).toEqual([
+          ["command\r"],
+          ["command\r"],
+          ["command\r"],
+        ]);
+
+        yield* manager.open(openInput({ threadId: "thread-4" }));
+        yield* write("thread-4");
+        expect(snapshotCalls).toBe(2);
+        ptyAdapter.processes[0]!.exitOnKill = "SIGTERM";
+        yield* manager.restart(restartInput({ threadId: "thread-1" }));
+        yield* write("thread-1");
+        expect(snapshotCalls).toBe(3);
+        yield* exitSnapshotTestProcesses(manager, ptyAdapter, [...threadIds, "thread-4"]);
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect.each([
+    { source: "native", outcome: "cancel" },
+    { source: "native", outcome: "timeout" },
+    { source: "fallback", outcome: "cancel" },
+    { source: "fallback", outcome: "timeout" },
+  ] as const)(
+    "abandons a shared $source snapshot after its last first-input waiter leaves via $outcome",
+    ({ source, outcome }) =>
+      Effect.gen(function* () {
+        const requestStarted = yield* Deferred.make<void>();
+        const releaseRequest = yield* Deferred.make<void>();
+        const requestStopped = yield* Deferred.make<void>();
+        const ptyAdapter = new FakePtyAdapter();
+        let snapshotCalls = 0;
+        let activeRequests = 0;
+        const processTable = Effect.gen(function* () {
+          snapshotCalls += 1;
+          activeRequests += 1;
+          if (snapshotCalls === 1) {
+            yield* Deferred.succeed(requestStarted, undefined);
+            yield* Deferred.await(releaseRequest);
+          }
+          return ptyAdapter.processes.map((process) => ({
+            pid: process.pid,
+            ppid: 1,
+            name: "zsh",
+          }));
+        }).pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              activeRequests -= 1;
+            }).pipe(Effect.andThen(Deferred.succeed(requestStopped, undefined))),
+          ),
+        );
+        const processRunner: ProcessRunner.ProcessRunner["Service"] = {
+          run: () =>
+            processTable.pipe(
+              Effect.map((entries) => ({
+                stdout: entries.map(({ pid, ppid, name }) => `${pid} ${ppid} ${name}`).join("\n"),
+                stderr: "",
+                code: ChildProcessSpawner.ExitCode(0),
+                timedOut: false,
+                stdoutTruncated: false,
+                stderrTruncated: false,
+                stdoutInvalidUtf8: false,
+                stderrInvalidUtf8: false,
+              })),
+            ),
+        };
+        const { manager } = yield* createManager(5, {
+          ptyAdapter,
+          shellResolver: () => "/bin/zsh",
+          subprocessPollIntervalMs: 60_000,
+          ...(source === "native" ? { processTable } : {}),
+        }).pipe(
+          Effect.provideService(ProcessRunner.ProcessRunner, processRunner),
+          Effect.provide(layerWithHostPlatform("linux")),
+        );
+        yield* TestClock.adjust(0);
+        const threadIds = ["thread-1", "thread-2"];
+        yield* Effect.forEach(threadIds, (threadId) => manager.open(openInput({ threadId })));
+        const write = (threadId: string) =>
+          manager.write({ threadId, terminalId: DEFAULT_TERMINAL_ID, data: "command\r" });
+        const writers = yield* Effect.forEach(threadIds, (threadId) =>
+          write(threadId).pipe(Effect.forkScoped),
+        );
+        yield* Deferred.await(requestStarted);
+        yield* TestClock.adjust(0);
+        expect(snapshotCalls).toBe(1);
+        if (outcome === "cancel") {
+          yield* Fiber.interrupt(writers[0]!);
+          expect(activeRequests).toBe(1);
+          yield* Fiber.interrupt(writers[1]!);
+        } else {
+          yield* TestClock.adjust("100 millis");
+          yield* Effect.forEach(writers, Fiber.join);
+        }
+        yield* Deferred.await(requestStopped);
+        expect(activeRequests).toBe(0);
+        expect(ptyAdapter.processes.map((process) => process.writes)).toEqual(
+          outcome === "cancel" ? [[], []] : [["command\r"], ["command\r"]],
+        );
+        // Releasing an abandoned source cannot publish a reusable result.
+        yield* Deferred.succeed(releaseRequest, undefined);
+        const nextThreadId = outcome === "cancel" ? "thread-1" : "thread-3";
+        if (outcome === "timeout") yield* manager.open(openInput({ threadId: nextThreadId }));
+        yield* write(nextThreadId);
+        expect(snapshotCalls).toBe(2);
+        expect(activeRequests).toBe(0);
+        yield* exitSnapshotTestProcesses(
+          manager,
+          ptyAdapter,
+          outcome === "timeout" ? [...threadIds, "thread-3"] : threadIds,
+        );
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
   it.effect("keeps last known subprocess state when the process snapshot fails", () =>
     Effect.gen(function* () {
       let failSnapshots = false;
@@ -1522,6 +1722,84 @@ it.layer(
       yield* manager.open(openInput());
       yield* manager.closeIdle({ threadId: "thread-1" });
       expect(ptyAdapter.processes[0]?.killed).toBe(true);
+    }),
+  );
+
+  it.effect("keeps later input behind the first PTY write after capture completes", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        shellResolver: () => "/bin/zsh",
+        subprocessPollIntervalMs: 60_000,
+        processTable: Effect.succeed([{ pid: 9000, ppid: 1, name: "zsh" }]),
+      }).pipe(Effect.provide(layerWithHostPlatform("linux")));
+      yield* manager.open(openInput());
+      const process = ptyAdapter.processes[0]!;
+      const originalWrite = process.write.bind(process);
+      const startLaterWrite = yield* Deferred.make<void>();
+      const laterWrite = yield* Deferred.await(startLaterWrite).pipe(
+        Effect.andThen(
+          manager.write({
+            threadId: "thread-1",
+            terminalId: DEFAULT_TERMINAL_ID,
+            data: "later input\r",
+          }),
+        ),
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      process.write = (data) => {
+        if (data === "first input\r") {
+          // Start the next chunk synchronously at the forwarding boundary.
+          // It must still queue even though the cached capture has completed.
+          Deferred.doneUnsafe(startLaterWrite, Effect.void);
+        }
+        originalWrite(data);
+      };
+
+      yield* manager.write({
+        threadId: "thread-1",
+        terminalId: DEFAULT_TERMINAL_ID,
+        data: "first input\r",
+      });
+      yield* Fiber.join(laterWrite);
+      expect(process.writes).toEqual(["first input\r", "later input\r"]);
+    }),
+  );
+
+  it.effect("keeps forwarded exec active when its writer is canceled before resuming", () =>
+    Effect.gen(function* () {
+      const captureEntered = yield* Deferred.make<void>();
+      const finishCapture = yield* Deferred.make<void>();
+      let commandName = "zsh";
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        shellResolver: () => "/bin/zsh",
+        subprocessPollIntervalMs: 60_000,
+        processTable: Effect.gen(function* () {
+          const name = commandName;
+          yield* Deferred.succeed(captureEntered, undefined);
+          yield* Deferred.await(finishCapture);
+          return [{ pid: 9000, ppid: 1, name }];
+        }),
+      }).pipe(Effect.provide(layerWithHostPlatform("linux")));
+      yield* manager.open(openInput());
+      const process = ptyAdapter.processes[0]!;
+      const originalWrite = process.write.bind(process);
+      let interruptWriter = () => {};
+      process.write = (data) => {
+        originalWrite(data);
+        commandName = "node";
+        interruptWriter();
+      };
+      const writing = yield* manager
+        .write({ threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, data: "exec node\r" })
+        .pipe(Effect.forkScoped({ startImmediately: true }));
+      interruptWriter = () => writing.interruptUnsafe();
+      yield* Deferred.await(captureEntered);
+      yield* Deferred.succeed(finishCapture, undefined);
+      expect(Exit.isFailure(yield* Fiber.await(writing))).toBe(true);
+      expect(process.writes).toEqual(["exec node\r"]);
+
+      yield* manager.closeIdle({ threadId: "thread-1" });
+      expect(process.killed).toBe(false);
     }),
   );
 
