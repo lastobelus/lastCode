@@ -2471,7 +2471,7 @@ it.layer(
   );
 
   it.effect.each(["native", "fallback"] as const)(
-    "preserves known ownership and activity through smaller output-invalidated %s scans",
+    "prunes exited children while preserving activity through output-invalidated %s scans",
     (source) =>
       Effect.gen(function* () {
         const ptyAdapter = new FakePtyAdapter();
@@ -2519,6 +2519,11 @@ it.layer(
             { pid: 9000, ppid: 1, name: "zsh" },
             { pid: 100, ppid: 9000, name: "sleep" },
           ],
+          [
+            { pid: 9000, ppid: 1, name: "zsh" },
+            { pid: 101, ppid: 1, name: "unrelated-server" },
+            { pid: 102, ppid: 9000, name: "worker" },
+          ],
           [{ pid: 9000, ppid: 1, name: "zsh" }],
         ]) {
           entries = sampled;
@@ -2534,13 +2539,17 @@ it.layer(
           const metadata = yield* Fiber.join(poll);
           observations.push({ processIds: [...ownedProcessIds], metadata });
         }
-        // Once a scan completes without intervening output, obsolete PIDs and
-        // activity can be cleared normally.
+        // Output keeps the activity indicator stable, but never retains a PID
+        // absent from the current command tree, including a reused child PID.
         const quietMetadata = yield* manager.refreshMetadata;
         const quietOwnership = [...ownedProcessIds];
         yield* exitSnapshotTestProcesses(manager, ptyAdapter, [terminal]);
+        expect(observations.map((observation) => observation.processIds)).toEqual([
+          [9000, 100],
+          [9000, 102],
+          [],
+        ]);
         for (const observation of observations) {
-          expect(observation.processIds).toEqual([9000, 100, 101]);
           expect(observation.metadata).toContainEqual(
             expect.objectContaining({ pid: 9000, hasRunningSubprocess: true, label: "node" }),
           );
@@ -2557,7 +2566,7 @@ it.layer(
       (["output", "write"] as const).map((boundary) => ({ source, boundary })),
     ),
   )(
-    "restores ownership when $boundary invalidates a $source scan during registration",
+    "reconciles ownership when $boundary invalidates a $source scan during registration",
     ({ source, boundary }) =>
       Effect.gen(function* () {
         const registrationStarted = yield* Deferred.make<void>();
@@ -2607,7 +2616,7 @@ it.layer(
         const metadata = yield* Fiber.join(poll);
         const ownership = [...ownedProcessIds];
         yield* exitSnapshotTestProcesses(manager, ptyAdapter, [terminal]);
-        expect(ownership).toEqual([9000]);
+        expect(ownership).toEqual(boundary === "write" ? [9000] : []);
         expect(metadata).toContainEqual(
           expect.objectContaining({ pid: 9000, hasRunningSubprocess: true, label: "node" }),
         );
