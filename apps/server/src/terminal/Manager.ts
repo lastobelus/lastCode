@@ -1593,10 +1593,19 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     : fallbackProcessTableSnapshot.pipe(
         Effect.map((snapshot) => ({ snapshot, snapshotSucceeded: true })),
       );
-  // Share overlapping polls and first-input captures, but never reuse a
-  // completed table after a new shell spawns or input changes its command.
-  // Zero TTL also interrupts the scan when its last waiter leaves.
-  const fetchProcessTableSnapshot = yield* Effect.cachedWithTTL(processTableSnapshot, 0);
+  // Share overlapping requests only until a spawn or write changes the table.
+  // Replacing the cache keeps new callers out of a pre-change scan; its older
+  // callers can still finish or interrupt it when the last waiter leaves.
+  let sharedProcessTableSnapshot: typeof processTableSnapshot | undefined;
+  const fetchProcessTableSnapshot = Effect.suspend(() => {
+    if (sharedProcessTableSnapshot !== undefined) return sharedProcessTableSnapshot;
+    return Effect.cachedWithTTL(processTableSnapshot, 0).pipe(
+      Effect.flatMap((cached) => {
+        sharedProcessTableSnapshot = cached;
+        return cached;
+      }),
+    );
+  });
   const customSubprocessInspector = options.subprocessInspector;
   const acquireSubprocessInspector: Effect.Effect<
     {
@@ -2363,6 +2372,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
               }
             }
             const spawnResult = yield* trySpawn(shellCandidates, terminalEnv, session);
+            sharedProcessTableSnapshot = undefined;
             ptyProcess = spawnResult.process;
             startedShell = spawnResult.shellLabel;
 
@@ -3094,6 +3104,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     yield* Effect.try({
       try: () => {
         process.write(input.data);
+        sharedProcessTableSnapshot = undefined;
         // Complete forwarding and the gate transition synchronously: a writer
         // canceled after sending its bytes must not look like untouched input.
         if (
