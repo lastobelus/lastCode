@@ -1,3 +1,4 @@
+import { resolveSidebarMode } from "../sidebarMode";
 import {
   DEFAULT_SERVER_SETTINGS,
   ProviderDriverKind,
@@ -577,4 +578,28 @@ it("uses the environment's model preferences after migration, including empty li
   );
   expect(merged.favorites).toEqual([]);
   expect(merged.providerModelPreferences).toEqual({});
+});
+
+describe("LastCode sidebar persistence", () => {
+  it.each([false, true])(
+    "preserves upstream legacy=%s through override, reload and restore",
+    async (legacySidebarEnabled) => {
+      let saved = { ...DEFAULT_CLIENT_SETTINGS, legacySidebarEnabled, legacySidebarScale: 75 };
+      persistenceMocks.getClientSettings.mockImplementation(async () => saved);
+      persistenceMocks.setClientSettings.mockImplementation(async (settings) => {
+        saved = settings;
+      });
+      await ensureClientSettingsHydrated();
+      expect(getClientSettings().lastcodeSidebarEnabled).toBe(false);
+      await updateClientSettings({ lastcodeSidebarEnabled: true });
+      expect(saved.legacySidebarEnabled).toBe(legacySidebarEnabled);
+      __resetClientSettingsPersistenceForTests();
+      await ensureClientSettingsHydrated();
+      expect(resolveSidebarMode(getClientSettings())).toBe("lastcode");
+      expect(getClientSettings().legacySidebarScale).toBe(75);
+      await updateClientSettings({ lastcodeSidebarEnabled: false });
+      expect(saved.legacySidebarEnabled).toBe(legacySidebarEnabled);
+      expect(resolveSidebarMode(saved)).toBe(legacySidebarEnabled ? "legacy" : "inbox");
+    },
+  );
 });

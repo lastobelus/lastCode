@@ -482,12 +482,25 @@ export function LastCodeSettingsPanel() {
           </>
         ) : null}
         <SettingsRow
+          {...searchableSetting("lastcode-sidebar")}
+          description="Use the LastCode project and thread tree. Overrides either upstream sidebar; turning it off restores your General → Legacy features sidebar preference."
+          control={
+            <Switch
+              aria-label="LastCode sidebar"
+              checked={clientSettings.lastcodeSidebarEnabled}
+              onCheckedChange={(checked) =>
+                updateClientSettings({ lastcodeSidebarEnabled: Boolean(checked) })
+              }
+            />
+          }
+        />
+        <SettingsRow
           {...searchableSetting("scale-legacy-sidebar")}
-          description="Scale legacy project and thread rows while leaving the sidebar header, Search field, and Projects heading unchanged. The 75% marker matches the normalized version of the original compact-sidebar patch."
+          description="Scale LastCode project and thread rows while leaving the sidebar header, Search field, and Projects heading unchanged. The 75% marker matches the normalized version of the original compact-sidebar patch."
           resetAction={
             clientSettings.legacySidebarScale !== DEFAULT_LEGACY_SIDEBAR_SCALE ? (
               <SettingResetButton
-                label="legacy sidebar scale"
+                label="LastCode sidebar scale"
                 onClick={() =>
                   updateClientSettings({ legacySidebarScale: DEFAULT_LEGACY_SIDEBAR_SCALE })
                 }
@@ -504,7 +517,7 @@ export function LastCodeSettingsPanel() {
               </output>
               <div className="relative min-w-0 flex-1 pb-3">
                 <input
-                  aria-label="Scale legacy sidebar"
+                  aria-label="Scale LastCode sidebar"
                   className="settings-slider block w-full"
                   id="legacy-sidebar-scale"
                   max={MAX_LEGACY_SIDEBAR_SCALE}
@@ -537,7 +550,7 @@ export function LastCodeSettingsPanel() {
         />
         <SettingsRow
           {...searchableSetting("thread-grouping-style")}
-          description="Choose how the Projects sidebar distinguishes subagents from ordinary threads created by an agent. This changes presentation, not thread relationships."
+          description="Choose how the LastCode sidebar distinguishes subagents from ordinary threads created by an agent. This changes presentation, not thread relationships."
           resetAction={
             clientSettings.legacySidebarThreadGroupingStyle !== "minimal" ? (
               <SettingResetButton
@@ -608,7 +621,7 @@ export function LastCodeSettingsPanel() {
         />
         <SettingsRow
           {...searchableSetting("show-worktree-indicators")}
-          description="Show the worktree icon beside threads that use a dedicated worktree in the legacy sidebar."
+          description="Show the worktree icon beside threads that use a dedicated worktree in the LastCode sidebar."
           status={
             <span className="inline-flex items-center gap-1 rounded-full bg-sidebar px-2 py-1 text-3xs tabular-nums text-secondary-label">
               {clientSettings.showThreadWorktreeIndicators ? (
@@ -624,7 +637,7 @@ export function LastCodeSettingsPanel() {
               onCheckedChange={(checked) =>
                 updateClientSettings({ showThreadWorktreeIndicators: Boolean(checked) })
               }
-              aria-label="Show worktree indicators (legacy sidebar)"
+              aria-label="Show worktree indicators (LastCode sidebar)"
             />
           }
         />

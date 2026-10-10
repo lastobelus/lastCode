@@ -1,6 +1,6 @@
 import type { ContextMenuItem } from "@t3tools/contracts";
 
-export function legacyThreadPersistenceAction(input: {
+export function lastcodeThreadPersistenceAction(input: {
   readonly persistent: boolean;
   readonly supported: boolean;
 }): ContextMenuItem | null {

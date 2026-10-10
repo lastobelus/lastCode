@@ -4,10 +4,10 @@ import { act } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import {
-  useCollapsedLegacySidebarFamilies,
-  useLegacySidebarFamiliesStore,
-} from "./legacySidebarFamilies.store";
-import { legacySidebarSubagentGroupKey } from "./legacySidebarFamilies.logic";
+  useCollapsedLastCodeSidebarFamilies,
+  useLastCodeSidebarFamiliesStore,
+} from "./lastcodeSidebarFamilies.store";
+import { lastcodeSidebarSubagentGroupKey } from "./lastcodeSidebarFamilies.logic";
 
 let renderer: ReactTestRenderer | null = null;
 
@@ -16,7 +16,7 @@ const key = (environment: string, thread: string) =>
 
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  useLegacySidebarFamiliesStore.setState({ collapsedByKey: {} });
+  useLastCodeSidebarFamiliesStore.setState({ collapsedByKey: {} });
 });
 
 afterEach(async () => {
@@ -28,10 +28,10 @@ afterEach(async () => {
 it("only updates a project subscription for its scoped threads, including grouped environments", async () => {
   const firstKey = key("environment-one", "parent");
   const groupedKey = key("environment-two", "parent");
-  const subagentGroupKey = legacySidebarSubagentGroupKey(firstKey);
+  const subagentGroupKey = lastcodeSidebarSubagentGroupKey(firstKey);
   const observed: Record<string, boolean>[] = [];
   function Probe({ threadKeys }: { threadKeys: string[] }) {
-    observed.push(useCollapsedLegacySidebarFamilies(threadKeys));
+    observed.push(useCollapsedLastCodeSidebarFamilies(threadKeys));
     return null;
   }
   const threadKeys = [firstKey, groupedKey, subagentGroupKey];
@@ -40,7 +40,7 @@ it("only updates a project subscription for its scoped threads, including groupe
   });
   const initial = observed.at(-1);
   const initialRenderCount = observed.length;
-  const { setCollapsed } = useLegacySidebarFamiliesStore.getState();
+  const { setCollapsed } = useLastCodeSidebarFamiliesStore.getState();
 
   await act(() => {
     setCollapsed(key("environment-one", "other-project-parent"), true);

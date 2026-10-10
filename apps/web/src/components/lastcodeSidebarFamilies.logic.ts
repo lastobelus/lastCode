@@ -7,7 +7,7 @@ import {
   type ThreadStatusPill,
 } from "./Sidebar.logic";
 
-export interface LegacySidebarFamilyRow {
+export interface LastCodeSidebarFamilyRow {
   thread: SidebarThreadSummary;
   key: string;
   depth: number;
@@ -25,8 +25,8 @@ export interface LegacySidebarFamilyRow {
   projectExpanded: boolean;
 }
 
-export type LegacySidebarFamilyItem =
-  | { type: "thread"; row: LegacySidebarFamilyRow }
+export type LastCodeSidebarFamilyItem =
+  | { type: "thread"; row: LastCodeSidebarFamilyRow }
   | {
       type: "subagents";
       key: string;
@@ -40,12 +40,12 @@ export type LegacySidebarFamilyItem =
       status: ThreadStatusPill | null;
     };
 
-export const legacySidebarSubagentGroupKey = (parentKey: string) => `${parentKey}:subagents`;
+export const lastcodeSidebarSubagentGroupKey = (parentKey: string) => `${parentKey}:subagents`;
 
-export const legacySidebarThreadKey = (thread: SidebarThreadSummary) =>
+export const lastcodeSidebarThreadKey = (thread: SidebarThreadSummary) =>
   scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
 
-export function legacySidebarSubagentStatusLabel(
+export function lastcodeSidebarSubagentStatusLabel(
   thread: SidebarThreadSummary,
   status: ThreadStatusPill | null,
 ): string {
@@ -61,16 +61,16 @@ export function legacySidebarSubagentStatusLabel(
   return "Idle";
 }
 
-export function legacySidebarIsAgentCreated(thread: SidebarThreadSummary): boolean {
+export function lastcodeSidebarIsAgentCreated(thread: SidebarThreadSummary): boolean {
   return thread.source.createdBy === "agent" && thread.lineage.relationshipToParent === null;
 }
 
-export function legacySidebarCreatorGroupingEligible(thread: SidebarThreadSummary): boolean {
-  return legacySidebarIsAgentCreated(thread) && thread.creatorThreadId !== undefined;
+export function lastcodeSidebarCreatorGroupingEligible(thread: SidebarThreadSummary): boolean {
+  return lastcodeSidebarIsAgentCreated(thread) && thread.creatorThreadId !== undefined;
 }
 
 /** Resolve attribution separately from the project-local display family. */
-export function legacySidebarCreatorDetails(
+export function lastcodeSidebarCreatorDetails(
   thread: SidebarThreadSummary,
   creator: SidebarThreadSummary | null,
 ) {
@@ -81,12 +81,12 @@ export function legacySidebarCreatorDetails(
       ? creator
       : null;
   const availableCreator = knownCreator && threadShellIsVisible(knownCreator) ? knownCreator : null;
-  const isAgentCreated = legacySidebarIsAgentCreated(thread);
+  const isAgentCreated = lastcodeSidebarIsAgentCreated(thread);
   const unavailableLabel =
     isAgentCreated && thread.creatorThreadId && !availableCreator
       ? `Creator unavailable (${thread.creatorThreadId})`
       : null;
-  const eligible = legacySidebarCreatorGroupingEligible(thread);
+  const eligible = lastcodeSidebarCreatorGroupingEligible(thread);
   return {
     description: isAgentCreated
       ? availableCreator
@@ -99,7 +99,7 @@ export function legacySidebarCreatorDetails(
   };
 }
 
-export function legacySidebarFamilySummary(row: LegacySidebarFamilyRow): string {
+export function lastcodeSidebarFamilySummary(row: LastCodeSidebarFamilyRow): string {
   const summarize = (counts: ReadonlyMap<string, number>, singular: string, plural: string) => {
     const total = Array.from(counts.values()).reduce((sum, count) => sum + count, 0);
     if (!total) return null;
@@ -118,7 +118,7 @@ export function legacySidebarFamilySummary(row: LegacySidebarFamilyRow): string 
  * Creator grouping only changes display placement; it never changes the conversation lineage.
  * Unavailable parents/creators and cycles leave the child reachable as an identified root.
  */
-export function projectLegacySidebarFamilies(input: {
+export function projectLastCodeSidebarFamilies(input: {
   threads: readonly SidebarThreadSummary[];
   collapsedByKey: Readonly<Record<string, boolean>>;
   activeThreadKey: string | null;
@@ -128,7 +128,7 @@ export function projectLegacySidebarFamilies(input: {
   groupingStyle?: "minimal" | "typed-groups";
   statusForThread?: (thread: SidebarThreadSummary) => ThreadStatusPill | null;
 }) {
-  const byKey = new Map(input.threads.map((thread) => [legacySidebarThreadKey(thread), thread]));
+  const byKey = new Map(input.threads.map((thread) => [lastcodeSidebarThreadKey(thread), thread]));
   const parentByKey = new Map<string, string>();
   const unavailableByKey = new Map<string, string>();
   const creatorGroupingWarningByKey = new Map<string, string>();
@@ -151,7 +151,7 @@ export function projectLegacySidebarFamilies(input: {
   }
 
   for (const [key, thread] of byKey) {
-    if (!legacySidebarCreatorGroupingEligible(thread) || thread.creatorGrouping !== "grouped")
+    if (!lastcodeSidebarCreatorGroupingEligible(thread) || thread.creatorGrouping !== "grouped")
       continue;
     const creatorId = thread.creatorThreadId!;
     const creatorKey = scopedThreadKey(scopeThreadRef(thread.environmentId, creatorId));
@@ -232,7 +232,7 @@ export function projectLegacySidebarFamilies(input: {
     input.collapsedByKey[key] === false ||
     (input.collapsedByKey[key] !== true && selectedDescendant);
 
-  const allRows: LegacySidebarFamilyRow[] = [];
+  const allRows: LastCodeSidebarFamilyRow[] = [];
   const stack = roots.toReversed().map((key) => ({ key, depth: 0 }));
   while (stack.length) {
     const { key, depth } = stack.pop()!;
@@ -263,7 +263,7 @@ export function projectLegacySidebarFamilies(input: {
   const statusByKey = new Map(
     allRows.map((row) => {
       const status = input.statusForThread?.(row.thread) ?? null;
-      const failed = legacySidebarSubagentStatusLabel(row.thread, status) === "Failed";
+      const failed = lastcodeSidebarSubagentStatusLabel(row.thread, status) === "Failed";
       return [
         row.key,
         failed
@@ -283,7 +283,7 @@ export function projectLegacySidebarFamilies(input: {
     if (!parent) continue;
     parent.descendantCount += row.descendantCount + 1;
     const rowStatus = statusByKey.get(row.key) ?? null;
-    const label = legacySidebarSubagentStatusLabel(row.thread, rowStatus);
+    const label = lastcodeSidebarSubagentStatusLabel(row.thread, rowStatus);
     const ownCounts = isSidebarSubagentThread(row.thread)
       ? parent.descendantStatusCounts
       : parent.createdThreadStatusCounts;
@@ -306,9 +306,12 @@ export function projectLegacySidebarFamilies(input: {
   const previewRoots = input.listExpanded ? roots : roots.slice(0, input.previewCount);
   const renderedRootKeys = new Set(input.projectExpanded ? previewRoots : []);
   if (selectedRoot) renderedRootKeys.add(selectedRoot);
-  const renderedRows: LegacySidebarFamilyRow[] = [];
-  const renderedItems: LegacySidebarFamilyItem[] = [];
-  const subagentGroups = new Map<string, Extract<LegacySidebarFamilyItem, { type: "subagents" }>>();
+  const renderedRows: LastCodeSidebarFamilyRow[] = [];
+  const renderedItems: LastCodeSidebarFamilyItem[] = [];
+  const subagentGroups = new Map<
+    string,
+    Extract<LastCodeSidebarFamilyItem, { type: "subagents" }>
+  >();
   const hiddenThreads: SidebarThreadSummary[] = [];
   let rootIsRendered = false;
   let collapsedDepth: number | null = null;
@@ -327,7 +330,7 @@ export function projectLegacySidebarFamilies(input: {
       else if (!selectedPath.has(row.key)) continue;
     }
     if (row.parentKey && isSidebarSubagentThread(row.thread)) {
-      const groupKey = legacySidebarSubagentGroupKey(row.parentKey);
+      const groupKey = lastcodeSidebarSubagentGroupKey(row.parentKey);
       let group = subagentGroups.get(groupKey);
       if (!group) {
         const subagents = (childrenByKey.get(row.parentKey) ?? []).filter((key) =>
