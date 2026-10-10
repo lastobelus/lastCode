@@ -449,7 +449,7 @@ const make = Effect.gen(function* () {
     lease: PreviewHostingLease,
   ) {
     let observation = "No HTTP response was attributed to the owned preview terminal.";
-    let timeoutMs = 0;
+    const timeoutMs = READY_TIMEOUT_MS;
     const result = yield* Effect.scoped(
       Effect.gen(function* () {
         const ready = yield* Deferred.make<DiscoveredLocalServer | null>();
@@ -461,7 +461,8 @@ const make = Effect.gen(function* () {
           ),
           (unsubscribe) => Effect.sync(unsubscribe),
         );
-        const listener = (servers: ReadonlyArray<DiscoveredLocalServer>) => {
+        const refreshRequests = yield* Queue.dropping<void>(1);
+        const checkReady = (servers: ReadonlyArray<DiscoveredLocalServer>) => {
           const expectedUrl = discoveryUrl(lease.url);
           const responding = servers.find((server) => discoveryUrl(server.url) === expectedUrl);
           if (responding !== undefined) {
@@ -475,14 +476,34 @@ const make = Effect.gen(function* () {
               server.terminal.terminalId === lease.terminalId
             );
           });
-          return match ? Deferred.succeed(ready, match).pipe(Effect.asVoid) : Effect.void;
+          return { responding, match };
         };
-        yield* discovery.subscribe({ configuredUrls: [lease.url], initialSnapshot: [] }, listener);
+        // Scanner callbacks must return before refreshing metadata or scanning again.
+        yield* Effect.forkScoped(
+          Effect.forever(
+            Effect.gen(function* () {
+              yield* Queue.take(refreshRequests);
+              yield* terminals.refreshMetadata;
+              const refreshed = checkReady(yield* discovery.scan([lease.url])).match;
+              if (refreshed) yield* Deferred.succeed(ready, refreshed);
+              // The fresh scan is checked directly, never queued for another refresh.
+            }),
+          ),
+        );
+        yield* discovery.subscribe(
+          { configuredUrls: [lease.url], initialSnapshot: [] },
+          (servers) => {
+            const { responding, match } = checkReady(servers);
+            if (match) return Deferred.succeed(ready, match).pipe(Effect.asVoid);
+            return responding === undefined
+              ? Effect.void
+              : Queue.offer(refreshRequests, undefined).pipe(Effect.asVoid);
+          },
+        );
         yield* discovery.retain;
-        timeoutMs = READY_TIMEOUT_MS;
-        return yield* Deferred.await(ready).pipe(Effect.timeoutOption(Duration.millis(timeoutMs)));
+        return yield* Deferred.await(ready);
       }),
-    );
+    ).pipe(Effect.timeoutOption(Duration.millis(timeoutMs)));
     if (Option.isNone(result)) {
       return yield* failReadiness(lease, `${observation} Readiness deadline: ${timeoutMs} ms.`);
     }

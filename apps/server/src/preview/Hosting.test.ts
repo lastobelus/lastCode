@@ -2771,6 +2771,161 @@ describe("PreviewHosting", () => {
     }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
   );
 
+  it.effect.each(["preview", "unowned", "foreign"] as const)(
+    "refreshes ownership during readiness and accepts only the preview terminal (%s)",
+    (owner) =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(10_000);
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-hosting-ownership-" });
+        const config = yield* Effect.provide(
+          ServerConfig.ServerConfig,
+          ServerConfig.layerTest(process.cwd(), root),
+        );
+        const callbackReturned = yield* Deferred.make<void>();
+        const refreshedScan = yield* Deferred.make<void>();
+        let postWriteRefreshes = 0;
+        let scansAfterWrite = 0;
+        const harness = testTerminalHarness({
+          onRefreshMetadata: () =>
+            Effect.gen(function* () {
+              if (harness.writes.length === 0) return;
+              // Refresh cannot wait inside the discovery callback that triggered it.
+              yield* Deferred.await(callbackReturned);
+              postWriteRefreshes += 1;
+            }),
+        });
+        const server = (terminal: DiscoveredLocalServer["terminal"]): DiscoveredLocalServer => ({
+          host: "localhost",
+          port: 5173,
+          url: PREVIEW_URL,
+          processName: "node",
+          pid: 100,
+          terminal,
+        });
+        const foreignOwner = {
+          threadId: ThreadId.make("other-thread"),
+          terminalId: "other-terminal",
+        };
+        const discovery = Layer.mock(PortScanner.PortDiscovery)({
+          scan: () =>
+            Effect.gen(function* () {
+              if (harness.writes.length === 0) return [];
+              scansAfterWrite += 1;
+              const opened = harness.opens[0]!;
+              const terminal =
+                owner === "preview" && postWriteRefreshes > 0
+                  ? { threadId: ThreadId.make(opened.threadId), terminalId: opened.terminalId }
+                  : owner === "foreign"
+                    ? foreignOwner
+                    : null;
+              yield* Deferred.succeed(refreshedScan, undefined);
+              return [server(terminal)];
+            }),
+          subscribe: (_input, listener) =>
+            listener([server(owner === "foreign" ? foreignOwner : null)]).pipe(
+              Effect.andThen(Deferred.succeed(callbackReturned, undefined)),
+              Effect.asVoid,
+            ),
+          retain: Effect.void,
+        });
+        const layer = PreviewHosting.layer.pipe(
+          Layer.provideMerge(
+            Layer.mergeAll(
+              NodeServices.layer,
+              FetchHttpClient.layer,
+              ServerConfig.layer(config),
+              terminalLayer(harness),
+              discovery,
+            ),
+          ),
+        );
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            const pending = yield* Effect.forkScoped(
+              Effect.result(
+                hosting.launch({
+                  threadId: "thread-1",
+                  command: "pnpm dev --port 5173",
+                  cwd: "/workspace",
+                  url: PREVIEW_URL,
+                }),
+              ),
+            );
+            yield* Deferred.await(refreshedScan);
+            assert.equal(postWriteRefreshes, 1);
+            assert.equal(scansAfterWrite, 1);
+            if (owner !== "preview") yield* TestClock.adjust(Duration.seconds(31));
+            const result = yield* Fiber.join(pending);
+            if (owner === "preview") {
+              assert.equal(result._tag, "Success");
+              if (result._tag === "Success") assert.equal(result.success.status, "active");
+              assert.equal(DateTime.toEpochMillis(yield* DateTime.now), 10_000);
+              assert.equal(harness.closes.length, 0);
+            } else {
+              assert.equal(result._tag, "Failure");
+              if (result._tag === "Failure") {
+                assert.include(result.failure.message, "ownership did not match");
+                assert.include(result.failure.message, "Readiness deadline: 30000 ms");
+              }
+              assert.deepEqual(yield* hosting.list(), []);
+              assert.equal(harness.closes.length, 1);
+            }
+            assert.equal(scansAfterWrite, 1);
+          }).pipe(Effect.provide(layer)),
+        );
+      }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
+  );
+
+  it.effect("keeps the readiness deadline while an ownership refresh is blocked", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({
+        prefix: "preview-hosting-refresh-deadline-",
+      });
+      const config = yield* Effect.provide(
+        ServerConfig.ServerConfig,
+        ServerConfig.layerTest(process.cwd(), root),
+      );
+      const refreshing = yield* Deferred.make<void>();
+      const blocked = yield* Deferred.make<void>();
+      let postWriteRefreshes = 0;
+      const harness = testTerminalHarness({
+        onRefreshMetadata: () =>
+          Effect.gen(function* () {
+            if (harness.writes.length === 0 || postWriteRefreshes++ > 0) return;
+            yield* Deferred.succeed(refreshing, undefined);
+            yield* Deferred.await(blocked);
+          }),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const pending = yield* Effect.forkScoped(
+            Effect.result(
+              hosting.launch({
+                threadId: "thread-1",
+                command: "pnpm dev --port 5173",
+                cwd: "/workspace",
+                url: PREVIEW_URL,
+              }),
+            ),
+          );
+          yield* Deferred.await(refreshing);
+          yield* TestClock.adjust(Duration.seconds(31));
+          const result = yield* Fiber.join(pending);
+          assert.equal(result._tag, "Failure");
+          if (result._tag === "Failure") {
+            assert.include(result.failure.message, "Readiness deadline: 30000 ms");
+          }
+          assert.deepEqual(yield* hosting.list(), []);
+          assert.equal(harness.closes.length, 1);
+        }).pipe(Effect.provide(hostingLayer(config, harness, true, [], false))),
+      );
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
+  );
+
   it.effect("does not treat an unattributed responding URL as preview readiness", () =>
     Effect.gen(function* () {
       yield* TestClock.setTime(10_000);
