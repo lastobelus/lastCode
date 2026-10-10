@@ -478,9 +478,9 @@ it.effect.each(["archive", "delete"] as const)(
   },
 );
 
-it.effect(
-  "preserves an interrupted launch's initial message retry while its target is archived",
-  () => {
+it.effect.each(["target", "sender"] as const)(
+  "preserves an interrupted launch's initial message retry while its %s is archived",
+  (inactive) => {
     const harness = makeHarness({ runSetup: () => Effect.never });
     return Effect.gen(function* () {
       const launches = yield* ThreadLaunch.ThreadLaunchService;
@@ -488,11 +488,29 @@ it.effect(
       const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
       const eventSink = yield* EventSink.EventSinkV2;
       const outbox = yield* EffectOutbox.EffectOutboxV2;
-      const { threadId: _unusedThreadId, ...input } = launchInput({
+      const senderThreadId =
+        inactive === "sender" ? ThreadId.make("thread:interrupted-launch-sender") : undefined;
+      if (senderThreadId !== undefined) {
+        yield* launches.launch(
+          launchInput({
+            command: "create-interrupted-launch-sender",
+            thread: senderThreadId,
+            workspace: { type: "existing_worktree", worktreePath: "/existing-worktree" },
+          }),
+        );
+      }
+      const { threadId: _unusedThreadId, ...baseInput } = launchInput({
         command: "launch-interrupted-after-create",
         thread: "unused",
         message: "Deliver after reopening",
       });
+      const input = {
+        ...baseInput,
+        initialMessage: {
+          ...baseInput.initialMessage!,
+          ...(senderThreadId === undefined ? {} : { senderThreadId }),
+        },
+      };
       const created = yield* Deferred.make<void>();
       const commitCommand = eventSink.commitCommand;
       const commitSpy = vi.spyOn(eventSink, "commitCommand").mockImplementation((command) =>
@@ -514,7 +532,7 @@ it.effect(
         yield* threads.dispatch({
           type: "thread.archive",
           commandId: CommandId.make("archive-interrupted-launch"),
-          threadId,
+          threadId: senderThreadId ?? threadId,
         });
         const failed = yield* launches.launch(input).pipe(Effect.flip);
         assert.equal(failed.operation, "dispatch-message");
@@ -526,7 +544,7 @@ it.effect(
         yield* threads.dispatch({
           type: "thread.unarchive",
           commandId: CommandId.make("unarchive-interrupted-launch"),
-          threadId,
+          threadId: senderThreadId ?? threadId,
         });
         const retried = yield* launches.launch(input);
         assert.equal(retried.threadId, threadId);
@@ -1751,6 +1769,108 @@ it.effect("falls back when the source control writer is unavailable", () =>
       );
     }).pipe(Effect.provide(harness.layer));
   }),
+);
+
+it.effect.each(["archive", "delete", "missing", "stopping"] as const)(
+  "does not allocate a Scratch folder for an inactive sender (%s)",
+  (inactive) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const scratchRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-launch-scratch-" });
+      let folderCount = 0;
+      const harness = makeHarness({
+        runSetup: () => Effect.never,
+        managedFolders: Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+          namedProjectsRoot: scratchRoot,
+          folderForThread: () =>
+            Effect.gen(function* () {
+              const path = `${scratchRoot}/folder-${++folderCount}`;
+              yield* fs.makeDirectory(path).pipe(Effect.orDie);
+              return Option.some(path);
+            }),
+        }),
+      });
+      yield* Effect.gen(function* () {
+        const launches = yield* ThreadLaunch.ThreadLaunchService;
+        const threads = yield* ThreadManagement.ThreadManagementService;
+        const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+        const senderThreadId = ThreadId.make("thread:scratch-sender");
+        if (inactive !== "missing") {
+          yield* launches.launch(
+            launchInput({
+              command: "create-scratch-sender",
+              thread: senderThreadId,
+              ...(inactive === "stopping" ? { message: "Start sender" } : {}),
+              workspace: { type: "existing_worktree", worktreePath: "/existing-worktree" },
+            }),
+          );
+          if (inactive === "stopping") {
+            yield* threads.dispatch({
+              type: "thread.stop",
+              commandId: CommandId.make("stop-scratch-sender"),
+              threadId: senderThreadId,
+            });
+            const orchestrator = yield* Orchestrator.OrchestratorV2;
+            yield* orchestrator.dispatch({
+              type: "thread.archive",
+              commandId: CommandId.make("deactivate-scratch-sender"),
+              threadId: senderThreadId,
+            });
+            assert.equal(
+              (yield* threads.getThreadShell(senderThreadId))?.archivePending?.status,
+              "stopping",
+            );
+          } else {
+            yield* threads.dispatch({
+              type: inactive === "archive" ? "thread.archive" : "thread.delete",
+              commandId: CommandId.make("deactivate-scratch-sender"),
+              threadId: senderThreadId,
+            });
+          }
+        }
+        const input = {
+          ...launchInput({ command: "scratch-from-sender", thread: "thread:scratch-target" }),
+          initialMessage: { text: "Start work", attachments: [], senderThreadId },
+          createdBy: "agent" as const,
+          creationSource: "mcp" as const,
+        };
+        const failed = yield* launches.launch(input).pipe(Effect.flip);
+        assert.equal(failed.operation, "dispatch-message");
+        assert.isEmpty(yield* fs.readDirectory(scratchRoot));
+        assert.ok(isDispatchError(failed.cause));
+        assert.include(String(failed.cause.cause), "not active");
+        assert.isNull(yield* threads.getThreadShell(input.threadId));
+        for (const commandId of [
+          input.commandId,
+          CommandId.make(`${input.commandId}:initial-message`),
+        ]) {
+          assert.isTrue(Option.isNone(yield* receipts.getByCommandId(commandId)));
+        }
+        if (inactive === "archive") {
+          yield* threads.dispatch({
+            type: "thread.unarchive",
+            commandId: CommandId.make("reopen-scratch-sender"),
+            threadId: senderThreadId,
+          });
+          const launched = yield* launches.launch(input);
+          assert.lengthOf(launched.projection.messages, 1);
+          assert.deepEqual(yield* fs.readDirectory(scratchRoot), ["folder-1"]);
+          yield* threads.dispatch({
+            type: "thread.archive",
+            commandId: CommandId.make("rearchive-scratch-sender"),
+            threadId: senderThreadId,
+          });
+          const replayed = yield* launches.launch(input);
+          assert.isTrue(replayed.resumed);
+          assert.lengthOf(replayed.projection.messages, 1);
+          assert.equal(
+            replayed.projection.thread.worktreePath,
+            launched.projection.thread.worktreePath,
+          );
+          assert.deepEqual(yield* fs.readDirectory(scratchRoot), ["folder-1"]);
+        }
+      }).pipe(Effect.provide(harness.layer));
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
 it.effect("runs a Scratch thread launched at the root in its own folder", () =>
