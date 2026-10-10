@@ -169,3 +169,119 @@ describe("admission publication (controlled platform fixtures, not native Window
     expect(NodeFS.readdirSync(directory)).toEqual([]);
   });
 });
+
+describe("empty admission directory cleanup", () => {
+  it("removes a native empty directory on release", async () => {
+    const directory = temporaryDirectory();
+    const release = await acquireLocalCiAdmissionLock(directory, { forceDirectoryLock: true });
+    const rmdir = vi.spyOn(NodeFS, "rmdirSync");
+    expect(release()).toBeUndefined();
+    expect(rmdir.mock.calls).toEqual([[NodePath.join(directory, "admission.lock.d")]]);
+    expect(NodeFS.readdirSync(directory)).toEqual([]);
+  });
+
+  it("ignores a native missing directory on release", async () => {
+    const directory = temporaryDirectory();
+    const lock = NodePath.join(directory, "admission.lock.d");
+    const release = await acquireLocalCiAdmissionLock(directory, { forceDirectoryLock: true });
+    const realUnlink = NodeFS.unlinkSync;
+    const realRmdir = NodeFS.rmdirSync;
+    vi.spyOn(NodeFS, "unlinkSync").mockImplementation((path) => {
+      realUnlink(path);
+      realRmdir(lock);
+    });
+    const rmdir = vi.spyOn(NodeFS, "rmdirSync");
+    expect(release()).toBeUndefined();
+    expect(rmdir.mock.calls).toEqual([[lock]]);
+  });
+
+  it("preserves a newly published owner's native nonempty directory", async () => {
+    const directory = temporaryDirectory();
+    const lock = NodePath.join(directory, "admission.lock.d");
+    const release = await acquireLocalCiAdmissionLock(directory, { forceDirectoryLock: true });
+    const freshOwner = NodePath.join(lock, "owner-fresh.json");
+    const realUnlink = NodeFS.unlinkSync;
+    vi.spyOn(NodeFS, "unlinkSync").mockImplementation((path) => {
+      realUnlink(path);
+      NodeFS.writeFileSync(freshOwner, "fresh owner");
+    });
+    const rmdir = vi.spyOn(NodeFS, "rmdirSync");
+    expect(release()).toBeUndefined();
+    expect(rmdir.mock.calls).toEqual([[lock]]);
+    expect(NodeFS.readFileSync(freshOwner, "utf8")).toBe("fresh owner");
+  });
+
+  it.each(["ENOENT", "ENOTEMPTY", "EEXIST"])(
+    "ignores only controlled %s with ordered lazy probes",
+    async (code) => {
+      const directory = temporaryDirectory();
+      const release = await acquireLocalCiAdmissionLock(directory, { forceDirectoryLock: true });
+      const observations: string[] = [];
+      const error = new Proxy(
+        { code },
+        {
+          has(target, property) {
+            observations.push(`has:${String(property)}`);
+            return Reflect.has(target, property);
+          },
+          get(target, property) {
+            observations.push(`get:${String(property)}`);
+            return Reflect.get(target, property);
+          },
+        },
+      );
+      const rmdir = vi.spyOn(NodeFS, "rmdirSync").mockImplementation(() => {
+        throw error;
+      });
+      expect(release()).toBeUndefined();
+      expect(observations).toEqual(
+        Array.from({ length: ["ENOENT", "ENOTEMPTY", "EEXIST"].indexOf(code) + 1 }, () => [
+          "has:code",
+          "get:code",
+        ]).flat(),
+      );
+      expect(rmdir.mock.calls).toEqual([[NodePath.join(directory, "admission.lock.d")]]);
+      release();
+      expect(rmdir).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("propagates the identical unknown error without repairing the directory on retry", async () => {
+    const directory = temporaryDirectory();
+    const release = await acquireLocalCiAdmissionLock(directory, { forceDirectoryLock: true });
+    const error = { code: "EACCES" };
+    const realRmdir = NodeFS.rmdirSync;
+    const rmdir = vi
+      .spyOn(NodeFS, "rmdirSync")
+      .mockImplementationOnce(() => {
+        throw error;
+      })
+      .mockImplementation(realRmdir);
+    let thrown: unknown;
+    try {
+      release();
+    } catch (actual) {
+      thrown = actual;
+    }
+    expect(thrown).toBe(error);
+    expect(release()).toBeUndefined();
+    expect(NodeFS.readdirSync(directory)).toEqual(["admission.lock.d"]);
+    expect(rmdir).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains repeated getter reads rather than caching the error code", async () => {
+    const directory = temporaryDirectory();
+    const release = await acquireLocalCiAdmissionLock(directory, { forceDirectoryLock: true });
+    const values = ["other", "other", "EEXIST"];
+    let reads = 0;
+    vi.spyOn(NodeFS, "rmdirSync").mockImplementation(() => {
+      throw {
+        get code() {
+          return values[reads++];
+        },
+      };
+    });
+    expect(release()).toBeUndefined();
+    expect(reads).toBe(3);
+  });
+});
