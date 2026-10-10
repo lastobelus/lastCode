@@ -15,6 +15,9 @@ const testState = vi.hoisted(() => {
     readonly environmentId: string;
     readonly promotedTo: null;
     readonly threadId: string;
+    readonly branch?: string | null;
+    readonly worktreePath?: string | null;
+    readonly environmentSelection?: "auto" | "manual";
   } | null = null;
   const router = {
     state: {
@@ -28,7 +31,7 @@ const testState = vi.hoisted(() => {
   const draftStore = {
     getComposerDraft: vi.fn(() => ({})),
     getDraftSessionByLogicalProjectKey: vi.fn(() => storedDraft),
-    getDraftSession: vi.fn(() => null),
+    getDraftSession: vi.fn(() => storedDraft),
     getDraftThread: vi.fn(() => null),
     applyStickyState: vi.fn(),
     setDraftThreadContext: vi.fn(),
@@ -60,6 +63,7 @@ const testState = vi.hoisted(() => {
         defaultRuntimeMode: "full-access",
       };
       router.state.location.href = "/";
+      router.state.matches[0]!.params = {};
       router.navigate.mockClear();
       draftStore.setDraftThreadContext.mockClear();
       draftStore.setLogicalProjectDraftThreadId.mockClear();
@@ -173,14 +177,105 @@ vi.mock("../state/server", () => ({
   environmentServerConfigsAtom: {},
   primaryServerSettingsAtom: "primary-settings",
 }));
-vi.mock("../threadRoutes", () => ({ resolveThreadRouteTarget: () => null }));
+vi.mock("../threadRoutes", () => ({
+  resolveThreadRouteTarget: (params: { draftId?: string }) =>
+    params.draftId ? { kind: "draft", draftId: params.draftId } : null,
+}));
 vi.mock("../uiStateStore", () => ({
   legacyProjectCwdPreferenceKey: () => "remote-project",
   useUiStateStore: () => [],
 }));
-vi.mock("./useSettings", () => ({ useClientSettings: () => ({}) }));
+vi.mock("./useSettings", () => ({
+  useClientSettings: (select: (settings: { loadBalancingEnabled: boolean }) => unknown) =>
+    select({ loadBalancingEnabled: false }),
+}));
 
 import { useNewThreadHandler } from "./useHandleNewThread";
+
+it.each([
+  { branch: "feature", worktreePath: null },
+  { branch: "feature", worktreePath: "/workspace/feature" },
+])("keeps an open empty draft's chosen checkout on its host: %j", async (workspace) => {
+  testState.reset({
+    draftId: "draft-existing",
+    environmentId: "environment-ssh",
+    promotedTo: null,
+    threadId: "thread-existing",
+    ...workspace,
+  });
+  testState.router.state.matches[0]!.params = { draftId: "draft-existing" };
+  testState.router.state.location.href = "/draft/draft-existing";
+  const projectRef = { environmentId: "environment-ssh", projectId: "project-remote" } as never;
+
+  await useNewThreadHandler()(projectRef);
+
+  expect(testState.draftStore.setLogicalProjectDraftThreadId).toHaveBeenCalledWith(
+    "remote-project",
+    projectRef,
+    "draft-existing",
+    expect.objectContaining({ environmentSelection: "manual", loadBalancedEnvironmentId: null }),
+  );
+});
+
+it.each([
+  { environmentSelection: "manual", branch: null },
+  { environmentSelection: "auto", branch: "main" },
+] as const)(
+  "keeps an open empty draft's routing intent without an override: %j",
+  async (routing) => {
+    testState.reset({
+      draftId: "draft-existing",
+      environmentId: "environment-ssh",
+      promotedTo: null,
+      threadId: "thread-existing",
+      ...routing,
+      worktreePath: null,
+    });
+    testState.router.state.matches[0]!.params = { draftId: "draft-existing" };
+    testState.router.state.location.href = "/draft/draft-existing";
+    const projectRef = { environmentId: "environment-ssh", projectId: "project-remote" } as never;
+
+    await useNewThreadHandler()(projectRef);
+
+    expect(testState.draftStore.setLogicalProjectDraftThreadId).toHaveBeenCalledWith(
+      "remote-project",
+      projectRef,
+      "draft-existing",
+      expect.objectContaining({
+        environmentSelection: routing.environmentSelection,
+        loadBalancedEnvironmentId: null,
+      }),
+    );
+  },
+);
+
+it("clears an open empty draft's checkout when Auto balance is explicitly selected", async () => {
+  testState.reset({
+    draftId: "draft-existing",
+    environmentId: "environment-ssh",
+    promotedTo: null,
+    threadId: "thread-existing",
+    branch: "feature",
+    worktreePath: "/workspace/feature",
+  });
+  testState.router.state.matches[0]!.params = { draftId: "draft-existing" };
+  testState.router.state.location.href = "/draft/draft-existing";
+  const projectRef = { environmentId: "environment-ssh", projectId: "project-remote" } as never;
+
+  await useNewThreadHandler()(projectRef, { environmentSelection: "auto" });
+
+  expect(testState.draftStore.setLogicalProjectDraftThreadId).toHaveBeenCalledWith(
+    "remote-project",
+    projectRef,
+    "draft-existing",
+    expect.objectContaining({
+      environmentSelection: "auto",
+      loadBalancedEnvironmentId: null,
+      branch: null,
+      worktreePath: null,
+    }),
+  );
+});
 
 describe.each([
   ["new", null],
@@ -194,6 +289,96 @@ describe.each([
     },
   ],
 ])("useNewThreadHandler with a %s draft", (_, draft) => {
+  it.each(["manual", "auto"] as const)(
+    "preserves the initial %s host choice and clears a previous automatic result",
+    async (environmentSelection) => {
+      testState.reset(draft);
+      const projectRef = {
+        environmentId: "environment-ssh",
+        projectId: "project-remote",
+      } as never;
+      const opened = await useNewThreadHandler()(projectRef, { environmentSelection });
+
+      expect(testState.draftStore.setLogicalProjectDraftThreadId).toHaveBeenCalledWith(
+        "remote-project",
+        projectRef,
+        opened!.draftId,
+        expect.objectContaining({ environmentSelection, loadBalancedEnvironmentId: null }),
+      );
+      if (draft) {
+        expect(testState.draftStore.setDraftThreadContext).toHaveBeenCalledWith(
+          draft.draftId,
+          expect.objectContaining({ environmentSelection, loadBalancedEnvironmentId: null }),
+        );
+      }
+    },
+  );
+
+  it("defaults to automatic intent before the load-balancing setting is hydrated", async () => {
+    testState.reset(draft);
+    const projectRef = {
+      environmentId: "environment-ssh",
+      projectId: "project-remote",
+    } as never;
+    const opened = await useNewThreadHandler()(projectRef);
+
+    expect(testState.draftStore.setLogicalProjectDraftThreadId).toHaveBeenCalledWith(
+      "remote-project",
+      projectRef,
+      opened!.draftId,
+      expect.objectContaining({ environmentSelection: "auto", loadBalancedEnvironmentId: null }),
+    );
+  });
+
+  it("keeps an explicit checkout on its selected host", async () => {
+    testState.reset(draft);
+    const projectRef = {
+      environmentId: "environment-ssh",
+      projectId: "project-remote",
+    } as never;
+    const opened = await useNewThreadHandler()(projectRef, {
+      envMode: "worktree",
+      branch: "feature",
+      worktreePath: "/workspace/feature",
+    });
+
+    expect(testState.draftStore.setLogicalProjectDraftThreadId).toHaveBeenCalledWith(
+      "remote-project",
+      projectRef,
+      opened!.draftId,
+      expect.objectContaining({ environmentSelection: "manual" }),
+    );
+  });
+
+  it("resamples an automatic background draft despite the previous host's branch", async () => {
+    testState.reset(draft);
+    const projectRef = {
+      environmentId: "environment-ssh",
+      projectId: "project-remote",
+    } as never;
+    const opened = await useNewThreadHandler()(projectRef, {
+      environmentSelection: "auto",
+      envMode: "worktree",
+      branch: "main",
+      worktreePath: null,
+      startFromOrigin: true,
+    });
+
+    expect(testState.draftStore.setLogicalProjectDraftThreadId).toHaveBeenCalledWith(
+      "remote-project",
+      projectRef,
+      opened!.draftId,
+      expect.objectContaining({
+        environmentSelection: "auto",
+        loadBalancedEnvironmentId: null,
+        branch: null,
+        worktreePath: null,
+        envMode: "worktree",
+        startFromOrigin: true,
+      }),
+    );
+  });
+
   it.each(["approval-required", "auto-accept-edits", "auto", "full-access"] as const)(
     "uses the target environment's %s permissions for new threads",
     async (runtimeMode) => {

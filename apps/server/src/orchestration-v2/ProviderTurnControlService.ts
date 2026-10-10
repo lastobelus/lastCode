@@ -15,7 +15,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import * as ProjectionStore from "./ProjectionStore.ts";
-import { ProviderAdapterSteerRunError } from "./ProviderAdapter.ts";
+import { ProviderAdapterSteerRunError } from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 
 const yieldToRuntime = Effect.yieldNow.pipe(

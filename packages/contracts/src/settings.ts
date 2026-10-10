@@ -83,6 +83,13 @@ export const SidebarThreadPreviewCount = Schema.Int.check(
 );
 export type SidebarThreadPreviewCount = typeof SidebarThreadPreviewCount.Type;
 const DEFAULT_SIDEBAR_THREAD_PREVIEW_COUNT: SidebarThreadPreviewCount = 6;
+export const MIN_HANDOFFS_MENU_LIMIT = 1;
+export const MAX_HANDOFFS_MENU_LIMIT = 50;
+export const HandoffsMenuLimit = Schema.Int.check(
+  Schema.isBetween({ minimum: MIN_HANDOFFS_MENU_LIMIT, maximum: MAX_HANDOFFS_MENU_LIMIT }),
+);
+export type HandoffsMenuLimit = typeof HandoffsMenuLimit.Type;
+export const DEFAULT_HANDOFFS_MENU_LIMIT: HandoffsMenuLimit = 7;
 export const MIN_LEGACY_SIDEBAR_SCALE = 50;
 export const MAX_LEGACY_SIDEBAR_SCALE = 100;
 export const LEGACY_SIDEBAR_SCALE_REFERENCE = 75;
@@ -146,6 +153,22 @@ export const AppearanceContrast = Schema.Int.check(
 );
 export type AppearanceContrast = typeof AppearanceContrast.Type;
 const DEFAULT_APPEARANCE_CONTRAST: AppearanceContrast = 100;
+export const MIN_SCROLLBAR_WIDTH = 1;
+export const MAX_SCROLLBAR_WIDTH = 12;
+export const ScrollbarWidth = Schema.Int.check(
+  Schema.isBetween({ minimum: MIN_SCROLLBAR_WIDTH, maximum: MAX_SCROLLBAR_WIDTH }),
+);
+export type ScrollbarWidth = typeof ScrollbarWidth.Type;
+export const DEFAULT_SCROLLBAR_WIDTH: ScrollbarWidth = 10;
+export const MIN_SCROLLBAR_MARGIN = 0;
+export const MAX_SCROLLBAR_MARGIN = 6;
+export const ScrollbarMargin = Schema.Int.check(
+  Schema.isBetween({ minimum: MIN_SCROLLBAR_MARGIN, maximum: MAX_SCROLLBAR_MARGIN }),
+);
+export type ScrollbarMargin = typeof ScrollbarMargin.Type;
+// The inline preview resize handle reaches four pixels into its neighboring
+// pane, so this default keeps the whole scrollbar thumb clear of that target.
+export const DEFAULT_SCROLLBAR_MARGIN: ScrollbarMargin = 4;
 export const MIN_PANEL_ANIMATION_DURATION_MS = 0;
 export const MAX_PANEL_ANIMATION_DURATION_MS = 400;
 export const PanelAnimationDurationMs = Schema.Int.check(
@@ -337,6 +360,13 @@ export const DiffColorScheme = Schema.Literals(["red-green", "blue-orange"]);
 export const ChatWidth = Schema.Literals(["comfortable", "wide", "full"]);
 export type ChatWidth = typeof ChatWidth.Type;
 
+export const IncomingMessageStyle = Schema.Literals(["neutral", "outline"]);
+export type IncomingMessageStyle = typeof IncomingMessageStyle.Type;
+export const IncomingMessageFillColor = Schema.NullOr(
+  TrimmedNonEmptyString.check(Schema.isPattern(/^#[\da-f]{6}$/i)),
+);
+export type IncomingMessageFillColor = typeof IncomingMessageFillColor.Type;
+
 export const ClientSettingsSchema = Schema.Struct({
   notificationMode: NotificationMode.pipe(
     Schema.withDecodingDefault(Effect.succeed("off" as const)),
@@ -346,6 +376,12 @@ export const ClientSettingsSchema = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed("red-green" as const)),
   ),
   chatWidth: ChatWidth.pipe(Schema.withDecodingDefault(Effect.succeed("comfortable" as const))),
+  incomingMessageStyle: IncomingMessageStyle.pipe(
+    Schema.withDecodingDefault(Effect.succeed("neutral" as const)),
+  ),
+  incomingMessageFillColor: IncomingMessageFillColor.pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   loadBalancingEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   loadBalancingWeights: LoadBalancingWeights.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   appearanceContrast: AppearanceContrast.pipe(
@@ -526,6 +562,13 @@ export const ClientSettingsSchema = Schema.Struct({
   legacySidebarScale: LegacySidebarScale.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_LEGACY_SIDEBAR_SCALE)),
   ),
+  largerScrollbarsEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  scrollbarWidth: ScrollbarWidth.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_SCROLLBAR_WIDTH)),
+  ),
+  scrollbarMargin: ScrollbarMargin.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_SCROLLBAR_MARGIN)),
+  ),
   roundedProjectIcons: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   showLocalEnvironmentIcon: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   showThreadProviderBadge: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
@@ -550,6 +593,9 @@ export const ClientSettingsSchema = Schema.Struct({
   ),
   sidebarThreadPreviewCount: SidebarThreadPreviewCount.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_THREAD_PREVIEW_COUNT)),
+  ),
+  handoffsMenuLimit: HandoffsMenuLimit.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_HANDOFFS_MENU_LIMIT)),
   ),
   timestampFormat: TimestampFormat.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_TIMESTAMP_FORMAT)),
@@ -1017,6 +1063,9 @@ export const WorktreeCleanupRules = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed("uncommitted-changes")),
   ),
   worktreeAfterDays: StorageRetentionDays,
+  worktreeDependenciesAfterDays: StorageRetentionDays.pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   worktreeOnMerge: Schema.Boolean,
   worktreeOnDelete: Schema.Boolean,
   worktreeUnchanged: Schema.Boolean,
@@ -1134,6 +1183,9 @@ export const StorageCleanupSettings = Schema.Struct({
   worktreeKeepWhen: WorktreeKeepWhen.pipe(
     Schema.withDecodingDefault(Effect.succeed("uncommitted-changes")),
   ),
+  worktreeDependenciesAfterDays: StorageRetentionDays.pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   worktreeAfterDays: StorageRetentionDays.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   worktreeOnMerge: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   worktreeOnDelete: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
@@ -1164,6 +1216,7 @@ export type LastCodeLocalCiSettings = typeof LastCodeLocalCiSettings.Type;
 export const DEFAULT_LASTCODE_LOCAL_CI_SETTINGS = Schema.decodeSync(LastCodeLocalCiSettings)({});
 
 export const ServerSettings = Schema.Struct({
+  environmentPauseEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   lastcodeLocalCi: LastCodeLocalCiSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_LASTCODE_LOCAL_CI_SETTINGS)),
   ),
@@ -1504,6 +1557,7 @@ const ModelSelectionPatch = Schema.Struct({
 });
 
 export const ServerSettingsPatch = Schema.Struct({
+  environmentPauseEnabled: Schema.optionalKey(Schema.Boolean),
   lastcodeLocalCi: Schema.optionalKey(
     Schema.Struct({
       quickCiMode: Schema.optionalKey(LastCodeQuickCiMode),
@@ -1521,6 +1575,7 @@ export const ServerSettingsPatch = Schema.Struct({
           mode: Schema.Literal("custom"),
           rules: Schema.Struct({
             worktreeKeepWhen: Schema.optionalKey(WorktreeKeepWhen),
+            worktreeDependenciesAfterDays: Schema.optionalKey(StorageRetentionDays),
             worktreeAfterDays: Schema.optionalKey(StorageRetentionDays),
             worktreeOnMerge: Schema.optionalKey(Schema.Boolean),
             worktreeOnDelete: Schema.optionalKey(Schema.Boolean),
@@ -1533,6 +1588,7 @@ export const ServerSettingsPatch = Schema.Struct({
   storageCleanup: Schema.optionalKey(
     Schema.Struct({
       worktreeKeepWhen: Schema.optionalKey(WorktreeKeepWhen),
+      worktreeDependenciesAfterDays: Schema.optionalKey(StorageRetentionDays),
       worktreeAfterDays: Schema.optionalKey(StorageRetentionDays),
       worktreeOnMerge: Schema.optionalKey(Schema.Boolean),
       worktreeOnDelete: Schema.optionalKey(Schema.Boolean),
@@ -1681,6 +1737,8 @@ export const ClientSettingsPatch = Schema.Struct({
   inAppNotificationsEnabled: Schema.optionalKey(Schema.Boolean),
   diffColorScheme: Schema.optionalKey(DiffColorScheme),
   chatWidth: Schema.optionalKey(ChatWidth),
+  incomingMessageStyle: Schema.optionalKey(IncomingMessageStyle),
+  incomingMessageFillColor: Schema.optionalKey(IncomingMessageFillColor),
   loadBalancingEnabled: Schema.optionalKey(Schema.Boolean),
   loadBalancingWeights: Schema.optionalKey(LoadBalancingWeights),
   appearanceContrast: Schema.optionalKey(AppearanceContrast),
@@ -1702,6 +1760,7 @@ export const ClientSettingsPatch = Schema.Struct({
   diffFilesCollapsed: Schema.optionalKey(Schema.Boolean),
   compactLegacySidebarStatuses: Schema.optionalKey(Schema.Boolean),
   showThreadWorktreeIndicators: Schema.optionalKey(Schema.Boolean),
+  handoffsMenuLimit: Schema.optionalKey(HandoffsMenuLimit),
   diffIgnoreWhitespace: Schema.optionalKey(Schema.Boolean),
   diffLayout: Schema.optionalKey(DiffLayout),
   environmentIdentificationMode: Schema.optionalKey(EnvironmentIdentificationMode),
@@ -1754,6 +1813,9 @@ export const ClientSettingsPatch = Schema.Struct({
   legacySidebarEnabled: Schema.optionalKey(Schema.Boolean),
   sidebarWorkingShelfEnabled: Schema.optionalKey(Schema.Boolean),
   legacySidebarScale: Schema.optionalKey(LegacySidebarScale),
+  largerScrollbarsEnabled: Schema.optionalKey(Schema.Boolean),
+  scrollbarWidth: Schema.optionalKey(ScrollbarWidth),
+  scrollbarMargin: Schema.optionalKey(ScrollbarMargin),
   roundedProjectIcons: Schema.optionalKey(Schema.Boolean),
   showLocalEnvironmentIcon: Schema.optionalKey(Schema.Boolean),
   showThreadProviderBadge: Schema.optionalKey(Schema.Boolean),

@@ -324,9 +324,15 @@ describe("projectSettingsOverrides patches", () => {
 describe("resolveWorktreeCleanup", () => {
   it("inherits machine rules, disables one project and keeps custom rules isolated", () => {
     const machine = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
-      storageCleanup: { worktreeAfterDays: 8, worktreeOnDelete: true, logsAfterDays: 3 },
+      storageCleanup: {
+        worktreeDependenciesAfterDays: 14,
+        worktreeAfterDays: 8,
+        worktreeOnDelete: true,
+        logsAfterDays: 3,
+      },
     });
     const inherited = resolveWorktreeCleanup(machine, projectId);
+    expect(inherited.worktreeDependenciesAfterDays).toBe(14);
     const off = applyServerSettingsPatch(machine, {
       projectSettingsOverrides: {
         [projectId]: { worktreeCleanup: { mode: "off" } },
@@ -336,6 +342,7 @@ describe("resolveWorktreeCleanup", () => {
       worktreeAfterDays: null,
       worktreeOnDelete: false,
       worktreeOnMerge: false,
+      worktreeDependenciesAfterDays: null,
       worktreeUnchanged: false,
       worktreeKeepWhen: "uncommitted-changes",
     });
@@ -370,6 +377,7 @@ describe("resolveWorktreeCleanup", () => {
       worktreeAfterDays: 15,
       worktreeOnDelete: true,
       worktreeOnMerge: true,
+      worktreeDependenciesAfterDays: null,
       worktreeUnchanged: false,
       worktreeKeepWhen: "uncommitted-changes",
     });

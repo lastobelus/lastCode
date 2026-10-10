@@ -22,13 +22,19 @@ export type T3McpToolSummaryAction =
   | "thread-wait"
   | "thread-interrupt"
   | "thread-configuration"
+  | "thread-archive-family"
   | "thread-configure"
   | "thread-fork"
+  | "subagent-promote"
+  | "subagent-promotion-status"
+  | "subagent-promotion-cancel"
   | "thread-merge"
   | "thread-search"
   | "thread-transfers"
   | "thread-organize"
   | "thread-update"
+  | "thread-recover"
+  | "thread-repair"
   | "queue-list"
   | "queue-read"
   | "queue-edit"
@@ -50,6 +56,10 @@ export type T3McpToolSummaryAction =
   | "project-clone"
   | "environment-read"
   | "environment-update"
+  | "environment-pause-status"
+  | "environment-pause-start"
+  | "environment-pause-retry"
+  | "environment-pause-resume"
   | "attachment-prepare"
   | "attachment-discard"
   | "attachment-send"
@@ -136,6 +146,14 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
   t3_thread_start: tool(["Start", "Starting", "Started", "a T3 thread"], "thread-create"),
   t3_thread_list: tool(["List", "Listing", "Listed", "T3 threads"], "thread-list"),
   t3_thread_read: tool(["Read", "Reading", "Read", "a T3 thread"], "thread-read"),
+  t3_thread_recover: tool(
+    ["Recover", "Recovering", "Requested recovery of", "a T3 thread"],
+    "thread-recover",
+  ),
+  t3_thread_repair: tool(
+    ["Open", "Opening", "Opened", "a thread repair conversation"],
+    "thread-repair",
+  ),
   t3_thread_send: tool(["Send", "Sending", "Sent", "to a T3 thread"], "thread-send"),
   t3_thread_wait: tool(["Wait", "Waiting", "Waited", "for a T3 thread"], "thread-wait"),
   t3_thread_interrupt: tool(
@@ -147,7 +165,14 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
     "worktree-handoff",
   ),
   t3_worktree_status: tool(["Get", "Getting", "Got", "thread worktree status"], "worktree-status"),
+  preview_host: tool(["Host", "Hosting", "Hosted", "a preview server"], "browser", "browser"),
+  preview_stop_thread: tool(
+    ["Stop", "Stopping", "Stopped", "thread previews and processes"],
+    "browser",
+    "browser",
+  ),
   preview_status: tool(["Get", "Getting", "Got", "preview browser status"], "browser", "browser"),
+  preview_profiles: tool(["List", "Listing", "Listed", "browser profiles"], "browser", "browser"),
   preview_open: tool(
     ["Open", "Opening", "Opened", "a page in the preview browser"],
     "browser",
@@ -276,8 +301,24 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
     ["Read", "Reading", "Read", "thread configuration"],
     "thread-configuration",
   ),
+  t3_thread_archive_family: tool(
+    ["Inspect", "Inspecting", "Inspected", "thread archive choices"],
+    "thread-archive-family",
+  ),
   t3_thread_configure: tool(["Set", "Setting", "Set", "thread model"], "thread-configure"),
   t3_thread_fork: tool(["Fork", "Forking", "Requested a fork of", "this thread"], "thread-fork"),
+  t3_subagent_promote: tool(
+    ["Promote", "Requesting promotion of", "Requested promotion of", "a subagent"],
+    "subagent-promote",
+  ),
+  t3_subagent_promotion_status: tool(
+    ["Check", "Checking", "Checked", "subagent promotion"],
+    "subagent-promotion-status",
+  ),
+  t3_subagent_promotion_cancel: tool(
+    ["Cancel", "Cancelling", "Requested cancellation of", "subagent promotion"],
+    "subagent-promotion-cancel",
+  ),
   t3_thread_merge_back: tool(
     ["Merge", "Merging", "Requested a merge of", "thread context"],
     "thread-merge",
@@ -296,6 +337,22 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
   t3_environment_preferences_update: tool(
     ["Update", "Updating", "Updated", "environment preferences"],
     "environment-update",
+  ),
+  t3_environment_pause_status: tool(
+    ["Check", "Checking", "Checked", "environment pause status"],
+    "environment-pause-status",
+  ),
+  t3_environment_pause_start: tool(
+    ["Pause", "Pausing", "Requested a pause of", "this environment"],
+    "environment-pause-start",
+  ),
+  t3_environment_pause_retry: tool(
+    ["Retry", "Retrying", "Retried", "environment pause deliveries"],
+    "environment-pause-retry",
+  ),
+  t3_environment_pause_resume: tool(
+    ["Resume", "Resuming", "Requested Resume for", "this environment"],
+    "environment-pause-resume",
   ),
   t3_thread_launch: tool(["Launch", "Launching", "Launched", "a project thread"], "thread-create"),
   t3_project_list: tool(["List", "Listing", "Listed", "projects"], "project-list"),

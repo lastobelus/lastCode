@@ -72,6 +72,19 @@ running the send button shows which action it will take. Long-press it to use th
 other action for a single message, or hold `Cmd` while sending from a hardware
 keyboard. The button only offers Steer when the running agent supports it.
 
+## Recover a thread
+
+LastCode checks Codex and Claude threads when their updates stop being recorded.
+Long thinking or tool calls alone do not trigger recovery. When the provider confirms
+that the affected turn ended, LastCode reconciles its status automatically without
+repeating the work. The recovery notice tells you when some output may be missing.
+
+Use **Check now** or **Recover** in the thread's notice to check again. If automatic
+recovery cannot finish, **Open repair thread** starts a separate investigation using
+the project's default provider and model. Your original conversation stays in place;
+**View repair thread** returns to the same investigation. Configure a project model
+default first if LastCode asks for one.
+
 ## Queue messages offline on mobile
 
 Mobile keeps local copies of draft attachments, so you can preview them and queue
@@ -279,6 +292,10 @@ share** and **Open in file viewer**. Pictures, videos and PDFs keep their native
 other document formats such as Word or Pages open in the device's own viewer when it has one.
 If nothing on the device can show a format, save or share it to open it elsewhere.
 
+In LastCode, enter `/annotate` to open the current thread's annotation editor. Enter `/annotate`
+followed by Markdown to save the annotation directly without sending a message to the agent.
+Annotations become available after the first message turns a draft into a saved thread.
+
 ## Images and videos in messages
 
 Select an image or video attachment or link to preview it. Playback support depends
@@ -291,6 +308,18 @@ return to the thumbnail to open this menu after watching a full-screen video.
 File links refer to the environment's machine, including when you connect remotely.
 Previews use the original file, even outside the workspace. Moving or deleting it
 can break the preview, so save a copy if you need to keep it.
+
+## Preview links
+
+Managed QA previews stay available for 24 hours after handoff. Opening one
+restarts its temporary server if needed; the server stops automatically when
+that window ends. Viewing does not extend the window. Open the link from its
+thread so LastCode can restore it before opening either browser. Remote viewing
+still requires the server to be reachable from your device.
+
+If a link opened in the integrated browser cannot connect, choose **Ask agent to
+restore preview**. The failed link and error go to the thread that owns the
+preview. After the agent restores it, reload the page.
 
 ## Files outside the workspace
 

@@ -1,9 +1,11 @@
 import {
   AuthOrchestrationOperateScope,
   EnvironmentId,
+  ProviderInstanceId,
   ThreadId,
   type ContextMenuItem,
 } from "@t3tools/contracts";
+import type { ThreadRuntimeSummary } from "@t3tools/client-runtime/state/models";
 import { AsyncResult } from "effect/reactivity";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -21,6 +23,11 @@ const state = vi.hoisted(() => ({
   granted: new Set<string>(),
   effects: [] as string[],
   completed: deferred<void>(),
+  runtime: null as ThreadRuntimeSummary | null,
+  archivePendingStatus: null as "stopping" | "failed" | null,
+  dismissalRequests: [] as unknown[][],
+  archiveRequests: [] as unknown[][],
+  persistent: false,
   show: vi.fn<
     (
       items: ReadonlyArray<ContextMenuItem<ThreadActionMenuId>>,
@@ -61,7 +68,16 @@ vi.mock("../state/entities", () => ({
     title: "Thread",
     branch: "main",
     worktreePath: null,
-    runtime: null,
+    runtime: state.runtime,
+    archivePending:
+      state.archivePendingStatus === null
+        ? null
+        : {
+            status: state.archivePendingStatus,
+            threadId: "original-owner",
+            commandId: "observed-failure",
+          },
+    persistent: state.persistent,
     latestRun: null,
   }),
   useProjects: () => [{ id: "project", environmentId: "secondary" }],
@@ -133,8 +149,13 @@ vi.mock("./useSettings", () => ({
     }),
 }));
 vi.mock("./useThreadActions", () => ({
-  useThreadActions: () =>
-    Object.fromEntries(
+  useThreadActions: () => ({
+    unarchiveThread: async (...args: unknown[]) => {
+      state.dismissalRequests.push(args);
+      recordEffect("dismissal");
+      return AsyncResult.success(undefined);
+    },
+    ...Object.fromEntries(
       [
         "markThreadUnread",
         "settleThread",
@@ -147,12 +168,14 @@ vi.mock("./useThreadActions", () => ({
         "deleteThread",
       ].map((action) => [
         action,
-        async () => {
+        async (...args: unknown[]) => {
+          if (action === "archiveThread") state.archiveRequests.push(args);
           recordEffect(action === "markThreadUnread" ? "mark-unread" : action);
           return AsyncResult.success(undefined);
         },
       ]),
     ),
+  }),
 }));
 
 import { useThreadActionMenu } from "./useThreadActionMenu";
@@ -173,6 +196,11 @@ beforeEach(() => {
   state.granted = new Set(["primary"]);
   state.effects = [];
   state.completed = deferred<void>();
+  state.runtime = null;
+  state.archivePendingStatus = null;
+  state.dismissalRequests = [];
+  state.archiveRequests = [];
+  state.persistent = false;
   state.show.mockReset().mockResolvedValue(null);
 });
 
@@ -204,19 +232,24 @@ describe("thread menu permissions", () => {
     );
   });
 
-  it.each(["rename", "regenerate-title", "delete", "pin", "settle", "archive"] as const)(
-    "%s rechecks after the native menu closes",
-    async (action) => {
-      state.granted.add("secondary");
-      const choice = deferred<ThreadActionMenuId | null>();
-      state.show.mockReturnValue(choice.promise);
-      createMenu().openMenu(position);
-      state.granted.delete("secondary");
-      choice.resolve(action);
-      await state.completed.promise;
-      expect(state.effects).toEqual([]);
-    },
-  );
+  it.each([
+    "rename",
+    "regenerate-title",
+    "delete",
+    "pin",
+    "settle",
+    "archive",
+    "dismiss-archive-failure",
+  ] as const)("%s rechecks after the native menu closes", async (action) => {
+    state.granted.add("secondary");
+    const choice = deferred<ThreadActionMenuId | null>();
+    state.show.mockReturnValue(choice.promise);
+    createMenu().openMenu(position);
+    state.granted.delete("secondary");
+    choice.resolve(action);
+    await state.completed.promise;
+    expect(state.effects).toEqual([]);
+  });
 
   it.each([
     ["new-thread-on-branch", "draft"],
@@ -228,5 +261,82 @@ describe("thread menu permissions", () => {
     createMenu().openMenu(position);
     await state.completed.promise;
     expect(state.effects).toEqual([effect]);
+  });
+});
+
+describe("thread menu archive retries", () => {
+  it("preserves the displayed retry attempt when the failure is dismissed while the native menu is open", async () => {
+    state.granted.add("secondary");
+    state.archivePendingStatus = "failed";
+    const choice = deferred<ThreadActionMenuId | null>();
+    state.show.mockReturnValue(choice.promise);
+    createMenu().openMenu(position);
+    state.archivePendingStatus = null;
+    choice.resolve("archive");
+    await state.completed.promise;
+    expect(state.archiveRequests).toEqual([
+      [
+        { environmentId: "secondary", threadId: "thread" },
+        expect.objectContaining({ expectedArchiveCommandId: "observed-failure" }),
+      ],
+    ]);
+  });
+  it("dismisses the original owner's observed failure even if state changes while the menu is open", async () => {
+    state.granted.add("secondary");
+    state.archivePendingStatus = "failed";
+    const choice = deferred<ThreadActionMenuId | null>();
+    state.show.mockReturnValue(choice.promise);
+    createMenu().openMenu(position);
+    state.archivePendingStatus = "stopping";
+    choice.resolve("dismiss-archive-failure");
+    await state.completed.promise;
+    expect(state.dismissalRequests).toEqual([
+      [
+        { environmentId: "secondary", threadId: "original-owner" },
+        { expectedArchiveCommandId: "observed-failure" },
+      ],
+    ]);
+  });
+  const nativeRuntime: ThreadRuntimeSummary = {
+    status: "running",
+    activeRunId: null,
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    providerName: "Codex",
+    lastError: null,
+    updatedAt: "2026-03-09T10:00:00.000Z",
+  };
+
+  it("routes active work and failed native shutdown through the archive family handler", async () => {
+    state.granted.add("secondary");
+    state.runtime = nativeRuntime;
+    const menu = createMenu();
+    menu.openMenu(position);
+    expect(state.show.mock.calls[0]![0].find((item) => item.id === "archive")?.disabled).not.toBe(
+      true,
+    );
+
+    state.archivePendingStatus = "stopping";
+    menu.openMenu(position);
+    expect(state.show.mock.calls[1]![0].find((item) => item.id === "archive")?.disabled).not.toBe(
+      true,
+    );
+
+    state.archivePendingStatus = "failed";
+    state.show.mockResolvedValue("archive");
+    menu.openMenu(position);
+    await state.completed.promise;
+    expect(state.show.mock.calls[2]![0].find((item) => item.id === "archive")?.disabled).not.toBe(
+      true,
+    );
+    expect(state.effects).toEqual(["archiveThread"]);
+  });
+
+  it("keeps a protected native thread's failed archive retry disabled", () => {
+    state.granted.add("secondary");
+    state.runtime = nativeRuntime;
+    state.archivePendingStatus = "failed";
+    state.persistent = true;
+    createMenu().openMenu(position);
+    expect(state.show.mock.calls[0]![0].find((item) => item.id === "archive")?.disabled).toBe(true);
   });
 });

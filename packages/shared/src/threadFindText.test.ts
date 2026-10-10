@@ -107,12 +107,8 @@ it("indexes file-label punctuation and visible prose without image alt text", ()
   expect(
     assistantSegments("[See ![hidden alt](https://example.com/a.png) now](/tmp/file.ts)"),
   ).toEqual(["See  now (file.ts)"]);
-  expect(assistantSegments("[first\nsecond](/tmp/file.ts)")).toEqual([
-    "first second (file.ts)",
-  ]);
-  expect(assistantSegments("[first<br>second](/tmp/file.ts)")).toEqual([
-    "first\nsecond (file.ts)",
-  ]);
+  expect(assistantSegments("[first\nsecond](/tmp/file.ts)")).toEqual(["first second (file.ts)"]);
+  expect(assistantSegments("[first<br>second](/tmp/file.ts)")).toEqual(["first\nsecond (file.ts)"]);
 });
 
 it("keeps fence paths literal and indexes file-chip labels in user messages", () => {
