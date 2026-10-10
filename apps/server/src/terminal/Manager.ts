@@ -1644,7 +1644,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       ? windowsProcessTableSnapshot()
       : posixProcessTableSnapshot(yield* resolvePosixPsCommand())
   ).pipe(Effect.provideService(ProcessRunner.ProcessRunner, processRunner));
-  const fetchProcessTableSnapshot: Effect.Effect<
+  const processTableSnapshot: Effect.Effect<
     {
       readonly snapshot: TerminalProcessTableSnapshot;
       /**
@@ -1670,6 +1670,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     : fallbackProcessTableSnapshot.pipe(
         Effect.map((snapshot) => ({ snapshot, snapshotSucceeded: true })),
       );
+  // Share overlapping polls and first-input captures, but never reuse a
+  // completed table after a new shell spawns or input changes its command.
+  // Zero TTL also interrupts the scan when its last waiter leaves.
+  const fetchProcessTableSnapshot = yield* Effect.cachedWithTTL(processTableSnapshot, 0);
   const customSubprocessInspector = options.subprocessInspector;
   const acquireSubprocessInspector: Effect.Effect<
     {
@@ -2557,7 +2561,6 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
                         Effect.sync(() => {
                           if (session.process !== spawnResult.process) return;
                           session.spawnedShellName = identity;
-                          session.captureShellIdentity = null;
                         }),
                       ),
                     ),
@@ -3288,12 +3291,24 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         terminalId,
       });
     }
-    if (session.captureShellIdentity !== null) yield* session.captureShellIdentity;
+    const captureShellIdentity = session.captureShellIdentity;
+    if (captureShellIdentity !== null) yield* captureShellIdentity;
     if (session.process !== process || session.status !== "running") {
       return yield* new TerminalNotRunningError({ threadId: input.threadId, terminalId });
     }
     yield* Effect.try({
-      try: () => process.write(input.data),
+      try: () => {
+        process.write(input.data);
+        // Complete forwarding and the gate transition synchronously: a writer
+        // canceled after sending its bytes must not look like untouched input.
+        if (
+          captureShellIdentity !== null &&
+          session.process === process &&
+          session.captureShellIdentity === captureShellIdentity
+        ) {
+          session.captureShellIdentity = null;
+        }
+      },
       catch: (cause) =>
         new TerminalWriteError({
           threadId: input.threadId,
