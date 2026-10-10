@@ -764,15 +764,15 @@ const make = Effect.gen(function* () {
         const initialBranch = workspaceStrategy.branch ?? null;
         const initialWorktreePath =
           workspaceStrategy.type === "existing_worktree" ? workspaceStrategy.worktreePath : null;
-        const claimDispatch =
+        const claim: Orchestrator.OrchestratorV2LaunchDispatchInput["claim"] =
           input.reuseExistingThread === true
-            ? threads.dispatch({
+            ? {
                 type: "thread.metadata.update",
                 commandId: input.commandId,
                 threadId: candidateThreadId,
                 expectedEmpty: true,
-              })
-            : threads.dispatch({
+              }
+            : {
                 type: "thread.create",
                 commandId: input.commandId,
                 threadId: candidateThreadId,
@@ -788,24 +788,11 @@ const make = Effect.gen(function* () {
                   : { importedNativeThread: input.importedNativeThread }),
                 createdBy: input.createdBy,
                 creationSource: input.creationSource,
-              });
-        const claimed = yield* claimDispatch.pipe(
-          Effect.mapError(
-            mapError(
-              input,
-              input.reuseExistingThread === true ? "update-thread" : "create-thread",
-              candidateThreadId,
-            ),
-          ),
-        );
-        const threadId =
-          claimed.storedEvents.find((stored) => stored.event.type.startsWith("thread."))?.event
-            .threadId ?? candidateThreadId;
-        if (project.id !== input.projectId) {
-          return yield* mapError(input, "resolve-project", threadId)("Project identity changed.");
-        }
-
-        let runId: RunId | null = null;
+              };
+        const claimOperation =
+          input.reuseExistingThread === true ? "update-thread" : "create-thread";
+        let claimed: Orchestrator.OrchestratorV2DispatchResult;
+        let dispatched: Orchestrator.OrchestratorV2DispatchResult | undefined;
         let messageWasAlreadyAccepted = false;
         if (input.initialMessage !== undefined) {
           const messageCommandId = CommandId.make(`${input.commandId}:initial-message`);
@@ -814,30 +801,59 @@ const make = Effect.gen(function* () {
           const messageId =
             input.initialMessage.messageId ??
             (yield* ids.allocate
-              .message({ threadId, ordinal: 1 })
-              .pipe(Effect.mapError(mapError(input, "dispatch-message", threadId))));
-          const dispatched = yield* threads
-            .dispatch({
-              type: "message.dispatch",
-              commandId: messageCommandId,
-              threadId,
-              messageId,
-              text: input.initialMessage.text,
-              ...(input.initialMessage.scheduledTaskId === undefined
-                ? {}
-                : { scheduledTaskId: input.initialMessage.scheduledTaskId }),
-              ...(input.initialMessage.senderThreadId === undefined
-                ? {}
-                : { senderThreadId: input.initialMessage.senderThreadId }),
-              attachments: input.initialMessage.attachments,
-              ...(input.initialMessage.context ? { context: input.initialMessage.context } : {}),
-              ...(input.generateTitle === true ? { titleSeed: input.title } : {}),
-              modelSelection: input.modelSelection,
-              dispatchMode: { type: "defer_start", workspaceStrategy },
-              createdBy: input.createdBy,
-              creationSource: input.creationSource,
+              .message({ threadId: candidateThreadId, ordinal: 1 })
+              .pipe(Effect.mapError(mapError(input, "dispatch-message", candidateThreadId))));
+          const result = yield* threads
+            .dispatchLaunch({
+              claim,
+              initialMessage: {
+                type: "message.dispatch",
+                commandId: messageCommandId,
+                threadId: candidateThreadId,
+                messageId,
+                text: input.initialMessage.text,
+                ...(input.initialMessage.scheduledTaskId === undefined
+                  ? {}
+                  : { scheduledTaskId: input.initialMessage.scheduledTaskId }),
+                ...(input.initialMessage.senderThreadId === undefined
+                  ? {}
+                  : { senderThreadId: input.initialMessage.senderThreadId }),
+                attachments: input.initialMessage.attachments,
+                ...(input.initialMessage.context ? { context: input.initialMessage.context } : {}),
+                ...(input.generateTitle === true ? { titleSeed: input.title } : {}),
+                modelSelection: input.modelSelection,
+                dispatchMode: { type: "defer_start", workspaceStrategy },
+                createdBy: input.createdBy,
+                creationSource: input.creationSource,
+              },
             })
-            .pipe(Effect.mapError(mapError(input, "dispatch-message", threadId)));
+            .pipe(
+              Effect.mapError((cause) =>
+                mapError(
+                  input,
+                  "commandId" in cause && cause.commandId === input.commandId
+                    ? claimOperation
+                    : "dispatch-message",
+                  candidateThreadId,
+                )(cause),
+              ),
+            );
+          claimed = result.claimed;
+          dispatched = result.initialMessage;
+        } else {
+          claimed = yield* threads
+            .dispatch(claim)
+            .pipe(Effect.mapError(mapError(input, claimOperation, candidateThreadId)));
+        }
+        const threadId =
+          claimed.storedEvents.find((stored) => stored.event.type.startsWith("thread."))?.event
+            .threadId ?? candidateThreadId;
+        if (project.id !== input.projectId) {
+          return yield* mapError(input, "resolve-project", threadId)("Project identity changed.");
+        }
+
+        let runId: RunId | null = null;
+        if (dispatched !== undefined) {
           const runCreated = dispatched.storedEvents.find(
             (stored) => stored.event.type === "run.created",
           );
