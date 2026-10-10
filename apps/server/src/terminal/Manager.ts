@@ -1595,7 +1595,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     : fallbackProcessTableSnapshot.pipe(
         Effect.map((snapshot) => ({ snapshot, snapshotSucceeded: true })),
       );
-  // Share overlapping requests only until a spawn or write changes the table.
+  // Share overlapping requests only until a spawn, write, or output changes activity.
   // Replacing the cache keeps new callers out of a pre-change scan; its older
   // callers can still finish or interrupt it when the last waiter leaves.
   let sharedProcessTableSnapshot: typeof processTableSnapshot | undefined;
@@ -2120,6 +2120,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           if (sanitized.visibleText.length > 0) {
             session.history.append(sanitized.visibleText);
           }
+          // Output can prove a command started after an unfinished scan sampled it.
+          sharedProcessTableSnapshot = undefined;
           const eventStamp = advanceEventSequence(session);
 
           return {

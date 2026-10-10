@@ -1785,6 +1785,155 @@ it.layer(
       }).pipe(Effect.provide(TestClock.layer())),
   );
 
+  it.effect.each(["native", "fallback"] as const)(
+    "retains exec roots and child commands after output invalidates a held post-write %s poll",
+    (source) =>
+      Effect.gen(function* () {
+        const staleSnapshotStarted = yield* Deferred.make<void>();
+        const releaseStaleSnapshot = yield* Deferred.make<void>();
+        const outputsProcessed = yield* Deferred.make<void>();
+        const ptyAdapter = new FakePtyAdapter();
+        let holdNextSnapshot = false;
+        let commandsStarted = false;
+        let snapshotCalls = 0;
+        const processTable = Effect.gen(function* () {
+          snapshotCalls += 1;
+          // The poll sees the submitted commands before either shell runs them.
+          const entries = [
+            { pid: 9000, ppid: 1, name: commandsStarted ? "node" : "zsh" },
+            { pid: 9001, ppid: 1, name: "zsh" },
+            ...(commandsStarted ? [{ pid: 9100, ppid: 9001, name: "node" }] : []),
+          ];
+          if (holdNextSnapshot) {
+            holdNextSnapshot = false;
+            yield* Deferred.succeed(staleSnapshotStarted, undefined);
+            yield* Deferred.await(releaseStaleSnapshot);
+          }
+          return entries;
+        });
+        const { manager } = yield* createSnapshotBoundaryManager(source, ptyAdapter, processTable);
+        yield* TestClock.adjust(0);
+        const terminals = ["exec", "child"].map((terminalId) => ({
+          threadId: "thread-1",
+          terminalId,
+        }));
+        yield* Effect.forEach(terminals, (terminal) => manager.open(openInput(terminal)));
+        for (const process of ptyAdapter.processes) process.exitOnKill = "SIGTERM";
+        yield* manager.write({ ...terminals[0]!, data: "exec node\r" });
+        yield* manager.write({ ...terminals[1]!, data: "node child\r" });
+        holdNextSnapshot = true;
+        yield* TestClock.adjust("60 seconds");
+        yield* Deferred.await(staleSnapshotStarted);
+        const callsBeforeOutput = snapshotCalls;
+        const pendingOutputs = new Set(terminals.map(({ terminalId }) => terminalId));
+        const unsubscribe = yield* manager.subscribe((event) =>
+          event.type === "output" &&
+          pendingOutputs.delete(event.terminalId) &&
+          pendingOutputs.size === 0
+            ? Deferred.succeed(outputsProcessed, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+        commandsStarted = true;
+        for (const process of ptyAdapter.processes) process.emitData("command started\n");
+        // Await the drained output, including its activity counter update,
+        // before closeIdle captures candidates. Its counter guard alone can
+        // no longer reject the old table at this point.
+        yield* Deferred.await(outputsProcessed);
+        const closing = yield* manager
+          .closeIdle({ threadId: "thread-1" })
+          .pipe(Effect.forkScoped({ startImmediately: true }));
+        yield* TestClock.adjust("100 millis");
+        const finishedBeforeStaleRelease = closing.pollUnsafe() !== undefined;
+        const callsAfterOutput = snapshotCalls;
+        yield* Deferred.succeed(releaseStaleSnapshot, undefined);
+        yield* Fiber.join(closing);
+        const killSignals = ptyAdapter.processes.map((process) => [...process.killSignals]);
+        const remainingPids = (yield* readIdleInspectionMetadata(manager))
+          .map(({ pid }) => pid)
+          .sort();
+        const remaining = terminals.filter((_, index) => !ptyAdapter.processes[index]!.killed);
+        if (remaining.length > 0) yield* exitSnapshotTestProcesses(manager, ptyAdapter, remaining);
+        expect(finishedBeforeStaleRelease).toBe(true);
+        expect(callsAfterOutput).toBe(callsBeforeOutput + 1);
+        expect(killSignals).toEqual([[], []]);
+        expect(remainingPids).toEqual([9000, 9001]);
+        expect(ptyAdapter.spawnInputs).toHaveLength(2);
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect.each(["native", "fallback"] as const)(
+    "coalesces cleanup callers on one fresh %s snapshot after drained output invalidates a held poll",
+    (source) =>
+      Effect.gen(function* () {
+        const staleSnapshotStarted = yield* Deferred.make<void>();
+        const releaseStaleSnapshot = yield* Deferred.make<void>();
+        const freshSnapshotStarted = yield* Deferred.make<void>();
+        const releaseFreshSnapshot = yield* Deferred.make<void>();
+        const outputProcessed = yield* Deferred.make<void>();
+        const ptyAdapter = new FakePtyAdapter();
+        let holdNextStaleSnapshot = false;
+        let holdNextFreshSnapshot = false;
+        let commandStarted = false;
+        let snapshotCalls = 0;
+        const processTable = Effect.gen(function* () {
+          snapshotCalls += 1;
+          const entries = [{ pid: 9000, ppid: 1, name: commandStarted ? "node" : "zsh" }];
+          if (holdNextStaleSnapshot) {
+            holdNextStaleSnapshot = false;
+            yield* Deferred.succeed(staleSnapshotStarted, undefined);
+            yield* Deferred.await(releaseStaleSnapshot);
+          } else if (holdNextFreshSnapshot) {
+            holdNextFreshSnapshot = false;
+            yield* Deferred.succeed(freshSnapshotStarted, undefined);
+            yield* Deferred.await(releaseFreshSnapshot);
+          }
+          return entries;
+        });
+        const { manager } = yield* createSnapshotBoundaryManager(source, ptyAdapter, processTable);
+        yield* TestClock.adjust(0);
+        const terminal = openInput();
+        yield* manager.open(terminal);
+        const process = ptyAdapter.processes[0]!;
+        process.exitOnKill = "SIGTERM";
+        yield* manager.write({ ...terminal, data: "exec node\r" });
+        holdNextStaleSnapshot = true;
+        yield* TestClock.adjust("60 seconds");
+        yield* Deferred.await(staleSnapshotStarted);
+        const callsBeforeOutput = snapshotCalls;
+        const unsubscribe = yield* manager.subscribe((event) =>
+          event.type === "output"
+            ? Deferred.succeed(outputProcessed, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+        commandStarted = true;
+        process.emitData("command started\n");
+        yield* Deferred.await(outputProcessed);
+        holdNextFreshSnapshot = true;
+        const callers = yield* Effect.forEach([1, 2, 3], () =>
+          manager.closeIdle(terminal).pipe(Effect.forkScoped({ startImmediately: true })),
+        );
+        yield* TestClock.adjust("100 millis");
+        const freshStarted = yield* Deferred.isDone(freshSnapshotStarted);
+        const callsWhileBothSnapshotsPending = snapshotCalls;
+        const callersStillPending = callers.every((caller) => caller.pollUnsafe() === undefined);
+        // Release both sources even when old code never starts a fresh scan,
+        // so negative controls reach assertions instead of hanging on a gate.
+        yield* Deferred.succeed(releaseFreshSnapshot, undefined);
+        yield* Deferred.succeed(releaseStaleSnapshot, undefined);
+        yield* Effect.forEach(callers, Fiber.join);
+        const killSignals = [...process.killSignals];
+        if (!process.killed) yield* exitSnapshotTestProcesses(manager, ptyAdapter, [terminal]);
+        expect(freshStarted).toBe(true);
+        expect(callsWhileBothSnapshotsPending).toBe(callsBeforeOutput + 1);
+        expect(snapshotCalls).toBe(callsBeforeOutput + 1);
+        expect(callersStillPending).toBe(true);
+        expect(killSignals).toEqual([]);
+        expect(ptyAdapter.spawnInputs).toHaveLength(1);
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
   it.effect.each([
     { source: "native", grouping: "threads" },
     { source: "fallback", grouping: "threads" },
