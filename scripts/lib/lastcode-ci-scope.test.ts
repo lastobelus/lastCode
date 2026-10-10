@@ -329,6 +329,91 @@ describe("resolveQuickCiScope", () => {
     ]);
   });
 
+  it.each([
+    "@fixture/library/subpath",
+    "../../packages/library/src/../src/index.ts",
+    { "#condition": { browser: [null, 42, false, "missing", "@fixture/library"] } },
+    ["@fixture/library", "@fixture/library", "@fixture/consumer", "./src/index.ts"],
+  ])("includes manifest-import consumers and their indirect dependents for %j", (imports) => {
+    const repo = fixture({
+      "apps/consumer/package.json": JSON.stringify({
+        name: "@fixture/consumer",
+        scripts: { typecheck: "tsc --noEmit" },
+        imports,
+      }),
+      "apps/consumer/src/index.ts": "export const consumer = 1;\n",
+      ...workspace("apps/indirect", "@fixture/indirect", {
+        dependencies: { "@fixture/consumer": "workspace:*" },
+      }),
+    });
+    repo.change("packages/library/src/index.ts", "export const value = 2;\n");
+    expect(repo.scope()).toMatchObject({
+      kind: "affected",
+      packages: ["@fixture/consumer", "@fixture/indirect", "@fixture/library"],
+    });
+  });
+
+  it.each([null, 42, false, [null, false, 42], { unknown: ["missing", "../../outside"] }])(
+    "ignores unresolved and non-string manifest-import values %j",
+    (imports) => {
+      const repo = fixture({
+        "apps/consumer/package.json": JSON.stringify({
+          name: "@fixture/consumer",
+          scripts: { typecheck: "tsc --noEmit" },
+          imports,
+        }),
+        "apps/consumer/src/index.ts": "export const consumer = 1;\n",
+      });
+      repo.change("packages/library/src/index.ts", "export const value = 2;\n");
+      expect(repo.scope()).toMatchObject({ kind: "affected", packages: ["@fixture/library"] });
+    },
+  );
+
+  it.each([true, false])(
+    "preserves first registered overlapping import name (short first: %j)",
+    (shortFirst) => {
+      const first = shortFirst ? "@fixture/overlap" : "@fixture/overlap/child";
+      const second = shortFirst ? "@fixture/overlap/child" : "@fixture/overlap";
+      const repo = fixture({
+        ...workspace("packages/a-first-longer", first),
+        ...workspace("packages/z-second", second),
+        "apps/consumer/package.json": JSON.stringify({
+          name: "@fixture/consumer",
+          scripts: { typecheck: "tsc --noEmit" },
+          imports: { "#overlap": "@fixture/overlap/child" },
+        }),
+        "apps/consumer/src/index.ts": "export const consumer = 1;\n",
+      });
+      repo.change("packages/z-second/src/index.ts", "export const value = 2;\n");
+      expect(repo.scope()).toMatchObject({ kind: "affected", packages: [second] });
+      repo.change("packages/a-first-longer/src/index.ts", "export const value = 2;\n");
+      expect(repo.scope()).toMatchObject({
+        kind: "affected",
+        packages: ["@fixture/consumer", first, second].sort(),
+      });
+    },
+  );
+
+  it("resolves import-map alias names using their registered owner", () => {
+    const repo = fixture({
+      ...workspace("apps/unrelated", "@fixture/unrelated", {
+        dependencies: { "library-alias": "link:../../packages/library" },
+      }),
+      "apps/consumer/package.json": JSON.stringify({
+        name: "@fixture/consumer",
+        scripts: { typecheck: "tsc --noEmit" },
+        imports: { "#alias": "library-alias/subpath" },
+      }),
+      "apps/consumer/src/index.ts": "export const consumer = 1;\n",
+    });
+    repo.change("packages/library/src/index.ts", "export const value = 2;\n");
+    expect(repo.scope().packages).toEqual([
+      "@fixture/consumer",
+      "@fixture/library",
+      "@fixture/unrelated",
+    ]);
+  });
+
   it("owns nested file modules through their containing workspace and finds their undeclared consumers", () => {
     const repo = fixture({
       ...workspace("apps/mobile", "@fixture/mobile", {
