@@ -2714,6 +2714,7 @@ const make = Effect.gen(function* () {
         );
       });
     }
+    // Reject agent typing here: the desktop CDP relay also carries human viewer input.
     if (
       tab.desktop &&
       (tab.backingPage === "desktop" || tab.backingPage === undefined) &&

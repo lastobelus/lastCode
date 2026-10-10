@@ -3415,47 +3415,59 @@ it.effect("canceled root connection closes its attempted page and never publishe
   ).pipe(Effect.provide(layer)),
 );
 
-it.live(
-  "shared native pages reject keyboard automation before acquiring a surface or sending input",
-  () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const browser = yield* ServerBrowser.ServerBrowser;
-        const manager = yield* Manager.PreviewManager;
-        const broker = yield* Broker.PreviewAutomationBroker;
-        yield* Effect.yieldNow;
-        desktopRendersNext = true;
-        const shared = yield* manager.open({
-          threadId: scope.thread.threadId,
-          runtime: "server",
-          desktopHostId: "local",
-          automationOwner: `${scope.environmentId}\u0000${scope.thread.providerSessionId}`,
-        });
-        yield* browser.attachViewer(viewerInput(shared.tabId, false));
-        expect(shared.backingPage).toBe("desktop");
-        surfaceCalls.length = 0;
-        for (const [operation, input] of [
-          ["type", { locator: "#field", text: "shared input" }],
-          ["press", { key: "Enter" }],
-        ] as const) {
-          const failure = yield* broker
-            .invoke<void>({ scope, tabId: shared.tabId, operation, input })
-            .pipe(Effect.flip);
-          expect(failure).toMatchObject({ _tag: "PreviewAutomationExecutionError" });
-          expect(failure.message).toContain("preview_open({reuseExistingTab:false})");
-          expect(failure.message).toContain("returned tabId");
-        }
-        expect(surfaceCalls).toEqual([]);
-        expect(rootCreations).toEqual([]);
-        const page = desktopConnections[0]!.context.page;
-        expect(page.locator).not.toHaveBeenCalled();
-        expect(page.keyboard.insertText).not.toHaveBeenCalled();
-        expect(page.keyboard.press).not.toHaveBeenCalled();
-        expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toEqual([
-          shared,
-        ]);
-      }),
-    ).pipe(Effect.provide(layer)),
+it.live("shared native pages reject agent keyboard input while allowing a controlling viewer", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const browser = yield* ServerBrowser.ServerBrowser;
+      const manager = yield* Manager.PreviewManager;
+      const broker = yield* Broker.PreviewAutomationBroker;
+      yield* Effect.yieldNow;
+      desktopRendersNext = true;
+      const shared = yield* manager.open({
+        threadId: scope.thread.threadId,
+        runtime: "server",
+        desktopHostId: "local",
+        automationOwner: `${scope.environmentId}\u0000${scope.thread.providerSessionId}`,
+      });
+      const viewer = yield* browser.attachViewer(viewerInput(shared.tabId, true));
+      expect(shared.backingPage).toBe("desktop");
+      surfaceCalls.length = 0;
+      for (const [operation, input] of [
+        ["type", { locator: "#field", text: "shared input" }],
+        ["press", { key: "Enter" }],
+      ] as const) {
+        const failure = yield* broker
+          .invoke<void>({ scope, tabId: shared.tabId, operation, input })
+          .pipe(Effect.flip);
+        expect(failure).toMatchObject({ _tag: "PreviewAutomationExecutionError" });
+        expect(failure.message).toContain("preview_open({reuseExistingTab:false})");
+        expect(failure.message).toContain("returned tabId");
+      }
+      expect(surfaceCalls).toEqual([]);
+      expect(rootCreations).toEqual([]);
+      const page = desktopConnections[0]!.context.page;
+      expect(page.locator).not.toHaveBeenCalled();
+      expect(page.keyboard.insertText).not.toHaveBeenCalled();
+      expect(page.keyboard.press).not.toHaveBeenCalled();
+      expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toEqual([shared]);
+      yield* viewer.input({ type: "takeControl" });
+      yield* viewer.input({ type: "text", text: "viewer text" });
+      yield* viewer.input({ type: "key", action: "down", key: "Enter", code: "Enter" });
+      const commands = desktopConnections[0]!.context.sessions.flatMap(
+        (session) => session.send.mock.calls,
+      );
+      expect(commands).toEqual(
+        expect.arrayContaining([
+          ["Input.insertText", { text: "viewer text" }],
+          [
+            "Input.dispatchKeyEvent",
+            expect.objectContaining({ type: "rawKeyDown", key: "Enter", code: "Enter" }),
+          ],
+        ]),
+      );
+      yield* viewer.input({ type: "releaseControl" });
+    }),
+  ).pipe(Effect.provide(layer)),
 );
 
 it.live("drives the desktop's own page for a tab the desktop renders", () =>

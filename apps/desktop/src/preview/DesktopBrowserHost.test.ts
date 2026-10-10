@@ -674,7 +674,7 @@ it.effect("disconnect retires pending native creation before its factory returns
 );
 
 it.effect.each(["Input.insertText", "Input.dispatchKeyEvent"])(
-  "rejects shared guest keyboard routing before native injection (%s)",
+  "relays remote viewer keyboard input to its shared guest (%s)",
   (method) =>
     Effect.gen(function* () {
       const host = yield* DesktopBrowserHost.make.pipe(
@@ -685,19 +685,29 @@ it.effect.each(["Input.insertText", "Input.dispatchKeyEvent"])(
         Stream.runForEach(({ event }) => Queue.offer(events, event)),
         Effect.forkScoped({ startImmediately: true }),
       );
-      host.attach({ ...key, desktopHostId: "host-a" }, makeDebuggee().tab, "shared-guest");
+      const debuggee = makeDebuggee();
+      const commands: Array<{ method: string; params: unknown; sessionId: string | undefined }> =
+        [];
+      debuggee.tab.debugger.sendCommand = async (method, params, sessionId) => {
+        commands.push({ method, params, sessionId });
+        return { method };
+      };
+      host.attach({ ...key, desktopHostId: "host-a" }, debuggee.tab, "shared-guest");
       yield* Queue.take(events);
+      const params =
+        method === "Input.insertText" ? { text: "viewer text" } : { type: "keyDown", key: "a" };
       yield* host.handleRemoteCommand({
         desktopHostId: "host-a",
         command: {
           type: "cdp",
           ...key,
-          message: JSON.stringify({ id: 1, method, sessionId: "t3-preview-page", params: {} }),
+          message: JSON.stringify({ id: 1, method, sessionId: "t3-preview-page", params }),
         },
       });
       const event = yield* Queue.take(events);
-      if (event.type !== "cdp") throw new Error("Expected rejected keyboard response");
-      expect(JSON.parse(event.message).error.message).toContain("reuseExistingTab:false");
+      if (event.type !== "cdp") throw new Error("Expected keyboard response");
+      expect(JSON.parse(event.message)).toMatchObject({ id: 1, result: { method } });
+      expect(commands).toEqual([{ method, params, sessionId: undefined }]);
     }),
 );
 

@@ -478,10 +478,6 @@ export const make = Effect.gen(function* () {
     const relay: CdpRelayConnection = createCdpRelayConnection(
       {
         send: async (method, params, sessionId) => {
-          if (!tab.popup && (method === "Input.insertText" || method === "Input.dispatchKeyEvent"))
-            throw new Error(
-              "Keyboard input cannot safely target this shared desktop tab. Create a new automation tab with preview_open({reuseExistingTab:false}) and use its returned tabId.",
-            );
           let localParams = params;
           if (
             tab.key.desktopHostId &&
