@@ -346,6 +346,8 @@ interface TerminalSessionState {
   eventSequence: number;
   /** Counts writes, so closeIdle can see input that has not echoed yet. */
   inputCount: number;
+  /** Queued or executing writes keep automatic cleanup away from the terminal. */
+  pendingInputCount: number;
   cols: number;
   rows: number;
   process: PtyAdapter.PtyProcess | null;
@@ -2546,6 +2548,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
                           platform,
                         ),
                       ),
+                      // Identity is best effort; never hold typing behind the
+                      // resource monitor's health timeout and fallback probe.
+                      Effect.timeoutOption("100 millis"),
+                      Effect.map(Option.getOrElse(() => spawnResult.shellName)),
                       Effect.orElseSucceed(() => spawnResult.shellName),
                       Effect.flatMap((identity) =>
                         Effect.sync(() => {
@@ -2901,6 +2907,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         updatedAt: yield* nowIso,
         eventSequence: 0,
         inputCount: 0,
+        pendingInputCount: 0,
         cols,
         rows,
         process: null,
@@ -3285,7 +3292,6 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     if (session.process !== process || session.status !== "running") {
       return yield* new TerminalNotRunningError({ threadId: input.threadId, terminalId });
     }
-    session.inputCount += 1;
     yield* Effect.try({
       try: () => process.write(input.data),
       catch: (cause) =>
@@ -3300,16 +3306,27 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
 
   const write: TerminalManager["Service"]["write"] = Effect.fn("terminal.write")(function* (input) {
     const session = yield* requireSession(input.threadId, input.terminalId);
-    // Only the first input waits for a snapshot. Keep close/restart serialized
-    // through that wait, while subsequent keystrokes retain the direct path.
-    return yield* session.captureShellIdentity === null
-      ? writeToSession(input, session)
-      : withThreadLock(
-          input.threadId,
-          requireSession(input.threadId, input.terminalId).pipe(
-            Effect.flatMap((current) => writeToSession(input, current)),
-          ),
-        );
+    // Record requested input before queuing for the lock: an idle check can
+    // already be running, or acquire the lock before this write does.
+    return yield* Effect.acquireUseRelease(
+      Effect.sync(() => {
+        session.inputCount += 1;
+        session.pendingInputCount += 1;
+      }),
+      () =>
+        session.captureShellIdentity === null
+          ? writeToSession(input, session)
+          : withThreadLock(
+              input.threadId,
+              requireSession(input.threadId, input.terminalId).pipe(
+                Effect.flatMap((current) => writeToSession(input, current)),
+              ),
+            ),
+      () =>
+        Effect.sync(() => {
+          session.pendingInputCount -= 1;
+        }),
+    );
   });
 
   const resizeLocked = Effect.fn("terminal.resize")(function* (input: TerminalResizeInput) {
@@ -3382,6 +3399,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           updatedAt: yield* nowIso,
           eventSequence: 0,
           inputCount: 0,
+          pendingInputCount: 0,
           cols,
           rows,
           process: null,
@@ -3538,6 +3556,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             ).pipe(
               Effect.flatMap((result) =>
                 result.hasRunningSubprocess ||
+                session.pendingInputCount > 0 ||
                 activityMark(session) !== marks.get(session.terminalId)
                   ? Effect.void
                   : closeSession(input.threadId, session.terminalId, false),
