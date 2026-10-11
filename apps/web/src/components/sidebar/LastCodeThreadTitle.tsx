@@ -21,6 +21,9 @@ import type {
   LastCodeRenameTarget,
   LastCodeThreadEditingCapabilities,
 } from "./useLastCodeThreadEditing";
+import { LastCodeThreadSourceControl } from "./LastCodeThreadSourceControl";
+import type { LastCodeThreadSourceControlSnapshot } from "./useLastCodeThreadSourceControl";
+import type { ScopedThreadRef } from "@t3tools/contracts";
 function WaitingAction({
   thread,
   threadStatus,
@@ -131,5 +134,44 @@ export function LastCodeThreadTitle({
         </>
       )}
     </>
+  );
+}
+
+/** Compose PR and title controls without adding a second source-control subscription. */
+export function LastCodeThreadLeadingControls({
+  family,
+  presentation,
+  threadStatus,
+  renameTarget,
+  editing,
+  sourceControl,
+  active,
+  navigateToThread,
+}: {
+  family: LastCodeSidebarFamilyRow;
+  presentation: LastCodeThreadFamilyPresentation;
+  threadStatus: ThreadStatusPill | null;
+  renameTarget: LastCodeRenameTarget | null;
+  editing: LastCodeThreadEditingCapabilities;
+  sourceControl: LastCodeThreadSourceControlSnapshot;
+  active: boolean;
+  navigateToThread: (ref: ScopedThreadRef) => Promise<void>;
+}) {
+  return (
+    <div className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
+      <LastCodeThreadSourceControl
+        thread={family.thread}
+        sourceControl={sourceControl}
+        isActive={active}
+        navigateToThread={navigateToThread}
+      />
+      <LastCodeThreadTitle
+        family={family}
+        presentation={presentation}
+        threadStatus={threadStatus}
+        renameTarget={renameTarget}
+        editing={editing}
+      />
+    </div>
   );
 }

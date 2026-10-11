@@ -16,7 +16,7 @@ import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environ
 import { AsyncResult } from "effect/reactivity";
 import * as Cause from "effect/Cause";
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
-import { LastCodeThreadTitle } from "./LastCodeThreadTitle";
+import { LastCodeThreadLeadingControls } from "./LastCodeThreadTitle";
 import { makeThreadFixture } from "../../test-fixtures";
 import { projectLastCodeSidebarFamilies } from "../lastcodeSidebarFamilies.logic";
 vi.mock("~/hooks/useSettings", () => ({
@@ -57,6 +57,12 @@ const mocks = vi.hoisted(() => ({
   rowDoubleClick: vi.fn(),
   canOperate: true,
   compact: false,
+  navigate: vi.fn(async () => {}),
+  openPr: vi.fn((event: React.MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    return true;
+  }),
 }));
 vi.mock("../../state/threads", () => ({ threadEnvironment: { updateMetadata: "update" } }));
 vi.mock("../../state/use-orchestration-command", () => ({
@@ -70,7 +76,13 @@ vi.mock("../ui/toast", () => ({
 }));
 const a = scopeThreadRef(EnvironmentId.make("first-env"), ThreadId.make("same-id"));
 const b = scopeThreadRef(EnvironmentId.make("second-env"), ThreadId.make("same-id"));
-function Harness({ revision = 0 }: { revision?: number }) {
+vi.mock("./LastCodeSidebarPresentation", () => ({
+  useLastCodeSidebarPresentation: () => ({
+    openPrLink: mocks.openPr,
+    openPullRequestsInRightPanel: true,
+  }),
+}));
+function Harness({ revision = 0, pr = false }: { revision?: number; pr?: boolean }) {
   const { renameTarget, archiveTarget, capabilities } = useLastCodeThreadEditing();
   return (
     <div onDoubleClick={mocks.rowDoubleClick}>
@@ -81,7 +93,7 @@ function Harness({ revision = 0 }: { revision?: number }) {
       <button onClick={() => capabilities.cancelArchiveConfirmation(b)}>Cancel archive B</button>
       <output>{archiveTarget}</output>
       <span>{revision}</span>
-      <LastCodeThreadTitle
+      <LastCodeThreadLeadingControls
         family={familyFor(
           renameTarget?.key === scopedThreadKey(b) ? b : a,
           renameTarget?.key === scopedThreadKey(b) ? "B title" : "A title",
@@ -90,6 +102,28 @@ function Harness({ revision = 0 }: { revision?: number }) {
         threadStatus={null}
         renameTarget={renameTarget}
         editing={capabilities}
+        active={false}
+        navigateToThread={mocks.navigate}
+        sourceControl={{
+          gitCwd: null,
+          threadProject: null,
+          threadProjectCwd: null,
+          branchMismatch: null,
+          pr: null,
+          prStatus: null,
+          currentLinkedPr: pr
+            ? {
+                host: "github.com",
+                repository: "example/project",
+                number: 1,
+                url: "https://github.com/example/project/pull/1",
+                source: "manual",
+                linkedAt: "2026-01-01T00:00:00Z",
+                snapshot: null,
+                stack: null,
+              }
+            : null,
+        }}
       />
     </div>
   );
@@ -153,6 +187,27 @@ function deferred<T>() {
   return { promise, resolve };
 }
 describe("row-local rename editor", () => {
+  it("keeps an inline draft mounted when PR presentation changes beside it", async () => {
+    await render();
+    await click("Rename A");
+    await draft("Retained draft");
+    const editor = input();
+    await act(() => root?.render(<Harness pr />));
+    expect(input()).toBe(editor);
+    expect(input()?.value).toBe("Retained draft");
+    await act(() => container!.querySelector<HTMLAnchorElement>("a")!.click());
+    expect(mocks.openPr).toHaveBeenLastCalledWith(
+      expect.anything(),
+      "https://github.com/example/project/pull/1",
+      a,
+    );
+    expect(mocks.navigate).toHaveBeenCalledWith(a);
+    expect(input()).toBe(editor);
+    expect(mocks.update).not.toHaveBeenCalled();
+    await act(() => root?.render(<Harness />));
+    expect(container!.querySelector("a")).toBeNull();
+    expect(input()?.value).toBe("Retained draft");
+  });
   it("focuses/selects on opening, retains draft through refresh, and isolates double-click word selection", async () => {
     await render();
     await click("Rename A");

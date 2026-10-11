@@ -33,9 +33,9 @@ import {
 } from "./sidebar/LastCodeThreadFamily";
 import { useLastCodeThreadSourceControl } from "./sidebar/useLastCodeThreadSourceControl";
 import { useLastCodeThreadProcesses } from "./sidebar/useLastCodeThreadProcesses";
-import { LastCodeThreadSourceControl } from "./sidebar/LastCodeThreadSourceControl";
 import { LastCodeThreadProcesses } from "./sidebar/LastCodeThreadProcesses";
-import { LastCodeThreadTitle } from "./sidebar/LastCodeThreadTitle";
+import { LastCodeThreadLeadingControls } from "./sidebar/LastCodeThreadTitle";
+import { LastCodeThreadRowLayout } from "./sidebar/LastCodeThreadRowLayout";
 import {
   useLastCodeThreadEditing,
   type LastCodeRenameTarget,
@@ -316,8 +316,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     />
   );
   const detailsLifetime = useLastCodeThreadDetails(threadRef, editing);
-  const { setThreadRowActive, annotationPopoverHandle, handleMouseLeave, handleBlurCapture } =
-    detailsLifetime;
+  const { annotationPopoverHandle } = detailsLifetime;
   const {
     handleRowClick,
     handleRowDoubleClick,
@@ -336,22 +335,13 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const family = props.familyRow;
 
   return (
-    <SidebarMenuSubItem
-      ref={rowRef}
-      className="w-full mb-1"
-      style={{ paddingLeft: 12 + Math.min(family.depth, 6) * 12 }}
-      data-thread-item
-      {...fileDropHandlers}
-      onFocusCapture={() => {
-        if (!hasActiveAnnotation) setThreadRowActive(true);
-      }}
-      onMouseEnter={() => {
-        if (!hasActiveAnnotation) setThreadRowActive(true);
-      }}
-      onMouseLeave={handleMouseLeave}
-      onBlurCapture={handleBlurCapture}
+    <LastCodeThreadRowLayout
+      depth={family.depth}
+      rowRef={rowRef}
+      fileDropHandlers={fileDropHandlers}
+      annotated={hasActiveAnnotation}
+      lifetime={detailsLifetime}
     >
-      <LastCodeSidebarFamilyGuides depth={family.depth} />
       <LastCodeThreadRowSurface
         family={family}
         relationship={familyPresentation}
@@ -367,21 +357,16 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
           renameTarget={renameTarget !== null}
           navigateToThread={navigation.navigateToThread}
         />
-        <div className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
-          <LastCodeThreadSourceControl
-            thread={thread}
-            sourceControl={sourceControl}
-            isActive={isActive}
-            navigateToThread={navigation.navigateToThread}
-          />
-          <LastCodeThreadTitle
-            family={family}
-            presentation={familyPresentation}
-            threadStatus={threadStatus}
-            renameTarget={canOperateThread ? renameTarget : null}
-            editing={editing}
-          />
-        </div>
+        <LastCodeThreadLeadingControls
+          family={family}
+          presentation={familyPresentation}
+          threadStatus={threadStatus}
+          renameTarget={canOperateThread ? renameTarget : null}
+          editing={editing}
+          sourceControl={sourceControl}
+          active={isActive}
+          navigateToThread={navigation.navigateToThread}
+        />
         <LastCodeThreadMetadataControls
           thread={thread}
           identity={identity}
@@ -412,7 +397,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         open={cleanupFailureOpen}
         onOpenChange={setCleanupFailureOpen}
       />
-    </SidebarMenuSubItem>
+    </LastCodeThreadRowLayout>
   );
 });
 

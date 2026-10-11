@@ -7,10 +7,16 @@ import { makeThreadFixture } from "../../test-fixtures";
 import { LastCodeThreadMetadata } from "./LastCodeThreadMetadata";
 import { LastCodeThreadDetails } from "./LastCodeThreadDetails";
 import { useLastCodeThreadDetails } from "./useLastCodeThreadDetails";
+import { LastCodeThreadRowLayout } from "./LastCodeThreadRowLayout";
 import { LastCodeThreadRowSurface } from "./LastCodeThreadRowSurface";
-import { handleLastCodeThreadRowKeyDown } from "./lastcodeThreadRowInteractions";
+import {
+  handleLastCodeThreadRowKeyDown,
+  useLastCodeThreadFileDrop,
+} from "./lastcodeThreadRowInteractions";
 import { projectLastCodeSidebarFamilies } from "../lastcodeSidebarFamilies.logic";
 const mocks = vi.hoisted(() => ({
+  lease: vi.fn(),
+  drop: vi.fn(),
   navigate: vi.fn(),
   context: vi.fn(),
   archive: vi.fn(),
@@ -52,6 +58,10 @@ function Harness({ jump = null, active = true }: { jump?: string | null; active?
     editing,
   );
   const { annotationPopoverHandle: handle } = lifetime;
+  const { fileDropHandlers } = useLastCodeThreadFileDrop(
+    { environmentId: thread.environmentId, threadId: thread.id },
+    mocks.drop,
+  );
   const value = {
     ...thread,
     annotation: thread.annotation
@@ -59,7 +69,13 @@ function Harness({ jump = null, active = true }: { jump?: string | null; active?
       : null,
   };
   return (
-    <>
+    <LastCodeThreadRowLayout
+      depth={2}
+      rowRef={mocks.lease}
+      fileDropHandlers={fileDropHandlers}
+      annotated={active}
+      lifetime={lifetime}
+    >
       <LastCodeThreadRowSurface
         family={
           projectLastCodeSidebarFamilies({
@@ -115,7 +131,8 @@ function Harness({ jump = null, active = true }: { jump?: string | null; active?
           onResolveAnnotation: mocks.resolve,
         }}
       />
-    </>
+      <output data-details-active>{String(lifetime.threadRowActive)}</output>
+    </LastCodeThreadRowLayout>
   );
 }
 let root: Root | null = null;
@@ -158,6 +175,36 @@ async function open() {
   await act(() => trigger().click());
 }
 describe("row details composition", () => {
+  it("keeps the lease on the li and cancels confirmation when an unannotated row loses hover", async () => {
+    await render(null, false);
+    const li = container.querySelector<HTMLLIElement>("li[data-thread-item]")!;
+    expect(mocks.lease).toHaveBeenCalledWith(li);
+    const row = container.querySelector<HTMLElement>(`[data-testid="thread-row-${thread.id}"]`)!;
+    await act(() => row.focus());
+    expect(container.querySelector("output")?.textContent).toBe("true");
+    await act(() =>
+      li.dispatchEvent(new MouseEvent("mouseout", { bubbles: true, relatedTarget: null })),
+    );
+    expect(container.querySelector("output")?.textContent).toBe("false");
+    expect(editing.cancelArchiveConfirmation).toHaveBeenCalledWith({
+      environmentId: thread.environmentId,
+      threadId: thread.id,
+    });
+    expect(container.querySelector("li[data-thread-item]")).toBe(li);
+  });
+  it("leaves annotation activation to the existing trigger when focus and hover enter its row", async () => {
+    await render(null);
+    const li = container.querySelector<HTMLLIElement>("li[data-thread-item]")!;
+    await act(() => {
+      container.querySelector<HTMLElement>(`[data-testid="thread-row-${thread.id}"]`)!.focus();
+      li.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, relatedTarget: null }));
+    });
+    expect(container.querySelector("output")?.textContent).toBe("false");
+    expect(document.querySelector('[data-slot="popover-popup"]')?.textContent).toContain(
+      "Follow up here",
+    );
+    expect(container.querySelector("li[data-thread-item]")).toBe(li);
+  });
   it.each(["Enter", " "])(
     "navigates once with %s without opening its annotation, while nested keys stay isolated",
     async (key) => {
