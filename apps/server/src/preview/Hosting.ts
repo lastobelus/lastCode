@@ -456,12 +456,19 @@ const make = Effect.gen(function* () {
 
   const waitForReady = Effect.fn("PreviewHosting.waitForReady")(function* (
     lease: PreviewHostingLease,
+    relaunchIdleCommand?: Effect.Effect<
+      boolean,
+      PreviewHostingError | TerminalManager.TerminalError
+    >,
   ) {
     let observation = "No HTTP response was attributed to the owned preview terminal.";
     const timeoutMs = READY_TIMEOUT_MS;
     const result = yield* Effect.scoped(
       Effect.gen(function* () {
-        const ready = yield* Deferred.make<DiscoveredLocalServer | null>();
+        const ready = yield* Deferred.make<
+          DiscoveredLocalServer | null,
+          PreviewHostingError | TerminalManager.TerminalError
+        >();
         yield* Effect.acquireRelease(
           subscribe((leases) =>
             leases.some((entry) => entry.leaseId === lease.id)
@@ -493,12 +500,30 @@ const make = Effect.gen(function* () {
             Effect.gen(function* () {
               yield* Queue.take(refreshRequests);
               yield* terminals.refreshMetadata;
-              const refreshed = checkReady(yield* discovery.scan([lease.url])).match;
-              if (refreshed) yield* Deferred.succeed(ready, refreshed);
+              let refreshed = checkReady(yield* discovery.scan([lease.url]));
+              if (
+                refreshed.responding === undefined &&
+                relaunchIdleCommand !== undefined &&
+                (yield* relaunchIdleCommand)
+              ) {
+                refreshed = checkReady(yield* discovery.scan([lease.url]));
+              }
+              if (refreshed.match) yield* Deferred.succeed(ready, refreshed.match);
               // The fresh scan is checked directly, never queued for another refresh.
             }),
-          ),
+          ).pipe(Effect.catchCause((cause) => Deferred.failCause(ready, cause))),
         );
+        if (relaunchIdleCommand !== undefined) {
+          // Discovery suppresses unchanged empty snapshots. Recheck skipped launches
+          // within the existing deadline; an active command is never written twice.
+          yield* Effect.forkScoped(
+            Effect.forever(
+              Effect.sleep(Duration.seconds(3)).pipe(
+                Effect.andThen(Queue.offer(refreshRequests, undefined)),
+              ),
+            ),
+          );
+        }
         yield* discovery.subscribe(
           { configuredUrls: [lease.url], initialSnapshot: [] },
           (servers) => {
@@ -665,20 +690,31 @@ const make = Effect.gen(function* () {
 
           const startsHandoff = lease.status === "starting";
           const previousTerminal = yield* verifyLaunchOwnership(lease);
-          const startsRun =
+          let startsRun =
             lease.status === "sleeping" ||
             previousTerminal?.status !== "running" ||
             !previousTerminal.hasRunningSubprocess;
-          if (
-            !(yield* launchCommandIfNeeded(lease, () => {
-              launchedRecovery = !startsHandoff;
-            }))
-          ) {
+          let commandLaunched = false;
+          const onLaunchStarted = () => {
+            commandLaunched = true;
+            startsRun = true;
+            launchedRecovery = !startsHandoff;
+          };
+          if (!(yield* launchCommandIfNeeded(lease, onLaunchStarted))) {
             const latest = yield* findLease(lease.id);
             if (latest !== null) yield* expireLocked(latest);
             return null;
           }
-          if ((yield* waitForReady(lease)) === null) {
+          const relaunchIdleCommand = Effect.gen(function* () {
+            if (commandLaunched) return false;
+            const terminal = yield* verifyLaunchOwnership(lease);
+            if (terminal?.status === "running" && terminal.hasRunningSubprocess) return false;
+            yield* launchCommandIfNeeded(lease, onLaunchStarted);
+            return commandLaunched;
+          });
+          if (
+            (yield* waitForReady(lease, commandLaunched ? undefined : relaunchIdleCommand)) === null
+          ) {
             const latest = yield* findLease(lease.id);
             if (latest !== null) yield* expireLocked(latest);
             return null;
