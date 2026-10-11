@@ -14,6 +14,28 @@ testing, use [test-t3-mobile](../test-t3-mobile/SKILL.md).
 
 ## Start the app
 
+Choose the route before launching. Record the machine that owns the app and the
+machine that actually runs the Browser page; the agent's machine alone does not
+identify the browser host. A loopback URL is usable only by a browser on that
+same machine. An attached viewer does not tell you where the browser process
+runs. When the tool advertises `browserHost`, ordinary agent QA can select
+`"environment"` to run beside the app; named desktop sign-ins select
+`"desktop"`. When the native desktop Browser runs elsewhere, use `--share` in
+both the dry run and managed launch, then navigate to the runner's published
+HTTPS origin. Do not first try the unshared loopback recipe remotely.
+
+For an environment-port navigation to that shared route, specify
+`protocol: "https"`. Do not assume that the default HTTP target selects the
+HTTPS mapping. Before navigation, check the local and published HTTPS
+`/.well-known/t3/environment` descriptors once and require the same environment
+ID. A successful pairing-token POST does not establish that the earlier remote
+descriptor check is reachable.
+
+`--host` configures the backend, not the web listener. The runner clears
+`T3CODE_WEB_BIND_HOST` for ordinary dev, so setting that variable is not a
+replacement for `--share`. Let the runner own sharing; do not install a proxy or
+configure a sharing service manually.
+
 Reuse this task's healthy dev server. Otherwise run `vp run dev` from the
 repository root through `preview_host` when available, retaining its managed
 terminal and lease. Follow `docs/lastcode/preview-handoffs.md` for the hosting
@@ -55,6 +77,12 @@ or emit a one-time pairing link as the lasting QA handoff.
 The automation tab can initially pair with that same configured credential.
 Keep it in the selected QA profile. Never replace a shared configured credential
 or restart the user's LastCode to prepare QA.
+
+If the first shared navigation displays the pairing page, automatic dev
+authentication has not passed. Ordinary pairing may allow the feature's own QA
+to continue, but record that intervention separately and report the retained
+lease URL scheme and published browser URL scheme to the browser-repair owner.
+Do not describe a manually paired session as an unattended preview success.
 
 Keep pairing URLs and credentials private: never commit them, include them in
 reports, or capture them in screenshots. Do not redirect startup output into
