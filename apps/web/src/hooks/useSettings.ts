@@ -389,6 +389,13 @@ export function useClientSettings<T = ClientSettings>(
   return useMemo(() => (selector ? selector(settings) : (settings as T)), [selector, settings]);
 }
 
+/** Subscribe to one setting so unrelated snapshot updates do not rerender the consumer. */
+export function useClientSetting<Key extends keyof ClientSettings>(key: Key): ClientSettings[Key] {
+  const getSnapshot = useCallback(() => getClientSettingsSnapshot()[key], [key]);
+  const getServerSnapshot = useCallback(() => DEFAULT_CLIENT_SETTINGS[key], [key]);
+  return useSyncExternalStore(subscribeClientSettings, getSnapshot, getServerSnapshot);
+}
+
 export function resolveEnvironmentIdentificationMode(input: {
   mode: EnvironmentIdentificationMode;
   settingsHydrated: boolean;

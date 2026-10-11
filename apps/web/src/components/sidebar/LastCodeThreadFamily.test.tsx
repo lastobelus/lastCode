@@ -28,11 +28,13 @@ const mocks = vi.hoisted(() => ({
   readCreator: vi.fn(),
 }));
 vi.mock("~/hooks/useSettings", () => ({
-  useClientSettings: (select: (value: object) => unknown) =>
-    select({
-      compactLegacySidebarStatuses: false,
-      legacySidebarThreadGroupingStyle: "typed-groups",
-    }),
+  useClientSetting: (key: string) =>
+    (
+      ({
+        compactLegacySidebarStatuses: false,
+        legacySidebarThreadGroupingStyle: "typed-groups",
+      }) as Record<string, unknown>
+    )[key],
 }));
 vi.mock("../ThreadStatusIndicators", () => ({ ThreadStatusLabel: () => null }));
 vi.mock("../../state/entities", () => ({

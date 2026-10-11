@@ -2,7 +2,7 @@ import { BotIcon, ChevronRightIcon, SparklesIcon, TriangleAlertIcon } from "luci
 import { parseScopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { ScopedThreadRef } from "@t3tools/contracts";
 import { cn } from "../../lib/utils";
-import { useClientSettings } from "~/hooks/useSettings";
+import { useClientSetting } from "~/hooks/useSettings";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { SidebarMenuSubItem } from "../ui/sidebar";
 import { ThreadStatusLabel } from "../ThreadStatusIndicators";
@@ -50,8 +50,7 @@ export function LastCodeThreadFamilyDisclosure({
   renameTarget: boolean;
   navigateToThread: Navigate;
 }) {
-  const typedGroups =
-    useClientSettings((settings) => settings.legacySidebarThreadGroupingStyle) === "typed-groups";
+  const typedGroups = useClientSetting("legacySidebarThreadGroupingStyle") === "typed-groups";
   const toggle = useFamilyToggle({ type: "thread", row: family }, navigateToThread);
   const thread = family.thread;
   return (
@@ -113,9 +112,7 @@ export function LastCodeSubagentGroup({
   item: Extract<LastCodeSidebarFamilyItem, { type: "subagents" }>;
   navigateToThread: Navigate;
 }) {
-  const compactStatusIndicators = useClientSettings(
-    (settings) => settings.compactLegacySidebarStatuses,
-  );
+  const compactStatusIndicators = useClientSetting("compactLegacySidebarStatuses");
   const toggle = useFamilyToggle(item, navigateToThread);
   return (
     <SidebarMenuSubItem className="w-full" data-thread-selection-safe>
@@ -156,11 +153,8 @@ export function LastCodeThreadRelationshipBadge({
     relationshipLabel,
     relationshipUnavailableLabel,
   } = presentation;
-  const typedGroups =
-    useClientSettings((settings) => settings.legacySidebarThreadGroupingStyle) === "typed-groups";
-  const compactStatusIndicators = useClientSettings(
-    (settings) => settings.compactLegacySidebarStatuses,
-  );
+  const typedGroups = useClientSetting("legacySidebarThreadGroupingStyle") === "typed-groups";
+  const compactStatusIndicators = useClientSetting("compactLegacySidebarStatuses");
   return (
     <>
       {isAgentCreated || relationshipUnavailableLabel ? (
@@ -201,11 +195,8 @@ export function LastCodeThreadFamilySummary({
   family: LastCodeSidebarFamilyRow;
   display: "inline" | "line";
 }) {
-  const typedGroups =
-    useClientSettings((settings) => settings.legacySidebarThreadGroupingStyle) === "typed-groups";
-  const compactStatusIndicators = useClientSettings(
-    (settings) => settings.compactLegacySidebarStatuses,
-  );
+  const typedGroups = useClientSetting("legacySidebarThreadGroupingStyle") === "typed-groups";
+  const compactStatusIndicators = useClientSetting("compactLegacySidebarStatuses");
   if (family.descendantCount === 0 || family.expanded || (display === "line") !== typedGroups)
     return null;
   if (display === "line")

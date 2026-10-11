@@ -20,11 +20,13 @@ import { LastCodeThreadTitle } from "./LastCodeThreadTitle";
 import { makeThreadFixture } from "../../test-fixtures";
 import { projectLastCodeSidebarFamilies } from "../lastcodeSidebarFamilies.logic";
 vi.mock("~/hooks/useSettings", () => ({
-  useClientSettings: (select: (value: object) => unknown) =>
-    select({
-      compactLegacySidebarStatuses: mocks.compact,
-      legacySidebarThreadGroupingStyle: "typed-groups",
-    }),
+  useClientSetting: (key: string) =>
+    (
+      ({
+        compactLegacySidebarStatuses: mocks.compact,
+        legacySidebarThreadGroupingStyle: "typed-groups",
+      }) as Record<string, unknown>
+    )[key],
 }));
 vi.mock("../ThreadStatusIndicators", () => ({ ThreadStatusLabel: () => null }));
 vi.mock("../dashboard/ThreadDashboardIndicator", () => ({ ThreadDashboardIndicator: () => null }));

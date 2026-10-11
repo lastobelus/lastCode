@@ -1,7 +1,7 @@
 import { MessageSquareLockIcon } from "lucide-react";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { actionRunningPresentation } from "@t3tools/shared/actionResume";
-import { useClientSettings } from "~/hooks/useSettings";
+import { useClientSetting } from "~/hooks/useSettings";
 import { ThreadStatusLabel } from "../ThreadStatusIndicators";
 import type { ThreadStatusPill } from "../Sidebar.logic";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -109,9 +109,7 @@ export function LastCodeThreadTitle({
   editing: LastCodeThreadEditingCapabilities;
 }) {
   const thread = family.thread;
-  const compactStatusIndicators = useClientSettings(
-    (settings) => settings.compactLegacySidebarStatuses,
-  );
+  const compactStatusIndicators = useClientSetting("compactLegacySidebarStatuses");
   return (
     <>
       <WaitingAction thread={thread} threadStatus={threadStatus} />
