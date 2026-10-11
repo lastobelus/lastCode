@@ -1,3 +1,7 @@
+import {
+  LastCodeSidebarPresentationProvider,
+  useLastCodeSidebarPresentation,
+} from "./sidebar/LastCodeSidebarPresentation";
 import { LastCodeThreadMetadataControls } from "./sidebar/LastCodeThreadMetadataControls";
 import { LastCodeThreadRowSurface } from "./sidebar/LastCodeThreadRowSurface";
 import { useLastCodeThreadNavigation } from "./sidebar/useLastCodeThreadNavigation";
@@ -49,10 +53,7 @@ import { LastCodeSidebarDesktopNotice } from "./sidebar/LastCodeSidebarDesktopNo
 import { LastCodeSidebarConnectionNotice } from "./sidebar/LastCodeSidebarConnectionNotice";
 import { LastCodeProjectNewThread } from "./sidebar/LastCodeProjectNewThread";
 
-import {
-  useSidebarProviderBadgePreferences,
-  type SidebarProviderBadgePreferences,
-} from "./sidebar/SidebarEnvironmentIcon";
+import { useSidebarProviderBadgePreferences } from "./sidebar/SidebarEnvironmentIcon";
 import { FolderPlusIcon, SearchIcon } from "lucide-react";
 import { ThreadStatusLabel } from "./ThreadStatusIndicators";
 import { ProjectSidebarDraftList } from "./sidebar/ProjectSidebarDraftList";
@@ -102,7 +103,6 @@ import { type EnvironmentIconColor, type LegacySidebarScale } from "@t3tools/con
 import { isDesktopLocalConnectionTarget, isWslConnectionTarget } from "../connection/desktopLocal";
 import { isElectron } from "../env";
 import { useTerminalFocus } from "../hooks/useTerminalFocus";
-import { useOpenPrLink } from "../lib/openPullRequestLink";
 import { isTerminalFocused } from "../lib/terminalFocus";
 import { readThreadShell, useProjects, useThreadShells } from "../state/entities";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
@@ -229,15 +229,10 @@ function buildThreadJumpLabelMap(input: {
 }
 
 interface SidebarThreadRowProps {
-  thread: SidebarThreadSummary;
   familyRow: LastCodeSidebarFamilyRow;
-  providerBadgePreferences: SidebarProviderBadgePreferences;
-  configuredEnvironmentIconColor: EnvironmentIconColor | undefined;
   projectCwd: string | null;
-  providerEntriesByEnvironmentId: ReadonlyMap<string, ReadonlyMap<string, ProviderInstanceEntry>>;
   orderedProjectThreadKeys: readonly string[];
   isActive: boolean;
-  openPullRequestsInRightPanel: boolean;
   jumpLabel: string | null;
   renameTarget: LastCodeRenameTarget | null;
   editing: LastCodeThreadEditingCapabilities;
@@ -256,11 +251,6 @@ interface SidebarThreadRowProps {
   ) => Promise<void>;
   clearSelection: () => void;
 
-  openPrLink: (
-    event: React.MouseEvent<HTMLElement>,
-    prUrl: string,
-    threadRef?: ScopedThreadRef,
-  ) => boolean;
   onFileDropThreads: (threadRef: ScopedThreadRef, files: File[]) => void;
   onEditAnnotation: (thread: SidebarThreadSummary) => void;
   onSaveAnnotationBody: (thread: SidebarThreadSummary, body: string) => Promise<boolean>;
@@ -271,7 +261,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const {
     orderedProjectThreadKeys,
     isActive,
-    openPullRequestsInRightPanel,
     jumpLabel,
     renameTarget,
     editing,
@@ -281,14 +270,14 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     handleMultiSelectContextMenu,
     handleThreadContextMenu,
     clearSelection,
-    openPrLink,
     onFileDropThreads,
     onEditAnnotation,
     onSaveAnnotationBody,
     onResolveAnnotation,
-    providerEntriesByEnvironmentId,
-    thread,
   } = props;
+  const { providerEntriesByEnvironmentId, environmentIconColors, providerBadgePreferences } =
+    useLastCodeSidebarPresentation();
+  const thread = props.familyRow.thread;
   const canOperateThread = useEnvironmentScope(thread.environmentId, AuthOrchestrationOperateScope);
   const threadRef = scopeThreadRef(thread.environmentId, thread.id);
   const threadKey = scopedThreadKey(threadRef);
@@ -306,8 +295,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const identity = useLastCodeThreadIdentity(
     props.familyRow,
     providerEntriesByEnvironmentId,
-    props.configuredEnvironmentIconColor,
-    props.providerBadgePreferences,
+    environmentIconColors[thread.environmentId],
+    providerBadgePreferences,
   );
   const sourceControl = useLastCodeThreadSourceControl(thread, leaseLiveStatus, props.projectCwd);
   const { gitCwd } = sourceControl;
@@ -406,8 +395,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             thread={thread}
             sourceControl={sourceControl}
             isActive={isActive}
-            openPullRequestsInRightPanel={openPullRequestsInRightPanel}
-            openPrLink={openPrLink}
             navigateToThread={navigateToThread}
           />
           <LastCodeThreadTitle
@@ -421,7 +408,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         <LastCodeThreadMetadataControls
           thread={thread}
           identity={identity}
-          preferences={props.providerBadgePreferences}
+          preferences={providerBadgePreferences}
           jumpLabel={jumpLabel}
           highlighted={isHighlighted}
           archive={{ allowed: canArchive, confirmationRequested: archiveConfirmActive, editing }}
@@ -456,9 +443,6 @@ interface SidebarProjectThreadListProps {
   groupingStyle: "minimal" | "typed-groups";
   lastcodeSidebarScale: LegacySidebarScale;
   scaleStyle: CSSProperties;
-  providerEntriesByEnvironmentId: ReadonlyMap<string, ReadonlyMap<string, ProviderInstanceEntry>>;
-  environmentIconColors: Readonly<Record<string, EnvironmentIconColor>>;
-  providerBadgePreferences: SidebarProviderBadgePreferences;
   projectCwd: string | null;
   projectKey: string;
   projectExpanded: boolean;
@@ -470,7 +454,6 @@ interface SidebarProjectThreadListProps {
   shouldShowThreadPanel: boolean;
   isThreadListExpanded: boolean;
   activeRouteThreadKey: string | null;
-  openPullRequestsInRightPanel: boolean;
   threadJumpLabelByKey: ReadonlyMap<string, string>;
   renameTarget: LastCodeRenameTarget | null;
   editing: LastCodeThreadEditingCapabilities;
@@ -491,11 +474,6 @@ interface SidebarProjectThreadListProps {
   ) => Promise<void>;
   clearSelection: () => void;
 
-  openPrLink: (
-    event: React.MouseEvent<HTMLElement>,
-    prUrl: string,
-    threadRef?: ScopedThreadRef,
-  ) => boolean;
   onEditAnnotation: (thread: SidebarThreadSummary) => void;
   onSaveAnnotationBody: (thread: SidebarThreadSummary, body: string) => Promise<boolean>;
   onResolveAnnotation: (thread: SidebarThreadSummary) => void;
@@ -509,9 +487,6 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
   const {
     lastcodeSidebarScale,
     scaleStyle,
-    providerEntriesByEnvironmentId,
-    environmentIconColors,
-    providerBadgePreferences,
     projectCwd,
     projectKey,
     projectExpanded,
@@ -523,7 +498,6 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
     shouldShowThreadPanel,
     isThreadListExpanded,
     activeRouteThreadKey,
-    openPullRequestsInRightPanel,
     threadJumpLabelByKey,
     renameTarget,
     editing,
@@ -535,7 +509,6 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
     handleMultiSelectContextMenu,
     handleThreadContextMenu,
     clearSelection,
-    openPrLink,
     onEditAnnotation,
     onSaveAnnotationBody,
     onResolveAnnotation,
@@ -594,15 +567,10 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
                 </SidebarMenuSubItem>
               ) : null}
               <SidebarThreadRow
-                thread={thread}
                 familyRow={familyRow}
-                providerBadgePreferences={providerBadgePreferences}
-                configuredEnvironmentIconColor={environmentIconColors[thread.environmentId]}
                 projectCwd={projectCwd}
-                providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
                 orderedProjectThreadKeys={orderedProjectThreadKeys}
                 isActive={activeRouteThreadKey === threadKey}
-                openPullRequestsInRightPanel={openPullRequestsInRightPanel}
                 jumpLabel={threadJumpLabelByKey.get(threadKey) ?? null}
                 renameTarget={renameTarget?.key === threadKey ? renameTarget : null}
                 editing={editing}
@@ -613,7 +581,6 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
                 handleMultiSelectContextMenu={handleMultiSelectContextMenu}
                 handleThreadContextMenu={handleThreadContextMenu}
                 clearSelection={clearSelection}
-                openPrLink={openPrLink}
                 onEditAnnotation={onEditAnnotation}
                 onSaveAnnotationBody={onSaveAnnotationBody}
                 onResolveAnnotation={onResolveAnnotation}
@@ -660,16 +627,13 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
 interface SidebarProjectItemProps {
   lastcodeSidebarScale: LegacySidebarScale;
   scaleStyle: CSSProperties;
-  providerEntriesByEnvironmentId: ReadonlyMap<string, ReadonlyMap<string, ProviderInstanceEntry>>;
   desktopLocalEnvironmentIds: ReadonlySet<EnvironmentId>;
   knownEnvironmentIds: ReadonlySet<EnvironmentId>;
   environmentIconColors: Readonly<Record<string, EnvironmentIconColor>>;
   showLocalEnvironmentIcon: boolean;
-  providerBadgePreferences: SidebarProviderBadgePreferences;
   project: SidebarProjectSnapshot;
   isThreadListExpanded: boolean;
   activeRouteThreadKey: string | null;
-  openPullRequestsInRightPanel: boolean;
   newThreadShortcutLabel: string | null;
   handleNewThread: ReturnType<typeof useNewThreadHandler>;
   threadJumpLabelByKey: ReadonlyMap<string, string>;
@@ -687,11 +651,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const {
     lastcodeSidebarScale,
     scaleStyle,
-    providerEntriesByEnvironmentId,
     project,
     isThreadListExpanded,
     activeRouteThreadKey,
-    openPullRequestsInRightPanel,
     newThreadShortcutLabel,
     handleNewThread,
     threadJumpLabelByKey,
@@ -733,7 +695,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const { navigateToThread, handleThreadClick, handleThreadFileDrop } =
     useLastCodeThreadNavigation();
   const clearSelection = useThreadSelectionStore((state) => state.clearSelection);
-  const openPrLink = useOpenPrLink();
   const projectPreferenceKeys = useMemo(
     () => lastCodeProjectExpansionPreferenceKeys(project),
     [project],
@@ -838,9 +799,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         groupingStyle={groupingStyle}
         lastcodeSidebarScale={lastcodeSidebarScale}
         scaleStyle={scaleStyle}
-        providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
-        environmentIconColors={props.environmentIconColors}
-        providerBadgePreferences={props.providerBadgePreferences}
         projectCwd={project.workspaceRoot}
         projectKey={project.projectKey}
         projectExpanded={projectExpanded}
@@ -852,7 +810,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         shouldShowThreadPanel={shouldShowThreadPanel}
         isThreadListExpanded={isThreadListExpanded}
         activeRouteThreadKey={activeRouteThreadKey}
-        openPullRequestsInRightPanel={openPullRequestsInRightPanel}
         threadJumpLabelByKey={threadJumpLabelByKey}
         renameTarget={renameTarget}
         editing={editing}
@@ -864,7 +821,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         handleMultiSelectContextMenu={handleMultiSelectContextMenu}
         handleThreadContextMenu={handleThreadContextMenu}
         clearSelection={clearSelection}
-        openPrLink={openPrLink}
         onEditAnnotation={annotations.edit}
         onSaveAnnotationBody={annotations.saveBody}
         onResolveAnnotation={(thread) => void annotations.resolve(thread)}
@@ -944,7 +900,6 @@ interface SidebarProjectsContentProps {
   expandedThreadListsByProject: ReadonlySet<string>;
   activeRouteProjectKey: string | null;
   routeThreadKey: string | null;
-  openPullRequestsInRightPanel: boolean;
   newThreadShortcutLabel: string | null;
   commandPaletteShortcutLabel: string | null;
   threadJumpLabelByKey: ReadonlyMap<string, string>;
@@ -958,12 +913,10 @@ interface SidebarProjectsContentProps {
   projectsLength: number;
   lastcodeSidebarScale: LegacySidebarScale;
   projectTreeScaleStyle: CSSProperties;
-  providerEntriesByEnvironmentId: ReadonlyMap<string, ReadonlyMap<string, ProviderInstanceEntry>>;
   desktopLocalEnvironmentIds: ReadonlySet<EnvironmentId>;
   knownEnvironmentIds: ReadonlySet<EnvironmentId>;
   environmentIconColors: Readonly<Record<string, EnvironmentIconColor>>;
   showLocalEnvironmentIcon: boolean;
-  providerBadgePreferences: SidebarProviderBadgePreferences;
 }
 
 const SidebarProjectsContent = memo(function SidebarProjectsContent(
@@ -982,7 +935,6 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     expandedThreadListsByProject,
     activeRouteProjectKey,
     routeThreadKey,
-    openPullRequestsInRightPanel,
     newThreadShortcutLabel,
     commandPaletteShortcutLabel,
     threadJumpLabelByKey,
@@ -996,12 +948,10 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     projectsLength,
     lastcodeSidebarScale,
     projectTreeScaleStyle,
-    providerEntriesByEnvironmentId,
     desktopLocalEnvironmentIds,
     knownEnvironmentIds,
     environmentIconColors,
     showLocalEnvironmentIcon,
-    providerBadgePreferences,
   } = props;
 
   return (
@@ -1076,18 +1026,15 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                       <SidebarProjectItem
                         lastcodeSidebarScale={lastcodeSidebarScale}
                         scaleStyle={projectTreeScaleStyle}
-                        providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
                         desktopLocalEnvironmentIds={desktopLocalEnvironmentIds}
                         knownEnvironmentIds={knownEnvironmentIds}
                         environmentIconColors={environmentIconColors}
                         showLocalEnvironmentIcon={showLocalEnvironmentIcon}
-                        providerBadgePreferences={providerBadgePreferences}
                         project={project}
                         isThreadListExpanded={expandedThreadListsByProject.has(project.projectKey)}
                         activeRouteThreadKey={
                           activeRouteProjectKey === project.projectKey ? routeThreadKey : null
                         }
-                        openPullRequestsInRightPanel={openPullRequestsInRightPanel}
                         newThreadShortcutLabel={newThreadShortcutLabel}
                         handleNewThread={handleNewThread}
                         threadJumpLabelByKey={threadJumpLabelByKey}
@@ -1115,18 +1062,15 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                 key={project.projectKey}
                 lastcodeSidebarScale={lastcodeSidebarScale}
                 scaleStyle={projectTreeScaleStyle}
-                providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
                 desktopLocalEnvironmentIds={desktopLocalEnvironmentIds}
                 knownEnvironmentIds={knownEnvironmentIds}
                 environmentIconColors={environmentIconColors}
                 showLocalEnvironmentIcon={showLocalEnvironmentIcon}
-                providerBadgePreferences={providerBadgePreferences}
                 project={project}
                 isThreadListExpanded={expandedThreadListsByProject.has(project.projectKey)}
                 activeRouteThreadKey={
                   activeRouteProjectKey === project.projectKey ? routeThreadKey : null
                 }
-                openPullRequestsInRightPanel={openPullRequestsInRightPanel}
                 newThreadShortcutLabel={newThreadShortcutLabel}
                 handleNewThread={handleNewThread}
                 threadJumpLabelByKey={threadJumpLabelByKey}
@@ -1725,40 +1669,44 @@ function LastCodeSidebarView() {
       ))}
       <SidebarChromeHeader isElectron={isElectron} />
 
-      <SidebarProjectsContent
-        openAddProject={openAddProjectCommandPalette}
-        isManualProjectSorting={isManualProjectSorting}
-        projectDnDSensors={projectDnDSensors}
-        projectCollisionDetection={projectCollisionDetection}
-        handleProjectDragStart={handleProjectDragStart}
-        handleProjectDragEnd={handleProjectDragEnd}
-        handleProjectDragCancel={handleProjectDragCancel}
-        handleNewThread={handleNewThread}
-        sortedProjects={sortedProjects}
-        expandedThreadListsByProject={expandedThreadListsByProject}
-        activeRouteProjectKey={activeRouteProjectKey}
-        routeThreadKey={routeThreadKey}
-        openPullRequestsInRightPanel={routeThreadRef !== null}
-        newThreadShortcutLabel={newThreadShortcutLabel}
-        commandPaletteShortcutLabel={commandPaletteShortcutLabel}
-        threadJumpLabelByKey={visibleThreadJumpLabelByKey}
-        attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
-        expandThreadListForProject={expandThreadListForProject}
-        collapseThreadListForProject={collapseThreadListForProject}
-        dragInProgressRef={dragInProgressRef}
-        suppressProjectClickAfterDragRef={suppressProjectClickAfterDragRef}
-        suppressProjectClickForContextMenuRef={suppressProjectClickForContextMenuRef}
-        attachProjectListAutoAnimateRef={attachProjectListAutoAnimateRef}
-        projectsLength={projects.length}
-        lastcodeSidebarScale={lastcodeSidebarScale}
-        projectTreeScaleStyle={scaleStyle}
+      <LastCodeSidebarPresentationProvider
         providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
-        desktopLocalEnvironmentIds={desktopLocalEnvironmentIds}
-        knownEnvironmentIds={knownEnvironmentIds}
         environmentIconColors={environmentIconColors}
-        showLocalEnvironmentIcon={showLocalEnvironmentIcon}
         providerBadgePreferences={providerBadgePreferences}
-      />
+        openPullRequestsInRightPanel={routeThreadRef !== null}
+      >
+        <SidebarProjectsContent
+          openAddProject={openAddProjectCommandPalette}
+          isManualProjectSorting={isManualProjectSorting}
+          projectDnDSensors={projectDnDSensors}
+          projectCollisionDetection={projectCollisionDetection}
+          handleProjectDragStart={handleProjectDragStart}
+          handleProjectDragEnd={handleProjectDragEnd}
+          handleProjectDragCancel={handleProjectDragCancel}
+          handleNewThread={handleNewThread}
+          sortedProjects={sortedProjects}
+          expandedThreadListsByProject={expandedThreadListsByProject}
+          activeRouteProjectKey={activeRouteProjectKey}
+          routeThreadKey={routeThreadKey}
+          newThreadShortcutLabel={newThreadShortcutLabel}
+          commandPaletteShortcutLabel={commandPaletteShortcutLabel}
+          threadJumpLabelByKey={visibleThreadJumpLabelByKey}
+          attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
+          expandThreadListForProject={expandThreadListForProject}
+          collapseThreadListForProject={collapseThreadListForProject}
+          dragInProgressRef={dragInProgressRef}
+          suppressProjectClickAfterDragRef={suppressProjectClickAfterDragRef}
+          suppressProjectClickForContextMenuRef={suppressProjectClickForContextMenuRef}
+          attachProjectListAutoAnimateRef={attachProjectListAutoAnimateRef}
+          projectsLength={projects.length}
+          lastcodeSidebarScale={lastcodeSidebarScale}
+          projectTreeScaleStyle={scaleStyle}
+          desktopLocalEnvironmentIds={desktopLocalEnvironmentIds}
+          knownEnvironmentIds={knownEnvironmentIds}
+          environmentIconColors={environmentIconColors}
+          showLocalEnvironmentIcon={showLocalEnvironmentIcon}
+        />
+      </LastCodeSidebarPresentationProvider>
       <SidebarChromeFooter />
     </>
   );

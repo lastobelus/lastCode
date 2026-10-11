@@ -1,3 +1,4 @@
+import { LastCodeSidebarPresentationProvider } from "./LastCodeSidebarPresentation";
 // @vitest-environment happy-dom
 import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -55,6 +56,7 @@ const mocks = vi.hoisted(() => ({
   readScope: vi.fn(),
   useScope: vi.fn(),
 }));
+vi.mock("../../lib/openPullRequestLink", () => ({ useOpenPrLink: () => mocks.openPr }));
 vi.mock("../../state/entities", () => ({ useProject: mocks.project }));
 vi.mock("../../state/query", () => ({ useEnvironmentQuery: mocks.query }));
 vi.mock("../../state/vcs", () => ({ vcsEnvironment: { status: mocks.status } }));
@@ -134,22 +136,27 @@ function Harness({
     processes = queryProcesses;
   }, [querySource, queryProcesses]);
   return (
-    <div onClick={mocks.bubble}>
-      <LastCodeThreadSourceControl
-        thread={value}
-        sourceControl={querySource}
-        isActive={active}
-        openPullRequestsInRightPanel={panel}
-        openPrLink={mocks.openPr}
-        navigateToThread={mocks.navigation}
-      />
-      <LastCodeThreadProcesses
-        threadRef={target}
-        processes={queryProcesses}
-        cleanupBlocked={value.worktreeCleanup != null}
-        navigateToThread={mocks.navigation}
-      />
-    </div>
+    <LastCodeSidebarPresentationProvider
+      providerEntriesByEnvironmentId={new Map()}
+      environmentIconColors={{}}
+      providerBadgePreferences={{ enabled: false, size: 50, transparency: 0 }}
+      openPullRequestsInRightPanel={panel}
+    >
+      <div onClick={mocks.bubble}>
+        <LastCodeThreadSourceControl
+          thread={value}
+          sourceControl={querySource}
+          isActive={active}
+          navigateToThread={mocks.navigation}
+        />
+        <LastCodeThreadProcesses
+          threadRef={target}
+          processes={queryProcesses}
+          cleanupBlocked={value.worktreeCleanup != null}
+          navigateToThread={mocks.navigation}
+        />
+      </div>
+    </LastCodeSidebarPresentationProvider>
   );
 }
 let root: Root | null = null,
@@ -208,6 +215,24 @@ async function click(element: HTMLElement) {
   await act(() => element.click());
 }
 describe("row-owned query and control seams", () => {
+  it("refreshes shared PR opening choices on the same mounted control", async () => {
+    const value = { ...thread, pullRequests: [link] };
+    mocks.openPr.mockReturnValue(true);
+    await render({ value, panel: true });
+    const anchor = container!.querySelector("a")!;
+    await click(anchor);
+    expect(mocks.openPr).toHaveBeenLastCalledWith(expect.anything(), anchor.href, ref);
+    expect(mocks.navigation).toHaveBeenCalledOnce();
+    await render({ value, panel: false });
+    expect(container!.querySelector("a")).toBe(anchor);
+    await click(anchor);
+    expect(mocks.openPr).toHaveBeenLastCalledWith(expect.anything(), anchor.href, undefined);
+    expect(mocks.navigation).toHaveBeenCalledOnce();
+    await render({ value, panel: true, active: true });
+    await click(anchor);
+    expect(mocks.openPr).toHaveBeenLastCalledWith(expect.anything(), anchor.href, ref);
+    expect(mocks.navigation).toHaveBeenCalledOnce();
+  });
   it("queries the exact physical project once and favors worktree over own cwd over representative fallback", async () => {
     await render({ value: { ...thread, worktreePath: "/own-worktree" } });
     expect(mocks.project).toHaveBeenCalledOnce();

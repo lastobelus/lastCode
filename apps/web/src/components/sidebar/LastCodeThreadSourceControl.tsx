@@ -1,3 +1,4 @@
+import { useLastCodeSidebarPresentation } from "./LastCodeSidebarPresentation";
 import { useCallback } from "react";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { ScopedThreadRef } from "@t3tools/contracts";
@@ -11,17 +12,14 @@ export function LastCodeThreadSourceControl({
   thread,
   sourceControl,
   isActive,
-  openPullRequestsInRightPanel,
-  openPrLink,
   navigateToThread,
 }: {
   thread: SidebarThreadSummary;
   sourceControl: LastCodeThreadSourceControlSnapshot;
   isActive: boolean;
-  openPullRequestsInRightPanel: boolean;
-  openPrLink: (event: React.MouseEvent<HTMLElement>, url: string, ref?: ScopedThreadRef) => boolean;
   navigateToThread: (ref: ScopedThreadRef) => Promise<void>;
 }) {
+  const { openPullRequestsInRightPanel, openPrLink } = useLastCodeSidebarPresentation();
   const { pr, prStatus, currentLinkedPr } = sourceControl;
   const cleanup = thread.worktreeCleanup ?? null;
   const threadRef = scopeThreadRef(thread.environmentId, thread.id);
