@@ -58,6 +58,38 @@ function WaitingAction({
     </>
   );
 }
+/** Keep a distinct child outcome visible without repeating the row's leading status. */
+function SubagentOutcome({
+  label,
+  leadingLabel,
+}: {
+  label: string;
+  leadingLabel: string | undefined;
+}) {
+  if (label === leadingLabel) return null;
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <span
+            role="img"
+            aria-label={label}
+            className="inline-flex shrink-0 items-center text-3xs text-sidebar-muted-foreground"
+          />
+        }
+      >
+        <span
+          data-lastcode-sidebar-unscaled-content
+          className="inline-flex size-3.5 items-center justify-center @sm/lastcode-sidebar:hidden"
+        >
+          {label.slice(0, 1)}
+        </span>
+        <span className="hidden min-w-0 truncate @sm/lastcode-sidebar:inline">{label}</span>
+      </TooltipTrigger>
+      <TooltipPopup side="top">{label}</TooltipPopup>
+    </Tooltip>
+  );
+}
 function TitleText({
   family,
   presentation,
@@ -69,6 +101,7 @@ function TitleText({
 }) {
   const thread = family.thread;
   const subagentLabel = presentation.subagentLabel;
+  const subagentStatus = lastcodeSidebarSubagentStatusLabel(thread, threadStatus);
   return (
     <>
       {thread.persistent && family.parentKey === null && !subagentLabel ? (
@@ -106,9 +139,7 @@ function TitleText({
             ) : null}
             <LastCodeThreadRelationshipBadge presentation={presentation} />
             {subagentLabel ? (
-              <span className="sr-only min-w-0 text-3xs text-sidebar-muted-foreground @sm/lastcode-sidebar:not-sr-only @sm/lastcode-sidebar:truncate">
-                {lastcodeSidebarSubagentStatusLabel(thread, threadStatus)}
-              </span>
+              <SubagentOutcome label={subagentStatus} leadingLabel={threadStatus?.label} />
             ) : null}
             <LastCodeThreadFamilySummary family={family} display="inline" />
           </span>

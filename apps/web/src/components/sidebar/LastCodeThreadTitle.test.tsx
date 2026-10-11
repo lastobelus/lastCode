@@ -11,12 +11,13 @@ import {
   it,
   vi,
 } from "vite-plus/test";
-import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, RunId, ThreadId } from "@t3tools/contracts";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { AsyncResult } from "effect/reactivity";
 import * as Cause from "effect/Cause";
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
-import { LastCodeThreadLeadingControls } from "./LastCodeThreadTitle";
+import { LastCodeThreadLeadingControls, LastCodeThreadTitle } from "./LastCodeThreadTitle";
+import type { ThreadStatusPill } from "../Sidebar.logic";
 import { makeThreadFixture } from "../../test-fixtures";
 import { projectLastCodeSidebarFamilies } from "../lastcodeSidebarFamilies.logic";
 vi.mock("~/hooks/useSettings", () => ({
@@ -186,6 +187,66 @@ function deferred<T>() {
   });
   return { promise, resolve };
 }
+function OutcomeHarness({
+  status,
+  leading,
+}: {
+  status: "failed" | "interrupted";
+  leading: ThreadStatusPill["label"] | null;
+}) {
+  const { capabilities } = useLastCodeThreadEditing();
+  const family = familyFor(a, "Child outcome");
+  family.thread = {
+    ...family.thread,
+    latestRun: {
+      runId: RunId.make("child-run"),
+      status,
+      requestedAt: null,
+      startedAt: null,
+      completedAt: "2026-01-01T00:01:00Z",
+      assistantMessageId: null,
+    },
+  };
+  return (
+    <LastCodeThreadTitle
+      family={family}
+      presentation={{ ...presentation, subagentLabel: "Subagent" }}
+      threadStatus={leading ? { label: leading, colorClass: "", dotClass: "", pulse: false } : null}
+      renameTarget={null}
+      editing={capabilities}
+    />
+  );
+}
+describe("compact child outcomes", () => {
+  it.each([
+    ["failed", null, "Failed"],
+    ["failed", "Completed", "Failed"],
+    ["interrupted", null, "Stopped"],
+    ["interrupted", "Completed", "Stopped"],
+  ] as const)("retains %s when the leading indicator is %s", async (status, leading, label) => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(() => root?.render(<OutcomeHarness status={status} leading={leading} />));
+    expect(
+      container
+        .querySelector(`[role="img"][aria-label="${label}"]`)
+        ?.querySelector("[data-lastcode-sidebar-unscaled-content]")?.textContent,
+    ).toBe(label[0]);
+    expect(container.querySelector(`[data-testid="thread-title-${a.threadId}"]`)?.textContent).toBe(
+      "Child outcome",
+    );
+    expect(mocks.update).not.toHaveBeenCalled();
+  });
+  it("does not add a second compact marker for a matching leading outcome", async () => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(() => root?.render(<OutcomeHarness status="failed" leading="Failed" />));
+    expect(container.querySelector('[role="img"][aria-label="Failed"]')).toBeNull();
+    expect(mocks.update).not.toHaveBeenCalled();
+  });
+});
 describe("row-local rename editor", () => {
   it("keeps an inline draft mounted when PR presentation changes beside it", async () => {
     await render();
