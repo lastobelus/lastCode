@@ -18,7 +18,7 @@ function useFamilyToggle(item: LastCodeSidebarFamilyItem, navigate: Navigate) {
   const setCollapsed = useLastCodeSidebarFamiliesStore((state) => state.setCollapsed);
   return () => {
     const family = item.type === "thread" ? item.row : item;
-    setCollapsed(item.type === "thread" ? item.row.key : item.key, family.expanded);
+    setCollapsed(family.key, family.expanded);
     if (!family.expanded || !family.collapseNavigatesToParent) return;
     const target =
       item.type === "thread"
@@ -216,8 +216,9 @@ export function LastCodeThreadFamilySummary({
 }) {
   const typedGroups = useClientSetting("legacySidebarThreadGroupingStyle") === "typed-groups";
   const compactStatusIndicators = useClientSetting("compactLegacySidebarStatuses");
-  if (family.descendantCount === 0 || family.expanded || (display === "line") !== typedGroups)
-    return null;
+  if (family.descendantCount === 0) return null;
+  if (family.expanded) return null;
+  if ((display === "line") !== typedGroups) return null;
   if (display === "line")
     return (
       <span className="flex items-center gap-1 truncate text-3xs leading-3 text-sidebar-muted-foreground">

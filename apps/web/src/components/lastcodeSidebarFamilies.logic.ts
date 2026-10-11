@@ -45,17 +45,21 @@ export const lastcodeSidebarSubagentGroupKey = (parentKey: string) => `${parentK
 export const lastcodeSidebarThreadKey = (thread: SidebarThreadSummary) =>
   scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
 
-const STOPPED_RUN_STATUSES = new Set(["interrupted", "cancelled", "rolled_back"]);
+const RUN_STATUS_LABELS = new Map<string, string>([
+  ["failed", "Failed"],
+  ["interrupted", "Stopped"],
+  ["cancelled", "Stopped"],
+  ["rolled_back", "Stopped"],
+  ["completed", "Done"],
+]);
 
 export function lastcodeSidebarSubagentStatusLabel(
   thread: SidebarThreadSummary,
   status: ThreadStatusPill | null,
 ): string {
   if (status && status.label !== "Completed") return status.label;
-  if (thread.runtime?.lastError || thread.latestRun?.status === "failed") return "Failed";
-  const runStatus = thread.latestRun?.status;
-  if (runStatus && STOPPED_RUN_STATUSES.has(runStatus)) return "Stopped";
-  return runStatus === "completed" ? "Done" : "Idle";
+  if (thread.runtime?.lastError) return "Failed";
+  return RUN_STATUS_LABELS.get(thread.latestRun?.status ?? "") ?? "Idle";
 }
 
 export function lastcodeSidebarIsAgentCreated(thread: SidebarThreadSummary): boolean {
@@ -170,17 +174,13 @@ function detachFamilyCycle(cycleKeys: readonly string[], graph: FamilyGraph) {
   // Display-only creator edges yield to delegated ownership when a mixed cycle forms.
   const creatorCycleKeys = cycleKeys.filter((cycleKey) => creatorEdges.has(cycleKey));
   for (const cycleKey of creatorCycleKeys.length ? creatorCycleKeys : cycleKeys) {
-    const parentKey = parentByKey.get(cycleKey);
+    // Every cycle edge was connected to a known thread; deleting other child edges
+    // cannot remove that parent's shell from this graph.
+    const parentTitle = byKey.get(parentByKey.get(cycleKey)!)!.title;
     if (creatorEdges.has(cycleKey)) {
-      creatorGroupingWarningByKey.set(
-        cycleKey,
-        `Creator ${byKey.get(parentKey ?? "")?.title ?? "unavailable"} · invalid grouping`,
-      );
+      creatorGroupingWarningByKey.set(cycleKey, `Creator ${parentTitle} · invalid grouping`);
     } else {
-      unavailableByKey.set(
-        cycleKey,
-        `Parent ${byKey.get(parentKey ?? "")?.title ?? "unavailable"} · invalid lineage`,
-      );
+      unavailableByKey.set(cycleKey, `Parent ${parentTitle} · invalid lineage`);
     }
     parentByKey.delete(cycleKey);
   }
