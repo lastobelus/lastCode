@@ -1,6 +1,5 @@
-import { LastCodeSidebarProject } from "./sidebar/LastCodeSidebarProject";
+import { LastCodeSidebarProjectList } from "./sidebar/LastCodeSidebarProjectList";
 import { LastCodeSidebarPresentationProvider } from "./sidebar/LastCodeSidebarPresentation";
-import type { LastCodeProjectDragHandle as SortableProjectHandleProps } from "./sidebar/LastCodeProjectHeader";
 import { projectLastCodeProjectThreads } from "./sidebar/lastcodeProjectThreads";
 import { lastCodeProjectExpansionPreferenceKeys } from "./sidebar/useLastCodeProjectHeaderGestures";
 import { LastCodeThreadActionsProvider } from "./sidebar/LastCodeThreadActions";
@@ -13,31 +12,7 @@ import { useSidebarProviderBadgePreferences } from "./sidebar/SidebarEnvironment
 import { FolderPlusIcon, SearchIcon } from "lucide-react";
 import { ProjectSidebarDraftList } from "./sidebar/ProjectSidebarDraftList";
 import { useAtomValue } from "@effect/atom-react";
-import { autoAnimate } from "@formkit/auto-animate";
-import React, {
-  useCallback,
-  useEffect,
-  memo,
-  useMemo,
-  useRef,
-  useState,
-  type CSSProperties,
-} from "react";
-import {
-  DndContext,
-  type DragCancelEvent,
-  type CollisionDetection,
-  PointerSensor,
-  type DragStartEvent,
-  closestCorners,
-  pointerWithin,
-  useSensor,
-  useSensors,
-  type DragEndEvent,
-} from "@dnd-kit/core";
-import { SortableContext, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
-import { restrictToFirstScrollableAncestor, restrictToVerticalAxis } from "@dnd-kit/modifiers";
-import { CSS } from "@dnd-kit/utilities";
+import React, { useCallback, useEffect, memo, useMemo, useState, type CSSProperties } from "react";
 import {
   ProjectId,
   type ScopedThreadRef,
@@ -125,10 +100,6 @@ import {
   buildSidebarProjectSnapshots,
   type SidebarProjectSnapshot,
 } from "../sidebarProjectGrouping";
-const SIDEBAR_LIST_ANIMATION_OPTIONS = {
-  duration: 180,
-  easing: "ease-out",
-} as const;
 const EMPTY_THREAD_JUMP_LABELS = new Map<string, string>();
 
 function SidebarThreadDetailPrewarmer({ threadRef }: { readonly threadRef: ScopedThreadRef }) {
@@ -166,53 +137,11 @@ function buildThreadJumpLabelMap(input: {
   return mapping.size > 0 ? mapping : EMPTY_THREAD_JUMP_LABELS;
 }
 
-function SortableProjectItem({
-  projectId,
-  disabled = false,
-  children,
-}: {
-  projectId: string;
-  disabled?: boolean;
-  children: (handleProps: SortableProjectHandleProps) => React.ReactNode;
-}) {
-  const {
-    attributes,
-    listeners,
-    setActivatorNodeRef,
-    setNodeRef,
-    transform,
-    transition,
-    isDragging,
-    isOver,
-  } = useSortable({ id: projectId, disabled });
-  return (
-    <li
-      ref={setNodeRef}
-      style={{
-        transform: CSS.Translate.toString(transform),
-        transition,
-      }}
-      className={`group/menu-item relative rounded-md ${
-        isDragging ? "z-20 opacity-80" : ""
-      } ${isOver && !isDragging ? "ring-1 ring-inset ring-primary/40" : ""}`}
-      data-sidebar="menu-item"
-      data-slot="sidebar-menu-item"
-    >
-      {children({ attributes, listeners, setActivatorNodeRef })}
-    </li>
-  );
-}
-
 interface SidebarProjectsContentProps {
   openAddProject: () => void;
-  isManualProjectSorting: boolean;
-  projectDnDSensors: ReturnType<typeof useSensors>;
-  projectCollisionDetection: CollisionDetection;
-  handleProjectDragStart: (event: DragStartEvent) => void;
-  handleProjectDragEnd: (event: DragEndEvent) => void;
-  handleProjectDragCancel: (event: DragCancelEvent) => void;
   handleNewThread: ReturnType<typeof useNewThreadHandler>;
   sortedProjects: readonly SidebarProjectSnapshot[];
+  orderedProjectKeys: readonly string[];
   expandedThreadListsByProject: ReadonlySet<string>;
   activeRouteProjectKey: string | null;
   routeThreadKey: string | null;
@@ -221,10 +150,6 @@ interface SidebarProjectsContentProps {
   threadJumpLabelByKey: ReadonlyMap<string, string>;
   expandThreadListForProject: (projectKey: string) => void;
   collapseThreadListForProject: (projectKey: string) => void;
-  dragInProgressRef: React.RefObject<boolean>;
-  suppressProjectClickAfterDragRef: React.RefObject<boolean>;
-  suppressProjectClickForContextMenuRef: React.RefObject<boolean>;
-  attachProjectListAutoAnimateRef: (node: HTMLElement | null) => void;
   projectsLength: number;
   lastcodeSidebarScale: LegacySidebarScale;
   projectTreeScaleStyle: CSSProperties;
@@ -235,14 +160,9 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
 ) {
   const {
     openAddProject,
-    isManualProjectSorting,
-    projectDnDSensors,
-    projectCollisionDetection,
-    handleProjectDragStart,
-    handleProjectDragEnd,
-    handleProjectDragCancel,
     handleNewThread,
     sortedProjects,
+    orderedProjectKeys,
     expandedThreadListsByProject,
     activeRouteProjectKey,
     routeThreadKey,
@@ -251,10 +171,6 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     threadJumpLabelByKey,
     expandThreadListForProject,
     collapseThreadListForProject,
-    dragInProgressRef,
-    suppressProjectClickAfterDragRef,
-    suppressProjectClickForContextMenuRef,
-    attachProjectListAutoAnimateRef,
     projectsLength,
     lastcodeSidebarScale,
     projectTreeScaleStyle,
@@ -264,13 +180,9 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     () => ({ handle: handleNewThread, shortcutLabel: newThreadShortcutLabel }),
     [handleNewThread, newThreadShortcutLabel],
   );
-  const gestures = useMemo(
-    () => ({
-      dragInProgressRef,
-      suppressProjectClickAfterDragRef,
-      suppressProjectClickForContextMenuRef,
-    }),
-    [dragInProgressRef, suppressProjectClickAfterDragRef, suppressProjectClickForContextMenuRef],
+  const activeRoute = useMemo(
+    () => ({ projectKey: activeRouteProjectKey, threadKey: routeThreadKey }),
+    [activeRouteProjectKey, routeThreadKey],
   );
   const onListExpandedChange = useCallback(
     (key: string, expanded: boolean) => {
@@ -332,61 +244,15 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
           </div>
         </div>
 
-        {isManualProjectSorting ? (
-          <DndContext
-            sensors={projectDnDSensors}
-            collisionDetection={projectCollisionDetection}
-            modifiers={[restrictToVerticalAxis, restrictToFirstScrollableAncestor]}
-            onDragStart={handleProjectDragStart}
-            onDragEnd={handleProjectDragEnd}
-            onDragCancel={handleProjectDragCancel}
-          >
-            <SidebarMenu>
-              <SortableContext
-                items={sortedProjects.map((project) => project.projectKey)}
-                strategy={verticalListSortingStrategy}
-              >
-                {sortedProjects.map((project) => (
-                  <SortableProjectItem key={project.projectKey} projectId={project.projectKey}>
-                    {(dragHandleProps) => (
-                      <LastCodeSidebarProject
-                        project={project}
-                        listExpanded={expandedThreadListsByProject.has(project.projectKey)}
-                        activeThreadKey={
-                          activeRouteProjectKey === project.projectKey ? routeThreadKey : null
-                        }
-                        jumpLabels={threadJumpLabelByKey}
-                        newThread={newThread}
-                        onListExpandedChange={onListExpandedChange}
-                        gestures={gestures}
-                        dragHandle={dragHandleProps}
-                      />
-                    )}
-                  </SortableProjectItem>
-                ))}
-              </SortableContext>
-            </SidebarMenu>
-          </DndContext>
-        ) : (
-          <SidebarMenu ref={attachProjectListAutoAnimateRef}>
-            {sortedProjects.map((project) => (
-              <SidebarMenuItem key={project.projectKey}>
-                <LastCodeSidebarProject
-                  project={project}
-                  listExpanded={expandedThreadListsByProject.has(project.projectKey)}
-                  activeThreadKey={
-                    activeRouteProjectKey === project.projectKey ? routeThreadKey : null
-                  }
-                  jumpLabels={threadJumpLabelByKey}
-                  newThread={newThread}
-                  onListExpandedChange={onListExpandedChange}
-                  gestures={gestures}
-                  dragHandle={null}
-                />
-              </SidebarMenuItem>
-            ))}
-          </SidebarMenu>
-        )}
+        <LastCodeSidebarProjectList
+          projects={sortedProjects}
+          orderedProjectKeys={orderedProjectKeys}
+          activeRoute={activeRoute}
+          expandedLists={expandedThreadListsByProject}
+          onExpandedChange={onListExpandedChange}
+          jumpLabels={threadJumpLabelByKey}
+          newThread={newThread}
+        />
 
         {projectsLength === 0 && (
           <div
@@ -408,7 +274,6 @@ function LastCodeSidebarView() {
   const collapsedFamiliesByKey = useLastCodeSidebarFamiliesStore((state) => state.collapsedByKey);
   const projectExpandedById = useUiStateStore((store) => store.projectExpandedById);
   const projectOrder = useUiStateStore((store) => store.projectOrder);
-  const reorderProjects = useUiStateStore((store) => store.reorderProjects);
   const navigate = useNavigate();
   const sidebarThreadSortOrder = useClientSettings((s) => s.sidebarThreadSortOrder);
   const groupingStyle = useClientSettings((s) => s.legacySidebarThreadGroupingStyle);
@@ -453,9 +318,6 @@ function LastCodeSidebarView() {
     ReadonlySet<string>
   >(() => new Set());
   const { showThreadJumpHints, updateThreadJumpHintsVisibility } = useThreadJumpHintVisibility();
-  const dragInProgressRef = useRef(false);
-  const suppressProjectClickAfterDragRef = useRef(false);
-  const suppressProjectClickForContextMenuRef = useRef(false);
   const clearSelection = useThreadSelectionStore((s) => s.clearSelection);
   const setSelectionAnchor = useThreadSelectionStore((s) => s.setAnchor);
   const platform = navigator.platform;
@@ -531,6 +393,11 @@ function LastCodeSidebarView() {
       ],
     });
   }, [projectOrder, projects]);
+
+  const orderedProjectKeys = useMemo(
+    () => orderedProjects.map(getProjectOrderKey),
+    [orderedProjects],
+  );
 
   // Build a mapping from physical project key → logical project key for
   // cross-environment grouping.  Projects that share a repositoryIdentity
@@ -666,65 +533,6 @@ function LastCodeSidebarView() {
     [clearSelection, isMobile, navigate, setOpenMobile, setSelectionAnchor],
   );
 
-  const projectDnDSensors = useSensors(
-    useSensor(PointerSensor, {
-      activationConstraint: { distance: 6 },
-    }),
-  );
-  const projectCollisionDetection = useCallback<CollisionDetection>((args) => {
-    const pointerCollisions = pointerWithin(args);
-    if (pointerCollisions.length > 0) {
-      return pointerCollisions;
-    }
-
-    return closestCorners(args);
-  }, []);
-
-  const handleProjectDragEnd = useCallback(
-    (event: DragEndEvent) => {
-      if (sidebarProjectSortOrder !== "manual") {
-        dragInProgressRef.current = false;
-        return;
-      }
-      dragInProgressRef.current = false;
-      const { active, over } = event;
-      if (!over || active.id === over.id) return;
-      const activeProject = sidebarProjects.find((project) => project.projectKey === active.id);
-      const overProject = sidebarProjects.find((project) => project.projectKey === over.id);
-      if (!activeProject || !overProject) return;
-      const activeMemberKeys = activeProject.memberProjects.map(
-        (member) => member.physicalProjectKey,
-      );
-      const overMemberKeys = overProject.memberProjects.map((member) => member.physicalProjectKey);
-      reorderProjects(orderedProjects.map(getProjectOrderKey), activeMemberKeys, overMemberKeys);
-    },
-    [orderedProjects, sidebarProjectSortOrder, reorderProjects, sidebarProjects],
-  );
-
-  const handleProjectDragStart = useCallback(
-    (_event: DragStartEvent) => {
-      if (sidebarProjectSortOrder !== "manual") {
-        return;
-      }
-      dragInProgressRef.current = true;
-      suppressProjectClickAfterDragRef.current = true;
-    },
-    [sidebarProjectSortOrder],
-  );
-
-  const handleProjectDragCancel = useCallback((_event: DragCancelEvent) => {
-    dragInProgressRef.current = false;
-  }, []);
-
-  const animatedProjectListsRef = useRef(new WeakSet<HTMLElement>());
-  const attachProjectListAutoAnimateRef = useCallback((node: HTMLElement | null) => {
-    if (!node || animatedProjectListsRef.current.has(node)) {
-      return;
-    }
-    autoAnimate(node, SIDEBAR_LIST_ANIMATION_OPTIONS);
-    animatedProjectListsRef.current.add(node);
-  }, []);
-
   const visibleThreads = useMemo(
     () => sidebarThreads.filter(threadShellIsVisible),
     [sidebarThreads],
@@ -760,7 +568,6 @@ function LastCodeSidebarView() {
     sidebarProjects,
     visibleThreads,
   ]);
-  const isManualProjectSorting = sidebarProjectSortOrder === "manual";
   const visibleSidebarThreadKeys = useMemo(
     () =>
       sortedProjects.flatMap((project) => {
@@ -975,14 +782,9 @@ function LastCodeSidebarView() {
       >
         <SidebarProjectsContent
           openAddProject={openAddProjectCommandPalette}
-          isManualProjectSorting={isManualProjectSorting}
-          projectDnDSensors={projectDnDSensors}
-          projectCollisionDetection={projectCollisionDetection}
-          handleProjectDragStart={handleProjectDragStart}
-          handleProjectDragEnd={handleProjectDragEnd}
-          handleProjectDragCancel={handleProjectDragCancel}
           handleNewThread={handleNewThread}
           sortedProjects={sortedProjects}
+          orderedProjectKeys={orderedProjectKeys}
           expandedThreadListsByProject={expandedThreadListsByProject}
           activeRouteProjectKey={activeRouteProjectKey}
           routeThreadKey={routeThreadKey}
@@ -991,10 +793,6 @@ function LastCodeSidebarView() {
           threadJumpLabelByKey={visibleThreadJumpLabelByKey}
           expandThreadListForProject={expandThreadListForProject}
           collapseThreadListForProject={collapseThreadListForProject}
-          dragInProgressRef={dragInProgressRef}
-          suppressProjectClickAfterDragRef={suppressProjectClickAfterDragRef}
-          suppressProjectClickForContextMenuRef={suppressProjectClickForContextMenuRef}
-          attachProjectListAutoAnimateRef={attachProjectListAutoAnimateRef}
           projectsLength={projects.length}
           lastcodeSidebarScale={lastcodeSidebarScale}
           projectTreeScaleStyle={scaleStyle}
