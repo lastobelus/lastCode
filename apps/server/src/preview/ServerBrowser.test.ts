@@ -5508,6 +5508,92 @@ it.live("an environment choice creates a new tab instead of reusing the current 
   ).pipe(Effect.provide(layer)),
 );
 
+it.live.each([false, true])(
+  "checks a detached tab's retained host before attachment (explicit=%s)",
+  (explicit) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        desktopRendersNext = true;
+        const { broker, browser, tabId } = yield* ready;
+        const viewer = yield* browser.attachViewer(viewerInput(tabId, false));
+        desktopTabs.delete(tabId);
+        desktopDetaches.emit("detach", {
+          threadId: scope.thread.threadId,
+          tabId,
+          desktopHostId: "local",
+        });
+        let ending = yield* Queue.take(viewer.output);
+        while (ending._tag !== "reconnect") ending = yield* Queue.take(viewer.output);
+        const connectionsBefore = desktopConnections.length;
+        const open = broker.invoke<PreviewAutomationStatus>({
+          scope,
+          ...(explicit ? { tabId } : {}),
+          operation: "open",
+          input: { browserHost: "environment", open: false },
+        });
+        if (explicit) {
+          const failure = yield* open.pipe(Effect.flip);
+          expect(failure).toMatchObject({
+            _tag: "PreviewAutomationExecutionError",
+            reason: expect.stringContaining("different browser host"),
+          });
+          expect(contextRequests).toEqual([]);
+        } else {
+          const opened = yield* open;
+          expect(opened).toMatchObject({ browserHost: "environment", profileId: "incognito" });
+          expect(opened.tabId).not.toBe(tabId);
+          expect(opened.tabs).toHaveLength(2);
+          expect(contextRequests).toEqual([{ profileId: "incognito", isolated: true }]);
+        }
+        expect(desktopConnections).toHaveLength(connectionsBefore);
+        expect(rootCreations).toHaveLength(1);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live("environment status advertises its own profiles instead of the desktop's catalogue", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const browser = yield* ServerBrowser.ServerBrowser;
+      const broker = yield* Broker.PreviewAutomationBroker;
+      yield* browser.reportProfiles({
+        profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+        defaultProfileId: "work",
+      });
+      yield* Effect.yieldNow;
+      const opened = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { browserHost: "environment", open: false, reuseExistingTab: false },
+      });
+      const tabId = PreviewTabId.make(opened.tabId!);
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(status).toMatchObject({
+        profileId: "incognito",
+        defaultProfileId: "incognito",
+        profiles: [
+          { id: "default", name: "Default" },
+          { id: "incognito", name: "Incognito", incognito: true },
+        ],
+      });
+      const rejected = yield* broker
+        .invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "openWithProfile",
+          input: { browserHost: "environment", profileId: "work", open: false },
+        })
+        .pipe(Effect.flip);
+      expect(rejected).toMatchObject({ _tag: "PreviewAutomationExecutionError" });
+      expect(contextRequests).toEqual([{ profileId: "incognito", isolated: true }]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live(
   "environment profile selection preserves reused storage and rejects an exact mismatch",
   () =>

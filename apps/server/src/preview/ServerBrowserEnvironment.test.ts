@@ -60,10 +60,10 @@ const desktop = Layer.effect(
 const executable = process.env.T3CODE_TEST_BROWSER_EXECUTABLE ?? chromium.executablePath();
 const launch = chromium.launch.bind(chromium);
 beforeEach(() => {
-  // CI installs Playwright's headless shell. Keep production launch options,
-  // but let Playwright locate that test binary when no executable was supplied.
+  // Match the other real-Chromium fixtures: Playwright's test binary and
+  // default test sandbox policy. Production sandbox requirements are unchanged.
   vi.spyOn(chromium, "launch").mockImplementation((options) => {
-    const launchOptions = { ...options };
+    const launchOptions = { ...options, chromiumSandbox: false };
     const testExecutable = process.env.T3CODE_TEST_BROWSER_EXECUTABLE;
     if (testExecutable) launchOptions.executablePath = testExecutable;
     else delete launchOptions.executablePath;

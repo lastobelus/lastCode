@@ -1848,15 +1848,21 @@ const make = Effect.gen(function* () {
       };
     });
 
-  const profileStatus = () => {
-    const profiles = reportedProfiles?.profiles ?? BUILT_IN_BROWSER_PROFILES;
+  const profileStatus = (environmentHosted = false) => {
+    const profiles = environmentHosted
+      ? BUILT_IN_BROWSER_PROFILES
+      : (reportedProfiles?.profiles ?? BUILT_IN_BROWSER_PROFILES);
     return {
       profiles: profiles.map((profile) => ({
         id: profile.id,
         name: profile.name,
         ...(profile.kind === "incognito" ? { incognito: true } : {}),
       })),
-      ...(reportedProfiles ? { defaultProfileId: reportedProfiles.defaultProfileId } : {}),
+      ...(environmentHosted
+        ? { defaultProfileId: INCOGNITO_BROWSER_PROFILE_ID }
+        : reportedProfiles
+          ? { defaultProfileId: reportedProfiles.defaultProfileId }
+          : {}),
     };
   };
 
@@ -1993,7 +1999,11 @@ const make = Effect.gen(function* () {
       viewportSetting: tab.setting,
       ...(viewport ? { viewport } : {}),
       tabs: listedTabs,
-      ...profileStatus(),
+      ...profileStatus(
+        !tab.desktop &&
+          (tab.profileId === undefined ||
+            findBrowserProfile(BUILT_IN_BROWSER_PROFILES, tab.profileId) !== undefined),
+      ),
       downloads: tab.downloads.map(({ fileName, path, sizeBytes, url, completedAt }) => ({
         fileName,
         path,
@@ -2725,9 +2735,37 @@ const make = Effect.gen(function* () {
             "Multiple tabs are open. Pass tabId or reuseExistingTab=false.",
             "tabRequired",
           );
+        // Check retained ownership before attachment: a host switch must not
+        // wait for the disconnected desktop page it is replacing.
+        let differentRetainedHost = false;
+        if (reuse && request.tabId !== undefined && open.browserHost !== undefined) {
+          const attached = tabs.get(tabKey(request.threadId, request.tabId));
+          const retained = attached
+            ? undefined
+            : (await Effect.runPromise(manager.list({ threadId: request.threadId }))).sessions.find(
+                (session) => session.tabId === request.tabId && session.runtime === "server",
+              );
+          const retainedHost = attached
+            ? attached.desktop
+              ? "desktop"
+              : "environment"
+            : retained
+              ? retained.backingPage === "desktop" ||
+                retained.backingPage === "desktop-popup" ||
+                retained.backingPage === "desktop-root"
+                ? "desktop"
+                : "environment"
+              : undefined;
+          differentRetainedHost = retainedHost !== undefined && retainedHost !== open.browserHost;
+          if (differentRetainedHost && request.tabIdExplicit)
+            throw new ServerBrowserPage.ServerBrowserOperationError(
+              "PreviewAutomationExecutionError",
+              "The selected tab uses a different browser host. Omit tabId to create a new tab; an existing tab cannot switch hosts.",
+            );
+        }
         // A tab still launching exists only as a session, so resolve it like a viewer would.
         const found =
-          reuse && request.tabId !== undefined
+          reuse && request.tabId !== undefined && !differentRetainedHost
             ? await Effect.runPromise(
                 findTab(request.threadId, request.tabId).pipe(
                   Effect.catchTags({
