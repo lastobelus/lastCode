@@ -111,6 +111,24 @@ function deferred() {
 }
 const files = [new File(["first"], "first.txt")];
 describe("thread selection and navigation", () => {
+  it("keeps the shared capability stable across row refreshes and refreshes mobile navigation", async () => {
+    await render();
+    const original = capability;
+    await render({ target: remote });
+    expect(capability).toBe(original);
+    await click();
+    expect(useThreadSelectionStore.getState().anchorThreadKey).toBe(scopedThreadKey(remote));
+    expect(mocks.close).not.toHaveBeenCalled();
+    mocks.mobile = true;
+    await render({ target: middle });
+    expect(capability).not.toBe(original);
+    await click();
+    expect(mocks.close).toHaveBeenCalledExactlyOnceWith(false);
+    expect(mocks.navigate).toHaveBeenLastCalledWith({
+      to: "/$environmentId/$threadId",
+      params: buildThreadRouteParams(middle),
+    });
+  });
   it("clears selection, anchors the scoped destination and closes mobile before navigation", async () => {
     mocks.mobile = true;
     await render();

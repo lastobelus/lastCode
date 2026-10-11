@@ -1,4 +1,4 @@
-import { useCallback, type MouseEvent } from "react";
+import { useCallback, useMemo, type MouseEvent } from "react";
 import { useRouter } from "@tanstack/react-router";
 import type { ScopedThreadRef } from "@t3tools/contracts";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
@@ -83,5 +83,8 @@ export function useLastCodeThreadNavigation() {
     },
     [navigateToThread, router],
   );
-  return { navigateToThread, handleThreadClick, handleThreadFileDrop };
+  return useMemo(
+    () => ({ navigateToThread, handleThreadClick, handleThreadFileDrop }),
+    [navigateToThread, handleThreadClick, handleThreadFileDrop],
+  );
 }

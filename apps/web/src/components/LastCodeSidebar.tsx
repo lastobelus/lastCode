@@ -15,10 +15,12 @@ import { projectLastCodeProjectThreads } from "./sidebar/lastcodeProjectThreads"
 import {
   LastCodeThreadDetails,
   LastCodeThreadCleanupOverlay,
+  type LastCodeThreadAnnotationActions,
 } from "./sidebar/LastCodeThreadDetails";
 import {
   useLastCodeThreadRowGestures,
   useLastCodeThreadFileDrop,
+  type LastCodeThreadRowMenus,
 } from "./sidebar/lastcodeThreadRowInteractions";
 import { useLastCodeThreadIdentity } from "./sidebar/useLastCodeThreadIdentity";
 import { LastCodeThreadHoverDetails } from "./sidebar/LastCodeThreadHoverDetails";
@@ -237,24 +239,9 @@ interface SidebarThreadRowProps {
   renameTarget: LastCodeRenameTarget | null;
   editing: LastCodeThreadEditingCapabilities;
   archiveConfirmActive: boolean;
-  handleThreadClick: (
-    event: React.MouseEvent,
-    threadRef: ScopedThreadRef,
-    orderedProjectThreadKeys: readonly string[],
-  ) => void;
-  navigateToThread: (threadRef: ScopedThreadRef) => Promise<void>;
-  handleMultiSelectContextMenu: (position: { x: number; y: number }) => Promise<void>;
-  handleThreadContextMenu: (
-    threadRef: ScopedThreadRef,
-    position: { x: number; y: number },
-    hasStoppableProcesses: boolean,
-  ) => Promise<void>;
-  clearSelection: () => void;
-
-  onFileDropThreads: (threadRef: ScopedThreadRef, files: File[]) => void;
-  onEditAnnotation: (thread: SidebarThreadSummary) => void;
-  onSaveAnnotationBody: (thread: SidebarThreadSummary, body: string) => Promise<boolean>;
-  onResolveAnnotation: (thread: SidebarThreadSummary) => void;
+  navigation: ReturnType<typeof useLastCodeThreadNavigation>;
+  menus: LastCodeThreadRowMenus;
+  annotations: LastCodeThreadAnnotationActions;
 }
 
 const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowProps) {
@@ -265,15 +252,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     renameTarget,
     editing,
     archiveConfirmActive,
-    handleThreadClick,
-    navigateToThread,
-    handleMultiSelectContextMenu,
-    handleThreadContextMenu,
-    clearSelection,
-    onFileDropThreads,
-    onEditAnnotation,
-    onSaveAnnotationBody,
-    onResolveAnnotation,
+    navigation,
+    menus,
+    annotations,
   } = props;
   const { providerEntriesByEnvironmentId, environmentIconColors, providerBadgePreferences } =
     useLastCodeSidebarPresentation();
@@ -283,7 +264,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const threadKey = scopedThreadKey(threadRef);
   const { isFileDragOver, fileDropHandlers } = useLastCodeThreadFileDrop(
     threadRef,
-    onFileDropThreads,
+    navigation.handleThreadFileDrop,
   );
   const { leaseLiveStatus, rowRef } = useSidebarRowSubscriptionLease(isActive);
   const cleanup = thread.worktreeCleanup ?? null;
@@ -346,13 +327,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     setCleanupFailureOpen,
   } = useLastCodeThreadRowGestures(
     thread,
-    { navigateToThread, handleThreadClick },
+    navigation,
     orderedProjectThreadKeys,
-    {
-      showThreadMenu: handleThreadContextMenu,
-      showBulkMenu: handleMultiSelectContextMenu,
-      clearSelection,
-    },
+    menus,
     { selected: isSelected, hasStoppableProcesses, renameActive: renameTarget !== null },
     editing.requestRename,
   );
@@ -388,14 +365,14 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         <LastCodeThreadFamilyDisclosure
           family={family}
           renameTarget={renameTarget !== null}
-          navigateToThread={navigateToThread}
+          navigateToThread={navigation.navigateToThread}
         />
         <div className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
           <LastCodeThreadSourceControl
             thread={thread}
             sourceControl={sourceControl}
             isActive={isActive}
-            navigateToThread={navigateToThread}
+            navigateToThread={navigation.navigateToThread}
           />
           <LastCodeThreadTitle
             family={family}
@@ -418,7 +395,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             threadRef={threadRef}
             processes={processes}
             cleanupBlocked={cleanup !== null}
-            navigateToThread={navigateToThread}
+            navigateToThread={navigation.navigateToThread}
           />
         </LastCodeThreadMetadataControls>
       </LastCodeThreadRowSurface>
@@ -428,7 +405,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         gitCwd={gitCwd}
         content={threadHoverDetails}
         trailingContent={cleanupHoverDetails}
-        annotations={{ onEditAnnotation, onSaveAnnotationBody, onResolveAnnotation }}
+        annotations={annotations}
       />
       <WorktreeCleanupFailureDialog
         thread={thread}
@@ -459,24 +436,9 @@ interface SidebarProjectThreadListProps {
   editing: LastCodeThreadEditingCapabilities;
   archiveTarget: string | null;
   attachThreadListAutoAnimateRef: (node: HTMLElement | null) => void;
-  handleThreadClick: (
-    event: React.MouseEvent,
-    threadRef: ScopedThreadRef,
-    orderedProjectThreadKeys: readonly string[],
-  ) => void;
-  navigateToThread: (threadRef: ScopedThreadRef) => Promise<void>;
-  onFileDropThreads: (threadRef: ScopedThreadRef, files: File[]) => void;
-  handleMultiSelectContextMenu: (position: { x: number; y: number }) => Promise<void>;
-  handleThreadContextMenu: (
-    threadRef: ScopedThreadRef,
-    position: { x: number; y: number },
-    hasStoppableProcesses: boolean,
-  ) => Promise<void>;
-  clearSelection: () => void;
-
-  onEditAnnotation: (thread: SidebarThreadSummary) => void;
-  onSaveAnnotationBody: (thread: SidebarThreadSummary, body: string) => Promise<boolean>;
-  onResolveAnnotation: (thread: SidebarThreadSummary) => void;
+  navigation: ReturnType<typeof useLastCodeThreadNavigation>;
+  menus: LastCodeThreadRowMenus;
+  annotations: LastCodeThreadAnnotationActions;
   expandThreadListForProject: (projectKey: string) => void;
   collapseThreadListForProject: (projectKey: string) => void;
 }
@@ -503,15 +465,9 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
     editing,
     archiveTarget,
     attachThreadListAutoAnimateRef,
-    handleThreadClick,
-    navigateToThread,
-    onFileDropThreads,
-    handleMultiSelectContextMenu,
-    handleThreadContextMenu,
-    clearSelection,
-    onEditAnnotation,
-    onSaveAnnotationBody,
-    onResolveAnnotation,
+    navigation,
+    menus,
+    annotations,
     expandThreadListForProject,
     collapseThreadListForProject,
   } = props;
@@ -547,7 +503,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
               <LastCodeSubagentGroup
                 key={item.key}
                 item={item}
-                navigateToThread={navigateToThread}
+                navigateToThread={navigation.navigateToThread}
               />
             );
           const familyRow = item.row;
@@ -575,15 +531,9 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
                 renameTarget={renameTarget?.key === threadKey ? renameTarget : null}
                 editing={editing}
                 archiveConfirmActive={archiveTarget === threadKey}
-                handleThreadClick={handleThreadClick}
-                navigateToThread={navigateToThread}
-                onFileDropThreads={onFileDropThreads}
-                handleMultiSelectContextMenu={handleMultiSelectContextMenu}
-                handleThreadContextMenu={handleThreadContextMenu}
-                clearSelection={clearSelection}
-                onEditAnnotation={onEditAnnotation}
-                onSaveAnnotationBody={onSaveAnnotationBody}
-                onResolveAnnotation={onResolveAnnotation}
+                navigation={navigation}
+                menus={menus}
+                annotations={annotations}
               />
             </React.Fragment>
           );
@@ -692,8 +642,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     ],
   );
 
-  const { navigateToThread, handleThreadClick, handleThreadFileDrop } =
-    useLastCodeThreadNavigation();
+  const navigation = useLastCodeThreadNavigation();
   const clearSelection = useThreadSelectionStore((state) => state.clearSelection);
   const projectPreferenceKeys = useMemo(
     () => lastCodeProjectExpansionPreferenceKeys(project),
@@ -768,9 +717,17 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     project,
     getMenuThread,
     startThreadRename,
-    annotations.edit,
-    navigateToThread,
+    annotations.actions.onEditAnnotation,
+    navigation.navigateToThread,
     handleNewThread,
+  );
+  const menus = useMemo(
+    () => ({
+      showThreadMenu: handleThreadContextMenu,
+      showBulkMenu: handleMultiSelectContextMenu,
+      clearSelection,
+    }),
+    [handleThreadContextMenu, handleMultiSelectContextMenu, clearSelection],
   );
 
   return (
@@ -815,15 +772,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         editing={editing}
         archiveTarget={archiveTarget}
         attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
-        handleThreadClick={handleThreadClick}
-        navigateToThread={navigateToThread}
-        onFileDropThreads={handleThreadFileDrop}
-        handleMultiSelectContextMenu={handleMultiSelectContextMenu}
-        handleThreadContextMenu={handleThreadContextMenu}
-        clearSelection={clearSelection}
-        onEditAnnotation={annotations.edit}
-        onSaveAnnotationBody={annotations.saveBody}
-        onResolveAnnotation={(thread) => void annotations.resolve(thread)}
+        navigation={navigation}
+        menus={menus}
+        annotations={annotations.actions}
         expandThreadListForProject={expandThreadListForProject}
         collapseThreadListForProject={collapseThreadListForProject}
       />

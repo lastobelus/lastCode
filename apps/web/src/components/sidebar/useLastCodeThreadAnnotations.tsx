@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { reportThreadOperationFailure } from "./lastcodeThreadOperationResult";
 import type { SidebarThreadSummary } from "../../types";
@@ -56,10 +56,16 @@ export function useLastCodeThreadAnnotations() {
     [resolveThreadAnnotation],
   );
 
+  const actions = useMemo(
+    () => ({
+      onEditAnnotation: setAnnotationEditorTarget,
+      onSaveAnnotationBody: saveAnnotationBody,
+      onResolveAnnotation: (thread: SidebarThreadSummary) => void resolveAnnotation(thread),
+    }),
+    [saveAnnotationBody, resolveAnnotation],
+  );
   return {
-    edit: setAnnotationEditorTarget,
-    saveBody: saveAnnotationBody,
-    resolve: resolveAnnotation,
+    actions,
     editor: (
       <ThreadAnnotationEditorDialog
         annotation={annotationEditorTarget?.annotation ?? null}

@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { act, useState } from "react";
+import { act, useEffect, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import {
   beforeAll,
@@ -46,8 +46,12 @@ const first = makeThreadFixture({
   annotation,
 });
 const second = { ...first, environmentId: EnvironmentId.make("second-env") };
+let actions: ReturnType<typeof useLastCodeThreadAnnotations>["actions"];
 function Harness({ revision = 0 }: { revision?: number }) {
   const annotations = useLastCodeThreadAnnotations();
+  useEffect(() => {
+    actions = annotations.actions;
+  }, [annotations.actions]);
   const [rowsVisible, setRowsVisible] = useState(true);
   return (
     <>
@@ -56,15 +60,19 @@ function Harness({ revision = 0 }: { revision?: number }) {
       </button>
       {rowsVisible && (
         <>
-          <button onClick={() => annotations.edit(first)}>Edit first</button>
-          <button onClick={() => annotations.edit(second)}>Edit second</button>
+          <button onClick={() => annotations.actions.onEditAnnotation(first)}>Edit first</button>
+          <button onClick={() => annotations.actions.onEditAnnotation(second)}>Edit second</button>
         </>
       )}
-      <button onClick={() => void annotations.saveBody(first, "Hover first")}>Hover first</button>
-      <button onClick={() => void annotations.saveBody(second, "Hover second")}>
+      <button onClick={() => void annotations.actions.onSaveAnnotationBody(first, "Hover first")}>
+        Hover first
+      </button>
+      <button onClick={() => void annotations.actions.onSaveAnnotationBody(second, "Hover second")}>
         Hover second
       </button>
-      <button onClick={() => void annotations.resolve(second)}>Resolve second</button>
+      <button onClick={() => void annotations.actions.onResolveAnnotation(second)}>
+        Resolve second
+      </button>
       <span>{revision}</span>
       {annotations.editor}
     </>
@@ -122,6 +130,21 @@ function deferred<T>() {
   return { promise, resolve };
 }
 describe("project-owned thread annotation editor", () => {
+  it("keeps row actions stable while the project editor changes targets and saves the exact hover destination", async () => {
+    await render();
+    const original = actions;
+    await click("Edit first");
+    await enter("First draft");
+    expect(actions).toBe(original);
+    await click("Edit second");
+    expect(actions).toBe(original);
+    await click("Hover first");
+    expect(mocks.upsert).toHaveBeenLastCalledWith({
+      environmentId: first.environmentId,
+      input: { threadId: first.id, body: "Hover first" },
+    });
+    expect(textarea()).not.toBeNull();
+  });
   it("keeps the draft through project refresh and row collapse, then resets after cancel/reopen", async () => {
     await render();
     await click("Edit first");
