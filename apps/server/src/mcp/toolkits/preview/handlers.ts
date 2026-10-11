@@ -11,7 +11,7 @@ import {
   type ToolActivityIcon,
   type ThreadId,
   type PreviewAutomationOperation,
-  type PreviewAutomationOpenInput,
+  type PreviewAutomationMcpOpenInput,
   type PreviewAutomationProfiles,
   type PreviewAutomationRecordingStatus,
   type PreviewAutomationResizeResult,
@@ -30,6 +30,7 @@ import {
 } from "../../../attachmentStore.ts";
 import { resolveAttachmentRelativePath } from "../../../attachmentPaths.ts";
 import * as ServerConfig from "../../../config.ts";
+import * as PublishedDocumentPreview from "../../../preview/PublishedDocumentPreview.ts";
 import * as PreviewHosting from "../../../preview/Hosting.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
@@ -46,8 +47,8 @@ import { previewToolFailure } from "./errors.ts";
  * `true` would silently override it for every `preview_open`.
  */
 export function normalizePreviewOpenInput(
-  input: PreviewAutomationOpenInput,
-): PreviewAutomationOpenInput {
+  input: PreviewAutomationMcpOpenInput,
+): PreviewAutomationMcpOpenInput {
   const open = input.open ?? input.show;
   return {
     ...input,
@@ -264,10 +265,19 @@ const handlers = {
     invokeTargeted<PreviewAutomationProfiles>("profiles", {}),
   ),
   preview_open: McpToolAccess.actsAsCaller((input) =>
-    invokeTargeted<PreviewAutomationStatus>(
-      input.profileId !== undefined || input.profileName !== undefined ? "openWithProfile" : "open",
-      normalizePreviewOpenInput(input),
-    ),
+    Effect.gen(function* () {
+      if (input.target !== undefined) {
+        const scope = yield* McpInvocationContext.requireThreadMcpCapability("preview");
+        const preview = yield* PublishedDocumentPreview.PublishedDocumentPreview;
+        return yield* preview.open(scope, normalizePreviewOpenInput(input));
+      }
+      return yield* invokeTargeted<PreviewAutomationStatus>(
+        input.profileId !== undefined || input.profileName !== undefined
+          ? "openWithProfile"
+          : "open",
+        normalizePreviewOpenInput(input),
+      );
+    }),
   ),
   preview_navigate: McpToolAccess.actsAsCaller((input) =>
     invokeTargeted<PreviewAutomationStatus>("navigate", input, input.timeoutMs),

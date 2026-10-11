@@ -239,6 +239,35 @@ export const PreviewAutomationOpenInput = Schema.Struct({
   });
 export type PreviewAutomationOpenInput = typeof PreviewAutomationOpenInput.Type;
 
+/** The own-thread document target is resolved by MCP before reaching a browser host. */
+export const PreviewAutomationMcpOpenInput = PreviewAutomationOpenInput.mapFields(
+  (fields) => ({
+    ...fields,
+    target: Schema.optional(
+      Schema.Struct({
+        kind: Schema.Literal("published-document"),
+        path: TrimmedNonEmptyString.annotate({
+          description:
+            "Exact file path published by a current assistant message in this calling thread. Attachments are not supported.",
+        }),
+      }),
+    ).annotate({
+      description:
+        "Open this thread's assistant-published file through the signed asset route in the environment browser. Mutually exclusive with url; desktop hosting is not supported.",
+    }),
+  }),
+  // Adding an optional target leaves the existing profile and tab checks valid.
+  { unsafePreserveChecks: true },
+).check(
+  Schema.makeFilter(
+    (input) =>
+      input.target === undefined ||
+      (input.url === undefined && input.browserHost !== "desktop") ||
+      "A published-document target cannot be combined with url or desktop hosting.",
+  ),
+);
+export type PreviewAutomationMcpOpenInput = typeof PreviewAutomationMcpOpenInput.Type;
+
 export const BrowserNavigationTarget = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("url").annotate({
@@ -1216,6 +1245,21 @@ export class PreviewAutomationRecordingDeadlineExpiredError extends Schema.Tagge
 ) {
   override get message(): string {
     return "The recording transfer deadline expired.";
+  }
+}
+
+export class PreviewAutomationPublishedDocumentError extends Schema.TaggedError<PreviewAutomationPublishedDocumentError>()(
+  "PreviewAutomationPublishedDocumentError",
+  {
+    threadId: ThreadId,
+    reason: Schema.Literals(["file-unavailable", "http-unavailable"]),
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return this.reason === "http-unavailable"
+      ? "The environment's HTTP server cannot serve this published document."
+      : "This document is unavailable or is not published by an assistant in this thread.";
   }
 }
 

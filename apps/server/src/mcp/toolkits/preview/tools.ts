@@ -8,8 +8,9 @@ import {
   PreviewAutomationEvaluateInput,
   PreviewAutomationHoverInput,
   PreviewAutomationNavigateInput,
-  PreviewAutomationOpenInput,
+  PreviewAutomationMcpOpenInput,
   PreviewAutomationProfiles,
+  PreviewAutomationPublishedDocumentError,
   PreviewAutomationPressInput,
   PreviewAutomationRecordingArtifact,
   PreviewAutomationRecordingStatus,
@@ -39,6 +40,7 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import * as ServerConfig from "../../../config.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as PublishedDocumentPreview from "../../../preview/PublishedDocumentPreview.ts";
 import * as PreviewHosting from "../../../preview/Hosting.ts";
 import { PreviewRemoteUnavailableFailure } from "./errors.ts";
 
@@ -133,11 +135,11 @@ const PreviewStopThreadTool = Tool.make("preview_stop_thread", {
 const PreviewOpenTool = browserTool(
   Tool.make("preview_open", {
     description:
-      "Initialize a collaborative browser tab and open its thread-bound inline preview by default. Set open=false for background-only automation. Choose browserHost='environment' for QA of this environment's loopback apps: the page runs on the server and streams into the same Browser panel, defaulting to isolated Incognito storage; explicitly selecting Default uses persistent storage in that environment. Choose browserHost='desktop' for desktop sign-ins such as Logged in Developer. Omit browserHost to retain the existing hosting policy. Pass tabId to reuse a specific existing tab, set reuseExistingTab=false to create another tab, or omit both to use this agent session's current tab. To select an existing cookie jar without changing the default, use exactly one of profileName (exact unique name) or profileId from preview_profiles for desktop hosting, or Default/Incognito for environment hosting. Existing tabs retain their host and profile; a mismatch creates a new tab unless an exact tabId was supplied, which fails. Unknown or ambiguous profiles fail. Another agent session's tabs can be read but not operated. Parallel subagents must each open with reuseExistingTab=false and pass the returned tabId on every call.",
-    parameters: PreviewAutomationOpenInput,
+      "Initialize a collaborative browser tab and open its thread-bound inline preview by default. Use target:{kind:'published-document',path:'report.html'} to open an exact file already published by an assistant in this calling thread, through signed HTTP in the environment browser. This target cannot be combined with url or desktop hosting; attachments are not supported. Set open=false for background-only automation. Choose browserHost='environment' for QA of this environment's loopback apps: the page runs on the server and streams into the same Browser panel, defaulting to isolated Incognito storage; explicitly selecting Default uses persistent storage in that environment. Choose browserHost='desktop' for desktop sign-ins such as Logged in Developer. Omit browserHost to retain the existing hosting policy. Pass tabId to reuse a specific existing tab, set reuseExistingTab=false to create another tab, or omit both to use this agent session's current tab. To select an existing cookie jar without changing the default, use exactly one of profileName (exact unique name) or profileId from preview_profiles for desktop hosting, or Default/Incognito for environment hosting. Existing tabs retain their host and profile; a mismatch creates a new tab unless an exact tabId was supplied, which fails. Unknown or ambiguous profiles fail. Another agent session's tabs can be read but not operated. Parallel subagents must each open with reuseExistingTab=false and pass the returned tabId on every call.",
+    parameters: PreviewAutomationMcpOpenInput,
     success: PreviewAutomationStatus,
-    failure: PreviewToolFailure,
-    dependencies,
+    failure: Schema.Union([PreviewToolFailure, PreviewAutomationPublishedDocumentError]),
+    dependencies: [...dependencies, PublishedDocumentPreview.PublishedDocumentPreview],
   })
     .annotate(Tool.Title, "Open browser preview")
     .annotate(Tool.Destructive, false),
