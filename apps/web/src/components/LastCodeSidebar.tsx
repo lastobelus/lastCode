@@ -1,3 +1,11 @@
+import {
+  buildLastCodeThreadMenu,
+  lastcodeThreadActionRequiresOperate,
+} from "./sidebar/lastcodeThreadMenu";
+import {
+  buildLastCodeProjectMenu,
+  formatProjectMemberActionLabel,
+} from "./sidebar/lastcodeProjectMenu";
 import { activateSidebarRowFromKeyboard } from "./sidebar/sidebarRowKeyboard";
 import {
   ConnectedSidebarEnvironmentIcon,
@@ -38,10 +46,6 @@ import {
 } from "./ThreadStatusIndicators";
 import { ProjectFavicon } from "./ProjectFavicon";
 import { ProjectSidebarDraftList } from "./sidebar/ProjectSidebarDraftList";
-import {
-  buildStopThreadProcessesMenuItem,
-  withThreadActionMenuDividers,
-} from "./threadActionMenu.logic";
 import { useAtomValue } from "@effect/atom-react";
 import { autoAnimate } from "@formkit/auto-animate";
 import { actionRunningPresentation } from "@t3tools/shared/actionResume";
@@ -75,7 +79,6 @@ import { CSS } from "@dnd-kit/utilities";
 import {
   AuthOrchestrationOperateScope,
   AuthPreviewOperateScope,
-  type ContextMenuItem,
   type EnvironmentId,
   ProjectId,
   type ScopedThreadRef,
@@ -202,10 +205,7 @@ import {
   shouldToastDesktopUpdateActionResult,
 } from "./desktopUpdate.logic";
 import { showDesktopUpdateDownloadedToast } from "./desktopUpdate.toast";
-import {
-  lastcodeThreadPersistenceAction,
-  protectLegacyThreadActions,
-} from "./lastcodeThreadPersistence.logic";
+import { protectLegacyThreadActions } from "./lastcodeThreadPersistence.logic";
 import { projectsContainPersistentThread } from "./projectPersistence.logic";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "./ui/alert";
 import { Button } from "./ui/button";
@@ -344,19 +344,6 @@ function clampSidebarThreadPreviewCount(value: number): SidebarThreadPreviewCoun
     MAX_SIDEBAR_THREAD_PREVIEW_COUNT,
     Math.max(MIN_SIDEBAR_THREAD_PREVIEW_COUNT, value),
   ) as SidebarThreadPreviewCount;
-}
-
-function formatProjectMemberActionLabel(
-  member: SidebarProjectGroupMember,
-  groupedProjectCount: number,
-): string {
-  if (groupedProjectCount <= 1) {
-    return member.title;
-  }
-
-  return member.environmentLabel
-    ? `${member.environmentLabel} — ${member.workspaceRoot}`
-    : member.workspaceRoot;
 }
 
 function projectExpansionPreferenceKeys(project: SidebarProjectSnapshot): string[] {
@@ -2508,132 +2495,53 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         const api = readLocalApi();
         if (!api) return;
 
-        const actionHandlers = new Map<string, () => Promise<void> | void>();
-        const isProjectRemovalBlocked = (member: SidebarProjectGroupMember) =>
-          projectsContainPersistentThread({ members: [member], threads: sidebarThreads });
-        const makeLeaf = (
-          action: "rename" | "grouping" | "copy-path" | "delete",
-          member: SidebarProjectGroupMember,
-          options?: {
-            destructive?: boolean;
-            disabled?: boolean;
-          },
-        ): ContextMenuItem<string> => {
-          const id = `${action}:${member.physicalProjectKey}`;
-          actionHandlers.set(id, () => {
-            switch (action) {
-              case "rename":
-                openProjectRenameDialog(member);
-                return;
-              case "grouping":
-                openProjectGroupingDialog(member);
-                return;
-              case "copy-path":
-                copyPathToClipboard(member.workspaceRoot, { path: member.workspaceRoot });
-                return;
-              case "delete":
-                return handleRemoveProject(member);
-            }
-          });
-
-          return {
-            id,
-            label: `${formatProjectMemberActionLabel(member, project.groupedProjectCount)}${
-              action === "delete" && options?.disabled ? " (disable persistence first)" : ""
-            }`,
-            ...(options?.destructive ? { destructive: true } : {}),
-            ...(options?.disabled ? { disabled: true } : {}),
-          };
-        };
-
-        const buildTargetedItem = (
-          action: "rename" | "grouping" | "copy-path" | "delete",
-          label: string,
-          options?: {
-            destructive?: boolean;
-            isDisabled?: (member: SidebarProjectGroupMember) => boolean;
-          },
-        ): ContextMenuItem<string> => {
-          if (project.memberProjects.length === 1) {
-            const singleMember = project.memberProjects[0]!;
-            return {
-              ...makeLeaf(action, singleMember, {
-                ...(options?.destructive ? { destructive: true } : {}),
-                ...(options?.isDisabled?.(singleMember) ? { disabled: true } : {}),
-              }),
-              label,
-              ...(action === "delete" ? { icon: "trash" } : {}),
-            };
-          }
-
-          return {
-            id: `${action}:submenu`,
-            label,
-            ...(action === "delete" ? { icon: "trash" } : {}),
-            children: project.memberProjects.map((member) =>
-              makeLeaf(action, member, {
-                ...(options?.destructive ? { destructive: true } : {}),
-                ...(options?.isDisabled?.(member) ? { disabled: true } : {}),
-              }),
-            ),
-          };
-        };
-
-        actionHandlers.set("open-dashboard", () => {
-          if (isMobile) setOpenMobile(false);
-          void router.navigate({
-            to: "/dashboard",
-            search: { environmentId: project.environmentId, projectId: project.id },
-          });
+        const { items, actions } = buildLastCodeProjectMenu({
+          members: project.memberProjects.map((member) => ({
+            member,
+            canOperate: readEnvironmentScope(member.environmentId, AuthOrchestrationOperateScope),
+            removalBlocked: projectsContainPersistentThread({
+              members: [member],
+              threads: sidebarThreads,
+            }),
+          })),
+          groupedProjectCount: project.groupedProjectCount,
+          isNoProjectGroup,
         });
-
-        actionHandlers.set("project-settings", () => {
-          if (isMobile) setOpenMobile(false);
-          void router.navigate({
-            to: "/projects/$projectKey",
-            params: { projectKey: projectSettingsKey },
-          });
-        });
-
-        const clicked = await api.contextMenu.show(
+        const clicked = await api.contextMenu.show(items, { x: event.clientX, y: event.clientY });
+        const actionHandlers = new Map<string, () => Promise<void> | void>([
           [
-            ...(isNoProjectGroup
-              ? []
-              : [
-                  buildTargetedItem("rename", "Rename", {
-                    isDisabled: (member) =>
-                      !readEnvironmentScope(member.environmentId, AuthOrchestrationOperateScope),
-                  }),
-                  buildTargetedItem("grouping", "Group into..."),
-                ]),
-            buildTargetedItem("copy-path", "Copy Path"),
-            { id: "open-dashboard", label: "Open dashboard", icon: "layout-dashboard" },
-            { id: "project-settings", label: "Project settings", icon: "settings" },
-            buildTargetedItem(
-              "delete",
-              project.memberProjects.length === 1 &&
-                isProjectRemovalBlocked(project.memberProjects[0]!)
-                ? "Remove (disable persistence first)"
-                : "Remove",
-              {
-                destructive: true,
-                isDisabled: (member) =>
-                  isProjectRemovalBlocked(member) ||
-                  !readEnvironmentScope(member.environmentId, AuthOrchestrationOperateScope),
-              },
-            ),
+            "open-dashboard",
+            () => {
+              if (isMobile) setOpenMobile(false);
+              void router.navigate({
+                to: "/dashboard",
+                search: { environmentId: project.environmentId, projectId: project.id },
+              });
+            },
           ],
-          {
-            x: event.clientX,
-            y: event.clientY,
+          [
+            "project-settings",
+            () => {
+              if (isMobile) setOpenMobile(false);
+              void router.navigate({
+                to: "/projects/$projectKey",
+                params: { projectKey: projectSettingsKey },
+              });
+            },
+          ],
+        ]);
+        const memberHandlers = {
+          rename: openProjectRenameDialog,
+          grouping: openProjectGroupingDialog,
+          "copy-path": (member: SidebarProjectGroupMember) => {
+            copyPathToClipboard(member.workspaceRoot, { path: member.workspaceRoot });
           },
-        );
-
-        if (!clicked) {
-          return;
+          delete: handleRemoveProject,
+        };
+        for (const [id, target] of actions) {
+          actionHandlers.set(id, () => memberHandlers[target.action](target.member));
         }
-
-        await actionHandlers.get(clicked)?.();
+        await actionHandlers.get(clicked ?? "")?.();
       })();
     },
     [
@@ -3286,11 +3194,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         thread.environmentId,
       );
       const supportsPersistence = readEnvironmentSupportsPersistence(thread.environmentId);
-      const persistenceAction = lastcodeThreadPersistenceAction({
-        persistent: thread.persistent === true,
-        supported: supportsPersistence,
-      });
-      const stopProcessesAction = buildStopThreadProcessesMenuItem(hasStoppableProcesses);
       const canAnnotate = supportsThreadAnnotations && thread.latestUserMessageAt !== null;
       const creatorRef = thread.creatorThreadId
         ? scopeThreadRef(thread.environmentId, thread.creatorThreadId)
@@ -3301,73 +3204,19 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       const handoffs = readThreadHandoffs(threadRef);
       const handoffDescriptors = handoffs.slice(0, handoffsMenuLimit).map(describeHandoff);
       const clicked = await api.contextMenu.show(
-        protectLegacyThreadActions(
-          withThreadActionMenuDividers([
-            ...(thread.branch
-              ? [{ id: "new-thread-on-branch", label: `New thread on ${thread.branch}` }]
-              : []),
-            { id: "rename", label: "Rename thread" },
-            ...(canAnnotate ? [{ id: "annotate", label: "Annotate thread…" }] : []),
-            { id: "mark-unread", label: "Mark unread" },
-            ...(creatorGroupingEligible
-              ? [
-                  {
-                    id:
-                      thread.creatorGrouping === "grouped"
-                        ? "creator-independent"
-                        : "creator-grouped",
-                    label:
-                      thread.creatorGrouping === "grouped"
-                        ? "Move to top level"
-                        : "Group with creator thread",
-                  },
-                ]
-              : []),
-            ...(canOpenCreator ? [{ id: "open-creator", label: "Open creator thread" }] : []),
-            ...(persistenceAction ? [persistenceAction] : []),
-            ...(stopProcessesAction ? [stopProcessesAction] : []),
-            { id: "copy-path", label: "Copy Path" },
-            { id: "copy-thread-id", label: "Copy Thread ID" },
-            { id: "open-dashboard", label: "Open dashboard", icon: "layout-dashboard" },
-            {
-              id: "project-settings",
-              label: "Project settings",
-              disabled: threadProjectSettingsKey === null,
-            },
-            { id: "handoffs-heading", label: "Handoffs", disabled: true, separatorBefore: true },
-            ...(handoffDescriptors.length
-              ? handoffDescriptors.map(({ entry, label }) => ({ id: `handoff:${entry.id}`, label }))
-              : [{ id: "handoffs-empty", label: "No handoffs yet", disabled: true }]),
-            ...(handoffs.length > handoffDescriptors.length
-              ? [{ id: "handoff-show-all", label: "Show all…" }]
-              : []),
-            ...(thread.archivePending?.status === "failed"
-              ? [{ id: "dismiss-archive-failure", label: "Dismiss archive failure" }]
-              : []),
-            {
-              id: "delete",
-              separatorBefore: true,
-              label: "Delete",
-              destructive: true,
-              icon: "trash",
-            },
-          ]),
-          thread.persistent === true,
-        ).map((item) =>
-          [
-            "rename",
-            "annotate",
-            "creator-independent",
-            "creator-grouped",
-            "mark-persistent",
-            "disable-persistence",
-            "stop-thread-processes",
-            "dismiss-archive-failure",
-            "delete",
-          ].includes(item.id)
-            ? { ...item, disabled: item.disabled || !canOperateThread }
-            : item,
-        ),
+        buildLastCodeThreadMenu({
+          thread,
+          creator: { groupingEligible: creatorGroupingEligible, canOpen: canOpenCreator },
+          canAnnotate,
+          supportsPersistence,
+          hasStoppableProcesses,
+          projectSettingsKey: threadProjectSettingsKey,
+          handoffs: {
+            entries: handoffDescriptors.map(({ entry, label }) => ({ id: entry.id, label })),
+            hasMore: handoffs.length > handoffDescriptors.length,
+          },
+          canOperate: canOperateThread,
+        }),
         position,
       );
 
@@ -3387,18 +3236,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       }
 
       if (
-        clicked !== null &&
-        [
-          "rename",
-          "annotate",
-          "creator-independent",
-          "creator-grouped",
-          "mark-persistent",
-          "disable-persistence",
-          "stop-thread-processes",
-          "dismiss-archive-failure",
-          "delete",
-        ].includes(clicked) &&
+        lastcodeThreadActionRequiresOperate(clicked) &&
         !checkTaskPermission(threadRef.environmentId)
       )
         return;
