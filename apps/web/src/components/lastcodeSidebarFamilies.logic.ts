@@ -45,20 +45,17 @@ export const lastcodeSidebarSubagentGroupKey = (parentKey: string) => `${parentK
 export const lastcodeSidebarThreadKey = (thread: SidebarThreadSummary) =>
   scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
 
+const STOPPED_RUN_STATUSES = new Set(["interrupted", "cancelled", "rolled_back"]);
+
 export function lastcodeSidebarSubagentStatusLabel(
   thread: SidebarThreadSummary,
   status: ThreadStatusPill | null,
 ): string {
   if (status && status.label !== "Completed") return status.label;
   if (thread.runtime?.lastError || thread.latestRun?.status === "failed") return "Failed";
-  if (
-    thread.latestRun?.status === "interrupted" ||
-    thread.latestRun?.status === "cancelled" ||
-    thread.latestRun?.status === "rolled_back"
-  )
-    return "Stopped";
-  if (thread.latestRun?.status === "completed") return "Done";
-  return "Idle";
+  const runStatus = thread.latestRun?.status;
+  if (runStatus && STOPPED_RUN_STATUSES.has(runStatus)) return "Stopped";
+  return runStatus === "completed" ? "Done" : "Idle";
 }
 
 export function lastcodeSidebarIsAgentCreated(thread: SidebarThreadSummary): boolean {
@@ -69,17 +66,29 @@ export function lastcodeSidebarCreatorGroupingEligible(thread: SidebarThreadSumm
   return lastcodeSidebarIsAgentCreated(thread) && thread.creatorThreadId !== undefined;
 }
 
+function creatorDescription(
+  isAgentCreated: boolean,
+  creator: SidebarThreadSummary | null,
+  unavailableLabel: string | null,
+) {
+  if (!isAgentCreated) return null;
+  return creator ? `Created by ${creator.title}` : (unavailableLabel ?? "Creator unknown");
+}
+
+function matchingCreator(thread: SidebarThreadSummary, creator: SidebarThreadSummary | null) {
+  return creator !== null &&
+    creator.id === thread.creatorThreadId &&
+    creator.environmentId === thread.environmentId
+    ? creator
+    : null;
+}
+
 /** Resolve attribution separately from the project-local display family. */
 export function lastcodeSidebarCreatorDetails(
   thread: SidebarThreadSummary,
   creator: SidebarThreadSummary | null,
 ) {
-  const knownCreator =
-    creator !== null &&
-    creator.id === thread.creatorThreadId &&
-    creator.environmentId === thread.environmentId
-      ? creator
-      : null;
+  const knownCreator = matchingCreator(thread, creator);
   const availableCreator = knownCreator && threadShellIsVisible(knownCreator) ? knownCreator : null;
   const isAgentCreated = lastcodeSidebarIsAgentCreated(thread);
   const unavailableLabel =
@@ -88,11 +97,7 @@ export function lastcodeSidebarCreatorDetails(
       : null;
   const eligible = lastcodeSidebarCreatorGroupingEligible(thread);
   return {
-    description: isAgentCreated
-      ? availableCreator
-        ? `Created by ${availableCreator.title}`
-        : (unavailableLabel ?? "Creator unknown")
-      : null,
+    description: creatorDescription(isAgentCreated, availableCreator, unavailableLabel),
     unavailableLabel: thread.creatorGrouping === "grouped" ? unavailableLabel : null,
     groupingEligible: eligible && (!knownCreator || knownCreator.projectId === thread.projectId),
     canOpen: eligible && availableCreator !== null,
@@ -121,6 +126,10 @@ interface FamilyGraph {
   creatorEdges: Set<string>;
 }
 
+function sameProject(thread: SidebarThreadSummary, parent: SidebarThreadSummary | undefined) {
+  return parent !== undefined && parent.projectId === thread.projectId;
+}
+
 function connectSubagentParents(graph: FamilyGraph) {
   const { byKey, parentByKey, unavailableByKey } = graph;
   for (const [key, thread] of byKey) {
@@ -130,7 +139,7 @@ function connectSubagentParents(graph: FamilyGraph) {
       ? scopedThreadKey(scopeThreadRef(thread.environmentId, parentId))
       : null;
     const parent = parentKey ? byKey.get(parentKey) : undefined;
-    if (parentKey && parent && parent.projectId === thread.projectId) {
+    if (parentKey && sameProject(thread, parent)) {
       parentByKey.set(key, parentKey);
     } else {
       unavailableByKey.set(
@@ -235,12 +244,7 @@ function buildFamilyGraph(threads: readonly SidebarThreadSummary[]) {
   return { ...graph, ...orderFamilyChildren(graph) };
 }
 
-/** Projects sorted visible shells into owned subagent and display-only creator families.
- * Root preview limits never split a family; collapsed families retain the selected ancestor path.
- * Creator grouping only changes display placement; it never changes the conversation lineage.
- * Unavailable parents/creators and cycles leave the child reachable as an identified root.
- */
-export function projectLastCodeSidebarFamilies(input: {
+type FamilyProjectionInput = {
   threads: readonly SidebarThreadSummary[];
   collapsedByKey: Readonly<Record<string, boolean>>;
   activeThreadKey: string | null;
@@ -249,7 +253,42 @@ export function projectLastCodeSidebarFamilies(input: {
   listExpanded: boolean;
   groupingStyle?: "minimal" | "typed-groups";
   statusForThread?: (thread: SidebarThreadSummary) => ThreadStatusPill | null;
-}) {
+};
+
+type OrderedFamilyGraph = ReturnType<typeof buildFamilyGraph>;
+type FamilySelection = ReturnType<typeof selectFamilyPath>;
+type FamilyStatusMap = Map<string, ThreadStatusPill | null>;
+
+function selectFamilyPath(graph: OrderedFamilyGraph, activeThreadKey: string | null) {
+  const { byKey, parentByKey } = graph;
+  const selectedPath = new Set<string>();
+  let selectedRoot: string | null = null;
+  let cursor = activeThreadKey;
+  while (cursor && byKey.has(cursor)) {
+    selectedPath.add(cursor);
+    selectedRoot = cursor;
+    cursor = parentByKey.get(cursor) ?? null;
+  }
+  const activeThread = activeThreadKey ? byKey.get(activeThreadKey) : undefined;
+  const activeThreadIsSubagent =
+    activeThread !== undefined && isSidebarSubagentThread(activeThread);
+
+  return { selectedPath, selectedRoot, activeThreadIsSubagent };
+}
+
+function familyExpanded(
+  collapsedByKey: FamilyProjectionInput["collapsedByKey"],
+  key: string,
+  selectedDescendant: boolean,
+) {
+  return collapsedByKey[key] === false || (collapsedByKey[key] !== true && selectedDescendant);
+}
+
+function buildFamilyRows(
+  graph: OrderedFamilyGraph,
+  selection: FamilySelection,
+  input: FamilyProjectionInput,
+) {
   const {
     byKey,
     parentByKey,
@@ -257,23 +296,8 @@ export function projectLastCodeSidebarFamilies(input: {
     creatorGroupingWarningByKey,
     childrenByKey,
     roots,
-  } = buildFamilyGraph(input.threads);
-  const typedGroups = input.groupingStyle === "typed-groups";
-  const selectedPath = new Set<string>();
-  let selectedRoot: string | null = null;
-  let cursor = input.activeThreadKey;
-  while (cursor && byKey.has(cursor)) {
-    selectedPath.add(cursor);
-    selectedRoot = cursor;
-    cursor = parentByKey.get(cursor) ?? null;
-  }
-  const activeThread = input.activeThreadKey ? byKey.get(input.activeThreadKey) : undefined;
-  const activeThreadIsSubagent =
-    activeThread !== undefined && isSidebarSubagentThread(activeThread);
-  const isExpanded = (key: string, selectedDescendant: boolean) =>
-    input.collapsedByKey[key] === false ||
-    (input.collapsedByKey[key] !== true && selectedDescendant);
-
+  } = graph;
+  const { selectedPath, activeThreadIsSubagent } = selection;
   const allRows: LastCodeSidebarFamilyRow[] = [];
   const stack = roots.toReversed().map((key) => ({ key, depth: 0 }));
   while (stack.length) {
@@ -288,7 +312,7 @@ export function projectLastCodeSidebarFamilies(input: {
       unavailableParentLabel: unavailableByKey.get(key) ?? null,
       descendantCount: 0,
       descendantsStatus: null,
-      expanded: isExpanded(key, selectedDescendant),
+      expanded: familyExpanded(input.collapsedByKey, key, selectedDescendant),
       selectedDescendant,
       collapseNavigatesToParent: selectedDescendant && activeThreadIsSubagent,
       descendantStatusCounts: new Map(),
@@ -301,8 +325,14 @@ export function projectLastCodeSidebarFamilies(input: {
       stack.push({ key: children[index]!, depth: depth + 1 });
     }
   }
-  const rowByKey = new Map(allRows.map((row) => [row.key, row]));
-  const statusByKey = new Map(
+  return allRows;
+}
+
+function familyStatuses(
+  allRows: readonly LastCodeSidebarFamilyRow[],
+  input: FamilyProjectionInput,
+): FamilyStatusMap {
+  return new Map(
     allRows.map((row) => {
       const status = input.statusForThread?.(row.thread) ?? null;
       const failed = lastcodeSidebarSubagentStatusLabel(row.thread, status) === "Failed";
@@ -319,6 +349,17 @@ export function projectLastCodeSidebarFamilies(input: {
       ];
     }),
   );
+}
+
+function mergeStatusCounts(target: Map<string, number>, source: ReadonlyMap<string, number>) {
+  for (const [label, count] of source) target.set(label, (target.get(label) ?? 0) + count);
+}
+
+function aggregateFamilyRows(
+  allRows: readonly LastCodeSidebarFamilyRow[],
+  rowByKey: Map<string, LastCodeSidebarFamilyRow>,
+  statusByKey: FamilyStatusMap,
+) {
   for (let index = allRows.length - 1; index >= 0; index--) {
     const row = allRows[index]!;
     const parent = row.parentKey ? rowByKey.get(row.parentKey) : undefined;
@@ -330,106 +371,194 @@ export function projectLastCodeSidebarFamilies(input: {
       ? parent.descendantStatusCounts
       : parent.createdThreadStatusCounts;
     ownCounts.set(label, (ownCounts.get(label) ?? 0) + 1);
-    const addCounts = (target: Map<string, number>, source: ReadonlyMap<string, number>) => {
-      for (const [descendantLabel, count] of source) {
-        target.set(descendantLabel, (target.get(descendantLabel) ?? 0) + count);
-      }
-    };
-    addCounts(parent.descendantStatusCounts, row.descendantStatusCounts);
-    addCounts(parent.createdThreadStatusCounts, row.createdThreadStatusCounts);
+    mergeStatusCounts(parent.descendantStatusCounts, row.descendantStatusCounts);
+    mergeStatusCounts(parent.createdThreadStatusCounts, row.createdThreadStatusCounts);
     parent.descendantsStatus = resolveProjectStatusIndicator([
       parent.descendantsStatus,
       row.descendantsStatus,
       rowStatus,
     ]);
   }
+}
 
-  const hasOverflowingThreads = roots.length > input.previewCount;
-  const previewRoots = input.listExpanded ? roots : roots.slice(0, input.previewCount);
+interface FamilyRowIndex {
+  byKey: Map<string, LastCodeSidebarFamilyRow>;
+  statusByKey: FamilyStatusMap;
+}
+function familyVisibility(
+  graph: OrderedFamilyGraph,
+  selection: FamilySelection,
+  input: FamilyProjectionInput,
+) {
+  const previewRoots = input.listExpanded ? graph.roots : graph.roots.slice(0, input.previewCount);
   const renderedRootKeys = new Set(input.projectExpanded ? previewRoots : []);
-  if (selectedRoot) renderedRootKeys.add(selectedRoot);
+  if (selection.selectedRoot) renderedRootKeys.add(selection.selectedRoot);
+  return {
+    ...selection,
+    collapsedByKey: input.collapsedByKey,
+    projectExpanded: input.projectExpanded,
+    renderedRootKeys,
+  };
+}
+type FamilyVisibility = ReturnType<typeof familyVisibility>;
+type VisibilityCursor = { rootIsRendered: boolean; collapsedDepth: number | null };
+type SubagentGroup = Extract<LastCodeSidebarFamilyItem, { type: "subagents" }>;
+
+function familyRowVisibility(
+  row: LastCodeSidebarFamilyRow,
+  cursor: VisibilityCursor,
+  visibility: FamilyVisibility,
+) {
+  const { renderedRootKeys, selectedPath, projectExpanded } = visibility;
+  if (row.depth === 0) {
+    cursor.rootIsRendered = renderedRootKeys.has(row.key);
+    cursor.collapsedDepth = null;
+  }
+  if (!cursor.rootIsRendered) {
+    return "hidden";
+  }
+  if (!projectExpanded && !selectedPath.has(row.key)) return "skip";
+  if (cursor.collapsedDepth !== null) {
+    if (row.depth <= cursor.collapsedDepth) cursor.collapsedDepth = null;
+    else if (!selectedPath.has(row.key)) return "skip";
+  }
+  return "render";
+}
+
+function buildSubagentGroup(
+  row: LastCodeSidebarFamilyRow,
+  graph: OrderedFamilyGraph,
+  index: FamilyRowIndex,
+  visibility: FamilyVisibility,
+): SubagentGroup {
+  const { parentKey, depth } = row as LastCodeSidebarFamilyRow & { parentKey: string };
+  const { childrenByKey, byKey } = graph;
+  const { selectedPath, activeThreadIsSubagent, collapsedByKey } = visibility;
+  const { byKey: rowByKey, statusByKey } = index;
+  const groupKey = lastcodeSidebarSubagentGroupKey(parentKey);
+  const subagents = (childrenByKey.get(parentKey) ?? []).filter((key) =>
+    isSidebarSubagentThread(byKey.get(key)!),
+  );
+  const selectedDescendant = subagents.some((key) => selectedPath.has(key));
+  return {
+    type: "subagents",
+    key: groupKey,
+    parentKey: parentKey,
+    parentTitle: byKey.get(parentKey)!.title,
+    depth,
+    expanded: familyExpanded(collapsedByKey, groupKey, selectedDescendant),
+    selectedDescendant,
+    collapseNavigatesToParent: selectedDescendant && activeThreadIsSubagent,
+    count: subagents.length,
+    status: resolveProjectStatusIndicator(
+      subagents.flatMap((key) => [
+        statusByKey.get(key) ?? null,
+        rowByKey.get(key)!.descendantsStatus,
+      ]),
+    ),
+  };
+}
+
+function subagentGroupsForRows(
+  graph: OrderedFamilyGraph,
+  index: FamilyRowIndex,
+  visibility: FamilyVisibility,
+) {
+  const groups = new Map<string, SubagentGroup>();
+  return (row: LastCodeSidebarFamilyRow) => {
+    if (!row.parentKey || !isSidebarSubagentThread(row.thread)) return null;
+    let group = groups.get(row.parentKey);
+    if (!group) {
+      group = buildSubagentGroup(row, graph, index, visibility);
+      groups.set(row.parentKey, group);
+    }
+    return group;
+  };
+}
+
+function subagentRowVisible(
+  row: LastCodeSidebarFamilyRow,
+  group: SubagentGroup | null,
+  cursor: VisibilityCursor,
+  selectedPath: ReadonlySet<string>,
+) {
+  if (!group || group.expanded) return true;
+  cursor.collapsedDepth ??= row.depth - 1;
+  return selectedPath.has(row.key);
+}
+
+function renderFamilyRows(
+  allRows: readonly LastCodeSidebarFamilyRow[],
+  graph: OrderedFamilyGraph,
+  index: FamilyRowIndex,
+  visibility: FamilyVisibility,
+) {
+  const getGroup = subagentGroupsForRows(graph, index, visibility);
+  const shownGroups = new Set<SubagentGroup>();
   const renderedRows: LastCodeSidebarFamilyRow[] = [];
   const renderedItems: LastCodeSidebarFamilyItem[] = [];
-  const subagentGroups = new Map<
-    string,
-    Extract<LastCodeSidebarFamilyItem, { type: "subagents" }>
-  >();
   const hiddenThreads: SidebarThreadSummary[] = [];
-  let rootIsRendered = false;
-  let collapsedDepth: number | null = null;
+  const cursor = { rootIsRendered: false, collapsedDepth: null as number | null };
   for (const row of allRows) {
-    if (row.depth === 0) {
-      rootIsRendered = renderedRootKeys.has(row.key);
-      collapsedDepth = null;
+    const disposition = familyRowVisibility(row, cursor, visibility);
+    if (disposition === "hidden") hiddenThreads.push(row.thread);
+    if (disposition !== "render") continue;
+    const group = getGroup(row);
+    if (group && !shownGroups.has(group)) {
+      renderedItems.push(group);
+      shownGroups.add(group);
     }
-    if (!rootIsRendered) {
-      hiddenThreads.push(row.thread);
-      continue;
-    }
-    if (!input.projectExpanded && !selectedPath.has(row.key)) continue;
-    if (collapsedDepth !== null) {
-      if (row.depth <= collapsedDepth) collapsedDepth = null;
-      else if (!selectedPath.has(row.key)) continue;
-    }
-    if (row.parentKey && isSidebarSubagentThread(row.thread)) {
-      const groupKey = lastcodeSidebarSubagentGroupKey(row.parentKey);
-      let group = subagentGroups.get(groupKey);
-      if (!group) {
-        const subagents = (childrenByKey.get(row.parentKey) ?? []).filter((key) =>
-          isSidebarSubagentThread(byKey.get(key)!),
-        );
-        const selectedDescendant = subagents.some((key) => selectedPath.has(key));
-        group = {
-          type: "subagents",
-          key: groupKey,
-          parentKey: row.parentKey,
-          parentTitle: byKey.get(row.parentKey)!.title,
-          depth: row.depth,
-          expanded: isExpanded(groupKey, selectedDescendant),
-          selectedDescendant,
-          collapseNavigatesToParent: selectedDescendant && activeThreadIsSubagent,
-          count: subagents.length,
-          status: resolveProjectStatusIndicator(
-            subagents.flatMap((key) => [
-              statusByKey.get(key) ?? null,
-              rowByKey.get(key)!.descendantsStatus,
-            ]),
-          ),
-        };
-        renderedItems.push(group);
-        subagentGroups.set(groupKey, group);
-      }
-      if (!group.expanded) {
-        collapsedDepth ??= row.depth - 1;
-        if (!selectedPath.has(row.key)) continue;
-      }
-    }
+    if (!subagentRowVisible(row, group, cursor, visibility.selectedPath)) continue;
     renderedRows.push(row);
     renderedItems.push({ type: "thread", row });
-    if (!row.expanded) collapsedDepth ??= row.depth;
+    if (!row.expanded) cursor.collapsedDepth ??= row.depth;
   }
-  if (typedGroups) {
-    const shownGroups = new Set<string>();
-    for (const row of renderedRows) {
-      if (!row.parentKey || isSidebarSubagentThread(row.thread)) continue;
-      const heading = "Created by this thread";
-      const groupKey = `${row.parentKey}:${heading}`;
-      if (!shownGroups.has(groupKey)) {
-        row.groupHeading = heading;
-        shownGroups.add(groupKey);
-      }
+  return { renderedRows, renderedItems, hiddenThreads };
+}
+
+function applyCreatorHeadings(renderedRows: readonly LastCodeSidebarFamilyRow[]) {
+  const shownGroups = new Set<string>();
+  for (const row of renderedRows) {
+    if (!row.parentKey || isSidebarSubagentThread(row.thread)) continue;
+    const heading = "Created by this thread";
+    const groupKey = `${row.parentKey}:${heading}`;
+    if (!shownGroups.has(groupKey)) {
+      row.groupHeading = heading;
+      shownGroups.add(groupKey);
     }
   }
+}
+
+/** Projects sorted visible shells into owned subagent and display-only creator families.
+ * Root preview limits never split a family; collapsed families retain the selected ancestor path.
+ * Creator grouping only changes display placement; it never changes the conversation lineage.
+ * Unavailable parents/creators and cycles leave the child reachable as an identified root.
+ */
+export function projectLastCodeSidebarFamilies(input: FamilyProjectionInput) {
+  const graph = buildFamilyGraph(input.threads);
+  const selection = selectFamilyPath(graph, input.activeThreadKey);
+  const allRows = buildFamilyRows(graph, selection, input);
+  const rowByKey = new Map(allRows.map((row) => [row.key, row]));
+  const statusByKey = familyStatuses(allRows, input);
+  aggregateFamilyRows(allRows, rowByKey, statusByKey);
+  const index = { byKey: rowByKey, statusByKey };
+  const { renderedRows, renderedItems, hiddenThreads } = renderFamilyRows(
+    allRows,
+    graph,
+    index,
+    familyVisibility(graph, selection, input),
+  );
+  if (input.groupingStyle === "typed-groups") applyCreatorHeadings(renderedRows);
   return {
     allRows,
     renderedRows,
     renderedItems,
-    hasOverflowingThreads,
+    hasOverflowingThreads: graph.roots.length > input.previewCount,
     hiddenThreads,
     orderedThreadKeys: renderedRows
       .filter((row) => row.thread.worktreeCleanup == null)
       .map((row) => row.key),
-    showEmptyThreadState: input.projectExpanded && roots.length === 0,
+    showEmptyThreadState: input.projectExpanded && graph.roots.length === 0,
     shouldShowThreadPanel: input.projectExpanded || renderedRows.length > 0,
   };
 }

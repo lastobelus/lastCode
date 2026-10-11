@@ -63,7 +63,7 @@ describe("legacy sidebar subagent families", () => {
           for (const activeThreadKey of [null, lastcodeSidebarThreadKey(child)]) {
             const options = { projectExpanded, listExpanded, previewCount, activeThreadKey };
             const rendering = project(shells, options);
-            const navigation = project(shells, { ...options, statusForThread: undefined });
+            const navigation = project(shells, { ...options, statusForThread: () => null });
             expect(navigation.orderedThreadKeys).toEqual(rendering.orderedThreadKeys);
             expect(rendering.orderedThreadKeys).toEqual(
               rendering.renderedRows.map((row) => row.key),
