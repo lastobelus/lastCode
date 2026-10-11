@@ -1,4 +1,4 @@
-import { memo } from "react";
+import { memo, useCallback } from "react";
 import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
 import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { useEnvironmentScope } from "../../state/session";
@@ -34,6 +34,7 @@ import { LastCodeThreadRowLayout } from "./LastCodeThreadRowLayout";
 import type {
   LastCodeRenameTarget,
   LastCodeThreadEditingCapabilities,
+  useLastCodeThreadEditing,
 } from "./useLastCodeThreadEditing";
 
 interface LastCodeThreadRowProps {
@@ -168,3 +169,43 @@ export const LastCodeThreadRow = memo(function LastCodeThreadRow(props: LastCode
     </LastCodeThreadRowLayout>
   );
 });
+
+/** Bind project-owned state to targeted row props without broadening unrelated row invalidation. */
+export function useLastCodeThreadRowRenderer(
+  projectCwd: string | null,
+  activeThreadKey: string | null,
+  jumpLabels: ReadonlyMap<string, string>,
+  editingState: ReturnType<typeof useLastCodeThreadEditing>,
+  navigation: LastCodeThreadRowProps["navigation"],
+  menus: LastCodeThreadRowProps["menus"],
+  annotations: LastCodeThreadRowProps["annotations"],
+) {
+  const { renameTarget, archiveTarget, capabilities: editing } = editingState;
+  return useCallback(
+    (familyRow: LastCodeSidebarFamilyRow) => (
+      <LastCodeThreadRow
+        familyRow={familyRow}
+        projectCwd={projectCwd}
+        isActive={activeThreadKey === familyRow.key}
+        jumpLabel={jumpLabels.get(familyRow.key) ?? null}
+        renameTarget={renameTarget?.key === familyRow.key ? renameTarget : null}
+        editing={editing}
+        archiveConfirmActive={archiveTarget === familyRow.key}
+        navigation={navigation}
+        menus={menus}
+        annotations={annotations}
+      />
+    ),
+    [
+      projectCwd,
+      activeThreadKey,
+      jumpLabels,
+      renameTarget,
+      archiveTarget,
+      editing,
+      navigation,
+      menus,
+      annotations,
+    ],
+  );
+}

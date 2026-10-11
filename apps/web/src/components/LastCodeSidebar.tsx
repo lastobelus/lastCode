@@ -1,4 +1,5 @@
-import { LastCodeThreadRow } from "./sidebar/LastCodeThreadRow";
+import { useLastCodeThreadRowRenderer } from "./sidebar/LastCodeThreadRow";
+import { LastCodeThreadList } from "./sidebar/LastCodeThreadList";
 import { LastCodeSidebarPresentationProvider } from "./sidebar/LastCodeSidebarPresentation";
 import { useLastCodeThreadNavigation } from "./sidebar/useLastCodeThreadNavigation";
 import {
@@ -8,14 +9,7 @@ import {
 import { lastCodeProjectExpansionPreferenceKeys } from "./sidebar/useLastCodeProjectHeaderGestures";
 import { useLastCodeProjectThreads } from "./sidebar/useLastCodeProjectThreads";
 import { projectLastCodeProjectThreads } from "./sidebar/lastcodeProjectThreads";
-import type { LastCodeThreadAnnotationActions } from "./sidebar/LastCodeThreadDetails";
-import type { LastCodeThreadRowMenus } from "./sidebar/lastcodeThreadRowInteractions";
-import { LastCodeSubagentGroup, LastCodeThreadGroupHeading } from "./sidebar/LastCodeThreadFamily";
-import {
-  useLastCodeThreadEditing,
-  type LastCodeRenameTarget,
-  type LastCodeThreadEditingCapabilities,
-} from "./sidebar/useLastCodeThreadEditing";
+import { useLastCodeThreadEditing } from "./sidebar/useLastCodeThreadEditing";
 import { useLastCodeBulkThreadMenu } from "./sidebar/useLastCodeBulkThreadMenu";
 import { useLastCodeThreadMenu } from "./sidebar/useLastCodeThreadMenu";
 import { useLastCodeThreadAnnotations } from "./sidebar/useLastCodeThreadAnnotations";
@@ -32,7 +26,6 @@ import { LastCodeProjectNewThread } from "./sidebar/LastCodeProjectNewThread";
 
 import { useSidebarProviderBadgePreferences } from "./sidebar/SidebarEnvironmentIcon";
 import { FolderPlusIcon, SearchIcon } from "lucide-react";
-import { ThreadStatusLabel } from "./ThreadStatusIndicators";
 import { ProjectSidebarDraftList } from "./sidebar/ProjectSidebarDraftList";
 import { useAtomValue } from "@effect/atom-react";
 import { autoAnimate } from "@formkit/auto-animate";
@@ -119,8 +112,6 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
-  SidebarMenuSubButton,
-  SidebarMenuSubItem,
   useSidebar,
 } from "./ui/sidebar";
 import { useThreadSelectionStore } from "../threadSelectionStore";
@@ -193,151 +184,8 @@ function buildThreadJumpLabelMap(input: {
   return mapping.size > 0 ? mapping : EMPTY_THREAD_JUMP_LABELS;
 }
 
-interface SidebarProjectThreadListProps {
-  lastcodeSidebarScale: LegacySidebarScale;
-  scaleStyle: CSSProperties;
-  projectCwd: string | null;
-  projectKey: string;
-  projectExpanded: boolean;
-  projection: Pick<
-    ReturnType<typeof useLastCodeProjectThreads>,
-    "familyProjection" | "hiddenThreadStatus"
-  >;
-  isThreadListExpanded: boolean;
-  activeRouteThreadKey: string | null;
-  threadJumpLabelByKey: ReadonlyMap<string, string>;
-  renameTarget: LastCodeRenameTarget | null;
-  editing: LastCodeThreadEditingCapabilities;
-  archiveTarget: string | null;
-  attachThreadListAutoAnimateRef: (node: HTMLElement | null) => void;
-  navigation: ReturnType<typeof useLastCodeThreadNavigation>;
-  menus: LastCodeThreadRowMenus;
-  annotations: LastCodeThreadAnnotationActions;
-  expandThreadListForProject: (projectKey: string) => void;
-  collapseThreadListForProject: (projectKey: string) => void;
-}
-
-const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
-  props: SidebarProjectThreadListProps,
-) {
-  const {
-    lastcodeSidebarScale,
-    scaleStyle,
-    projectCwd,
-    projectKey,
-    projectExpanded,
-    projection,
-    isThreadListExpanded,
-    activeRouteThreadKey,
-    threadJumpLabelByKey,
-    renameTarget,
-    editing,
-    archiveTarget,
-    attachThreadListAutoAnimateRef,
-    navigation,
-    menus,
-    annotations,
-    expandThreadListForProject,
-    collapseThreadListForProject,
-  } = props;
-  const { hiddenThreadStatus, familyProjection } = projection;
-  const { hasOverflowingThreads, renderedItems, showEmptyThreadState, shouldShowThreadPanel } =
-    familyProjection;
-  const showMoreButtonRender = useMemo(() => <button type="button" />, []);
-  const showLessButtonRender = useMemo(() => <button type="button" />, []);
-
-  return (
-    <ul
-      ref={attachThreadListAutoAnimateRef}
-      className="@container/lastcode-sidebar relative flex min-w-0 flex-col before:pointer-events-none before:absolute before:inset-y-0 before:left-2 before:border-l before:border-sidebar-border group-data-[collapsible=icon]:hidden"
-      data-sidebar="menu-sub"
-      data-slot="sidebar-menu-sub"
-      data-lastcode-sidebar-scale={lastcodeSidebarScale}
-      style={{
-        ...scaleStyle,
-        marginLeft: "calc(8px * var(--lastcode-sidebar-content-zoom) - 8px)",
-      }}
-    >
-      {shouldShowThreadPanel && showEmptyThreadState ? (
-        <SidebarMenuSubItem className="w-full" data-thread-selection-safe>
-          <div
-            data-thread-selection-safe
-            className="flex h-8 w-full items-center pl-8 pr-2 text-left text-xs text-sidebar-muted-foreground/75"
-          >
-            <span>No threads yet</span>
-          </div>
-        </SidebarMenuSubItem>
-      ) : null}
-      {shouldShowThreadPanel &&
-        renderedItems.map((item) => {
-          if (item.type === "subagents")
-            return (
-              <LastCodeSubagentGroup
-                key={item.key}
-                item={item}
-                navigateToThread={navigation.navigateToThread}
-              />
-            );
-          const familyRow = item.row;
-          const thread = familyRow.thread;
-          const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
-          return (
-            <React.Fragment key={threadKey}>
-              <LastCodeThreadGroupHeading family={familyRow} />
-              <LastCodeThreadRow
-                familyRow={familyRow}
-                projectCwd={projectCwd}
-                isActive={activeRouteThreadKey === threadKey}
-                jumpLabel={threadJumpLabelByKey.get(threadKey) ?? null}
-                renameTarget={renameTarget?.key === threadKey ? renameTarget : null}
-                editing={editing}
-                archiveConfirmActive={archiveTarget === threadKey}
-                navigation={navigation}
-                menus={menus}
-                annotations={annotations}
-              />
-            </React.Fragment>
-          );
-        })}
-
-      {projectExpanded && hasOverflowingThreads && !isThreadListExpanded && (
-        <SidebarMenuSubItem className="ml-6">
-          <SidebarMenuSubButton
-            render={showMoreButtonRender}
-            data-thread-selection-safe
-            size="sm"
-            onClick={() => {
-              expandThreadListForProject(projectKey);
-            }}
-          >
-            <span className="flex min-w-0 flex-1 items-center gap-2">
-              {hiddenThreadStatus && <ThreadStatusLabel status={hiddenThreadStatus} compact />}
-              <span>Show more</span>
-            </span>
-          </SidebarMenuSubButton>
-        </SidebarMenuSubItem>
-      )}
-      {projectExpanded && hasOverflowingThreads && isThreadListExpanded && (
-        <SidebarMenuSubItem className="ml-6">
-          <SidebarMenuSubButton
-            render={showLessButtonRender}
-            data-thread-selection-safe
-            size="sm"
-            onClick={() => {
-              collapseThreadListForProject(projectKey);
-            }}
-          >
-            <span>Show less</span>
-          </SidebarMenuSubButton>
-        </SidebarMenuSubItem>
-      )}
-    </ul>
-  );
-});
-
 interface SidebarProjectItemProps {
   lastcodeSidebarScale: LegacySidebarScale;
-  scaleStyle: CSSProperties;
   desktopLocalEnvironmentIds: ReadonlySet<EnvironmentId>;
   knownEnvironmentIds: ReadonlySet<EnvironmentId>;
   environmentIconColors: Readonly<Record<string, EnvironmentIconColor>>;
@@ -361,7 +209,6 @@ interface SidebarProjectItemProps {
 const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjectItemProps) {
   const {
     lastcodeSidebarScale,
-    scaleStyle,
     project,
     isThreadListExpanded,
     activeRouteThreadKey,
@@ -425,7 +272,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   // Menu callbacks read current project members without invalidating every row callback.
   const sidebarThreadByKeyRef = useRef(sidebarThreadByKey);
   sidebarThreadByKeyRef.current = sidebarThreadByKey;
-  const { renameTarget, archiveTarget, capabilities: editing } = useLastCodeThreadEditing();
+  const threadEditing = useLastCodeThreadEditing();
+  const editing = threadEditing.capabilities;
   const annotations = useLastCodeThreadAnnotations();
   const [projectRenameTarget, setProjectRenameTarget] = useState<SidebarProjectGroupMember | null>(
     null,
@@ -487,6 +335,23 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     [handleThreadContextMenu, handleMultiSelectContextMenu, clearSelection],
   );
 
+  const renderThreadRow = useLastCodeThreadRowRenderer(
+    project.workspaceRoot,
+    activeRouteThreadKey,
+    threadJumpLabelByKey,
+    threadEditing,
+    navigation,
+    menus,
+    annotations.actions,
+  );
+  const onListExpandedChange = useCallback(
+    (expanded: boolean) => {
+      if (expanded) expandThreadListForProject(project.projectKey);
+      else collapseThreadListForProject(project.projectKey);
+    },
+    [project.projectKey, expandThreadListForProject, collapseThreadListForProject],
+  );
+
   return (
     <>
       <LastCodeProjectHeader
@@ -509,25 +374,15 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         />
       </LastCodeProjectHeader>
 
-      <SidebarProjectThreadList
-        lastcodeSidebarScale={lastcodeSidebarScale}
-        scaleStyle={scaleStyle}
-        projectCwd={project.workspaceRoot}
-        projectKey={project.projectKey}
+      <LastCodeThreadList
+        scale={lastcodeSidebarScale}
         projectExpanded={projectExpanded}
         projection={projection}
-        isThreadListExpanded={isThreadListExpanded}
-        activeRouteThreadKey={activeRouteThreadKey}
-        threadJumpLabelByKey={threadJumpLabelByKey}
-        renameTarget={renameTarget}
-        editing={editing}
-        archiveTarget={archiveTarget}
-        attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
-        navigation={navigation}
-        menus={menus}
-        annotations={annotations.actions}
-        expandThreadListForProject={expandThreadListForProject}
-        collapseThreadListForProject={collapseThreadListForProject}
+        listExpanded={isThreadListExpanded}
+        onListExpandedChange={onListExpandedChange}
+        attachAnimation={attachThreadListAutoAnimateRef}
+        navigateToThread={navigation.navigateToThread}
+        renderRow={renderThreadRow}
       />
 
       {annotations.editor}
@@ -727,7 +582,6 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                     {(dragHandleProps) => (
                       <SidebarProjectItem
                         lastcodeSidebarScale={lastcodeSidebarScale}
-                        scaleStyle={projectTreeScaleStyle}
                         desktopLocalEnvironmentIds={desktopLocalEnvironmentIds}
                         knownEnvironmentIds={knownEnvironmentIds}
                         environmentIconColors={environmentIconColors}
@@ -763,7 +617,6 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
               <SidebarProjectListRow
                 key={project.projectKey}
                 lastcodeSidebarScale={lastcodeSidebarScale}
-                scaleStyle={projectTreeScaleStyle}
                 desktopLocalEnvironmentIds={desktopLocalEnvironmentIds}
                 knownEnvironmentIds={knownEnvironmentIds}
                 environmentIconColors={environmentIconColors}
