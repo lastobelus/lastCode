@@ -9,12 +9,14 @@ import {
   resolveProjectGroupingMode,
 } from "./logicalProject";
 import {
+  NO_PROJECT_GROUP_KEY,
   buildPhysicalToLogicalProjectKeyMap,
   buildSidebarProjectPickerEntries,
   buildSidebarProjectSnapshots,
   projectGroupsSpanEnvironments,
+  resolveSidebarProjectSettingsKey,
 } from "./sidebarProjectGrouping";
-import { orderItemsByPreferredIds } from "./components/Sidebar.logic";
+import { orderItemsByPreferredIds, sortProjectsForSidebar } from "./components/Sidebar.logic";
 import { legacyProjectCwdPreferenceKey } from "./uiStateStore";
 import type { Project } from "./types";
 
@@ -456,5 +458,204 @@ describe("environment grouping", () => {
     });
 
     expect(groups.map((group) => group.displayName)).toEqual(["separate", "shared-repo"]);
+  });
+});
+
+describe("No project sidebar group", () => {
+  const primaryScratch = makeProject({
+    id: ProjectId.make("scratch-primary"),
+    title: "No project",
+    workspaceRoot: "/state/scratch",
+  });
+  const remoteScratch = makeProject({
+    id: ProjectId.make("scratch-remote"),
+    environmentId: remoteEnvironmentId,
+    title: "No project",
+    workspaceRoot: "/remote/state/scratch/",
+  });
+  const scratchWorkspaceRootsByEnvironmentId = new Map([
+    [primaryEnvironmentId, "/state/scratch"],
+    [remoteEnvironmentId, "/remote/state/scratch"],
+  ]);
+  const groupingInput = {
+    projects: [remoteScratch, primaryScratch],
+    settings: defaultGroupingSettings,
+    primaryEnvironmentId,
+    scratchWorkspaceRootsByEnvironmentId,
+  };
+  const resolveEnvironmentLabel = (environmentId: EnvironmentId) =>
+    environmentId === primaryEnvironmentId ? "Primary" : "Remote";
+
+  it.each(["repository", "repository_path", "separate"] as const)(
+    "keeps one scratch group with every physical target in %s mode",
+    (sidebarProjectGroupingMode) => {
+      const input = {
+        ...groupingInput,
+        settings: {
+          sidebarProjectGroupingMode,
+          sidebarProjectGroupingOverrides: {
+            [derivePhysicalProjectKey(primaryScratch)]: "separate" as const,
+          },
+        },
+      };
+      const groups = buildSidebarProjectSnapshots({ ...input, resolveEnvironmentLabel });
+      expect(groups).toHaveLength(1);
+      expect(groups[0]).toMatchObject({
+        projectKey: NO_PROJECT_GROUP_KEY,
+        displayName: "No project",
+        environmentId: primaryEnvironmentId,
+        id: primaryScratch.id,
+        environmentPresence: "mixed",
+      });
+      expect(groups[0]?.memberProjectRefs).toEqual([
+        { environmentId: remoteEnvironmentId, projectId: remoteScratch.id },
+        { environmentId: primaryEnvironmentId, projectId: primaryScratch.id },
+      ]);
+      expect(groups[0]?.memberProjects.map((member) => member.id)).toEqual([
+        remoteScratch.id,
+        primaryScratch.id,
+      ]);
+
+      const keyMap = buildPhysicalToLogicalProjectKeyMap(input);
+      expect(keyMap.get(derivePhysicalProjectKey(primaryScratch))).toBe(NO_PROJECT_GROUP_KEY);
+      expect(keyMap.get(derivePhysicalProjectKey(remoteScratch))).toBe(NO_PROJECT_GROUP_KEY);
+      // Sidebar grouping does not change the environment-local keys used by drafts.
+      expect(deriveLogicalProjectKeyFromSettings(primaryScratch, input.settings)).not.toBe(
+        deriveLogicalProjectKeyFromSettings(remoteScratch, input.settings),
+      );
+    },
+  );
+
+  it("retains an empty scratch group for every project sort order", () => {
+    const groups = buildSidebarProjectSnapshots({ ...groupingInput, resolveEnvironmentLabel });
+    for (const order of ["updated_at", "created_at", "manual"] as const) {
+      expect(
+        sortProjectsForSidebar(
+          groups.map((group) => ({ ...group, id: group.projectKey })),
+          [],
+          order,
+        ).map((group) => group.projectKey),
+      ).toEqual([NO_PROJECT_GROUP_KEY]);
+    }
+  });
+
+  it("keeps the same group key when only one environment has scratch projects", () => {
+    for (const project of [primaryScratch, remoteScratch]) {
+      const groups = buildSidebarProjectSnapshots({
+        ...groupingInput,
+        projects: [project],
+        resolveEnvironmentLabel,
+      });
+      expect(groups).toHaveLength(1);
+      expect(groups[0]?.projectKey).toBe(NO_PROJECT_GROUP_KEY);
+      expect(groups[0]?.memberProjectRefs).toEqual([
+        { environmentId: project.environmentId, projectId: project.id },
+      ]);
+    }
+  });
+
+  it("recognizes scratch by the environment's advertised root instead of its title", () => {
+    const renamedScratch = { ...primaryScratch, title: "Personal work" };
+    const ordinary = makeProject({
+      id: ProjectId.make("ordinary-no-project"),
+      title: "No project",
+      workspaceRoot: "/workspace/ordinary",
+    });
+    const groups = buildSidebarProjectSnapshots({
+      ...groupingInput,
+      projects: [renamedScratch, ordinary],
+      resolveEnvironmentLabel,
+    });
+    expect(groups).toHaveLength(2);
+    expect(groups[0]?.projectKey).toBe(NO_PROJECT_GROUP_KEY);
+    expect(groups[0]?.displayName).toBe("No project");
+    expect(groups[1]?.projectKey).toBe(derivePhysicalProjectKey(ordinary));
+  });
+
+  it("preserves stale scratch aliases and the chosen machine when resolving a project", () => {
+    const staleScratch = {
+      ...remoteScratch,
+      id: ProjectId.make("scratch-remote-stale"),
+      updatedAt: "2025-12-31T00:00:00.000Z",
+    };
+    const groups = buildSidebarProjectSnapshots({
+      ...groupingInput,
+      projects: [staleScratch, ...groupingInput.projects],
+      resolveEnvironmentLabel,
+    });
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.memberProjects.map((member) => member.id)).toEqual([
+      remoteScratch.id,
+      primaryScratch.id,
+    ]);
+    expect(groups[0]?.memberProjectRefs.map((ref) => ref.projectId)).toEqual([
+      staleScratch.id,
+      remoteScratch.id,
+      primaryScratch.id,
+    ]);
+    const [entry] = buildSidebarProjectPickerEntries({
+      groups,
+      preferredProjectRef: {
+        environmentId: remoteEnvironmentId,
+        projectId: staleScratch.id,
+      },
+    });
+    expect(entry?.targetProject.environmentId).toBe(remoteEnvironmentId);
+    expect(entry?.targetProject.id).toBe(remoteScratch.id);
+  });
+
+  it("opens scratch settings for the selected machine, including retained project aliases", () => {
+    const staleScratch = {
+      ...remoteScratch,
+      id: ProjectId.make("scratch-remote-stale"),
+      updatedAt: "2025-12-31T00:00:00.000Z",
+    };
+    const [group] = buildSidebarProjectSnapshots({
+      ...groupingInput,
+      projects: [staleScratch, ...groupingInput.projects],
+      resolveEnvironmentLabel,
+    });
+    expect(group?.environmentId).toBe(primaryEnvironmentId);
+    for (const targetProject of [primaryScratch, remoteScratch, staleScratch]) {
+      const key = resolveSidebarProjectSettingsKey({
+        sidebarProjectKey: group!.projectKey,
+        targetProject,
+        settings: defaultGroupingSettings,
+      });
+      expect(key).toBe(derivePhysicalProjectKey(targetProject));
+      expect(key).not.toBe(NO_PROJECT_GROUP_KEY);
+    }
+  });
+
+  it("keeps repository settings scoped to the existing logical group", () => {
+    const targetProject = makeProject({ repositoryIdentity });
+    expect(
+      resolveSidebarProjectSettingsKey({
+        sidebarProjectKey: repositoryIdentity.canonicalKey,
+        targetProject,
+        settings: {
+          sidebarProjectGroupingMode: "separate",
+          sidebarProjectGroupingOverrides: {},
+        },
+      }),
+    ).toBe(repositoryIdentity.canonicalKey);
+  });
+
+  it("keeps the consolidated group at its first physical project's manual position", () => {
+    const before = makeProject({
+      id: ProjectId.make("before"),
+      workspaceRoot: "/workspace/before",
+    });
+    const after = makeProject({ id: ProjectId.make("after"), workspaceRoot: "/workspace/after" });
+    const groups = buildSidebarProjectSnapshots({
+      ...groupingInput,
+      projects: [before, remoteScratch, after, primaryScratch],
+      resolveEnvironmentLabel,
+    });
+    expect(groups.map((group) => group.projectKey)).toEqual([
+      derivePhysicalProjectKey(before),
+      NO_PROJECT_GROUP_KEY,
+      derivePhysicalProjectKey(after),
+    ]);
   });
 });
