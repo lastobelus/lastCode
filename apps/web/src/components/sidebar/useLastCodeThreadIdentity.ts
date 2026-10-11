@@ -38,20 +38,48 @@ export function useLastCodeThreadIdentity(
     showLocalEnvironmentIcon: showLocalEnvironmentIcon || providerBadgePreferences.enabled,
     environmentLabel: remoteEnvLabel,
   });
-  const showsThreadEnvironmentIcon =
-    providerBadgePreferences.enabled ||
-    (environmentPresentation.showRowIcon &&
-      family.parentKey === null &&
-      (thread.lineage.relationshipToParent !== "subagent" || thread.lineage.independent === true));
-  const threadEnvironmentLabel = providerBadgePreferences.enabled
-    ? (environmentPresentation.hoverLabel ?? remoteEnvLabel ?? "Local")
-    : family.parentKey !== null
-      ? null
-      : environmentPresentation.hoverLabel;
+  const decoration = resolveThreadEnvironmentDecoration(
+    family,
+    environmentPresentation,
+    providerBadgePreferences.enabled,
+    remoteEnvLabel,
+  );
   const environmentIconColor = resolveEnvironmentIconColor(
     configuredEnvironmentIconColor,
     environment !== null && !isDesktopLocalThread,
   );
+  const providerIdentity = resolveThreadProviderIdentity(thread, providerEntriesByEnvironmentId);
+  return { ...decoration, environmentIconColor, ...providerIdentity };
+}
+
+/** Family rows suppress repeated environment labels; provider badges explicitly opt back in. */
+function resolveThreadEnvironmentDecoration(
+  family: LastCodeSidebarFamilyRow,
+  presentation: ReturnType<typeof legacyThreadEnvironmentPresentation>,
+  showProviderBadge: boolean,
+  remoteEnvLabel: string | null,
+) {
+  if (showProviderBadge) {
+    return {
+      showsThreadEnvironmentIcon: true,
+      threadEnvironmentLabel: presentation.hoverLabel ?? remoteEnvLabel ?? "Local",
+    };
+  }
+  const thread = family.thread;
+  const independent =
+    thread.lineage.relationshipToParent !== "subagent" || thread.lineage.independent === true;
+  return {
+    showsThreadEnvironmentIcon:
+      presentation.showRowIcon && family.parentKey === null && independent,
+    threadEnvironmentLabel: family.parentKey !== null ? null : presentation.hoverLabel,
+  };
+}
+
+/** Provider identity always comes from the thread's owning environment, including runtime overrides. */
+function resolveThreadProviderIdentity(
+  thread: LastCodeSidebarFamilyRow["thread"],
+  providerEntriesByEnvironmentId: ReadonlyMap<string, ReadonlyMap<string, ProviderInstanceEntry>>,
+) {
   const modelInstanceId = thread.runtime?.providerInstanceId ?? thread.modelSelection.instanceId;
   const environmentProviderEntries = providerEntriesByEnvironmentId.get(thread.environmentId);
   const providerEntry = environmentProviderEntries?.get(modelInstanceId) ?? null;
@@ -64,14 +92,7 @@ export function useLastCodeThreadIdentity(
   const modelLabel = selectedModel
     ? getTriggerDisplayModelLabel(selectedModel)
     : thread.modelSelection.model;
-  return {
-    showsThreadEnvironmentIcon,
-    threadEnvironmentLabel,
-    environmentIconColor,
-    modelInstanceId,
-    providerEntry,
-    showInstanceBadge,
-    modelLabel,
-  };
+  return { modelInstanceId, providerEntry, showInstanceBadge, modelLabel };
 }
+
 export type LastCodeThreadIdentity = ReturnType<typeof useLastCodeThreadIdentity>;

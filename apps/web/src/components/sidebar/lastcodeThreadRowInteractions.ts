@@ -38,6 +38,16 @@ export function activateLastCodeThreadRow(
   activate();
 }
 
+/** Modified gestures belong to selection/navigation rather than the inline editor. */
+function hasRowGestureModifier(event: MouseEvent) {
+  return (["metaKey", "ctrlKey", "shiftKey", "altKey"] as const).some((key) => event[key]);
+}
+
+function requestsRowContextMenu(event: KeyboardEvent) {
+  if (event.key === "ContextMenu") return true;
+  return event.key === "F10" && event.shiftKey;
+}
+
 /** Preserve the in-progress editor and leave nested controls/modifiers to their own action. */
 export function renameLastCodeThreadRow(
   event: MouseEvent,
@@ -46,15 +56,17 @@ export function renameLastCodeThreadRow(
   requestRename: (ref: ScopedThreadRef, title: string) => void,
 ) {
   if (!readEnvironmentScope(thread.environmentId, AuthOrchestrationOperateScope)) return;
-  if (thread.worktreeCleanup != null || state.renameActive || state.isMobile) return;
-  if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  if (thread.worktreeCleanup != null) return;
+  if (state.renameActive) return;
+  if (state.isMobile) return;
+  if (hasRowGestureModifier(event)) return;
   if ((event.target as HTMLElement).closest("button, a")) return;
   event.preventDefault();
   requestRename(scopeThreadRef(thread.environmentId, thread.id), thread.title);
 }
 
 export function handleLastCodeThreadRowKeyDown(event: KeyboardEvent, activate: () => void) {
-  if (event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey)) {
+  if (requestsRowContextMenu(event)) {
     if (event.target !== event.currentTarget) return;
     event.preventDefault();
     event.stopPropagation();
