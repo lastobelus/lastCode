@@ -1,3 +1,9 @@
+import {
+  activateLastCodeThreadRow,
+  renameLastCodeThreadRow,
+  handleLastCodeThreadRowKeyDown,
+  openLastCodeThreadRowMenu,
+} from "./sidebar/lastcodeThreadRowInteractions";
 import { useLastCodeThreadIdentity } from "./sidebar/useLastCodeThreadIdentity";
 import { LastCodeThreadHoverDetails } from "./sidebar/LastCodeThreadHoverDetails";
 import { useLastCodeThreadDetails } from "./sidebar/useLastCodeThreadDetails";
@@ -35,7 +41,7 @@ import { LastCodeSidebarOptions } from "./sidebar/LastCodeSidebarOptions";
 import { LastCodeSidebarDesktopNotice } from "./sidebar/LastCodeSidebarDesktopNotice";
 import { LastCodeSidebarConnectionNotice } from "./sidebar/LastCodeSidebarConnectionNotice";
 import { formatProjectMemberActionLabel } from "./sidebar/lastcodeProjectMenu";
-import { activateSidebarRowFromKeyboard } from "./sidebar/sidebarRowKeyboard";
+
 import {
   useSidebarProviderBadgePreferences,
   type SidebarProviderBadgePreferences,
@@ -114,7 +120,7 @@ import {
   ThreadAnnotationNavigationTrigger,
 } from "./thread-annotation/ThreadAnnotation";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
-import { readEnvironmentScope, useEnvironmentScope } from "../state/session";
+import { useEnvironmentScope } from "../state/session";
 import {
   legacyProjectCwdPreferenceKey,
   resolveProjectExpanded,
@@ -351,7 +357,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const { leaseLiveStatus, rowRef } = useSidebarRowSubscriptionLease(isActive);
   const cleanup = thread.worktreeCleanup ?? null;
   const isCleanupPending = cleanup?.status === "deleting" || cleanup?.status === "queued";
-  const isCleanupFailed = cleanup?.status === "failed";
   const [cleanupFailureOpen, setCleanupFailureOpen] = useState(false);
   const localLastVisitedAt = useUiStateStore((state) => state.threadLastVisitedAtById[threadKey]);
   const lastVisitedAt = resolveThreadLastVisitedAt(thread.lastVisitedAt, localLastVisitedAt);
@@ -422,130 +427,59 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     handleThreadDetailsTooltipOpenChange,
   } = useLastCodeThreadDetails(threadRef, editing);
   const handleRowClick = useCallback(
-    (event: React.MouseEvent) => {
-      if (isCleanupFailed) {
-        event.preventDefault();
-        setCleanupFailureOpen(true);
-        return;
-      }
-      if (isCleanupPending) {
-        event.preventDefault();
-        return;
-      }
-      handleThreadClick(event, threadRef, orderedProjectThreadKeys);
-    },
-    [handleThreadClick, isCleanupFailed, isCleanupPending, orderedProjectThreadKeys, threadRef],
+    (event: React.MouseEvent) =>
+      activateLastCodeThreadRow(
+        thread,
+        () => handleThreadClick(event, threadRef, orderedProjectThreadKeys),
+        () => setCleanupFailureOpen(true),
+        event,
+      ),
+    [thread, handleThreadClick, threadRef, orderedProjectThreadKeys],
   );
   const handleRowDoubleClick = useCallback(
-    (event: React.MouseEvent) => {
-      if (!readEnvironmentScope(thread.environmentId, AuthOrchestrationOperateScope)) return;
-      if (cleanup !== null) return;
-      // Already renaming this row: a double-click on the row chrome (outside the
-      // input) must not restart and discard the in-progress edit.
-      if (renameTarget) return;
-      // On mobile the first tap navigates and closes the sidebar sheet, so the
-      // inline rename can't be shown. Renaming there stays on the context menu.
-      if (isMobile) return;
-      // cmd/ctrl/shift double-clicks are multi-select intent, not rename.
-      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-      // Ignore double-clicks bubbling from nested controls (PR status, port,
-      // archive buttons) — only the row body should enter inline rename.
-      if ((event.target as HTMLElement).closest("button, a")) return;
-      event.preventDefault();
-      editing.requestRename(threadRef, thread.title);
-    },
-    [cleanup, isMobile, renameTarget, editing, threadRef, thread.environmentId, thread.title],
+    (event: React.MouseEvent) =>
+      renameLastCodeThreadRow(
+        event,
+        thread,
+        { isMobile, renameActive: renameTarget !== null },
+        editing.requestRename,
+      ),
+    [thread, isMobile, renameTarget, editing.requestRename],
   );
   const handleRowKeyDown = useCallback(
-    (event: React.KeyboardEvent) => {
-      if (event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey)) {
-        if (event.target !== event.currentTarget) return;
-        event.preventDefault();
-        event.stopPropagation();
-        const bounds = event.currentTarget.getBoundingClientRect();
-        // Route keyboard requests through the same cleanup and multiselect guards as a click.
-        event.currentTarget.dispatchEvent(
-          new MouseEvent("contextmenu", {
-            bubbles: true,
-            cancelable: true,
-            clientX: bounds.left + 16,
-            clientY: bounds.bottom,
-          }),
-        );
-        return;
-      }
-      activateSidebarRowFromKeyboard(event, () => {
-        if (isCleanupFailed) {
-          setCleanupFailureOpen(true);
-          return;
-        }
-        if (isCleanupPending) return;
-        navigateToThread(threadRef);
-      });
-    },
-    [isCleanupFailed, isCleanupPending, navigateToThread, threadRef],
+    (event: React.KeyboardEvent) =>
+      handleLastCodeThreadRowKeyDown(event, () =>
+        activateLastCodeThreadRow(
+          thread,
+          () => {
+            void navigateToThread(threadRef);
+          },
+          () => setCleanupFailureOpen(true),
+        ),
+      ),
+    [thread, navigateToThread, threadRef],
   );
   const handleRowContextMenu = useCallback(
     (event: React.MouseEvent) => {
-      event.preventDefault();
-      if (cleanup !== null) return;
-      const hasSelection = useThreadSelectionStore.getState().hasSelection();
-      if (hasSelection && isSelected) {
-        void (async () => {
-          const result = await settlePromise(() =>
-            handleMultiSelectContextMenu({
-              x: event.clientX,
-              y: event.clientY,
-            }),
-          );
-          if (result._tag === "Failure") {
-            const error = squashAtomCommandFailure(result);
-            toastManager.add(
-              stackedThreadToast({
-                type: "error",
-                title: "Thread action failed",
-                description: error instanceof Error ? error.message : "An error occurred.",
-              }),
-            );
-          }
-        })();
-        return;
-      }
-
-      if (hasSelection) {
-        clearSelection();
-      }
-      void (async () => {
-        const result = await settlePromise(() =>
-          handleThreadContextMenu(
-            threadRef,
-            {
-              x: event.clientX,
-              y: event.clientY,
-            },
-            hasStoppableProcesses,
-          ),
-        );
-        if (result._tag === "Failure") {
-          const error = squashAtomCommandFailure(result);
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Thread action failed",
-              description: error instanceof Error ? error.message : "An error occurred.",
-            }),
-          );
-        }
-      })();
+      void openLastCodeThreadRowMenu(
+        event,
+        threadRef,
+        { cleanupBlocked: cleanup !== null, isSelected, hasStoppableProcesses },
+        {
+          showThreadMenu: handleThreadContextMenu,
+          showBulkMenu: handleMultiSelectContextMenu,
+          clearSelection,
+        },
+      );
     },
     [
-      cleanup,
-      clearSelection,
-      handleMultiSelectContextMenu,
-      handleThreadContextMenu,
-      hasStoppableProcesses,
-      isSelected,
       threadRef,
+      cleanup,
+      isSelected,
+      hasStoppableProcesses,
+      handleThreadContextMenu,
+      handleMultiSelectContextMenu,
+      clearSelection,
     ],
   );
   const family = props.familyRow;
