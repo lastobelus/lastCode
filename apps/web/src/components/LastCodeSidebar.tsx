@@ -1,4 +1,8 @@
 import {
+  LastCodeThreadDetails,
+  LastCodeThreadCleanupOverlay,
+} from "./sidebar/LastCodeThreadDetails";
+import {
   activateLastCodeThreadRow,
   renameLastCodeThreadRow,
   handleLastCodeThreadRowKeyDown,
@@ -115,10 +119,7 @@ import {
   useThreadShells,
   useThreadShellsForProjectRefs,
 } from "../state/entities";
-import {
-  ThreadAnnotationHoverPopover,
-  ThreadAnnotationNavigationTrigger,
-} from "./thread-annotation/ThreadAnnotation";
+import { ThreadAnnotationNavigationTrigger } from "./thread-annotation/ThreadAnnotation";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useEnvironmentScope } from "../state/session";
 import {
@@ -387,8 +388,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   });
   const isConfirmingArchive =
     canOperateThread && !thread.persistent && cleanup === null && archiveConfirmActive;
-  const annotation = thread.annotation ?? null;
-  const hasActiveAnnotation = annotation?.resolvedAt === null;
+  const hasActiveAnnotation = thread.annotation?.resolvedAt === null;
   const cleanupBlockerTitle =
     cleanup?.status === "queued"
       ? (readThreadShell(scopeThreadRef(thread.environmentId, cleanup.blockedByThreadId))?.title ??
@@ -415,6 +415,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       standalone
     />
   );
+  const detailsLifetime = useLastCodeThreadDetails(threadRef, editing);
   const {
     threadRowActive,
     setThreadRowActive,
@@ -424,8 +425,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     threadDetailsTooltipId,
     handleMouseLeave,
     handleBlurCapture,
-    handleThreadDetailsTooltipOpenChange,
-  } = useLastCodeThreadDetails(threadRef, editing);
+  } = detailsLifetime;
   const handleRowClick = useCallback(
     (event: React.MouseEvent) =>
       activateLastCodeThreadRow(
@@ -548,27 +548,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         onKeyDown={handleRowKeyDown}
         onContextMenu={handleRowContextMenu}
       >
-        {isCleanupPending && !hasActiveAnnotation ? (
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <span
-                  aria-label={`${thread.title} cleanup details`}
-                  className="absolute inset-0 z-20 cursor-not-allowed"
-                />
-              }
-            />
-            <TooltipPopup
-              align="start"
-              side="right"
-              sideOffset={4}
-              variant="glass"
-              viewportPadding="none"
-            >
-              <div className="text-left">{threadHoverDetails}</div>
-            </TooltipPopup>
-          </Tooltip>
-        ) : null}
+        <LastCodeThreadCleanupOverlay thread={thread} content={threadHoverDetails} />
         <LastCodeThreadFamilyDisclosure
           family={family}
           renameTarget={renameTarget !== null}
@@ -627,40 +607,14 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
           </LastCodeThreadMetadata>
         </div>
       </ThreadAnnotationNavigationTrigger>
-      {hasActiveAnnotation && annotation ? (
-        <ThreadAnnotationHoverPopover
-          annotation={annotation}
-          cwd={gitCwd ?? undefined}
-          handle={annotationPopoverHandle}
-          navigationTriggerId={annotationTriggerId}
-          onBodyChange={(body) => onSaveAnnotationBody(thread, body)}
-          onEdit={() => {
-            if (checkTaskPermission(thread.environmentId)) onEditAnnotation(thread);
-          }}
-          onResolve={() => onResolveAnnotation(thread)}
-          threadDetails={threadHoverDetails}
-          trailingContent={cleanupHoverDetails}
-          threadRef={threadRef}
-        />
-      ) : null}
-      <Tooltip
-        disabled={hasActiveAnnotation}
-        open={!hasActiveAnnotation && threadRowActive}
-        onOpenChange={handleThreadDetailsTooltipOpenChange}
-      >
-        <TooltipPopup
-          align="start"
-          animated={false}
-          anchor={threadNavigationRef}
-          id={threadDetailsTooltipId}
-          side="right"
-          sideOffset={4}
-          variant="glass"
-          viewportPadding="none"
-        >
-          <div className="text-left">{threadHoverDetails}</div>
-        </TooltipPopup>
-      </Tooltip>
+      <LastCodeThreadDetails
+        thread={thread}
+        lifetime={detailsLifetime}
+        gitCwd={gitCwd}
+        content={threadHoverDetails}
+        trailingContent={cleanupHoverDetails}
+        annotations={{ onEditAnnotation, onSaveAnnotationBody, onResolveAnnotation }}
+      />
       <WorktreeCleanupFailureDialog
         thread={thread}
         open={cleanupFailureOpen}
