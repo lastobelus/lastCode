@@ -1,10 +1,14 @@
+import { LastCodeThreadArchiveControl } from "./sidebar/LastCodeThreadArchiveControl";
+import { LastCodeThreadTitleEditor } from "./sidebar/LastCodeThreadTitle";
+import {
+  useLastCodeThreadEditing,
+  type LastCodeRenameTarget,
+  type LastCodeThreadEditingCapabilities,
+} from "./sidebar/useLastCodeThreadEditing";
 import { useLastCodeBulkThreadMenu } from "./sidebar/useLastCodeBulkThreadMenu";
 import { useLastCodeThreadMenu } from "./sidebar/useLastCodeThreadMenu";
 import { useLastCodeThreadAnnotations } from "./sidebar/useLastCodeThreadAnnotations";
-import {
-  LastCodeThreadActionsProvider,
-  useLastCodeThreadActions,
-} from "./sidebar/LastCodeThreadActions";
+import { LastCodeThreadActionsProvider } from "./sidebar/LastCodeThreadActions";
 import { useLastCodeProjectMenu } from "./sidebar/useLastCodeProjectMenu";
 import { checkTaskPermission } from "./sidebar/lastcodeSidebarPermission";
 import { LastCodeProjectRenameDialog } from "./sidebar/LastCodeProjectRenameDialog";
@@ -24,7 +28,6 @@ import { ThreadDashboardIndicator } from "./dashboard/ThreadDashboardIndicator";
 import { useSupportsMultiplePullRequests } from "~/hooks/useSupportsMultiplePullRequests";
 import { resolveThreadCurrentPullRequestLink } from "@t3tools/shared/threadPullRequests";
 import {
-  ArchiveIcon,
   BotIcon,
   SparklesIcon,
   ChevronRightIcon,
@@ -136,7 +139,6 @@ import {
 import { useThreadDiscoveredPorts } from "../portDiscoveryState";
 import { openDiscoveredPort } from "./preview/openDiscoveredPort";
 import { useAtomCommand } from "../state/use-atom-command";
-import { useOrchestrationCommand } from "../state/use-orchestration-command";
 import { useEnvironmentQuery } from "../state/query";
 import { previewEnvironment } from "../state/preview";
 import { readEnvironmentScope, useEnvironmentScope } from "../state/session";
@@ -167,7 +169,7 @@ import {
   resolveEnvironmentIconColor,
 } from "../environmentIcons";
 
-import { threadEnvironment, useEnvironmentThread } from "../state/threads";
+import { useEnvironmentThread } from "../state/threads";
 import { useEnvironment, useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
 import {
   buildThreadRouteParams,
@@ -335,16 +337,9 @@ interface SidebarThreadRowProps {
   isActive: boolean;
   openPullRequestsInRightPanel: boolean;
   jumpLabel: string | null;
-  appSettingsConfirmThreadArchive: boolean;
-  renamingThreadKey: string | null;
-  renamingTitle: string;
-  setRenamingTitle: (title: string) => void;
-  startThreadRename: (threadKey: string, title: string) => void;
-  renamingInputRef: React.RefObject<HTMLInputElement | null>;
-  renamingCommittedRef: React.RefObject<boolean>;
-  confirmingArchiveThreadKey: string | null;
-  setConfirmingArchiveThreadKey: React.Dispatch<React.SetStateAction<string | null>>;
-  confirmArchiveButtonRefs: React.RefObject<Map<string, HTMLButtonElement>>;
+  renameTarget: LastCodeRenameTarget | null;
+  editing: LastCodeThreadEditingCapabilities;
+  archiveConfirmActive: boolean;
   handleThreadClick: (
     event: React.MouseEvent,
     threadRef: ScopedThreadRef,
@@ -358,13 +353,7 @@ interface SidebarThreadRowProps {
     hasStoppableProcesses: boolean,
   ) => Promise<void>;
   clearSelection: () => void;
-  commitRename: (
-    threadRef: ScopedThreadRef,
-    newTitle: string,
-    originalTitle: string,
-  ) => Promise<void>;
-  cancelRename: () => void;
-  attemptArchiveThread: (threadRef: ScopedThreadRef) => Promise<void>;
+
   openPrLink: (
     event: React.MouseEvent<HTMLElement>,
     prUrl: string,
@@ -382,24 +371,14 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     isActive,
     openPullRequestsInRightPanel,
     jumpLabel,
-    appSettingsConfirmThreadArchive,
-    renamingThreadKey,
-    renamingTitle,
-    setRenamingTitle,
-    startThreadRename,
-    renamingInputRef,
-    renamingCommittedRef,
-    confirmingArchiveThreadKey,
-    setConfirmingArchiveThreadKey,
-    confirmArchiveButtonRefs,
+    renameTarget,
+    editing,
+    archiveConfirmActive,
     handleThreadClick,
     navigateToThread,
     handleMultiSelectContextMenu,
     handleThreadContextMenu,
     clearSelection,
-    commitRename,
-    cancelRename,
-    attemptArchiveThread,
     openPrLink,
     onFileDropThreads,
     onEditAnnotation,
@@ -554,10 +533,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const prStatus = prStatusIndicator(pr, linkedPullRequestStatus?.sourceControlProvider);
   const terminalStatus = terminalStatusFromRunningIds(runningTerminalIds);
   const isConfirmingArchive =
-    canOperateThread &&
-    !thread.persistent &&
-    cleanup === null &&
-    confirmingArchiveThreadKey === threadKey;
+    canOperateThread && !thread.persistent && cleanup === null && archiveConfirmActive;
   const annotation = thread.annotation ?? null;
   const hasActiveAnnotation = annotation?.resolvedAt === null;
   const cleanupBlockerTitle =
@@ -648,8 +624,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const annotationPopoverHandle = useMemo(() => createAnnotationPopoverHandle(), []);
   const annotationTriggerId = useId();
   const clearConfirmingArchive = useCallback(() => {
-    setConfirmingArchiveThreadKey((current) => (current === threadKey ? null : current));
-  }, [setConfirmingArchiveThreadKey, threadKey]);
+    editing.cancelArchiveConfirmation(threadRef);
+  }, [editing, threadRef]);
   const handleMouseLeave = useCallback(() => {
     clearConfirmingArchive();
     setThreadRowActive(false);
@@ -693,7 +669,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       if (cleanup !== null) return;
       // Already renaming this row: a double-click on the row chrome (outside the
       // input) must not restart and discard the in-progress edit.
-      if (renamingThreadKey === threadKey) return;
+      if (renameTarget) return;
       // On mobile the first tap navigates and closes the sidebar sheet, so the
       // inline rename can't be shown. Renaming there stays on the context menu.
       if (isMobile) return;
@@ -703,17 +679,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       // archive buttons) — only the row body should enter inline rename.
       if ((event.target as HTMLElement).closest("button, a")) return;
       event.preventDefault();
-      startThreadRename(threadKey, thread.title);
+      editing.requestRename(threadRef, thread.title);
     },
-    [
-      cleanup,
-      isMobile,
-      renamingThreadKey,
-      startThreadRename,
-      threadKey,
-      thread.environmentId,
-      thread.title,
-    ],
+    [cleanup, isMobile, renameTarget, editing, threadRef, thread.environmentId, thread.title],
   );
   const handleRowKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
@@ -830,101 +798,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       threadRef,
     ],
   );
-  const handleRenameInputRef = useCallback(
-    (element: HTMLInputElement | null) => {
-      if (element && renamingInputRef.current !== element) {
-        renamingInputRef.current = element;
-        element.focus();
-        element.select();
-      }
-    },
-    [renamingInputRef],
-  );
-  const handleRenameInputChange = useCallback(
-    (event: React.ChangeEvent<HTMLInputElement>) => {
-      setRenamingTitle(event.target.value);
-    },
-    [setRenamingTitle],
-  );
-  const handleRenameInputKeyDown = useCallback(
-    (event: React.KeyboardEvent<HTMLInputElement>) => {
-      event.stopPropagation();
-      if (event.key === "Enter") {
-        event.preventDefault();
-        renamingCommittedRef.current = true;
-        void commitRename(threadRef, renamingTitle, thread.title);
-      } else if (event.key === "Escape") {
-        event.preventDefault();
-        renamingCommittedRef.current = true;
-        cancelRename();
-      }
-    },
-    [cancelRename, commitRename, renamingCommittedRef, renamingTitle, thread.title, threadRef],
-  );
-  const handleRenameInputBlur = useCallback(() => {
-    if (!renamingCommittedRef.current) {
-      void commitRename(threadRef, renamingTitle, thread.title);
-    }
-  }, [commitRename, renamingCommittedRef, renamingTitle, thread.title, threadRef]);
-  // Keep clicks/double-clicks inside the rename input from bubbling to the row.
-  // Without stopping `dblclick`, double-clicking to select a word would re-fire
-  // the row's rename handler and reset the in-progress edit back to the title.
-  const handleRenameInputClick = useCallback((event: React.MouseEvent<HTMLInputElement>) => {
-    event.stopPropagation();
-  }, []);
-  const handleConfirmArchiveRef = useCallback(
-    (element: HTMLButtonElement | null) => {
-      if (element) {
-        confirmArchiveButtonRefs.current.set(threadKey, element);
-      } else {
-        confirmArchiveButtonRefs.current.delete(threadKey);
-      }
-    },
-    [confirmArchiveButtonRefs, threadKey],
-  );
   const stopPropagationOnPointerDown = useCallback(
-    (event: React.PointerEvent<HTMLButtonElement>) => {
-      event.stopPropagation();
-    },
+    (event: React.PointerEvent<HTMLButtonElement>) => event.stopPropagation(),
     [],
-  );
-  const handleConfirmArchiveClick = useCallback(
-    (event: React.MouseEvent<HTMLButtonElement>) => {
-      event.preventDefault();
-      event.stopPropagation();
-      clearConfirmingArchive();
-      if (thread.persistent) return;
-      void attemptArchiveThread(threadRef);
-    },
-    [attemptArchiveThread, clearConfirmingArchive, thread.persistent, threadRef],
-  );
-  const handleStartArchiveConfirmation = useCallback(
-    (event: React.MouseEvent<HTMLButtonElement>) => {
-      event.preventDefault();
-      event.stopPropagation();
-      if (!checkTaskPermission(thread.environmentId)) return;
-      if (thread.persistent) return;
-      setConfirmingArchiveThreadKey(threadKey);
-      requestAnimationFrame(() => {
-        confirmArchiveButtonRefs.current.get(threadKey)?.focus();
-      });
-    },
-    [
-      confirmArchiveButtonRefs,
-      setConfirmingArchiveThreadKey,
-      thread.persistent,
-      threadKey,
-      thread.environmentId,
-    ],
-  );
-  const handleArchiveImmediateClick = useCallback(
-    (event: React.MouseEvent<HTMLButtonElement>) => {
-      event.preventDefault();
-      event.stopPropagation();
-      if (thread.persistent) return;
-      void attemptArchiveThread(threadRef);
-    },
-    [attemptArchiveThread, thread.persistent, threadRef],
   );
   const threadNavigationRef = useRef<HTMLDivElement | null>(null);
   const threadDetailsTooltipId = useId();
@@ -1040,10 +916,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                   aria-expanded={family.expanded}
                   className={cn(
                     "relative z-30 inline-flex size-4 shrink-0 items-center justify-center rounded-sm outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring",
-                    typedGroups &&
-                      !family.expanded &&
-                      renamingThreadKey !== threadKey &&
-                      "-translate-y-1.5",
+                    typedGroups && !family.expanded && !renameTarget && "-translate-y-1.5",
                   )}
                   onPointerDown={(event) => event.stopPropagation()}
                   onDoubleClick={(event) => event.stopPropagation()}
@@ -1143,16 +1016,13 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
           {threadStatus && (
             <ThreadStatusLabel status={threadStatus} compact={props.compactStatusIndicators} />
           )}
-          {canOperateThread && renamingThreadKey === threadKey ? (
-            <input
-              ref={handleRenameInputRef}
-              className="min-w-0 flex-1 truncate rounded border border-ring bg-transparent px-0.5 text-sm outline-none"
-              value={renamingTitle}
-              onChange={handleRenameInputChange}
-              onKeyDown={handleRenameInputKeyDown}
-              onBlur={handleRenameInputBlur}
-              onClick={handleRenameInputClick}
-              onDoubleClick={handleRenameInputClick}
+          {canOperateThread && renameTarget ? (
+            <LastCodeThreadTitleEditor
+              key={renameTarget.session}
+              threadRef={threadRef}
+              title={thread.title}
+              target={renameTarget}
+              finishRename={editing.finishRename}
             />
           ) : (
             <>
@@ -1360,56 +1230,12 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                 </span>
               </>
             ) : null}
-            {isConfirmingArchive && !thread.persistent ? (
-              <button
-                ref={handleConfirmArchiveRef}
-                type="button"
-                data-thread-selection-safe
-                data-testid={`thread-archive-confirm-${thread.id}`}
-                aria-label={`Confirm archive ${thread.title}`}
-                className="absolute top-1/2 right-1 inline-flex h-5 -translate-y-1/2 cursor-pointer items-center rounded-md bg-destructive/12 px-2 text-3xs font-medium text-destructive transition-colors hover:bg-destructive/18 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-destructive/40"
-                onPointerDown={stopPropagationOnPointerDown}
-                onClick={handleConfirmArchiveClick}
-              >
-                Confirm
-              </button>
-            ) : canOperateThread && !thread.persistent && cleanup === null ? (
-              appSettingsConfirmThreadArchive ? (
-                <div className="pointer-events-none absolute top-1/2 right-0.5 -translate-y-1/2 opacity-0 transition-opacity duration-150 max-sm:pointer-events-auto max-sm:opacity-100 group-hover/menu-sub-item:pointer-events-auto group-hover/menu-sub-item:opacity-100 group-focus-within/menu-sub-item:pointer-events-auto group-focus-within/menu-sub-item:opacity-100">
-                  <button
-                    type="button"
-                    data-thread-selection-safe
-                    data-testid={`thread-archive-${thread.id}`}
-                    aria-label={`Archive ${thread.title}`}
-                    className={SIDEBAR_ICON_ACTION_BUTTON_CLASS}
-                    onPointerDown={stopPropagationOnPointerDown}
-                    onClick={handleStartArchiveConfirmation}
-                  >
-                    <ArchiveIcon className="size-3.5" />
-                  </button>
-                </div>
-              ) : (
-                <Tooltip>
-                  <TooltipTrigger
-                    render={
-                      <div className="pointer-events-none absolute top-1/2 right-0.5 -translate-y-1/2 opacity-0 transition-opacity duration-150 max-sm:pointer-events-auto max-sm:opacity-100 group-hover/menu-sub-item:pointer-events-auto group-hover/menu-sub-item:opacity-100 group-focus-within/menu-sub-item:pointer-events-auto group-focus-within/menu-sub-item:opacity-100">
-                        <button
-                          type="button"
-                          data-thread-selection-safe
-                          data-testid={`thread-archive-${thread.id}`}
-                          aria-label={`Archive ${thread.title}`}
-                          className={SIDEBAR_ICON_ACTION_BUTTON_CLASS}
-                          onPointerDown={stopPropagationOnPointerDown}
-                          onClick={handleArchiveImmediateClick}
-                        >
-                          <ArchiveIcon className="size-3.5" />
-                        </button>
-                      </div>
-                    }
-                  />
-                  <TooltipPopup side="top">Archive</TooltipPopup>
-                </Tooltip>
-              )
+            {canOperateThread && !thread.persistent && cleanup === null ? (
+              <LastCodeThreadArchiveControl
+                thread={thread}
+                confirming={isConfirmingArchive}
+                editing={editing}
+              />
             ) : null}
             <span
               className={threadMetaClassName}
@@ -1551,16 +1377,9 @@ interface SidebarProjectThreadListProps {
   activeRouteThreadKey: string | null;
   openPullRequestsInRightPanel: boolean;
   threadJumpLabelByKey: ReadonlyMap<string, string>;
-  appSettingsConfirmThreadArchive: boolean;
-  renamingThreadKey: string | null;
-  renamingTitle: string;
-  setRenamingTitle: (title: string) => void;
-  startThreadRename: (threadKey: string, title: string) => void;
-  renamingInputRef: React.RefObject<HTMLInputElement | null>;
-  renamingCommittedRef: React.RefObject<boolean>;
-  confirmingArchiveThreadKey: string | null;
-  setConfirmingArchiveThreadKey: React.Dispatch<React.SetStateAction<string | null>>;
-  confirmArchiveButtonRefs: React.RefObject<Map<string, HTMLButtonElement>>;
+  renameTarget: LastCodeRenameTarget | null;
+  editing: LastCodeThreadEditingCapabilities;
+  archiveTarget: string | null;
   attachThreadListAutoAnimateRef: (node: HTMLElement | null) => void;
   handleThreadClick: (
     event: React.MouseEvent,
@@ -1576,13 +1395,7 @@ interface SidebarProjectThreadListProps {
     hasStoppableProcesses: boolean,
   ) => Promise<void>;
   clearSelection: () => void;
-  commitRename: (
-    threadRef: ScopedThreadRef,
-    newTitle: string,
-    originalTitle: string,
-  ) => Promise<void>;
-  cancelRename: () => void;
-  attemptArchiveThread: (threadRef: ScopedThreadRef) => Promise<void>;
+
   openPrLink: (
     event: React.MouseEvent<HTMLElement>,
     prUrl: string,
@@ -1620,16 +1433,9 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
     activeRouteThreadKey,
     openPullRequestsInRightPanel,
     threadJumpLabelByKey,
-    appSettingsConfirmThreadArchive,
-    renamingThreadKey,
-    renamingTitle,
-    setRenamingTitle,
-    startThreadRename,
-    renamingInputRef,
-    renamingCommittedRef,
-    confirmingArchiveThreadKey,
-    setConfirmingArchiveThreadKey,
-    confirmArchiveButtonRefs,
+    renameTarget,
+    editing,
+    archiveTarget,
     attachThreadListAutoAnimateRef,
     handleThreadClick,
     navigateToThread,
@@ -1637,9 +1443,6 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
     handleMultiSelectContextMenu,
     handleThreadContextMenu,
     clearSelection,
-    commitRename,
-    cancelRename,
-    attemptArchiveThread,
     openPrLink,
     onEditAnnotation,
     onSaveAnnotationBody,
@@ -1742,25 +1545,15 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
                 isActive={activeRouteThreadKey === threadKey}
                 openPullRequestsInRightPanel={openPullRequestsInRightPanel}
                 jumpLabel={threadJumpLabelByKey.get(threadKey) ?? null}
-                appSettingsConfirmThreadArchive={appSettingsConfirmThreadArchive}
-                renamingThreadKey={renamingThreadKey}
-                renamingTitle={renamingTitle}
-                setRenamingTitle={setRenamingTitle}
-                startThreadRename={startThreadRename}
-                renamingInputRef={renamingInputRef}
-                renamingCommittedRef={renamingCommittedRef}
-                confirmingArchiveThreadKey={confirmingArchiveThreadKey}
-                setConfirmingArchiveThreadKey={setConfirmingArchiveThreadKey}
-                confirmArchiveButtonRefs={confirmArchiveButtonRefs}
+                renameTarget={renameTarget?.key === threadKey ? renameTarget : null}
+                editing={editing}
+                archiveConfirmActive={archiveTarget === threadKey}
                 handleThreadClick={handleThreadClick}
                 navigateToThread={navigateToThread}
                 onFileDropThreads={onFileDropThreads}
                 handleMultiSelectContextMenu={handleMultiSelectContextMenu}
                 handleThreadContextMenu={handleThreadContextMenu}
                 clearSelection={clearSelection}
-                commitRename={commitRename}
-                cancelRename={cancelRename}
-                attemptArchiveThread={attemptArchiveThread}
                 openPrLink={openPrLink}
                 onEditAnnotation={onEditAnnotation}
                 onSaveAnnotationBody={onSaveAnnotationBody}
@@ -1856,15 +1649,11 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     isManualProjectSorting,
     dragHandleProps,
   } = props;
-  const { archiveThread } = useLastCodeThreadActions();
   const groupingStyle = useClientSettings((settings) => settings.legacySidebarThreadGroupingStyle);
   const threadSortOrder = useClientSettings<SidebarThreadSortOrder>(
     (settings) => settings.sidebarThreadSortOrder,
   );
 
-  const appSettingsConfirmThreadArchive = useClientSettings<boolean>(
-    (settings) => settings.confirmThreadArchive,
-  );
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const isNoProjectGroup = project.projectKey === NO_PROJECT_GROUP_KEY;
   const loadBalancingEnabled = useClientSettings((settings) => settings.loadBalancingEnabled);
@@ -1887,9 +1676,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       props.showLocalEnvironmentIcon,
     ],
   );
-  const updateThreadMetadata = useOrchestrationCommand(threadEnvironment.updateMetadata, {
-    reportFailure: false,
-  });
 
   const sidebarThreadPreviewCount = useClientSettings<SidebarThreadPreviewCount>(
     (settings) => settings.sidebarThreadPreviewCount,
@@ -1935,18 +1721,13 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       ),
     ),
   );
-  const [renamingThreadKey, setRenamingThreadKey] = useState<string | null>(null);
-  const [renamingTitle, setRenamingTitle] = useState("");
-  const [confirmingArchiveThreadKey, setConfirmingArchiveThreadKey] = useState<string | null>(null);
+  const { renameTarget, archiveTarget, capabilities: editing } = useLastCodeThreadEditing();
   const annotations = useLastCodeThreadAnnotations();
   const [projectRenameTarget, setProjectRenameTarget] = useState<SidebarProjectGroupMember | null>(
     null,
   );
   const [projectGroupingTarget, setProjectGroupingTarget] =
     useState<SidebarProjectGroupMember | null>(null);
-  const renamingCommittedRef = useRef(false);
-  const renamingInputRef = useRef<HTMLInputElement | null>(null);
-  const confirmArchiveButtonRefs = useRef(new Map<string, HTMLButtonElement>());
   const projectThreadKeys = useMemo(
     () =>
       [...sidebarThreadByKey.keys()].flatMap((key) => [key, lastcodeSidebarSubagentGroupKey(key)]),
@@ -2298,91 +2079,12 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     ],
   );
 
-  const attemptArchiveThread = useCallback(
-    async (threadRef: ScopedThreadRef) => {
-      if (!checkTaskPermission(threadRef.environmentId)) return;
-      if (readThreadShell(threadRef)?.persistent === true) {
-        toastManager.add(
-          stackedThreadToast({
-            type: "warning",
-            title: "Persistent thread not archived",
-            description: "Disable persistence or move it to another thread first.",
-          }),
-        );
-        return;
-      }
-      const result = await archiveThread(threadRef, { confirmed: true });
-      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-        const error = squashAtomCommandFailure(result);
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Failed to archive thread",
-            description: error instanceof Error ? error.message : "An error occurred.",
-          }),
-        );
-      }
+  const startThreadRename = useCallback(
+    (key: string, title: string) => {
+      const ref = parseScopedThreadKey(key);
+      if (ref) editing.requestRename(ref, title);
     },
-    [archiveThread],
-  );
-
-  const cancelRename = useCallback(() => {
-    setRenamingThreadKey(null);
-    renamingInputRef.current = null;
-  }, []);
-
-  const startThreadRename = useCallback((threadKey: string, title: string) => {
-    const threadRef = parseScopedThreadKey(threadKey);
-    if (!threadRef || !checkTaskPermission(threadRef.environmentId)) return;
-    setRenamingThreadKey(threadKey);
-    setRenamingTitle(title);
-    renamingCommittedRef.current = false;
-  }, []);
-
-  const commitRename = useCallback(
-    async (threadRef: ScopedThreadRef, newTitle: string, originalTitle: string) => {
-      const threadKey = scopedThreadKey(threadRef);
-      const finishRename = () => {
-        setRenamingThreadKey((current) => {
-          if (current !== threadKey) return current;
-          renamingInputRef.current = null;
-          return null;
-        });
-      };
-
-      const trimmed = newTitle.trim();
-      if (trimmed.length === 0) {
-        toastManager.add({
-          type: "warning",
-          title: "Thread title cannot be empty",
-        });
-        finishRename();
-        return;
-      }
-      if (trimmed === originalTitle) {
-        finishRename();
-        return;
-      }
-      const result = await updateThreadMetadata({
-        environmentId: threadRef.environmentId,
-        input: {
-          threadId: threadRef.threadId,
-          title: trimmed,
-        },
-      });
-      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-        const error = squashAtomCommandFailure(result);
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Failed to rename thread",
-            description: error instanceof Error ? error.message : "An error occurred.",
-          }),
-        );
-      }
-      finishRename();
-    },
-    [updateThreadMetadata],
+    [editing],
   );
 
   const getMenuThread = useCallback(
@@ -2594,16 +2296,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         activeRouteThreadKey={activeRouteThreadKey}
         openPullRequestsInRightPanel={openPullRequestsInRightPanel}
         threadJumpLabelByKey={threadJumpLabelByKey}
-        appSettingsConfirmThreadArchive={appSettingsConfirmThreadArchive}
-        renamingThreadKey={renamingThreadKey}
-        renamingTitle={renamingTitle}
-        setRenamingTitle={setRenamingTitle}
-        startThreadRename={startThreadRename}
-        renamingInputRef={renamingInputRef}
-        renamingCommittedRef={renamingCommittedRef}
-        confirmingArchiveThreadKey={confirmingArchiveThreadKey}
-        setConfirmingArchiveThreadKey={setConfirmingArchiveThreadKey}
-        confirmArchiveButtonRefs={confirmArchiveButtonRefs}
+        renameTarget={renameTarget}
+        editing={editing}
+        archiveTarget={archiveTarget}
         attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
         handleThreadClick={handleThreadClick}
         navigateToThread={navigateToThread}
@@ -2611,9 +2306,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         handleMultiSelectContextMenu={handleMultiSelectContextMenu}
         handleThreadContextMenu={handleThreadContextMenu}
         clearSelection={clearSelection}
-        commitRename={commitRename}
-        cancelRename={cancelRename}
-        attemptArchiveThread={attemptArchiveThread}
         openPrLink={openPrLink}
         onEditAnnotation={annotations.edit}
         onSaveAnnotationBody={annotations.saveBody}
