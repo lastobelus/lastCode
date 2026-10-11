@@ -39,6 +39,36 @@ export class ServerBrowserOperationError extends Error {
   }
 }
 
+/** Install access in this page's cookie context before navigating; never put credentials in URLs. */
+export async function prepareBrowserCredential(
+  page: Page,
+  destination: string,
+  credential: string,
+  timeoutMs: number,
+): Promise<void> {
+  // Playwright cannot abort this request with our signal. Drain it before handing off
+  // control so a cancelled operation cannot write cookies into later work.
+  try {
+    const response = await page
+      .context()
+      .request.post(new URL("/api/auth/browser-session", destination).href, {
+        data: { credential },
+        maxRedirects: 0,
+        timeout: Math.max(1, Math.min(timeoutMs, 5_000)),
+      });
+    try {
+      if (!response.ok()) throw new Error("Browser session exchange was rejected.");
+    } finally {
+      await response.dispose();
+    }
+  } catch {
+    throw new ServerBrowserOperationError(
+      "PreviewAutomationExecutionError",
+      "The browser destination rejected development access. Use the HTTPS destination produced by the retained development recipe with --share.",
+    );
+  }
+}
+
 export const toOperationError = (cause: unknown): ServerBrowserOperationError => {
   if (cause instanceof BrowserControlInterrupted)
     return new ServerBrowserOperationError(

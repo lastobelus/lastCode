@@ -889,6 +889,96 @@ it.live.each(["headless", "local", "remote"] as const)(
     ).pipe(Effect.provide(layer)),
 );
 
+it.live("returns the actionable shared-route failure to the browser caller", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker, tabId } = yield* ready;
+      hostingPreparation = () =>
+        Effect.fail(
+          new HostingAuth.PreviewHostingAuthError({
+            reason: "bootstrap_failed",
+            boundary: "browser_descriptor",
+          }),
+        );
+      const result = yield* Effect.result(
+        broker.invoke({
+          scope,
+          tabId,
+          operation: "navigate",
+          input: { url: "http://localhost:5173/qa" },
+        }),
+      );
+      expect(result._tag).toBe("Failure");
+      if (result._tag === "Failure") {
+        expect(result.failure.message).toContain("descriptor");
+        expect(result.failure.message).toContain("--share");
+        expect(result.failure.message).toContain("HTTPS");
+        expect(result.failure.message).not.toContain("localhost");
+      }
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("retains the owned HTTP origin after a first cold HTTPS native open", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      profileCatalogue = {
+        desktopHostId: "fixture-desktop",
+        profiles: [{ id: "fixture-profile", name: "Fixture profile", kind: "persistent" }],
+        defaultProfileId: "fixture-profile",
+      };
+      desktopRendersNext = true;
+      const localUrl = "http://localhost:5173/qa?mode=dark#anchor";
+      const browserUrl = "https://environment.example.test:5173/qa?mode=dark#anchor";
+      const prepared: Array<{ threadId: string; url: string; browserUrl?: string }> = [];
+      hostingPreparation = (input) =>
+        Effect.sync(() => {
+          prepared.push(input);
+          return {
+            managed: true,
+            ...(input.url === browserUrl ? { localUrl } : {}),
+            bootstrapToken: "fixture-one-use-credential",
+          };
+        });
+      const broker = yield* Broker.PreviewAutomationBroker;
+      yield* Effect.yieldNow;
+      expect(desktopConnections).toHaveLength(0);
+      const opened = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "openWithProfile",
+        input: {
+          profileName: "Fixture profile",
+          url: browserUrl,
+          open: false,
+          reuseExistingTab: false,
+        },
+      });
+      const selected = desktopConnections[0]!.context;
+      expect(selected.request.post).toHaveBeenCalledExactlyOnceWith(
+        "https://environment.example.test:5173/api/auth/browser-session",
+        expect.objectContaining({
+          data: { credential: "fixture-one-use-credential" },
+          maxRedirects: 0,
+        }),
+      );
+      expect(selected.cookies).toEqual(new Set(["https://environment.example.test:5173"]));
+      expect(selected.page.goto).toHaveBeenCalledExactlyOnceWith(browserUrl, expect.any(Object));
+      yield* broker.invoke({
+        scope,
+        tabId: opened.tabId!,
+        operation: "navigate",
+        input: { url: browserUrl },
+      });
+      expect(prepared).toEqual([
+        { threadId: testThread.threadId, url: browserUrl },
+        { threadId: testThread.threadId, url: localUrl, browserUrl },
+      ]);
+      expect(selected.page.url()).toBe(browserUrl);
+      expect(selected.request.post).toHaveBeenCalledTimes(2);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live.each(["open", "openWithProfile", "navigate"] as const)(
   "%s passes both origins to hosting and cannot navigate after identity rejection",
   (operation) =>
