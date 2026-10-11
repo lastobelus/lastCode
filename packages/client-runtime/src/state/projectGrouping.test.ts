@@ -2,7 +2,7 @@ import { EnvironmentId, ProjectId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { EnvironmentProject } from "./models.ts";
-import { chooseLoadBalancedEnvironment } from "../load-balancing.ts";
+import { evaluateLoadBalancedEnvironments } from "../load-balancing.ts";
 import {
   buildProjectGroups,
   derivePhysicalProjectKey,
@@ -27,13 +27,17 @@ describe("load balancing shared project machines", () => {
       { environmentId: "idle", resources, weight: 1 },
       { environmentId: "preferred", resources: { ...resources, cpuCount: 4 }, weight: 3 },
     ];
-    expect(chooseLoadBalancedEnvironment(candidates, now)).toBe("preferred");
-    expect(chooseLoadBalancedEnvironment(candidates.slice(0, 2), now)).toBe("idle");
+    expect(evaluateLoadBalancedEnvironments(candidates, now).selectedEnvironmentId).toBe(
+      "preferred",
+    );
+    expect(
+      evaluateLoadBalancedEnvironments(candidates.slice(0, 2), now).selectedEnvironmentId,
+    ).toBe("idle");
   });
 
   it("rejects stale, unknown, excluded and saturated machines", () => {
     expect(
-      chooseLoadBalancedEnvironment(
+      evaluateLoadBalancedEnvironments(
         [
           {
             environmentId: "stale",
@@ -59,7 +63,7 @@ describe("load balancing shared project machines", () => {
           },
         ],
         now,
-      ),
+      ).selectedEnvironmentId,
     ).toBeNull();
   });
 
@@ -70,8 +74,82 @@ describe("load balancing shared project machines", () => {
       receivedAt: now,
       weight: 1,
     };
-    expect(chooseLoadBalancedEnvironment([candidate], now)).toBe("different-clock");
-    expect(chooseLoadBalancedEnvironment([candidate], now + 15_001)).toBeNull();
+    expect(evaluateLoadBalancedEnvironments([candidate], now).selectedEnvironmentId).toBe(
+      "different-clock",
+    );
+    expect(
+      evaluateLoadBalancedEnvironments([candidate], now + 15_001).selectedEnvironmentId,
+    ).toBeNull();
+  });
+
+  it("doubles the score for Prefer versus Normal without overriding available capacity", () => {
+    const normal = { environmentId: "normal", resources, receivedAt: now - 200, weight: 50 };
+    const preferred = { environmentId: "preferred", resources, weight: 100 };
+    const evaluation = evaluateLoadBalancedEnvironments([normal, preferred], now);
+    expect(evaluation.selectedEnvironmentId).toBe("preferred");
+    expect(evaluation.candidates).toEqual([
+      { ...normal, sampleAgeMs: 200, score: 160, reason: null },
+      { ...preferred, receivedAt: null, sampleAgeMs: 0, score: 320, reason: null },
+    ]);
+    expect(
+      evaluateLoadBalancedEnvironments(
+        [normal, { ...preferred, resources: { ...resources, cpuUtilization: 0.8 } }],
+        now,
+      ).selectedEnvironmentId,
+    ).toBe("normal");
+  });
+
+  it.each([
+    { resources: null, weight: 50, reason: "missing-resources" },
+    { resources, weight: 0, reason: "manual-only" },
+    { resources, weight: -1, reason: "invalid-weight" },
+    { resources, weight: Number.NaN, reason: "invalid-weight" },
+    { resources, weight: Number.POSITIVE_INFINITY, reason: "invalid-weight" },
+    {
+      resources: { ...resources, sampledAt: now - 15_001 },
+      weight: 50,
+      reason: "stale-resources",
+    },
+    {
+      resources: { ...resources, sampledAt: now + 5_001 },
+      weight: 50,
+      reason: "stale-resources",
+    },
+    { resources: { ...resources, cpuUtilization: null }, weight: 50, reason: "cpu-unavailable" },
+    { resources: { ...resources, cpuUtilization: 0.95 }, weight: 50, reason: "cpu-saturated" },
+    { resources: { ...resources, cpuCount: 0 }, weight: 50, reason: "invalid-capacity" },
+    { resources: { ...resources, totalMemoryBytes: 0 }, weight: 50, reason: "invalid-capacity" },
+    {
+      resources: { ...resources, availableMemoryBytes: 800 },
+      weight: 50,
+      reason: "memory-pressure",
+    },
+  ])("explains rejected candidates: $reason", ({ resources: snapshot, weight, reason }) => {
+    const evaluation = evaluateLoadBalancedEnvironments(
+      [{ environmentId: "candidate", resources: snapshot, weight }],
+      now,
+    );
+    expect(evaluation.selectedEnvironmentId).toBeNull();
+    expect(evaluation.candidates[0]).toEqual({
+      environmentId: "candidate",
+      resources: snapshot,
+      weight,
+      receivedAt: null,
+      sampleAgeMs: snapshot ? now - snapshot.sampledAt : null,
+      score: null,
+      reason,
+    });
+  });
+
+  it("keeps the first candidate on equal scores", () => {
+    const candidates = [
+      { environmentId: "first", resources, weight: 50 },
+      { environmentId: "second", resources, weight: 50 },
+    ];
+    expect(evaluateLoadBalancedEnvironments(candidates, now).selectedEnvironmentId).toBe("first");
+    expect(
+      evaluateLoadBalancedEnvironments(candidates.toReversed(), now).selectedEnvironmentId,
+    ).toBe("second");
   });
 });
 const repositoryIdentity = {

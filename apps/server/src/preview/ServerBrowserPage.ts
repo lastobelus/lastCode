@@ -18,7 +18,7 @@ import {
   type PreviewAutomationWaitForInput,
 } from "@t3tools/contracts";
 import { constVoid } from "effect/Function";
-import type { CDPSession, Locator, Page } from "playwright-core";
+import type { CDPSession, Locator, Page, Route } from "playwright-core";
 import * as NodeCrypto from "node:crypto";
 import { BrowserControlInterrupted } from "./SessionControl.ts";
 
@@ -70,6 +70,65 @@ export const toOperationError = (cause: unknown): ServerBrowserOperationError =>
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_READ_TIMEOUT_MS = 10_000;
 const DEFAULT_CAPTURE_TIMEOUT_MS = 3_000;
+
+/** Redirect an existing navigation without appending a new history entry. */
+export const navigateWithRedirect = async (
+  page: Page,
+  storedUrl: string,
+  destination: string,
+  navigate: (redirected: boolean) => Promise<unknown>,
+  signal?: AbortSignal,
+) => {
+  signal?.throwIfAborted();
+  if (destination === storedUrl) {
+    await navigate(false);
+    return;
+  }
+  const requestUrl = new URL(storedUrl);
+  requestUrl.hash = "";
+  const matches = (url: URL) => url.href === requestUrl.href;
+  const pending = new Set<Promise<void>>();
+  const redirect = (route: Route) => {
+    const work = (async () => {
+      const request = route.request();
+      if (!request.isNavigationRequest() || request.frame() !== page.mainFrame()) {
+        await route.fallback();
+      } else if (signal?.aborted) {
+        await route.abort("aborted");
+      } else {
+        await route.fulfill({ status: 302, headers: { location: destination } });
+      }
+    })();
+    pending.add(work);
+    void work.then(
+      () => pending.delete(work),
+      () => pending.delete(work),
+    );
+    return work;
+  };
+  await page.route(matches, redirect);
+  try {
+    signal?.throwIfAborted();
+    await navigate(true);
+    signal?.throwIfAborted();
+    // Cached and same-document history traversal can commit without a request to redirect.
+    if (page.url() === storedUrl) {
+      const committed = page.waitForURL((url) => url.href !== storedUrl, {
+        waitUntil: "commit",
+        timeout: DEFAULT_TIMEOUT_MS,
+      });
+      void committed.catch(constVoid);
+      await page.evaluate(`location.replace(${JSON.stringify(destination)})`);
+      await committed;
+    }
+  } finally {
+    try {
+      await page.unroute(matches, redirect);
+    } finally {
+      await Promise.allSettled(pending);
+    }
+  }
+};
 
 type ReadOptions = {
   readonly timeoutMs?: number | undefined;
@@ -283,12 +342,15 @@ const captureViewportWithinBudget = async (
     options.scale < 1
       ? await read("Page.getLayoutMetrics", () => cdp.send("Page.getLayoutMetrics"))
       : undefined;
+  const viewport = page.viewportSize();
+  // CDP screenshot clips use DIP; native layout metrics use CSS pixels before page zoom.
+  const zoom = viewport ? 1 : (metrics?.cssVisualViewport.zoom ?? 1);
   const clip = metrics && {
-    x: metrics.cssVisualViewport.pageX,
-    y: metrics.cssVisualViewport.pageY,
-    ...(page.viewportSize() ?? {
-      width: Math.max(1, Math.round(metrics.cssVisualViewport.clientWidth)),
-      height: Math.max(1, Math.round(metrics.cssVisualViewport.clientHeight)),
+    x: metrics.cssVisualViewport.pageX * zoom,
+    y: metrics.cssVisualViewport.pageY * zoom,
+    ...(viewport ?? {
+      width: Math.max(1, metrics.cssVisualViewport.clientWidth * zoom),
+      height: Math.max(1, metrics.cssVisualViewport.clientHeight * zoom),
     }),
     scale: options.scale,
   };
@@ -616,7 +678,10 @@ export const evaluate = async (
     // awaitPromise is deliberate user work; honor the broker's explicit remaining budget.
     Number.POSITIVE_INFINITY,
   ).catch((cause: unknown) => {
-    if (cause instanceof ServerBrowserOperationError && cause.tag === "PreviewAutomationTimeoutError")
+    if (
+      cause instanceof ServerBrowserOperationError &&
+      cause.tag === "PreviewAutomationTimeoutError"
+    )
       void cdp.send("Runtime.terminateExecution").catch(constVoid);
     throw cause;
   });

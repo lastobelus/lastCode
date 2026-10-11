@@ -7,10 +7,12 @@ import {
   PreviewAutomationRecordingTransferError,
   PreviewAutomationRecordingDesktopUpdateRequiredError,
   PreviewAutomationRecordingArtifact,
+  PreviewHostingError as ContractPreviewHostingError,
   type ToolActivityIcon,
   type ThreadId,
   type PreviewAutomationOperation,
   type PreviewAutomationOpenInput,
+  type PreviewAutomationProfiles,
   type PreviewAutomationRecordingStatus,
   type PreviewAutomationResizeResult,
   type PreviewAutomationSelectResult,
@@ -28,6 +30,7 @@ import {
 } from "../../../attachmentStore.ts";
 import { resolveAttachmentRelativePath } from "../../../attachmentPaths.ts";
 import * as ServerConfig from "../../../config.ts";
+import * as PreviewHosting from "../../../preview/Hosting.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
@@ -75,7 +78,8 @@ const invoke = Effect.fn("PreviewToolkit.invoke")(function* <A>(
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
     ...(tabId === undefined ? {} : { tabId }),
   });
-  if (["status", "open", "navigate", "snapshot"].includes(operation)) return { result };
+  if (["status", "open", "openWithProfile", "profiles", "navigate", "snapshot"].includes(operation))
+    return { result };
   const statusTabId =
     (operation !== "evaluate" && typeof result === "object" && result !== null
       ? (result as { tabId?: PreviewTabId }).tabId
@@ -189,15 +193,78 @@ export const claimPreviewRecording = Effect.fn("PreviewToolkit.claimRecording")(
   return { ...recording, id: finalId, path: finalPath };
 });
 
+const isPreviewHostingError = Schema.is(PreviewHosting.PreviewHostingError);
+
 const handlers = {
+  preview_stop_thread: McpToolAccess.actsAsCaller(() =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.requireThreadMcpCapability("preview");
+      const hosting = yield* PreviewHosting.PreviewHosting;
+      return yield* hosting.stopThread(scope.thread.threadId).pipe(
+        Effect.as({}),
+        Effect.mapError(
+          () =>
+            new ContractPreviewHostingError({
+              reason: "unavailable",
+              message: "Some previews or processes could not be stopped. Please try again.",
+            }),
+        ),
+      );
+    }),
+  ),
+  preview_host: McpToolAccess.actsAsCaller((input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.requireThreadMcpCapability("preview");
+      const hosting = yield* PreviewHosting.PreviewHosting;
+      return yield* hosting
+        .launch({
+          command: input.command,
+          cwd: input.cwd,
+          url: input.url,
+          threadId: scope.thread.threadId,
+          providerInstanceId: scope.thread.providerInstanceId,
+          ...(input.worktreePath === undefined ? {} : { worktreePath: input.worktreePath }),
+          ...(input.env === undefined ? {} : { env: input.env }),
+          ...(input.browserAuth === undefined ? {} : { browserAuth: input.browserAuth }),
+        })
+        .pipe(
+          Effect.map(PreviewHosting.toPreviewHostingLeaseSummary),
+          Effect.mapError((error) => {
+            if (isPreviewHostingError(error)) {
+              const reason =
+                error.operation === "validate" && error.detail?.includes("already served")
+                  ? "url_in_use"
+                  : error.operation === "validate"
+                    ? "invalid_request"
+                    : "unavailable";
+              const message =
+                error.operation === "validate" || error.operation === "ready"
+                  ? error.message
+                  : "Preview hosting is unavailable on this server.";
+              return new ContractPreviewHostingError({ reason, message });
+            }
+            return new ContractPreviewHostingError({
+              reason: "unavailable",
+              message: "The preview terminal could not be started.",
+            });
+          }),
+        );
+    }),
+  ),
   preview_dialog: McpToolAccess.actsAsCaller((input) =>
     invokeTargeted<PreviewAutomationStatus>("dialog", input),
   ),
   preview_status: McpToolAccess.readsAsCaller((input) =>
     invokeTargeted<PreviewAutomationStatus>("status", input ?? {}),
   ),
+  preview_profiles: McpToolAccess.readsAsCaller(() =>
+    invokeTargeted<PreviewAutomationProfiles>("profiles", {}),
+  ),
   preview_open: McpToolAccess.actsAsCaller((input) =>
-    invokeTargeted<PreviewAutomationStatus>("open", normalizePreviewOpenInput(input)),
+    invokeTargeted<PreviewAutomationStatus>(
+      input.profileId !== undefined || input.profileName !== undefined ? "openWithProfile" : "open",
+      normalizePreviewOpenInput(input),
+    ),
   ),
   preview_navigate: McpToolAccess.actsAsCaller((input) =>
     invokeTargeted<PreviewAutomationStatus>("navigate", input, input.timeoutMs),

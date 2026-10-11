@@ -188,6 +188,23 @@ export function buildSidebarProjectSnapshots(
   });
 }
 
+/** Puts the selected physical project first without changing shared group ordering. */
+export function orderProjectMembersForPicker(
+  members: readonly SidebarProjectGroupMember[],
+  targetProject: Pick<Project, "environmentId" | "id">,
+) {
+  const preferredIndex = members.findIndex(
+    (member) =>
+      member.environmentId === targetProject.environmentId && member.id === targetProject.id,
+  );
+  if (preferredIndex <= 0) return members;
+  return [
+    members[preferredIndex]!,
+    ...members.slice(0, preferredIndex),
+    ...members.slice(preferredIndex + 1),
+  ];
+}
+
 export function buildSidebarProjectPickerEntries(input: {
   groups: ReadonlyArray<SidebarProjectSnapshot>;
   preferredProjectRef: ScopedProjectRef | null;

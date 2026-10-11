@@ -55,19 +55,22 @@ Run the guarded bootstrap from the checkout:
 ```bash
 mise exec node@24.13.1 -- node scripts/lastcode-setup.mjs \
   --enable-nightly-writes \
-  --checkpoint-interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS"
+  --checkpoint-daily-at "$LASTCODE_CHECKPOINT_DAILY_AT" \
+  --checkpoint-time-zone "$LASTCODE_CHECKPOINT_TIME_ZONE"
 ```
 
-Deployment configuration must set `LASTCODE_CHECKPOINT_INTERVAL_SECONDS` to a
-positive integer. The explicit flag acknowledges the remote writes described
-above. The command:
+Deployment configuration can instead pass
+`--checkpoint-interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS"` to
+retain interval scheduling. The explicit write flag acknowledges the remote
+writes described above. The command:
 
 1. installs the pinned workspace dependencies;
 2. registers the LastCode project and reconciles its non-setup `t3.json`
    Actions into the local LastCode environment;
 3. creates a detached `lastcode-automation` worktree beside the checkout;
 4. installs the managed macOS checkpoint service;
-5. starts the first checkpoint run; and
+5. starts the first checkpoint run for interval schedules, while daily
+   schedules wait for their configured wall clock; and
 6. installs `lastcode-checkpoints`, `lastcode-build`, and `lastcode-install`
    under `~/.local/bin` with their managed files under `~/.lastcode/bin`.
 
@@ -127,5 +130,16 @@ pnpm lastcode:checkpoint:service run-now
 pnpm lastcode:checkpoint:service uninstall
 ```
 
+Change only the saved schedule, without starting or reloading the service:
+
+```bash
+pnpm lastcode:checkpoint:service configure-schedule \
+  --daily-at "$LASTCODE_CHECKPOINT_DAILY_AT" \
+  --time-zone "$LASTCODE_CHECKPOINT_TIME_ZONE"
+```
+
+Run `pnpm lastcode:checkpoint:service install` later to apply it.
+
 Uninstalling the service retains a timestamped disabled plist and does not
-remove the checkout, worktrees, tags, build artifacts, or installed app.
+remove the saved schedule, checkout, worktrees, tags, build artifacts, or
+installed app.

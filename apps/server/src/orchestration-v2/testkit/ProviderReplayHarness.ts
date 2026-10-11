@@ -1,3 +1,5 @@
+import * as UpdateDrainAdmission from "../../updateDrain/UpdateDrainAdmission.ts";
+import type { MigrationHistoryError } from "../../persistence/DatabaseMigrations.ts";
 import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
 import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -7,6 +9,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
+import type * as Schema from "effect/Schema";
 import type * as SqlClient from "effect/sql/SqlClient";
 import type { MigrationError } from "effect/sql/Migrator";
 import type { SqlError } from "effect/sql/SqlError";
@@ -28,6 +31,8 @@ import * as CommandReceiptStore from "../CommandReceiptStore.ts";
 import * as ContextHandoffService from "../ContextHandoffService.ts";
 import * as EffectOutbox from "../EffectOutbox.ts";
 import * as EffectWorker from "../EffectWorker.ts";
+import * as IncomingMessageSummaryService from "../IncomingMessageSummaryService.ts";
+import * as SubagentPromotionService from "../SubagentPromotionService.ts";
 import * as EventSink from "../EventSink.ts";
 import * as EventStore from "../EventStore.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -187,9 +192,14 @@ export function runOrchestratorV2ProviderReplayScenario<
   options: {
     readonly databaseLayer?: Layer.Layer<
       SqlClient.SqlClient,
-      MigrationError | PlatformError.PlatformError | SqlError
+      | MigrationError
+      | MigrationHistoryError
+      | Schema.SchemaError
+      | PlatformError.PlatformError
+      | SqlError
     >;
     readonly runEffectWorker?: boolean;
+    readonly admissionLayer?: Layer.Layer<UpdateDrainAdmission.UpdateDrainAdmission>;
     // Start continuation runs for provider wake turns, as the live runtime does.
     // Off by default: most fixtures record no wake turn.
     readonly runContinuationWorker?: boolean;
@@ -204,6 +214,8 @@ export function runOrchestratorV2ProviderReplayScenario<
   | OrchestratorV2ScenarioStepError
   | Error
   | MigrationError
+  | MigrationHistoryError
+  | Schema.SchemaError
   | PlatformError.PlatformError
   | SqlError,
   never
@@ -229,9 +241,14 @@ export function layerProviderReplay<Transcript extends ProviderReplayTranscript,
   options: {
     readonly databaseLayer?: Layer.Layer<
       SqlClient.SqlClient,
-      MigrationError | PlatformError.PlatformError | SqlError
+      | MigrationError
+      | MigrationHistoryError
+      | Schema.SchemaError
+      | PlatformError.PlatformError
+      | SqlError
     >;
     readonly runEffectWorker?: boolean;
+    readonly admissionLayer?: Layer.Layer<UpdateDrainAdmission.UpdateDrainAdmission>;
     // Start continuation runs for provider wake turns, as the live runtime does.
     // Off by default: most fixtures record no wake turn.
     readonly runContinuationWorker?: boolean;
@@ -246,7 +263,12 @@ export function layerProviderReplay<Transcript extends ProviderReplayTranscript,
   | EffectWorker.OrchestrationEffectWorkerV2
   | EventSink.EventSinkV2
   | ProviderSessionManager.ProviderSessionManagerV2,
-  Error | MigrationError | PlatformError.PlatformError | SqlError
+  | Error
+  | MigrationError
+  | MigrationHistoryError
+  | Schema.SchemaError
+  | PlatformError.PlatformError
+  | SqlError
 > {
   const layerRegistry = harness.makeProviderAdapterRegistryLayer(
     scenario.transcript,
@@ -265,9 +287,14 @@ export function layerWithRegistry<Error>(
   options: {
     readonly databaseLayer?: Layer.Layer<
       SqlClient.SqlClient,
-      MigrationError | PlatformError.PlatformError | SqlError
+      | MigrationError
+      | MigrationHistoryError
+      | Schema.SchemaError
+      | PlatformError.PlatformError
+      | SqlError
     >;
     readonly runEffectWorker?: boolean;
+    readonly admissionLayer?: Layer.Layer<UpdateDrainAdmission.UpdateDrainAdmission>;
     // Start continuation runs for provider wake turns, as the live runtime does.
     // Off by default: most fixtures record no wake turn.
     readonly runContinuationWorker?: boolean;
@@ -281,7 +308,12 @@ export function layerWithRegistry<Error>(
   | EffectWorker.OrchestrationEffectWorkerV2
   | EventSink.EventSinkV2
   | ProviderSessionManager.ProviderSessionManagerV2,
-  Error | MigrationError | PlatformError.PlatformError | SqlError
+  | Error
+  | MigrationError
+  | MigrationHistoryError
+  | Schema.SchemaError
+  | PlatformError.PlatformError
+  | SqlError
 > {
   const layerServerConfig = Layer.effect(
     ServerConfig.ServerConfig,
@@ -379,6 +411,7 @@ export function layerWithRegistry<Error>(
         layerEventSinkProvided,
         IdAllocator.layer,
         layerProviderEventIngestorProvided,
+        layerStores,
         layerServerSettings,
       ),
     ),
@@ -440,6 +473,11 @@ export function layerWithRegistry<Error>(
   const layerOrchestratorProvided = Orchestrator.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
+        options.admissionLayer ??
+          Layer.mock(UpdateDrainAdmission.UpdateDrainAdmission)({
+            admit: (_kind, effect) => effect,
+            admitOrElse: (_kind, effect) => effect,
+          }),
         layerCheckpointServiceProvided,
         CommandPolicy.layer,
         layerContextHandoffServiceProvided,
@@ -454,18 +492,9 @@ export function layerWithRegistry<Error>(
       ),
     ),
   );
-  const layerThreadManagementProvided = Layer.unwrap(
-    Effect.gen(function* () {
-      const orchestrator = yield* Orchestrator.OrchestratorV2;
-      return Layer.mock(ThreadManagementService.ThreadManagementService)({
-        dispatch: orchestrator.dispatch,
-        getThreadRecords: orchestrator.getThreadRecords,
-        getThreadProjection: orchestrator.getThreadProjection,
-        recoverDelegatedTask: orchestrator.recoverDelegatedTask,
-        delegatedTaskResultPending: orchestrator.delegatedTaskResultPending,
-      });
-    }),
-  ).pipe(Layer.provide(layerOrchestratorProvided));
+  const layerThreadManagementProvided = ThreadManagementService.layer.pipe(
+    Layer.provide(Layer.merge(layerOrchestratorProvided, layerProviderSessionManagerProvided)),
+  );
   const layerContinuationWorkerProvided =
     options.runContinuationWorker === true
       ? ProviderContinuationService.layer.pipe(
@@ -478,9 +507,15 @@ export function layerWithRegistry<Error>(
           ),
         )
       : Layer.empty;
+  const subagentPromotionProvided = SubagentPromotionService.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(layerStores, layerProvidedRegistry, layerRuntime, layerOrchestratorProvided),
+    ),
+  );
   const layerEffectExecutorProvided = EffectWorker.layerExecutor.pipe(
     Layer.provide(
       Layer.mergeAll(
+        layerStores,
         layerRunFinalizationServiceProvided,
         layerCheckpointRollbackServiceProvided,
         layerProviderSessionManagerProvided,
@@ -488,8 +523,12 @@ export function layerWithRegistry<Error>(
         layerProviderTurnStartServiceProvided,
         layerRuntimeRequestServiceProvided,
         layerThreadTitleRegenerationTest,
+        Layer.mock(IncomingMessageSummaryService.IncomingMessageSummaryService)({
+          execute: () => Effect.void,
+        }),
         layerServerSettings,
         layerThreadManagementProvided,
+        subagentPromotionProvided,
       ),
     ),
   );
@@ -514,7 +553,11 @@ export function layerWithRegistry<Error>(
   // the effect worker claims anything, as in serverRuntimeStartup.
   const layerStartupRecovery: Layer.Layer<
     never,
-    MigrationError | PlatformError.PlatformError | SqlError
+    | MigrationError
+    | MigrationHistoryError
+    | Schema.SchemaError
+    | PlatformError.PlatformError
+    | SqlError
   > =
     options.recoverOnStartup === true
       ? Layer.effectDiscard(

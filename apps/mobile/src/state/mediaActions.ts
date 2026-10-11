@@ -3,6 +3,7 @@ import { useNavigation } from "@react-navigation/native";
 import type { MediaActionId } from "@t3tools/client-runtime/media-actions";
 import {
   AuthFilesystemReadScope,
+  AuthOrchestrationReadScope,
   type EnvironmentId,
   sessionGrantsScope,
   type SessionGrantInput,
@@ -21,9 +22,13 @@ import { downloadAndShareAttachment, shareLocalAttachment } from "../lib/attachm
 import { copyTextWithHaptic } from "../lib/copyTextWithHaptic";
 import { loadLocalAttachmentPreview } from "../lib/localAttachmentPreview";
 
-/** An explicit action may ask the server while its grant is still unresolved. */
+/** Refresh reauthorizes an exact linked file when only conversation access is granted. */
 function allowsHostMedia(session: SessionGrantInput | null) {
-  return session === null || sessionGrantsScope(session, AuthFilesystemReadScope);
+  return (
+    session === null ||
+    sessionGrantsScope(session, AuthFilesystemReadScope) ||
+    sessionGrantsScope(session, AuthOrchestrationReadScope)
+  );
 }
 
 function canReadHostMedia(environmentId: EnvironmentId | null): boolean {

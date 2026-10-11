@@ -15,6 +15,7 @@ export type {
   BranchNameGenerationResult,
   CommitMessageGenerationInput,
   CommitMessageGenerationResult,
+  IncomingMessageSummaryGenerationInput,
   PrContentGenerationInput,
   PrContentGenerationResult,
   ThreadTitleGenerationInput,
@@ -32,7 +33,8 @@ type TextGenerationOp =
   | "generateCommitMessage"
   | "generatePrContent"
   | "generateBranchName"
-  | "generateThreadTitle";
+  | "generateThreadTitle"
+  | "generateIncomingMessageSummary";
 
 const resolveInstance = (
   registry: ProviderInstanceRegistry.ProviderInstanceRegistry["Service"],
@@ -57,6 +59,14 @@ export const make = Effect.gen(function* () {
   const registry = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
   const sourceControl = yield* SourceControlProviderRegistry.SourceControlProviderRegistry;
   return TextGeneration.of({
+    generateIncomingMessageSummary: (input) =>
+      resolveInstance(
+        registry,
+        "generateIncomingMessageSummary",
+        input.modelSelection.instanceId,
+      ).pipe(
+        Effect.flatMap((textGeneration) => textGeneration.generateIncomingMessageSummary(input)),
+      ),
     generateCommitMessage: (input) =>
       resolveInstance(registry, "generateCommitMessage", input.modelSelection.instanceId).pipe(
         Effect.flatMap((textGeneration) => textGeneration.generateCommitMessage(input)),
