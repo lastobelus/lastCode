@@ -1,3 +1,5 @@
+import { useLastCodeProjectThreads } from "./sidebar/useLastCodeProjectThreads";
+import { projectLastCodeProjectThreads } from "./sidebar/lastcodeProjectThreads";
 import {
   LastCodeThreadDetails,
   LastCodeThreadCleanupOverlay,
@@ -66,7 +68,6 @@ import React, {
   type CSSProperties,
 } from "react";
 import { cn } from "~/lib/utils";
-import { useShallow } from "zustand/react/shallow";
 import {
   DndContext,
   type DragCancelEvent,
@@ -99,12 +100,7 @@ import {
 import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { threadShellIsVisible } from "@t3tools/client-runtime/state/models";
 import { useNavigate, useParams, useRouter } from "@tanstack/react-router";
-import {
-  type EnvironmentIconColor,
-  type LegacySidebarScale,
-  type SidebarThreadPreviewCount,
-  type SidebarThreadSortOrder,
-} from "@t3tools/contracts/settings";
+import { type EnvironmentIconColor, type LegacySidebarScale } from "@t3tools/contracts/settings";
 import { isDesktopLocalConnectionTarget, isWslConnectionTarget } from "../connection/desktopLocal";
 import { isElectron } from "../env";
 import { useTerminalFocus } from "../hooks/useTerminalFocus";
@@ -113,12 +109,7 @@ import { isTerminalFocused } from "../lib/terminalFocus";
 import { isMacPlatform } from "../lib/utils";
 import { useSidebarPendingFileDropStore } from "../sidebarPendingFileDropStore";
 import { makeWorkspaceFileDropHandlers } from "./chat/workspaceFileDrop";
-import {
-  readThreadShell,
-  useProjects,
-  useThreadShells,
-  useThreadShellsForProjectRefs,
-} from "../state/entities";
+import { readThreadShell, useProjects, useThreadShells } from "../state/entities";
 import { ThreadAnnotationNavigationTrigger } from "./thread-annotation/ThreadAnnotation";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useEnvironmentScope } from "../state/session";
@@ -177,7 +168,6 @@ import {
   isContextMenuPointerDown,
   isSidebarNestedLinkClick,
   isTrailingDoubleClick,
-  resolveProjectStatusIndicator,
   resolveThreadLastVisitedAt,
   resolveThreadStatusPill,
   orderItemsByPreferredIds,
@@ -187,7 +177,6 @@ import {
   useThreadJumpHintVisibility,
   ThreadStatusPill,
 } from "./Sidebar.logic";
-import { sortThreads } from "../lib/threadSort";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import { LastCodeSidebarThreadPicker } from "./sidebar/LastCodeSidebarThreadPicker";
 import { useIsMobile } from "~/hooks/useMediaQuery";
@@ -201,16 +190,11 @@ import {
 } from "../logicalProject";
 import type { SidebarThreadSummary } from "../types";
 import {
-  projectLastCodeSidebarFamilies,
   lastcodeSidebarFamilySummary,
-  lastcodeSidebarSubagentGroupKey,
   type LastCodeSidebarFamilyItem,
   type LastCodeSidebarFamilyRow,
 } from "./lastcodeSidebarFamilies.logic";
-import {
-  useCollapsedLastCodeSidebarFamilies,
-  useLastCodeSidebarFamiliesStore,
-} from "./lastcodeSidebarFamilies.store";
+import { useLastCodeSidebarFamiliesStore } from "./lastcodeSidebarFamilies.store";
 import { deriveProviderInstanceEntries, type ProviderInstanceEntry } from "../providerInstances";
 import { SidebarThreadCleanupHoverContent } from "./sidebar/SidebarThreadHoverContent";
 import { WorktreeCleanupFailureDialog } from "./WorktreeCleanupFailureDialog";
@@ -877,10 +861,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     isManualProjectSorting,
     dragHandleProps,
   } = props;
-  const groupingStyle = useClientSettings((settings) => settings.legacySidebarThreadGroupingStyle);
-  const threadSortOrder = useClientSettings<SidebarThreadSortOrder>(
-    (settings) => settings.sidebarThreadSortOrder,
-  );
 
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const isNoProjectGroup = project.projectKey === NO_PROJECT_GROUP_KEY;
@@ -905,9 +885,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     ],
   );
 
-  const sidebarThreadPreviewCount = useClientSettings<SidebarThreadPreviewCount>(
-    (settings) => settings.sidebarThreadPreviewCount,
-  );
   const router = useRouter();
   const queuePendingFileDrop = useSidebarPendingFileDropStore((s) => s.queuePendingFileDrop);
   const clearPendingFileDrop = useSidebarPendingFileDropStore((s) => s.clearPendingFileDrop);
@@ -918,37 +895,25 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const clearSelection = useThreadSelectionStore((state) => state.clearSelection);
   const setSelectionAnchor = useThreadSelectionStore((state) => state.setAnchor);
   const openPrLink = useOpenPrLink();
-  const sidebarThreads = useThreadShellsForProjectRefs(project.memberProjectRefs);
-  const sidebarThreadByKey = useMemo(
-    () =>
-      new Map(
-        sidebarThreads.map(
-          (thread) =>
-            [scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)), thread] as const,
-        ),
-      ),
-    [sidebarThreads],
-  );
-  // Keep a ref so callbacks can read the latest map without appearing in
-  // dependency arrays (avoids invalidating every thread-row memo on each
-  // thread-list change).
-  const sidebarThreadByKeyRef = useRef(sidebarThreadByKey);
-  sidebarThreadByKeyRef.current = sidebarThreadByKey;
-  const projectThreads = sidebarThreads;
   const projectPreferenceKeys = useMemo(() => projectExpansionPreferenceKeys(project), [project]);
   const projectExpanded = useUiStateStore((state) =>
     resolveProjectExpanded(state.projectExpandedById, projectPreferenceKeys),
   );
-  const threadLastVisitedAts = useUiStateStore(
-    useShallow((state) =>
-      projectThreads.map(
-        (thread) =>
-          state.threadLastVisitedAtById[
-            scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))
-          ] ?? null,
-      ),
-    ),
+  const {
+    threadsByKey: sidebarThreadByKey,
+    groupingStyle,
+    projectStatus,
+    hiddenThreadStatus,
+    familyProjection,
+  } = useLastCodeProjectThreads(
+    project,
+    activeRouteThreadKey,
+    projectExpanded,
+    isThreadListExpanded,
   );
+  // Menu callbacks read current project members without invalidating every row callback.
+  const sidebarThreadByKeyRef = useRef(sidebarThreadByKey);
+  sidebarThreadByKeyRef.current = sidebarThreadByKey;
   const { renameTarget, archiveTarget, capabilities: editing } = useLastCodeThreadEditing();
   const annotations = useLastCodeThreadAnnotations();
   const [projectRenameTarget, setProjectRenameTarget] = useState<SidebarProjectGroupMember | null>(
@@ -956,62 +921,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   );
   const [projectGroupingTarget, setProjectGroupingTarget] =
     useState<SidebarProjectGroupMember | null>(null);
-  const projectThreadKeys = useMemo(
-    () =>
-      [...sidebarThreadByKey.keys()].flatMap((key) => [key, lastcodeSidebarSubagentGroupKey(key)]),
-    [sidebarThreadByKey],
-  );
-  const collapsedFamiliesByKey = useCollapsedLastCodeSidebarFamilies(projectThreadKeys);
-  const { projectStatus, hiddenThreadStatus, familyProjection } = useMemo(() => {
-    const lastVisitedAtByThreadKey = new Map(
-      projectThreads.map((thread, index) => [
-        scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
-        resolveThreadLastVisitedAt(thread.lastVisitedAt, threadLastVisitedAts[index] ?? undefined),
-      ]),
-    );
-    const statusForThread = (thread: SidebarThreadSummary) => {
-      const lastVisitedAt = lastVisitedAtByThreadKey.get(
-        scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
-      );
-      return resolveThreadStatusPill({
-        thread: {
-          ...thread,
-          ...(lastVisitedAt !== null && lastVisitedAt !== undefined ? { lastVisitedAt } : {}),
-        },
-      });
-    };
-    const visibleProjectThreads = sortThreads(
-      projectThreads.filter(threadShellIsVisible),
-      threadSortOrder,
-    );
-    const familyProjection = projectLastCodeSidebarFamilies({
-      threads: visibleProjectThreads,
-      collapsedByKey: collapsedFamiliesByKey,
-      activeThreadKey: activeRouteThreadKey,
-      projectExpanded,
-      previewCount: sidebarThreadPreviewCount,
-      listExpanded: isThreadListExpanded,
-      groupingStyle,
-      statusForThread,
-    });
-    return {
-      projectStatus: resolveProjectStatusIndicator(visibleProjectThreads.map(statusForThread)),
-      hiddenThreadStatus: resolveProjectStatusIndicator(
-        familyProjection.hiddenThreads.map(statusForThread),
-      ),
-      familyProjection,
-    };
-  }, [
-    projectThreads,
-    threadLastVisitedAts,
-    threadSortOrder,
-    collapsedFamiliesByKey,
-    activeRouteThreadKey,
-    projectExpanded,
-    sidebarThreadPreviewCount,
-    isThreadListExpanded,
-    groupingStyle,
-  ]);
   const {
     hasOverflowingThreads,
     renderedItems,
@@ -2200,23 +2109,19 @@ function LastCodeSidebarView() {
   const visibleSidebarThreadKeys = useMemo(
     () =>
       sortedProjects.flatMap((project) => {
-        const projectThreads = sortThreads(
-          (threadsByProjectKey.get(project.projectKey) ?? []).filter(threadShellIsVisible),
-          sidebarThreadSortOrder,
-        );
+        const projectThreads = threadsByProjectKey.get(project.projectKey) ?? [];
         const projectExpanded = resolveProjectExpanded(
           projectExpandedById,
           projectExpansionPreferenceKeys(project),
         );
-        return projectLastCodeSidebarFamilies({
-          threads: projectThreads,
+        return projectLastCodeProjectThreads(projectThreads, sidebarThreadSortOrder, {
           collapsedByKey: collapsedFamiliesByKey,
           activeThreadKey: routeThreadKey,
           projectExpanded,
           previewCount: sidebarThreadPreviewCount,
           listExpanded: expandedThreadListsByProject.has(project.projectKey),
           groupingStyle,
-        }).orderedThreadKeys;
+        }).familyProjection.orderedThreadKeys;
       }),
     [
       sidebarThreadSortOrder,
