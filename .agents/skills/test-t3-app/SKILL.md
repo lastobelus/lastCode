@@ -43,17 +43,27 @@ contract. Use a foreground command; do not detach the process. Otherwise retain
 its terminal session. Use the worktree's ignored `.t3` state.
 
 Before managed launch, resolve the absolute path of this worktree's `.t3`
-directory. Substitute that literal path for `<isolated-home>` in these commands
-(the quoted argument works in POSIX shells, PowerShell, and cmd.exe):
+directory. Substitute that literal path for `<isolated-home>` in the selected
+recipe (the quoted argument works in POSIX shells, PowerShell, and cmd.exe).
+When the Browser runs on the same machine as the app, use the local recipe:
 
 ```text
 ./node_modules/.bin/vp run dev --dry-run --home-dir "<isolated-home>"
 ./node_modules/.bin/vp run dev --home-dir "<isolated-home>"
 ```
 
-Run the dry run first and read `webPort` from its `[dev-runner]` output. Use
-`http://localhost:<webPort>` as the requested preview URL, then give the second
-command to `preview_host` with the same working directory and environment.
+When the native Browser runs on another machine, use the shared recipe instead:
+
+```text
+./node_modules/.bin/vp run dev --dry-run --share --home-dir "<isolated-home>"
+./node_modules/.bin/vp run dev --share --home-dir "<isolated-home>"
+```
+
+Run the selected recipe's dry run first and read `webPort` from its
+`[dev-runner]` output. Use `http://localhost:<webPort>` as the requested hosting
+URL, then give that recipe's second command to `preview_host` with the same
+working directory and environment. For the shared recipe, Browser navigation
+uses the published HTTPS route checked above, rather than the hosting URL.
 Use the workspace-installed executable for this unattended launch; a global
 Vite+ proxy can wait before starting the command. On Windows use
 `node_modules\\.bin\\vp.cmd`. If the workspace executable is missing, repair setup
