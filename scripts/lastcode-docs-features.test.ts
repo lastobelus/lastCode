@@ -348,3 +348,99 @@ it.layer(NodeServices.layer)("LastCode docs feature registry", (it) => {
     }),
   );
 });
+
+it.layer(NodeServices.layer)("README marker errors", (it) => {
+  it.effect("preserves exact marker errors before reading the registry", () =>
+    Effect.gen(function* () {
+      const reads: Array<string> = [];
+      const registry = new Proxy(yield* loadRegistry(), {
+        get(target, key, receiver) {
+          reads.push(String(key));
+          return Reflect.get(target, key, receiver);
+        },
+      });
+      for (const readme of [
+        "",
+        "# LastCode\r\n😀",
+        "<!-- lastcode-features:start --",
+        "<!-- LASTCODE-FEATURES:END -->",
+      ]) {
+        assert.deepStrictEqual(checkLastCodeReadmeFeatureBlock(readme, registry), {
+          active: false,
+          current: true,
+        });
+        assert.throws(
+          () => replaceLastCodeReadmeFeatureBlock(readme, registry),
+          Error,
+          /^README feature markers are not active\.$/,
+        );
+      }
+      for (const readme of [
+        README_FEATURES_START,
+        README_FEATURES_END,
+        README_FEATURES_START.repeat(2),
+        README_FEATURES_END.repeat(2),
+        README_FEATURES_START.repeat(2) + README_FEATURES_END,
+        README_FEATURES_START + README_FEATURES_END.repeat(2),
+        README_FEATURES_START.repeat(2) + README_FEATURES_END.repeat(2),
+        README_FEATURES_END + README_FEATURES_START,
+        README_FEATURES_START + README_FEATURES_END + README_FEATURES_START,
+      ]) {
+        for (const call of [checkLastCodeReadmeFeatureBlock, replaceLastCodeReadmeFeatureBlock]) {
+          assert.throws(
+            () => call(readme, registry),
+            Error,
+            /^README must contain one ordered LastCode feature marker pair\.$/,
+          );
+        }
+      }
+      assert.deepStrictEqual(reads, []);
+    }),
+  );
+});
+
+it.layer(NodeServices.layer)("README marker replacement", (it) => {
+  it.effect("preserves exact replacement bytes and active registry read order", () =>
+    Effect.gen(function* () {
+      const reads: Array<string> = [];
+      const registry = new Proxy(yield* loadRegistry(), {
+        get(target, key, receiver) {
+          reads.push(String(key));
+          return Reflect.get(target, key, receiver);
+        },
+      });
+      const block = renderLastCodeReadmeFeatureBlock(registry);
+      const renderReads = [...reads];
+      assert.isAbove(renderReads.length, 0);
+      for (const [prefix, suffix] of [
+        ["", ""],
+        ["😀é\r\n", "\r\n尾😀"],
+        [
+          "repeat repeat\n<!-- lastcode-features:start --\n",
+          "\n<!-- LASTCODE-FEATURES:END -->\nrepeat repeat",
+        ],
+      ]) {
+        for (const content of ["", "\r\nold\r\n", "😀\n<!-- lastcode-features:end --\n"]) {
+          const readme = prefix + README_FEATURES_START + content + README_FEATURES_END + suffix;
+          reads.length = 0;
+          assert.deepStrictEqual(checkLastCodeReadmeFeatureBlock(readme, registry), {
+            active: true,
+            current: false,
+          });
+          assert.deepStrictEqual(reads, renderReads);
+          reads.length = 0;
+          const replaced = replaceLastCodeReadmeFeatureBlock(readme, registry);
+          assert.equal(replaced, prefix + block + suffix);
+          assert.deepStrictEqual(reads, renderReads);
+          reads.length = 0;
+          assert.deepStrictEqual(checkLastCodeReadmeFeatureBlock(replaced, registry), {
+            active: true,
+            current: true,
+          });
+          assert.deepStrictEqual(reads, renderReads);
+          assert.equal(replaceLastCodeReadmeFeatureBlock(replaced, registry), replaced);
+        }
+      }
+    }),
+  );
+});
