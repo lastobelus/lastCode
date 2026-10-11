@@ -1,3 +1,4 @@
+import { useLastCodeSidebarEnvironments } from "./sidebar/useLastCodeSidebarEnvironments";
 import { useLastCodeSidebarNavigation } from "./sidebar/useLastCodeSidebarNavigation";
 import { useLastCodeSidebarProjects } from "./sidebar/useLastCodeSidebarProjects";
 import { LastCodeSidebarProjectList } from "./sidebar/LastCodeSidebarProjectList";
@@ -6,20 +7,16 @@ import { LastCodeThreadActionsProvider } from "./sidebar/LastCodeThreadActions";
 import { LastCodeSidebarOptions } from "./sidebar/LastCodeSidebarOptions";
 import { LastCodeSidebarDesktopNotice } from "./sidebar/LastCodeSidebarDesktopNotice";
 import { LastCodeSidebarConnectionNotice } from "./sidebar/LastCodeSidebarConnectionNotice";
-import { useSidebarProviderBadgePreferences } from "./sidebar/SidebarEnvironmentIcon";
 import { FolderPlusIcon, SearchIcon } from "lucide-react";
 import { ProjectSidebarDraftList } from "./sidebar/ProjectSidebarDraftList";
-import { useAtomValue } from "@effect/atom-react";
 import { useCallback, memo, useMemo, useState, type CSSProperties } from "react";
 import type { ScopedThreadRef } from "@t3tools/contracts";
 import { scopedThreadKey, scopeProjectRef } from "@t3tools/client-runtime/environment";
 import type { LegacySidebarScale } from "@t3tools/contracts/settings";
-import { isDesktopLocalConnectionTarget, isWslConnectionTarget } from "../connection/desktopLocal";
 import { isElectron } from "../env";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { lastcodeSidebarScaleStyle } from "../lastcodeSidebarScale";
 import { useEnvironmentThread } from "../state/threads";
-import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
 import { Kbd } from "./ui/kbd";
 import { Button } from "./ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
@@ -35,8 +32,6 @@ import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrom
 import { LastCodeSidebarThreadPicker } from "./sidebar/LastCodeSidebarThreadPicker";
 import { CommandDialogTrigger } from "./ui/command";
 import { useClientSettings } from "~/hooks/useSettings";
-import { primaryServerProvidersAtom } from "../state/server";
-import { deriveProviderInstanceEntries, type ProviderInstanceEntry } from "../providerInstances";
 import type { SidebarProjectSnapshot } from "../sidebarProjectGrouping";
 function SidebarThreadDetailPrewarmer({ threadRef }: { readonly threadRef: ScopedThreadRef }) {
   useEnvironmentThread(threadRef.environmentId, threadRef.threadId);
@@ -176,10 +171,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
 
 function LastCodeSidebarView() {
   const lastcodeSidebarScale = useClientSettings<LegacySidebarScale>((s) => s.legacySidebarScale);
-  const environmentIconColors = useClientSettings((s) => s.environmentIconColors);
-  const showLocalEnvironmentIcon = useClientSettings((s) => s.showLocalEnvironmentIcon);
-  const providerBadgePreferences = useSidebarProviderBadgePreferences();
-  const serverProviders = useAtomValue(primaryServerProvidersAtom);
+  const { grouping, presentation } = useLastCodeSidebarEnvironments();
   const scaleStyle = useMemo(
     () => lastcodeSidebarScaleStyle(lastcodeSidebarScale),
     [lastcodeSidebarScale],
@@ -193,73 +185,8 @@ function LastCodeSidebarView() {
   const [expandedThreadListsByProject, setExpandedThreadListsByProject] = useState<
     ReadonlySet<string>
   >(() => new Set());
-  const { environments } = useEnvironments();
-  const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const providerEntriesByEnvironmentId = useMemo(() => {
-    const entriesByEnvironmentId = new Map<string, ReadonlyMap<string, ProviderInstanceEntry>>();
-    for (const environment of environments) {
-      const environmentProviders =
-        environment.serverConfig?.providers ??
-        (environment.environmentId === primaryEnvironmentId ? serverProviders : []);
-      entriesByEnvironmentId.set(
-        environment.environmentId,
-        new Map(
-          deriveProviderInstanceEntries(environmentProviders).map(
-            (entry) => [entry.instanceId as string, entry] as const,
-          ),
-        ),
-      );
-    }
-    return entriesByEnvironmentId;
-  }, [environments, primaryEnvironmentId, serverProviders]);
-  const environmentLabelById = useMemo(
-    () =>
-      new Map(
-        environments.map((environment) => [environment.environmentId, environment.label] as const),
-      ),
-    [environments],
-  );
-  const scratchWorkspaceRootsByEnvironmentId = useMemo(
-    () =>
-      new Map(
-        environments.flatMap((environment) =>
-          environment.serverConfig?.scratchWorkspaceRoot
-            ? [[environment.environmentId, environment.serverConfig.scratchWorkspaceRoot] as const]
-            : [],
-        ),
-      ),
-    [environments],
-  );
-  const desktopLocalEnvironmentIds = useMemo(
-    () =>
-      new Set(
-        environments
-          .filter((environment) => isDesktopLocalConnectionTarget(environment.entry.target))
-          .map((environment) => environment.environmentId),
-      ),
-    [environments],
-  );
-  const wslEnvironmentIds = useMemo(
-    () =>
-      new Set(
-        environments
-          .filter((environment) => isWslConnectionTarget(environment.entry.target))
-          .map((environment) => environment.environmentId),
-      ),
-    [environments],
-  );
-  const knownEnvironmentIds = useMemo(
-    () => new Set(environments.map((environment) => environment.environmentId)),
-    [environments],
-  );
   const { sortedProjects, orderedProjectKeys, resolveProjectKey, index } =
-    useLastCodeSidebarProjects({
-      primaryEnvironmentId,
-      scratchWorkspaceRootsByEnvironmentId,
-      environmentLabelById,
-      desktopLocalEnvironmentIds,
-      wslEnvironmentIds,
-    });
+    useLastCodeSidebarProjects(grouping);
   const {
     routeThreadRef,
     routeThreadKey,
@@ -293,11 +220,6 @@ function LastCodeSidebarView() {
     });
   }, []);
 
-  const projectEnvironments = useMemo(
-    () => ({ desktopLocalEnvironmentIds, knownEnvironmentIds, showLocalEnvironmentIcon }),
-    [desktopLocalEnvironmentIds, knownEnvironmentIds, showLocalEnvironmentIcon],
-  );
-
   return (
     <>
       {prewarmedSidebarThreadRefs.map((threadRef) => (
@@ -306,10 +228,7 @@ function LastCodeSidebarView() {
       <SidebarChromeHeader isElectron={isElectron} />
 
       <LastCodeSidebarPresentationProvider
-        projectEnvironments={projectEnvironments}
-        providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
-        environmentIconColors={environmentIconColors}
-        providerBadgePreferences={providerBadgePreferences}
+        {...presentation}
         openPullRequestsInRightPanel={routeThreadRef !== null}
       >
         <SidebarProjectsContent
