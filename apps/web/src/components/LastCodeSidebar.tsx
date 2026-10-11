@@ -1,3 +1,8 @@
+import {
+  LastCodeProjectHeader,
+  type LastCodeProjectDragHandle as SortableProjectHandleProps,
+} from "./sidebar/LastCodeProjectHeader";
+import { lastCodeProjectExpansionPreferenceKeys } from "./sidebar/useLastCodeProjectHeaderGestures";
 import { useLastCodeProjectThreads } from "./sidebar/useLastCodeProjectThreads";
 import { projectLastCodeProjectThreads } from "./sidebar/lastcodeProjectThreads";
 import {
@@ -52,9 +57,8 @@ import {
   useSidebarProviderBadgePreferences,
   type SidebarProviderBadgePreferences,
 } from "./sidebar/SidebarEnvironmentIcon";
-import { ChevronRightIcon, FolderPlusIcon, SearchIcon } from "lucide-react";
+import { FolderPlusIcon, SearchIcon } from "lucide-react";
 import { ThreadStatusLabel } from "./ThreadStatusIndicators";
-import { ProjectFavicon } from "./ProjectFavicon";
 import { ProjectSidebarDraftList } from "./sidebar/ProjectSidebarDraftList";
 import { useAtomValue } from "@effect/atom-react";
 import { autoAnimate } from "@formkit/auto-animate";
@@ -130,11 +134,7 @@ import { useShortcutModifierState } from "../shortcutModifierState";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { lastcodeSidebarScaleStyle } from "../lastcodeSidebarScale";
-import {
-  ConnectedEnvironmentIcon,
-  projectEnvironmentIconEntries,
-  resolveEnvironmentIconColor,
-} from "../environmentIcons";
+import { projectEnvironmentIconEntries, resolveEnvironmentIconColor } from "../environmentIcons";
 
 import { useEnvironmentThread } from "../state/threads";
 import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
@@ -196,7 +196,6 @@ import { deriveProviderInstanceEntries, type ProviderInstanceEntry } from "../pr
 import { SidebarThreadCleanupHoverContent } from "./sidebar/SidebarThreadHoverContent";
 import { WorktreeCleanupFailureDialog } from "./WorktreeCleanupFailureDialog";
 import {
-  NO_PROJECT_GROUP_KEY,
   buildPhysicalToLogicalProjectKeyMap,
   buildSidebarProjectSnapshots,
   type SidebarProjectGroupMember,
@@ -211,14 +210,6 @@ const EMPTY_THREAD_JUMP_LABELS = new Map<string, string>();
 function SidebarThreadDetailPrewarmer({ threadRef }: { readonly threadRef: ScopedThreadRef }) {
   useEnvironmentThread(threadRef.environmentId, threadRef.threadId);
   return null;
-}
-
-function projectExpansionPreferenceKeys(project: SidebarProjectSnapshot): string[] {
-  return [
-    project.projectKey,
-    ...project.memberProjects.map((member) => member.physicalProjectKey),
-    ...project.memberProjects.map((member) => legacyProjectCwdPreferenceKey(member.workspaceRoot)),
-  ];
 }
 
 function buildThreadJumpLabelMap(input: {
@@ -858,7 +849,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   } = props;
 
   const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const isNoProjectGroup = project.projectKey === NO_PROJECT_GROUP_KEY;
   const projectEnvironmentIcons = useMemo(
     () =>
       projectEnvironmentIconEntries({
@@ -866,12 +856,20 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         primaryEnvironmentId,
         desktopLocalEnvironmentIds: props.desktopLocalEnvironmentIds,
         showLocalEnvironmentIcon: props.showLocalEnvironmentIcon,
-      }),
+      }).map((entry) => ({
+        ...entry,
+        color: resolveEnvironmentIconColor(
+          props.environmentIconColors[entry.environmentId],
+          props.knownEnvironmentIds.has(entry.environmentId),
+        ),
+      })),
     [
       primaryEnvironmentId,
       project.memberProjects,
       props.desktopLocalEnvironmentIds,
       props.showLocalEnvironmentIcon,
+      props.environmentIconColors,
+      props.knownEnvironmentIds,
     ],
   );
 
@@ -879,13 +877,15 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const queuePendingFileDrop = useSidebarPendingFileDropStore((s) => s.queuePendingFileDrop);
   const clearPendingFileDrop = useSidebarPendingFileDropStore((s) => s.clearPendingFileDrop);
   const { isMobile, setOpenMobile } = useSidebar();
-  const setProjectExpanded = useUiStateStore((state) => state.setProjectExpanded);
   const toggleThreadSelection = useThreadSelectionStore((state) => state.toggleThread);
   const rangeSelectTo = useThreadSelectionStore((state) => state.rangeSelectTo);
   const clearSelection = useThreadSelectionStore((state) => state.clearSelection);
   const setSelectionAnchor = useThreadSelectionStore((state) => state.setAnchor);
   const openPrLink = useOpenPrLink();
-  const projectPreferenceKeys = useMemo(() => projectExpansionPreferenceKeys(project), [project]);
+  const projectPreferenceKeys = useMemo(
+    () => lastCodeProjectExpansionPreferenceKeys(project),
+    [project],
+  );
   const projectExpanded = useUiStateStore((state) =>
     resolveProjectExpanded(state.projectExpandedById, projectPreferenceKeys),
   );
@@ -919,71 +919,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     orderedThreadKeys: orderedProjectThreadKeys,
   } = familyProjection;
 
-  const handleProjectButtonClick = useCallback(
-    (event: React.MouseEvent<HTMLButtonElement>) => {
-      if (suppressProjectClickForContextMenuRef.current) {
-        suppressProjectClickForContextMenuRef.current = false;
-        event.preventDefault();
-        event.stopPropagation();
-        return;
-      }
-      if (dragInProgressRef.current) {
-        event.preventDefault();
-        event.stopPropagation();
-        return;
-      }
-      if (suppressProjectClickAfterDragRef.current) {
-        suppressProjectClickAfterDragRef.current = false;
-        event.preventDefault();
-        event.stopPropagation();
-        return;
-      }
-      if (useThreadSelectionStore.getState().hasSelection()) {
-        clearSelection();
-      }
-      setProjectExpanded(projectPreferenceKeys, !projectExpanded);
-    },
-    [
-      clearSelection,
-      dragInProgressRef,
-      projectExpanded,
-      projectPreferenceKeys,
-      setProjectExpanded,
-      suppressProjectClickAfterDragRef,
-      suppressProjectClickForContextMenuRef,
-    ],
-  );
-
-  const handleProjectButtonKeyDown = useCallback(
-    (event: React.KeyboardEvent<HTMLButtonElement>) => {
-      if (event.key !== "Enter" && event.key !== " ") return;
-      event.preventDefault();
-      if (dragInProgressRef.current) {
-        return;
-      }
-      setProjectExpanded(projectPreferenceKeys, !projectExpanded);
-    },
-    [dragInProgressRef, projectExpanded, projectPreferenceKeys, setProjectExpanded],
-  );
-
-  const handleProjectButtonPointerDownCapture = useCallback(
-    (event: React.PointerEvent<HTMLButtonElement>) => {
-      suppressProjectClickForContextMenuRef.current = false;
-      if (
-        isContextMenuPointerDown({
-          button: event.button,
-          ctrlKey: event.ctrlKey,
-          isMac: isMacPlatform(navigator.platform),
-        })
-      ) {
-        event.stopPropagation();
-      }
-
-      suppressProjectClickAfterDragRef.current = false;
-    },
-    [suppressProjectClickAfterDragRef, suppressProjectClickForContextMenuRef],
-  );
-
   const openProjectRenameDialog = useCallback((member: SidebarProjectGroupMember) => {
     if (checkTaskPermission(member.environmentId)) setProjectRenameTarget(member);
   }, []);
@@ -1002,15 +937,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     openProjectGroupingDialog,
     getProjectMenuThreads,
   );
-  const handleProjectButtonContextMenu = useCallback(
-    (event: React.MouseEvent<HTMLButtonElement>) => {
-      event.preventDefault();
-      suppressProjectClickForContextMenuRef.current = true;
-      void showProjectMenu({ x: event.clientX, y: event.clientY });
-    },
-    [showProjectMenu, suppressProjectClickForContextMenuRef],
-  );
-
   const navigateToThread = useCallback(
     (threadRef: ScopedThreadRef) => {
       if (useThreadSelectionStore.getState().selectedThreadKeys.size > 0) {
@@ -1137,161 +1063,25 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
   return (
     <>
-      <div
-        className="group/project-header relative"
-        data-lastcode-sidebar-scale={lastcodeSidebarScale}
-        style={{
-          ...scaleStyle,
-          marginLeft: "calc(8px * var(--lastcode-sidebar-content-zoom) - 8px)",
+      <LastCodeProjectHeader
+        project={project}
+        expanded={projectExpanded}
+        status={projectStatus}
+        environments={projectEnvironmentIcons}
+        drag={{ manual: isManualProjectSorting, handle: dragHandleProps }}
+        gestures={{
+          dragInProgressRef,
+          suppressProjectClickAfterDragRef,
+          suppressProjectClickForContextMenuRef,
         }}
+        showMenu={showProjectMenu}
       >
-        <SidebarMenuButton
-          size="tree"
-          ref={isManualProjectSorting ? dragHandleProps?.setActivatorNodeRef : undefined}
-          className={isManualProjectSorting ? "cursor-grab active:cursor-grabbing" : undefined}
-          {...(isManualProjectSorting && dragHandleProps ? dragHandleProps.attributes : {})}
-          {...(isManualProjectSorting && dragHandleProps ? dragHandleProps.listeners : {})}
-          onPointerDownCapture={handleProjectButtonPointerDownCapture}
-          onClick={handleProjectButtonClick}
-          onKeyDown={handleProjectButtonKeyDown}
-          onContextMenu={handleProjectButtonContextMenu}
-        >
-          {!projectExpanded && projectStatus ? (
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <span
-                    aria-label={projectStatus.label}
-                    className={`relative inline-flex size-4 shrink-0 items-center justify-center ${projectStatus.colorClass}`}
-                  />
-                }
-              >
-                <span className="absolute inset-0 flex items-center justify-center transition-opacity duration-150 group-hover/project-header:opacity-0">
-                  <span
-                    data-lastcode-sidebar-unscaled-content
-                    className={`size-[9px] rounded-full ${projectStatus.dotClass} ${
-                      projectStatus.pulse ? "animate-status-pulse" : ""
-                    }`}
-                  />
-                </span>
-                <ChevronRightIcon className="absolute inset-0 m-auto size-3.5 text-icon-muted opacity-0 transition-opacity duration-150 group-hover/project-header:opacity-100" />
-              </TooltipTrigger>
-              <TooltipPopup side="top">{projectStatus.label}</TooltipPopup>
-            </Tooltip>
-          ) : (
-            <span className="inline-flex size-4 shrink-0 items-center justify-center">
-              <ChevronRightIcon
-                className={`size-3.5 text-muted-foreground/70 transition-transform duration-150 ${projectExpanded ? "rotate-90" : ""}`}
-              />
-            </span>
-          )}
-          <span className="mr-0.5 flex shrink-0">
-            <ProjectFavicon project={project} />
-          </span>
-          <span className="flex min-w-0 flex-1 items-center gap-2">
-            <span className="truncate text-sm font-medium text-sidebar-foreground/90">
-              {project.displayName}
-            </span>
-            {project.groupedProjectCount > 1 && !isNoProjectGroup ? (
-              <span className="shrink-0 text-secondary-label text-3xs">
-                {project.groupedProjectCount} projects
-              </span>
-            ) : null}
-          </span>
-          {/* Keeps the name clear of the environment badge and new-thread button overlaid on
-              the row's end (two slots on touch, where both stay visible). */}
-          <span
-            aria-hidden
-            className="w-4 shrink-0 max-sm:w-10"
-            style={
-              projectEnvironmentIcons.length > 0
-                ? { width: `calc(1.75rem + ${Math.min(projectEnvironmentIcons.length, 3)}rem)` }
-                : undefined
-            }
-          />
-        </SidebarMenuButton>
-        {/* Environment badges stay left of the New thread action so mixed
-            groups remain inspectable without overlapping the action or title. */}
-        {projectEnvironmentIcons.length > 0 && (
-          <span
-            aria-label={`Project environments: ${projectEnvironmentIcons.map((entry) => entry.label).join(", ")}`}
-            className="pointer-events-none absolute top-1 right-(--project-environment-inset) inline-flex h-5 translate-x-full items-center gap-(--thread-metadata-gap) rounded-md max-sm:right-[calc(var(--project-environment-inset)+1.5rem*var(--lastcode-sidebar-content-zoom)+var(--thread-metadata-gap))]"
-            style={
-              {
-                "--project-environment-inset":
-                  "calc(0.5rem + 3.75rem * var(--lastcode-sidebar-content-zoom) + var(--thread-metadata-gap))",
-                "--thread-metadata-gap":
-                  "calc(var(--spacing) * var(--lastcode-sidebar-content-zoom))",
-              } as CSSProperties
-            }
-          >
-            {projectEnvironmentIcons
-              .slice(0, projectEnvironmentIcons.length > 3 ? 2 : 3)
-              .map((entry) => (
-                <Tooltip key={entry.environmentId}>
-                  <TooltipTrigger
-                    render={
-                      <span
-                        role="img"
-                        tabIndex={0}
-                        aria-label={entry.label}
-                        className="pointer-events-auto inline-flex size-3 items-center justify-center"
-                        data-lastcode-sidebar-unscaled-content
-                      />
-                    }
-                  >
-                    <ConnectedEnvironmentIcon
-                      environmentId={entry.environmentId}
-                      context="project"
-                      color={resolveEnvironmentIconColor(
-                        props.environmentIconColors[entry.environmentId],
-                        props.knownEnvironmentIds.has(entry.environmentId),
-                      )}
-                      className="size-3"
-                    />
-                  </TooltipTrigger>
-                  <TooltipPopup side="top">{entry.label}</TooltipPopup>
-                </Tooltip>
-              ))}
-            {projectEnvironmentIcons.length > 3 ? (
-              <Tooltip>
-                <TooltipTrigger
-                  render={
-                    <span
-                      role="img"
-                      tabIndex={0}
-                      aria-label={`${projectEnvironmentIcons.length - 2} more project environments`}
-                      className="pointer-events-auto inline-flex size-3 items-center justify-center text-3xs text-icon-muted"
-                      data-lastcode-sidebar-unscaled-content
-                    />
-                  }
-                >
-                  +{projectEnvironmentIcons.length - 2}
-                </TooltipTrigger>
-                <TooltipPopup side="top">
-                  <div className="flex flex-col gap-1.5">
-                    {projectEnvironmentIcons.slice(2).map((entry) => (
-                      <div key={entry.environmentId} className="flex items-center gap-2">
-                        <ConnectedEnvironmentIcon
-                          environmentId={entry.environmentId}
-                          context="project"
-                          className="size-3 shrink-0"
-                        />
-                        <span>{entry.label}</span>
-                      </div>
-                    ))}
-                  </div>
-                </TooltipPopup>
-              </Tooltip>
-            ) : null}
-          </span>
-        )}
         <LastCodeProjectNewThread
           project={project}
           handleNewThread={handleNewThread}
           shortcutLabel={newThreadShortcutLabel}
         />
-      </div>
+      </LastCodeProjectHeader>
 
       <SidebarProjectThreadList
         groupingStyle={groupingStyle}
@@ -1352,11 +1142,6 @@ const SidebarProjectListRow = memo(function SidebarProjectListRow(props: Sidebar
     </SidebarMenuItem>
   );
 });
-
-type SortableProjectHandleProps = Pick<
-  ReturnType<typeof useSortable>,
-  "attributes" | "listeners" | "setActivatorNodeRef"
->;
 
 function SortableProjectItem({
   projectId,
@@ -1995,7 +1780,7 @@ function LastCodeSidebarView() {
         const projectThreads = threadsByProjectKey.get(project.projectKey) ?? [];
         const projectExpanded = resolveProjectExpanded(
           projectExpandedById,
-          projectExpansionPreferenceKeys(project),
+          lastCodeProjectExpansionPreferenceKeys(project),
         );
         return projectLastCodeProjectThreads(projectThreads, sidebarThreadSortOrder, {
           collapsedByKey: collapsedFamiliesByKey,
