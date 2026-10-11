@@ -5393,6 +5393,246 @@ it.live(
     ).pipe(Effect.provide(layer)),
 );
 
+it.live("explicit environment hosting opens loopback without consulting a connected desktop", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      localDesktopAvailable = true;
+      profileCatalogue = {
+        desktopHostId: "remote-desktop",
+        profiles: [{ id: "work", name: "Logged in Developer", kind: "persistent" }],
+        defaultProfileId: "work",
+      };
+      remoteUrlAvailable = false;
+      const broker = yield* Broker.PreviewAutomationBroker;
+      yield* ServerBrowser.ServerBrowser;
+      yield* Effect.yieldNow;
+      const opened = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: {
+          browserHost: "environment",
+          url: "http://127.0.0.1:5173/fixture",
+          reuseExistingTab: false,
+          open: false,
+        },
+      });
+      expect(opened).toMatchObject({
+        available: true,
+        browserHost: "environment",
+        profileId: "incognito",
+        profileName: "Incognito",
+        control: { owner: "agent", ownedByCaller: true },
+      });
+      expect(profileRequests).toEqual([]);
+      expect(rootCreations).toEqual([]);
+      expect(contexts[0]!.page.goto).toHaveBeenCalledWith(
+        "http://127.0.0.1:5173/fixture",
+        expect.anything(),
+      );
+      const manager = yield* Manager.PreviewManager;
+      expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toEqual([
+        expect.objectContaining({
+          backingPage: "server",
+          automationOwner: `${scope.environmentId}\u0000${scope.thread.providerSessionId}`,
+        }),
+      ]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("environment hosting refuses desktop sign-ins instead of substituting a cookie jar", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const broker = yield* Broker.PreviewAutomationBroker;
+      yield* ServerBrowser.ServerBrowser;
+      yield* Effect.yieldNow;
+      const failure = yield* broker
+        .invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "openWithProfile",
+          input: { browserHost: "environment", profileName: "Logged in Developer", open: false },
+        })
+        .pipe(Effect.flip);
+      expect(failure).toMatchObject({ _tag: "PreviewAutomationExecutionError" });
+      expect(contexts).toEqual([]);
+      expect(profileRequests).toEqual([]);
+      expect(rootCreations).toEqual([]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("an explicit host mismatch cannot replace a requested desktop tab", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      desktopRendersNext = true;
+      const { broker, tabId } = yield* ready;
+      const failure = yield* broker
+        .invoke<PreviewAutomationStatus>({
+          scope,
+          tabId,
+          operation: "open",
+          input: { browserHost: "environment", open: false },
+        })
+        .pipe(Effect.flip);
+      expect(failure).toMatchObject({ _tag: "PreviewAutomationExecutionError" });
+      expect(rootCreations).toHaveLength(1);
+      expect(contextRequests).toEqual([]);
+      expect(
+        (yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          tabId,
+          operation: "status",
+          input: {},
+        })).browserHost,
+      ).toBe("desktop");
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("an environment choice creates a new tab instead of reusing the current desktop tab", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      desktopRendersNext = true;
+      const { broker, tabId } = yield* ready;
+      const opened = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { browserHost: "environment", open: false },
+      });
+      expect(opened).toMatchObject({ browserHost: "environment", profileId: "incognito" });
+      expect(opened.tabId).not.toBe(tabId);
+      expect(rootCreations).toHaveLength(1);
+      expect(contextRequests).toEqual([{ profileId: "incognito", isolated: true }]);
+      expect(opened.tabs).toHaveLength(2);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live(
+  "environment profile selection preserves reused storage and rejects an exact mismatch",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const broker = yield* Broker.PreviewAutomationBroker;
+        yield* ServerBrowser.ServerBrowser;
+        yield* Effect.yieldNow;
+        const opened = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "openWithProfile",
+          input: { browserHost: "environment", profileName: "Incognito", open: false },
+        });
+        const tabId = PreviewTabId.make(opened.tabId!);
+        expect(opened).toMatchObject({ browserHost: "environment", profileId: "incognito" });
+        const reused = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          tabId,
+          operation: "open",
+          input: { browserHost: "environment", open: false },
+        });
+        expect(reused).toMatchObject({ tabId, profileId: "incognito" });
+        const failure = yield* broker
+          .invoke<PreviewAutomationStatus>({
+            scope,
+            tabId,
+            operation: "openWithProfile",
+            input: { browserHost: "environment", profileId: "default", open: false },
+          })
+          .pipe(Effect.flip);
+        expect(failure).toMatchObject({ _tag: "PreviewAutomationProfileError" });
+        expect(contextRequests).toEqual([{ profileId: "incognito", isolated: true }]);
+        expect(profileRequests).toEqual([]);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live("an explicit desktop choice never falls back to an environment cookie jar", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const broker = yield* Broker.PreviewAutomationBroker;
+      const browser = yield* ServerBrowser.ServerBrowser;
+      yield* browser.reportProfiles({ profiles: [], defaultProfileId: "default" });
+      yield* Effect.yieldNow;
+      const failure = yield* broker
+        .invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { browserHost: "desktop", open: false },
+        })
+        .pipe(Effect.flip);
+      expect(failure).toMatchObject({ _tag: "PreviewAutomationRemoteUnavailableError" });
+      expect(contextRequests).toEqual([]);
+      expect(rootCreations).toEqual([]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("an environment choice cannot replace an explicitly missing tab", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const broker = yield* Broker.PreviewAutomationBroker;
+      yield* ServerBrowser.ServerBrowser;
+      yield* Effect.yieldNow;
+      const failure = yield* broker
+        .invoke<PreviewAutomationStatus>({
+          scope,
+          tabId: PreviewTabId.make("missing-environment-tab"),
+          operation: "open",
+          input: { browserHost: "environment", open: false },
+        })
+        .pipe(Effect.flip);
+      expect(failure).toMatchObject({ _tag: "PreviewAutomationTabNotFoundError" });
+      expect(contextRequests).toEqual([]);
+      expect(rootCreations).toEqual([]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("an environment popup stays on the server when local native IPC is available", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      localDesktopAvailable = true;
+      const broker = yield* Broker.PreviewAutomationBroker;
+      yield* ServerBrowser.ServerBrowser;
+      yield* Effect.yieldNow;
+      const opened = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { browserHost: "environment", open: false, reuseExistingTab: false },
+      });
+      const manager = yield* Manager.PreviewManager;
+      const events = yield* manager.subscribeEvents;
+      const popup = makeContext();
+      contexts[0]!.page.emit("popup", popup.page);
+      const event = Option.getOrThrow(
+        yield* Stream.fromSubscription(events).pipe(
+          Stream.filter((event) => event.type === "opened" && event.tabId !== opened.tabId),
+          Stream.runHead,
+        ),
+      );
+      if (event.type !== "opened") throw new Error("Expected popup opening");
+      expect(event.snapshot).toMatchObject({
+        backingPage: "server",
+        profileId: "incognito",
+        automationOwner: `${scope.environmentId}\u0000${scope.thread.providerSessionId}`,
+        reveal: false,
+      });
+      expect(event.snapshot.desktopHostId).toBeUndefined();
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId: event.tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(status).toMatchObject({
+        browserHost: "environment",
+        profileId: "incognito",
+        control: { owner: "agent", ownedByCaller: true },
+      });
+      expect(rootCreations).toEqual([]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live("an agent tab keeps throwaway storage when no client reported profiles", () =>
   Effect.scoped(
     Effect.gen(function* () {

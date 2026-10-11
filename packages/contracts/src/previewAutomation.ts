@@ -93,6 +93,8 @@ export type PreviewAutomationProfiles = typeof PreviewAutomationProfiles.Type;
 
 export const PreviewAutomationStatus = Schema.Struct({
   available: Schema.Boolean,
+  /** The machine hosting this tab, independent of its streamed viewer. */
+  browserHost: Schema.optional(Schema.Literals(["environment", "desktop"])),
   visible: Schema.Boolean,
   /** Native user-visible presentation, independent of background rendering leases. */
   nativePresented: Schema.optional(Schema.Boolean),
@@ -182,13 +184,17 @@ export type PreviewAutomationDialogInput = typeof PreviewAutomationDialogInput.T
 
 export const PreviewAutomationOpenInput = Schema.Struct({
   ...PreviewAutomationTabTargetFields,
+  browserHost: Schema.optional(Schema.Literals(["environment", "desktop"])).annotate({
+    description:
+      "Choose environment to run the page in this environment's browser and reach its loopback apps without exposing a port. New environment tabs default to isolated Incognito storage; explicitly selecting Default uses this environment's persistent storage, never desktop sign-ins. Choose desktop for existing desktop profiles. Omit to retain the current hosting policy. An exact tabId cannot switch hosts.",
+  }),
   profileId: Schema.optional(BrowserProfileId).annotate({
     description:
-      "Existing desktop browser profile ID from preview_profiles. Mutually exclusive with profileName. Omit both to use the configured default for new tabs; reused tabs retain their profile.",
+      "Desktop browser profile ID from preview_profiles, or default/incognito for environment hosting. Mutually exclusive with profileName. Omit both to use the configured desktop default or isolated environment Incognito for new tabs; reused tabs retain their profile.",
   }),
   profileName: Schema.optional(BrowserProfileName).annotate({
     description:
-      "Exact, case-sensitive existing profile name from preview_profiles. Mutually exclusive with profileId. Unknown or duplicate names fail; use profileId to disambiguate.",
+      "Exact desktop profile name from preview_profiles, or Default/Incognito for environment hosting. Mutually exclusive with profileId. Unknown or duplicate desktop names fail; use profileId to disambiguate.",
   }),
   url: Schema.optional(BoundedUrl).annotate({
     description: `Optional initial page URL. ${URL_GUIDANCE} Omit to open a blank tab.`,

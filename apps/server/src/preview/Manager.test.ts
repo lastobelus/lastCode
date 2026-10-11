@@ -488,6 +488,29 @@ it.layer(PreviewManagerTestLayer)("PreviewManager", (it) => {
       }),
   );
 
+  it.effect("an explicit environment choice remains headless with local native IPC available", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const manager = yield* PreviewManager.make.pipe(
+        Effect.provideService(ServerConfig.ServerConfig, {
+          ...config,
+          desktopBrowserFd: 4,
+          desktopBrowserControlFd: 5,
+        }),
+      );
+      const threadId = freshThreadId();
+      const opened = yield* manager.open({
+        threadId,
+        runtime: "server",
+        environmentHosted: true,
+        automationOwner: "agent-a",
+      });
+      expect(opened).toMatchObject({ backingPage: "server", automationOwner: "agent-a" });
+      expect(opened.desktopHostId).toBeUndefined();
+      expect((yield* manager.list({ threadId })).sessions).toEqual([opened]);
+    }),
+  );
+
   it.effect("lists all environment tabs when the thread filter is omitted", () =>
     Effect.gen(function* () {
       const manager = yield* PreviewManager.PreviewManager;

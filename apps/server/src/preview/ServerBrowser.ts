@@ -1440,6 +1440,7 @@ const make = Effect.gen(function* () {
         threadId: opener.threadId,
         ...(/^https?:/i.test(url) ? { url } : {}),
         runtime: "server",
+        ...(opener.desktop === null ? { environmentHosted: true } : {}),
         ...(opener.profileId === undefined ? {} : { profileId: opener.profileId }),
         ...(opener.desktopHostId === undefined ? {} : { desktopHostId: opener.desktopHostId }),
         // Agent popups stay with the agent and only float when it asks, like its own opens.
@@ -1859,10 +1860,16 @@ const make = Effect.gen(function* () {
     };
   };
 
-  /** Matches an id, then a case-insensitive name. Omitted means the reported default. */
-  const resolveOpenProfile = (requested: string | undefined): string | undefined => {
-    if (requested === undefined) return reportedProfiles?.defaultProfileId;
-    const profiles = reportedProfiles?.profiles ?? BUILT_IN_BROWSER_PROFILES;
+  /** Environment QA defaults to isolated storage; other opens retain the reported default. */
+  const resolveOpenProfile = (
+    requested: string | undefined,
+    environmentHosted = false,
+  ): string | undefined => {
+    if (requested === undefined)
+      return environmentHosted ? INCOGNITO_BROWSER_PROFILE_ID : reportedProfiles?.defaultProfileId;
+    const profiles = environmentHosted
+      ? BUILT_IN_BROWSER_PROFILES
+      : (reportedProfiles?.profiles ?? BUILT_IN_BROWSER_PROFILES);
     const wanted = requested.toLowerCase();
     const match =
       findBrowserProfile(profiles, requested) ??
@@ -1959,11 +1966,13 @@ const make = Effect.gen(function* () {
           );
     const status = {
       profileId: tab.profileId ?? null,
-      profileName:
-        catalogue?.desktopHostId === desktopHostId
+      profileName: tab.desktop
+        ? catalogue?.desktopHostId === desktopHostId
           ? (catalogue?.profiles.find((profile) => profile.id === tab.profileId)?.name ?? null)
-          : null,
+          : null
+        : (BUILT_IN_BROWSER_PROFILES.find((profile) => profile.id === tab.profileId)?.name ?? null),
       available: true,
+      browserHost: tab.desktop ? ("desktop" as const) : ("environment" as const),
       visible: tab.nativePresented || tab.viewers.size > 0,
       nativePresented: tab.nativePresented,
       streamViewers: tab.viewers.size,
@@ -2636,25 +2645,38 @@ const make = Effect.gen(function* () {
             "The agent session is missing. Reconnect the provider.",
           );
         const open = input as PreviewAutomationOpenInput;
-        const desktopHostId = await profileDesktopHost(request);
-        const catalogue = await Effect.runPromise(
-          desktopChannel.getProfiles({
-            threadId: request.threadId,
-            agentSessionId: request.agentSessionId,
-            ...(desktopHostId === undefined ? {} : { desktopHostId }),
-          }),
-        );
+        const environmentHosted = open.browserHost === "environment";
+        const desktopHostId = environmentHosted ? undefined : await profileDesktopHost(request);
+        const catalogue = environmentHosted
+          ? null
+          : await Effect.runPromise(
+              desktopChannel.getProfiles({
+                threadId: request.threadId,
+                agentSessionId: request.agentSessionId,
+                ...(desktopHostId === undefined ? {} : { desktopHostId }),
+              }),
+            );
         // Reported web profiles remain available for environment-hosted pages. An
         // explicit desktop-profile operation must still use its owning desktop.
         const useReportedProfile =
-          desktopHostId === undefined &&
-          catalogue === null &&
-          request.operation === "open" &&
-          (reportedProfiles !== null || !desktopChannel.available);
+          environmentHosted ||
+          (open.browserHost !== "desktop" &&
+            desktopHostId === undefined &&
+            catalogue === null &&
+            request.operation === "open" &&
+            (reportedProfiles !== null || !desktopChannel.available));
         const reportedProfileId = useReportedProfile
-          ? resolveOpenProfile(open.profileId ?? open.profileName)
+          ? resolveOpenProfile(open.profileId ?? open.profileName, environmentHosted)
           : undefined;
-        let selectedProfileId: string | undefined;
+        if (open.browserHost === "desktop" && catalogue === null)
+          throw new ServerBrowserPage.ServerBrowserOperationError(
+            "PreviewAutomationRemoteUnavailableError",
+            "No unambiguous connected desktop browser is available. The requested desktop tab was not opened.",
+          );
+        let selectedProfileId =
+          environmentHosted && (open.profileId !== undefined || open.profileName !== undefined)
+            ? reportedProfileId
+            : undefined;
         if (
           !useReportedProfile &&
           (open.profileId !== undefined || open.profileName !== undefined)
@@ -2720,7 +2742,23 @@ const make = Effect.gen(function* () {
           found && (request.tabIdExplicit || found.control.agentId === request.agentSessionId)
             ? found
             : undefined;
-        if (selectedProfileId !== undefined && request.tabIdExplicit && existing === undefined) {
+        if (
+          existing &&
+          open.browserHost !== undefined &&
+          (existing.desktop ? "desktop" : "environment") !== open.browserHost
+        ) {
+          if (request.tabIdExplicit)
+            throw new ServerBrowserPage.ServerBrowserOperationError(
+              "PreviewAutomationExecutionError",
+              "The selected tab uses a different browser host. Omit tabId to create a new tab; an existing tab cannot switch hosts.",
+            );
+          existing = undefined;
+        }
+        if (
+          request.tabIdExplicit &&
+          (reuse || selectedProfileId !== undefined) &&
+          existing === undefined
+        ) {
           throw new ServerBrowserPage.ServerBrowserOperationError(
             "PreviewAutomationTabNotFoundError",
             "The requested preview tab no longer exists.",
@@ -2780,6 +2818,7 @@ const make = Effect.gen(function* () {
                 runtime: "server",
                 reveal: false,
                 automationOwner: request.agentSessionId,
+                ...(environmentHosted ? { environmentHosted: true } : {}),
                 ...(desktopHostId === undefined ? {} : { desktopHostId }),
                 createDesktopRoot: (snapshot) => createDesktopRoot(snapshot, signal),
                 ...(newTabProfileId === undefined || catalogue === null
