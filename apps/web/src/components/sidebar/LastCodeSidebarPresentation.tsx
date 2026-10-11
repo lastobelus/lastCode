@@ -1,4 +1,5 @@
 import { createContext, useContext, useMemo, type ReactNode } from "react";
+import type { EnvironmentId } from "@t3tools/contracts";
 import type { EnvironmentIconColor } from "@t3tools/contracts/settings";
 import type { ProviderInstanceEntry } from "../../providerInstances";
 import { useOpenPrLink } from "../../lib/openPullRequestLink";
@@ -9,6 +10,11 @@ interface Presentation {
   environmentIconColors: Readonly<Record<string, EnvironmentIconColor>>;
   providerBadgePreferences: SidebarProviderBadgePreferences;
   openPullRequestsInRightPanel: boolean;
+  projectEnvironments: {
+    desktopLocalEnvironmentIds: ReadonlySet<EnvironmentId>;
+    knownEnvironmentIds: ReadonlySet<EnvironmentId>;
+    showLocalEnvironmentIcon: boolean;
+  };
   openPrLink: ReturnType<typeof useOpenPrLink>;
 }
 const PresentationContext = createContext<Presentation | null>(null);
@@ -19,6 +25,7 @@ export function LastCodeSidebarPresentationProvider({
   environmentIconColors,
   providerBadgePreferences,
   openPullRequestsInRightPanel,
+  projectEnvironments,
 }: Omit<Presentation, "openPrLink"> & { children: ReactNode }) {
   const openPrLink = useOpenPrLink();
   const value = useMemo(
@@ -28,6 +35,7 @@ export function LastCodeSidebarPresentationProvider({
       providerBadgePreferences,
       openPullRequestsInRightPanel,
       openPrLink,
+      projectEnvironments,
     }),
     [
       providerEntriesByEnvironmentId,
@@ -35,6 +43,7 @@ export function LastCodeSidebarPresentationProvider({
       providerBadgePreferences,
       openPullRequestsInRightPanel,
       openPrLink,
+      projectEnvironments,
     ],
   );
   return <PresentationContext.Provider value={value}>{children}</PresentationContext.Provider>;

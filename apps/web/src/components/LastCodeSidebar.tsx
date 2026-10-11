@@ -1,28 +1,13 @@
-import { useLastCodeThreadRowRenderer } from "./sidebar/LastCodeThreadRow";
-import { LastCodeThreadList } from "./sidebar/LastCodeThreadList";
+import { LastCodeSidebarProject } from "./sidebar/LastCodeSidebarProject";
 import { LastCodeSidebarPresentationProvider } from "./sidebar/LastCodeSidebarPresentation";
-import { useLastCodeThreadNavigation } from "./sidebar/useLastCodeThreadNavigation";
-import {
-  LastCodeProjectHeader,
-  type LastCodeProjectDragHandle as SortableProjectHandleProps,
-} from "./sidebar/LastCodeProjectHeader";
-import { lastCodeProjectExpansionPreferenceKeys } from "./sidebar/useLastCodeProjectHeaderGestures";
-import { useLastCodeProjectThreads } from "./sidebar/useLastCodeProjectThreads";
+import type { LastCodeProjectDragHandle as SortableProjectHandleProps } from "./sidebar/LastCodeProjectHeader";
 import { projectLastCodeProjectThreads } from "./sidebar/lastcodeProjectThreads";
-import { useLastCodeThreadEditing } from "./sidebar/useLastCodeThreadEditing";
-import { useLastCodeBulkThreadMenu } from "./sidebar/useLastCodeBulkThreadMenu";
-import { useLastCodeThreadMenu } from "./sidebar/useLastCodeThreadMenu";
-import { useLastCodeThreadAnnotations } from "./sidebar/useLastCodeThreadAnnotations";
+import { lastCodeProjectExpansionPreferenceKeys } from "./sidebar/useLastCodeProjectHeaderGestures";
 import { LastCodeThreadActionsProvider } from "./sidebar/LastCodeThreadActions";
-import { useLastCodeProjectMenu } from "./sidebar/useLastCodeProjectMenu";
-import { checkTaskPermission } from "./sidebar/lastcodeSidebarPermission";
-import { LastCodeProjectRenameDialog } from "./sidebar/LastCodeProjectRenameDialog";
-import { LastCodeProjectGroupingDialog } from "./sidebar/LastCodeProjectGroupingDialog";
 
 import { LastCodeSidebarOptions } from "./sidebar/LastCodeSidebarOptions";
 import { LastCodeSidebarDesktopNotice } from "./sidebar/LastCodeSidebarDesktopNotice";
 import { LastCodeSidebarConnectionNotice } from "./sidebar/LastCodeSidebarConnectionNotice";
-import { LastCodeProjectNewThread } from "./sidebar/LastCodeProjectNewThread";
 
 import { useSidebarProviderBadgePreferences } from "./sidebar/SidebarEnvironmentIcon";
 import { FolderPlusIcon, SearchIcon } from "lucide-react";
@@ -54,7 +39,6 @@ import { SortableContext, useSortable, verticalListSortingStrategy } from "@dnd-
 import { restrictToFirstScrollableAncestor, restrictToVerticalAxis } from "@dnd-kit/modifiers";
 import { CSS } from "@dnd-kit/utilities";
 import {
-  type EnvironmentId,
   ProjectId,
   type ScopedThreadRef,
   type ResolvedKeybindingsConfig,
@@ -68,7 +52,7 @@ import {
 } from "@t3tools/client-runtime/environment";
 import { threadShellIsVisible } from "@t3tools/client-runtime/state/models";
 import { useNavigate, useParams } from "@tanstack/react-router";
-import { type EnvironmentIconColor, type LegacySidebarScale } from "@t3tools/contracts/settings";
+import { type LegacySidebarScale } from "@t3tools/contracts/settings";
 import { isDesktopLocalConnectionTarget, isWslConnectionTarget } from "../connection/desktopLocal";
 import { isElectron } from "../env";
 import { useTerminalFocus } from "../hooks/useTerminalFocus";
@@ -93,7 +77,6 @@ import { useShortcutModifierState } from "../shortcutModifierState";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { lastcodeSidebarScaleStyle } from "../lastcodeSidebarScale";
-import { projectEnvironmentIconEntries, resolveEnvironmentIconColor } from "../environmentIcons";
 
 import { useEnvironmentThread } from "../state/threads";
 import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
@@ -140,7 +123,6 @@ import { deriveProviderInstanceEntries, type ProviderInstanceEntry } from "../pr
 import {
   buildPhysicalToLogicalProjectKeyMap,
   buildSidebarProjectSnapshots,
-  type SidebarProjectGroupMember,
   type SidebarProjectSnapshot,
 } from "../sidebarProjectGrouping";
 const SIDEBAR_LIST_ANIMATION_OPTIONS = {
@@ -183,229 +165,6 @@ function buildThreadJumpLabelMap(input: {
   }
   return mapping.size > 0 ? mapping : EMPTY_THREAD_JUMP_LABELS;
 }
-
-interface SidebarProjectItemProps {
-  lastcodeSidebarScale: LegacySidebarScale;
-  desktopLocalEnvironmentIds: ReadonlySet<EnvironmentId>;
-  knownEnvironmentIds: ReadonlySet<EnvironmentId>;
-  environmentIconColors: Readonly<Record<string, EnvironmentIconColor>>;
-  showLocalEnvironmentIcon: boolean;
-  project: SidebarProjectSnapshot;
-  isThreadListExpanded: boolean;
-  activeRouteThreadKey: string | null;
-  newThreadShortcutLabel: string | null;
-  handleNewThread: ReturnType<typeof useNewThreadHandler>;
-  threadJumpLabelByKey: ReadonlyMap<string, string>;
-  attachThreadListAutoAnimateRef: (node: HTMLElement | null) => void;
-  expandThreadListForProject: (projectKey: string) => void;
-  collapseThreadListForProject: (projectKey: string) => void;
-  dragInProgressRef: React.RefObject<boolean>;
-  suppressProjectClickAfterDragRef: React.RefObject<boolean>;
-  suppressProjectClickForContextMenuRef: React.RefObject<boolean>;
-  isManualProjectSorting: boolean;
-  dragHandleProps: SortableProjectHandleProps | null;
-}
-
-const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjectItemProps) {
-  const {
-    lastcodeSidebarScale,
-    project,
-    isThreadListExpanded,
-    activeRouteThreadKey,
-    newThreadShortcutLabel,
-    handleNewThread,
-    threadJumpLabelByKey,
-    attachThreadListAutoAnimateRef,
-    expandThreadListForProject,
-    collapseThreadListForProject,
-    dragInProgressRef,
-    suppressProjectClickAfterDragRef,
-    suppressProjectClickForContextMenuRef,
-    isManualProjectSorting,
-    dragHandleProps,
-  } = props;
-
-  const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const projectEnvironmentIcons = useMemo(
-    () =>
-      projectEnvironmentIconEntries({
-        members: project.memberProjects,
-        primaryEnvironmentId,
-        desktopLocalEnvironmentIds: props.desktopLocalEnvironmentIds,
-        showLocalEnvironmentIcon: props.showLocalEnvironmentIcon,
-      }).map((entry) => ({
-        ...entry,
-        color: resolveEnvironmentIconColor(
-          props.environmentIconColors[entry.environmentId],
-          props.knownEnvironmentIds.has(entry.environmentId),
-        ),
-      })),
-    [
-      primaryEnvironmentId,
-      project.memberProjects,
-      props.desktopLocalEnvironmentIds,
-      props.showLocalEnvironmentIcon,
-      props.environmentIconColors,
-      props.knownEnvironmentIds,
-    ],
-  );
-
-  const clearSelection = useThreadSelectionStore((state) => state.clearSelection);
-  const projectPreferenceKeys = useMemo(
-    () => lastCodeProjectExpansionPreferenceKeys(project),
-    [project],
-  );
-  const projectExpanded = useUiStateStore((state) =>
-    resolveProjectExpanded(state.projectExpandedById, projectPreferenceKeys),
-  );
-  const {
-    threadsByKey: sidebarThreadByKey,
-    projectStatus,
-    hiddenThreadStatus,
-    familyProjection,
-  } = useLastCodeProjectThreads(
-    project,
-    activeRouteThreadKey,
-    projectExpanded,
-    isThreadListExpanded,
-  );
-  // Menu callbacks read current project members without invalidating every row callback.
-  const sidebarThreadByKeyRef = useRef(sidebarThreadByKey);
-  sidebarThreadByKeyRef.current = sidebarThreadByKey;
-  const threadEditing = useLastCodeThreadEditing();
-  const editing = threadEditing.capabilities;
-  const annotations = useLastCodeThreadAnnotations();
-  const [projectRenameTarget, setProjectRenameTarget] = useState<SidebarProjectGroupMember | null>(
-    null,
-  );
-  const [projectGroupingTarget, setProjectGroupingTarget] =
-    useState<SidebarProjectGroupMember | null>(null);
-  const navigation = useLastCodeThreadNavigation(familyProjection.orderedThreadKeys);
-  const projection = useMemo(
-    () => ({ familyProjection, hiddenThreadStatus }),
-    [familyProjection, hiddenThreadStatus],
-  );
-
-  const openProjectRenameDialog = useCallback((member: SidebarProjectGroupMember) => {
-    if (checkTaskPermission(member.environmentId)) setProjectRenameTarget(member);
-  }, []);
-  const openProjectGroupingDialog = useCallback(
-    (member: SidebarProjectGroupMember) => setProjectGroupingTarget(member),
-    [],
-  );
-
-  const getProjectMenuThreads = useCallback(
-    () => Array.from(sidebarThreadByKeyRef.current.values()),
-    [],
-  );
-  const showProjectMenu = useLastCodeProjectMenu(
-    project,
-    openProjectRenameDialog,
-    openProjectGroupingDialog,
-    getProjectMenuThreads,
-  );
-  const handleMultiSelectContextMenu = useLastCodeBulkThreadMenu();
-
-  const startThreadRename = useCallback(
-    (key: string, title: string) => {
-      const ref = parseScopedThreadKey(key);
-      if (ref) editing.requestRename(ref, title);
-    },
-    [editing],
-  );
-
-  const getMenuThread = useCallback(
-    (ref: ScopedThreadRef) => sidebarThreadByKeyRef.current.get(scopedThreadKey(ref)) ?? null,
-    [],
-  );
-  const handleThreadContextMenu = useLastCodeThreadMenu(
-    project,
-    getMenuThread,
-    startThreadRename,
-    annotations.actions.onEditAnnotation,
-    navigation.navigateToThread,
-    handleNewThread,
-  );
-  const menus = useMemo(
-    () => ({
-      showThreadMenu: handleThreadContextMenu,
-      showBulkMenu: handleMultiSelectContextMenu,
-      clearSelection,
-    }),
-    [handleThreadContextMenu, handleMultiSelectContextMenu, clearSelection],
-  );
-
-  const renderThreadRow = useLastCodeThreadRowRenderer(
-    project.workspaceRoot,
-    activeRouteThreadKey,
-    threadJumpLabelByKey,
-    threadEditing,
-    navigation,
-    menus,
-    annotations.actions,
-  );
-  const onListExpandedChange = useCallback(
-    (expanded: boolean) => {
-      if (expanded) expandThreadListForProject(project.projectKey);
-      else collapseThreadListForProject(project.projectKey);
-    },
-    [project.projectKey, expandThreadListForProject, collapseThreadListForProject],
-  );
-
-  return (
-    <>
-      <LastCodeProjectHeader
-        project={project}
-        expanded={projectExpanded}
-        status={projectStatus}
-        environments={projectEnvironmentIcons}
-        drag={{ manual: isManualProjectSorting, handle: dragHandleProps }}
-        gestures={{
-          dragInProgressRef,
-          suppressProjectClickAfterDragRef,
-          suppressProjectClickForContextMenuRef,
-        }}
-        showMenu={showProjectMenu}
-      >
-        <LastCodeProjectNewThread
-          project={project}
-          handleNewThread={handleNewThread}
-          shortcutLabel={newThreadShortcutLabel}
-        />
-      </LastCodeProjectHeader>
-
-      <LastCodeThreadList
-        scale={lastcodeSidebarScale}
-        projectExpanded={projectExpanded}
-        projection={projection}
-        listExpanded={isThreadListExpanded}
-        onListExpandedChange={onListExpandedChange}
-        attachAnimation={attachThreadListAutoAnimateRef}
-        navigateToThread={navigation.navigateToThread}
-        renderRow={renderThreadRow}
-      />
-
-      {annotations.editor}
-
-      <LastCodeProjectRenameDialog
-        target={projectRenameTarget}
-        onClose={() => setProjectRenameTarget(null)}
-      />
-      <LastCodeProjectGroupingDialog
-        target={projectGroupingTarget}
-        onClose={() => setProjectGroupingTarget(null)}
-      />
-    </>
-  );
-});
-
-const SidebarProjectListRow = memo(function SidebarProjectListRow(props: SidebarProjectItemProps) {
-  return (
-    <SidebarMenuItem>
-      <SidebarProjectItem {...props} />
-    </SidebarMenuItem>
-  );
-});
 
 function SortableProjectItem({
   projectId,
@@ -460,7 +219,6 @@ interface SidebarProjectsContentProps {
   newThreadShortcutLabel: string | null;
   commandPaletteShortcutLabel: string | null;
   threadJumpLabelByKey: ReadonlyMap<string, string>;
-  attachThreadListAutoAnimateRef: (node: HTMLElement | null) => void;
   expandThreadListForProject: (projectKey: string) => void;
   collapseThreadListForProject: (projectKey: string) => void;
   dragInProgressRef: React.RefObject<boolean>;
@@ -470,10 +228,6 @@ interface SidebarProjectsContentProps {
   projectsLength: number;
   lastcodeSidebarScale: LegacySidebarScale;
   projectTreeScaleStyle: CSSProperties;
-  desktopLocalEnvironmentIds: ReadonlySet<EnvironmentId>;
-  knownEnvironmentIds: ReadonlySet<EnvironmentId>;
-  environmentIconColors: Readonly<Record<string, EnvironmentIconColor>>;
-  showLocalEnvironmentIcon: boolean;
 }
 
 const SidebarProjectsContent = memo(function SidebarProjectsContent(
@@ -495,7 +249,6 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     newThreadShortcutLabel,
     commandPaletteShortcutLabel,
     threadJumpLabelByKey,
-    attachThreadListAutoAnimateRef,
     expandThreadListForProject,
     collapseThreadListForProject,
     dragInProgressRef,
@@ -505,11 +258,27 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     projectsLength,
     lastcodeSidebarScale,
     projectTreeScaleStyle,
-    desktopLocalEnvironmentIds,
-    knownEnvironmentIds,
-    environmentIconColors,
-    showLocalEnvironmentIcon,
   } = props;
+
+  const newThread = useMemo(
+    () => ({ handle: handleNewThread, shortcutLabel: newThreadShortcutLabel }),
+    [handleNewThread, newThreadShortcutLabel],
+  );
+  const gestures = useMemo(
+    () => ({
+      dragInProgressRef,
+      suppressProjectClickAfterDragRef,
+      suppressProjectClickForContextMenuRef,
+    }),
+    [dragInProgressRef, suppressProjectClickAfterDragRef, suppressProjectClickForContextMenuRef],
+  );
+  const onListExpandedChange = useCallback(
+    (key: string, expanded: boolean) => {
+      if (expanded) expandThreadListForProject(key);
+      else collapseThreadListForProject(key);
+    },
+    [expandThreadListForProject, collapseThreadListForProject],
+  );
 
   return (
     <SidebarContent
@@ -580,30 +349,17 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                 {sortedProjects.map((project) => (
                   <SortableProjectItem key={project.projectKey} projectId={project.projectKey}>
                     {(dragHandleProps) => (
-                      <SidebarProjectItem
-                        lastcodeSidebarScale={lastcodeSidebarScale}
-                        desktopLocalEnvironmentIds={desktopLocalEnvironmentIds}
-                        knownEnvironmentIds={knownEnvironmentIds}
-                        environmentIconColors={environmentIconColors}
-                        showLocalEnvironmentIcon={showLocalEnvironmentIcon}
+                      <LastCodeSidebarProject
                         project={project}
-                        isThreadListExpanded={expandedThreadListsByProject.has(project.projectKey)}
-                        activeRouteThreadKey={
+                        listExpanded={expandedThreadListsByProject.has(project.projectKey)}
+                        activeThreadKey={
                           activeRouteProjectKey === project.projectKey ? routeThreadKey : null
                         }
-                        newThreadShortcutLabel={newThreadShortcutLabel}
-                        handleNewThread={handleNewThread}
-                        threadJumpLabelByKey={threadJumpLabelByKey}
-                        attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
-                        expandThreadListForProject={expandThreadListForProject}
-                        collapseThreadListForProject={collapseThreadListForProject}
-                        dragInProgressRef={dragInProgressRef}
-                        suppressProjectClickAfterDragRef={suppressProjectClickAfterDragRef}
-                        suppressProjectClickForContextMenuRef={
-                          suppressProjectClickForContextMenuRef
-                        }
-                        isManualProjectSorting={isManualProjectSorting}
-                        dragHandleProps={dragHandleProps}
+                        jumpLabels={threadJumpLabelByKey}
+                        newThread={newThread}
+                        onListExpandedChange={onListExpandedChange}
+                        gestures={gestures}
+                        dragHandle={dragHandleProps}
                       />
                     )}
                   </SortableProjectItem>
@@ -614,30 +370,20 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
         ) : (
           <SidebarMenu ref={attachProjectListAutoAnimateRef}>
             {sortedProjects.map((project) => (
-              <SidebarProjectListRow
-                key={project.projectKey}
-                lastcodeSidebarScale={lastcodeSidebarScale}
-                desktopLocalEnvironmentIds={desktopLocalEnvironmentIds}
-                knownEnvironmentIds={knownEnvironmentIds}
-                environmentIconColors={environmentIconColors}
-                showLocalEnvironmentIcon={showLocalEnvironmentIcon}
-                project={project}
-                isThreadListExpanded={expandedThreadListsByProject.has(project.projectKey)}
-                activeRouteThreadKey={
-                  activeRouteProjectKey === project.projectKey ? routeThreadKey : null
-                }
-                newThreadShortcutLabel={newThreadShortcutLabel}
-                handleNewThread={handleNewThread}
-                threadJumpLabelByKey={threadJumpLabelByKey}
-                attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
-                expandThreadListForProject={expandThreadListForProject}
-                collapseThreadListForProject={collapseThreadListForProject}
-                dragInProgressRef={dragInProgressRef}
-                suppressProjectClickAfterDragRef={suppressProjectClickAfterDragRef}
-                suppressProjectClickForContextMenuRef={suppressProjectClickForContextMenuRef}
-                isManualProjectSorting={isManualProjectSorting}
-                dragHandleProps={null}
-              />
+              <SidebarMenuItem key={project.projectKey}>
+                <LastCodeSidebarProject
+                  project={project}
+                  listExpanded={expandedThreadListsByProject.has(project.projectKey)}
+                  activeThreadKey={
+                    activeRouteProjectKey === project.projectKey ? routeThreadKey : null
+                  }
+                  jumpLabels={threadJumpLabelByKey}
+                  newThread={newThread}
+                  onListExpandedChange={onListExpandedChange}
+                  gestures={gestures}
+                  dragHandle={null}
+                />
+              </SidebarMenuItem>
             ))}
           </SidebarMenu>
         )}
@@ -979,15 +725,6 @@ function LastCodeSidebarView() {
     animatedProjectListsRef.current.add(node);
   }, []);
 
-  const animatedThreadListsRef = useRef(new WeakSet<HTMLElement>());
-  const attachThreadListAutoAnimateRef = useCallback((node: HTMLElement | null) => {
-    if (!node || animatedThreadListsRef.current.has(node)) {
-      return;
-    }
-    autoAnimate(node, SIDEBAR_LIST_ANIMATION_OPTIONS);
-    animatedThreadListsRef.current.add(node);
-  }, []);
-
   const visibleThreads = useMemo(
     () => sidebarThreads.filter(threadShellIsVisible),
     [sidebarThreads],
@@ -1217,6 +954,11 @@ function LastCodeSidebarView() {
     });
   }, []);
 
+  const projectEnvironments = useMemo(
+    () => ({ desktopLocalEnvironmentIds, knownEnvironmentIds, showLocalEnvironmentIcon }),
+    [desktopLocalEnvironmentIds, knownEnvironmentIds, showLocalEnvironmentIcon],
+  );
+
   return (
     <>
       {prewarmedSidebarThreadRefs.map((threadRef) => (
@@ -1225,6 +967,7 @@ function LastCodeSidebarView() {
       <SidebarChromeHeader isElectron={isElectron} />
 
       <LastCodeSidebarPresentationProvider
+        projectEnvironments={projectEnvironments}
         providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
         environmentIconColors={environmentIconColors}
         providerBadgePreferences={providerBadgePreferences}
@@ -1246,7 +989,6 @@ function LastCodeSidebarView() {
           newThreadShortcutLabel={newThreadShortcutLabel}
           commandPaletteShortcutLabel={commandPaletteShortcutLabel}
           threadJumpLabelByKey={visibleThreadJumpLabelByKey}
-          attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
           expandThreadListForProject={expandThreadListForProject}
           collapseThreadListForProject={collapseThreadListForProject}
           dragInProgressRef={dragInProgressRef}
@@ -1256,10 +998,6 @@ function LastCodeSidebarView() {
           projectsLength={projects.length}
           lastcodeSidebarScale={lastcodeSidebarScale}
           projectTreeScaleStyle={scaleStyle}
-          desktopLocalEnvironmentIds={desktopLocalEnvironmentIds}
-          knownEnvironmentIds={knownEnvironmentIds}
-          environmentIconColors={environmentIconColors}
-          showLocalEnvironmentIcon={showLocalEnvironmentIcon}
         />
       </LastCodeSidebarPresentationProvider>
       <SidebarChromeFooter />

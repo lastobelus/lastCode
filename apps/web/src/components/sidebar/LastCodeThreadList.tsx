@@ -1,3 +1,4 @@
+import { useLastCodeSidebarListAnimation } from "./useLastCodeSidebarListAnimation";
 import { Fragment, memo, useMemo, type ReactNode } from "react";
 import type { ScopedThreadRef } from "@t3tools/contracts";
 import type { LegacySidebarScale } from "@t3tools/contracts/settings";
@@ -17,7 +18,6 @@ interface Props {
   projectExpanded: boolean;
   listExpanded: boolean;
   onListExpandedChange: (expanded: boolean) => void;
-  attachAnimation: (node: HTMLElement | null) => void;
   navigateToThread: (ref: ScopedThreadRef) => Promise<void>;
   renderRow: (family: LastCodeSidebarFamilyRow) => ReactNode;
 }
@@ -71,10 +71,10 @@ export const LastCodeThreadList = memo(function LastCodeThreadList({
   projectExpanded,
   listExpanded,
   onListExpandedChange,
-  attachAnimation,
   navigateToThread,
   renderRow,
 }: Props) {
+  const attachAnimation = useLastCodeSidebarListAnimation();
   const scaleStyle = useMemo(() => lastcodeSidebarScaleStyle(scale), [scale]);
   const { hiddenThreadStatus, familyProjection } = projection;
   const { hasOverflowingThreads, renderedItems, showEmptyThreadState, shouldShowThreadPanel } =

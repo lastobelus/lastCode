@@ -21,8 +21,9 @@ import { LastCodeThreadList } from "./LastCodeThreadList";
 const mocks = vi.hoisted(() => ({
   navigate: vi.fn(async () => {}),
   expansion: vi.fn(),
-  attach: vi.fn(),
+  animate: vi.fn(),
 }));
+vi.mock("@formkit/auto-animate", () => ({ autoAnimate: mocks.animate }));
 vi.mock("~/hooks/useSettings", () => ({
   useClientSetting: (key: string) =>
     key === "legacySidebarThreadGroupingStyle" ? "typed-groups" : false,
@@ -73,7 +74,6 @@ function Harness({
         mocks.expansion(value);
         setExpanded(value);
       }}
-      attachAnimation={mocks.attach}
       navigateToThread={mocks.navigate}
       renderRow={(family) => (
         <li>
@@ -137,7 +137,7 @@ describe("project thread list composition", () => {
     expect(container.textContent).not.toContain("Other");
     expect(container.querySelector('input[aria-label="Draft Parent"]')).toBe(draft);
     expect(mocks.expansion.mock.calls).toEqual([[true], [false]]);
-    expect(mocks.attach).toHaveBeenCalledTimes(1);
+    expect(mocks.animate).toHaveBeenCalledTimes(1);
   });
   it("uses the real typed subagent disclosure and returns a selected child to its parent", async () => {
     await act(() => root?.render(<Harness selectedChild />));

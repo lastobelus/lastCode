@@ -137,6 +137,11 @@ function Harness({
   }, [querySource, queryProcesses]);
   return (
     <LastCodeSidebarPresentationProvider
+      projectEnvironments={{
+        desktopLocalEnvironmentIds: new Set(),
+        knownEnvironmentIds: new Set(),
+        showLocalEnvironmentIcon: false,
+      }}
       providerEntriesByEnvironmentId={new Map()}
       environmentIconColors={{}}
       providerBadgePreferences={{ enabled: false, size: 50, transparency: 0 }}

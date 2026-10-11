@@ -10,6 +10,11 @@ import {
 const mocks = vi.hoisted(() => ({ render: vi.fn(), open: vi.fn(() => true) }));
 vi.mock("../../lib/openPullRequestLink", () => ({ useOpenPrLink: () => mocks.open }));
 const values: Omit<ComponentProps<typeof LastCodeSidebarPresentationProvider>, "children"> = {
+  projectEnvironments: {
+    desktopLocalEnvironmentIds: new Set(),
+    knownEnvironmentIds: new Set(),
+    showLocalEnvironmentIcon: false,
+  },
   providerEntriesByEnvironmentId: new Map(),
   environmentIconColors: {},
   providerBadgePreferences: { enabled: false, size: 50, transparency: 0 },
