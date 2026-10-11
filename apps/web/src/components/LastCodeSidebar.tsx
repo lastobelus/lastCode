@@ -46,13 +46,13 @@ import { LastCodeProjectGroupingDialog } from "./sidebar/LastCodeProjectGrouping
 import { LastCodeSidebarOptions } from "./sidebar/LastCodeSidebarOptions";
 import { LastCodeSidebarDesktopNotice } from "./sidebar/LastCodeSidebarDesktopNotice";
 import { LastCodeSidebarConnectionNotice } from "./sidebar/LastCodeSidebarConnectionNotice";
-import { formatProjectMemberActionLabel } from "./sidebar/lastcodeProjectMenu";
+import { LastCodeProjectNewThread } from "./sidebar/LastCodeProjectNewThread";
 
 import {
   useSidebarProviderBadgePreferences,
   type SidebarProviderBadgePreferences,
 } from "./sidebar/SidebarEnvironmentIcon";
-import { ChevronRightIcon, FolderPlusIcon, SearchIcon, SquarePenIcon } from "lucide-react";
+import { ChevronRightIcon, FolderPlusIcon, SearchIcon } from "lucide-react";
 import { ThreadStatusLabel } from "./ThreadStatusIndicators";
 import { ProjectFavicon } from "./ProjectFavicon";
 import { ProjectSidebarDraftList } from "./sidebar/ProjectSidebarDraftList";
@@ -97,7 +97,6 @@ import {
   scopeProjectRef,
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
-import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { threadShellIsVisible } from "@t3tools/client-runtime/state/models";
 import { useNavigate, useParams, useRouter } from "@tanstack/react-router";
 import { type EnvironmentIconColor, type LegacySidebarScale } from "@t3tools/contracts/settings";
@@ -128,7 +127,6 @@ import {
 } from "../keybindings";
 import { isModelPickerOpen } from "../modelPickerVisibility";
 import { useShortcutModifierState } from "../shortcutModifierState";
-import { readLocalApi } from "../localApi";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { lastcodeSidebarScaleStyle } from "../lastcodeSidebarScale";
@@ -145,7 +143,6 @@ import {
   resolveActiveThreadRouteRef,
   resolveThreadRouteTarget,
 } from "../threadRoutes";
-import { stackedThreadToast, toastManager } from "./ui/toast";
 import { Kbd } from "./ui/kbd";
 import { Button } from "./ui/button";
 
@@ -210,8 +207,6 @@ const SIDEBAR_LIST_ANIMATION_OPTIONS = {
   easing: "ease-out",
 } as const;
 const EMPTY_THREAD_JUMP_LABELS = new Map<string, string>();
-const SIDEBAR_ICON_ACTION_BUTTON_CLASS =
-  "inline-flex h-6 min-w-6 cursor-pointer items-center justify-center rounded-md px-0.75 text-icon-muted hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring";
 
 function SidebarThreadDetailPrewarmer({ threadRef }: { readonly threadRef: ScopedThreadRef }) {
   useEnvironmentThread(threadRef.environmentId, threadRef.threadId);
@@ -864,11 +859,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const isNoProjectGroup = project.projectKey === NO_PROJECT_GROUP_KEY;
-  const loadBalancingEnabled = useClientSettings((settings) => settings.loadBalancingEnabled);
-  const canAutoBalance =
-    loadBalancingEnabled &&
-    !isNoProjectGroup &&
-    new Set(project.memberProjects.map((member) => member.environmentId)).size > 1;
   const projectEnvironmentIcons = useMemo(
     () =>
       projectEnvironmentIconEntries({
@@ -1124,98 +1114,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
   const handleMultiSelectContextMenu = useLastCodeBulkThreadMenu();
 
-  const createThreadForProjectMember = useCallback(
-    (member: SidebarProjectGroupMember, environmentSelection: "auto" | "manual" = "manual") => {
-      if (isMobile) {
-        setOpenMobile(false);
-      }
-      void (async () => {
-        const result = await settlePromise(() =>
-          handleNewThread(scopeProjectRef(member.environmentId, member.id), {
-            environmentSelection,
-          }),
-        );
-        if (result._tag === "Failure") {
-          const error = squashAtomCommandFailure(result);
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Could not create thread",
-              description: error instanceof Error ? error.message : "An error occurred.",
-            }),
-          );
-        }
-      })();
-    },
-    [handleNewThread, isMobile, setOpenMobile],
-  );
-
-  const handleCreateThreadClick = useCallback(
-    (event: React.MouseEvent<HTMLButtonElement>) => {
-      event.preventDefault();
-      event.stopPropagation();
-
-      if (project.memberProjects.length === 1) {
-        createThreadForProjectMember(project.memberProjects[0]!);
-        return;
-      }
-
-      void (async () => {
-        const api = readLocalApi();
-        if (!api) {
-          return;
-        }
-        const clickedResult = await settlePromise(() =>
-          api.contextMenu.show(
-            [
-              ...(canAutoBalance ? [{ id: "auto", label: "Auto balance" }] : []),
-              ...project.memberProjects.map((member) => ({
-                id: member.physicalProjectKey,
-                label: formatProjectMemberActionLabel(member, project.groupedProjectCount),
-              })),
-            ],
-            {
-              x: event.clientX,
-              y: event.clientY,
-            },
-          ),
-        );
-        if (clickedResult._tag === "Failure") {
-          const error = squashAtomCommandFailure(clickedResult);
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Could not choose environment",
-              description: error instanceof Error ? error.message : "An error occurred.",
-            }),
-          );
-          return;
-        }
-        const clicked = clickedResult.value;
-        if (!clicked) {
-          return;
-        }
-        if (clicked === "auto") {
-          createThreadForProjectMember(project.memberProjects[0]!, "auto");
-          return;
-        }
-        const targetMember = project.memberProjects.find(
-          (member) => member.physicalProjectKey === clicked,
-        );
-        if (!targetMember) {
-          return;
-        }
-        createThreadForProjectMember(targetMember);
-      })();
-    },
-    [
-      canAutoBalance,
-      createThreadForProjectMember,
-      project.groupedProjectCount,
-      project.memberProjects,
-    ],
-  );
-
   const startThreadRename = useCallback(
     (key: string, title: string) => {
       const ref = parseScopedThreadKey(key);
@@ -1388,26 +1286,11 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             ) : null}
           </span>
         )}
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <div className="pointer-events-none absolute top-[calc(50%+1px)] right-0.5 -translate-y-1/2 opacity-0 transition-opacity duration-150 max-sm:pointer-events-auto max-sm:opacity-100 group-hover/project-header:pointer-events-auto group-hover/project-header:opacity-100 group-focus-within/project-header:pointer-events-auto group-focus-within/project-header:opacity-100">
-                <button
-                  type="button"
-                  aria-label={`Create new thread in ${project.displayName}`}
-                  data-testid="new-thread-button"
-                  className={SIDEBAR_ICON_ACTION_BUTTON_CLASS}
-                  onClick={handleCreateThreadClick}
-                >
-                  <SquarePenIcon className="size-3.5" />
-                </button>
-              </div>
-            }
-          />
-          <TooltipPopup side="top">
-            {newThreadShortcutLabel ? `New thread (${newThreadShortcutLabel})` : "New thread"}
-          </TooltipPopup>
-        </Tooltip>
+        <LastCodeProjectNewThread
+          project={project}
+          handleNewThread={handleNewThread}
+          shortcutLabel={newThreadShortcutLabel}
+        />
       </div>
 
       <SidebarProjectThreadList
