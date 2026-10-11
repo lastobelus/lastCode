@@ -52,6 +52,27 @@ const keys = (projection: ReturnType<typeof project>) =>
   projection.renderedRows.map((row) => row.thread.id);
 
 describe("legacy sidebar subagent families", () => {
+  it("keeps rendered and keyboard order identical across preview, expansion and status inputs", () => {
+    const parent = thread("parent");
+    const child = thread("child", "parent");
+    const other = thread("other", undefined, { lastVisitedAt: "2026-03-09T12:00:00Z" });
+    const shells = [parent, child, other];
+    for (const projectExpanded of [false, true]) {
+      for (const listExpanded of [false, true]) {
+        for (const previewCount of [0, 1, 5]) {
+          for (const activeThreadKey of [null, lastcodeSidebarThreadKey(child)]) {
+            const options = { projectExpanded, listExpanded, previewCount, activeThreadKey };
+            const rendering = project(shells, options);
+            const navigation = project(shells, { ...options, statusForThread: undefined });
+            expect(navigation.orderedThreadKeys).toEqual(rendering.orderedThreadKeys);
+            expect(rendering.orderedThreadKeys).toEqual(
+              rendering.renderedRows.map((row) => row.key),
+            );
+          }
+        }
+      }
+    }
+  });
   it("shows released subagents as independent roots while preserving their owned descendants", () => {
     const released = thread("helper", "archived-parent", {
       lineage: {

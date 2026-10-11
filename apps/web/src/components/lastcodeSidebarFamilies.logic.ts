@@ -113,26 +113,16 @@ export function lastcodeSidebarFamilySummary(row: LastCodeSidebarFamilyRow): str
     .join(" · ");
 }
 
-/** Projects sorted visible shells into owned subagent and display-only creator families.
- * Root preview limits never split a family; collapsed families retain the selected ancestor path.
- * Creator grouping only changes display placement; it never changes the conversation lineage.
- * Unavailable parents/creators and cycles leave the child reachable as an identified root.
- */
-export function projectLastCodeSidebarFamilies(input: {
-  threads: readonly SidebarThreadSummary[];
-  collapsedByKey: Readonly<Record<string, boolean>>;
-  activeThreadKey: string | null;
-  projectExpanded: boolean;
-  previewCount: number;
-  listExpanded: boolean;
-  groupingStyle?: "minimal" | "typed-groups";
-  statusForThread?: (thread: SidebarThreadSummary) => ThreadStatusPill | null;
-}) {
-  const byKey = new Map(input.threads.map((thread) => [lastcodeSidebarThreadKey(thread), thread]));
-  const parentByKey = new Map<string, string>();
-  const unavailableByKey = new Map<string, string>();
-  const creatorGroupingWarningByKey = new Map<string, string>();
-  const creatorEdges = new Set<string>();
+interface FamilyGraph {
+  byKey: Map<string, SidebarThreadSummary>;
+  parentByKey: Map<string, string>;
+  unavailableByKey: Map<string, string>;
+  creatorGroupingWarningByKey: Map<string, string>;
+  creatorEdges: Set<string>;
+}
+
+function connectSubagentParents(graph: FamilyGraph) {
+  const { byKey, parentByKey, unavailableByKey } = graph;
   for (const [key, thread] of byKey) {
     if (!isSidebarSubagentThread(thread)) continue;
     const parentId = thread.lineage.parentThreadId;
@@ -149,7 +139,10 @@ export function projectLastCodeSidebarFamilies(input: {
       );
     }
   }
+}
 
+function connectCreators(graph: FamilyGraph) {
+  const { byKey, parentByKey, creatorEdges } = graph;
   for (const [key, thread] of byKey) {
     if (!lastcodeSidebarCreatorGroupingEligible(thread) || thread.creatorGrouping !== "grouped")
       continue;
@@ -161,7 +154,31 @@ export function projectLastCodeSidebarFamilies(input: {
       creatorEdges.add(key);
     }
   }
+}
 
+function detachFamilyCycle(cycleKeys: readonly string[], graph: FamilyGraph) {
+  const { byKey, parentByKey, creatorEdges, creatorGroupingWarningByKey, unavailableByKey } = graph;
+  // Display-only creator edges yield to delegated ownership when a mixed cycle forms.
+  const creatorCycleKeys = cycleKeys.filter((cycleKey) => creatorEdges.has(cycleKey));
+  for (const cycleKey of creatorCycleKeys.length ? creatorCycleKeys : cycleKeys) {
+    const parentKey = parentByKey.get(cycleKey);
+    if (creatorEdges.has(cycleKey)) {
+      creatorGroupingWarningByKey.set(
+        cycleKey,
+        `Creator ${byKey.get(parentKey ?? "")?.title ?? "unavailable"} · invalid grouping`,
+      );
+    } else {
+      unavailableByKey.set(
+        cycleKey,
+        `Parent ${byKey.get(parentKey ?? "")?.title ?? "unavailable"} · invalid lineage`,
+      );
+    }
+    parentByKey.delete(cycleKey);
+  }
+}
+
+function detachFamilyCycles(graph: FamilyGraph) {
+  const { byKey, parentByKey } = graph;
   // A parent graph has one outgoing edge per child. Visit each edge once and detach cycles.
   const visited = new Set<string>();
   for (const key of byKey.keys()) {
@@ -171,24 +188,7 @@ export function projectLastCodeSidebarFamilies(input: {
     while (cursor && !visited.has(cursor)) {
       const cycleIndex = pathIndex.get(cursor);
       if (cycleIndex !== undefined) {
-        const cycleKeys = path.slice(cycleIndex);
-        // Display-only creator edges yield to delegated ownership when a mixed cycle forms.
-        const creatorCycleKeys = cycleKeys.filter((cycleKey) => creatorEdges.has(cycleKey));
-        for (const cycleKey of creatorCycleKeys.length ? creatorCycleKeys : cycleKeys) {
-          const parentKey = parentByKey.get(cycleKey);
-          if (creatorEdges.has(cycleKey)) {
-            creatorGroupingWarningByKey.set(
-              cycleKey,
-              `Creator ${byKey.get(parentKey ?? "")?.title ?? "unavailable"} · invalid grouping`,
-            );
-          } else {
-            unavailableByKey.set(
-              cycleKey,
-              `Parent ${byKey.get(parentKey ?? "")?.title ?? "unavailable"} · invalid lineage`,
-            );
-          }
-          parentByKey.delete(cycleKey);
-        }
+        detachFamilyCycle(path.slice(cycleIndex), graph);
         break;
       }
       pathIndex.set(cursor, path.length);
@@ -197,7 +197,10 @@ export function projectLastCodeSidebarFamilies(input: {
     }
     for (const pathKey of path) visited.add(pathKey);
   }
+}
 
+function orderFamilyChildren(graph: FamilyGraph) {
+  const { byKey, parentByKey } = graph;
   const childrenByKey = new Map<string, string[]>();
   const roots: string[] = [];
   for (const key of byKey.keys()) {
@@ -209,7 +212,6 @@ export function projectLastCodeSidebarFamilies(input: {
       childrenByKey.set(parentKey, siblings);
     }
   }
-  const typedGroups = input.groupingStyle === "typed-groups";
   // Keep delegated work together after ordinary conversations in both layouts.
   for (const [key, children] of childrenByKey) {
     childrenByKey.set(key, [
@@ -217,6 +219,46 @@ export function projectLastCodeSidebarFamilies(input: {
       ...children.filter((childKey) => isSidebarSubagentThread(byKey.get(childKey)!)),
     ]);
   }
+  return { childrenByKey, roots };
+}
+
+function buildFamilyGraph(threads: readonly SidebarThreadSummary[]) {
+  const byKey = new Map(threads.map((thread) => [lastcodeSidebarThreadKey(thread), thread]));
+  const parentByKey = new Map<string, string>();
+  const unavailableByKey = new Map<string, string>();
+  const creatorGroupingWarningByKey = new Map<string, string>();
+  const creatorEdges = new Set<string>();
+  const graph = { byKey, parentByKey, unavailableByKey, creatorGroupingWarningByKey, creatorEdges };
+  connectSubagentParents(graph);
+  connectCreators(graph);
+  detachFamilyCycles(graph);
+  return { ...graph, ...orderFamilyChildren(graph) };
+}
+
+/** Projects sorted visible shells into owned subagent and display-only creator families.
+ * Root preview limits never split a family; collapsed families retain the selected ancestor path.
+ * Creator grouping only changes display placement; it never changes the conversation lineage.
+ * Unavailable parents/creators and cycles leave the child reachable as an identified root.
+ */
+export function projectLastCodeSidebarFamilies(input: {
+  threads: readonly SidebarThreadSummary[];
+  collapsedByKey: Readonly<Record<string, boolean>>;
+  activeThreadKey: string | null;
+  projectExpanded: boolean;
+  previewCount: number;
+  listExpanded: boolean;
+  groupingStyle?: "minimal" | "typed-groups";
+  statusForThread?: (thread: SidebarThreadSummary) => ThreadStatusPill | null;
+}) {
+  const {
+    byKey,
+    parentByKey,
+    unavailableByKey,
+    creatorGroupingWarningByKey,
+    childrenByKey,
+    roots,
+  } = buildFamilyGraph(input.threads);
+  const typedGroups = input.groupingStyle === "typed-groups";
   const selectedPath = new Set<string>();
   let selectedRoot: string | null = null;
   let cursor = input.activeThreadKey;
