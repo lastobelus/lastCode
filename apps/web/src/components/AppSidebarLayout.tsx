@@ -95,6 +95,7 @@ function SidebarControl() {
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const { toggleSidebar, isMobile, mobileSheetMounted } = useSidebar();
   const updateClientSettings = useUpdateClientSettings();
+  const sidebarMode = useSidebarMode();
   const clientSettingsHydrated = useClientSettingsHydrated();
   const routeTarget = useParams({
     strict: false,
@@ -157,7 +158,7 @@ function SidebarControl() {
         toggleSidebar();
         return;
       }
-      updateClientSettings(toggleUpstreamSidebar);
+      if (sidebarMode !== "lastcode") updateClientSettings(toggleUpstreamSidebar);
     };
 
     // Capture before focused editors consume commands such as Mod+B for rich-text formatting.
@@ -175,6 +176,7 @@ function SidebarControl() {
     keybindings,
     previewOpen,
     terminalOpen,
+    sidebarMode,
     toggleSidebar,
     updateClientSettings,
     usagePageOpen,

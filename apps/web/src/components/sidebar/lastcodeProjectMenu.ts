@@ -33,7 +33,8 @@ function memberActionItem(
   const label = formatProjectMemberActionLabel(target.member, groupedProjectCount);
   return {
     id: `${action}:${target.member.physicalProjectKey}`,
-    label: action === "delete" && disabled ? `${label} (disable persistence first)` : label,
+    label:
+      action === "delete" && target.removalBlocked ? `${label} (disable persistence first)` : label,
     ...(action === "delete" ? { destructive: true } : {}),
     ...(disabled ? { disabled: true } : {}),
   };

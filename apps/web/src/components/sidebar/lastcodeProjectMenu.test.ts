@@ -45,7 +45,29 @@ describe("LastCode project context menu", () => {
     ]);
     expect(menu.actions.get("copy-path:environment-b")).toEqual({ action: "copy-path", member: b });
     expect(menu.items[2]?.children?.every((item) => !item.disabled)).toBe(true);
-    expect(menu.items[5]?.children?.[1]).toMatchObject({ disabled: true, destructive: true });
+    expect(menu.items[5]?.children?.[1]).toMatchObject({
+      label: "environment-b — /work/environment-b",
+      disabled: true,
+      destructive: true,
+    });
+  });
+
+  it("explains persistence protection only for protected grouped members", () => {
+    const menu = buildLastCodeProjectMenu({
+      members: [
+        { member: member("protected"), canOperate: true, removalBlocked: true },
+        { member: member("read-only"), canOperate: false, removalBlocked: false },
+      ],
+      groupedProjectCount: 2,
+      isNoProjectGroup: false,
+    });
+    expect(menu.items[5]?.children).toMatchObject([
+      {
+        label: "protected — /work/protected (disable persistence first)",
+        disabled: true,
+      },
+      { label: "read-only — /work/read-only", disabled: true },
+    ]);
   });
 
   it("keeps a protected single member visible but unavailable for removal", () => {
