@@ -231,7 +231,17 @@ export function LastCodeThreadFamilySummary({
   return (
     <>
       {family.descendantsStatus ? (
-        <ThreadStatusLabel status={family.descendantsStatus} compact={compactStatusIndicators} />
+        <>
+          <span className="inline-flex shrink-0 @sm/lastcode-sidebar:hidden">
+            <ThreadStatusLabel status={family.descendantsStatus} compact />
+          </span>
+          <span className="hidden min-w-0 overflow-hidden @sm/lastcode-sidebar:inline-flex">
+            <ThreadStatusLabel
+              status={family.descendantsStatus}
+              compact={compactStatusIndicators}
+            />
+          </span>
+        </>
       ) : null}
       <Tooltip>
         <TooltipTrigger

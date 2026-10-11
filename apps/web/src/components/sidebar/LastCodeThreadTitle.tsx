@@ -82,16 +82,36 @@ function TitleText({
           >
             {thread.title}
           </span>
-          {thread.persistent && (family.parentKey !== null || subagentLabel) ? (
-            <span className="shrink-0 text-3xs text-sidebar-muted-foreground">Protected</span>
-          ) : null}
-          <LastCodeThreadRelationshipBadge presentation={presentation} />
-          {subagentLabel ? (
-            <span className="shrink-0 text-3xs text-sidebar-muted-foreground">
-              {lastcodeSidebarSubagentStatusLabel(thread, threadStatus)}
-            </span>
-          ) : null}
-          <LastCodeThreadFamilySummary family={family} display="inline" />
+          <span className="flex min-w-0 max-w-[40%] items-center gap-1 overflow-hidden">
+            {thread.persistent && (family.parentKey !== null || subagentLabel) ? (
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <span
+                      aria-label="Protected"
+                      className="shrink-0 text-3xs text-sidebar-muted-foreground"
+                    />
+                  }
+                >
+                  <MessageSquareLockIcon
+                    aria-hidden
+                    className="size-3 @sm/lastcode-sidebar:hidden"
+                  />
+                  <span aria-hidden className="hidden @sm/lastcode-sidebar:inline">
+                    Protected
+                  </span>
+                </TooltipTrigger>
+                <TooltipPopup side="top">Protected from archive and deletion</TooltipPopup>
+              </Tooltip>
+            ) : null}
+            <LastCodeThreadRelationshipBadge presentation={presentation} />
+            {subagentLabel ? (
+              <span className="sr-only min-w-0 text-3xs text-sidebar-muted-foreground @sm/lastcode-sidebar:not-sr-only @sm/lastcode-sidebar:truncate">
+                {lastcodeSidebarSubagentStatusLabel(thread, threadStatus)}
+              </span>
+            ) : null}
+            <LastCodeThreadFamilySummary family={family} display="inline" />
+          </span>
         </span>
         <LastCodeThreadFamilySummary family={family} display="line" />
       </span>
@@ -117,7 +137,14 @@ export function LastCodeThreadTitle({
     <>
       <WaitingAction thread={thread} threadStatus={threadStatus} />
       {threadStatus && (
-        <ThreadStatusLabel status={threadStatus} compact={compactStatusIndicators} />
+        <>
+          <span className="inline-flex shrink-0 @sm/lastcode-sidebar:hidden">
+            <ThreadStatusLabel status={threadStatus} compact />
+          </span>
+          <span className="hidden min-w-0 max-w-[35%] overflow-hidden @sm/lastcode-sidebar:inline-flex">
+            <ThreadStatusLabel status={threadStatus} compact={compactStatusIndicators} />
+          </span>
+        </>
       )}
       {renameTarget ? (
         <LastCodeThreadTitleEditor
