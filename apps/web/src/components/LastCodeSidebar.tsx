@@ -1,3 +1,4 @@
+import { LastCodeThreadRowSurface } from "./sidebar/LastCodeThreadRowSurface";
 import { useLastCodeThreadNavigation } from "./sidebar/useLastCodeThreadNavigation";
 import {
   LastCodeProjectHeader,
@@ -70,7 +71,6 @@ import React, {
   useState,
   type CSSProperties,
 } from "react";
-import { cn } from "~/lib/utils";
 import {
   DndContext,
   type DragCancelEvent,
@@ -109,7 +109,6 @@ import { useTerminalFocus } from "../hooks/useTerminalFocus";
 import { useOpenPrLink } from "../lib/openPullRequestLink";
 import { isTerminalFocused } from "../lib/terminalFocus";
 import { readThreadShell, useProjects, useThreadShells } from "../state/entities";
-import { ThreadAnnotationNavigationTrigger } from "./thread-annotation/ThreadAnnotation";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useEnvironmentScope } from "../state/session";
 import {
@@ -179,7 +178,6 @@ import {
 } from "../logicalProject";
 import type { SidebarThreadSummary } from "../types";
 import {
-  lastcodeSidebarFamilySummary,
   type LastCodeSidebarFamilyItem,
   type LastCodeSidebarFamilyRow,
 } from "./lastcodeSidebarFamilies.logic";
@@ -237,7 +235,6 @@ function buildThreadJumpLabelMap(input: {
 interface SidebarThreadRowProps {
   thread: SidebarThreadSummary;
   familyRow: LastCodeSidebarFamilyRow;
-  groupingStyle: "minimal" | "typed-groups";
   providerBadgePreferences: SidebarProviderBadgePreferences;
   configuredEnvironmentIconColor: EnvironmentIconColor | undefined;
   projectCwd: string | null;
@@ -305,7 +302,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   );
   const { leaseLiveStatus, rowRef } = useSidebarRowSubscriptionLease(isActive);
   const cleanup = thread.worktreeCleanup ?? null;
-  const isCleanupPending = cleanup?.status === "deleting" || cleanup?.status === "queued";
   const localLastVisitedAt = useUiStateStore((state) => state.threadLastVisitedAtById[threadKey]);
   const lastVisitedAt = resolveThreadLastVisitedAt(thread.lastVisitedAt, localLastVisitedAt);
   const isSelected = useThreadSelectionStore((state) => state.selectedThreadKeys.has(threadKey));
@@ -341,7 +337,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         null)
       : null;
   const familyPresentation = useLastCodeThreadFamily(props.familyRow, threadStatus);
-  const { creatorDescription, relationshipLabel } = familyPresentation;
   const threadHoverDetails = (
     <LastCodeThreadHoverDetails
       thread={thread}
@@ -362,16 +357,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     />
   );
   const detailsLifetime = useLastCodeThreadDetails(threadRef, editing);
-  const {
-    threadRowActive,
-    setThreadRowActive,
-    annotationPopoverHandle,
-    annotationTriggerId,
-    threadNavigationRef,
-    threadDetailsTooltipId,
-    handleMouseLeave,
-    handleBlurCapture,
-  } = detailsLifetime;
+  const { setThreadRowActive, annotationPopoverHandle, handleMouseLeave, handleBlurCapture } =
+    detailsLifetime;
   const {
     handleRowClick,
     handleRowDoubleClick,
@@ -392,23 +379,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     editing.requestRename,
   );
   const family = props.familyRow;
-  const typedGroups = props.groupingStyle === "typed-groups";
-  const threadRowElement = (
-    <div
-      ref={threadNavigationRef}
-      className={cn(
-        "relative isolate flex h-8 w-full min-w-0 cursor-pointer select-none items-center gap-1 overflow-hidden rounded-md pr-2 text-left text-xs outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring group-data-[collapsible=icon]:hidden [&>span:last-child]:truncate [&>svg:not([class*='size-'])]:size-4 [&>svg]:shrink-0 [&>svg]:text-sidebar-muted-foreground",
-        isActive
-          ? "bg-sidebar-row-active font-medium text-sidebar-foreground hover:bg-sidebar-row-active"
-          : isSelected
-            ? "bg-sidebar-row-selected text-sidebar-foreground hover:bg-sidebar-row-active"
-            : "text-sidebar-muted-foreground/80 hover:bg-sidebar-row-hover hover:text-sidebar-foreground",
-        typedGroups && family.descendantCount > 0 && !family.expanded && "h-10",
-        isCleanupPending && "cursor-not-allowed opacity-65",
-        isFileDragOver && "ring-1 ring-inset ring-primary/70",
-      )}
-    />
-  );
 
   return (
     <SidebarMenuSubItem
@@ -427,35 +397,14 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       onBlurCapture={handleBlurCapture}
     >
       <LastCodeSidebarFamilyGuides depth={family.depth} />
-      {/* A thread row is the LastCode sidebar's own control (a focusable div that hosts nested
-          links and buttons), not a SidebarMenuSubButton, so it owns its look here. */}
-      <ThreadAnnotationNavigationTrigger
-        annotationActive={hasActiveAnnotation}
-        handle={annotationPopoverHandle}
-        id={annotationTriggerId}
-        render={threadRowElement}
-        role="button"
-        tabIndex={0}
-        aria-describedby={
-          !hasActiveAnnotation && threadRowActive ? threadDetailsTooltipId : undefined
-        }
-        data-active={isActive}
-        aria-label={
-          relationshipLabel
-            ? `${thread.title}, ${relationshipLabel}${creatorDescription ? `, ${creatorDescription}` : ""}${thread.persistent ? ", protected from archive and deletion" : ""}${!family.expanded && family.descendantCount ? `, ${lastcodeSidebarFamilySummary(family)}` : ""}`
-            : undefined
-        }
-        data-slot="sidebar-menu-sub-button"
-        data-sidebar="menu-sub-button"
-        data-size="sm"
-        data-testid={`thread-row-${thread.id}`}
-        data-cleanup-pending={isCleanupPending}
-        data-file-drag-over={isFileDragOver}
-        aria-disabled={isCleanupPending || undefined}
-        onClick={handleRowClick}
-        onDoubleClick={handleRowDoubleClick}
-        onKeyDown={handleRowKeyDown}
-        onContextMenu={handleRowContextMenu}
+      <LastCodeThreadRowSurface
+        family={family}
+        relationship={familyPresentation}
+        lifetime={detailsLifetime}
+        gestures={{ handleRowClick, handleRowDoubleClick, handleRowKeyDown, handleRowContextMenu }}
+        active={isActive}
+        selected={isSelected}
+        fileDragOver={isFileDragOver}
       >
         <LastCodeThreadCleanupOverlay thread={thread} content={threadHoverDetails} />
         <LastCodeThreadFamilyDisclosure
@@ -515,7 +464,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             ) : null}
           </LastCodeThreadMetadata>
         </div>
-      </ThreadAnnotationNavigationTrigger>
+      </LastCodeThreadRowSurface>
       <LastCodeThreadDetails
         thread={thread}
         lifetime={detailsLifetime}
@@ -675,7 +624,6 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
                 </SidebarMenuSubItem>
               ) : null}
               <SidebarThreadRow
-                groupingStyle={props.groupingStyle}
                 thread={thread}
                 familyRow={familyRow}
                 providerBadgePreferences={providerBadgePreferences}

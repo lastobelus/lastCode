@@ -7,9 +7,12 @@ import { makeThreadFixture } from "../../test-fixtures";
 import { LastCodeThreadMetadata } from "./LastCodeThreadMetadata";
 import { LastCodeThreadDetails } from "./LastCodeThreadDetails";
 import { useLastCodeThreadDetails } from "./useLastCodeThreadDetails";
-import { ThreadAnnotationNavigationTrigger } from "../thread-annotation/ThreadAnnotation";
+import { LastCodeThreadRowSurface } from "./LastCodeThreadRowSurface";
+import { handleLastCodeThreadRowKeyDown } from "./lastcodeThreadRowInteractions";
+import { projectLastCodeSidebarFamilies } from "../lastcodeSidebarFamilies.logic";
 const mocks = vi.hoisted(() => ({
   navigate: vi.fn(),
+  context: vi.fn(),
   archive: vi.fn(),
   worktrees: true,
   edit: vi.fn(),
@@ -24,7 +27,10 @@ const editing = {
   requestArchiveConfirmation: vi.fn(),
   cancelArchiveConfirmation: vi.fn(),
 };
-vi.mock("../../hooks/useSettings", () => ({ useClientSetting: () => mocks.worktrees }));
+vi.mock("../../hooks/useSettings", () => ({
+  useClientSetting: (key: string) =>
+    key === "legacySidebarThreadGroupingStyle" ? "typed-groups" : mocks.worktrees,
+}));
 vi.mock("../ThreadStatusIndicators", () => ({
   ThreadWorktreeIndicator: () => <span>Worktree</span>,
 }));
@@ -45,7 +51,7 @@ function Harness({ jump = null, active = true }: { jump?: string | null; active?
     { environmentId: thread.environmentId, threadId: thread.id },
     editing,
   );
-  const { annotationPopoverHandle: handle, annotationTriggerId, threadNavigationRef } = lifetime;
+  const { annotationPopoverHandle: handle } = lifetime;
   const value = {
     ...thread,
     annotation: thread.annotation
@@ -54,15 +60,29 @@ function Harness({ jump = null, active = true }: { jump?: string | null; active?
   };
   return (
     <>
-      <ThreadAnnotationNavigationTrigger
-        annotationActive={active}
-        handle={handle}
-        id={annotationTriggerId}
-        render={<div ref={threadNavigationRef} />}
-        role="button"
-        tabIndex={0}
-        onClick={mocks.navigate}
-        onKeyDown={mocks.navigate}
+      <LastCodeThreadRowSurface
+        family={
+          projectLastCodeSidebarFamilies({
+            threads: [value],
+            collapsedByKey: {},
+            activeThreadKey: null,
+            projectExpanded: true,
+            previewCount: 5,
+            listExpanded: false,
+            groupingStyle: "typed-groups",
+          }).renderedItems.flatMap((item) => (item.type === "thread" ? [item.row] : []))[0]!
+        }
+        relationship={{ relationshipLabel: null, creatorDescription: null }}
+        lifetime={lifetime}
+        gestures={{
+          handleRowClick: mocks.navigate,
+          handleRowDoubleClick: () => {},
+          handleRowContextMenu: mocks.context,
+          handleRowKeyDown: (event) => handleLastCodeThreadRowKeyDown(event, mocks.navigate),
+        }}
+        active={false}
+        selected={false}
+        fileDragOver={false}
       >
         <LastCodeThreadMetadata
           thread={value}
@@ -82,7 +102,7 @@ function Harness({ jump = null, active = true }: { jump?: string | null; active?
             Archive
           </button>
         </LastCodeThreadMetadata>
-      </ThreadAnnotationNavigationTrigger>
+      </LastCodeThreadRowSurface>
       <LastCodeThreadDetails
         thread={value}
         lifetime={lifetime}
@@ -138,6 +158,49 @@ async function open() {
   await act(() => trigger().click());
 }
 describe("row details composition", () => {
+  it.each(["Enter", " "])(
+    "navigates once with %s without opening its annotation, while nested keys stay isolated",
+    async (key) => {
+      await render(null);
+      const row = container.querySelector<HTMLElement>(`[data-testid="thread-row-${thread.id}"]`)!;
+      await act(() => {
+        row.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+        row.dispatchEvent(new KeyboardEvent("keyup", { key, bubbles: true, cancelable: true }));
+      });
+      expect(mocks.navigate).toHaveBeenCalledTimes(1);
+      expect(document.querySelector('[data-slot="popover-popup"]')).toBeNull();
+      await act(() =>
+        action("Archive").dispatchEvent(
+          new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }),
+        ),
+      );
+      expect(mocks.navigate).toHaveBeenCalledTimes(1);
+      await act(() => action("Archive").click());
+      expect(mocks.archive).toHaveBeenCalledTimes(1);
+      await open();
+      expect(document.querySelector('[data-slot="popover-popup"]')?.textContent).toContain(
+        "Follow up here",
+      );
+      expect(container.querySelector(`[data-testid="thread-row-${thread.id}"]`)).toBe(row);
+    },
+  );
+  it("routes a native context-menu key through the same surface and leaves nested controls alone", async () => {
+    await render(null);
+    const row = container.querySelector<HTMLElement>(`[data-testid="thread-row-${thread.id}"]`)!;
+    await act(() =>
+      row.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ContextMenu", bubbles: true, cancelable: true }),
+      ),
+    );
+    expect(mocks.context).toHaveBeenCalledTimes(1);
+    await act(() =>
+      action("Archive").dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ContextMenu", bubbles: true, cancelable: true }),
+      ),
+    );
+    expect(mocks.context).toHaveBeenCalledTimes(1);
+    expect(mocks.navigate).not.toHaveBeenCalled();
+  });
   it.each([null, "⌘1"])(
     "opens annotation from metadata %s with shared content and no navigation",
     async (jump) => {
