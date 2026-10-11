@@ -27,7 +27,11 @@ import { useLastCodeThreadClipboard } from "./useLastCodeThreadClipboard";
 import { deleteLastCodeThread } from "./lastcodeThreadDeletion";
 import { reportThreadOperationFailure } from "./lastcodeThreadOperationResult";
 import { checkTaskPermission } from "./lastcodeSidebarPermission";
-import { readLastCodeThreadMenuTarget } from "./lastcodeThreadMenuTarget";
+import {
+  readLastCodeThreadMenuTarget,
+  readLastCodeThreadMenuProject,
+  type LastCodeThreadMenuTarget,
+} from "./lastcodeThreadMenuTarget";
 import {
   isLastCodeThreadActionId,
   lastcodeThreadActionRequiresOperate,
@@ -53,9 +57,9 @@ export function useLastCodeThreadMenu(
   const handoffsLimit = useClientSettings((s) => s.handoffsMenuLimit);
   const confirmDeletion = useClientSettings((s) => s.confirmThreadDelete);
   const settings = useClientSettings(selectProjectGroupingSettings);
-  const openHandoff = useOpenHandoff();
   const router = useRouter();
   const { isMobile, setOpenMobile } = useSidebar();
+  const openHandoff = useThreadMenuHandoff(router, isMobile, setOpenMobile);
   const members = useMemo(
     () =>
       new Map(
@@ -77,27 +81,15 @@ export function useLastCodeThreadMenu(
       const thread = getThread(ref);
       if (!thread) return;
       const target = readLastCodeThreadMenuTarget(
-        project,
-        ref,
         thread,
-        members,
-        settings,
+        readLastCodeThreadMenuProject(thread, project, members, settings),
         handoffsLimit,
         hasStoppableProcesses,
       );
       const clicked = await api.contextMenu.show(target.items, position);
       const handoff = parseLastCodeHandoffAction(clicked);
       if (handoff) {
-        if (isMobile) setOpenMobile(false);
-        await router.navigate({
-          to: "/$environmentId/$threadId",
-          params: { environmentId: thread.environmentId, threadId: thread.id },
-        });
-        if (handoff.kind === "all") useRightPanelStore.getState().open(ref, "handoffs");
-        else {
-          const entry = target.handoffs.find((candidate) => candidate.id === handoff.id);
-          if (entry) await openHandoff(ref, entry);
-        }
+        await openHandoff(target, handoff);
         return;
       }
       if (lastcodeThreadActionRequiresOperate(clicked) && !checkTaskPermission(ref.environmentId))
@@ -228,5 +220,33 @@ export function useLastCodeThreadMenu(
       stopProcesses,
       updateMetadata,
     ],
+  );
+}
+
+/** Handoff destinations share thread navigation, but individual and show-all actions open different views. */
+function useThreadMenuHandoff(
+  router: ReturnType<typeof useRouter>,
+  isMobile: boolean,
+  setOpenMobile: ReturnType<typeof useSidebar>["setOpenMobile"],
+) {
+  const openHandoff = useOpenHandoff();
+  return useCallback(
+    async (
+      target: LastCodeThreadMenuTarget,
+      handoff: NonNullable<ReturnType<typeof parseLastCodeHandoffAction>>,
+    ) => {
+      const { thread, threadRef } = target;
+      if (isMobile) setOpenMobile(false);
+      await router.navigate({
+        to: "/$environmentId/$threadId",
+        params: { environmentId: thread.environmentId, threadId: thread.id },
+      });
+      if (handoff.kind === "all") useRightPanelStore.getState().open(threadRef, "handoffs");
+      else {
+        const entry = target.handoffs.find((candidate) => candidate.id === handoff.id);
+        if (entry) await openHandoff(threadRef, entry);
+      }
+    },
+    [isMobile, setOpenMobile, router, openHandoff],
   );
 }

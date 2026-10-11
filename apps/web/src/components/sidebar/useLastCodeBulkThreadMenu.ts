@@ -55,32 +55,16 @@ export function useLastCodeBulkThreadMenu() {
       const api = readLocalApi();
       if (!api) return;
       const threadKeys = [...useThreadSelectionStore.getState().selectedThreadKeys];
-      if (threadKeys.length === 0) return;
       const selectedThreadEntries = readSelectedThreadEntries(threadKeys);
       const count = selectedThreadEntries.length;
       if (count === 0) return;
       const { items, persistent } = selectionMenu(selectedThreadEntries);
       const clicked = await api.contextMenu.show(items, position);
 
-      if (persistent && isSelectionMutation(clicked)) {
-        warnPersistentBulkThread();
-        return;
-      }
+      if (!selectionActionPermitted(clicked, selectedThreadEntries, persistent)) return;
 
       if (clicked === "mark-unread") {
-        for (const { threadRef } of selectedThreadEntries) {
-          markThreadUnread(threadRef);
-        }
-        clearSelection();
-        return;
-      }
-
-      if (
-        isSelectionMutation(clicked) &&
-        !selectedThreadEntries.every(({ threadRef }) =>
-          checkTaskPermission(threadRef.environmentId),
-        )
-      ) {
+        markSelectionUnread(selectedThreadEntries, markThreadUnread, clearSelection);
         return;
       }
 
@@ -113,4 +97,27 @@ export function useLastCodeBulkThreadMenu() {
       removeFromSelection,
     ],
   );
+}
+
+function markSelectionUnread(
+  entries: ReturnType<typeof readSelectedThreadEntries>,
+  markUnread: ReturnType<typeof useLastCodeThreadActions>["markThreadUnread"],
+  clearSelection: () => void,
+) {
+  for (const { threadRef } of entries) markUnread(threadRef);
+  clearSelection();
+}
+
+/** Only archive/delete require a fresh authority check after the native menu closes. */
+function selectionActionPermitted(
+  action: string | null,
+  entries: ReturnType<typeof readSelectedThreadEntries>,
+  persistent: boolean,
+) {
+  if (!isSelectionMutation(action)) return true;
+  if (persistent) {
+    warnPersistentBulkThread();
+    return false;
+  }
+  return entries.every(({ threadRef }) => checkTaskPermission(threadRef.environmentId));
 }

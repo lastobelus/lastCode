@@ -1,4 +1,3 @@
-import type { ScopedThreadRef } from "@t3tools/contracts";
 import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
 import {
   scopedProjectKey,
@@ -27,15 +26,12 @@ import { describeHandoff } from "../../handoffs/handoffMenu";
 import { lastcodeSidebarCreatorDetails } from "../lastcodeSidebarFamilies.logic";
 import { buildLastCodeThreadMenu } from "./lastcodeThreadMenu";
 
-// Read at menu-open time; actions retain this snapshot while their command guards reread authority.
-export function readLastCodeThreadMenuTarget(
-  project: SidebarProjectSnapshot,
-  threadRef: ScopedThreadRef,
+/** Resolve the exact physical project before reading thread-menu capabilities. */
+export function readLastCodeThreadMenuProject(
   thread: SidebarThreadSummary,
+  project: SidebarProjectSnapshot,
   members: ReadonlyMap<string, SidebarProjectGroupMember>,
   settings: ProjectGroupingSettings,
-  handoffsLimit: number,
-  hasStoppableProcesses: boolean,
 ) {
   const projectRef = scopeProjectRef(thread.environmentId, thread.projectId);
   const threadProject = readProject(projectRef) ?? members.get(scopedProjectKey(projectRef));
@@ -50,6 +46,18 @@ export function readLastCodeThreadMenuTarget(
       : project.projectKey;
   const workspacePath =
     thread.worktreePath ?? threadProject?.workspaceRoot ?? project.workspaceRoot ?? null;
+  return { projectSettingsKey, workspacePath };
+}
+
+// Read at menu-open time; actions retain this snapshot while their command guards reread authority.
+export function readLastCodeThreadMenuTarget(
+  thread: SidebarThreadSummary,
+  projectTarget: ReturnType<typeof readLastCodeThreadMenuProject>,
+  handoffsLimit: number,
+  hasStoppableProcesses: boolean,
+) {
+  const threadRef = scopeThreadRef(thread.environmentId, thread.id);
+  const { projectSettingsKey, workspacePath } = projectTarget;
   const creatorRef = thread.creatorThreadId
     ? scopeThreadRef(thread.environmentId, thread.creatorThreadId)
     : null;
