@@ -23,7 +23,8 @@ import {
   type LastCodeThreadRowMenus,
 } from "./sidebar/lastcodeThreadRowInteractions";
 import { useLastCodeThreadIdentity } from "./sidebar/useLastCodeThreadIdentity";
-import { LastCodeThreadHoverDetails } from "./sidebar/LastCodeThreadHoverDetails";
+import { createLastCodeThreadHoverContents } from "./sidebar/LastCodeThreadHoverDetails";
+import { useLastCodeThreadStatus } from "./sidebar/useLastCodeThreadStatus";
 import { useLastCodeThreadDetails } from "./sidebar/useLastCodeThreadDetails";
 import { useLastCodeThreadFamily } from "./sidebar/useLastCodeThreadFamily";
 import {
@@ -106,7 +107,7 @@ import { isDesktopLocalConnectionTarget, isWslConnectionTarget } from "../connec
 import { isElectron } from "../env";
 import { useTerminalFocus } from "../hooks/useTerminalFocus";
 import { isTerminalFocused } from "../lib/terminalFocus";
-import { readThreadShell, useProjects, useThreadShells } from "../state/entities";
+import { useProjects, useThreadShells } from "../state/entities";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useEnvironmentScope } from "../state/session";
 import {
@@ -155,8 +156,6 @@ import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
 import {
   getSidebarThreadIdsToPrewarm,
   resolveAdjacentThreadId,
-  resolveThreadLastVisitedAt,
-  resolveThreadStatusPill,
   orderItemsByPreferredIds,
   shouldClearThreadSelectionOnMouseDown,
   sortProjectsForSidebar,
@@ -181,7 +180,6 @@ import {
 } from "./lastcodeSidebarFamilies.logic";
 import { useLastCodeSidebarFamiliesStore } from "./lastcodeSidebarFamilies.store";
 import { deriveProviderInstanceEntries, type ProviderInstanceEntry } from "../providerInstances";
-import { SidebarThreadCleanupHoverContent } from "./sidebar/SidebarThreadHoverContent";
 import { WorktreeCleanupFailureDialog } from "./WorktreeCleanupFailureDialog";
 import {
   buildPhysicalToLogicalProjectKeyMap,
@@ -268,8 +266,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   );
   const { leaseLiveStatus, rowRef } = useSidebarRowSubscriptionLease(isActive);
   const cleanup = thread.worktreeCleanup ?? null;
-  const localLastVisitedAt = useUiStateStore((state) => state.threadLastVisitedAtById[threadKey]);
-  const lastVisitedAt = resolveThreadLastVisitedAt(thread.lastVisitedAt, localLastVisitedAt);
   const isSelected = useThreadSelectionStore((state) => state.selectedThreadKeys.has(threadKey));
   const processes = useLastCodeThreadProcesses(threadRef);
   const { hasStoppableProcesses } = processes;
@@ -282,39 +278,19 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const sourceControl = useLastCodeThreadSourceControl(thread, leaseLiveStatus, props.projectCwd);
   const { gitCwd } = sourceControl;
   const isHighlighted = isActive || isSelected;
-  const threadStatus = resolveThreadStatusPill({
-    thread: {
-      ...thread,
-      lastVisitedAt,
-    },
-  });
+  const threadStatus = useLastCodeThreadStatus(thread);
   const canArchive = canOperateThread && !thread.persistent && cleanup === null;
   const hasActiveAnnotation = thread.annotation?.resolvedAt === null;
-  const cleanupBlockerTitle =
-    cleanup?.status === "queued"
-      ? (readThreadShell(scopeThreadRef(thread.environmentId, cleanup.blockedByThreadId))?.title ??
-        null)
-      : null;
   const familyPresentation = useLastCodeThreadFamily(props.familyRow, threadStatus);
-  const threadHoverDetails = (
-    <LastCodeThreadHoverDetails
-      thread={thread}
-      sourceControl={sourceControl}
-      processes={processes}
-      identity={identity}
-      familyPresentation={familyPresentation}
-      projectCwdFallback={props.projectCwd}
-      cleanupBlockerTitle={cleanupBlockerTitle}
-      hasActiveAnnotation={hasActiveAnnotation}
-    />
-  );
-  const cleanupHoverDetails = (
-    <SidebarThreadCleanupHoverContent
-      thread={thread}
-      blockerTitle={cleanupBlockerTitle}
-      standalone
-    />
-  );
+  const { content: threadHoverDetails, trailingContent: cleanupHoverDetails } =
+    createLastCodeThreadHoverContents({
+      thread,
+      sourceControl,
+      processes,
+      identity,
+      familyPresentation,
+      projectCwdFallback: props.projectCwd,
+    });
   const detailsLifetime = useLastCodeThreadDetails(threadRef, editing);
   const { annotationPopoverHandle } = detailsLifetime;
   const {
