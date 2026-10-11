@@ -1,3 +1,4 @@
+import { useLastCodeThreadAnnotations } from "./sidebar/useLastCodeThreadAnnotations";
 import {
   archiveLastCodeSelection,
   deleteLastCodeSelection,
@@ -138,8 +139,6 @@ import {
   useThreadShellsForProjectRefs,
 } from "../state/entities";
 import {
-  runThreadAnnotationBodySave,
-  ThreadAnnotationEditorDialog,
   ThreadAnnotationHoverPopover,
   ThreadAnnotationNavigationTrigger,
 } from "./thread-annotation/ThreadAnnotation";
@@ -1924,12 +1923,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const updateThreadMetadata = useOrchestrationCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
-  const upsertThreadAnnotation = useOrchestrationCommand(threadEnvironment.upsertAnnotation, {
-    reportFailure: false,
-  });
-  const resolveThreadAnnotation = useOrchestrationCommand(threadEnvironment.resolveAnnotation, {
-    reportFailure: false,
-  });
+
   const stopThreadProcesses = useStopThreadProcesses();
   const sidebarThreadPreviewCount = useClientSettings<SidebarThreadPreviewCount>(
     (settings) => settings.sidebarThreadPreviewCount,
@@ -2019,9 +2013,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const [renamingThreadKey, setRenamingThreadKey] = useState<string | null>(null);
   const [renamingTitle, setRenamingTitle] = useState("");
   const [confirmingArchiveThreadKey, setConfirmingArchiveThreadKey] = useState<string | null>(null);
-  const [annotationEditorTarget, setAnnotationEditorTarget] = useState<SidebarThreadSummary | null>(
-    null,
-  );
+  const annotations = useLastCodeThreadAnnotations();
   const [projectRenameTarget, setProjectRenameTarget] = useState<SidebarProjectGroupMember | null>(
     null,
   );
@@ -2511,61 +2503,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     renamingInputRef.current = null;
   }, []);
 
-  const saveAnnotationBody = useCallback(
-    async (target: SidebarThreadSummary, body: string): Promise<boolean> => {
-      return runThreadAnnotationBodySave(
-        scopeThreadRef(target.environmentId, target.id),
-        async () => {
-          const result = await upsertThreadAnnotation({
-            environmentId: target.environmentId,
-            input: { threadId: target.id, body },
-          });
-          if (result._tag === "Success") return true;
-          if (!isAtomCommandInterrupted(result)) {
-            const error = squashAtomCommandFailure(result);
-            toastManager.add(
-              stackedThreadToast({
-                type: "error",
-                title: "Failed to save annotation",
-                description: error instanceof Error ? error.message : "An error occurred.",
-              }),
-            );
-          }
-          return false;
-        },
-      );
-    },
-    [upsertThreadAnnotation],
-  );
-
-  const saveAnnotation = useCallback(
-    async (body: string): Promise<boolean> => {
-      if (!annotationEditorTarget) return false;
-      return saveAnnotationBody(annotationEditorTarget, body);
-    },
-    [annotationEditorTarget, saveAnnotationBody],
-  );
-
-  const resolveAnnotation = useCallback(
-    async (thread: SidebarThreadSummary) => {
-      const result = await resolveThreadAnnotation({
-        environmentId: thread.environmentId,
-        input: { threadId: thread.id },
-      });
-      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-        const error = squashAtomCommandFailure(result);
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Failed to resolve annotation",
-            description: error instanceof Error ? error.message : "An error occurred.",
-          }),
-        );
-      }
-    },
-    [resolveThreadAnnotation],
-  );
-
   const startThreadRename = useCallback((threadKey: string, title: string) => {
     const threadRef = parseScopedThreadKey(threadKey);
     if (!threadRef || !checkTaskPermission(threadRef.environmentId)) return;
@@ -2796,7 +2733,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       }
 
       if (clicked === "annotate") {
-        setAnnotationEditorTarget(thread);
+        annotations.edit(thread);
         return;
       }
 
@@ -2850,6 +2787,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       });
     },
     [
+      annotations.edit,
       appSettingsConfirmThreadDelete,
       handoffsMenuLimit,
       openHandoff,
@@ -3092,21 +3030,14 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         cancelRename={cancelRename}
         attemptArchiveThread={attemptArchiveThread}
         openPrLink={openPrLink}
-        onEditAnnotation={setAnnotationEditorTarget}
-        onSaveAnnotationBody={saveAnnotationBody}
-        onResolveAnnotation={(thread) => void resolveAnnotation(thread)}
+        onEditAnnotation={annotations.edit}
+        onSaveAnnotationBody={annotations.saveBody}
+        onResolveAnnotation={(thread) => void annotations.resolve(thread)}
         expandThreadListForProject={expandThreadListForProject}
         collapseThreadListForProject={collapseThreadListForProject}
       />
 
-      <ThreadAnnotationEditorDialog
-        annotation={annotationEditorTarget?.annotation ?? null}
-        open={annotationEditorTarget !== null}
-        onOpenChange={(open) => {
-          if (!open) setAnnotationEditorTarget(null);
-        }}
-        onSave={saveAnnotation}
-      />
+      {annotations.editor}
 
       <LastCodeProjectRenameDialog
         target={projectRenameTarget}
