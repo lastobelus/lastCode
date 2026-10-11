@@ -1,3 +1,4 @@
+import { activateSidebarRowFromKeyboard } from "./sidebar/sidebarRowKeyboard";
 import { threadShellIsVisible } from "@t3tools/client-runtime/state/models";
 import { WorktreeCleanupFailureDialog } from "./WorktreeCleanupFailureDialog";
 import { ProjectSidebarDraftList } from "./sidebar/ProjectSidebarDraftList";
@@ -586,14 +587,14 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   );
   const handleRowKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
-      if (event.key !== "Enter" && event.key !== " ") return;
-      event.preventDefault();
-      if (isCleanupFailed) {
-        setCleanupFailureOpen(true);
-        return;
-      }
-      if (isCleanupPending) return;
-      navigateToThread(threadRef);
+      activateSidebarRowFromKeyboard(event, () => {
+        if (isCleanupFailed) {
+          setCleanupFailureOpen(true);
+          return;
+        }
+        if (isCleanupPending) return;
+        navigateToThread(threadRef);
+      });
     },
     [isCleanupFailed, isCleanupPending, navigateToThread, threadRef],
   );
