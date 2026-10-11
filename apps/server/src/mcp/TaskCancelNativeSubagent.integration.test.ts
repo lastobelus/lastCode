@@ -36,6 +36,7 @@ import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
+import * as ThreadReadBroker from "./ThreadReadBroker.ts";
 
 const driver = ProviderDriverKind.make("claudeAgent");
 const instanceId = ProviderInstanceId.make("claudeAgent");
@@ -136,6 +137,7 @@ it.effect("task_cancel ends a delegated child's background native subagent", () 
         ThreadManagementService.layer.pipe(Layer.provide(layerOrchestrator)),
       );
       const layerTest = OrchestratorMcpService.layer.pipe(
+        Layer.provide(ThreadReadBroker.layer),
         Layer.provideMerge(layerOrchestration),
         Layer.provide(
           Layer.mergeAll(

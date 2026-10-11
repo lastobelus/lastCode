@@ -21,6 +21,62 @@ import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as ScheduledTaskService from "./ScheduledTaskService.ts";
+import { makePausedEnvironment } from "../orchestration-v2/EnvironmentAutomation.testkit.ts";
+
+it.effect("refuses paused webhook deliveries without consuming their retry identity", () =>
+  Effect.gen(function* () {
+    const pause = yield* makePausedEnvironment;
+    yield* withService(({ service, launches }) =>
+      Effect.gen(function* () {
+        const { task } = yield* service.upsert(yield* webhookTaskInput());
+        const request = requestFor(task, { relayDeliveryId: "pause-retry" });
+        assert.equal((yield* service.triggerWebhook(request))._tag, "environment_paused");
+        assert.equal(yield* Queue.size(launches), 0);
+        assert.equal(
+          (yield* service.list()).tasks.find((candidate) => candidate.id === task.id)?.runCount,
+          0,
+        );
+        yield* pause.resume;
+        assert.equal((yield* service.triggerWebhook(request))._tag, "accepted");
+        const launch = yield* Queue.take(launches);
+        assert.include(launch.commandId, "pause-retry");
+        assert.include(launch.initialMessage!.text, "https://github.com/org/repo/pull/45");
+        assert.equal((yield* service.triggerWebhook(request))._tag, "accepted");
+        assert.equal(yield* Queue.size(launches), 0);
+      }),
+    ).pipe(Effect.provide(pause.layer));
+  }),
+);
+
+it.effect("holds an already admitted webhook until Resume before preparing its thread", () =>
+  Effect.gen(function* () {
+    const pause = yield* makePausedEnvironment;
+    yield* pause.resume;
+    const gate = yield* Deferred.make<void>();
+    yield* withService(
+      ({ service, launches }) =>
+        Effect.gen(function* () {
+          const { task } = yield* service.upsert(yield* webhookTaskInput());
+          yield* service.triggerWebhook(requestFor(task, { relayDeliveryId: "before-pause" }));
+          yield* Queue.take(launches);
+          yield* service.triggerWebhook(
+            requestFor(task, { relayDeliveryId: "admitted-then-paused" }),
+          );
+          yield* pause.pause;
+          yield* Deferred.succeed(gate, undefined);
+          yield* TestClock.adjust("5 seconds");
+          assert.equal(yield* Queue.size(launches), 0);
+          yield* pause.resume;
+          yield* TestClock.adjust("5 seconds");
+          const held = yield* Queue.take(launches);
+          assert.include(held.commandId, "admitted-then-paused");
+          assert.include(held.initialMessage!.text, "https://github.com/org/repo/pull/45");
+          assert.equal(yield* Queue.size(launches), 0);
+        }),
+      { gate },
+    ).pipe(Effect.provide(pause.layer));
+  }),
+);
 
 const decodeUpsertInput = Schema.decodeUnknownEffect(ScheduledTaskUpsertInput);
 

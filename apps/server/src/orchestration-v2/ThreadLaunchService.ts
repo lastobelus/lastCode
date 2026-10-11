@@ -23,6 +23,7 @@ import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -319,6 +320,7 @@ const make = Effect.gen(function* () {
     const tracked = input.workspaceStrategy.type === "worktree" || reused !== undefined;
     let createdWorktreePath: string | null = null;
     let setupTerminalId: string | null = null;
+    let branchRenameFiber: Fiber.Fiber<void, never> | null = null;
     let workspaceRecorded = false;
     if (input.workspaceStrategy.type === "worktree") {
       yield* setupTracker.begin({
@@ -510,7 +512,7 @@ const make = Effect.gen(function* () {
       ) {
         const oldBranch = branch;
         const worktreeCwd = worktreePath;
-        yield* generateBranchNameFor(worktreeCwd, initialMessage).pipe(
+        branchRenameFiber = yield* generateBranchNameFor(worktreeCwd, initialMessage).pipe(
           Effect.flatMap(({ branch: newBranch, exactName }) =>
             git.renameBranch({
               cwd: worktreeCwd,
@@ -539,6 +541,7 @@ const make = Effect.gen(function* () {
               cause,
             }),
           ),
+          Effect.asVoid,
           Effect.forkIn(preparationScope),
         );
       }
@@ -649,6 +652,10 @@ const make = Effect.gen(function* () {
           // the thread recorded, so a retry reuses it, and removes one it never
           // recorded, which a retry would otherwise duplicate.
           if (tracked && createdWorktreePath && (cancelled || !workspaceRecorded)) {
+            // Rename owns a separate fiber so it can outlive successful setup.
+            // Stop it before cleanup; its metadata write could otherwise rebind
+            // the thread to the worktree after the directory is removed.
+            if (branchRenameFiber !== null) yield* Fiber.interrupt(branchRenameFiber);
             if (setupTerminalId)
               yield* terminals
                 .close({ threadId, terminalId: setupTerminalId, deleteHistory: true })

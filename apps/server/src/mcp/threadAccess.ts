@@ -22,17 +22,21 @@ export const unavailable = () =>
     message: "The operation could not be completed.",
   });
 
-/** Decider string rejections are public; wrapped storage and hydration causes are not. */
-export const dispatchFailure = (error: OrchestratorV2Error) =>
-  (error._tag === "OrchestratorDispatchError" ||
+/** Known admission messages and decider rejections are public; internal causes are not. */
+export const dispatchFailure = (error: OrchestratorV2Error) => {
+  if (error._tag === "OrchestratorThreadArchivingError") {
+    return new OrchestratorMcpFailure({ code: "orchestration_error", message: error.message });
+  }
+  return (error._tag === "OrchestratorDispatchError" ||
     error._tag === "OrchestratorCommandRejectedError") &&
-  typeof error.cause === "string" &&
-  error.cause.length > 0
+    typeof error.cause === "string" &&
+    error.cause.length > 0
     ? new OrchestratorMcpFailure({
         code: "orchestration_error",
         message: Array.from(error.cause).slice(0, 1000).join(""),
       })
     : unavailable();
+};
 
 /**
  * The most a caller may hand to the threads it targets. A thread caller is

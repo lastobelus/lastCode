@@ -8,7 +8,7 @@ import type { FollowUpBehavior } from "../../lib/followUpBehavior";
 export interface ComposerSendPresentation {
   readonly label: string;
   readonly icon: "arrow.up" | "checkmark" | "list.number" | "arrow.turn.left.up";
-  /** What a plain tap does while a turn runs, or null when the turn is idle. */
+  /** What a plain tap does for a follow-up, or null for an ordinary idle send. */
   readonly action: ActiveTurnComposerAction | null;
   /** What the long-press menu and the Command chord do instead. */
   readonly alternate: ActiveTurnComposerAction | null;
@@ -31,6 +31,7 @@ export function resolveComposerSendPresentation(input: {
   readonly editingQueuedMessage: boolean;
   readonly running: boolean;
   readonly canSteer: boolean;
+  readonly forceQueue: boolean;
   readonly followUpBehavior: FollowUpBehavior;
   /** Outbox reasons the send waits rather than leaving immediately. */
   readonly deliveryDeferred: boolean;
@@ -40,6 +41,15 @@ export function resolveComposerSendPresentation(input: {
       label: "Update queued message",
       icon: "checkmark",
       action: null,
+      alternate: null,
+      offersFollowUpChoice: false,
+    };
+  }
+  if (input.forceQueue) {
+    return {
+      label: "Queue",
+      icon: "list.number",
+      action: "queue",
       alternate: null,
       offersFollowUpChoice: false,
     };

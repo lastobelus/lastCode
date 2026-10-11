@@ -33,6 +33,7 @@ import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import { useServerConfigs } from "../../state/entities";
 import { useEnvironmentScope } from "../../state/session";
 import { ThreadSwipeable } from "../home/thread-swipe-actions";
+import { threadUnarchiveTargetId } from "../home/threadArchive";
 import type { ArchivedThreadGroup, ArchivedThreadSortOrder } from "./archivedThreadList";
 import { SettingsScreenContent } from "../settings/components/SettingsScreen";
 
@@ -189,6 +190,7 @@ function ArchivedThreadRow(props: {
   readonly onSwipeableWillOpen: (methods: SwipeableMethods) => void;
   readonly simultaneousSwipeGesture?: ComponentProps<typeof ThreadSwipeable>["simultaneousWith"];
   readonly onUnarchive: () => void;
+  readonly restoresFamily: boolean;
   readonly thread: EnvironmentThreadShell;
 }) {
   const { width: windowWidth } = useWindowDimensions();
@@ -266,9 +268,11 @@ function ArchivedThreadRow(props: {
       onSwipeableClose={props.onSwipeableClose}
       onSwipeableWillOpen={props.onSwipeableWillOpen}
       primaryAction={{
-        accessibilityLabel: `Unarchive ${props.thread.title}`,
+        accessibilityLabel: props.restoresFamily
+          ? `Restore ${props.thread.title} and its archived thread family`
+          : `Unarchive ${props.thread.title}`,
         icon: "arrow.uturn.backward",
-        label: "Unarchive",
+        label: props.restoresFamily ? "Restore family" : "Unarchive",
         onPress: props.onUnarchive,
       }}
       simultaneousWith={props.simultaneousSwipeGesture}
@@ -294,6 +298,7 @@ function ArchiveError(props: { readonly message: string; readonly onRetry: () =>
 }
 
 export function ArchivedThreadsScreen(props: {
+  readonly archivedThreads: readonly EnvironmentThreadShell[];
   readonly environments: ReadonlyArray<ArchivedThreadsHeaderEnvironment>;
   readonly error: string | null;
   readonly groups: ReadonlyArray<ArchivedThreadGroup>;
@@ -382,6 +387,9 @@ export function ArchivedThreadsScreen(props: {
           onSwipeableClose={handleSwipeableClose}
           onSwipeableWillOpen={handleSwipeableWillOpen}
           onUnarchive={() => onUnarchiveThread(item.thread)}
+          restoresFamily={
+            threadUnarchiveTargetId(item.thread, props.archivedThreads) !== item.thread.id
+          }
           simultaneousSwipeGesture={archiveScrollGesture}
           thread={item.thread}
         />
@@ -393,6 +401,7 @@ export function ArchivedThreadsScreen(props: {
       handleSwipeableWillOpen,
       onDeleteThread,
       onUnarchiveThread,
+      props.archivedThreads,
     ],
   );
   const listEmptyComponent = useMemo(() => {

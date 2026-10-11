@@ -1,59 +1,29 @@
+import type { OrchestrationV2IncomingMessageSummary } from "@t3tools/contracts";
 import {
-  type OrchestrationV2Actor,
-  type OrchestrationV2CreationSource,
-  ScheduledTaskId,
-} from "@t3tools/contracts";
+  isIncomingUserMessage,
+  isShortIncomingMessage,
+  resolveUserMessagePresentation,
+} from "@t3tools/shared/userMessage";
 
-const LEGACY_AUTOMATION_PREFIX = /^\[Triggered by schedule task: [^\r\n]+\]\r?\n\r?\n/;
-const LEGACY_AUTOMATION_MESSAGE_ID = /^scheduled-task-message:(.+):\d+:(?:scheduled|manual)$/;
+export { resolveUserMessagePresentation };
 
-/**
- * Text and sender label for a user-role message. Older scheduled messages
- * stored their attribution in the prompt itself.
- */
-export function resolveUserMessagePresentation(message: {
-  readonly id?: string;
-  readonly role: string;
-  readonly text: string;
-  readonly createdBy?: OrchestrationV2Actor;
-  readonly creationSource?: OrchestrationV2CreationSource;
-  readonly scheduledTaskId?: ScheduledTaskId;
-}): {
-  readonly text: string;
-  /** Who sent a user-role message the user did not type. */
-  readonly attribution: "automation" | "agent" | "t3code" | null;
-  readonly scheduledTaskId: ScheduledTaskId | undefined;
-} {
-  if (message.role !== "user") {
-    return { text: message.text, attribution: null, scheduledTaskId: undefined };
-  }
-  if (message.scheduledTaskId !== undefined) {
-    return {
-      text: message.text,
-      attribution: "automation",
-      scheduledTaskId: message.scheduledTaskId,
-    };
-  }
-  const legacyPrefix = LEGACY_AUTOMATION_PREFIX.exec(message.text);
-  const legacyTaskId = legacyPrefix
-    ? LEGACY_AUTOMATION_MESSAGE_ID.exec(message.id ?? "")?.[1]
-    : undefined;
-  if (legacyPrefix !== null && (legacyTaskId !== undefined || message.createdBy === "agent")) {
-    return {
-      text: message.text.slice(legacyPrefix[0].length),
-      attribution: "automation",
-      scheduledTaskId: legacyTaskId === undefined ? undefined : ScheduledTaskId.make(legacyTaskId),
-    };
-  }
+/** Shared preview semantics for chat, mobile, and the minimap. */
+export function resolveIncomingMessagePreview(
+  message: Parameters<typeof resolveUserMessagePresentation>[0] & {
+    readonly incomingSummary?: OrchestrationV2IncomingMessageSummary | undefined;
+  },
+) {
+  const { text } = resolveUserMessagePresentation(message);
+  const isIncoming = isIncomingUserMessage(message);
+  const summary = isIncoming ? message.incomingSummary : undefined;
+  const isSummary = summary?.status === "ready";
+  const pending = summary?.status === "pending";
+  const firstLineEnd = isSummary ? -1 : text.search(/\r?\n/u);
   return {
-    text: message.text,
-    // Restart continuations were sent as the agent before they became notices.
-    attribution:
-      message.createdBy !== "agent"
-        ? null
-        : message.creationSource === "server"
-          ? "t3code"
-          : "agent",
-    scheduledTaskId: undefined,
+    isIncoming,
+    previewText: isSummary ? summary.text : firstLineEnd < 0 ? text : text.slice(0, firstLineEnd),
+    pending,
+    isSummary,
+    canExpand: isIncoming && (!isShortIncomingMessage(text) || isSummary || pending),
   };
 }

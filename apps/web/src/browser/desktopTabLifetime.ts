@@ -47,7 +47,11 @@ export interface AcquiredDesktopTab {
 /** `serverTab` names the server tab this desktop tab renders, so the server can drive it. */
 export function acquireDesktopTab(
   tabId: string,
-  serverTab?: { readonly threadId: string; readonly tabId: string },
+  serverTab?: {
+    readonly threadId: string;
+    readonly tabId: string;
+    readonly desktopHostId?: string | undefined;
+  },
 ): AcquiredDesktopTab {
   const current =
     leases.get(tabId) ??

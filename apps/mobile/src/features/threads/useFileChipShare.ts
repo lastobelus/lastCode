@@ -1,11 +1,11 @@
-import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
+import { fileAssetResourceForAccess, resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import { Alert } from "react-native";
 
 import { downloadAndShareAttachment } from "../../lib/attachmentDownload";
-import { assetEnvironment } from "../../state/assets";
+import { assetEnvironment, useHostFileAccess } from "../../state/assets";
 import { usePreparedConnection } from "../../state/session";
 import { useAtomQueryRunner } from "../../state/use-atom-query-runner";
 import { fileChipShareSource, type FileChipTarget } from "./fileChipMenu";
@@ -16,16 +16,19 @@ export function useFileChipShare(
   threadId: ThreadId,
   sourceIdentifier: string,
 ) {
+  const fileAccess = useHostFileAccess(environmentId);
   const connection = usePreparedConnection(environmentId);
   const httpBaseUrl = Option.isSome(connection) ? connection.value.httpBaseUrl : null;
   const createUrl = useAtomQueryRunner(assetEnvironment.createUrl, {
     refresh: true,
     reportFailure: false,
   });
+  const canReadFilesRef = useRef(fileAccess.canReadFiles);
   const connectionRef = useRef(httpBaseUrl);
   useLayoutEffect(() => {
     connectionRef.current = httpBaseUrl;
-  }, [httpBaseUrl]);
+    canReadFilesRef.current = fileAccess.canReadFiles;
+  }, [httpBaseUrl, fileAccess.canReadFiles]);
   const requestRef = useRef<AbortController | null>(null);
   useEffect(() => () => requestRef.current?.abort(), []);
 
@@ -36,9 +39,12 @@ export function useFileChipShare(
       const request = new AbortController();
       requestRef.current = request;
       const httpBaseUrl = connectionRef.current;
-      void (async () => {
+      return (async () => {
         if (httpBaseUrl === null) throw new Error("Reconnect to the environment and try again.");
-        const result = await createUrl({ environmentId, input: { resource: source.resource } });
+        const result = await createUrl({
+          environmentId,
+          input: { resource: fileAssetResourceForAccess(source.resource, canReadFilesRef.current) },
+        });
         if (request.signal.aborted) return;
         const url =
           result._tag === "Success" ? resolveAssetUrl(httpBaseUrl, result.value.relativeUrl) : null;

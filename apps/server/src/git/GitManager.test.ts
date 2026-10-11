@@ -328,6 +328,8 @@ function createTextGeneration(
   overrides: Partial<FakeGitTextGeneration> = {},
 ): TextGeneration.TextGeneration["Service"] {
   const implementation: FakeGitTextGeneration = {
+    generateIncomingMessageSummary: () =>
+      Effect.die("Preview generation is not used by GitManager"),
     generateCommitMessage: (input) =>
       Effect.succeed({
         subject: "Implement stacked git actions",
@@ -351,6 +353,8 @@ function createTextGeneration(
   };
 
   return {
+    generateIncomingMessageSummary: () =>
+      Effect.die("Preview generation is not used by GitManager"),
     generateCommitMessage: (input) =>
       implementation.generateCommitMessage(input).pipe(
         Effect.mapError(

@@ -232,7 +232,11 @@ const make = Effect.gen(function* () {
       threadPullRequestsOf(shell).find(
         (link) => link.source !== "stack-dismissed" && threadPullRequestKeysEqual(link, target),
       );
-    if (watching && thread.lineage.relationshipToParent === "subagent") {
+    if (
+      watching &&
+      thread.lineage.relationshipToParent === "subagent" &&
+      thread.lineage.independent !== true
+    ) {
       return yield* new PullRequestWatchFromSubagentError();
     }
     const before = watchedLink(thread);

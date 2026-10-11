@@ -1923,8 +1923,21 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         const latestGoalTurnId = (providerTurnId: ProviderTurnId) =>
           goalRuns.get(providerTurnId)?.at(-1)?.providerTurnId ?? providerTurnId;
 
+        // Keep each provider thread's latest terminal until durable root
+        // finalization acknowledges it or this runtime is garbage-collected.
+        // Unrelated completions and runtime release must preserve evidence a
+        // failed persistence reader still needs to reconcile its exact turn.
+        const terminalEvidence = new Map<
+          string,
+          Extract<ProviderAdapter.ProviderAdapterV2Event, { type: "turn.terminal" }>
+        >();
         const emitProviderEvent = (event: ProviderAdapter.ProviderAdapterV2Event) =>
-          Queue.offer(events, event).pipe(Effect.asVoid);
+          Effect.suspend(() => {
+            if (event.type === "turn.terminal") {
+              terminalEvidence.set(event.providerThreadId, event);
+            }
+            return Queue.offer(events, event).pipe(Effect.asVoid);
+          });
 
         /** Writes the thread's current native goal onto its root provider thread. */
         const emitGoalUpdate = Effect.fnUntraced(function* (nativeThreadId: string) {
@@ -6437,6 +6450,36 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           providerSessionId: input.providerSessionId,
           providerSession: session,
           events: Stream.fromEffectRepeat(Queue.take(events)),
+          publishEventsBarrier: (barrier) =>
+            turnTerminalizationPermit.withPermits(1)(
+              Effect.gen(function* () {
+                const observation = yield* barrier.observe;
+                yield* emitProviderEvent({
+                  type: "events.barrier",
+                  driver: CODEX_PROVIDER,
+                  after: barrier.after(observation),
+                });
+              }),
+            ),
+          inspectTurn: ({ providerThread, providerTurnId }) =>
+            Effect.gen(function* () {
+              const event = terminalEvidence.get(providerThread.id);
+              if (event?.providerTurnId === providerTurnId) {
+                return { status: "terminal" as const, event };
+              }
+              const active = Array.from((yield* Ref.get(activeTurns)).values()).some(
+                (turn) =>
+                  turn.providerTurnId === providerTurnId &&
+                  turn.providerThread.id === providerThread.id,
+              );
+              return { status: active ? ("active" as const) : ("unknown" as const) };
+            }),
+          acknowledgeTurnTerminal: ({ providerThreadId, providerTurnId }) =>
+            Effect.sync(() => {
+              if (terminalEvidence.get(providerThreadId)?.providerTurnId === providerTurnId) {
+                terminalEvidence.delete(providerThreadId);
+              }
+            }),
           canReuseContextUsage: canReuseCodexContextUsage,
           // Known gap: a subagent that Codex resumes later reads as completed
           // (not pending) between turns, so idle release can win the race
@@ -7186,24 +7229,93 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           readThreadSnapshot: (threadInput) =>
             Effect.gen(function* () {
               const threadId = yield* getNativeThreadId(threadInput.providerThread);
-              const response = yield* ensureInitialized.pipe(
-                Effect.andThen(client.request("thread/read", { threadId, includeTurns: true })),
+              const metadata = yield* ensureInitialized.pipe(
+                Effect.andThen(client.request("thread/read", { threadId, includeTurns: false })),
               );
+              let nativeThread = metadata.thread;
+              if (nativeThread.historyMode === "paginated") {
+                const turns: Array<CodexSchema.V2ThreadTurnsListResponse__Turn> = [];
+                let cursor: string | null = null;
+                const visited = new Set<string | null>();
+                do {
+                  if (visited.has(cursor)) {
+                    return yield* CodexErrors.CodexAppServerRequestError.internalError(
+                      "Thread history pagination repeated a cursor.",
+                      undefined,
+                      { method: "thread/turns/list", operation: "decode-payload" },
+                    );
+                  }
+                  visited.add(cursor);
+                  const page: CodexSchema.V2ThreadTurnsListResponse = yield* client.request(
+                    "thread/turns/list",
+                    { threadId, cursor, limit: 100, sortDirection: "asc", itemsView: "full" },
+                  );
+                  turns.push(...page.data);
+                  cursor = page.nextCursor ?? null;
+                } while (cursor !== null);
+                nativeThread = { ...nativeThread, turns };
+              } else {
+                nativeThread = (yield* client.request("thread/read", {
+                  threadId,
+                  includeTurns: true,
+                })).thread;
+              }
+              const targetThreadId = threadInput.providerThread.appThreadId ?? input.threadId;
+              const messages: Array<OrchestrationV2ConversationMessage> = [];
+              for (const turn of nativeThread.turns) {
+                if (turn.itemsView !== undefined && turn.itemsView !== "full") {
+                  return yield* CodexErrors.CodexAppServerRequestError.internalError(
+                    "Thread history returned incomplete turn items.",
+                    undefined,
+                    { method: "thread/read", operation: "decode-payload" },
+                  );
+                }
+                const createdAt = codexTimestamp(turn.startedAt ?? nativeThread.createdAt);
+                for (const item of turn.items) {
+                  if (item.type !== "userMessage" && item.type !== "agentMessage") continue;
+                  const text =
+                    item.type === "userMessage" ? codexUserMessageText(item.content) : item.text;
+                  if (text.length === 0) continue;
+                  messages.push({
+                    createdBy: item.type === "userMessage" ? "user" : "agent",
+                    creationSource: "provider",
+                    // Forks retain native item IDs, so scope imported messages to their destination.
+                    id: idAllocator.derive.messageFromProviderItem({
+                      driver: CODEX_PROVIDER,
+                      nativeItemId: [targetThreadId, turn.id, item.id]
+                        .map(encodeURIComponent)
+                        .join(":"),
+                    }),
+                    threadId: targetThreadId,
+                    runId: null,
+                    nodeId: null,
+                    role: item.type === "userMessage" ? "user" : "assistant",
+                    text,
+                    attachments: [],
+                    streaming: false,
+                    createdAt,
+                    updatedAt:
+                      item.type === "userMessage"
+                        ? createdAt
+                        : codexTimestamp(turn.completedAt ?? nativeThread.updatedAt),
+                  });
+                }
+              }
               return {
                 providerThread: {
                   ...threadInput.providerThread,
                   nativeThreadRef: {
                     driver: CODEX_PROVIDER,
-                    nativeId: response.thread.id,
+                    nativeId: nativeThread.id,
                     strength: "strong" as const,
                   },
                   nativeConversationHeadRef: threadInput.providerThread.nativeConversationHeadRef,
-                  updatedAt: codexTimestamp(response.thread.updatedAt),
+                  updatedAt: codexTimestamp(nativeThread.updatedAt),
                 },
                 providerTurns: [],
-                messages: [],
+                messages,
                 runtimeRequests: [],
-                providerPayload: response.thread,
+                providerPayload: nativeThread,
               };
             }).pipe(
               Effect.mapError(
