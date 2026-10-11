@@ -77,7 +77,7 @@ export function LastCodeThreadRowSurface({
   const annotationActive = thread.annotation?.resolvedAt === null;
   const pending =
     thread.worktreeCleanup?.status === "deleting" || thread.worktreeCleanup?.status === "queued";
-  const tall = groupingStyle === "typed-groups" && family.descendantCount > 0 && !family.expanded;
+  const tall = hasCollapsedFamilySummary(family, groupingStyle);
   return (
     <ThreadAnnotationNavigationTrigger
       annotationActive={annotationActive}
@@ -109,4 +109,11 @@ export function LastCodeThreadRowSurface({
       {children}
     </ThreadAnnotationNavigationTrigger>
   );
+}
+
+/** Typed collapsed families reserve the second line used by their descendant summary. */
+function hasCollapsedFamilySummary(family: LastCodeSidebarFamilyRow, groupingStyle: string) {
+  if (groupingStyle !== "typed-groups") return false;
+  if (family.descendantCount === 0) return false;
+  return !family.expanded;
 }

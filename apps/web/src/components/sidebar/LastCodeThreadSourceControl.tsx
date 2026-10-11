@@ -19,32 +19,13 @@ export function LastCodeThreadSourceControl({
   isActive: boolean;
   navigateToThread: (ref: ScopedThreadRef) => Promise<void>;
 }) {
-  const { openPullRequestsInRightPanel, openPrLink } = useLastCodeSidebarPresentation();
   const { pr, prStatus, currentLinkedPr } = sourceControl;
   const cleanup = thread.worktreeCleanup ?? null;
-  const threadRef = scopeThreadRef(thread.environmentId, thread.id);
-  const handlePrClick = useCallback(
-    (event: React.MouseEvent<HTMLAnchorElement>) => {
-      const url = prStatus?.url ?? currentLinkedPr?.url;
-      if (!url) return;
-      const openedInRightPanel = openPrLink(
-        event,
-        url,
-        openPullRequestsInRightPanel ? threadRef : undefined,
-      );
-      if (openedInRightPanel && openPullRequestsInRightPanel && !isActive) {
-        navigateToThread(threadRef);
-      }
-    },
-    [
-      isActive,
-      navigateToThread,
-      openPrLink,
-      openPullRequestsInRightPanel,
-      prStatus,
-      currentLinkedPr,
-      threadRef,
-    ],
+  const handlePrClick = useThreadPullRequestClick(
+    thread,
+    sourceControl,
+    isActive,
+    navigateToThread,
   );
   return (
     <>
@@ -84,5 +65,40 @@ export function LastCodeThreadSourceControl({
         </a>
       ) : null}
     </>
+  );
+}
+
+/** Opening a PR retains the exact thread destination when the right panel is used. */
+function useThreadPullRequestClick(
+  thread: SidebarThreadSummary,
+  sourceControl: LastCodeThreadSourceControlSnapshot,
+  isActive: boolean,
+  navigateToThread: (ref: ScopedThreadRef) => Promise<void>,
+) {
+  const { openPullRequestsInRightPanel, openPrLink } = useLastCodeSidebarPresentation();
+  const { prStatus, currentLinkedPr } = sourceControl;
+  const threadRef = scopeThreadRef(thread.environmentId, thread.id);
+  return useCallback(
+    (event: React.MouseEvent<HTMLAnchorElement>) => {
+      const url = prStatus?.url ?? currentLinkedPr?.url;
+      if (!url) return;
+      const openedInRightPanel = openPrLink(
+        event,
+        url,
+        openPullRequestsInRightPanel ? threadRef : undefined,
+      );
+      if (!openedInRightPanel) return;
+      if (!openPullRequestsInRightPanel) return;
+      if (!isActive) navigateToThread(threadRef);
+    },
+    [
+      isActive,
+      navigateToThread,
+      openPrLink,
+      openPullRequestsInRightPanel,
+      prStatus,
+      currentLinkedPr,
+      threadRef,
+    ],
   );
 }

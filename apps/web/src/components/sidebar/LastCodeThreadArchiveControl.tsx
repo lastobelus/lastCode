@@ -25,8 +25,6 @@ export function LastCodeThreadArchiveControl({
   editing: LastCodeThreadEditingCapabilities;
 }) {
   const confirmRequired = useClientSettings((settings) => settings.confirmThreadArchive);
-  const { archiveThread } = useLastCodeThreadActions();
-  const ref = scopeThreadRef(thread.environmentId, thread.id);
   const confirmButton = useRef<HTMLButtonElement | null>(null);
   useEffect(() => {
     if (!confirming) return;
@@ -34,17 +32,7 @@ export function LastCodeThreadArchiveControl({
     return () => cancelAnimationFrame(frame);
   }, [confirming]);
   const stopPointer = (event: React.PointerEvent<HTMLButtonElement>) => event.stopPropagation();
-  const archive = (event: React.MouseEvent<HTMLButtonElement>) => {
-    event.preventDefault();
-    event.stopPropagation();
-    if (confirming) editing.cancelArchiveConfirmation(ref);
-    if (thread.persistent) return;
-    if (!confirming && confirmRequired) {
-      if (checkTaskPermission(thread.environmentId)) editing.requestArchiveConfirmation(ref);
-      return;
-    }
-    void archiveLastCodeThread(ref, confirming, archiveThread);
-  };
+  const archive = useArchiveClick(thread, confirming, editing, confirmRequired);
   if (confirming)
     return (
       <button
@@ -103,4 +91,26 @@ export async function archiveLastCodeThread(
   }
   const result = inlineConfirmed ? await archive(ref, { confirmed: true }) : await archive(ref);
   reportThreadOperationFailure(result, "Failed to archive thread");
+}
+
+/** Inline confirmation is independent from the shared family archive confirmation. */
+function useArchiveClick(
+  thread: SidebarThreadSummary,
+  confirming: boolean,
+  editing: LastCodeThreadEditingCapabilities,
+  confirmRequired: boolean,
+) {
+  const { archiveThread } = useLastCodeThreadActions();
+  const ref = scopeThreadRef(thread.environmentId, thread.id);
+  return (event: React.MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (confirming) editing.cancelArchiveConfirmation(ref);
+    if (thread.persistent) return;
+    if (!confirming && confirmRequired) {
+      if (checkTaskPermission(thread.environmentId)) editing.requestArchiveConfirmation(ref);
+      return;
+    }
+    void archiveLastCodeThread(ref, confirming, archiveThread);
+  };
 }

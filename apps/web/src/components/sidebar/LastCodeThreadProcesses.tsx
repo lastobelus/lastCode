@@ -35,21 +35,7 @@ export function LastCodeThreadProcesses({
       event.preventDefault();
       event.stopPropagation();
       navigateToThread(threadRef);
-      void (async () => {
-        const result = await openDiscoveredPort({ threadRef, port, openPreview });
-        if (result._tag === "Success" || isAtomCommandInterrupted(result)) {
-          return;
-        }
-        const error = squashAtomCommandFailure(result);
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Unable to open preview",
-            description:
-              error instanceof Error ? error.message : "The preview could not be opened.",
-          }),
-        );
-      })();
+      void openThreadDiscoveredPort({ threadRef, port, openPreview });
     },
     [discoveredPorts, navigateToThread, openPreview, threadRef],
   );
@@ -95,5 +81,19 @@ export function LastCodeThreadProcesses({
         </Tooltip>
       ) : null}
     </>
+  );
+}
+
+/** Preview opening reports command failure after the row has navigated to its owning thread. */
+async function openThreadDiscoveredPort(input: Parameters<typeof openDiscoveredPort>[0]) {
+  const result = await openDiscoveredPort(input);
+  if (result._tag === "Success" || isAtomCommandInterrupted(result)) return;
+  const error = squashAtomCommandFailure(result);
+  toastManager.add(
+    stackedThreadToast({
+      type: "error",
+      title: "Unable to open preview",
+      description: error instanceof Error ? error.message : "The preview could not be opened.",
+    }),
   );
 }

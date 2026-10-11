@@ -9,6 +9,18 @@ import { prStatusIndicator, useLinkedThreadPullRequest } from "../ThreadStatusIn
 import { resolveLocalCheckoutBranchMismatch } from "../BranchToolbar.logic";
 import type { SidebarThreadSummary } from "../../types";
 
+/** A linked PR already supplies status; only leased branch rows need the local checkout query. */
+function threadGitStatusQuery(thread: SidebarThreadSummary, live: boolean, cwd: string | null) {
+  if (!live) return null;
+  if (thread.linkedPullRequest != null) return null;
+  if (thread.branch == null) return null;
+  if (cwd === null) return null;
+  return vcsEnvironment.status({
+    environmentId: thread.environmentId,
+    input: { cwd, includeRemote: false },
+  });
+}
+
 export function useLastCodeThreadSourceControl(
   thread: SidebarThreadSummary,
   leaseLiveStatus: boolean,
@@ -25,14 +37,7 @@ export function useLastCodeThreadSourceControl(
   );
   const threadProjectCwd = threadProject?.workspaceRoot ?? null;
   const gitCwd = thread.worktreePath ?? threadProjectCwd ?? projectCwdFallback;
-  const gitStatus = useEnvironmentQuery(
-    leaseLiveStatus && thread.linkedPullRequest == null && thread.branch != null && gitCwd !== null
-      ? vcsEnvironment.status({
-          environmentId: thread.environmentId,
-          input: { cwd: gitCwd, includeRemote: false },
-        })
-      : null,
-  );
+  const gitStatus = useEnvironmentQuery(threadGitStatusQuery(thread, leaseLiveStatus, gitCwd));
   const linkedPullRequestStatus = useLinkedThreadPullRequest(
     thread.environmentId,
     thread.linkedPullRequest,
