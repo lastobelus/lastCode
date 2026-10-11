@@ -100,6 +100,94 @@ function fixture(files: Readonly<Record<string, string>> = {}) {
 }
 
 describe("resolveQuickCiScope", () => {
+  it.each([
+    ["documentation", "docs/guide.md", "Guide\n", "none", []],
+    [
+      "source and reverse dependencies",
+      "packages/library/src/index.ts",
+      "export const value = 2;\n",
+      "affected",
+      ["@fixture/consumer", "@fixture/library"],
+    ],
+  ])("keeps scope narrow with an unchanged Gitlink: %s", (_name, file, text, kind, packages) => {
+    const repo = fixture();
+    const submodule = fixture();
+    // The commit is absent from the superproject; reading it as a blob would fail.
+    const path = "vendor/helper.ts";
+    NodeFS.mkdirSync(NodePath.join(repo.repo, path), { recursive: true });
+    git(repo.repo, ["update-index", "--add", "--cacheinfo", `160000,${submodule.base},${path}`]);
+    const base = repo.commit();
+    expect(git(repo.repo, ["ls-tree", "HEAD", "--", path])).toContain("160000 commit");
+    repo.change(file, text);
+    expect(resolveQuickCiScope(repo.repo, base, repo.commit())).toMatchObject({
+      kind,
+      packages,
+      changedFiles: [file],
+    });
+  });
+
+  it.each(["revision", "addition", "deletion", "replacement"])(
+    "keeps a Gitlink %s conservative even at a documentation path",
+    (change) => {
+      const repo = fixture();
+      const submodule = fixture();
+      const path = "docs/submodule.md";
+      NodeFS.mkdirSync(NodePath.join(repo.repo, path), { recursive: true });
+      const setGitlink = (oid: string) =>
+        git(repo.repo, ["update-index", "--add", "--cacheinfo", `160000,${oid},${path}`]);
+      if (change !== "addition") setGitlink(submodule.base);
+      const base = change === "addition" ? repo.base : repo.commit();
+      if (change === "deletion" || change === "replacement") {
+        git(repo.repo, ["update-index", "--force-remove", path]);
+        NodeFS.rmSync(NodePath.join(repo.repo, path), { recursive: true });
+        if (change === "replacement") repo.change(path, "Ordinary documentation\n");
+      } else {
+        submodule.change("docs/guide.md", "New revision\n");
+        setGitlink(submodule.commit());
+      }
+      expect(resolveQuickCiScope(repo.repo, base, repo.commit())).toMatchObject({
+        kind: "full",
+        reason: `Changed path is a submodule: ${path}`,
+        changedFiles: [path],
+      });
+    },
+  );
+
+  it("skips the dependency graph for AGENTS and skill Markdown despite an unresolved local dependency", () => {
+    const repo = fixture({
+      ...workspace("apps/unrelated", "@fixture/unrelated", {
+        dependencies: { "local-runtime": "file:deps/local-runtime.tgz" },
+      }),
+      "apps/unrelated/deps/local-runtime.tgz": "Tracked archive, not a workspace directory",
+    });
+    repo.change("AGENTS.md", "Updated instructions\n");
+    repo.change(".agents/skills/example/SKILL.md", "Updated skill\n");
+    expect(repo.scope()).toEqual({
+      kind: "none",
+      packages: [],
+      reason: "Only documentation or static assets changed",
+      changedFiles: [".agents/skills/example/SKILL.md", "AGENTS.md"],
+    });
+    repo.change("packages/library/src/index.ts", "export const value = 2;\n");
+    expect(repo.scope()).toMatchObject({
+      kind: "full",
+      reason: "Cannot safely narrow typecheck: Unresolved local dependency local-runtime",
+    });
+  });
+
+  it("keeps manifest changes conservative with an unresolved local dependency", () => {
+    const repo = fixture({
+      ...workspace("apps/unrelated", "@fixture/unrelated", {
+        dependencies: { "local-runtime": "file:missing" },
+      }),
+    });
+    repo.change("packages/library/package.json", JSON.stringify({ name: "@fixture/library" }));
+    expect(repo.scope()).toMatchObject({
+      kind: "full",
+      reason: "Workspace or TypeScript configuration changed: packages/library/package.json",
+    });
+  });
+
   it("resolves relative installed config references using Windows path separators", () => {
     expect(
       resolveQuickCiConfigReference(
