@@ -1,5 +1,6 @@
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import { isLoopbackHost } from "@t3tools/shared/preview";
+import { isPrivateNetworkHost } from "@t3tools/shared/hostClassification";
 import {
   PREVIEW_URL_MAX_LENGTH,
   ProviderInstanceId,
@@ -148,7 +149,7 @@ export class PreviewHosting extends Context.Service<
       readonly url: string;
       readonly browserUrl?: string;
     }) => Effect.Effect<
-      { readonly managed: boolean; readonly bootstrapToken?: string },
+      { readonly managed: boolean; readonly bootstrapToken?: string; readonly localUrl?: string },
       PreviewHostingError | TerminalManager.TerminalError | HostingAuth.PreviewHostingAuthError
     >;
     readonly list: (
@@ -1263,17 +1264,40 @@ const make = Effect.gen(function* () {
   const prepareNavigation: PreviewHosting["Service"]["prepareNavigation"] = Effect.fn(
     "PreviewHosting.prepareNavigation",
   )(function* (input) {
-    const normalized = normalizeLocalHttpUrl(input.url);
-    if (normalized === null) return { managed: false };
-    const target = new URL(normalized);
+    if (input.url.length > PREVIEW_URL_MAX_LENGTH) return { managed: false };
+    let target: URL;
+    try {
+      target = new URL(input.url);
+    } catch {
+      return { managed: false };
+    }
     if (target.username !== "" || target.password !== "") return { managed: false };
-    // Only the saved origin is verified; another loopback alias may serve a different listener.
-    const candidates = (yield* list(input.threadId)).filter(
-      (lease) => new URL(lease.url).origin === target.origin,
-    );
+    const normalized = normalizeLocalHttpUrl(input.url);
+    const sharedHttps =
+      input.browserUrl === undefined &&
+      target.protocol === "https:" &&
+      !isLoopbackHost(target.hostname) &&
+      isPrivateNetworkHost(target.hostname);
+    if (normalized === null && !sharedHttps) return { managed: false };
+    // Preserve exact loopback origins. A first shared HTTPS destination is accepted
+    // only after both descriptors identify the same owned development application.
+    const candidates = (yield* list(input.threadId)).filter((lease) => {
+      const local = new URL(lease.url);
+      return (
+        local.origin === target.origin ||
+        (sharedHttps &&
+          lease.browserAuth === "t3-dev" &&
+          local.protocol === "http:" &&
+          Number(local.port || 80) === Number(target.port || 443))
+      );
+    });
     // One owned listener may serve several paths; never guess between saved recipes.
     if (candidates.length !== 1) return { managed: false };
     const owned = candidates[0]!;
+    const localTarget = new URL(target);
+    const localOrigin = new URL(owned.url);
+    localTarget.protocol = localOrigin.protocol;
+    localTarget.host = localOrigin.host;
     const recovered = yield* recover({
       threadId: input.threadId,
       leaseId: PreviewHostingLeaseId.make(owned.id),
@@ -1283,10 +1307,11 @@ const make = Effect.gen(function* () {
       return yield* new PreviewHostingError({ operation: "validate", statePath });
     const bootstrapToken = yield* HostingAuth.prepareBrowserCredential({
       ...recovered,
-      browserUrl: input.browserUrl,
+      browserUrl: input.browserUrl ?? (sharedHttps ? target.href : undefined),
     }).pipe(Effect.provideService(HttpClient.HttpClient, httpClient));
     return {
       managed: true,
+      ...(sharedHttps ? { localUrl: localTarget.href } : {}),
       ...(bootstrapToken === undefined ? {} : { bootstrapToken }),
     };
   });

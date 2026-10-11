@@ -27,6 +27,51 @@ const clientLayer = (fetch: typeof globalThis.fetch) =>
   FetchHttpClient.layer.pipe(Layer.provide(Layer.succeed(FetchHttpClient.Fetch, fetch)));
 
 describe("managed preview browser authentication", () => {
+  it.effect.each(["local_descriptor", "browser_descriptor"] as const)(
+    "identifies an unreachable descriptor boundary without issuing access: %s",
+    (boundary) => {
+      const requests: Array<{ url: string; method: string; authorization: string | null }> = [];
+      return Effect.gen(function* () {
+        const result = yield* Effect.result(
+          HostingAuth.prepareBrowserCredential({ ...lease, browserUrl: remoteBrowserUrl }),
+        );
+        assert.equal(result._tag, "Failure");
+        if (result._tag === "Failure") {
+          assert.equal(result.failure.boundary, boundary);
+          assert.include(result.failure.message, "descriptor");
+          if (boundary === "browser_descriptor") {
+            assert.include(result.failure.message, "--share");
+            assert.include(result.failure.message, "HTTPS");
+          }
+          assert.notInclude(result.failure.message, "fixture-hidden-diagnostic");
+          assert.notInclude(result.failure.message, "managed-server");
+          assert.notInclude(result.failure.message, lease.env.T3CODE_DEV_AUTH_TOKEN);
+        }
+        assert.isTrue(
+          requests.every((request) => request.method === "GET" && request.authorization === null),
+        );
+      }).pipe(
+        Effect.provide(
+          clientLayer((url, init) => {
+            const parsed = new URL(String(url));
+            requests.push({
+              url: parsed.href,
+              method: init?.method ?? "GET",
+              authorization: new Headers(init?.headers).get("authorization"),
+            });
+            const failed =
+              boundary === "local_descriptor"
+                ? parsed.hostname === "localhost"
+                : parsed.hostname === "managed-server";
+            return failed
+              ? Promise.reject(new Error("fixture-hidden-diagnostic"))
+              : Promise.resolve(Response.json(descriptor));
+          }),
+        ),
+      );
+    },
+  );
+
   it.effect("does not authenticate arbitrary previews or disclose their environment", () =>
     Effect.gen(function* () {
       const token = yield* HostingAuth.prepareBrowserCredential({

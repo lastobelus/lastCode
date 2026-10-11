@@ -2457,6 +2457,7 @@ const make = Effect.gen(function* () {
     let localUrl = url;
     const requested = new URL(url);
     const localOrigin = target.hostedOrigins?.get(requested.origin);
+    const sharedHttps = localOrigin !== undefined && requested.protocol === "https:";
     if (localOrigin !== undefined) {
       const local = new URL(localOrigin);
       requested.protocol = local.protocol;
@@ -2464,7 +2465,9 @@ const make = Effect.gen(function* () {
       localUrl = requested.href;
     }
     let destination = url;
-    if (target.desktopHostId !== undefined && target.desktopHostId !== "local") {
+    // The verified shared HTTPS listener owns its hostname and certificate;
+    // the desktop's control-channel address cannot replace that origin.
+    if (target.desktopHostId !== undefined && target.desktopHostId !== "local" && !sharedHttps) {
       const resolved = await Effect.runPromise(
         desktopChannel.resolveUrl({
           desktopHostId: target.desktopHostId,
@@ -2490,17 +2493,19 @@ const make = Effect.gen(function* () {
         })
         .pipe(
           Effect.mapError(
-            () =>
+            (cause) =>
               new ServerBrowserPage.ServerBrowserOperationError(
                 "PreviewAutomationExecutionError",
-                "The saved development preview could not be prepared for browser navigation.",
+                cause._tag === "PreviewHostingAuthError"
+                  ? cause.message
+                  : "The saved development preview could not be prepared for browser navigation.",
               ),
           ),
         ),
       { signal },
     );
     signal?.throwIfAborted();
-    return { ...prepared, url: destination, localUrl };
+    return { ...prepared, url: destination, localUrl: prepared.localUrl ?? localUrl };
   };
 
   const prepareBrowserCredential = async (
@@ -2513,29 +2518,12 @@ const make = Effect.gen(function* () {
     if (destination.managed)
       tab.hostedOrigins.set(new URL(destination.url).origin, new URL(destination.localUrl).origin);
     if (destination.bootstrapToken === undefined) return;
-    // The context request installs the session cookie in this page's profile.
-    // Credentials never enter its URL, manager events, history, or navigation errors.
-    // Playwright does not abort this HTTP request with our signal. Await its
-    // actual completion so the control queue cannot hand off before cookie writes drain.
-    try {
-      const response = await tab.page
-        .context()
-        .request.post(new URL("/api/auth/browser-session", destination.url).href, {
-          data: { credential: destination.bootstrapToken },
-          maxRedirects: 0,
-          timeout: Math.max(1, Math.min(timeoutMs, 5_000)),
-        });
-      try {
-        if (!response.ok()) throw new Error("Browser session exchange was rejected.");
-      } finally {
-        await response.dispose();
-      }
-    } catch {
-      throw new ServerBrowserPage.ServerBrowserOperationError(
-        "PreviewAutomationExecutionError",
-        "Could not prepare browser access to this development preview.",
-      );
-    }
+    await ServerBrowserPage.prepareBrowserCredential(
+      tab.page,
+      destination.url,
+      destination.bootstrapToken,
+      timeoutMs,
+    );
     signal?.throwIfAborted();
   };
 
@@ -2545,15 +2533,18 @@ const make = Effect.gen(function* () {
     signal?: AbortSignal,
   ) => {
     if (!/^https?:/i.test(url)) return url;
+    const prepareUnmapped = async () => {
+      const prepared = await Effect.runPromise(
+        hosting.prepareNavigation({ threadId: tab.threadId, url }),
+        {
+          signal,
+        },
+      );
+      return { ...prepared, url, localUrl: prepared.localUrl ?? url };
+    };
     const destination = tab.hostedOrigins.has(new URL(url).origin)
       ? await browserNavigationUrl(tab, url, signal)
-      : {
-          ...(await Effect.runPromise(hosting.prepareNavigation({ threadId: tab.threadId, url }), {
-            signal,
-          })),
-          url,
-          localUrl: url,
-        };
+      : await prepareUnmapped();
     await prepareBrowserCredential(tab, destination, signal);
     return destination.url;
   };

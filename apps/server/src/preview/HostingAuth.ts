@@ -14,11 +14,27 @@ export class PreviewHostingAuthError extends Schema.TaggedError<PreviewHostingAu
   "PreviewHostingAuthError",
   {
     reason: Schema.Literals(["invalid_configuration", "bootstrap_failed"]),
+    boundary: Schema.optional(
+      Schema.Literals([
+        "local_descriptor",
+        "browser_descriptor",
+        "environment_identity",
+        "credential_issue",
+      ]),
+    ),
     // HTTP failures can retain authorization headers or a malformed credential response.
     cause: Schema.optional(Schema.Redacted(Schema.Defect(), { disallowJsonEncode: true })),
   },
 ) {
   override get message() {
+    if (this.boundary === "browser_descriptor")
+      return "The browser destination did not return a valid development environment descriptor. Relaunch the retained development recipe with --share and use its HTTPS destination for a remote desktop.";
+    if (this.boundary === "local_descriptor")
+      return "The owned local listener did not return a valid development environment descriptor. Check the retained recipe's local readiness URL before opening its shared HTTPS destination.";
+    if (this.boundary === "environment_identity")
+      return "The local listener and browser destination describe different development environments. Use the HTTPS destination produced by the retained recipe with --share.";
+    if (this.boundary === "credential_issue")
+      return "The owned development preview could not issue browser access. Check that the retained recipe still includes its configured development credential.";
     return "Could not prepare browser access to this development preview.";
   }
 }
@@ -61,13 +77,25 @@ export const prepareBrowserCredential = Effect.fn("PreviewHosting.prepareBrowser
         // Within the trusted development network, this rejects accidental misrouting.
         // Copied userdata or spoofed public descriptors can share an ID; this is not authentication.
         const descriptors = yield* Effect.forEach(
-          [url, destination],
-          (origin) =>
+          [
+            { origin: url, boundary: "local_descriptor" as const },
+            { origin: destination, boundary: "browser_descriptor" as const },
+          ],
+          ({ origin, boundary }) =>
             client
               .execute(HttpClientRequest.get(new URL("/.well-known/t3/environment", origin).href))
               .pipe(
                 Effect.flatMap(HttpClientResponse.filterStatusOk),
                 Effect.flatMap(HttpClientResponse.schemaBodyJson(ExecutionEnvironmentDescriptor)),
+                Effect.timeout("5 seconds"),
+                Effect.mapError(
+                  (cause) =>
+                    new PreviewHostingAuthError({
+                      reason: "bootstrap_failed",
+                      boundary,
+                      cause: Redacted.make(cause),
+                    }),
+                ),
               ),
           { concurrency: 2 },
         ).pipe(
@@ -76,17 +104,12 @@ export const prepareBrowserCredential = Effect.fn("PreviewHosting.prepareBrowser
             redirect: "manual",
             credentials: "omit",
           }),
-          Effect.timeout("5 seconds"),
-          Effect.mapError(
-            (cause) =>
-              new PreviewHostingAuthError({
-                reason: "bootstrap_failed",
-                cause: Redacted.make(cause),
-              }),
-          ),
         );
         if (descriptors[0]!.environmentId !== descriptors[1]!.environmentId)
-          return yield* new PreviewHostingAuthError({ reason: "bootstrap_failed" });
+          return yield* new PreviewHostingAuthError({
+            reason: "bootstrap_failed",
+            boundary: "environment_identity",
+          });
       }
     }
     const credential = yield* HttpClientRequest.post(
@@ -105,7 +128,11 @@ export const prepareBrowserCredential = Effect.fn("PreviewHosting.prepareBrowser
       Effect.timeout("5 seconds"),
       Effect.mapError(
         (cause) =>
-          new PreviewHostingAuthError({ reason: "bootstrap_failed", cause: Redacted.make(cause) }),
+          new PreviewHostingAuthError({
+            reason: "bootstrap_failed",
+            boundary: "credential_issue",
+            cause: Redacted.make(cause),
+          }),
       ),
     );
     return credential.credential;

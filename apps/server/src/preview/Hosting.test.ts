@@ -2375,6 +2375,108 @@ describe("PreviewHosting", () => {
       }).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  it.effect.each(["matching", "unreachable", "mismatched"] as const)(
+    "prepares a first HTTPS destination from its owned HTTP recipe (%s)",
+    (boundary) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-cold-https-" });
+        const config = yield* Effect.provide(
+          ServerConfig.ServerConfig,
+          ServerConfig.layerTest(process.cwd(), root),
+        );
+        const requests: Array<{ url: string; method: string }> = [];
+        const httpLayer = FetchHttpClient.layer.pipe(
+          Layer.provide(
+            Layer.succeed(FetchHttpClient.Fetch, (url, init) => {
+              const parsed = new URL(String(url));
+              requests.push({ url: parsed.href, method: init?.method ?? "GET" });
+              if (parsed.hostname === "managed-server" && boundary === "unreachable")
+                return Promise.reject(new Error("Fixture destination is unreachable"));
+              return Promise.resolve(
+                Response.json(
+                  init?.method === "POST"
+                    ? {
+                        id: "fixture-grant",
+                        credential: "fixture-one-use",
+                        expiresAt: "2026-10-07T22:00:00.000Z",
+                      }
+                    : {
+                        environmentId:
+                          parsed.hostname === "managed-server" && boundary === "mismatched"
+                            ? "other-application"
+                            : "hosted-application",
+                        label: "Hosted application",
+                        platform: { os: "linux", arch: "x64" },
+                        serverVersion: "0.0.0",
+                        capabilities: { repositoryIdentity: false },
+                      },
+                ),
+              );
+            }),
+          ),
+        );
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            const saved = yield* hosting.launch({
+              threadId: "thread-1",
+              command: "dev-command --share",
+              cwd: "/workspace",
+              url: PREVIEW_URL,
+              browserAuth: "t3-dev",
+              env: { T3CODE_DEV_AUTH_TOKEN: "fixture-development-credential" },
+            });
+            const result = yield* Effect.result(
+              hosting.prepareNavigation({
+                threadId: saved.threadId,
+                url: "https://managed-server:5173/qa?theme=dark#anchor",
+              }),
+            );
+            if (boundary === "matching") {
+              assert.equal(result._tag, "Success");
+              if (result._tag === "Success")
+                assert.deepEqual(result.success, {
+                  managed: true,
+                  localUrl: "http://localhost:5173/qa?theme=dark#anchor",
+                  bootstrapToken: "fixture-one-use",
+                });
+              assert.equal(requests.at(-1)?.url, "http://localhost:5173/api/auth/pairing-token");
+              assert.equal(requests.at(-1)?.method, "POST");
+            } else {
+              assert.equal(result._tag, "Failure");
+              if (result._tag === "Failure") {
+                assert.propertyVal(
+                  result.failure,
+                  "boundary",
+                  boundary === "unreachable" ? "browser_descriptor" : "environment_identity",
+                );
+                assert.include(result.failure.message, "--share");
+                assert.notInclude(result.failure.message, "managed-server");
+                assert.notInclude(result.failure.message, "fixture-development-credential");
+              }
+              assert.isTrue(requests.every(({ method }) => method === "GET"));
+            }
+            assert.deepEqual(
+              requests
+                .slice(0, 2)
+                .map(({ url }) => url)
+                .toSorted(),
+              [
+                "http://localhost:5173/.well-known/t3/environment",
+                "https://managed-server:5173/.well-known/t3/environment",
+              ].toSorted(),
+            );
+            assert.equal((yield* hosting.list(saved.threadId))[0]?.id, saved.id);
+          }).pipe(
+            Effect.provide(
+              hostingLayer(config, testTerminalHarness(), true, [], true, undefined, httpLayer),
+            ),
+          ),
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("sleeps only its terminal and retains the handoff until explicit stop", () =>
     Effect.gen(function* () {
       yield* TestClock.setTime(10_000);

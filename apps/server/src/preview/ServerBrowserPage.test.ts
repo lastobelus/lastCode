@@ -1,5 +1,14 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- An ephemeral HTTP fixture verifies real Chromium redirects across origins.
 import * as NodeHttp from "node:http";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Temporary loopback TLS fixture; no certificate or key is retained.
+import * as NodeHttps from "node:https";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Temporary loopback TLS fixture.
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Temporary loopback TLS fixture.
+import * as NodePath from "node:path";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Generates an ephemeral test certificate, as in PortScanner.test.ts.
+import * as NodeChildProcess from "node:child_process";
 
 import {
   chromium,
@@ -135,6 +144,115 @@ describe("server browser element refs", () => {
       networkEntries: [],
       actionTimeline: [],
     });
+
+  it("automatically authenticates a fresh HTTPS cookie context before its first document load", async () => {
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "preview-cold-tls-"));
+    const key = NodePath.join(directory, "test.key");
+    const certificate = NodePath.join(directory, "test.crt");
+    const requests: string[] = [];
+    let server: NodeHttps.Server | undefined;
+    let fresh: BrowserContext | undefined;
+    let control: BrowserContext | undefined;
+    try {
+      NodeChildProcess.execFileSync(
+        "openssl",
+        [
+          "req",
+          "-x509",
+          "-newkey",
+          "rsa:2048",
+          "-nodes",
+          "-days",
+          "1",
+          "-subj",
+          "/CN=localhost",
+          "-keyout",
+          key,
+          "-out",
+          certificate,
+        ],
+        { stdio: "ignore" },
+      );
+      server = NodeHttps.createServer(
+        {
+          key: NodeFS.readFileSync(key),
+          cert: NodeFS.readFileSync(certificate),
+        },
+        (request, response) => {
+          requests.push(`${request.method} ${request.url}`);
+          if (request.url === "/api/auth/browser-session") {
+            let body = "";
+            request.setEncoding("utf8");
+            request.on("data", (chunk) => {
+              body += chunk;
+            });
+            request.on("end", () => {
+              if (JSON.parse(body).credential !== "fixture-one-use") {
+                response.writeHead(401).end();
+                return;
+              }
+              response.setHeader(
+                "Set-Cookie",
+                "fixture-session=accepted; Path=/; Secure; HttpOnly; SameSite=Lax",
+              );
+              response.setHeader("Content-Type", "application/json");
+              response.end("{}");
+            });
+            return;
+          }
+          const authenticated = request.headers.cookie?.includes("fixture-session=accepted");
+          if (request.url === "/api/auth/session") {
+            response.writeHead(authenticated ? 200 : 401).end();
+            return;
+          }
+          if (request.url === "/qa" && !authenticated) {
+            response.writeHead(302, { Location: "/pair" }).end();
+            return;
+          }
+          response.setHeader("Content-Type", "text/html");
+          response.end(request.url === "/pair" ? "<h1>Pair</h1>" : "<h1>cold-bootstrap-ready</h1>");
+        },
+      );
+      await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (address === null || typeof address === "string")
+        throw new Error("Missing TLS fixture listener");
+      const origin = `https://127.0.0.1:${address.port}`;
+      // Trust is confined to this throwaway certificate/context, never production.
+      fresh = await browser.newContext({ ignoreHTTPSErrors: true });
+      const selected = await fresh.newPage();
+      expect(await fresh.cookies()).toEqual([]);
+      const unauthenticated = await fresh.request.get(`${origin}/api/auth/session`);
+      expect(unauthenticated.status()).toBe(401);
+      await unauthenticated.dispose();
+      requests.length = 0;
+      await ServerBrowserPage.prepareBrowserCredential(
+        selected,
+        `${origin}/qa`,
+        "fixture-one-use",
+        15_000,
+      );
+      await selected.goto(`${origin}/qa`);
+      expect(await selected.locator("h1").innerText()).toBe("cold-bootstrap-ready");
+      expect(selected.url()).toBe(`${origin}/qa`);
+      expect((await fresh.cookies()).map((cookie) => cookie.name)).toEqual(["fixture-session"]);
+      expect(requests.slice(0, 2)).toEqual(["POST /api/auth/browser-session", "GET /qa"]);
+      expect(requests).not.toContain("GET /pair");
+      control = await browser.newContext({ ignoreHTTPSErrors: true });
+      expect(await control.cookies()).toEqual([]);
+      const unprepared = await control.newPage();
+      await unprepared.goto(`${origin}/qa`);
+      expect(unprepared.url()).toBe(`${origin}/pair`);
+    } finally {
+      await control?.close();
+      await fresh?.close();
+      if (server)
+        await new Promise<void>((resolve, reject) =>
+          server!.close((error) => (error ? reject(error) : resolve())),
+        );
+      NodeFS.rmSync(directory, { recursive: true, force: true });
+    }
+  });
 
   it.each(["back", "forward", "reload", "same-document back"])(
     "redirects a changed origin during %s without adding a history entry",
