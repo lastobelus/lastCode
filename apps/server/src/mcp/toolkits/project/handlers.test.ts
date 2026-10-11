@@ -1,8 +1,12 @@
+import { ThreadReadAuthorization } from "../../../orchestration-v2/ThreadReadAuthorization.ts";
 import { expect, it } from "@effect/vitest";
 import {
   EnvironmentId,
+  MessageId,
   ProjectId,
   ProviderInstanceId,
+  RunId,
+  type OrchestrationV2ThreadProjection,
   ThreadId,
   type OrchestrationV2ThreadShell,
   type Project as ProjectRecord,
@@ -25,78 +29,133 @@ import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
 import * as VcsProcess from "../../../vcs/VcsProcess.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
+import * as ThreadReadBroker from "../../ThreadReadBroker.ts";
 import * as ProjectHandlers from "./handlers.ts";
 import { ProjectToolkit } from "./tools.ts";
 
-it.effect("attributes a launched thread's first message to the calling thread", () =>
-  Effect.gen(function* () {
-    const sourceThreadId = ThreadId.make("source-thread");
-    const projectId = ProjectId.make("project");
-    const providerInstanceId = ProviderInstanceId.make("codex");
-    const modelSelection = { instanceId: providerInstanceId, model: "gpt-5" };
-    const caller = {
-      id: sourceThreadId,
-      projectId,
-      providerInstanceId,
-      modelSelection,
-      runtimeMode: "full-access",
-      interactionMode: "default",
-      activeRunId: "active-run",
-      archivedAt: null,
-      deletedAt: null,
-    } as OrchestrationV2ThreadShell;
-    let launchedSender: ThreadId | undefined;
-    const layerDependencies = Layer.mergeAll(
-      NodeCrypto.layer,
-      Layer.succeed(McpInvocationContext.McpInvocationContext, {
-        environmentId: EnvironmentId.make("environment"),
-        requestNamespace: "session",
-        thread: {
-          threadId: sourceThreadId,
-          providerSessionId: "session",
-          providerInstanceId,
-        },
-        client: undefined,
-        issuedAt: 0,
-        capabilities: new Set(["orchestration" as const]),
-      }),
-      Layer.mock(ThreadManagement.ThreadManagementService)({
-        getThreadShell: () => Effect.succeed(caller),
-      }),
-      Layer.mock(ThreadLaunch.ThreadLaunchService)({
-        launch: (input) => {
-          launchedSender = input.initialMessage?.senderThreadId;
-          return Effect.succeed({
-            threadId: input.threadId,
-            projection: {
-              thread: { id: input.threadId, projectId, modelSelection },
-              runs: [],
-            },
-            resumed: false,
-          } as unknown as ThreadLaunch.ThreadLaunchResult);
-        },
-      }),
-      Layer.mock(Project.ProjectService)({}),
-      Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/projects" }),
-      Layer.mock(GitVcsDriver.GitVcsDriver)({}),
-      NodeServices.layer,
-      ServerConfig.layerTest(process.cwd(), { prefix: "t3-source-link-" }).pipe(
-        Layer.provide(NodeServices.layer),
-      ),
-    );
-    const toolkit = yield* ProjectToolkit.pipe(
-      Effect.provide(
-        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
-          Layer.provide(layerDependencies),
+it.effect(
+  "keeps a launched first message tied to the requesting run when its parent advances",
+  () =>
+    Effect.gen(function* () {
+      const sourceThreadId = ThreadId.make("source-thread");
+      const projectId = ProjectId.make("project");
+      const providerInstanceId = ProviderInstanceId.make("codex");
+      const modelSelection = { instanceId: providerInstanceId, model: "gpt-5" };
+      const sourceMessageId = MessageId.make("source-message");
+      let sourceRun = {
+        id: RunId.make("active-run"),
+        userMessageId: sourceMessageId,
+        ordinal: 1,
+        status: "running",
+      };
+      const broker = yield* ThreadReadBroker.ThreadReadBroker.pipe(
+        Effect.provide(ThreadReadBroker.layer.pipe(Layer.provide(NodeCrypto.layer))),
+      );
+      yield* broker.authorize({
+        threadId: sourceThreadId,
+        messageId: sourceMessageId,
+        sessionId: "requester-session",
+        alreadyStored: false,
+      });
+      const caller = {
+        id: sourceThreadId,
+        projectId,
+        providerInstanceId,
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        activeRunId: "active-run",
+        archivedAt: null,
+        deletedAt: null,
+      } as OrchestrationV2ThreadShell;
+      const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+      const layerDependencies = Layer.mergeAll(
+        NodeCrypto.layer,
+        Layer.succeed(ThreadReadBroker.ThreadReadBroker, broker),
+        Layer.succeed(McpInvocationContext.McpInvocationContext, {
+          environmentId: EnvironmentId.make("environment"),
+          requestNamespace: "session",
+          thread: {
+            threadId: sourceThreadId,
+            providerSessionId: "session",
+            providerInstanceId,
+          },
+          client: undefined,
+          issuedAt: 0,
+          capabilities: new Set(["orchestration" as const]),
+        }),
+        Layer.mock(ThreadManagement.ThreadManagementService)({
+          getThreadShell: () => Effect.succeed(caller),
+          getThreadRecords: (threadId) =>
+            Effect.succeed({
+              thread: { id: threadId },
+              runs: threadId === sourceThreadId ? [sourceRun] : [],
+              contextTransfers: [],
+            } as unknown as OrchestrationV2ThreadProjection),
+        }),
+        Layer.mock(ThreadLaunch.ThreadLaunchService)({
+          launch: (input) => {
+            launched.push(input);
+            return Effect.gen(function* () {
+              sourceRun = {
+                id: RunId.make("later-run"),
+                userMessageId: MessageId.make("later-message"),
+                ordinal: 2,
+                status: "running",
+              };
+              yield* broker.authorize({
+                threadId: sourceThreadId,
+                messageId: sourceRun.userMessageId,
+                sessionId: "another-client-session",
+                alreadyStored: false,
+              });
+              if (input.initialMessage?.messageId !== undefined && input.threadId !== undefined) {
+                const authorization = yield* ThreadReadAuthorization;
+                yield* authorization.authorize(input.threadId, input.initialMessage.messageId);
+              }
+              return {
+                threadId: input.threadId,
+                projection: {
+                  thread: { id: input.threadId, projectId, modelSelection },
+                  runs: [],
+                },
+                resumed: false,
+              } as unknown as ThreadLaunch.ThreadLaunchResult;
+            });
+          },
+        }),
+        Layer.mock(Project.ProjectService)({}),
+        Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/projects" }),
+        Layer.mock(GitVcsDriver.GitVcsDriver)({}),
+        NodeServices.layer,
+        ServerConfig.layerTest(process.cwd(), { prefix: "t3-source-link-" }).pipe(
+          Layer.provide(NodeServices.layer),
         ),
-      ),
-    );
-    const result = yield* toolkit
-      .handle("t3_thread_launch", { title: "Audit", message: "Review the change" })
-      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
-    expect(result.at(-1)?.result).toMatchObject({ projectId, modelSelection });
-    expect(launchedSender).toBe(sourceThreadId);
-  }),
+      );
+      const toolkit = yield* ProjectToolkit.pipe(
+        Effect.provide(
+          McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+            Layer.provide(layerDependencies),
+          ),
+        ),
+      );
+      const result = yield* toolkit
+        .handle("t3_thread_launch", { title: "Audit", message: "Review the change" })
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
+      expect(result.at(-1)?.result).toMatchObject({ projectId, modelSelection });
+      expect(launched[0]?.initialMessage?.senderThreadId).toBe(sourceThreadId);
+      expect(launched[0]?.creatorThreadId).toBe(sourceThreadId);
+      const prompted = launched[0]!;
+      expect(
+        yield* broker.authorizedSession(prompted.threadId!, prompted.initialMessage!.messageId!),
+      ).toBe("requester-session");
+      const unprompted = { title: "Independent notes", creatorThreadId: "untrusted-creator" };
+      yield* toolkit
+        .handle("t3_thread_launch", unprompted)
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
+      expect(launched[1]?.initialMessage).toBeUndefined();
+      expect(launched[1]?.creatorThreadId).toBe(sourceThreadId);
+    }),
 );
 
 it.effect("launches a scratch thread into the Scratch project", () =>

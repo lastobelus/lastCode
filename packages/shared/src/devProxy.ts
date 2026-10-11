@@ -21,6 +21,15 @@ export const DEV_PROXIED_ORIGIN_PRESERVING_PREFIXES: ReadonlySet<string> = new S
   "/mcp",
 ]);
 
+export const SHARED_DEV_LOOPBACK_HOST = "127.0.0.1";
+
+export function resolveWebDevServerHost(input: {
+  readonly explicitHost: string | undefined;
+  readonly sharedBindHost: string | undefined;
+}): string {
+  return input.sharedBindHost || input.explicitHost || "localhost";
+}
+
 export function isDevProxiedPath(pathname: string): boolean {
   return DEV_PROXIED_PATH_PREFIXES.some(
     (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`),
