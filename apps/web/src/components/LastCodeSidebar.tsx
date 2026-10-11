@@ -1,3 +1,4 @@
+import { useLastCodeSidebarProjects } from "./sidebar/useLastCodeSidebarProjects";
 import { LastCodeSidebarProjectList } from "./sidebar/LastCodeSidebarProjectList";
 import { LastCodeSidebarPresentationProvider } from "./sidebar/LastCodeSidebarPresentation";
 import { projectLastCodeProjectThreads } from "./sidebar/lastcodeProjectThreads";
@@ -13,32 +14,21 @@ import { FolderPlusIcon, SearchIcon } from "lucide-react";
 import { ProjectSidebarDraftList } from "./sidebar/ProjectSidebarDraftList";
 import { useAtomValue } from "@effect/atom-react";
 import React, { useCallback, useEffect, memo, useMemo, useState, type CSSProperties } from "react";
-import {
-  ProjectId,
-  type ScopedThreadRef,
-  type ResolvedKeybindingsConfig,
-} from "@t3tools/contracts";
+import { type ScopedThreadRef, type ResolvedKeybindingsConfig } from "@t3tools/contracts";
 import {
   parseScopedThreadKey,
-  scopedProjectKey,
   scopedThreadKey,
   scopeProjectRef,
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
-import { threadShellIsVisible } from "@t3tools/client-runtime/state/models";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { type LegacySidebarScale } from "@t3tools/contracts/settings";
 import { isDesktopLocalConnectionTarget, isWslConnectionTarget } from "../connection/desktopLocal";
 import { isElectron } from "../env";
 import { useTerminalFocus } from "../hooks/useTerminalFocus";
 import { isTerminalFocused } from "../lib/terminalFocus";
-import { useProjects, useThreadShells } from "../state/entities";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
-import {
-  legacyProjectCwdPreferenceKey,
-  resolveProjectExpanded,
-  useUiStateStore,
-} from "../uiStateStore";
+import { resolveProjectExpanded, useUiStateStore } from "../uiStateStore";
 import {
   resolveShortcutCommand,
   shortcutLabelForCommand,
@@ -77,9 +67,7 @@ import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
 import {
   getSidebarThreadIdsToPrewarm,
   resolveAdjacentThreadId,
-  orderItemsByPreferredIds,
   shouldClearThreadSelectionOnMouseDown,
-  sortProjectsForSidebar,
   useThreadJumpHintVisibility,
 } from "./Sidebar.logic";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
@@ -87,19 +75,9 @@ import { LastCodeSidebarThreadPicker } from "./sidebar/LastCodeSidebarThreadPick
 import { CommandDialogTrigger } from "./ui/command";
 import { useClientSettings } from "~/hooks/useSettings";
 import { primaryServerKeybindingsAtom, primaryServerProvidersAtom } from "../state/server";
-import {
-  derivePhysicalProjectKey,
-  getProjectOrderKey,
-  selectProjectGroupingSettings,
-} from "../logicalProject";
-import type { SidebarThreadSummary } from "../types";
 import { useLastCodeSidebarFamiliesStore } from "./lastcodeSidebarFamilies.store";
 import { deriveProviderInstanceEntries, type ProviderInstanceEntry } from "../providerInstances";
-import {
-  buildPhysicalToLogicalProjectKeyMap,
-  buildSidebarProjectSnapshots,
-  type SidebarProjectSnapshot,
-} from "../sidebarProjectGrouping";
+import type { SidebarProjectSnapshot } from "../sidebarProjectGrouping";
 const EMPTY_THREAD_JUMP_LABELS = new Map<string, string>();
 
 function SidebarThreadDetailPrewarmer({ threadRef }: { readonly threadRef: ScopedThreadRef }) {
@@ -269,16 +247,11 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
 });
 
 function LastCodeSidebarView() {
-  const projects = useProjects();
-  const sidebarThreads = useThreadShells();
   const collapsedFamiliesByKey = useLastCodeSidebarFamiliesStore((state) => state.collapsedByKey);
   const projectExpandedById = useUiStateStore((store) => store.projectExpandedById);
-  const projectOrder = useUiStateStore((store) => store.projectOrder);
   const navigate = useNavigate();
   const sidebarThreadSortOrder = useClientSettings((s) => s.sidebarThreadSortOrder);
   const groupingStyle = useClientSettings((s) => s.legacySidebarThreadGroupingStyle);
-  const sidebarProjectSortOrder = useClientSettings((s) => s.sidebarProjectSortOrder);
-  const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
   const sidebarThreadPreviewCount = useClientSettings((s) => s.sidebarThreadPreviewCount);
   const lastcodeSidebarScale = useClientSettings<LegacySidebarScale>((s) => s.legacySidebarScale);
   const environmentIconColors = useClientSettings((s) => s.environmentIconColors);
@@ -382,118 +355,21 @@ function LastCodeSidebarView() {
     () => new Set(environments.map((environment) => environment.environmentId)),
     [environments],
   );
-  const orderedProjects = useMemo(() => {
-    return orderItemsByPreferredIds({
-      items: projects,
-      preferredIds: projectOrder,
-      getId: getProjectOrderKey,
-      getPreferenceIds: (project) => [
-        getProjectOrderKey(project),
-        legacyProjectCwdPreferenceKey(project.workspaceRoot),
-      ],
-    });
-  }, [projectOrder, projects]);
-
-  const orderedProjectKeys = useMemo(
-    () => orderedProjects.map(getProjectOrderKey),
-    [orderedProjects],
-  );
-
-  // Build a mapping from physical project key → logical project key for
-  // cross-environment grouping.  Projects that share a repositoryIdentity
-  // canonicalKey are treated as one logical project in the sidebar.
-  const physicalToLogicalKey = useMemo(() => {
-    return buildPhysicalToLogicalProjectKeyMap({
-      projects: orderedProjects,
-      settings: projectGroupingSettings,
+  const { sortedProjects, orderedProjectKeys, resolveProjectKey, index } =
+    useLastCodeSidebarProjects({
       primaryEnvironmentId,
       scratchWorkspaceRootsByEnvironmentId,
+      environmentLabelById,
+      desktopLocalEnvironmentIds,
+      wslEnvironmentIds,
     });
-  }, [
-    orderedProjects,
-    projectGroupingSettings,
-    primaryEnvironmentId,
-    scratchWorkspaceRootsByEnvironmentId,
-  ]);
-  const projectPhysicalKeyByScopedRef = useMemo(
-    () =>
-      new Map(
-        orderedProjects.map((project) => [
-          scopedProjectKey(scopeProjectRef(project.environmentId, project.id)),
-          derivePhysicalProjectKey(project),
-        ]),
-      ),
-    [orderedProjects],
-  );
-
-  const sidebarProjects = useMemo<SidebarProjectSnapshot[]>(() => {
-    return buildSidebarProjectSnapshots({
-      projects: orderedProjects,
-      settings: projectGroupingSettings,
-      primaryEnvironmentId,
-      scratchWorkspaceRootsByEnvironmentId,
-      resolveEnvironmentLabel: (environmentId) => environmentLabelById.get(environmentId) ?? null,
-      isDesktopLocalEnvironment: (environmentId) => desktopLocalEnvironmentIds.has(environmentId),
-      isWslEnvironment: (environmentId) => wslEnvironmentIds.has(environmentId),
-    });
-  }, [
-    environmentLabelById,
-    desktopLocalEnvironmentIds,
-    wslEnvironmentIds,
-    orderedProjects,
-    projectGroupingSettings,
-    primaryEnvironmentId,
-    scratchWorkspaceRootsByEnvironmentId,
-  ]);
-
-  const sidebarProjectByKey = useMemo(
-    () => new Map(sidebarProjects.map((project) => [project.projectKey, project] as const)),
-    [sidebarProjects],
-  );
-  const sidebarThreadByKey = useMemo(
-    () =>
-      new Map(
-        sidebarThreads.map(
-          (thread) =>
-            [scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)), thread] as const,
-        ),
-      ),
-    [sidebarThreads],
-  );
-  // Resolve the active route's project key to a logical key so it matches the
-  // sidebar's grouped project entries.
+  const { byThreadKey: sidebarThreadByKey, byProjectKey: threadsByProjectKey } = index;
   const activeRouteProjectKey = useMemo(() => {
-    if (!routeThreadKey) {
-      return null;
-    }
-    const activeThread = sidebarThreadByKey.get(routeThreadKey);
-    if (!activeThread) return null;
-    const physicalKey =
-      projectPhysicalKeyByScopedRef.get(
-        scopedProjectKey(scopeProjectRef(activeThread.environmentId, activeThread.projectId)),
-      ) ?? scopedProjectKey(scopeProjectRef(activeThread.environmentId, activeThread.projectId));
-    return physicalToLogicalKey.get(physicalKey) ?? physicalKey;
-  }, [routeThreadKey, sidebarThreadByKey, physicalToLogicalKey, projectPhysicalKeyByScopedRef]);
-
-  // Group threads by logical project key so all threads from grouped projects
-  // are displayed together.
-  const threadsByProjectKey = useMemo(() => {
-    const next = new Map<string, SidebarThreadSummary[]>();
-    for (const thread of sidebarThreads) {
-      const physicalKey =
-        projectPhysicalKeyByScopedRef.get(
-          scopedProjectKey(scopeProjectRef(thread.environmentId, thread.projectId)),
-        ) ?? scopedProjectKey(scopeProjectRef(thread.environmentId, thread.projectId));
-      const logicalKey = physicalToLogicalKey.get(physicalKey) ?? physicalKey;
-      const existing = next.get(logicalKey);
-      if (existing) {
-        existing.push(thread);
-      } else {
-        next.set(logicalKey, [thread]);
-      }
-    }
-    return next;
-  }, [sidebarThreads, physicalToLogicalKey, projectPhysicalKeyByScopedRef]);
+    const thread = routeThreadKey ? sidebarThreadByKey.get(routeThreadKey) : null;
+    return thread
+      ? resolveProjectKey(scopeProjectRef(thread.environmentId, thread.projectId))
+      : null;
+  }, [routeThreadKey, sidebarThreadByKey, resolveProjectKey]);
   const getCurrentSidebarShortcutContext = useCallback(
     () => ({
       terminalFocus: isTerminalFocused(),
@@ -533,41 +409,6 @@ function LastCodeSidebarView() {
     [clearSelection, isMobile, navigate, setOpenMobile, setSelectionAnchor],
   );
 
-  const visibleThreads = useMemo(
-    () => sidebarThreads.filter(threadShellIsVisible),
-    [sidebarThreads],
-  );
-  const sortedProjects = useMemo(() => {
-    const sortableProjects = sidebarProjects.map((project) => ({
-      ...project,
-      id: project.projectKey,
-    }));
-    const sortableThreads = visibleThreads.map((thread) => {
-      const physicalKey =
-        projectPhysicalKeyByScopedRef.get(
-          scopedProjectKey(scopeProjectRef(thread.environmentId, thread.projectId)),
-        ) ?? scopedProjectKey(scopeProjectRef(thread.environmentId, thread.projectId));
-      return {
-        ...thread,
-        projectId: (physicalToLogicalKey.get(physicalKey) ?? physicalKey) as ProjectId,
-      };
-    });
-    return sortProjectsForSidebar(
-      sortableProjects,
-      sortableThreads,
-      sidebarProjectSortOrder,
-    ).flatMap((project) => {
-      const resolvedProject = sidebarProjectByKey.get(project.id);
-      return resolvedProject ? [resolvedProject] : [];
-    });
-  }, [
-    sidebarProjectSortOrder,
-    physicalToLogicalKey,
-    projectPhysicalKeyByScopedRef,
-    sidebarProjectByKey,
-    sidebarProjects,
-    visibleThreads,
-  ]);
   const visibleSidebarThreadKeys = useMemo(
     () =>
       sortedProjects.flatMap((project) => {
@@ -793,7 +634,7 @@ function LastCodeSidebarView() {
           threadJumpLabelByKey={visibleThreadJumpLabelByKey}
           expandThreadListForProject={expandThreadListForProject}
           collapseThreadListForProject={collapseThreadListForProject}
-          projectsLength={projects.length}
+          projectsLength={sortedProjects.length}
           lastcodeSidebarScale={lastcodeSidebarScale}
           projectTreeScaleStyle={scaleStyle}
         />
