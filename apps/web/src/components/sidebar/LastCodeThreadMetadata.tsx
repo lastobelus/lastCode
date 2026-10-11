@@ -187,11 +187,11 @@ export function LastCodeThreadMetadata({
   const gridClassName = jumpLabel
     ? "grid shrink-0 grid-cols-[max-content] items-center max-sm:grid-cols-[max-content_calc(1.5rem*var(--lastcode-sidebar-content-zoom))]"
     : "grid shrink-0 grid-cols-[repeat(2,calc(0.75rem*var(--lastcode-sidebar-content-zoom)))_calc(3rem*var(--lastcode-sidebar-content-zoom))] items-center gap-x-(--thread-metadata-gap) max-sm:grid-cols-[repeat(2,calc(0.75rem*var(--lastcode-sidebar-content-zoom)))_calc(3rem*var(--lastcode-sidebar-content-zoom))_calc(1.5rem*var(--lastcode-sidebar-content-zoom))]";
-  // Fixed tracks keep timestamps from shifting icons. Jump hints replace those
-  // tracks while retaining the touch action space and archive control position.
+  // Fixed tracks keep timestamps from shifting icons. Anchor archive controls to
+  // this line, not the whole row: metadata can wrap below a deeply indented title.
   return (
     <div
-      className={gridClassName}
+      className={`relative min-h-6 ${gridClassName}`}
       style={
         {
           "--thread-metadata-gap": "calc(var(--spacing) * var(--lastcode-sidebar-content-zoom))",

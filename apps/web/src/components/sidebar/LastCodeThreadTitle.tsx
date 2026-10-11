@@ -25,6 +25,10 @@ import type {
 import { LastCodeThreadSourceControl } from "./LastCodeThreadSourceControl";
 import type { LastCodeThreadSourceControlSnapshot } from "./useLastCodeThreadSourceControl";
 import type { ScopedThreadRef } from "@t3tools/contracts";
+
+// Physical pixels: outcome + PR + two gaps still leave at least 32px for the name.
+// The row wraps metadata instead of shrinking this budget, including at sidebar zoom.
+export const LASTCODE_THREAD_LEADING_MIN_WIDTH = 72;
 function WaitingAction({
   thread,
   threadStatus,
@@ -277,7 +281,12 @@ export function LastCodeThreadLeadingControls({
   navigateToThread: (ref: ScopedThreadRef) => Promise<void>;
 }) {
   return (
-    <div className="@container/lastcode-thread-title flex min-w-0 flex-1 items-center gap-1.5 text-left">
+    <div
+      className="@container/lastcode-thread-title flex min-w-0 flex-1 items-center gap-1.5 text-left"
+      style={{
+        minWidth: `calc(${LASTCODE_THREAD_LEADING_MIN_WIDTH}px * var(--lastcode-sidebar-content-zoom))`,
+      }}
+    >
       <LastCodeThreadSourceControl
         thread={family.thread}
         sourceControl={sourceControl}

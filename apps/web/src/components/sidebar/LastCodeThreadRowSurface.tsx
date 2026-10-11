@@ -43,18 +43,20 @@ function rowAppearance(
   pending: boolean,
 ) {
   return cn(
-    "relative isolate flex h-8 w-full min-w-0 cursor-pointer select-none items-center gap-1 overflow-hidden rounded-md pr-2 text-left text-xs outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring group-data-[collapsible=icon]:hidden [&>span:last-child]:truncate [&>svg:not([class*='size-'])]:size-4 [&>svg]:shrink-0 [&>svg]:text-sidebar-muted-foreground",
+    "relative isolate flex h-auto min-h-8 w-full min-w-0 flex-wrap cursor-pointer select-none items-center gap-1 overflow-hidden rounded-md py-1 pr-2 text-left text-xs outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring group-data-[collapsible=icon]:hidden [&>span:last-child]:truncate [&>svg:not([class*='size-'])]:size-4 [&>svg]:shrink-0 [&>svg]:text-sidebar-muted-foreground",
     state.active
       ? "bg-sidebar-row-active font-medium text-sidebar-foreground hover:bg-sidebar-row-active"
       : state.selected
         ? "bg-sidebar-row-selected text-sidebar-foreground hover:bg-sidebar-row-active"
         : "text-sidebar-muted-foreground/80 hover:bg-sidebar-row-hover hover:text-sidebar-foreground",
-    tall && "h-10",
+    tall && "min-h-10",
     pending && "cursor-not-allowed opacity-65",
     state.fileDragOver && "ring-1 ring-inset ring-primary/70",
   );
 }
-/** A focusable row with nested controls, sharing the row-owned annotation handle and navigation ref. */
+/** Keep one row boundary; metadata wraps before consuming the reserved leading budget.
+ * Height must remain automatic so wrapped controls and family summaries cannot be clipped.
+ */
 export function LastCodeThreadRowSurface({
   family,
   relationship,

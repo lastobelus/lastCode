@@ -37,7 +37,7 @@ export function LastCodeThreadMetadataControls({
 }: Props) {
   const confirming = archive.allowed && archive.confirmationRequested;
   return (
-    <div className="ml-auto flex shrink-0 items-center gap-1.5">
+    <div className="ml-auto flex max-w-full shrink-0 flex-wrap items-center justify-end gap-1.5">
       {children}
       <LastCodeThreadMetadata
         thread={thread}
