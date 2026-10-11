@@ -2457,6 +2457,7 @@ const make = Effect.gen(function* () {
     let localUrl = url;
     const requested = new URL(url);
     const localOrigin = target.hostedOrigins?.get(requested.origin);
+    const sharedHttps = localOrigin !== undefined && requested.protocol === "https:";
     if (localOrigin !== undefined) {
       const local = new URL(localOrigin);
       requested.protocol = local.protocol;
@@ -2464,7 +2465,9 @@ const make = Effect.gen(function* () {
       localUrl = requested.href;
     }
     let destination = url;
-    if (target.desktopHostId !== undefined && target.desktopHostId !== "local") {
+    // The verified shared HTTPS listener owns its hostname and certificate;
+    // the desktop's control-channel address cannot replace that origin.
+    if (target.desktopHostId !== undefined && target.desktopHostId !== "local" && !sharedHttps) {
       const resolved = await Effect.runPromise(
         desktopChannel.resolveUrl({
           desktopHostId: target.desktopHostId,
@@ -2480,11 +2483,6 @@ const make = Effect.gen(function* () {
           "The connected desktop cannot resolve this environment URL. Check the environment connection before retrying; the desktop's localhost was not opened.",
         );
       destination = normalizePreviewUrl(resolved);
-      if (localOrigin !== undefined && new URL(url).protocol === "https:") {
-        const shared = new URL(destination);
-        shared.protocol = "https:";
-        destination = shared.href;
-      }
     }
     const prepared = await Effect.runPromise(
       hosting

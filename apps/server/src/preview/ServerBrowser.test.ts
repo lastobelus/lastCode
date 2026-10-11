@@ -919,64 +919,112 @@ it.live("returns the actionable shared-route failure to the browser caller", () 
   ).pipe(Effect.provide(layer)),
 );
 
-it.live("retains the owned HTTP origin after a first cold HTTPS native open", () =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      profileCatalogue = {
-        desktopHostId: "fixture-desktop",
-        profiles: [{ id: "fixture-profile", name: "Fixture profile", kind: "persistent" }],
-        defaultProfileId: "fixture-profile",
-      };
-      desktopRendersNext = true;
-      const localUrl = "http://localhost:5173/qa?mode=dark#anchor";
-      const browserUrl = "https://environment.example.test:5173/qa?mode=dark#anchor";
-      const prepared: Array<{ threadId: string; url: string; browserUrl?: string }> = [];
-      hostingPreparation = (input) =>
-        Effect.sync(() => {
-          prepared.push(input);
-          return {
-            managed: true,
-            ...(input.url === browserUrl ? { localUrl } : {}),
-            bootstrapToken: "fixture-one-use-credential",
-          };
+it.live.each(["environment.example.test", "127.0.0.1", "192.0.2.20"])(
+  "retains the owned HTTP origin after a first cold HTTPS native open (connection host: %s)",
+  (connectionHost) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        remoteUrlHostname = connectionHost;
+        profileCatalogue = {
+          desktopHostId: "fixture-desktop",
+          profiles: [{ id: "fixture-profile", name: "Fixture profile", kind: "persistent" }],
+          defaultProfileId: "fixture-profile",
+        };
+        desktopRendersNext = true;
+        const localUrl = "http://localhost:5173/qa?mode=dark#anchor";
+        const browserUrl = "https://environment.example.test:5173/qa?mode=dark#anchor";
+        const prepared: Array<{ threadId: string; url: string; browserUrl?: string }> = [];
+        hostingPreparation = (input) =>
+          Effect.sync(() => {
+            prepared.push(input);
+            return {
+              managed: true,
+              ...(input.url === browserUrl ? { localUrl } : {}),
+              bootstrapToken: "fixture-one-use-credential",
+            };
+          });
+        const broker = yield* Broker.PreviewAutomationBroker;
+        yield* Effect.yieldNow;
+        expect(desktopConnections).toHaveLength(0);
+        const opened = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "openWithProfile",
+          input: {
+            profileName: "Fixture profile",
+            url: browserUrl,
+            open: false,
+            reuseExistingTab: false,
+          },
         });
-      const broker = yield* Broker.PreviewAutomationBroker;
-      yield* Effect.yieldNow;
-      expect(desktopConnections).toHaveLength(0);
-      const opened = yield* broker.invoke<PreviewAutomationStatus>({
-        scope,
-        operation: "openWithProfile",
-        input: {
-          profileName: "Fixture profile",
-          url: browserUrl,
-          open: false,
-          reuseExistingTab: false,
-        },
-      });
-      const selected = desktopConnections[0]!.context;
-      expect(selected.request.post).toHaveBeenCalledExactlyOnceWith(
-        "https://environment.example.test:5173/api/auth/browser-session",
-        expect.objectContaining({
-          data: { credential: "fixture-one-use-credential" },
-          maxRedirects: 0,
-        }),
-      );
-      expect(selected.cookies).toEqual(new Set(["https://environment.example.test:5173"]));
-      expect(selected.page.goto).toHaveBeenCalledExactlyOnceWith(browserUrl, expect.any(Object));
-      yield* broker.invoke({
-        scope,
-        tabId: opened.tabId!,
-        operation: "navigate",
-        input: { url: browserUrl },
-      });
-      expect(prepared).toEqual([
-        { threadId: testThread.threadId, url: browserUrl },
-        { threadId: testThread.threadId, url: localUrl, browserUrl },
-      ]);
-      expect(selected.page.url()).toBe(browserUrl);
-      expect(selected.request.post).toHaveBeenCalledTimes(2);
-    }),
-  ).pipe(Effect.provide(layer)),
+        const selected = desktopConnections[0]!.context;
+        expect(selected.request.post).toHaveBeenCalledExactlyOnceWith(
+          "https://environment.example.test:5173/api/auth/browser-session",
+          expect.objectContaining({
+            data: { credential: "fixture-one-use-credential" },
+            maxRedirects: 0,
+          }),
+        );
+        expect(selected.cookies).toEqual(new Set(["https://environment.example.test:5173"]));
+        expect(selected.page.goto).toHaveBeenCalledExactlyOnceWith(browserUrl, expect.any(Object));
+        const nextBrowserUrl = browserUrl.replace("/qa?", "/qa/next?");
+        const nextLocalUrl = localUrl.replace("/qa?", "/qa/next?");
+        yield* broker.invoke({
+          scope,
+          tabId: opened.tabId!,
+          operation: "navigate",
+          input: { url: nextBrowserUrl },
+        });
+        expect(prepared).toEqual([
+          { threadId: testThread.threadId, url: browserUrl },
+          { threadId: testThread.threadId, url: nextLocalUrl, browserUrl: nextBrowserUrl },
+        ]);
+        expect(selected.page.url()).toBe(nextBrowserUrl);
+        expect(selected.request.post).toHaveBeenCalledTimes(2);
+
+        const browser = yield* ServerBrowser.ServerBrowser;
+        const viewer = yield* browser.attachViewer(viewerInput(opened.tabId!, true));
+        yield* viewer.input({ type: "takeControl" });
+        for (const ignoreCache of [false, true]) {
+          const reloaded = Promise.withResolvers<void>();
+          const reload = selected.page.reload.getMockImplementation()!;
+          selected.page.reload.mockImplementationOnce(async () => {
+            await reload();
+            reloaded.resolve();
+          });
+          for (const session of selected.sessions) {
+            const send = session.send.getMockImplementation()!;
+            session.send.mockImplementation(async (method, input) => {
+              if (method === "Page.reload") reloaded.resolve();
+              return send(method, input);
+            });
+          }
+          yield* viewer.input({ type: "reload", ignoreCache });
+          yield* Effect.promise(() => reloaded.promise);
+          expect(selected.page.url()).toBe(nextBrowserUrl);
+        }
+        for (const delta of [-1, 1] as const) {
+          const committed = Promise.withResolvers<void>();
+          const method = delta < 0 ? "goBack" : "goForward";
+          const navigate = selected.page[method].getMockImplementation()!;
+          selected.page[method].mockImplementationOnce(async () => {
+            await navigate();
+            committed.resolve();
+          });
+          yield* viewer.input({ type: "history", delta });
+          yield* Effect.promise(() => committed.promise);
+          expect(selected.page.url()).toBe(delta < 0 ? browserUrl : nextBrowserUrl);
+        }
+        expect(prepared.slice(2)).toEqual(
+          [nextLocalUrl, nextLocalUrl, localUrl, nextLocalUrl].map((url) => ({
+            threadId: testThread.threadId,
+            url,
+            browserUrl: url.replace("http://localhost", "https://environment.example.test"),
+          })),
+        );
+        expect(selected.request.post).toHaveBeenCalledTimes(6);
+        expect(selected.cookies).toEqual(new Set(["https://environment.example.test:5173"]));
+      }),
+    ).pipe(Effect.provide(layer)),
 );
 
 it.live.each(["open", "openWithProfile", "navigate"] as const)(
