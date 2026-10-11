@@ -99,11 +99,15 @@ afterEach(async () => {
   await act(() => root.unmount());
   container.remove();
 });
-async function render(value = project()) {
+async function render(value = project(), handleNewThread = create) {
   await act(() =>
     root.render(
       <div onClick={mocks.parentClick}>
-        <LastCodeProjectNewThread project={value} handleNewThread={create} shortcutLabel="⌘N" />
+        <LastCodeProjectNewThread
+          project={value}
+          handleNewThread={handleNewThread}
+          shortcutLabel="⌘N"
+        />
       </div>,
     ),
   );
@@ -231,17 +235,11 @@ describe("project New thread targeting", () => {
   });
   it("uses the refreshed physical member and creation callback on the next click", async () => {
     await render(project([first]));
+    const button = container.querySelector("button");
     const refreshed = { ...remote, id: ProjectId.make("new-project") };
     const newer = vi.fn<ReturnType<typeof useNewThreadHandler>>().mockResolvedValue(null);
-    await act(() =>
-      root.render(
-        <LastCodeProjectNewThread
-          project={project([refreshed])}
-          handleNewThread={newer}
-          shortcutLabel={null}
-        />,
-      ),
-    );
+    await render(project([refreshed]), newer);
+    expect(container.querySelector("button")).toBe(button);
     await click();
     expect(create).not.toHaveBeenCalled();
     expect(newer).toHaveBeenCalledExactlyOnceWith(
