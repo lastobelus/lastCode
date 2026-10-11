@@ -1,6 +1,8 @@
 import { useAtomValue } from "@effect/atom-react";
 import * as Schema from "effect/Schema";
 import {
+  lazy,
+  Suspense,
   useEffect,
   useState,
   useSyncExternalStore,
@@ -37,7 +39,6 @@ import {
   useUpdateClientSettings,
 } from "../hooks/useSettings";
 import LegacyThreadSidebar from "./LegacySidebar";
-import LastCodeSidebar from "./LastCodeSidebar";
 import { toggleUpstreamSidebar } from "../sidebarMode";
 import { useThreadVisitedMigration } from "../hooks/useThreadVisitedMigration";
 import ThreadSidebar from "./Sidebar";
@@ -66,6 +67,7 @@ import {
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 
 const MACOS_TRAFFIC_LIGHTS_LEFT_INSET = "var(--desktop-window-controls-inset, 90px)";
+const LastCodeSidebar = lazy(() => import("./LastCodeSidebar"));
 
 function subscribeToViewportWidth(onChange: () => void): () => void {
   window.addEventListener("resize", onChange);
@@ -392,7 +394,9 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
               <SettingsSidebarNav pathname={pathname} />
             </>
           ) : sidebarMode === "lastcode" ? (
-            <LastCodeSidebar />
+            <Suspense fallback={<SidebarChromeHeader isElectron={isElectron} />}>
+              <LastCodeSidebar />
+            </Suspense>
           ) : sidebarMode === "legacy" ? (
             <LegacyThreadSidebar />
           ) : (
