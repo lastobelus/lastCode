@@ -32,6 +32,7 @@ function createSettingsRouter(initialEntry = "/settings/general") {
       }
     },
   });
+  const archived = createRoute({ getParentRoute: () => settings, path: "archived" });
   const general = createRoute({ getParentRoute: () => settings, path: "general" });
   const projects = createRoute({ getParentRoute: () => settings, path: "projects" });
   const integrations = createRoute({ getParentRoute: () => settings, path: "integrations" });
@@ -73,6 +74,7 @@ function createSettingsRouter(initialEntry = "/settings/general") {
         sourceControl,
         providers,
         scheduledTasks,
+        archived,
       ]),
       legacyProject,
     ]),
@@ -92,6 +94,30 @@ describe("settings scope navigation", () => {
     expect(router.state.location.search).toEqual({ machine: "remote-server" });
     await router.navigate({ to: "/settings/projects", search: { project: "another-project" } });
     expect(router.state.location.search).toEqual({ project: "another-project" });
+  });
+
+  it("keeps Archive scope through search navigation and clears only the selected project", async () => {
+    const router = createSettingsRouter();
+    await router.load();
+    await router.navigate({ to: "/settings/general", search: checkoutSearch });
+    await router.navigate({ to: "/settings/archived", hash: "archive" });
+    expect(router.state.location.search).toEqual(checkoutSearch);
+
+    await router.navigate({
+      from: "/settings",
+      to: "/settings/archived",
+      search: () => ({ project: undefined, checkout: undefined, machine: "remote-server" }),
+      hash: "",
+    });
+    expect(router.state.location.pathname).toBe("/settings/archived");
+    expect(router.state.location.search).toEqual({ machine: "remote-server" });
+
+    await router.navigate({
+      from: "/settings",
+      to: "/settings/archived",
+      search: () => ({ project: undefined, checkout: undefined, machine: undefined }),
+    });
+    expect(router.state.location.search).toEqual({});
   });
 
   it("clears a checkout when selecting all environments and all projects", async () => {
@@ -125,6 +151,7 @@ describe("settings scope navigation", () => {
     "/settings/integrations",
     "/settings/source-control",
     "/settings/scheduled-tasks",
+    "/settings/archived",
   ] as const)(
     "keeps %s when regrouping or selecting a target from the shared settings layout",
     async (to) => {

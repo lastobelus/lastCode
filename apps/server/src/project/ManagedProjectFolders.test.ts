@@ -1,3 +1,4 @@
+import * as ServerSettings from "../serverSettings.ts";
 import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
@@ -82,6 +83,7 @@ const layer = (baseDir: string, options?: HarnessOptions) =>
           ),
     ),
     Layer.provideMerge(RuntimeLayer.layerProjectService),
+    Layer.provideMerge(ServerSettings.layerTest()),
     Layer.provideMerge(layerEnrichment),
     Layer.provideMerge(WorkspacePaths.layer),
     Layer.provideMerge(layerGitWorkflow(options?.vcsProcess)),

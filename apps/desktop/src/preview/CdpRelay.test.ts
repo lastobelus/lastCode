@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { createCdpRelayConnection, type CdpRelayTarget } from "./CdpRelay.ts";
+import {
+  createCdpRelayConnection,
+  type CdpRelayConnection,
+  type CdpRelayTarget,
+} from "./CdpRelay.ts";
 
 const makeTarget = (
   send: CdpRelayTarget["send"],
@@ -18,6 +22,112 @@ const makeTarget = (
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 describe("CDP relay", () => {
+  it("replays the retained page's execution context to a reconnected client", async () => {
+    let runtimeEnabled = false;
+    let activeRelay: CdpRelayConnection;
+    const send = vi.fn(async (method: string, params: Record<string, unknown>) => {
+      if (method === "Runtime.disable") runtimeEnabled = false;
+      if (method === "Runtime.enable" && !runtimeEnabled) {
+        runtimeEnabled = true;
+        activeRelay.event(
+          "Runtime.executionContextCreated",
+          {
+            context: {
+              id: 7,
+              name: "",
+              origin: "https://fixture.example",
+              auxData: { isDefault: true, frameId: "GUEST-TARGET" },
+            },
+          },
+          "",
+        );
+      }
+      if (method === "Runtime.callFunctionOn") {
+        expect(params.executionContextId).toBe(7);
+        return { result: { type: "string", value: "same-backing-page" } };
+      }
+      return {};
+    });
+    const target = makeTarget(send);
+    for (let connection = 0; connection < 2; connection += 1) {
+      const written: Array<Record<string, unknown>> = [];
+      activeRelay = createCdpRelayConnection(target, (raw) => written.push(JSON.parse(raw)));
+      activeRelay.receive(JSON.stringify({ id: 1, method: "Target.setAutoAttach", params: {} }));
+      await settle();
+      activeRelay.receive(
+        JSON.stringify({ id: 2, method: "Runtime.enable", sessionId: "t3-preview-page" }),
+      );
+      await settle();
+      expect(written).toContainEqual({
+        method: "Runtime.executionContextCreated",
+        params: {
+          context: {
+            id: 7,
+            name: "",
+            origin: "https://fixture.example",
+            auxData: { isDefault: true, frameId: "GUEST-TARGET" },
+          },
+        },
+        sessionId: "t3-preview-page",
+      });
+      activeRelay.receive(
+        JSON.stringify({
+          id: 3,
+          method: "Runtime.callFunctionOn",
+          params: {
+            executionContextId: 7,
+            functionDeclaration: "() => window.backingPageIdentity",
+          },
+          sessionId: "t3-preview-page",
+        }),
+      );
+      await settle();
+      expect(written).toContainEqual({
+        id: 3,
+        result: { result: { type: "string", value: "same-backing-page" } },
+        sessionId: "t3-preview-page",
+      });
+    }
+    expect(send.mock.calls.filter(([method]) => method === "Runtime.disable")).toHaveLength(2);
+  });
+
+  it("finishes the runtime reset before announcing the root and leaves extra and child sessions intact", async () => {
+    const reset = Promise.withResolvers<void>();
+    const send = vi.fn(async (method: string) => {
+      if (method === "Runtime.disable") await reset.promise;
+      return {};
+    });
+    const written: Array<Record<string, unknown>> = [];
+    const relay = createCdpRelayConnection(makeTarget(send), (raw) =>
+      written.push(JSON.parse(raw)),
+    );
+    relay.receive(JSON.stringify({ id: 1, method: "Target.setAutoAttach", params: {} }));
+    await settle();
+    expect(written).toEqual([]);
+    reset.resolve();
+    await settle();
+    expect(written).toContainEqual(expect.objectContaining({ method: "Target.attachedToTarget" }));
+    relay.receive(JSON.stringify({ id: 2, method: "Target.setAutoAttach", params: {} }));
+    relay.receive(
+      JSON.stringify({
+        id: 3,
+        method: "Target.attachToTarget",
+        params: { targetId: "GUEST-TARGET" },
+      }),
+    );
+    await settle();
+    const extra = (written.find((message) => message.id === 3)!.result as { sessionId: string })
+      .sessionId;
+    relay.receive(JSON.stringify({ id: 4, method: "Runtime.enable", sessionId: extra }));
+    relay.receive(JSON.stringify({ id: 5, method: "Runtime.enable", sessionId: "iframe-session" }));
+    await settle();
+    expect(send.mock.calls).toEqual([
+      ["Runtime.disable", {}, undefined],
+      ["Runtime.enable", {}, undefined],
+      ["Runtime.enable", {}, "iframe-session"],
+    ]);
+  });
+
   it("announces only the tab's page, under its real target id", async () => {
     const written: Array<Record<string, unknown>> = [];
     const relay = createCdpRelayConnection(makeTarget(vi.fn()), (raw) =>
