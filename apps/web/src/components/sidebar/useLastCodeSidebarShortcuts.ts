@@ -32,11 +32,10 @@ function useKeyboardNavigation(
   keys: readonly string[],
   threads: ReadonlyMap<string, SidebarThreadSummary>,
   route: ReturnType<typeof useLastCodeSidebarRoute>,
-  jumpKeys: readonly string[],
   keybindings: ResolvedKeybindingsConfig,
-  platform: string,
 ) {
   const navigateToThread = useLastCodeNavigateToThread(useRouter());
+  const platform = navigator.platform;
   const { routeThreadKey, routeTerminalOpen } = route;
   useEffect(() => {
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
@@ -45,16 +44,12 @@ function useKeyboardNavigation(
         terminalOpen: routeTerminalOpen,
         modelPickerOpen: isModelPickerOpen(),
       };
-      if (event.defaultPrevented || event.repeat || isCommandPaletteOpen() || isModelPickerOpen())
-        return;
+      if (event.defaultPrevented) return;
+      if (event.repeat) return;
+      if (isCommandPaletteOpen()) return;
+      if (isModelPickerOpen()) return;
       const command = resolveShortcutCommand(event, keybindings, { platform, context });
-      const target = resolveLastCodeSidebarShortcutTarget(
-        command,
-        keys,
-        jumpKeys,
-        routeThreadKey,
-        threads,
-      );
+      const target = resolveLastCodeSidebarShortcutTarget(command, keys, routeThreadKey, threads);
       if (!target) return;
       event.preventDefault();
       event.stopPropagation();
@@ -62,16 +57,7 @@ function useKeyboardNavigation(
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [
-    keys,
-    threads,
-    routeThreadKey,
-    routeTerminalOpen,
-    jumpKeys,
-    keybindings,
-    platform,
-    navigateToThread,
-  ]);
+  }, [keys, threads, routeThreadKey, routeTerminalOpen, keybindings, platform, navigateToThread]);
 }
 function useSelectionDismissal() {
   const clearSelection = useThreadSelectionStore((state) => state.clearSelection);
@@ -98,7 +84,6 @@ export function useLastCodeSidebarShortcuts(
     modifiers = useShortcutModifierState();
   const { showThreadJumpHints, updateThreadJumpHintsVisibility } = useThreadJumpHintVisibility();
   const commands = useMemo(() => lastCodeThreadJumpCommands(keys), [keys]);
-  const jumpKeys = useMemo(() => [...commands.keys()], [commands]);
   const { routeTerminalOpen } = route;
   const labels = useMemo(
     () => lastCodeThreadJumpLabels(commands, keybindings, routeTerminalOpen, platform),
@@ -116,7 +101,7 @@ export function useLastCodeSidebarShortcuts(
     () => updateThreadJumpHintsVisibility(shouldShow),
     [shouldShow, updateThreadJumpHintsVisibility],
   );
-  useKeyboardNavigation(keys, threads, route, jumpKeys, keybindings, platform);
+  useKeyboardNavigation(keys, threads, route, keybindings);
   useSelectionDismissal();
   const options = useMemo(
     () => ({ platform, context: { terminalFocus: false, terminalOpen: false } }),

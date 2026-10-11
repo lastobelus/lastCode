@@ -22,7 +22,6 @@ export function lastCodeThreadJumpCommands(keys: readonly string[]) {
 export function resolveLastCodeSidebarShortcutTarget(
   command: string | null,
   orderedKeys: readonly string[],
-  jumpKeys: readonly string[],
   currentKey: string | null,
   threads: ReadonlyMap<string, SidebarThreadSummary>,
 ): ScopedThreadRef | null {
@@ -33,7 +32,7 @@ export function resolveLastCodeSidebarShortcutTarget(
       ? resolveAdjacentThreadId({ threadIds: orderedKeys, currentThreadId: currentKey, direction })
       : jumpIndex === null
         ? null
-        : jumpKeys[jumpIndex];
+        : orderedKeys[jumpIndex];
   const thread = key ? threads.get(key) : null;
   return thread ? scopeThreadRef(thread.environmentId, thread.id) : null;
 }
