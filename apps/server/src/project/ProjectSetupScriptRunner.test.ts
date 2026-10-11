@@ -34,7 +34,11 @@ const startDrain = {
 };
 
 function makeHarness(
-  options: { readonly setupScript?: boolean; readonly writeEffect?: Effect.Effect<void> } = {},
+  options: {
+    readonly setupScript?: boolean;
+    readonly writeEffect?: Effect.Effect<void>;
+    readonly terminalLinkProfileName?: string;
+  } = {},
 ) {
   const open = vi.fn((input: Parameters<TerminalManager.TerminalManager["Service"]["open"]>[0]) =>
     Effect.succeed({
@@ -83,6 +87,9 @@ function makeHarness(
               command: "vp install",
               icon: "configure" as const,
               runOnWorktreeCreate: true,
+              ...(options.terminalLinkProfileName === undefined
+                ? {}
+                : { terminalLinkProfileName: options.terminalLinkProfileName }),
             },
             {
               id: "clean",
@@ -338,3 +345,19 @@ it.effect("holds admission through command write and releases it before setup co
     }).pipe(Effect.provide(layer));
   }),
 );
+
+it.effect("preserves an opted-in setup Action's profile in its own terminal", () => {
+  const { layer, open, projectId } = makeHarness({ terminalLinkProfileName: "Work account" });
+  return Effect.gen(function* () {
+    const runner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
+    const result = yield* runner.runForThread({
+      threadId: "thread-1",
+      projectId,
+      worktreePath: "/workspace/example",
+      trigger: "setup",
+    });
+    assert.equal(result.status, "started");
+    assert.equal(open.mock.calls[0]?.[0].terminalLinkProfileName, "Work account");
+    assert.match(open.mock.calls[0]?.[0].terminalId ?? "", /^setup-/u);
+  }).pipe(Effect.provide(layer));
+});

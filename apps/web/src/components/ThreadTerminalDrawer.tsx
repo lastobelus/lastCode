@@ -450,6 +450,7 @@ export function TerminalViewport({
       ...(providerInstanceId ? { providerInstanceId } : {}),
     },
   });
+  const readTerminalLinkProfileName = useEffectEvent(() => terminalSession.terminalLinkProfileName);
   const canResizeTerminal =
     canOperateTerminal && terminalSession.version > 0 && terminalSession.status === "running";
   const resizeSessionGeneration = canResizeTerminal ? terminalSession.output.generation : null;
@@ -875,12 +876,16 @@ export function TerminalViewport({
               );
             });
           };
-          if (!readEnvironmentScope(environmentId, AuthPreviewOperateScope)) {
+          if (
+            !readEnvironmentScope(environmentId, AuthPreviewOperateScope) &&
+            readTerminalLinkProfileName() === undefined
+          ) {
             fallbackToBrowser(text);
             return;
           }
           void openTerminalLinkInPreview({
             url: text,
+            terminalLinkProfileName: readTerminalLinkProfileName(),
             threadRef,
             openPreview,
             fallbackToBrowser,

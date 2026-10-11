@@ -32,7 +32,8 @@ const browserDefaultsMocks = vi.hoisted(() => ({
   resolve: vi.fn(),
 }));
 
-vi.mock("~/browser/browserDefaults", () => ({
+vi.mock("~/browser/browserDefaults", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("~/browser/browserDefaults")>()),
   resolveBrowserDefaults: browserDefaultsMocks.resolve,
   browserDefaultOpenViewport: (defaults: { viewport: unknown }) => defaults.viewport,
   browserDefaultOpenProfileId: (defaults: { profileId: string }) => defaults.profileId,
@@ -49,7 +50,8 @@ vi.mock("~/browser/browserLinkTarget", () => ({
 
 const hydratedDefaults = {
   viewport: { _tag: "fixed", width: 1280, height: 720 } as const,
-  profileId: "work",
+  profileId: "default",
+  profiles: [{ id: "work", name: "Work account", kind: "persistent" as const }],
 };
 
 const threadRef = {
@@ -80,6 +82,139 @@ afterEach(() => {
 });
 
 describe("openTerminalLinkInPreview", () => {
+  it("opens a generic Action link with the exact named profile without changing Default", async () => {
+    const openPreview = vi.fn(async () => AsyncResult.success(snapshot));
+    const fallbackToBrowser = vi.fn();
+    await openTerminalLinkInPreview({
+      url: "https://example.com/docs",
+      threadRef,
+      openPreview,
+      fallbackToBrowser,
+      forceBrowser: false,
+      terminalLinkProfileName: "Work account",
+    });
+    expect(openPreview).toHaveBeenCalledWith({
+      environmentId: "local",
+      input: {
+        threadId: "thread-1",
+        url: "https://example.com/docs",
+        viewport: hydratedDefaults.viewport,
+        profileId: "work",
+      },
+    });
+    expect(hydratedDefaults.profileId).toBe("default");
+    expect(fallbackToBrowser).not.toHaveBeenCalled();
+  });
+
+  it("keeps the configured ordinary profile after opening an opted-in Action", async () => {
+    const defaults = { ...hydratedDefaults, profileId: "research" };
+    browserDefaultsMocks.resolve.mockResolvedValue(defaults);
+    const openPreview = vi.fn(async () => AsyncResult.success(snapshot));
+    const fallbackToBrowser = vi.fn();
+    const input = {
+      url: "https://example.com/docs",
+      threadRef,
+      openPreview,
+      fallbackToBrowser,
+      forceBrowser: false,
+    };
+    await openTerminalLinkInPreview({ ...input, terminalLinkProfileName: "Work account" });
+    await openTerminalLinkInPreview(input);
+    expect(openPreview).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ input: expect.objectContaining({ profileId: "work" }) }),
+    );
+    expect(openPreview).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ input: expect.objectContaining({ profileId: "research" }) }),
+    );
+    expect(defaults.profileId).toBe("research");
+    expect(fallbackToBrowser).not.toHaveBeenCalled();
+  });
+
+  it("does not let a browser modifier bypass a missing named profile", async () => {
+    const fallbackToBrowser = vi.fn();
+    const openPreview = vi.fn(async () => AsyncResult.success(snapshot));
+    await expect(
+      openTerminalLinkInPreview({
+        url: "https://example.com/docs",
+        threadRef,
+        openPreview,
+        fallbackToBrowser,
+        forceBrowser: true,
+        terminalLinkProfileName: "Missing",
+      }),
+    ).rejects.toMatchObject({ _tag: "PreviewAutomationProfileError", reason: "unknown" });
+    expect(fallbackToBrowser).not.toHaveBeenCalled();
+    expect(openPreview).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { name: "Missing", profiles: hydratedDefaults.profiles, reason: "unknown" },
+    { name: "work account", profiles: hydratedDefaults.profiles, reason: "unknown" },
+    {
+      name: "Work account",
+      profiles: [
+        ...hydratedDefaults.profiles,
+        { id: "other", name: "Work account", kind: "persistent" as const },
+      ],
+      reason: "ambiguous",
+    },
+  ])(
+    "rejects $reason profile intent before opening either browser",
+    async ({ name, profiles, reason }) => {
+      browserDefaultsMocks.resolve.mockResolvedValue({ ...hydratedDefaults, profiles });
+      const openPreview = vi.fn(async () => AsyncResult.success(snapshot));
+      const fallbackToBrowser = vi.fn();
+      await expect(
+        openTerminalLinkInPreview({
+          url: "https://example.com/docs",
+          threadRef,
+          openPreview,
+          fallbackToBrowser,
+          forceBrowser: false,
+          terminalLinkProfileName: name,
+        }),
+      ).rejects.toMatchObject({ _tag: "PreviewAutomationProfileError", reason });
+      expect(openPreview).not.toHaveBeenCalled();
+      expect(fallbackToBrowser).not.toHaveBeenCalled();
+      expect(hostingMocks.prepare).not.toHaveBeenCalled();
+    },
+  );
+
+  it("reports named-profile preview failure without falling back to another browser", async () => {
+    const fallbackToBrowser = vi.fn();
+    await expect(
+      openTerminalLinkInPreview({
+        url: "https://example.com/docs",
+        threadRef,
+        openPreview: async () => AsyncResult.failure(Cause.fail(new Error("unavailable"))),
+        fallbackToBrowser,
+        forceBrowser: false,
+        terminalLinkProfileName: "Work account",
+      }),
+    ).rejects.toBeInstanceOf(TerminalLinkPreviewOpenError);
+    expect(fallbackToBrowser).not.toHaveBeenCalled();
+  });
+
+  it("reports unavailable integrated routing for explicit intent instead of silently opening externally", async () => {
+    linkTargetMocks.preference.mockReturnValue("system");
+    const fallbackToBrowser = vi.fn();
+    const openPreview = vi.fn(async () => AsyncResult.success(snapshot));
+    await expect(
+      openTerminalLinkInPreview({
+        url: "https://example.com/docs",
+        threadRef,
+        openPreview,
+        fallbackToBrowser,
+        forceBrowser: false,
+        terminalLinkProfileName: "Work account",
+      }),
+    ).rejects.toMatchObject({ _tag: "TerminalLinkProfileUnavailableError" });
+    expect(openPreview).not.toHaveBeenCalled();
+    expect(fallbackToBrowser).not.toHaveBeenCalled();
+  });
+
   it("waits for owning-thread recovery before opening a stopped terminal link", async () => {
     let entered!: () => void;
     const started = new Promise<void>((resolve) => {

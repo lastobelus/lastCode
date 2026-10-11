@@ -7,6 +7,7 @@ import {
   browserDefaultOpenProfileId,
   browserDefaultOpenViewport,
   resolveBrowserDefaults,
+  resolveBrowserOpenProfileId,
 } from "~/browser/browserDefaults";
 import { isWebUrl, resolveBrowserLinkTargetPreference } from "~/browser/browserLinkTarget";
 import type { OpenPreviewMutation } from "~/browser/openFileInPreview";
@@ -38,8 +39,18 @@ export class TerminalLinkPreviewOpenError extends Schema.TaggedError<TerminalLin
   }
 }
 
+export class TerminalLinkProfileUnavailableError extends Schema.TaggedError<TerminalLinkProfileUnavailableError>()(
+  "TerminalLinkProfileUnavailableError",
+  {},
+) {
+  override get message(): string {
+    return "Opening this Action link requires the integrated Browser with its named profile.";
+  }
+}
+
 interface OpenTerminalLinkInPreviewInput<E> {
   readonly url: string;
+  readonly terminalLinkProfileName?: string;
   readonly threadRef: ScopedThreadRef;
   readonly openPreview: OpenPreviewMutation<E>;
   readonly fallbackToBrowser: (url: string) => void;
@@ -54,7 +65,20 @@ interface OpenTerminalLinkInPreviewInput<E> {
 export async function openTerminalLinkInPreview<E>(
   input: OpenTerminalLinkInPreviewInput<E>,
 ): Promise<void> {
+  // Resolve explicit intent before either browser opens. Never infer it from the URL.
+  const explicitDefaults =
+    input.terminalLinkProfileName === undefined ? undefined : await resolveBrowserDefaults();
+  const explicitProfileId =
+    explicitDefaults === undefined
+      ? undefined
+      : resolveBrowserOpenProfileId(
+          { profileName: input.terminalLinkProfileName },
+          explicitDefaults,
+        );
   if (typeof window !== "undefined" && !window.desktopBridge) {
+    if (explicitProfileId !== undefined && !input.forceBrowser) {
+      throw new TerminalLinkProfileUnavailableError();
+    }
     await openPreparedExternalUrl(input.url, async () =>
       hostedPreviewNavigationUrl(await prepareHostedPreview(input.threadRef, input.url)),
     );
@@ -69,6 +93,9 @@ export async function openTerminalLinkInPreview<E>(
     (await resolveBrowserLinkTargetPreference()) === "app";
 
   if (!supportsPreview) {
+    if (explicitProfileId !== undefined && !input.forceBrowser) {
+      throw new TerminalLinkProfileUnavailableError();
+    }
     input.fallbackToBrowser(hostedPreviewNavigationUrl(prepared));
     return;
   }
@@ -79,7 +106,7 @@ export async function openTerminalLinkInPreview<E>(
     targetOrigin: new URL(input.url).origin,
   };
 
-  const defaults = await resolveBrowserDefaults();
+  const defaults = explicitDefaults ?? (await resolveBrowserDefaults());
   const runtime = previewRuntimeFor(input.threadRef.environmentId);
   const desktopHostId =
     runtime === "server" ? desktopBrowserHostFor(input.threadRef.environmentId) : undefined;
@@ -94,7 +121,7 @@ export async function openTerminalLinkInPreview<E>(
       // Same reason as `openUrlInPreview`: this path handles its own result
       // mapping, so the configured defaults are applied explicitly.
       viewport: browserDefaultOpenViewport(defaults),
-      profileId: browserDefaultOpenProfileId(defaults),
+      profileId: explicitProfileId ?? browserDefaultOpenProfileId(defaults),
       ...(runtime === undefined ? {} : { runtime }),
       ...(desktopHostId === undefined ? {} : { desktopHostId }),
     },
@@ -103,12 +130,9 @@ export async function openTerminalLinkInPreview<E>(
     if (isAtomCommandInterrupted(result)) {
       return;
     }
-    console.error(
-      new TerminalLinkPreviewOpenError({
-        ...errorContext,
-        cause: result.cause,
-      }),
-    );
+    const error = new TerminalLinkPreviewOpenError({ ...errorContext, cause: result.cause });
+    if (explicitProfileId !== undefined) throw error;
+    console.error(error);
     input.fallbackToBrowser(hostedPreviewNavigationUrl(prepared));
     return;
   }

@@ -344,6 +344,7 @@ import {
 import { type NewProjectScriptInput } from "./ProjectScriptsControl";
 import {
   buildProjectScript,
+  selectProjectScriptTerminal,
   commandForProjectScript,
   nextProjectScriptId,
   projectScriptIdFromCommand,
@@ -5103,11 +5104,19 @@ export default function ChatView(props: ChatViewProps) {
       const baseTerminalId =
         terminalUiState.activeTerminalId || activeKnownTerminalIds[0] || DEFAULT_THREAD_TERMINAL_ID;
       const isBaseTerminalBusy = runningTerminalIds.includes(baseTerminalId);
-      const wantsNewTerminal = Boolean(options?.preferNewTerminal) || isBaseTerminalBusy;
-      const shouldCreateNewTerminal =
-        wantsNewTerminal ||
-        !canReuseTerminal ||
-        !readEnvironmentScope(environmentId, AuthTerminalReadScope);
+      const terminalLaunch = selectProjectScriptTerminal({
+        script,
+        baseTerminalId,
+        baseTerminalLinkProfileName: activeThreadKnownSessions.find(
+          (session) => session.target.terminalId === baseTerminalId,
+        )?.state.terminalLinkProfileName,
+        isBaseTerminalBusy,
+        preferNewTerminal: Boolean(options?.preferNewTerminal),
+        canReuseTerminal,
+        canReadTerminal: readEnvironmentScope(environmentId, AuthTerminalReadScope),
+        allocateTerminalId,
+      });
+      const shouldCreateNewTerminal = terminalLaunch.createNewTerminal;
       const targetWorktreePath = options?.worktreePath ?? activeThread.worktreePath ?? null;
 
       setTerminalUiLaunchContext({
@@ -5128,11 +5137,14 @@ export default function ChatView(props: ChatViewProps) {
         worktreePath: targetWorktreePath,
         ...(options?.env ? { extraEnv: options.env } : {}),
       });
-      const targetTerminalId = shouldCreateNewTerminal ? allocateTerminalId() : baseTerminalId;
+      const targetTerminalId = terminalLaunch.terminalId;
       const openTerminalInput: TerminalOpenInput = shouldCreateNewTerminal
         ? {
             threadId: activeThreadId,
             terminalId: targetTerminalId,
+            ...(terminalLaunch.terminalLinkProfileName === undefined
+              ? {}
+              : { terminalLinkProfileName: terminalLaunch.terminalLinkProfileName }),
             cwd: targetCwd,
             ...(targetWorktreePath !== null ? { worktreePath: targetWorktreePath } : {}),
             env: runtimeEnv,
@@ -5218,6 +5230,7 @@ export default function ChatView(props: ChatViewProps) {
       openPreview,
       hasTerminalWriteAccess,
       activeKnownTerminalIds,
+      activeThreadKnownSessions,
       canReuseTerminal,
       allocateTerminalId,
       runningTerminalIds,

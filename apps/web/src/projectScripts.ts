@@ -17,6 +17,7 @@ export interface ProjectScriptInput {
   readonly previewUrl: Exclude<ProjectScript["previewUrl"], undefined> | null;
   readonly autoOpenPreview: boolean;
   readonly allowAgentResume?: boolean;
+  readonly terminalLinkProfileName?: string;
 }
 
 export function buildProjectScript(id: string, input: ProjectScriptInput): ProjectScript {
@@ -29,12 +30,42 @@ export function buildProjectScript(id: string, input: ProjectScriptInput): Proje
     ...(input.runOnWorktreeCreate && input.waitForSetup ? { async: false } : {}),
     ...(input.runOnSettle ? { runOnSettle: true } : {}),
     ...(input.allowAgentResume ? { allowAgentResume: true } : {}),
+    ...(input.terminalLinkProfileName === undefined
+      ? {}
+      : { terminalLinkProfileName: input.terminalLinkProfileName }),
     ...(input.previewUrl === null
       ? {}
       : {
           previewUrl: input.previewUrl,
           autoOpenPreview: input.autoOpenPreview,
         }),
+  };
+}
+
+/** Keep Action link intent out of reused shells, including a later ordinary Action. */
+export function selectProjectScriptTerminal(input: {
+  readonly script: ProjectScript;
+  readonly baseTerminalId: string;
+  readonly baseTerminalLinkProfileName?: string;
+  readonly isBaseTerminalBusy: boolean;
+  readonly preferNewTerminal: boolean;
+  readonly canReuseTerminal: boolean;
+  readonly canReadTerminal: boolean;
+  readonly allocateTerminalId: () => string;
+}) {
+  const createNewTerminal =
+    input.script.terminalLinkProfileName !== undefined ||
+    input.baseTerminalLinkProfileName !== undefined ||
+    input.preferNewTerminal ||
+    input.isBaseTerminalBusy ||
+    !input.canReuseTerminal ||
+    !input.canReadTerminal;
+  return {
+    createNewTerminal,
+    terminalId: createNewTerminal ? input.allocateTerminalId() : input.baseTerminalId,
+    ...(input.script.terminalLinkProfileName === undefined
+      ? {}
+      : { terminalLinkProfileName: input.script.terminalLinkProfileName }),
   };
 }
 

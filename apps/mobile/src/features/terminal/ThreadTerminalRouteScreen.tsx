@@ -438,6 +438,9 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
             cols: initialAttachGridSize.cols,
             rows: initialAttachGridSize.rows,
             ...(pendingLaunch?.env ? { env: pendingLaunch.env } : {}),
+            ...(pendingLaunch?.terminalLinkProfileName === undefined
+              ? {}
+              : { terminalLinkProfileName: pendingLaunch.terminalLinkProfileName }),
             ...(pendingLaunch ? { restartIfNotRunning: true } : {}),
           }
         : null,

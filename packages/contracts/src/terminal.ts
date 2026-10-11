@@ -45,6 +45,7 @@ export const TerminalOpenInput = Schema.Struct({
   rows: Schema.optional(TerminalRowsSchema),
   env: Schema.optional(TerminalEnvSchema),
   providerInstanceId: Schema.optional(ProviderInstanceId),
+  terminalLinkProfileName: Schema.optional(TrimmedNonEmptyStringSchema),
 });
 export type TerminalOpenInput = typeof TerminalOpenInput.Type;
 
@@ -56,6 +57,7 @@ export const TerminalAttachInput = Schema.Struct({
   rows: Schema.optional(TerminalRowsSchema),
   env: Schema.optional(TerminalEnvSchema),
   providerInstanceId: Schema.optional(ProviderInstanceId),
+  terminalLinkProfileName: Schema.optional(TrimmedNonEmptyStringSchema),
   restartIfNotRunning: Schema.optional(Schema.Boolean),
 });
 export type TerminalAttachInput = typeof TerminalAttachInput.Type;
@@ -105,6 +107,7 @@ export const TerminalSessionSnapshot = Schema.Struct({
   terminalId: Schema.String.check(Schema.isNonEmpty()),
   cwd: Schema.String.check(Schema.isNonEmpty()),
   worktreePath: Schema.NullOr(TrimmedNonEmptyStringSchema),
+  terminalLinkProfileName: Schema.optional(TrimmedNonEmptyStringSchema),
   status: TerminalSessionStatus,
   pid: Schema.NullOr(Schema.Int.check(Schema.isGreaterThan(0))),
   history: Schema.String,
@@ -122,6 +125,7 @@ export const TerminalSummary = Schema.Struct({
   terminalId: Schema.String.check(Schema.isNonEmpty()),
   cwd: Schema.String.check(Schema.isNonEmpty()),
   worktreePath: Schema.NullOr(TrimmedNonEmptyStringSchema),
+  terminalLinkProfileName: Schema.optional(TrimmedNonEmptyStringSchema),
   status: TerminalSessionStatus,
   pid: Schema.NullOr(Schema.Int.check(Schema.isGreaterThan(0))),
   exitCode: Schema.NullOr(Schema.Int),

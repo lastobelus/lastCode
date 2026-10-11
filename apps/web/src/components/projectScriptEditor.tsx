@@ -101,6 +101,7 @@ export interface NewProjectScriptInput {
   autoOpenPreview: boolean;
   /** Permit provider-scoped MCP launch plus a one-shot automated follow-up. */
   allowAgentResume: boolean;
+  terminalLinkProfileName?: string;
 }
 
 export type ProjectScriptActionResult = AtomCommandResult<void, unknown>;
@@ -140,6 +141,9 @@ export function editorRequestForScript(
       waitForSetup: script.runOnWorktreeCreate && script.async === false,
       runOnSettle: script.runOnSettle ?? false,
       keybinding: keybindingValueForCommand(keybindings, commandForProjectScript(script.id)),
+      ...(script.terminalLinkProfileName === undefined
+        ? {}
+        : { terminalLinkProfileName: script.terminalLinkProfileName }),
       previewUrl: script.previewUrl ?? null,
       autoOpenPreview: script.autoOpenPreview ?? false,
       allowAgentResume: script.allowAgentResume ?? false,
@@ -297,6 +301,9 @@ export function ProjectScriptEditorDialog({
         previewUrl: trimmedPreviewUrl.length > 0 ? trimmedPreviewUrl : null,
         autoOpenPreview: trimmedPreviewUrl.length > 0 ? autoOpenPreview : false,
         allowAgentResume,
+        ...(request.initial.terminalLinkProfileName === undefined
+          ? {}
+          : { terminalLinkProfileName: request.initial.terminalLinkProfileName }),
       } satisfies NewProjectScriptInput;
     } catch (error) {
       setValidationError(error instanceof Error ? error.message : "Failed to save action.");

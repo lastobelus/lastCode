@@ -423,6 +423,9 @@ export const make = Effect.gen(function* () {
               threadId: input.threadId,
               terminalId,
               cwd,
+              ...(script.terminalLinkProfileName === undefined
+                ? {}
+                : { terminalLinkProfileName: script.terminalLinkProfileName }),
               worktreePath: input.worktreePath,
               // Setup may run before a terminal client attaches to answer color probes.
               env: { ...env, NO_COLOR: "1", FORCE_COLOR: "0" },

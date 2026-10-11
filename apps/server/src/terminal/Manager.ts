@@ -375,6 +375,7 @@ interface TerminalSessionState {
   /** Final capture runs under the thread lock immediately before first input. */
   captureShellIdentity: Effect.Effect<void> | null;
   runtimeEnv: Record<string, string> | null;
+  terminalLinkProfileName: string | undefined;
 }
 
 interface PersistHistoryRequest {
@@ -463,6 +464,9 @@ function snapshot(session: TerminalSessionState): TerminalSessionSnapshot {
     terminalId: session.terminalId,
     cwd: session.cwd,
     worktreePath: session.worktreePath,
+    ...(session.terminalLinkProfileName === undefined
+      ? {}
+      : { terminalLinkProfileName: session.terminalLinkProfileName }),
     status: session.status,
     pid: session.pid,
     history: session.history.value(),
@@ -492,6 +496,9 @@ function summary(session: TerminalSessionState): TerminalSummary {
     terminalId: session.terminalId,
     cwd: session.cwd,
     worktreePath: session.worktreePath,
+    ...(session.terminalLinkProfileName === undefined
+      ? {}
+      : { terminalLinkProfileName: session.terminalLinkProfileName }),
     status: session.status,
     pid: session.pid,
     exitCode: session.exitCode,
@@ -3144,6 +3151,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         observedShellSample: null,
         captureShellIdentity: null,
         runtimeEnv: normalizedRuntimeEnv(input.env),
+        terminalLinkProfileName: input.terminalLinkProfileName,
       };
 
       const createdSession = session;
@@ -3181,13 +3189,15 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     const launchContextChanged =
       liveSession.cwd !== input.cwd ||
       runtimeEnvChanged ||
-      liveSession.worktreePath !== nextWorktreePath;
+      liveSession.worktreePath !== nextWorktreePath ||
+      liveSession.terminalLinkProfileName !== input.terminalLinkProfileName;
 
     if (launchContextChanged) {
       yield* stopProcess(liveSession);
       liveSession.cwd = input.cwd;
       liveSession.worktreePath = nextWorktreePath;
       liveSession.runtimeEnv = nextRuntimeEnv;
+      liveSession.terminalLinkProfileName = input.terminalLinkProfileName;
       liveSession.history.clear();
       liveSession.pendingHistoryControlSequence = "";
       liveSession.pendingProcessEvents = [];
@@ -3196,6 +3206,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       yield* persistHistory(liveSession.threadId, liveSession.terminalId, liveSession.history);
     } else if (liveSession.status === "exited" || liveSession.status === "error") {
       liveSession.runtimeEnv = nextRuntimeEnv;
+      liveSession.terminalLinkProfileName = input.terminalLinkProfileName;
       liveSession.worktreePath = nextWorktreePath;
       liveSession.history.clear();
       liveSession.pendingHistoryControlSequence = "";
@@ -3326,6 +3337,9 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         if (!session.process && input.cwd && input.restartIfNotRunning === true && startIfNeeded) {
           const resolvedInput = yield* resolveLaunchInputEnvironment({
             ...input,
+            ...(session.terminalLinkProfileName === undefined
+              ? {}
+              : { terminalLinkProfileName: session.terminalLinkProfileName }),
             terminalId,
             cwd: input.cwd,
           });
@@ -3697,6 +3711,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           observedShellSample: null,
           captureShellIdentity: null,
           runtimeEnv: normalizedRuntimeEnv(input.env),
+          terminalLinkProfileName: undefined,
         };
         const createdSession = session;
         yield* modifyManagerState((state) => {
@@ -3711,6 +3726,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         session.cwd = input.cwd;
         session.worktreePath = input.worktreePath ?? null;
         session.runtimeEnv = normalizedRuntimeEnv(input.env);
+        session.terminalLinkProfileName = undefined;
       }
 
       const cols = input.cols ?? session.cols;

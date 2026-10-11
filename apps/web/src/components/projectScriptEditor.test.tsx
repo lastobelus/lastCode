@@ -113,6 +113,16 @@ afterEach(async () => {
 });
 
 describe("project action editor save lifecycle", () => {
+  it("preserves declared terminal profile intent while editing other Action settings", async () => {
+    onSubmit.mockResolvedValue(AsyncResult.success(undefined));
+    const editing = request("sign-in");
+    open({ ...editing, initial: { ...editing.initial, terminalLinkProfileName: "Work account" } });
+    await act(async () => {
+      await submit();
+    });
+    expect(onSubmit.mock.calls[0]?.[1].terminalLinkProfileName).toBe("Work account");
+  });
+
   it("blocks repeated submits and edits until the current save completes", async () => {
     const save = deferredSave();
     onSubmit.mockReturnValue(save.promise);

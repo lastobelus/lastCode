@@ -7,6 +7,7 @@ import {
   type TerminalMetadataStreamEvent,
   type TerminalOpenInput,
   type TerminalRestartInput,
+  type TerminalSummary,
   ProviderDriverKind,
   ProviderInstanceId,
   ServerSettingsError,
@@ -478,6 +479,73 @@ it.layer(
       assert.equal(third.threadId, "thread-1");
       expect(ptyAdapter.spawnInputs).toHaveLength(1);
     }),
+  );
+
+  it.effect(
+    "retains Action profile intent in metadata and attached snapshots, clearing it on ordinary reuse",
+    () =>
+      Effect.gen(function* () {
+        const { manager, ptyAdapter } = yield* createManager();
+        const action = yield* manager.open(openInput({ terminalLinkProfileName: "Work account" }));
+        assert.equal(action.terminalLinkProfileName, "Work account");
+        const metadata = yield* Ref.make<ReadonlyArray<TerminalSummary>>([]);
+        const stopMetadata = yield* manager.subscribeMetadata((event) =>
+          event.type === "snapshot" ? Ref.set(metadata, event.terminals) : Effect.void,
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(stopMetadata));
+        assert.equal((yield* Ref.get(metadata))[0]?.terminalLinkProfileName, "Work account");
+        const snapshots = yield* Ref.make<ReadonlyArray<TerminalAttachStreamEvent>>([]);
+        const stopAttach = yield* manager.attachStream(
+          { threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID },
+          (event) => Ref.update(snapshots, (events) => [...events, event]),
+          false,
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(stopAttach));
+        const attached = (yield* Ref.get(snapshots)).find((event) => event.type === "snapshot");
+        assert.equal(
+          attached?.type === "snapshot" ? attached.snapshot.terminalLinkProfileName : undefined,
+          "Work account",
+        );
+        expect(ptyAdapter.spawnInputs).toHaveLength(1);
+        const exited = yield* Deferred.make<void>();
+        const stopExit = yield* manager.subscribe((event) =>
+          event.type === "exited"
+            ? Deferred.succeed(exited, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(stopExit));
+        yield* Effect.sync(() => ptyAdapter.processes[0]!.emitExit({ exitCode: 0, signal: null }));
+        yield* Deferred.await(exited);
+        const stopCompleted = yield* manager.observeStream(
+          { threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID },
+          (event) => Ref.update(snapshots, (events) => [...events, event]),
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(stopCompleted));
+        const completed = (yield* Ref.get(snapshots)).findLast(
+          (event) => event.type === "snapshot",
+        );
+        assert.equal(
+          completed?.type === "snapshot" ? completed.snapshot.status : undefined,
+          "exited",
+        );
+        assert.equal(
+          completed?.type === "snapshot" ? completed.snapshot.terminalLinkProfileName : undefined,
+          "Work account",
+        );
+        const ordinary = yield* manager.open(openInput());
+        assert.notProperty(ordinary, "terminalLinkProfileName");
+        const ordinaryAttached = (yield* Ref.get(snapshots)).findLast(
+          (event) => event.type === "snapshot",
+        );
+        assert.isDefined(ordinaryAttached);
+        if (ordinaryAttached?.type === "snapshot")
+          assert.notProperty(ordinaryAttached.snapshot, "terminalLinkProfileName");
+        expect(ptyAdapter.spawnInputs).toHaveLength(2);
+        const named = yield* manager.open(openInput({ terminalLinkProfileName: "Work account" }));
+        assert.equal(named.terminalLinkProfileName, "Work account");
+        const restarted = yield* manager.restart({ ...openInput(), cols: 80, rows: 24 });
+        assert.notProperty(restarted, "terminalLinkProfileName");
+      }),
   );
 
   it.effect("attaches to running sessions without restarting them", () =>
