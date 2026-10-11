@@ -30,7 +30,7 @@ import { useLastCodeThreadFamily } from "./sidebar/useLastCodeThreadFamily";
 import {
   LastCodeThreadFamilyDisclosure,
   LastCodeSubagentGroup,
-  LastCodeSidebarFamilyGuides,
+  LastCodeThreadGroupHeading,
 } from "./sidebar/LastCodeThreadFamily";
 import { useLastCodeThreadSourceControl } from "./sidebar/useLastCodeThreadSourceControl";
 import { useLastCodeThreadProcesses } from "./sidebar/useLastCodeThreadProcesses";
@@ -161,7 +161,6 @@ import {
   sortProjectsForSidebar,
   useSidebarRowSubscriptionLease,
   useThreadJumpHintVisibility,
-  ThreadStatusPill,
 } from "./Sidebar.logic";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import { LastCodeSidebarThreadPicker } from "./sidebar/LastCodeSidebarThreadPicker";
@@ -174,10 +173,7 @@ import {
   selectProjectGroupingSettings,
 } from "../logicalProject";
 import type { SidebarThreadSummary } from "../types";
-import {
-  type LastCodeSidebarFamilyItem,
-  type LastCodeSidebarFamilyRow,
-} from "./lastcodeSidebarFamilies.logic";
+import { type LastCodeSidebarFamilyRow } from "./lastcodeSidebarFamilies.logic";
 import { useLastCodeSidebarFamiliesStore } from "./lastcodeSidebarFamilies.store";
 import { deriveProviderInstanceEntries, type ProviderInstanceEntry } from "../providerInstances";
 import { WorktreeCleanupFailureDialog } from "./WorktreeCleanupFailureDialog";
@@ -231,7 +227,6 @@ function buildThreadJumpLabelMap(input: {
 interface SidebarThreadRowProps {
   familyRow: LastCodeSidebarFamilyRow;
   projectCwd: string | null;
-  orderedProjectThreadKeys: readonly string[];
   isActive: boolean;
   jumpLabel: string | null;
   renameTarget: LastCodeRenameTarget | null;
@@ -244,7 +239,6 @@ interface SidebarThreadRowProps {
 
 const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowProps) {
   const {
-    orderedProjectThreadKeys,
     isActive,
     jumpLabel,
     renameTarget,
@@ -303,7 +297,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   } = useLastCodeThreadRowGestures(
     thread,
     navigation,
-    orderedProjectThreadKeys,
     menus,
     { selected: isSelected, hasStoppableProcesses, renameActive: renameTarget !== null },
     editing.requestRename,
@@ -378,18 +371,15 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
 });
 
 interface SidebarProjectThreadListProps {
-  groupingStyle: "minimal" | "typed-groups";
   lastcodeSidebarScale: LegacySidebarScale;
   scaleStyle: CSSProperties;
   projectCwd: string | null;
   projectKey: string;
   projectExpanded: boolean;
-  hasOverflowingThreads: boolean;
-  hiddenThreadStatus: ThreadStatusPill | null;
-  orderedProjectThreadKeys: readonly string[];
-  renderedItems: readonly LastCodeSidebarFamilyItem[];
-  showEmptyThreadState: boolean;
-  shouldShowThreadPanel: boolean;
+  projection: Pick<
+    ReturnType<typeof useLastCodeProjectThreads>,
+    "familyProjection" | "hiddenThreadStatus"
+  >;
   isThreadListExpanded: boolean;
   activeRouteThreadKey: string | null;
   threadJumpLabelByKey: ReadonlyMap<string, string>;
@@ -413,12 +403,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
     projectCwd,
     projectKey,
     projectExpanded,
-    hasOverflowingThreads,
-    hiddenThreadStatus,
-    orderedProjectThreadKeys,
-    renderedItems,
-    showEmptyThreadState,
-    shouldShowThreadPanel,
+    projection,
     isThreadListExpanded,
     activeRouteThreadKey,
     threadJumpLabelByKey,
@@ -432,6 +417,9 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
     expandThreadListForProject,
     collapseThreadListForProject,
   } = props;
+  const { hiddenThreadStatus, familyProjection } = projection;
+  const { hasOverflowingThreads, renderedItems, showEmptyThreadState, shouldShowThreadPanel } =
+    familyProjection;
   const showMoreButtonRender = useMemo(() => <button type="button" />, []);
   const showLessButtonRender = useMemo(() => <button type="button" />, []);
 
@@ -472,21 +460,10 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
           const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
           return (
             <React.Fragment key={threadKey}>
-              {familyRow.groupHeading ? (
-                <SidebarMenuSubItem className="w-full" data-thread-selection-safe>
-                  <LastCodeSidebarFamilyGuides depth={familyRow.depth} />
-                  <div
-                    style={{ paddingLeft: Math.min(familyRow.depth, 6) * 12 + 32 }}
-                    className="py-1 text-3xs text-sidebar-muted-foreground uppercase"
-                  >
-                    {familyRow.groupHeading}
-                  </div>
-                </SidebarMenuSubItem>
-              ) : null}
+              <LastCodeThreadGroupHeading family={familyRow} />
               <SidebarThreadRow
                 familyRow={familyRow}
                 projectCwd={projectCwd}
-                orderedProjectThreadKeys={orderedProjectThreadKeys}
                 isActive={activeRouteThreadKey === threadKey}
                 jumpLabel={threadJumpLabelByKey.get(threadKey) ?? null}
                 renameTarget={renameTarget?.key === threadKey ? renameTarget : null}
@@ -603,7 +580,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     ],
   );
 
-  const navigation = useLastCodeThreadNavigation();
   const clearSelection = useThreadSelectionStore((state) => state.clearSelection);
   const projectPreferenceKeys = useMemo(
     () => lastCodeProjectExpansionPreferenceKeys(project),
@@ -614,7 +590,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   );
   const {
     threadsByKey: sidebarThreadByKey,
-    groupingStyle,
     projectStatus,
     hiddenThreadStatus,
     familyProjection,
@@ -634,13 +609,11 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   );
   const [projectGroupingTarget, setProjectGroupingTarget] =
     useState<SidebarProjectGroupMember | null>(null);
-  const {
-    hasOverflowingThreads,
-    renderedItems,
-    showEmptyThreadState,
-    shouldShowThreadPanel,
-    orderedThreadKeys: orderedProjectThreadKeys,
-  } = familyProjection;
+  const navigation = useLastCodeThreadNavigation(familyProjection.orderedThreadKeys);
+  const projection = useMemo(
+    () => ({ familyProjection, hiddenThreadStatus }),
+    [familyProjection, hiddenThreadStatus],
+  );
 
   const openProjectRenameDialog = useCallback((member: SidebarProjectGroupMember) => {
     if (checkTaskPermission(member.environmentId)) setProjectRenameTarget(member);
@@ -714,18 +687,12 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       </LastCodeProjectHeader>
 
       <SidebarProjectThreadList
-        groupingStyle={groupingStyle}
         lastcodeSidebarScale={lastcodeSidebarScale}
         scaleStyle={scaleStyle}
         projectCwd={project.workspaceRoot}
         projectKey={project.projectKey}
         projectExpanded={projectExpanded}
-        hasOverflowingThreads={hasOverflowingThreads}
-        hiddenThreadStatus={hiddenThreadStatus}
-        orderedProjectThreadKeys={orderedProjectThreadKeys}
-        renderedItems={renderedItems}
-        showEmptyThreadState={showEmptyThreadState}
-        shouldShowThreadPanel={shouldShowThreadPanel}
+        projection={projection}
         isThreadListExpanded={isThreadListExpanded}
         activeRouteThreadKey={activeRouteThreadKey}
         threadJumpLabelByKey={threadJumpLabelByKey}

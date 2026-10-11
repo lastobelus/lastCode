@@ -44,7 +44,7 @@ function selectOrNavigate(
 }
 
 /** One project-owned navigation capability shared by its rows, menus and file drops. */
-export function useLastCodeThreadNavigation() {
+export function useLastCodeThreadNavigation(orderedThreadKeys: readonly string[]) {
   const router = useRouter();
   const { isMobile, setOpenMobile } = useSidebar();
   const navigateToThread = useCallback(
@@ -61,9 +61,9 @@ export function useLastCodeThreadNavigation() {
     [isMobile, router, setOpenMobile],
   );
   const handleThreadClick = useCallback(
-    (event: MouseEvent, threadRef: ScopedThreadRef, orderedThreadKeys: readonly string[]) =>
+    (event: MouseEvent, threadRef: ScopedThreadRef) =>
       selectOrNavigate(event, threadRef, orderedThreadKeys, navigateToThread),
-    [navigateToThread],
+    [navigateToThread, orderedThreadKeys],
   );
   const handleThreadFileDrop = useCallback(
     async (threadRef: ScopedThreadRef, files: File[]) => {

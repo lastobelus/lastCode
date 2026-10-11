@@ -47,12 +47,12 @@ function Harness({
   target?: ScopedThreadRef;
   keys?: string[];
 }) {
-  const navigation = useLastCodeThreadNavigation();
+  const navigation = useLastCodeThreadNavigation(keys);
   useEffect(() => {
     capability = navigation;
   }, [navigation]);
   return (
-    <div data-testid="row" onClick={(event) => navigation.handleThreadClick(event, target, keys)}>
+    <div data-testid="row" onClick={(event) => navigation.handleThreadClick(event, target)}>
       <span>Row</span>
       <a href="#nested">
         <span>Nested link</span>
@@ -111,6 +111,18 @@ function deferred() {
 }
 const files = [new File(["first"], "first.txt")];
 describe("thread selection and navigation", () => {
+  it("refreshes bound range order on the same mounted row without replacing navigation or file drop", async () => {
+    await render({ target: remote });
+    const original = capability;
+    const reversed = ordered.toReversed();
+    await render({ target: remote, keys: reversed });
+    expect(capability.navigateToThread).toBe(original.navigateToThread);
+    expect(capability.handleThreadFileDrop).toBe(original.handleThreadFileDrop);
+    useThreadSelectionStore.getState().setAnchor(scopedThreadKey(first));
+    await click({ shiftKey: true });
+    expect([...useThreadSelectionStore.getState().selectedThreadKeys]).toEqual(reversed);
+    expect(mocks.navigate).not.toHaveBeenCalled();
+  });
   it("keeps the shared capability stable across row refreshes and refreshes mobile navigation", async () => {
     await render();
     const original = capability;

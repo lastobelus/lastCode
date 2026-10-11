@@ -121,7 +121,6 @@ type RowNavigation = Pick<
 export function useLastCodeThreadRowGestures(
   thread: SidebarThreadSummary,
   navigation: RowNavigation,
-  orderedThreadKeys: readonly string[],
   menus: LastCodeThreadRowMenus,
   state: { selected: boolean; hasStoppableProcesses: boolean; renameActive: boolean },
   requestRename: LastCodeThreadEditingCapabilities["requestRename"],
@@ -136,11 +135,11 @@ export function useLastCodeThreadRowGestures(
     (event: MouseEvent) =>
       activateLastCodeThreadRow(
         thread,
-        () => handleThreadClick(event, scopeThreadRef(environmentId, id), orderedThreadKeys),
+        () => handleThreadClick(event, scopeThreadRef(environmentId, id)),
         () => setCleanupFailureOpen(true),
         event,
       ),
-    [thread, handleThreadClick, environmentId, id, orderedThreadKeys],
+    [thread, handleThreadClick, environmentId, id],
   );
   const handleRowDoubleClick = useCallback(
     (event: MouseEvent) =>

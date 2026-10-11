@@ -26,7 +26,6 @@ const first = makeThreadFixture({
 const remote = { ...first, environmentId: EnvironmentId.make("remote"), title: "Remote" };
 const firstRef = scopeThreadRef(first.environmentId, first.id),
   remoteRef = scopeThreadRef(remote.environmentId, remote.id);
-const ordered = [firstRef, remoteRef].map(scopedThreadKey);
 const failed = {
   status: "failed",
   repositoryRoot: "/workspace",
@@ -51,7 +50,6 @@ function Harness({
   const gestures = useLastCodeThreadRowGestures(
     thread,
     { navigateToThread: mocks.navigate, handleThreadClick: mocks.click },
-    ordered,
     {
       showThreadMenu: mocks.menu,
       showBulkMenu: mocks.bulk,
@@ -128,7 +126,7 @@ it("refreshes scoped pointer/keyboard/rename/menu destinations on one mounted ro
   await render({ thread: remote, stoppable: false });
   expect(row()).toBe(before);
   await pointer("click");
-  expect(mocks.click).toHaveBeenCalledWith(expect.anything(), remoteRef, ordered);
+  expect(mocks.click).toHaveBeenCalledWith(expect.anything(), remoteRef);
   await key("Enter");
   expect(mocks.navigate).toHaveBeenCalledExactlyOnceWith(remoteRef);
   await pointer("dblclick");

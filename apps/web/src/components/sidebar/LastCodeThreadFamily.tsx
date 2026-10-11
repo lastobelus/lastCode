@@ -41,6 +41,25 @@ export function LastCodeSidebarFamilyGuides({ depth }: { depth: number }) {
   ));
 }
 
+export function LastCodeThreadGroupHeading({
+  family,
+}: {
+  family: Pick<LastCodeSidebarFamilyRow, "depth" | "groupHeading">;
+}) {
+  if (!family.groupHeading) return null;
+  return (
+    <SidebarMenuSubItem className="w-full" data-thread-selection-safe>
+      <LastCodeSidebarFamilyGuides depth={family.depth} />
+      <div
+        style={{ paddingLeft: Math.min(family.depth, 6) * 12 + 32 }}
+        className="py-1 text-3xs text-sidebar-muted-foreground uppercase"
+      >
+        {family.groupHeading}
+      </div>
+    </SidebarMenuSubItem>
+  );
+}
+
 export function LastCodeThreadFamilyDisclosure({
   family,
   renameTarget,
