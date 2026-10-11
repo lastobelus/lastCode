@@ -26,40 +26,55 @@ function input(): Parameters<typeof buildLastCodeThreadMenu>[0] {
   };
 }
 
+function menuInput(
+  canOperate: boolean,
+  persistent: boolean,
+  grouped: boolean,
+  optional: boolean,
+): ReturnType<typeof input> {
+  const data = input();
+  return {
+    ...data,
+    canOperate,
+    thread: {
+      ...data.thread,
+      persistent,
+      creatorGrouping: grouped ? "grouped" : "independent",
+      archivePending: optional
+        ? {
+            status: "failed",
+            threadId: ThreadId.make("thread"),
+            commandId: CommandId.make("command"),
+            error: "Rejected",
+          }
+        : null,
+    },
+    handoffs: optional ? data.handoffs : { entries: [], hasMore: false },
+  };
+}
+
 describe("LastCode thread context menu", () => {
   it("classifies every emitted static action across optional menu states", () => {
     const emitted = new Set<string>();
-    for (const canOperate of [true, false])
-      for (const persistent of [true, false])
-        for (const grouped of [true, false])
-          for (const optional of [true, false]) {
-            const data = input();
-            const menu = buildLastCodeThreadMenu({
-              ...data,
-              canOperate,
-              thread: {
-                ...data.thread,
-                persistent,
-                creatorGrouping: grouped ? "grouped" : "independent",
-                archivePending: optional
-                  ? {
-                      status: "failed",
-                      threadId: ThreadId.make("thread"),
-                      commandId: CommandId.make("command"),
-                      error: "Rejected",
-                    }
-                  : null,
-              },
-              handoffs: optional ? data.handoffs : { entries: [], hasMore: false },
-            });
-            for (const item of menu) {
-              if (item.id.startsWith("handoff:")) continue;
-              expect(isLastCodeThreadActionId(item.id), item.id).toBe(true);
-              emitted.add(item.id);
-              if (lastcodeThreadActionRequiresOperate(item.id) && !canOperate)
-                expect(item.disabled, item.id).toBe(true);
-            }
-          }
+    const permissions = [true, false].flatMap((canOperate) =>
+      [true, false].map((persistent) => ({ canOperate, persistent })),
+    );
+    const grouping = permissions.flatMap((permission) =>
+      [true, false].map((grouped) => ({ ...permission, grouped })),
+    );
+    const cases = grouping.flatMap((group) =>
+      [true, false].map((optional) => ({ ...group, optional })),
+    );
+    for (const { canOperate, persistent, grouped, optional } of cases) {
+      const menu = buildLastCodeThreadMenu(menuInput(canOperate, persistent, grouped, optional));
+      for (const item of menu) {
+        if (item.id.startsWith("handoff:")) continue;
+        expect(isLastCodeThreadActionId(item.id), item.id).toBe(true);
+        emitted.add(item.id);
+        if (lastcodeThreadActionRequiresOperate(item.id) && !canOperate)
+          expect(item.disabled, item.id).toBe(true);
+      }
+    }
     expect([...emitted].sort()).toEqual(Object.keys(LASTCODE_THREAD_ACTION_POLICY).sort());
     for (const action of [null, "unknown", "constructor", "__proto__"]) {
       expect(isLastCodeThreadActionId(action)).toBe(false);
