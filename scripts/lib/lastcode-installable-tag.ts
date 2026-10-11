@@ -20,8 +20,8 @@ export function parseNightlyTag(tag: string): NightlyTag | undefined {
   const match = /^v(\d+)\.(\d+)\.(\d+)-nightly\.(\d{8})\.(\d+)$/.exec(tag);
   if (!match) return undefined;
 
+  // A successful match guarantees all five nonempty digit captures.
   const [, major, minor, patch, date, runNumber] = match;
-  if (!major || !minor || !patch || !date || !runNumber) return undefined;
 
   return {
     tag,
