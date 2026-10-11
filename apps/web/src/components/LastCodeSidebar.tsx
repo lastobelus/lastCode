@@ -1,3 +1,7 @@
+import {
+  LastCodeThreadMetadata,
+  LastCodeThreadMetadataEnvironment,
+} from "./sidebar/LastCodeThreadMetadata";
 import { useLastCodeThreadFamily } from "./sidebar/useLastCodeThreadFamily";
 import {
   LastCodeThreadFamilyDisclosure,
@@ -30,12 +34,11 @@ import { LastCodeSidebarConnectionNotice } from "./sidebar/LastCodeSidebarConnec
 import { formatProjectMemberActionLabel } from "./sidebar/lastcodeProjectMenu";
 import { activateSidebarRowFromKeyboard } from "./sidebar/sidebarRowKeyboard";
 import {
-  ConnectedSidebarEnvironmentIcon,
   useSidebarProviderBadgePreferences,
   type SidebarProviderBadgePreferences,
 } from "./sidebar/SidebarEnvironmentIcon";
 import { ChevronRightIcon, FolderPlusIcon, SearchIcon, SquarePenIcon } from "lucide-react";
-import { ThreadStatusLabel, ThreadWorktreeIndicator } from "./ThreadStatusIndicators";
+import { ThreadStatusLabel } from "./ThreadStatusIndicators";
 import { ProjectFavicon } from "./ProjectFavicon";
 import { ProjectSidebarDraftList } from "./sidebar/ProjectSidebarDraftList";
 import { useAtomValue } from "@effect/atom-react";
@@ -108,7 +111,7 @@ import {
   ThreadAnnotationHoverPopover,
   ThreadAnnotationNavigationTrigger,
 } from "./thread-annotation/ThreadAnnotation";
-import { PopoverCreateHandle as createAnnotationPopoverHandle, PopoverTrigger } from "./ui/popover";
+import { PopoverCreateHandle as createAnnotationPopoverHandle } from "./ui/popover";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { readEnvironmentScope, useEnvironmentScope } from "../state/session";
 import {
@@ -145,7 +148,6 @@ import {
   resolveThreadRouteTarget,
 } from "../threadRoutes";
 import { stackedThreadToast, toastManager } from "./ui/toast";
-import { formatRelativeTimeLabel } from "../timestampFormat";
 import { Kbd } from "./ui/kbd";
 import { Button } from "./ui/button";
 
@@ -465,17 +467,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       standalone
     />
   );
-  const threadMetaVisibilityClassName = isConfirmingArchive
-    ? "opacity-0"
-    : canOperateThread && !thread.persistent && cleanup === null
-      ? "transition-opacity duration-150 group-hover/menu-sub-item:opacity-0 group-focus-within/menu-sub-item:opacity-0"
-      : "";
-  const threadMetaClassName = `pointer-events-none inline-flex w-full justify-end ${
-    jumpLabel ? "col-start-1 row-start-1 z-10" : ""
-  } ${threadMetaVisibilityClassName}`;
-  const threadMetadataGridClassName = jumpLabel
-    ? "grid shrink-0 grid-cols-[max-content] items-center max-sm:grid-cols-[max-content_calc(1.5rem*var(--lastcode-sidebar-content-zoom))]"
-    : "grid shrink-0 grid-cols-[repeat(2,calc(0.75rem*var(--lastcode-sidebar-content-zoom)))_calc(3rem*var(--lastcode-sidebar-content-zoom))] items-center gap-x-(--thread-metadata-gap) max-sm:grid-cols-[repeat(2,calc(0.75rem*var(--lastcode-sidebar-content-zoom)))_calc(3rem*var(--lastcode-sidebar-content-zoom))_calc(1.5rem*var(--lastcode-sidebar-content-zoom))]";
   const [threadRowActive, setThreadRowActive] = useState(false);
   const annotationPopoverHandle = useMemo(() => createAnnotationPopoverHandle(), []);
   const annotationTriggerId = useId();
@@ -631,10 +622,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       threadRef,
     ],
   );
-  const stopPropagationOnPointerDown = useCallback(
-    (event: React.PointerEvent<HTMLButtonElement>) => event.stopPropagation(),
-    [],
-  );
   const threadNavigationRef = useRef<HTMLDivElement | null>(null);
   const threadDetailsTooltipId = useId();
   const family = props.familyRow;
@@ -753,78 +740,25 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             cleanupBlocked={cleanup !== null}
             navigateToThread={navigateToThread}
           />
-          {/* These fixed tracks are the scanning columns for every thread row.
-              Empty local/worktree cells stay mounted for ordinary timestamps,
-              which cannot widen the grid and push either icon sideways. A
-              transient jump hint replaces all three cells and uses a
-              content-sized track so a custom shortcut cannot paint across
-              visible row content or create an implicit grid row; the mobile
-              grid retains its trailing action track. */}
-          <div
-            className={threadMetadataGridClassName}
-            style={
-              {
-                "--thread-metadata-gap":
-                  "calc(var(--spacing) * var(--lastcode-sidebar-content-zoom))",
-              } as CSSProperties
+          <LastCodeThreadMetadata
+            thread={thread}
+            jumpLabel={jumpLabel}
+            highlighted={isHighlighted}
+            confirming={isConfirmingArchive}
+            canArchive={canOperateThread && !thread.persistent && cleanup === null}
+            annotationHandle={annotationPopoverHandle}
+            environmentIcon={
+              <LastCodeThreadMetadataEnvironment
+                thread={thread}
+                visible={showsThreadEnvironmentIcon}
+                label={threadEnvironmentLabel}
+                color={environmentIconColor}
+                confirming={isConfirmingArchive}
+                providerEntry={providerEntry}
+                preferences={props.providerBadgePreferences}
+              />
             }
-            data-testid={`thread-metadata-grid-${thread.id}`}
           >
-            {jumpLabel === null ? (
-              <>
-                <span
-                  className="inline-flex h-3 w-full items-center justify-center"
-                  data-thread-metadata-column="worktree"
-                >
-                  {props.showWorktreeIndicators ? (
-                    <ThreadWorktreeIndicator thread={thread} />
-                  ) : null}
-                </span>
-                <span
-                  className="inline-flex h-3 w-full items-center justify-center"
-                  data-thread-metadata-column="environment"
-                >
-                  {showsThreadEnvironmentIcon ? (
-                    <Tooltip>
-                      <TooltipTrigger
-                        render={
-                          <span
-                            aria-label={[
-                              threadEnvironmentLabel ?? "Remote",
-                              props.providerBadgePreferences.enabled
-                                ? providerEntry?.displayName
-                                : null,
-                            ]
-                              .filter(Boolean)
-                              .join(" · ")}
-                            className={`inline-flex shrink-0 items-center justify-center ${
-                              isConfirmingArchive ? "invisible" : ""
-                            }`}
-                            data-lastcode-sidebar-unscaled-content
-                          />
-                        }
-                      >
-                        <ConnectedSidebarEnvironmentIcon
-                          environmentId={thread.environmentId}
-                          context="legacy-row"
-                          color={environmentIconColor}
-                          className="size-3"
-                          provider={props.providerBadgePreferences.enabled ? providerEntry : null}
-                          badgeSize={props.providerBadgePreferences.size}
-                          badgeTransparency={props.providerBadgePreferences.transparency}
-                        />
-                      </TooltipTrigger>
-                      <TooltipPopup side="top">
-                        {threadEnvironmentLabel}
-                        {props.providerBadgePreferences.enabled && providerEntry
-                          ? ` · ${providerEntry.displayName}`
-                          : null}
-                      </TooltipPopup>
-                    </Tooltip>
-                  ) : null}
-                </span>
-              </>
-            ) : null}
             {canOperateThread && !thread.persistent && cleanup === null ? (
               <LastCodeThreadArchiveControl
                 thread={thread}
@@ -832,78 +766,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                 editing={editing}
               />
             ) : null}
-            <span
-              className={threadMetaClassName}
-              data-thread-metadata-column="timestamp"
-              data-thread-metadata-mode={jumpLabel ? "jump" : "timestamp"}
-            >
-              <span className="inline-flex items-center gap-1">
-                {jumpLabel ? (
-                  hasActiveAnnotation && annotation ? (
-                    <PopoverTrigger
-                      aria-label={`${jumpLabel}; show annotation for ${thread.title}`}
-                      handle={annotationPopoverHandle}
-                      onPointerDown={stopPropagationOnPointerDown}
-                      onClick={(event) => event.stopPropagation()}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter" || event.key === " ") event.stopPropagation();
-                      }}
-                    >
-                      <span className="inline-flex h-5 items-center rounded-full border border-dotted border-warning bg-warning/10 px-1.5 font-mono text-3xs font-medium tracking-tight text-warning-foreground shadow-sm">
-                        {jumpLabel}
-                      </span>
-                    </PopoverTrigger>
-                  ) : (
-                    <Tooltip>
-                      <TooltipTrigger
-                        render={
-                          <span
-                            aria-label={jumpLabel}
-                            className="inline-flex h-5 items-center rounded-full border border-border/80 bg-background/90 px-1.5 font-mono text-3xs font-medium tracking-tight text-foreground shadow-sm"
-                          />
-                        }
-                      >
-                        {jumpLabel}
-                      </TooltipTrigger>
-                      <TooltipPopup side="top">{jumpLabel}</TooltipPopup>
-                    </Tooltip>
-                  )
-                ) : hasActiveAnnotation && annotation ? (
-                  <PopoverTrigger
-                    aria-label={`Show annotation for ${thread.title}`}
-                    handle={annotationPopoverHandle}
-                    onPointerDown={stopPropagationOnPointerDown}
-                    onClick={(event) => event.stopPropagation()}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") event.stopPropagation();
-                    }}
-                  >
-                    <span
-                      className={`border-b border-dotted border-warning text-3xs tabular-nums ${
-                        isHighlighted ? "text-foreground" : "text-secondary-label"
-                      }`}
-                      data-lastcode-sidebar-unscaled-content
-                    >
-                      {formatRelativeTimeLabel(
-                        thread.latestUserMessageAt ?? thread.updatedAt ?? thread.createdAt,
-                      )}
-                    </span>
-                  </PopoverTrigger>
-                ) : (
-                  <span
-                    className={`text-3xs tabular-nums ${
-                      isHighlighted ? "text-foreground" : "text-secondary-label"
-                    }`}
-                    data-lastcode-sidebar-unscaled-content
-                  >
-                    {formatRelativeTimeLabel(
-                      thread.latestUserMessageAt ?? thread.updatedAt ?? thread.createdAt,
-                    )}
-                  </span>
-                )}
-              </span>
-            </span>
-          </div>
+          </LastCodeThreadMetadata>
         </div>
       </ThreadAnnotationNavigationTrigger>
       {hasActiveAnnotation && annotation ? (
