@@ -524,7 +524,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     canOperateThread && cleanup === null && confirmingArchiveThreadKey === threadKey;
   const threadMetaClassName = isConfirmingArchive
     ? "pointer-events-none opacity-0"
-    : canOperateThread
+    : canOperateThread && !thread.persistent && cleanup === null
       ? "pointer-events-none transition-opacity duration-150 max-sm:pr-6 group-hover/menu-sub-item:opacity-0 group-focus-within/menu-sub-item:opacity-0"
       : "pointer-events-none";
   const clearConfirmingArchive = useCallback(() => {
@@ -1883,11 +1883,15 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
         const clicked = await api.contextMenu.show(
           [
-            buildTargetedItem("rename", "Rename", {
-              isDisabled: (member) =>
-                !readEnvironmentScope(member.environmentId, AuthOrchestrationOperateScope),
-            }),
-            buildTargetedItem("grouping", "Group into..."),
+            ...(project.projectKey === NO_PROJECT_GROUP_KEY
+              ? []
+              : [
+                  buildTargetedItem("rename", "Rename", {
+                    isDisabled: (member) =>
+                      !readEnvironmentScope(member.environmentId, AuthOrchestrationOperateScope),
+                  }),
+                  buildTargetedItem("grouping", "Group into..."),
+                ]),
             buildTargetedItem("copy-path", "Copy Path"),
             { id: "project-settings", label: "Project settings", icon: "settings" },
             buildTargetedItem("delete", "Remove", {
@@ -1917,6 +1921,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       openProjectRenameDialog,
       project.groupedProjectCount,
       project.memberProjects,
+      project.projectKey,
       projectSettingsKey,
       router,
       setOpenMobile,

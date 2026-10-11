@@ -21,11 +21,16 @@ export function SidebarModeToggle({ onBackdrop = false }: { onBackdrop?: boolean
           <Button
             aria-label={sidebarMode === "lastcode" ? "LastCode sidebar active" : "Legacy sidebar"}
             aria-pressed={sidebarMode === "legacy"}
-            disabled={!hydrated || sidebarMode === "lastcode"}
+            disabled={!hydrated}
+            aria-disabled={sidebarMode === "lastcode" || undefined}
             size="titlebar-icon"
             variant={onBackdrop ? "media-toggle" : "ghost-toggle"}
             className="pointer-events-auto relative top-auto translate-y-0"
-            onClick={() => updateSettings(toggleUpstreamSidebar)}
+            onClick={() => {
+              if (hydrated && sidebarMode !== "lastcode") {
+                updateSettings(toggleUpstreamSidebar);
+              }
+            }}
           >
             <ListTreeIcon />
           </Button>

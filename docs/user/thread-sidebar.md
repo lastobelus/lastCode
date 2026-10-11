@@ -268,7 +268,7 @@ for custom configuration.
 On web and desktop, enable **Settings → LastCode → Appearance → LastCode sidebar**
 for the LastCode project tree, annotations, and family controls. It is off by default.
 While enabled, it overrides the upstream sidebar choice without changing that preference.
-Turn it off to return to the sidebar selected by **Legacy sidebar** in General settings.
+Turn it off to return to the sidebar selected by **Settings → General → Legacy features → Sidebar (legacy)**.
 The quick sidebar-mode control changes the upstream choice only while LastCode sidebar is off.
 
 ## Thread annotations in LastCode
