@@ -5,9 +5,8 @@ export function activateSidebarRowFromKeyboard(
   event: KeyboardEvent<Element>,
   activate: () => void,
 ) {
-  if (event.target !== event.currentTarget || (event.key !== "Enter" && event.key !== " ")) {
-    return;
-  }
+  if (event.target !== event.currentTarget) return;
+  if (event.key !== "Enter" && event.key !== " ") return;
   event.preventDefault();
   activate();
 }

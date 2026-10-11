@@ -95,11 +95,9 @@ export function lastcodeSidebarCreatorDetails(
   const knownCreator = matchingCreator(thread, creator);
   const availableCreator = knownCreator && threadShellIsVisible(knownCreator) ? knownCreator : null;
   const isAgentCreated = lastcodeSidebarIsAgentCreated(thread);
-  const unavailableLabel =
-    isAgentCreated && thread.creatorThreadId && !availableCreator
-      ? `Creator unavailable (${thread.creatorThreadId})`
-      : null;
   const eligible = lastcodeSidebarCreatorGroupingEligible(thread);
+  const unavailableLabel =
+    eligible && !availableCreator ? `Creator unavailable (${thread.creatorThreadId})` : null;
   return {
     description: creatorDescription(isAgentCreated, availableCreator, unavailableLabel),
     unavailableLabel: thread.creatorGrouping === "grouped" ? unavailableLabel : null,

@@ -68,6 +68,15 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 
 const MACOS_TRAFFIC_LIGHTS_LEFT_INSET = "var(--desktop-window-controls-inset, 90px)";
 const LastCodeSidebar = lazy(() => import("./LastCodeSidebar"));
+const THREAD_SIDEBARS = {
+  lastcode: (
+    <Suspense fallback={<SidebarChromeHeader isElectron={isElectron} />}>
+      <LastCodeSidebar />
+    </Suspense>
+  ),
+  legacy: <LegacyThreadSidebar />,
+  inbox: <ThreadSidebar />,
+};
 
 function subscribeToViewportWidth(onChange: () => void): () => void {
   window.addEventListener("resize", onChange);
@@ -149,16 +158,19 @@ function SidebarControl() {
           modelPickerOpen: isModelPickerOpen(),
         },
       });
-      if (command !== "sidebar.toggle" && command !== "sidebar.mode.toggle") return;
-      if (command === "sidebar.mode.toggle" && !clientSettingsHydrated) return;
-
-      event.preventDefault();
-      event.stopPropagation();
-      if (command === "sidebar.toggle") {
-        toggleSidebar();
-        return;
+      switch (command) {
+        case "sidebar.toggle":
+          event.preventDefault();
+          event.stopPropagation();
+          toggleSidebar();
+          return;
+        case "sidebar.mode.toggle":
+          if (!clientSettingsHydrated) return;
+          event.preventDefault();
+          event.stopPropagation();
+          if (sidebarMode !== "lastcode") updateClientSettings(toggleUpstreamSidebar);
+          return;
       }
-      if (sidebarMode !== "lastcode") updateClientSettings(toggleUpstreamSidebar);
     };
 
     // Capture before focused editors consume commands such as Mod+B for rich-text formatting.
@@ -395,14 +407,8 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
               <SidebarChromeHeader isElectron={isElectron} />
               <SettingsSidebarNav pathname={pathname} />
             </>
-          ) : sidebarMode === "lastcode" ? (
-            <Suspense fallback={<SidebarChromeHeader isElectron={isElectron} />}>
-              <LastCodeSidebar />
-            </Suspense>
-          ) : sidebarMode === "legacy" ? (
-            <LegacyThreadSidebar />
           ) : (
-            <ThreadSidebar />
+            THREAD_SIDEBARS[sidebarMode]
           )}
           <SidebarRail onDoubleClick={resetSidebarWidth} />
         </Sidebar>
