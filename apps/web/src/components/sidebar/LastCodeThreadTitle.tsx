@@ -8,6 +8,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { ThreadDashboardIndicator } from "../dashboard/ThreadDashboardIndicator";
 import {
   lastcodeSidebarSubagentStatusLabel,
+  lastcodeSidebarFamilySummary,
   type LastCodeSidebarFamilyRow,
 } from "../lastcodeSidebarFamilies.logic";
 import type { SidebarThreadSummary } from "../../types";
@@ -90,6 +91,59 @@ function SubagentOutcome({
     </Tooltip>
   );
 }
+/** One fixed-size target preserves outcomes and detail text when indentation consumes row space. */
+function CompactThreadDetails({
+  family,
+  presentation,
+  threadStatus,
+}: {
+  family: LastCodeSidebarFamilyRow;
+  presentation: LastCodeThreadFamilyPresentation;
+  threadStatus: ThreadStatusPill | null;
+}) {
+  const thread = family.thread;
+  const outcome = presentation.subagentLabel
+    ? lastcodeSidebarSubagentStatusLabel(thread, threadStatus)
+    : null;
+  const action = thread.actionResume;
+  const leadingStatus = threadStatus ?? { label: "", description: "" };
+  const label = [
+    ...new Set(
+      [
+        outcome,
+        leadingStatus.label,
+        leadingStatus.description,
+        thread.persistent ? "Protected from archive and deletion" : null,
+        presentation.relationshipDescription,
+        presentation.relationshipUnavailableLabel,
+        lastcodeSidebarFamilySummary(family),
+        action?.outcome === "running" ? actionRunningPresentation(action).summary : null,
+        thread.dashboardItems?.length
+          ? `Project dashboard · ${thread.dashboardItems.filter((item) => item.status === "open").length} open items. Open it from the thread menu`
+          : null,
+      ].filter(Boolean),
+    ),
+  ].join(" · ");
+  if (!label) return null;
+  const marker = label.slice(0, 1);
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <span
+            role="img"
+            aria-label={label}
+            data-lastcode-sidebar-unscaled-content
+            className="inline-flex size-3.5 shrink-0 items-center justify-center text-3xs text-sidebar-muted-foreground @2xl/lastcode-thread-title:hidden"
+          />
+        }
+      >
+        {marker}
+      </TooltipTrigger>
+      <TooltipPopup side="top">{label}</TooltipPopup>
+    </Tooltip>
+  );
+}
 function TitleText({
   family,
   presentation,
@@ -105,7 +159,10 @@ function TitleText({
   return (
     <>
       {thread.persistent && family.parentKey === null && !subagentLabel ? (
-        <MessageSquareLockIcon aria-hidden className="size-3.5 shrink-0" />
+        <MessageSquareLockIcon
+          aria-hidden
+          className="hidden size-3.5 shrink-0 @2xl/lastcode-thread-title:block"
+        />
       ) : null}
       <span className="min-w-0 flex-1">
         <span className="flex min-w-0 items-center gap-1">
@@ -115,7 +172,7 @@ function TitleText({
           >
             {thread.title}
           </span>
-          <span className="flex min-w-0 max-w-[40%] items-center gap-1 overflow-hidden">
+          <span className="hidden min-w-0 items-center gap-1 @2xl/lastcode-thread-title:flex">
             {thread.persistent && (family.parentKey !== null || subagentLabel) ? (
               <Tooltip>
                 <TooltipTrigger
@@ -166,16 +223,18 @@ export function LastCodeThreadTitle({
   const compactStatusIndicators = useClientSetting("compactLegacySidebarStatuses");
   return (
     <>
-      <WaitingAction thread={thread} threadStatus={threadStatus} />
+      <span className="hidden @2xl/lastcode-thread-title:contents">
+        <WaitingAction thread={thread} threadStatus={threadStatus} />
+      </span>
+      <CompactThreadDetails
+        family={family}
+        presentation={presentation}
+        threadStatus={threadStatus}
+      />
       {threadStatus && (
-        <>
-          <span className="inline-flex shrink-0 @sm/lastcode-sidebar:hidden">
-            <ThreadStatusLabel status={threadStatus} compact />
-          </span>
-          <span className="hidden min-w-0 max-w-[35%] overflow-hidden @sm/lastcode-sidebar:inline-flex">
-            <ThreadStatusLabel status={threadStatus} compact={compactStatusIndicators} />
-          </span>
-        </>
+        <span className="hidden min-w-0 max-w-[35%] overflow-hidden @2xl/lastcode-thread-title:inline-flex">
+          <ThreadStatusLabel status={threadStatus} compact={compactStatusIndicators} />
+        </span>
       )}
       {renameTarget ? (
         <LastCodeThreadTitleEditor
@@ -188,7 +247,9 @@ export function LastCodeThreadTitle({
       ) : (
         <>
           <TitleText family={family} presentation={presentation} threadStatus={threadStatus} />
-          <ThreadDashboardIndicator items={thread.dashboardItems} />
+          <span className="hidden @2xl/lastcode-thread-title:contents">
+            <ThreadDashboardIndicator items={thread.dashboardItems} />
+          </span>
         </>
       )}
     </>
@@ -216,7 +277,7 @@ export function LastCodeThreadLeadingControls({
   navigateToThread: (ref: ScopedThreadRef) => Promise<void>;
 }) {
   return (
-    <div className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
+    <div className="@container/lastcode-thread-title flex min-w-0 flex-1 items-center gap-1.5 text-left">
       <LastCodeThreadSourceControl
         thread={family.thread}
         sourceControl={sourceControl}

@@ -190,14 +190,17 @@ function deferred<T>() {
 function OutcomeHarness({
   status,
   leading,
+  protectedChild = false,
 }: {
   status: "failed" | "interrupted";
   leading: ThreadStatusPill["label"] | null;
+  protectedChild?: boolean;
 }) {
   const { capabilities } = useLastCodeThreadEditing();
   const family = familyFor(a, "Child outcome");
   family.thread = {
     ...family.thread,
+    persistent: protectedChild,
     latestRun: {
       runId: RunId.make("child-run"),
       status,
@@ -228,11 +231,9 @@ describe("compact child outcomes", () => {
     document.body.append(container);
     root = createRoot(container);
     await act(() => root?.render(<OutcomeHarness status={status} leading={leading} />));
-    expect(
-      container
-        .querySelector(`[role="img"][aria-label="${label}"]`)
-        ?.querySelector("[data-lastcode-sidebar-unscaled-content]")?.textContent,
-    ).toBe(label[0]);
+    const outcome = container.querySelector(`[role="img"][aria-label="${label}"]`);
+    const marker = outcome?.querySelector("[data-lastcode-sidebar-unscaled-content]") ?? outcome;
+    expect(marker?.textContent).toBe(label[0]);
     expect(container.querySelector(`[data-testid="thread-title-${a.threadId}"]`)?.textContent).toBe(
       "Child outcome",
     );
@@ -243,9 +244,29 @@ describe("compact child outcomes", () => {
     document.body.append(container);
     root = createRoot(container);
     await act(() => root?.render(<OutcomeHarness status="failed" leading="Failed" />));
-    expect(container.querySelector('[role="img"][aria-label="Failed"]')).toBeNull();
+    expect(container.querySelectorAll('[role="img"][aria-label="Failed"]')).toHaveLength(1);
     expect(mocks.update).not.toHaveBeenCalled();
   });
+  it.each(["failed", "interrupted"] as const)(
+    "keeps %s and protection in one complete compact target",
+    async (status) => {
+      container = document.createElement("div");
+      document.body.append(container);
+      root = createRoot(container);
+      await act(() =>
+        root?.render(<OutcomeHarness status={status} leading="Completed" protectedChild />),
+      );
+      const detail = [...container.querySelectorAll('[role="img"]')].find((element) =>
+        element.getAttribute("aria-label")?.includes("Protected from archive and deletion"),
+      );
+      expect(detail?.getAttribute("aria-label")).toContain(
+        status === "failed" ? "Failed" : "Stopped",
+      );
+      expect(detail?.getAttribute("aria-label")).toContain("Completed");
+      expect(detail?.textContent).toBe(status === "failed" ? "F" : "S");
+      expect(mocks.update).not.toHaveBeenCalled();
+    },
+  );
 });
 describe("row-local rename editor", () => {
   it("keeps an inline draft mounted when PR presentation changes beside it", async () => {
