@@ -1,3 +1,4 @@
+import { LastCodeThreadMetadataControls } from "./sidebar/LastCodeThreadMetadataControls";
 import { LastCodeThreadRowSurface } from "./sidebar/LastCodeThreadRowSurface";
 import { useLastCodeThreadNavigation } from "./sidebar/useLastCodeThreadNavigation";
 import {
@@ -18,10 +19,6 @@ import {
 import { useLastCodeThreadIdentity } from "./sidebar/useLastCodeThreadIdentity";
 import { LastCodeThreadHoverDetails } from "./sidebar/LastCodeThreadHoverDetails";
 import { useLastCodeThreadDetails } from "./sidebar/useLastCodeThreadDetails";
-import {
-  LastCodeThreadMetadata,
-  LastCodeThreadMetadataEnvironment,
-} from "./sidebar/LastCodeThreadMetadata";
 import { useLastCodeThreadFamily } from "./sidebar/useLastCodeThreadFamily";
 import {
   LastCodeThreadFamilyDisclosure,
@@ -32,7 +29,6 @@ import { useLastCodeThreadSourceControl } from "./sidebar/useLastCodeThreadSourc
 import { useLastCodeThreadProcesses } from "./sidebar/useLastCodeThreadProcesses";
 import { LastCodeThreadSourceControl } from "./sidebar/LastCodeThreadSourceControl";
 import { LastCodeThreadProcesses } from "./sidebar/LastCodeThreadProcesses";
-import { LastCodeThreadArchiveControl } from "./sidebar/LastCodeThreadArchiveControl";
 import { LastCodeThreadTitle } from "./sidebar/LastCodeThreadTitle";
 import {
   useLastCodeThreadEditing,
@@ -313,12 +309,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     props.configuredEnvironmentIconColor,
     props.providerBadgePreferences,
   );
-  const {
-    showsThreadEnvironmentIcon,
-    threadEnvironmentLabel,
-    environmentIconColor,
-    providerEntry,
-  } = identity;
   const sourceControl = useLastCodeThreadSourceControl(thread, leaseLiveStatus, props.projectCwd);
   const { gitCwd } = sourceControl;
   const isHighlighted = isActive || isSelected;
@@ -328,8 +318,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       lastVisitedAt,
     },
   });
-  const isConfirmingArchive =
-    canOperateThread && !thread.persistent && cleanup === null && archiveConfirmActive;
+  const canArchive = canOperateThread && !thread.persistent && cleanup === null;
   const hasActiveAnnotation = thread.annotation?.resolvedAt === null;
   const cleanupBlockerTitle =
     cleanup?.status === "queued"
@@ -429,41 +418,22 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             editing={editing}
           />
         </div>
-        <div className="ml-auto flex shrink-0 items-center gap-1.5">
+        <LastCodeThreadMetadataControls
+          thread={thread}
+          identity={identity}
+          preferences={props.providerBadgePreferences}
+          jumpLabel={jumpLabel}
+          highlighted={isHighlighted}
+          archive={{ allowed: canArchive, confirmationRequested: archiveConfirmActive, editing }}
+          annotationHandle={annotationPopoverHandle}
+        >
           <LastCodeThreadProcesses
             threadRef={threadRef}
             processes={processes}
             cleanupBlocked={cleanup !== null}
             navigateToThread={navigateToThread}
           />
-          <LastCodeThreadMetadata
-            thread={thread}
-            jumpLabel={jumpLabel}
-            highlighted={isHighlighted}
-            confirming={isConfirmingArchive}
-            canArchive={canOperateThread && !thread.persistent && cleanup === null}
-            annotationHandle={annotationPopoverHandle}
-            environmentIcon={
-              <LastCodeThreadMetadataEnvironment
-                thread={thread}
-                visible={showsThreadEnvironmentIcon}
-                label={threadEnvironmentLabel}
-                color={environmentIconColor}
-                confirming={isConfirmingArchive}
-                providerEntry={providerEntry}
-                preferences={props.providerBadgePreferences}
-              />
-            }
-          >
-            {canOperateThread && !thread.persistent && cleanup === null ? (
-              <LastCodeThreadArchiveControl
-                thread={thread}
-                confirming={isConfirmingArchive}
-                editing={editing}
-              />
-            ) : null}
-          </LastCodeThreadMetadata>
-        </div>
+        </LastCodeThreadMetadataControls>
       </LastCodeThreadRowSurface>
       <LastCodeThreadDetails
         thread={thread}

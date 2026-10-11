@@ -17,10 +17,9 @@ import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environ
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { makeThreadFixture } from "../../test-fixtures";
 import type { LastCodeThreadActions } from "./LastCodeThreadActions";
-import {
-  LastCodeThreadArchiveControl,
-  archiveLastCodeThread,
-} from "./LastCodeThreadArchiveControl";
+import { archiveLastCodeThread } from "./LastCodeThreadArchiveControl";
+import { LastCodeThreadMetadataControls } from "./LastCodeThreadMetadataControls";
+import { useLastCodeThreadDetails } from "./useLastCodeThreadDetails";
 import { useLastCodeThreadEditing } from "./useLastCodeThreadEditing";
 import { activateSidebarRowFromKeyboard } from "./sidebarRowKeyboard";
 const mocks = vi.hoisted(() => ({
@@ -35,6 +34,7 @@ vi.mock("./LastCodeThreadActions", () => ({
   useLastCodeThreadActions: () => ({ archiveThread: mocks.archive }),
 }));
 vi.mock("~/hooks/useSettings", () => ({
+  useClientSetting: () => true,
   useClientSettings: (select: (settings: { confirmThreadArchive: boolean }) => unknown) =>
     select({ confirmThreadArchive: mocks.confirm }),
 }));
@@ -46,25 +46,49 @@ vi.mock("../ui/toast", () => ({
   toastManager: { add: mocks.toast },
   stackedThreadToast: (value: unknown) => value,
 }));
+vi.mock("../ThreadStatusIndicators", () => ({
+  ThreadWorktreeIndicator: () => <span>Worktree</span>,
+}));
+vi.mock("./SidebarEnvironmentIcon", () => ({ ConnectedSidebarEnvironmentIcon: () => null }));
 const thread = makeThreadFixture({
   environmentId: EnvironmentId.make("remote-member"),
   id: ThreadId.make("ordinary"),
   title: "Ordinary",
 });
 const ref = scopeThreadRef(thread.environmentId, thread.id);
-function Harness() {
+function Harness({ allowed = true }: { allowed?: boolean }) {
   const { archiveTarget, capabilities } = useLastCodeThreadEditing();
+  const lifetime = useLastCodeThreadDetails(ref, capabilities);
   return (
     <li
+      onMouseLeave={lifetime.handleMouseLeave}
       onKeyDown={(event) => {
         activateSidebarRowFromKeyboard(event, mocks.navigation);
       }}
     >
-      <LastCodeThreadArchiveControl
+      <LastCodeThreadMetadataControls
         thread={thread}
-        confirming={archiveTarget === scopedThreadKey(ref)}
-        editing={capabilities}
-      />
+        identity={{
+          showsThreadEnvironmentIcon: true,
+          threadEnvironmentLabel: "Remote",
+          environmentIconColor: undefined,
+          providerEntry: null,
+          modelInstanceId: thread.modelSelection.instanceId,
+          showInstanceBadge: false,
+          modelLabel: "Model",
+        }}
+        preferences={{ enabled: false, size: 50, transparency: 0 }}
+        jumpLabel={null}
+        highlighted={false}
+        archive={{
+          allowed,
+          confirmationRequested: archiveTarget === scopedThreadKey(ref),
+          editing: capabilities,
+        }}
+        annotationHandle={lifetime.annotationPopoverHandle}
+      >
+        <button>Process control</button>
+      </LastCodeThreadMetadataControls>
       <button onClick={() => capabilities.cancelArchiveConfirmation(ref)}>Cancel</button>
     </li>
   );
@@ -121,6 +145,42 @@ async function flushFocus() {
   await act(() => pending.forEach((fn) => fn(0)));
 }
 describe("row-local archive control", () => {
+  it("cancels confirmation on row mouse leave and keeps the process control mounted", async () => {
+    await render();
+    const process = [...container!.querySelectorAll("button")].find(
+      (button) => button.textContent === "Process control",
+    );
+    await click("Archive");
+    await act(() =>
+      container!
+        .querySelector("li")!
+        .dispatchEvent(new MouseEvent("mouseout", { bubbles: true, relatedTarget: document.body })),
+    );
+    expect(button("Confirm archive")).toBeNull();
+    expect(button("Archive")).not.toBeNull();
+    expect(
+      [...container!.querySelectorAll("button")].find(
+        (button) => button.textContent === "Process control",
+      ),
+    ).toBe(process);
+    expect(mocks.archive).not.toHaveBeenCalled();
+    await click("Archive");
+    await flushFocus();
+    expect(document.activeElement).toBe(button("Confirm archive"));
+  });
+  it("updates denied archive presentation without resetting the independent editing target", async () => {
+    await render();
+    await click("Archive");
+    await act(() => root?.render(<Harness allowed={false} />));
+    expect(button("Archive")).toBeNull();
+    expect(button("Confirm archive")).toBeNull();
+    expect(mocks.archive).not.toHaveBeenCalled();
+    await act(() => root?.render(<Harness />));
+    await flushFocus();
+    expect(document.activeElement).toBe(button("Confirm archive"));
+    await click("Confirm archive");
+    expect(mocks.archive).toHaveBeenCalledExactlyOnceWith(ref, { confirmed: true });
+  });
   it("focuses inline confirmation and submits only the exact confirmed destination", async () => {
     await render();
     await click("Archive");
