@@ -43,9 +43,8 @@ function selectOrNavigate(
   void navigate(threadRef);
 }
 
-/** One project-owned navigation capability shared by its rows, menus and file drops. */
-export function useLastCodeThreadNavigation(orderedThreadKeys: readonly string[]) {
-  const router = useRouter();
+/** Shared destination operation for root shortcuts, rows, menus and file drops. */
+export function useLastCodeNavigateToThread(router: ReturnType<typeof useRouter>) {
   const { isMobile, setOpenMobile } = useSidebar();
   const navigateToThread = useCallback(
     (threadRef: ScopedThreadRef) => {
@@ -60,6 +59,13 @@ export function useLastCodeThreadNavigation(orderedThreadKeys: readonly string[]
     },
     [isMobile, router, setOpenMobile],
   );
+  return navigateToThread;
+}
+
+/** One project-owned navigation capability shared by its rows, menus and file drops. */
+export function useLastCodeThreadNavigation(orderedThreadKeys: readonly string[]) {
+  const router = useRouter();
+  const navigateToThread = useLastCodeNavigateToThread(router);
   const handleThreadClick = useCallback(
     (event: MouseEvent, threadRef: ScopedThreadRef) =>
       selectOrNavigate(event, threadRef, orderedThreadKeys, navigateToThread),

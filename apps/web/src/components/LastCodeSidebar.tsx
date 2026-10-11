@@ -1,58 +1,27 @@
+import { useLastCodeSidebarNavigation } from "./sidebar/useLastCodeSidebarNavigation";
 import { useLastCodeSidebarProjects } from "./sidebar/useLastCodeSidebarProjects";
 import { LastCodeSidebarProjectList } from "./sidebar/LastCodeSidebarProjectList";
 import { LastCodeSidebarPresentationProvider } from "./sidebar/LastCodeSidebarPresentation";
-import { projectLastCodeProjectThreads } from "./sidebar/lastcodeProjectThreads";
-import { lastCodeProjectExpansionPreferenceKeys } from "./sidebar/useLastCodeProjectHeaderGestures";
 import { LastCodeThreadActionsProvider } from "./sidebar/LastCodeThreadActions";
-
 import { LastCodeSidebarOptions } from "./sidebar/LastCodeSidebarOptions";
 import { LastCodeSidebarDesktopNotice } from "./sidebar/LastCodeSidebarDesktopNotice";
 import { LastCodeSidebarConnectionNotice } from "./sidebar/LastCodeSidebarConnectionNotice";
-
 import { useSidebarProviderBadgePreferences } from "./sidebar/SidebarEnvironmentIcon";
 import { FolderPlusIcon, SearchIcon } from "lucide-react";
 import { ProjectSidebarDraftList } from "./sidebar/ProjectSidebarDraftList";
 import { useAtomValue } from "@effect/atom-react";
-import React, { useCallback, useEffect, memo, useMemo, useState, type CSSProperties } from "react";
-import { type ScopedThreadRef, type ResolvedKeybindingsConfig } from "@t3tools/contracts";
-import {
-  parseScopedThreadKey,
-  scopedThreadKey,
-  scopeProjectRef,
-  scopeThreadRef,
-} from "@t3tools/client-runtime/environment";
-import { useNavigate, useParams } from "@tanstack/react-router";
-import { type LegacySidebarScale } from "@t3tools/contracts/settings";
+import { useCallback, memo, useMemo, useState, type CSSProperties } from "react";
+import type { ScopedThreadRef } from "@t3tools/contracts";
+import { scopedThreadKey, scopeProjectRef } from "@t3tools/client-runtime/environment";
+import type { LegacySidebarScale } from "@t3tools/contracts/settings";
 import { isDesktopLocalConnectionTarget, isWslConnectionTarget } from "../connection/desktopLocal";
 import { isElectron } from "../env";
-import { useTerminalFocus } from "../hooks/useTerminalFocus";
-import { isTerminalFocused } from "../lib/terminalFocus";
-import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
-import { resolveProjectExpanded, useUiStateStore } from "../uiStateStore";
-import {
-  resolveShortcutCommand,
-  shortcutLabelForCommand,
-  shouldShowThreadJumpHintsForModifiers,
-  threadJumpCommandForIndex,
-  threadJumpIndexFromCommand,
-  threadTraversalDirectionFromCommand,
-} from "../keybindings";
-import { isModelPickerOpen } from "../modelPickerVisibility";
-import { useShortcutModifierState } from "../shortcutModifierState";
-import { useComposerDraftStore } from "../composerDraftStore";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { lastcodeSidebarScaleStyle } from "../lastcodeSidebarScale";
-
 import { useEnvironmentThread } from "../state/threads";
 import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
-import {
-  buildThreadRouteParams,
-  resolveActiveThreadRouteRef,
-  resolveThreadRouteTarget,
-} from "../threadRoutes";
 import { Kbd } from "./ui/kbd";
 import { Button } from "./ui/button";
-
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import {
   SidebarContent,
@@ -60,59 +29,18 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
-  useSidebar,
 } from "./ui/sidebar";
-import { useThreadSelectionStore } from "../threadSelectionStore";
-import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
-import {
-  getSidebarThreadIdsToPrewarm,
-  resolveAdjacentThreadId,
-  shouldClearThreadSelectionOnMouseDown,
-  useThreadJumpHintVisibility,
-} from "./Sidebar.logic";
+import { openCommandPalette } from "../commandPaletteBus";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import { LastCodeSidebarThreadPicker } from "./sidebar/LastCodeSidebarThreadPicker";
 import { CommandDialogTrigger } from "./ui/command";
 import { useClientSettings } from "~/hooks/useSettings";
-import { primaryServerKeybindingsAtom, primaryServerProvidersAtom } from "../state/server";
-import { useLastCodeSidebarFamiliesStore } from "./lastcodeSidebarFamilies.store";
+import { primaryServerProvidersAtom } from "../state/server";
 import { deriveProviderInstanceEntries, type ProviderInstanceEntry } from "../providerInstances";
 import type { SidebarProjectSnapshot } from "../sidebarProjectGrouping";
-const EMPTY_THREAD_JUMP_LABELS = new Map<string, string>();
-
 function SidebarThreadDetailPrewarmer({ threadRef }: { readonly threadRef: ScopedThreadRef }) {
   useEnvironmentThread(threadRef.environmentId, threadRef.threadId);
   return null;
-}
-
-function buildThreadJumpLabelMap(input: {
-  keybindings: ResolvedKeybindingsConfig;
-  platform: string;
-  terminalOpen: boolean;
-  threadJumpCommandByKey: ReadonlyMap<
-    string,
-    NonNullable<ReturnType<typeof threadJumpCommandForIndex>>
-  >;
-}): ReadonlyMap<string, string> {
-  if (input.threadJumpCommandByKey.size === 0) {
-    return EMPTY_THREAD_JUMP_LABELS;
-  }
-
-  const shortcutLabelOptions = {
-    platform: input.platform,
-    context: {
-      terminalFocus: false,
-      terminalOpen: input.terminalOpen,
-    },
-  } as const;
-  const mapping = new Map<string, string>();
-  for (const [threadKey, command] of input.threadJumpCommandByKey) {
-    const label = shortcutLabelForCommand(input.keybindings, command, shortcutLabelOptions);
-    if (label) {
-      mapping.set(threadKey, label);
-    }
-  }
-  return mapping.size > 0 ? mapping : EMPTY_THREAD_JUMP_LABELS;
 }
 
 interface SidebarProjectsContentProps {
@@ -247,12 +175,6 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
 });
 
 function LastCodeSidebarView() {
-  const collapsedFamiliesByKey = useLastCodeSidebarFamiliesStore((state) => state.collapsedByKey);
-  const projectExpandedById = useUiStateStore((store) => store.projectExpandedById);
-  const navigate = useNavigate();
-  const sidebarThreadSortOrder = useClientSettings((s) => s.sidebarThreadSortOrder);
-  const groupingStyle = useClientSettings((s) => s.legacySidebarThreadGroupingStyle);
-  const sidebarThreadPreviewCount = useClientSettings((s) => s.sidebarThreadPreviewCount);
   const lastcodeSidebarScale = useClientSettings<LegacySidebarScale>((s) => s.legacySidebarScale);
   const environmentIconColors = useClientSettings((s) => s.environmentIconColors);
   const showLocalEnvironmentIcon = useClientSettings((s) => s.showLocalEnvironmentIcon);
@@ -264,25 +186,6 @@ function LastCodeSidebarView() {
   );
   const handleNewThread = useNewThreadHandler();
 
-  const { isMobile, setOpenMobile } = useSidebar();
-  const routeTarget = useParams({
-    strict: false,
-    select: (params) => resolveThreadRouteTarget(params),
-  });
-  const routeDraftThread = useComposerDraftStore((store) =>
-    routeTarget?.kind === "draft" ? store.getDraftSession(routeTarget.draftId) : null,
-  );
-  const routeThreadRef = useMemo(
-    () => resolveActiveThreadRouteRef(routeTarget, routeDraftThread),
-    [routeDraftThread, routeTarget],
-  );
-  const routeThreadKey = routeThreadRef ? scopedThreadKey(routeThreadRef) : null;
-  const routeTerminalOpen = useTerminalUiStateStore((state) =>
-    routeThreadRef
-      ? selectThreadTerminalUiState(state.terminalUiStateByThreadKey, routeThreadRef).terminalOpen
-      : false,
-  );
-  const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const openAddProjectCommandPalette = useCallback(
     () => openCommandPalette({ open: "add-project" }),
     [],
@@ -290,12 +193,6 @@ function LastCodeSidebarView() {
   const [expandedThreadListsByProject, setExpandedThreadListsByProject] = useState<
     ReadonlySet<string>
   >(() => new Set());
-  const { showThreadJumpHints, updateThreadJumpHintsVisibility } = useThreadJumpHintVisibility();
-  const clearSelection = useThreadSelectionStore((s) => s.clearSelection);
-  const setSelectionAnchor = useThreadSelectionStore((s) => s.setAnchor);
-  const platform = navigator.platform;
-  const shortcutModifiers = useShortcutModifierState();
-  const terminalFocused = useTerminalFocus();
   const { environments } = useEnvironments();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const providerEntriesByEnvironmentId = useMemo(() => {
@@ -363,227 +260,21 @@ function LastCodeSidebarView() {
       desktopLocalEnvironmentIds,
       wslEnvironmentIds,
     });
-  const { byThreadKey: sidebarThreadByKey, byProjectKey: threadsByProjectKey } = index;
+  const {
+    routeThreadRef,
+    routeThreadKey,
+    prewarmedSidebarThreadRefs,
+    visibleThreadJumpLabelByKey,
+    newThreadShortcutLabel,
+    commandPaletteShortcutLabel,
+  } = useLastCodeSidebarNavigation(sortedProjects, index, expandedThreadListsByProject);
+  const { byThreadKey: sidebarThreadByKey } = index;
   const activeRouteProjectKey = useMemo(() => {
     const thread = routeThreadKey ? sidebarThreadByKey.get(routeThreadKey) : null;
     return thread
       ? resolveProjectKey(scopeProjectRef(thread.environmentId, thread.projectId))
       : null;
   }, [routeThreadKey, sidebarThreadByKey, resolveProjectKey]);
-  const getCurrentSidebarShortcutContext = useCallback(
-    () => ({
-      terminalFocus: isTerminalFocused(),
-      terminalOpen: routeTerminalOpen,
-      modelPickerOpen: isModelPickerOpen(),
-    }),
-    [routeTerminalOpen],
-  );
-  const newThreadShortcutLabelOptions = useMemo(
-    () => ({
-      platform,
-      context: {
-        terminalFocus: false,
-        terminalOpen: false,
-      },
-    }),
-    [platform],
-  );
-  const newThreadShortcutLabel =
-    shortcutLabelForCommand(keybindings, "chat.newLocal", newThreadShortcutLabelOptions) ??
-    shortcutLabelForCommand(keybindings, "chat.new", newThreadShortcutLabelOptions);
-
-  const navigateToThread = useCallback(
-    (threadRef: ScopedThreadRef) => {
-      if (useThreadSelectionStore.getState().selectedThreadKeys.size > 0) {
-        clearSelection();
-      }
-      setSelectionAnchor(scopedThreadKey(threadRef));
-      if (isMobile) {
-        setOpenMobile(false);
-      }
-      void navigate({
-        to: "/$environmentId/$threadId",
-        params: buildThreadRouteParams(threadRef),
-      });
-    },
-    [clearSelection, isMobile, navigate, setOpenMobile, setSelectionAnchor],
-  );
-
-  const visibleSidebarThreadKeys = useMemo(
-    () =>
-      sortedProjects.flatMap((project) => {
-        const projectThreads = threadsByProjectKey.get(project.projectKey) ?? [];
-        const projectExpanded = resolveProjectExpanded(
-          projectExpandedById,
-          lastCodeProjectExpansionPreferenceKeys(project),
-        );
-        return projectLastCodeProjectThreads(projectThreads, sidebarThreadSortOrder, {
-          collapsedByKey: collapsedFamiliesByKey,
-          activeThreadKey: routeThreadKey,
-          projectExpanded,
-          previewCount: sidebarThreadPreviewCount,
-          listExpanded: expandedThreadListsByProject.has(project.projectKey),
-          groupingStyle,
-        }).familyProjection.orderedThreadKeys;
-      }),
-    [
-      sidebarThreadSortOrder,
-      sidebarThreadPreviewCount,
-      collapsedFamiliesByKey,
-      groupingStyle,
-      expandedThreadListsByProject,
-      projectExpandedById,
-      routeThreadKey,
-      sortedProjects,
-      threadsByProjectKey,
-    ],
-  );
-  const threadJumpCommandByKey = useMemo(() => {
-    const mapping = new Map<string, NonNullable<ReturnType<typeof threadJumpCommandForIndex>>>();
-    for (const [visibleThreadIndex, threadKey] of visibleSidebarThreadKeys.entries()) {
-      const jumpCommand = threadJumpCommandForIndex(visibleThreadIndex);
-      if (!jumpCommand) {
-        return mapping;
-      }
-      mapping.set(threadKey, jumpCommand);
-    }
-
-    return mapping;
-  }, [visibleSidebarThreadKeys]);
-  const threadJumpThreadKeys = useMemo(
-    () => [...threadJumpCommandByKey.keys()],
-    [threadJumpCommandByKey],
-  );
-  const sidebarShortcutContext = {
-    terminalFocus: terminalFocused,
-    terminalOpen: routeTerminalOpen,
-    modelPickerOpen: isModelPickerOpen(),
-  };
-  const threadJumpLabelByKey = useMemo(
-    () =>
-      buildThreadJumpLabelMap({
-        keybindings,
-        platform,
-        terminalOpen: sidebarShortcutContext.terminalOpen,
-        threadJumpCommandByKey,
-      }),
-    [keybindings, platform, sidebarShortcutContext.terminalOpen, threadJumpCommandByKey],
-  );
-  const shouldShowThreadJumpHintsNow = shouldShowThreadJumpHintsForModifiers(
-    shortcutModifiers,
-    keybindings,
-    {
-      platform,
-      context: sidebarShortcutContext,
-    },
-  );
-  const visibleThreadJumpLabelByKey = showThreadJumpHints
-    ? threadJumpLabelByKey
-    : EMPTY_THREAD_JUMP_LABELS;
-  const orderedSidebarThreadKeys = visibleSidebarThreadKeys;
-  const prewarmedSidebarThreadKeys = useMemo(
-    () => getSidebarThreadIdsToPrewarm(visibleSidebarThreadKeys),
-    [visibleSidebarThreadKeys],
-  );
-  const prewarmedSidebarThreadRefs = useMemo(
-    () =>
-      prewarmedSidebarThreadKeys.flatMap((threadKey) => {
-        const ref = parseScopedThreadKey(threadKey);
-        return ref ? [ref] : [];
-      }),
-    [prewarmedSidebarThreadKeys],
-  );
-
-  useEffect(() => {
-    updateThreadJumpHintsVisibility(shouldShowThreadJumpHintsNow);
-  }, [shouldShowThreadJumpHintsNow, updateThreadJumpHintsVisibility]);
-
-  useEffect(() => {
-    const onWindowKeyDown = (event: globalThis.KeyboardEvent) => {
-      const shortcutContext = getCurrentSidebarShortcutContext();
-
-      if (event.defaultPrevented || event.repeat || isCommandPaletteOpen() || isModelPickerOpen()) {
-        return;
-      }
-
-      const command = resolveShortcutCommand(event, keybindings, {
-        platform,
-        context: shortcutContext,
-      });
-      const traversalDirection = threadTraversalDirectionFromCommand(command);
-      if (traversalDirection !== null) {
-        const targetThreadKey = resolveAdjacentThreadId({
-          threadIds: orderedSidebarThreadKeys,
-          currentThreadId: routeThreadKey,
-          direction: traversalDirection,
-        });
-        if (!targetThreadKey) {
-          return;
-        }
-        const targetThread = sidebarThreadByKey.get(targetThreadKey);
-        if (!targetThread) {
-          return;
-        }
-
-        event.preventDefault();
-        event.stopPropagation();
-        navigateToThread(scopeThreadRef(targetThread.environmentId, targetThread.id));
-        return;
-      }
-
-      const jumpIndex = threadJumpIndexFromCommand(command ?? "");
-      if (jumpIndex === null) {
-        return;
-      }
-
-      const targetThreadKey = threadJumpThreadKeys[jumpIndex];
-      if (!targetThreadKey) {
-        return;
-      }
-      const targetThread = sidebarThreadByKey.get(targetThreadKey);
-      if (!targetThread) {
-        return;
-      }
-
-      event.preventDefault();
-      event.stopPropagation();
-      navigateToThread(scopeThreadRef(targetThread.environmentId, targetThread.id));
-    };
-
-    window.addEventListener("keydown", onWindowKeyDown);
-
-    return () => {
-      window.removeEventListener("keydown", onWindowKeyDown);
-    };
-  }, [
-    getCurrentSidebarShortcutContext,
-    keybindings,
-    navigateToThread,
-    orderedSidebarThreadKeys,
-    platform,
-    routeThreadKey,
-    sidebarThreadByKey,
-    threadJumpThreadKeys,
-  ]);
-
-  useEffect(() => {
-    const onMouseDown = (event: globalThis.MouseEvent) => {
-      if (!useThreadSelectionStore.getState().hasSelection()) return;
-      const target = event.target instanceof HTMLElement ? event.target : null;
-      if (!shouldClearThreadSelectionOnMouseDown(target)) return;
-      clearSelection();
-    };
-
-    window.addEventListener("mousedown", onMouseDown);
-    return () => {
-      window.removeEventListener("mousedown", onMouseDown);
-    };
-  }, [clearSelection]);
-
-  const commandPaletteShortcutLabel = isMobile
-    ? null
-    : shortcutLabelForCommand(keybindings, "commandPalette.toggle", newThreadShortcutLabelOptions);
-
   const expandThreadListForProject = useCallback((projectKey: string) => {
     setExpandedThreadListsByProject((current) => {
       if (current.has(projectKey)) return current;
