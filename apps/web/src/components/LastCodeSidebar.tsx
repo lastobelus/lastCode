@@ -1,3 +1,8 @@
+import { useLastCodeProjectMenu } from "./sidebar/useLastCodeProjectMenu";
+import { checkTaskPermission } from "./sidebar/lastcodeSidebarPermission";
+import { LastCodeProjectRenameDialog } from "./sidebar/LastCodeProjectRenameDialog";
+import { LastCodeProjectGroupingDialog } from "./sidebar/LastCodeProjectGroupingDialog";
+
 import { LastCodeSidebarOptions } from "./sidebar/LastCodeSidebarOptions";
 import { LastCodeSidebarDesktopNotice } from "./sidebar/LastCodeSidebarDesktopNotice";
 import { LastCodeSidebarConnectionNotice } from "./sidebar/LastCodeSidebarConnectionNotice";
@@ -5,10 +10,7 @@ import {
   buildLastCodeThreadMenu,
   lastcodeThreadActionRequiresOperate,
 } from "./sidebar/lastcodeThreadMenu";
-import {
-  buildLastCodeProjectMenu,
-  formatProjectMemberActionLabel,
-} from "./sidebar/lastcodeProjectMenu";
+import { formatProjectMemberActionLabel } from "./sidebar/lastcodeProjectMenu";
 import { activateSidebarRowFromKeyboard } from "./sidebar/sidebarRowKeyboard";
 import {
   ConnectedSidebarEnvironmentIcon,
@@ -84,7 +86,6 @@ import {
   ProjectId,
   type ScopedThreadRef,
   type ResolvedKeybindingsConfig,
-  type SidebarProjectGroupingMode,
   ThreadId,
 } from "@t3tools/contracts";
 import {
@@ -94,7 +95,6 @@ import {
   scopeProjectRef,
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
-import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
 import {
   isAtomCommandInterrupted,
   settlePromise,
@@ -112,7 +112,6 @@ import { isDesktopLocalConnectionTarget, isWslConnectionTarget } from "../connec
 import { isElectron } from "../env";
 import { useTerminalFocus } from "../hooks/useTerminalFocus";
 import { useOpenPrLink } from "../lib/openPullRequestLink";
-import { releaseProjectDraftUploads } from "../lib/composerDraftUploads";
 import { isTerminalFocused } from "../lib/terminalFocus";
 import { isMacPlatform } from "../lib/utils";
 import { useSidebarPendingFileDropStore } from "../sidebarPendingFileDropStore";
@@ -145,10 +144,7 @@ import {
 import { useThreadDiscoveredPorts } from "../portDiscoveryState";
 import { openDiscoveredPort } from "./preview/openDiscoveredPort";
 import { useAtomCommand } from "../state/use-atom-command";
-import {
-  ORCHESTRATION_OPERATE_DENIED_MESSAGE,
-  useOrchestrationCommand,
-} from "../state/use-orchestration-command";
+import { useOrchestrationCommand } from "../state/use-orchestration-command";
 import { useEnvironmentQuery } from "../state/query";
 import { previewEnvironment } from "../state/preview";
 import { readEnvironmentScope, useEnvironmentScope } from "../state/session";
@@ -180,7 +176,6 @@ import {
 } from "../environmentIcons";
 
 import { useThreadActions } from "../hooks/useThreadActions";
-import { projectEnvironment } from "../state/projects";
 import { threadEnvironment, useEnvironmentThread } from "../state/threads";
 import { useEnvironment, useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
 import {
@@ -192,19 +187,8 @@ import { stackedThreadToast, toastManager } from "./ui/toast";
 import { formatRelativeTimeLabel } from "../timestampFormat";
 import { Kbd } from "./ui/kbd";
 import { protectLegacyThreadActions } from "./lastcodeThreadPersistence.logic";
-import { projectsContainPersistentThread } from "./projectPersistence.logic";
 import { Button } from "./ui/button";
-import {
-  Dialog,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogPanel,
-  DialogPopup,
-  DialogTitle,
-} from "./ui/dialog";
-import { Input } from "./ui/input";
-import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "./ui/select";
+
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import {
   SidebarContent,
@@ -245,11 +229,10 @@ import { LastCodeSidebarThreadPicker } from "./sidebar/LastCodeSidebarThreadPick
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { useIsMobile } from "~/hooks/useMediaQuery";
 import { CommandDialogTrigger } from "./ui/command";
-import { useClientSettings, useUpdateClientSettings } from "~/hooks/useSettings";
+import { useClientSettings } from "~/hooks/useSettings";
 import { primaryServerKeybindingsAtom, primaryServerProvidersAtom } from "../state/server";
 import {
   derivePhysicalProjectKey,
-  deriveProjectGroupingOverrideKey,
   getProjectOrderKey,
   selectProjectGroupingSettings,
 } from "../logicalProject";
@@ -294,11 +277,6 @@ const SIDEBAR_LIST_ANIMATION_OPTIONS = {
   easing: "ease-out",
 } as const;
 const EMPTY_THREAD_JUMP_LABELS = new Map<string, string>();
-const PROJECT_GROUPING_MODE_LABELS: Record<SidebarProjectGroupingMode, string> = {
-  repository: "Group by repository",
-  repository_path: "Group by repository path",
-  separate: "Keep separate",
-};
 const SIDEBAR_ICON_ACTION_BUTTON_CLASS =
   "inline-flex h-6 min-w-6 cursor-pointer items-center justify-center rounded-md px-0.75 text-icon-muted hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring";
 
@@ -313,17 +291,6 @@ function projectExpansionPreferenceKeys(project: SidebarProjectSnapshot): string
     ...project.memberProjects.map((member) => member.physicalProjectKey),
     ...project.memberProjects.map((member) => legacyProjectCwdPreferenceKey(member.workspaceRoot)),
   ];
-}
-
-function projectGroupingModeDescription(mode: SidebarProjectGroupingMode): string {
-  switch (mode) {
-    case "repository":
-      return "Projects from the same repository share one sidebar row.";
-    case "repository_path":
-      return "Projects group only when both the repository and repo-relative path match.";
-    case "separate":
-      return "Every project path gets its own sidebar row.";
-  }
 }
 
 function buildThreadJumpLabelMap(input: {
@@ -424,18 +391,6 @@ interface SidebarThreadRowProps {
   onEditAnnotation: (thread: SidebarThreadSummary) => void;
   onSaveAnnotationBody: (thread: SidebarThreadSummary, body: string) => Promise<boolean>;
   onResolveAnnotation: (thread: SidebarThreadSummary) => void;
-}
-
-function checkTaskPermission(environmentId: EnvironmentId): boolean {
-  if (readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)) return true;
-  toastManager.add(
-    stackedThreadToast({
-      type: "error",
-      title: "Action unavailable",
-      description: ORCHESTRATION_OPERATE_DENIED_MESSAGE,
-    }),
-  );
-  return false;
 }
 
 const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowProps) {
@@ -1950,11 +1905,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     loadBalancingEnabled &&
     !isNoProjectGroup &&
     new Set(project.memberProjects.map((member) => member.environmentId)).size > 1;
-  const projectSettingsKey = resolveSidebarProjectSettingsKey({
-    sidebarProjectKey: project.projectKey,
-    targetProject: project,
-    settings: projectGroupingSettings,
-  });
   const projectEnvironmentIcons = useMemo(
     () =>
       projectEnvironmentIconEntries({
@@ -1970,12 +1920,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       props.showLocalEnvironmentIcon,
     ],
   );
-  const deleteProject = useOrchestrationCommand(projectEnvironment.delete, {
-    reportFailure: false,
-  });
-  const updateProject = useOrchestrationCommand(projectEnvironment.update, {
-    reportFailure: false,
-  });
   const updateThreadMetadata = useOrchestrationCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
@@ -1986,7 +1930,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     reportFailure: false,
   });
   const stopThreadProcesses = useStopThreadProcesses();
-  const updateSettings = useUpdateClientSettings();
   const sidebarThreadPreviewCount = useClientSettings<SidebarThreadPreviewCount>(
     (settings) => settings.sidebarThreadPreviewCount,
   );
@@ -2081,16 +2024,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const [projectRenameTarget, setProjectRenameTarget] = useState<SidebarProjectGroupMember | null>(
     null,
   );
-  const [projectRenameTitle, setProjectRenameTitle] = useState("");
-  const canRenameProject = useEnvironmentScope(
-    projectRenameTarget?.environmentId ?? null,
-    AuthOrchestrationOperateScope,
-  );
   const [projectGroupingTarget, setProjectGroupingTarget] =
     useState<SidebarProjectGroupMember | null>(null);
-  const [projectGroupingSelection, setProjectGroupingSelection] = useState<
-    SidebarProjectGroupingMode | "inherit"
-  >("inherit");
   const renamingCommittedRef = useRef(false);
   const renamingInputRef = useRef<HTMLInputElement | null>(null);
   const confirmArchiveButtonRefs = useRef(new Map<string, HTMLButtonElement>());
@@ -2104,22 +2039,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       ),
     [project.memberProjects],
   );
-  const memberThreadCountByPhysicalKey = useMemo(() => {
-    const counts = new Map<string, number>(
-      project.memberProjects.map((member) => [member.physicalProjectKey, 0] as const),
-    );
-    for (const thread of projectThreads) {
-      const member = memberProjectByScopedKey.get(
-        scopedProjectKey(scopeProjectRef(thread.environmentId, thread.projectId)),
-      );
-      if (!member) {
-        continue;
-      }
-      counts.set(member.physicalProjectKey, (counts.get(member.physicalProjectKey) ?? 0) + 1);
-    }
-    return counts;
-  }, [memberProjectByScopedKey, project.memberProjects, projectThreads]);
-
   const projectThreadKeys = useMemo(
     () =>
       [...sidebarThreadByKey.keys()].flatMap((key) => [key, lastcodeSidebarSubagentGroupKey(key)]),
@@ -2250,278 +2169,30 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   );
 
   const openProjectRenameDialog = useCallback((member: SidebarProjectGroupMember) => {
-    if (!checkTaskPermission(member.environmentId)) return;
-    setProjectRenameTarget(member);
-    setProjectRenameTitle(member.title);
+    if (checkTaskPermission(member.environmentId)) setProjectRenameTarget(member);
   }, []);
-
   const openProjectGroupingDialog = useCallback(
-    (member: SidebarProjectGroupMember) => {
-      const overrideKey = deriveProjectGroupingOverrideKey(member);
-      setProjectGroupingTarget(member);
-      setProjectGroupingSelection(
-        projectGroupingSettings.sidebarProjectGroupingOverrides?.[overrideKey] ?? "inherit",
-      );
-    },
-    [projectGroupingSettings.sidebarProjectGroupingOverrides],
+    (member: SidebarProjectGroupMember) => setProjectGroupingTarget(member),
+    [],
   );
 
-  const removeProject = useCallback(
-    async (member: SidebarProjectGroupMember) => {
-      const memberProjectRef = scopeProjectRef(member.environmentId, member.id);
-      const result = await deleteProject({
-        environmentId: member.environmentId,
-        input: {
-          projectId: member.id,
-          force: true,
-        },
-      });
-      if (result._tag === "Failure") {
-        return result;
-      }
-      const draftStore = useComposerDraftStore.getState();
-      releaseProjectDraftUploads(
-        memberProjectRef,
-        sidebarThreads
-          .filter(
-            (thread) =>
-              thread.environmentId === member.environmentId && thread.projectId === member.id,
-          )
-          .map((thread) => scopeThreadRef(thread.environmentId, thread.id)),
-      );
-      const projectDraftThread = draftStore.getDraftThreadByProjectRef(memberProjectRef);
-      if (projectDraftThread) {
-        draftStore.clearDraftThread(projectDraftThread.draftId);
-      }
-      draftStore.clearProjectDraftThreadId(memberProjectRef);
-      return result;
-    },
-    [deleteProject, sidebarThreads],
+  const getProjectMenuThreads = useCallback(
+    () => Array.from(sidebarThreadByKeyRef.current.values()),
+    [],
   );
-
-  const handleRemoveProject = useCallback(
-    async (member: SidebarProjectGroupMember) => {
-      if (!checkTaskPermission(member.environmentId)) return;
-      const api = readLocalApi();
-      if (!api) {
-        return;
-      }
-
-      if (
-        projectsContainPersistentThread({
-          members: [member],
-          threads: Array.from(sidebarThreadByKeyRef.current.values()),
-        })
-      ) {
-        toastManager.add(
-          stackedThreadToast({
-            type: "warning",
-            title: "Persistent thread protected",
-            description:
-              "Disable persistence or move it to another thread before removing this project.",
-          }),
-        );
-        return;
-      }
-
-      const memberProjectRef = scopeProjectRef(member.environmentId, member.id);
-      const memberThreadCount = memberThreadCountByPhysicalKey.get(member.physicalProjectKey) ?? 0;
-      if (memberThreadCount > 0) {
-        const warningToastId = toastManager.add(
-          stackedThreadToast({
-            type: "warning",
-            title: "Project is not empty",
-            description: "Delete all threads in this project before removing it.",
-            actionVariant: "destructive",
-            actionProps: {
-              children: "Delete anyway",
-              onClick: () => {
-                void (async () => {
-                  toastManager.close(warningToastId);
-                  await new Promise<void>((resolve) => {
-                    window.setTimeout(resolve, 180);
-                  });
-                  if (!checkTaskPermission(member.environmentId)) return;
-
-                  const latestProjectThreads = Array.from(
-                    sidebarThreadByKeyRef.current.values(),
-                  ).filter(
-                    (thread) =>
-                      thread.environmentId === memberProjectRef.environmentId &&
-                      thread.projectId === memberProjectRef.projectId,
-                  );
-                  const confirmed = await api.dialogs.confirm(
-                    latestProjectThreads.length > 0
-                      ? [
-                          `Remove project "${member.title}" and delete its ${latestProjectThreads.length} thread${
-                            latestProjectThreads.length === 1 ? "" : "s"
-                          }?`,
-                          `Path: ${member.workspaceRoot}`,
-                          ...(member.environmentLabel
-                            ? [`Environment: ${member.environmentLabel}`]
-                            : []),
-                          "This deletes all threads in this project, including archived threads, forks, independent threads, and subagents. This cannot be undone.",
-                          "This removes only this project entry.",
-                        ].join("\n")
-                      : [
-                          `Remove project "${member.title}"?`,
-                          `Path: ${member.workspaceRoot}`,
-                          ...(member.environmentLabel
-                            ? [`Environment: ${member.environmentLabel}`]
-                            : []),
-                          "This deletes all threads in this project, including archived threads, forks, independent threads, and subagents. This cannot be undone.",
-                          "This removes only this project entry.",
-                        ].join("\n"),
-                    { variant: "destructive" },
-                  );
-                  if (!confirmed) {
-                    return;
-                  }
-
-                  const result = await removeProject(member);
-                  if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-                    const error = squashAtomCommandFailure(result);
-                    toastManager.add(
-                      stackedThreadToast({
-                        type: "error",
-                        title: `Failed to remove "${member.title}"`,
-                        description:
-                          error instanceof Error
-                            ? error.message
-                            : "Unknown error removing project.",
-                      }),
-                    );
-                  }
-                })().catch((error) => {
-                  const message =
-                    error instanceof Error ? error.message : "Unknown error removing project.";
-                  console.error("Failed to remove project", {
-                    projectId: member.id,
-                    environmentId: member.environmentId,
-                    ...safeErrorLogAttributes(error),
-                  });
-                  toastManager.add(
-                    stackedThreadToast({
-                      type: "error",
-                      title: `Failed to remove "${member.title}"`,
-                      description: message,
-                    }),
-                  );
-                });
-              },
-            },
-          }),
-        );
-        return;
-      }
-
-      const message = [
-        `Remove project "${member.title}"?`,
-        `Path: ${member.workspaceRoot}`,
-        ...(member.environmentLabel ? [`Environment: ${member.environmentLabel}`] : []),
-        "This deletes all threads in this project, including archived threads, forks, independent threads, and subagents. This cannot be undone.",
-        "This removes only this project entry.",
-      ].join("\n");
-      const confirmed = await api.dialogs.confirm(message, { variant: "destructive" });
-      if (!confirmed) {
-        return;
-      }
-
-      const result = await removeProject(member);
-      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-        const error = squashAtomCommandFailure(result);
-        const message = error instanceof Error ? error.message : "Unknown error removing project.";
-        console.error("Failed to remove project", {
-          projectId: member.id,
-          environmentId: member.environmentId,
-          ...safeErrorLogAttributes(error),
-        });
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: `Failed to remove "${member.title}"`,
-            description: message,
-          }),
-        );
-      }
-    },
-    [memberThreadCountByPhysicalKey, removeProject],
+  const showProjectMenu = useLastCodeProjectMenu(
+    project,
+    openProjectRenameDialog,
+    openProjectGroupingDialog,
+    getProjectMenuThreads,
   );
-
   const handleProjectButtonContextMenu = useCallback(
     (event: React.MouseEvent<HTMLButtonElement>) => {
       event.preventDefault();
       suppressProjectClickForContextMenuRef.current = true;
-      void (async () => {
-        const api = readLocalApi();
-        if (!api) return;
-
-        const { items, actions } = buildLastCodeProjectMenu({
-          members: project.memberProjects.map((member) => ({
-            member,
-            canOperate: readEnvironmentScope(member.environmentId, AuthOrchestrationOperateScope),
-            removalBlocked: projectsContainPersistentThread({
-              members: [member],
-              threads: sidebarThreads,
-            }),
-          })),
-          groupedProjectCount: project.groupedProjectCount,
-          isNoProjectGroup,
-        });
-        const clicked = await api.contextMenu.show(items, { x: event.clientX, y: event.clientY });
-        const actionHandlers = new Map<string, () => Promise<void> | void>([
-          [
-            "open-dashboard",
-            () => {
-              if (isMobile) setOpenMobile(false);
-              void router.navigate({
-                to: "/dashboard",
-                search: { environmentId: project.environmentId, projectId: project.id },
-              });
-            },
-          ],
-          [
-            "project-settings",
-            () => {
-              if (isMobile) setOpenMobile(false);
-              void router.navigate({
-                to: "/projects/$projectKey",
-                params: { projectKey: projectSettingsKey },
-              });
-            },
-          ],
-        ]);
-        const memberHandlers = {
-          rename: openProjectRenameDialog,
-          grouping: openProjectGroupingDialog,
-          "copy-path": (member: SidebarProjectGroupMember) => {
-            copyPathToClipboard(member.workspaceRoot, { path: member.workspaceRoot });
-          },
-          delete: handleRemoveProject,
-        };
-        for (const [id, target] of actions) {
-          actionHandlers.set(id, () => memberHandlers[target.action](target.member));
-        }
-        await actionHandlers.get(clicked ?? "")?.();
-      })();
+      void showProjectMenu({ x: event.clientX, y: event.clientY });
     },
-    [
-      copyPathToClipboard,
-      handleRemoveProject,
-      isMobile,
-      isNoProjectGroup,
-      openProjectGroupingDialog,
-      openProjectRenameDialog,
-      project.groupedProjectCount,
-      project.memberProjects,
-      project.environmentId,
-      project.id,
-      projectSettingsKey,
-      router,
-      setOpenMobile,
-      sidebarThreads,
-      suppressProjectClickForContextMenuRef,
-    ],
+    [showProjectMenu, suppressProjectClickForContextMenuRef],
   );
 
   const navigateToThread = useCallback(
@@ -3044,82 +2715,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     },
     [updateThreadMetadata],
   );
-
-  const closeProjectRenameDialog = useCallback(() => {
-    setProjectRenameTarget(null);
-    setProjectRenameTitle("");
-  }, []);
-
-  const submitProjectRename = useCallback(async () => {
-    if (!projectRenameTarget) {
-      return;
-    }
-
-    const trimmed = projectRenameTitle.trim();
-    if (trimmed.length === 0) {
-      toastManager.add({
-        type: "warning",
-        title: "Project title cannot be empty",
-      });
-      return;
-    }
-
-    if (trimmed === projectRenameTarget.title) {
-      closeProjectRenameDialog();
-      return;
-    }
-
-    const result = await updateProject({
-      environmentId: projectRenameTarget.environmentId,
-      input: {
-        projectId: projectRenameTarget.id,
-        title: trimmed,
-      },
-    });
-    if (result._tag === "Success") {
-      closeProjectRenameDialog();
-    } else if (!isAtomCommandInterrupted(result)) {
-      const error = squashAtomCommandFailure(result);
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Failed to rename project",
-          description: error instanceof Error ? error.message : "An error occurred.",
-        }),
-      );
-    }
-  }, [closeProjectRenameDialog, projectRenameTarget, projectRenameTitle, updateProject]);
-
-  const closeProjectGroupingDialog = useCallback(() => {
-    setProjectGroupingTarget(null);
-    setProjectGroupingSelection("inherit");
-  }, []);
-
-  const saveProjectGroupingPreference = useCallback(() => {
-    if (!projectGroupingTarget) {
-      return;
-    }
-
-    const overrideKey = deriveProjectGroupingOverrideKey(projectGroupingTarget);
-    const nextOverrides = {
-      ...projectGroupingSettings.sidebarProjectGroupingOverrides,
-    };
-    if (projectGroupingSelection === "inherit") {
-      delete nextOverrides[overrideKey];
-    } else {
-      nextOverrides[overrideKey] = projectGroupingSelection;
-    }
-    updateSettings({
-      sidebarProjectGroupingOverrides: nextOverrides,
-    });
-    closeProjectGroupingDialog();
-  }, [
-    closeProjectGroupingDialog,
-    projectGroupingSelection,
-    projectGroupingSettings.sidebarProjectGroupingOverrides,
-    projectGroupingTarget,
-    updateSettings,
-  ]);
 
   const handleThreadContextMenu = useCallback(
     async (
@@ -3647,131 +3242,14 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         onSave={saveAnnotation}
       />
 
-      <Dialog
-        open={projectRenameTarget !== null}
-        onOpenChange={(open) => {
-          if (!open) {
-            closeProjectRenameDialog();
-          }
-        }}
-      >
-        <DialogPopup className="max-w-lg">
-          <DialogHeader>
-            <DialogTitle>Rename project</DialogTitle>
-            <DialogDescription>
-              {projectRenameTarget
-                ? `Update the title for ${projectRenameTarget.workspaceRoot}.`
-                : "Update the project title."}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogPanel>
-            <div className="grid gap-1.5">
-              <span className="text-xs font-medium text-foreground">Project title</span>
-              <Input
-                aria-label="Project title"
-                disabled={!canRenameProject}
-                value={projectRenameTitle}
-                onChange={(event) => setProjectRenameTitle(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    event.preventDefault();
-                    void submitProjectRename();
-                  }
-                }}
-              />
-            </div>
-            {projectRenameTarget?.environmentLabel ? (
-              <p className="text-xs text-muted-foreground">
-                Environment: {projectRenameTarget.environmentLabel}
-              </p>
-            ) : null}
-            {!canRenameProject ? (
-              <p className="text-xs text-muted-foreground">
-                This connection cannot change projects.
-              </p>
-            ) : null}
-          </DialogPanel>
-          <DialogFooter>
-            <Button variant="outline" onClick={closeProjectRenameDialog}>
-              Cancel
-            </Button>
-            <Button disabled={!canRenameProject} onClick={() => void submitProjectRename()}>
-              Save
-            </Button>
-          </DialogFooter>
-        </DialogPopup>
-      </Dialog>
-
-      <Dialog
-        open={projectGroupingTarget !== null}
-        onOpenChange={(open) => {
-          if (!open) {
-            closeProjectGroupingDialog();
-          }
-        }}
-      >
-        <DialogPopup className="max-w-lg">
-          <DialogHeader>
-            <DialogTitle>Project grouping</DialogTitle>
-            <DialogDescription>
-              {projectGroupingTarget
-                ? `Choose how ${projectGroupingTarget.workspaceRoot} should be grouped in the sidebar.`
-                : "Choose how this project should be grouped in the sidebar."}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogPanel>
-            <div className="grid gap-1.5">
-              <span className="text-xs font-medium text-foreground">Grouping rule</span>
-              <Select
-                value={projectGroupingSelection}
-                onValueChange={(value) => {
-                  if (
-                    value === "inherit" ||
-                    value === "repository" ||
-                    value === "repository_path" ||
-                    value === "separate"
-                  ) {
-                    setProjectGroupingSelection(value);
-                  }
-                }}
-              >
-                <SelectTrigger className="w-full" aria-label="Project grouping rule">
-                  <SelectValue>
-                    {projectGroupingSelection === "inherit"
-                      ? `Use global default (${PROJECT_GROUPING_MODE_LABELS[projectGroupingSettings.sidebarProjectGroupingMode]})`
-                      : PROJECT_GROUPING_MODE_LABELS[projectGroupingSelection]}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectPopup align="end" alignItemWithTrigger={false}>
-                  <SelectItem hideIndicator value="inherit">
-                    Use global default
-                  </SelectItem>
-                  <SelectItem hideIndicator value="repository">
-                    {PROJECT_GROUPING_MODE_LABELS.repository}
-                  </SelectItem>
-                  <SelectItem hideIndicator value="repository_path">
-                    {PROJECT_GROUPING_MODE_LABELS.repository_path}
-                  </SelectItem>
-                  <SelectItem hideIndicator value="separate">
-                    {PROJECT_GROUPING_MODE_LABELS.separate}
-                  </SelectItem>
-                </SelectPopup>
-              </Select>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              {projectGroupingSelection === "inherit"
-                ? projectGroupingModeDescription(projectGroupingSettings.sidebarProjectGroupingMode)
-                : projectGroupingModeDescription(projectGroupingSelection)}
-            </p>
-          </DialogPanel>
-          <DialogFooter>
-            <Button variant="outline" onClick={closeProjectGroupingDialog}>
-              Cancel
-            </Button>
-            <Button onClick={saveProjectGroupingPreference}>Save</Button>
-          </DialogFooter>
-        </DialogPopup>
-      </Dialog>
+      <LastCodeProjectRenameDialog
+        target={projectRenameTarget}
+        onClose={() => setProjectRenameTarget(null)}
+      />
+      <LastCodeProjectGroupingDialog
+        target={projectGroupingTarget}
+        onClose={() => setProjectGroupingTarget(null)}
+      />
     </>
   );
 });
