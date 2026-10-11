@@ -1,5 +1,12 @@
+import { CommandId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
-import { buildLastCodeThreadMenu, lastcodeThreadActionRequiresOperate } from "./lastcodeThreadMenu";
+import {
+  buildLastCodeThreadMenu,
+  lastcodeThreadActionRequiresOperate,
+  LASTCODE_THREAD_ACTION_POLICY,
+  isLastCodeThreadActionId,
+  parseLastCodeHandoffAction,
+} from "./lastcodeThreadMenu";
 
 function input(): Parameters<typeof buildLastCodeThreadMenu>[0] {
   return {
@@ -20,6 +27,54 @@ function input(): Parameters<typeof buildLastCodeThreadMenu>[0] {
 }
 
 describe("LastCode thread context menu", () => {
+  it("classifies every emitted static action across optional menu states", () => {
+    const emitted = new Set<string>();
+    for (const canOperate of [true, false])
+      for (const persistent of [true, false])
+        for (const grouped of [true, false])
+          for (const optional of [true, false]) {
+            const data = input();
+            const menu = buildLastCodeThreadMenu({
+              ...data,
+              canOperate,
+              thread: {
+                ...data.thread,
+                persistent,
+                creatorGrouping: grouped ? "grouped" : "independent",
+                archivePending: optional
+                  ? {
+                      status: "failed",
+                      threadId: ThreadId.make("thread"),
+                      commandId: CommandId.make("command"),
+                      error: "Rejected",
+                    }
+                  : null,
+              },
+              handoffs: optional ? data.handoffs : { entries: [], hasMore: false },
+            });
+            for (const item of menu) {
+              if (item.id.startsWith("handoff:")) continue;
+              expect(isLastCodeThreadActionId(item.id), item.id).toBe(true);
+              emitted.add(item.id);
+              if (lastcodeThreadActionRequiresOperate(item.id) && !canOperate)
+                expect(item.disabled, item.id).toBe(true);
+            }
+          }
+    expect([...emitted].sort()).toEqual(Object.keys(LASTCODE_THREAD_ACTION_POLICY).sort());
+    for (const action of [null, "unknown", "constructor", "__proto__"]) {
+      expect(isLastCodeThreadActionId(action)).toBe(false);
+      expect(lastcodeThreadActionRequiresOperate(action)).toBe(false);
+    }
+  });
+  it("parses dynamic handoff IDs separately without splitting their identity", () => {
+    expect(parseLastCodeHandoffAction("handoff:remote:entry")).toEqual({
+      kind: "entry",
+      id: "remote:entry",
+    });
+    expect(parseLastCodeHandoffAction("handoff-show-all")).toEqual({ kind: "all" });
+    expect(parseLastCodeHandoffAction(null)).toBeNull();
+    expect(parseLastCodeHandoffAction("copy-path")).toBeNull();
+  });
   it("applies the same destination permission policy after the menu closes", () => {
     for (const action of [
       "rename",

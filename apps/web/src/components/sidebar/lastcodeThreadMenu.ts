@@ -9,21 +9,42 @@ import {
   withThreadActionMenuDividers,
 } from "../threadActionMenu.logic";
 
-// The menu and the post-menu permission check share this mutation policy.
-const OPERATE_ACTIONS = new Set([
-  "rename",
-  "annotate",
-  "creator-independent",
-  "creator-grouped",
-  "mark-persistent",
-  "disable-persistence",
-  "stop-thread-processes",
-  "dismiss-archive-failure",
-  "delete",
-]);
-
+// Every static item is explicitly classified, including disabled guidance rows.
+export const LASTCODE_THREAD_ACTION_POLICY = {
+  "new-thread-on-branch": false,
+  rename: true,
+  annotate: true,
+  "mark-unread": false,
+  "creator-independent": true,
+  "creator-grouped": true,
+  "open-creator": false,
+  "mark-persistent": true,
+  "disable-persistence": true,
+  "stop-thread-processes": true,
+  "copy-path": false,
+  "copy-thread-id": false,
+  "open-dashboard": false,
+  "project-settings": false,
+  "handoffs-heading": false,
+  "handoffs-empty": false,
+  "handoff-show-all": false,
+  "dismiss-archive-failure": true,
+  delete: true,
+} as const;
+export type LastCodeThreadActionId = keyof typeof LASTCODE_THREAD_ACTION_POLICY;
+export function isLastCodeThreadActionId(action: string | null): action is LastCodeThreadActionId {
+  return (
+    action !== null && Object.prototype.hasOwnProperty.call(LASTCODE_THREAD_ACTION_POLICY, action)
+  );
+}
 export function lastcodeThreadActionRequiresOperate(action: string | null): boolean {
-  return action !== null && OPERATE_ACTIONS.has(action);
+  return isLastCodeThreadActionId(action) && LASTCODE_THREAD_ACTION_POLICY[action];
+}
+export function parseLastCodeHandoffAction(action: string | null) {
+  if (action === "handoff-show-all") return { kind: "all" } as const;
+  if (action?.startsWith("handoff:"))
+    return { kind: "entry", id: action.slice("handoff:".length) } as const;
+  return null;
 }
 
 interface ThreadMenuInput {

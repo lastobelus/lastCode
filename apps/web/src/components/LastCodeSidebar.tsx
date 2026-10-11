@@ -1,3 +1,13 @@
+import {
+  archiveLastCodeSelection,
+  deleteLastCodeSelection,
+  warnPersistentBulkThread,
+} from "./sidebar/lastcodeBulkThreadOperations";
+import { deleteLastCodeThread } from "./sidebar/lastcodeThreadDeletion";
+import {
+  LastCodeThreadActionsProvider,
+  useLastCodeThreadActions,
+} from "./sidebar/LastCodeThreadActions";
 import { useLastCodeProjectMenu } from "./sidebar/useLastCodeProjectMenu";
 import { checkTaskPermission } from "./sidebar/lastcodeSidebarPermission";
 import { LastCodeProjectRenameDialog } from "./sidebar/LastCodeProjectRenameDialog";
@@ -175,7 +185,6 @@ import {
   resolveEnvironmentIconColor,
 } from "../environmentIcons";
 
-import { useThreadActions } from "../hooks/useThreadActions";
 import { threadEnvironment, useEnvironmentThread } from "../state/threads";
 import { useEnvironment, useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
 import {
@@ -200,14 +209,10 @@ import {
   SidebarMenuSubItem,
   useSidebar,
 } from "./ui/sidebar";
-import {
-  getThreadKeysToDeselectAfterDelete,
-  useThreadSelectionStore,
-} from "../threadSelectionStore";
+import { useThreadSelectionStore } from "../threadSelectionStore";
 import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
 import {
   buildMultiSelectThreadContextMenuItems,
-  collectUnprotectedBulkThreadEntries,
   getSidebarThreadIdsToPrewarm,
   resolveAdjacentThreadId,
   isContextMenuPointerDown,
@@ -1839,12 +1844,6 @@ interface SidebarProjectItemProps {
   openPullRequestsInRightPanel: boolean;
   newThreadShortcutLabel: string | null;
   handleNewThread: ReturnType<typeof useNewThreadHandler>;
-  archiveThread: ReturnType<typeof useThreadActions>["archiveThread"];
-  archiveThreads: ReturnType<typeof useThreadActions>["archiveThreads"];
-  unarchiveThread: ReturnType<typeof useThreadActions>["unarchiveThread"];
-  deleteThread: ReturnType<typeof useThreadActions>["deleteThread"];
-  setThreadPersistence: ReturnType<typeof useThreadActions>["setThreadPersistence"];
-  markThreadUnread: ReturnType<typeof useThreadActions>["markThreadUnread"];
   threadJumpLabelByKey: ReadonlyMap<string, string>;
   attachThreadListAutoAnimateRef: (node: HTMLElement | null) => void;
   expandThreadListForProject: (projectKey: string) => void;
@@ -1869,12 +1868,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     openPullRequestsInRightPanel,
     newThreadShortcutLabel,
     handleNewThread,
-    archiveThread,
-    archiveThreads,
-    unarchiveThread,
-    deleteThread,
-    markThreadUnread,
-    setThreadPersistence,
     threadJumpLabelByKey,
     attachThreadListAutoAnimateRef,
     expandThreadListForProject,
@@ -1885,6 +1878,14 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     isManualProjectSorting,
     dragHandleProps,
   } = props;
+  const {
+    archiveThread,
+    archiveThreads,
+    unarchiveThread,
+    deleteThread,
+    setThreadPersistence,
+    markThreadUnread,
+  } = useLastCodeThreadActions();
   const handoffsMenuLimit = useClientSettings((s) => s.handoffsMenuLimit);
   const openHandoff = useOpenHandoff();
   const groupingStyle = useClientSettings((settings) => settings.legacySidebarThreadGroupingStyle);
@@ -2321,14 +2322,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       const hasPersistentThread = selectedThreadEntries.some(
         ({ thread }) => thread.persistent === true,
       );
-      const warnPersistentThreadProtected = () =>
-        toastManager.add(
-          stackedThreadToast({
-            type: "warning",
-            title: "Persistent thread protected",
-            description: "Disable persistence or move it to another thread first.",
-          }),
-        );
       const clicked = await api.contextMenu.show(
         protectLegacyThreadActions(
           buildMultiSelectThreadContextMenuItems({ count }),
@@ -2342,7 +2335,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       );
 
       if (hasPersistentThread && (clicked === "archive" || clicked === "delete")) {
-        warnPersistentThreadProtected();
+        warnPersistentBulkThread();
         return;
       }
 
@@ -2364,113 +2357,24 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       }
 
       if (clicked === "archive") {
-        const currentEntries = collectUnprotectedBulkThreadEntries({
-          threadKeys: selectedThreadEntries.map(({ threadKey }) => threadKey),
+        await archiveLastCodeSelection(threadKeys, selectedThreadEntries, {
           getEntry: readSelectedThreadEntry,
+          canOperate: checkTaskPermission,
+          removeFromSelection,
+          archiveThreads,
         });
-        if (!currentEntries) {
-          warnPersistentThreadProtected();
-          return;
-        }
-
-        if (!currentEntries.every(({ threadRef }) => checkTaskPermission(threadRef.environmentId)))
-          return;
-        if (currentEntries.some(({ thread }) => thread.worktreeCleanup != null)) return;
-
-        const archiveOutcome = await archiveThreads(currentEntries);
-        if (archiveOutcome === null) return;
-        for (const failure of archiveOutcome.followupFailures) {
-          if (isAtomCommandInterrupted(failure)) continue;
-          const error = squashAtomCommandFailure(failure);
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Thread archived, but navigation failed",
-              description: error instanceof Error ? error.message : "An error occurred.",
-            }),
-          );
-        }
-        if (archiveOutcome.mutationFailure) {
-          removeFromSelection(archiveOutcome.archivedThreadKeys);
-          if (!isAtomCommandInterrupted(archiveOutcome.mutationFailure)) {
-            const error = squashAtomCommandFailure(archiveOutcome.mutationFailure);
-            toastManager.add(
-              stackedThreadToast({
-                type: "error",
-                title: "Failed to archive threads",
-                description: error instanceof Error ? error.message : "An error occurred.",
-              }),
-            );
-          }
-          return;
-        }
-        removeFromSelection(threadKeys);
         return;
       }
-
       if (clicked !== "delete") return;
-
-      if (appSettingsConfirmThreadDelete) {
-        const confirmed = await api.dialogs.confirm(
-          [
-            `Delete ${count} thread${count === 1 ? "" : "s"}?`,
-            `This also deletes any of ${count === 1 ? "its" : "their"} subagents, including archived ones; unselected forks and independent threads are kept. This cannot be undone.`,
-          ].join("\n"),
-          { variant: "destructive" },
-        );
-        if (!confirmed) return;
-      }
-      if (
-        !selectedThreadEntries.every(({ threadRef }) =>
-          checkTaskPermission(threadRef.environmentId),
-        )
-      ) {
-        return;
-      }
-
-      const currentEntries = collectUnprotectedBulkThreadEntries({
-        threadKeys: selectedThreadEntries.map(({ threadKey }) => threadKey),
+      await deleteLastCodeSelection(threadKeys, selectedThreadEntries, {
         getEntry: readSelectedThreadEntry,
+        canOperate: checkTaskPermission,
+        removeFromSelection,
+        confirm: (message, options) => api.dialogs.confirm(message, options),
+        confirmDeletion: appSettingsConfirmThreadDelete,
+        deleteThread,
+        threadExists: (ref) => readThreadShell(ref) !== null,
       });
-      if (!currentEntries) {
-        warnPersistentThreadProtected();
-        return;
-      }
-
-      if (!currentEntries.every(({ threadRef }) => checkTaskPermission(threadRef.environmentId)))
-        return;
-
-      if (currentEntries.some(({ thread }) => thread.worktreeCleanup != null)) return;
-
-      // Only discount batch members after their deletions succeed.
-      const deletedThreadKeys = new Set<string>();
-      let firstError: unknown = null;
-      for (const { threadKey, threadRef } of currentEntries) {
-        const result = await deleteThread(threadRef, {
-          deletedThreadKeys,
-        });
-        if (result._tag === "Failure") {
-          if (isAtomCommandInterrupted(result)) break;
-          firstError ??= squashAtomCommandFailure(result);
-          continue;
-        }
-        deletedThreadKeys.add(threadKey);
-      }
-      if (firstError !== null) {
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Failed to delete threads",
-            description: firstError instanceof Error ? firstError.message : "An error occurred.",
-          }),
-        );
-      }
-      removeFromSelection(
-        getThreadKeysToDeselectAfterDelete(threadKeys, deletedThreadKeys, (threadKey) => {
-          const threadRef = parseScopedThreadKey(threadKey);
-          return threadRef !== null && readThreadShell(threadRef) !== null;
-        }),
-      );
     },
     [
       appSettingsConfirmThreadDelete,
@@ -2937,51 +2841,13 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         return;
       }
       if (clicked !== "delete") return;
-      if (!checkTaskPermission(threadRef.environmentId)) return;
-      if (thread.persistent) {
-        toastManager.add(
-          stackedThreadToast({
-            type: "warning",
-            title: "Persistent thread not deleted",
-            description: "Disable persistence or move it to another thread first.",
-          }),
-        );
-        return;
-      }
-      if (appSettingsConfirmThreadDelete) {
-        const confirmed = await api.dialogs.confirm(
-          [
-            `Delete thread "${thread.title}"?`,
-            "This also deletes any of its subagents, including archived ones; other forks and independent threads are kept. This cannot be undone.",
-          ].join("\n"),
-          { variant: "destructive" },
-        );
-        if (!confirmed) {
-          return;
-        }
-      }
-      if (!checkTaskPermission(threadRef.environmentId)) return;
-      if (readThreadShell(threadRef)?.persistent === true) {
-        toastManager.add(
-          stackedThreadToast({
-            type: "warning",
-            title: "Persistent thread not deleted",
-            description: "Disable persistence or move it to another thread first.",
-          }),
-        );
-        return;
-      }
-      const result = await deleteThread(threadRef);
-      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-        const error = squashAtomCommandFailure(result);
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Failed to delete thread",
-            description: error instanceof Error ? error.message : "An error occurred.",
-          }),
-        );
-      }
+      await deleteLastCodeThread(threadRef, thread, {
+        canOperate: checkTaskPermission,
+        confirm: (message, options) => api.dialogs.confirm(message, options),
+        confirmDeletion: appSettingsConfirmThreadDelete,
+        readThread: readThreadShell,
+        deleteThread,
+      });
     },
     [
       appSettingsConfirmThreadDelete,
@@ -3313,12 +3179,6 @@ interface SidebarProjectsContentProps {
   handleProjectDragEnd: (event: DragEndEvent) => void;
   handleProjectDragCancel: (event: DragCancelEvent) => void;
   handleNewThread: ReturnType<typeof useNewThreadHandler>;
-  archiveThread: ReturnType<typeof useThreadActions>["archiveThread"];
-  archiveThreads: ReturnType<typeof useThreadActions>["archiveThreads"];
-  unarchiveThread: ReturnType<typeof useThreadActions>["unarchiveThread"];
-  deleteThread: ReturnType<typeof useThreadActions>["deleteThread"];
-  setThreadPersistence: ReturnType<typeof useThreadActions>["setThreadPersistence"];
-  markThreadUnread: ReturnType<typeof useThreadActions>["markThreadUnread"];
   sortedProjects: readonly SidebarProjectSnapshot[];
   expandedThreadListsByProject: ReadonlySet<string>;
   activeRouteProjectKey: string | null;
@@ -3359,12 +3219,6 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     handleProjectDragEnd,
     handleProjectDragCancel,
     handleNewThread,
-    archiveThread,
-    archiveThreads,
-    unarchiveThread,
-    deleteThread,
-    markThreadUnread,
-    setThreadPersistence,
     sortedProjects,
     expandedThreadListsByProject,
     activeRouteProjectKey,
@@ -3481,12 +3335,6 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                         openPullRequestsInRightPanel={openPullRequestsInRightPanel}
                         newThreadShortcutLabel={newThreadShortcutLabel}
                         handleNewThread={handleNewThread}
-                        archiveThread={archiveThread}
-                        archiveThreads={archiveThreads}
-                        unarchiveThread={unarchiveThread}
-                        deleteThread={deleteThread}
-                        setThreadPersistence={setThreadPersistence}
-                        markThreadUnread={markThreadUnread}
                         threadJumpLabelByKey={threadJumpLabelByKey}
                         attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
                         expandThreadListForProject={expandThreadListForProject}
@@ -3528,12 +3376,6 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                 openPullRequestsInRightPanel={openPullRequestsInRightPanel}
                 newThreadShortcutLabel={newThreadShortcutLabel}
                 handleNewThread={handleNewThread}
-                archiveThread={archiveThread}
-                archiveThreads={archiveThreads}
-                unarchiveThread={unarchiveThread}
-                deleteThread={deleteThread}
-                setThreadPersistence={setThreadPersistence}
-                markThreadUnread={markThreadUnread}
                 threadJumpLabelByKey={threadJumpLabelByKey}
                 attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
                 expandThreadListForProject={expandThreadListForProject}
@@ -3562,7 +3404,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
   );
 });
 
-export default function LastCodeSidebar() {
+function LastCodeSidebarView() {
   const projects = useProjects();
   const sidebarThreads = useThreadShells();
   const collapsedFamiliesByKey = useLastCodeSidebarFamiliesStore((state) => state.collapsedByKey);
@@ -3591,14 +3433,7 @@ export default function LastCodeSidebar() {
     [lastcodeSidebarScale],
   );
   const handleNewThread = useNewThreadHandler();
-  const {
-    archiveThread,
-    archiveThreads,
-    unarchiveThread,
-    deleteThread,
-    markThreadUnread,
-    setThreadPersistence,
-  } = useThreadActions();
+
   const { isMobile, setOpenMobile } = useSidebar();
   const routeTarget = useParams({
     strict: false,
@@ -4156,12 +3991,6 @@ export default function LastCodeSidebar() {
         handleProjectDragEnd={handleProjectDragEnd}
         handleProjectDragCancel={handleProjectDragCancel}
         handleNewThread={handleNewThread}
-        archiveThread={archiveThread}
-        archiveThreads={archiveThreads}
-        unarchiveThread={unarchiveThread}
-        deleteThread={deleteThread}
-        setThreadPersistence={setThreadPersistence}
-        markThreadUnread={markThreadUnread}
         sortedProjects={sortedProjects}
         expandedThreadListsByProject={expandedThreadListsByProject}
         activeRouteProjectKey={activeRouteProjectKey}
@@ -4191,5 +4020,13 @@ export default function LastCodeSidebar() {
       />
       <SidebarChromeFooter />
     </>
+  );
+}
+
+export default function LastCodeSidebar() {
+  return (
+    <LastCodeThreadActionsProvider>
+      <LastCodeSidebarView />
+    </LastCodeThreadActionsProvider>
   );
 }
