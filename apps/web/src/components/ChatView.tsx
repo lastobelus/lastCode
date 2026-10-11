@@ -5107,6 +5107,7 @@ export default function ChatView(props: ChatViewProps) {
       const terminalLaunch = selectProjectScriptTerminal({
         script,
         baseTerminalId,
+        existingTerminalIds: allocatableActiveTerminalIds,
         baseTerminalLinkProfileName: activeThreadKnownSessions.find(
           (session) => session.target.terminalId === baseTerminalId,
         )?.state.terminalLinkProfileName,
@@ -5142,9 +5143,7 @@ export default function ChatView(props: ChatViewProps) {
         ? {
             threadId: activeThreadId,
             terminalId: targetTerminalId,
-            ...(terminalLaunch.terminalLinkProfileName === undefined
-              ? {}
-              : { terminalLinkProfileName: terminalLaunch.terminalLinkProfileName }),
+            terminalLinkProfileName: terminalLaunch.terminalLinkProfileName ?? null,
             cwd: targetCwd,
             ...(targetWorktreePath !== null ? { worktreePath: targetWorktreePath } : {}),
             env: runtimeEnv,
@@ -5154,6 +5153,7 @@ export default function ChatView(props: ChatViewProps) {
         : {
             threadId: activeThreadId,
             terminalId: targetTerminalId,
+            terminalLinkProfileName: null,
             cwd: targetCwd,
             ...(targetWorktreePath !== null ? { worktreePath: targetWorktreePath } : {}),
             env: runtimeEnv,
@@ -5231,6 +5231,7 @@ export default function ChatView(props: ChatViewProps) {
       hasTerminalWriteAccess,
       activeKnownTerminalIds,
       activeThreadKnownSessions,
+      allocatableActiveTerminalIds,
       canReuseTerminal,
       allocateTerminalId,
       runningTerminalIds,

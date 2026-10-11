@@ -5,6 +5,8 @@ import {
   type ProjectScript,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
+import { nextTerminalId } from "@t3tools/shared/terminalLabels";
+import { randomUUID } from "./lib/utils";
 const isScriptRunCommand = Schema.is(SCRIPT_RUN_COMMAND_PATTERN);
 
 export interface ProjectScriptInput {
@@ -46,6 +48,7 @@ export function buildProjectScript(id: string, input: ProjectScriptInput): Proje
 export function selectProjectScriptTerminal(input: {
   readonly script: ProjectScript;
   readonly baseTerminalId: string;
+  readonly existingTerminalIds?: ReadonlyArray<string>;
   readonly baseTerminalLinkProfileName?: string;
   readonly isBaseTerminalBusy: boolean;
   readonly preferNewTerminal: boolean;
@@ -62,7 +65,12 @@ export function selectProjectScriptTerminal(input: {
     !input.canReadTerminal;
   return {
     createNewTerminal,
-    terminalId: createNewTerminal ? input.allocateTerminalId() : input.baseTerminalId,
+    terminalId:
+      input.script.terminalLinkProfileName !== undefined
+        ? nextTerminalId(input.existingTerminalIds ?? [input.baseTerminalId], randomUUID())
+        : createNewTerminal
+          ? input.allocateTerminalId()
+          : input.baseTerminalId,
     ...(input.script.terminalLinkProfileName === undefined
       ? {}
       : { terminalLinkProfileName: input.script.terminalLinkProfileName }),

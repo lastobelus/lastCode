@@ -278,7 +278,7 @@ describe("Action terminal selection", () => {
     });
     expect(action).toEqual({
       createNewTerminal: true,
-      terminalId: "term-2",
+      terminalId: expect.stringMatching(/^term-2-[0-9a-f-]{36}$/u),
       terminalLinkProfileName: "Work account",
     });
     const next = selectProjectScriptTerminal({
@@ -288,6 +288,24 @@ describe("Action terminal selection", () => {
       allocateTerminalId: () => "term-3",
     });
     expect(next).toEqual({ createNewTerminal: true, terminalId: "term-3" });
+    expect(selectProjectScriptTerminal(base)).toEqual({
+      createNewTerminal: false,
+      terminalId: "term-1",
+    });
+  });
+
+  it("allocates different opted-in terminals for clients with the same stale numeric snapshot", () => {
+    const action = { ...ordinary, terminalLinkProfileName: "Work account" };
+    const first = selectProjectScriptTerminal({ ...base, script: action });
+    const second = selectProjectScriptTerminal({
+      ...base,
+      script: { ...action, terminalLinkProfileName: "Other account" },
+    });
+    expect(first.terminalId).not.toBe(second.terminalId);
+    expect(first.terminalId).not.toBe("term-2");
+    expect(second.terminalId).not.toBe("term-2");
+    expect(first.terminalLinkProfileName).toBe("Work account");
+    expect(second.terminalLinkProfileName).toBe("Other account");
     expect(selectProjectScriptTerminal(base)).toEqual({
       createNewTerminal: false,
       terminalId: "term-1",

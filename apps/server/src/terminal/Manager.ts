@@ -9,6 +9,7 @@
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import {
   DEFAULT_TERMINAL_ID,
+  TrimmedNonEmptyString,
   TerminalCwdError,
   TerminalCwdNotDirectoryError,
   TerminalCwdNotFoundError,
@@ -377,6 +378,12 @@ interface TerminalSessionState {
   runtimeEnv: Record<string, string> | null;
   terminalLinkProfileName: string | undefined;
 }
+
+const TerminalHistoryProfile = Schema.fromJsonString(
+  Schema.Struct({ terminalLinkProfileName: TrimmedNonEmptyString }),
+);
+const decodeTerminalHistoryProfile = Schema.decodeUnknownEffect(TerminalHistoryProfile);
+const encodeTerminalHistoryProfile = Schema.encodeSync(TerminalHistoryProfile);
 
 interface PersistHistoryRequest {
   history: BoundedTerminalHistory;
@@ -1850,6 +1857,55 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     return path.join(logsDir, `${threadPart}_${toSafeTerminalId(terminalId)}.log`);
   };
 
+  const historyProfilePath = (threadId: string, terminalId: string) =>
+    `${historyPath(threadId, terminalId)}.profile.json`;
+
+  // Intent belongs to the retained transcript, not just the in-memory process.
+  const readHistoryProfile = Effect.fn("terminal.readHistoryProfile")(function* (
+    threadId: string,
+    terminalId: string,
+  ) {
+    return yield* Effect.gen(function* () {
+      if (
+        !(yield* fileSystem.exists(historyPath(threadId, terminalId))) ||
+        !(yield* fileSystem.exists(historyProfilePath(threadId, terminalId)))
+      )
+        return undefined;
+      const raw = yield* fileSystem.readFileString(historyProfilePath(threadId, terminalId));
+      return (yield* decodeTerminalHistoryProfile(raw)).terminalLinkProfileName;
+    }).pipe(
+      Effect.mapError(
+        (cause) => new TerminalHistoryError({ operation: "read", threadId, terminalId, cause }),
+      ),
+    );
+  });
+
+  const persistHistoryProfile = Effect.fn("terminal.persistHistoryProfile")(function* (
+    session: TerminalSessionState,
+  ) {
+    const filePath = historyProfilePath(session.threadId, session.terminalId);
+    const write =
+      session.terminalLinkProfileName === undefined
+        ? fileSystem.remove(filePath, { force: true })
+        : fileSystem.writeFileString(
+            filePath,
+            encodeTerminalHistoryProfile({
+              terminalLinkProfileName: session.terminalLinkProfileName,
+            }),
+          );
+    yield* write.pipe(
+      Effect.mapError(
+        (cause) =>
+          new TerminalHistoryError({
+            operation: "write",
+            threadId: session.threadId,
+            terminalId: session.terminalId,
+            cause,
+          }),
+      ),
+    );
+  });
+
   const legacyHistoryPath = (threadId: string) =>
     path.join(logsDir, `${legacySafeThreadId(threadId)}.log`);
 
@@ -2176,6 +2232,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     terminalId: string,
   ) {
     yield* fileSystem.remove(historyPath(threadId, terminalId), { force: true }).pipe(
+      Effect.andThen(fileSystem.remove(historyProfilePath(threadId, terminalId), { force: true })),
       Effect.catch((error) =>
         Effect.logWarning("failed to delete terminal history", {
           threadId,
@@ -2205,11 +2262,15 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     const retainedPaths = new Set(
       retainedTerminalIds.flatMap((terminalId) => [
         historyPath(threadId, terminalId),
+        historyProfilePath(threadId, terminalId),
         ...(terminalId === DEFAULT_TERMINAL_ID ? [legacyHistoryPath(threadId)] : []),
       ]),
     );
     const threadPrefix = `${toSafeThreadId(threadId)}_`;
-    const retainedByPrefix = (name: string) => {
+    const retainedByPrefix = (entry: string) => {
+      const name = entry.endsWith(".profile.json")
+        ? entry.slice(0, -".profile.json".length)
+        : entry;
       if (
         retainedTerminalPrefixes.length === 0 ||
         !name.startsWith(threadPrefix) ||
@@ -2231,6 +2292,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           !retainedPaths.has(path.join(logsDir, name)) &&
           !retainedByPrefix(name) &&
           (name === `${toSafeThreadId(threadId)}.log` ||
+            name === `${toSafeThreadId(threadId)}.log.profile.json` ||
             name === `${legacySafeThreadId(threadId)}.log` ||
             name.startsWith(threadPrefix)),
       ),
@@ -2565,6 +2627,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     eventType: "started" | "restarted",
   ) {
     yield* stopProcess(session);
+    yield* persistHistoryProfile(session);
     yield* Effect.annotateCurrentSpan({
       "terminal.thread_id": session.threadId,
       "terminal.id": session.terminalId,
@@ -3113,6 +3176,19 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     if (Option.isNone(existing)) {
       yield* flushPersist(input.threadId, terminalId);
       const history = yield* readHistory(input.threadId, terminalId);
+      const retainedProfileName = yield* readHistoryProfile(input.threadId, terminalId);
+      const terminalLinkProfileName =
+        input.terminalLinkProfileName === undefined
+          ? retainedProfileName
+          : (input.terminalLinkProfileName ?? undefined);
+      // An explicit new Action cannot reinterpret another Action's retained output.
+      if (
+        input.terminalLinkProfileName !== undefined &&
+        terminalLinkProfileName !== retainedProfileName
+      ) {
+        history.clear();
+        yield* persistHistory(input.threadId, terminalId, history);
+      }
       const cols = input.cols ?? DEFAULT_OPEN_COLS;
       const rows = input.rows ?? DEFAULT_OPEN_ROWS;
       const session: TerminalSessionState = {
@@ -3151,7 +3227,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         observedShellSample: null,
         captureShellIdentity: null,
         runtimeEnv: normalizedRuntimeEnv(input.env),
-        terminalLinkProfileName: input.terminalLinkProfileName,
+        terminalLinkProfileName,
       };
 
       const createdSession = session;
@@ -3179,6 +3255,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     }
 
     const liveSession = existing.value;
+    const nextTerminalLinkProfileName =
+      input.terminalLinkProfileName === undefined
+        ? liveSession.terminalLinkProfileName
+        : (input.terminalLinkProfileName ?? undefined);
     const nextRuntimeEnv = normalizedRuntimeEnv(input.env);
     const currentRuntimeEnv = liveSession.runtimeEnv;
     const targetCols = input.cols ?? liveSession.cols;
@@ -3190,14 +3270,14 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       liveSession.cwd !== input.cwd ||
       runtimeEnvChanged ||
       liveSession.worktreePath !== nextWorktreePath ||
-      liveSession.terminalLinkProfileName !== input.terminalLinkProfileName;
+      liveSession.terminalLinkProfileName !== nextTerminalLinkProfileName;
 
     if (launchContextChanged) {
       yield* stopProcess(liveSession);
       liveSession.cwd = input.cwd;
       liveSession.worktreePath = nextWorktreePath;
       liveSession.runtimeEnv = nextRuntimeEnv;
-      liveSession.terminalLinkProfileName = input.terminalLinkProfileName;
+      liveSession.terminalLinkProfileName = nextTerminalLinkProfileName;
       liveSession.history.clear();
       liveSession.pendingHistoryControlSequence = "";
       liveSession.pendingProcessEvents = [];
@@ -3206,7 +3286,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       yield* persistHistory(liveSession.threadId, liveSession.terminalId, liveSession.history);
     } else if (liveSession.status === "exited" || liveSession.status === "error") {
       liveSession.runtimeEnv = nextRuntimeEnv;
-      liveSession.terminalLinkProfileName = input.terminalLinkProfileName;
+      liveSession.terminalLinkProfileName = nextTerminalLinkProfileName;
       liveSession.worktreePath = nextWorktreePath;
       liveSession.history.clear();
       liveSession.pendingHistoryControlSequence = "";
@@ -3337,7 +3417,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         if (!session.process && input.cwd && input.restartIfNotRunning === true && startIfNeeded) {
           const resolvedInput = yield* resolveLaunchInputEnvironment({
             ...input,
-            ...(session.terminalLinkProfileName === undefined
+            ...(input.terminalLinkProfileName !== undefined ||
+            session.terminalLinkProfileName === undefined
               ? {}
               : { terminalLinkProfileName: session.terminalLinkProfileName }),
             terminalId,

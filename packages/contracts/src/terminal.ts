@@ -45,7 +45,8 @@ export const TerminalOpenInput = Schema.Struct({
   rows: Schema.optional(TerminalRowsSchema),
   env: Schema.optional(TerminalEnvSchema),
   providerInstanceId: Schema.optional(ProviderInstanceId),
-  terminalLinkProfileName: Schema.optional(TrimmedNonEmptyStringSchema),
+  /** Omit to restore retained intent; null explicitly starts an ordinary shell. */
+  terminalLinkProfileName: Schema.optional(Schema.NullOr(TrimmedNonEmptyStringSchema)),
 });
 export type TerminalOpenInput = typeof TerminalOpenInput.Type;
 
@@ -57,7 +58,8 @@ export const TerminalAttachInput = Schema.Struct({
   rows: Schema.optional(TerminalRowsSchema),
   env: Schema.optional(TerminalEnvSchema),
   providerInstanceId: Schema.optional(ProviderInstanceId),
-  terminalLinkProfileName: Schema.optional(TrimmedNonEmptyStringSchema),
+  /** Omit to restore retained intent; null explicitly starts an ordinary shell. */
+  terminalLinkProfileName: Schema.optional(Schema.NullOr(TrimmedNonEmptyStringSchema)),
   restartIfNotRunning: Schema.optional(Schema.Boolean),
 });
 export type TerminalAttachInput = typeof TerminalAttachInput.Type;
@@ -288,7 +290,7 @@ export type TerminalCwdError = typeof TerminalCwdError.Type;
 export class TerminalHistoryError extends Schema.TaggedError<TerminalHistoryError>()(
   "TerminalHistoryError",
   {
-    operation: Schema.Literals(["read", "truncate", "migrate"]),
+    operation: Schema.Literals(["read", "write", "truncate", "migrate"]),
     threadId: Schema.String,
     terminalId: Schema.String,
     cause: Schema.optional(Schema.Defect()),
