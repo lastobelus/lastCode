@@ -1,63 +1,137 @@
-import { useCallback, useRef, useState } from "react";
-import type { ScopedThreadRef } from "@t3tools/contracts";
-import { useOrchestrationCommand } from "../../state/use-orchestration-command";
-import { threadEnvironment } from "../../state/threads";
-import { renameLastCodeThread } from "./lastcodeThreadRename";
+import { MessageSquareLockIcon } from "lucide-react";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { actionRunningPresentation } from "@t3tools/shared/actionResume";
+import { useClientSettings } from "~/hooks/useSettings";
+import { ThreadStatusLabel } from "../ThreadStatusIndicators";
+import type { ThreadStatusPill } from "../Sidebar.logic";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { ThreadDashboardIndicator } from "../dashboard/ThreadDashboardIndicator";
+import {
+  lastcodeSidebarSubagentStatusLabel,
+  type LastCodeSidebarFamilyRow,
+} from "../lastcodeSidebarFamilies.logic";
+import type { SidebarThreadSummary } from "../../types";
+import { LastCodeThreadTitleEditor } from "./LastCodeThreadTitleEditor";
+import {
+  LastCodeThreadRelationshipBadge,
+  LastCodeThreadFamilySummary,
+} from "./LastCodeThreadFamily";
+import type { LastCodeThreadFamilyPresentation } from "./useLastCodeThreadFamily";
 import type {
   LastCodeRenameTarget,
   LastCodeThreadEditingCapabilities,
 } from "./useLastCodeThreadEditing";
-
-export function LastCodeThreadTitleEditor({
-  threadRef,
-  title,
-  target,
-  finishRename,
+function WaitingAction({
+  thread,
+  threadStatus,
 }: {
-  threadRef: ScopedThreadRef;
-  title: string;
-  target: LastCodeRenameTarget;
-  finishRename: LastCodeThreadEditingCapabilities["finishRename"];
+  thread: SidebarThreadSummary;
+  threadStatus: ThreadStatusPill | null;
 }) {
-  const [draft, setDraft] = useState(target.initialTitle);
-  const inputRef = useRef<HTMLInputElement | null>(null);
-  const committed = useRef(false);
-  const update = useOrchestrationCommand(threadEnvironment.updateMetadata, {
-    reportFailure: false,
-  });
-  const setInput = useCallback((element: HTMLInputElement | null) => {
-    if (element && inputRef.current !== element) {
-      inputRef.current = element;
-      element.focus();
-      element.select();
-    }
-  }, []);
-  const finish = () => finishRename(threadRef, target.session);
-  const submit = () => {
-    if (committed.current) return;
-    committed.current = true;
-    void renameLastCodeThread(threadRef, draft, title, { update, finish });
-  };
   return (
-    <input
-      ref={setInput}
-      className="min-w-0 flex-1 truncate rounded border border-ring bg-transparent px-0.5 text-sm outline-none"
-      value={draft}
-      onChange={(event) => setDraft(event.target.value)}
-      onKeyDown={(event) => {
-        event.stopPropagation();
-        if (event.key === "Enter") {
-          event.preventDefault();
-          submit();
-        } else if (event.key === "Escape") {
-          event.preventDefault();
-          committed.current = true;
-          finish();
-        }
-      }}
-      onBlur={submit}
-      onClick={(event) => event.stopPropagation()}
-      onDoubleClick={(event) => event.stopPropagation()}
-    />
+    <>
+      {thread.actionResume?.outcome === "running" &&
+      actionRunningPresentation(thread.actionResume).state === "waiting" &&
+      threadStatus?.label !== "Waiting" ? (
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <span
+                aria-label={`Waiting for ${thread.actionResume.actionName}. ${actionRunningPresentation(thread.actionResume).summary}`}
+                className="inline-flex size-3.5 shrink-0 items-center justify-center text-warning-foreground"
+              />
+            }
+          >
+            <span
+              data-lastcode-sidebar-unscaled-content
+              className="size-1.5 rounded-full bg-warning"
+            />
+          </TooltipTrigger>
+          <TooltipPopup side="top">
+            {actionRunningPresentation(thread.actionResume).summary}
+          </TooltipPopup>
+        </Tooltip>
+      ) : null}
+    </>
+  );
+}
+function TitleText({
+  family,
+  presentation,
+  threadStatus,
+}: {
+  family: LastCodeSidebarFamilyRow;
+  presentation: LastCodeThreadFamilyPresentation;
+  threadStatus: ThreadStatusPill | null;
+}) {
+  const thread = family.thread;
+  const subagentLabel = presentation.subagentLabel;
+  return (
+    <>
+      {thread.persistent && family.parentKey === null && !subagentLabel ? (
+        <MessageSquareLockIcon aria-hidden className="size-3.5 shrink-0" />
+      ) : null}
+      <span className="min-w-0 flex-1">
+        <span className="flex min-w-0 items-center gap-1">
+          <span
+            className={`min-w-0 flex-1 truncate text-sm ${thread.persistent ? "italic" : ""}`}
+            data-testid={`thread-title-${thread.id}`}
+          >
+            {thread.title}
+          </span>
+          {thread.persistent && (family.parentKey !== null || subagentLabel) ? (
+            <span className="shrink-0 text-3xs text-sidebar-muted-foreground">Protected</span>
+          ) : null}
+          <LastCodeThreadRelationshipBadge presentation={presentation} />
+          {subagentLabel ? (
+            <span className="shrink-0 text-3xs text-sidebar-muted-foreground">
+              {lastcodeSidebarSubagentStatusLabel(thread, threadStatus)}
+            </span>
+          ) : null}
+          <LastCodeThreadFamilySummary family={family} display="inline" />
+        </span>
+        <LastCodeThreadFamilySummary family={family} display="line" />
+      </span>
+    </>
+  );
+}
+export function LastCodeThreadTitle({
+  family,
+  presentation,
+  threadStatus,
+  renameTarget,
+  editing,
+}: {
+  family: LastCodeSidebarFamilyRow;
+  presentation: LastCodeThreadFamilyPresentation;
+  threadStatus: ThreadStatusPill | null;
+  renameTarget: LastCodeRenameTarget | null;
+  editing: LastCodeThreadEditingCapabilities;
+}) {
+  const thread = family.thread;
+  const compactStatusIndicators = useClientSettings(
+    (settings) => settings.compactLegacySidebarStatuses,
+  );
+  return (
+    <>
+      <WaitingAction thread={thread} threadStatus={threadStatus} />
+      {threadStatus && (
+        <ThreadStatusLabel status={threadStatus} compact={compactStatusIndicators} />
+      )}
+      {renameTarget ? (
+        <LastCodeThreadTitleEditor
+          key={renameTarget.session}
+          threadRef={scopeThreadRef(thread.environmentId, thread.id)}
+          title={thread.title}
+          target={renameTarget}
+          finishRename={editing.finishRename}
+        />
+      ) : (
+        <>
+          <TitleText family={family} presentation={presentation} threadStatus={threadStatus} />
+          <ThreadDashboardIndicator items={thread.dashboardItems} />
+        </>
+      )}
+    </>
   );
 }

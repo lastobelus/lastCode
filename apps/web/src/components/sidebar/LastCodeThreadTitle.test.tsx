@@ -16,13 +16,45 @@ import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environ
 import { AsyncResult } from "effect/reactivity";
 import * as Cause from "effect/Cause";
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
-import { LastCodeThreadTitleEditor } from "./LastCodeThreadTitle";
+import { LastCodeThreadTitle } from "./LastCodeThreadTitle";
+import { makeThreadFixture } from "../../test-fixtures";
+import { projectLastCodeSidebarFamilies } from "../lastcodeSidebarFamilies.logic";
+vi.mock("~/hooks/useSettings", () => ({
+  useClientSettings: (select: (value: object) => unknown) =>
+    select({
+      compactLegacySidebarStatuses: mocks.compact,
+      legacySidebarThreadGroupingStyle: "typed-groups",
+    }),
+}));
+vi.mock("../ThreadStatusIndicators", () => ({ ThreadStatusLabel: () => null }));
+vi.mock("../dashboard/ThreadDashboardIndicator", () => ({ ThreadDashboardIndicator: () => null }));
+const presentation = {
+  isAgentCreated: false,
+  creatorDescription: null,
+  subagentLabel: null,
+  relationshipDescription: null,
+  relationshipLabel: null,
+  relationshipUnavailableLabel: null,
+};
+function familyFor(ref: typeof a, title: string) {
+  return projectLastCodeSidebarFamilies({
+    threads: [makeThreadFixture({ id: ref.threadId, environmentId: ref.environmentId, title })],
+    collapsedByKey: {},
+    activeThreadKey: null,
+    projectExpanded: true,
+    previewCount: 5,
+    listExpanded: false,
+    groupingStyle: "typed-groups",
+    statusForThread: () => null,
+  }).renderedRows[0]!;
+}
 import { useLastCodeThreadEditing } from "./useLastCodeThreadEditing";
 const mocks = vi.hoisted(() => ({
   update: vi.fn<(value: unknown) => Promise<AtomCommandResult<unknown, unknown>>>(),
   toast: vi.fn(),
   rowDoubleClick: vi.fn(),
   canOperate: true,
+  compact: false,
 }));
 vi.mock("../../state/threads", () => ({ threadEnvironment: { updateMetadata: "update" } }));
 vi.mock("../../state/use-orchestration-command", () => ({
@@ -47,15 +79,16 @@ function Harness({ revision = 0 }: { revision?: number }) {
       <button onClick={() => capabilities.cancelArchiveConfirmation(b)}>Cancel archive B</button>
       <output>{archiveTarget}</output>
       <span>{revision}</span>
-      {renameTarget && (
-        <LastCodeThreadTitleEditor
-          key={renameTarget.session}
-          threadRef={renameTarget.key === scopedThreadKey(a) ? a : b}
-          title={renameTarget.key === scopedThreadKey(a) ? "A title" : "B title"}
-          target={renameTarget}
-          finishRename={capabilities.finishRename}
-        />
-      )}
+      <LastCodeThreadTitle
+        family={familyFor(
+          renameTarget?.key === scopedThreadKey(b) ? b : a,
+          renameTarget?.key === scopedThreadKey(b) ? "B title" : "A title",
+        )}
+        presentation={presentation}
+        threadStatus={null}
+        renameTarget={renameTarget}
+        editing={capabilities}
+      />
     </div>
   );
 }
@@ -75,6 +108,7 @@ afterAll(() => {
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.canOperate = true;
+  mocks.compact = false;
   mocks.update.mockResolvedValue(AsyncResult.success(undefined));
 });
 afterEach(async () => {
@@ -124,6 +158,7 @@ describe("row-local rename editor", () => {
     expect(input()?.selectionStart).toBe(0);
     expect(input()?.selectionEnd).toBe("A title".length);
     await draft("Draft");
+    mocks.compact = true;
     await act(() => root?.render(<Harness revision={1} />));
     expect(input()?.value).toBe("Draft");
     await act(() => input()!.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })));
