@@ -2860,6 +2860,151 @@ describe("PreviewHosting", () => {
     }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
   );
 
+  it.effect.each([true, false])(
+    "rechecks a retained nonresponding command without duplicating an active launch (idle: %s)",
+    (idle) =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(1_000);
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-retained-idle-" });
+        const config = yield* Effect.provide(
+          ServerConfig.ServerConfig,
+          ServerConfig.layerTest(process.cwd(), root),
+        );
+        const saved = leaseFixture({ env: { FIXTURE_MODE: "retained" } });
+        yield* fs.makeDirectory(config.stateDir, { recursive: true });
+        yield* fs.writeFileString(
+          `${config.stateDir}/preview-hosting.json`,
+          encodePersistedHostingState({ version: 1, leases: [saved] }),
+        );
+        const subscribed = yield* Deferred.make<void>();
+        const inspecting = yield* Deferred.make<void>();
+        const releaseInspection = yield* Deferred.make<void>();
+        const rescanned = yield* Deferred.make<void>();
+        let refreshes = 0;
+        let responding = false;
+        let notify:
+          | ((servers: ReadonlyArray<DiscoveredLocalServer>) => Effect.Effect<void>)
+          | undefined;
+        const server: DiscoveredLocalServer = {
+          host: "localhost",
+          port: 5173,
+          url: PREVIEW_URL,
+          processName: "node",
+          pid: 100,
+          terminal: { threadId: ThreadId.make(saved.threadId), terminalId: saved.terminalId },
+        };
+        const harness = testTerminalHarness({
+          summaries: [terminalFixture(saved.threadId, saved.terminalId)],
+          onRefreshMetadata: () =>
+            Effect.gen(function* () {
+              refreshes++;
+              if (refreshes < 3 || harness.writes.length > 0) return;
+              yield* Deferred.succeed(inspecting, undefined);
+              yield* Deferred.await(releaseInspection);
+              harness.summaries[0] = terminalFixture(
+                saved.threadId,
+                saved.terminalId,
+                "running",
+                !idle,
+              );
+            }),
+          onWrite: () =>
+            Effect.gen(function* () {
+              responding = true;
+              yield* notify!([server]);
+            }),
+        });
+        const discovery = Layer.mock(PortScanner.PortDiscovery)({
+          scan: () =>
+            Effect.gen(function* () {
+              if (refreshes >= 3) yield* Deferred.succeed(rescanned, undefined);
+              return responding ? [server] : [];
+            }),
+          subscribe: (_input, listener) =>
+            Effect.gen(function* () {
+              notify = listener;
+              // Like real discovery, an unchanged empty list emits no callback.
+              if (responding) yield* listener([server]);
+              yield* Deferred.succeed(subscribed, undefined);
+            }),
+          retain: Effect.void,
+        });
+        const layer = PreviewHosting.layer.pipe(
+          Layer.provideMerge(
+            Layer.mergeAll(
+              NodeServices.layer,
+              FetchHttpClient.layer,
+              ServerConfig.layer(config),
+              terminalLayer(harness),
+              discovery,
+            ),
+          ),
+        );
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const hosting = yield* PreviewHosting.PreviewHosting;
+            const pending = yield* Effect.forkScoped(
+              hosting.recover({ threadId: saved.threadId, leaseId: saved.id, url: saved.url }),
+            );
+            yield* Deferred.await(subscribed);
+            assert.equal(refreshes, 2);
+            assert.deepEqual(harness.writes, []);
+            yield* TestClock.adjust(Duration.seconds(3));
+            assert.equal(refreshes, 3);
+            yield* Deferred.await(inspecting);
+            assert.deepEqual(harness.writes, []);
+            yield* Deferred.succeed(releaseInspection, undefined);
+            if (!idle) {
+              yield* Deferred.await(rescanned);
+              assert.deepEqual(harness.opens, []);
+              assert.deepEqual(harness.writes, []);
+              assert.deepEqual(harness.closes, []);
+              responding = true;
+              yield* notify!([server]);
+            }
+            const recovered = yield* Fiber.join(pending);
+            assert.equal(recovered?.id, saved.id);
+            assert.equal(recovered?.handedOffAt, saved.handedOffAt);
+            assert.deepEqual(harness.closes, []);
+            if (idle) {
+              assert.deepEqual(harness.opens, [
+                {
+                  threadId: saved.threadId,
+                  terminalId: saved.terminalId,
+                  cwd: saved.cwd,
+                  worktreePath: saved.worktreePath,
+                  env: saved.env,
+                },
+              ]);
+              assert.deepEqual(harness.writes, [
+                {
+                  threadId: saved.threadId,
+                  terminalId: saved.terminalId,
+                  data: `${saved.command}\n`,
+                },
+              ]);
+              assert.equal(
+                Date.parse(recovered!.expiresAt),
+                4_000 + PreviewHosting.PREVIEW_HOSTING_LEASE_MS,
+              );
+            } else {
+              assert.equal(recovered?.expiresAt, saved.expiresAt);
+              assert.deepEqual(harness.opens, []);
+              assert.deepEqual(harness.writes, []);
+            }
+            const repeated = yield* hosting.recover({
+              threadId: saved.threadId,
+              leaseId: saved.id,
+              url: saved.url,
+            });
+            assert.equal(repeated?.id, saved.id);
+            assert.equal(harness.writes.length, idle ? 1 : 0);
+          }).pipe(Effect.provide(layer)),
+        );
+      }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestClock.layer()))),
+  );
+
   it.effect.each(["preview", "unowned", "foreign"] as const)(
     "refreshes ownership during readiness and accepts only the preview terminal (%s)",
     (owner) =>
