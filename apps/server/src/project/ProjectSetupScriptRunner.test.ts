@@ -146,7 +146,7 @@ function makeHarness(
     ),
   );
 
-  return { layer, open, write, listeners, projectId, closeIdle };
+  return { layer, open, write, listeners, projectId, closeIdle, project };
 }
 
 it.effect("resolves setup scripts through the standalone project service", () => {
@@ -359,5 +359,30 @@ it.effect("preserves an opted-in setup Action's profile in its own terminal", ()
     assert.equal(result.status, "started");
     assert.equal(open.mock.calls[0]?.[0].terminalLinkProfileName, "Work account");
     assert.match(open.mock.calls[0]?.[0].terminalId ?? "", /^setup-/u);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("clears a reused setup terminal's profile after the Action removes its selection", () => {
+  const { layer, open, projectId, project } = makeHarness({
+    terminalLinkProfileName: "Work account",
+  });
+  return Effect.gen(function* () {
+    const runner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
+    const input = {
+      threadId: "thread-1",
+      projectId,
+      worktreePath: "/workspace/example",
+      trigger: "setup" as const,
+    };
+    assert.equal((yield* runner.runForThread(input)).status, "started");
+    const script = project.scripts[0]!;
+    if ("terminalLinkProfileName" in script) delete script.terminalLinkProfileName;
+    assert.equal((yield* runner.runForThread(input)).status, "started");
+
+    const initial = open.mock.calls[0]?.[0];
+    const rerun = open.mock.calls[1]?.[0];
+    assert.equal(initial?.terminalLinkProfileName, "Work account");
+    assert.equal(rerun?.terminalId, initial?.terminalId);
+    assert.equal(rerun?.terminalLinkProfileName, null);
   }).pipe(Effect.provide(layer));
 });
