@@ -277,7 +277,6 @@ interface SidebarThreadRowProps {
   thread: SidebarThreadSummary;
   familyRow: LastCodeSidebarFamilyRow;
   groupingStyle: "minimal" | "typed-groups";
-  showWorktreeIndicators: boolean;
   showLocalEnvironmentIcon: boolean;
   providerBadgePreferences: SidebarProviderBadgePreferences;
   configuredEnvironmentIconColor: EnvironmentIconColor | undefined;
@@ -815,8 +814,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
 interface SidebarProjectThreadListProps {
   groupingStyle: "minimal" | "typed-groups";
   lastcodeSidebarScale: LegacySidebarScale;
-  compactStatusIndicators: boolean;
-  showWorktreeIndicators: boolean;
   scaleStyle: CSSProperties;
   providerEntriesByEnvironmentId: ReadonlyMap<string, ReadonlyMap<string, ProviderInstanceEntry>>;
   environmentIconColors: Readonly<Record<string, EnvironmentIconColor>>;
@@ -871,7 +868,6 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
 ) {
   const {
     lastcodeSidebarScale,
-    showWorktreeIndicators,
     scaleStyle,
     providerEntriesByEnvironmentId,
     environmentIconColors,
@@ -962,7 +958,6 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
                 groupingStyle={props.groupingStyle}
                 thread={thread}
                 familyRow={familyRow}
-                showWorktreeIndicators={showWorktreeIndicators}
                 showLocalEnvironmentIcon={showLocalEnvironmentIcon}
                 providerBadgePreferences={providerBadgePreferences}
                 configuredEnvironmentIconColor={environmentIconColors[thread.environmentId]}
@@ -1027,8 +1022,6 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
 
 interface SidebarProjectItemProps {
   lastcodeSidebarScale: LegacySidebarScale;
-  compactStatusIndicators: boolean;
-  showWorktreeIndicators: boolean;
   scaleStyle: CSSProperties;
   providerEntriesByEnvironmentId: ReadonlyMap<string, ReadonlyMap<string, ProviderInstanceEntry>>;
   desktopLocalEnvironmentIds: ReadonlySet<EnvironmentId>;
@@ -1056,8 +1049,6 @@ interface SidebarProjectItemProps {
 const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjectItemProps) {
   const {
     lastcodeSidebarScale,
-    compactStatusIndicators,
-    showWorktreeIndicators,
     scaleStyle,
     providerEntriesByEnvironmentId,
     project,
@@ -1703,8 +1694,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       <SidebarProjectThreadList
         groupingStyle={groupingStyle}
         lastcodeSidebarScale={lastcodeSidebarScale}
-        compactStatusIndicators={compactStatusIndicators}
-        showWorktreeIndicators={showWorktreeIndicators}
         scaleStyle={scaleStyle}
         providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
         environmentIconColors={props.environmentIconColors}
@@ -1831,8 +1820,6 @@ interface SidebarProjectsContentProps {
   attachProjectListAutoAnimateRef: (node: HTMLElement | null) => void;
   projectsLength: number;
   lastcodeSidebarScale: LegacySidebarScale;
-  compactStatusIndicators: boolean;
-  showWorktreeIndicators: boolean;
   projectTreeScaleStyle: CSSProperties;
   providerEntriesByEnvironmentId: ReadonlyMap<string, ReadonlyMap<string, ProviderInstanceEntry>>;
   desktopLocalEnvironmentIds: ReadonlySet<EnvironmentId>;
@@ -1871,8 +1858,6 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     attachProjectListAutoAnimateRef,
     projectsLength,
     lastcodeSidebarScale,
-    compactStatusIndicators,
-    showWorktreeIndicators,
     projectTreeScaleStyle,
     providerEntriesByEnvironmentId,
     desktopLocalEnvironmentIds,
@@ -1953,8 +1938,6 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                     {(dragHandleProps) => (
                       <SidebarProjectItem
                         lastcodeSidebarScale={lastcodeSidebarScale}
-                        compactStatusIndicators={compactStatusIndicators}
-                        showWorktreeIndicators={showWorktreeIndicators}
                         scaleStyle={projectTreeScaleStyle}
                         providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
                         desktopLocalEnvironmentIds={desktopLocalEnvironmentIds}
@@ -1994,8 +1977,6 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
               <SidebarProjectListRow
                 key={project.projectKey}
                 lastcodeSidebarScale={lastcodeSidebarScale}
-                compactStatusIndicators={compactStatusIndicators}
-                showWorktreeIndicators={showWorktreeIndicators}
                 scaleStyle={projectTreeScaleStyle}
                 providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
                 desktopLocalEnvironmentIds={desktopLocalEnvironmentIds}
@@ -2053,12 +2034,6 @@ function LastCodeSidebarView() {
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
   const sidebarThreadPreviewCount = useClientSettings((s) => s.sidebarThreadPreviewCount);
   const lastcodeSidebarScale = useClientSettings<LegacySidebarScale>((s) => s.legacySidebarScale);
-  const compactStatusIndicators = useClientSettings(
-    (settings) => settings.compactLegacySidebarStatuses,
-  );
-  const showWorktreeIndicators = useClientSettings(
-    (settings) => settings.showThreadWorktreeIndicators,
-  );
   const environmentIconColors = useClientSettings((s) => s.environmentIconColors);
   const showLocalEnvironmentIcon = useClientSettings((s) => s.showLocalEnvironmentIcon);
   const providerBadgePreferences = useSidebarProviderBadgePreferences();
@@ -2643,8 +2618,6 @@ function LastCodeSidebarView() {
         attachProjectListAutoAnimateRef={attachProjectListAutoAnimateRef}
         projectsLength={projects.length}
         lastcodeSidebarScale={lastcodeSidebarScale}
-        compactStatusIndicators={compactStatusIndicators}
-        showWorktreeIndicators={showWorktreeIndicators}
         projectTreeScaleStyle={scaleStyle}
         providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
         desktopLocalEnvironmentIds={desktopLocalEnvironmentIds}

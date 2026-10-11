@@ -30,7 +30,12 @@ const thread = makeThreadFixture({
 });
 function Harness({ jump = null, active = true }: { jump?: string | null; active?: boolean }) {
   const handle = useMemo(() => createPopoverHandle(), []);
-  const value = { ...thread, annotation: active ? (thread.annotation ?? null) : null };
+  const value = {
+    ...thread,
+    annotation: thread.annotation
+      ? { ...thread.annotation, resolvedAt: active ? null : "2026-09-04T00:00:00.000Z" }
+      : null,
+  };
   return (
     <>
       <ThreadAnnotationNavigationTrigger
@@ -115,6 +120,7 @@ describe("metadata annotation controls", () => {
       expect(button).not.toBeNull();
       await act(() => {
         button.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+        button.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true }));
       });
       expect(mocks.navigate).not.toHaveBeenCalled();
       await act(() => button.click());
@@ -152,13 +158,16 @@ describe("metadata annotation controls", () => {
     expect(container.textContent).toContain("⌘2");
     expect(trigger()).toBeNull();
   });
-  it("removes the annotation trigger when resolved and retains ordinary timestamp content", async () => {
-    await render(null);
-    const text = trigger().textContent;
-    await act(() => root?.render(<Harness active={false} />));
-    expect(trigger()).toBeNull();
-    expect(container.querySelector('[data-thread-metadata-column="timestamp"]')?.textContent).toBe(
-      text,
-    );
-  });
+  it.each([null, "⌘3"])(
+    "resolves an existing annotation in %s mode without losing ordinary content",
+    async (jump) => {
+      await render(jump);
+      const text = trigger().textContent;
+      await act(() => root?.render(<Harness jump={jump} active={false} />));
+      expect(trigger()).toBeNull();
+      expect(
+        container.querySelector('[data-thread-metadata-column="timestamp"]')?.textContent,
+      ).toBe(text);
+    },
+  );
 });
