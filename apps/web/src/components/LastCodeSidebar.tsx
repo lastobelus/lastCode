@@ -11,10 +11,8 @@ import {
   LastCodeThreadCleanupOverlay,
 } from "./sidebar/LastCodeThreadDetails";
 import {
-  activateLastCodeThreadRow,
-  renameLastCodeThreadRow,
-  handleLastCodeThreadRowKeyDown,
-  openLastCodeThreadRowMenu,
+  useLastCodeThreadRowGestures,
+  useLastCodeThreadFileDrop,
 } from "./sidebar/lastcodeThreadRowInteractions";
 import { useLastCodeThreadIdentity } from "./sidebar/useLastCodeThreadIdentity";
 import { LastCodeThreadHoverDetails } from "./sidebar/LastCodeThreadHoverDetails";
@@ -110,7 +108,6 @@ import { isElectron } from "../env";
 import { useTerminalFocus } from "../hooks/useTerminalFocus";
 import { useOpenPrLink } from "../lib/openPullRequestLink";
 import { isTerminalFocused } from "../lib/terminalFocus";
-import { makeWorkspaceFileDropHandlers } from "./chat/workspaceFileDrop";
 import { readThreadShell, useProjects, useThreadShells } from "../state/entities";
 import { ThreadAnnotationNavigationTrigger } from "./thread-annotation/ThreadAnnotation";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
@@ -172,7 +169,6 @@ import {
 } from "./Sidebar.logic";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import { LastCodeSidebarThreadPicker } from "./sidebar/LastCodeSidebarThreadPicker";
-import { useIsMobile } from "~/hooks/useMediaQuery";
 import { CommandDialogTrigger } from "./ui/command";
 import { useClientSettings } from "~/hooks/useSettings";
 import { primaryServerKeybindingsAtom, primaryServerProvidersAtom } from "../state/server";
@@ -303,34 +299,18 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const canOperateThread = useEnvironmentScope(thread.environmentId, AuthOrchestrationOperateScope);
   const threadRef = scopeThreadRef(thread.environmentId, thread.id);
   const threadKey = scopedThreadKey(threadRef);
-  const [isFileDragOver, setIsFileDragOver] = useState(false);
-  const fileDropHandlers = useMemo(
-    () =>
-      makeWorkspaceFileDropHandlers({
-        setDragActive: setIsFileDragOver,
-        addFiles: (files) => {
-          onFileDropThreads(threadRef, files);
-        },
-        addFolders: () => {},
-      }),
-    [onFileDropThreads, threadRef],
+  const { isFileDragOver, fileDropHandlers } = useLastCodeThreadFileDrop(
+    threadRef,
+    onFileDropThreads,
   );
-  useEffect(() => {
-    if (!isFileDragOver) return;
-    const clearFileDrag = () => setIsFileDragOver(false);
-    window.addEventListener("dragend", clearFileDrag);
-    return () => window.removeEventListener("dragend", clearFileDrag);
-  }, [isFileDragOver]);
   const { leaseLiveStatus, rowRef } = useSidebarRowSubscriptionLease(isActive);
   const cleanup = thread.worktreeCleanup ?? null;
   const isCleanupPending = cleanup?.status === "deleting" || cleanup?.status === "queued";
-  const [cleanupFailureOpen, setCleanupFailureOpen] = useState(false);
   const localLastVisitedAt = useUiStateStore((state) => state.threadLastVisitedAtById[threadKey]);
   const lastVisitedAt = resolveThreadLastVisitedAt(thread.lastVisitedAt, localLastVisitedAt);
   const isSelected = useThreadSelectionStore((state) => state.selectedThreadKeys.has(threadKey));
   const processes = useLastCodeThreadProcesses(threadRef);
   const { hasStoppableProcesses } = processes;
-  const isMobile = useIsMobile();
   const identity = useLastCodeThreadIdentity(
     props.familyRow,
     providerEntriesByEnvironmentId,
@@ -392,61 +372,24 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     handleMouseLeave,
     handleBlurCapture,
   } = detailsLifetime;
-  const handleRowClick = useCallback(
-    (event: React.MouseEvent) =>
-      activateLastCodeThreadRow(
-        thread,
-        () => handleThreadClick(event, threadRef, orderedProjectThreadKeys),
-        () => setCleanupFailureOpen(true),
-        event,
-      ),
-    [thread, handleThreadClick, threadRef, orderedProjectThreadKeys],
-  );
-  const handleRowDoubleClick = useCallback(
-    (event: React.MouseEvent) =>
-      renameLastCodeThreadRow(
-        event,
-        thread,
-        { isMobile, renameActive: renameTarget !== null },
-        editing.requestRename,
-      ),
-    [thread, isMobile, renameTarget, editing.requestRename],
-  );
-  const handleRowKeyDown = useCallback(
-    (event: React.KeyboardEvent) =>
-      handleLastCodeThreadRowKeyDown(event, () =>
-        activateLastCodeThreadRow(
-          thread,
-          () => {
-            void navigateToThread(threadRef);
-          },
-          () => setCleanupFailureOpen(true),
-        ),
-      ),
-    [thread, navigateToThread, threadRef],
-  );
-  const handleRowContextMenu = useCallback(
-    (event: React.MouseEvent) => {
-      void openLastCodeThreadRowMenu(
-        event,
-        threadRef,
-        { cleanupBlocked: cleanup !== null, isSelected, hasStoppableProcesses },
-        {
-          showThreadMenu: handleThreadContextMenu,
-          showBulkMenu: handleMultiSelectContextMenu,
-          clearSelection,
-        },
-      );
-    },
-    [
-      threadRef,
-      cleanup,
-      isSelected,
-      hasStoppableProcesses,
-      handleThreadContextMenu,
-      handleMultiSelectContextMenu,
+  const {
+    handleRowClick,
+    handleRowDoubleClick,
+    handleRowKeyDown,
+    handleRowContextMenu,
+    cleanupFailureOpen,
+    setCleanupFailureOpen,
+  } = useLastCodeThreadRowGestures(
+    thread,
+    { navigateToThread, handleThreadClick },
+    orderedProjectThreadKeys,
+    {
+      showThreadMenu: handleThreadContextMenu,
+      showBulkMenu: handleMultiSelectContextMenu,
       clearSelection,
-    ],
+    },
+    { selected: isSelected, hasStoppableProcesses, renameActive: renameTarget !== null },
+    editing.requestRename,
   );
   const family = props.familyRow;
   const typedGroups = props.groupingStyle === "typed-groups";

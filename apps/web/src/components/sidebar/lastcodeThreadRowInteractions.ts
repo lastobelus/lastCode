@@ -1,4 +1,15 @@
-import type { KeyboardEvent, MouseEvent } from "react";
+import { useIsMobile } from "../../hooks/useMediaQuery";
+import { makeWorkspaceFileDropHandlers } from "../chat/workspaceFileDrop";
+import type { useLastCodeThreadNavigation } from "./useLastCodeThreadNavigation";
+import type { LastCodeThreadEditingCapabilities } from "./useLastCodeThreadEditing";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type KeyboardEvent,
+  type MouseEvent,
+} from "react";
 import { AuthOrchestrationOperateScope, type ScopedThreadRef } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
@@ -100,4 +111,109 @@ export async function openLastCodeThreadRowMenu(
   }
   if (hasSelection) menus.clearSelection();
   await showRowMenu(() => menus.showThreadMenu(threadRef, position, state.hasStoppableProcesses));
+}
+
+type RowNavigation = Pick<
+  ReturnType<typeof useLastCodeThreadNavigation>,
+  "navigateToThread" | "handleThreadClick"
+>;
+/** Row-owned interaction and cleanup-dialog lifetime; operations remain project-owned. */
+export function useLastCodeThreadRowGestures(
+  thread: SidebarThreadSummary,
+  navigation: RowNavigation,
+  orderedThreadKeys: readonly string[],
+  menus: LastCodeThreadRowMenus,
+  state: { selected: boolean; hasStoppableProcesses: boolean; renameActive: boolean },
+  requestRename: LastCodeThreadEditingCapabilities["requestRename"],
+) {
+  const isMobile = useIsMobile();
+  const [cleanupFailureOpen, setCleanupFailureOpen] = useState(false);
+  const { environmentId, id } = thread;
+  const { navigateToThread, handleThreadClick } = navigation;
+  const { showThreadMenu, showBulkMenu, clearSelection } = menus;
+  const { selected, hasStoppableProcesses, renameActive } = state;
+  const handleRowClick = useCallback(
+    (event: MouseEvent) =>
+      activateLastCodeThreadRow(
+        thread,
+        () => handleThreadClick(event, scopeThreadRef(environmentId, id), orderedThreadKeys),
+        () => setCleanupFailureOpen(true),
+        event,
+      ),
+    [thread, handleThreadClick, environmentId, id, orderedThreadKeys],
+  );
+  const handleRowDoubleClick = useCallback(
+    (event: MouseEvent) =>
+      renameLastCodeThreadRow(event, thread, { isMobile, renameActive }, requestRename),
+    [thread, isMobile, renameActive, requestRename],
+  );
+  const handleRowKeyDown = useCallback(
+    (event: KeyboardEvent) =>
+      handleLastCodeThreadRowKeyDown(event, () =>
+        activateLastCodeThreadRow(
+          thread,
+          () => {
+            void navigateToThread(scopeThreadRef(environmentId, id));
+          },
+          () => setCleanupFailureOpen(true),
+        ),
+      ),
+    [thread, navigateToThread, environmentId, id],
+  );
+  const handleRowContextMenu = useCallback(
+    (event: MouseEvent) => {
+      void openLastCodeThreadRowMenu(
+        event,
+        scopeThreadRef(environmentId, id),
+        {
+          cleanupBlocked: thread.worktreeCleanup != null,
+          isSelected: selected,
+          hasStoppableProcesses,
+        },
+        { showThreadMenu, showBulkMenu, clearSelection },
+      );
+    },
+    [
+      environmentId,
+      id,
+      thread.worktreeCleanup,
+      selected,
+      hasStoppableProcesses,
+      showThreadMenu,
+      showBulkMenu,
+      clearSelection,
+    ],
+  );
+  return {
+    handleRowClick,
+    handleRowDoubleClick,
+    handleRowKeyDown,
+    handleRowContextMenu,
+    cleanupFailureOpen,
+    setCleanupFailureOpen,
+  };
+}
+
+/** File-only drop highlighting belongs to the mounted row, including global drag cancellation. */
+export function useLastCodeThreadFileDrop(
+  threadRef: ScopedThreadRef,
+  onDrop: (ref: ScopedThreadRef, files: File[]) => void,
+) {
+  const [isFileDragOver, setIsFileDragOver] = useState(false);
+  const fileDropHandlers = useMemo(
+    () =>
+      makeWorkspaceFileDropHandlers({
+        setDragActive: setIsFileDragOver,
+        addFiles: (files) => onDrop(threadRef, files),
+        addFolders: () => {},
+      }),
+    [onDrop, threadRef],
+  );
+  useEffect(() => {
+    if (!isFileDragOver) return;
+    const clearFileDrag = () => setIsFileDragOver(false);
+    window.addEventListener("dragend", clearFileDrag);
+    return () => window.removeEventListener("dragend", clearFileDrag);
+  }, [isFileDragOver]);
+  return { isFileDragOver, fileDropHandlers };
 }
