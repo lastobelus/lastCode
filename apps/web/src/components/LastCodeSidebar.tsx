@@ -1,3 +1,6 @@
+import { useLastCodeThreadIdentity } from "./sidebar/useLastCodeThreadIdentity";
+import { LastCodeThreadHoverDetails } from "./sidebar/LastCodeThreadHoverDetails";
+import { useLastCodeThreadDetails } from "./sidebar/useLastCodeThreadDetails";
 import {
   LastCodeThreadMetadata,
   LastCodeThreadMetadataEnvironment,
@@ -46,7 +49,6 @@ import { autoAnimate } from "@formkit/auto-animate";
 import React, {
   useCallback,
   useEffect,
-  useId,
   memo,
   useMemo,
   useRef,
@@ -111,7 +113,6 @@ import {
   ThreadAnnotationHoverPopover,
   ThreadAnnotationNavigationTrigger,
 } from "./thread-annotation/ThreadAnnotation";
-import { PopoverCreateHandle as createAnnotationPopoverHandle } from "./ui/popover";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { readEnvironmentScope, useEnvironmentScope } from "../state/session";
 import {
@@ -135,13 +136,12 @@ import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { lastcodeSidebarScaleStyle } from "../lastcodeSidebarScale";
 import {
   ConnectedEnvironmentIcon,
-  legacyThreadEnvironmentPresentation,
   projectEnvironmentIconEntries,
   resolveEnvironmentIconColor,
 } from "../environmentIcons";
 
 import { useEnvironmentThread } from "../state/threads";
-import { useEnvironment, useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
+import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
 import {
   buildThreadRouteParams,
   resolveActiveThreadRouteRef,
@@ -204,16 +204,8 @@ import {
   useCollapsedLastCodeSidebarFamilies,
   useLastCodeSidebarFamiliesStore,
 } from "./lastcodeSidebarFamilies.store";
-import {
-  deriveProviderInstanceEntries,
-  shouldShowInstanceBadge,
-  type ProviderInstanceEntry,
-} from "../providerInstances";
-import { getTriggerDisplayModelLabel } from "./chat/providerIconUtils";
-import {
-  SidebarThreadCleanupHoverContent,
-  SidebarThreadHoverContent,
-} from "./sidebar/SidebarThreadHoverContent";
+import { deriveProviderInstanceEntries, type ProviderInstanceEntry } from "../providerInstances";
+import { SidebarThreadCleanupHoverContent } from "./sidebar/SidebarThreadHoverContent";
 import { WorktreeCleanupFailureDialog } from "./WorktreeCleanupFailureDialog";
 import {
   NO_PROJECT_GROUP_KEY,
@@ -277,7 +269,6 @@ interface SidebarThreadRowProps {
   thread: SidebarThreadSummary;
   familyRow: LastCodeSidebarFamilyRow;
   groupingStyle: "minimal" | "typed-groups";
-  showLocalEnvironmentIcon: boolean;
   providerBadgePreferences: SidebarProviderBadgePreferences;
   configuredEnvironmentIconColor: EnvironmentIconColor | undefined;
   projectCwd: string | null;
@@ -366,44 +357,22 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const lastVisitedAt = resolveThreadLastVisitedAt(thread.lastVisitedAt, localLastVisitedAt);
   const isSelected = useThreadSelectionStore((state) => state.selectedThreadKeys.has(threadKey));
   const processes = useLastCodeThreadProcesses(threadRef);
-  const { runningTerminalIds, hasStoppableProcesses, terminalStatus } = processes;
+  const { hasStoppableProcesses } = processes;
   const isMobile = useIsMobile();
-  const environment = useEnvironment(thread.environmentId);
-  const primaryEnvironmentId = usePrimaryEnvironmentId();
-  // No primary (the hosted app) means every thread is remote, and the machine
-  // glyph is what tells the environments apart.
-  const isRemoteThread = thread.environmentId !== primaryEnvironmentId;
-  const remoteEnvLabel = environment?.label ?? null;
-  // A desktop-local secondary backend (e.g. the WSL backend) shows up as a
-  // bearer environment whose connection id is prefixed "local:". It runs on the
-  // user's own machine, so a remote-server icon is misleading — label it "Local" and
-  // suppress the row icon (the project header already shows a container icon
-  // for desktop-local projects, see sidebarProjectGrouping).
-  const isDesktopLocalThread =
-    environment !== null && isDesktopLocalConnectionTarget(environment.entry.target);
-  const environmentPresentation = legacyThreadEnvironmentPresentation({
-    isPrimary: !isRemoteThread,
-    isDesktopLocal: isDesktopLocalThread,
-    showLocalEnvironmentIcon:
-      props.showLocalEnvironmentIcon || props.providerBadgePreferences.enabled,
-    environmentLabel: remoteEnvLabel,
-  });
-  const showsThreadEnvironmentIcon =
-    props.providerBadgePreferences.enabled ||
-    (environmentPresentation.showRowIcon &&
-      props.familyRow.parentKey === null &&
-      (thread.lineage.relationshipToParent !== "subagent" || thread.lineage.independent === true));
-  const threadEnvironmentLabel = props.providerBadgePreferences.enabled
-    ? (environmentPresentation.hoverLabel ?? remoteEnvLabel ?? "Local")
-    : props.familyRow.parentKey !== null
-      ? null
-      : environmentPresentation.hoverLabel;
-  const environmentIconColor = resolveEnvironmentIconColor(
+  const identity = useLastCodeThreadIdentity(
+    props.familyRow,
+    providerEntriesByEnvironmentId,
     props.configuredEnvironmentIconColor,
-    environment !== null && !isDesktopLocalThread,
+    props.providerBadgePreferences,
   );
+  const {
+    showsThreadEnvironmentIcon,
+    threadEnvironmentLabel,
+    environmentIconColor,
+    providerEntry,
+  } = identity;
   const sourceControl = useLastCodeThreadSourceControl(thread, leaseLiveStatus, props.projectCwd);
-  const { gitCwd, threadProject, threadProjectCwd, branchMismatch } = sourceControl;
+  const { gitCwd } = sourceControl;
   const isHighlighted = isActive || isSelected;
   const threadStatus = resolveThreadStatusPill({
     thread: {
@@ -420,44 +389,19 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       ? (readThreadShell(scopeThreadRef(thread.environmentId, cleanup.blockedByThreadId))?.title ??
         null)
       : null;
-  const modelInstanceId = thread.runtime?.providerInstanceId ?? thread.modelSelection.instanceId;
-  const environmentProviderEntries = providerEntriesByEnvironmentId.get(thread.environmentId);
-  const providerEntry = environmentProviderEntries?.get(modelInstanceId) ?? null;
-  const showInstanceBadge =
-    providerEntry !== null &&
-    shouldShowInstanceBadge(providerEntry, environmentProviderEntries?.values() ?? []);
-  const selectedModel = providerEntry?.models.find(
-    (model) => model.slug === thread.modelSelection.model,
-  );
-  const modelLabel = selectedModel
-    ? getTriggerDisplayModelLabel(selectedModel)
-    : thread.modelSelection.model;
   const familyPresentation = useLastCodeThreadFamily(props.familyRow, threadStatus);
-  const { creatorDescription, relationshipDescription, relationshipLabel } = familyPresentation;
+  const { creatorDescription, relationshipLabel } = familyPresentation;
   const threadHoverDetails = (
-    <>
-      {relationshipDescription ? (
-        <div className="mb-2 text-xs text-sidebar-muted-foreground">{relationshipDescription}</div>
-      ) : null}
-
-      <SidebarThreadHoverContent
-        branchMismatch={branchMismatch}
-        environmentLabel={threadEnvironmentLabel}
-        environmentIconColor={environmentIconColor}
-        modelInstanceId={modelInstanceId}
-        modelLabel={modelLabel}
-        projectCwd={threadProjectCwd ?? props.projectCwd}
-        projectFaviconPath={threadProject?.faviconPath ?? null}
-        projectTitle={threadProject?.title ?? null}
-        providerEntry={providerEntry}
-        showInstanceBadge={showInstanceBadge}
-        terminalProcessCount={runningTerminalIds.length}
-        terminalStatus={terminalStatus}
-        thread={thread}
-        cleanupBlockerTitle={cleanupBlockerTitle}
-        showCleanup={!hasActiveAnnotation}
-      />
-    </>
+    <LastCodeThreadHoverDetails
+      thread={thread}
+      sourceControl={sourceControl}
+      processes={processes}
+      identity={identity}
+      familyPresentation={familyPresentation}
+      projectCwdFallback={props.projectCwd}
+      cleanupBlockerTitle={cleanupBlockerTitle}
+      hasActiveAnnotation={hasActiveAnnotation}
+    />
   );
   const cleanupHoverDetails = (
     <SidebarThreadCleanupHoverContent
@@ -466,34 +410,17 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       standalone
     />
   );
-  const [threadRowActive, setThreadRowActive] = useState(false);
-  const annotationPopoverHandle = useMemo(() => createAnnotationPopoverHandle(), []);
-  const annotationTriggerId = useId();
-  const clearConfirmingArchive = useCallback(() => {
-    editing.cancelArchiveConfirmation(threadRef);
-  }, [editing, threadRef]);
-  const handleMouseLeave = useCallback(() => {
-    clearConfirmingArchive();
-    setThreadRowActive(false);
-  }, [clearConfirmingArchive]);
-  const handleThreadDetailsTooltipOpenChange = useCallback<
-    NonNullable<React.ComponentProps<typeof Tooltip>["onOpenChange"]>
-  >((open, eventDetails) => {
-    if (!open && eventDetails.reason === "escape-key") setThreadRowActive(false);
-  }, []);
-  const handleBlurCapture = useCallback(
-    (event: React.FocusEvent<HTMLLIElement>) => {
-      const currentTarget = event.currentTarget;
-      requestAnimationFrame(() => {
-        if (currentTarget.contains(document.activeElement)) {
-          return;
-        }
-        clearConfirmingArchive();
-        setThreadRowActive(false);
-      });
-    },
-    [clearConfirmingArchive],
-  );
+  const {
+    threadRowActive,
+    setThreadRowActive,
+    annotationPopoverHandle,
+    annotationTriggerId,
+    threadNavigationRef,
+    threadDetailsTooltipId,
+    handleMouseLeave,
+    handleBlurCapture,
+    handleThreadDetailsTooltipOpenChange,
+  } = useLastCodeThreadDetails(threadRef, editing);
   const handleRowClick = useCallback(
     (event: React.MouseEvent) => {
       if (isCleanupFailed) {
@@ -621,8 +548,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       threadRef,
     ],
   );
-  const threadNavigationRef = useRef<HTMLDivElement | null>(null);
-  const threadDetailsTooltipId = useId();
   const family = props.familyRow;
   const typedGroups = props.groupingStyle === "typed-groups";
   const threadRowElement = (
@@ -817,7 +742,6 @@ interface SidebarProjectThreadListProps {
   scaleStyle: CSSProperties;
   providerEntriesByEnvironmentId: ReadonlyMap<string, ReadonlyMap<string, ProviderInstanceEntry>>;
   environmentIconColors: Readonly<Record<string, EnvironmentIconColor>>;
-  showLocalEnvironmentIcon: boolean;
   providerBadgePreferences: SidebarProviderBadgePreferences;
   projectCwd: string | null;
   projectKey: string;
@@ -871,7 +795,6 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
     scaleStyle,
     providerEntriesByEnvironmentId,
     environmentIconColors,
-    showLocalEnvironmentIcon,
     providerBadgePreferences,
     projectCwd,
     projectKey,
@@ -958,7 +881,6 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
                 groupingStyle={props.groupingStyle}
                 thread={thread}
                 familyRow={familyRow}
-                showLocalEnvironmentIcon={showLocalEnvironmentIcon}
                 providerBadgePreferences={providerBadgePreferences}
                 configuredEnvironmentIconColor={environmentIconColors[thread.environmentId]}
                 projectCwd={projectCwd}
@@ -1697,7 +1619,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         scaleStyle={scaleStyle}
         providerEntriesByEnvironmentId={providerEntriesByEnvironmentId}
         environmentIconColors={props.environmentIconColors}
-        showLocalEnvironmentIcon={props.showLocalEnvironmentIcon}
         providerBadgePreferences={props.providerBadgePreferences}
         projectCwd={project.workspaceRoot}
         projectKey={project.projectKey}
