@@ -212,6 +212,7 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
       expect(first.orchestrationProtocolVersion).toBe(ORCHESTRATION_PROTOCOL_VERSION);
       expect(second.capabilities.repositoryIdentity).toBe(true);
       expect(second.capabilities.connectionProbe).toBe(true);
+      expect(second.capabilities.lastcodeLocalCi).toBe(true);
       expect(second.capabilities.attachmentUploads).toBe(true);
       expect(second.capabilities.fileAttachments).toEqual({ maxUploadBytes: 50 * 1024 * 1024 });
       expect(second.capabilities.pullRequests).toBe(true);
