@@ -5393,6 +5393,82 @@ it.live(
     ).pipe(Effect.provide(layer)),
 );
 
+it.live.each([undefined, "incognito"])(
+  "a host-omitted existing tab retains reported defaults (profile=%s)",
+  (profileId) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const browser = yield* ServerBrowser.ServerBrowser;
+        const broker = yield* Broker.PreviewAutomationBroker;
+        const manager = yield* Manager.PreviewManager;
+        yield* Effect.yieldNow;
+        if (profileId !== undefined)
+          yield* browser.reportProfiles({ profiles: [], defaultProfileId: profileId });
+        const opened = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { open: false },
+        });
+        const tabId = PreviewTabId.make(opened.tabId!);
+        yield* browser.reportProfiles({
+          profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+          defaultProfileId: "work",
+        });
+        const reportedStatus = {
+          profileId: profileId ?? null,
+          defaultProfileId: "work",
+          profiles: [
+            { id: "default", name: "Default" },
+            { id: "incognito", name: "Incognito", incognito: true },
+            { id: "work", name: "Work" },
+          ],
+        };
+        expect(
+          yield* broker.invoke<PreviewAutomationStatus>({
+            scope,
+            tabId,
+            operation: "status",
+            input: {},
+          }),
+        ).toMatchObject(reportedStatus);
+        expect(
+          yield* broker.invoke<PreviewAutomationStatus>({
+            scope,
+            tabId,
+            operation: "open",
+            input: { open: false },
+          }),
+        ).toMatchObject({ tabId, ...reportedStatus });
+        const events = yield* manager.subscribeEvents;
+        contexts[0]!.page.emit("popup", makeContext().page);
+        const event = Option.getOrThrow(
+          yield* Stream.fromSubscription(events).pipe(
+            Stream.filter((event) => event.type === "opened" && event.tabId !== tabId),
+            Stream.runHead,
+          ),
+        );
+        expect(
+          yield* broker.invoke<PreviewAutomationStatus>({
+            scope,
+            tabId: event.tabId,
+            operation: "status",
+            input: {},
+          }),
+        ).toMatchObject(reportedStatus);
+        const fresh = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { open: false, reuseExistingTab: false },
+        });
+        expect(fresh).toMatchObject({ profileId: "work", defaultProfileId: "work" });
+        expect(contextRequests).toEqual([
+          { profileId: profileId ?? "default", isolated: true },
+          { profileId: "work", isolated: false },
+        ]);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
 it.live("explicit environment hosting opens loopback without consulting a connected desktop", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -5581,6 +5657,18 @@ it.live("environment status advertises its own profiles instead of the desktop's
           { id: "incognito", name: "Incognito", incognito: true },
         ],
       });
+      const reused = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "open",
+        input: { open: false },
+      });
+      expect(reused).toMatchObject({
+        tabId,
+        profileId: "incognito",
+        defaultProfileId: "incognito",
+        profiles: status.profiles,
+      });
       const rejected = yield* broker
         .invoke<PreviewAutomationStatus>({
           scope,
@@ -5590,6 +5678,49 @@ it.live("environment status advertises its own profiles instead of the desktop's
         .pipe(Effect.flip);
       expect(rejected).toMatchObject({ _tag: "PreviewAutomationExecutionError" });
       expect(contextRequests).toEqual([{ profileId: "incognito", isolated: true }]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("a retained environment session keeps its profile policy after failed attachment", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const browser = yield* ServerBrowser.ServerBrowser;
+      const broker = yield* Broker.PreviewAutomationBroker;
+      const manager = yield* Manager.PreviewManager;
+      yield* browser.reportProfiles({
+        profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+        defaultProfileId: "work",
+      });
+      yield* Effect.yieldNow;
+      contextFailure = new Error("Test context unavailable");
+      const failure = yield* broker
+        .invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { browserHost: "environment", open: false },
+        })
+        .pipe(Effect.flip);
+      expect(failure).toMatchObject({ _tag: "PreviewAutomationExecutionError" });
+      const { sessions } = yield* manager.list({ threadId: scope.thread.threadId });
+      expect(sessions).toHaveLength(1);
+      const tabId = sessions[0]!.tabId;
+      contextFailure = null;
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "open",
+        input: { open: false },
+      });
+      expect(status).toMatchObject({
+        tabId,
+        profileId: "incognito",
+        defaultProfileId: "incognito",
+        profiles: [
+          { id: "default", name: "Default" },
+          { id: "incognito", name: "Incognito", incognito: true },
+        ],
+      });
     }),
   ).pipe(Effect.provide(layer)),
 );
@@ -5627,6 +5758,46 @@ it.live(
         expect(failure).toMatchObject({ _tag: "PreviewAutomationProfileError" });
         expect(contextRequests).toEqual([{ profileId: "incognito", isolated: true }]);
         expect(profileRequests).toEqual([]);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live.each([false, true])(
+  "an attached desktop tab can be reused without its catalogue (explicit=%s)",
+  (explicit) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        desktopRendersNext = true;
+        const { broker, tabId } = yield* ready;
+        profileCatalogueUnavailable = true;
+        const reused = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          ...(explicit ? { tabId } : {}),
+          operation: "open",
+          input: { browserHost: "desktop", open: false, url: "https://reuse.example.test/" },
+        });
+        expect(reused).toMatchObject({
+          tabId,
+          browserHost: "desktop",
+          url: "https://reuse.example.test/",
+        });
+        for (const input of [
+          { reuseExistingTab: false },
+          { profileId: "default" },
+          { profileName: "Default" },
+        ]) {
+          const failure = yield* broker
+            .invoke<PreviewAutomationStatus>({
+              scope,
+              ...(explicit ? { tabId } : {}),
+              operation: "open",
+              input: { browserHost: "desktop", open: false, ...input },
+            })
+            .pipe(Effect.flip);
+          expect(failure).toMatchObject({ _tag: "PreviewAutomationRemoteUnavailableError" });
+        }
+        expect(rootCreations).toHaveLength(1);
+        expect(contextRequests).toEqual([]);
       }),
     ).pipe(Effect.provide(layer)),
 );
@@ -5678,7 +5849,11 @@ it.live("an environment popup stays on the server when local native IPC is avail
     Effect.gen(function* () {
       localDesktopAvailable = true;
       const broker = yield* Broker.PreviewAutomationBroker;
-      yield* ServerBrowser.ServerBrowser;
+      const browser = yield* ServerBrowser.ServerBrowser;
+      yield* browser.reportProfiles({
+        profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+        defaultProfileId: "work",
+      });
       yield* Effect.yieldNow;
       const opened = yield* broker.invoke<PreviewAutomationStatus>({
         scope,
@@ -5712,6 +5887,11 @@ it.live("an environment popup stays on the server when local native IPC is avail
       expect(status).toMatchObject({
         browserHost: "environment",
         profileId: "incognito",
+        defaultProfileId: "incognito",
+        profiles: [
+          { id: "default", name: "Default" },
+          { id: "incognito", name: "Incognito", incognito: true },
+        ],
         control: { owner: "agent", ownedByCaller: true },
       });
       expect(rootCreations).toEqual([]);

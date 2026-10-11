@@ -515,6 +515,8 @@ const make = Effect.gen(function* () {
   const pendingTabs = new Map<string, Promise<ServerTab>>();
   /** Verified origins belong to the preview session, which can outlive its attachment. */
   const sessionHostedOrigins = new Map<string, Map<string, string>>();
+  /** Explicit environment selection uses built-ins; physical server storage alone does not. */
+  const environmentProfileSessions = new Set<string>();
   /** Sessions closed while their tab was still opening; the open discards its page. */
   const closedPendingTabs = new Set<string>();
   /** Popup pages waiting for the tab their `opened` event creates. */
@@ -832,7 +834,10 @@ const make = Effect.gen(function* () {
     const key = tabKey(tab.threadId, tab.tabId);
     if (tabs.get(key) !== tab) return;
     tabs.delete(key);
-    if (closeSession || !sessionOpen(tab)) sessionHostedOrigins.delete(key);
+    if (closeSession || !sessionOpen(tab)) {
+      sessionHostedOrigins.delete(key);
+      environmentProfileSessions.delete(key);
+    }
     tab.closing = true;
     tab.viewerNavigation?.abort(new BrowserControlInterrupted());
     clearAbortedNavigation(tab);
@@ -1431,6 +1436,9 @@ const make = Effect.gen(function* () {
     const url = popup.url();
     // Opening a tab awaits setup; its opener can close before publication or attachment.
     const hostedOrigins = new Map(opener.hostedOrigins);
+    const environmentProfiles = environmentProfileSessions.has(
+      tabKey(opener.threadId, opener.tabId),
+    );
     // Captured now: the person whose click opened the popup gets switched to it.
     const controller = [...opener.viewers].find(
       (viewer) => viewer.id === opener.control.controller,
@@ -1447,12 +1455,15 @@ const make = Effect.gen(function* () {
         ...(opener.control.agentId === null
           ? {}
           : { automationOwner: opener.control.agentId, reveal: false }),
-        beforePublish: (snapshot) =>
-          adoptedPages.set(tabKey(snapshot.threadId, snapshot.tabId), {
+        beforePublish: (snapshot) => {
+          const key = tabKey(snapshot.threadId, snapshot.tabId);
+          if (environmentProfiles) environmentProfileSessions.add(key);
+          adoptedPages.set(key, {
             page: popup,
             openerTabId: opener.tabId,
             hostedOrigins,
-          }),
+          });
+        },
       }),
     ).then(
       (snapshot) => {
@@ -1999,11 +2010,7 @@ const make = Effect.gen(function* () {
       viewportSetting: tab.setting,
       ...(viewport ? { viewport } : {}),
       tabs: listedTabs,
-      ...profileStatus(
-        !tab.desktop &&
-          (tab.profileId === undefined ||
-            findBrowserProfile(BUILT_IN_BROWSER_PROFILES, tab.profileId) !== undefined),
-      ),
+      ...profileStatus(environmentProfileSessions.has(tabKey(tab.threadId, tab.tabId))),
       downloads: tab.downloads.map(({ fileName, path, sizeBytes, url, completedAt }) => ({
         fileName,
         path,
@@ -2678,11 +2685,6 @@ const make = Effect.gen(function* () {
         const reportedProfileId = useReportedProfile
           ? resolveOpenProfile(open.profileId ?? open.profileName, environmentHosted)
           : undefined;
-        if (open.browserHost === "desktop" && catalogue === null)
-          throw new ServerBrowserPage.ServerBrowserOperationError(
-            "PreviewAutomationRemoteUnavailableError",
-            "No unambiguous connected desktop browser is available. The requested desktop tab was not opened.",
-          );
         let selectedProfileId =
           environmentHosted && (open.profileId !== undefined || open.profileName !== undefined)
             ? reportedProfileId
@@ -2819,6 +2821,11 @@ const make = Effect.gen(function* () {
           }
           existing = undefined;
         }
+        if (!existing && open.browserHost === "desktop" && catalogue === null)
+          throw new ServerBrowserPage.ServerBrowserOperationError(
+            "PreviewAutomationRemoteUnavailableError",
+            "No unambiguous connected desktop browser is available. The requested desktop tab was not opened.",
+          );
         if (
           !existing &&
           newTabProfileId !== undefined &&
@@ -2856,7 +2863,14 @@ const make = Effect.gen(function* () {
                 runtime: "server",
                 reveal: false,
                 automationOwner: request.agentSessionId,
-                ...(environmentHosted ? { environmentHosted: true } : {}),
+                ...(environmentHosted
+                  ? {
+                      environmentHosted: true,
+                      beforePublish: (snapshot) => {
+                        environmentProfileSessions.add(tabKey(snapshot.threadId, snapshot.tabId));
+                      },
+                    }
+                  : {}),
                 ...(desktopHostId === undefined ? {} : { desktopHostId }),
                 createDesktopRoot: (snapshot) => createDesktopRoot(snapshot, signal),
                 ...(newTabProfileId === undefined || catalogue === null
@@ -2881,6 +2895,8 @@ const make = Effect.gen(function* () {
                   "A browser dialog is pending. Read preview_status and use preview_dialog first.",
                   "dialogPending",
                 );
+              if (environmentHosted)
+                environmentProfileSessions.add(tabKey(tab.threadId, tab.tabId));
               const reveal = open.open ?? open.show;
               if (reveal !== false) {
                 tab.revealRequested = true;
@@ -3431,6 +3447,7 @@ const make = Effect.gen(function* () {
       const tab = tabs.get(key);
       if (event.type === "closed") {
         sessionHostedOrigins.delete(key);
+        environmentProfileSessions.delete(key);
         const popup = nativePopupForTab(event.threadId, event.tabId);
         if (popup) {
           popup.closeRequested = true;
