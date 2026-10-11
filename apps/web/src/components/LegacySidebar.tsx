@@ -521,7 +521,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const prStatus = prStatusIndicator(pr, linkedPullRequestStatus?.sourceControlProvider);
   const terminalStatus = terminalStatusFromRunningIds(runningTerminalIds);
   const isConfirmingArchive =
-    canOperateThread && cleanup === null && confirmingArchiveThreadKey === threadKey;
+    canOperateThread &&
+    !thread.persistent &&
+    cleanup === null &&
+    confirmingArchiveThreadKey === threadKey;
   const threadMetaClassName = isConfirmingArchive
     ? "pointer-events-none opacity-0"
     : canOperateThread && !thread.persistent && cleanup === null
@@ -2671,7 +2674,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             <span className="truncate text-sm font-medium text-sidebar-foreground/90">
               {project.displayName}
             </span>
-            {project.groupedProjectCount > 1 ? (
+            {project.projectKey !== NO_PROJECT_GROUP_KEY && project.groupedProjectCount > 1 ? (
               <span className="shrink-0 text-secondary-label text-3xs">
                 {project.groupedProjectCount} projects
               </span>
