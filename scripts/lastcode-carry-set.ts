@@ -268,9 +268,15 @@ export function carrySetShadowTarget(
       `${checkpointTag} metadata names ${sourceCommit}, but the tag resolves to ${taggedCommit}.`,
     );
   }
+  // Keep last-trailer-wins and validation precedence; immutable modes are omitted, carry, or historical.
   const replayMode = trailers.get("Replay-Mode");
-  if (replayMode !== undefined && replayMode !== "carry" && replayMode !== "historical") {
-    throw new Error(`${checkpointTag} has an invalid Replay-Mode.`);
+  switch (replayMode) {
+    case undefined:
+    case "carry":
+    case "historical":
+      break;
+    default:
+      throw new Error(`${checkpointTag} has an invalid Replay-Mode.`);
   }
   return {
     checkpointTag,
