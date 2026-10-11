@@ -1,9 +1,5 @@
-import {
-  LastCodeSidebarPresentationProvider,
-  useLastCodeSidebarPresentation,
-} from "./sidebar/LastCodeSidebarPresentation";
-import { LastCodeThreadMetadataControls } from "./sidebar/LastCodeThreadMetadataControls";
-import { LastCodeThreadRowSurface } from "./sidebar/LastCodeThreadRowSurface";
+import { LastCodeThreadRow } from "./sidebar/LastCodeThreadRow";
+import { LastCodeSidebarPresentationProvider } from "./sidebar/LastCodeSidebarPresentation";
 import { useLastCodeThreadNavigation } from "./sidebar/useLastCodeThreadNavigation";
 import {
   LastCodeProjectHeader,
@@ -12,31 +8,9 @@ import {
 import { lastCodeProjectExpansionPreferenceKeys } from "./sidebar/useLastCodeProjectHeaderGestures";
 import { useLastCodeProjectThreads } from "./sidebar/useLastCodeProjectThreads";
 import { projectLastCodeProjectThreads } from "./sidebar/lastcodeProjectThreads";
-import {
-  LastCodeThreadDetails,
-  LastCodeThreadCleanupOverlay,
-  type LastCodeThreadAnnotationActions,
-} from "./sidebar/LastCodeThreadDetails";
-import {
-  useLastCodeThreadRowGestures,
-  useLastCodeThreadFileDrop,
-  type LastCodeThreadRowMenus,
-} from "./sidebar/lastcodeThreadRowInteractions";
-import { useLastCodeThreadIdentity } from "./sidebar/useLastCodeThreadIdentity";
-import { createLastCodeThreadHoverContents } from "./sidebar/LastCodeThreadHoverDetails";
-import { useLastCodeThreadStatus } from "./sidebar/useLastCodeThreadStatus";
-import { useLastCodeThreadDetails } from "./sidebar/useLastCodeThreadDetails";
-import { useLastCodeThreadFamily } from "./sidebar/useLastCodeThreadFamily";
-import {
-  LastCodeThreadFamilyDisclosure,
-  LastCodeSubagentGroup,
-  LastCodeThreadGroupHeading,
-} from "./sidebar/LastCodeThreadFamily";
-import { useLastCodeThreadSourceControl } from "./sidebar/useLastCodeThreadSourceControl";
-import { useLastCodeThreadProcesses } from "./sidebar/useLastCodeThreadProcesses";
-import { LastCodeThreadProcesses } from "./sidebar/LastCodeThreadProcesses";
-import { LastCodeThreadLeadingControls } from "./sidebar/LastCodeThreadTitle";
-import { LastCodeThreadRowLayout } from "./sidebar/LastCodeThreadRowLayout";
+import type { LastCodeThreadAnnotationActions } from "./sidebar/LastCodeThreadDetails";
+import type { LastCodeThreadRowMenus } from "./sidebar/lastcodeThreadRowInteractions";
+import { LastCodeSubagentGroup, LastCodeThreadGroupHeading } from "./sidebar/LastCodeThreadFamily";
 import {
   useLastCodeThreadEditing,
   type LastCodeRenameTarget,
@@ -87,7 +61,6 @@ import { SortableContext, useSortable, verticalListSortingStrategy } from "@dnd-
 import { restrictToFirstScrollableAncestor, restrictToVerticalAxis } from "@dnd-kit/modifiers";
 import { CSS } from "@dnd-kit/utilities";
 import {
-  AuthOrchestrationOperateScope,
   type EnvironmentId,
   ProjectId,
   type ScopedThreadRef,
@@ -109,7 +82,6 @@ import { useTerminalFocus } from "../hooks/useTerminalFocus";
 import { isTerminalFocused } from "../lib/terminalFocus";
 import { useProjects, useThreadShells } from "../state/entities";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
-import { useEnvironmentScope } from "../state/session";
 import {
   legacyProjectCwdPreferenceKey,
   resolveProjectExpanded,
@@ -159,7 +131,6 @@ import {
   orderItemsByPreferredIds,
   shouldClearThreadSelectionOnMouseDown,
   sortProjectsForSidebar,
-  useSidebarRowSubscriptionLease,
   useThreadJumpHintVisibility,
 } from "./Sidebar.logic";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
@@ -173,10 +144,8 @@ import {
   selectProjectGroupingSettings,
 } from "../logicalProject";
 import type { SidebarThreadSummary } from "../types";
-import { type LastCodeSidebarFamilyRow } from "./lastcodeSidebarFamilies.logic";
 import { useLastCodeSidebarFamiliesStore } from "./lastcodeSidebarFamilies.store";
 import { deriveProviderInstanceEntries, type ProviderInstanceEntry } from "../providerInstances";
-import { WorktreeCleanupFailureDialog } from "./WorktreeCleanupFailureDialog";
 import {
   buildPhysicalToLogicalProjectKeyMap,
   buildSidebarProjectSnapshots,
@@ -223,152 +192,6 @@ function buildThreadJumpLabelMap(input: {
   }
   return mapping.size > 0 ? mapping : EMPTY_THREAD_JUMP_LABELS;
 }
-
-interface SidebarThreadRowProps {
-  familyRow: LastCodeSidebarFamilyRow;
-  projectCwd: string | null;
-  isActive: boolean;
-  jumpLabel: string | null;
-  renameTarget: LastCodeRenameTarget | null;
-  editing: LastCodeThreadEditingCapabilities;
-  archiveConfirmActive: boolean;
-  navigation: ReturnType<typeof useLastCodeThreadNavigation>;
-  menus: LastCodeThreadRowMenus;
-  annotations: LastCodeThreadAnnotationActions;
-}
-
-const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowProps) {
-  const {
-    isActive,
-    jumpLabel,
-    renameTarget,
-    editing,
-    archiveConfirmActive,
-    navigation,
-    menus,
-    annotations,
-  } = props;
-  const { providerEntriesByEnvironmentId, environmentIconColors, providerBadgePreferences } =
-    useLastCodeSidebarPresentation();
-  const thread = props.familyRow.thread;
-  const canOperateThread = useEnvironmentScope(thread.environmentId, AuthOrchestrationOperateScope);
-  const threadRef = scopeThreadRef(thread.environmentId, thread.id);
-  const threadKey = scopedThreadKey(threadRef);
-  const { isFileDragOver, fileDropHandlers } = useLastCodeThreadFileDrop(
-    threadRef,
-    navigation.handleThreadFileDrop,
-  );
-  const { leaseLiveStatus, rowRef } = useSidebarRowSubscriptionLease(isActive);
-  const cleanup = thread.worktreeCleanup ?? null;
-  const isSelected = useThreadSelectionStore((state) => state.selectedThreadKeys.has(threadKey));
-  const processes = useLastCodeThreadProcesses(threadRef);
-  const { hasStoppableProcesses } = processes;
-  const identity = useLastCodeThreadIdentity(
-    props.familyRow,
-    providerEntriesByEnvironmentId,
-    environmentIconColors[thread.environmentId],
-    providerBadgePreferences,
-  );
-  const sourceControl = useLastCodeThreadSourceControl(thread, leaseLiveStatus, props.projectCwd);
-  const { gitCwd } = sourceControl;
-  const isHighlighted = isActive || isSelected;
-  const threadStatus = useLastCodeThreadStatus(thread);
-  const canArchive = canOperateThread && !thread.persistent && cleanup === null;
-  const hasActiveAnnotation = thread.annotation?.resolvedAt === null;
-  const familyPresentation = useLastCodeThreadFamily(props.familyRow, threadStatus);
-  const { content: threadHoverDetails, trailingContent: cleanupHoverDetails } =
-    createLastCodeThreadHoverContents({
-      thread,
-      sourceControl,
-      processes,
-      identity,
-      familyPresentation,
-      projectCwdFallback: props.projectCwd,
-    });
-  const detailsLifetime = useLastCodeThreadDetails(threadRef, editing);
-  const { annotationPopoverHandle } = detailsLifetime;
-  const {
-    handleRowClick,
-    handleRowDoubleClick,
-    handleRowKeyDown,
-    handleRowContextMenu,
-    cleanupFailureOpen,
-    setCleanupFailureOpen,
-  } = useLastCodeThreadRowGestures(
-    thread,
-    navigation,
-    menus,
-    { selected: isSelected, hasStoppableProcesses, renameActive: renameTarget !== null },
-    editing.requestRename,
-  );
-  const family = props.familyRow;
-
-  return (
-    <LastCodeThreadRowLayout
-      depth={family.depth}
-      rowRef={rowRef}
-      fileDropHandlers={fileDropHandlers}
-      annotated={hasActiveAnnotation}
-      lifetime={detailsLifetime}
-    >
-      <LastCodeThreadRowSurface
-        family={family}
-        relationship={familyPresentation}
-        lifetime={detailsLifetime}
-        gestures={{ handleRowClick, handleRowDoubleClick, handleRowKeyDown, handleRowContextMenu }}
-        active={isActive}
-        selected={isSelected}
-        fileDragOver={isFileDragOver}
-      >
-        <LastCodeThreadCleanupOverlay thread={thread} content={threadHoverDetails} />
-        <LastCodeThreadFamilyDisclosure
-          family={family}
-          renameTarget={renameTarget !== null}
-          navigateToThread={navigation.navigateToThread}
-        />
-        <LastCodeThreadLeadingControls
-          family={family}
-          presentation={familyPresentation}
-          threadStatus={threadStatus}
-          renameTarget={canOperateThread ? renameTarget : null}
-          editing={editing}
-          sourceControl={sourceControl}
-          active={isActive}
-          navigateToThread={navigation.navigateToThread}
-        />
-        <LastCodeThreadMetadataControls
-          thread={thread}
-          identity={identity}
-          preferences={providerBadgePreferences}
-          jumpLabel={jumpLabel}
-          highlighted={isHighlighted}
-          archive={{ allowed: canArchive, confirmationRequested: archiveConfirmActive, editing }}
-          annotationHandle={annotationPopoverHandle}
-        >
-          <LastCodeThreadProcesses
-            threadRef={threadRef}
-            processes={processes}
-            cleanupBlocked={cleanup !== null}
-            navigateToThread={navigation.navigateToThread}
-          />
-        </LastCodeThreadMetadataControls>
-      </LastCodeThreadRowSurface>
-      <LastCodeThreadDetails
-        thread={thread}
-        lifetime={detailsLifetime}
-        gitCwd={gitCwd}
-        content={threadHoverDetails}
-        trailingContent={cleanupHoverDetails}
-        annotations={annotations}
-      />
-      <WorktreeCleanupFailureDialog
-        thread={thread}
-        open={cleanupFailureOpen}
-        onOpenChange={setCleanupFailureOpen}
-      />
-    </LastCodeThreadRowLayout>
-  );
-});
 
 interface SidebarProjectThreadListProps {
   lastcodeSidebarScale: LegacySidebarScale;
@@ -461,7 +284,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
           return (
             <React.Fragment key={threadKey}>
               <LastCodeThreadGroupHeading family={familyRow} />
-              <SidebarThreadRow
+              <LastCodeThreadRow
                 familyRow={familyRow}
                 projectCwd={projectCwd}
                 isActive={activeRouteThreadKey === threadKey}
