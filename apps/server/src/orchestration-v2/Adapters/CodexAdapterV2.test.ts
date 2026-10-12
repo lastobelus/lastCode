@@ -510,11 +510,11 @@ describe("CodexAdapterV2 runtime policy", () => {
 
       assert.equal(params.collaborationMode?.mode, "default");
       assert.include(
-        params.additionalContext?.t3_code_orchestration?.value ?? "",
+        params.additionalContext?.t3_code_orchestration_01?.value ?? "",
         "Use `delegate_task`",
       );
       assert.include(
-        params.additionalContext?.t3_code_orchestration?.value ?? "",
+        params.additionalContext?.t3_code_orchestration_02?.value ?? "",
         "structured object, never as JSON text",
       );
     }),
@@ -563,7 +563,10 @@ describe("CodexAdapterV2 runtime policy", () => {
         params.collaborationMode?.settings.developer_instructions ?? "",
         "request_user_input",
       );
-      assert.include(params.additionalContext?.t3_code_tools?.value ?? "", "preview_status");
+      assert.include(
+        params.additionalContext?.t3_code_tools_browser?.value ?? "",
+        "preview_status",
+      );
     }),
   );
 
@@ -3127,7 +3130,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           hasT3Mcp: true,
         });
         assert.include(
-          params.additionalContext?.t3_code_orchestration?.value ?? "",
+          params.additionalContext?.t3_code_orchestration_01?.value ?? "",
           "delegate_task",
         );
         const entries = codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt: "work" });
