@@ -763,6 +763,106 @@ it.layer(
       }),
   );
 
+  it.effect.each([{ profileName: null }, { profileName: "Other account" }])(
+    "blocks explicit Action intent $profileName when retained transcript clearing fails",
+    ({ profileName }) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const deniedLogs = new Set<string>();
+        const failingFs = FileSystem.FileSystem.of({
+          ...fs,
+          writeFileString: (file, content, options) =>
+            deniedLogs.has(file)
+              ? Effect.fail(
+                  new PlatformError.PlatformError(
+                    new PlatformError.SystemError({
+                      _tag: "PermissionDenied",
+                      module: "FileSystem",
+                      method: "writeFileString",
+                    }),
+                  ),
+                )
+              : fs.writeFileString(file, content, options),
+        });
+        const { manager, ptyAdapter, logsDir } = yield* createManager().pipe(
+          Effect.provideService(FileSystem.FileSystem, failingFs),
+        );
+        const terminalId = "term-action-a";
+        const target = { threadId: "thread-1", terminalId };
+        const unrelated = { threadId: "thread-1", terminalId: "term-action-b" };
+        yield* manager.open(
+          openInput({ terminalId: unrelated.terminalId, terminalLinkProfileName: "Work account" }),
+        );
+        const output = yield* Queue.unbounded<string>();
+        const stop = yield* manager.subscribe((event) =>
+          event.type === "output"
+            ? Queue.offer(output, event.terminalId).pipe(Effect.asVoid)
+            : Effect.void,
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(stop));
+        yield* Effect.sync(() => ptyAdapter.processes[0]!.emitData("unrelated output\n"));
+        assert.equal(yield* Queue.take(output), unrelated.terminalId);
+        assert.equal(yield* manager.history(unrelated), "unrelated output\n");
+        const logPath = yield* multiTerminalHistoryLogPath(logsDir, target.threadId, terminalId);
+        yield* fs.writeFileString(logPath, "stale Action output\n");
+        yield* fs.writeFileString(`${logPath}.profile.json`, "invalid metadata");
+        deniedLogs.add(logPath);
+
+        const result = yield* manager
+          .open(openInput({ terminalId, terminalLinkProfileName: profileName }))
+          .pipe(Effect.result);
+        assert.equal(result._tag, "Failure");
+        if (result._tag === "Failure") {
+          assert.equal(result.failure._tag, "TerminalHistoryError");
+          if (result.failure._tag === "TerminalHistoryError")
+            assert.equal(result.failure.operation, "write");
+        }
+        expect(ptyAdapter.spawnInputs).toHaveLength(1);
+        assert.equal(yield* fs.readFileString(logPath), "stale Action output\n");
+        assert.equal(yield* fs.readFileString(`${logPath}.profile.json`), "invalid metadata");
+        const omitted = yield* manager.open(openInput({ terminalId })).pipe(Effect.result);
+        assert.equal(omitted._tag, "Failure");
+        if (omitted._tag === "Failure" && omitted.failure._tag === "TerminalHistoryError")
+          assert.equal(omitted.failure.operation, "read");
+        expect((yield* manager.refreshMetadata).map((entry) => entry.terminalId)).toEqual([
+          unrelated.terminalId,
+        ]);
+        const unrelatedSnapshot = yield* manager.open(
+          openInput({ terminalId: unrelated.terminalId }),
+        );
+        assert.equal(unrelatedSnapshot.history, "unrelated output\n");
+        assert.equal(unrelatedSnapshot.terminalLinkProfileName, "Work account");
+        assert.equal(ptyAdapter.processes[0]!.killed, false);
+
+        // Ordinary output remains best effort even when its transcript cannot be written.
+        const unrelatedLog = yield* multiTerminalHistoryLogPath(
+          logsDir,
+          unrelated.threadId,
+          unrelated.terminalId,
+        );
+        deniedLogs.add(unrelatedLog);
+        yield* Effect.sync(() => ptyAdapter.processes[0]!.emitData("more output\n"));
+        assert.equal(yield* Queue.take(output), unrelated.terminalId);
+        assert.equal(yield* manager.history(unrelated), "unrelated output\n");
+        const live = yield* manager.open(openInput({ terminalId: unrelated.terminalId }));
+        assert.equal(live.history, "unrelated output\nmore output\n");
+        assert.equal(live.status, "running");
+        assert.equal(ptyAdapter.processes[0]!.killed, false);
+        expect(ptyAdapter.spawnInputs).toHaveLength(1);
+
+        deniedLogs.clear();
+        const replaced = yield* manager.open(
+          openInput({ terminalId, terminalLinkProfileName: profileName }),
+        );
+        assert.equal(replaced.history, "");
+        assert.equal(replaced.terminalLinkProfileName, profileName ?? undefined);
+        yield* manager.close(target);
+        const reopened = yield* manager.open(openInput({ terminalId }));
+        assert.equal(reopened.terminalLinkProfileName, profileName ?? undefined);
+        assert.equal(reopened.history, "");
+      }),
+  );
+
   it.effect("fails a named Action launch before spawning when its intent cannot be stored", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

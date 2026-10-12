@@ -3192,8 +3192,19 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         input.terminalLinkProfileName !== undefined &&
         (retainedProfile._tag === "Failure" || terminalLinkProfileName !== retainedProfileName)
       ) {
+        // Replacement must clear the transcript before storing new intent or spawning.
+        yield* fileSystem.writeFileString(historyPath(input.threadId, terminalId), "").pipe(
+          Effect.mapError(
+            (cause) =>
+              new TerminalHistoryError({
+                operation: "write",
+                threadId: input.threadId,
+                terminalId,
+                cause,
+              }),
+          ),
+        );
         history.clear();
-        yield* persistHistory(input.threadId, terminalId, history);
       }
       const cols = input.cols ?? DEFAULT_OPEN_COLS;
       const rows = input.rows ?? DEFAULT_OPEN_ROWS;
