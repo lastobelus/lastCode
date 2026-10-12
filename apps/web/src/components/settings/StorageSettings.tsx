@@ -167,12 +167,6 @@ function RetentionControl({
   );
 }
 
-const KEEP_WHEN_LABELS = {
-  "any-local-files": "Any local files",
-  "uncommitted-changes": "Uncommitted changes",
-  "tracked-changes": "Edited tracked files",
-} as const;
-
 function CleanupResults({
   report,
   environmentLabel,
@@ -566,7 +560,7 @@ export function StorageSettingsPanel() {
             <SettingsRow
               title="Delete inactive worktrees"
               status={ruleStatus("worktreeAfterDays")}
-              description="Remove worktrees after their threads have been inactive for this many days. Branches and thread history are kept."
+              description="Clean archived worktrees are eligible immediately when enabled. Unarchived worktrees use the configured delay. Branches and thread history are kept."
               serverScoped={!isProjectScope}
               control={
                 <RetentionControl
@@ -608,41 +602,10 @@ export function StorageSettingsPanel() {
             ) && (
               <SettingsRow
                 {...searchableSetting("storage-worktree-keep-when")}
-                status={ruleStatus("worktreeKeepWhen")}
-                description={
-                  settings.worktreeKeepWhen === "any-local-files"
-                    ? "Includes ignored files, except node_modules."
-                    : settings.worktreeKeepWhen === "tracked-changes"
-                      ? "Deletes untracked and ignored files, including .env."
-                      : "Keeps edits and untracked files. Deletes ignored files, including .env."
-                }
+                title="Local work is preserved"
+                description="Edits, untracked files and unknown ignored files keep the checkout. Verified generated files are reclaimed separately."
                 serverScoped={!isProjectScope}
-                control={
-                  <Select
-                    value={ruleStatus("worktreeKeepWhen") ? null : settings.worktreeKeepWhen}
-                    onValueChange={(next) => {
-                      if (
-                        next === "any-local-files" ||
-                        next === "uncommitted-changes" ||
-                        next === "tracked-changes"
-                      )
-                        updateWorktree({ worktreeKeepWhen: next });
-                    }}
-                  >
-                    <SelectTrigger size="sm" aria-label="Keep worktrees with local changes">
-                      <SelectValue>
-                        {ruleStatus("worktreeKeepWhen")
-                          ? "Mixed"
-                          : KEEP_WHEN_LABELS[settings.worktreeKeepWhen]}
-                      </SelectValue>
-                    </SelectTrigger>
-                    <SelectPopup align="end" alignItemWithTrigger={false}>
-                      <SelectItem value="any-local-files">Any local files</SelectItem>
-                      <SelectItem value="uncommitted-changes">Uncommitted changes</SelectItem>
-                      <SelectItem value="tracked-changes">Edited tracked files</SelectItem>
-                    </SelectPopup>
-                  </Select>
-                }
+                control={null}
               />
             )}
           </>

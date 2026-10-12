@@ -155,13 +155,14 @@ Inherit follows each machine's rules; Off disables automatic worktree deletion a
 removal for that project. Custom applies separate worktree rules to the selected project or checkout.
 Browser captures and log retention remain machine-wide.
 
-Worktrees can be removed after a chosen number of inactive days, after merging, or when they
-have no commits beyond the default branch. Only T3-managed worktrees are eligible. Active
-sessions and shared worktrees prevent removal. **Keep worktrees with local changes** defaults
-to **Uncommitted changes**, which protects tracked edits and untracked files but deletes ignored
-files such as `.env` and build output. **Any local files** also protects ignored files other than
-`node_modules`. **Edited tracked files** protects only tracked edits and allows untracked and
-ignored files to be deleted. Branches and thread history stay; starting another turn recreates the checkout.
+When **Delete inactive worktrees** is enabled, clean archived checkouts are eligible
+immediately. Unarchived checkouts use the delay configured in settings. Worktrees can also
+be removed after merging or when they have no commits beyond the default branch. Only
+registered linked worktrees in configured cleanup locations are eligible. Active consumers
+prevent removal. Shared families qualify only when every owner is archived and every owner
+has cleanup enabled. Edits, untracked files and unknown ignored files—including notes, `.env`
+and local runtime state—always preserve a checkout. Branches and thread history stay;
+starting another turn recreates the checkout.
 Merge cleanup requires a merged pull request whose commits are included in the remote default
 branch. A squash or rebase merge on GitHub also counts when the pull request targeted the default
 branch and the worktree is still at the pull request's last commit.

@@ -39,6 +39,7 @@ import { vi } from "vite-plus/test";
 import * as NodeFSP from "node:fs/promises";
 import * as GeneratedDependencies from "./workspace/GeneratedDependencies.ts";
 import * as DependencyMounts from "./workspace/DependencyMounts.ts";
+import * as WorktreeConsumers from "./workspace/WorktreeConsumers.ts";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const original = await importOriginal<typeof NodeFSP>();
@@ -296,7 +297,7 @@ const cleanupFixture = Effect.gen(function* () {
   yield* fs.writeFileString(globalExcludes, "");
   yield* command(repo, ["config", "core.excludesFile", globalExcludes]);
   yield* fs.writeFileString(`${repo}/tracked.txt`, "original\n");
-  yield* fs.writeFileString(`${repo}/.gitignore`, ".env\ndist/\nnode_modules/\n");
+  yield* fs.writeFileString(`${repo}/.gitignore`, ".env\ndist/\nnode_modules/\n.t3/\n");
   yield* command(repo, ["add", "."]);
   yield* command(repo, ["commit", "-m", "initial"]);
   yield* fs.makeDirectory(config.worktreesDir, { recursive: true });
@@ -720,6 +721,18 @@ const cleanupFixture = Effect.gen(function* () {
         storageCleanup: { ...settings.storageCleanup, worktreeDependenciesAfterDays: days },
       };
     },
+    setRetention: (worktreeAfterDays: number | null) => {
+      settings = { ...settings, storageCleanup: { ...settings.storageCleanup, worktreeAfterDays } };
+    },
+    setProjectWholeCleanupOff: (projectId: ProjectId) => {
+      settings = {
+        ...settings,
+        projectSettingsOverrides: {
+          ...settings.projectSettingsOverrides,
+          [projectId]: { worktreeCleanup: { mode: "off" } },
+        },
+      };
+    },
     disable: () => {
       settings = {
         ...settings,
@@ -808,6 +821,8 @@ const runCleanupTest = <A, E>(
     // Context.Reference falls back to the real host inventory. Keep this test
     // default outside the fixture so individual tests can override it.
     Effect.provideService(GeneratedDependencies.ProcessWorkingDirectories, Effect.succeed([])),
+    Effect.provideService(WorktreeConsumers.ProcessPaths, Effect.succeed([])),
+    Effect.provideService(DependencyMounts.MountPoints, Effect.succeed([])),
     Effect.provide(cleanupTestLayer),
     Effect.scoped,
   );
@@ -1203,7 +1218,187 @@ describe("dependency cleanup reports", () => {
 });
 
 describe("storage cleanup reports and local file policies", () => {
-  it.live("measures nested regular files without following symlinks", () =>
+  it.live("reclaims a clean archived checkout immediately and preserves its branch history", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture;
+        fixture.setRetention(90);
+        fixture.setThreads([
+          shell({
+            branch: "feature",
+            worktreePath: fixture.worktree,
+            archivedAt: at(-1),
+            createdAt: at(-1),
+            latestUserMessageAt: at(-1),
+            latestRunCompletedAt: at(-1),
+          }),
+        ]);
+        yield* fixture.fs.writeFileString(
+          `${fixture.worktree}/tracked.txt`,
+          "unique branch work\n",
+        );
+        yield* fixture.command(fixture.worktree, ["add", "tracked.txt"]);
+        yield* fixture.command(fixture.worktree, ["commit", "-m", "unique work remains on branch"]);
+        const before = (yield* fixture.command(fixture.repo, ["rev-parse", "refs/heads/feature"]))
+          .stdout;
+        const checkpoint = "refs/t3/orchestration-v2/checkpoints/generic-checkpoint";
+        yield* fixture.command(fixture.repo, ["update-ref", checkpoint, before.trim()]);
+        const report = yield* fixture.service.runNow;
+        expect(report.entries[0]).toMatchObject({
+          outcome: "removed",
+          reason: "All thread owners are archived",
+        });
+        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(false);
+        expect(
+          (yield* fixture.command(fixture.repo, ["rev-parse", "refs/heads/feature"])).stdout,
+        ).toBe(before);
+        expect((yield* fixture.command(fixture.repo, ["rev-parse", checkpoint])).stdout).toBe(
+          before,
+        );
+      }),
+    ),
+  );
+  it.live.each([3, 90])(
+    "keeps a recent unarchived checkout for its configured %s day delay",
+    (days) =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          const fixture = yield* cleanupFixture;
+          fixture.setRetention(days);
+          fixture.setThreads([
+            shell({
+              branch: "feature",
+              worktreePath: fixture.worktree,
+              latestUserMessageAt: at(-DAY_MS),
+            }),
+          ]);
+          expect((yield* fixture.service.runNow).entries[0]).toMatchObject({ outcome: "kept" });
+          expect(yield* fixture.fs.exists(fixture.worktree)).toBe(true);
+        }),
+      ),
+  );
+  it.live("reclaims shared archived families but preserves an Off or unarchived owner", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture;
+        const first = shell({
+          branch: "feature",
+          worktreePath: fixture.worktree,
+          archivedAt: at(-1),
+        });
+        const sibling = shell({
+          id: ThreadId.make("sibling"),
+          branch: "feature",
+          worktreePath: fixture.worktree,
+          archivedAt: at(-1),
+        });
+        fixture.setThreads([first, { ...sibling, archivedAt: null }]);
+        expect((yield* fixture.service.runNow).entries[0]?.reason).toBe("Shared by 2 threads");
+        const otherProject = ProjectId.make("off-owner-project");
+        fixture.setProjectWholeCleanupOff(otherProject);
+        fixture.setThreads([first, { ...sibling, projectId: otherProject }]);
+        expect((yield* fixture.service.runNow).entries[0]?.reason).toBe(
+          "Whole-worktree cleanup is off for an owner",
+        );
+        fixture.setThreads([first, sibling]);
+        expect((yield* fixture.service.runNow).entries[0]).toMatchObject({ outcome: "removed" });
+      }),
+    ),
+  );
+  it.live("protects an archived checkout used through an open output path with cwd elsewhere", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        let processPaths: readonly string[] = [];
+        const fixture = yield* cleanupFixture.pipe(
+          Effect.provideService(
+            WorktreeConsumers.ProcessPaths,
+            Effect.sync(() => processPaths),
+          ),
+        );
+        fixture.setThreads([
+          shell({ branch: "feature", worktreePath: fixture.worktree, archivedAt: at(-1) }),
+        ]);
+        processPaths = [`${fixture.worktree}/dist/bin.mjs`];
+        const report = yield* fixture.service.runNow;
+        expect(report.entries[0]?.reason).toContain("process is using a file");
+        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(true);
+        processPaths = [];
+        expect((yield* fixture.service.runNow).entries[0]).toMatchObject({ outcome: "removed" });
+      }),
+    ),
+  );
+  it.live("protects unknown ignored additions made while measuring a clean archived checkout", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        let measuredRoot: string | undefined;
+        let additionWritten = false;
+        const fixture = yield* cleanupFixture.pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            readDirectory: (directory, options) =>
+              Effect.gen(function* () {
+                if (directory === measuredRoot && !additionWritten) {
+                  additionWritten = true;
+                  yield* fs.makeDirectory(`${directory}/.t3`, { recursive: true });
+                  yield* fs.writeFileString(
+                    `${directory}/.t3/retained-notes.txt`,
+                    "new unique notes\n",
+                  );
+                }
+                return yield* fs.readDirectory(directory, options);
+              }),
+          }),
+        );
+        measuredRoot = yield* fs.realPath(fixture.worktree);
+        fixture.setThreads([
+          shell({ branch: "feature", worktreePath: fixture.worktree, archivedAt: at(-1) }),
+        ]);
+        expect((yield* fixture.service.runNow).entries[0]).toMatchObject({
+          outcome: "kept",
+          bytes: null,
+        });
+        expect(yield* fs.readFileString(`${fixture.worktree}/.t3/retained-notes.txt`)).toBe(
+          "new unique notes\n",
+        );
+      }),
+    ),
+  );
+  it.live.each([".t3/notes.txt", "research/retained.txt", "node_modules/manual.txt"])(
+    "preserves unknown ignored %s even for an archived checkout and permissive setting",
+    (relative) =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          const fixture = yield* cleanupFixture;
+          fixture.setPolicy("tracked-changes");
+          fixture.setThreads([
+            shell({ branch: "feature", worktreePath: fixture.worktree, archivedAt: at(-1) }),
+          ]);
+          if (relative.startsWith("research/"))
+            yield* fixture.command(fixture.worktree, [
+              "config",
+              "core.excludesFile",
+              `${fixture.repo}/ignore-rules`,
+            ]);
+          if (relative.startsWith("research/"))
+            yield* fixture.fs.writeFileString(`${fixture.repo}/ignore-rules`, "research/\n");
+          yield* fixture.fs.makeDirectory(
+            `${fixture.worktree}/${relative.split("/").slice(0, -1).join("/")}`,
+            { recursive: true },
+          );
+          yield* fixture.fs.writeFileString(
+            `${fixture.worktree}/${relative}`,
+            "unique retained bytes\n",
+          );
+          const report = yield* fixture.service.runNow;
+          expect(report.entries[0]).toMatchObject({ outcome: "kept", bytes: null });
+          expect(yield* fixture.fs.readFileString(`${fixture.worktree}/${relative}`)).toBe(
+            "unique retained bytes\n",
+          );
+        }),
+      ),
+  );
+  it.live("preserves unrecognized ignored installs without following their links", () =>
     runCleanupTest(
       Effect.gen(function* () {
         const { service, fs, worktree, setPolicy } = yield* cleanupFixture;
@@ -1219,9 +1414,11 @@ describe("storage cleanup reports and local file policies", () => {
         yield* fs.symlink(`${outside}/external`, `${worktree}/node_modules/file-link`);
         yield* fs.symlink(`${outside}/missing`, `${worktree}/node_modules/dangling-link`);
         const report = yield* service.runNow;
-        const bytes = sizes.reduce((sum, size) => sum + size, 8);
-        expect(report.entries[0]).toMatchObject({ outcome: "removed", bytes, files: null });
-        expect(report.bytesFreed).toBe(bytes);
+        expect(sizes.length).toBeGreaterThan(0);
+        expect(report.entries[0]).toMatchObject({ outcome: "kept", bytes: null, files: null });
+        expect(report.entries[0]?.reason).toContain("ignored files (node_modules/)");
+        expect(report.bytesFreed).toBe(0);
+        expect(yield* fs.exists(`${worktree}/node_modules/nested/file`)).toBe(true);
         expect(yield* fs.readFileString(`${outside}/external`)).toBe("must not count");
       }),
     ),
@@ -1269,7 +1466,6 @@ describe("storage cleanup reports and local file policies", () => {
         );
         measuredPath = yield* fs.realPath(fixture.worktree);
         fixture.setPolicy("tracked-changes");
-        yield* fs.writeFileString(`${fixture.worktree}/notes.txt`, "untracked\n");
         const cleanup = yield* fixture.service.runNow.pipe(Effect.forkChild);
         yield* Deferred.await(measuring);
         if (owner === "thread")
@@ -1287,7 +1483,6 @@ describe("storage cleanup reports and local file policies", () => {
         });
         expect(report.bytesFreed).toBe(0);
         expect(yield* fs.exists(fixture.worktree)).toBe(true);
-        expect(yield* fs.readFileString(`${fixture.worktree}/notes.txt`)).toBe("untracked\n");
       }),
     ),
   );
@@ -1406,11 +1601,11 @@ describe("storage cleanup reports and local file policies", () => {
   );
   it.live.each([
     ["any-local-files", ".env", "kept"],
-    ["uncommitted-changes", ".env", "removed"],
-    ["tracked-changes", ".env", "removed"],
+    ["uncommitted-changes", ".env", "kept"],
+    ["tracked-changes", ".env", "kept"],
     ["any-local-files", "notes.txt", "kept"],
     ["uncommitted-changes", "notes.txt", "kept"],
-    ["tracked-changes", "notes.txt", "removed"],
+    ["tracked-changes", "notes.txt", "kept"],
     ["any-local-files", "tracked.txt", "kept"],
     ["uncommitted-changes", "tracked.txt", "kept"],
     ["tracked-changes", "tracked.txt", "kept"],
@@ -1458,7 +1653,6 @@ describe("storage cleanup reports and local file policies", () => {
         const fixture = yield* cleanupFixture;
         fixture.setPolicy("tracked-changes");
         fixture.editBeforeRemoval();
-        yield* fixture.fs.writeFileString(`${fixture.worktree}/notes.txt`, "untracked\n");
         const report = yield* fixture.service.runNow;
         expect(report.entries[0]).toMatchObject({ outcome: "failed", bytes: null, files: null });
         expect(report.bytesFreed).toBe(0);
@@ -1466,7 +1660,6 @@ describe("storage cleanup reports and local file policies", () => {
         expect(yield* fixture.fs.readFileString(`${fixture.worktree}/tracked.txt`)).toBe(
           "late edit\n",
         );
-        expect(yield* fixture.fs.exists(`${fixture.worktree}/notes.txt`)).toBe(false);
       }),
     ),
   );
