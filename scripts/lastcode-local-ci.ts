@@ -22,6 +22,7 @@ import {
 } from "./lib/lastcode-ci-budget.ts";
 import { resolveQuickCiScope, type QuickCiScope } from "./lib/lastcode-ci-scope.ts";
 import { runCiProcess } from "./lib/lastcode-ci-process.ts";
+import { recordDependencyUse } from "../packages/shared/src/dependencyActivity.ts";
 
 export const LASTCODE_BASE_BRANCH = "lastcode/main";
 export const LASTCODE_ORIGIN_REMOTE = "origin";
@@ -1134,19 +1135,31 @@ async function executeLocalCi(
             : {}),
         };
         const inheritedEnv = cleanGitEnvironment(env);
-        await runCiProcess({
-          cwd: repoRoot,
-          command: step.command,
-          args: step.args,
-          signal,
-          onSpawn: (pid) => lease.recordChild(pid),
-          env: {
-            ...inheritedEnv,
-            GOMAXPROCS: String(policy.compilerThreads),
-            PATH: `${NodePath.resolve(repoRoot, "node_modules/.bin")}${NodePath.delimiter}${inheritedEnv.PATH ?? ""}`,
-          },
-          ...(step.failureHelp ? { failureHelp: step.failureHelp } : {}),
-        });
+        const noteDependencyUse = () => {
+          // Planned Vite+ steps execute installed test/lint/build tools. Git-only
+          // admission, status, wait and dry-run paths don't count as dependency use.
+          if (step.command !== "vp") return;
+          try { recordDependencyUse(repoRoot, Date.now()); }
+          catch { console.warn("[lastcode:ci] Could not record dependency use."); }
+        };
+        noteDependencyUse();
+        try {
+          await runCiProcess({
+            cwd: repoRoot,
+            command: step.command,
+            args: step.args,
+            signal,
+            onSpawn: (pid) => lease.recordChild(pid),
+            env: {
+              ...inheritedEnv,
+              GOMAXPROCS: String(policy.compilerThreads),
+              PATH: `${NodePath.resolve(repoRoot, "node_modules/.bin")}${NodePath.delimiter}${inheritedEnv.PATH ?? ""}`,
+            },
+            ...(step.failureHelp ? { failureHelp: step.failureHelp } : {}),
+          });
+        } finally {
+          noteDependencyUse();
+        }
       }
     } finally {
       NodeFS.rmSync(transferOutputDirectory, { recursive: true, force: true });
