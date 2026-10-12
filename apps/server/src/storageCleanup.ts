@@ -1213,19 +1213,8 @@ const make = Effect.gen(function* () {
     entries: StorageCleanupReportEntry[],
     runId: string,
   ) {
-    const snapshot = yield* readThreads();
-    const deleted = yield* readDeletedDependencyCandidates();
-    const owned = new Set<string>();
-    for (const thread of [...snapshot.threads, ...deleted]) {
-      if (thread.worktreePath === null) continue;
-      const worktreePath = path.resolve(thread.worktreePath);
-      const canonicalPath = yield* fs
-        .realPath(worktreePath)
-        .pipe(Effect.orElseSucceed(() => worktreePath));
-      owned.add(canonicalPath);
-    }
-    const seenRepositories = new Set<string>();
     const seenWorktrees = new Set<string>();
+    const worktrees: string[] = [];
     const managedRoots: string[] = [];
     for (const directory of managedWorktreesDirectories(
       yield* settingsService.getSettings,
@@ -1239,7 +1228,8 @@ const make = Effect.gen(function* () {
       );
       if (root !== null && !isFilesystemRoot(root, path)) managedRoots.push(root);
     }
-    for (const project of snapshot.projects) {
+    const seenRepositories = new Set<string>();
+    for (const project of yield* projectStore.listShells()) {
       const root = path.resolve(project.workspaceRoot);
       if (seenRepositories.has(root)) continue;
       seenRepositories.add(root);
@@ -1252,26 +1242,50 @@ const make = Effect.gen(function* () {
       );
       for (const candidate of paths) {
         const worktreePath = path.resolve(candidate);
-        if (
-          !managedRoots.some((managedRoot) => inside(managedRoot, worktreePath)) ||
-          owned.has(worktreePath) ||
-          seenWorktrees.has(worktreePath)
-        )
-          continue;
+        if (!managedRoots.some((managedRoot) => inside(managedRoot, worktreePath))) continue;
+        if (seenWorktrees.has(worktreePath)) continue;
         seenWorktrees.add(worktreePath);
-        const entry: StorageCleanupReportEntry = {
-          kind: "worktree",
-          outcome: "kept",
-          reason: "No owning thread; retained for review",
-          path: worktreePath,
-          threadId: null,
-          threadTitle: null,
-          bytes: null,
-          files: null,
-        };
-        entries.push(entry);
-        yield* audit({ event: "unowned-worktree", runId, ...entry });
+        worktrees.push(worktreePath);
       }
+    }
+
+    // Inventory may take long enough for thread ownership to change. Capture it
+    // afterward, and defer labels if ownership moves while alias paths resolve.
+    const ownershipSequence = yield* readApplicationSequence();
+    const snapshot = yield* readThreads();
+    const deleted = yield* readDeletedDependencyCandidates();
+    const owned = new Set<string>();
+    for (const thread of [...snapshot.threads, ...deleted]) {
+      if (thread.worktreePath === null) continue;
+      const worktreePath = path.resolve(thread.worktreePath);
+      const canonicalPath = yield* fs
+        .realPath(worktreePath)
+        .pipe(Effect.orElseSucceed(() => worktreePath));
+      owned.add(canonicalPath);
+    }
+    if (yield* ownershipChangedSince(ownershipSequence)) {
+      yield* audit({
+        event: "unowned-worktree-inventory-deferred",
+        runId,
+        reason: "thread ownership changed while resolving known worktree paths",
+        candidateCount: worktrees.length,
+      });
+      return;
+    }
+    for (const worktreePath of worktrees) {
+      if (owned.has(worktreePath)) continue;
+      const entry: StorageCleanupReportEntry = {
+        kind: "worktree",
+        outcome: "kept",
+        reason: "No owning thread; retained for review",
+        path: worktreePath,
+        threadId: null,
+        threadTitle: null,
+        bytes: null,
+        files: null,
+      };
+      entries.push(entry);
+      yield* audit({ event: "unowned-worktree", runId, ...entry });
     }
   });
 

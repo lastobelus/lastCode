@@ -274,6 +274,7 @@ const cleanupFixture = Effect.gen(function* () {
   let projectRoots = [{ id: ProjectId.make("project-1"), workspaceRoot: repo }];
   let editBeforeRemoval = false;
   let onDependencyInspection: (() => void) | null = null;
+  let onWorktreeInventory: (() => void) | null = null;
   let openSessionCwd: string | null = null;
   let fullStatusCalls = 0;
   let previewPaths: ReadonlyArray<string> = [];
@@ -298,6 +299,16 @@ const cleanupFixture = Effect.gen(function* () {
         fullStatusCalls++;
         return git.statusDetailsLocal(...args);
       },
+      listWorktreePaths: (cwd) =>
+        git.listWorktreePaths(cwd).pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              const callback = onWorktreeInventory;
+              onWorktreeInventory = null;
+              callback?.();
+            }),
+          ),
+        ),
     }),
     Effect.provideService(Settings.ServerSettingsService, {
       getSettings: Effect.sync(() => settings),
@@ -411,6 +422,11 @@ const cleanupFixture = Effect.gen(function* () {
     },
     addThreadOnDependencyInspection: (thread: OrchestrationV2ThreadShell) => {
       onDependencyInspection = () => {
+        threads = [...threads, thread];
+      };
+    },
+    addThreadOnWorktreeInventory: (thread: OrchestrationV2ThreadShell) => {
+      onWorktreeInventory = () => {
         threads = [...threads, thread];
       };
     },
@@ -1007,6 +1023,51 @@ describe("storage cleanup reports and local file policies", () => {
           ),
         ).toEqual([]);
         expect(yield* fixture.fs.exists(newlyOwned)).toBe(true);
+      }),
+    ),
+  );
+  it.live("does not label a worktree unowned when ownership appears during Git inventory", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture;
+        fixture.disable();
+        const ownedDuringInventory = `${fixture.config.worktreesDir}/owned-during-inventory`;
+        yield* fixture.command(fixture.repo, [
+          "worktree",
+          "add",
+          "--detach",
+          ownedDuringInventory,
+          "HEAD",
+        ]);
+        fixture.addThreadOnWorktreeInventory(
+          shell({
+            id: ThreadId.make("inventory-owner"),
+            branch: "main",
+            worktreePath: ownedDuringInventory,
+          }),
+        );
+
+        const report = yield* fixture.service.runNow;
+        expect(
+          report.entries.some(
+            (entry) =>
+              entry.path === ownedDuringInventory &&
+              entry.reason === "No owning thread; retained for review",
+          ),
+        ).toBe(false);
+        const auditText = yield* fixture.fs.readFileString(
+          `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
+        );
+        const auditRecords = auditText
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as { event?: string; path?: string });
+        expect(
+          auditRecords.some(
+            (record) => record.event === "unowned-worktree" && record.path === ownedDuringInventory,
+          ),
+        ).toBe(false);
+        expect(yield* fixture.fs.exists(ownedDuringInventory)).toBe(true);
       }),
     ),
   );
