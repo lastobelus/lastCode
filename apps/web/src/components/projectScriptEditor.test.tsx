@@ -1,4 +1,5 @@
-import { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId, ProjectScript } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import { act, StrictMode, type ReactNode } from "react";
@@ -39,12 +40,18 @@ vi.mock("./ui/popover", () => ({
 vi.mock("./ui/switch", () => ({ Switch: "input" }));
 vi.mock("./ui/textarea", () => ({ Textarea: "textarea" }));
 
+import { buildProjectScript } from "~/projectScripts";
+
 import {
   EMPTY_PROJECT_SCRIPT_INPUT,
   ProjectScriptEditorDialog,
   type ProjectScriptActionResult,
   type ProjectScriptEditorRequest,
 } from "./projectScriptEditor";
+
+const savedActionJson = Schema.fromJsonString(ProjectScript);
+const encodeSavedAction = Schema.encodeSync(savedActionJson);
+const decodeSavedAction = Schema.decodeUnknownSync(savedActionJson);
 
 const onSubmit = vi.fn<Parameters<typeof ProjectScriptEditorDialog>[0]["onSubmit"]>();
 const onClose = vi.fn();
@@ -117,10 +124,86 @@ describe("project action editor save lifecycle", () => {
     onSubmit.mockResolvedValue(AsyncResult.success(undefined));
     const editing = request("sign-in");
     open({ ...editing, initial: { ...editing.initial, terminalLinkProfileName: "Work account" } });
+    act(() => {
+      renderer!.root.findByProps({ id: "script-name" }).props.onChange({
+        target: { value: "Updated sign-in" },
+      });
+    });
     await act(async () => {
       await submit();
     });
-    expect(onSubmit.mock.calls[0]?.[1].terminalLinkProfileName).toBe("Work account");
+    const saved = buildProjectScript(editing.scriptId!, onSubmit.mock.calls[0]![1]);
+    expect(saved.name).toBe("Updated sign-in");
+    expect(saved.terminalLinkProfileName).toBe("Work account");
+  });
+
+  it.each([
+    { initial: undefined, edited: "", expected: undefined },
+    { initial: undefined, edited: " Work account ", expected: "Work account" },
+    { initial: "Work account", edited: " Other account ", expected: "Other account" },
+    { initial: "Work account", edited: "", expected: undefined },
+    { initial: "Work account", edited: "   ", expected: undefined },
+  ])(
+    "saves edited terminal profile intent: $initial → $expected",
+    async ({ initial, edited, expected }) => {
+      onSubmit.mockResolvedValue(AsyncResult.success(undefined));
+      const editing = request("sign-in");
+      open({
+        ...editing,
+        initial: {
+          ...editing.initial,
+          ...(initial === undefined ? {} : { terminalLinkProfileName: initial }),
+        },
+      });
+      act(() => {
+        renderer!.root.findByProps({ id: "script-terminal-link-profile" }).props.onChange({
+          target: { value: edited },
+        });
+      });
+      await act(async () => {
+        await submit();
+      });
+      const payload = onSubmit.mock.calls[0]![1];
+      const saved = encodeSavedAction(buildProjectScript(editing.scriptId!, payload));
+      const restored = decodeSavedAction(saved);
+      if (expected === undefined) {
+        expect(payload).not.toHaveProperty("terminalLinkProfileName");
+        expect(restored).not.toHaveProperty("terminalLinkProfileName");
+      } else {
+        expect(restored.terminalLinkProfileName).toBe(expected);
+      }
+    },
+  );
+
+  it("clears an imported terminal profile using the editor reset control", async () => {
+    onSubmit.mockResolvedValue(AsyncResult.success(undefined));
+    const editing = request("sign-in");
+    open({ ...editing, initial: { ...editing.initial, terminalLinkProfileName: "Work account" } });
+    act(() => {
+      renderer!.root.findByProps({ "aria-label": "Clear terminal link profile" }).props.onClick();
+    });
+    await act(async () => {
+      await submit();
+    });
+    expect(buildProjectScript(editing.scriptId!, onSubmit.mock.calls[0]![1])).not.toHaveProperty(
+      "terminalLinkProfileName",
+    );
+  });
+
+  it("hydrates a replacement Action's profile without retaining unsaved edits", async () => {
+    onSubmit.mockResolvedValue(AsyncResult.success(undefined));
+    const first = request("sign-in");
+    open({ ...first, initial: { ...first.initial, terminalLinkProfileName: "Work account" } });
+    act(() => {
+      renderer!.root.findByProps({ id: "script-terminal-link-profile" }).props.onChange({
+        target: { value: "Unsaved account" },
+      });
+    });
+    open(request("build"));
+    await act(async () => {
+      await submit();
+    });
+    expect(onSubmit.mock.calls[0]![1]).not.toHaveProperty("terminalLinkProfileName");
   });
 
   it("blocks repeated submits and edits until the current save completes", async () => {
