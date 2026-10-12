@@ -2589,8 +2589,8 @@ const make = Effect.gen(function* () {
     });
   };
 
-  const profileDesktopHost = async (request: PreviewAutomationRequest) => {
-    if (!request.agentSessionId) return undefined;
+  const profileHost = async (request: PreviewAutomationRequest) => {
+    if (!request.agentSessionId) return { desktopHostId: undefined, environmentHosted: false };
     const owned = [...tabs.values()].filter(
       (tab) => tab.threadId === request.threadId && tab.control.agentId === request.agentSessionId,
     );
@@ -2598,7 +2598,11 @@ const make = Effect.gen(function* () {
       request.tabIdExplicit && request.tabId !== undefined
         ? tabs.get(tabKey(request.threadId, request.tabId))
         : owned.find((tab) => tab.tabId === request.tabId);
-    if (current) return current.desktop ? (current.desktopHostId ?? "local") : undefined;
+    if (current)
+      return {
+        desktopHostId: current.desktop ? (current.desktopHostId ?? "local") : undefined,
+        environmentHosted: environmentProfileSessions.has(tabKey(current.threadId, current.tabId)),
+      };
     if (request.tabId !== undefined) {
       const { sessions } = await Effect.runPromise(manager.list({ threadId: request.threadId }));
       const retained = sessions.find(
@@ -2611,8 +2615,14 @@ const make = Effect.gen(function* () {
         retained?.backingPage === "desktop-popup" ||
         retained?.backingPage === "desktop-root"
       )
-        return retained.desktopHostId ?? "local";
-      if (retained) return undefined;
+        return { desktopHostId: retained.desktopHostId ?? "local", environmentHosted: false };
+      if (retained)
+        return {
+          desktopHostId: undefined,
+          environmentHosted: environmentProfileSessions.has(
+            tabKey(request.threadId, retained.tabId),
+          ),
+        };
       if (request.tabIdExplicit)
         throw new ServerBrowserPage.ServerBrowserOperationError(
           "PreviewAutomationTabNotFoundError",
@@ -2620,7 +2630,12 @@ const make = Effect.gen(function* () {
         );
     }
     const latest = owned.sort((left, right) => right.createdAt - left.createdAt)[0];
-    return latest?.desktop ? (latest.desktopHostId ?? "local") : undefined;
+    return {
+      desktopHostId: latest?.desktop ? (latest.desktopHostId ?? "local") : undefined,
+      environmentHosted:
+        latest !== undefined &&
+        environmentProfileSessions.has(tabKey(latest.threadId, latest.tabId)),
+    };
   };
 
   const runOperation = async (
@@ -2640,7 +2655,7 @@ const make = Effect.gen(function* () {
           request.threadId,
         );
       case "profiles": {
-        const desktopHostId = await profileDesktopHost(request);
+        const { desktopHostId } = await profileHost(request);
         const profiles = await Effect.runPromise(
           desktopChannel.getProfiles({
             threadId: request.threadId,
@@ -2662,8 +2677,12 @@ const make = Effect.gen(function* () {
             "The agent session is missing. Reconnect the provider.",
           );
         const open = input as PreviewAutomationOpenInput;
-        const environmentHosted = open.browserHost === "environment";
-        const desktopHostId = environmentHosted ? undefined : await profileDesktopHost(request);
+        const currentHost =
+          open.browserHost === "environment" ? undefined : await profileHost(request);
+        const environmentHosted =
+          open.browserHost === "environment" ||
+          (open.browserHost === undefined && currentHost?.environmentHosted === true);
+        const desktopHostId = environmentHosted ? undefined : currentHost?.desktopHostId;
         const catalogue = environmentHosted
           ? null
           : await Effect.runPromise(

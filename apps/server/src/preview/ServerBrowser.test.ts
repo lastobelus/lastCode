@@ -5537,6 +5537,90 @@ it.live("environment hosting refuses desktop sign-ins instead of substituting a 
   ).pipe(Effect.provide(layer)),
 );
 
+it.live.each([
+  { desktopAvailable: false, mode: "reuse" },
+  { desktopAvailable: false, mode: "new" },
+  { desktopAvailable: false, mode: "profile" },
+  { desktopAvailable: true, mode: "reuse" },
+  { desktopAvailable: true, mode: "new" },
+  { desktopAvailable: true, mode: "profile" },
+] as const)(
+  "an omitted host retains environment policy (desktop=$desktopAvailable, open=$mode)",
+  ({ desktopAvailable, mode }) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        localDesktopAvailable = desktopAvailable;
+        const browser = yield* ServerBrowser.ServerBrowser;
+        const broker = yield* Broker.PreviewAutomationBroker;
+        yield* browser.reportProfiles({
+          profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+          defaultProfileId: "work",
+        });
+        yield* Effect.yieldNow;
+        const first = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { browserHost: "environment", open: false },
+        });
+        const next = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: mode === "profile" ? "openWithProfile" : "open",
+          input: {
+            open: false,
+            ...(mode === "new" ? { reuseExistingTab: false } : {}),
+            ...(mode === "profile" ? { profileName: "Default" } : {}),
+          },
+        });
+        expect(next).toMatchObject({
+          browserHost: "environment",
+          profileId: mode === "profile" ? "default" : "incognito",
+          defaultProfileId: "incognito",
+        });
+        if (mode === "reuse") expect(next.tabId).toBe(first.tabId);
+        else expect(next.tabId).not.toBe(first.tabId);
+        expect(profileRequests).toEqual([]);
+        expect(rootCreations).toEqual([]);
+        expect(contextRequests).toEqual([
+          { profileId: "incognito", isolated: true },
+          ...(mode === "reuse"
+            ? []
+            : [
+                {
+                  profileId: mode === "profile" ? "default" : "incognito",
+                  isolated: mode !== "profile",
+                },
+              ]),
+        ]);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live("an explicit desktop choice overrides retained environment policy", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      localDesktopAvailable = true;
+      const broker = yield* Broker.PreviewAutomationBroker;
+      yield* ServerBrowser.ServerBrowser;
+      yield* Effect.yieldNow;
+      const first = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { browserHost: "environment", open: false },
+      });
+      desktopRendersNext = true;
+      const next = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { browserHost: "desktop", open: false },
+      });
+      expect(next).toMatchObject({ browserHost: "desktop", profileId: "default" });
+      expect(next.tabId).not.toBe(first.tabId);
+      expect(rootCreations).toHaveLength(1);
+      expect(contextRequests).toEqual([{ profileId: "incognito", isolated: true }]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live("an explicit host mismatch cannot replace a requested desktop tab", () =>
   Effect.scoped(
     Effect.gen(function* () {
