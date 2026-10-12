@@ -108,13 +108,17 @@ inspecting or seeding SQLite. Stop the test server before direct fixture writes.
 
 Routine automated QA against isolated development state does not need a
 separate permission prompt. Keep it in the background so the user can continue
-using LastCode. Call `preview_status` and `preview_profiles`, then explicitly select `Default`
-or an existing dedicated QA profile with
+using LastCode. Call `preview_status` and `preview_profiles`. When the tool
+advertises `browserHost`, start isolated QA beside the app with
+`preview_open({ open: false, browserHost: "environment", profileName: "Incognito", reuseExistingTab: false })`.
+Environment hosting supports only `Default` and `Incognito`; select `Default`
+when the check needs persistent environment storage. Any named desktop profile,
+including a dedicated QA profile or `Logged in Developer`, requires
+`browserHost: "desktop"` and the shared recipe when the app is remote. Omitting
+the host keeps the current policy even when opening a new tab or selecting a
+different profile. When the tool does not advertise the selector, explicitly
+select `Default` or an existing dedicated QA profile with
 `preview_open({ open: false, profileName: "Default", reuseExistingTab: false })`.
-When the tool advertises `browserHost`, set `browserHost: "environment"` on the
-first QA open. Set `browserHost: "desktop"` when switching to a named desktop
-sign-in such as `Logged in Developer`. Omitting the host keeps the current
-policy even when opening a new tab or selecting a different profile.
 Verify its returned profile. GitHub work requiring login uses a separate tab in
 `Logged in Developer`; never change the default profile to obtain that session. Retain the returned `tabId` and pass it to subsequent tools; reuse that
 QA tab for the rest of the task. Do not hide or repurpose a tab the user is
