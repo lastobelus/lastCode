@@ -648,7 +648,11 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
       // The environment host may install Chromium on its first open (up to
       // ten minutes). Keep that request alive without replaying its effects.
       const timeoutMs =
-        input.timeoutMs ?? (input.operation === "open" && connection.preferred ? 660_000 : 15_000);
+        input.timeoutMs ??
+        ((input.operation === "open" || input.operation === "openWithProfile") &&
+        connection.preferred
+          ? 660_000
+          : 15_000);
       const canReuseAssignedTab =
         assigned !== undefined &&
         assigned.connectionId === connection.connectionId &&
