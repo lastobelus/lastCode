@@ -114,10 +114,17 @@ describe("LastCode Action kit", () => {
 
     expect(actions.length).toBeGreaterThan(0);
     for (const action of actions) {
-      const scriptPath =
+      const directScriptPath =
         /\bnode (?:"\$T3CODE_PROJECT_ROOT\/)?(scripts\/[^\s"]+\.(?:ts|mjs))\b/u.exec(
           action.command,
         )?.[1];
+      const primaryScriptName =
+        /\bjoin\(process\.env\.T3CODE_PROJECT_ROOT,\s*'scripts',\s*'([^']+\.(?:ts|mjs))'\)/u.exec(
+          action.command,
+        )?.[1];
+      const scriptPath =
+        directScriptPath ??
+        (primaryScriptName === undefined ? undefined : NodePath.join("scripts", primaryScriptName));
       expect(scriptPath, `${action.name} must run a repository-owned script`).toBeDefined();
 
       const source = NodeFS.readFileSync(NodePath.join(repoRoot, scriptPath!), "utf8");

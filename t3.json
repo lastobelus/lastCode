@@ -4,14 +4,14 @@
   "scripts": [
     {
       "name": "Setup Worktree",
-      "command": "mise exec node@24.13.1 -- node \"$T3CODE_PROJECT_ROOT/scripts/setup-worktree.ts\"",
+      "command": "mise exec node@24.13.1 -- node -e \"const r=require('node:child_process').spawnSync(process.execPath,[require('node:path').join(process.env.T3CODE_PROJECT_ROOT,'scripts','setup-worktree.ts')],{stdio:'inherit'});if(r.error)console.error(r.error.message);process.exit(r.status??1);\"",
       "icon": "configure",
       "runOnWorktreeCreate": true
     },
     {
       "id": "lc-prepare-dependencies",
       "name": "Prepare Dependencies",
-      "command": "mise exec node@24.13.1 -- node \"$T3CODE_PROJECT_ROOT/scripts/prepare-dependencies.ts\"",
+      "command": "mise exec node@24.13.1 -- node -e \"const r=require('node:child_process').spawnSync(process.execPath,[require('node:path').join(process.env.T3CODE_PROJECT_ROOT,'scripts','prepare-dependencies.ts')],{stdio:'inherit'});if(r.error)console.error(r.error.message);process.exit(r.status??1);\"",
       "icon": "configure"
     },
     {
@@ -29,7 +29,7 @@
     {
       "id": "lc-local-ci",
       "name": "Run Quick CI",
-      "command": "mise exec node@24.13.1 -- node \"$T3CODE_PROJECT_ROOT/scripts/prepare-dependencies.ts\" --for-ci && mise exec node@24.13.1 -- node scripts/lastcode-local-ci.ts --quick",
+      "command": "mise exec node@24.13.1 -- node -e \"for(const args of [[require('node:path').join(process.env.T3CODE_PROJECT_ROOT,'scripts','prepare-dependencies.ts'),'--for-ci'],['scripts/lastcode-local-ci.ts','--quick']]){const r=require('node:child_process').spawnSync(process.execPath,args,{stdio:'inherit'});if(r.error)console.error(r.error.message);if(r.status===0)continue;process.exit(r.status??1);}\"",
       "icon": "test"
     },
     {
