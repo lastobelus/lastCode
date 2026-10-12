@@ -1228,11 +1228,38 @@ const make = Effect.gen(function* () {
       );
       if (root !== null && !isFilesystemRoot(root, path)) managedRoots.push(root);
     }
+    if (managedRoots.length === 0) return;
+    const seenProjectRoots = new Set<string>();
     const seenRepositories = new Set<string>();
     for (const project of yield* projectStore.listShells()) {
       const root = path.resolve(project.workspaceRoot);
-      if (seenRepositories.has(root)) continue;
-      seenRepositories.add(root);
+      if (seenProjectRoots.has(root)) continue;
+      seenProjectRoots.add(root);
+      const repository = yield* git
+        .execute({
+          operation: "StorageCleanup.inventoryRepository",
+          cwd: root,
+          args: ["rev-parse", "--git-common-dir"],
+          allowNonZeroExit: true,
+          timeoutMs: 5_000,
+          maxOutputBytes: 4_096,
+        })
+        .pipe(
+          Effect.flatMap((result) => {
+            const commonDir = result.stdout.trim();
+            if (
+              result.exitCode !== 0 ||
+              result.stdoutTruncated ||
+              commonDir === "" ||
+              commonDir.includes("\n")
+            )
+              return Effect.succeed(null);
+            return fs.realPath(path.resolve(root, commonDir));
+          }),
+          Effect.orElseSucceed(() => null),
+        );
+      if (repository === null || seenRepositories.has(repository)) continue;
+      seenRepositories.add(repository);
       const paths = yield* git.listWorktreePaths(root).pipe(
         Effect.catch((error) =>
           Effect.logWarning("could not inspect registered worktrees for cleanup audit", {
@@ -1362,12 +1389,35 @@ const make = Effect.gen(function* () {
     );
     yield* cleanDependencies(serverSettings, now, entries, runId).pipe(
       Effect.catch((error) =>
-        Effect.logWarning("dependency cleanup failed", { error }).pipe(Effect.as(undefined)),
+        Effect.gen(function* () {
+          const entry: StorageCleanupReportEntry = {
+            kind: "worktree",
+            scope: "dependencies",
+            outcome: "failed",
+            reason: cleanupFailureReason(error),
+            path: null,
+            threadId: null,
+            threadTitle: null,
+            bytes: null,
+            files: null,
+          };
+          entries.push(entry);
+          yield* audit({ event: "dependency-cleanup-failed", runId, ...entry });
+          yield* Effect.logWarning("dependency cleanup failed", { error });
+        }),
       ),
     );
-    yield* reportUnownedWorktrees(entries, runId).pipe(
-      Effect.catch((error) => Effect.logWarning("worktree ownership audit failed", { error })),
-    );
+    if (
+      trigger === "manual" ||
+      anyWorktreePolicy(
+        serverSettings,
+        (rules) => worktreeCleanupEnabled(rules) || dependencyCleanupEnabled(rules),
+      )
+    ) {
+      yield* reportUnownedWorktrees(entries, runId).pipe(
+        Effect.catch((error) => Effect.logWarning("worktree ownership audit failed", { error })),
+      );
+    }
     for (const category of [
       {
         kind: "browser-artifacts" as const,

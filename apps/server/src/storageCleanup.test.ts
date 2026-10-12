@@ -10,6 +10,7 @@ import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as SqlError from "effect/sql/SqlError";
 import {
   DEFAULT_SERVER_SETTINGS,
   StorageCleanupReport,
@@ -278,6 +279,9 @@ const cleanupFixture = Effect.gen(function* () {
   let editBeforeRemoval = false;
   let onDependencyInspection: (() => void) | null = null;
   let onWorktreeInventory: (() => void) | null = null;
+  let worktreeInventoryCalls = 0;
+  const activation = yield* Deferred.make<void>();
+  let failDependencyRead = false;
   let openSessionCwd: string | null = null;
   let fullStatusCalls = 0;
   let previewPaths: ReadonlyArray<string> = [];
@@ -306,6 +310,7 @@ const cleanupFixture = Effect.gen(function* () {
         git.listWorktreePaths(cwd).pipe(
           Effect.tap(() =>
             Effect.sync(() => {
+              worktreeInventoryCalls++;
               const callback = onWorktreeInventory;
               onWorktreeInventory = null;
               callback?.();
@@ -335,9 +340,20 @@ const cleanupFixture = Effect.gen(function* () {
     Effect.provideService(
       SqlClient.SqlClient,
       Object.assign(
-        (strings: TemplateStringsArray) =>
-          Effect.sync(() => {
-            const query = strings.join("");
+        (strings: TemplateStringsArray) => {
+          const query = strings.join("");
+          if (failDependencyRead && query.includes("FROM orchestration_v2_projection_threads t")) {
+            failDependencyRead = false;
+            return Effect.fail(
+              new SqlError.SqlError({
+                reason: new SqlError.SqlSyntaxError({
+                  cause: new Error("Fixture dependency query failure"),
+                  message: "Fixture dependency query failure",
+                }),
+              }),
+            );
+          }
+          return Effect.sync(() => {
             if (query.includes("COALESCE(MAX(sequence)")) return [{ sequence: 0 }];
             return openSessionCwd !== null && query.includes("projection_provider_sessions")
               ? [
@@ -357,7 +373,8 @@ const cleanupFixture = Effect.gen(function* () {
                   },
                 ]
               : [];
-          }),
+          });
+        },
         { in: (values: ReadonlyArray<unknown>) => values },
       ) as unknown as SqlClient.SqlClient,
     ),
@@ -374,10 +391,12 @@ const cleanupFixture = Effect.gen(function* () {
     Effect.provideService(TerminalManager.TerminalManager, {
       subscribeMetadata: () => Effect.succeed(() => {}),
     } as unknown as TerminalManager.TerminalManager["Service"]),
-    Effect.provideService(ServerActivation, Effect.never),
+    Effect.provideService(ServerActivation, Deferred.await(activation)),
   );
   return {
     service: Context.get(context, StorageCleanup.StorageCleanup),
+    activate: () => Deferred.succeed(activation, undefined),
+    worktreeInventoryCalls: () => worktreeInventoryCalls,
     setPreviewPaths: (paths: ReadonlyArray<string>) => {
       previewPaths = paths;
     },
@@ -432,6 +451,9 @@ const cleanupFixture = Effect.gen(function* () {
       onWorktreeInventory = () => {
         threads = [...threads, thread];
       };
+    },
+    failNextDependencyRead: () => {
+      failDependencyRead = true;
     },
     setManagedWorktreeDirectories: (current: string, previous: ReadonlyArray<string>) => {
       settings = {
@@ -912,6 +934,64 @@ describe("storage cleanup reports and local file policies", () => {
       }),
     ),
   );
+  it.live("skips disabled automatic Git inventories while retaining manual discovery", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture;
+        fixture.disable();
+        const orphan = `${fixture.config.worktreesDir}/manual-only-orphan`;
+        yield* fixture.command(fixture.repo, ["worktree", "add", "--detach", orphan, "HEAD"]);
+        const automatic = yield* fixture.service.reports.pipe(
+          Stream.filter((report) => report?.trigger === "automatic"),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        yield* fixture.activate();
+        const [automaticReport] = yield* Fiber.join(automatic);
+        expect(automaticReport?.trigger).toBe("automatic");
+        expect(fixture.worktreeInventoryCalls()).toBe(0);
+        expect(automaticReport?.entries.some((entry) => entry.path === orphan)).toBe(false);
+
+        const manual = yield* fixture.service.runNow;
+        expect(fixture.worktreeInventoryCalls()).toBe(1);
+        expect(manual.entries).toContainEqual(
+          expect.objectContaining({
+            path: orphan,
+            reason: "No owning thread; retained for review",
+          }),
+        );
+        expect(yield* fixture.fs.exists(orphan)).toBe(true);
+      }),
+    ),
+  );
+  it.live("inventories automatic runs when dependency cleanup is enabled", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture;
+        fixture.disable();
+        fixture.setDependencyPolicy(8);
+        const orphan = `${fixture.config.worktreesDir}/automatic-orphan`;
+        yield* fixture.command(fixture.repo, ["worktree", "add", "--detach", orphan, "HEAD"]);
+        const automatic = yield* fixture.service.reports.pipe(
+          Stream.filter((report) => report?.trigger === "automatic"),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        yield* fixture.activate();
+        const [report] = yield* Fiber.join(automatic);
+        expect(fixture.worktreeInventoryCalls()).toBe(1);
+        expect(report?.entries).toContainEqual(
+          expect.objectContaining({
+            path: orphan,
+            reason: "No owning thread; retained for review",
+          }),
+        );
+        expect(yield* fixture.fs.exists(orphan)).toBe(true);
+      }),
+    ),
+  );
   it.live("reports and retains a registered worktree without a thread owner", () =>
     runCleanupTest(
       Effect.gen(function* () {
@@ -1098,6 +1178,7 @@ describe("storage cleanup reports and local file policies", () => {
             (entry) => entry.reason === "No owning thread; retained for review",
           );
           expect(orphanEntries.map((entry) => entry.path).sort()).toEqual([first, second].sort());
+          expect(fixture.worktreeInventoryCalls()).toBe(1);
           expect(yield* fixture.fs.exists(first)).toBe(true);
           expect(yield* fixture.fs.exists(second)).toBe(true);
         }),
@@ -1169,6 +1250,40 @@ describe("storage cleanup reports and local file policies", () => {
         expect(
           yield* fixture.fs.exists(`${fixture.config.logsDir}/storage-cleanup.audit.ndjson`),
         ).toBe(false);
+      }),
+    ),
+  );
+  it.live("reports and audits a dependency inventory failure while continuing file cleanup", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture;
+        fixture.disable();
+        fixture.setDependencyPolicy(8);
+        fixture.enableFiles();
+        fixture.failNextDependencyRead();
+
+        const report = yield* fixture.service.runNow;
+        expect(report.entries).toContainEqual(
+          expect.objectContaining({
+            kind: "worktree",
+            scope: "dependencies",
+            outcome: "failed",
+            reason: expect.stringContaining("Fixture dependency query failure"),
+            path: null,
+            threadId: null,
+            threadTitle: null,
+          }),
+        );
+        expect(report.counts.failed).toBe(1);
+        expect(report.entries.some((entry) => entry.kind === "browser-artifacts")).toBe(true);
+        expect(report.entries.some((entry) => entry.kind === "logs")).toBe(true);
+
+        const auditText = yield* fixture.fs.readFileString(
+          `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
+        );
+        expect(auditText).toContain('"event":"dependency-cleanup-failed"');
+        expect(auditText).toContain('"scope":"dependencies"');
+        expect(auditText).toContain('"Fixture dependency query failure"');
       }),
     ),
   );
