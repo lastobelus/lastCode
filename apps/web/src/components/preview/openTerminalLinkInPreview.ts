@@ -50,7 +50,7 @@ export class TerminalLinkProfileUnavailableError extends Schema.TaggedError<Term
 
 interface OpenTerminalLinkInPreviewInput<E> {
   readonly url: string;
-  readonly terminalLinkProfileName?: string;
+  readonly terminalLinkProfileName?: string | undefined;
   readonly threadRef: ScopedThreadRef;
   readonly openPreview: OpenPreviewMutation<E>;
   readonly fallbackToBrowser: (url: string) => void;

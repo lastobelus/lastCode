@@ -49,7 +49,7 @@ export function selectProjectScriptTerminal(input: {
   readonly script: ProjectScript;
   readonly baseTerminalId: string;
   readonly existingTerminalIds?: ReadonlyArray<string>;
-  readonly baseTerminalLinkProfileName?: string;
+  readonly baseTerminalLinkProfileName?: string | undefined;
   readonly isBaseTerminalBusy: boolean;
   readonly preferNewTerminal: boolean;
   readonly canReuseTerminal: boolean;
