@@ -1,3 +1,4 @@
+import { observeDependencyActivity, recordDependencyUse } from "@t3tools/shared/dependencyActivity";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 // @effect-diagnostics nodeBuiltinImport:off - FileSystem lacks lstat; dependency
 // installs contain links, which must be measured and removed without following them.
@@ -5,6 +6,7 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeChildProcess from "node:child_process";
 import * as Context from "effect/Context";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -118,6 +120,16 @@ export class GeneratedDependencies extends Context.Service<
   GeneratedDependencies,
   {
     readonly processWorkingDirectories: Effect.Effect<ReadonlyArray<string> | null>;
+    /** Recognize and age an install without recursively measuring it. */
+    readonly observe: (
+      input: DependencyInput,
+      now: number,
+      used?: boolean,
+      persist?: boolean,
+    ) => Effect.Effect<
+      { readonly lastUsedAt: number; readonly renewed: boolean } | null,
+      GeneratedDependenciesError
+    >;
     readonly inspect: (
       input: DependencyInput,
     ) => Effect.Effect<DependencyInspection | null, GeneratedDependenciesError>;
@@ -247,7 +259,10 @@ const make = Effect.gen(function* () {
   const git = yield* GitVcsDriver.GitVcsDriver;
   const processCwds = yield* ProcessWorkingDirectories;
   const mountPoints = yield* DependencyMounts.MountPoints;
-  const validate = Effect.fn("GeneratedDependencies.validate")(function* (input: DependencyInput) {
+  const validate = Effect.fn("GeneratedDependencies.validate")(function* (
+    input: DependencyInput,
+    operation = "GeneratedDependencies.inspect",
+  ) {
     const worktreePath = NodePath.resolve(input.worktreePath);
     const managedWorktreesRoot = NodePath.resolve(input.managedWorktreesRoot);
     const repositoryRoot = NodePath.resolve(input.repositoryRoot);
@@ -279,7 +294,7 @@ const make = Effect.gen(function* () {
     const runGit = (args: ReadonlyArray<string>, cwd = worktreePath) =>
       git
         .execute({
-          operation: "GeneratedDependencies.inspect",
+          operation,
           cwd,
           args,
           allowNonZeroExit: true,
@@ -355,6 +370,34 @@ const make = Effect.gen(function* () {
           packageManager: candidate.packageManager,
           ...identity,
         } satisfies Omit<DependencyInspection, "estimatedReclaimedBytes">);
+  });
+
+  const observe = Effect.fn("GeneratedDependencies.observe")(function* (
+    input: DependencyInput,
+    now: number,
+    used = false,
+    persist = true,
+  ) {
+    const current = yield* validate(input, "GeneratedDependencies.observe");
+    if (current === null) return null;
+    const location = yield* git
+      .execute({
+        operation: "GeneratedDependencies.observe",
+        cwd: current.worktreePath,
+        args: ["rev-parse", "--absolute-git-dir"],
+        maxOutputBytes: 64 * 1024,
+      })
+      .pipe(
+        Effect.mapError(
+          (cause) => new GeneratedDependenciesError({ path: current.dependencyPath, cause }),
+        ),
+      );
+    if (location.stdoutTruncated || location.stderrTruncated) return null;
+    return yield* Effect.try({
+      try: () =>
+        observeDependencyActivity(location.stdout.trim(), current.worktreePath, now, used, persist),
+      catch: (cause) => new GeneratedDependenciesError({ path: current.dependencyPath, cause }),
+    });
   });
 
   const inspect = Effect.fn("GeneratedDependencies.inspect")(function* (input: DependencyInput) {
@@ -563,7 +606,12 @@ const make = Effect.gen(function* () {
     );
     return removed.filter((entry) => entry !== null);
   });
-  return GeneratedDependencies.of({ inspect, removeBatch, processWorkingDirectories: processCwds });
+  return GeneratedDependencies.of({
+    observe,
+    inspect,
+    removeBatch,
+    processWorkingDirectories: processCwds,
+  });
 });
 
 export const layer = Layer.effect(GeneratedDependencies, make);

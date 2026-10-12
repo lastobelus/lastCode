@@ -42,7 +42,7 @@ import {
   withMetrics,
 } from "../observability/Metrics.ts";
 import { ProviderWorkspaceMissingError } from "../provider/Errors.ts";
-import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
+import { withWorkspaceUse } from "../workspace/workspaceLease.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ServerSettings from "../serverSettings.ts";
@@ -2630,7 +2630,7 @@ export const layerWithOptions = (
           // running provider turns do not hold this lease.
           return input.runtimePolicy.cwd === null
             ? open
-            : withWorkspaceLease(input.runtimePolicy.cwd, open);
+            : withWorkspaceUse(input.runtimePolicy.cwd, open);
         },
         ownershipRevision: Effect.sync(() => ownershipRevision),
         isLive: (providerSessionId) =>

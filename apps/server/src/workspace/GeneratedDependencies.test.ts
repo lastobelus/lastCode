@@ -734,6 +734,17 @@ const makeShell = (worktreePath: string) =>
   });
 
 type SweepCase =
+  | "ownerless-eligible"
+  | "ownerless-legacy"
+  | "ownerless-reprepared"
+  | "ownerless-regenerated"
+  | "ownerless-off"
+  | "ownerless-process"
+  | "ownerless-preview"
+  | "ownerless-history"
+  | "ownerless-use-during-inspection"
+  | "ownerless-project-off"
+  | "ownerless-shared-project"
   | "eligible"
   | "archived"
   | "whole-policy"
@@ -808,6 +819,7 @@ type SweepCase =
   | "final-mount-queued-run"
   | "final-mount-candidate-event"
   | "final-mount-provider-ownership"
+  | "final-mount-dependency-use"
   | "worker-ready-burst"
   | "worker-terminal-burst"
   | "worker-settings-burst";
@@ -843,6 +855,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   ])
     yield* sql.unsafe(query);
   let thread = makeShell(f.input.worktreePath);
+  const ownerless = mode.startsWith("ownerless-");
   const workerLifecycle = mode.startsWith("worker-");
   const batch =
     mode === "batch" ||
@@ -933,7 +946,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
         mode === "whole-policy"
           ? "any-local-files"
           : DEFAULT_SERVER_SETTINGS.storageCleanup.worktreeKeepWhen,
-      worktreeDependenciesAfterDays: mode === "disabled" ? null : 7,
+      worktreeDependenciesAfterDays: mode === "disabled" || mode === "ownerless-off" ? null : 7,
       worktreeAfterDays:
         wholeSharedDeleted || wholeSession
           ? 7
@@ -945,6 +958,11 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
       worktreeUnchanged: false,
     },
   };
+  if (mode === "ownerless-project-off")
+    settings = {
+      ...settings,
+      projectSettingsOverrides: { [projectId]: { worktreeCleanup: { mode: "off" } } },
+    };
   let mountReads = 0;
   setMountReader(
     Effect.gen(function* () {
@@ -960,6 +978,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
         if (mode === "final-mount-candidate-event")
           yield* sql`INSERT INTO orchestration_events (aggregate_kind, stream_id, event_type, occurred_at, application_event_version) VALUES ('thread', ${threadId}, 'turn-item.updated', ${DateTime.formatIso(at(0))}, 2)`;
         if (mode === "final-mount-provider-ownership") acquireManagerOwnership();
+        if (mode === "final-mount-dependency-use") yield* f.cleanup.observe(f.input, NOW, true);
       }
       return ["/"];
     }).pipe(Effect.orDie),
@@ -1092,6 +1111,27 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
       yield* sql`INSERT INTO orchestration_v2_projection_threads VALUES (${deletedHistoryId}, ${projectId}, ${payload}, 'deleted')`;
     }
   }
+  // These existing guard cases start with a positively observed old installation.
+  if (mode !== "ownerless-legacy")
+    for (const candidate of [thread, ...additionalThreads])
+      yield* f.cleanup.observe(
+        { ...f.input, worktreePath: candidate.worktreePath! },
+        NOW - 30 * day,
+      );
+  if (mode === "ownerless-reprepared") yield* f.cleanup.observe(f.input, NOW - day, true);
+  if (mode === "ownerless-regenerated") {
+    yield* f.fs.remove(f.dependencyPath, { recursive: true });
+    yield* f.fs.makeDirectory(f.path.join(f.dependencyPath, "package"), { recursive: true });
+    yield* f.fs.writeFileString(f.path.join(f.dependencyPath, f.marker), "layoutVersion: 5\n");
+    yield* f.fs.writeFileString(
+      f.path.join(f.dependencyPath, "package/index.js"),
+      "module.exports = 2;\n",
+    );
+  }
+  if (mode === "ownerless-history") {
+    yield* sql`CREATE TABLE projection_threads (worktree_path TEXT, branch TEXT, project_id TEXT)`;
+    yield* sql`INSERT INTO projection_threads VALUES (${f.input.worktreePath}, 'feature', ${projectId})`;
+  }
   const project = {
     id: projectId,
     workspaceRoot: mode === "project-root" ? f.input.worktreePath : f.repository,
@@ -1110,6 +1150,9 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   let processStartedDuringInspection = false;
   setProcessReader(() => {
     processReads++;
+    if (mode === "ownerless-process") return [f.input.worktreePath];
+    if (mode === "ownerless-use-during-inspection" && dependencyInspections() > 0)
+      return [f.input.worktreePath];
     if (mode === "process-unknown" || (mode === "batch-process-unknown" && processReads > 1))
       return null;
     if (mode === "batch-process-started" && dependencyInspections() > 0) {
@@ -1217,7 +1260,14 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
       ...config,
       worktreesDir: f.input.managedWorktreesRoot,
     }),
-    Layer.mock(ProjectStore.ProjectStoreV2)({ listShells: () => Effect.succeed([project]) }),
+    Layer.mock(ProjectStore.ProjectStoreV2)({
+      listShells: () =>
+        Effect.succeed(
+          mode === "ownerless-shared-project"
+            ? [project, { ...project, id: ProjectId.make("other-project") }]
+            : [project],
+        ),
+    }),
     Layer.mock(ProjectionStore.ProjectionStoreV2)({
       getShellSnapshot: (options) =>
         Effect.gen(function* () {
@@ -1227,6 +1277,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
           if (reads === 1 && mode === "initial-revision-changed")
             yield* sql`INSERT INTO orchestration_events (sequence, aggregate_kind, stream_id, event_type, application_event_version) VALUES (1, 'thread', ${threadId}, 'thread.metadata-updated', 2)`;
           const threads =
+            ownerless ||
             options?.location === "archive" ||
             (deleted && mode !== "deleted-visible-pending") ||
             mode === "archived"
@@ -1369,7 +1420,9 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     }),
     Layer.mock(PreviewHosting.PreviewHosting)({
       protectedWorkspacePaths: () =>
-        Effect.succeed(mode === "preview" ? [f.input.worktreePath] : []),
+        Effect.succeed(
+          mode === "preview" || mode === "ownerless-preview" ? [f.input.worktreePath] : [],
+        ),
     }),
   );
   const cleanupContext = yield* Layer.build(StorageCleanup.layer).pipe(
@@ -1421,6 +1474,49 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     if (mode === "worker-settings-burst")
       assert.equal(settings.storageCleanup.worktreeDependenciesAfterDays, 30);
   } else yield* worker.runNow;
+  if (ownerless) {
+    const report = yield* worker.latestReport;
+    const removed = mode === "ownerless-eligible";
+    assert.equal(yield* f.fs.exists(f.dependencyPath), !removed);
+    assert.equal(
+      yield* f.fs.readFileString(f.path.join(f.input.worktreePath, "source.ts")),
+      source,
+    );
+    assert.equal(
+      yield* f.fs.readFileString(f.path.join(f.input.worktreePath, "research/notes.md")),
+      "private research",
+    );
+    if (removed) {
+      assert.isAtLeast(report!.bytesFreed, 0);
+      assert.isTrue(
+        report!.entries.some((entry) => entry.outcome === "removed" && entry.threadId === null),
+      );
+    }
+    if (mode === "ownerless-legacy") {
+      assert.isTrue(
+        report!.entries.some((entry) => entry.reason.includes("full inactivity period")),
+      );
+      yield* TestClock.setTime(NOW + 8 * day);
+      yield* worker.runNow;
+      assert.isFalse(yield* f.fs.exists(f.dependencyPath));
+    }
+    if (mode === "ownerless-use-during-inspection") {
+      assert.equal(report!.bytesFreed, 0);
+      setProcessReader(() => []);
+      yield* TestClock.setTime(NOW + day);
+      yield* worker.runNow;
+      assert.isTrue(yield* f.fs.exists(f.dependencyPath));
+      yield* TestClock.setTime(NOW + 8 * day);
+      yield* worker.runNow;
+      assert.isFalse(yield* f.fs.exists(f.dependencyPath));
+    }
+    if (mode === "ownerless-reprepared") {
+      yield* TestClock.setTime(NOW + 8 * day);
+      yield* worker.runNow;
+      assert.isFalse(yield* f.fs.exists(f.dependencyPath));
+    }
+    return;
+  }
   if (
     mode === "whole-removal" ||
     (wholeSession &&
@@ -1532,6 +1628,17 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
 });
 
 it.effect.each([
+  "ownerless-eligible",
+  "ownerless-legacy",
+  "ownerless-reprepared",
+  "ownerless-regenerated",
+  "ownerless-off",
+  "ownerless-process",
+  "ownerless-preview",
+  "ownerless-history",
+  "ownerless-use-during-inspection",
+  "ownerless-project-off",
+  "ownerless-shared-project",
   "eligible",
   "archived",
   "whole-policy",
@@ -1606,6 +1713,7 @@ it.effect.each([
   "final-mount-queued-run",
   "final-mount-candidate-event",
   "final-mount-provider-ownership",
+  "final-mount-dependency-use",
   "worker-ready-burst",
   "worker-terminal-burst",
   "worker-settings-burst",

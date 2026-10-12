@@ -399,7 +399,7 @@ const make = Effect.gen(function* () {
       let snapshot = yield* capture();
       return Effect.fn("StorageCleanup.hasLiveProviderSession")(function* (
         worktreePath: string,
-        threadId: ThreadId,
+        threadId?: ThreadId,
       ) {
         // Dependency cohorts call this guard concurrently; each check keeps
         // its own snapshot while a sibling may refresh the shared cache.
@@ -420,7 +420,7 @@ const make = Effect.gen(function* () {
         // than protecting every worktree for the remainder of the sweep.
         return (
           current === null ||
-          current.protectedThreads.has(threadId) ||
+          (threadId !== undefined && current.protectedThreads.has(threadId)) ||
           current.protectedAncestors.has(path.resolve(worktreePath))
         );
       });
@@ -794,6 +794,50 @@ const make = Effect.gen(function* () {
       (thread) => thread.cleanupPath,
     );
     const deletedGroups = Map.groupBy(deletedOwners, (thread) => thread.cleanupPath);
+    const dependencyActivityByPath = new Map<
+      string,
+      { lastUsedAt: number; renewed: boolean } | null
+    >();
+    for (const [cwd, owners] of Map.groupBy(
+      [...liveOwners, ...deletedOwners],
+      (owner) => owner.cleanupPath,
+    )) {
+      const owner = owners[0]!;
+      if (
+        owners.length !== 1 ||
+        owner.worktreePath === null ||
+        resolveWorktreeCleanup(serverSettings, owner.projectId).worktreeDependenciesAfterDays ===
+          null ||
+        !(yield* fs.exists(path.join(cwd, "node_modules")))
+      )
+        continue;
+      const root = roots.find((root) => inside(root, cwd));
+      const project =
+        "workspaceRoot" in owner
+          ? { workspaceRoot: owner.workspaceRoot }
+          : snapshot.projects.find((project) => project.id === owner.projectId);
+      if (root === undefined || project === undefined) continue;
+      const used =
+        processCwds === null ||
+        processCwds.some((processCwd) => processCwd === cwd || inside(cwd, processCwd)) ||
+        (yield* terminalUsesDependencies(cwd, owner.recordedWorktreePath)) ||
+        (yield* previewUsesDependencies(cwd, owner.recordedWorktreePath)) ||
+        (yield* hasLiveProviderSession(cwd, owner.id));
+      dependencyActivityByPath.set(
+        cwd,
+        yield* dependencies
+          .observe(
+            {
+              managedWorktreesRoot: root,
+              worktreePath: cwd,
+              repositoryRoot: project.workspaceRoot,
+            },
+            now,
+            used,
+          )
+          .pipe(Effect.orElseSucceed(() => null)),
+      );
+    }
     const reports = new Map<string, StorageCleanupReportEntry>();
     const noteCandidate = (
       thread: Pick<OrchestrationV2ThreadShell, "id" | "title">,
@@ -833,6 +877,240 @@ const make = Effect.gen(function* () {
         Object.assign(noteCandidate(oldOwner, cwd), {
           reason: "More than one thread uses this worktree",
         });
+    }
+    const readRegistered = Effect.fn("StorageCleanup.registeredDependencies")(function* (
+      repositoryRoot: string,
+    ) {
+      const result = yield* git.execute({
+        operation: "StorageCleanup.registeredDependencies",
+        cwd: repositoryRoot,
+        args: ["worktree", "list", "--porcelain", "-z"],
+        maxOutputBytes: 1024 * 1024,
+      });
+      if (result.stdoutTruncated || result.stderrTruncated) return [];
+      return result.stdout.split("\0\0").flatMap((block) => {
+        const fields = block.split("\0");
+        const location = fields.find((field) => field.startsWith("worktree "))?.slice(9);
+        const branch = fields.find((field) => field.startsWith("branch refs/heads/"))?.slice(18);
+        return location ? [{ recordedPath: path.resolve(location), branch: branch ?? null }] : [];
+      });
+    });
+    const registered = (yield* Effect.forEach(snapshot.projects, (project) =>
+      readRegistered(project.workspaceRoot).pipe(
+        Effect.flatMap((worktrees) =>
+          Effect.forEach(worktrees, (worktree) =>
+            Effect.gen(function* () {
+              return { ...worktree, project, cwd: yield* resolveOwnerPath(worktree.recordedPath) };
+            }),
+          ),
+        ),
+        Effect.orElseSucceed(() => []),
+      ),
+    )).flat();
+    const registeredGroups = Map.groupBy(registered, (entry) => entry.cwd);
+    // Include durable deleted records even when their project no longer exists.
+    const durableOwners = yield* sql<{
+      payload_json: string;
+    }>`SELECT payload_json FROM orchestration_v2_projection_threads`;
+    const historicalOwners = yield* Effect.forEach(durableOwners, (row) =>
+      decodeCleanupThread(row.payload_json),
+    );
+    const legacyExists =
+      yield* sql`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'projection_threads'`;
+    const legacyOwners =
+      legacyExists.length === 0
+        ? []
+        : yield* sql<{ worktree_path: string | null; branch: string | null; project_id: string }>`
+      SELECT worktree_path, branch, project_id FROM projection_threads
+    `;
+    const knownPaths = new Set([...groups.keys(), ...deletedGroups.keys()]);
+    for (const owner of [
+      ...historicalOwners.map((thread) => thread.worktreePath),
+      ...legacyOwners.map((thread) => thread.worktree_path),
+    ]) {
+      if (owner !== null) knownPaths.add(yield* resolveOwnerPath(owner));
+    }
+    // The managed layout is root/repository/worktree. Unknown repositories never
+    // receive an inactivity record or automatic deletion authority.
+    for (const root of roots) {
+      const pending = [{ directory: root, depth: 0 }];
+      let visited = 0;
+      while (pending.length > 0 && visited < 1000) {
+        const { directory, depth } = pending.pop()!;
+        visited++;
+        if (directory !== root && (yield* fs.exists(path.join(directory, ".git")))) {
+          if (
+            !knownPaths.has(directory) &&
+            !registeredGroups.has(directory) &&
+            (yield* fs.exists(path.join(directory, "node_modules")))
+          )
+            entries.push({
+              kind: "dependencies",
+              outcome: "kept",
+              reason: "Could not verify a current repository and project mapping",
+              path: path.join(directory, "node_modules"),
+              threadId: null,
+              threadTitle: null,
+              bytes: null,
+              files: null,
+            });
+          continue;
+        }
+        if (depth === 2) continue;
+        const names = yield* fs.readDirectory(directory).pipe(Effect.orElseSucceed(() => []));
+        for (const name of names) {
+          if (name.startsWith(".") || name === "node_modules") continue;
+          const child = path.join(directory, name);
+          const canonical = yield* fs.realPath(child).pipe(Effect.orElseSucceed(() => null));
+          // Never follow candidate or intermediate links, including aliases into another root.
+          if (canonical !== child) continue;
+          const stat = yield* fs.stat(child).pipe(Effect.orElseSucceed(() => null));
+          if (stat?.type === "Directory") pending.push({ directory: child, depth: depth + 1 });
+        }
+      }
+      if (pending.length > 0)
+        entries.push({
+          kind: "dependencies",
+          outcome: "kept",
+          reason: "Some dependency locations exceeded the discovery limit and were kept",
+          path: root,
+          threadId: null,
+          threadTitle: null,
+          bytes: null,
+          files: null,
+        });
+    }
+    for (const [cwd, mappings] of registeredGroups) {
+      if (knownPaths.has(cwd) || !(yield* fs.exists(path.join(cwd, "node_modules")))) continue;
+      const entry: StorageCleanupReportEntry = {
+        kind: "dependencies",
+        outcome: "kept",
+        reason: "Ownerless install is not yet eligible",
+        path: path.join(cwd, "node_modules"),
+        threadId: null,
+        threadTitle: null,
+        bytes: null,
+        files: null,
+      };
+      entries.push(entry);
+      const candidate = mappings[0]!;
+      const { project, branch, recordedPath } = candidate;
+      const days = resolveWorktreeCleanup(serverSettings, project.id).worktreeDependenciesAfterDays;
+      if (days === null) {
+        entry.reason = "Project dependency cleanup is off";
+        continue;
+      }
+      if (mappings.length !== 1) {
+        entry.reason = "Repository belongs to more than one project";
+        continue;
+      }
+      if (
+        branch !== null &&
+        ([...snapshot.threads, ...historicalOwners].some(
+          (owner) => owner.projectId === project.id && owner.branch === branch,
+        ) ||
+          legacyOwners.some((owner) => owner.project_id === project.id && owner.branch === branch))
+      ) {
+        entry.reason = "Thread history still names this branch";
+        continue;
+      }
+      const managedWorktreesRoot = roots.find((root) => inside(root, cwd));
+      if (managedWorktreesRoot === undefined) {
+        entry.reason = "Worktree is outside the configured cleanup locations";
+        continue;
+      }
+      const input = {
+        managedWorktreesRoot,
+        worktreePath: cwd,
+        repositoryRoot: project.workspaceRoot,
+      };
+      const keep = (reason: string) => {
+        entry.reason = reason;
+        return false;
+      };
+      const cleanOwnerless = Effect.gen(function* () {
+        const consumerReason = Effect.fnUntraced(function* () {
+          if (processCwds === null) return "Could not check running processes safely";
+          if (processCwds.some((processCwd) => processCwd === cwd || inside(cwd, processCwd)))
+            return "A running process is using this worktree";
+          if (yield* terminalUsesDependencies(cwd, recordedPath))
+            return "A terminal is still using this worktree";
+          if (yield* previewUsesDependencies(cwd, recordedPath))
+            return "A preview is using this worktree, or preview ownership could not be checked";
+          if (yield* hasLiveProviderSession(cwd)) return "A provider session is still open";
+          if (yield* containsProjectRoot(cwd, snapshot.projects))
+            return "A project uses this worktree as its main workspace";
+          return null;
+        });
+        const protectedReason = yield* consumerReason();
+        const observation = yield* dependencies.observe(input, now, protectedReason !== null);
+        if (observation === null) return keep("No dependency install could be safely recognized");
+        if (protectedReason !== null) return keep(protectedReason);
+        if (observation.lastUsedAt >= now - days * DAY_MS) {
+          return keep(
+            observation.renewed
+              ? "Started a full inactivity period for this recognized install"
+              : "Dependencies were prepared or used within the inactivity period",
+          );
+        }
+        const revalidate = Effect.fnUntraced(function* () {
+          const current = yield* settingsService.getSettings;
+          if (
+            !locationsUnchanged(current) ||
+            resolveWorktreeCleanup(current, project.id).worktreeDependenciesAfterDays !== days
+          )
+            return keep("Dependency cleanup policy or locations changed");
+          if (yield* ownershipChangedSince(sequence))
+            return keep("Workspace ownership changed during cleanup");
+          if (!(yield* pathIdentityUnchanged(recordedPath, cwd)))
+            return keep("Worktree path is a symlink or its location changed");
+          if (yield* branchChanged(cwd, branch)) return keep("Repository or branch changed");
+          if (
+            !(yield* readRegistered(project.workspaceRoot)).some(
+              (worktree) => worktree.recordedPath === recordedPath && worktree.branch === branch,
+            )
+          )
+            return keep("Worktree registration changed");
+          const reason = yield* consumerReason();
+          if (reason !== null) {
+            yield* dependencies.observe(input, now, true);
+            return keep(reason);
+          }
+          const latest = yield* dependencies.observe(input, now, false, false);
+          return (
+            latest !== null &&
+            !latest.renewed &&
+            latest.lastUsedAt === observation.lastUsedAt &&
+            !(yield* ownershipChangedSince(sequence)) &&
+            resolveWorktreeCleanup(yield* settingsService.getSettings, project.id)
+              .worktreeDependenciesAfterDays === days
+          );
+        });
+        if (!(yield* revalidate())) return false;
+        const inspection = yield* dependencies.inspect(input);
+        if (inspection === null)
+          return keep("No dependency install could be safely recognized and measured");
+        const canRemove = revalidate().pipe(Effect.catch(() => Effect.succeed(false)));
+        const removed = yield* dependencies.removeBatch([
+          { inspection, canRemove, isStillEligible: canRemove },
+        ]);
+        if (removed.length > 0) {
+          entry.outcome = "removed";
+          entry.bytes = removed[0]!.estimatedReclaimedBytes;
+          entry.reason = "Removed inactive ownerless dependencies; reclaimed size is estimated";
+          return true;
+        }
+        return keep("A final safety check prevented dependency removal");
+      }).pipe(
+        Effect.catch(() =>
+          Effect.sync(() => keep("Could not safely verify dependency activity or ownership")),
+        ),
+      );
+      const leasedPaths = [...new Set([cwd, recordedPath])].sort();
+      yield* leasedPaths.reduceRight(
+        (effect, target) => withWorkspaceLease(target, effect),
+        cleanOwnerless,
+      );
     }
     const ownershipChanged = yield* ownershipChangedSince(sequence);
     const candidates = [
@@ -881,6 +1159,15 @@ const make = Effect.gen(function* () {
           ? { workspaceRoot: thread.workspaceRoot }
           : snapshot.projects.find((entry) => entry.id === thread.projectId);
         if (project === undefined) return keep("Project is no longer available");
+        const dependencyActivity = dependencyActivityByPath.get(worktreePath) ?? null;
+        if (dependencyActivity === null)
+          return keep("No dependency install could be safely recognized");
+        if (dependencyActivity.lastUsedAt >= now - days * DAY_MS)
+          return keep(
+            dependencyActivity.renewed
+              ? "Started a full inactivity period for this recognized install"
+              : "Dependencies were prepared or used within the inactivity period",
+          );
         if (yield* terminalUsesDependencies(worktreePath, recordedWorktreePath))
           return keep("A terminal is still using this worktree");
         return [
@@ -921,6 +1208,18 @@ const make = Effect.gen(function* () {
               };
               const candidateStillIdle = Effect.fn("StorageCleanup.dependencyCandidateStillIdle")(
                 function* () {
+                  const dependencyActivity = yield* dependencies.observe(
+                    { managedWorktreesRoot, worktreePath, repositoryRoot: project.workspaceRoot },
+                    now,
+                    false,
+                    false,
+                  );
+                  if (
+                    dependencyActivity === null ||
+                    dependencyActivity.renewed ||
+                    dependencyActivity.lastUsedAt >= now - days * DAY_MS
+                  )
+                    return keep("Dependency installation or use changed during cleanup");
                   const currentSettings = yield* settingsService.getSettings;
                   if (!locationsUnchanged(currentSettings))
                     return keep("Worktree cleanup locations changed");
@@ -1017,6 +1316,18 @@ const make = Effect.gen(function* () {
                 return yield* revalidate();
               });
               const isStillEligible = Effect.gen(function* () {
+                const dependencyActivity = yield* dependencies.observe(
+                  { managedWorktreesRoot, worktreePath, repositoryRoot: project.workspaceRoot },
+                  now,
+                  false,
+                  false,
+                );
+                if (
+                  dependencyActivity === null ||
+                  dependencyActivity.renewed ||
+                  dependencyActivity.lastUsedAt >= now - days * DAY_MS
+                )
+                  return keep("Dependency installation or use changed during cleanup");
                 if (
                   eligibilitySequence === null ||
                   (yield* terminalUsesDependencies(worktreePath, recordedWorktreePath)) ||

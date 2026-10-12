@@ -6,7 +6,7 @@
  *
  * @module TerminalManager
  */
-import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
+import { withWorkspaceUse } from "../workspace/workspaceLease.ts";
 import {
   DEFAULT_TERMINAL_ID,
   TrimmedNonEmptyString,
@@ -3337,10 +3337,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   });
 
   const openLocked = (input: TerminalOpenInput) =>
-    withWorkspaceLease(
-      path.resolve(input.worktreePath ?? input.cwd),
-      openWithWorkspaceLease(input),
-    );
+    withWorkspaceUse(path.resolve(input.worktreePath ?? input.cwd), openWithWorkspaceLease(input));
 
   const open: TerminalManager["Service"]["open"] = (input) =>
     withThreadLock(
@@ -3844,7 +3841,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       input.threadId,
       resolveLaunchInputEnvironment(input).pipe(
         Effect.flatMap((resolved) =>
-          withWorkspaceLease(
+          withWorkspaceUse(
             path.resolve(resolved.worktreePath ?? resolved.cwd),
             restartResolved(resolved),
           ),

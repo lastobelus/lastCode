@@ -176,8 +176,11 @@ worktrees were removed or kept and why, plus any failures.
 
 Enable **Remove inactive worktree dependencies** to reclaim recognized npm or pnpm
 `node_modules` installations after a chosen number of inactive days, while keeping the
-worktree and its source, notes, and research files. Active agents, sessions, terminals, and
-previews prevent cleanup. Other generated folders and vendored sources are kept. Reinstall
+worktree and its source, notes, and research files. This includes registered manual and QA
+worktrees in the configured cleanup locations when their repository maps to one project.
+Dependency preparation and app-managed use renew the inactivity period. Recognized installs
+with no recorded usage start a full inactivity period when first observed; folder age alone
+does not qualify them. Active agents, sessions, terminals, and previews prevent cleanup. Other generated folders and vendored sources are kept. Reinstall
 the project's dependencies before continuing work. This rule is off by default and follows
 the project's Inherit, Off, or Custom policy. Dependency cleanup is available on macOS and
 Linux and skips a worktree when process activity cannot be checked reliably. On mobile, open
