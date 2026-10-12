@@ -1,0 +1,4 @@
+interface:
+  display_name: "LastCode Babysit"
+  short_description: "Babysit LastCode PRs and sequential stacks"
+  default_prompt: "Use $babysit to babysit this LastCode PR or identified stack, merging in dependency order only when I explicitly request it."
