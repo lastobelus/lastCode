@@ -1339,7 +1339,8 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
       yield* Deferred.succeed(workerControl.releaseInitialInventory, undefined);
       yield* worker.drain;
     }).pipe(Effect.ensuring(Deferred.succeed(workerControl.releaseInitialInventory, undefined)));
-    assert.equal(reads, mode === "worker-ready-burst" ? 1 : 2);
+    // Each sweep reads dependency owners once and refreshes them once for the audit.
+    assert.equal(reads, mode === "worker-ready-burst" ? 2 : 4);
     assert.equal(processReads, mode === "worker-terminal-burst" ? 3 : 2);
     assert.equal(
       yield* f.fs.readFileString(f.path.join(f.input.worktreePath, "tmp/notes.md")),
@@ -1372,7 +1373,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     mode === "worker-terminal-burst" ||
     (batch && mode !== "batch-process-started" && mode !== "batch-process-unknown");
   if (batch) {
-    assert.equal(reads, 1);
+    assert.equal(reads, 2);
     assert.equal(processReads, mode === "batch-five" ? 3 : 2);
     assert.include(targetedReads, threadId);
     for (const candidate of additionalThreads) {
@@ -1415,7 +1416,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     assert.equal(dependencyInspections(), 0);
   }
   if (mode === "revision-changed") {
-    assert.equal(reads, 1);
+    assert.equal(reads, 2);
     assert.equal(dependencyInspections(), 0);
   }
   if (mode === "deleted-event-after-capture") assert.isTrue(deletedEventInserted);
@@ -1424,7 +1425,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     assert.equal(mountReads, mode === "final-mount-unchanged" ? 3 : 2);
     assert.equal(targetedReads.length, 4);
     assert.equal(processReads, 2);
-    assert.equal(reads, 1);
+    assert.equal(reads, 2);
     if (mode === "final-mount-policy-off")
       assert.isNull(settings.storageCleanup.worktreeDependenciesAfterDays);
     if (mode === "final-mount-queued-run")

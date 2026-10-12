@@ -259,6 +259,9 @@ const cleanupFixture = Effect.gen(function* () {
   yield* command(repo, ["init", "-b", "main"]);
   yield* command(repo, ["config", "user.email", "cleanup@example.test"]);
   yield* command(repo, ["config", "user.name", "Cleanup test"]);
+  const globalExcludes = `${baseDir}/empty-global-excludes`;
+  yield* fs.writeFileString(globalExcludes, "");
+  yield* command(repo, ["config", "core.excludesFile", globalExcludes]);
   yield* fs.writeFileString(`${repo}/tracked.txt`, "original\n");
   yield* fs.writeFileString(`${repo}/.gitignore`, ".env\ndist/\nnode_modules/\n");
   yield* command(repo, ["add", "."]);
@@ -828,7 +831,6 @@ describe("storage cleanup reports and local file policies", () => {
         const fixture = yield* cleanupFixture;
         fixture.disable();
         fixture.setDependencyPolicy(8);
-        yield* fixture.fs.writeFileString(`${fixture.worktree}/.gitignore`, ".env\ndist/\n");
         yield* fixture.fs.writeFileString(
           `${fixture.worktree}/package.json`,
           '{"name":"fixture","version":"1.0.0"}',
@@ -876,7 +878,6 @@ describe("storage cleanup reports and local file policies", () => {
         fixture.disable();
         fixture.setDependencyPolicy(8);
         fixture.setPreviewPaths([fixture.worktree]);
-        yield* fixture.fs.writeFileString(`${fixture.worktree}/.gitignore`, ".env\ndist/\n");
         yield* fixture.fs.writeFileString(
           `${fixture.worktree}/package.json`,
           '{"name":"fixture","version":"1.0.0"}',
@@ -993,7 +994,6 @@ describe("storage cleanup reports and local file policies", () => {
             worktreePath: newlyOwned,
           }),
         );
-        yield* fixture.fs.writeFileString(`${fixture.worktree}/.gitignore`, ".env\ndist/\n");
         yield* fixture.fs.writeFileString(
           `${fixture.worktree}/package.json`,
           '{"name":"fixture","version":"1.0.0"}',
