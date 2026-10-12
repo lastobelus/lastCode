@@ -177,15 +177,19 @@ function CleanupResults({
   return (
     <>
       {report.entries.map((entry, index) => {
-        const dependencyInstall =
-          entry.kind === "worktree" && entry.worktreeResource === "dependencies";
-        const name = dependencyInstall
-          ? `Dependencies: ${entry.path?.split(/[\\/]/).filter(Boolean).at(-2) ?? "worktree"}`
-          : entry.kind === "worktree"
-            ? (entry.path?.split(/[\\/]/).findLast(Boolean) ?? "Worktrees")
-            : entry.kind === "logs"
-              ? "Rotated logs"
-              : "Browser artifacts";
+        const disposable =
+          entry.worktreeResource === "dependencies" ||
+          entry.worktreeResource === "generated-builds";
+        const name =
+          entry.worktreeResource === "dependencies"
+            ? `Dependencies: ${entry.path?.split(/[\\/]/).filter(Boolean).at(-2) ?? "worktree"}`
+            : entry.worktreeResource === "generated-builds"
+              ? `Build outputs: ${entry.path?.split(/[\\/]/).findLast(Boolean) ?? "worktree"}`
+              : entry.kind === "worktree"
+                ? (entry.path?.split(/[\\/]/).findLast(Boolean) ?? "Worktrees")
+                : entry.kind === "logs"
+                  ? "Rotated logs"
+                  : "Browser artifacts";
         return (
           <SettingsRow
             key={`${entry.kind}:${entry.worktreeResource ?? "all"}:${entry.path ?? entry.kind}:${entry.threadId ?? index}`}
@@ -202,12 +206,12 @@ function CleanupResults({
               entry.outcome === "removed" && (
                 <span className="text-xs text-muted-foreground">
                   {[
-                    (dependencyInstall || entry.kind !== "worktree") && entry.files !== null
+                    (disposable || entry.kind !== "worktree") && entry.files !== null
                       ? `${entry.files.toLocaleString()} ${entry.files === 1 ? "file" : "files"}`
                       : null,
                     entry.bytes !== null
-                      ? `${formatBytes(entry.bytes)}${dependencyInstall ? " estimated" : ""}`
-                      : dependencyInstall
+                      ? `${formatBytes(entry.bytes)}${disposable ? " estimated" : ""}`
+                      : disposable
                         ? "Size unknown"
                         : null,
                   ]

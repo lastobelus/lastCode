@@ -668,9 +668,9 @@ const make = Effect.gen(function* () {
     serverSettings: ServerSettings,
     now: number,
     entries: StorageCleanupReportEntry[],
-    kind: "dependencies" | "generated-builds",
+    resource: "dependencies" | "generated-builds",
   ) {
-    const generatedBuilds = kind === "generated-builds";
+    const generatedBuilds = resource === "generated-builds";
     const outputPath = (cwd: string) => (generatedBuilds ? cwd : path.join(cwd, "node_modules"));
     const outputExists = (cwd: string) =>
       generatedBuilds ? builds.hasOutputs(cwd) : fs.exists(outputPath(cwd));
@@ -689,7 +689,7 @@ const make = Effect.gen(function* () {
     if (!anyWorktreePolicy(serverSettings, dependencyCleanupEnabled)) {
       entries.push({
         kind: "worktree",
-        worktreeResource: kind,
+        worktreeResource: resource,
         outcome: "kept",
         reason: "Dependency cleanup policy is disabled",
         path: null,
@@ -869,7 +869,8 @@ const make = Effect.gen(function* () {
       worktreePath: string,
     ) => {
       const entry: StorageCleanupReportEntry = {
-        kind,
+        kind: "worktree",
+        worktreeResource: resource,
         outcome: "kept",
         reason: "A final safety check prevented dependency removal",
         path: outputPath(worktreePath),
@@ -995,7 +996,8 @@ const make = Effect.gen(function* () {
             (yield* outputExists(directory))
           )
             entries.push({
-              kind,
+              kind: "worktree",
+              worktreeResource: resource,
               outcome: "kept",
               reason: "Could not verify a current repository and project mapping",
               path: outputPath(directory),
@@ -1020,7 +1022,8 @@ const make = Effect.gen(function* () {
       }
       if (pending.length > 0)
         entries.push({
-          kind,
+          kind: "worktree",
+          worktreeResource: resource,
           outcome: "kept",
           reason: "Some dependency locations exceeded the discovery limit and were kept",
           path: root,
@@ -1033,7 +1036,8 @@ const make = Effect.gen(function* () {
     for (const [cwd, mappings] of registeredGroups) {
       if (knownPaths.has(cwd) || !(yield* outputExists(cwd))) continue;
       const entry: StorageCleanupReportEntry = {
-        kind,
+        kind: "worktree",
+        worktreeResource: resource,
         outcome: "kept",
         reason: "Ownerless install is not yet eligible",
         path: outputPath(cwd),
@@ -2388,7 +2392,8 @@ const make = Effect.gen(function* () {
       Effect.catch((error) =>
         Effect.sync(() =>
           entries.push({
-            kind: "generated-builds",
+            kind: "worktree",
+            worktreeResource: "generated-builds",
             outcome: "failed",
             reason: cleanupFailureReason(error),
             path: null,
@@ -2506,6 +2511,11 @@ const make = Effect.gen(function* () {
     const counts = { removed: 0, kept: 0, failed: 0 };
     let bytesFreed = 0;
     for (const entry of entries) {
+      // Keep the original report kind vocabulary. Older clients ignore the open
+      // detail field and still receive an explicit description of the resource.
+      if (entry.worktreeResource === "dependencies") entry.reason = `Dependencies: ${entry.reason}`;
+      if (entry.worktreeResource === "generated-builds")
+        entry.reason = `Build outputs: ${entry.reason}`;
       counts[entry.outcome]++;
       bytesFreed += entry.bytes ?? 0;
     }

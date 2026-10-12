@@ -89,6 +89,25 @@ const decodeLegacyCleanupReport = Schema.decodeUnknownSync(
     ),
   }),
 );
+const decodeHistoricalReport = Schema.decodeSync(
+  Schema.Struct({
+    trigger: Schema.Literals(["automatic", "manual"]),
+    startedAt: Schema.String,
+    finishedAt: Schema.String,
+    entries: Schema.Array(
+      Schema.Struct({
+        kind: Schema.Literals(["worktree", "browser-artifacts", "logs"]),
+        outcome: Schema.Literals(["removed", "kept", "failed"]),
+        reason: Schema.String,
+        path: Schema.NullOr(Schema.String),
+        threadId: Schema.NullOr(Schema.String),
+        threadTitle: Schema.NullOr(Schema.String),
+      }),
+    ),
+    counts: Schema.Struct({ removed: Schema.Number, kept: Schema.Number, failed: Schema.Number }),
+    omittedCount: Schema.Number,
+  }),
+);
 
 function at(offsetMs: number): DateTime.Utc {
   return DateTime.makeUnsafe(NOW_MS + offsetMs);
@@ -1287,6 +1306,54 @@ const seedCompilerOutput = Effect.fnUntraced(function* (
 
 describe("verified build sweep shares the dependency rule", () => {
   it.live(
+    "service-generated build reports remain readable by the historical three-kind client",
+    () =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          const fixture = yield* cleanupFixture;
+          fixture.setDependencyRetention(3);
+          yield* seedCompilerOutput(fixture, "apps/web/dist", fixture.now - 4 * DAY_MS);
+          const report = yield* fixture.service.runNow;
+          const historical = decodeHistoricalReport(report);
+          expect(historical.counts).toEqual(report.counts);
+          expect(historical.entries).toMatchObject([
+            {
+              kind: "worktree",
+              outcome: "removed",
+              reason: expect.stringContaining("Build outputs:"),
+            },
+          ]);
+          expect(report.entries[0]?.worktreeResource).toBe("generated-builds");
+        }),
+      ),
+  );
+  it("new report decoding accepts missing and unknown open resource details", () => {
+    const report = {
+      trigger: "manual",
+      startedAt: "2026-06-10T12:00:00.000Z",
+      finishedAt: "2026-06-10T12:00:01.000Z",
+      entries: [
+        {
+          kind: "worktree",
+          outcome: "kept",
+          reason: "Retained worktree resource",
+          path: null,
+          threadId: null,
+          threadTitle: null,
+        },
+      ],
+      counts: { removed: 0, kept: 1, failed: 0 },
+      omittedCount: 0,
+    };
+    expect(decodeCleanupReport(report).entries[0]?.worktreeResource).toBeUndefined();
+    expect(
+      decodeCleanupReport({
+        ...report,
+        entries: [{ ...report.entries[0], worktreeResource: "future-resource" }],
+      }).entries[0]?.worktreeResource,
+    ).toBe("future-resource");
+  });
+  it.live(
     "reclaims verified ownerless output using its actual clock, then protects regenerated output and Off",
     () =>
       runCleanupTest(
@@ -1297,19 +1364,19 @@ describe("verified build sweep shares the dependency rule", () => {
           fixture.setThreads([]);
           expect(
             (yield* fixture.service.runNow).entries.filter(
-              (entry) => entry.kind === "generated-builds",
+              (entry) => entry.worktreeResource === "generated-builds",
             ),
           ).toMatchObject([{ outcome: "removed" }]);
           yield* seedCompilerOutput(fixture, "apps/web/dist", fixture.now);
           expect(
             (yield* fixture.service.runNow).entries.filter(
-              (entry) => entry.kind === "generated-builds",
+              (entry) => entry.worktreeResource === "generated-builds",
             ),
           ).toMatchObject([{ outcome: "kept" }]);
           fixture.setProjectWholeCleanupOff(ProjectId.make("project-1"));
           expect(
             (yield* fixture.service.runNow).entries.filter(
-              (entry) => entry.kind === "generated-builds",
+              (entry) => entry.worktreeResource === "generated-builds",
             ),
           ).toMatchObject([{ outcome: "kept", reason: expect.stringContaining("off") }]);
           expect(
@@ -1340,7 +1407,7 @@ describe("verified build sweep shares the dependency rule", () => {
           fixture.setThreads([first, { ...sibling, archivedAt: null }]);
           expect(
             (yield* fixture.service.runNow).entries.filter(
-              (entry) => entry.kind === "generated-builds",
+              (entry) => entry.worktreeResource === "generated-builds",
             ),
           ).toMatchObject([{ outcome: "kept", reason: expect.stringContaining("unarchived") }]);
           const offProject = ProjectId.make("off-owner");
@@ -1348,13 +1415,13 @@ describe("verified build sweep shares the dependency rule", () => {
           fixture.setThreads([first, { ...sibling, projectId: offProject }]);
           expect(
             (yield* fixture.service.runNow).entries.filter(
-              (entry) => entry.kind === "generated-builds",
+              (entry) => entry.worktreeResource === "generated-builds",
             ),
           ).toMatchObject([{ outcome: "kept", reason: expect.stringContaining("off") }]);
           fixture.setThreads([first, sibling]);
           expect(
             (yield* fixture.service.runNow).entries.filter(
-              (entry) => entry.kind === "generated-builds",
+              (entry) => entry.worktreeResource === "generated-builds",
             ),
           ).toMatchObject([{ outcome: "removed" }]);
           expect(yield* fixture.fs.exists(fixture.worktree)).toBe(true);
@@ -1383,9 +1450,9 @@ describe("verified build sweep shares the dependency rule", () => {
             "unique notes\n",
           );
           const report = yield* fixture.service.runNow;
-          expect(report.entries.filter((entry) => entry.kind === "generated-builds")).toMatchObject(
-            [{ outcome: "removed", files: 1 }],
-          );
+          expect(
+            report.entries.filter((entry) => entry.worktreeResource === "generated-builds"),
+          ).toMatchObject([{ outcome: "removed", files: 1 }]);
           expect(yield* fixture.fs.exists(`${fixture.worktree}/${root}/assets/emitted.bin`)).toBe(
             false,
           );
@@ -1408,9 +1475,9 @@ describe("verified build sweep shares the dependency rule", () => {
           fixture.setDependencyRetention(days);
           yield* seedCompilerOutput(fixture, "apps/web/dist", fixture.now - idleDays * DAY_MS);
           const report = yield* fixture.service.runNow;
-          expect(report.entries.filter((entry) => entry.kind === "generated-builds")).toMatchObject(
-            [{ outcome }],
-          );
+          expect(
+            report.entries.filter((entry) => entry.worktreeResource === "generated-builds"),
+          ).toMatchObject([{ outcome }]);
           expect(yield* fixture.fs.exists(fixture.worktree)).toBe(true);
         }),
       ),
@@ -1426,13 +1493,13 @@ describe("verified build sweep shares the dependency rule", () => {
           fixture.setProjectDependencyRetention(ProjectId.make("project-1"), 14);
           expect(
             (yield* fixture.service.runNow).entries.filter(
-              (entry) => entry.kind === "generated-builds",
+              (entry) => entry.worktreeResource === "generated-builds",
             ),
           ).toMatchObject([{ outcome: "kept" }]);
           fixture.setProjectWholeCleanupOff(ProjectId.make("project-1"));
           expect(
             (yield* fixture.service.runNow).entries.filter(
-              (entry) => entry.kind === "generated-builds",
+              (entry) => entry.worktreeResource === "generated-builds",
             ),
           ).toEqual([]);
           expect(
@@ -1464,9 +1531,9 @@ describe("verified build sweep shares the dependency rule", () => {
             "retained legacy output\n",
           );
           const report = yield* legacy.service.runNow;
-          expect(report.entries.filter((entry) => entry.kind === "generated-builds")).toMatchObject(
-            [{ outcome: "kept", reason: expect.stringContaining("review") }],
-          );
+          expect(
+            report.entries.filter((entry) => entry.worktreeResource === "generated-builds"),
+          ).toMatchObject([{ outcome: "kept", reason: expect.stringContaining("review") }]);
           expect(yield* legacy.fs.exists(`${legacy.worktree}/apps/web/dist/unknown.bin`)).toBe(
             true,
           );
@@ -1496,7 +1563,7 @@ describe("verified build sweep shares the dependency rule", () => {
         paths = [`${fixture.worktree}/apps/web/dist/assets/emitted.bin`];
         expect(
           (yield* fixture.service.runNow).entries.filter(
-            (entry) => entry.kind === "generated-builds",
+            (entry) => entry.worktreeResource === "generated-builds",
           ),
         ).toMatchObject([{ outcome: "kept" }]);
         expect(
@@ -1507,7 +1574,7 @@ describe("verified build sweep shares the dependency rule", () => {
         paths = [];
         expect(
           (yield* fixture.service.runNow).entries.filter(
-            (entry) => entry.kind === "generated-builds",
+            (entry) => entry.worktreeResource === "generated-builds",
           ),
         ).toMatchObject([{ outcome: "kept" }]);
         const statusOnly = yield* cleanupFixture;
@@ -1523,7 +1590,7 @@ describe("verified build sweep shares the dependency rule", () => {
         ]);
         expect(
           (yield* statusOnly.service.runNow).entries.filter(
-            (entry) => entry.kind === "generated-builds",
+            (entry) => entry.worktreeResource === "generated-builds",
           ),
         ).toMatchObject([{ outcome: "removed" }]);
       }),
@@ -1943,7 +2010,7 @@ describe("storage cleanup reports and local file policies", () => {
         expect(report.trigger).toBe("manual");
         expect(
           report.entries.filter(
-            (entry) => entry.kind === "worktree" && entry.worktreeResource !== "dependencies",
+            (entry) => entry.kind === "worktree" && entry.worktreeResource === undefined,
           ),
         ).toMatchObject([
           {
@@ -2068,7 +2135,7 @@ describe("storage cleanup reports and local file policies", () => {
           yield* fs.remove(worktree, { recursive: true });
           expect(
             (yield* service.runNow).entries.filter(
-              (entry) => entry.kind === "worktree" && entry.worktreeResource !== "dependencies",
+              (entry) => entry.kind === "worktree" && entry.worktreeResource === undefined,
             ),
           ).toEqual([]);
         }),
@@ -2823,9 +2890,7 @@ describe("storage cleanup reports and local file policies", () => {
         expect(
           reports
             .flatMap((report) => report.entries)
-            .filter(
-              (entry) => entry.kind === "worktree" && entry.worktreeResource !== "dependencies",
-            ),
+            .filter((entry) => entry.kind === "worktree" && entry.worktreeResource === undefined),
         ).toMatchObject([{ outcome: "removed" }]);
         expect(yield* service.latestReport).toEqual(reports[1]);
       }),
