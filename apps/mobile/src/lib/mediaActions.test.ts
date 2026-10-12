@@ -1,5 +1,6 @@
 import {
   AuthFilesystemReadScope,
+  AuthOrchestrationReadScope,
   EnvironmentId,
   ThreadId,
   type AuthSessionState,
@@ -8,7 +9,7 @@ import { AsyncResult } from "effect/reactivity";
 import { beforeEach, expect, it, vi } from "vite-plus/test";
 
 const state = vi.hoisted(() => ({
-  sessions: new Map<string, Pick<AuthSessionState, "authenticated" | "scopes">>(),
+  sessions: new Map<string, Pick<AuthSessionState, "authenticated" | "scopes" | "permissions">>(),
   refresh: vi.fn(),
   download: vi.fn(),
   shareLocal: vi.fn(),
@@ -65,11 +66,11 @@ import type { MediaActionsSource } from "./mediaActionsSource";
 const environmentId = EnvironmentId.make("media-environment");
 const otherEnvironmentId = EnvironmentId.make("other-environment");
 const threadId = ThreadId.make("media-thread");
-const granted: Pick<AuthSessionState, "authenticated" | "scopes"> = {
+const granted: Pick<AuthSessionState, "authenticated" | "scopes" | "permissions"> = {
   authenticated: true,
   scopes: [AuthFilesystemReadScope],
 };
-const denied: Pick<AuthSessionState, "authenticated" | "scopes"> = {
+const denied: Pick<AuthSessionState, "authenticated" | "scopes" | "permissions"> = {
   authenticated: true,
   scopes: [],
 };
@@ -263,4 +264,45 @@ it("shares device draft attachments without a host grant", async () => {
 
   expect(state.refresh).not.toHaveBeenCalled();
   expect(state.shareDraft).toHaveBeenCalledOnce();
+});
+
+it.each(["workspace-file", "media-file"] as const)(
+  "shares %s after a fresh URL authorization with conversation-only access",
+  async (_tag) => {
+    state.sessions.set(environmentId, {
+      authenticated: true,
+      scopes: [AuthOrchestrationReadScope],
+      permissions: [AuthOrchestrationReadScope],
+    });
+    const source = hostSource(_tag);
+    const media = useMediaActions(source);
+    expect(media.actions.find(({ id }) => id === "save")?.disabled).toBe(false);
+    await media.share();
+    expect(state.refresh).toHaveBeenCalledWith(
+      environmentId,
+      "resource" in source ? source.resource : null,
+    );
+    expect(state.download).toHaveBeenCalledWith(
+      expect.objectContaining({ url: "https://host.test/image.png" }),
+    );
+  },
+);
+
+it("does not download when the server denies a file under conversation-only access", async () => {
+  state.sessions.set(environmentId, {
+    authenticated: true,
+    scopes: [AuthOrchestrationReadScope],
+    permissions: [AuthOrchestrationReadScope],
+  });
+  state.refresh.mockResolvedValue(null);
+  await useMediaActions(hostSource()).share();
+  expect(state.refresh).toHaveBeenCalledOnce();
+  expect(state.download).not.toHaveBeenCalled();
+});
+
+it("preserves path copying without conversation or filesystem access", () => {
+  const media = useMediaActions(hostSource());
+  media.actions.find(({ id }) => id === "copy-relative-path")!.run();
+  expect(state.copy).toHaveBeenCalledWith("image.png");
+  expect(state.refresh).not.toHaveBeenCalled();
 });

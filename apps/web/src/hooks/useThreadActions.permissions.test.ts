@@ -10,6 +10,7 @@ import {
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { makeThreadFixture } from "../test-fixtures";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -62,6 +63,34 @@ vi.mock("../state/use-atom-command", () => ({
         return AsyncResult.failure(Cause.fail(new Error("Server denied the request")));
       }
       state.afterRequest?.(action);
+      if (action === "loadArchiveFamily") {
+        return AsyncResult.success({
+          childThreadIds: [],
+          promotableChildThreadIds: [],
+          keptThreadIds: [],
+          activeChildThreadIds: [],
+          activeThreadIds: [],
+          unreadThreadIds: [],
+          protectedChildThreadIds: [],
+          nativeStopCount: 0,
+          requiresConfirmation: false,
+          canPromote: false,
+          canStopAndArchive: true,
+          children: [],
+          activeChildren: [],
+          activeThreads: [],
+          unreadThreads: [],
+          promotableChildren: [],
+          protectedChildren: [],
+          threads: state.threads
+            .filter(
+              (thread) =>
+                thread.environmentId === request.environmentId &&
+                thread.id === request.input.threadId,
+            )
+            .map((thread) => makeThreadFixture({ ...thread, runtime: null })),
+        });
+      }
       return AsyncResult.success(undefined);
     },
 }));
@@ -76,21 +105,24 @@ vi.mock("../state/use-atom-query-runner", () => ({
         }),
 }));
 vi.mock("../state/threads", () => ({
-  threadEnvironment: Object.fromEntries(
-    [
-      "archive",
-      "unarchive",
-      "delete",
-      "settle",
-      "unsettle",
-      "pin",
-      "unpin",
-      "reorderPin",
-      "snooze",
-      "unsnooze",
-      "stopSession",
-    ].map((action) => [action, action]),
-  ),
+  threadEnvironment: {
+    loadArchiveFamily: "loadArchiveFamily",
+    ...Object.fromEntries(
+      [
+        "archive",
+        "unarchive",
+        "delete",
+        "settle",
+        "unsettle",
+        "pin",
+        "unpin",
+        "reorderPin",
+        "snooze",
+        "unsnooze",
+        "stopSession",
+      ].map((action) => [action, action]),
+    ),
+  },
 }));
 vi.mock("../state/vcs", () => ({
   vcsEnvironment: { removeWorktree: "removeWorktree", refreshStatus: "refreshStatus" },
@@ -99,6 +131,7 @@ vi.mock("../state/entities", () => ({
   readEnvironmentSupportsPinning: () => true,
   readEnvironmentSupportsPinReorder: () => true,
   readEnvironmentSupportsSettlement: () => true,
+  readEnvironmentSupportsArchiveFamilies: () => true,
   readEnvironmentSupportsSnooze: () => true,
   readEnvironmentSupportsWorktreeCleanup: () => false,
   readThreadShell: (ref: ScopedThreadRef) =>
@@ -258,6 +291,15 @@ describe("thread action permissions", () => {
       state.scopes.get(secondary)!.add(AuthOrchestrationOperateScope);
       expect((await run(actions, target))._tag).toBe("Success");
       expect(state.requests).toEqual([
+        ...(name === "archive"
+          ? [
+              expect.objectContaining({
+                action: "loadArchiveFamily",
+                environmentId: secondary,
+                input: { threadId: target.threadId },
+              }),
+            ]
+          : []),
         expect.objectContaining({ action: name, environmentId: secondary }),
       ]);
     },

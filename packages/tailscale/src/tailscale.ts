@@ -111,11 +111,13 @@ export class TailscaleCommandTimeoutError extends Schema.TaggedError<TailscaleCo
   }
 }
 
-type TailscaleCommandError =
-  | TailscaleCommandSpawnError
-  | TailscaleCommandOutputError
-  | TailscaleCommandExitError
-  | TailscaleCommandTimeoutError;
+const TailscaleCommandError = Schema.Union([
+  TailscaleCommandSpawnError,
+  TailscaleCommandOutputError,
+  TailscaleCommandExitError,
+  TailscaleCommandTimeoutError,
+]);
+type TailscaleCommandError = typeof TailscaleCommandError.Type;
 
 export class TailscaleStatusParseError extends Schema.TaggedError<TailscaleStatusParseError>()(
   "TailscaleStatusParseError",
@@ -126,7 +128,7 @@ export class TailscaleStatusParseError extends Schema.TaggedError<TailscaleStatu
   }
 }
 
-export class TailscaleServePortOccupiedError extends Schema.TaggedErrorClass<TailscaleServePortOccupiedError>()(
+export class TailscaleServePortOccupiedError extends Schema.TaggedError<TailscaleServePortOccupiedError>()(
   "TailscaleServePortOccupiedError",
   { servePort: Schema.Number },
 ) {

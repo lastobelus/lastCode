@@ -19,13 +19,38 @@ describe("lastcode-setup", () => {
         "--dry-run",
       ]),
     ).toEqual({
+      checkpointDailyAt: undefined,
       checkpointIntervalSeconds: 1234,
+      checkpointTimeZone: undefined,
       dryRun: true,
       enableNightlyWrites: true,
       help: false,
       trustedProjectActionIds: ["lc-wait-for-pr"],
     });
     expect(() => parseOptions(["--checkpoint-interval-seconds", "0"])).toThrow("positive integer");
+    expect(
+      parseOptions([
+        "--enable-nightly-writes",
+        "--checkpoint-daily-at",
+        "02:00",
+        "--checkpoint-time-zone",
+        "America/Los_Angeles",
+      ]),
+    ).toMatchObject({
+      checkpointDailyAt: "02:00",
+      checkpointIntervalSeconds: undefined,
+      checkpointTimeZone: "America/Los_Angeles",
+    });
+    expect(() =>
+      parseOptions([
+        "--checkpoint-interval-seconds",
+        "3600",
+        "--checkpoint-daily-at",
+        "02:00",
+        "--checkpoint-time-zone",
+        "America/Los_Angeles",
+      ]),
+    ).toThrow("either a checkpoint interval");
     expect(() => parseOptions(["--surprise"])).toThrow("Unknown argument");
   });
 
@@ -37,10 +62,15 @@ describe("lastcode-setup", () => {
   });
 
   it("installs dependencies, the service, and all managed commands", () => {
-    const commands = setupCommands("/repo", "/node", 1234, {
-      home: "/home/example",
-      trustedProjectActionIds: ["lc-wait-for-pr"],
-    });
+    const commands = setupCommands(
+      "/repo",
+      "/node",
+      { kind: "interval", intervalSeconds: 1234 },
+      {
+        home: "/home/example",
+        trustedProjectActionIds: ["lc-wait-for-pr"],
+      },
+    );
     expect(commands.map(({ command, args }) => [command, ...args])).toEqual([
       ["vp", "install", "--frozen-lockfile"],
       [
@@ -69,8 +99,30 @@ describe("lastcode-setup", () => {
     ]);
   });
 
+  it("passes a daily schedule to the managed checkpoint service", () => {
+    const commands = setupCommands(
+      "/repo",
+      "/node",
+      { kind: "daily", dailyAt: "02:00", timeZone: "America/Los_Angeles" },
+      { home: "/home/example" },
+    );
+    expect(commands.find((step) => step.kind === "service")?.args).toEqual([
+      "/repo/scripts/lastcode-nightly-service.ts",
+      "install",
+      "--daily-at",
+      "02:00",
+      "--time-zone",
+      "America/Los_Angeles",
+    ]);
+  });
+
   it("disables a newly installed service when a later helper fails", () => {
-    const commands = setupCommands("/repo", "/node", 1234, { home: "/home/example" });
+    const commands = setupCommands(
+      "/repo",
+      "/node",
+      { kind: "interval", intervalSeconds: 1234 },
+      { home: "/home/example" },
+    );
     const executed = [];
 
     expect(() =>
@@ -91,7 +143,12 @@ describe("lastcode-setup", () => {
   });
 
   it("preserves a service that existed before a failed rerun", () => {
-    const commands = setupCommands("/repo", "/node", 1234, { home: "/home/example" });
+    const commands = setupCommands(
+      "/repo",
+      "/node",
+      { kind: "interval", intervalSeconds: 1234 },
+      { home: "/home/example" },
+    );
     const executed = [];
 
     expect(() =>

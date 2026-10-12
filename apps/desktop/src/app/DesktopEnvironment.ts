@@ -1,3 +1,4 @@
+import { LASTCODE_DESKTOP_DISTRIBUTION } from "@t3tools/shared/desktopDistribution";
 import type {
   DesktopAppBranding,
   DesktopAppStageLabel,
@@ -86,6 +87,7 @@ export class DesktopEnvironment extends Context.Service<
     readonly linuxWmClass: string;
     readonly linuxApplicationsDir: string;
     readonly appImagePath: Option.Option<string>;
+    readonly userDataDirName: string;
     readonly defaultDesktopSettings: DesktopAppSettings.DesktopSettings;
     readonly runtimeInfo: DesktopRuntimeInfo;
     readonly resolvePickFolderDefaultPath: (rawOptions: unknown) => Option.Option<string>;
@@ -93,7 +95,7 @@ export class DesktopEnvironment extends Context.Service<
   }
 >()("@t3tools/desktop/app/DesktopEnvironment") {}
 
-const APP_BASE_NAME = "T3 Code";
+const APP_BASE_NAME = LASTCODE_DESKTOP_DISTRIBUTION.productName;
 
 function resolveDesktopAppStageLabel(input: {
   readonly isDevelopment: boolean;
@@ -236,10 +238,17 @@ const make = Effect.fn("desktop.environment.make")(function* (
     branding,
     displayName,
     appUserModelId: Option.getOrElse(config.appUserModelIdOverride, () =>
-      isDevelopment ? "com.t3tools.t3code.dev" : "com.t3tools.t3code",
+      isDevelopment
+        ? LASTCODE_DESKTOP_DISTRIBUTION.developmentAppId
+        : LASTCODE_DESKTOP_DISTRIBUTION.appId,
     ),
     linuxDesktopEntryName: resolveLinuxDesktopEntryName(isDevelopment),
-    linuxWmClass: isDevelopment ? "t3code-dev" : "t3code",
+    linuxWmClass: isDevelopment
+      ? LASTCODE_DESKTOP_DISTRIBUTION.developmentExecutableName
+      : LASTCODE_DESKTOP_DISTRIBUTION.executableName,
+    userDataDirName: isDevelopment
+      ? LASTCODE_DESKTOP_DISTRIBUTION.developmentUserDataDirName
+      : `${LASTCODE_DESKTOP_DISTRIBUTION.userDataDirName}-v2`,
     linuxApplicationsDir,
     appImagePath: config.appImagePath,
     defaultDesktopSettings: DesktopAppSettings.resolveDefaultDesktopSettings(input.appVersion),

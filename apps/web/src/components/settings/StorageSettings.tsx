@@ -106,10 +106,12 @@ function RetentionControl({
   label,
   value,
   onChange,
+  disabled = false,
 }: {
   label: string;
   value: number | null;
   onChange: (value: number | null) => void;
+  disabled?: boolean;
 }) {
   const [draft, setDraft] = useState(value);
   const [savedValue, setSavedValue] = useState(value);
@@ -123,6 +125,7 @@ function RetentionControl({
       {value !== null ? (
         <NumberField
           value={draft}
+          disabled={disabled}
           min={1}
           max={3650}
           step={1}
@@ -156,6 +159,7 @@ function RetentionControl({
       )}
       <Switch
         aria-label={label}
+        disabled={disabled}
         checked={value !== null}
         onCheckedChange={(enabled) => onChange(enabled ? 8 : null)}
       />
@@ -423,6 +427,10 @@ export function StorageSettingsPanel() {
       : undefined;
   const update = (patch: Partial<StorageCleanupSettings>) =>
     updateSettings({ storageCleanup: patch });
+  const dependenciesSupported = connectedEnvironments.every(
+    (environment) =>
+      environment.serverConfig?.environment.capabilities.worktreeDependencyCleanup === true,
+  );
   const updateWorktree = (patch: Partial<WorktreeCleanupRules>) =>
     isProjectScope
       ? updateSettings({ worktreeCleanup: { mode: "custom", rules: patch } })
@@ -512,6 +520,26 @@ export function StorageSettingsPanel() {
         )}
         {(!isProjectScope || (!mixedModes && mode === "custom")) && (
           <>
+            <SettingsRow
+              title="Remove inactive worktree dependencies"
+              status={ruleStatus("worktreeDependenciesAfterDays")}
+              description={
+                dependenciesSupported
+                  ? "Remove recognized npm or pnpm node_modules installations after this many inactive days. Keeps the worktree, source, tmp, notes, and other files. Active agents, terminals, and previews prevent cleanup. Reinstall dependencies before resuming work."
+                  : "Choose updated macOS or Linux machines to use dependency cleanup."
+              }
+              serverScoped={!isProjectScope}
+              control={
+                <RetentionControl
+                  label="Remove inactive worktree dependencies"
+                  disabled={!dependenciesSupported}
+                  value={settings.worktreeDependenciesAfterDays}
+                  onChange={(worktreeDependenciesAfterDays) =>
+                    updateWorktree({ worktreeDependenciesAfterDays })
+                  }
+                />
+              }
+            />
             <SettingsRow
               title="Delete worktrees with deleted threads"
               status={ruleStatus("worktreeOnDelete")}

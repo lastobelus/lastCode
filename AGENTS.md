@@ -102,6 +102,13 @@ An empty database is a bad test. Seed your worktree's `.t3` with a copy of real 
 - The server is event-sourced, and side effects run after the command commits. In tests, drain the effect worker (`OrchestrationEffectWorkerV2.drain`) or await the specific persisted event or `Deferred` that marks the milestone. Never wait on sleeps or polling. A test that needs a timeout to pass is wrong.
 - User-visible frontend changes should get one integrated pass in a real client: `test-t3-app` for web, `test-t3-mobile` for mobile. The primary agent does this once after integrating. Subagents do not launch their own dev servers. Routine automated QA in an isolated development instance is authorized: use a thread-owned background preview with `preview_open({ open: false, reuseExistingTab: false })` and keep the returned tab ID. Do not focus an application, switch the user's thread, or operate their live workspace. Ask before foreground computer use or back-and-forth human QA, according to the machine interaction policy.
 
+Before dev-browser QA, identify the actual browser host as well as the app host.
+When they differ, use the runner's `--share` recipe and published HTTPS origin;
+an unshared loopback URL and a backend `--host` override do not make the web
+listener reachable by the remote desktop. Navigate directly to the runner's
+published HTTPS URL. Follow `test-t3-app` for the one descriptor-readiness
+check and record any manual pairing separately from automatic authentication.
+
 For authorized mobile verification, a missing or outdated native client is a build step, not a blocker. Run `node scripts/mobile-native-client.ts ensure <ios|android> <device-id>` on the simulator host before starting Metro. It checks the local Expo fingerprint and builds/installs when needed. See `test-t3-mobile` for the full workflow.
 
 For an already-started LastCode checkpoint service run, use the resumable

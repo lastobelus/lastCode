@@ -637,7 +637,7 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
             (yield* resolveNodeExecutable("Device automation", hostEnvironment).pipe(
               Effect.provideService(FileSystem.FileSystem, fs),
               Effect.provideService(Path.Path, path),
-              Effect.provideService(HostProcessPlatform, hostPlatform),
+              Effect.provideService(HostProcess.Platform, hostPlatform),
             )),
         };
       }

@@ -71,6 +71,25 @@ const BACKEND_READINESS_PATH = "/.well-known/t3/environment";
 const { logWarning: logBackendProcessWarning } =
   DesktopObservability.makeComponentLogger("desktop-backend-process");
 
+function recordDesktopBrowserStreamFailure<E>(
+  kind: "command" | "reply",
+  fd: number,
+  cause: Cause.Cause<E>,
+) {
+  // Both streams live until the backend run scope closes. Its cancellation
+  // is a normal stop, rather than evidence of a broken inherited pipe.
+  if (Cause.hasInterruptsOnly(cause)) return Effect.void;
+  return Effect.failCause(cause).pipe(
+    Effect.withSpan(`desktop.browser.${kind}Stream`, { attributes: { fd } }),
+    Effect.catchCause(() =>
+      logBackendProcessWarning(`desktop browser ${kind} stream stopped`, {
+        fd,
+        cause: Cause.pretty(cause),
+      }),
+    ),
+  );
+}
+
 type BackendProcessLayerServices = ChildProcessSpawner.ChildProcessSpawner | HttpClient.HttpClient;
 
 type BackendProcessRunRequirements = BackendProcessLayerServices | Scope.Scope;
@@ -299,7 +318,11 @@ export interface BackendInstanceSpec {
   // 127.0.0.1). Splitting this off from configResolve avoids races
   // between "fired onReady" and "currentConfig already advanced".
   readonly onReady?: (httpBaseUrl: URL) => Effect.Effect<void>;
+  /** Runs once per backend run before its first inherited-fd browser command. */
+  readonly prepareDesktopBrowser?: Effect.Effect<void>;
   readonly onShutdown?: () => Effect.Effect<void>;
+  // Report an unexpected exit before the first successful startup, once per instance.
+  readonly onStartupFailure?: (reason: string) => Effect.Effect<void>;
   // Fired once when a fatal or bounded preflight failure has exhausted its
   // retries. Returns true when the callback changed configuration and the
   // manager should resolve once more; false stops the failed instance.
@@ -483,7 +506,6 @@ export const runBackendProcess = Effect.fn("runBackendProcess")(function* (
     ) {
       additionalFds[`fd${options.bootstrap.desktopBrowserFd}`] = {
         type: "input",
-        stream: options.desktopBrowserStream,
       };
     }
     if (options.bootstrap.desktopBrowserControlFd !== undefined) {
@@ -520,6 +542,19 @@ export const runBackendProcess = Effect.fn("runBackendProcess")(function* (
     ),
   );
   const outputFibers: Array<Fiber.Fiber<void, never>> = [];
+
+  if (
+    options.bootstrapDelivery === "fd3" &&
+    options.bootstrap.desktopBrowserFd !== undefined &&
+    options.desktopBrowserStream !== undefined
+  ) {
+    const browserFd = options.bootstrap.desktopBrowserFd;
+    yield* options.desktopBrowserStream.pipe(
+      Stream.run(handle.getInputFd(browserFd)),
+      Effect.catchCause((cause) => recordDesktopBrowserStreamFailure("reply", browserFd, cause)),
+      Effect.forkScoped,
+    );
+  }
 
   yield* options.onStarted?.(handle.pid) ?? Effect.void;
   if (
@@ -570,12 +605,7 @@ export const runBackendProcess = Effect.fn("runBackendProcess")(function* (
       Stream.splitLines,
       Stream.filter((line) => line.length > 0),
       Stream.runForEach(handleCommand),
-      Effect.catchCause((cause) =>
-        logBackendProcessWarning("desktop browser command stream stopped", {
-          fd: browserFd,
-          cause: Cause.pretty(cause),
-        }),
-      ),
+      Effect.catchCause((cause) => recordDesktopBrowserStreamFailure("command", browserFd, cause)),
       Effect.forkScoped,
     );
   }
@@ -693,6 +723,7 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const httpClient = yield* HttpClient.HttpClient;
   const state = yield* Ref.make(initialState);
+  const startupSettled = yield* Ref.make(false);
   const mutex = yield* Semaphore.make(1);
 
   const { logWarning: logInstanceWarning, logError: logInstanceError } =
@@ -933,6 +964,13 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
                 }
                 if (wasReady) {
                   yield* spec.onShutdown?.() ?? Effect.void;
+                } else if (
+                  exitObserved &&
+                  !stopRequested &&
+                  nextState.desiredRunning &&
+                  !(yield* Ref.getAndSet(startupSettled, true))
+                ) {
+                  yield* spec.onStartupFailure?.(reason) ?? Effect.void;
                 }
               }
 
@@ -943,12 +981,21 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
           );
         });
 
+        const prepareDesktopBrowser = yield* Effect.cached(
+          Effect.void.pipe(
+            // A completed marker survives even when preparation never completes.
+            Effect.withSpan("desktop.browser.prepareStarted"),
+            Effect.andThen(spec.prepareDesktopBrowser ?? Effect.void),
+            Effect.withSpan("desktop.browser.prepare"),
+          ),
+        );
         const program = runBackendProcess({
           ...config.value,
           desktopTelemetryStream: desktopTelemetryPublisher.encoded,
           // Only a bootstrap that names the browser fds (the local primary) gets them.
           desktopBrowserStream: desktopBrowserHost.events,
-          onDesktopBrowserCommand: desktopBrowserHost.handleCommandLine,
+          onDesktopBrowserCommand: (line) =>
+            prepareDesktopBrowser.pipe(Effect.andThen(desktopBrowserHost.handleCommandLine(line))),
           onDesktopTelemetryControl: (message) =>
             desktopTelemetryPublisher.handleControlForSource(spec.id, message),
           onStarted: Effect.fn("desktop.backendInstance.onStarted")(function* (pid) {
@@ -985,6 +1032,7 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
               return;
             }
 
+            yield* Ref.set(startupSettled, true);
             yield* spec.onReady?.(config.value.httpBaseUrl) ?? Effect.void;
             if (
               config.value.runningDistro !== undefined &&

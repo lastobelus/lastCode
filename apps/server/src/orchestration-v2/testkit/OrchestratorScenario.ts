@@ -133,10 +133,23 @@ export class OrchestratorV2ScenarioStepError extends Schema.TaggedError<Orchestr
 
 function commandThreadIds(command: OrchestrationV2Command): ReadonlyArray<ThreadId> {
   switch (command.type) {
+    case "subagent.promote.request":
+    case "subagent.promote.cancel":
     case "thread.create":
+    case "thread.persistence.set":
+    case "thread.annotation.upsert":
+    case "thread.annotation.resolve":
+    case "thread.annotation.reopen":
+    case "thread.attention.set":
+    case "thread.attention.clear":
+    case "thread.dashboard-item.upsert":
+    case "thread.dashboard-item.remove":
     case "thread.archive":
     case "thread.unarchive":
     case "thread.delete":
+    case "thread.worktree-cleanup.retry":
+    case "thread.worktree-cleanup.abandon":
+    case "thread.worktree-cleanup.update":
     case "thread.settle":
     case "thread.auto-settle":
     case "thread.unsettle":
