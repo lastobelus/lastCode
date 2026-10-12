@@ -68,7 +68,7 @@ const scope = (threadId: ThreadId): McpInvocationContext.McpThreadInvocationScop
 const launch = chromium.launch.bind(chromium);
 beforeEach(() => {
   vi.spyOn(chromium, "launch").mockImplementation((options) => {
-    const launchOptions = { ...options };
+    const launchOptions = { ...options, chromiumSandbox: false };
     if (process.env.T3CODE_TEST_BROWSER_EXECUTABLE) {
       launchOptions.executablePath = process.env.T3CODE_TEST_BROWSER_EXECUTABLE;
     } else {
@@ -284,7 +284,10 @@ it.live("MCP opens only its own current publication through signed HTTP in real 
         reuseExistingTab: false,
       });
       const opened = yield* call("owner", request(publishedPath));
-      expect(opened.result.isError).not.toBe(true);
+      expect(
+        opened.result.isError,
+        opened.result.content.map((entry) => entry.text ?? "").join("\n"),
+      ).not.toBe(true);
       const status = yield* decodeStatus(opened.result.structuredContent);
       expect(status).toMatchObject({
         browserHost: "environment",
