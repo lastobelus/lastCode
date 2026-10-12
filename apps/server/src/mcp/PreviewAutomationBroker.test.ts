@@ -17,6 +17,7 @@ import {
   type PreviewAutomationStreamEvent,
   SERVER_BROWSER_AUTOMATION_CLIENT_ID,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Deferred from "effect/Deferred";
@@ -403,11 +404,15 @@ it.effect.each([
         );
         const pending = yield* broker
           .invoke({ scope, operation, input: {}, ...override })
-          .pipe(Effect.flip, Effect.forkScoped);
+          .pipe(Effect.exit, Effect.forkScoped);
         const request = yield* Deferred.await(received);
         expect(request.timeoutMs).toBe(15_000);
         yield* TestClock.adjust(15_000);
-        expect(yield* Fiber.join(pending)).toBeInstanceOf(PreviewAutomationTimeoutError);
+        const result = yield* Fiber.join(pending);
+        expect(Exit.isFailure(result)).toBe(true);
+        if (Exit.isFailure(result)) {
+          expect(Cause.squash(result.cause)).toBeInstanceOf(PreviewAutomationTimeoutError);
+        }
       }),
     ),
 );
