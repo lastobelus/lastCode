@@ -584,24 +584,47 @@ it.effect("one dependency removal error leaves its sibling eligible for deletion
       }),
       () => Effect.sync(() => rm.mockImplementation(original)),
     );
-    const removed = yield* first.cleanup.removeBatch([
-      {
-        inspection: first.inspection,
-        canRemove: Effect.succeed(true),
-        isStillEligible: Effect.succeed(true),
-      },
-      {
-        inspection: second.inspection,
-        canRemove: Effect.succeed(true),
-        isStillEligible: Effect.succeed(true),
-      },
-    ]);
+    const decisions: Array<{ path: string; outcome: string; reason: string }> = [];
+    const removed = yield* first.cleanup.removeBatch(
+      [
+        {
+          inspection: first.inspection,
+          canRemove: Effect.succeed(true),
+          isStillEligible: Effect.succeed(true),
+        },
+        {
+          inspection: second.inspection,
+          canRemove: Effect.succeed(true),
+          isStillEligible: Effect.succeed(true),
+        },
+      ],
+      (inspection, decision) =>
+        Effect.sync(() =>
+          decisions.push({
+            path: inspection.dependencyPath,
+            outcome: decision.outcome,
+            reason: decision.reason,
+          }),
+        ),
+    );
     assert.deepStrictEqual(
       removed.map((entry) => entry.dependencyPath),
       [second.dependencyPath],
     );
     assert.isTrue(yield* first.fs.exists(first.dependencyPath));
     assert.isFalse(yield* second.fs.exists(second.dependencyPath));
+    assert.deepStrictEqual(decisions, [
+      {
+        path: first.dependencyPath,
+        outcome: "failed",
+        reason: "Fixture removal failure",
+      },
+      {
+        path: second.dependencyPath,
+        outcome: "removed",
+        reason: "Dependency install removed",
+      },
+    ]);
     yield* assertBatchWorkspacePreserved(first);
     yield* assertBatchWorkspacePreserved(second);
   }).pipe(Effect.scoped, Effect.provide(testLayer())),

@@ -186,12 +186,14 @@ function CleanupResults({
         const name =
           entry.kind === "worktree"
             ? (entry.path?.split(/[\\/]/).findLast(Boolean) ?? "Worktrees")
-            : entry.kind === "logs"
-              ? "Rotated logs"
-              : "Browser artifacts";
+            : entry.kind === "dependencies"
+              ? (entry.path?.split(/[\\/]/).findLast(Boolean) ?? "Dependency installs")
+              : entry.kind === "logs"
+                ? "Rotated logs"
+                : "Browser artifacts";
         return (
           <SettingsRow
-            key={`${entry.path ?? entry.kind}:${entry.threadId ?? index}`}
+            key={`${entry.kind}:${entry.path ?? entry.kind}:${entry.threadId ?? index}`}
             title={environmentLabel ? `${environmentLabel}: ${name}` : name}
             description={
               <span

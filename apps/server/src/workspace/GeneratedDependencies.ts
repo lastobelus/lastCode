@@ -95,7 +95,7 @@ interface DependencyInput {
   readonly worktreePath: string;
 }
 
-interface DependencyInspection extends DependencyInput {
+export interface DependencyInspection extends DependencyInput {
   readonly repositoryCommonGitDir: string;
   readonly dependencyPath: string;
   readonly packageManager: "npm" | "pnpm";
@@ -103,6 +103,11 @@ interface DependencyInspection extends DependencyInput {
   readonly estimatedReclaimedBytes: number;
   readonly device: number;
   readonly inode: number;
+}
+
+export interface DependencyRemovalDecision {
+  readonly outcome: "removed" | "kept" | "failed";
+  readonly reason: string;
 }
 
 export const MAX_DEPENDENCY_REMOVAL_BATCH_SIZE = 4;
@@ -122,6 +127,10 @@ export class GeneratedDependencies extends Context.Service<
         /** Lightweight application-state invalidation after cohort preparation. */
         readonly isStillEligible: Effect.Effect<boolean>;
       }>,
+      onDecision?: (
+        inspection: DependencyInspection,
+        decision: DependencyRemovalDecision,
+      ) => Effect.Effect<void>,
     ) => Effect.Effect<ReadonlyArray<DependencyInspection>>;
   }
 >()("t3/workspace/GeneratedDependencies") {}
@@ -135,6 +144,11 @@ const inside = (root: string, target: string) => {
     !NodePath.isAbsolute(relative)
   );
 };
+
+const failureReason = (error: GeneratedDependenciesError) =>
+  error.cause instanceof Error
+    ? (error.cause.message.split(/\r?\n/)[0] ?? error.message)
+    : error.message;
 
 const lstatIfPresent = async (target: string) => {
   try {
@@ -357,14 +371,25 @@ const make = Effect.gen(function* () {
       readonly canRemove: Effect.Effect<boolean>;
       readonly isStillEligible: Effect.Effect<boolean>;
     }>,
+    onDecision?: (
+      inspection: DependencyInspection,
+      decision: DependencyRemovalDecision,
+    ) => Effect.Effect<void>,
   ) {
+    const decide = (
+      inspection: DependencyInspection,
+      outcome: DependencyRemovalDecision["outcome"],
+      reason: string,
+    ) => onDecision?.(inspection, { outcome, reason }) ?? Effect.void;
     if (
       entries.length === 0 ||
       entries.length > MAX_DEPENDENCY_REMOVAL_BATCH_SIZE ||
       new Set(entries.map(({ inspection }) => NodePath.resolve(inspection.worktreePath))).size !==
         entries.length
     )
-      return [];
+      return yield* Effect.forEach(entries, ({ inspection }) =>
+        decide(inspection, "failed", "Invalid dependency removal batch"),
+      ).pipe(Effect.as([]));
     const validated = (yield* Effect.forEach(
       entries,
       ({ inspection, canRemove, isStillEligible }) =>
@@ -378,16 +403,32 @@ const make = Effect.gen(function* () {
             current.inode !== inspection.inode ||
             current.packageManager !== inspection.packageManager
           )
-            return null;
+            return yield* decide(
+              inspection,
+              "kept",
+              "Dependency identity changed before removal",
+            ).pipe(Effect.as(null));
           return { current, inspection, canRemove, isStillEligible };
-        }).pipe(Effect.catch(skip)),
+        }).pipe(
+          Effect.catch((error) =>
+            skip(error).pipe(
+              Effect.andThen(decide(inspection, "failed", failureReason(error))),
+              Effect.as(null),
+            ),
+          ),
+        ),
       { concurrency: entries.length },
     )).filter((entry) => entry !== null);
     if (validated.length === 0) return [];
     // Finish all recognition and Git work before the shared fresh inventory.
     // Leases stay held, and no candidate queues behind another lengthy removal.
     const processes = yield* processCwds;
-    if (processes === null) return [];
+    if (processes === null) {
+      yield* Effect.forEach(validated, ({ inspection }) =>
+        decide(inspection, "kept", "Active process inspection is unavailable"),
+      );
+      return [];
+    }
     const eligible = (yield* Effect.forEach(
       validated,
       ({ current, inspection, canRemove, isStillEligible }) =>
@@ -397,28 +438,48 @@ const make = Effect.gen(function* () {
               (cwd) =>
                 NodePath.resolve(cwd) === current.worktreePath ||
                 inside(current.worktreePath, NodePath.resolve(cwd)),
-            ) ||
-            !(yield* canRemove)
-          )
+            )
+          ) {
+            yield* decide(inspection, "kept", "An active process owns the worktree");
             return null;
+          }
+          if (!(yield* canRemove)) {
+            yield* decide(inspection, "kept", "Worktree ownership or cleanup eligibility changed");
+            return null;
+          }
           return { current, inspection, isStillEligible };
-        }).pipe(Effect.catch(skip)),
+        }).pipe(
+          Effect.catch((error) =>
+            skip(error).pipe(
+              Effect.andThen(decide(inspection, "failed", failureReason(error))),
+              Effect.as(null),
+            ),
+          ),
+        ),
       { concurrency: validated.length },
     )).filter((entry) => entry !== null);
     if (eligible.length === 0) return [];
     // One fresh mount snapshot covers the entire cohort, including same-device
     // bind mounts added while any candidate's asynchronous eligibility checks ran.
     const mounts = yield* mountPoints;
-    if (mounts === null) return [];
+    if (mounts === null) {
+      yield* Effect.forEach(eligible, ({ inspection }) =>
+        decide(inspection, "kept", "Mount inspection is unavailable"),
+      );
+      return [];
+    }
     const removed = yield* Effect.forEach(
       eligible,
       ({ current, inspection, isStillEligible }) =>
         Effect.gen(function* () {
-          if (
-            DependencyMounts.containsMount(current.dependencyPath, mounts) ||
-            !(yield* isStillEligible)
-          )
+          if (DependencyMounts.containsMount(current.dependencyPath, mounts)) {
+            yield* decide(inspection, "kept", "Dependency path is a mount");
             return null;
+          }
+          if (!(yield* isStillEligible)) {
+            yield* decide(inspection, "kept", "Worktree ownership or cleanup eligibility changed");
+            return null;
+          }
           const ready = yield* Effect.tryPromise({
             try: async () => {
               if (await hasLiveRuntime(current.worktreePath)) return false;
@@ -431,15 +492,21 @@ const make = Effect.gen(function* () {
             catch: (cause) =>
               new GeneratedDependenciesError({ path: inspection.dependencyPath, cause }),
           });
-          if (!ready) return null;
+          if (!ready) {
+            yield* decide(inspection, "kept", "Runtime or dependency identity is still active");
+            return null;
+          }
           // The final application guard can await I/O. Refresh mounts afterward,
           // independently per candidate so no sibling delays its final snapshot.
           const finalMounts = yield* mountPoints;
-          if (
-            finalMounts === null ||
-            DependencyMounts.containsMount(current.dependencyPath, finalMounts)
-          )
+          if (finalMounts === null) {
+            yield* decide(inspection, "kept", "Final mount inspection is unavailable");
             return null;
+          }
+          if (DependencyMounts.containsMount(current.dependencyPath, finalMounts)) {
+            yield* decide(inspection, "kept", "Dependency path became a mount");
+            return null;
+          }
           // Keep the caller's leases until native removal settles on cancellation.
           return yield* Effect.tryPromise({
             try: async () => {
@@ -453,8 +520,26 @@ const make = Effect.gen(function* () {
             },
             catch: (cause) =>
               new GeneratedDependenciesError({ path: inspection.dependencyPath, cause }),
-          }).pipe(Effect.uninterruptible);
-        }).pipe(Effect.catch(skip)),
+          }).pipe(
+            Effect.uninterruptible,
+            Effect.tap((removed) =>
+              decide(
+                inspection,
+                removed === null ? "kept" : "removed",
+                removed === null
+                  ? "Dependency identity changed before removal"
+                  : "Dependency install removed",
+              ),
+            ),
+          );
+        }).pipe(
+          Effect.catch((error) =>
+            skip(error).pipe(
+              Effect.andThen(decide(inspection, "failed", failureReason(error))),
+              Effect.as(null),
+            ),
+          ),
+        ),
       { concurrency: eligible.length },
     );
     return removed.filter((entry) => entry !== null);
