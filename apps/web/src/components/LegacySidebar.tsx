@@ -1976,6 +1976,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     ) => {
       if (isSidebarNestedLinkClick(event.target)) return;
       const isMac = isMacPlatform(navigator.platform);
+      if (isContextMenuPointerDown({ button: event.button, ctrlKey: event.ctrlKey, isMac })) return;
       const isModClick = isMac ? event.metaKey : event.ctrlKey;
       const isShiftClick = event.shiftKey;
       const threadKey = scopedThreadKey(threadRef);
