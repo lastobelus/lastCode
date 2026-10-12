@@ -140,6 +140,10 @@ When given a budget for local reviews (e.g., example: "up to 5 rounds of Astra H
 - One request is one PR. Split it only when the maintainer asks. Outside contributions follow the stricter [one problem per PR](CONTRIBUTING.md#one-problem) rule.
 - When babysitting: poll checks and comments newer than the last push, verify each bot finding against the source, fix real ones, dismiss false positives with a written reason. Stay quiet when nothing is new. Stop when the bots are green on the latest commit.
 
+## When something goes wrong
+
+Finding out why a failure happened, yours or another thread's, is the moment to ask whether the next thread will hit it too. If the cause was guidance that is wrong, stale, missing, or easy to misread, or a tool or error message that pointed the wrong way, repairing your own run leaves the trap in place. In the same reply as the diagnosis, say what would remove it and where that change belongs. Make the change when it falls inside your task; otherwise leave the recommendation with the developer.
+
 ## Documentation
 
 Most code changes do not need an internal documentation change. Agents can read the code.
@@ -151,6 +155,7 @@ Most code changes do not need an internal documentation change. Agents can read 
 - `docs/user/` helps users accomplish tasks. Give each major feature a concise section explaining what it does, how to start, and anything unintuitive. A settings path is useful; descriptions of visible buttons, icons, layouts, animations, or every UI state are not. Before adding text, ask what task or decision it helps the user with.
 - Keep user docs in the shipped product's voice, without implementation details or contributor tooling. Update the relevant feature section when how to use it changes. A UI tweak does not need a documentation entry, and a new control does not need its own page.
 - `docs/operations/` holds maintainer setup, release, and debugging procedures. Keep instructions for operating an installed T3 Code server in the user guides.
+- Guidance for agents (this file, `.agents/skills/`, tool descriptions, and prompts) follows the same rules and is read far more often. When a failure exposes a gap, prefer fixing the tool or its error message, which is read at the moment it matters. Otherwise change the sentence that misled, in the one file that owns the rule, and point to it from anywhere else that needs it. State the rule and its reason. The attempts that failed along the way do not each need a prohibition.
 
 ## Public/private infrastructure boundary
 
