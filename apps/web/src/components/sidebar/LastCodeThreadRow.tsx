@@ -50,7 +50,7 @@ interface LastCodeThreadRowProps {
   annotations: LastCodeThreadAnnotationActions;
 }
 
-export const LastCodeThreadRow = memo(function LastCodeThreadRow(props: LastCodeThreadRowProps) {
+const LastCodeThreadRow = memo(function LastCodeThreadRow(props: LastCodeThreadRowProps) {
   const { isActive, renameTarget, editing, navigation } = props;
   const { providerEntriesByEnvironmentId, environmentIconColors, providerBadgePreferences } =
     useLastCodeSidebarPresentation();
