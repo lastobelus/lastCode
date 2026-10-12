@@ -42,6 +42,8 @@ export function LastCodeThreadTitleEditor({
     <input
       ref={setInput}
       className="min-w-0 flex-1 truncate rounded border border-ring bg-transparent px-0.5 text-sm outline-none"
+      // Reserve the leading column's physical width so controls wrap above the editor.
+      style={{ minWidth: "calc(72px * var(--lastcode-sidebar-content-zoom))" }}
       value={draft}
       onChange={(event) => setDraft(event.target.value)}
       onKeyDown={(event) => {
