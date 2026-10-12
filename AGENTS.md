@@ -105,8 +105,8 @@ An empty database is a bad test. Seed your worktree's `.t3` with a copy of real 
 Before dev-browser QA, identify the actual browser host as well as the app host.
 When they differ, use the runner's `--share` recipe and published HTTPS origin;
 an unshared loopback URL and a backend `--host` override do not make the web
-listener reachable by the remote desktop. Use `protocol: "https"` for a shared
-environment-port target. Follow `test-t3-app` for the one descriptor-readiness
+listener reachable by the remote desktop. Navigate directly to the runner's
+published HTTPS URL. Follow `test-t3-app` for the one descriptor-readiness
 check and record any manual pairing separately from automatic authentication.
 
 For authorized mobile verification, a missing or outdated native client is a build step, not a blocker. Run `node scripts/mobile-native-client.ts ensure <ios|android> <device-id>` on the simulator host before starting Metro. It checks the local Expo fingerprint and builds/installs when needed. See `test-t3-mobile` for the full workflow.

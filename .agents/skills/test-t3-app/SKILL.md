@@ -24,9 +24,11 @@ runs. When the tool advertises `browserHost`, ordinary agent QA can select
 both the dry run and managed launch, then navigate to the runner's published
 HTTPS origin. Do not first try the unshared loopback recipe remotely.
 
-For an environment-port navigation to that shared route, specify
-`protocol: "https"`. Do not assume that the default HTTP target selects the
-HTTPS mapping. Before navigation, check the local and published HTTPS
+For a remote desktop Browser, pass the runner's published HTTPS URL directly
+to `preview_navigate({ tabId, url: "<published-https-url>" })`. An
+environment-port target constructs a loopback URL; changing its protocol does
+not select the published hostname or its managed authentication route. Before
+navigation, check the local and published HTTPS
 `/.well-known/t3/environment` descriptors once and require the same environment
 ID. A successful pairing-token POST does not establish that the earlier remote
 descriptor check is reachable.
