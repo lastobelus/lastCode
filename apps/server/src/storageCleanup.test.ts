@@ -1,3 +1,4 @@
+import { observeDependencyActivity } from "@t3tools/shared/dependencyActivity";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Context from "effect/Context";
@@ -301,6 +302,12 @@ const cleanupFixture = Effect.gen(function* () {
   yield* fs.makeDirectory(config.worktreesDir, { recursive: true });
   let worktree = `${config.worktreesDir}/feature`;
   yield* command(repo, ["worktree", "add", "-b", "feature", worktree]);
+  const seedAgedDependencyUse = Effect.gen(function* () {
+    const location = yield* command(worktree, ["rev-parse", "--absolute-git-dir"]);
+    yield* Effect.sync(() =>
+      observeDependencyActivity(location.stdout.trim(), worktree, NOW_MS - 30 * DAY_MS, true),
+    );
+  });
   let settings: import("@t3tools/contracts").ServerSettings = {
     ...DEFAULT_SERVER_SETTINGS,
     storageCleanup: { ...DEFAULT_SERVER_SETTINGS.storageCleanup, worktreeAfterDays: 8 },
@@ -636,6 +643,7 @@ const cleanupFixture = Effect.gen(function* () {
         `${worktree}/node_modules/package/index.js`,
         "module.exports = 1;\n",
       );
+      yield* seedAgedDependencyUse;
       settings = {
         ...settings,
         storageCleanup: {
@@ -669,6 +677,8 @@ const cleanupFixture = Effect.gen(function* () {
             : { previousWorktreesDirectories: [cleanupDirectory] }),
         };
         if (removeDefault) yield* fs.remove(config.worktreesDir, { recursive: true });
+        // Moving the checkout changes its usage identity; guard tests need an aged observation at the final location.
+        yield* seedAgedDependencyUse;
         return { canonicalPath: moved, recordedPath: worktree, cleanupDirectory };
       }),
     onDependencyInspection: (hook: Effect.Effect<void>) => {

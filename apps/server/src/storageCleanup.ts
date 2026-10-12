@@ -796,7 +796,7 @@ const make = Effect.gen(function* () {
     const deletedGroups = Map.groupBy(deletedOwners, (thread) => thread.cleanupPath);
     const dependencyActivityByPath = new Map<
       string,
-      { lastUsedAt: number; renewed: boolean } | null
+      { lastUsedAt: number; renewed: boolean; protectedReason: string | null } | null
     >();
     for (const [cwd, owners] of Map.groupBy(
       [...liveOwners, ...deletedOwners],
@@ -817,25 +817,28 @@ const make = Effect.gen(function* () {
           ? { workspaceRoot: owner.workspaceRoot }
           : snapshot.projects.find((project) => project.id === owner.projectId);
       if (root === undefined || project === undefined) continue;
-      const used =
-        processCwds === null ||
-        processCwds.some((processCwd) => processCwd === cwd || inside(cwd, processCwd)) ||
-        (yield* terminalUsesDependencies(cwd, owner.recordedWorktreePath)) ||
-        (yield* previewUsesDependencies(cwd, owner.recordedWorktreePath)) ||
-        (yield* hasLiveProviderSession(cwd, owner.id));
+      const protectedReason =
+        processCwds === null
+          ? "Could not check running processes safely"
+          : processCwds.some((processCwd) => processCwd === cwd || inside(cwd, processCwd))
+            ? "A running process is using this worktree"
+            : (yield* terminalUsesDependencies(cwd, owner.recordedWorktreePath))
+              ? "A terminal is still using this worktree"
+              : (yield* previewUsesDependencies(cwd, owner.recordedWorktreePath))
+                ? "A preview is using this worktree, or preview ownership could not be checked"
+                : (yield* hasLiveProviderSession(cwd, owner.id))
+                  ? "A provider session is still open"
+                  : null;
+      const activity = yield* dependencies
+        .observe(
+          { managedWorktreesRoot: root, worktreePath: cwd, repositoryRoot: project.workspaceRoot },
+          now,
+          protectedReason !== null,
+        )
+        .pipe(Effect.orElseSucceed(() => null));
       dependencyActivityByPath.set(
         cwd,
-        yield* dependencies
-          .observe(
-            {
-              managedWorktreesRoot: root,
-              worktreePath: cwd,
-              repositoryRoot: project.workspaceRoot,
-            },
-            now,
-            used,
-          )
-          .pipe(Effect.orElseSucceed(() => null)),
+        activity === null ? null : { ...activity, protectedReason },
       );
     }
     const reports = new Map<string, StorageCleanupReportEntry>();
@@ -1222,6 +1225,8 @@ const make = Effect.gen(function* () {
         const dependencyActivity = dependencyActivityByPath.get(worktreePath) ?? null;
         if (dependencyActivity === null)
           return keep("No dependency install could be safely recognized");
+        if (dependencyActivity.protectedReason !== null)
+          return keep(dependencyActivity.protectedReason);
         if (dependencyActivity.lastUsedAt >= now - days * DAY_MS)
           return keep(
             dependencyActivity.renewed
