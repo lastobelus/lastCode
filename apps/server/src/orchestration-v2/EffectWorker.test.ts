@@ -125,6 +125,7 @@ function layerExecutorFor(input: {
         isLive: () => Effect.succeed(false),
         pendingExecution: Effect.succeed([]),
         ownershipRevision: Effect.succeed(0),
+        workspaceOwnership: Effect.succeed([]),
         close: () => Effect.void,
         closeInstance: () => Effect.void,
         teardownThread: () => Effect.die("unused teardownThread"),

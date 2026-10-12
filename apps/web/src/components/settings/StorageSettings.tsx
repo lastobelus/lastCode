@@ -184,10 +184,10 @@ function CleanupResults({
     <>
       {report.entries.map((entry, index) => {
         const name =
-          entry.scope === "dependencies"
-            ? (entry.path?.split(/[\\/]/).findLast(Boolean) ?? "Dependency installs")
-            : entry.kind === "worktree"
-              ? (entry.path?.split(/[\\/]/).findLast(Boolean) ?? "Worktrees")
+          entry.kind === "worktree"
+            ? (entry.path?.split(/[\\/]/).findLast(Boolean) ?? "Worktrees")
+            : entry.kind === "dependencies"
+              ? `Dependencies: ${entry.path?.split(/[\\/]/).filter(Boolean).at(-2) ?? "worktree"}`
               : entry.kind === "logs"
                 ? "Rotated logs"
                 : "Browser artifacts";
@@ -210,7 +210,11 @@ function CleanupResults({
                     entry.kind !== "worktree" && entry.files !== null
                       ? `${entry.files.toLocaleString()} ${entry.files === 1 ? "file" : "files"}`
                       : null,
-                    entry.bytes !== null ? formatBytes(entry.bytes) : null,
+                    entry.bytes !== null
+                      ? `${formatBytes(entry.bytes)}${entry.kind === "dependencies" ? " estimated" : ""}`
+                      : entry.kind === "dependencies"
+                        ? "Size unknown"
+                        : null,
                   ]
                     .filter(Boolean)
                     .join(" · ")}
@@ -276,6 +280,7 @@ function CleanupSection() {
     const settings = environment.serverConfig?.settings;
     if (!settings) return false;
     const enabled = (rules: WorktreeCleanupRules) =>
+      rules.worktreeDependenciesAfterDays !== null ||
       rules.worktreeAfterDays !== null ||
       rules.worktreeOnMerge ||
       rules.worktreeOnDelete ||
@@ -298,7 +303,7 @@ function CleanupSection() {
       environment,
       report,
       description: report
-        ? `Last run ${formatRelativeTimeLabel(report.finishedAt)}. ${formatBytes(report.bytesFreed)} recovered.${report.counts.failed > 0 ? ` ${report.counts.failed} ${report.counts.failed === 1 ? "item" : "items"} couldn't be removed.` : ""}`
+        ? `Last run ${formatRelativeTimeLabel(report.finishedAt)}. ${formatBytes(report.bytesFreed)} recovered${report.entries.some((entry) => entry.kind === "dependencies" && entry.outcome === "removed") ? " (includes dependency estimates)" : ""}.${report.counts.failed > 0 ? ` ${report.counts.failed} ${report.counts.failed === 1 ? "item" : "items"} couldn't be removed.` : ""}`
         : query?.failed
           ? "Could not load the last run."
           : query?.loading

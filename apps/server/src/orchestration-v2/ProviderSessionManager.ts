@@ -174,6 +174,13 @@ export interface ProviderSessionManagerV2Shape {
   >;
   /** Includes unfinished runtime shutdown without extending its idle lifetime. */
   readonly isLive: (providerSessionId: ProviderSessionId) => Effect.Effect<boolean>;
+  /** Runtime-owned workspaces, including closes whose attachment was never persisted. */
+  readonly workspaceOwnership: Effect.Effect<
+    ReadonlyArray<{
+      readonly cwd: string;
+      readonly threadIds: ReadonlyArray<ThreadId>;
+    }>
+  >;
   /** Live execution, event ingestion, and unfinished teardown, without extending idle lifetime. */
   readonly pendingExecution: Effect.Effect<
     ReadonlyArray<{
@@ -454,7 +461,16 @@ export const layerWithOptions = (
       // Orders a thread's attach against a detach unloading it on the same session.
       const threadAttachment = yield* KeyedLock.make<string>();
       const detachSerialization = yield* KeyedLock.make<string>();
-      const closingSessionScopes = new Map<string, Set<Deferred.Deferred<void>>>();
+      const closingSessionScopes = new Map<
+        string,
+        Map<
+          Deferred.Deferred<void>,
+          {
+            readonly cwd: string;
+            readonly threadIds: ReadonlyArray<ThreadId>;
+          }
+        >
+      >();
       let ownershipRevision = 0;
       // Each native call owns its cleanup evidence, even after runtime replacement.
       // Sleeping idle timers do not enter this map.
@@ -920,8 +936,11 @@ export const layerWithOptions = (
                 return ["kept", current] as const;
               }
               const updated = new Map(current);
-              const closing = closingSessionScopes.get(key) ?? new Set<Deferred.Deferred<void>>();
-              closing.add(existing.scopeClosed);
+              const closing = new Map(closingSessionScopes.get(key));
+              closing.set(existing.scopeClosed, {
+                cwd: existing.runtime.providerSession.cwd,
+                threadIds: [...existing.attachedThreadIds],
+              });
               closingSessionScopes.set(key, closing);
               ownershipRevision += 1;
               updated.delete(key);
@@ -2621,6 +2640,16 @@ export const layerWithOptions = (
               return current.has(key) || (closingSessionScopes.get(key)?.size ?? 0) > 0;
             }),
           ),
+        workspaceOwnership: Effect.gen(function* () {
+          const current = yield* Ref.get(sessions);
+          return [
+            ...[...current.values()].map((entry) => ({
+              cwd: entry.runtime.providerSession.cwd,
+              threadIds: [...entry.attachedThreadIds],
+            })),
+            ...[...closingSessionScopes.values()].flatMap((closing) => [...closing.values()]),
+          ];
+        }),
         pendingExecution: Effect.gen(function* () {
           const blockers = new Map<
             string,
@@ -2745,7 +2774,7 @@ export const layerWithOptions = (
                 const completions = closingSessionScopes.get(sessionKey(input.providerSessionId));
                 return completions === undefined
                   ? Effect.void
-                  : Effect.forEach([...completions], Deferred.await, {
+                  : Effect.forEach([...completions.keys()], Deferred.await, {
                       concurrency: "unbounded",
                       discard: true,
                     }).pipe(Effect.timeout(RELEASE_SCOPE_CLOSE_TIMEOUT_MS));

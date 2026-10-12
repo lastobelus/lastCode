@@ -4131,6 +4131,90 @@ it.effect("ProviderSessionManagerV2 uses the same release path for runtime failu
   }),
 );
 
+it.effect(
+  "ProviderSessionManagerV2 protects rowless workspaces after attachment persistence fails",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const closeEntered = yield* Deferred.make<void>();
+      const allowClose = yield* Deferred.make<void>();
+      const failingSessionWrites = Layer.effect(
+        EventSink.EventSinkV2,
+        Effect.gen(function* () {
+          const delegate = yield* EventSink.EventSinkV2;
+          return EventSink.EventSinkV2.of({
+            ...delegate,
+            write: (input) =>
+              input.events.some((event) => event.type.startsWith("provider-session."))
+                ? Effect.fail(
+                    new EventSink.EventSinkWriteError({ eventCount: input.events.length }),
+                  )
+                : delegate.write(input),
+          });
+        }),
+      ).pipe(Layer.provide(layerTestEventSink));
+      yield* Effect.gen(function* () {
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const threadId = ThreadId.make("rowless-runtime-pending-close");
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        yield* eventSink.write({
+          events: [
+            yield* makeThreadCreatedEvent({
+              idAllocator,
+              threadId,
+              now: yield* DateTime.now,
+            }),
+          ],
+        });
+        const startup = yield* manager
+          .open({
+            threadId,
+            providerSessionId,
+            modelSelection,
+            runtimePolicy,
+          })
+          .pipe(Effect.result, Effect.forkChild);
+        yield* Deferred.await(closeEntered);
+        yield* TestClock.adjust("30 seconds");
+        assert.equal((yield* Fiber.join(startup))._tag, "Failure");
+        // Startup has released its lease while the adapter finalizer still owns
+        // a workspace that never acquired a durable provider-session row.
+        yield* withWorkspaceLease(runtimePolicy.cwd, Effect.void);
+        assert.deepEqual(
+          (yield* projections.getThreadRecords(threadId, ["providerSessions"])).providerSessions,
+          [],
+        );
+        assert.deepEqual(yield* manager.workspaceOwnership, [
+          {
+            cwd: runtimePolicy.cwd,
+            threadIds: [threadId],
+          },
+        ]);
+        yield* Deferred.succeed(allowClose, undefined);
+        yield* manager.teardownThread({ threadId, providerSessionId });
+        assert.deepEqual(yield* manager.workspaceOwnership, []);
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60_000,
+            configureMcp: false,
+            eventSinkLayer: failingSessionWrites,
+            beforeClose: Deferred.succeed(closeEntered, undefined).pipe(
+              Effect.andThen(Deferred.await(allowClose)),
+            ),
+          }),
+        ),
+      );
+    }),
+);
+
 it.effect("ProviderSessionManagerV2 protects errored runtimes until scope close completes", () =>
   Effect.gen(function* () {
     const state = yield* Ref.make(emptyState);
@@ -4151,6 +4235,8 @@ it.effect("ProviderSessionManagerV2 protects errored runtimes until scope close 
         events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
       });
       yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+      const ownedWorkspace = [{ cwd: runtimePolicy.cwd, threadIds: [threadId] }];
+      assert.deepEqual(yield* manager.workspaceOwnership, ownedWorkspace);
       const openedRevision = yield* manager.ownershipRevision;
       const release = yield* manager
         .release({ providerSessionId, reason: "runtime_error", detail: "process failed" })
@@ -4158,6 +4244,7 @@ it.effect("ProviderSessionManagerV2 protects errored runtimes until scope close 
       yield* Deferred.await(closeEntered);
       assert.isTrue(Option.isNone(yield* manager.get(providerSessionId)));
       assert.isTrue(yield* manager.isLive(providerSessionId));
+      assert.deepEqual(yield* manager.workspaceOwnership, ownedWorkspace);
       const closingRevision = yield* manager.ownershipRevision;
       assert.isAbove(closingRevision, openedRevision);
 
@@ -4166,12 +4253,14 @@ it.effect("ProviderSessionManagerV2 protects errored runtimes until scope close 
       const projection = yield* projectionStore.getThreadProjection(threadId);
       assert.equal(projection.providerSessions.at(-1)?.status, "error");
       assert.isTrue(yield* manager.isLive(providerSessionId));
+      assert.deepEqual(yield* manager.workspaceOwnership, ownedWorkspace);
       assert.equal((yield* Ref.get(state)).closeCount, 0);
       assert.equal(yield* manager.ownershipRevision, closingRevision);
 
       yield* Deferred.succeed(allowClose, undefined);
       yield* manager.teardownThread({ threadId, providerSessionId });
       assert.isFalse(yield* manager.isLive(providerSessionId));
+      assert.deepEqual(yield* manager.workspaceOwnership, []);
       assert.isAbove(yield* manager.ownershipRevision, closingRevision);
       assert.equal((yield* Ref.get(state)).closeCount, 1);
     });
