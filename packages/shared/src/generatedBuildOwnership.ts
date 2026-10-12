@@ -95,18 +95,37 @@ function readRecord(ctx: Context) {
   if (signature(FS.lstatSync(ctx.recordPath)) !== signature(stat)) throw new Error("Build ownership changed during observation");
   return { record: value as BuildRecord, recordIdentity: signature(stat), token: Crypto.createHash("sha256").update(raw).update(signature(stat)).digest("hex") };
 }
-function writeRecord(ctx: Context, record: BuildRecord) {
+const ownershipSnapshot = (previous: ReturnType<typeof readRecord>) => previous === null ? null : JSON.stringify({
+  version: previous.record.version,
+  worktreeIdentity: previous.record.worktreeIdentity,
+  root: previous.record.root,
+  files: previous.record.files,
+  emissions: previous.record.emissions,
+});
+
+function writeRecord(ctx: Context, record: BuildRecord, expectedIdentity?: string) {
   const raw = JSON.stringify(record);
   if (record.files.length > MAX_FILES || Buffer.byteLength(raw) > MAX_RECORD_BYTES) throw new Error("Build ownership exceeds its observation limit");
   const temporary = `${ctx.recordPath}.${Crypto.randomUUID()}.tmp`;
   try {
     FS.writeFileSync(temporary, raw, { flag: "wx", mode: 0o600 });
+    // Best-effort native admission immediately before replacement. Usage must
+    // not overwrite an ownership generation published while its temp was written.
+    if (expectedIdentity !== undefined && signature(FS.lstatSync(ctx.recordPath)) !== expectedIdentity) return false;
     FS.renameSync(temporary, ctx.recordPath);
+    return true;
   } finally { FS.rmSync(temporary, { force: true }); }
 }
 function evidenceMatches(file: OwnedFile, target: string) {
   const current = fileEvidence(target);
   return current.identity === file.identity && current.hash === file.hash;
+}
+
+/** Metadata-only clock observation; does not hash, adopt or renew any output. */
+export function generatedBuildActivity(worktreePath: string, root: string) {
+  const ctx = context(worktreePath, root);
+  const previous = ctx && readRecord(ctx);
+  return previous ? { token: previous.token, lastUsedAt: previous.record.lastUsedAt } : null;
 }
 
 /** Provenance is evidence of emitted bytes, never deletion consent. Caller owns policy, Git, leases and read protection. */
@@ -123,11 +142,11 @@ export function inspectGeneratedBuildOwnership(worktreePath: string, root: strin
   return { token: previous.token, lastUsedAt: previous.record.lastUsedAt, files };
 }
 
-async function asynchronousFileEvidence(target: string) {
+async function asynchronousFileEvidence(target: string, signal?: AbortSignal) {
   const before = await FS.promises.lstat(target);
   if (!before.isFile() || before.nlink !== 1) throw new Error("Generated output is not an exclusive regular file");
   const hash = Crypto.createHash("sha256");
-  for await (const chunk of FS.createReadStream(target, { flags: FS.constants.O_RDONLY | (FS.constants.O_NOFOLLOW ?? 0) })) hash.update(chunk as Uint8Array);
+  for await (const chunk of FS.createReadStream(target, { flags: FS.constants.O_RDONLY | (FS.constants.O_NOFOLLOW ?? 0), ...(signal ? { signal } : {}) })) hash.update(chunk as Uint8Array);
   if (signature(await FS.promises.lstat(target)) !== signature(before)) throw new Error("Generated output changed during observation");
   return { identity: signature(before), hash: hash.digest("hex") };
 }
@@ -151,7 +170,7 @@ export async function inspectGeneratedBuildOwnershipAsync(worktreePath: string, 
 
 /** Hash bounded batches, then refresh policy/consumers once per batch before synchronous final identity checks. */
 export async function removeGeneratedBuildFilesAsync(
-  worktreePath: string, root: string, expectedToken: string, paths: readonly string[], revalidate: () => Promise<boolean>,
+  worktreePath: string, root: string, expectedToken: string, paths: readonly string[], revalidate: (paths: readonly string[]) => Promise<boolean>, signal?: AbortSignal,
 ) {
   const ctx = context(worktreePath, root);
   if (!ctx) throw new Error("Build ownership requires a linked worktree");
@@ -172,19 +191,23 @@ export async function removeGeneratedBuildFilesAsync(
     return { bytes, files, kept };
   };
   for (let offset = 0; offset < requested.length; offset += 64) {
+    if (signal?.aborted) return stop(offset, "Build cleanup was cancelled");
     const batch = requested.slice(offset, offset + 64);
     const verified = new Set<string>();
     for (const file of batch) {
+      if (signal?.aborted) return stop(offset, "Build cleanup was cancelled");
       try {
-        const current = await asynchronousFileEvidence(safePath(ctx.cwd, `${root}/${file.path}`));
+        const current = await asynchronousFileEvidence(safePath(ctx.cwd, `${root}/${file.path}`), signal);
         if (current.identity === file.identity && current.hash === file.hash) verified.add(file.path);
         else kept.push({ path: file.path, reason: "Generated file changed since emission" });
       } catch (error) { kept.push({ path: file.path, reason: missing(error) ? "Generated file is absent" : "Generated file cannot be safely verified" }); }
     }
     if (verified.size === 0) continue;
-    if (!(await revalidate())) return stop(offset, "Build cleanup guards changed before removal");
+    if (signal?.aborted) return stop(offset, "Build cleanup was cancelled");
+    if (!(await revalidate([...verified]))) return stop(offset, "Build cleanup guards changed before removal");
     for (const [index, file] of batch.entries()) {
       if (!verified.has(file.path)) continue;
+      if (signal?.aborted) return stop(offset + index, "Build cleanup was cancelled");
       try {
         if (signature(FS.lstatSync(ctx.recordPath)) !== previous.recordIdentity) return stop(offset + index, "Build ownership changed before removal");
         const target = safePath(ctx.cwd, `${root}/${file.path}`);
@@ -216,8 +239,7 @@ export function recordGeneratedBuildUse(worktreePath: string, root: string, now:
   const ctx = context(worktreePath, root);
   const previous = ctx && readRecord(ctx);
   if (!ctx || !previous) return false;
-  writeRecord(ctx, { ...previous.record, lastUsedAt: Math.max(now, previous.record.lastUsedAt) });
-  return true;
+  return writeRecord(ctx, { ...previous.record, lastUsedAt: Math.max(now, previous.record.lastUsedAt) }, previous.recordIdentity);
 }
 
 /** Exact selective deletion only. Keep provenance and approvals, including after partial removal or regeneration. */
@@ -280,7 +302,10 @@ export function createGeneratedBuildStage(worktreePath: string, root: string) {
       const source = FS.realpathSync(sourceDirectory);
       if (source !== directory && !source.startsWith(`${directory}${Path.sep}`)) throw new Error("Output is outside the runner-owned stage");
       if (allocation(FS.lstatSync(directory)) !== initialAllocation) throw new Error("Build stage changed identity");
-      if (readRecord(ctx)?.token !== initial?.token) throw new Error("Another build changed output ownership");
+      // Cleanup can observe an actual compiler consumer while this runner is
+      // staging. Timestamp-only renewal does not supersede emitted ownership.
+      const initialOwnership = ownershipSnapshot(initial);
+      if (ownershipSnapshot(readRecord(ctx)) !== initialOwnership) throw new Error("Another build changed output ownership");
       const emitted: Array<OwnedFile & { source: string; mode: number }> = [];
       const stageLinks = new Map<string, { count: number; links: number }>();
       const visit = (dir: string, prefix: string) => {
@@ -324,7 +349,9 @@ export function createGeneratedBuildStage(worktreePath: string, root: string) {
         FS.chmodSync(destination, file.mode);
         priorFiles.set(file.path, { path: file.path, ...fileEvidence(destination) });
       }
-      writeRecord(ctx, { version: 1, worktreeIdentity: ctx.worktreeIdentity, root, lastUsedAt: Math.max(now, initial?.record.lastUsedAt ?? 0), files: [...priorFiles.values()], emissions: emitted.map(({ path, hash }) => ({ path, hash })) });
+      const latest = readRecord(ctx);
+      if (ownershipSnapshot(latest) !== initialOwnership) throw new Error("Another build changed output ownership");
+      writeRecord(ctx, { version: 1, worktreeIdentity: ctx.worktreeIdentity, root, lastUsedAt: Math.max(now, latest?.record.lastUsedAt ?? 0), files: [...priorFiles.values()], emissions: emitted.map(({ path, hash }) => ({ path, hash })) });
       initial = readRecord(ctx);
       if (!retainStage) discard();
     },

@@ -181,3 +181,17 @@ it("a watched runner keeps its own stage and renews ownership for repeated emitt
   assert.equal(inspectGeneratedBuildOwnership(cwd, root)!.lastUsedAt, 200);
   watcher.discard();
 });
+
+it("usage-only renewal does not invalidate an in-progress compiler stage or erase its newer clock", () => {
+  const { cwd, emit } = fixture();
+  const root = "apps/web/dist";
+  const original = createGeneratedBuildStage(cwd, root)!;
+  emit(original.directory, "main.js", "original compiler output");
+  original.publish(100);
+  const stage = createGeneratedBuildStage(cwd, root)!;
+  emit(stage.directory, "main.js", "rebuilt compiler output");
+  assert.isTrue(recordGeneratedBuildUse(cwd, root, 1000));
+  stage.publish(500);
+  assert.equal(inspectGeneratedBuildOwnership(cwd, root)!.lastUsedAt, 1000);
+  assert.equal(inspectGeneratedBuildOwnership(cwd, root)!.files[0]?.reason, null);
+});

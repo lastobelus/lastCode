@@ -138,3 +138,40 @@ test("ordinary source archives without Git metadata keep their build behavior", 
   assert.equal(createGeneratedBuildStage(cwd, "apps/web/dist"), null);
   assert.equal(createGeneratedBuildStage(cwd, "apps/server/dist"), null);
 });
+
+test("a staged rebuild tolerates timestamp-only consumer renewal and preserves its latest clock", (t) => {
+  const { cwd } = fixture(t);
+  const root = "apps/web/dist";
+  const original = createGeneratedBuildStage(cwd, root);
+  compiler(original.directory, "main.js", "original emitted bytes");
+  original.publish(100);
+  const previous = inspectGeneratedBuildOwnership(cwd, root);
+  const rebuild = createGeneratedBuildStage(cwd, root);
+  compiler(rebuild.directory, "main.js", "rebuilt emitted bytes");
+  assert.equal(recordGeneratedBuildUse(cwd, root, 1000), true);
+  const renewed = inspectGeneratedBuildOwnership(cwd, root);
+  assert.notEqual(renewed.token, previous.token);
+  rebuild.publish(500);
+  const published = inspectGeneratedBuildOwnership(cwd, root);
+  assert.equal(published.lastUsedAt, 1000);
+  assert.equal(published.files[0].reason, null);
+  assert.equal(FS.readFileSync(Path.join(cwd, root, "main.js"), "utf8"), "rebuilt emitted bytes");
+  assert.throws(() => removeGeneratedBuildFiles(cwd, root, renewed.token, ["main.js"]), /ownership changed/);
+});
+
+test("a competing compiler ownership generation still rejects a stale staged rebuild", (t) => {
+  const { cwd } = fixture(t);
+  const root = "apps/server/dist";
+  const original = createGeneratedBuildStage(cwd, root);
+  compiler(original.directory, "main.js", "original compiler");
+  original.publish(100);
+  const stale = createGeneratedBuildStage(cwd, root);
+  compiler(stale.directory, "main.js", "stale compiler");
+  const competitor = createGeneratedBuildStage(cwd, root);
+  compiler(competitor.directory, "main.js", "new compiler generation");
+  competitor.publish(200);
+  assert.throws(() => stale.publish(300), /Another build changed output ownership/);
+  stale.discard();
+  assert.equal(FS.readFileSync(Path.join(cwd, root, "main.js"), "utf8"), "new compiler generation");
+  assert.equal(inspectGeneratedBuildOwnership(cwd, root).lastUsedAt, 200);
+});
