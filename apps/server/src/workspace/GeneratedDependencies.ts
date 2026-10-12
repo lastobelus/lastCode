@@ -26,6 +26,8 @@ class GeneratedDependenciesError extends Schema.TaggedError<GeneratedDependencie
   }
 }
 
+const isGeneratedDependenciesError = Schema.is(GeneratedDependenciesError);
+
 const processWorkingDirectories = async (
   platform: NodeJS.Platform,
   uid: number | undefined,
@@ -120,12 +122,12 @@ export class GeneratedDependencies extends Context.Service<
       input: DependencyInput,
     ) => Effect.Effect<DependencyInspection | null, GeneratedDependenciesError>;
     /** Shares a fresh process check after every entry's Git/identity validation. */
-    readonly removeBatch: (
+    readonly removeBatch: <EligibilityError>(
       entries: ReadonlyArray<{
         readonly inspection: DependencyInspection;
-        readonly canRemove: Effect.Effect<boolean>;
+        readonly canRemove: Effect.Effect<boolean, EligibilityError>;
         /** Lightweight application-state invalidation after cohort preparation. */
-        readonly isStillEligible: Effect.Effect<boolean>;
+        readonly isStillEligible: Effect.Effect<boolean, EligibilityError>;
       }>,
       onDecision?: (
         inspection: DependencyInspection,
@@ -145,10 +147,27 @@ const inside = (root: string, target: string) => {
   );
 };
 
-const failureReason = (error: GeneratedDependenciesError) =>
-  error.cause instanceof Error
-    ? (error.cause.message.split(/\r?\n/)[0] ?? error.message)
-    : error.message;
+const failureReason = (error: unknown) => {
+  const sqlCause =
+    typeof error === "object" && error !== null && "_tag" in error && error._tag === "SqlError"
+      ? "reason" in error &&
+        typeof error.reason === "object" &&
+        error.reason !== null &&
+        "cause" in error.reason
+        ? error.reason.cause
+        : null
+      : null;
+  const message = isGeneratedDependenciesError(error)
+    ? error.cause instanceof Error
+      ? error.cause.message
+      : error.message
+    : sqlCause instanceof Error
+      ? sqlCause.message
+      : error instanceof Error
+        ? error.message
+        : String(error);
+  return message.split(/\r?\n/)[0] ?? message;
+};
 
 const lstatIfPresent = async (target: string) => {
   try {
@@ -363,13 +382,13 @@ const make = Effect.gen(function* () {
       : ({ ...current, estimatedReclaimedBytes } satisfies DependencyInspection);
   });
 
-  const skip = (error: GeneratedDependenciesError) =>
+  const skip = (error: unknown) =>
     Effect.logDebug("storage cleanup skipped dependency install", { error }).pipe(Effect.as(null));
-  const removeBatch = Effect.fn("GeneratedDependencies.removeBatch")(function* (
+  const removeBatch = Effect.fn("GeneratedDependencies.removeBatch")(function* <EligibilityError>(
     entries: ReadonlyArray<{
       readonly inspection: DependencyInspection;
-      readonly canRemove: Effect.Effect<boolean>;
-      readonly isStillEligible: Effect.Effect<boolean>;
+      readonly canRemove: Effect.Effect<boolean, EligibilityError>;
+      readonly isStillEligible: Effect.Effect<boolean, EligibilityError>;
     }>,
     onDecision?: (
       inspection: DependencyInspection,

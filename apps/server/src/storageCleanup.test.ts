@@ -284,11 +284,15 @@ const cleanupFixture = Effect.gen(function* () {
   let onDependencyInspection: (() => void) | null = null;
   let onWorktreeInventory: (() => void) | null = null;
   let worktreeInventoryCalls = 0;
+  let failManagedRootCanonicalization = false;
   let failNextGitInventory = false;
+  let inventoryIdentityMode: "command-error" | "malformed" | "missing-git-dir" | "not-git" | null =
+    null;
   let failProjectInventory = false;
   const activation = yield* Deferred.make<void>();
   let failDependencyRead = false;
   let failWorktreeRead = false;
+  let failEligibilityRevalidation = false;
   let deletedDependencyRows: Array<{
     payload_json: string;
     workspaceRoot: string;
@@ -300,6 +304,18 @@ const cleanupFixture = Effect.gen(function* () {
   let ownershipRevision = 0;
   const context = yield* Layer.build(StorageCleanup.layer).pipe(
     Effect.provideService(ServerConfig.ServerConfig, config),
+    Effect.provideService(FileSystem.FileSystem, {
+      ...fs,
+      exists: (target: string) =>
+        failManagedRootCanonicalization && target === config.worktreesDir
+          ? Effect.sync(() => {
+              failManagedRootCanonicalization = false;
+            }).pipe(
+              Effect.flatMap(() => fs.remove(target, { recursive: true })),
+              Effect.as(true),
+            )
+          : fs.exists(target),
+    }),
     Effect.provideService(GeneratedDependencies.ProcessWorkingDirectories, Effect.succeed([])),
     Effect.provideService(GitVcsDriver.GitVcsDriver, {
       ...git,
@@ -311,6 +327,43 @@ const cleanupFixture = Effect.gen(function* () {
             const callback = onDependencyInspection;
             onDependencyInspection = null;
             callback();
+          }
+          if (input.operation === "StorageCleanup.inventoryRepository" && inventoryIdentityMode) {
+            const mode = inventoryIdentityMode;
+            inventoryIdentityMode = null;
+            if (mode === "command-error")
+              return yield* Effect.fail(
+                new GitCommandError({
+                  operation: input.operation,
+                  command: "git rev-parse --git-common-dir",
+                  cwd: input.cwd,
+                  detail: "Fixture Git identity execution failure",
+                }),
+              );
+            if (mode === "malformed")
+              return {
+                exitCode: 0,
+                stdout: "",
+                stderr: "",
+                stdoutTruncated: false,
+                stderrTruncated: false,
+              };
+            if (mode === "missing-git-dir")
+              return {
+                exitCode: 0,
+                stdout: "missing-git-dir",
+                stderr: "",
+                stdoutTruncated: false,
+                stderrTruncated: false,
+              };
+            if (mode === "not-git")
+              return {
+                exitCode: 128,
+                stdout: "",
+                stderr: "fatal: not a git repository (or any parent up to mount point)",
+                stdoutTruncated: false,
+                stderrTruncated: false,
+              };
           }
           return yield* git.execute(input);
         }),
@@ -396,6 +449,20 @@ const cleanupFixture = Effect.gen(function* () {
                 reason: new SqlError.SqlSyntaxError({
                   cause: new Error("Fixture worktree query failure"),
                   message: "Fixture worktree query failure",
+                }),
+              }),
+            );
+          }
+          if (
+            failEligibilityRevalidation &&
+            query.includes("OR (aggregate_kind = 'thread' AND stream_id")
+          ) {
+            failEligibilityRevalidation = false;
+            return Effect.fail(
+              new SqlError.SqlError({
+                reason: new SqlError.SqlSyntaxError({
+                  cause: new Error("Fixture eligibility revalidation failure"),
+                  message: "Failed to execute statement",
                 }),
               }),
             );
@@ -510,8 +577,17 @@ const cleanupFixture = Effect.gen(function* () {
     failNextGitInventory: () => {
       failNextGitInventory = true;
     },
+    setInventoryIdentityMode: (mode: typeof inventoryIdentityMode) => {
+      inventoryIdentityMode = mode;
+    },
     failProjectInventory: () => {
       failProjectInventory = true;
+    },
+    failManagedRootCanonicalization: () => {
+      failManagedRootCanonicalization = true;
+    },
+    failEligibilityRevalidation: () => {
+      failEligibilityRevalidation = true;
     },
     setDeletedDependencyRows: (rows: typeof deletedDependencyRows) => {
       deletedDependencyRows = rows;
@@ -960,6 +1036,50 @@ describe("storage cleanup reports and local file policies", () => {
         );
         expect(audit).toContain('"event":"candidate"');
         expect(audit).toContain('"outcome":"removed"');
+      }),
+    ),
+  );
+  it.live("reports revalidation query failures and retains dependency installs", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture;
+        fixture.disable();
+        fixture.setDependencyPolicy(8);
+        yield* fixture.fs.writeFileString(
+          `${fixture.worktree}/package.json`,
+          '{"name":"fixture","version":"1.0.0"}',
+        );
+        yield* fixture.fs.writeFileString(
+          `${fixture.worktree}/package-lock.json`,
+          '{"name":"fixture","version":"1.0.0","lockfileVersion":3,"packages":{"":{"name":"fixture","version":"1.0.0"}}}',
+        );
+        yield* fixture.command(fixture.worktree, [
+          "add",
+          ".gitignore",
+          "package.json",
+          "package-lock.json",
+        ]);
+        yield* fixture.command(fixture.worktree, ["commit", "-m", "add dependency markers"]);
+        yield* fixture.fs.makeDirectory(`${fixture.worktree}/node_modules`, { recursive: true });
+        yield* fixture.fs.writeFileString(
+          `${fixture.worktree}/node_modules/.package-lock.json`,
+          '{"name":"fixture","lockfileVersion":3,"packages":{}}',
+        );
+        fixture.failEligibilityRevalidation();
+        const report = yield* fixture.service.runNow;
+        const detail = "Fixture eligibility revalidation failure";
+        const failed = report.entries.find(
+          (entry) => entry.scope === "dependencies" && entry.outcome === "failed",
+        );
+        expect(failed?.reason).toContain(detail);
+        expect(report.counts.failed).toBe(1);
+        expect(yield* fixture.fs.exists(`${fixture.worktree}/node_modules`)).toBe(true);
+        const auditText = yield* fixture.fs.readFileString(
+          `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
+        );
+        expect(auditText).toContain('"event":"candidate"');
+        expect(auditText).toContain('"outcome":"failed"');
+        expect(auditText).toContain(detail);
       }),
     ),
   );
@@ -1458,6 +1578,80 @@ describe("storage cleanup reports and local file policies", () => {
         );
         expect(auditText).toContain('"event":"worktree-inventory-failed"');
         expect(auditText).toContain('"reason":"git worktree list: Fixture Git inventory failure"');
+      }),
+    ),
+  );
+  it.live(
+    "reports repository identity and canonical path failures but ignores non-Git projects",
+    () =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          const fixture = yield* cleanupFixture;
+          fixture.disable();
+          for (const [mode, expectedReason] of [
+            ["command-error", "Fixture Git identity execution failure"],
+            ["malformed", "successful Git identity output was empty or malformed"],
+            ["missing-git-dir", "FileSystem.realPath"],
+          ] as const) {
+            fixture.setInventoryIdentityMode(mode);
+            const report = yield* fixture.service.runNow;
+            expect(report.entries).toContainEqual(
+              expect.objectContaining({
+                kind: "worktree",
+                outcome: "failed",
+                path: fixture.repo,
+                reason: expect.stringContaining(expectedReason),
+              }),
+            );
+            const auditText = yield* fixture.fs.readFileString(
+              `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
+            );
+            expect(auditText).toContain('"event":"worktree-inventory-failed"');
+            expect(auditText).toContain(expectedReason);
+          }
+
+          fixture.setInventoryIdentityMode("not-git");
+          const auditBefore = yield* fixture.fs.readFileString(
+            `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
+          );
+          const report = yield* fixture.service.runNow;
+          expect(report.entries).not.toContainEqual(
+            expect.objectContaining({
+              kind: "worktree",
+              outcome: "failed",
+              path: fixture.repo,
+            }),
+          );
+          const auditText = yield* fixture.fs.readFileString(
+            `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
+          );
+          expect(auditText.match(/"event":"worktree-inventory-failed"/g)?.length).toBe(
+            auditBefore.match(/"event":"worktree-inventory-failed"/g)?.length,
+          );
+        }),
+      ),
+  );
+  it.live("audits managed worktree root canonicalization failures", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture;
+        fixture.disable();
+        fixture.failManagedRootCanonicalization();
+        const report = yield* fixture.service.runNow;
+        expect(report.entries).toContainEqual(
+          expect.objectContaining({
+            kind: "worktree",
+            outcome: "failed",
+            path: fixture.config.worktreesDir,
+            reason: expect.stringContaining("FileSystem.realPath"),
+          }),
+        );
+        expect(report.counts.failed).toBe(1);
+        const auditText = yield* fixture.fs.readFileString(
+          `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
+        );
+        expect(auditText).toContain('"event":"worktree-inventory-failed"');
+        expect(auditText).toContain("FileSystem.realPath (");
       }),
     ),
   );

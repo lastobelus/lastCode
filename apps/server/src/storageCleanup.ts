@@ -892,7 +892,7 @@ const make = Effect.gen(function* () {
               const canRemove = Effect.gen(function* () {
                 eligibilitySequence = yield* readApplicationSequence();
                 return yield* revalidate();
-              }).pipe(Effect.catch(() => Effect.succeed(false)));
+              });
               const isStillEligible = Effect.gen(function* () {
                 if (eligibilitySequence === null || hasTerminal(worktreePath)) return false;
                 if (
@@ -927,7 +927,7 @@ const make = Effect.gen(function* () {
                   resolveWorktreeCleanup(yield* settingsService.getSettings, thread.projectId)
                     .worktreeDependenciesAfterDays === days
                 );
-              }).pipe(Effect.catch(() => Effect.succeed(false)));
+              });
               return {
                 inspection,
                 canRemove,
@@ -1242,16 +1242,47 @@ const make = Effect.gen(function* () {
     const seenWorktrees = new Set<string>();
     const worktrees: string[] = [];
     const managedRoots: string[] = [];
+    const recordInventoryFailure = (failedPath: string, error: { readonly message: string }) =>
+      Effect.gen(function* () {
+        const entry: StorageCleanupReportEntry = {
+          kind: "worktree",
+          outcome: "failed",
+          reason: cleanupFailureReason(error),
+          path: failedPath,
+          threadId: null,
+          threadTitle: null,
+          bytes: null,
+          files: null,
+        };
+        entries.push(entry);
+        yield* audit({ event: "worktree-inventory-failed", runId, ...entry });
+        yield* Effect.logWarning("could not inspect registered worktrees for cleanup audit", {
+          error: entry.reason,
+        });
+      });
+    const captureInventory = <A, E>(effect: Effect.Effect<A, E>) =>
+      effect.pipe(
+        Effect.map((value) => ({ value })),
+        Effect.catch((error) => Effect.succeed({ error })),
+      );
     for (const directory of managedWorktreesDirectories(
       yield* settingsService.getSettings,
       config.worktreesDir,
       path,
       yield* HostProcess.HomeDirectory,
     )) {
-      const root = yield* fs.exists(directory).pipe(
-        Effect.flatMap((exists) => (exists ? fs.realPath(directory) : Effect.succeed(null))),
-        Effect.orElseSucceed(() => null),
-      );
+      const exists = yield* captureInventory(fs.exists(directory));
+      if ("error" in exists) {
+        yield* recordInventoryFailure(directory, exists.error);
+        continue;
+      }
+      if (!exists.value) continue;
+      const resolvedRoot = yield* captureInventory(fs.realPath(directory));
+      if ("error" in resolvedRoot) {
+        yield* recordInventoryFailure(directory, resolvedRoot.error);
+        continue;
+      }
+      const root = resolvedRoot.value;
       if (root !== null && !isFilesystemRoot(root, path)) managedRoots.push(root);
     }
     if (managedRoots.length === 0) return;
@@ -1261,49 +1292,62 @@ const make = Effect.gen(function* () {
       const root = path.resolve(project.workspaceRoot);
       if (seenProjectRoots.has(root)) continue;
       seenProjectRoots.add(root);
-      const repository = yield* git
-        .execute({
+      const identity = yield* captureInventory(
+        git.execute({
           operation: "StorageCleanup.inventoryRepository",
           cwd: root,
           args: ["rev-parse", "--git-common-dir"],
+          env: { LC_ALL: "C" },
           allowNonZeroExit: true,
           timeoutMs: 5_000,
           maxOutputBytes: 4_096,
-        })
-        .pipe(
-          Effect.flatMap((result) => {
-            const commonDir = result.stdout.trim();
-            if (
-              result.exitCode !== 0 ||
-              result.stdoutTruncated ||
-              commonDir === "" ||
-              commonDir.includes("\n")
-            )
-              return Effect.succeed(null);
-            return fs.realPath(path.resolve(root, commonDir));
+        }),
+      );
+      if ("error" in identity) {
+        yield* recordInventoryFailure(root, identity.error);
+        continue;
+      }
+      const result = identity.value;
+      if (result.exitCode !== 0) {
+        if (result.stderr.toLowerCase().includes("not a git repository")) continue;
+        yield* recordInventoryFailure(
+          root,
+          new GitCommandError({
+            operation: "StorageCleanup.inventoryRepository",
+            command: "git rev-parse --git-common-dir",
+            cwd: root,
+            detail: result.stderr.trim().split(/\r?\n/)[0] || `exited ${result.exitCode}`,
           }),
-          Effect.orElseSucceed(() => null),
         );
+        continue;
+      }
+      const commonDir = result.stdout.trim();
+      if (result.stdoutTruncated || commonDir === "" || commonDir.includes("\n")) {
+        yield* recordInventoryFailure(
+          root,
+          new GitCommandError({
+            operation: "StorageCleanup.inventoryRepository",
+            command: "git rev-parse --git-common-dir",
+            cwd: root,
+            detail: result.stdoutTruncated
+              ? "successful Git identity output was truncated"
+              : "successful Git identity output was empty or malformed",
+          }),
+        );
+        continue;
+      }
+      const repositoryResult = yield* captureInventory(fs.realPath(path.resolve(root, commonDir)));
+      if ("error" in repositoryResult) {
+        yield* recordInventoryFailure(root, repositoryResult.error);
+        continue;
+      }
+      const repository = repositoryResult.value;
       if (repository === null || seenRepositories.has(repository)) continue;
       seenRepositories.add(repository);
       const paths = yield* git.listWorktreePaths(root).pipe(
         Effect.catch((error) =>
           Effect.gen(function* () {
-            const entry: StorageCleanupReportEntry = {
-              kind: "worktree",
-              outcome: "failed",
-              reason: cleanupFailureReason(error),
-              path: root,
-              threadId: null,
-              threadTitle: null,
-              bytes: null,
-              files: null,
-            };
-            entries.push(entry);
-            yield* audit({ event: "worktree-inventory-failed", runId, ...entry });
-            yield* Effect.logWarning("could not inspect registered worktrees for cleanup audit", {
-              error: entry.reason,
-            });
+            yield* recordInventoryFailure(root, error);
             return [] as string[];
           }),
         ),
