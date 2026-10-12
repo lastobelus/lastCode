@@ -11,6 +11,7 @@
 import * as Cause from "effect/Cause";
 import * as Scope from "effect/Scope";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as TxQueue from "effect/TxQueue";
 import * as TxRef from "effect/TxRef";
 
@@ -27,6 +28,14 @@ export interface DrainableWorker<A> {
    * Resolves when the queue is empty and the worker is idle (not processing).
    */
   readonly drain: Effect.Effect<void>;
+
+  /**
+   * Stop the worker after its current queue has been drained.
+   *
+   * Callers that coordinate access to a worker may use this to retire idle
+   * keyed workers before their parent scope closes.
+   */
+  readonly shutdown: Effect.Effect<void>;
 }
 
 /**
@@ -46,10 +55,13 @@ export const makeDrainableWorker = <A, E, R>(
   process: (item: A) => Effect.Effect<void, E, R>,
 ): Effect.Effect<DrainableWorker<A>, never, Scope.Scope | R> =>
   Effect.gen(function* () {
+    const workerScope = yield* Scope.make("sequential");
+    yield* Effect.addFinalizer(() => Scope.close(workerScope, Exit.void).pipe(Effect.ignore));
     const outstanding = yield* TxRef.make(0);
-    const queue = yield* Effect.acquireRelease(TxQueue.unbounded<A>(), (queue) =>
-      // Uncount only the dropped items: an item still running uncounts itself,
-      // even when a parallel scope closes it after this finalizer.
+    const queue = yield* TxQueue.unbounded<A>();
+    yield* Scope.addFinalizer(
+      workerScope,
+      // Uncount only the dropped items: an item still running uncounts itself.
       TxQueue.clear(queue).pipe(
         Effect.flatMap((dropped) => TxRef.update(outstanding, (n) => n - dropped.length)),
         Effect.andThen(TxQueue.shutdown(queue)),
@@ -75,7 +87,7 @@ export const makeDrainableWorker = <A, E, R>(
         ),
       ),
       Effect.forever,
-      Effect.forkScoped,
+      Effect.forkIn(workerScope),
     );
 
     const drain: DrainableWorker<A>["drain"] = TxRef.get(outstanding).pipe(
@@ -83,12 +95,18 @@ export const makeDrainableWorker = <A, E, R>(
       Effect.tx,
     );
 
-    const enqueue = (element: A): Effect.Effect<boolean, never, never> =>
+    const enqueue = (element: A): Effect.Effect<void, never, never> =>
       TxQueue.offer(queue, element).pipe(
-        // A shut-down queue refuses the item, so it is never processed.
-        Effect.tap((offered) => (offered ? TxRef.update(outstanding, (n) => n + 1) : Effect.void)),
+        Effect.tap((accepted) =>
+          accepted ? TxRef.update(outstanding, (n) => n + 1) : Effect.void,
+        ),
+        Effect.asVoid,
         Effect.tx,
       );
 
-    return { enqueue, drain } satisfies DrainableWorker<A>;
+    // Closing the child scope interrupts the worker and shuts down the queue.
+    // The parent scope also closes it, and Scope.close is idempotent.
+    const shutdown = Scope.close(workerScope, Exit.void).pipe(Effect.ignore);
+
+    return { enqueue, drain, shutdown } satisfies DrainableWorker<A>;
   });
