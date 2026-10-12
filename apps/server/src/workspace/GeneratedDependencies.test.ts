@@ -1,3 +1,4 @@
+import { recordDependencyUse } from "@t3tools/shared/dependencyActivity";
 import * as Path from "effect/Path";
 import * as Context from "effect/Context";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -764,6 +765,21 @@ type SweepCase =
   | "ownerless-non-git-project"
   | "eligible"
   | "archived"
+  | "archived-status-only"
+  | "archived-unknown-age"
+  | "archived-reprepared"
+  | "archived-off"
+  | "archived-shared"
+  | "archived-shared-active"
+  | "archived-shared-off"
+  | "archived-shared-unarchived"
+  | "archived-shared-reopened"
+  | "archived-shared-pending"
+  | "owned-use-recent"
+  | "owned-custom-short"
+  | "owned-custom-long"
+  | "owned-inherited-use"
+  | "owned-project-custom"
   | "whole-policy"
   | "whole-removal"
   | "whole-shared-deleted-visible-pending"
@@ -942,7 +958,29 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
         },
       }
     : null;
-  if (mode === "archived") thread = { ...thread, archivedAt: at(15) };
+  const archivedShared = mode.startsWith("archived-shared");
+  if (mode === "archived" || mode.startsWith("archived-"))
+    thread = { ...thread, archivedAt: at(15) };
+  if (mode === "archived-status-only" || mode === "recent")
+    thread = {
+      ...thread,
+      latestUserMessageAt: at(1),
+      latestRunRequestedAt: at(1),
+      latestRunStartedAt: at(1),
+      latestRunCompletedAt: at(1),
+    };
+  let sharedSibling = archivedShared
+    ? {
+        ...thread,
+        id: ThreadId.make("archived-sibling"),
+        projectId:
+          mode === "archived-shared-off" ? ProjectId.make("off-project") : thread.projectId,
+        archivedAt: mode === "archived-shared-unarchived" ? null : at(15),
+        status: mode === "archived-shared-active" ? ("queued" as const) : ("idle" as const),
+      }
+    : null;
+  if (mode === "archived-shared-pending")
+    yield* sql`INSERT INTO orchestration_v2_projection_runs VALUES (${sharedSibling!.id}, 'queued')`;
   if (mode === "deleted-visible-pending")
     thread = {
       ...thread,
@@ -964,7 +1002,14 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
         mode === "whole-policy"
           ? "any-local-files"
           : DEFAULT_SERVER_SETTINGS.storageCleanup.worktreeKeepWhen,
-      worktreeDependenciesAfterDays: mode === "disabled" || mode === "ownerless-off" ? null : 7,
+      worktreeDependenciesAfterDays:
+        mode === "disabled" || mode === "ownerless-off" || mode === "archived-off"
+          ? null
+          : mode === "owned-custom-short"
+            ? 3
+            : mode === "owned-custom-long" || mode === "owned-inherited-use"
+              ? 14
+              : 7,
       worktreeAfterDays:
         wholeSharedDeleted || wholeSession
           ? 7
@@ -980,6 +1025,30 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     settings = {
       ...settings,
       projectSettingsOverrides: { [projectId]: { worktreeCleanup: { mode: "off" } } },
+    };
+  if (mode === "archived-shared-off")
+    settings = {
+      ...settings,
+      projectSettingsOverrides: {
+        [sharedSibling!.projectId]: { worktreeCleanup: { mode: "off" } },
+      },
+    };
+  if (mode === "owned-inherited-use")
+    settings = {
+      ...settings,
+      projectSettingsOverrides: { [projectId]: { worktreeCleanup: null } },
+    };
+  if (mode === "owned-project-custom")
+    settings = {
+      ...settings,
+      projectSettingsOverrides: {
+        [projectId]: {
+          worktreeCleanup: {
+            mode: "custom",
+            rules: { ...settings.storageCleanup, worktreeDependenciesAfterDays: 14 },
+          },
+        },
+      },
     };
   let mountReads = 0;
   setMountReader(
@@ -1132,13 +1201,22 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     }
   }
   // These existing guard cases start with a positively observed old installation.
-  if (mode !== "ownerless-legacy")
+  if (mode !== "ownerless-legacy" && mode !== "archived-unknown-age")
     for (const candidate of [thread, ...additionalThreads])
       yield* f.cleanup.observe(
         { ...f.input, worktreePath: candidate.worktreePath! },
         NOW - 30 * day,
       );
   if (mode === "ownerless-reprepared") yield* f.cleanup.observe(f.input, NOW - day, true);
+  if (mode === "archived-reprepared" || mode === "owned-use-recent")
+    yield* Effect.sync(() => recordDependencyUse(f.input.worktreePath, NOW - day));
+  if (
+    mode === "owned-custom-short" ||
+    mode === "owned-custom-long" ||
+    mode === "owned-inherited-use" ||
+    mode === "owned-project-custom"
+  )
+    yield* Effect.sync(() => recordDependencyUse(f.input.worktreePath, NOW - 10 * day));
   if (mode === "ownerless-regenerated") {
     yield* f.fs.remove(f.dependencyPath, { recursive: true });
     yield* f.fs.makeDirectory(f.path.join(f.dependencyPath, "package"), { recursive: true });
@@ -1149,8 +1227,8 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     );
   }
   if (mode === "ownerless-history") {
-    yield* sql`CREATE TABLE projection_threads (worktree_path TEXT, branch TEXT, project_id TEXT)`;
-    yield* sql`INSERT INTO projection_threads VALUES (${f.input.worktreePath}, 'feature', ${projectId})`;
+    yield* sql`CREATE TABLE projection_threads (thread_id TEXT, worktree_path TEXT, branch TEXT, project_id TEXT)`;
+    yield* sql`INSERT INTO projection_threads VALUES ('legacy-owner', ${f.input.worktreePath}, 'feature', ${projectId})`;
   }
   const project = {
     id: projectId,
@@ -1176,7 +1254,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     processReads++;
     if (mode === "ownerless-process") return [f.input.worktreePath];
     if (mode === "ownerless-use-during-inspection" && dependencyInspections() > 0)
-      return [f.input.worktreePath];
+      return [f.path.join(f.dependencyPath, "package")];
     if (mode === "process-unknown" || (mode === "batch-process-unknown" && processReads > 1))
       return null;
     if (mode === "batch-process-started" && dependencyInspections() > 0) {
@@ -1299,7 +1377,9 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
                     mode === "ownerless-shared-project" ? f.repository : otherProjectRoot,
                 },
               ]
-            : [project],
+            : mode === "archived-shared-off"
+              ? [project, { ...project, id: sharedSibling!.projectId }]
+              : [project],
         ),
     }),
     Layer.mock(ProjectionStore.ProjectionStoreV2)({
@@ -1327,15 +1407,24 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
             schemaVersion: 1 as const,
             snapshotSequence: 0,
             projects: [project],
-            threads,
-            archivedThreads:
-              mode === "batch"
-                ? unrelatedHistory
-                : mode === "archived"
-                  ? [thread]
-                  : mode === "shared-archived"
-                    ? [{ ...thread, id: ThreadId.make("archived-other"), archivedAt: at(15) }]
-                    : [],
+            threads: archivedShared
+              ? sharedSibling!.archivedAt === null
+                ? [sharedSibling!]
+                : []
+              : mode.startsWith("archived-")
+                ? []
+                : threads,
+            archivedThreads: archivedShared
+              ? [thread, ...(sharedSibling!.archivedAt !== null ? [sharedSibling!] : [])]
+              : mode.startsWith("archived-")
+                ? [thread]
+                : mode === "batch"
+                  ? unrelatedHistory
+                  : mode === "archived"
+                    ? [thread]
+                    : mode === "shared-archived"
+                      ? [{ ...thread, id: ThreadId.make("archived-other"), archivedAt: at(15) }]
+                      : [],
           };
         }).pipe(Effect.orDie),
       getThreadShell: (requestedId) =>
@@ -1392,6 +1481,11 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
               }),
             );
             providerEventInserted = true;
+          }
+          if (requestedId === sharedSibling?.id) {
+            if (mode === "archived-shared-reopened")
+              sharedSibling = { ...sharedSibling, archivedAt: null };
+            return sharedSibling;
           }
           const additionalThread = additionalThreads.find(
             (candidate) => candidate.id === requestedId,
@@ -1544,6 +1638,12 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
       yield* worker.runNow;
       assert.isFalse(yield* f.fs.exists(f.dependencyPath));
     }
+    if (mode === "ownerless-process") {
+      setProcessReader(() => []);
+      yield* TestClock.setTime(NOW + day);
+      yield* worker.runNow;
+      assert.isFalse(yield* f.fs.exists(f.dependencyPath));
+    }
     if (mode === "ownerless-reprepared") {
       yield* TestClock.setTime(NOW + 8 * day);
       yield* worker.runNow;
@@ -1564,7 +1664,14 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     mode === "eligible" ||
     mode === "final-mount-unchanged" ||
     mode === "archived" ||
+    mode === "archived-status-only" ||
+    mode === "archived-unknown-age" ||
+    mode === "archived-reprepared" ||
+    mode === "archived-shared" ||
+    mode === "recent" ||
+    mode === "owned-custom-short" ||
     mode === "deleted" ||
+    mode === "deleted-recent" ||
     mode === "deleted-unrelated-events" ||
     mode === "whole-policy" ||
     releasedErrorSession ||
@@ -1680,6 +1787,21 @@ it.effect.each([
   "ownerless-non-git-project",
   "eligible",
   "archived",
+  "archived-status-only",
+  "archived-unknown-age",
+  "archived-reprepared",
+  "archived-off",
+  "archived-shared",
+  "archived-shared-active",
+  "archived-shared-off",
+  "archived-shared-unarchived",
+  "archived-shared-reopened",
+  "archived-shared-pending",
+  "owned-use-recent",
+  "owned-custom-short",
+  "owned-custom-long",
+  "owned-inherited-use",
+  "owned-project-custom",
   "whole-policy",
   "whole-removal",
   "whole-shared-deleted-visible-pending",

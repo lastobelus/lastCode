@@ -92,3 +92,14 @@ it("final snapshots detect renewal at the same timestamp without writing activit
   observeDependencyActivity(gitDir, cwd, 100, true);
   assert.notEqual(dependencyActivitySnapshot(cwd), before);
 });
+
+it("Finder and directory-only metadata changes do not renew dependency use", () => {
+  const { cwd, gitDir, deps } = fixture();
+  observeDependencyActivity(gitDir, cwd, 100);
+  NodeFS.writeFileSync(NodePath.join(cwd, ".DS_Store"), "fixture metadata");
+  NodeFS.writeFileSync(NodePath.join(deps, ".DS_Store"), "fixture metadata");
+  assert.deepEqual(observeDependencyActivity(gitDir, cwd, 200), {
+    lastUsedAt: 100,
+    renewed: false,
+  });
+});

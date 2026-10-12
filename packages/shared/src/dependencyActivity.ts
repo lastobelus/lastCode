@@ -25,8 +25,9 @@ const readActivity = (gitDirectory: string, worktreePath: string) => {
     // Include marker changes so direct package-manager preparation also renews age.
     return [stat.dev, stat.ino, stat.birthtimeMs, stat.mtimeMs, stat.ctimeMs];
   });
-  // Worktree folder mtimes aren't a last-used clock. Its identity alone detects replacement.
+  // Folder timestamps aren't usage. Only replacement and installer marker changes renew age.
   signatures[0] = signatures[0]!.slice(0, 3);
+  signatures[1] = signatures[1]!.slice(0, 3);
   const identity = JSON.stringify({ cwd, signatures });
   const target = NodePath.join(gitDir, "t3-dependency-activity.json");
   let recordIdentity: readonly number[] | null = null;
@@ -103,7 +104,7 @@ export function dependencyActivitySnapshot(worktreePath: string) {
   return JSON.stringify({ identity, previous, recordIdentity });
 }
 
-/** Record app-managed use, including terminals started below the checkout root. */
+/** Record actual dependency-backed execution, including commands below the checkout root. */
 export function recordDependencyUse(startDirectory: string, now: number) {
   let cwd = NodeFS.realpathSync(startDirectory);
   for (let depth = 0; depth < 64; depth++) {

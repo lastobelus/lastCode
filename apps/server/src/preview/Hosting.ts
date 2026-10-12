@@ -36,7 +36,7 @@ import * as ServerConfig from "../config.ts";
 import * as PortScanner from "./PortScanner.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as HostingAuth from "./HostingAuth.ts";
-import { withWorkspaceUse } from "../workspace/workspaceLease.ts";
+import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 
 export const PREVIEW_HOSTING_LEASE_MS = 24 * 60 * 60 * 1_000;
 const READY_TIMEOUT_MS = 30_000;
@@ -880,7 +880,7 @@ const make = Effect.gen(function* () {
       const leaseForCleanup = yield* SynchronizedRef.make<PreviewHostingLease | null>(null);
       const operation = Effect.gen(function* () {
         const reservation = launchGate.withPermit(
-          withWorkspaceUse(
+          withWorkspaceLease(
             path.resolve(input.worktreePath ?? input.cwd),
             Effect.gen(function* () {
               if (startupError !== null) return yield* startupError;

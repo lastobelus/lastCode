@@ -979,7 +979,7 @@ describe("dependency cleanup reports", () => {
           expect(report.entries).toMatchObject([
             {
               outcome: "kept",
-              reason: "Dependencies: More than one thread uses this worktree",
+              reason: "Dependencies: An unarchived thread still shares this worktree",
             },
           ]);
           expect(yield* fixture.fs.exists(`${paths.canonicalPath}/node_modules`)).toBe(true);

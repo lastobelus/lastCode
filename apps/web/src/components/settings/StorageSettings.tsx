@@ -535,7 +535,7 @@ export function StorageSettingsPanel() {
               status={ruleStatus("worktreeDependenciesAfterDays")}
               description={
                 dependenciesSupported
-                  ? "Remove recognized npm or pnpm node_modules installations after this many inactive days. Keeps the worktree, source, tmp, notes, and other files. Active agents, terminals, and previews prevent cleanup. Reinstall dependencies before resuming work."
+                  ? "Remove recognized npm or pnpm node_modules installations immediately for archived owners, or after the configured delay since dependency use for unarchived and ownerless worktrees. Every shared owner must be archived with cleanup enabled. Keeps source, tmp, notes, and other files. Active consumers prevent cleanup. Reinstall dependencies before resuming work."
                   : "Choose updated macOS or Linux machines to use dependency cleanup."
               }
               serverScoped={!isProjectScope}

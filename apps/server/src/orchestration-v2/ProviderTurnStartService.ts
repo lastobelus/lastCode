@@ -23,7 +23,7 @@ import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 
-import { withWorkspaceUse } from "../workspace/workspaceLease.ts";
+import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
@@ -532,7 +532,7 @@ export const layer: Layer.Layer<
       }
       const { worktreePath, branch } = projection.thread;
       if (worktreePath !== null && branch !== null) {
-        yield* withWorkspaceUse(
+        yield* withWorkspaceLease(
           worktreePath,
           Effect.gen(function* () {
             const exists = yield* fileSystem

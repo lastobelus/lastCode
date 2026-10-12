@@ -175,16 +175,24 @@ Choose **Delete now** to run the enabled rules immediately. The latest results s
 worktrees were removed or kept and why, plus any failures.
 
 Enable **Remove inactive worktree dependencies** to reclaim recognized npm or pnpm
-`node_modules` installations after a chosen number of inactive days, while keeping the
-worktree and its source, notes, and research files. This includes registered manual and QA
-worktrees in the configured cleanup locations when their repository maps to one project.
-Dependency preparation and app-managed use renew the inactivity period. Recognized installs
-with no recorded usage start a full inactivity period when first observed; folder age alone
-does not qualify them. Active agents, sessions, terminals, and previews prevent cleanup. Other generated folders and vendored sources are kept. Reinstall
-the project's dependencies before continuing work. This rule is off by default and follows
-the project's Inherit, Off, or Custom policy. Dependency cleanup is available on macOS and
-Linux and skips a worktree when process activity cannot be checked reliably. On mobile, open
-**Settings → Maintenance** to configure dependency cleanup for an environment or a selected project.
+`node_modules` installations while keeping the worktree and its source, notes, and research
+files. Archived threads are eligible immediately when this rule is enabled. For shared
+worktrees, every owner must be archived and have cleanup enabled; an unarchived or active
+owner, or an owner whose project policy is Off, keeps the install.
+
+Unarchived and ownerless installs use the delay configured in settings, measured from actual
+dependency use. This includes registered manual and QA worktrees in configured cleanup
+locations when their repository maps to one project. Dependency preparation and the
+dependency-backed development and CI runners renew that clock; status conversations and
+simply opening a terminal do not. Recognized installs with uncertain usage start a full
+configured interval when first observed. Folder timestamps alone never prove usage.
+
+Active agents, sessions, terminals, previews, processes, and runtime protection prevent
+cleanup. Other generated folders and vendored sources are kept. Reinstall dependencies
+before continuing work. This rule is off by default and follows the project's Inherit, Off,
+or Custom policy. Dependency cleanup is available on macOS and Linux and keeps worktrees
+when consumers cannot be checked reliably. On mobile, open **Settings → Maintenance** to
+configure cleanup for an environment or project.
 
 Browser captures and rotated logs have separate retention periods. Expired capture links stop
 working. Current logs, message attachments, and browser profiles are kept.

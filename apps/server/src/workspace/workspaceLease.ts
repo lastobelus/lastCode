@@ -1,5 +1,3 @@
-import { recordDependencyUse } from "@t3tools/shared/dependencyActivity";
-import * as Clock from "effect/Clock";
 import * as NodePath from "@effect/platform-node/NodePath";
 import * as Effect from "effect/Effect";
 import * as Path from "effect/Path";
@@ -31,18 +29,4 @@ export const withWorkspaceLease = <A, E, R>(
           ),
         );
       }),
-  );
-
-/** Startup renews dependency retention while holding the same exclusion as cleanup. */
-export const withWorkspaceUse = <A, E, R>(cwd: string, effect: Effect.Effect<A, E, R>) =>
-  withWorkspaceLease(
-    cwd,
-    Effect.gen(function* () {
-      const now = yield* Clock.currentTimeMillis;
-      yield* Effect.try({ try: () => recordDependencyUse(cwd, now), catch: (cause) => cause }).pipe(
-        // Broken usage evidence blocks aging inspection; it must not prevent starting work.
-        Effect.catch(() => Effect.logDebug("Could not record dependency use")),
-      );
-      return yield* effect;
-    }),
   );
