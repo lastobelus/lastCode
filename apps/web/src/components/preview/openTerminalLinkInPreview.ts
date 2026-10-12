@@ -41,10 +41,12 @@ export class TerminalLinkPreviewOpenError extends Schema.TaggedError<TerminalLin
 
 export class TerminalLinkProfileUnavailableError extends Schema.TaggedError<TerminalLinkProfileUnavailableError>()(
   "TerminalLinkProfileUnavailableError",
-  {},
+  { reason: Schema.Literals(["hosted-web", "preview-unavailable"]) },
 ) {
   override get message(): string {
-    return "Open this Action link in the desktop app that owns the configured browser profile.";
+    return this.reason === "hosted-web"
+      ? "Open this Action link in the desktop app that owns the configured browser profile."
+      : "Opening this Action link requires the integrated Browser with its named profile.";
   }
 }
 
@@ -72,7 +74,7 @@ export async function openTerminalLinkInPreview<E>(
     !window.desktopBridge &&
     input.terminalLinkProfileName !== undefined
   ) {
-    throw new TerminalLinkProfileUnavailableError();
+    throw new TerminalLinkProfileUnavailableError({ reason: "hosted-web" });
   }
   // Resolve explicit intent before either browser opens. Never infer it from the URL.
   const explicitDefaults =
@@ -100,7 +102,7 @@ export async function openTerminalLinkInPreview<E>(
 
   if (!supportsPreview) {
     if (explicitProfileId !== undefined && !input.forceBrowser) {
-      throw new TerminalLinkProfileUnavailableError();
+      throw new TerminalLinkProfileUnavailableError({ reason: "preview-unavailable" });
     }
     input.fallbackToBrowser(hostedPreviewNavigationUrl(prepared));
     return;

@@ -118,6 +118,7 @@ describe("openTerminalLinkInPreview", () => {
         }),
       ).rejects.toMatchObject({
         _tag: "TerminalLinkProfileUnavailableError",
+        reason: "hosted-web",
         message:
           "Open this Action link in the desktop app that owns the configured browser profile.",
       });
@@ -332,7 +333,12 @@ describe("openTerminalLinkInPreview", () => {
         forceBrowser: false,
         terminalLinkProfileName: "Work account",
       }),
-    ).rejects.toMatchObject({ _tag: "TerminalLinkProfileUnavailableError" });
+    ).rejects.toMatchObject({
+      _tag: "TerminalLinkProfileUnavailableError",
+      reason: "preview-unavailable",
+      message: "Opening this Action link requires the integrated Browser with its named profile.",
+    });
+    expect(browserDefaultsMocks.resolve).toHaveBeenCalledOnce();
     expect(openPreview).not.toHaveBeenCalled();
     expect(fallbackToBrowser).not.toHaveBeenCalled();
   });
