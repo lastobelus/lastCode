@@ -11,8 +11,9 @@ Nightly source tracking is documented separately in
 
 Worktrees created by LastCode initially contain source and linked environment files.
 When tests, development, or a build need dependencies, run the **Prepare Dependencies**
-Project Action in that worktree. It requires pnpm 11.10.0 and installs from the worktree's
-lockfile without building or warming web caches. **Run Quick CI** includes this preparation
+Project Action in that worktree. It requires the exact pnpm version pinned by that
+worktree's `package.json` and installs from its lockfile without building or warming
+web caches. **Run Quick CI** includes this preparation
 automatically. For a saved Full CI Action, copy the **Run Quick CI** command from
 `t3.json` and change its final `--quick` argument to `--full`. The Node launcher
 resolves the primary preparation helper while preserving the target worktree cwd,
