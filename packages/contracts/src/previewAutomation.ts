@@ -1144,11 +1144,20 @@ export class PreviewAutomationRequestQueueClosedError extends Schema.TaggedError
   }
 }
 
+/** Native surface failures that can be reported without exposing page or host details. */
+export const PreviewAutomationAvailabilityReason = Schema.Literals([
+  "guest-unavailable",
+  "surface-unsupported",
+  "layout-timeout",
+  "host-unavailable",
+]);
+
 export class PreviewAutomationRemoteUnavailableError extends Schema.TaggedError<PreviewAutomationRemoteUnavailableError>()(
   "PreviewAutomationRemoteUnavailableError",
   {
     ...PreviewAutomationRequestErrorFields,
     ...PreviewAutomationRemoteDiagnosticFields,
+    reason: Schema.optional(PreviewAutomationAvailabilityReason),
   },
 ) {
   override get message(): string {

@@ -35,6 +35,7 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import { PreviewSnapshotToolkit, PreviewStandardToolkit, PreviewToolkit } from "./tools.ts";
+import { previewToolFailure } from "./errors.ts";
 
 /**
  * Collapses the `show` alias onto `open` and defaults tab reuse.
@@ -62,22 +63,24 @@ const invoke = Effect.fn("PreviewToolkit.invoke")(function* <A>(
   tabId?: PreviewTabId,
 ): Effect.fn.Return<
   { result: A; toolIcon?: ToolActivityIcon },
-  import("@t3tools/contracts").PreviewAutomationError,
+  ReturnType<typeof previewToolFailure>,
   McpInvocationContext.McpInvocationContext | PreviewAutomationBroker.PreviewAutomationBroker
 > {
   const scope = yield* McpInvocationContext.requireThreadMcpCapability("preview");
   const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
   let targetTabId = tabId;
-  const result = yield* broker.invoke<A>({
-    onTargetTab: (resolvedTabId) => {
-      targetTabId = resolvedTabId;
-    },
-    scope,
-    operation,
-    input,
-    ...(timeoutMs === undefined ? {} : { timeoutMs }),
-    ...(tabId === undefined ? {} : { tabId }),
-  });
+  const result = yield* broker
+    .invoke<A>({
+      onTargetTab: (resolvedTabId) => {
+        targetTabId = resolvedTabId;
+      },
+      scope,
+      operation,
+      input,
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
+      ...(tabId === undefined ? {} : { tabId }),
+    })
+    .pipe(Effect.mapError(previewToolFailure));
   if (["status", "open", "openWithProfile", "profiles", "navigate", "snapshot"].includes(operation))
     return { result };
   const statusTabId =

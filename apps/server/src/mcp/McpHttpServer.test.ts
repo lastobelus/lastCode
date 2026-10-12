@@ -345,6 +345,49 @@ const callSnapshot = (args: Record<string, unknown>) =>
       );
   });
 
+it.effect("retains safe unavailable diagnostics in the snapshot's custom MCP adapter", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
+      const connected = yield* Deferred.make<void>();
+      const clientId = "https://workstation.example/private-host";
+      const events = yield* broker.connect({ clientId, environmentId });
+      let correlation: { requestId: string; connectionId: string } | undefined;
+      yield* Stream.runForEach(events, (event) => {
+        if (event.type === "connected") return Deferred.succeed(connected, undefined);
+        correlation = { requestId: event.request.requestId, connectionId: event.connectionId };
+        return broker.respond({
+          clientId,
+          ...correlation,
+          ok: false,
+          error: {
+            _tag: "PreviewAutomationRemoteUnavailableError",
+            message: "https://page.example/?token=credential",
+            detail: { reason: "guest-unavailable", profile: "private-profile" },
+          },
+        });
+      }).pipe(Effect.forkScoped);
+      yield* Deferred.await(connected);
+      const result = yield* callSnapshot({ includeImage: false });
+      const error = {
+        _tag: "PreviewAutomationRemoteUnavailableError",
+        operation: "snapshot",
+        failureCount: 1,
+        message: "Preview automation snapshot is unavailable.",
+        reason: "guest-unavailable",
+        ...correlation,
+      };
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toEqual({ error });
+      expect(result.content).toHaveLength(1);
+      const content = result.content[0];
+      expect(content?.type).toBe("text");
+      if (content?.type === "text") expect(decodeJsonText(content.text)).toEqual(error);
+      expect(JSON.stringify(result)).not.toMatch(/private|credential|https:|cause|stack/);
+    }),
+  ).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("returns the Action service's update drain rejection over MCP", () =>
   Effect.gen(function* () {
     let requestedAction: string | undefined;

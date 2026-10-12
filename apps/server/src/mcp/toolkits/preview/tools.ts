@@ -40,6 +40,7 @@ import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import * as ServerConfig from "../../../config.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as PreviewHosting from "../../../preview/Hosting.ts";
+import { PreviewRemoteUnavailableFailure } from "./errors.ts";
 
 const dependencies = [
   McpInvocationContext.McpInvocationContext,
@@ -48,7 +49,11 @@ const dependencies = [
 ];
 
 /** What a browser action fails with, including the access gate's refusal. */
-const PreviewToolFailure = Schema.Union([PreviewAutomationError, OrchestratorMcpFailure]);
+const PreviewToolFailure = Schema.Union([
+  PreviewAutomationError,
+  PreviewRemoteUnavailableFailure,
+  OrchestratorMcpFailure,
+]);
 
 const presentationFields = { toolIcon: Schema.optional(ToolActivityIcon) };
 

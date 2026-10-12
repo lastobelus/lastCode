@@ -4216,7 +4216,12 @@ it.live("viewers see the agent's pointer move to its target and click there", ()
   ).pipe(Effect.provide(layer)),
 );
 
-it.effect.each(["layout-timeout", "surface-unsupported"] as const)(
+it.effect.each([
+  "layout-timeout",
+  "surface-unsupported",
+  "guest-unavailable",
+  "host-unavailable",
+] as const)(
   "reports native %s without dispatching the page mutation or evicting the host",
   (reason) =>
     Effect.scoped(
@@ -4225,15 +4230,33 @@ it.effect.each(["layout-timeout", "surface-unsupported"] as const)(
         const { broker, tabId } = yield* ready;
         surfaceCalls.length = 0;
         surfaceFailure = new DesktopBrowserTransportError({ reason });
-        const error = yield* broker
-          .invoke<void>({ scope, tabId, operation: "click", input: { locator: "button" } })
-          .pipe(Effect.flip);
-        expect(error).toMatchObject({
-          _tag: "PreviewAutomationRemoteUnavailableError",
-          cause: { detail: { reason } },
-        });
+        for (const request of [
+          { operation: "click", input: { locator: "button" } },
+          { operation: "navigate", input: { url: "https://page.example/" } },
+          { operation: "waitFor", input: { text: "ready" } },
+          { operation: "evaluate", input: { expression: "1" } },
+        ] as const) {
+          const error = yield* broker.invoke<void>({ scope, tabId, ...request }).pipe(Effect.flip);
+          expect(error).toMatchObject({
+            _tag: "PreviewAutomationRemoteUnavailableError",
+            operation: request.operation,
+            requestId: expect.stringMatching(/^preview-\d+$/),
+            connectionId: expect.any(String),
+            reason,
+            cause: { detail: { reason } },
+          });
+        }
         expect(desktopConnections[0]!.context.page.locator).not.toHaveBeenCalled();
-        expect(surfaceCalls.map((call) => call.action)).toEqual(["acquire", "release"]);
+        expect(surfaceCalls.map((call) => call.action)).toEqual([
+          "acquire",
+          "release",
+          "acquire",
+          "release",
+          "acquire",
+          "release",
+          "acquire",
+          "release",
+        ]);
         surfaceFailure = null;
         expect(
           yield* broker.invoke({ scope, tabId, operation: "evaluate", input: { expression: "1" } }),
