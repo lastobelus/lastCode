@@ -812,6 +812,9 @@ const make = Effect.gen(function* () {
         threadId: invocation.threadId,
         terminalId,
         cwd,
+        ...(script.terminalLinkProfileName === undefined
+          ? {}
+          : { terminalLinkProfileName: script.terminalLinkProfileName }),
         worktreePath: thread.worktreePath,
         env,
         cols: 120,

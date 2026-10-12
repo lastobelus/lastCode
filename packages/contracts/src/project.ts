@@ -41,6 +41,8 @@ export const ProjectScript = Schema.Struct({
   runOnSettle: Schema.optional(Schema.Boolean),
   /** Start the agent while setup runs unless explicitly disabled. */
   async: Schema.optional(Schema.Boolean),
+  /** Exact existing desktop browser profile name for links in this Action's dedicated terminal. */
+  terminalLinkProfileName: Schema.optional(TrimmedNonEmptyString),
   previewUrl: Schema.optional(TrimmedNonEmptyString),
   autoOpenPreview: Schema.optional(Schema.Boolean),
   allowAgentResume: Schema.optional(Schema.Boolean),

@@ -344,6 +344,7 @@ import {
 import { type NewProjectScriptInput } from "./ProjectScriptsControl";
 import {
   buildProjectScript,
+  selectProjectScriptTerminal,
   commandForProjectScript,
   nextProjectScriptId,
   projectScriptIdFromCommand,
@@ -1148,6 +1149,12 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
   const storeSetActiveTerminal = useTerminalUiStateStore((state) => state.setActiveTerminal);
   const storeCloseTerminal = useTerminalUiStateStore((state) => state.closeTerminal);
   const reconcileTerminalIds = useTerminalUiStateStore((state) => state.reconcileTerminalIds);
+
+  useEffect(() => {
+    useTerminalUiStateStore
+      .getState()
+      .confirmPendingTerminalLinkProfiles(threadRef, knownTerminalSessions ?? []);
+  }, [knownTerminalSessions, threadRef]);
 
   useEffect(() => {
     if (terminalIdListsEqual(serverOrderedTerminalIds, terminalUiState.terminalIds)) {
@@ -5092,7 +5099,14 @@ export default function ChatView(props: ChatViewProps) {
         rememberAsLastInvoked?: boolean;
       },
     ) => {
-      if (!hasTerminalWriteAccess() || !activeThreadId || !activeProject || !activeThread) return;
+      if (
+        !hasTerminalWriteAccess() ||
+        !activeThreadId ||
+        !activeProject ||
+        !activeThread ||
+        !activeThreadRef
+      )
+        return;
       if (options?.rememberAsLastInvoked !== false) {
         setLastInvokedScriptByProjectId((current) => {
           if (current[activeProject.id] === script.id) return current;
@@ -5100,14 +5114,42 @@ export default function ChatView(props: ChatViewProps) {
         });
       }
       const targetCwd = options?.cwd ?? gitCwd ?? activeProject.workspaceRoot;
+      // Another Action can allocate before this callback's render sees the new terminal.
+      const terminalStore = useTerminalUiStateStore.getState();
+      const currentTerminalUiState = selectThreadTerminalUiState(
+        terminalStore.terminalUiStateByThreadKey,
+        activeThreadRef,
+      );
+      const existingTerminalIds = [
+        ...new Set([...allocatableActiveTerminalIds, ...currentTerminalUiState.terminalIds]),
+      ];
       const baseTerminalId =
-        terminalUiState.activeTerminalId || activeKnownTerminalIds[0] || DEFAULT_THREAD_TERMINAL_ID;
+        currentTerminalUiState.activeTerminalId ||
+        activeKnownTerminalIds[0] ||
+        DEFAULT_THREAD_TERMINAL_ID;
       const isBaseTerminalBusy = runningTerminalIds.includes(baseTerminalId);
-      const wantsNewTerminal = Boolean(options?.preferNewTerminal) || isBaseTerminalBusy;
-      const shouldCreateNewTerminal =
-        wantsNewTerminal ||
-        !canReuseTerminal ||
-        !readEnvironmentScope(environmentId, AuthTerminalReadScope);
+      const terminalLaunch = selectProjectScriptTerminal({
+        script,
+        baseTerminalId,
+        existingTerminalIds,
+        pendingTerminalLinkProfiles:
+          terminalStore.pendingTerminalLinkProfilesByThreadKey[scopedThreadKey(activeThreadRef)],
+        baseTerminalLinkProfileName: activeThreadKnownSessions.find(
+          (session) => session.target.terminalId === baseTerminalId,
+        )?.state.terminalLinkProfileName,
+        isBaseTerminalBusy,
+        preferNewTerminal: Boolean(options?.preferNewTerminal),
+        canReuseTerminal,
+        canReadTerminal: readEnvironmentScope(environmentId, AuthTerminalReadScope),
+        allocateTerminalId: () =>
+          nextTerminalId(
+            existingTerminalIds,
+            canReuseTerminal && readEnvironmentScope(environmentId, AuthTerminalReadScope)
+              ? undefined
+              : randomUUID(),
+          ),
+      });
+      const shouldCreateNewTerminal = terminalLaunch.createNewTerminal;
       const targetWorktreePath = options?.worktreePath ?? activeThread.worktreePath ?? null;
 
       setTerminalUiLaunchContext({
@@ -5116,9 +5158,6 @@ export default function ChatView(props: ChatViewProps) {
         worktreePath: targetWorktreePath,
       });
       setTerminalOpen(true);
-      if (!activeThreadRef) {
-        return;
-      }
       setTerminalFocusRequestId((value) => value + 1);
 
       const runtimeEnv = projectScriptRuntimeEnv({
@@ -5128,11 +5167,12 @@ export default function ChatView(props: ChatViewProps) {
         worktreePath: targetWorktreePath,
         ...(options?.env ? { extraEnv: options.env } : {}),
       });
-      const targetTerminalId = shouldCreateNewTerminal ? allocateTerminalId() : baseTerminalId;
+      const targetTerminalId = terminalLaunch.terminalId;
       const openTerminalInput: TerminalOpenInput = shouldCreateNewTerminal
         ? {
             threadId: activeThreadId,
             terminalId: targetTerminalId,
+            terminalLinkProfileName: terminalLaunch.terminalLinkProfileName ?? null,
             cwd: targetCwd,
             ...(targetWorktreePath !== null ? { worktreePath: targetWorktreePath } : {}),
             env: runtimeEnv,
@@ -5142,19 +5182,21 @@ export default function ChatView(props: ChatViewProps) {
         : {
             threadId: activeThreadId,
             terminalId: targetTerminalId,
+            terminalLinkProfileName: null,
             cwd: targetCwd,
             ...(targetWorktreePath !== null ? { worktreePath: targetWorktreePath } : {}),
             env: runtimeEnv,
           };
 
       if (shouldCreateNewTerminal) {
-        storeNewTerminal(activeThreadRef, targetTerminalId);
+        storeNewTerminal(activeThreadRef, targetTerminalId, terminalLaunch.terminalLinkProfileName);
       } else {
         storeSetActiveTerminal(activeThreadRef, targetTerminalId);
       }
 
       const openResult = await openTerminal({ environmentId, input: openTerminalInput });
       if (openResult._tag === "Failure") {
+        terminalStore.releasePendingTerminalLinkProfile(activeThreadRef, targetTerminalId);
         if (!isAtomCommandInterrupted(openResult)) {
           const error = squashAtomCommandFailure(openResult);
           setThreadError(
@@ -5218,10 +5260,10 @@ export default function ChatView(props: ChatViewProps) {
       openPreview,
       hasTerminalWriteAccess,
       activeKnownTerminalIds,
+      activeThreadKnownSessions,
+      allocatableActiveTerminalIds,
       canReuseTerminal,
-      allocateTerminalId,
       runningTerminalIds,
-      terminalUiState.activeTerminalId,
       writeTerminal,
     ],
   );

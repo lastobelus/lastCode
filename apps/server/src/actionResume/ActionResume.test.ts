@@ -195,6 +195,7 @@ const makeHarness = Effect.gen(function* () {
   const state = {
     callerRunId: null as RunId | null,
     missingShell: false,
+    actionProfileName: undefined as string | undefined,
     deleted: false,
     drainClosed: false,
     metadataReceipt: null as Deferred.Deferred<void> | null,
@@ -388,7 +389,17 @@ const makeHarness = Effect.gen(function* () {
         Effect.gen(function* () {
           if (state.launchResolved !== null)
             yield* Deferred.succeed(state.launchResolved, undefined);
-          return Option.some(project);
+          return Option.some(
+            state.actionProfileName === undefined
+              ? project
+              : {
+                  ...project,
+                  scripts: project.scripts.map((script) => ({
+                    ...script,
+                    terminalLinkProfileName: state.actionProfileName,
+                  })),
+                },
+          );
         }),
     }),
     Layer.mock(TerminalManager.TerminalManager)({
@@ -503,6 +514,24 @@ it("propagates shell command exit status", () => {
     "exit $LASTEXITCODE",
   );
 });
+
+it.effect.each([undefined, "Work account"])(
+  "carries explicit Action profile intent (%s) into a dedicated terminal",
+  (name) =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness;
+      h.state.actionProfileName = name;
+      yield* Effect.gen(function* () {
+        const actions = yield* ActionResume.ActionResume;
+        const run = yield* actions.runProjectActionAndResume(invocation, "qa");
+        assert.equal(h.opened[0]?.terminalId, run.terminalId);
+        assert.match(run.terminalId, /^action-/u);
+        assert.equal(h.opened[0]?.terminalLinkProfileName, name);
+        if (name === undefined) assert.notProperty(h.opened[0], "terminalLinkProfileName");
+        assert.equal(h.written.length, 1);
+      }).pipe(Effect.provide(h.layer));
+    }).pipe(Effect.provide(StoreTestLayer)),
+);
 
 it.effect("runs an opted-in process, retains progress/output, and dispatches one V2 result", () =>
   Effect.gen(function* () {

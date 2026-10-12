@@ -64,6 +64,12 @@ export const T3ProjectFileScript = Schema.Struct({
         "Only for runOnWorktreeCreate scripts. When true (the default), the agent starts while the script is still running. Set false to hold the agent until the script exits.",
     }),
   ),
+  terminalLinkProfileName: Schema.optionalKey(
+    trimmedNonEmpty({
+      description:
+        "Exact name of an existing desktop browser profile for links printed by this Action. Runs in a dedicated terminal; open its links in the desktop app that owns the profile, where the name must be unique.",
+    }),
+  ),
   previewUrl: Schema.optionalKey(
     trimmedNonEmpty({
       description:
