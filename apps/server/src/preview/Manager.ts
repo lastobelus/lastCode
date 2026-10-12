@@ -59,6 +59,8 @@ export class PreviewManager extends Context.Service<
     readonly open: (
       input: PreviewOpenInput & {
         readonly automationOwner?: string;
+        /** Trusted agent selection of environment hosting, even with local native IPC. */
+        readonly environmentHosted?: boolean;
         /** Trusted native creation, unavailable on public open inputs. */
         readonly desktopPopup?: {
           readonly popupId: string;
@@ -284,13 +286,14 @@ export const make = Effect.gen(function* PreviewManagerMake() {
       const runtime = input.runtime;
       // Choose before publishing: renderers and automation must create the same page.
       // An unavailable selected desktop fails attachment; it never becomes a headless tab.
-      const desktopHostId =
-        input.desktopHostId ??
-        (runtime === "server" &&
-        serverConfig.desktopBrowserFd !== undefined &&
-        serverConfig.desktopBrowserControlFd !== undefined
-          ? "local"
-          : undefined);
+      const desktopHostId = input.environmentHosted
+        ? undefined
+        : (input.desktopHostId ??
+          (runtime === "server" &&
+          serverConfig.desktopBrowserFd !== undefined &&
+          serverConfig.desktopBrowserControlFd !== undefined
+            ? "local"
+            : undefined));
       // Persisted client surfaces must not bind to a different tab after a server restart.
       const tabId = `${newPreviewTabId()}${runtime === "server" ? `_${serverEpoch}` : ""}`;
       const updatedAt = yield* currentIsoTimestamp;

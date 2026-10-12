@@ -93,6 +93,8 @@ export type PreviewAutomationProfiles = typeof PreviewAutomationProfiles.Type;
 
 export const PreviewAutomationStatus = Schema.Struct({
   available: Schema.Boolean,
+  /** The machine hosting this tab, independent of its streamed viewer. */
+  browserHost: Schema.optional(Schema.Literals(["environment", "desktop"])),
   visible: Schema.Boolean,
   /** Native user-visible presentation, independent of background rendering leases. */
   nativePresented: Schema.optional(Schema.Boolean),
@@ -182,13 +184,17 @@ export type PreviewAutomationDialogInput = typeof PreviewAutomationDialogInput.T
 
 export const PreviewAutomationOpenInput = Schema.Struct({
   ...PreviewAutomationTabTargetFields,
+  browserHost: Schema.optional(Schema.Literals(["environment", "desktop"])).annotate({
+    description:
+      "Choose environment to run the page in this environment's browser and reach its loopback apps without exposing a port. New environment tabs default to isolated Incognito storage; explicitly selecting Default uses this environment's persistent storage, never desktop sign-ins. Choose desktop for existing desktop profiles. Omit to retain the current hosting policy. An exact tabId cannot switch hosts.",
+  }),
   profileId: Schema.optional(BrowserProfileId).annotate({
     description:
-      "Existing desktop browser profile ID from preview_profiles. Mutually exclusive with profileName. Omit both to use the configured default for new tabs; reused tabs retain their profile.",
+      "Desktop browser profile ID from preview_profiles, or default/incognito for environment hosting. Mutually exclusive with profileName. Omit both to use the configured desktop default or isolated environment Incognito for new tabs; reused tabs retain their profile.",
   }),
   profileName: Schema.optional(BrowserProfileName).annotate({
     description:
-      "Exact, case-sensitive existing profile name from preview_profiles. Mutually exclusive with profileId. Unknown or duplicate names fail; use profileId to disambiguate.",
+      "Exact desktop profile name from preview_profiles, or Default/Incognito for environment hosting. Mutually exclusive with profileId. Unknown or duplicate desktop names fail; use profileId to disambiguate.",
   }),
   url: Schema.optional(BoundedUrl).annotate({
     description: `Optional initial page URL. ${URL_GUIDANCE} Omit to open a blank tab.`,
@@ -232,6 +238,35 @@ export const PreviewAutomationOpenInput = Schema.Struct({
       "Opens the collaborative browser for the current thread. Use preview_navigate afterward when readiness waiting matters.",
   });
 export type PreviewAutomationOpenInput = typeof PreviewAutomationOpenInput.Type;
+
+/** The own-thread document target is resolved by MCP before reaching a browser host. */
+export const PreviewAutomationMcpOpenInput = PreviewAutomationOpenInput.mapFields(
+  (fields) => ({
+    ...fields,
+    target: Schema.optional(
+      Schema.Struct({
+        kind: Schema.Literal("published-document"),
+        path: TrimmedNonEmptyString.annotate({
+          description:
+            "Exact file path published by a current assistant message in this calling thread. Attachments are not supported.",
+        }),
+      }),
+    ).annotate({
+      description:
+        "Open this thread's assistant-published file through the signed asset route in the environment browser. Mutually exclusive with url; desktop hosting is not supported.",
+    }),
+  }),
+  // Adding an optional target leaves the existing profile and tab checks valid.
+  { unsafePreserveChecks: true },
+).check(
+  Schema.makeFilter(
+    (input) =>
+      input.target === undefined ||
+      (input.url === undefined && input.browserHost !== "desktop") ||
+      "A published-document target cannot be combined with url or desktop hosting.",
+  ),
+);
+export type PreviewAutomationMcpOpenInput = typeof PreviewAutomationMcpOpenInput.Type;
 
 export const BrowserNavigationTarget = Schema.Union([
   Schema.Struct({
@@ -1210,6 +1245,21 @@ export class PreviewAutomationRecordingDeadlineExpiredError extends Schema.Tagge
 ) {
   override get message(): string {
     return "The recording transfer deadline expired.";
+  }
+}
+
+export class PreviewAutomationPublishedDocumentError extends Schema.TaggedError<PreviewAutomationPublishedDocumentError>()(
+  "PreviewAutomationPublishedDocumentError",
+  {
+    threadId: ThreadId,
+    reason: Schema.Literals(["file-unavailable", "http-unavailable"]),
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return this.reason === "http-unavailable"
+      ? "The environment's HTTP server cannot serve this published document."
+      : "This document is unavailable or is not published by an assistant in this thread.";
   }
 }
 

@@ -16,6 +16,7 @@ import {
   PreviewAutomationHost,
   PreviewAutomationError,
   PreviewAutomationOpenInput,
+  PreviewAutomationMcpOpenInput,
   PreviewAutomationResizeInput,
   PreviewAutomationResizeResult,
   PreviewAutomationStatus,
@@ -29,6 +30,7 @@ const decodeServer = Schema.decodeUnknownSync(DiscoveredLocalServer);
 const decodeConfiguredLocalServerUrls = Schema.decodeUnknownSync(ConfiguredLocalServerUrls);
 const decodeViewport = Schema.decodeUnknownSync(PreviewViewportSetting);
 const decodeResizeInput = Schema.decodeUnknownSync(PreviewAutomationResizeInput);
+const decodeMcpOpenInput = Schema.decodeUnknownSync(PreviewAutomationMcpOpenInput);
 const decodeOpenInput = Schema.decodeUnknownSync(PreviewAutomationOpenInput);
 const decodeResizeResult = Schema.decodeUnknownSync(PreviewAutomationResizeResult);
 const decodeAutomationHost = Schema.decodeUnknownSync(PreviewAutomationHost);
@@ -45,6 +47,28 @@ describe("PreviewAutomationOpenInput", () => {
     expect(() => decodeOpenInput({ profileId: "work-id", profileName: "Work" })).toThrow();
     expect(() => decodeOpenInput({ profileName: " " })).toThrow();
     expect(() => decodeOpenInput({ profileId: "" })).toThrow();
+  });
+
+  it("accepts an own-thread published document target", () => {
+    expect(
+      decodeMcpOpenInput({ target: { kind: "published-document", path: "report.html" } }),
+    ).toEqual({
+      target: { kind: "published-document", path: "report.html" },
+    });
+  });
+
+  it("rejects ambiguous or desktop-hosted published document targets", () => {
+    const target = { kind: "published-document", path: "report.html" };
+    expect(() => decodeMcpOpenInput({ profileId: "work", profileName: "Work" })).toThrow();
+    expect(() => decodeMcpOpenInput({ tabId: "tab", reuseExistingTab: false })).toThrow();
+    expect(() => decodeMcpOpenInput({ target, url: "https://example.com" })).toThrow();
+    expect(() => decodeMcpOpenInput({ target, browserHost: "desktop" })).toThrow();
+    expect(() =>
+      decodeMcpOpenInput({ target: { kind: "published-document", path: " " } }),
+    ).toThrow();
+    expect(() =>
+      decodeMcpOpenInput({ target: { kind: "attachment", path: "report.html" } }),
+    ).toThrow();
   });
 
   it("accepts the inline preview visibility flag", () => {

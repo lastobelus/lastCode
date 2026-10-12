@@ -1,3 +1,4 @@
+import * as PublishedDocumentPreview from "../../../preview/PublishedDocumentPreview.ts";
 import * as Orchestrator from "../../../orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "../../../orchestration-v2/ProjectionStore.ts";
 import * as ProjectStore from "../../../orchestration-v2/ProjectStore.ts";
@@ -67,6 +68,7 @@ const layerStubServices = Layer.mergeAll(
   Layer.mock(UpdateDrainAdmission.UpdateDrainAdmission)({}),
   Layer.mock(EnvironmentPause.EnvironmentPause)({}),
   Layer.mock(PreviewHosting.PreviewHosting)({}),
+  Layer.mock(PublishedDocumentPreview.PublishedDocumentPreview)({}),
   Layer.mock(ThreadLifecycle.ThreadLifecycleService)({}),
   Layer.mock(ThreadRecovery.ThreadRecoveryService)({}),
   Layer.mock(ThreadRecoveryRepair.ThreadRecoveryRepairService)({}),

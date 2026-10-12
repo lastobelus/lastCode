@@ -515,6 +515,8 @@ const make = Effect.gen(function* () {
   const pendingTabs = new Map<string, Promise<ServerTab>>();
   /** Verified origins belong to the preview session, which can outlive its attachment. */
   const sessionHostedOrigins = new Map<string, Map<string, string>>();
+  /** Explicit environment selection uses built-ins; physical server storage alone does not. */
+  const environmentProfileSessions = new Set<string>();
   /** Sessions closed while their tab was still opening; the open discards its page. */
   const closedPendingTabs = new Set<string>();
   /** Popup pages waiting for the tab their `opened` event creates. */
@@ -832,7 +834,10 @@ const make = Effect.gen(function* () {
     const key = tabKey(tab.threadId, tab.tabId);
     if (tabs.get(key) !== tab) return;
     tabs.delete(key);
-    if (closeSession || !sessionOpen(tab)) sessionHostedOrigins.delete(key);
+    if (closeSession || !sessionOpen(tab)) {
+      sessionHostedOrigins.delete(key);
+      environmentProfileSessions.delete(key);
+    }
     tab.closing = true;
     tab.viewerNavigation?.abort(new BrowserControlInterrupted());
     clearAbortedNavigation(tab);
@@ -1431,6 +1436,9 @@ const make = Effect.gen(function* () {
     const url = popup.url();
     // Opening a tab awaits setup; its opener can close before publication or attachment.
     const hostedOrigins = new Map(opener.hostedOrigins);
+    const environmentProfiles = environmentProfileSessions.has(
+      tabKey(opener.threadId, opener.tabId),
+    );
     // Captured now: the person whose click opened the popup gets switched to it.
     const controller = [...opener.viewers].find(
       (viewer) => viewer.id === opener.control.controller,
@@ -1440,18 +1448,22 @@ const make = Effect.gen(function* () {
         threadId: opener.threadId,
         ...(/^https?:/i.test(url) ? { url } : {}),
         runtime: "server",
+        ...(opener.desktop === null ? { environmentHosted: true } : {}),
         ...(opener.profileId === undefined ? {} : { profileId: opener.profileId }),
         ...(opener.desktopHostId === undefined ? {} : { desktopHostId: opener.desktopHostId }),
         // Agent popups stay with the agent and only float when it asks, like its own opens.
         ...(opener.control.agentId === null
           ? {}
           : { automationOwner: opener.control.agentId, reveal: false }),
-        beforePublish: (snapshot) =>
-          adoptedPages.set(tabKey(snapshot.threadId, snapshot.tabId), {
+        beforePublish: (snapshot) => {
+          const key = tabKey(snapshot.threadId, snapshot.tabId);
+          if (environmentProfiles) environmentProfileSessions.add(key);
+          adoptedPages.set(key, {
             page: popup,
             openerTabId: opener.tabId,
             hostedOrigins,
-          }),
+          });
+        },
       }),
     ).then(
       (snapshot) => {
@@ -1847,22 +1859,34 @@ const make = Effect.gen(function* () {
       };
     });
 
-  const profileStatus = () => {
-    const profiles = reportedProfiles?.profiles ?? BUILT_IN_BROWSER_PROFILES;
+  const profileStatus = (environmentHosted = false) => {
+    const profiles = environmentHosted
+      ? BUILT_IN_BROWSER_PROFILES
+      : (reportedProfiles?.profiles ?? BUILT_IN_BROWSER_PROFILES);
     return {
       profiles: profiles.map((profile) => ({
         id: profile.id,
         name: profile.name,
         ...(profile.kind === "incognito" ? { incognito: true } : {}),
       })),
-      ...(reportedProfiles ? { defaultProfileId: reportedProfiles.defaultProfileId } : {}),
+      ...(environmentHosted
+        ? { defaultProfileId: INCOGNITO_BROWSER_PROFILE_ID }
+        : reportedProfiles
+          ? { defaultProfileId: reportedProfiles.defaultProfileId }
+          : {}),
     };
   };
 
-  /** Matches an id, then a case-insensitive name. Omitted means the reported default. */
-  const resolveOpenProfile = (requested: string | undefined): string | undefined => {
-    if (requested === undefined) return reportedProfiles?.defaultProfileId;
-    const profiles = reportedProfiles?.profiles ?? BUILT_IN_BROWSER_PROFILES;
+  /** Environment QA defaults to isolated storage; other opens retain the reported default. */
+  const resolveOpenProfile = (
+    requested: string | undefined,
+    environmentHosted = false,
+  ): string | undefined => {
+    if (requested === undefined)
+      return environmentHosted ? INCOGNITO_BROWSER_PROFILE_ID : reportedProfiles?.defaultProfileId;
+    const profiles = environmentHosted
+      ? BUILT_IN_BROWSER_PROFILES
+      : (reportedProfiles?.profiles ?? BUILT_IN_BROWSER_PROFILES);
     const wanted = requested.toLowerCase();
     const match =
       findBrowserProfile(profiles, requested) ??
@@ -1959,11 +1983,13 @@ const make = Effect.gen(function* () {
           );
     const status = {
       profileId: tab.profileId ?? null,
-      profileName:
-        catalogue?.desktopHostId === desktopHostId
+      profileName: tab.desktop
+        ? catalogue?.desktopHostId === desktopHostId
           ? (catalogue?.profiles.find((profile) => profile.id === tab.profileId)?.name ?? null)
-          : null,
+          : null
+        : (BUILT_IN_BROWSER_PROFILES.find((profile) => profile.id === tab.profileId)?.name ?? null),
       available: true,
+      browserHost: tab.desktop ? ("desktop" as const) : ("environment" as const),
       visible: tab.nativePresented || tab.viewers.size > 0,
       nativePresented: tab.nativePresented,
       streamViewers: tab.viewers.size,
@@ -1984,7 +2010,7 @@ const make = Effect.gen(function* () {
       viewportSetting: tab.setting,
       ...(viewport ? { viewport } : {}),
       tabs: listedTabs,
-      ...profileStatus(),
+      ...profileStatus(environmentProfileSessions.has(tabKey(tab.threadId, tab.tabId))),
       downloads: tab.downloads.map(({ fileName, path, sizeBytes, url, completedAt }) => ({
         fileName,
         path,
@@ -2563,8 +2589,8 @@ const make = Effect.gen(function* () {
     });
   };
 
-  const profileDesktopHost = async (request: PreviewAutomationRequest) => {
-    if (!request.agentSessionId) return undefined;
+  const profileHost = async (request: PreviewAutomationRequest) => {
+    if (!request.agentSessionId) return { desktopHostId: undefined, environmentHosted: false };
     const owned = [...tabs.values()].filter(
       (tab) => tab.threadId === request.threadId && tab.control.agentId === request.agentSessionId,
     );
@@ -2572,7 +2598,11 @@ const make = Effect.gen(function* () {
       request.tabIdExplicit && request.tabId !== undefined
         ? tabs.get(tabKey(request.threadId, request.tabId))
         : owned.find((tab) => tab.tabId === request.tabId);
-    if (current) return current.desktop ? (current.desktopHostId ?? "local") : undefined;
+    if (current)
+      return {
+        desktopHostId: current.desktop ? (current.desktopHostId ?? "local") : undefined,
+        environmentHosted: environmentProfileSessions.has(tabKey(current.threadId, current.tabId)),
+      };
     if (request.tabId !== undefined) {
       const { sessions } = await Effect.runPromise(manager.list({ threadId: request.threadId }));
       const retained = sessions.find(
@@ -2585,8 +2615,14 @@ const make = Effect.gen(function* () {
         retained?.backingPage === "desktop-popup" ||
         retained?.backingPage === "desktop-root"
       )
-        return retained.desktopHostId ?? "local";
-      if (retained) return undefined;
+        return { desktopHostId: retained.desktopHostId ?? "local", environmentHosted: false };
+      if (retained)
+        return {
+          desktopHostId: undefined,
+          environmentHosted: environmentProfileSessions.has(
+            tabKey(request.threadId, retained.tabId),
+          ),
+        };
       if (request.tabIdExplicit)
         throw new ServerBrowserPage.ServerBrowserOperationError(
           "PreviewAutomationTabNotFoundError",
@@ -2594,7 +2630,12 @@ const make = Effect.gen(function* () {
         );
     }
     const latest = owned.sort((left, right) => right.createdAt - left.createdAt)[0];
-    return latest?.desktop ? (latest.desktopHostId ?? "local") : undefined;
+    return {
+      desktopHostId: latest?.desktop ? (latest.desktopHostId ?? "local") : undefined,
+      environmentHosted:
+        latest !== undefined &&
+        environmentProfileSessions.has(tabKey(latest.threadId, latest.tabId)),
+    };
   };
 
   const runOperation = async (
@@ -2614,7 +2655,7 @@ const make = Effect.gen(function* () {
           request.threadId,
         );
       case "profiles": {
-        const desktopHostId = await profileDesktopHost(request);
+        const { desktopHostId } = await profileHost(request);
         const profiles = await Effect.runPromise(
           desktopChannel.getProfiles({
             threadId: request.threadId,
@@ -2636,25 +2677,37 @@ const make = Effect.gen(function* () {
             "The agent session is missing. Reconnect the provider.",
           );
         const open = input as PreviewAutomationOpenInput;
-        const desktopHostId = await profileDesktopHost(request);
-        const catalogue = await Effect.runPromise(
-          desktopChannel.getProfiles({
-            threadId: request.threadId,
-            agentSessionId: request.agentSessionId,
-            ...(desktopHostId === undefined ? {} : { desktopHostId }),
-          }),
-        );
+        const currentHost =
+          open.browserHost === "environment" ? undefined : await profileHost(request);
+        const environmentHosted =
+          open.browserHost === "environment" ||
+          (open.browserHost === undefined && currentHost?.environmentHosted === true);
+        const desktopHostId = environmentHosted ? undefined : currentHost?.desktopHostId;
+        const catalogue = environmentHosted
+          ? null
+          : await Effect.runPromise(
+              desktopChannel.getProfiles({
+                threadId: request.threadId,
+                agentSessionId: request.agentSessionId,
+                ...(desktopHostId === undefined ? {} : { desktopHostId }),
+              }),
+            );
         // Reported web profiles remain available for environment-hosted pages. An
         // explicit desktop-profile operation must still use its owning desktop.
         const useReportedProfile =
-          desktopHostId === undefined &&
-          catalogue === null &&
-          request.operation === "open" &&
-          (reportedProfiles !== null || !desktopChannel.available);
+          environmentHosted ||
+          (open.browserHost !== "desktop" &&
+            desktopHostId === undefined &&
+            catalogue === null &&
+            request.operation === "open" &&
+            (reportedProfiles !== null || !desktopChannel.available));
         const reportedProfileId = useReportedProfile
-          ? resolveOpenProfile(open.profileId ?? open.profileName)
+          ? resolveOpenProfile(open.profileId ?? open.profileName, environmentHosted)
           : undefined;
-        let selectedProfileId: string | undefined;
+        let selectedProfileId =
+          environmentHosted && (open.profileId !== undefined || open.profileName !== undefined)
+            ? reportedProfileId
+            : undefined;
         if (
           !useReportedProfile &&
           (open.profileId !== undefined || open.profileName !== undefined)
@@ -2703,9 +2756,37 @@ const make = Effect.gen(function* () {
             "Multiple tabs are open. Pass tabId or reuseExistingTab=false.",
             "tabRequired",
           );
+        // Check retained ownership before attachment: a host switch must not
+        // wait for the disconnected desktop page it is replacing.
+        let differentRetainedHost = false;
+        if (reuse && request.tabId !== undefined && open.browserHost !== undefined) {
+          const attached = tabs.get(tabKey(request.threadId, request.tabId));
+          const retained = attached
+            ? undefined
+            : (await Effect.runPromise(manager.list({ threadId: request.threadId }))).sessions.find(
+                (session) => session.tabId === request.tabId && session.runtime === "server",
+              );
+          const retainedHost = attached
+            ? attached.desktop
+              ? "desktop"
+              : "environment"
+            : retained
+              ? retained.backingPage === "desktop" ||
+                retained.backingPage === "desktop-popup" ||
+                retained.backingPage === "desktop-root"
+                ? "desktop"
+                : "environment"
+              : undefined;
+          differentRetainedHost = retainedHost !== undefined && retainedHost !== open.browserHost;
+          if (differentRetainedHost && request.tabIdExplicit)
+            throw new ServerBrowserPage.ServerBrowserOperationError(
+              "PreviewAutomationExecutionError",
+              "The selected tab uses a different browser host. Omit tabId to create a new tab; an existing tab cannot switch hosts.",
+            );
+        }
         // A tab still launching exists only as a session, so resolve it like a viewer would.
         const found =
-          reuse && request.tabId !== undefined
+          reuse && request.tabId !== undefined && !differentRetainedHost
             ? await Effect.runPromise(
                 findTab(request.threadId, request.tabId).pipe(
                   Effect.catchTags({
@@ -2720,7 +2801,23 @@ const make = Effect.gen(function* () {
           found && (request.tabIdExplicit || found.control.agentId === request.agentSessionId)
             ? found
             : undefined;
-        if (selectedProfileId !== undefined && request.tabIdExplicit && existing === undefined) {
+        if (
+          existing &&
+          open.browserHost !== undefined &&
+          (existing.desktop ? "desktop" : "environment") !== open.browserHost
+        ) {
+          if (request.tabIdExplicit)
+            throw new ServerBrowserPage.ServerBrowserOperationError(
+              "PreviewAutomationExecutionError",
+              "The selected tab uses a different browser host. Omit tabId to create a new tab; an existing tab cannot switch hosts.",
+            );
+          existing = undefined;
+        }
+        if (
+          request.tabIdExplicit &&
+          (reuse || selectedProfileId !== undefined) &&
+          existing === undefined
+        ) {
           throw new ServerBrowserPage.ServerBrowserOperationError(
             "PreviewAutomationTabNotFoundError",
             "The requested preview tab no longer exists.",
@@ -2743,6 +2840,11 @@ const make = Effect.gen(function* () {
           }
           existing = undefined;
         }
+        if (!existing && open.browserHost === "desktop" && catalogue === null)
+          throw new ServerBrowserPage.ServerBrowserOperationError(
+            "PreviewAutomationRemoteUnavailableError",
+            "No unambiguous connected desktop browser is available. The requested desktop tab was not opened.",
+          );
         if (
           !existing &&
           newTabProfileId !== undefined &&
@@ -2780,6 +2882,14 @@ const make = Effect.gen(function* () {
                 runtime: "server",
                 reveal: false,
                 automationOwner: request.agentSessionId,
+                ...(environmentHosted
+                  ? {
+                      environmentHosted: true,
+                      beforePublish: (snapshot) => {
+                        environmentProfileSessions.add(tabKey(snapshot.threadId, snapshot.tabId));
+                      },
+                    }
+                  : {}),
                 ...(desktopHostId === undefined ? {} : { desktopHostId }),
                 createDesktopRoot: (snapshot) => createDesktopRoot(snapshot, signal),
                 ...(newTabProfileId === undefined || catalogue === null
@@ -2804,6 +2914,8 @@ const make = Effect.gen(function* () {
                   "A browser dialog is pending. Read preview_status and use preview_dialog first.",
                   "dialogPending",
                 );
+              if (environmentHosted)
+                environmentProfileSessions.add(tabKey(tab.threadId, tab.tabId));
               const reveal = open.open ?? open.show;
               if (reveal !== false) {
                 tab.revealRequested = true;
@@ -3354,6 +3466,7 @@ const make = Effect.gen(function* () {
       const tab = tabs.get(key);
       if (event.type === "closed") {
         sessionHostedOrigins.delete(key);
+        environmentProfileSessions.delete(key);
         const popup = nativePopupForTab(event.threadId, event.tabId);
         if (popup) {
           popup.closeRequested = true;

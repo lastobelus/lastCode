@@ -1,3 +1,4 @@
+import * as PublishedDocumentPreview from "../preview/PublishedDocumentPreview.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
@@ -136,6 +137,7 @@ it.effect("isolates full and restricted tool discovery over HTTP", () =>
             Layer.mock(ProjectStore.ProjectStoreV2)({}),
             Layer.mock(DeviceService.DeviceService)({}),
             Layer.mock(PreviewHosting.PreviewHosting)({}),
+            Layer.mock(PublishedDocumentPreview.PublishedDocumentPreview)({}),
             Layer.mock(PreviewBrowser.PreviewBrowser)({
               executable: Effect.die("tool discovery must not launch a browser"),
               installed: Effect.succeedNone,
@@ -275,6 +277,7 @@ const client = McpSchema.McpServerClient.of({
 });
 const layerTest = McpHttpServer.layerPreviewToolkit.pipe(
   Layer.provide(Layer.mock(PreviewHosting.PreviewHosting)({})),
+  Layer.provide(Layer.mock(PublishedDocumentPreview.PublishedDocumentPreview)({})),
   Layer.provideMerge(McpServer.McpServer.layer),
   Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
   Layer.provideMerge(PreviewAutomationBroker.layer),
