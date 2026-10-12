@@ -192,7 +192,7 @@ function CleanupResults({
                   : "Browser artifacts";
         return (
           <SettingsRow
-            key={`${entry.kind}:${entry.worktreeResource ?? "all"}:${entry.path ?? entry.kind}:${entry.threadId ?? index}`}
+            key={`${entry.kind}:${entry.worktreeResource ?? "checkout"}:${entry.path ?? ""}:${entry.threadId ?? index}`}
             title={environmentLabel ? `${environmentLabel}: ${name}` : name}
             description={
               <span

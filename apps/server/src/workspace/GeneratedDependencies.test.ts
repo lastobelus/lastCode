@@ -1,4 +1,7 @@
-import { recordDependencyUse } from "@t3tools/shared/dependencyActivity";
+import {
+  recordDependencyUse,
+  dependencyActivitySnapshot,
+} from "@t3tools/shared/dependencyActivity";
 import * as Path from "effect/Path";
 import * as Context from "effect/Context";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -37,6 +40,7 @@ import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as GeneratedDependencies from "./GeneratedDependencies.ts";
 import * as DependencyMounts from "./DependencyMounts.ts";
+import * as WorktreeConsumers from "./WorktreeConsumers.ts";
 import * as StorageCleanup from "../storageCleanup.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
@@ -62,6 +66,7 @@ const testLayer = (
   mountPoints?: Effect.Effect<ReadonlyArray<string> | null>,
   failSharedProjectInventory = false,
   onDependencyObservation: (cwd: string) => void = () => undefined,
+  processPaths: Effect.Effect<ReadonlyArray<string> | null> = Effect.succeed([]),
 ) => {
   const gitLayer = Layer.effect(
     GitVcsDriver.GitVcsDriver,
@@ -98,12 +103,12 @@ const testLayer = (
     Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-dependencies-test-" })),
     Layer.provideMerge(NodeServices.layer),
     Layer.provideMerge(Layer.succeed(GeneratedDependencies.ProcessWorkingDirectories, processCwds)),
+    Layer.provideMerge(Layer.succeed(WorktreeConsumers.ProcessPaths, processPaths)),
+    Layer.provideMerge(
+      Layer.succeed(DependencyMounts.MountPoints, mountPoints ?? Effect.succeed(["/"])),
+    ),
   );
-  return mountPoints === undefined
-    ? dependencies
-    : dependencies.pipe(
-        Layer.provideMerge(Layer.succeed(DependencyMounts.MountPoints, mountPoints)),
-      );
+  return dependencies;
 };
 
 const fixture = Effect.fn("test.dependencyFixture")(function* (manager: "npm" | "pnpm" = "pnpm") {
@@ -481,6 +486,310 @@ it.effect("preserves a worktree's live dev runtime even when its process cwd is 
     assert.isNull(yield* cleanup.remove(inspected!, Effect.succeed(true)));
     assert.isTrue(yield* fs.exists(dependencyPath));
   }).pipe(Effect.scoped, Effect.provide(testLayer())),
+);
+
+it.effect.each(["executable", "open", "mapped", "canonical-alias"] as const)(
+  "retains and renews an install consumed through an %s path while cwd is elsewhere",
+  (consumer) => {
+    let paths: ReadonlyArray<string> = [];
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(NOW);
+      const f = yield* fixture();
+      const original = yield* f.cleanup.observe(f.input, NOW - 20 * day);
+      assert.equal(original!.lastUsedAt, NOW - 20 * day);
+      const target = f.path.join(f.dependencyPath, "package", `${consumer}.js`);
+      yield* f.fs.writeFileString(target, "module.exports = 1;\n");
+      const reference =
+        consumer === "canonical-alias" ? f.path.join(f.root, "consumer-alias.js") : target;
+      if (consumer === "canonical-alias") yield* f.fs.symlink(target, reference);
+      paths = [reference];
+      const inspected = yield* f.cleanup.inspect(f.input);
+      assert.isNotNull(inspected);
+      assert.isNull(yield* f.cleanup.remove(inspected!, Effect.succeed(true)));
+      assert.isTrue(yield* f.fs.exists(target));
+      paths = [];
+      assert.equal((yield* f.cleanup.observe(f.input, NOW + day, false, false))!.lastUsedAt, NOW);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        testLayer(
+          Effect.succeed(["/workspace/elsewhere"]),
+          undefined,
+          undefined,
+          false,
+          undefined,
+          Effect.sync(() => paths),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect.each(["eligibility", "native"] as const)(
+  "a late %s installed-file consumer renews age even when it exits before the last guard",
+  (stage) => {
+    let paths: ReadonlyArray<string> = [];
+    let sawLateConsumer = false;
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(NOW);
+      const f = yield* fixture();
+      yield* f.cleanup.observe(f.input, NOW - 20 * day);
+      const inspected = yield* f.cleanup.inspect(f.input);
+      const target = f.path.join(f.dependencyPath, "package/index.js");
+      assert.isNotNull(inspected);
+      assert.deepStrictEqual(
+        yield* f.cleanup.removeBatch([
+          {
+            inspection: inspected!,
+            canRemove: Effect.sync(() => {
+              if (stage === "eligibility") paths = [target];
+              return true;
+            }),
+            isStillEligible: Effect.sync(() => {
+              if (stage === "native") paths = [target];
+              return true;
+            }),
+          },
+        ]),
+        [],
+      );
+      assert.isTrue(sawLateConsumer);
+      assert.deepStrictEqual(paths, []);
+      assert.isTrue(yield* f.fs.exists(target));
+      assert.equal((yield* f.cleanup.observe(f.input, NOW + day, false, false))!.lastUsedAt, NOW);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        testLayer(
+          Effect.succeed(["/workspace/elsewhere"]),
+          undefined,
+          Effect.sync(() => {
+            if (sawLateConsumer) paths = []; // The consumer exits after its positive observation.
+            return ["/"];
+          }),
+          false,
+          undefined,
+          Effect.sync(() => {
+            if (paths.length > 0) sawLateConsumer = true;
+            return paths;
+          }),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect(
+  "generic checkout cwd and source-file consumers protect while live without renewing dependency use",
+  () => {
+    let paths: ReadonlyArray<string> = [];
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(NOW);
+      const f = yield* fixture();
+      yield* f.cleanup.observe(f.input, NOW - 20 * day);
+      const before = yield* Effect.sync(() => dependencyActivitySnapshot(f.input.worktreePath));
+      const inspected = yield* f.cleanup.inspect(f.input);
+      assert.isNotNull(inspected);
+      for (const reference of [
+        f.input.worktreePath,
+        f.path.join(f.input.worktreePath, "source.ts"),
+      ]) {
+        paths = [reference];
+        assert.isNull(yield* f.cleanup.remove(inspected!, Effect.succeed(true)));
+        assert.equal(
+          (yield* f.cleanup.observe(f.input, NOW, false, false))!.lastUsedAt,
+          NOW - 20 * day,
+        );
+        assert.equal(
+          yield* Effect.sync(() => dependencyActivitySnapshot(f.input.worktreePath)),
+          before,
+        );
+      }
+      paths = [];
+      assert.isNotNull(yield* f.cleanup.remove(inspected!, Effect.succeed(true)));
+      assert.isFalse(yield* f.fs.exists(f.dependencyPath));
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        testLayer(
+          Effect.succeed([]),
+          undefined,
+          undefined,
+          false,
+          undefined,
+          Effect.sync(() => paths),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect(
+  "read-only observation compares metadata without sampling or renewing unsaved installed-file use",
+  () => {
+    let paths: ReadonlyArray<string> = [];
+    let inventoryReads = 0;
+    return Effect.gen(function* () {
+      const f = yield* fixture();
+      yield* f.cleanup.observe(f.input, NOW - 20 * day);
+      const before = yield* Effect.sync(() => dependencyActivitySnapshot(f.input.worktreePath));
+      paths = [f.path.join(f.dependencyPath, "package/index.js")];
+      const readonly = yield* f.cleanup.observe(f.input, NOW, false, false);
+      assert.equal(readonly!.lastUsedAt, NOW - 20 * day);
+      assert.isFalse(readonly!.renewed);
+      assert.equal(inventoryReads, 1);
+      assert.equal(
+        yield* Effect.sync(() => dependencyActivitySnapshot(f.input.worktreePath)),
+        before,
+      );
+      paths = [];
+      assert.equal(
+        (yield* f.cleanup.observe(f.input, NOW + day, false, false))!.lastUsedAt,
+        NOW - 20 * day,
+      );
+      assert.equal(inventoryReads, 1);
+      paths = [f.path.join(f.dependencyPath, "package/index.js")];
+      yield* f.cleanup.observe(f.input, NOW);
+      paths = [];
+      assert.equal((yield* f.cleanup.observe(f.input, NOW + day, false, false))!.lastUsedAt, NOW);
+      assert.equal(inventoryReads, 2);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        testLayer(
+          Effect.succeed([]),
+          undefined,
+          undefined,
+          false,
+          undefined,
+          Effect.sync(() => {
+            inventoryReads++;
+            return paths;
+          }),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect(
+  "keeps dependencies when the full process inventory is unknown, including at the final seam",
+  () => {
+    let paths: ReadonlyArray<string> | null = [];
+    return Effect.gen(function* () {
+      const f = yield* fixture();
+      yield* f.cleanup.observe(f.input, NOW - 20 * day);
+      const before = yield* Effect.sync(() => dependencyActivitySnapshot(f.input.worktreePath));
+      const inspected = yield* f.cleanup.inspect(f.input);
+      assert.isNotNull(inspected);
+      paths = null;
+      assert.isNull(yield* f.cleanup.observe(f.input, NOW));
+      assert.isNull(yield* f.cleanup.remove(inspected!, Effect.succeed(true)));
+      paths = [];
+      assert.isNull(
+        yield* f.cleanup.remove(
+          inspected!,
+          Effect.sync(() => {
+            paths = null;
+            return true;
+          }),
+        ),
+      );
+      assert.isTrue(yield* f.fs.exists(f.dependencyPath));
+      assert.equal(
+        yield* Effect.sync(() => dependencyActivitySnapshot(f.input.worktreePath)),
+        before,
+      );
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        testLayer(
+          Effect.succeed([]),
+          undefined,
+          undefined,
+          false,
+          undefined,
+          Effect.sync(() => paths),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect(
+  "rechecks application eligibility after policy changes during the final file-consumer inventory",
+  () => {
+    let inventoryReads = 0;
+    let eligible = true;
+    let eligibilityChecks = 0;
+    return Effect.gen(function* () {
+      const f = yield* fixture();
+      const inspected = yield* f.cleanup.inspect(f.input);
+      assert.isNotNull(inspected);
+      const removed = yield* f.cleanup.removeBatch([
+        {
+          inspection: inspected!,
+          canRemove: Effect.succeed(true),
+          isStillEligible: Effect.sync(() => {
+            eligibilityChecks++;
+            return eligible;
+          }),
+        },
+      ]);
+      assert.deepStrictEqual(removed, []);
+      assert.equal(inventoryReads, 3);
+      assert.equal(eligibilityChecks, 2);
+      assert.isTrue(yield* f.fs.exists(f.dependencyPath));
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        testLayer(
+          Effect.succeed([]),
+          undefined,
+          undefined,
+          false,
+          undefined,
+          Effect.sync(() => {
+            if (++inventoryReads === 3) eligible = false;
+            return [];
+          }),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect(
+  "malformed optional usage evidence keeps dependencies even with positively observed consumers",
+  () => {
+    let paths: ReadonlyArray<string> = [];
+    return Effect.gen(function* () {
+      const f = yield* fixture();
+      const inspected = yield* f.cleanup.inspect(f.input);
+      assert.isNotNull(inspected);
+      const location = yield* f.runGit(f.input.worktreePath, ["rev-parse", "--absolute-git-dir"]);
+      const record = f.path.join(location.stdout.trim(), "t3-dependency-activity.json");
+      yield* f.fs.writeFileString(record, "invalid usage evidence");
+      paths = [f.path.join(f.dependencyPath, "package/index.js")];
+      const error = yield* f.cleanup.observe(f.input, NOW).pipe(Effect.flip);
+      assert.equal(error._tag, "GeneratedDependenciesError");
+      assert.isNull(yield* f.cleanup.remove(inspected!, Effect.succeed(true)));
+      assert.equal(yield* f.fs.readFileString(record), "invalid usage evidence");
+      assert.isTrue(yield* f.fs.exists(f.dependencyPath));
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        testLayer(
+          Effect.succeed([]),
+          undefined,
+          undefined,
+          false,
+          undefined,
+          Effect.sync(() => paths),
+        ),
+      ),
+    );
+  },
 );
 
 it.effect(

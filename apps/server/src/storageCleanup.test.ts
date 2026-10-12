@@ -983,6 +983,55 @@ describe("provider protection during storage cleanup", () => {
 });
 
 describe("dependency cleanup reports", () => {
+  it.live.each(["owned", "ownerless"] as const)(
+    "remembers installed-file consumers with cwd elsewhere for %s dependencies",
+    (ownership) =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          let paths: readonly string[] = [];
+          const fixture = yield* cleanupFixture.pipe(
+            Effect.provideService(
+              WorktreeConsumers.ProcessPaths,
+              Effect.sync(() => paths),
+            ),
+            Effect.provideService(
+              GeneratedDependencies.ProcessWorkingDirectories,
+              Effect.succeed([]),
+            ),
+          );
+          yield* fixture.enableDependencies;
+          if (ownership === "ownerless") fixture.setThreads([]);
+          paths = [`${fixture.worktree}/node_modules/package/index.js`];
+          const first = yield* fixture.service.runNow;
+          expect(
+            first.entries.filter((entry) => entry.worktreeResource === "dependencies"),
+          ).toMatchObject([{ outcome: "kept" }]);
+          const location = yield* fixture.command(fixture.worktree, [
+            "rev-parse",
+            "--absolute-git-dir",
+          ]);
+          const activity = yield* Effect.sync(() =>
+            observeDependencyActivity(
+              location.stdout.trim(),
+              fixture.worktree,
+              fixture.now,
+              false,
+              false,
+            ),
+          );
+          expect(activity.lastUsedAt).toBeGreaterThanOrEqual(fixture.now);
+          paths = [];
+          const afterExit = yield* fixture.service.runNow;
+          expect(
+            afterExit.entries.filter((entry) => entry.worktreeResource === "dependencies"),
+          ).toMatchObject([{ outcome: "kept" }]);
+          expect(
+            yield* fixture.fs.exists(`${fixture.worktree}/node_modules/package/index.js`),
+          ).toBe(true);
+        }),
+      ),
+  );
+
   it.live.each(["configured", "previous"] as const)(
     "removes dependencies through a symlinked parent in the %s location",
     (location) =>

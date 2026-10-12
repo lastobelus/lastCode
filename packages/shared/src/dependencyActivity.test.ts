@@ -103,3 +103,13 @@ it("Finder and directory-only metadata changes do not renew dependency use", () 
     renewed: false,
   });
 });
+
+it("final snapshots detect a rebound Git directory even without an activity record", () => {
+  const { cwd, root } = fixture();
+  const before = dependencyActivitySnapshot(cwd);
+  const other = NodePath.join(root, "other-git-metadata");
+  NodeFS.mkdirSync(other);
+  NodeFS.writeFileSync(NodePath.join(cwd, ".git"), `gitdir: ${other}\n`);
+  assert.notEqual(dependencyActivitySnapshot(cwd), before);
+  assert.isFalse(NodeFS.existsSync(NodePath.join(other, "t3-dependency-activity.json")));
+});

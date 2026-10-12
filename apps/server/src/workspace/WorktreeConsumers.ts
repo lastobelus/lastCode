@@ -131,7 +131,9 @@ const lsofPaths = (output: string): ReadonlyArray<string> | null => {
       return paths.length <= MAX_PROCESS_PATHS;
     }
     if (file.descriptor === "cwd" || file.descriptor === "txt") return false;
-    return ["IPv4", "IPv6", "unix", "KQUEUE", "PSXSEM", "PSXSHM", "systm"].includes(file.type);
+    return ["IPv4", "IPv6", "unix", "PIPE", "KQUEUE", "PSXSEM", "PSXSHM", "systm"].includes(
+      file.type,
+    );
   };
   for (const raw of output.split("\0")) {
     const field = raw.replace(/^\n/, "");
@@ -230,8 +232,8 @@ const runtimeKeptReason = async (root: string): Promise<string | null> => {
 
 /** Call under the canonical workspace lease immediately before removing generated files or a checkout. */
 export const worktreeConsumerReason = Effect.fn("WorktreeConsumers.worktreeConsumerReason")(
-  function* (canonicalRoot: string) {
-    const paths = yield* yield* ProcessPaths;
+  function* (canonicalRoot: string, capturedPaths?: ReadonlyArray<string> | null) {
+    const paths = capturedPaths === undefined ? yield* yield* ProcessPaths : capturedPaths;
     if (paths === null) return "Process file-consumer inventory is unavailable.";
     const mounts = yield* yield* DependencyMounts.MountPoints;
     if (mounts === null) return "Mount inventory is unavailable.";

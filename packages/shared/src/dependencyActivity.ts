@@ -100,8 +100,11 @@ const worktreeGitDirectory = (cwd: string) => {
 /** A read-only comparison immediately before removal catches in-place renewal too. */
 export function dependencyActivitySnapshot(worktreePath: string) {
   const cwd = NodeFS.realpathSync(worktreePath);
-  const { identity, previous, recordIdentity } = readActivity(worktreeGitDirectory(cwd), cwd);
-  return JSON.stringify({ identity, previous, recordIdentity });
+  const { identity, target, previous, recordIdentity } = readActivity(
+    worktreeGitDirectory(cwd),
+    cwd,
+  );
+  return JSON.stringify({ identity, target, previous, recordIdentity });
 }
 
 /** Record actual dependency-backed execution, including commands below the checkout root. */

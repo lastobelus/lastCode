@@ -204,6 +204,7 @@ describe("Darwin worktree consumers", () => {
         darwinFixture(
           lsof +
             "f6\0tunix\0n->0x12345\0\nf7\0tKQUEUE\0\n" +
+            "f8\0tPIPE\0n0xabcdef0123456789->0x123456789abcdef0\0\n" +
             "p20\0\nfcwd\0tDIR\0n/workspace/other\0\nf1\0tunix\0n/var/run/example.sock\0\n",
         );
         expect(yield* inventory("darwin")).toEqual([
