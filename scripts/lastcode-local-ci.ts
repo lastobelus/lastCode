@@ -23,6 +23,7 @@ import {
 import { resolveQuickCiScope, type QuickCiScope } from "./lib/lastcode-ci-scope.ts";
 import { runCiProcess } from "./lib/lastcode-ci-process.ts";
 import { recordDependencyUse } from "../packages/shared/src/dependencyActivity.ts";
+import { createGeneratedBuildStage } from "../packages/shared/src/generatedBuildOwnership.ts";
 
 export const LASTCODE_BASE_BRANCH = "lastcode/main";
 export const LASTCODE_ORIGIN_REMOTE = "origin";
@@ -1142,6 +1143,9 @@ async function executeLocalCi(
           try { recordDependencyUse(repoRoot, Date.now()); }
           catch { console.warn("[lastcode:ci] Could not record dependency use."); }
         };
+        const debugStage = step.command === "cargo" && step.args[0] === "test"
+          ? createGeneratedBuildStage(repoRoot, "native/resource-monitor/target/debug")
+          : null;
         noteDependencyUse();
         try {
           await runCiProcess({
@@ -1152,12 +1156,15 @@ async function executeLocalCi(
             onSpawn: (pid) => lease.recordChild(pid),
             env: {
               ...inheritedEnv,
+              ...(debugStage ? { CARGO_TARGET_DIR: debugStage.directory } : {}),
               GOMAXPROCS: String(policy.compilerThreads),
               PATH: `${NodePath.resolve(repoRoot, "node_modules/.bin")}${NodePath.delimiter}${inheritedEnv.PATH ?? ""}`,
             },
             ...(step.failureHelp ? { failureHelp: step.failureHelp } : {}),
           });
+          debugStage?.publish(Date.now(), NodePath.join(debugStage.directory, "debug"));
         } finally {
+          debugStage?.discard();
           noteDependencyUse();
         }
       }

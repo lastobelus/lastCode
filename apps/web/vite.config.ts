@@ -1,4 +1,6 @@
 import * as NodeZlib from "node:zlib";
+import { fileURLToPath } from "node:url";
+import { createGeneratedBuildStage } from "@t3tools/shared/generatedBuildOwnership";
 
 import react, { reactCompilerPreset } from "@vitejs/plugin-react";
 import babel from "@rolldown/plugin-babel";
@@ -159,11 +161,41 @@ const configuredAllowedHosts = (process.env.T3CODE_DEV_ALLOWED_HOSTS ?? "")
   .filter((entry) => entry.length > 0);
 const allowedHosts = [".ts.net", ...configuredAllowedHosts];
 
-export default defineConfig(() => {
+export default defineConfig(({ command }) => {
+  const stage = command === "build"
+    ? createGeneratedBuildStage(fileURLToPath(new URL("../..", import.meta.url)), "apps/web/dist")
+    : null;
+  let emitted = false;
+  const provenancePlugin: Plugin = {
+    name: "runner-owned-build-output",
+    apply: "build",
+    enforce: "post",
+    configResolved(config) {
+      if (stage && config.build.outDir !== stage.directory) {
+        stage.discard();
+        throw new Error("Managed build output must use its private stage");
+      }
+    },
+    buildStart() { emitted = false; },
+    writeBundle() { emitted = true; },
+    buildEnd(error) { if (error && !this.meta.watchMode) stage?.discard(); },
+    renderError() { emitted = false; },
+    closeBundle() {
+      try {
+        // A watched compiler retains its own private tree between emissions;
+        // ownership never comes from scanning the real destination directory.
+        if (emitted) stage?.publish(Date.now(), undefined, this.meta.watchMode);
+      } finally {
+        if (!this.meta.watchMode) stage?.discard();
+      }
+    },
+    closeWatcher() { stage?.discard(); },
+  };
   return {
     assetsInclude: ["**/*.wasm"],
     plugins: [
       devCompressionPlugin(),
+      provenancePlugin,
       thirdPartyLicensesPlugin({
         bundleName: "web",
         configFile: new URL("../../third-party-licenses.config.json", import.meta.url),
@@ -284,7 +316,7 @@ export default defineConfig(() => {
       devSourcemap: buildSourcemap !== false,
     },
     build: {
-      outDir: "dist",
+      outDir: stage?.directory ?? "dist",
       emptyOutDir: true,
       manifest: true,
       sourcemap: buildSourcemap,

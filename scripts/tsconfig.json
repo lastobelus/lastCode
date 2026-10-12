@@ -6,5 +6,9 @@
     "types": ["node"],
     "lib": ["ESNext", "esnext.disposable"]
   },
-  "include": ["**/*.ts", "../packages/shared/src/dependencyActivity.ts"]
+  "include": [
+    "**/*.ts",
+    "../packages/shared/src/dependencyActivity.ts",
+    "../packages/shared/src/generatedBuildOwnership.ts"
+  ]
 }
