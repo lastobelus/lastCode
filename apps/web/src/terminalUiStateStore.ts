@@ -6,6 +6,7 @@
  */
 
 import { parseScopedThreadKey, scopedThreadKey } from "@t3tools/client-runtime/environment";
+import { type KnownTerminalSession } from "@t3tools/client-runtime/state/terminal";
 import { type ScopedThreadRef } from "@t3tools/contracts";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
@@ -560,15 +561,44 @@ function removeRecordEntry<T>(record: Record<string, T>, key: string): Record<st
   return remaining;
 }
 
+function updatePendingTerminalLinkProfile(
+  profilesByThreadKey: Record<string, Record<string, string>>,
+  threadRef: ScopedThreadRef,
+  terminalId: string,
+  profileName: string | undefined,
+) {
+  const threadKey = terminalThreadKey(threadRef);
+  const current = profilesByThreadKey[threadKey] ?? {};
+  if (current[terminalId] === profileName) return profilesByThreadKey;
+  const next =
+    profileName === undefined
+      ? removeRecordEntry(current, terminalId)
+      : { ...current, [terminalId]: profileName };
+  return Object.keys(next).length === 0
+    ? removeRecordEntry(profilesByThreadKey, threadKey)
+    : { ...profilesByThreadKey, [threadKey]: next };
+}
+
 interface TerminalUiStateStoreState {
   terminalUiStateByThreadKey: Record<string, ThreadTerminalUiState>;
   /** Closed ids hidden from stale server metadata until that id is explicitly opened again. */
   suppressedTerminalIdsByThreadKey: Record<string, string[]>;
+  /** Action profile intent retained until the metadata stream confirms the allocation. */
+  pendingTerminalLinkProfilesByThreadKey: Record<string, Record<string, string>>;
   setTerminalOpen: (threadRef: ScopedThreadRef, open: boolean) => void;
   setTerminalHeight: (threadRef: ScopedThreadRef, height: number) => void;
   splitTerminal: (threadRef: ScopedThreadRef, terminalId: string) => void;
   splitTerminalVertical: (threadRef: ScopedThreadRef, terminalId: string) => void;
-  newTerminal: (threadRef: ScopedThreadRef, terminalId: string) => void;
+  newTerminal: (
+    threadRef: ScopedThreadRef,
+    terminalId: string,
+    terminalLinkProfileName?: string,
+  ) => void;
+  confirmPendingTerminalLinkProfiles: (
+    threadRef: ScopedThreadRef,
+    sessions: ReadonlyArray<KnownTerminalSession>,
+  ) => void;
+  releasePendingTerminalLinkProfile: (threadRef: ScopedThreadRef, terminalId: string) => void;
   ensureTerminal: (
     threadRef: ScopedThreadRef,
     terminalId: string,
@@ -592,6 +622,7 @@ export const useTerminalUiStateStore = create<TerminalUiStateStoreState>()(
           suppressedTerminalIds: readonly string[],
         ) => ThreadTerminalUiState,
         suppression?: { terminalId: string; suppressed: boolean },
+        pendingProfileName?: string,
       ) => {
         set((state) => {
           const threadKey = terminalThreadKey(threadRef);
@@ -609,15 +640,27 @@ export const useTerminalUiStateStore = create<TerminalUiStateStoreState>()(
                 suppression.suppressed,
               )
             : state.suppressedTerminalIdsByThreadKey;
+          const nextPendingTerminalLinkProfilesByThreadKey =
+            suppression && (suppression.suppressed || pendingProfileName !== undefined)
+              ? updatePendingTerminalLinkProfile(
+                  state.pendingTerminalLinkProfilesByThreadKey,
+                  threadRef,
+                  suppression.terminalId,
+                  suppression.suppressed ? undefined : pendingProfileName,
+                )
+              : state.pendingTerminalLinkProfilesByThreadKey;
           if (
             nextTerminalUiStateByThreadKey === state.terminalUiStateByThreadKey &&
-            nextSuppressedTerminalIdsByThreadKey === state.suppressedTerminalIdsByThreadKey
+            nextSuppressedTerminalIdsByThreadKey === state.suppressedTerminalIdsByThreadKey &&
+            nextPendingTerminalLinkProfilesByThreadKey ===
+              state.pendingTerminalLinkProfilesByThreadKey
           ) {
             return state;
           }
           return {
             terminalUiStateByThreadKey: nextTerminalUiStateByThreadKey,
             suppressedTerminalIdsByThreadKey: nextSuppressedTerminalIdsByThreadKey,
+            pendingTerminalLinkProfilesByThreadKey: nextPendingTerminalLinkProfilesByThreadKey,
           };
         });
       };
@@ -625,6 +668,7 @@ export const useTerminalUiStateStore = create<TerminalUiStateStoreState>()(
       return {
         terminalUiStateByThreadKey: {},
         suppressedTerminalIdsByThreadKey: {},
+        pendingTerminalLinkProfilesByThreadKey: {},
         setTerminalOpen: (threadRef, open) => {
           const terminalState = selectThreadTerminalUiState(
             get().terminalUiStateByThreadKey,
@@ -650,10 +694,50 @@ export const useTerminalUiStateStore = create<TerminalUiStateStoreState>()(
             terminalId,
             suppressed: false,
           }),
-        newTerminal: (threadRef, terminalId) =>
-          updateTerminal(threadRef, (state) => newThreadTerminal(state, terminalId), {
-            terminalId,
-            suppressed: false,
+        newTerminal: (threadRef, terminalId, terminalLinkProfileName) =>
+          updateTerminal(
+            threadRef,
+            (state) => newThreadTerminal(state, terminalId),
+            { terminalId, suppressed: false },
+            terminalLinkProfileName,
+          ),
+        confirmPendingTerminalLinkProfiles: (threadRef, sessions) =>
+          set((state) => {
+            let profiles = state.pendingTerminalLinkProfilesByThreadKey;
+            const threadKey = terminalThreadKey(threadRef);
+            if (profiles[threadKey] === undefined) return state;
+            // An earlier attach snapshot can know the id before the Action's open sets its profile.
+            for (const session of sessions) {
+              if (
+                session.target.environmentId !== threadRef.environmentId ||
+                session.target.threadId !== threadRef.threadId ||
+                session.state.terminalLinkProfileName === undefined ||
+                profiles[threadKey]?.[session.target.terminalId] !==
+                  session.state.terminalLinkProfileName
+              )
+                continue;
+              profiles = updatePendingTerminalLinkProfile(
+                profiles,
+                threadRef,
+                session.target.terminalId,
+                undefined,
+              );
+            }
+            return profiles === state.pendingTerminalLinkProfilesByThreadKey
+              ? state
+              : { pendingTerminalLinkProfilesByThreadKey: profiles };
+          }),
+        releasePendingTerminalLinkProfile: (threadRef, terminalId) =>
+          set((state) => {
+            const profiles = updatePendingTerminalLinkProfile(
+              state.pendingTerminalLinkProfilesByThreadKey,
+              threadRef,
+              terminalId,
+              undefined,
+            );
+            return profiles === state.pendingTerminalLinkProfilesByThreadKey
+              ? state
+              : { pendingTerminalLinkProfilesByThreadKey: profiles };
           }),
         ensureTerminal: (threadRef, terminalId, options) =>
           updateTerminal(
@@ -689,13 +773,21 @@ export const useTerminalUiStateStore = create<TerminalUiStateStoreState>()(
           }),
         reconcileTerminalIds: (threadRef, nextIds) =>
           updateTerminal(threadRef, (state, suppressedTerminalIds) => {
+            const pendingNextIds = [
+              ...new Set([
+                ...nextIds,
+                ...Object.keys(
+                  get().pendingTerminalLinkProfilesByThreadKey[terminalThreadKey(threadRef)] ?? {},
+                ),
+              ]),
+            ];
             if (suppressedTerminalIds.length === 0) {
-              return reconcileThreadTerminalSessionIds(state, nextIds);
+              return reconcileThreadTerminalSessionIds(state, pendingNextIds);
             }
             const suppressedIds = new Set(suppressedTerminalIds);
             return reconcileThreadTerminalSessionIds(
               state,
-              nextIds.filter((terminalId) => !suppressedIds.has(terminalId)),
+              pendingNextIds.filter((terminalId) => !suppressedIds.has(terminalId)),
             );
           }),
         clearTerminalUiState: (threadRef) =>
@@ -708,9 +800,12 @@ export const useTerminalUiStateStore = create<TerminalUiStateStoreState>()(
             );
             const hadSuppressedTerminalIds =
               state.suppressedTerminalIdsByThreadKey[threadKey] !== undefined;
+            const hadPendingProfiles =
+              state.pendingTerminalLinkProfilesByThreadKey[threadKey] !== undefined;
             if (
               nextTerminalUiStateByThreadKey === state.terminalUiStateByThreadKey &&
-              !hadSuppressedTerminalIds
+              !hadSuppressedTerminalIds &&
+              !hadPendingProfiles
             ) {
               return state;
             }
@@ -718,6 +813,10 @@ export const useTerminalUiStateStore = create<TerminalUiStateStoreState>()(
               terminalUiStateByThreadKey: nextTerminalUiStateByThreadKey,
               suppressedTerminalIdsByThreadKey: removeRecordEntry(
                 state.suppressedTerminalIdsByThreadKey,
+                threadKey,
+              ),
+              pendingTerminalLinkProfilesByThreadKey: removeRecordEntry(
+                state.pendingTerminalLinkProfilesByThreadKey,
                 threadKey,
               ),
             };
@@ -728,7 +827,9 @@ export const useTerminalUiStateStore = create<TerminalUiStateStoreState>()(
             const hadTerminalUiState = state.terminalUiStateByThreadKey[threadKey] !== undefined;
             const hadSuppressedTerminalIds =
               state.suppressedTerminalIdsByThreadKey[threadKey] !== undefined;
-            if (!hadTerminalUiState && !hadSuppressedTerminalIds) {
+            const hadPendingProfiles =
+              state.pendingTerminalLinkProfilesByThreadKey[threadKey] !== undefined;
+            if (!hadTerminalUiState && !hadSuppressedTerminalIds && !hadPendingProfiles) {
               return state;
             }
             return {
@@ -740,6 +841,10 @@ export const useTerminalUiStateStore = create<TerminalUiStateStoreState>()(
                 state.suppressedTerminalIdsByThreadKey,
                 threadKey,
               ),
+              pendingTerminalLinkProfilesByThreadKey: removeRecordEntry(
+                state.pendingTerminalLinkProfilesByThreadKey,
+                threadKey,
+              ),
             };
           }),
         removeOrphanedTerminalUiStates: (activeThreadKeys) =>
@@ -748,6 +853,7 @@ export const useTerminalUiStateStore = create<TerminalUiStateStoreState>()(
               [
                 ...Object.keys(state.terminalUiStateByThreadKey),
                 ...Object.keys(state.suppressedTerminalIdsByThreadKey),
+                ...Object.keys(state.pendingTerminalLinkProfilesByThreadKey),
               ].filter((key) => !activeThreadKeys.has(key)),
             );
             if (orphanedIds.size === 0) {
@@ -757,13 +863,18 @@ export const useTerminalUiStateStore = create<TerminalUiStateStoreState>()(
             const nextSuppressedTerminalIdsByThreadKey = {
               ...state.suppressedTerminalIdsByThreadKey,
             };
+            const nextPendingTerminalLinkProfilesByThreadKey = {
+              ...state.pendingTerminalLinkProfilesByThreadKey,
+            };
             for (const id of orphanedIds) {
               delete nextTerminalUiStateByThreadKey[id];
               delete nextSuppressedTerminalIdsByThreadKey[id];
+              delete nextPendingTerminalLinkProfilesByThreadKey[id];
             }
             return {
               terminalUiStateByThreadKey: nextTerminalUiStateByThreadKey,
               suppressedTerminalIdsByThreadKey: nextSuppressedTerminalIdsByThreadKey,
+              pendingTerminalLinkProfilesByThreadKey: nextPendingTerminalLinkProfilesByThreadKey,
             };
           }),
       };

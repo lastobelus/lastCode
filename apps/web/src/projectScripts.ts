@@ -50,6 +50,7 @@ export function selectProjectScriptTerminal(input: {
   readonly baseTerminalId: string;
   readonly existingTerminalIds?: ReadonlyArray<string>;
   readonly baseTerminalLinkProfileName?: string | undefined;
+  readonly pendingTerminalLinkProfiles?: Readonly<Record<string, string>> | undefined;
   readonly isBaseTerminalBusy: boolean;
   readonly preferNewTerminal: boolean;
   readonly canReuseTerminal: boolean;
@@ -59,6 +60,7 @@ export function selectProjectScriptTerminal(input: {
   const createNewTerminal =
     input.script.terminalLinkProfileName !== undefined ||
     input.baseTerminalLinkProfileName !== undefined ||
+    input.pendingTerminalLinkProfiles?.[input.baseTerminalId] !== undefined ||
     input.preferNewTerminal ||
     input.isBaseTerminalBusy ||
     !input.canReuseTerminal ||
