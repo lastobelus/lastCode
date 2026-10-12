@@ -7024,7 +7024,10 @@ export default function ChatView(props: ChatViewProps) {
   useEffect(() => {
     if (!activeThread?.id || terminalUiState.terminalOpen) return;
     const frame = window.requestAnimationFrame(() => {
-      if (shouldRefocusComposerOnWindowFocus(document.activeElement)) focusComposer();
+      // A double-click can mount the row editor before this navigation frame runs.
+      if (!document.activeElement?.matches('[data-sidebar="menu-sub-button"] input')) {
+        focusComposer();
+      }
     });
     return () => {
       window.cancelAnimationFrame(frame);
