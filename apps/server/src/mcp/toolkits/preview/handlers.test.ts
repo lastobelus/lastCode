@@ -15,6 +15,7 @@ import {
 } from "../../../attachmentStore.ts";
 import * as ServerConfig from "../../../config.ts";
 import * as PreviewHosting from "../../../preview/Hosting.ts";
+import * as PublishedDocumentPreview from "../../../preview/PublishedDocumentPreview.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as McpToolAccessTestkit from "../../McpToolAccess.testkit.ts";
@@ -87,6 +88,7 @@ it.effect.each([
         McpToolAccessTestkit.liveThreadsLayer,
         Layer.succeed(PreviewAutomationBroker.PreviewAutomationBroker, broker),
         Layer.mock(PreviewHosting.PreviewHosting)({}),
+        Layer.mock(PublishedDocumentPreview.PublishedDocumentPreview)({}),
         ServerConfig.layerTest(process.cwd(), { prefix: "preview-diagnostic-test-" }).pipe(
           Layer.provide(NodeServices.layer),
         ),
