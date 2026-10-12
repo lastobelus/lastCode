@@ -865,13 +865,14 @@ it.layer(
       }),
   );
 
-  it.effect("fails a named Action launch before spawning when its intent cannot be stored", () =>
+  it.effect("does not retain a failed Action launch or disturb other terminal opens", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
+      const deniedProfiles = new Set<string>();
       const failingFs = FileSystem.FileSystem.of({
         ...fs,
         writeFileString: (file, content, options) =>
-          file.endsWith(".profile.json")
+          deniedProfiles.has(file)
             ? Effect.fail(
                 new PlatformError.PlatformError(
                   new PlatformError.SystemError({
@@ -883,19 +884,54 @@ it.layer(
               )
             : fs.writeFileString(file, content, options),
       });
-      const { manager, ptyAdapter } = yield* createManager().pipe(
+      const { manager, ptyAdapter, logsDir } = yield* createManager().pipe(
         Effect.provideService(FileSystem.FileSystem, failingFs),
       );
-      const result = yield* manager
-        .open(openInput({ terminalId: "term-action-a", terminalLinkProfileName: "Work account" }))
-        .pipe(Effect.result);
+      const unrelated = yield* manager.open(
+        openInput({ terminalId: "term-action-b", terminalLinkProfileName: "Other account" }),
+      );
+      const input = openInput({
+        terminalId: "term-action-a",
+        terminalLinkProfileName: "Work account",
+      });
+      const logPath = yield* multiTerminalHistoryLogPath(logsDir, input.threadId, input.terminalId);
+      deniedProfiles.add(`${logPath}.profile.json`);
+      const [result, pending] = yield* Effect.all(
+        [
+          manager.open(input).pipe(Effect.result),
+          manager.open(openInput({ terminalId: "term-pending" })),
+        ],
+        { concurrency: "unbounded" },
+      );
       assert.equal(result._tag, "Failure");
       if (result._tag === "Failure") {
         assert.equal(result.failure._tag, "TerminalHistoryError");
         if (result.failure._tag === "TerminalHistoryError")
           assert.equal(result.failure.operation, "write");
       }
-      expect(ptyAdapter.spawnInputs).toHaveLength(0);
+      assert.equal(pending.status, "running");
+      expect(ptyAdapter.spawnInputs).toHaveLength(2);
+      expect((yield* manager.refreshMetadata).map((entry) => entry.terminalId).sort()).toEqual([
+        unrelated.terminalId,
+        pending.terminalId,
+      ]);
+      const retained = yield* manager.open(openInput({ terminalId: unrelated.terminalId }));
+      assert.equal(retained.status, "running");
+      assert.equal(retained.pid, unrelated.pid);
+      assert.equal(retained.terminalLinkProfileName, "Other account");
+      assert.equal(ptyAdapter.processes[0]!.killed, false);
+
+      deniedProfiles.clear();
+      const retried = yield* manager.open(input);
+      assert.equal(retried.status, "running");
+      assert.equal(retried.terminalLinkProfileName, "Work account");
+      assert.equal(
+        yield* fs.readFileString(`${logPath}.profile.json`),
+        encodeUnknownJson({ terminalLinkProfileName: "Work account" }),
+      );
+      const reused = yield* manager.open(input);
+      assert.equal(reused.pid, retried.pid);
+      expect(ptyAdapter.spawnInputs).toHaveLength(3);
     }),
   );
 

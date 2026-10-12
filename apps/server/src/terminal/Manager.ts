@@ -2654,8 +2654,11 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       session.pendingProcessEventIndex = 0;
       session.processEventDrainRunning = false;
       session.updatedAt = startingAt;
-      return [undefined, state] as const;
+      const sessions = new Map(state.sessions);
+      sessions.set(toSessionKey(session.threadId, session.terminalId), session);
+      return [undefined, { ...state, sessions }] as const;
     });
+    yield* evictInactiveSessionsIfNeeded();
 
     let ptyProcess: PtyAdapter.PtyProcess | null = null;
     let startedShell: string | null = null;
@@ -3171,7 +3174,6 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     const terminalId = input.terminalId;
     yield* assertValidCwd(input.cwd);
 
-    const sessionKey = toSessionKey(input.threadId, terminalId);
     const existing = yield* getSession(input.threadId, terminalId);
     if (Option.isNone(existing)) {
       yield* flushPersist(input.threadId, terminalId);
@@ -3247,14 +3249,6 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         terminalLinkProfileName,
       };
 
-      const createdSession = session;
-      yield* modifyManagerState((state) => {
-        const sessions = new Map(state.sessions);
-        sessions.set(sessionKey, createdSession);
-        return [undefined, { ...state, sessions }] as const;
-      });
-
-      yield* evictInactiveSessionsIfNeeded();
       yield* startSession(
         session,
         {
@@ -3767,7 +3761,6 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       const terminalId = input.terminalId;
       yield* assertValidCwd(input.cwd);
 
-      const sessionKey = toSessionKey(input.threadId, terminalId);
       const existingSession = yield* getSession(input.threadId, terminalId);
       let session: TerminalSessionState;
       if (Option.isNone(existingSession)) {
@@ -3811,13 +3804,6 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           runtimeEnv: normalizedRuntimeEnv(input.env),
           terminalLinkProfileName: undefined,
         };
-        const createdSession = session;
-        yield* modifyManagerState((state) => {
-          const sessions = new Map(state.sessions);
-          sessions.set(sessionKey, createdSession);
-          return [undefined, { ...state, sessions }] as const;
-        });
-        yield* evictInactiveSessionsIfNeeded();
       } else {
         session = existingSession.value;
         yield* stopProcess(session);
