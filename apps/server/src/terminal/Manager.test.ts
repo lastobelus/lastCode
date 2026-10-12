@@ -585,6 +585,8 @@ it.layer(
           ).toBe(false);
         } else {
           yield* manager.close(target);
+          // Close removes the session before its process exits. Restoration starts afterward.
+          yield* manager.waitForThreadShutdown(target.threadId);
           if (mode === "retained-id" || mode === "retained-prefix") {
             yield* manager.closeThreadExcept(
               "thread-1",
