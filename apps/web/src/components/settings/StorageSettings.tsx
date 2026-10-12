@@ -183,17 +183,18 @@ function CleanupResults({
   return (
     <>
       {report.entries.map((entry, index) => {
-        const name =
-          entry.kind === "worktree"
+        const dependencyInstall =
+          entry.kind === "worktree" && entry.worktreeResource === "dependencies";
+        const name = dependencyInstall
+          ? `Dependencies: ${entry.path?.split(/[\\/]/).filter(Boolean).at(-2) ?? "worktree"}`
+          : entry.kind === "worktree"
             ? (entry.path?.split(/[\\/]/).findLast(Boolean) ?? "Worktrees")
-            : entry.kind === "dependencies"
-              ? `Dependencies: ${entry.path?.split(/[\\/]/).filter(Boolean).at(-2) ?? "worktree"}`
-              : entry.kind === "logs"
-                ? "Rotated logs"
-                : "Browser artifacts";
+            : entry.kind === "logs"
+              ? "Rotated logs"
+              : "Browser artifacts";
         return (
           <SettingsRow
-            key={`${entry.kind}:${entry.scope ?? "all"}:${entry.path ?? entry.kind}:${entry.threadId ?? index}`}
+            key={`${entry.kind}:${entry.worktreeResource ?? "all"}:${entry.path ?? entry.kind}:${entry.threadId ?? index}`}
             title={environmentLabel ? `${environmentLabel}: ${name}` : name}
             description={
               <span
@@ -207,12 +208,12 @@ function CleanupResults({
               entry.outcome === "removed" && (
                 <span className="text-xs text-muted-foreground">
                   {[
-                    entry.kind !== "worktree" && entry.files !== null
+                    (dependencyInstall || entry.kind !== "worktree") && entry.files !== null
                       ? `${entry.files.toLocaleString()} ${entry.files === 1 ? "file" : "files"}`
                       : null,
                     entry.bytes !== null
-                      ? `${formatBytes(entry.bytes)}${entry.kind === "dependencies" ? " estimated" : ""}`
-                      : entry.kind === "dependencies"
+                      ? `${formatBytes(entry.bytes)}${dependencyInstall ? " estimated" : ""}`
+                      : dependencyInstall
                         ? "Size unknown"
                         : null,
                   ]

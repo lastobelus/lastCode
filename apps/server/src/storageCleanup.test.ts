@@ -5,6 +5,7 @@ import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import type * as Path from "effect/Path";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -21,7 +22,6 @@ import {
 import * as ServerConfig from "./config.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
-import * as GeneratedDependencies from "./workspace/GeneratedDependencies.ts";
 import * as VcsProcess from "./vcs/VcsProcess.ts";
 import * as PreviewHosting from "./preview/Hosting.ts";
 import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManager.ts";
@@ -65,6 +65,24 @@ const DAY_MS = 24 * 60 * 60 * 1_000;
 const decodeCleanupReport = Schema.decodeSync(StorageCleanupReport);
 const decodeFullThread = Schema.decodeUnknownSync(OrchestrationV2AppThreadJson);
 const encodeFullThread = Schema.encodeSync(Schema.fromJsonString(OrchestrationV2AppThreadJson));
+const encodeCleanupReport = Schema.encodeSync(StorageCleanupReport);
+const decodeLegacyCleanupReport = Schema.decodeUnknownSync(
+  Schema.Struct({
+    ...StorageCleanupReport.fields,
+    entries: Schema.Array(
+      Schema.Struct({
+        kind: Schema.Literals(["worktree", "browser-artifacts", "logs"]),
+        outcome: Schema.Literals(["removed", "kept", "failed"]),
+        reason: Schema.String,
+        path: Schema.NullOr(Schema.String),
+        threadId: Schema.NullOr(ThreadId),
+        threadTitle: Schema.NullOr(Schema.String),
+        bytes: Schema.NullOr(Schema.Number),
+        files: Schema.NullOr(Schema.Number),
+      }),
+    ),
+  }),
+);
 
 function at(offsetMs: number): DateTime.Utc {
   return DateTime.makeUnsafe(NOW_MS + offsetMs);
@@ -323,6 +341,9 @@ const cleanupFixture = Effect.gen(function* () {
   const terminalListeners: Parameters<
     TerminalManager.TerminalManager["Service"]["subscribeMetadata"]
   >[0][] = [];
+  const processDirectories = yield* Effect.serviceOption(
+    GeneratedDependencies.ProcessWorkingDirectories,
+  );
   const context = yield* Layer.build(StorageCleanup.layer).pipe(
     Effect.provideService(ServerConfig.ServerConfig, config),
     Effect.provideService(FileSystem.FileSystem, {
@@ -337,7 +358,10 @@ const cleanupFixture = Effect.gen(function* () {
             )
           : fs.exists(target),
     }),
-    Effect.provideService(GeneratedDependencies.ProcessWorkingDirectories, Effect.succeed([])),
+    Effect.provideService(
+      GeneratedDependencies.ProcessWorkingDirectories,
+      Option.getOrElse(processDirectories, () => Effect.succeed([])),
+    ),
     Effect.provideService(GitVcsDriver.GitVcsDriver, {
       ...git,
       execute: (input) =>
@@ -497,11 +521,15 @@ const cleanupFixture = Effect.gen(function* () {
             );
           }
           return Effect.sync(() => {
-            if (query.includes("COALESCE(MAX(sequence)")) return [{ sequence: providerEventSequence }];
+            if (query.includes("COALESCE(MAX(sequence)"))
+              return [{ sequence: providerEventSequence }];
             if (query.includes("event_type LIKE 'provider-session.%'"))
               return providerEventSequence > Number(values[0]) ? [{ changed: 1 }] : [];
             if (query.includes("projection_provider_session_bindings"))
-              return sessionBindings.map((thread_id) => ({ provider_session_id: "session-1", thread_id }));
+              return sessionBindings.map((thread_id) => ({
+                provider_session_id: "session-1",
+                thread_id,
+              }));
             if (query.includes("SELECT t.payload_json, p.workspace_root"))
               return deletedDependencyRows;
             return openSessionCwd !== null && query.includes("projection_provider_sessions")
@@ -596,7 +624,9 @@ const cleanupFixture = Effect.gen(function* () {
       editBeforeRemoval = true;
     },
     fs,
-    get worktree() { return worktree; },
+    get worktree() {
+      return worktree;
+    },
     repo,
     config,
     command,
@@ -819,7 +849,7 @@ describe("provider protection during storage cleanup", () => {
         fixture.setOpenSessionCwd(fixture.worktree);
         fixture.setSessionLive(false);
         const report = yield* fixture.service.runNow;
-        expect(report.counts).toEqual({ removed: 1, kept: 0, failed: 0 });
+        expect(report.counts).toEqual({ removed: 1, kept: 1, failed: 0 });
         expect(yield* fixture.fs.exists(fixture.worktree)).toBe(false);
       }),
     ),
@@ -848,7 +878,7 @@ describe("provider protection during storage cleanup", () => {
         measuredPath = yield* fs.realPath(fixture.worktree);
         onMeasurement = fixture.publishProviderChange;
         const report = yield* fixture.service.runNow;
-        expect(report.counts).toEqual({ removed: 1, kept: 0, failed: 0 });
+        expect(report.counts).toEqual({ removed: 1, kept: 1, failed: 0 });
         expect(yield* fs.exists(fixture.worktree)).toBe(false);
       }),
     ),
@@ -889,7 +919,8 @@ describe("dependency cleanup reports", () => {
             const paths = yield* fixture.moveDependencies(location, false, true);
             const report = yield* fixture.service.runNow;
             expect(report.entries[0]).toMatchObject({
-              kind: "dependencies",
+              kind: "worktree",
+              worktreeResource: "dependencies",
               outcome: "removed",
               path: `${paths.canonicalPath}/node_modules`,
             });
@@ -912,7 +943,7 @@ describe("dependency cleanup reports", () => {
           const report = yield* fixture.service.runNow;
           expect(report.entries[0]).toMatchObject({
             outcome: "kept",
-            reason: "Worktree path is a symlink or its location changed",
+            reason: "Dependencies: Worktree path is a symlink or its location changed",
           });
           expect(yield* fixture.fs.exists(`${fixture.worktree}/node_modules`)).toBe(true);
         }),
@@ -939,7 +970,7 @@ describe("dependency cleanup reports", () => {
           expect(report.entries).toMatchObject([
             {
               outcome: "kept",
-              reason: "More than one thread uses this worktree",
+              reason: "Dependencies: More than one thread uses this worktree",
             },
           ]);
           expect(yield* fixture.fs.exists(`${paths.canonicalPath}/node_modules`)).toBe(true);
@@ -997,7 +1028,7 @@ describe("dependency cleanup reports", () => {
           const report = yield* fixture.service.runNow;
           expect(report.entries[0]).toMatchObject({
             outcome: "kept",
-            reason: "Worktree path is a symlink or its location changed",
+            reason: "Dependencies: Worktree path is a symlink or its location changed",
           });
           expect(yield* fixture.fs.exists(`${paths.canonicalPath}/node_modules`)).toBe(true);
         }),
@@ -1020,7 +1051,8 @@ describe("dependency cleanup reports", () => {
             yield* fixture.moveDependencies(location, missing);
             const report = yield* fixture.service.runNow;
             expect(report.entries[0]).toMatchObject({
-              kind: "dependencies",
+              kind: "worktree",
+              worktreeResource: "dependencies",
               outcome: "removed",
               path: `${fixture.worktree}/node_modules`,
             });
@@ -1058,7 +1090,8 @@ describe("dependency cleanup reports", () => {
           expect(report.counts).toEqual({ removed: 1, kept: 0, failed: 0 });
           expect(report.entries).toMatchObject([
             {
-              kind: "dependencies",
+              kind: "worktree",
+              worktreeResource: "dependencies",
               outcome: "removed",
               path: dependencyPath,
               threadId: "thread-1",
@@ -1069,6 +1102,14 @@ describe("dependency cleanup reports", () => {
           ]);
           expect(report.bytesFreed).toBe(estimatedBytes);
           expect(report.entries[0]?.reason).toContain("estimated");
+          const legacyReport = decodeLegacyCleanupReport(encodeCleanupReport(report));
+          expect(legacyReport.entries[0]).toMatchObject({
+            kind: "worktree",
+            path: dependencyPath,
+            reason: expect.stringMatching(/^Dependencies:/),
+            bytes: estimatedBytes,
+          });
+          expect(legacyReport.entries[0]).not.toHaveProperty("worktreeResource");
           expect(yield* fixture.fs.exists(dependencyPath)).toBe(false);
           expect(yield* fixture.fs.exists(`${fixture.worktree}/tracked.txt`)).toBe(true);
           expect((yield* fixture.service.runNow).entries).toEqual([]);
@@ -1087,13 +1128,12 @@ describe("dependency cleanup reports", () => {
           const report = yield* fixture.service.runNow;
           expect(report.counts).toEqual({ removed: 0, kept: 0, failed: 1 });
           expect(report.entries[0]).toMatchObject({
-            kind: "dependencies",
+            kind: "worktree",
+            worktreeResource: "dependencies",
             outcome: "failed",
             bytes: null,
           });
-          expect(report.entries[0]?.reason).toContain(
-            "Could not safely inspect or remove dependencies",
-          );
+          expect(report.entries[0]?.reason).toContain("test deletion denied");
           expect(report.bytesFreed).toBe(0);
           expect(yield* fixture.fs.exists(`${fixture.worktree}/node_modules`)).toBe(true);
         }),
@@ -1111,10 +1151,12 @@ describe("dependency cleanup reports", () => {
           const report = yield* fixture.service.runNow;
           expect(report.counts).toEqual({ removed: 0, kept: 1, failed: 0 });
           expect(report.entries[0]).toMatchObject({
-            kind: "dependencies",
+            kind: "worktree",
+            worktreeResource: "dependencies",
             outcome: "kept",
             bytes: null,
-            reason: "A preview is using this worktree, or preview ownership could not be checked",
+            reason:
+              "Dependencies: A preview is using this worktree, or preview ownership could not be checked",
           });
           expect(report.bytesFreed).toBe(0);
           expect(yield* fixture.fs.exists(`${fixture.worktree}/node_modules`)).toBe(true);
@@ -1138,10 +1180,11 @@ describe("dependency cleanup reports", () => {
         const report = yield* fixture.service.runNow;
         expect(report.counts).toEqual({ removed: 0, kept: 1, failed: 0 });
         expect(report.entries[0]).toMatchObject({
-          kind: "dependencies",
+          kind: "worktree",
+          worktreeResource: "dependencies",
           outcome: "kept",
           bytes: null,
-          reason: "A final safety check prevented dependency removal",
+          reason: "Dependencies: Active process inspection is unavailable",
         });
         expect(report.bytesFreed).toBe(0);
         expect(yield* fixture.fs.exists(`${fixture.worktree}/node_modules`)).toBe(true);
@@ -1327,6 +1370,31 @@ describe("storage cleanup reports and local file policies", () => {
     expect(report.bytesFreed).toBe(0);
     expect(report.entries[0]).toMatchObject({ bytes: null, files: null });
   });
+  it.each([undefined, "dependencies", "future-resource"])(
+    "decodes omitted and unfamiliar worktree resource detail: %s",
+    (resource) => {
+      const report = decodeCleanupReport({
+        trigger: "manual",
+        startedAt: "2026-06-10T12:00:00.000Z",
+        finishedAt: "2026-06-10T12:00:01.000Z",
+        entries: [
+          {
+            kind: "worktree",
+            ...(resource === undefined ? {} : { worktreeResource: resource }),
+            outcome: "kept",
+            reason: "Retained worktree content",
+            path: null,
+            threadId: null,
+            threadTitle: null,
+          },
+        ],
+        counts: { removed: 0, kept: 1, failed: 0 },
+        omittedCount: 0,
+      });
+      expect(report.entries[0]?.worktreeResource).toBe(resource);
+      expect(decodeLegacyCleanupReport(encodeCleanupReport(report)).counts).toEqual(report.counts);
+    },
+  );
   it.live.each([
     ["any-local-files", ".env", "kept"],
     ["uncommitted-changes", ".env", "removed"],
@@ -1353,7 +1421,7 @@ describe("storage cleanup reports and local file policies", () => {
         expect(report.trigger).toBe("manual");
         expect(
           report.entries.filter(
-            (entry) => entry.kind === "worktree",
+            (entry) => entry.kind === "worktree" && entry.worktreeResource !== "dependencies",
           ),
         ).toMatchObject([
           {
@@ -1474,13 +1542,13 @@ describe("storage cleanup reports and local file policies", () => {
           fixture.disable();
           expect(
             (yield* service.runNow).entries.filter(
-              (entry) => entry.kind === "worktree",
+              (entry) => entry.kind === "worktree" && entry.worktreeResource !== "dependencies",
             ),
           ).toEqual([]);
           yield* fs.remove(worktree, { recursive: true });
           expect(
             (yield* service.runNow).entries.filter(
-              (entry) => entry.kind === "worktree",
+              (entry) => entry.kind === "worktree" && entry.worktreeResource !== "dependencies",
             ),
           ).toEqual([]);
         }),
@@ -1496,10 +1564,10 @@ describe("storage cleanup reports and local file policies", () => {
         const report = yield* fixture.service.runNow;
         expect(report.entries).toContainEqual(
           expect.objectContaining({
-            kind: "dependencies",
+            kind: "worktree",
+            worktreeResource: "dependencies",
             outcome: "kept",
-            reason:
-              "No dependency install could be safely recognized and measured",
+            reason: "Dependencies: No dependency install could be safely recognized and measured",
           }),
         );
         const audit = yield* fixture.fs.readFileString(
@@ -1541,9 +1609,10 @@ describe("storage cleanup reports and local file policies", () => {
         const report = yield* fixture.service.runNow;
         expect(report.entries).toContainEqual(
           expect.objectContaining({
-            kind: "dependencies",
+            kind: "worktree",
+            worktreeResource: "dependencies",
             outcome: "removed",
-            reason: "Removed npm dependencies; reclaimed size is estimated",
+            reason: "Dependencies: Removed npm dependencies; reclaimed size is estimated",
             path: `${fixture.worktree}/node_modules`,
             bytes: expect.any(Number),
           }),
@@ -1587,7 +1656,10 @@ describe("storage cleanup reports and local file policies", () => {
         const report = yield* fixture.service.runNow;
         const detail = "Fixture eligibility revalidation failure";
         const failed = report.entries.find(
-          (entry) => entry.kind === "dependencies" && entry.outcome === "failed",
+          (entry) =>
+            entry.kind === "worktree" &&
+            entry.worktreeResource === "dependencies" &&
+            entry.outcome === "failed",
         );
         expect(failed?.reason).toContain(detail);
         expect(report.counts.failed).toBe(1);
@@ -1616,17 +1688,31 @@ describe("storage cleanup reports and local file policies", () => {
           }),
         );
         expect(report.counts).toEqual({ removed: 1, kept: 0, failed: 0 });
-        expect(report.entries.filter((entry) => entry.kind === "dependencies")).toEqual([]);
+        expect(
+          report.entries.filter(
+            (entry) => entry.kind === "worktree" && entry.worktreeResource === "dependencies",
+          ),
+        ).toEqual([]);
         const auditText = yield* fixture.fs.readFileString(
           `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
         );
         const auditRecords = auditText
           .trim()
           .split("\n")
-          .map((line) => JSON.parse(line) as { event?: string; kind?: string });
+          .map(
+            (line) =>
+              JSON.parse(line) as {
+                event?: string;
+                kind?: string;
+                worktreeResource?: string;
+              },
+          );
         expect(
           auditRecords.filter(
-            (record) => record.event === "candidate" && record.kind === "dependencies",
+            (record) =>
+              record.event === "candidate" &&
+              record.kind === "worktree" &&
+              record.worktreeResource === "dependencies",
           ),
         ).toEqual([]);
       }),
@@ -1666,9 +1752,10 @@ describe("storage cleanup reports and local file policies", () => {
         expect(
           report.entries.some(
             (entry) =>
-              entry.kind === "dependencies" &&
+              entry.kind === "worktree" &&
+              entry.worktreeResource === "dependencies" &&
               entry.threadId === deletedThread.id &&
-              entry.path === fixture.worktree,
+              entry.path === `${fixture.worktree}/node_modules`,
           ),
         ).toBe(false);
         const auditText = yield* fixture.fs.readFileString(
@@ -1708,12 +1795,14 @@ describe("storage cleanup reports and local file policies", () => {
         );
 
         const report = yield* fixture.service.runNow;
-        const dependencyEntries = report.entries.filter((entry) => entry.kind === "dependencies");
+        const dependencyEntries = report.entries.filter(
+          (entry) => entry.kind === "worktree" && entry.worktreeResource === "dependencies",
+        );
         expect(dependencyEntries).toHaveLength(1);
         expect(dependencyEntries[0]).toMatchObject({
           outcome: "kept",
           reason:
-            "A preview is using this worktree, or preview ownership could not be checked",
+            "Dependencies: A preview is using this worktree, or preview ownership could not be checked",
           path: `${fixture.worktree}/node_modules`,
         });
         expect(yield* fixture.fs.exists(`${fixture.worktree}/node_modules`)).toBe(true);
@@ -2054,7 +2143,8 @@ describe("storage cleanup reports and local file policies", () => {
         const report = yield* fixture.service.runNow;
         expect(report.entries).toContainEqual(
           expect.objectContaining({
-            kind: "dependencies",
+            kind: "worktree",
+            worktreeResource: "dependencies",
             outcome: "failed",
             reason: expect.stringContaining("Fixture dependency query failure"),
             path: null,
@@ -2070,7 +2160,7 @@ describe("storage cleanup reports and local file policies", () => {
           `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
         );
         expect(auditText).toContain('"event":"dependency-cleanup-failed"');
-        expect(auditText).toContain('"kind":"dependencies"');
+        expect(auditText).toContain('"worktreeResource":"dependencies"');
         expect(auditText).toContain('"Fixture dependency query failure"');
       }),
     ),
@@ -2213,7 +2303,9 @@ describe("storage cleanup reports and local file policies", () => {
         expect(
           reports
             .flatMap((report) => report.entries)
-            .filter((entry) => entry.kind === "worktree"),
+            .filter(
+              (entry) => entry.kind === "worktree" && entry.worktreeResource !== "dependencies",
+            ),
         ).toMatchObject([{ outcome: "removed" }]);
         expect(yield* service.latestReport).toEqual(reports[1]);
       }),

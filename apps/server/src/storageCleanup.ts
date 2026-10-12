@@ -669,8 +669,15 @@ const make = Effect.gen(function* () {
   ) {
     if (!anyWorktreePolicy(serverSettings, dependencyCleanupEnabled)) {
       entries.push({
-        kind: "dependencies", outcome: "kept", reason: "Dependency cleanup policy is disabled",
-        path: null, threadId: null, threadTitle: null, bytes: null, files: null,
+        kind: "worktree",
+        worktreeResource: "dependencies",
+        outcome: "kept",
+        reason: "Dependency cleanup policy is disabled",
+        path: null,
+        threadId: null,
+        threadTitle: null,
+        bytes: null,
+        files: null,
       });
       return;
     }
@@ -793,7 +800,8 @@ const make = Effect.gen(function* () {
       worktreePath: string,
     ) => {
       const entry: StorageCleanupReportEntry = {
-        kind: "dependencies",
+        kind: "worktree",
+        worktreeResource: "dependencies",
         outcome: "kept",
         reason: "A final safety check prevented dependency removal",
         path: path.join(worktreePath, "node_modules"),
@@ -1075,12 +1083,16 @@ const make = Effect.gen(function* () {
           Effect.sync(() => {
             const entry = reports.get(inspection.worktreePath)!;
             dependencyEstimates.set(entry, inspection.estimatedReclaimedBytes);
-            const genericRefusal = decision.outcome === "kept" &&
+            const genericRefusal =
+              decision.outcome === "kept" &&
               decision.reason === "Worktree ownership or cleanup eligibility changed";
             Object.assign(entry, {
               outcome: decision.outcome,
-              reason: genericRefusal && entry.reason !== "A final safety check prevented dependency removal"
-                ? entry.reason : decision.reason,
+              reason:
+                genericRefusal &&
+                entry.reason !== "A final safety check prevented dependency removal"
+                  ? entry.reason
+                  : decision.reason,
               bytes: decision.outcome === "removed" ? inspection.estimatedReclaimedBytes : null,
             });
           }),
@@ -1596,7 +1608,8 @@ const make = Effect.gen(function* () {
       Effect.catch((error) =>
         Effect.gen(function* () {
           const entry: StorageCleanupReportEntry = {
-            kind: "dependencies",
+            kind: "worktree",
+            worktreeResource: "dependencies",
             outcome: "failed",
             reason: cleanupFailureReason(error),
             path: null,
@@ -1611,13 +1624,15 @@ const make = Effect.gen(function* () {
         }),
       ),
     );
-    for (const entry of entries.filter((entry) => entry.kind === "dependencies"))
+    for (const entry of entries.filter((entry) => entry.worktreeResource === "dependencies")) {
+      Object.assign(entry, { reason: `Dependencies: ${entry.reason}` });
       yield* audit({
         event: "candidate",
         runId,
         ...entry,
         estimatedReclaimedBytes: dependencyEstimates.get(entry) ?? entry.bytes,
       });
+    }
     if (
       trigger === "manual" ||
       anyWorktreePolicy(
