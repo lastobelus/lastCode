@@ -17,11 +17,19 @@ tear down the prepared setup.
 
 Routine automated QA runs in a thread-owned background browser against isolated
 development state. It does not require a separate permission prompt or prevent
-the user from continuing to use LastCode. Discover profiles with `preview_profiles`, then select `Default` or an existing
-dedicated QA profile explicitly in
-`preview_open({ open: false, profileName: "Default", reuseExistingTab: false })`.
-Reuse its returned
-`tabId` for navigation, interactions, and evidence throughout the task. Do not
+the user from continuing to use LastCode. When `preview_open` advertises
+`browserHost`, select `browserHost: "environment"` for automated QA. Open a new
+background tab with `preview_open({ browserHost: "environment", open: false,
+reuseExistingTab: false })`; its dedicated Incognito context does not require a
+desktop profile catalogue. Select `profileName: "Default"` explicitly only when
+that environment's persistent QA state is needed. Verify the returned host and
+profile before interacting.
+
+On older tools that do not advertise `browserHost`, use the supported existing
+route, discover profiles when that route supports them, and select Default or a
+dedicated QA profile. Verify where the browser actually runs; a loopback app URL
+does not select environment hosting. Reuse the returned `tabId` for navigation,
+interactions, and evidence throughout the task. Do not
 hide or repurpose a tab the user is inspecting. Keep foreground application control and human
 acceptance subject to the machine interaction policy.
 
