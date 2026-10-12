@@ -122,13 +122,15 @@ inspecting or seeding SQLite. Stop the test server before direct fixture writes.
 
 Routine automated QA against isolated development state does not need a
 separate permission prompt. Keep it in the background so the user can continue
-using LastCode. Call `preview_status` and `preview_profiles`. When the tool
+using LastCode. Call `preview_status`. When the tool
 advertises `browserHost`, start isolated QA beside the app with
 `preview_open({ open: false, browserHost: "environment", profileName: "Incognito", reuseExistingTab: false })`.
 Environment hosting supports only `Default` and `Incognito`; select `Default`
 when the check needs persistent environment storage. Any named desktop profile,
 including a dedicated QA profile or `Logged in Developer`, requires
-`browserHost: "desktop"` and the shared recipe when the app is remote. Omitting
+`browserHost: "desktop"` and the shared recipe when the app is remote. Discover
+that desktop's profiles with `preview_profiles` before its dedicated open;
+environment-hosted QA uses the built-in choices without that desktop lookup. Omitting
 the host keeps the current policy even when opening a new tab or selecting a
 different profile. When the tool does not advertise the selector, explicitly
 select `Default` or an existing dedicated QA profile with
