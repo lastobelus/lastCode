@@ -8,18 +8,29 @@ import { useSettingsProjectGroups } from "./useSettingsProjectGroups";
 import { useLocation, useNavigate } from "@tanstack/react-router";
 import type { EnvironmentId } from "@t3tools/contracts";
 
-/** Offer an explicit target change when a category has no settings at this scope. */
-export function SettingsScopeNotice({
-  children,
-  target,
-  targetId,
-  eligibleEnvironmentIds,
-}: {
+interface SettingsScopeNoticeProps {
   children: string;
   target: "environment" | "all" | "project" | "checkout";
   targetId?: string;
   eligibleEnvironmentIds?: readonly EnvironmentId[];
-}) {
+}
+
+/** Offer an explicit target change when a category has no settings at this scope. */
+export function SettingsScopeNotice(props: SettingsScopeNoticeProps) {
+  return (
+    <SettingsPageContainer>
+      <SettingsScopeNoticeContent {...props} />
+    </SettingsPageContainer>
+  );
+}
+
+/** Scope recovery within a section that already belongs to a settings page. */
+export function SettingsScopeNoticeContent({
+  children,
+  target,
+  targetId,
+  eligibleEnvironmentIds,
+}: SettingsScopeNoticeProps) {
   const { selectScope, search } = useSettingsScope();
   const navigate = useNavigate({ from: "/settings" });
   const pathname = useLocation({ select: (location) => location.pathname });
@@ -62,29 +73,36 @@ export function SettingsScopeNotice({
               }))
           : [{ label: "Open all environments", search: {} }];
   return (
-    <SettingsPageContainer>
-      <Alert role="status">
-        <AlertDescription>
-          <p>{children}</p>
-          <AlertAction className="flex-wrap">
-            {choices.map((choice) => (
-              <Button
-                key={JSON.stringify(choice.search)}
-                size="sm-multiline"
-                variant="outline"
-                className="max-w-full break-all text-left"
-                onClick={() => {
-                  if (targetId)
-                    void navigate({ to: pathname, search: () => choice.search, hash: targetId });
-                  else selectScope(choice.search);
-                }}
-              >
-                {choice.label}
-              </Button>
-            ))}
-          </AlertAction>
-        </AlertDescription>
-      </Alert>
-    </SettingsPageContainer>
+    <Alert role="status">
+      <AlertDescription>
+        <p>{children}</p>
+        <AlertAction className="flex-wrap">
+          {choices.map((choice) => (
+            <Button
+              key={JSON.stringify(choice.search)}
+              size="sm-multiline"
+              variant="outline"
+              className="max-w-full break-all text-left"
+              onClick={() => {
+                if (targetId)
+                  void navigate({
+                    to: pathname,
+                    // Explicit axes let an "all" choice clear the retained scope.
+                    search: () => ({
+                      project: choice.search.project,
+                      machine: choice.search.machine,
+                      checkout: choice.search.checkout,
+                    }),
+                    hash: targetId,
+                  });
+                else selectScope(choice.search);
+              }}
+            >
+              {choice.label}
+            </Button>
+          ))}
+        </AlertAction>
+      </AlertDescription>
+    </Alert>
   );
 }
