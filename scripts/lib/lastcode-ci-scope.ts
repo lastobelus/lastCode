@@ -167,13 +167,18 @@ function readWorkspacePatterns(text: string): ReadonlyArray<string> {
 
 function readSnapshot(repoRoot: string, commit: string) {
   const entries = new Map<string, { readonly oid: string; readonly mode: string }>();
+  const gitlinks = new Set<string>();
   for (const entry of git(repoRoot, ["ls-tree", "-r", "-z", "--full-tree", commit])
     .toString()
     .split("\0")) {
     if (!entry) continue;
     const match = /^(\d+) blob ([a-f\d]+)\t([\s\S]+)$/.exec(entry);
     if (match) entries.set(match[3]!, { mode: match[1]!, oid: match[2]! });
-    else throw new Error("Unsupported Git tree entry");
+    else {
+      const gitlink = /^160000 commit [a-f\d]+\t([\s\S]+)$/.exec(entry);
+      if (!gitlink) throw new Error("Unsupported Git tree entry");
+      gitlinks.add(gitlink[1]!);
+    }
   }
   const contents = new Map<string, string>();
   let bytesRead = 0;
@@ -181,6 +186,9 @@ function readSnapshot(repoRoot: string, commit: string) {
     files: ReadonlyArray<string>,
     consume?: (file: string, source: string) => void,
   ): void => {
+    // Gitlinks describe another repository, never source blobs in this snapshot.
+    for (const file of files)
+      if (gitlinks.has(file)) throw new Error(`Cannot read submodule as a source blob: ${file}`);
     if (consume)
       for (const file of new Set(files)) {
         const source = contents.get(file);
@@ -239,7 +247,7 @@ function readSnapshot(repoRoot: string, commit: string) {
     readFiles([file]);
     return contents.get(file);
   };
-  return { entries, contents, read, readFiles };
+  return { entries, gitlinks, contents, read, readFiles };
 }
 
 function changedPaths(repoRoot: string, base: string, head: string): ReadonlyArray<string> {
@@ -285,7 +293,12 @@ export function resolveQuickCiScope(
     return { kind: "none", packages: [], reason: "No files changed", changedFiles };
 
   try {
-    const { entries, contents, read, readFiles } = readSnapshot(repoRoot, head);
+    const { entries, gitlinks, contents, read, readFiles } = readSnapshot(repoRoot, head);
+    const baseGitlinks = readSnapshot(repoRoot, base).gitlinks;
+    for (const file of changedFiles) {
+      if (gitlinks.has(file) || baseGitlinks.has(file))
+        return full(`Changed path is a submodule: ${file}`);
+    }
     const workspaceText = read("pnpm-workspace.yaml");
     if (!workspaceText) return full("Workspace configuration is unavailable");
     const patterns = readWorkspacePatterns(workspaceText);
@@ -327,8 +340,9 @@ export function resolveQuickCiScope(
         (workspace) => file === workspace.directory || file.startsWith(`${workspace.directory}/`),
       );
     const byName = new Map(workspaces.map((workspace) => [workspace.name, workspace]));
-    // File/link modules can live inside a workspace without being workspaces
-    // themselves. Register their import names against that owning workspace.
+    let localDependencyError: string | undefined;
+    // Register owned file/link aliases for TypeScript config resolution. Defer
+    // ownership failures until a change actually needs the dependency graph.
     for (const workspace of workspaces) {
       for (const field of [
         "dependencies",
@@ -344,18 +358,19 @@ export function resolveQuickCiScope(
             NodePath.posix.join(workspace.directory, specifier.replace(/^[^:]+:/, "")),
           );
           const target = owner(directory);
-          if (!target || !entries.has(`${directory}/package.json`))
-            throw new Error(`Unresolved local dependency ${name}`);
+          if (!target || !entries.has(`${directory}/package.json`)) {
+            localDependencyError ??= `Unresolved local dependency ${name}`;
+            continue;
+          }
           const existing = byName.get(name);
-          if (existing && existing.name !== target.name)
-            throw new Error(`Ambiguous local dependency ${name}`);
+          if (existing && existing.name !== target.name) {
+            localDependencyError ??= `Ambiguous local dependency ${name}`;
+            continue;
+          }
           byName.set(name, target);
         }
       }
     }
-    const dependencies = new Map(
-      workspaces.map((workspace) => [workspace.name, new Set<string>()]),
-    );
     const configPaths = new Set<string>();
     const configs = new Map<string, ConfigScope>();
 
@@ -481,44 +496,6 @@ export function resolveQuickCiScope(
     };
 
     for (const workspace of workspaces) {
-      const edges = dependencies.get(workspace.name)!;
-      for (const field of [
-        "dependencies",
-        "devDependencies",
-        "peerDependencies",
-        "optionalDependencies",
-      ]) {
-        const values = workspace.manifest[field];
-        if (values === undefined) continue;
-        if (!values || typeof values !== "object" || Array.isArray(values))
-          throw new Error(`Unsupported dependencies for ${workspace.name}`);
-        for (const [name, specifier] of Object.entries(values)) {
-          if (byName.has(name)) edges.add(byName.get(name)!.name);
-          else if (typeof specifier === "string" && specifier.startsWith("workspace:"))
-            throw new Error(`Unresolved workspace dependency ${name}`);
-          else if (typeof specifier === "string" && /^(?:file|link):/.test(specifier)) {
-            const directory = normalize(
-              NodePath.posix.join(workspace.directory, specifier.replace(/^[^:]+:/, "")),
-            );
-            const target = owner(directory);
-            if (!target) throw new Error(`Unresolved local dependency ${name}`);
-            edges.add(target.name);
-          }
-        }
-      }
-      // Import keys may be aliases: keep first registered name and recursive value order.
-      const addImportTargets = (value: unknown): void => {
-        if (value && typeof value === "object") {
-          for (const target of Object.values(value)) addImportTargets(target);
-          return;
-        }
-        if (typeof value !== "string") return;
-        const target = value.startsWith(".")
-          ? owner(normalize(NodePath.posix.join(workspace.directory, value)))
-          : [...byName].find(([name]) => value === name || value.startsWith(`${name}/`))?.[1];
-        if (target) edges.add(target.name);
-      };
-      addImportTargets(workspace.manifest.imports);
       if (!workspace.typecheck) continue;
       const files = [...entries.keys()].filter(
         (file) => owner(file)?.name === workspace.name && /(?:^|\/)tsconfig[^/]*\.json$/.test(file),
@@ -552,16 +529,6 @@ export function resolveQuickCiScope(
         if (NodePath.isAbsolute(pattern) || pattern.startsWith("../"))
           throw new Error(`Unsupported external TypeScript input ${pattern}`);
         patternRegex(pattern);
-      }
-      // Alias targets can consume another workspace without declaring a dependency.
-      for (const alias of scope.aliases) {
-        const path = normalize(NodePath.posix.join(alias.directory, alias.pattern)).split(
-          /[?*]/,
-        )[0]!;
-        for (const target of workspaces) {
-          if (path.startsWith(`${target.directory}/`) || target.directory.startsWith(path))
-            edges.add(target.name);
-        }
       }
     }
 
@@ -602,6 +569,62 @@ export function resolveQuickCiScope(
         reason: "Only documentation or static assets changed",
         changedFiles,
       };
+
+    // Dependency ownership matters only when there are typecheck inputs to check.
+    if (localDependencyError) throw new Error(localDependencyError);
+    const dependencies = new Map(
+      workspaces.map((workspace) => [workspace.name, new Set<string>()]),
+    );
+    for (const workspace of workspaces) {
+      const edges = dependencies.get(workspace.name)!;
+      for (const field of [
+        "dependencies",
+        "devDependencies",
+        "peerDependencies",
+        "optionalDependencies",
+      ]) {
+        const values = workspace.manifest[field];
+        if (values === undefined) continue;
+        if (!values || typeof values !== "object" || Array.isArray(values))
+          throw new Error(`Unsupported dependencies for ${workspace.name}`);
+        for (const [name, specifier] of Object.entries(values)) {
+          if (byName.has(name)) edges.add(byName.get(name)!.name);
+          else if (typeof specifier === "string" && specifier.startsWith("workspace:"))
+            throw new Error(`Unresolved workspace dependency ${name}`);
+          else if (typeof specifier === "string" && /^(?:file|link):/.test(specifier)) {
+            const directory = normalize(
+              NodePath.posix.join(workspace.directory, specifier.replace(/^[^:]+:/, "")),
+            );
+            const target = owner(directory);
+            if (!target) throw new Error(`Unresolved local dependency ${name}`);
+            edges.add(target.name);
+          }
+        }
+      }
+      // Import keys may be aliases: keep first registered name and recursive value order.
+      const addImportTargets = (value: unknown): void => {
+        if (value && typeof value === "object") {
+          for (const target of Object.values(value)) addImportTargets(target);
+          return;
+        }
+        if (typeof value !== "string") return;
+        const target = value.startsWith(".")
+          ? owner(normalize(NodePath.posix.join(workspace.directory, value)))
+          : [...byName].find(([name]) => value === name || value.startsWith(`${name}/`))?.[1];
+        if (target) edges.add(target.name);
+      };
+      addImportTargets(workspace.manifest.imports);
+      // Alias targets can consume another workspace without declaring a dependency.
+      for (const alias of configs.get(workspace.name)?.aliases ?? []) {
+        const path = normalize(NodePath.posix.join(alias.directory, alias.pattern)).split(
+          /[?*]/,
+        )[0]!;
+        for (const target of workspaces) {
+          if (path.startsWith(`${target.directory}/`) || target.directory.startsWith(path))
+            edges.add(target.name);
+        }
+      }
+    }
 
     const consumers = (file: string) =>
       workspaces.filter(
