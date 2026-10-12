@@ -91,6 +91,12 @@ describe("searchSettings", () => {
     } finally {
       localeLowerCase.mockRestore();
     }
+    expect(searchSettings("compact status").map((item) => item.id)).toEqual([
+      "compact-status-indicators",
+    ]);
+    expect(searchSettings("worktree indicators").map((item) => item.id)).toEqual([
+      "show-worktree-indicators",
+    ]);
     expect(searchSettings("xyzzy")).toEqual([]);
   });
 
@@ -326,6 +332,10 @@ describe("searchSettings", () => {
   it("serves anchor props to panels from the catalog", () => {
     expect(searchableSetting("word-wrap")).toEqual({ id: "word-wrap", title: "Word wrap" });
     expect(searchableSetting("archive")).toEqual({ id: "archive", title: "Archived threads" });
+    expect(searchableSetting("show-worktree-indicators")).toEqual({
+      id: "show-worktree-indicators",
+      title: "Show worktree indicators (legacy sidebar)",
+    });
   });
 
   it("routes appearance settings to their current section", () => {
@@ -368,7 +378,6 @@ describe("searchSettings", () => {
       ["snap-shot-animations", "snap-shot-enabled"],
     ]);
   });
-
   it("routes browser recording quality to integrations", () => {
     const result = searchSettings("recording frame rate")[0];
     expect(result).toMatchObject({
@@ -377,7 +386,6 @@ describe("searchSettings", () => {
     });
     expect(result).not.toHaveProperty("targetId");
   });
-
   it("routes where links open to integrations", () => {
     expect(searchSettings("open links in")[0]).toMatchObject({
       id: "browser-link-target",
@@ -385,7 +393,6 @@ describe("searchSettings", () => {
     });
     expect(searchSettings("external links")[0]).toMatchObject({ id: "browser-link-target" });
   });
-
   it("finds the default browser profile action in the profiles list", () => {
     expect(searchSettings("default profile")[0]).toMatchObject({
       id: "browser-default-profile",
@@ -593,5 +600,43 @@ describe("settings sidebar scope", () => {
     expect(isSettingsOverviewVisible({ machine: "remote" })).toBe(false);
     expect(isSettingsOverviewVisible({ project: "project" })).toBe(true);
     expect(isSettingsOverviewVisible({ project: "project", checkout: "checkout" })).toBe(true);
+  });
+
+  it("routes legacy sidebar scaling to LastCode settings", () => {
+    expect(searchSettings("scale legacy sidebar")[0]).toMatchObject({
+      id: "scale-legacy-sidebar",
+      to: "/settings/lastcode",
+    });
+  });
+
+  it.each([
+    ["show thread provider badges", "show-thread-provider-badges"],
+    ["provider badge size", "thread-provider-badge-size"],
+    ["provider badge transparency", "thread-provider-badge-transparency"],
+  ])("routes %s to the always-visible badge toggle", (query, id) => {
+    const result = searchSettings(query)[0];
+    expect(result).toMatchObject({
+      id,
+      to: "/settings/lastcode",
+    });
+    expect(result?.targetId ?? result?.id).toBe("show-thread-provider-badges");
+  });
+
+  it("finds badge transparency through opacity search", () => {
+    expect(searchSettings("provider badge opacity")).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "thread-provider-badge-transparency",
+          to: "/settings/lastcode",
+        }),
+      ]),
+    );
+  });
+
+  it("routes project icon rounding to LastCode settings", () => {
+    expect(searchSettings("rounded project icons")[0]).toMatchObject({
+      id: "rounded-project-icons",
+      to: "/settings/lastcode",
+    });
   });
 });

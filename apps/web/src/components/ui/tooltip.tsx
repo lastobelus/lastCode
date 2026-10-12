@@ -87,6 +87,7 @@ function TooltipPopup({
   side = "top",
   variant = "default",
   viewportPadding = "default",
+  animated = true,
   anchor,
   children,
   ...props
@@ -97,14 +98,20 @@ function TooltipPopup({
   /** `code` renders monospace content that breaks anywhere, for paths and commands. */
   variant?: "default" | "glass" | "code";
   viewportPadding?: "default" | "none";
+  /** Animate the popup and content changes between triggers. */
+  animated?: boolean;
   anchor?: TooltipPrimitive.Positioner.Props["anchor"];
 }) {
+  const Viewport = animated ? TooltipPrimitive.Viewport : "div";
   return (
     <TooltipPrimitive.Portal>
       <TooltipPrimitive.Positioner
         align={align}
         anchor={anchor}
-        className="pointer-events-none z-[140] h-(--positioner-height) w-(--positioner-width) max-w-(--available-width) transition-[top,left,right,bottom,transform] data-instant:transition-none"
+        className={cn(
+          "pointer-events-none z-[140] h-(--positioner-height) w-(--positioner-width) max-w-(--available-width) transition-[top,left,right,bottom,transform] data-instant:transition-none",
+          !animated && "transition-none",
+        )}
         data-slot="tooltip-positioner"
         side={side}
         sideOffset={sideOffset}
@@ -119,12 +126,13 @@ function TooltipPopup({
             variant === "code"
               ? "max-w-120 wrap-anywhere text-left font-mono text-[11px] leading-relaxed"
               : "max-w-80 wrap-anywhere whitespace-normal leading-snug",
+            !animated && "transition-none",
             className,
           )}
           data-slot="tooltip-popup"
           {...props}
         >
-          <TooltipPrimitive.Viewport
+          <Viewport
             className={cn(
               "relative size-full overflow-clip px-(--viewport-inline-padding) py-1 [--viewport-inline-padding:--spacing(2)] data-instant:transition-none **:data-current:data-ending-style:opacity-0 **:data-current:data-starting-style:opacity-0 **:data-previous:data-ending-style:opacity-0 **:data-previous:data-starting-style:opacity-0 **:data-current:w-[calc(var(--popup-width)-2*var(--viewport-inline-padding)-2px)] **:data-previous:w-[calc(var(--popup-width)-2*var(--viewport-inline-padding)-2px)] **:data-previous:truncate **:data-current:opacity-100 **:data-previous:opacity-100 **:data-current:transition-opacity **:data-previous:transition-opacity",
               viewportPadding === "none" && "p-0",
@@ -132,7 +140,7 @@ function TooltipPopup({
             data-slot="tooltip-viewport"
           >
             {children}
-          </TooltipPrimitive.Viewport>
+          </Viewport>
         </TooltipPrimitive.Popup>
       </TooltipPrimitive.Positioner>
     </TooltipPrimitive.Portal>
