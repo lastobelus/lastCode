@@ -2,10 +2,12 @@ import { describe, expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Stream from "effect/Stream";
+import { McpSchema, McpServer } from "effect/ai";
 
 import {
   createPendingAttachmentId,
@@ -17,8 +19,133 @@ import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as McpToolAccessTestkit from "../../McpToolAccess.testkit.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import { toolkitRegistration } from "../../McpHttpServer.ts";
 import { claimPreviewRecording, normalizePreviewOpenInput, layerStandard } from "./handlers.ts";
 import { PreviewStandardToolkit } from "./tools.ts";
+
+it.effect.each([
+  { name: "preview_navigate", operation: "navigate", arguments: { url: "https://page.example/" } },
+  { name: "preview_wait_for", operation: "waitFor", arguments: { text: "ready" } },
+  { name: "preview_evaluate", operation: "evaluate", arguments: { expression: "1" } },
+] as const)("%s retains safe native failure diagnostics through MCP registration", (tool) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const scope: McpInvocationContext.McpThreadInvocationScope = {
+        environmentId: EnvironmentId.make("diagnostic-environment"),
+        thread: {
+          threadId: ThreadId.make("diagnostic-thread"),
+          providerSessionId: "diagnostic-session",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+        },
+        client: undefined,
+        requestNamespace: "diagnostic-session",
+        capabilities: new Set(["preview"]),
+        issuedAt: 0,
+      };
+      const client = McpSchema.McpServerClient.of({
+        clientId: 1,
+        protocolVersion: "2025-06-18",
+        clientCapabilities: {},
+        clientInfo: { name: "preview-diagnostic-test", version: "1" },
+        initializePayload: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "preview-diagnostic-test", version: "1" },
+        },
+        getClient: Effect.die("unused"),
+      });
+      const broker = yield* PreviewAutomationBroker.make.pipe(Effect.provide(NodeServices.layer));
+      const hostId = "https://workstation.example/private-host";
+      const events = yield* broker.connect({
+        clientId: hostId,
+        environmentId: scope.environmentId,
+      });
+      const connected = yield* Deferred.make<void>();
+      const requests: Array<{ operation: string; requestId: string; connectionId: string }> = [];
+      let detail: unknown;
+      yield* Stream.runForEach(events, (event) => {
+        if (event.type === "connected") return Deferred.succeed(connected, undefined);
+        requests.push({
+          operation: event.request.operation,
+          requestId: event.request.requestId,
+          connectionId: event.connectionId,
+        });
+        return broker.respond({
+          clientId: hostId,
+          connectionId: event.connectionId,
+          requestId: event.request.requestId,
+          ok: false,
+          error: {
+            _tag: "PreviewAutomationRemoteUnavailableError",
+            message: "Private remote message: https://page.example/?token=credential",
+            ...(detail === undefined ? {} : { detail }),
+          },
+        });
+      }).pipe(Effect.forkScoped);
+      yield* Deferred.await(connected);
+      const dependencies = Layer.mergeAll(
+        McpToolAccessTestkit.liveThreadsLayer,
+        Layer.succeed(PreviewAutomationBroker.PreviewAutomationBroker, broker),
+        Layer.mock(PreviewHosting.PreviewHosting)({}),
+        NodeServices.layer,
+      );
+      const registration = toolkitRegistration(PreviewStandardToolkit, layerStandard).pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provide(dependencies),
+      );
+      yield* Effect.gen(function* () {
+        const server = yield* McpServer.McpServer;
+        const call = (caller = scope) =>
+          server
+            .callTool({ name: tool.name, arguments: tool.arguments })
+            .pipe(
+              Effect.provideService(McpInvocationContext.McpInvocationContext, caller),
+              Effect.provideService(McpSchema.McpServerClient, client),
+            );
+        for (const reason of [
+          "guest-unavailable",
+          "surface-unsupported",
+          "layout-timeout",
+          "host-unavailable",
+          "https://workstation.example/unknown-reason",
+          undefined,
+        ]) {
+          detail =
+            reason === undefined
+              ? undefined
+              : {
+                  reason,
+                  url: "https://page.example/?token=credential",
+                  profile: "private-profile",
+                  frame: "private-frame",
+                };
+          const result = yield* call();
+          expect(result.isError).toBe(true);
+          expect(result.structuredContent).toBeUndefined();
+          expect(result.content).toHaveLength(1);
+          const content = result.content[0];
+          expect(content?.type).toBe("text");
+          if (content?.type !== "text") return;
+          const request = requests.at(-1)!;
+          expect(JSON.parse(content.text)).toEqual({
+            _tag: "PreviewAutomationRemoteUnavailableError",
+            message: `Preview automation ${tool.operation} is unavailable.`,
+            ...request,
+            ...(reason !== undefined && !reason.startsWith("https:") ? { reason } : {}),
+          });
+          expect(content.text).not.toMatch(/private|credential|https:|cause|stack/);
+        }
+        // The diagnostic mapping must not bypass or reclassify the access gate.
+        const denied = yield* call({ ...scope, capabilities: new Set() });
+        expect(denied.isError).toBe(true);
+        expect(denied.content).toEqual([
+          { type: "text", text: expect.stringContaining("capability") },
+        ]);
+        expect(requests).toHaveLength(6);
+      }).pipe(Effect.provide(registration));
+    }),
+  ),
+);
 
 it.effect("preview_host returns structured startup diagnostics to its owning agent", () =>
   Effect.gen(function* () {

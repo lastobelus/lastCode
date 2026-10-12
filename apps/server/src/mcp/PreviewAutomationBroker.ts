@@ -10,6 +10,7 @@ import {
   PreviewAutomationMalformedResponseError,
   PreviewAutomationNoAvailableHostError,
   PreviewAutomationRemoteUnavailableError,
+  PreviewAutomationAvailabilityReason,
   PreviewAutomationRecordingTransferError,
   PreviewAutomationRecordingDesktopUpdateRequiredError,
   PreviewAutomationRecordingTooLargeError,
@@ -201,6 +202,9 @@ const hostAssignmentKey = (scope: McpInvocationContext.McpThreadInvocationScope)
 
 const isPreviewTabId = Schema.is(PreviewTabId);
 const decodeControlReason = Schema.decodeUnknownOption(PreviewAutomationControlReason);
+const decodeAvailabilityReason = Schema.decodeUnknownOption(
+  Schema.Struct({ reason: PreviewAutomationAvailabilityReason }),
+);
 
 const readResultTabId = (result: unknown): PreviewTabId | null | undefined => {
   if (typeof result !== "object" || result === null || !("tabId" in result)) return undefined;
@@ -368,11 +372,14 @@ const classifyResponseError = (
       });
     }
     case "PreviewAutomationUnavailableError":
-    case "PreviewAutomationRemoteUnavailableError":
+    case "PreviewAutomationRemoteUnavailableError": {
+      const detail = decodeAvailabilityReason(error.detail);
       return new PreviewAutomationRemoteUnavailableError({
         ...context,
         ...remoteDiagnostics,
+        ...(Option.isSome(detail) ? { reason: detail.value.reason } : {}),
       });
+    }
     default:
       return new PreviewAutomationExecutionError({
         ...context,

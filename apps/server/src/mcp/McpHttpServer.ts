@@ -43,6 +43,7 @@ import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
 import * as OrchestratorHandlers from "./toolkits/orchestrator/handlers.ts";
 import { OrchestratorToolkit } from "./toolkits/orchestrator/tools.ts";
 import * as PreviewHandlers from "./toolkits/preview/handlers.ts";
+import { PreviewRemoteUnavailableFailure } from "./toolkits/preview/errors.ts";
 import {
   PreviewSnapshotTool,
   PreviewSnapshotToolkit,
@@ -439,6 +440,7 @@ const saveScreenshot = Effect.fn("McpHttpServer.saveScreenshot")(function* (
 });
 
 const isPreviewAutomationError = Schema.is(PreviewAutomationError);
+const isPreviewRemoteUnavailableFailure = Schema.is(PreviewRemoteUnavailableFailure);
 
 const previewSnapshotFailure = <E>(cause: Cause.Cause<E>) => {
   if (Cause.hasInterrupts(cause) || cause.reasons.some(Cause.isDieReason)) {
@@ -453,26 +455,47 @@ const previewSnapshotFailure = <E>(cause: Cause.Cause<E>) => {
     typeof firstFailure._tag === "string"
       ? firstFailure._tag
       : "PreviewSnapshotError";
-  // Preview errors build their message on the server, never from page output,
-  // and it tells the agent what to do next, such as falling back to a shell browser.
-  const message = isPreviewAutomationError(firstFailure) ? firstFailure.message : undefined;
+  // This separate snapshot adapter retains the ordinary tools' safe correlation
+  // without exposing the remote cause or host identity.
+  const diagnostic = isPreviewRemoteUnavailableFailure(firstFailure)
+    ? {
+        connectionId: firstFailure.connectionId,
+        requestId: firstFailure.requestId,
+        ...(firstFailure.reason === undefined ? {} : { reason: firstFailure.reason }),
+      }
+    : undefined;
+  const message = diagnostic
+    ? "Preview automation snapshot is unavailable."
+    : isPreviewAutomationError(firstFailure)
+      ? firstFailure.message
+      : undefined;
+  const error = {
+    _tag: errorTag,
+    operation: "snapshot",
+    failureCount: failures.length,
+    ...(message === undefined ? {} : { message }),
+    ...diagnostic,
+  };
   const result = new McpSchema.CallToolResult({
     isError: true,
     structuredContent: {
-      error: {
-        _tag: errorTag,
-        operation: "snapshot",
-        failureCount: failures.length,
-        ...(message === undefined ? {} : { message }),
-      },
+      error,
     },
     // Some clients show only the text content and others only structuredContent, so both carry it.
-    content: [{ type: "text", text: `Preview snapshot failed: ${message ?? `${errorTag}.`}` }],
+    content: [
+      {
+        type: "text",
+        text: diagnostic
+          ? JSON.stringify(error)
+          : `Preview snapshot failed: ${message ?? `${errorTag}.`}`,
+      },
+    ],
   });
   return Effect.logWarning("preview snapshot failed", {
     operation: "snapshot",
     errorTag,
     failureCount: failures.length,
+    ...diagnostic,
   }).pipe(Effect.as(result));
 };
 
