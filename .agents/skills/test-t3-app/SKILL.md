@@ -65,7 +65,19 @@ Run the selected recipe's dry run first and read `webPort` from its
 `[dev-runner]` output. Use `http://localhost:<webPort>` as the requested hosting
 URL, then give that recipe's second command to `preview_host` with the same
 working directory and environment. For the shared recipe, Browser navigation
-uses the published HTTPS route checked above, rather than the hosting URL.
+uses the published HTTPS route rather than the hosting URL.
+
+After the shared managed launch, obtain that URL on the app host with the
+read-only command `tailscale serve status --json`. The hosting result retains
+the supplied loopback URL and does not expose the runner's terminal output.
+In `Web`, select the single mapping key ending in `:<webPort>` whose root
+`Handlers["/"].Proxy` is `http://127.0.0.1:<webPort>`. Its published URL is
+`https://<mapping-key>/`. Check its environment descriptor against the local
+one before Browser navigation, as described above. A missing, ambiguous or
+mismatched mapping is a sharing-readiness failure even when the local lease
+is active; do not guess the URL from the environment connection or configure
+a replacement mapping. Keep the status output and concrete URL private.
+
 Use the workspace-installed executable for this unattended launch; a global
 Vite+ proxy can wait before starting the command. On Windows use
 `node_modules\\.bin\\vp.cmd`. If the workspace executable is missing, repair setup
