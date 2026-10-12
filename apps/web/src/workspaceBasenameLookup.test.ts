@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 
+import { claimWorkspaceBasenameLookup } from "./workspaceBasenameLookup";
 import {
-  claimWorkspaceBasenameLookup,
   needsWorkspaceBasenameLookup,
   pickWorkspaceBasenameMatch,
-} from "./workspaceBasenameLookup";
+} from "@t3tools/shared/workspaceBasenameLookup";
 
 describe("needsWorkspaceBasenameLookup", () => {
   it("flags bare filenames", () => {

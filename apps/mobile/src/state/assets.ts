@@ -2,11 +2,17 @@ import { useAtomValue } from "@effect/atom-react";
 import { resolveFilesystemReadAccess } from "@t3tools/client-runtime/state/filesystem";
 import {
   assetUrlStateFromResult,
+  fileAssetResourceForAccess,
   createAssetEnvironmentAtoms,
   createProjectFaviconUrlAtomFamily,
   EMPTY_ASSET_URL_ATOM,
 } from "@t3tools/client-runtime/state/assets";
-import type { AssetResource, EnvironmentId } from "@t3tools/contracts";
+import {
+  AuthOrchestrationReadScope,
+  sessionGrantsScope,
+  type AssetResource,
+  type EnvironmentId,
+} from "@t3tools/contracts";
 import { useCallback } from "react";
 
 import { connectionAtomRuntime } from "../connection/runtime";
@@ -29,10 +35,7 @@ export const projectFaviconUrlAtom = createProjectFaviconUrlAtomFamily({
   projectClones: environmentProjectCloneListAtom,
 });
 
-export function useAssetUrlState(
-  environmentId: EnvironmentId | null,
-  resource: AssetResource | null,
-): AssetUrlState {
+export function useHostFileAccess(environmentId: EnvironmentId | null) {
   const fileAccessSession = useEnvironmentQuery(
     environmentId === null ? null : environmentSession.sessionStateAtom(environmentId),
   );
@@ -43,17 +46,35 @@ export function useAssetUrlState(
     session: fileAccessSession.data,
     sessionError: fileAccessSession.error,
   });
+  return {
+    ...fileAccess,
+    canReadLinkedFiles:
+      fileAccessSession.error === null &&
+      fileAccessSession.data !== null &&
+      sessionGrantsScope(fileAccessSession.data, AuthOrchestrationReadScope),
+  };
+}
+
+export function useAssetUrlState(
+  environmentId: EnvironmentId | null,
+  resource: AssetResource | null,
+): AssetUrlState {
+  const fileAccess = useHostFileAccess(environmentId);
+  const fileEnvironment = useEnvironmentPresentation(environmentId);
+  const scopedResource =
+    resource === null ? null : fileAssetResourceForAccess(resource, fileAccess.canReadFiles);
   const canReadResource =
     fileAccess.canReadFiles ||
-    (resource?._tag !== "workspace-file" &&
-      resource?._tag !== "media-file" &&
-      resource?._tag !== "draft-workspace-file");
+    (scopedResource?._tag === "media-file" && fileAccess.canReadLinkedFiles) ||
+    (scopedResource?._tag !== "workspace-file" &&
+      scopedResource?._tag !== "media-file" &&
+      scopedResource?._tag !== "draft-workspace-file");
   const preparedConnection = usePreparedConnection(environmentId);
   const connectionPhase = fileEnvironment.presentation?.connection.phase ?? "available";
   const result = useAtomValue(
-    !canReadResource || environmentId === null || resource === null
+    !canReadResource || environmentId === null || scopedResource === null
       ? EMPTY_ASSET_URL_ATOM
-      : assetEnvironment.createUrl({ environmentId, input: { resource } }),
+      : assetEnvironment.createUrl({ environmentId, input: { resource: scopedResource } }),
   );
   const shared = !canReadResource
     ? fileAccess.isPending
@@ -85,6 +106,7 @@ export function useRefreshAssetUrl(
   environmentId: EnvironmentId | null,
   resource: AssetResource | null,
 ): () => Promise<string | null> {
+  const fileAccess = useHostFileAccess(environmentId);
   const connection = usePreparedConnection(environmentId);
   const httpBaseUrl = connection._tag === "Some" ? connection.value.httpBaseUrl : null;
   const createUrl = useAtomQueryRunner(assetEnvironment.createUrl, {
@@ -94,9 +116,12 @@ export function useRefreshAssetUrl(
   return useCallback(async () => {
     if (environmentId === null || resource === null || httpBaseUrl === null) return null;
     const state = assetUrlStateFromResult(
-      await createUrl({ environmentId, input: { resource } }),
+      await createUrl({
+        environmentId,
+        input: { resource: fileAssetResourceForAccess(resource, fileAccess.canReadFiles) },
+      }),
       httpBaseUrl,
     );
     return state._tag === "Success" ? state.url : null;
-  }, [createUrl, environmentId, httpBaseUrl, resource]);
+  }, [createUrl, environmentId, httpBaseUrl, resource, fileAccess.canReadFiles]);
 }

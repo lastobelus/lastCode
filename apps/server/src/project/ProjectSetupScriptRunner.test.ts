@@ -16,7 +16,7 @@ import * as Ref from "effect/Ref";
 import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as UpdateDrainRepositoryPersistence from "../persistence/UpdateDrainRepository.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -104,7 +104,7 @@ function makeHarness(
           Layer.mergeAll(
             UpdateDrain.layer.pipe(
               Layer.provide(UpdateDrainRepositoryPersistence.layer),
-              Layer.provide(SqlitePersistenceMemory),
+              Layer.provide(SqlitePersistence.layerMemory),
             ),
             Layer.mock(EffectOutbox.EffectOutboxV2)({ pendingCleanup: Effect.succeed([]) }),
             Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({}),
@@ -139,11 +139,11 @@ function makeHarness(
     ),
   );
 
-  return { layer, open, write, listeners, projectId };
+  return { layer, open, write, listeners, projectId, closeIdle };
 }
 
 it.effect("resolves setup scripts through the standalone project service", () => {
-  const { layer, open, write, listeners, projectId } = makeHarness();
+  const { layer, open, write, listeners, projectId, closeIdle } = makeHarness();
   return Effect.gen(function* () {
     const runner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
     const result = yield* runner.runForThread({

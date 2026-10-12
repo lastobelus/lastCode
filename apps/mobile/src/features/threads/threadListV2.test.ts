@@ -24,6 +24,7 @@ import {
 } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
+import { buildThreadPersistenceMenuItems } from "./thread-persistence-menu";
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
 import { makeRawThreadShell, makeThreadShellFixture } from "../../test-fixtures";
 import { threadJumpTarget } from "../keyboard/threadKeyboardShortcuts";
@@ -32,15 +33,23 @@ import {
   buildThreadListV2ListItems,
   getThreadListV2OrderedSection,
   isThreadListV2ListItem,
+  resolveThreadListV2CleanupActions,
   resolveThreadListV2SnoozeMenuSelection,
   resolveThreadListV2SnoozeGateExpiryMs,
   resolveThreadListV2Status,
   resolveThreadListV2SwipeActions,
+  withThreadListV2ArchiveAction,
   sortThreadsForListV2,
   threadListV2ListItemsAreEqual,
   threadHasUnseenCompletion,
   type ThreadListV2ListItem,
 } from "./threadListV2";
+
+import {
+  resolveThreadStatus,
+  resolveWorktreeCleanupStatus,
+  shouldShowActionWaitingIndicator,
+} from "./thread-status";
 
 const environmentId = EnvironmentId.make("environment-1");
 
@@ -111,6 +120,37 @@ describe("resolveThreadListV2SnoozeMenuSelection", () => {
 });
 
 describe("resolveThreadListV2Status", () => {
+  it.each(["stopping", "failed"] as const)(
+    "shows persisted %s archive before stale provider and approval state",
+    (status) => {
+      const thread = makeThread({
+        id: ThreadId.make("archive-root"),
+        title: "Archiving",
+        hasPendingApprovals: true,
+        archivePending: {
+          threadId: ThreadId.make("archive-root"),
+          commandId: CommandId.make("archive-request"),
+          childDisposition: "stop_and_archive",
+          childThreadIds: [],
+          archiveThreadIds: [],
+          promoteThreadIds: [],
+          status,
+        },
+      });
+      expect(resolveThreadListV2Status(thread)).toBe(
+        status === "failed" ? "archive-failed" : "archiving",
+      );
+      expect(resolveThreadStatus(thread)).toMatchObject({
+        label: status === "failed" ? "Archive failed" : "Archiving…",
+        pulse: false,
+      });
+      if (status === "failed")
+        expect(resolveThreadStatus(thread)?.description).toContain(
+          "some work may have stopped. Choose Archive again to retry, or dismiss to keep these threads as they are.",
+        );
+      expect(resolveThreadListV2Status({ ...thread, archivePending: null })).toBe("approval");
+    },
+  );
   it("distinguishes usage limits from ordinary failures and clears the label after recovery", () => {
     const thread = makeThread({
       id: ThreadId.make("limited"),
@@ -248,11 +288,150 @@ describe("queued messages keep a settled thread active", () => {
   });
 });
 
+describe("ordinary thread archive menus", () => {
+  it.each([
+    ["active", ["settle", "rename", "delete"]],
+    ["snoozable", ["settle", "snooze", "delete"]],
+    ["settled", ["unsettle", "rename", "delete"]],
+    ["snoozed", ["unsnooze", "delete"]],
+    ["legacy", ["archive", "delete"]],
+  ])("offers Archive alongside the existing %s lifecycle actions", (_variant, ids) => {
+    const actions = ids.map((id) => ({ id, title: id }));
+    const items = withThreadListV2ArchiveAction(actions, { archiveFamiliesSupported: true });
+    expect(items.filter((item) => item.id === "archive")).toEqual([
+      {
+        id: "archive",
+        title: "Archive",
+        image: "archivebox",
+        attributes: { disabled: false },
+      },
+    ]);
+    expect(items.filter((item) => item.id !== "archive")).toEqual(
+      actions.filter((item) => item.id !== "archive"),
+    );
+    expect(items.findIndex((item) => item.id === "archive")).toBeLessThan(
+      items.findIndex((item) => item.id === "delete"),
+    );
+  });
+
+  it("keeps Archive visibly unavailable with an update-server explanation", () => {
+    const items = withThreadListV2ArchiveAction([{ id: "settle", title: "Settle" }], {
+      archiveFamiliesSupported: false,
+    });
+    expect(items.find((item) => item.id === "archive")).toMatchObject({
+      title: "Archive (update server first)",
+      attributes: { disabled: true },
+    });
+    expect(items.find((item) => item.id === "settle")).toEqual({ id: "settle", title: "Settle" });
+  });
+
+  it("replaces ordinary Archive with one Retry archive after a failed shutdown", () => {
+    const items = withThreadListV2ArchiveAction(
+      [
+        { id: "archive", title: "Archive" },
+        { id: "delete", title: "Delete" },
+      ],
+      {
+        archiveFamiliesSupported: true,
+        archivePending: {
+          status: "failed",
+          threadId: ThreadId.make("owner"),
+          commandId: CommandId.make("failed-attempt"),
+        },
+      },
+    );
+    expect(items.filter((item) => item.title === "Retry archive")).toEqual([
+      {
+        id: 'retry-archive-failure:["owner","failed-attempt"]',
+        title: "Retry archive",
+        image: "archivebox",
+        attributes: { disabled: false },
+      },
+    ]);
+    expect(items.map((item) => item.id)).toEqual([
+      'retry-archive-failure:["owner","failed-attempt"]',
+      'dismiss-archive-failure:["owner","failed-attempt"]',
+      "delete",
+    ]);
+  });
+
+  it("does not allow another Archive while shutdown is pending", () => {
+    const items = withThreadListV2ArchiveAction([], {
+      archiveFamiliesSupported: true,
+      archivePending: {
+        status: "stopping",
+        threadId: ThreadId.make("owner"),
+        commandId: CommandId.make("failed-attempt"),
+      },
+    });
+    expect(items[0]).toMatchObject({ title: "Archiving…", attributes: { disabled: true } });
+    expect(items.some((item) => item.id?.startsWith("dismiss-archive-failure:"))).toBe(false);
+  });
+
+  it.each(["Dismiss archive failure", "Retry archive"] as const)(
+    "keeps an old %s native selection distinct from a newer failed archive",
+    (title) => {
+      const ids = ["attempt-one", "attempt-two"].map((commandId) => {
+        const items = withThreadListV2ArchiveAction([], {
+          archiveFamiliesSupported: true,
+          archivePending: {
+            status: "failed",
+            threadId: ThreadId.make("owner"),
+            commandId: CommandId.make(commandId),
+          },
+        });
+        return items.find((item) => item.title === title)?.id;
+      });
+      const action = title === "Retry archive" ? "retry" : "dismiss";
+      expect(ids).toEqual([
+        `${action}-archive-failure:["owner","attempt-one"]`,
+        `${action}-archive-failure:["owner","attempt-two"]`,
+      ]);
+      expect(ids[0]).not.toBe(ids[1]);
+    },
+  );
+
+  it.each([undefined, "failed"] as const)(
+    "keeps ordinary and retry archive protected by persistence (%s)",
+    (archivePendingStatus) => {
+      const items = buildThreadPersistenceMenuItems({
+        actions: withThreadListV2ArchiveAction(
+          [
+            { id: "settle", title: "Settle" },
+            { id: "delete", title: "Delete" },
+          ],
+          {
+            archiveFamiliesSupported: true,
+            archivePending:
+              archivePendingStatus === undefined
+                ? null
+                : {
+                    status: archivePendingStatus,
+                    threadId: ThreadId.make("owner"),
+                    commandId: CommandId.make("failed-attempt"),
+                  },
+          },
+        ),
+        persistent: true,
+        supported: true,
+      });
+      expect(items.find((item) => item.image === "archivebox")).toMatchObject({
+        title: `${archivePendingStatus === "failed" ? "Retry archive" : "Archive"} (disable persistence first)`,
+        attributes: { disabled: true },
+      });
+      expect(items.find((item) => item.id === "settle")).toEqual({ id: "settle", title: "Settle" });
+      expect(items[0]?.id).toBe("disable-persistence");
+    },
+  );
+});
+
 describe("resolveThreadListV2SwipeActions", () => {
   it("offers settle and snooze for an active snoozable thread", () => {
     expect(
       resolveThreadListV2SwipeActions({
         variant: "card",
+        archiveFamiliesSupported: true,
+        persistent: false,
         settlementSupported: true,
         snoozeSupported: true,
         snoozable: true,
@@ -264,6 +443,8 @@ describe("resolveThreadListV2SwipeActions", () => {
     expect(
       resolveThreadListV2SwipeActions({
         variant: "slim",
+        archiveFamiliesSupported: true,
+        persistent: false,
         settlementSupported: true,
         snoozeSupported: true,
         snoozable: true,
@@ -271,29 +452,70 @@ describe("resolveThreadListV2SwipeActions", () => {
     ).toEqual({ primary: "unsettle", secondary: "snooze" });
   });
 
-  it("omits snooze when the server or thread does not allow it", () => {
+  it("offers archive when the server or thread does not allow snooze", () => {
     expect(
       resolveThreadListV2SwipeActions({
         variant: "card",
+        archiveFamiliesSupported: true,
+        persistent: false,
         settlementSupported: true,
         snoozeSupported: false,
         snoozable: true,
       }),
-    ).toEqual({ primary: "settle", secondary: null });
+    ).toEqual({ primary: "settle", secondary: "archive" });
     expect(
       resolveThreadListV2SwipeActions({
         variant: "card",
+        archiveFamiliesSupported: true,
+        persistent: false,
         settlementSupported: true,
         snoozeSupported: true,
         snoozable: false,
       }),
-    ).toEqual({ primary: "settle", secondary: null });
+    ).toEqual({ primary: "settle", secondary: "archive" });
+  });
+
+  it.each([
+    ["older server", false, false, undefined],
+    ["persistent thread", true, true, undefined],
+    ["pending shutdown", true, false, "stopping"],
+  ] as const)(
+    "omits Archive swipe for %s while retaining Settle",
+    (_reason, archiveFamiliesSupported, persistent, archivePendingStatus) => {
+      expect(
+        resolveThreadListV2SwipeActions({
+          variant: "card",
+          settlementSupported: true,
+          archiveFamiliesSupported,
+          persistent,
+          archivePendingStatus,
+          snoozeSupported: true,
+          snoozable: false,
+        }),
+      ).toEqual({ primary: "settle", secondary: null });
+    },
+  );
+
+  it("keeps Archive swipe available after a failed shutdown", () => {
+    expect(
+      resolveThreadListV2SwipeActions({
+        variant: "card",
+        settlementSupported: true,
+        archiveFamiliesSupported: true,
+        persistent: false,
+        archivePendingStatus: "failed",
+        snoozeSupported: true,
+        snoozable: false,
+      }),
+    ).toEqual({ primary: "settle", secondary: "archive" });
   });
 
   it("falls back to archive only for a pre-lifecycle server", () => {
     expect(
       resolveThreadListV2SwipeActions({
         variant: "card",
+        archiveFamiliesSupported: true,
+        persistent: false,
         settlementSupported: false,
         snoozeSupported: false,
         snoozable: true,
@@ -301,16 +523,18 @@ describe("resolveThreadListV2SwipeActions", () => {
     ).toEqual({ primary: "archive", secondary: null });
   });
 
-  it("offers wake and no snooze on a snoozed row", () => {
+  it("offers wake and archive on a snoozed row", () => {
     expect(
       resolveThreadListV2SwipeActions({
         variant: "slim",
+        archiveFamiliesSupported: true,
+        persistent: false,
         settlementSupported: true,
         snoozeSupported: true,
         snoozable: true,
         snoozed: true,
       }),
-    ).toEqual({ primary: "unsnooze", secondary: null });
+    ).toEqual({ primary: "unsnooze", secondary: "archive" });
   });
 });
 
@@ -1726,6 +1950,122 @@ it("excludes subagents from navigation, search and ordering while retaining user
   ).toEqual([fork.id, root.id]);
 });
 
+it.each(["stopping", "failed"] as const)(
+  "keeps stranded %s native archive repair visible outside collapsed shelves",
+  (status) => {
+    const owner = makeThread({
+      id: ThreadId.make("archive-owner"),
+      title: "Owner",
+      archivedAt: NOW,
+    });
+    const child = makeThread({
+      id: ThreadId.make("stranded-native"),
+      title: "Repair child",
+      lineage: {
+        rootThreadId: owner.id,
+        parentThreadId: owner.id,
+        relationshipToParent: "subagent",
+      },
+      archivePending: {
+        threadId: owner.id,
+        commandId: CommandId.make("archive-repair"),
+        childDisposition: "stop_and_archive",
+        childThreadIds: [],
+        archiveThreadIds: [],
+        promoteThreadIds: [],
+        status,
+      },
+      settledOverride: "settled",
+      pinnedAt: NOW,
+      snoozedAt: NOW,
+      snoozedUntil: "2026-07-01T00:00:00.000Z",
+    });
+    const ordinaryChild = { ...child, id: ThreadId.make("ordinary-child"), archivePending: null };
+    const threads = [owner, child, ordinaryChild];
+    const layout = buildThreadListV2Items({
+      threads,
+      environmentId: owner.environmentId,
+      searchQuery: "Repair",
+      now: NOW,
+      workingShelfEnabled: true,
+      workingShelfExpanded: false,
+      snoozedShelfExpanded: false,
+    });
+    expect(layout.items.map((item) => [item.thread.id, item.variant])).toEqual([
+      [child.id, "card"],
+    ]);
+    expect(getThreadListV2OrderedSection({ threads, section: "active", now: NOW })).toEqual([
+      child,
+    ]);
+    expect(getThreadListV2OrderedSection({ threads, section: "pinned", now: NOW })).toEqual([]);
+    expect(
+      buildThreadListV2Items({
+        threads: [child],
+        environmentId: null,
+        searchQuery: "",
+        now: NOW,
+      }).items.map((item) => item.thread.id),
+    ).toEqual([child.id]);
+    expect(
+      buildThreadListV2Items({
+        threads: [{ ...owner, archivedAt: null }, child],
+        environmentId: null,
+        searchQuery: "Repair",
+        now: NOW,
+      }).items,
+    ).toEqual([]);
+    expect(child.lineage.independent).toBeUndefined();
+    const nestedOwner = {
+      ...child,
+      archivePending: { ...child.archivePending!, threadId: child.id },
+    };
+    const nestedChild = {
+      ...nestedOwner,
+      id: ThreadId.make("nested-participant"),
+      lineage: { ...child.lineage, parentThreadId: nestedOwner.id },
+    };
+    expect(
+      buildThreadListV2Items({
+        threads: [{ ...owner, archivedAt: null }, nestedOwner, nestedChild],
+        environmentId: null,
+        searchQuery: "Repair",
+        now: NOW,
+        workingShelfEnabled: true,
+        workingShelfExpanded: false,
+        snoozedShelfExpanded: false,
+      }).items.map((item) => [item.thread.id, item.variant]),
+    ).toEqual([[nestedOwner.id, "card"]]);
+  },
+);
+
+it("shows released subagents in navigation, search and ordering", () => {
+  const root = makeThread({ id: ThreadId.make("root"), title: "Root", archivedAt: NOW });
+  const child = makeThread({
+    id: ThreadId.make("released"),
+    title: "Released work",
+    lineage: {
+      parentThreadId: root.id,
+      rootThreadId: root.id,
+      relationshipToParent: "subagent",
+      independent: true,
+    },
+  });
+  const threads = [root, child];
+  expect(
+    buildThreadListV2Items({
+      threads,
+      environmentId: null,
+      searchQuery: "Released",
+      now: NOW,
+    }).items.map((item) => item.thread.id),
+  ).toEqual([child.id]);
+  expect(
+    getThreadListV2OrderedSection({ threads, section: "active", now: NOW }).map(
+      (thread) => thread.id,
+    ),
+  ).toEqual([child.id]);
+});
+
 /* ─── Recycled-list equality + per-row clock scoping ─────────────────── */
 
 const BASE_MS = Date.parse(NOW);
@@ -2436,4 +2776,237 @@ describe("Working section beta", () => {
       "settled",
     ]);
   });
+});
+
+describe("LastCode mobile thread state", () => {
+  const actionResume = {
+    runId: "action-1",
+    threadId: ThreadId.make("action-thread"),
+    projectId: ProjectId.make("project-1"),
+    actionId: "wait-for-pr",
+    actionName: "Wait for PR",
+    terminalId: "action-terminal",
+    outcome: "running" as const,
+    delivery: "pending" as const,
+    startedAt: NOW,
+    finishedAt: null,
+    exitCode: null,
+    exitSignal: null,
+  };
+
+  it("keeps Action waiting/progress visible behind question and runtime priorities", () => {
+    const thread = makeThread({ id: actionResume.threadId, title: "Action", actionResume });
+    expect(resolveThreadListV2Status(thread)).toBe("waiting");
+    expect(resolveThreadStatus(thread)?.kind).toBe("waiting");
+    expect(shouldShowActionWaitingIndicator(thread, "waiting")).toBe(false);
+    expect(
+      resolveThreadListV2Status({
+        ...thread,
+        actionResume: {
+          ...actionResume,
+          progress: { version: 1, state: "working", summary: "Checking reviews", updatedAt: NOW },
+        },
+      }),
+    ).toBe("working");
+    const question = { ...thread, attention: { kind: "question" as const, raisedAt: NOW } };
+    expect(resolveThreadListV2Status(question)).toBe("question");
+    expect(resolveThreadListV2Status({ ...question, hasPendingApprovals: true })).toBe("approval");
+    expect(resolveThreadListV2Status({ ...question, hasPendingUserInput: true })).toBe("input");
+    const runtime = {
+      status: "running" as const,
+      activeRunId: RunId.make("run-1"),
+      providerName: "Codex",
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      lastError: null,
+      updatedAt: NOW,
+    };
+    expect(resolveThreadListV2Status({ ...thread, runtime })).toBe("working");
+    expect(resolveThreadStatus({ ...thread, runtime })?.kind).toBe("working");
+    expect(shouldShowActionWaitingIndicator(thread, "working")).toBe(true);
+    const workingAction = {
+      ...thread,
+      actionResume: {
+        ...actionResume,
+        progress: {
+          version: 1 as const,
+          state: "working" as const,
+          summary: "Checking reviews",
+          updatedAt: NOW,
+        },
+      },
+    };
+    expect(resolveThreadStatus(workingAction)?.kind).toBe("working");
+    expect(shouldShowActionWaitingIndicator(workingAction, "working")).toBe(false);
+    expect(
+      resolveThreadListV2Status({ ...thread, runtime: { ...runtime, status: "failed" } }),
+    ).toBe("failed");
+  });
+
+  it("surfaces cleanup recovery ahead of stale settled, snooze and pin metadata", () => {
+    const cleanup = {
+      status: "failed" as const,
+      repositoryRoot: "/workspace/project",
+      worktreePath: "/workspace/worktree",
+      startedAt: NOW,
+      failedAt: NOW,
+      error: "Worktree is busy",
+    };
+    const thread = makeThread({
+      id: ThreadId.make("cleanup"),
+      title: "Cleanup",
+      worktreeCleanup: cleanup,
+      settledOverride: "settled",
+      snoozedUntil: "2026-06-03T00:00:00.000Z",
+      pinnedAt: NOW,
+    });
+    expect(resolveThreadStatus({ ...thread, hasPendingApprovals: true })).toMatchObject({
+      kind: "cleanup-failed",
+      pulse: false,
+    });
+    expect(resolveWorktreeCleanupStatus(thread)?.label).toBe("Cleanup failed");
+    expect(
+      resolveWorktreeCleanupStatus({
+        ...thread,
+        worktreeCleanup: {
+          status: "deleting",
+          repositoryRoot: cleanup.repositoryRoot,
+          worktreePath: cleanup.worktreePath,
+          startedAt: NOW,
+        },
+      })?.label,
+    ).toBe("Deleting");
+    const queuedCleanup = {
+      status: "queued" as const,
+      repositoryRoot: cleanup.repositoryRoot,
+      worktreePath: cleanup.worktreePath,
+      queuedAt: NOW,
+      blockedByThreadId: ThreadId.make("cleanup-blocker"),
+    };
+    expect(resolveWorktreeCleanupStatus({ ...thread, worktreeCleanup: queuedCleanup })?.label).toBe(
+      "Deleting (Queued)",
+    );
+    expect(resolveThreadListV2CleanupActions(queuedCleanup)).toEqual([]);
+    const layout = buildThreadListV2Items({
+      threads: [thread],
+      environmentId: null,
+      searchQuery: "",
+      now: NOW,
+    });
+    expect(layout.items.map(({ thread, variant }) => [thread.id, variant])).toEqual([
+      ["cleanup", "card"],
+    ]);
+    expect(layout.settledCount).toBe(0);
+    expect(layout.snoozedCount).toBe(0);
+    expect(resolveThreadListV2CleanupActions(cleanup)).toEqual([
+      "retry-worktree-cleanup",
+      "keep-worktree",
+    ]);
+    expect(
+      resolveThreadListV2CleanupActions({
+        status: "deleting",
+        repositoryRoot: cleanup.repositoryRoot,
+        worktreePath: cleanup.worktreePath,
+        startedAt: NOW,
+      }),
+    ).toEqual([]);
+  });
+});
+
+describe("archived cleanup recovery", () => {
+  const cleanupBase = {
+    repositoryRoot: "/workspace/project",
+    worktreePath: "/workspace/worktree",
+  };
+
+  it.each([
+    {
+      ...cleanupBase,
+      status: "queued" as const,
+      queuedAt: NOW,
+      blockedByThreadId: ThreadId.make("cleanup-blocker"),
+    },
+    { ...cleanupBase, status: "deleting" as const, startedAt: NOW },
+    {
+      ...cleanupBase,
+      status: "failed" as const,
+      startedAt: NOW,
+      failedAt: NOW,
+      error: "Worktree is busy",
+    },
+  ])(
+    "retains archived $status recovery before ordinary archive and subagent filters",
+    (cleanup) => {
+      const thread = makeThread({
+        id: ThreadId.make("cleanup"),
+        title: "Cleanup",
+        archivedAt: NOW,
+        deletedAt: NOW,
+        worktreeCleanup: cleanup,
+        settledOverride: "settled",
+        pinnedAt: NOW,
+        snoozedUntil: "2026-06-03T00:00:00.000Z",
+      });
+      const subagent = makeThread({
+        ...thread,
+        id: ThreadId.make("cleanup-subagent"),
+        lineage: {
+          rootThreadId: ThreadId.make("root"),
+          parentThreadId: ThreadId.make("root"),
+          relationshipToParent: "subagent",
+        },
+      });
+      const threads = [
+        thread,
+        subagent,
+        makeThread({ id: ThreadId.make("archived"), title: "Archived", archivedAt: NOW }),
+        makeThread({
+          id: ThreadId.make("ordinary-subagent"),
+          title: "Subagent",
+          lineage: subagent.lineage,
+        }),
+        makeThread({ ...thread, id: ThreadId.make("cleanup-cleared"), worktreeCleanup: null }),
+        makeThread({
+          ...thread,
+          id: ThreadId.make("unarchived-deleted"),
+          archivedAt: null,
+          worktreeCleanup: null,
+        }),
+      ];
+      const input = { threads, environmentId: null, searchQuery: "", now: NOW };
+      const layout = buildThreadListV2Items(input);
+      expect(layout.items.map(({ thread, variant }) => [thread.id, variant]).sort()).toEqual([
+        ["cleanup", "card"],
+        ["cleanup-subagent", "card"],
+      ]);
+      expect(layout.settledCount).toBe(0);
+      expect(layout.snoozedCount).toBe(0);
+      const workingLayout = buildThreadListV2Items({ ...input, workingShelfEnabled: true });
+      expect(workingLayout.items.map(({ thread, variant }) => [thread.id, variant]).sort()).toEqual(
+        [
+          ["cleanup", "card"],
+          ["cleanup-subagent", "card"],
+        ],
+      );
+      expect(workingLayout.workingCount).toBe(0);
+      expect(
+        getThreadListV2OrderedSection({ ...input, section: "active" })
+          .map(({ id }) => id)
+          .sort(),
+      ).toEqual(["cleanup", "cleanup-subagent"]);
+      expect(getThreadListV2OrderedSection({ ...input, section: "pinned" })).toEqual([]);
+      expect(resolveThreadListV2CleanupActions(cleanup)).toEqual(
+        cleanup.status === "failed" ? ["retry-worktree-cleanup", "keep-worktree"] : [],
+      );
+      expect(layout.items.map(({ thread }) => [thread.archivedAt, thread.deletedAt])).toEqual([
+        [NOW, NOW],
+        [NOW, NOW],
+      ]);
+      expect(
+        buildThreadListV2Items({
+          ...input,
+          threads: [thread, subagent].map((thread) => ({ ...thread, worktreeCleanup: null })),
+        }).items,
+      ).toEqual([]);
+    },
+  );
 });
