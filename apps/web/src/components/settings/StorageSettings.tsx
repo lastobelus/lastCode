@@ -184,16 +184,16 @@ function CleanupResults({
     <>
       {report.entries.map((entry, index) => {
         const name =
-          entry.kind === "worktree"
-            ? (entry.path?.split(/[\\/]/).findLast(Boolean) ?? "Worktrees")
-            : entry.kind === "dependencies"
-              ? (entry.path?.split(/[\\/]/).findLast(Boolean) ?? "Dependency installs")
+          entry.scope === "dependencies"
+            ? (entry.path?.split(/[\\/]/).findLast(Boolean) ?? "Dependency installs")
+            : entry.kind === "worktree"
+              ? (entry.path?.split(/[\\/]/).findLast(Boolean) ?? "Worktrees")
               : entry.kind === "logs"
                 ? "Rotated logs"
                 : "Browser artifacts";
         return (
           <SettingsRow
-            key={`${entry.kind}:${entry.path ?? entry.kind}:${entry.threadId ?? index}`}
+            key={`${entry.kind}:${entry.scope ?? "all"}:${entry.path ?? entry.kind}:${entry.threadId ?? index}`}
             title={environmentLabel ? `${environmentLabel}: ${name}` : name}
             description={
               <span

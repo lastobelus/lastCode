@@ -7,7 +7,6 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import type {
   OrchestrationV2ThreadShell,
-  OrchestrationProjectShell,
   ProviderSessionId,
   ProjectId,
   ServerSettings,
@@ -616,7 +615,8 @@ const make = Effect.gen(function* () {
       estimatedBytes?: number | null;
     }) => {
       const entry: StorageCleanupReportEntry = {
-        kind: "dependencies",
+        kind: "worktree",
+        scope: "dependencies",
         outcome: input.outcome,
         reason: sentence(input.reason),
         path: input.path,
@@ -676,7 +676,7 @@ const make = Effect.gen(function* () {
         outcome: "kept",
         reason: "thread ownership changed during inspection",
       });
-      return snapshot;
+      return;
     }
     const noteSkip = (
       thread: Pick<OrchestrationV2ThreadShell, "id" | "title" | "worktreePath">,
@@ -949,7 +949,6 @@ const make = Effect.gen(function* () {
       const paths = [...new Set(group.map((entry) => entry.worktreePath))].sort();
       yield* paths.reduceRight((effect, cwd) => withWorkspaceLease(cwd, effect), removeGroup);
     }
-    return snapshot;
   });
 
   const cleanWorktrees = Effect.fn("StorageCleanup.cleanWorktrees")(function* (
@@ -1213,26 +1212,33 @@ const make = Effect.gen(function* () {
   const reportUnownedWorktrees = Effect.fn("StorageCleanup.reportUnownedWorktrees")(function* (
     entries: StorageCleanupReportEntry[],
     runId: string,
-    knownSnapshot?: {
-      readonly projects: ReadonlyArray<OrchestrationProjectShell>;
-      readonly threads: ReadonlyArray<OrchestrationV2ThreadShell>;
-    },
   ) {
-    const snapshot = knownSnapshot ?? (yield* readThreads());
+    const snapshot = yield* readThreads();
     const deleted = yield* readDeletedDependencyCandidates();
-    const owned = new Set(
-      [...snapshot.threads, ...deleted].flatMap((thread) =>
-        thread.worktreePath === null ? [] : [path.resolve(thread.worktreePath)],
-      ),
-    );
+    const owned = new Set<string>();
+    for (const thread of [...snapshot.threads, ...deleted]) {
+      if (thread.worktreePath === null) continue;
+      const worktreePath = path.resolve(thread.worktreePath);
+      const canonicalPath = yield* fs
+        .realPath(worktreePath)
+        .pipe(Effect.orElseSucceed(() => worktreePath));
+      owned.add(canonicalPath);
+    }
     const seenRepositories = new Set<string>();
     const seenWorktrees = new Set<string>();
-    const managedRoots = managedWorktreesDirectories(
+    const managedRoots: string[] = [];
+    for (const directory of managedWorktreesDirectories(
       yield* settingsService.getSettings,
       config.worktreesDir,
       path,
       yield* HostProcess.HomeDirectory,
-    ).map((directory) => path.resolve(directory));
+    )) {
+      const root = yield* fs.exists(directory).pipe(
+        Effect.flatMap((exists) => (exists ? fs.realPath(directory) : Effect.succeed(null))),
+        Effect.orElseSucceed(() => null),
+      );
+      if (root !== null && !isFilesystemRoot(root, path)) managedRoots.push(root);
+    }
     for (const project of snapshot.projects) {
       const root = path.resolve(project.workspaceRoot);
       if (seenRepositories.has(root)) continue;
@@ -1340,12 +1346,12 @@ const make = Effect.gen(function* () {
         }),
       ),
     );
-    const knownSnapshot = yield* cleanDependencies(serverSettings, now, entries, runId).pipe(
+    yield* cleanDependencies(serverSettings, now, entries, runId).pipe(
       Effect.catch((error) =>
         Effect.logWarning("dependency cleanup failed", { error }).pipe(Effect.as(undefined)),
       ),
     );
-    yield* reportUnownedWorktrees(entries, runId, knownSnapshot).pipe(
+    yield* reportUnownedWorktrees(entries, runId).pipe(
       Effect.catch((error) => Effect.logWarning("worktree ownership audit failed", { error })),
     );
     for (const category of [

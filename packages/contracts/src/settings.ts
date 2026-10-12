@@ -1156,7 +1156,9 @@ const NULLABLE_PROJECT_SETTINGS_OVERRIDES: ReadonlySet<ProjectScopedServerSettin
 ]);
 
 export const StorageCleanupReportEntry = Schema.Struct({
-  kind: Schema.Literals(["worktree", "dependencies", "browser-artifacts", "logs"]),
+  kind: Schema.Literals(["worktree", "browser-artifacts", "logs"]),
+  // Older clients decode kind as a closed union; narrow worktree targets additively.
+  scope: Schema.optional(Schema.Literal("dependencies")),
   outcome: Schema.Literals(["removed", "kept", "failed"]),
   reason: Schema.String,
   path: Schema.NullOr(Schema.String),
