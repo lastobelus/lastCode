@@ -325,6 +325,11 @@ const make = Effect.gen(function* () {
     };
   });
 
+  const canonicalWorkspacePath = Effect.fnUntraced(function* (cwd: string) {
+    const resolved = path.resolve(cwd);
+    return yield* fs.realPath(resolved).pipe(Effect.orElseSucceed(() => resolved));
+  });
+
   const makeProviderSessionGuard = Effect.fn("StorageCleanup.makeProviderSessionGuard")(
     function* () {
       const providerEventsSince = Effect.fnUntraced(function* (sequence: number) {
@@ -369,12 +374,17 @@ const make = Effect.gen(function* () {
         // Runtime ownership also covers failed attachment persistence and
         // replacement closes whose durable row still names an older cwd.
         for (const workspace of [...runtimeWorkspaces, ...protectedSessions]) {
-          let ancestor = path.resolve(workspace.cwd);
-          while (true) {
-            protectedAncestors.add(ancestor);
-            const parent = path.dirname(ancestor);
-            if (parent === ancestor) break;
-            ancestor = parent;
+          for (const cwd of new Set([
+            path.resolve(workspace.cwd),
+            yield* canonicalWorkspacePath(workspace.cwd),
+          ])) {
+            let ancestor = cwd;
+            while (true) {
+              protectedAncestors.add(ancestor);
+              const parent = path.dirname(ancestor);
+              if (parent === ancestor) break;
+              ancestor = parent;
+            }
           }
         }
         // Never use mixed runtime, cwd and binding observations. One unstable
@@ -672,22 +682,111 @@ const make = Effect.gen(function* () {
         settings.previousWorktreesDirectories,
         serverSettings.previousWorktreesDirectories,
       );
-    const processCwds = yield* dependencies.processWorkingDirectories;
+    const processCwds = yield* dependencies.processWorkingDirectories.pipe(
+      Effect.flatMap((cwds) =>
+        cwds === null ? Effect.succeed(null) : Effect.forEach(cwds, canonicalWorkspacePath),
+      ),
+    );
     const hasLiveProviderSession = yield* makeProviderSessionGuard();
     const sequence = yield* readApplicationSequence();
     const snapshot = yield* readThreads();
-    const groups = Map.groupBy(
-      // Deleted shells can remain visible during cleanup; use their durable
-      // deletion activity and outbox guards through the deleted-candidate path.
+    const canonicalPaths = new Map<string, string>();
+    const resolveOwnerPath = Effect.fnUntraced(function* (recordedPath: string) {
+      const resolved = path.resolve(recordedPath);
+      const cached = canonicalPaths.get(resolved);
+      if (cached !== undefined) return cached;
+      const canonical = yield* canonicalWorkspacePath(resolved);
+      canonicalPaths.set(resolved, canonical);
+      return canonical;
+    });
+    const pathIdentityUnchanged = Effect.fnUntraced(function* (
+      recordedPath: string,
+      canonicalPath: string,
+    ) {
+      // Parent aliases are supported; the worktree itself must remain a real
+      // directory at the same canonical location throughout deletion.
+      const leafIsLink = yield* fs.readLink(recordedPath).pipe(
+        Effect.as(true),
+        Effect.catchIf(
+          (error) =>
+            error.cause instanceof Error && "code" in error.cause && error.cause.code === "EINVAL",
+          () => Effect.succeed(false),
+        ),
+        Effect.orElseSucceed(() => true),
+      );
+      return (
+        !leafIsLink &&
+        (yield* fs.realPath(recordedPath).pipe(Effect.orElseSucceed(() => null))) === canonicalPath
+      );
+    });
+    const terminalUsesDependencies = Effect.fnUntraced(function* (
+      canonicalPath: string,
+      recordedPath: string,
+    ) {
+      if (hasTerminal(canonicalPath) || hasTerminal(recordedPath)) return true;
+      for (const terminals of liveTerminals.values()) {
+        for (const terminal of terminals.values()) {
+          if (terminal.status !== "starting" && terminal.status !== "running") continue;
+          const cwd = yield* canonicalWorkspacePath(terminal.cwd);
+          if (cwd === canonicalPath || inside(canonicalPath, cwd)) return true;
+          if (
+            terminal.worktreePath !== null &&
+            (yield* canonicalWorkspacePath(terminal.worktreePath)) === canonicalPath
+          )
+            return true;
+        }
+      }
+      return false;
+    });
+    const previewUsesDependencies = Effect.fnUntraced(function* (
+      canonicalPath: string,
+      recordedPath: string,
+    ) {
+      const protectedPaths = yield* previewsProtectingWorktrees();
+      if (
+        previewUsesWorktree(canonicalPath, protectedPaths) ||
+        previewUsesWorktree(recordedPath, protectedPaths)
+      )
+        return true;
+      for (const candidate of protectedPaths ?? []) {
+        const cwd = yield* canonicalWorkspacePath(candidate);
+        if (cwd === canonicalPath || inside(canonicalPath, cwd)) return true;
+      }
+      return false;
+    });
+    const liveOwners = yield* Effect.forEach(
       snapshot.threads.filter(
         (thread) => thread.worktreePath !== null && thread.deletedAt === null,
       ),
-      (thread) => path.resolve(thread.worktreePath!),
+      (thread) =>
+        Effect.gen(function* () {
+          const recordedWorktreePath = path.resolve(thread.worktreePath!);
+          return {
+            ...thread,
+            recordedWorktreePath,
+            cleanupPath: yield* resolveOwnerPath(recordedWorktreePath),
+          };
+        }),
     );
-    const deletedGroups = Map.groupBy(
+    const deletedOwners = yield* Effect.forEach(
       (yield* readDeletedDependencyCandidates()).filter((thread) => thread.worktreePath !== null),
-      (thread) => path.resolve(thread.worktreePath!),
+      (thread) =>
+        Effect.gen(function* () {
+          const recordedWorktreePath = path.resolve(thread.worktreePath!);
+          return {
+            ...thread,
+            recordedWorktreePath,
+            cleanupPath: yield* resolveOwnerPath(recordedWorktreePath),
+          };
+        }),
     );
+    const groups = Map.groupBy(
+      // Deleted shells can remain visible during cleanup; use their durable
+      // deletion activity and outbox guards through the deleted-candidate path.
+      liveOwners,
+      (thread) => thread.cleanupPath,
+    );
+    const deletedGroups = Map.groupBy(deletedOwners, (thread) => thread.cleanupPath);
     const reports = new Map<string, StorageCleanupReportEntry>();
     const noteCandidate = (
       thread: Pick<OrchestrationV2ThreadShell, "id" | "title">,
@@ -746,7 +845,8 @@ const make = Effect.gen(function* () {
         const deleted = "dependencyActivityAt" in thread;
         const activityAt = deleted ? thread.dependencyActivityAt : storageCleanupActivityAt(thread);
         if (activityAt !== null && activityAt >= now - days * DAY_MS) return [];
-        const worktreePath = path.resolve(thread.worktreePath);
+        const worktreePath = thread.cleanupPath;
+        const recordedWorktreePath = thread.recordedWorktreePath;
         if (!(yield* fs.exists(path.join(worktreePath, "node_modules")))) return [];
         const entry = noteCandidate(thread, worktreePath);
         const keep = (reason: string) => {
@@ -754,6 +854,8 @@ const make = Effect.gen(function* () {
           return [];
         };
         if (activityAt === null) return keep("Could not verify the last thread activity");
+        if (!(yield* pathIdentityUnchanged(recordedWorktreePath, worktreePath)))
+          return keep("Worktree path is a symlink or its location changed");
         const managedWorktreesRoot = roots.find((root) => inside(root, worktreePath));
         if (managedWorktreesRoot === undefined)
           return keep("Worktree is outside the configured cleanup locations");
@@ -771,8 +873,20 @@ const make = Effect.gen(function* () {
           ? { workspaceRoot: thread.workspaceRoot }
           : snapshot.projects.find((entry) => entry.id === thread.projectId);
         if (project === undefined) return keep("Project is no longer available");
-        if (hasTerminal(worktreePath)) return keep("A terminal is still using this worktree");
-        return [{ thread, days, deleted, activityAt, worktreePath, managedWorktreesRoot, project }];
+        if (yield* terminalUsesDependencies(worktreePath, recordedWorktreePath))
+          return keep("A terminal is still using this worktree");
+        return [
+          {
+            thread,
+            days,
+            deleted,
+            activityAt,
+            worktreePath,
+            recordedWorktreePath,
+            managedWorktreesRoot,
+            project,
+          },
+        ];
       }),
     )).flat();
     const batchSize = GeneratedDependencies.MAX_DEPENDENCY_REMOVAL_BATCH_SIZE;
@@ -781,7 +895,16 @@ const make = Effect.gen(function* () {
       const removeGroup = Effect.gen(function* () {
         const prepared = (yield* Effect.forEach(
           group,
-          ({ thread, days, deleted, activityAt, worktreePath, managedWorktreesRoot, project }) =>
+          ({
+            thread,
+            days,
+            deleted,
+            activityAt,
+            worktreePath,
+            recordedWorktreePath,
+            managedWorktreesRoot,
+            project,
+          }) =>
             Effect.gen(function* () {
               const entry = reports.get(worktreePath)!;
               const keep = (reason: string) => {
@@ -798,7 +921,9 @@ const make = Effect.gen(function* () {
                     thread.projectId,
                   ).worktreeDependenciesAfterDays;
                   if (currentDays !== days) return keep("Dependency cleanup policy changed");
-                  if (hasTerminal(worktreePath))
+                  if (!(yield* pathIdentityUnchanged(recordedWorktreePath, worktreePath)))
+                    return keep("Worktree path is a symlink or its location changed");
+                  if (yield* terminalUsesDependencies(worktreePath, recordedWorktreePath))
                     return keep("A terminal is still using this worktree");
                   // Reuse normalized ownership and project roots only while no
                   // ownership event has changed them; otherwise defer to a new sweep.
@@ -806,7 +931,7 @@ const make = Effect.gen(function* () {
                     return keep("Workspace ownership changed during cleanup");
                   if (yield* containsProjectRoot(worktreePath, [project, ...snapshot.projects]))
                     return keep("A project uses this worktree as its main workspace");
-                  if (previewUsesWorktree(worktreePath, yield* previewsProtectingWorktrees()))
+                  if (yield* previewUsesDependencies(worktreePath, recordedWorktreePath))
                     return keep(
                       "A preview is using this worktree, or preview ownership could not be checked",
                     );
@@ -819,7 +944,7 @@ const make = Effect.gen(function* () {
                       rows.length !== 1 ||
                       rows[0]!.id !== thread.id ||
                       rows[0]!.worktreePath === null ||
-                      path.resolve(rows[0]!.worktreePath) !== worktreePath ||
+                      path.resolve(rows[0]!.worktreePath) !== recordedWorktreePath ||
                       rows[0]!.branch !== thread.branch ||
                       rows[0]!.projectId !== thread.projectId ||
                       path.resolve(rows[0]!.workspaceRoot) !==
@@ -837,7 +962,7 @@ const make = Effect.gen(function* () {
                     latest.deletedAt !== null ||
                     latest.id !== thread.id ||
                     latest.worktreePath === null ||
-                    path.resolve(latest.worktreePath) !== worktreePath ||
+                    path.resolve(latest.worktreePath) !== recordedWorktreePath ||
                     latest.branch !== thread.branch ||
                     latest.projectId !== thread.projectId ||
                     !storageCleanupThreadIdle(latest, now) ||
@@ -847,7 +972,7 @@ const make = Effect.gen(function* () {
                   if (yield* hasPendingWorkspaceWork(thread.id))
                     return keep("Thread still has active or pending work");
                   return (
-                    !hasTerminal(worktreePath) &&
+                    !(yield* terminalUsesDependencies(worktreePath, recordedWorktreePath)) &&
                     resolveWorktreeCleanup(yield* settingsService.getSettings, thread.projectId)
                       .worktreeDependenciesAfterDays === days &&
                     !(yield* ownershipChangedSince(sequence))
@@ -884,7 +1009,12 @@ const make = Effect.gen(function* () {
                 return yield* revalidate();
               });
               const isStillEligible = Effect.gen(function* () {
-                if (eligibilitySequence === null || hasTerminal(worktreePath)) return false;
+                if (
+                  eligibilitySequence === null ||
+                  (yield* terminalUsesDependencies(worktreePath, recordedWorktreePath)) ||
+                  !(yield* pathIdentityUnchanged(recordedWorktreePath, worktreePath))
+                )
+                  return false;
                 const currentSettings = yield* settingsService.getSettings;
                 if (!locationsUnchanged(currentSettings))
                   return keep("Worktree cleanup locations changed");
@@ -912,11 +1042,11 @@ const make = Effect.gen(function* () {
                   `;
                   if (pending.length > 0) return false;
                 }
-                if (previewUsesWorktree(worktreePath, yield* previewsProtectingWorktrees()))
+                if (yield* previewUsesDependencies(worktreePath, recordedWorktreePath))
                   return false;
                 if (yield* hasLiveProviderSession(worktreePath, thread.id)) return false;
                 return (
-                  !hasTerminal(worktreePath) &&
+                  !(yield* terminalUsesDependencies(worktreePath, recordedWorktreePath)) &&
                   resolveWorktreeCleanup(yield* settingsService.getSettings, thread.projectId)
                     .worktreeDependenciesAfterDays === days
                 );
@@ -971,7 +1101,9 @@ const make = Effect.gen(function* () {
         }
       });
       // Ordered group leases exclude startup throughout inspection and removal.
-      const paths = [...new Set(group.map((entry) => entry.worktreePath))].sort();
+      const paths = [
+        ...new Set(group.flatMap((entry) => [entry.worktreePath, entry.recordedWorktreePath])),
+      ].sort();
       yield* paths.reduceRight((effect, cwd) => withWorkspaceLease(cwd, effect), removeGroup);
     }
   });

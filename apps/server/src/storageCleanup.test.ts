@@ -319,6 +319,10 @@ const cleanupFixture = Effect.gen(function* () {
   let fullStatusCalls = 0;
   let previewPaths: ReadonlyArray<string> = [];
   let ownershipRevision = 0;
+  let dependencyInspectionHook: Effect.Effect<void> | null = null;
+  const terminalListeners: Parameters<
+    TerminalManager.TerminalManager["Service"]["subscribeMetadata"]
+  >[0][] = [];
   const context = yield* Layer.build(StorageCleanup.layer).pipe(
     Effect.provideService(ServerConfig.ServerConfig, config),
     Effect.provideService(FileSystem.FileSystem, {
@@ -338,6 +342,14 @@ const cleanupFixture = Effect.gen(function* () {
       ...git,
       execute: (input) =>
         Effect.gen(function* () {
+          if (
+            input.operation === "GeneratedDependencies.inspect" &&
+            dependencyInspectionHook !== null
+          ) {
+            const hook = dependencyInspectionHook;
+            dependencyInspectionHook = null;
+            yield* hook;
+          }
           if (editBeforeRemoval && input.args.includes("remove"))
             yield* fs.writeFileString(`${worktree}/tracked.txt`, "late edit\n");
           if (input.operation === "GeneratedDependencies.inspect" && onDependencyInspection) {
@@ -540,7 +552,11 @@ const cleanupFixture = Effect.gen(function* () {
       invalidateStatus: () => Effect.void,
     } as unknown as GitManager.GitManager["Service"]),
     Effect.provideService(TerminalManager.TerminalManager, {
-      subscribeMetadata: () => Effect.succeed(() => {}),
+      subscribeMetadata: (listener: (typeof terminalListeners)[number]) =>
+        Effect.sync(() => {
+          terminalListeners.push(listener);
+          return () => {};
+        }),
     } as unknown as TerminalManager.TerminalManager["Service"]),
     Effect.provideService(ServerActivation, Deferred.await(activation)),
   );
@@ -607,21 +623,51 @@ const cleanupFixture = Effect.gen(function* () {
         },
       };
     }),
-    moveDependencies: (location: "configured" | "previous", removeDefault = false) =>
+    moveDependencies: (
+      location: "configured" | "previous",
+      removeDefault = false,
+      aliasParent = false,
+    ) =>
       Effect.gen(function* () {
         const directory = `${baseDir}/alternate-worktrees`;
         const moved = `${directory}/feature`;
         yield* fs.makeDirectory(directory, { recursive: true });
         yield* command(repo, ["worktree", "move", worktree, moved]);
         worktree = moved;
+        const cleanupDirectory = aliasParent ? `${baseDir}/aliased-worktrees` : directory;
+        if (aliasParent) {
+          yield* fs.symlink(directory, cleanupDirectory);
+          worktree = `${cleanupDirectory}/feature`;
+        }
         threads = threads.map((thread) => ({ ...thread, worktreePath: worktree }));
         settings = {
           ...settings,
           ...(location === "configured"
-            ? { worktreesDirectory: directory }
-            : { previousWorktreesDirectories: [directory] }),
+            ? { worktreesDirectory: cleanupDirectory }
+            : { previousWorktreesDirectories: [cleanupDirectory] }),
         };
         if (removeDefault) yield* fs.remove(config.worktreesDir, { recursive: true });
+        return { canonicalPath: moved, recordedPath: worktree, cleanupDirectory };
+      }),
+    onDependencyInspection: (hook: Effect.Effect<void>) => {
+      dependencyInspectionHook = hook;
+    },
+    setTerminalCwd: (cwd: string) =>
+      terminalListeners[0]!({
+        type: "upsert",
+        terminal: {
+          threadId: "unrelated-terminal",
+          terminalId: "terminal-1",
+          cwd,
+          worktreePath: null,
+          status: "starting",
+          pid: null,
+          exitCode: null,
+          exitSignal: null,
+          hasRunningSubprocess: false,
+          label: "Shell",
+          updatedAt: "2026-06-10T12:00:00.000Z",
+        },
       }),
     enableFiles: () => {
       settings = {
@@ -832,6 +878,133 @@ describe("provider protection during storage cleanup", () => {
 });
 
 describe("dependency cleanup reports", () => {
+  it.live.each(["configured", "previous"] as const)(
+    "removes dependencies through a symlinked parent in the %s location",
+    (location) =>
+      runCleanupTest(
+        isolatedDependencies(
+          Effect.gen(function* () {
+            const fixture = yield* cleanupFixture;
+            yield* fixture.enableDependencies;
+            const paths = yield* fixture.moveDependencies(location, false, true);
+            const report = yield* fixture.service.runNow;
+            expect(report.entries[0]).toMatchObject({
+              kind: "dependencies",
+              outcome: "removed",
+              path: `${paths.canonicalPath}/node_modules`,
+            });
+            expect(yield* fixture.fs.exists(`${paths.recordedPath}/node_modules`)).toBe(false);
+            expect(yield* fixture.fs.exists(`${paths.recordedPath}/tracked.txt`)).toBe(true);
+          }),
+        ),
+      ),
+  );
+
+  it.live("refuses a symlinked worktree leaf", () =>
+    runCleanupTest(
+      isolatedDependencies(
+        Effect.gen(function* () {
+          const fixture = yield* cleanupFixture;
+          yield* fixture.enableDependencies;
+          const alias = `${fixture.config.worktreesDir}/linked-feature`;
+          yield* fixture.fs.symlink(fixture.worktree, alias);
+          fixture.setThreads([shell({ branch: "feature", worktreePath: alias })]);
+          const report = yield* fixture.service.runNow;
+          expect(report.entries[0]).toMatchObject({
+            outcome: "kept",
+            reason: "Worktree path is a symlink or its location changed",
+          });
+          expect(yield* fixture.fs.exists(`${fixture.worktree}/node_modules`)).toBe(true);
+        }),
+      ),
+    ),
+  );
+
+  it.live("keeps a worktree shared by canonical and aliased owners", () =>
+    runCleanupTest(
+      isolatedDependencies(
+        Effect.gen(function* () {
+          const fixture = yield* cleanupFixture;
+          yield* fixture.enableDependencies;
+          const paths = yield* fixture.moveDependencies("configured", false, true);
+          fixture.setThreads([
+            shell({ branch: "feature", worktreePath: paths.recordedPath }),
+            shell({
+              id: ThreadId.make("other"),
+              branch: "feature",
+              worktreePath: paths.canonicalPath,
+            }),
+          ]);
+          const report = yield* fixture.service.runNow;
+          expect(report.entries).toMatchObject([
+            {
+              outcome: "kept",
+              reason: "More than one thread uses this worktree",
+            },
+          ]);
+          expect(yield* fixture.fs.exists(`${paths.canonicalPath}/node_modules`)).toBe(true);
+        }),
+      ),
+    ),
+  );
+
+  it.live.each(["terminal", "provider", "preview", "process"] as const)(
+    "keeps dependencies protected by an aliased %s workspace",
+    (owner) =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          let processCwds: string[] = [];
+          const fixture = yield* cleanupFixture.pipe(
+            Effect.provideService(
+              GeneratedDependencies.ProcessWorkingDirectories,
+              Effect.sync(() => processCwds),
+            ),
+            Effect.provideService(DependencyMounts.MountPoints, Effect.succeed([])),
+          );
+          yield* fixture.enableDependencies;
+          const paths = yield* fixture.moveDependencies("configured", false, true);
+          // The candidate uses the real path while its owner uses the parent alias.
+          fixture.setThreads([shell({ branch: "feature", worktreePath: paths.canonicalPath })]);
+          if (owner === "terminal") yield* fixture.setTerminalCwd(paths.recordedPath);
+          else if (owner === "provider") fixture.setOpenSessionCwd(paths.recordedPath);
+          else if (owner === "preview") fixture.setPreviewPaths([paths.recordedPath]);
+          else processCwds = [paths.recordedPath];
+          const report = yield* fixture.service.runNow;
+          expect(report.counts).toEqual({ removed: 0, kept: 1, failed: 0 });
+          expect(report.entries[0]?.reason.toLowerCase()).toContain(
+            owner === "provider" ? "provider session" : owner,
+          );
+          expect(yield* fixture.fs.exists(`${paths.canonicalPath}/node_modules`)).toBe(true);
+        }),
+      ),
+  );
+
+  it.live("keeps dependencies when a parent alias retargets during inspection", () =>
+    runCleanupTest(
+      isolatedDependencies(
+        Effect.gen(function* () {
+          const fixture = yield* cleanupFixture;
+          yield* fixture.enableDependencies;
+          const paths = yield* fixture.moveDependencies("configured", false, true);
+          const replacement = yield* fixture.fs.makeTempDirectoryScoped();
+          yield* fixture.fs.makeDirectory(`${replacement}/feature`);
+          fixture.onDependencyInspection(
+            Effect.gen(function* () {
+              yield* fixture.fs.remove(paths.cleanupDirectory);
+              yield* fixture.fs.symlink(replacement, paths.cleanupDirectory);
+            }).pipe(Effect.orDie),
+          );
+          const report = yield* fixture.service.runNow;
+          expect(report.entries[0]).toMatchObject({
+            outcome: "kept",
+            reason: "Worktree path is a symlink or its location changed",
+          });
+          expect(yield* fixture.fs.exists(`${paths.canonicalPath}/node_modules`)).toBe(true);
+        }),
+      ),
+    ),
+  );
+
   it.live.each([
     ["configured", false],
     ["previous", false],

@@ -303,7 +303,9 @@ function CleanupSection() {
       environment,
       report,
       description: report
-        ? `Last run ${formatRelativeTimeLabel(report.finishedAt)}. ${formatBytes(report.bytesFreed)} recovered${report.entries.some((entry) => entry.kind === "dependencies" && entry.outcome === "removed") ? " (includes dependency estimates)" : ""}.${report.counts.failed > 0 ? ` ${report.counts.failed} ${report.counts.failed === 1 ? "item" : "items"} couldn't be removed.` : ""}`
+        ? // File sizes cannot prove the change in free disk space, and individual
+          // dependency results may be omitted from a capped report.
+          `Last run ${formatRelativeTimeLabel(report.finishedAt)}. Estimated space recovered: ${formatBytes(report.bytesFreed)}.${report.counts.failed > 0 ? ` ${report.counts.failed} ${report.counts.failed === 1 ? "item" : "items"} couldn't be removed.` : ""}`
         : query?.failed
           ? "Could not load the last run."
           : query?.loading
