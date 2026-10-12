@@ -472,15 +472,24 @@ export const make = Effect.gen(function* () {
         }),
       )
       .pipe(
-        Effect.catchTag(["UpdateDrainAdmissionError", "UpdateDrainError"], (cause) =>
-          Effect.fail(
-            new ProjectSetupScriptOperationError({
-              ...errorContext,
-              operation: "admitSetupScript",
-              cause,
-            }),
-          ),
-        ),
+        Effect.catchTags({
+          UpdateDrainAdmissionError: (cause) =>
+            Effect.fail(
+              new ProjectSetupScriptOperationError({
+                ...errorContext,
+                operation: "admitSetupScript",
+                cause,
+              }),
+            ),
+          UpdateDrainError: (cause) =>
+            Effect.fail(
+              new ProjectSetupScriptOperationError({
+                ...errorContext,
+                operation: "admitSetupScript",
+                cause,
+              }),
+            ),
+        }),
       );
 
     // A clean run leaves only an idle prompt behind; its output stays in the

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import type { OrchestrationV2ThreadProjection } from "@t3tools/contracts";
+import { RunAttemptId, type OrchestrationV2ThreadProjection } from "@t3tools/contracts";
 
 import {
   canDetachThreadProviderSession,
@@ -31,6 +31,63 @@ const capabilities = (input?: {
   }) as never;
 
 describe("thread workflows", () => {
+  it.each(["suspect", "stale", "recovering", "failed"] as const)(
+    "keeps queued messages editable but does not offer steering into a %s attempt",
+    (status) => {
+      const projection = {
+        thread: {
+          id: "thread",
+          activeProviderThreadId: "provider-thread",
+          recovery: { runId: "active", attemptId: "attempt-active", status },
+        },
+        runs: [
+          {
+            id: "active",
+            status: "running",
+            activeAttemptId: "attempt-active",
+            providerThreadId: "provider-thread",
+          },
+          { id: "queued", status: "queued", userMessageId: "queued-message", ordinal: 2 },
+        ],
+        messages: [{ id: "queued-message", text: "Continue later" }],
+        providerTurns: [{ runAttemptId: "attempt-active", status: "running" }],
+        providerThreads: [{ id: "provider-thread", providerSessionId: "provider-session" }],
+        providerSessions: [
+          {
+            id: "provider-session",
+            status: "running",
+            capabilities: capabilities({ queued: true, steer: true }),
+          },
+        ],
+      } as unknown as OrchestrationV2ThreadProjection;
+      const blocked = deriveThreadQueueWorkflowState(projection);
+      expect(blocked.canPromoteToSteer).toBe(false);
+      expect(blocked.canReorder).toBe(true);
+      expect(blocked.queuedRuns.map((entry) => entry.text)).toEqual(["Continue later"]);
+      expect(
+        deriveThreadQueueWorkflowState({
+          ...projection,
+          thread: {
+            ...projection.thread,
+            recovery: { ...projection.thread.recovery!, status: "recovered" },
+          },
+        }).canPromoteToSteer,
+      ).toBe(true);
+      expect(
+        deriveThreadQueueWorkflowState({
+          ...projection,
+          thread: {
+            ...projection.thread,
+            recovery: {
+              ...projection.thread.recovery!,
+              attemptId: RunAttemptId.make("previous-attempt"),
+            },
+          },
+        }).canPromoteToSteer,
+      ).toBe(true);
+    },
+  );
+
   it("allows a completed thread to switch providers after its session detaches", () => {
     const projection = {
       thread: {

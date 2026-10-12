@@ -1,9 +1,11 @@
 import {
   AuthFilesystemReadScope,
+  AuthOrchestrationReadScope,
   EnvironmentId,
   type AuthSessionState,
   type ProjectListEntriesResult,
   ProjectReadFileError,
+  ThreadId,
   type ProjectReadFileResult,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -14,7 +16,10 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const authorizationMocks = vi.hoisted(() => ({
   sessionAtom: null as Atom.Atom<
-    AsyncResult.AsyncResult<Pick<AuthSessionState, "authenticated" | "scopes">, Error>
+    AsyncResult.AsyncResult<
+      Pick<AuthSessionState, "authenticated" | "scopes" | "permissions">,
+      Error
+    >
   > | null,
   phase: "connected" as "connected" | "offline",
 }));
@@ -165,6 +170,65 @@ describe("project query refresh", () => {
       expect(entries.data).toBeNull();
       expect(entries.error).toBe("This connection cannot read host files.");
       expect(entries.isPending).toBe(false);
+    } finally {
+      registry.dispose();
+      atomHooks.registry = null;
+    }
+  });
+
+  it("reads a linked conversation file without exposing the file tree or optimistic host contents", () => {
+    authorizationMocks.sessionAtom = Atom.make(
+      AsyncResult.success({ authenticated: true, permissions: [AuthOrchestrationReadScope] }),
+    );
+    const registry = AtomRegistry.make();
+    atomHooks.registry = registry;
+    projectMocks.readFile.mockReturnValue(Atom.make(AsyncResult.success(file("published report"))));
+    projectMocks.optimisticFile.mockReturnValue(
+      Atom.make({ data: file("unrelated cached contents") }),
+    );
+    const threadId = ThreadId.make("report-thread");
+    try {
+      const query = useProjectFileQuery(environmentId, "/repo", "src/preview.ts", true, threadId);
+      expect(query.data?.contents).toBe("published report");
+      expect(query.error).toBeNull();
+      expect(projectMocks.readFile).toHaveBeenCalledWith({
+        environmentId,
+        input: { cwd: "/repo", relativePath: "src/preview.ts", linkedThreadId: threadId },
+      });
+      expect(useProjectEntriesQuery(environmentId, "/repo").data).toBeNull();
+      expect(projectMocks.listEntries).not.toHaveBeenCalled();
+    } finally {
+      registry.dispose();
+      atomHooks.registry = null;
+    }
+  });
+
+  it("preserves the server denial for a file that was not published in the conversation", () => {
+    authorizationMocks.sessionAtom = Atom.make(
+      AsyncResult.success({ authenticated: true, permissions: [AuthOrchestrationReadScope] }),
+    );
+    const registry = AtomRegistry.make();
+    atomHooks.registry = registry;
+    projectMocks.readFile.mockReturnValue(
+      Atom.make(
+        AsyncResult.failure(Cause.fail(new Error("This file is not linked in this conversation."))),
+      ),
+    );
+    projectMocks.optimisticFile.mockReturnValue(Atom.make(null));
+    try {
+      expect(
+        useProjectFileQuery(
+          environmentId,
+          "/repo",
+          "private.txt",
+          true,
+          ThreadId.make("report-thread"),
+        ),
+      ).toMatchObject({
+        data: null,
+        error: "This file is not linked in this conversation.",
+        isPending: false,
+      });
     } finally {
       registry.dispose();
       atomHooks.registry = null;

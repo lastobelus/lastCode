@@ -31,6 +31,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as PubSub from "effect/PubSub";
+import * as Ref from "effect/Ref";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -59,6 +60,7 @@ import * as McpToolAccess from "../mcp/McpToolAccess.ts";
 import * as ActionResumeHandlers from "../mcp/toolkits/actionResume/handlers.ts";
 import { ActionResumeToolkit } from "../mcp/toolkits/actionResume/tools.ts";
 import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
+import { makePausedEnvironment } from "../orchestration-v2/EnvironmentAutomation.testkit.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as ActionResume from "./ActionResume.ts";
@@ -1493,5 +1495,119 @@ it.effect(
         assert.equal(h.followUps().length, 1);
         assert.equal(h.followUps()[0]?.messageId, `action-resume:${run.runId}:follow-up`);
       }).pipe(Effect.provide(h.layer));
+    }).pipe(Effect.provide(StoreTestLayer)),
+);
+
+it.effect("retains a completed Action while paused and delivers once after Resume", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness;
+    const pause = yield* makePausedEnvironment;
+    yield* Effect.gen(function* () {
+      const actions = yield* ActionResume.ActionResume;
+      const run = yield* actions.runProjectActionAndResume(invocation, "qa");
+      yield* h.emit({
+        type: "exited",
+        threadId,
+        terminalId: run.terminalId,
+        exitCode: 0,
+        exitSignal: null,
+      });
+      yield* actions.retryPendingFollowUps;
+      assert.equal(h.state.latest?.delivery, "pending");
+      assert.equal(h.followUps().length, 0);
+      yield* pause.resume;
+      yield* actions.retryPendingFollowUps;
+      yield* actions.retryPendingFollowUps;
+      assert.equal(h.state.latest?.delivery, "delivered");
+      assert.equal(h.followUps().length, 1);
+      assert.equal(h.followUps()[0]?.messageId, `action-resume:${run.runId}:follow-up`);
+    }).pipe(Effect.provide(h.layer.pipe(Layer.provide(pause.layer))));
+  }).pipe(Effect.provide(StoreTestLayer)),
+);
+
+it.effect("delivers a pause-held result once after Resume clears and the service restarts", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness;
+    const pause = yield* makePausedEnvironment;
+    let runId: string | undefined;
+    yield* Effect.gen(function* () {
+      const actions = yield* ActionResume.ActionResume;
+      const run = yield* actions.runProjectActionAndResume(invocation, "qa");
+      runId = run.runId;
+      yield* h.emit({
+        type: "output",
+        threadId,
+        terminalId: run.terminalId,
+        data:
+          ActionResume.actionOutputMarker(run.runId, "start") +
+          "saved while paused" +
+          ActionResume.actionOutputMarker(run.runId, "end"),
+      });
+      yield* h.emit({
+        type: "exited",
+        threadId,
+        terminalId: run.terminalId,
+        exitCode: 0,
+        exitSignal: null,
+      });
+      const held = Option.getOrThrow(yield* h.store.get(threadId, run.runId));
+      assert.equal(held.state.delivery, "pending");
+      assert.isTrue(held.state.heldByEnvironmentPause);
+      assert.equal(held.outputTail, "saved while paused");
+      yield* actions.retryPendingFollowUps;
+      yield* actions.retryPendingFollowUps;
+      assert.equal(h.state.latest?.revision, held.state.revision);
+      assert.equal(h.followUps().length, 0);
+      yield* pause.resume;
+      // The session can clear before the next open-state scheduler scan.
+      yield* Ref.set(pause.state, null);
+    }).pipe(Effect.provide(h.layer.pipe(Layer.provide(pause.layer))));
+
+    yield* Effect.gen(function* () {
+      const actions = yield* ActionResume.ActionResume;
+      // This is the automatic open-state retry, with no manual Action Resume.
+      yield* actions.retryPendingFollowUps;
+      yield* actions.retryPendingFollowUps;
+      assert.equal(h.state.latest?.delivery, "delivered");
+      assert.equal(h.followUps().length, 1);
+      assert.equal(h.followUps()[0]?.messageId, `action-resume:${runId}:follow-up`);
+      assert.include(h.followUps()[0]!.text, "saved while paused");
+    }).pipe(Effect.provide(Layer.fresh(h.layer.pipe(Layer.provide(pause.layer)))));
+  }).pipe(Effect.provide(StoreTestLayer)),
+);
+
+it.effect.each(["pausing", "resuming"] as const)(
+  "keeps an environment-deferred Action pending across restart during %s",
+  (phase) =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness;
+      const pause = yield* makePausedEnvironment;
+      if (phase === "resuming") yield* pause.resume;
+      yield* h.store.save(
+        retained("environment-deferred", { outcome: "succeeded", delivery: "pending" }),
+        "retained output",
+      );
+      h.state.metadataReceipt = yield* Deferred.make<void>();
+      yield* Effect.gen(function* () {
+        yield* ActionResume.ActionResume;
+        yield* Deferred.await(h.state.metadataReceipt!);
+        if (phase === "pausing") {
+          assert.equal(h.state.latest?.delivery, "pending");
+          assert.equal(h.followUps().length, 0);
+        }
+        assert.isTrue(
+          Option.getOrThrow(yield* h.store.get(threadId, "environment-deferred")).state
+            .heldByEnvironmentPause,
+        );
+        yield* pause.resume;
+        yield* Ref.set(pause.state, null);
+      }).pipe(Effect.provide(h.layer.pipe(Layer.provide(pause.layer))));
+      yield* Effect.gen(function* () {
+        const actions = yield* ActionResume.ActionResume;
+        yield* actions.retryPendingFollowUps;
+        yield* actions.retryPendingFollowUps;
+        assert.equal(h.followUps().length, 1);
+        assert.include(h.followUps()[0]!.text, "retained output");
+      }).pipe(Effect.provide(Layer.fresh(h.layer.pipe(Layer.provide(pause.layer)))));
     }).pipe(Effect.provide(StoreTestLayer)),
 );

@@ -117,6 +117,11 @@ function threadDetailToShell(
     snoozedUntil: thread.snoozedUntil ?? null,
     snoozedAt: thread.snoozedAt ?? null,
     deletedAt: thread.deletedAt,
+    persistent: thread.persistent,
+    annotation: thread.annotation ?? null,
+    attention: thread.attention ?? null,
+    actionResume: thread.actionResume ?? null,
+    worktreeCleanup: thread.worktreeCleanup ?? null,
   });
 }
 

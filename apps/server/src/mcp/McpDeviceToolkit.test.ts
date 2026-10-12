@@ -364,6 +364,9 @@ it.effect("does not boot or issue a credential when agent readiness is unsupport
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
         Layer.provide(layerUnsupported),
+        Layer.provide(
+          ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-device-unsupported-" }),
+        ),
         Layer.provide(layerAccess),
         Layer.provide(NodeServices.layer),
       ),
@@ -696,6 +699,9 @@ it.effect("rolls back the opened session when post-open credential issuance is i
           Layer.provideMerge(McpServer.McpServer.layer),
           Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
           Layer.provide(delayedDevices),
+          Layer.provide(
+            ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-device-delayed-" }),
+          ),
           Layer.provide(layerAccess),
           Layer.provide(NodeServices.layer),
         ),
@@ -785,6 +791,10 @@ it.effect.each([
             Layer.provideMerge(McpServer.McpServer.layer),
             Layer.provide(devices),
             Layer.provide(access),
+            Layer.provide(
+              ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-device-revoke-readiness-" }),
+            ),
+            Layer.provide(NodeServices.layer),
           ),
         ),
       );
