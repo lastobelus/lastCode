@@ -87,6 +87,9 @@ it.effect.each([
         McpToolAccessTestkit.liveThreadsLayer,
         Layer.succeed(PreviewAutomationBroker.PreviewAutomationBroker, broker),
         Layer.mock(PreviewHosting.PreviewHosting)({}),
+        ServerConfig.layerTest(process.cwd(), { prefix: "preview-diagnostic-test-" }).pipe(
+          Layer.provide(NodeServices.layer),
+        ),
         NodeServices.layer,
       );
       const registration = toolkitRegistration(PreviewStandardToolkit, layerStandard).pipe(
