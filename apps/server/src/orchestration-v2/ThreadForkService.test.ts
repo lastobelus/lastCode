@@ -106,11 +106,11 @@ function makeSourceProjection(sourceRun: OrchestrationV2Run): OrchestrationV2Thr
   };
 }
 
-const planFork = (sourceRun: OrchestrationV2Run) =>
+const planFork = (sourceRun: OrchestrationV2Run, sourceThread = makeSourceThread()) =>
   Effect.gen(function* () {
     const service = yield* ThreadForkService.ThreadForkServiceV2;
     return yield* service.plan({
-      sourceProjection: makeSourceProjection(sourceRun),
+      sourceProjection: { ...makeSourceProjection(sourceRun), thread: sourceThread },
       sourceRun,
       sourceProviderThread: undefined,
       canonicalSourcePoint: {
@@ -176,6 +176,75 @@ it.effect("forks from a usage-limited failed run", () =>
       threadId: sourceThreadId,
       runId: sourceRunId,
     });
+  }),
+);
+
+it.effect("keeps the source thread's Project Action out of its fork", () =>
+  Effect.gen(function* () {
+    const source = makeSourceThread();
+    const actionResume = {
+      runId: "action:source-ci",
+      threadId: sourceThreadId,
+      projectId: source.projectId,
+      actionId: "quick-ci",
+      actionName: "Run Quick CI",
+      terminalId: "terminal:source-ci",
+      outcome: "running" as const,
+      delivery: "armed" as const,
+      startedAt: DateTime.formatIso(snoozedAt),
+      finishedAt: null,
+      exitCode: null,
+      exitSignal: null,
+    };
+    const result = yield* planFork(makeSourceRun("completed"), { ...source, actionResume });
+    assert.isNull(result.targetThread.actionResume);
+    assert.equal(actionResume.threadId, sourceThreadId);
+    assert.equal(actionResume.outcome, "running");
+  }),
+);
+
+it.effect("does not inherit an ordinary source conversation's creator or placement", () =>
+  Effect.gen(function* () {
+    for (const creatorGrouping of ["grouped", "independent"] as const) {
+      const sourceThread = {
+        ...makeSourceThread(),
+        createdBy: "agent" as const,
+        creationSource: "mcp" as const,
+        creatorThreadId: ThreadId.make("thread:ordinary-creator"),
+        creatorGrouping,
+      };
+      const { targetThread } = yield* planFork(makeSourceRun("completed"), sourceThread);
+      assert.isFalse("creatorThreadId" in targetThread);
+      assert.isFalse("creatorGrouping" in targetThread);
+      assert.equal(targetThread.createdBy, "user");
+      assert.equal(targetThread.lineage.parentThreadId, sourceThread.id);
+      assert.equal(targetThread.lineage.relationshipToParent, "fork");
+      assert.equal(sourceThread.creatorThreadId, "thread:ordinary-creator");
+      assert.equal(sourceThread.creatorGrouping, creatorGrouping);
+    }
+  }),
+);
+
+it.effect("keeps dashboard requests on their source instead of copying them to a fork", () =>
+  Effect.gen(function* () {
+    const sourceRun = makeSourceRun("completed");
+    const request = {
+      id: "source-qa",
+      title: "Check the source result",
+      body: "Verify the source thread's work.",
+      kind: "qa" as const,
+      status: "open" as const,
+      priority: "normal" as const,
+      effort: "focused" as const,
+      requiresComputer: true,
+      createdAt: DateTime.formatIso(sourceCreatedAt),
+      updatedAt: DateTime.formatIso(snoozedAt),
+    };
+    const sourceThread = { ...makeSourceThread(), dashboardItems: [request] };
+    const result = yield* planFork(sourceRun, sourceThread);
+
+    assert.deepEqual(result.targetThread.dashboardItems, []);
+    assert.deepEqual(sourceThread.dashboardItems, [request]);
   }),
 );
 
