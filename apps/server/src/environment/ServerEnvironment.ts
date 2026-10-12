@@ -234,6 +234,7 @@ export const make = Effect.gen(function* () {
       projectWorktreeCleanup: true,
       worktreesDirectory: true,
       worktreeDependencyCleanup: hostPlatform === "darwin" || hostPlatform === "linux",
+      worktreeBuildCleanup: hostPlatform === "darwin" || hostPlatform === "linux",
       threadRestartContinuation: true,
       projectSettingsOverrides: true,
       projectProviderInstanceOverrides: true,

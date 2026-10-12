@@ -141,6 +141,8 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   /** Server honors the `worktreesDirectory` setting. */
   worktreesDirectory: Schema.optionalKey(Schema.Boolean),
   worktreeDependencyCleanup: Schema.optionalKey(Schema.Boolean),
+  /** Verified compiler outputs share the resolved dependency-cleanup rule. */
+  worktreeBuildCleanup: Schema.optionalKey(Schema.Boolean),
   /** Server persists the opt-in for continuing interrupted threads after restarts. */
   threadRestartContinuation: Schema.optionalKey(Schema.Boolean),
   /** Server resolves `projectSettingsOverrides`; older servers ignore the key. */

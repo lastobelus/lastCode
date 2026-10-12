@@ -194,6 +194,15 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
     reportFailure: true,
   });
   const supportsDependencies = supportsMobileWorktreeDependencyCleanup(targets, projectSelected);
+  const supportsBuilds =
+    targets.length > 0 &&
+    targets.every(
+      (target) =>
+        target.environment.serverConfig.environment.capabilities.worktreeBuildCleanup === true,
+    );
+  const disposableOutputsLabel = supportsBuilds
+    ? "Remove inactive dependencies and build outputs"
+    : "Remove inactive worktree dependencies";
   const pageProjectKeys = PAGE_PROJECT_KEYS[props.page].filter(
     (key) => key !== "worktreeCleanup" || supportsDependencies,
   );
@@ -547,8 +556,12 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                       >
                         <SettingsSwitchRow
                           icon="archivebox"
-                          label="Remove inactive worktree dependencies"
-                          subtitle="Remove recognized npm or pnpm node_modules immediately for archived owners, or after the configured delay since dependency use for unarchived and ownerless worktrees. Every shared owner must be archived with cleanup enabled. Keep source, tmp, notes, and other files. Active consumers prevent cleanup. Reinstall dependencies before resuming work."
+                          label={disposableOutputsLabel}
+                          subtitle={
+                            supportsBuilds
+                              ? "Remove recognized dependencies and unchanged verified build outputs immediately for archived owners, or after the configured delay since actual use for unarchived and ownerless worktrees. Every shared owner must be archived with cleanup enabled. Retain additions, notes and source until its separate worktree rule permits removal. Active consumers prevent cleanup. Reinstall or rebuild before resuming work."
+                              : "Remove recognized npm or pnpm dependencies using the selected environment's inactivity rule. Source and other files are kept. Active consumers prevent cleanup. Reinstall before resuming work."
+                          }
                           value={dependencySettings.enabled}
                           disabled={dependenciesDisabled}
                           onValueChange={(enabled) =>

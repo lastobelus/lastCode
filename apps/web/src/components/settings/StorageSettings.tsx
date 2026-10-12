@@ -435,6 +435,14 @@ export function StorageSettingsPanel() {
     (environment) =>
       environment.serverConfig?.environment.capabilities.worktreeDependencyCleanup === true,
   );
+  const buildsSupported = connectedEnvironments.every(
+    (environment) =>
+      environment.serverConfig?.environment.capabilities.worktreeBuildCleanup === true,
+  );
+  const disposableOutputsLabel = buildsSupported
+    ? "Remove inactive dependencies and build outputs"
+    : "Remove inactive worktree dependencies";
+
   const updateWorktree = (patch: Partial<WorktreeCleanupRules>) =>
     isProjectScope
       ? updateSettings({ worktreeCleanup: { mode: "custom", rules: patch } })
@@ -525,17 +533,19 @@ export function StorageSettingsPanel() {
         {(!isProjectScope || (!mixedModes && mode === "custom")) && (
           <>
             <SettingsRow
-              title="Remove inactive worktree dependencies"
+              title={disposableOutputsLabel}
               status={ruleStatus("worktreeDependenciesAfterDays")}
               description={
                 dependenciesSupported
-                  ? "Remove recognized npm or pnpm node_modules installations immediately for archived owners, or after the configured delay since dependency use for unarchived and ownerless worktrees. Every shared owner must be archived with cleanup enabled. Keeps source, tmp, notes, and other files. Active consumers prevent cleanup. Reinstall dependencies before resuming work."
+                  ? buildsSupported
+                    ? "Remove recognized dependencies and unchanged verified build outputs immediately for archived owners, or after the configured delay since actual use for unarchived and ownerless worktrees. Every shared owner must be archived with cleanup enabled. Retain additions, notes and source until its separate worktree rule permits removal. Active consumers prevent cleanup. Reinstall or rebuild before resuming work."
+                    : "Remove recognized npm or pnpm dependencies using the selected environment's inactivity rule. Source and other files are kept. Active consumers prevent cleanup. Reinstall before resuming work."
                   : "Choose updated macOS or Linux machines to use dependency cleanup."
               }
               serverScoped={!isProjectScope}
               control={
                 <RetentionControl
-                  label="Remove inactive worktree dependencies"
+                  label={disposableOutputsLabel}
                   disabled={!dependenciesSupported}
                   value={settings.worktreeDependenciesAfterDays}
                   onChange={(worktreeDependenciesAfterDays) =>
@@ -560,7 +570,11 @@ export function StorageSettingsPanel() {
             <SettingsRow
               title="Delete inactive worktrees"
               status={ruleStatus("worktreeAfterDays")}
-              description="Clean archived worktrees are eligible immediately when enabled. Unarchived worktrees use the configured delay. Branches and thread history are kept."
+              description={
+                buildsSupported
+                  ? "Clean archived worktrees are eligible immediately when enabled. Unarchived worktrees use the configured delay. Branches and thread history are kept."
+                  : "Remove worktrees using the selected environment’s inactivity rule. Branches and thread history are kept."
+              }
               serverScoped={!isProjectScope}
               control={
                 <RetentionControl
@@ -603,7 +617,11 @@ export function StorageSettingsPanel() {
               <SettingsRow
                 {...searchableSetting("storage-worktree-keep-when")}
                 title="Local work is preserved"
-                description="Edits, untracked files and unknown ignored files keep the checkout. Verified generated files are reclaimed separately."
+                description={
+                  buildsSupported
+                    ? "Edits, untracked files and unknown ignored files keep the checkout. Verified generated files are reclaimed separately."
+                    : "Older selected environments use their existing local-file policy. Update them for automatic preservation of unknown local files."
+                }
                 serverScoped={!isProjectScope}
                 control={null}
               />

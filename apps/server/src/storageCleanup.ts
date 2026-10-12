@@ -51,6 +51,7 @@ import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import { withWorkspaceLease } from "./workspace/workspaceLease.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as GeneratedDependencies from "./workspace/GeneratedDependencies.ts";
+import * as GeneratedBuilds from "./workspace/GeneratedBuilds.ts";
 import { worktreeConsumerReason } from "./workspace/WorktreeConsumers.ts";
 
 const decodeCleanupThread = Schema.decodeUnknownEffect(
@@ -228,6 +229,7 @@ const make = Effect.gen(function* () {
   const dependencies = yield* GeneratedDependencies.GeneratedDependencies.pipe(
     Effect.provide(GeneratedDependencies.layer),
   );
+  const builds = yield* GeneratedBuilds.GeneratedBuilds.pipe(Effect.provide(GeneratedBuilds.layer));
   const liveTerminals = new Map<string, Map<string, TerminalSummary>>();
   const noteTerminal = (terminal: TerminalSummary) => {
     const threadTerminals =
@@ -662,15 +664,32 @@ const make = Effect.gen(function* () {
   });
 
   const dependencyEstimates = new WeakMap<StorageCleanupReportEntry, number>();
-  const cleanDependencies = Effect.fn("StorageCleanup.cleanDependencies")(function* (
+  const cleanDisposableOutputs = Effect.fn("StorageCleanup.cleanDisposableOutputs")(function* (
     serverSettings: ServerSettings,
     now: number,
     entries: StorageCleanupReportEntry[],
+    kind: "dependencies" | "generated-builds",
   ) {
+    const generatedBuilds = kind === "generated-builds";
+    const outputPath = (cwd: string) => (generatedBuilds ? cwd : path.join(cwd, "node_modules"));
+    const outputExists = (cwd: string) =>
+      generatedBuilds ? builds.hasOutputs(cwd) : fs.exists(outputPath(cwd));
+    const observe = (
+      input: { managedWorktreesRoot: string; repositoryRoot: string; worktreePath: string },
+      time: number,
+      used = false,
+      persist = true,
+    ) =>
+      generatedBuilds
+        ? builds.observe(input, time, used, persist)
+        : dependencies.observe(input, time, used, persist);
+    const unrecognizedReason = generatedBuilds
+      ? "No verified compiler emissions; legacy build outputs need exact-file review"
+      : "No dependency install could be safely recognized";
     if (!anyWorktreePolicy(serverSettings, dependencyCleanupEnabled)) {
       entries.push({
         kind: "worktree",
-        worktreeResource: "dependencies",
+        worktreeResource: kind,
         outcome: "kept",
         reason: "Dependency cleanup policy is disabled",
         path: null,
@@ -809,7 +828,7 @@ const make = Effect.gen(function* () {
         owner.worktreePath === null ||
         resolveWorktreeCleanup(serverSettings, owner.projectId).worktreeDependenciesAfterDays ===
           null ||
-        !(yield* fs.exists(path.join(cwd, "node_modules")))
+        !(yield* outputExists(cwd))
       )
         continue;
       const root = roots.find((root) => inside(root, cwd));
@@ -830,17 +849,15 @@ const make = Effect.gen(function* () {
                 : (yield* hasLiveProviderSession(cwd, owner.id))
                   ? "A provider session is still open"
                   : null;
-      const activity = yield* dependencies
-        .observe(
-          { managedWorktreesRoot: root, worktreePath: cwd, repositoryRoot: project.workspaceRoot },
-          now,
-          processCwds?.some(
-            (processCwd) =>
-              processCwd === path.join(cwd, "node_modules") ||
-              inside(path.join(cwd, "node_modules"), processCwd),
-          ) ?? false,
-        )
-        .pipe(Effect.orElseSucceed(() => null));
+      const activity = yield* observe(
+        { managedWorktreesRoot: root, worktreePath: cwd, repositoryRoot: project.workspaceRoot },
+        now,
+        processCwds?.some(
+          (processCwd) =>
+            processCwd === path.join(cwd, "node_modules") ||
+            inside(path.join(cwd, "node_modules"), processCwd),
+        ) ?? false,
+      ).pipe(Effect.orElseSucceed(() => null));
       dependencyActivityByPath.set(
         cwd,
         activity === null ? null : { ...activity, protectedReason },
@@ -852,11 +869,10 @@ const make = Effect.gen(function* () {
       worktreePath: string,
     ) => {
       const entry: StorageCleanupReportEntry = {
-        kind: "worktree",
-        worktreeResource: "dependencies",
+        kind,
         outcome: "kept",
         reason: "A final safety check prevented dependency removal",
-        path: path.join(worktreePath, "node_modules"),
+        path: outputPath(worktreePath),
         threadId: thread.id,
         threadTitle: thread.title,
         bytes: null,
@@ -976,13 +992,13 @@ const make = Effect.gen(function* () {
           if (
             !knownPaths.has(directory) &&
             !registeredGroups.has(directory) &&
-            (yield* fs.exists(path.join(directory, "node_modules")))
+            (yield* outputExists(directory))
           )
             entries.push({
-              kind: "dependencies",
+              kind,
               outcome: "kept",
               reason: "Could not verify a current repository and project mapping",
-              path: path.join(directory, "node_modules"),
+              path: outputPath(directory),
               threadId: null,
               threadTitle: null,
               bytes: null,
@@ -1004,7 +1020,7 @@ const make = Effect.gen(function* () {
       }
       if (pending.length > 0)
         entries.push({
-          kind: "dependencies",
+          kind,
           outcome: "kept",
           reason: "Some dependency locations exceeded the discovery limit and were kept",
           path: root,
@@ -1015,12 +1031,12 @@ const make = Effect.gen(function* () {
         });
     }
     for (const [cwd, mappings] of registeredGroups) {
-      if (knownPaths.has(cwd) || !(yield* fs.exists(path.join(cwd, "node_modules")))) continue;
+      if (knownPaths.has(cwd) || !(yield* outputExists(cwd))) continue;
       const entry: StorageCleanupReportEntry = {
-        kind: "dependencies",
+        kind,
         outcome: "kept",
         reason: "Ownerless install is not yet eligible",
-        path: path.join(cwd, "node_modules"),
+        path: outputPath(cwd),
         threadId: null,
         threadTitle: null,
         bytes: null,
@@ -1086,7 +1102,7 @@ const make = Effect.gen(function* () {
           return null;
         });
         const protectedReason = yield* consumerReason();
-        const observation = yield* dependencies.observe(
+        const observation = yield* observe(
           input,
           now,
           processCwds?.some(
@@ -1095,7 +1111,7 @@ const make = Effect.gen(function* () {
               inside(path.join(cwd, "node_modules"), processCwd),
           ) ?? false,
         );
-        if (observation === null) return keep("No dependency install could be safely recognized");
+        if (observation === null) return keep(unrecognizedReason);
         if (protectedReason !== null) return keep(protectedReason);
         if (observation.lastUsedAt >= now - days * DAY_MS) {
           return keep(
@@ -1134,21 +1150,32 @@ const make = Effect.gen(function* () {
             return keep("Worktree registration changed or could not be verified");
           const reason = yield* consumerReason();
           if (reason !== null) return keep(reason);
-          const latest = yield* dependencies.observe(input, now, false, false);
+          const latest = yield* observe(input, now, false, false);
           return (
             latest !== null &&
             !latest.renewed &&
-            latest.lastUsedAt === observation.lastUsedAt &&
+            (generatedBuilds || latest.lastUsedAt === observation.lastUsedAt) &&
             !(yield* ownershipChangedSince(sequence)) &&
             resolveWorktreeCleanup(yield* settingsService.getSettings, project.id)
               .worktreeDependenciesAfterDays === days
           );
         });
         if (!(yield* revalidate())) return false;
+        const canRemove = revalidate().pipe(Effect.catch(() => Effect.succeed(false)));
+        if (generatedBuilds) {
+          const removed = yield* builds.remove(input, now, days, false, canRemove, canRemove);
+          entry.reason = removed.reason;
+          if (removed.files > 0)
+            Object.assign(entry, {
+              outcome: "removed",
+              bytes: removed.bytes,
+              files: removed.files,
+            });
+          return removed.files > 0;
+        }
         const inspection = yield* dependencies.inspect(input);
         if (inspection === null)
           return keep("No dependency install could be safely recognized and measured");
-        const canRemove = revalidate().pipe(Effect.catch(() => Effect.succeed(false)));
         const removed = yield* dependencies.removeBatch([
           { inspection, canRemove, isStillEligible: canRemove },
         ]);
@@ -1193,7 +1220,7 @@ const make = Effect.gen(function* () {
         const activityAt = deleted ? thread.dependencyActivityAt : storageCleanupActivityAt(thread);
         const worktreePath = thread.cleanupPath;
         const recordedWorktreePath = thread.recordedWorktreePath;
-        if (!(yield* fs.exists(path.join(worktreePath, "node_modules")))) return [];
+        if (!(yield* outputExists(worktreePath))) return [];
         const entry = noteCandidate(thread, worktreePath);
         const keep = (reason: string) => {
           Object.assign(entry, { reason });
@@ -1242,10 +1269,22 @@ const make = Effect.gen(function* () {
           ? { workspaceRoot: thread.workspaceRoot }
           : snapshot.projects.find((entry) => entry.id === thread.projectId);
         if (project === undefined) return keep("Project is no longer available");
+        if (projectRepositories.some((repository) => repository.uncertain))
+          return keep("Could not verify repository ownership for every current project");
+        const repository = projectRepositories.find(
+          (repository) => repository.project.id === thread.projectId,
+        );
+        if (
+          repository?.commonDirectory === null ||
+          repository === undefined ||
+          projectRepositories.filter(
+            (entry) => entry.commonDirectory === repository.commonDirectory,
+          ).length !== 1
+        )
+          return keep("Repository and project mapping could not be verified uniquely");
         if (!archived) {
           const dependencyActivity = dependencyActivityByPath.get(worktreePath) ?? null;
-          if (dependencyActivity === null)
-            return keep("No dependency install could be safely recognized");
+          if (dependencyActivity === null) return keep(unrecognizedReason);
           if (dependencyActivity.protectedReason !== null)
             return keep(dependencyActivity.protectedReason);
           if (dependencyActivity.lastUsedAt >= now - days * DAY_MS)
@@ -1371,7 +1410,7 @@ const make = Effect.gen(function* () {
                   )
                     return keep("A shared owner's project could not be verified safely");
                   if (
-                    (yield* dependencies.observe(
+                    (yield* observe(
                       {
                         managedWorktreesRoot,
                         worktreePath,
@@ -1382,7 +1421,11 @@ const make = Effect.gen(function* () {
                       false,
                     )) === null
                   )
-                    return keep("Shared owners do not map to the same recognized repository");
+                    return keep(
+                      generatedBuilds
+                        ? unrecognizedReason
+                        : "Shared owners do not map to the same recognized repository",
+                    );
                 }
                 return (
                   allOwnerPoliciesUnchanged(yield* settingsService.getSettings) ||
@@ -1392,7 +1435,7 @@ const make = Effect.gen(function* () {
               const candidateStillIdle = Effect.fn("StorageCleanup.dependencyCandidateStillIdle")(
                 function* () {
                   if (!archived) {
-                    const dependencyActivity = yield* dependencies.observe(
+                    const dependencyActivity = yield* observe(
                       { managedWorktreesRoot, worktreePath, repositoryRoot: project.workspaceRoot },
                       now,
                       false,
@@ -1488,15 +1531,6 @@ const make = Effect.gen(function* () {
                 );
               });
               if (!(yield* revalidate())) return null;
-              const inspection = yield* dependencies.inspect({
-                managedWorktreesRoot,
-                worktreePath,
-                repositoryRoot: project.workspaceRoot,
-              });
-              if (inspection === null) {
-                keep("No dependency install could be safely recognized and measured");
-                return null;
-              }
               let eligibilitySequence: number | null = null;
               const canRemove = Effect.gen(function* () {
                 eligibilitySequence = yield* readApplicationSequence();
@@ -1504,7 +1538,7 @@ const make = Effect.gen(function* () {
               });
               const isStillEligible = Effect.gen(function* () {
                 if (!archived) {
-                  const dependencyActivity = yield* dependencies.observe(
+                  const dependencyActivity = yield* observe(
                     { managedWorktreesRoot, worktreePath, repositoryRoot: project.workspaceRoot },
                     now,
                     false,
@@ -1559,6 +1593,33 @@ const make = Effect.gen(function* () {
                   allOwnerPoliciesUnchanged(yield* settingsService.getSettings)
                 );
               });
+              if (generatedBuilds) {
+                const removed = yield* builds.remove(
+                  { managedWorktreesRoot, worktreePath, repositoryRoot: project.workspaceRoot },
+                  now,
+                  days,
+                  archived,
+                  canRemove,
+                  isStillEligible,
+                );
+                entry.reason = removed.reason;
+                if (removed.files > 0)
+                  Object.assign(entry, {
+                    outcome: "removed",
+                    bytes: removed.bytes,
+                    files: removed.files,
+                  });
+                return null;
+              }
+              const inspection = yield* dependencies.inspect({
+                managedWorktreesRoot,
+                worktreePath,
+                repositoryRoot: project.workspaceRoot,
+              });
+              if (inspection === null) {
+                keep("No dependency install could be safely recognized and measured");
+                return null;
+              }
               return {
                 inspection,
                 canRemove,
@@ -2303,7 +2364,7 @@ const make = Effect.gen(function* () {
       startedAt: DateTime.formatIso(DateTime.makeUnsafe(now)),
       settings,
     });
-    yield* cleanDependencies(serverSettings, now, entries).pipe(
+    yield* cleanDisposableOutputs(serverSettings, now, entries, "dependencies").pipe(
       Effect.catch((error) =>
         Effect.gen(function* () {
           const entry: StorageCleanupReportEntry = {
@@ -2321,6 +2382,22 @@ const make = Effect.gen(function* () {
           yield* audit({ event: "dependency-cleanup-failed", runId, ...entry });
           yield* Effect.logWarning("dependency cleanup failed", { error });
         }),
+      ),
+    );
+    yield* cleanDisposableOutputs(serverSettings, now, entries, "generated-builds").pipe(
+      Effect.catch((error) =>
+        Effect.sync(() =>
+          entries.push({
+            kind: "generated-builds",
+            outcome: "failed",
+            reason: cleanupFailureReason(error),
+            path: null,
+            threadId: null,
+            threadTitle: null,
+            bytes: null,
+            files: null,
+          }),
+        ),
       ),
     );
     yield* cleanWorktrees(serverSettings, now, entries, runId).pipe(

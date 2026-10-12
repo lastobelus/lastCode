@@ -175,22 +175,26 @@ Existing prompts for deleting a worktree manually remain available when this pol
 Choose **Delete now** to run the enabled rules immediately. The latest results show which
 worktrees were removed or kept and why, plus any failures.
 
-Enable **Remove inactive worktree dependencies** to reclaim recognized npm or pnpm
-`node_modules` installations while keeping the worktree and its source, notes, and research
-files. Archived threads are eligible immediately when this rule is enabled. For shared
+Enable **Remove inactive dependencies and build outputs** to reclaim recognized npm or
+pnpm `node_modules` installations and unchanged build files recorded by the compiler runners.
+This existing dependency rule also governs verified app `dist` and resource-monitor debug
+outputs; source checkouts remain subject to the separate whole-worktree rule. Additions,
+notes and research files are kept. Archived threads are eligible immediately when this rule is enabled. For shared
 worktrees, every owner must be archived and have cleanup enabled; an unarchived or active
 owner, or an owner whose project policy is Off, keeps the install.
 
 Unarchived and ownerless installs use the delay configured in settings, measured from actual
-dependency use. This includes registered manual and QA worktrees in configured cleanup
+dependency or compiled-output use. This includes registered manual and QA worktrees in configured cleanup
 locations when their repository maps to one project. Dependency preparation and the
 dependency-backed development and CI runners renew that clock; status conversations and
 simply opening a terminal do not. Recognized installs with uncertain usage start a full
 configured interval when first observed. Folder timestamps alone never prove usage.
 
 Active agents, sessions, terminals, previews, processes, and runtime protection prevent
-cleanup. Other generated folders and vendored sources are kept. Reinstall dependencies
-before continuing work. This rule is off by default and follows the project's Inherit, Off,
+cleanup. Only unchanged recorded emissions are removed from build folders; arbitrary
+additions and edited outputs remain. Existing build files without compiler provenance need
+exact-file review and are kept until reviewed. Other generated folders and vendored sources
+are kept. Reinstall dependencies or rebuild outputs before continuing work. This rule is off by default and follows the project's Inherit, Off,
 or Custom policy. Dependency cleanup is available on macOS and Linux and keeps worktrees
 when consumers cannot be checked reliably. On mobile, open **Settings → Maintenance** to
 configure cleanup for an environment or project.
