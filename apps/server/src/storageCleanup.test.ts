@@ -13,6 +13,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlError from "effect/sql/SqlError";
 import {
   DEFAULT_SERVER_SETTINGS,
+  GitCommandError,
   OrchestrationV2AppThreadJson,
   StorageCleanupReport,
   type WorktreeKeepWhen,
@@ -283,8 +284,11 @@ const cleanupFixture = Effect.gen(function* () {
   let onDependencyInspection: (() => void) | null = null;
   let onWorktreeInventory: (() => void) | null = null;
   let worktreeInventoryCalls = 0;
+  let failNextGitInventory = false;
+  let failProjectInventory = false;
   const activation = yield* Deferred.make<void>();
   let failDependencyRead = false;
+  let failWorktreeRead = false;
   let deletedDependencyRows: Array<{
     payload_json: string;
     workspaceRoot: string;
@@ -315,7 +319,23 @@ const cleanupFixture = Effect.gen(function* () {
         return git.statusDetailsLocal(...args);
       },
       listWorktreePaths: (cwd) =>
-        git.listWorktreePaths(cwd).pipe(
+        (failNextGitInventory
+          ? Effect.sync(() => {
+              failNextGitInventory = false;
+            }).pipe(
+              Effect.flatMap(() =>
+                Effect.fail(
+                  new GitCommandError({
+                    operation: "listWorktreePaths",
+                    command: "git worktree list",
+                    cwd,
+                    detail: "Fixture Git inventory failure",
+                  }),
+                ),
+              ),
+            )
+          : git.listWorktreePaths(cwd)
+        ).pipe(
           Effect.tap(() =>
             Effect.sync(() => {
               worktreeInventoryCalls++;
@@ -331,7 +351,15 @@ const cleanupFixture = Effect.gen(function* () {
       subscribeChanges: Effect.succeed(Stream.empty),
     } as unknown as Settings.ServerSettingsService["Service"]),
     Effect.provideService(ProjectStore.ProjectStoreV2, {
-      listShells: () => Effect.sync(() => projectRoots),
+      listShells: () =>
+        failProjectInventory
+          ? Effect.fail(
+              new ProjectStore.ProjectStoreV2Error({
+                operation: "listShells",
+                cause: new Error("Fixture project inventory failure"),
+              }),
+            )
+          : Effect.sync(() => projectRoots),
     } as unknown as ProjectStore.ProjectStoreV2["Service"]),
     Effect.provideService(ProjectionStore.ProjectionStoreV2, {
       getShellSnapshot: (input?: { location?: string }) =>
@@ -357,6 +385,17 @@ const cleanupFixture = Effect.gen(function* () {
                 reason: new SqlError.SqlSyntaxError({
                   cause: new Error("Fixture dependency query failure"),
                   message: "Fixture dependency query failure",
+                }),
+              }),
+            );
+          }
+          if (failWorktreeRead && query.includes("WHERE t.deleted_at IS NOT NULL")) {
+            failWorktreeRead = false;
+            return Effect.fail(
+              new SqlError.SqlError({
+                reason: new SqlError.SqlSyntaxError({
+                  cause: new Error("Fixture worktree query failure"),
+                  message: "Fixture worktree query failure",
                 }),
               }),
             );
@@ -464,6 +503,15 @@ const cleanupFixture = Effect.gen(function* () {
     },
     failNextDependencyRead: () => {
       failDependencyRead = true;
+    },
+    failNextWorktreeRead: () => {
+      failWorktreeRead = true;
+    },
+    failNextGitInventory: () => {
+      failNextGitInventory = true;
+    },
+    failProjectInventory: () => {
+      failProjectInventory = true;
     },
     setDeletedDependencyRows: (rows: typeof deletedDependencyRows) => {
       deletedDependencyRows = rows;
@@ -1387,6 +1435,59 @@ describe("storage cleanup reports and local file policies", () => {
       }),
     ),
   );
+  it.live("reports and audits a Git inventory failure without labeling paths unowned", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture;
+        fixture.failNextGitInventory();
+        const report = yield* fixture.service.runNow;
+        const failed = report.entries.find(
+          (entry) => entry.kind === "worktree" && entry.outcome === "failed",
+        );
+        expect(failed).toMatchObject({
+          outcome: "failed",
+          reason: expect.stringContaining("Fixture Git inventory failure"),
+          path: fixture.repo,
+        });
+        expect(report.counts.failed).toBeGreaterThanOrEqual(1);
+        expect(report.entries).not.toContainEqual(
+          expect.objectContaining({ reason: "No owning thread; retained for review" }),
+        );
+        const auditText = yield* fixture.fs.readFileString(
+          `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
+        );
+        expect(auditText).toContain('"event":"worktree-inventory-failed"');
+        expect(auditText).toContain('"reason":"git worktree list: Fixture Git inventory failure"');
+      }),
+    ),
+  );
+  it.live(
+    "reports and audits outer worktree inventory failures while continuing file cleanup",
+    () =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          const fixture = yield* cleanupFixture;
+          fixture.failProjectInventory();
+          fixture.enableFiles();
+          const report = yield* fixture.service.runNow;
+          expect(report.entries).toContainEqual(
+            expect.objectContaining({
+              kind: "worktree",
+              outcome: "failed",
+              reason: "Project store operation 'listShells' failed.",
+            }),
+          );
+          expect(report.counts.failed).toBeGreaterThanOrEqual(1);
+          expect(report.entries.some((entry) => entry.kind === "browser-artifacts")).toBe(true);
+          expect(report.entries.some((entry) => entry.kind === "logs")).toBe(true);
+          const auditText = yield* fixture.fs.readFileString(
+            `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
+          );
+          expect(auditText).toContain('"event":"worktree-ownership-audit-failed"');
+          expect(auditText).toContain("Project store operation 'listShells' failed.");
+        }),
+      ),
+  );
   it.live("serializes concurrent requests and returns each run's report", () =>
     runCleanupTest(
       Effect.gen(function* () {
@@ -1454,7 +1555,8 @@ describe("storage cleanup reports and local file policies", () => {
   it.live("reports git failures without aborting the remaining categories", () =>
     runCleanupTest(
       Effect.gen(function* () {
-        const { service, worktree, command, enableFiles } = yield* cleanupFixture;
+        const fixture = yield* cleanupFixture;
+        const { service, worktree, command, enableFiles } = fixture;
         enableFiles();
         yield* command(worktree, ["worktree", "lock", worktree]);
         const report = yield* service.runNow;
@@ -1466,6 +1568,62 @@ describe("storage cleanup reports and local file policies", () => {
           "browser-artifacts",
           "logs",
         ]);
+        const auditText = yield* fixture.fs.readFileString(
+          `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
+        );
+        expect(auditText).toContain('"event":"worktree-decision"');
+        expect(auditText).toContain("cannot remove a locked working tree");
+      }),
+    ),
+  );
+  it.live("audits top-level worktree cleanup failures and continues file cleanup", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture;
+        fixture.failNextWorktreeRead();
+        fixture.enableFiles();
+        const report = yield* fixture.service.runNow;
+        expect(report.entries).toContainEqual(
+          expect.objectContaining({
+            kind: "worktree",
+            outcome: "failed",
+            reason: expect.stringContaining("Fixture worktree query failure"),
+          }),
+        );
+        expect(report.counts.failed).toBe(1);
+        expect(report.entries.some((entry) => entry.kind === "browser-artifacts")).toBe(true);
+        expect(report.entries.some((entry) => entry.kind === "logs")).toBe(true);
+        const auditText = yield* fixture.fs.readFileString(
+          `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
+        );
+        expect(auditText).toContain('"event":"worktree-cleanup-failed"');
+        expect(auditText).toContain('"Fixture worktree query failure"');
+      }),
+    ),
+  );
+  it.live("reports and audits file cleanup failures while continuing other categories", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture;
+        fixture.disable();
+        fixture.enableFiles();
+        yield* fixture.fs.makeDirectory(fixture.config.browserArtifactsDir, { recursive: true });
+        yield* fixture.fs.remove(fixture.config.browserArtifactsDir, { recursive: true });
+        yield* fixture.fs.writeFileString(fixture.config.browserArtifactsDir, "not a directory");
+
+        const report = yield* fixture.service.runNow;
+        const failed = report.entries.find(
+          (entry) => entry.kind === "browser-artifacts" && entry.outcome === "failed",
+        );
+        expect(failed?.reason).toEqual(expect.any(String));
+        expect(report.counts.failed).toBe(1);
+        expect(report.entries.some((entry) => entry.kind === "logs")).toBe(true);
+        const auditText = yield* fixture.fs.readFileString(
+          `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
+        );
+        expect(auditText).toContain('"event":"file-cleanup-failed"');
+        expect(auditText).toContain('"kind":"browser-artifacts"');
+        expect(auditText).toContain(JSON.stringify(failed?.reason));
       }),
     ),
   );

@@ -1288,9 +1288,24 @@ const make = Effect.gen(function* () {
       seenRepositories.add(repository);
       const paths = yield* git.listWorktreePaths(root).pipe(
         Effect.catch((error) =>
-          Effect.logWarning("could not inspect registered worktrees for cleanup audit", {
-            error: cleanupFailureReason(error),
-          }).pipe(Effect.as([] as string[])),
+          Effect.gen(function* () {
+            const entry: StorageCleanupReportEntry = {
+              kind: "worktree",
+              outcome: "failed",
+              reason: cleanupFailureReason(error),
+              path: root,
+              threadId: null,
+              threadTitle: null,
+              bytes: null,
+              files: null,
+            };
+            entries.push(entry);
+            yield* audit({ event: "worktree-inventory-failed", runId, ...entry });
+            yield* Effect.logWarning("could not inspect registered worktrees for cleanup audit", {
+              error: entry.reason,
+            });
+            return [] as string[];
+          }),
         ),
       );
       for (const candidate of paths) {
@@ -1399,7 +1414,7 @@ const make = Effect.gen(function* () {
     yield* cleanWorktrees(serverSettings, now, entries, runId).pipe(
       Effect.catch((error) =>
         Effect.gen(function* () {
-          entries.push({
+          const entry: StorageCleanupReportEntry = {
             kind: "worktree",
             outcome: "failed",
             reason: cleanupFailureReason(error),
@@ -1408,7 +1423,9 @@ const make = Effect.gen(function* () {
             threadTitle: null,
             bytes: null,
             files: null,
-          });
+          };
+          entries.push(entry);
+          yield* audit({ event: "worktree-cleanup-failed", runId, ...entry });
           yield* Effect.logWarning("worktree cleanup failed", { error });
         }),
       ),
@@ -1441,7 +1458,23 @@ const make = Effect.gen(function* () {
       )
     ) {
       yield* reportUnownedWorktrees(entries, runId).pipe(
-        Effect.catch((error) => Effect.logWarning("worktree ownership audit failed", { error })),
+        Effect.catch((error) =>
+          Effect.gen(function* () {
+            const entry: StorageCleanupReportEntry = {
+              kind: "worktree",
+              outcome: "failed",
+              reason: cleanupFailureReason(error),
+              path: null,
+              threadId: null,
+              threadTitle: null,
+              bytes: null,
+              files: null,
+            };
+            entries.push(entry);
+            yield* audit({ event: "worktree-ownership-audit-failed", runId, ...entry });
+            yield* Effect.logWarning("worktree ownership audit failed", { error });
+          }),
+        ),
       );
     }
     for (const category of [
@@ -1475,7 +1508,7 @@ const make = Effect.gen(function* () {
         ),
         Effect.catch((error) =>
           Effect.gen(function* () {
-            entries.push({
+            const entry: StorageCleanupReportEntry = {
               kind: category.kind,
               outcome: "failed",
               reason: cleanupFailureReason(error),
@@ -1484,7 +1517,9 @@ const make = Effect.gen(function* () {
               threadTitle: null,
               bytes: removed.files > 0 ? removed.bytes : null,
               files: removed.files > 0 ? removed.files : null,
-            });
+            };
+            entries.push(entry);
+            yield* audit({ event: "file-cleanup-failed", runId, ...entry });
             yield* Effect.logWarning("storage file cleanup failed", { kind: category.kind, error });
           }),
         ),
