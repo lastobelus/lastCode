@@ -215,3 +215,27 @@ it("declared CI launcher stops after preparation failure and propagates CI failu
   const success = runDeclaredLauncher("Run Quick CI", target, anchor);
   NodeAssert.equal(success.status, 0, success.stderr);
 });
+
+it("preparation records dependency use and still installs when optional aging evidence is corrupt", () => {
+  const root = fixture();
+  const metadata = NodePath.join(root, "git-metadata");
+  const dependencyPath = NodePath.join(root, "node_modules");
+  NodeFS.mkdirSync(metadata);
+  NodeFS.mkdirSync(dependencyPath);
+  NodeFS.writeFileSync(NodePath.join(dependencyPath, ".modules.yaml"), "layoutVersion: 5\n");
+  const record = NodePath.join(metadata, "t3-dependency-activity.json");
+  let installs = 0;
+  const execute = (command, args) => {
+    if (command === "git") return { status: 0, stdout: `${metadata}\n` };
+    if (args[0] === "--version") return { status: 0, stdout: "11.10.0\n" };
+    installs++;
+    return { status: 0 };
+  };
+  prepareDependencies(root, execute);
+  NodeAssert.equal(installs, 1);
+  NodeAssert.equal(JSON.parse(NodeFS.readFileSync(record, "utf8")).version, 1);
+  NodeFS.writeFileSync(record, "invalid retained evidence");
+  prepareDependencies(root, execute);
+  NodeAssert.equal(installs, 2);
+  NodeAssert.equal(NodeFS.readFileSync(record, "utf8"), "invalid retained evidence");
+});
