@@ -7,7 +7,7 @@ import * as NodeProcess from "node:process";
 import * as NodeReadline from "node:readline";
 
 import { DEFAULT_LASTCODE_LOCAL_CI_SETTINGS } from "@t3tools/contracts/settings";
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   acquireLocalCiBudget,
@@ -371,18 +371,35 @@ describe("local CI policy", () => {
 });
 
 describe("lease record admission", () => {
+  beforeEach(() => {
+    vi.spyOn(ProcessIdentity, "getCurrentProcessStartIdentity").mockReturnValue("caller");
+    vi.spyOn(ProcessIdentity, "readProcessIdentities").mockReturnValue(new Map());
+    vi.spyOn(ProcessIdentity, "isProcessIdentityRunning").mockImplementation(
+      (pid, identity, identities) => identities.get(pid)?.startIdentity === identity,
+    );
+  });
+
   it("preserves valid nullable child identities and the strictest capacity", async () => {
     const directory = temporaryDirectory();
-    const owner = worker(directory, 1);
-    await owner.start();
-    await owner.next("acquired");
-    const name = NodeFS.readdirSync(directory).find((entry) => entry.endsWith(".lease.json"))!;
+    const ownerPid = 31415;
+    vi.spyOn(ProcessIdentity, "readProcessIdentities").mockReturnValue(
+      new Map([[ownerPid, { pid: ownerPid, group: ownerPid, startIdentity: "fixture" }]]),
+    );
+    const name = "record.lease.json";
     const path = NodePath.join(directory, name);
-    const original = JSON.parse(NodeFS.readFileSync(path, "utf8"));
+    const original = {
+      pid: ownerPid,
+      startIdentity: "fixture",
+      childPid: null,
+      childStartIdentity: null,
+      token: "record",
+      maxConcurrentRuns: 1,
+      repoRoot: "workspace.example",
+    };
     for (const [childPid, childStartIdentity] of [
       [null, null],
-      [owner.pid, null],
-      [owner.pid, original.startIdentity],
+      [ownerPid, null],
+      [ownerPid, original.startIdentity],
     ]) {
       const record = { ...original, childPid, childStartIdentity, repoRoot: "", extra: true };
       NodeFS.writeFileSync(path, JSON.stringify(record));
@@ -399,8 +416,6 @@ describe("lease record admission", () => {
         NodeFS.readdirSync(directory).filter((entry) => entry.endsWith(".lease.json")),
       ).toEqual([name]);
     }
-    NodeFS.writeFileSync(path, JSON.stringify(original));
-    await owner.release();
   });
 
   it("stops malformed records before granting otherwise available capacity", async () => {
@@ -479,6 +494,38 @@ describe("lease record admission", () => {
       );
       expect(enumeration).toHaveBeenCalledWith(directory);
       enumeration.mockRestore();
+    }
+  });
+
+  it("skips a disappearing lease but stops other filesystem errors with their cause", async () => {
+    for (const code of ["ENOENT", "EACCES", "EISDIR"]) {
+      const directory = temporaryDirectory();
+      const path = NodePath.join(directory, "record.lease.json");
+      NodeFS.writeFileSync(path, "{");
+      const cause = Object.assign(new Error("fixture read failure"), { code });
+      const read = vi.spyOn(NodeFS, "readFileSync").mockImplementationOnce(() => {
+        if (code === "ENOENT") NodeFS.rmSync(path);
+        throw cause;
+      });
+      const result = tryAcquireLocalCiBudget({
+        policy: DEFAULT_LASTCODE_LOCAL_CI_SETTINGS,
+        repoRoot: "workspace.example",
+        directory,
+      });
+      if (code === "ENOENT") {
+        const lease = await result;
+        expect(lease).toBeDefined();
+        lease!.release();
+      } else {
+        await expect(result).rejects.toMatchObject({
+          message:
+            "Unable to read a local CI lease. Admission has stopped to avoid exceeding the budget.",
+          cause,
+        });
+        expect(NodeFS.readFileSync(path, "utf8")).toBe("{");
+      }
+      expect(read).toHaveBeenCalledWith(path, "utf8");
+      read.mockRestore();
     }
   });
 });
