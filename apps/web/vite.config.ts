@@ -20,6 +20,7 @@ import {
 import { loadRepoEnv } from "../../scripts/lib/public-config";
 import { thirdPartyLicensesPlugin } from "../../scripts/lib/third-party-licenses";
 import { tailwindPlugins } from "./vite/tailwind";
+import { createBuildOwnershipPlugin } from "./vite/buildOwnership.ts";
 
 const repoEnv = loadRepoEnv();
 Object.assign(process.env, repoEnv);
@@ -162,35 +163,11 @@ const configuredAllowedHosts = (process.env.T3CODE_DEV_ALLOWED_HOSTS ?? "")
 const allowedHosts = [".ts.net", ...configuredAllowedHosts];
 
 export default defineConfig(({ command }) => {
+  const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
   const stage = command === "build"
-    ? createGeneratedBuildStage(fileURLToPath(new URL("../..", import.meta.url)), "apps/web/dist")
+    ? createGeneratedBuildStage(repoRoot, "apps/web/dist")
     : null;
-  let emitted = false;
-  const provenancePlugin: Plugin = {
-    name: "runner-owned-build-output",
-    apply: "build",
-    enforce: "post",
-    configResolved(config) {
-      if (stage && config.build.outDir !== stage.directory) {
-        stage.discard();
-        throw new Error("Managed build output must use its private stage");
-      }
-    },
-    buildStart() { emitted = false; },
-    writeBundle() { emitted = true; },
-    buildEnd(error) { if (error && !this.meta.watchMode) stage?.discard(); },
-    renderError() { emitted = false; },
-    closeBundle() {
-      try {
-        // A watched compiler retains its own private tree between emissions;
-        // ownership never comes from scanning the real destination directory.
-        if (emitted) stage?.publish(Date.now(), undefined, this.meta.watchMode);
-      } finally {
-        if (!this.meta.watchMode) stage?.discard();
-      }
-    },
-    closeWatcher() { stage?.discard(); },
-  };
+  const provenancePlugin = createBuildOwnershipPlugin(repoRoot, stage);
   return {
     assetsInclude: ["**/*.wasm"],
     plugins: [

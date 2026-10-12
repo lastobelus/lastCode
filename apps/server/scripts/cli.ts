@@ -13,6 +13,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import { LASTCODE_DEVELOPMENT_ICON_OVERRIDES } from "../../../scripts/lib/lastcode-brand-assets.ts";
 import { findEsmImportsOfExternalPackages } from "../../../scripts/lib/cli-executable-imports.ts";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
+import { recordDependencyUse } from "@t3tools/shared/dependencyActivity";
 import { createGeneratedBuildStage, copyOwnedGeneratedBuild } from "@t3tools/shared/generatedBuildOwnership";
 import {
   ServerCliBuildAssetMissingError,
@@ -90,6 +91,15 @@ const buildCmd = Command.make(
           Effect.sync(() => createGeneratedBuildStage(repoRoot, "apps/server/dist")),
           (stage) => Effect.sync(() => stage?.discard()),
         );
+        const noteDependencyUse = Effect.gen(function* () {
+          const now = yield* Clock.currentTimeMillis;
+          yield* Effect.try({ try: () => recordDependencyUse(repoRoot, now), catch: (cause) => cause }).pipe(
+            Effect.catch(() => Effect.logWarning("[cli] Could not record build dependency use.")),
+          );
+        });
+        // Actual dependency-backed compiler execution only. Command/config
+        // inspection does not run this callback; failures still record use.
+        yield* Effect.acquireRelease(noteDependencyUse, () => noteDependencyUse);
         yield* Effect.log("[cli] Running tsdown...");
         yield* runCommand(
           ChildProcess.make(process.execPath, ["--run", "build:bundle"], {
