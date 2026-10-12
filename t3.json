@@ -4,9 +4,15 @@
   "scripts": [
     {
       "name": "Setup Worktree",
-      "command": "node scripts/setup-worktree.ts",
+      "command": "mise exec node@24.13.1 -- node \"$T3CODE_PROJECT_ROOT/scripts/setup-worktree.ts\"",
       "icon": "configure",
       "runOnWorktreeCreate": true
+    },
+    {
+      "id": "lc-prepare-dependencies",
+      "name": "Prepare Dependencies",
+      "command": "mise exec node@24.13.1 -- node \"$T3CODE_PROJECT_ROOT/scripts/prepare-dependencies.ts\"",
+      "icon": "configure"
     },
     {
       "id": "lc-wait-for-pr",
@@ -23,7 +29,7 @@
     {
       "id": "lc-local-ci",
       "name": "Run Quick CI",
-      "command": "mise exec node@24.13.1 -- node scripts/lastcode-local-ci.ts --quick",
+      "command": "mise exec node@24.13.1 -- node \"$T3CODE_PROJECT_ROOT/scripts/prepare-dependencies.ts\" --for-ci && mise exec node@24.13.1 -- node scripts/lastcode-local-ci.ts --quick",
       "icon": "test"
     },
     {

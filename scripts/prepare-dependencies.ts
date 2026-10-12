@@ -1,0 +1,80 @@
+#!/usr/bin/env node
+// @effect-diagnostics nodeBuiltinImport:off globalConsole:off -- Dependency-free worktree preparation.
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
+import { lastCodeAction } from "./lib/lastcode-action-kit.ts";
+
+const PACKAGE_MANAGER = "pnpm@11.10.0";
+
+/** Install the target checkout's locked dependency graph without a separate readiness stamp. */
+export function prepareDependencies(cwd: string, execute = NodeChildProcess.spawnSync) {
+  const target = NodePath.resolve(cwd);
+  const manifest = JSON.parse(NodeFS.readFileSync(NodePath.join(target, "package.json"), "utf8"));
+  if (manifest.packageManager !== PACKAGE_MANAGER) {
+    throw new Error(`Expected ${PACKAGE_MANAGER} in the target checkout's package.json.`);
+  }
+  if (!NodeFS.existsSync(NodePath.join(target, "pnpm-lock.yaml"))) {
+    throw new Error("The target checkout has no pnpm-lock.yaml.");
+  }
+  // oxlint-disable-next-line t3code/no-global-process-runtime -- This bootstrap must run without installed workspace dependencies.
+  const options = { cwd: target, shell: process.platform === "win32" };
+  const version = execute("pnpm", ["--version"], { ...options, encoding: "utf8" });
+  if (version.error || version.status !== 0) {
+    throw new Error(`Dependency installer unavailable. Install ${PACKAGE_MANAGER} and retry.`);
+  }
+  if (String(version.stdout).trim() !== PACKAGE_MANAGER.slice("pnpm@".length)) {
+    throw new Error(
+      `Dependency preparation requires ${PACKAGE_MANAGER}; found ${String(version.stdout).trim()}.`,
+    );
+  }
+  const installed = execute("pnpm", ["install", "--frozen-lockfile"], {
+    ...options,
+    stdio: "inherit",
+  });
+  if (installed.error) throw installed.error;
+  if (installed.status !== 0) {
+    throw new Error(
+      `Dependency installation failed (${installed.signal ?? installed.status ?? "unknown exit"}).`,
+    );
+  }
+}
+
+export function runPreparation(
+  argv: ReadonlyArray<string>,
+  cwd = process.cwd(),
+  prepare = prepareDependencies,
+  reporter = lastCodeAction,
+) {
+  try {
+    if (argv.length > 1 || (argv.length === 1 && argv[0] !== "--for-ci")) {
+      throw new Error("Usage: prepare-dependencies.ts [--for-ci] (run in the target checkout)");
+    }
+    reporter.progress({
+      state: "working",
+      phase: "dependencies",
+      summary: "Preparing checkout dependencies",
+    });
+    prepare(cwd);
+    // CI follows in the same Action and owns its successful terminal result.
+    if (argv[0] !== "--for-ci") {
+      reporter.result({
+        outcome: "success",
+        reason: "dependencies-installed",
+        summary: "Dependency installation completed",
+      });
+    }
+    return 0;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[prepare-dependencies] ${message}`);
+    reporter.result({
+      outcome: "attention",
+      reason: "dependency-preparation-failed",
+      summary: message.slice(0, 280),
+    });
+    return 1;
+  }
+}
+
+if (import.meta.main) process.exitCode = runPreparation(process.argv.slice(2));

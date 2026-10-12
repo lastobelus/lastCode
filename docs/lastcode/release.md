@@ -7,6 +7,17 @@ for an exact Intel checkpoint or revision; releases have no schedule.
 Nightly source tracking is documented separately in
 [Nightly Checkpoint Workflow](nightly-workflow.md).
 
+## Worktree preparation
+
+Worktrees created by LastCode initially contain source and linked environment files.
+When tests, development, or a build need dependencies, run the **Prepare Dependencies**
+Project Action in that worktree. It requires pnpm 11.10.0 and installs from the worktree's
+lockfile without building or warming web caches. **Run Quick CI** includes this preparation
+automatically. Repeat preparation after dependency
+cleanup. A successful install does not verify every file inside existing packages: if a tool
+still reports missing package files, diagnose the affected installation before retrying or
+removing anything.
+
 ## Pull Request CI
 
 Ordinary branch pushes apply the Quick CI policy through `.vite-hooks/pre-push`:
