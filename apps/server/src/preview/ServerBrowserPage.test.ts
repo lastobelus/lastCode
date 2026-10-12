@@ -150,6 +150,7 @@ describe("server browser element refs", () => {
     const key = NodePath.join(directory, "test.key");
     const certificate = NodePath.join(directory, "test.crt");
     const requests: string[] = [];
+    const authenticationAndDocuments: { request: string; cookie: string | undefined }[] = [];
     let server: NodeHttps.Server | undefined;
     let fresh: BrowserContext | undefined;
     let control: BrowserContext | undefined;
@@ -179,7 +180,14 @@ describe("server browser element refs", () => {
           cert: NodeFS.readFileSync(certificate),
         },
         (request, response) => {
-          requests.push(`${request.method} ${request.url}`);
+          const entry = `${request.method} ${request.url}`;
+          requests.push(entry);
+          if (
+            request.url === "/api/auth/browser-session" ||
+            request.headers["sec-fetch-dest"] === "document"
+          ) {
+            authenticationAndDocuments.push({ request: entry, cookie: request.headers.cookie });
+          }
           if (request.url === "/api/auth/browser-session") {
             let body = "";
             request.setEncoding("utf8");
@@ -236,7 +244,12 @@ describe("server browser element refs", () => {
       expect(await selected.locator("h1").innerText()).toBe("cold-bootstrap-ready");
       expect(selected.url()).toBe(`${origin}/qa`);
       expect((await fresh.cookies()).map((cookie) => cookie.name)).toEqual(["fixture-session"]);
-      expect(requests.slice(0, 2)).toEqual(["POST /api/auth/browser-session", "GET /qa"]);
+      // Assert every document load and its cookie; ancillary HTTP traffic is
+      // not a navigation and must not define the first-document auth gate.
+      expect(authenticationAndDocuments).toEqual([
+        { request: "POST /api/auth/browser-session", cookie: undefined },
+        { request: "GET /qa", cookie: "fixture-session=accepted" },
+      ]);
       expect(requests).not.toContain("GET /pair");
       control = await browser.newContext({ ignoreHTTPSErrors: true });
       expect(await control.cookies()).toEqual([]);
