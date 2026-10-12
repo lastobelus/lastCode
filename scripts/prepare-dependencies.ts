@@ -5,15 +5,20 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import { lastCodeAction as defaultActionReporter } from "./lib/lastcode-action-kit.ts";
 
-const PACKAGE_MANAGER = "pnpm@11.10.0";
-
 /** Install the target checkout's locked dependency graph without a separate readiness stamp. */
 export function prepareDependencies(cwd: string, execute = NodeChildProcess.spawnSync) {
   const target = NodePath.resolve(cwd);
   const manifest = JSON.parse(NodeFS.readFileSync(NodePath.join(target, "package.json"), "utf8"));
-  if (manifest.packageManager !== PACKAGE_MANAGER) {
-    throw new Error(`Expected ${PACKAGE_MANAGER} in the target checkout's package.json.`);
+  const pin =
+    typeof manifest.packageManager === "string"
+      ? manifest.packageManager.match(
+          /^pnpm@(\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?)(?:\+sha(?:224|512)\.[0-9a-f]+)?$/,
+        )
+      : null;
+  if (!pin) {
+    throw new Error("Expected an exact pnpm version in the target checkout's package.json.");
   }
+  const packageManager = `pnpm@${pin[1]}`;
   if (!NodeFS.existsSync(NodePath.join(target, "pnpm-lock.yaml"))) {
     throw new Error("The target checkout has no pnpm-lock.yaml.");
   }
@@ -21,11 +26,11 @@ export function prepareDependencies(cwd: string, execute = NodeChildProcess.spaw
   const options = { cwd: target, shell: process.platform === "win32" };
   const version = execute("pnpm", ["--version"], { ...options, encoding: "utf8" });
   if (version.error || version.status !== 0) {
-    throw new Error(`Dependency installer unavailable. Install ${PACKAGE_MANAGER} and retry.`);
+    throw new Error(`Dependency installer unavailable. Install ${packageManager} and retry.`);
   }
-  if (String(version.stdout).trim() !== PACKAGE_MANAGER.slice("pnpm@".length)) {
+  if (String(version.stdout).trim() !== pin[1]) {
     throw new Error(
-      `Dependency preparation requires ${PACKAGE_MANAGER}; found ${String(version.stdout).trim()}.`,
+      `Dependency preparation requires ${packageManager}; found ${String(version.stdout).trim()}.`,
     );
   }
   const installed = execute("pnpm", ["install", "--frozen-lockfile"], {

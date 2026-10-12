@@ -25,15 +25,12 @@ function runDeclaredLauncher(name, target, anchor, env = {}) {
   });
 }
 
-function fixture() {
+function fixture(packageManager = "pnpm@11.10.0") {
   const root = NodeFS.realpathSync(
     NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "dependency-preparation-")),
   );
   onTestFinished(() => NodeFS.rmSync(root, { recursive: true, force: true }));
-  NodeFS.writeFileSync(
-    NodePath.join(root, "package.json"),
-    JSON.stringify({ packageManager: "pnpm@11.10.0" }),
-  );
+  NodeFS.writeFileSync(NodePath.join(root, "package.json"), JSON.stringify({ packageManager }));
   NodeFS.writeFileSync(NodePath.join(root, "pnpm-lock.yaml"), "fixture-lock\n");
   return root;
 }
@@ -51,6 +48,38 @@ it("preparation invokes the pinned installer in the target checkout on each run"
   prepareDependencies(root, execute);
   NodeAssert.equal(calls.filter((call) => call.args[0] === "install").length, 2);
   NodeAssert.deepEqual(calls[1].args, ["install", "--frozen-lockfile"]);
+});
+
+it("prepares older target pins and validates the installer against that target", () => {
+  for (const version of ["10.17.1", "12.0.0-beta.1"]) {
+    const root = fixture(`pnpm@${version}`);
+    const calls = [];
+    prepareDependencies(root, (command, args, options) => {
+      calls.push({ command, args, options });
+      return args[0] === "--version" ? { status: 0, stdout: `${version}\n` } : { status: 0 };
+    });
+    NodeAssert.equal(calls[1].options.cwd, root);
+    NodeAssert.deepEqual(calls[1].args, ["install", "--frozen-lockfile"]);
+    NodeAssert.throws(
+      () => prepareDependencies(root, () => ({ status: 0, stdout: "11.10.0" })),
+      new RegExp(`requires pnpm@${version.replaceAll(".", "\\.")}`),
+    );
+  }
+});
+
+it("rejects missing, unsupported, and unpinned package managers before running an installer", () => {
+  for (const packageManager of [undefined, "npm@11.10.0", "pnpm@latest", "pnpm@^11.10.0"]) {
+    const root = fixture(packageManager);
+    if (packageManager === undefined)
+      NodeFS.writeFileSync(NodePath.join(root, "package.json"), "{}");
+    NodeAssert.throws(
+      () =>
+        prepareDependencies(root, () => {
+          NodeAssert.fail("invalid target pins must not start an installer");
+        }),
+      /Expected an exact pnpm version/,
+    );
+  }
 });
 
 it("missing installer, mismatched version, and failed install cannot report readiness", () => {
