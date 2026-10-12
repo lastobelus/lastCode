@@ -46,7 +46,11 @@
         "apps/web/src/components/LastCodeSidebar.tsx",
         "apps/server/src/orchestration-v2/ThreadLifecycleService.ts",
         "apps/server/src/orchestration-v2/ProjectionStore.ts",
-        "packages/contracts/src/orchestrationV2.ts"
+        "packages/contracts/src/orchestrationV2.ts",
+        "apps/web/src/components/sidebar/useLastCodeThreadAnnotations.tsx",
+        "apps/web/src/components/sidebar/LastCodeThreadMetadataControls.tsx",
+        "apps/web/src/components/sidebar/LastCodeThreadActions.tsx",
+        "apps/web/src/components/sidebar/LastCodeThreadRowSurface.tsx"
       ],
       "captureRecipeIds": ["thread-annotations", "workspace-overview"]
     },
@@ -62,7 +66,10 @@
         "apps/web/src/components/settings/LastCodeSettings.tsx",
         "apps/web/src/components/LastCodeSidebar.tsx",
         "apps/web/src/lastcodeSidebarScale.ts",
-        "packages/contracts/src/settings.ts"
+        "packages/contracts/src/settings.ts",
+        "apps/web/src/components/sidebar/",
+        "apps/web/src/components/lastcodeSidebarFamilies.logic.ts",
+        "apps/web/src/components/lastcodeSidebarFamilies.store.ts"
       ],
       "captureRecipeIds": ["workspace-overview"]
     },

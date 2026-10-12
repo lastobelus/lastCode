@@ -11,13 +11,13 @@ import {
   it,
   vi,
 } from "vite-plus/test";
-import { EnvironmentId, RunId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, RunId, ThreadId, type ActionResumeState } from "@t3tools/contracts";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { AsyncResult } from "effect/reactivity";
 import * as Cause from "effect/Cause";
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import { LastCodeThreadLeadingControls, LastCodeThreadTitle } from "./LastCodeThreadTitle";
-import type { ThreadStatusPill } from "../Sidebar.logic";
+import { resolveThreadStatusPill, type ThreadStatusPill } from "../Sidebar.logic";
 import { makeThreadFixture } from "../../test-fixtures";
 import { projectLastCodeSidebarFamilies } from "../lastcodeSidebarFamilies.logic";
 vi.mock("~/hooks/useSettings", () => ({
@@ -29,7 +29,10 @@ vi.mock("~/hooks/useSettings", () => ({
       }) as Record<string, unknown>
     )[key],
 }));
-vi.mock("../ThreadStatusIndicators", () => ({ ThreadStatusLabel: () => null }));
+vi.mock("../ThreadStatusIndicators", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../ThreadStatusIndicators")>();
+  return { ThreadStatusLabel: actual.ThreadStatusLabel };
+});
 vi.mock("../dashboard/ThreadDashboardIndicator", () => ({ ThreadDashboardIndicator: () => null }));
 const presentation = {
   isAgentCreated: false,
@@ -65,12 +68,18 @@ const mocks = vi.hoisted(() => ({
     return true;
   }),
 }));
-vi.mock("../../state/threads", () => ({ threadEnvironment: { updateMetadata: "update" } }));
+vi.mock("../../state/threads", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../state/threads")>()),
+  threadEnvironment: { updateMetadata: "update" },
+}));
 vi.mock("../../state/use-orchestration-command", () => ({
   useOrchestrationCommand: () => mocks.update,
   ORCHESTRATION_OPERATE_DENIED_MESSAGE: "Read-only environment",
 }));
-vi.mock("../../state/session", () => ({ readEnvironmentScope: () => mocks.canOperate }));
+vi.mock("../../state/session", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../state/session")>()),
+  readEnvironmentScope: () => mocks.canOperate,
+}));
 vi.mock("../ui/toast", () => ({
   toastManager: { add: mocks.toast },
   stackedThreadToast: (value: unknown) => value,
@@ -248,7 +257,7 @@ describe("compact child outcomes", () => {
     expect(mocks.update).not.toHaveBeenCalled();
   });
   it.each(["failed", "interrupted"] as const)(
-    "keeps %s and protection in one complete compact target",
+    "keeps %s and protection separately available",
     async (status) => {
       container = document.createElement("div");
       document.body.append(container);
@@ -256,17 +265,122 @@ describe("compact child outcomes", () => {
       await act(() =>
         root?.render(<OutcomeHarness status={status} leading="Completed" protectedChild />),
       );
-      const detail = [...container.querySelectorAll('[role="img"]')].find((element) =>
-        element.getAttribute("aria-label")?.includes("Protected from archive and deletion"),
+      const label = status === "failed" ? "Failed" : "Stopped";
+      expect(container.querySelector(`[role="img"][aria-label="${label}"]`)?.textContent).toContain(
+        label[0],
       );
-      expect(detail?.getAttribute("aria-label")).toContain(
-        status === "failed" ? "Failed" : "Stopped",
-      );
-      expect(detail?.getAttribute("aria-label")).toContain("Completed");
-      expect(detail?.textContent).toBe(status === "failed" ? "F" : "S");
+      expect(container.querySelector('[role="img"][aria-label="Completed"]')).not.toBeNull();
+      expect(container.querySelector('[aria-label="Protected"]')).not.toBeNull();
       expect(mocks.update).not.toHaveBeenCalled();
     },
   );
+});
+describe("visible status transitions", () => {
+  const actionFor = (state: "working" | "waiting", family: ReturnType<typeof familyFor>) =>
+    ({
+      runId: "fixture-action",
+      threadId: family.thread.id,
+      projectId: family.thread.projectId,
+      actionId: "fixture-check",
+      actionName: "Fixture check",
+      command: "fixture-check",
+      terminalId: "fixture-terminal",
+      outcome: "running",
+      delivery: "armed",
+      startedAt: "2026-01-01T00:00:00Z",
+      finishedAt: null,
+      exitCode: null,
+      exitSignal: null,
+      progress: {
+        version: 1,
+        state,
+        summary: "Waiting for fixture",
+        updatedAt: "2026-01-01T00:00:00Z",
+      },
+    }) satisfies ActionResumeState;
+  function StatusHarness({ family }: { family: ReturnType<typeof familyFor> }) {
+    const { capabilities } = useLastCodeThreadEditing();
+    return (
+      <LastCodeThreadTitle
+        family={family}
+        presentation={presentation}
+        threadStatus={resolveThreadStatusPill({ thread: family.thread })}
+        renameTarget={null}
+        editing={capabilities}
+      />
+    );
+  }
+  it("keeps Working and the concurrent waiting Action separate, then transitions to Waiting", async () => {
+    const family = familyFor(a, "Status transition");
+    family.thread = {
+      ...family.thread,
+      actionResume: actionFor("waiting", family),
+      runtime: {
+        status: "running",
+        activeRunId: null,
+        providerInstanceId: family.thread.providerInstanceId!,
+        providerName: "Fixture provider",
+        lastError: null,
+        updatedAt: "2026-01-01T00:00:00Z",
+      },
+    };
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(() => root?.render(<StatusHarness family={family} />));
+    expect(container.querySelector('[aria-label="Working"]')?.textContent).toContain("Working");
+    expect(container.querySelector('[aria-label^="Waiting for Fixture check."]')).not.toBeNull();
+    family.thread = { ...family.thread, runtime: null };
+    await act(() => root?.render(<StatusHarness family={family} />));
+    expect(container.querySelector('[aria-label="Working"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Waiting"]')?.textContent).toContain("Waiting");
+    expect(container.querySelector('[aria-label^="Waiting for Fixture check."]')).toBeNull();
+    mocks.compact = true;
+    await act(() => root?.render(<StatusHarness family={family} />));
+    expect(container.querySelector('[aria-label="Waiting"]')?.textContent).toBe("");
+    expect(mocks.update).not.toHaveBeenCalled();
+  });
+  it("retains distinct Connecting and Completed labels when a queued run settles", async () => {
+    const family = familyFor(a, "Connection transition");
+    family.thread = {
+      ...family.thread,
+      runtime: {
+        status: "queued",
+        activeRunId: null,
+        providerInstanceId: family.thread.providerInstanceId!,
+        providerName: "Fixture provider",
+        lastError: null,
+        updatedAt: "2026-01-01T00:00:00Z",
+      },
+    };
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(() => root?.render(<StatusHarness family={family} />));
+    expect(container.querySelector('[aria-label="Connecting"]')?.textContent).toContain(
+      "Connecting",
+    );
+    family.thread = {
+      ...family.thread,
+      runtime: null,
+      lastVisitedAt: "2026-01-01T00:00:00Z",
+      latestRun: {
+        runId: RunId.make("fixture-run"),
+        status: "completed",
+        requestedAt: null,
+        startedAt: null,
+        completedAt: "2026-01-01T00:01:00Z",
+        assistantMessageId: null,
+      },
+    };
+    await act(() => root?.render(<StatusHarness family={family} />));
+    expect(container.querySelector('[aria-label="Connecting"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Completed"]')?.textContent).toContain("Completed");
+    expect(container.querySelector(`[data-testid="thread-title-${a.threadId}"]`)?.textContent).toBe(
+      "Connection transition",
+    );
+    expect(mocks.update).not.toHaveBeenCalled();
+  });
 });
 describe("row-local rename editor", () => {
   it("keeps an inline draft mounted when PR presentation changes beside it", async () => {
