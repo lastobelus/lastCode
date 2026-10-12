@@ -653,6 +653,17 @@ const make = Effect.gen(function* () {
       });
       return;
     }
+    const removedWorktrees = new Set(
+      entries.flatMap((entry) =>
+        entry.kind === "worktree" &&
+        entry.scope !== "dependencies" &&
+        entry.outcome === "removed" &&
+        entry.path !== null
+          ? [path.resolve(entry.path)]
+          : [],
+      ),
+    );
+    const missingWorktrees = new Set<string>();
     const hasLiveProviderSession = yield* makeProviderSessionGuard();
     const sequence = yield* readApplicationSequence();
     const snapshot = yield* readThreads();
@@ -691,6 +702,10 @@ const make = Effect.gen(function* () {
       ).worktreeDependenciesAfterDays;
       if (days === null) continue;
       const cwd = path.resolve(thread.worktreePath);
+      if (removedWorktrees.has(cwd) || !(yield* fs.exists(cwd))) {
+        missingWorktrees.add(cwd);
+        continue;
+      }
       const ownerCount = groups.get(cwd)?.length ?? 0;
       if (ownerCount !== 1 || deletedGroups.has(cwd))
         yield* noteSkip(thread, "shared owner or deleted-thread ownership is ambiguous");
@@ -717,11 +732,12 @@ const make = Effect.gen(function* () {
         serverSettings,
         thread.projectId,
       ).worktreeDependenciesAfterDays;
-      if (days === null) {
-        yield* noteSkip(thread, "dependency cleanup policy is disabled");
+      if (days === null) continue;
+      const cwd = path.resolve(thread.worktreePath);
+      if (removedWorktrees.has(cwd) || !(yield* fs.exists(cwd))) {
+        missingWorktrees.add(cwd);
         continue;
       }
-      const cwd = path.resolve(thread.worktreePath);
       const activityAt = thread.dependencyActivityAt;
       if ((deletedGroups.get(cwd)?.length ?? 0) !== 1 || groups.has(cwd))
         yield* noteSkip(thread, "shared owner or deleted-thread ownership is ambiguous");
@@ -738,10 +754,20 @@ const make = Effect.gen(function* () {
     }
     const candidates = [
       ...[...groups.entries()].flatMap(([cwd, group]) =>
-        group.length === 1 && !deletedGroups.has(cwd) ? [group[0]!] : [],
+        group.length === 1 &&
+        !deletedGroups.has(cwd) &&
+        !removedWorktrees.has(cwd) &&
+        !missingWorktrees.has(cwd)
+          ? [group[0]!]
+          : [],
       ),
       ...[...deletedGroups.entries()].flatMap(([cwd, group]) =>
-        !groups.has(cwd) && group.length === 1 ? [group[0]!] : [],
+        !groups.has(cwd) &&
+        group.length === 1 &&
+        !removedWorktrees.has(cwd) &&
+        !missingWorktrees.has(cwd)
+          ? [group[0]!]
+          : [],
       ),
     ];
     const eligible = candidates.flatMap((thread) => {

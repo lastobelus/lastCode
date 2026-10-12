@@ -13,6 +13,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlError from "effect/sql/SqlError";
 import {
   DEFAULT_SERVER_SETTINGS,
+  OrchestrationV2AppThreadJson,
   StorageCleanupReport,
   type WorktreeKeepWhen,
 } from "@t3tools/contracts";
@@ -51,6 +52,8 @@ import {
 const NOW_MS = Date.parse("2026-06-10T12:00:00.000Z");
 const DAY_MS = 24 * 60 * 60 * 1_000;
 const decodeCleanupReport = Schema.decodeSync(StorageCleanupReport);
+const decodeFullThread = Schema.decodeUnknownSync(OrchestrationV2AppThreadJson);
+const encodeFullThread = Schema.encodeSync(Schema.fromJsonString(OrchestrationV2AppThreadJson));
 
 function at(offsetMs: number): DateTime.Utc {
   return DateTime.makeUnsafe(NOW_MS + offsetMs);
@@ -282,6 +285,11 @@ const cleanupFixture = Effect.gen(function* () {
   let worktreeInventoryCalls = 0;
   const activation = yield* Deferred.make<void>();
   let failDependencyRead = false;
+  let deletedDependencyRows: Array<{
+    payload_json: string;
+    workspaceRoot: string;
+    latestEventAt: string | null;
+  }> = [];
   let openSessionCwd: string | null = null;
   let fullStatusCalls = 0;
   let previewPaths: ReadonlyArray<string> = [];
@@ -355,6 +363,8 @@ const cleanupFixture = Effect.gen(function* () {
           }
           return Effect.sync(() => {
             if (query.includes("COALESCE(MAX(sequence)")) return [{ sequence: 0 }];
+            if (query.includes("SELECT t.payload_json, p.workspace_root"))
+              return deletedDependencyRows;
             return openSessionCwd !== null && query.includes("projection_provider_sessions")
               ? [
                   {
@@ -454,6 +464,18 @@ const cleanupFixture = Effect.gen(function* () {
     },
     failNextDependencyRead: () => {
       failDependencyRead = true;
+    },
+    setDeletedDependencyRows: (rows: typeof deletedDependencyRows) => {
+      deletedDependencyRows = rows;
+    },
+    setProjectWorktreeCleanupOff: (projectId: ProjectId) => {
+      settings = {
+        ...settings,
+        projectSettingsOverrides: {
+          ...settings.projectSettingsOverrides,
+          [projectId]: { worktreeCleanup: { mode: "off" } },
+        },
+      };
     },
     setManagedWorktreeDirectories: (current: string, previous: ReadonlyArray<string>) => {
       settings = {
@@ -890,6 +912,84 @@ describe("storage cleanup reports and local file policies", () => {
         );
         expect(audit).toContain('"event":"candidate"');
         expect(audit).toContain('"outcome":"removed"');
+      }),
+    ),
+  );
+  it.live("does not report dependency cleanup after its worktree was removed", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture;
+        fixture.setDependencyPolicy(8);
+
+        const report = yield* fixture.service.runNow;
+        expect(report.entries).toContainEqual(
+          expect.objectContaining({
+            kind: "worktree",
+            outcome: "removed",
+            path: fixture.worktree,
+          }),
+        );
+        expect(report.counts).toEqual({ removed: 1, kept: 0, failed: 0 });
+        expect(report.entries.filter((entry) => entry.scope === "dependencies")).toEqual([]);
+        const auditText = yield* fixture.fs.readFileString(
+          `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
+        );
+        const auditRecords = auditText
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as { event?: string; scope?: string });
+        expect(
+          auditRecords.filter(
+            (record) => record.event === "candidate" && record.scope === "dependencies",
+          ),
+        ).toEqual([]);
+      }),
+    ),
+  );
+  it.live("does not report deleted threads with disabled dependency cleanup", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture;
+        fixture.disable();
+        fixture.setDependencyPolicy(8);
+        const disabledProjectId = ProjectId.make("disabled-dependency-project");
+        const deletedThread = shell({
+          id: ThreadId.make("deleted-disabled-dependency"),
+          projectId: disabledProjectId,
+          branch: "feature",
+          worktreePath: fixture.worktree,
+          createdAt: at(-40 * DAY_MS),
+          updatedAt: at(-30 * DAY_MS),
+          deletedAt: at(-30 * DAY_MS),
+        });
+        const payload = encodeFullThread(
+          decodeFullThread({
+            ...deletedThread,
+            createdAt: DateTime.formatIso(deletedThread.createdAt),
+            updatedAt: DateTime.formatIso(deletedThread.updatedAt),
+            deletedAt: DateTime.formatIso(deletedThread.deletedAt!),
+          }),
+        );
+        fixture.setThreads([]);
+        fixture.setProjectWorktreeCleanupOff(disabledProjectId);
+        fixture.setDeletedDependencyRows([
+          { payload_json: payload, workspaceRoot: fixture.repo, latestEventAt: null },
+        ]);
+
+        const report = yield* fixture.service.runNow;
+        expect(
+          report.entries.some(
+            (entry) =>
+              entry.scope === "dependencies" &&
+              entry.threadId === deletedThread.id &&
+              entry.path === fixture.worktree,
+          ),
+        ).toBe(false);
+        const auditText = yield* fixture.fs.readFileString(
+          `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
+        );
+        expect(auditText).not.toContain(String(deletedThread.id));
+        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(true);
       }),
     ),
   );
