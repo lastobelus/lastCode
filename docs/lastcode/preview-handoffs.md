@@ -29,6 +29,9 @@ For a signed-in browser identity, call `preview_profiles` to list the connected
 desktop's existing profiles and configured default. Pass either an exact unique
 `profileName` or stable `profileId` to `preview_open`, for example
 `preview_open({ open: false, reuseExistingTab: false, profileName: "Work" })`.
+When `browserHost` is advertised, include `browserHost: "desktop"` in named
+desktop sign-in opens. An omitted host retains the current policy, so a new
+tab or profile choice alone does not leave environment hosting.
 For GitHub uploads and other GitHub work requiring a login, explicitly select
 `Logged in Developer` in a separate tab. Ordinary QA keeps its bare or dedicated
 QA profile; never change the default to obtain a login. This selects the new

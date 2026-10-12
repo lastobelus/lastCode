@@ -111,6 +111,10 @@ separate permission prompt. Keep it in the background so the user can continue
 using LastCode. Call `preview_status` and `preview_profiles`, then explicitly select `Default`
 or an existing dedicated QA profile with
 `preview_open({ open: false, profileName: "Default", reuseExistingTab: false })`.
+When the tool advertises `browserHost`, set `browserHost: "environment"` on the
+first QA open. Set `browserHost: "desktop"` when switching to a named desktop
+sign-in such as `Logged in Developer`. Omitting the host keeps the current
+policy even when opening a new tab or selecting a different profile.
 Verify its returned profile. GitHub work requiring login uses a separate tab in
 `Logged in Developer`; never change the default profile to obtain that session. Retain the returned `tabId` and pass it to subsequent tools; reuse that
 QA tab for the rest of the task. Do not hide or repurpose a tab the user is
