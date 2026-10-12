@@ -1297,6 +1297,18 @@ const make = Effect.gen(function* () {
                 Object.assign(entry, { reason });
                 return false;
               };
+              const allOwnerPoliciesUnchanged = (currentSettings: ServerSettings) =>
+                owners.every((owner) => {
+                  const initial = resolveWorktreeCleanup(
+                    serverSettings,
+                    owner.projectId,
+                  ).worktreeDependenciesAfterDays;
+                  return (
+                    initial !== null &&
+                    resolveWorktreeCleanup(currentSettings, owner.projectId)
+                      .worktreeDependenciesAfterDays === initial
+                  );
+                });
               const familyStillIdle = Effect.fnUntraced(function* () {
                 for (const owner of owners) {
                   const initialDays = resolveWorktreeCleanup(
@@ -1372,7 +1384,10 @@ const make = Effect.gen(function* () {
                   )
                     return keep("Shared owners do not map to the same recognized repository");
                 }
-                return true;
+                return (
+                  allOwnerPoliciesUnchanged(yield* settingsService.getSettings) ||
+                  keep("An owning project's dependency cleanup policy changed or is off")
+                );
               });
               const candidateStillIdle = Effect.fn("StorageCleanup.dependencyCandidateStillIdle")(
                 function* () {
@@ -1453,9 +1468,8 @@ const make = Effect.gen(function* () {
                     return keep("Thread still has active or pending work");
                   return (
                     !(yield* terminalUsesDependencies(worktreePath, recordedWorktreePath)) &&
-                    resolveWorktreeCleanup(yield* settingsService.getSettings, thread.projectId)
-                      .worktreeDependenciesAfterDays === days &&
-                    !(yield* ownershipChangedSince(sequence))
+                    !(yield* ownershipChangedSince(sequence)) &&
+                    allOwnerPoliciesUnchanged(yield* settingsService.getSettings)
                   );
                 },
               );
@@ -1542,8 +1556,7 @@ const make = Effect.gen(function* () {
                 if (yield* hasLiveProviderSession(worktreePath, thread.id)) return false;
                 return (
                   !(yield* terminalUsesDependencies(worktreePath, recordedWorktreePath)) &&
-                  resolveWorktreeCleanup(yield* settingsService.getSettings, thread.projectId)
-                    .worktreeDependenciesAfterDays === days
+                  allOwnerPoliciesUnchanged(yield* settingsService.getSettings)
                 );
               });
               return {

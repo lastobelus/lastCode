@@ -61,6 +61,7 @@ const testLayer = (
   onDependencyInspection: () => void = () => undefined,
   mountPoints?: Effect.Effect<ReadonlyArray<string> | null>,
   failSharedProjectInventory = false,
+  onDependencyObservation: (cwd: string) => void = () => undefined,
 ) => {
   const gitLayer = Layer.effect(
     GitVcsDriver.GitVcsDriver,
@@ -84,6 +85,8 @@ const testLayer = (
                 }),
               );
             if (request.operation === "GeneratedDependencies.inspect") onDependencyInspection();
+            if (request.operation === "GeneratedDependencies.observe")
+              onDependencyObservation(request.cwd);
             return yield* git.execute(request);
           }),
       };
@@ -775,6 +778,7 @@ type SweepCase =
   | "archived-shared-unarchived"
   | "archived-shared-reopened"
   | "archived-shared-pending"
+  | "archived-shared-policy-race"
   | "owned-use-recent"
   | "owned-custom-short"
   | "owned-custom-long"
@@ -867,6 +871,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     readonly releaseInitialInventory: Deferred.Deferred<void>;
   },
   setMountReader: (reader: Effect.Effect<ReadonlyArray<string> | null>) => void,
+  setObservationHook: (hook: (cwd: string) => void) => void,
 ) {
   yield* TestClock.setTime(NOW);
   const f = yield* fixture();
@@ -974,7 +979,9 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
         ...thread,
         id: ThreadId.make("archived-sibling"),
         projectId:
-          mode === "archived-shared-off" ? ProjectId.make("off-project") : thread.projectId,
+          mode === "archived-shared-off" || mode === "archived-shared-policy-race"
+            ? ProjectId.make("sibling-project")
+            : thread.projectId,
         archivedAt: mode === "archived-shared-unarchived" ? null : at(15),
         status: mode === "archived-shared-active" ? ("queued" as const) : ("idle" as const),
       }
@@ -1050,6 +1057,19 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
         },
       },
     };
+  const siblingProjectRoot = f.path.join(f.root, "sibling-project");
+  if (mode === "archived-shared-policy-race") {
+    yield* f.fs.symlink(f.repository, siblingProjectRoot);
+    setObservationHook((cwd) => {
+      if (cwd === siblingProjectRoot)
+        settings = {
+          ...settings,
+          projectSettingsOverrides: {
+            [sharedSibling!.projectId]: { worktreeCleanup: { mode: "off" } },
+          },
+        };
+    });
+  }
   let mountReads = 0;
   setMountReader(
     Effect.gen(function* () {
@@ -1377,8 +1397,16 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
                     mode === "ownerless-shared-project" ? f.repository : otherProjectRoot,
                 },
               ]
-            : mode === "archived-shared-off"
-              ? [project, { ...project, id: sharedSibling!.projectId }]
+            : mode === "archived-shared-off" || mode === "archived-shared-policy-race"
+              ? [
+                  project,
+                  {
+                    ...project,
+                    id: sharedSibling!.projectId,
+                    workspaceRoot:
+                      mode === "archived-shared-policy-race" ? siblingProjectRoot : f.repository,
+                  },
+                ]
               : [project],
         ),
     }),
@@ -1797,6 +1825,7 @@ it.effect.each([
   "archived-shared-unarchived",
   "archived-shared-reopened",
   "archived-shared-pending",
+  "archived-shared-policy-race",
   "owned-use-recent",
   "owned-custom-short",
   "owned-custom-long",
@@ -1885,6 +1914,7 @@ it.effect.each([
     let dependencyInspections = 0;
     let processEffectReads = 0;
     let readMounts: Effect.Effect<ReadonlyArray<string> | null> = Effect.succeed(["/"]);
+    let observationHook: (cwd: string) => void = () => undefined;
     const initialInventoryEntered = yield* Deferred.make<void>();
     const releaseInitialInventory = yield* Deferred.make<void>();
     const processes = Effect.gen(function* () {
@@ -1905,6 +1935,9 @@ it.effect.each([
       (reader) => {
         readMounts = reader;
       },
+      (hook) => {
+        observationHook = hook;
+      },
     ).pipe(
       Effect.scoped,
       Effect.provide(
@@ -1914,6 +1947,7 @@ it.effect.each([
             () => dependencyInspections++,
             Effect.suspend(() => readMounts),
             mode === "ownerless-shared-project-failed-inventory",
+            (cwd) => observationHook(cwd),
           ),
           NodeSqliteClient.layer({ filename: ":memory:" }).pipe(Layer.provide(NodeServices.layer)),
         ),
