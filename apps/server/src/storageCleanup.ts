@@ -887,7 +887,7 @@ const make = Effect.gen(function* () {
         args: ["worktree", "list", "--porcelain", "-z"],
         maxOutputBytes: 1024 * 1024,
       });
-      if (result.stdoutTruncated || result.stderrTruncated) return [];
+      if (result.stdoutTruncated || result.stderrTruncated) return null;
       return result.stdout.split("\0\0").flatMap((block) => {
         const fields = block.split("\0");
         const location = fields.find((field) => field.startsWith("worktree "))?.slice(9);
@@ -895,17 +895,58 @@ const make = Effect.gen(function* () {
         return location ? [{ recordedPath: path.resolve(location), branch: branch ?? null }] : [];
       });
     });
-    const registered = (yield* Effect.forEach(snapshot.projects, (project) =>
-      readRegistered(project.workspaceRoot).pipe(
-        Effect.flatMap((worktrees) =>
-          Effect.forEach(worktrees, (worktree) =>
-            Effect.gen(function* () {
-              return { ...worktree, project, cwd: yield* resolveOwnerPath(worktree.recordedPath) };
-            }),
-          ),
-        ),
-        Effect.orElseSucceed(() => []),
-      ),
+    const readProjectRepositories = Effect.fn("StorageCleanup.projectRepositories")(function* () {
+      return yield* Effect.forEach(snapshot.projects, (project) =>
+        Effect.gen(function* () {
+          const result = yield* git.execute({
+            operation: "StorageCleanup.projectRepository",
+            cwd: project.workspaceRoot,
+            args: ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            allowNonZeroExit: true,
+            env: { LC_ALL: "C" },
+            maxOutputBytes: 64 * 1024,
+          });
+          if (
+            result.exitCode !== 0 &&
+            !result.stdoutTruncated &&
+            !result.stderrTruncated &&
+            result.stderr.toLowerCase().includes("not a git repository")
+          )
+            return { project, commonDirectory: null, uncertain: false };
+          const value = result.stdout.trim();
+          if (
+            result.exitCode !== 0 ||
+            result.stdoutTruncated ||
+            result.stderrTruncated ||
+            !path.isAbsolute(value) ||
+            value.includes("\n")
+          )
+            return { project, commonDirectory: null, uncertain: true };
+          return { project, commonDirectory: yield* fs.realPath(value), uncertain: false };
+        }).pipe(Effect.orElseSucceed(() => ({ project, commonDirectory: null, uncertain: true }))),
+      );
+    });
+    const projectRepositories = yield* readProjectRepositories();
+    const registered = (yield* Effect.forEach(
+      projectRepositories,
+      ({ project, commonDirectory }) =>
+        commonDirectory === null
+          ? Effect.succeed([])
+          : readRegistered(project.workspaceRoot).pipe(
+              Effect.flatMap((worktrees) =>
+                Effect.forEach(worktrees ?? [], (worktree) =>
+                  Effect.gen(function* () {
+                    return {
+                      ...worktree,
+                      project,
+                      commonDirectory,
+                      cwd: yield* resolveOwnerPath(worktree.recordedPath),
+                    };
+                  }),
+                ),
+              ),
+              Effect.orElseSucceed(() => []),
+            ),
     )).flat();
     const registeredGroups = Map.groupBy(registered, (entry) => entry.cwd);
     // Include durable deleted records even when their project no longer exists.
@@ -1000,7 +1041,16 @@ const make = Effect.gen(function* () {
         entry.reason = "Project dependency cleanup is off";
         continue;
       }
-      if (mappings.length !== 1) {
+      if (projectRepositories.some((repository) => repository.uncertain)) {
+        entry.reason = "Could not verify repository ownership for every current project";
+        continue;
+      }
+      if (
+        mappings.length !== 1 ||
+        projectRepositories.filter(
+          (repository) => repository.commonDirectory === candidate.commonDirectory,
+        ).length !== 1
+      ) {
         entry.reason = "Repository belongs to more than one project";
         continue;
       }
@@ -1065,12 +1115,22 @@ const make = Effect.gen(function* () {
           if (!(yield* pathIdentityUnchanged(recordedPath, cwd)))
             return keep("Worktree path is a symlink or its location changed");
           if (yield* branchChanged(cwd, branch)) return keep("Repository or branch changed");
+          const currentRepositories = yield* readProjectRepositories();
           if (
-            !(yield* readRegistered(project.workspaceRoot)).some(
+            currentRepositories.some((repository) => repository.uncertain) ||
+            currentRepositories.filter(
+              (repository) => repository.commonDirectory === candidate.commonDirectory,
+            ).length !== 1
+          )
+            return keep("Repository and project mapping could not be verified uniquely");
+          const registration = yield* readRegistered(project.workspaceRoot);
+          if (
+            registration === null ||
+            !registration.some(
               (worktree) => worktree.recordedPath === recordedPath && worktree.branch === branch,
             )
           )
-            return keep("Worktree registration changed");
+            return keep("Worktree registration changed or could not be verified");
           const reason = yield* consumerReason();
           if (reason !== null) {
             yield* dependencies.observe(input, now, true);

@@ -2,7 +2,11 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
 import { assert, it, onTestFinished } from "vite-plus/test";
-import { observeDependencyActivity, recordDependencyUse } from "./dependencyActivity.ts";
+import {
+  observeDependencyActivity,
+  recordDependencyUse,
+  dependencyActivitySnapshot,
+} from "./dependencyActivity.ts";
 
 const fixture = () => {
   const root = NodeFS.realpathSync(
@@ -78,4 +82,13 @@ it("final revalidation is read-only, detects renewal and preserves approval reco
   assert.equal(NodeFS.readFileSync(activity, "utf8"), original);
   assert.equal(NodeFS.readFileSync(consent, "utf8"), "one-use consent remains unchanged");
   assert.equal(observeDependencyActivity(gitDir, cwd, 300).lastUsedAt, 300);
+});
+
+it("final snapshots detect renewal at the same timestamp without writing activity", () => {
+  const { cwd, gitDir } = fixture();
+  observeDependencyActivity(gitDir, cwd, 100);
+  const before = dependencyActivitySnapshot(cwd);
+  assert.equal(dependencyActivitySnapshot(cwd), before);
+  observeDependencyActivity(gitDir, cwd, 100, true);
+  assert.notEqual(dependencyActivitySnapshot(cwd), before);
 });

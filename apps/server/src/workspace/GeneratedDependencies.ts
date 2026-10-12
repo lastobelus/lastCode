@@ -1,4 +1,8 @@
-import { observeDependencyActivity, recordDependencyUse } from "@t3tools/shared/dependencyActivity";
+import {
+  observeDependencyActivity,
+  recordDependencyUse,
+  dependencyActivitySnapshot,
+} from "@t3tools/shared/dependencyActivity";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 // @effect-diagnostics nodeBuiltinImport:off - FileSystem lacks lstat; dependency
 // installs contain links, which must be measured and removed without following them.
@@ -470,7 +474,12 @@ const make = Effect.gen(function* () {
               "kept",
               "Dependency identity changed before removal",
             ).pipe(Effect.as(null));
-          return { current, inspection, canRemove, isStillEligible };
+          const usageSnapshot = yield* Effect.try({
+            try: () => dependencyActivitySnapshot(current.worktreePath),
+            catch: (cause) =>
+              new GeneratedDependenciesError({ path: current.dependencyPath, cause }),
+          });
+          return { current, inspection, canRemove, isStillEligible, usageSnapshot };
         }).pipe(
           Effect.catch((error) =>
             skip(error).pipe(
@@ -493,7 +502,7 @@ const make = Effect.gen(function* () {
     }
     const eligible = (yield* Effect.forEach(
       validated,
-      ({ current, inspection, canRemove, isStillEligible }) =>
+      ({ current, inspection, canRemove, isStillEligible, usageSnapshot }) =>
         Effect.gen(function* () {
           if (
             processes.some(
@@ -509,7 +518,7 @@ const make = Effect.gen(function* () {
             yield* decide(inspection, "kept", "Worktree ownership or cleanup eligibility changed");
             return null;
           }
-          return { current, inspection, isStillEligible };
+          return { current, inspection, isStillEligible, usageSnapshot };
         }).pipe(
           Effect.catch((error) =>
             skip(error).pipe(
@@ -532,7 +541,7 @@ const make = Effect.gen(function* () {
     }
     const removed = yield* Effect.forEach(
       eligible,
-      ({ current, inspection, isStillEligible }) =>
+      ({ current, inspection, isStillEligible, usageSnapshot }) =>
         Effect.gen(function* () {
           if (DependencyMounts.containsMount(current.dependencyPath, mounts)) {
             yield* decide(inspection, "kept", "Dependency path is a mount");
@@ -576,6 +585,9 @@ const make = Effect.gen(function* () {
               const stat = await NodeFSP.lstat(current.dependencyPath);
               if (!stat.isDirectory() || stat.dev !== current.device || stat.ino !== current.inode)
                 return null;
+              // All asynchronous eligibility and mount work is complete. Read the
+              // tiny usage evidence synchronously just before submitting removal.
+              if (dependencyActivitySnapshot(current.worktreePath) !== usageSnapshot) return null;
               // fs.rm unlinks internal symlinks; it does not traverse their targets.
               await NodeFSP.rm(current.dependencyPath, { recursive: true });
               return { ...current, estimatedReclaimedBytes: inspection.estimatedReclaimedBytes };

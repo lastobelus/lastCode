@@ -15,6 +15,7 @@ import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as TestClock from "effect/testing/TestClock";
 import {
   DEFAULT_SERVER_SETTINGS,
+  GitCommandError,
   OrchestrationV2ThreadShell,
   OrchestrationV2AppThreadJson,
   OrchestrationV2ProviderSessionJson,
@@ -58,6 +59,7 @@ const testLayer = (
   processCwds: Effect.Effect<ReadonlyArray<string> | null> = Effect.succeed([]),
   onDependencyInspection: () => void = () => undefined,
   mountPoints?: Effect.Effect<ReadonlyArray<string> | null>,
+  failSharedProjectInventory = false,
 ) => {
   const gitLayer = Layer.effect(
     GitVcsDriver.GitVcsDriver,
@@ -67,6 +69,19 @@ const testLayer = (
         ...git,
         execute: (request: Parameters<typeof git.execute>[0]) =>
           Effect.gen(function* () {
+            if (
+              failSharedProjectInventory &&
+              request.operation === "StorageCleanup.registeredDependencies" &&
+              request.cwd.endsWith("/project-alias")
+            )
+              return yield* Effect.fail(
+                new GitCommandError({
+                  operation: request.operation,
+                  command: "git",
+                  cwd: request.cwd,
+                  detail: "Fixture inventory failure",
+                }),
+              );
             if (request.operation === "GeneratedDependencies.inspect") onDependencyInspection();
             return yield* git.execute(request);
           }),
@@ -745,6 +760,8 @@ type SweepCase =
   | "ownerless-use-during-inspection"
   | "ownerless-project-off"
   | "ownerless-shared-project"
+  | "ownerless-shared-project-failed-inventory"
+  | "ownerless-non-git-project"
   | "eligible"
   | "archived"
   | "whole-policy"
@@ -820,6 +837,7 @@ type SweepCase =
   | "final-mount-candidate-event"
   | "final-mount-provider-ownership"
   | "final-mount-dependency-use"
+  | "final-mount-late-dependency-use"
   | "worker-ready-burst"
   | "worker-terminal-burst"
   | "worker-settings-burst";
@@ -980,6 +998,8 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
         if (mode === "final-mount-provider-ownership") acquireManagerOwnership();
         if (mode === "final-mount-dependency-use") yield* f.cleanup.observe(f.input, NOW, true);
       }
+      if (mountReads === 3 && mode === "final-mount-late-dependency-use")
+        yield* f.cleanup.observe(f.input, NOW, true);
       return ["/"];
     }).pipe(Effect.orDie),
   );
@@ -1141,6 +1161,10 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     createdAt: "2026-05-01T00:00:00.000Z",
     updatedAt: "2026-05-01T00:00:00.000Z",
   };
+  const otherProjectRoot = f.path.join(f.root, "project-alias");
+  if (mode === "ownerless-shared-project-failed-inventory")
+    yield* f.fs.symlink(f.repository, otherProjectRoot);
+  if (mode === "ownerless-non-git-project") yield* f.fs.makeDirectory(otherProjectRoot);
   let reads = 0;
   let deletedEventInserted = false;
   const sessionLookups = new Map<string, number>();
@@ -1263,8 +1287,18 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     Layer.mock(ProjectStore.ProjectStoreV2)({
       listShells: () =>
         Effect.succeed(
-          mode === "ownerless-shared-project"
-            ? [project, { ...project, id: ProjectId.make("other-project") }]
+          mode === "ownerless-shared-project" ||
+            mode === "ownerless-shared-project-failed-inventory" ||
+            mode === "ownerless-non-git-project"
+            ? [
+                project,
+                {
+                  ...project,
+                  id: ProjectId.make("other-project"),
+                  workspaceRoot:
+                    mode === "ownerless-shared-project" ? f.repository : otherProjectRoot,
+                },
+              ]
             : [project],
         ),
     }),
@@ -1476,7 +1510,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   } else yield* worker.runNow;
   if (ownerless) {
     const report = yield* worker.latestReport;
-    const removed = mode === "ownerless-eligible";
+    const removed = mode === "ownerless-eligible" || mode === "ownerless-non-git-project";
     assert.equal(yield* f.fs.exists(f.dependencyPath), !removed);
     assert.equal(
       yield* f.fs.readFileString(f.path.join(f.input.worktreePath, "source.ts")),
@@ -1590,7 +1624,10 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   if (mode === "deleted-event-after-capture") assert.isTrue(deletedEventInserted);
   if (mode.startsWith("final-mount-")) {
     // The mutation occurs only after both complete eligibility checks have run.
-    assert.equal(mountReads, mode === "final-mount-unchanged" ? 3 : 2);
+    assert.equal(
+      mountReads,
+      mode === "final-mount-unchanged" || mode === "final-mount-late-dependency-use" ? 3 : 2,
+    );
     assert.equal(targetedReads.length, 4);
     assert.equal(processReads, 2);
     assert.equal(reads, 2);
@@ -1639,6 +1676,8 @@ it.effect.each([
   "ownerless-use-during-inspection",
   "ownerless-project-off",
   "ownerless-shared-project",
+  "ownerless-shared-project-failed-inventory",
+  "ownerless-non-git-project",
   "eligible",
   "archived",
   "whole-policy",
@@ -1714,6 +1753,7 @@ it.effect.each([
   "final-mount-candidate-event",
   "final-mount-provider-ownership",
   "final-mount-dependency-use",
+  "final-mount-late-dependency-use",
   "worker-ready-burst",
   "worker-terminal-burst",
   "worker-settings-burst",
@@ -1751,6 +1791,7 @@ it.effect.each([
             processes,
             () => dependencyInspections++,
             Effect.suspend(() => readMounts),
+            mode === "ownerless-shared-project-failed-inventory",
           ),
           NodeSqliteClient.layer({ filename: ":memory:" }).pipe(Layer.provide(NodeServices.layer)),
         ),
