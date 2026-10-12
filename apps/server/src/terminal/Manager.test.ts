@@ -650,20 +650,117 @@ it.layer(
     }),
   );
 
-  it.effect("rejects unreadable retained Action intent before starting another process", () =>
-    Effect.gen(function* () {
-      const { manager, ptyAdapter, logsDir } = yield* createManager();
-      const terminalId = "term-action-a";
-      yield* manager.open(openInput({ terminalId, terminalLinkProfileName: "Work account" }));
-      yield* manager.close({ threadId: "thread-1", terminalId });
-      const fs = yield* FileSystem.FileSystem;
-      const logPath = yield* multiTerminalHistoryLogPath(logsDir, "thread-1", terminalId);
-      yield* fs.writeFileString(`${logPath}.profile.json`, "invalid metadata");
-      const reopened = yield* manager.open(openInput({ terminalId })).pipe(Effect.result);
-      assert.equal(reopened._tag, "Failure");
-      if (reopened._tag === "Failure") assert.equal(reopened.failure._tag, "TerminalHistoryError");
-      expect(ptyAdapter.spawnInputs).toHaveLength(1);
-    }),
+  it.effect.each([null, "Work account"])(
+    "keeps retained output when explicit %s matches readable intent",
+    (profileName) =>
+      Effect.gen(function* () {
+        const { manager, ptyAdapter } = yield* createManager();
+        const terminalId = "term-action-a";
+        const input = openInput({ terminalId, terminalLinkProfileName: profileName });
+        const target = { threadId: input.threadId, terminalId };
+        yield* manager.open(input);
+        const output = yield* Deferred.make<void>();
+        const stop = yield* manager.subscribe((event) =>
+          event.type === "output"
+            ? Deferred.succeed(output, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(stop));
+        yield* Effect.sync(() => ptyAdapter.processes[0]!.emitData("retained output\n"));
+        yield* Deferred.await(output);
+        yield* manager.close(target);
+        const reopened = yield* manager.open(input);
+        assert.equal(reopened.history, "retained output\n");
+        assert.equal(reopened.terminalLinkProfileName, profileName ?? undefined);
+        assert.equal(yield* manager.history(target), "retained output\n");
+      }),
+  );
+
+  it.effect.each(["invalid metadata", '{"terminalLinkProfileName":'])(
+    "rejects unreadable retained Action intent %s before starting another process",
+    (raw) =>
+      Effect.gen(function* () {
+        const { manager, ptyAdapter, logsDir } = yield* createManager();
+        const terminalId = "term-action-a";
+        yield* manager.open(openInput({ terminalId, terminalLinkProfileName: "Work account" }));
+        yield* manager.close({ threadId: "thread-1", terminalId });
+        const fs = yield* FileSystem.FileSystem;
+        const logPath = yield* multiTerminalHistoryLogPath(logsDir, "thread-1", terminalId);
+        yield* fs.writeFileString(logPath, "retained output\n");
+        yield* fs.writeFileString(`${logPath}.profile.json`, raw);
+        const reopened = yield* manager.open(openInput({ terminalId })).pipe(Effect.result);
+        assert.equal(reopened._tag, "Failure");
+        if (reopened._tag === "Failure")
+          assert.equal(reopened.failure._tag, "TerminalHistoryError");
+        expect(ptyAdapter.spawnInputs).toHaveLength(1);
+        assert.equal(yield* fs.readFileString(logPath), "retained output\n");
+        assert.equal(yield* fs.readFileString(`${logPath}.profile.json`), raw);
+      }),
+  );
+
+  it.effect.each([
+    { profileName: null, raw: "invalid metadata" },
+    { profileName: "Other account", raw: "invalid metadata" },
+    { profileName: null, raw: '{"terminalLinkProfileName":' },
+    { profileName: "Other account", raw: '{"terminalLinkProfileName":' },
+  ])(
+    "replaces corrupt retained Action intent with explicit $profileName ($raw)",
+    ({ profileName, raw }) =>
+      Effect.gen(function* () {
+        const { manager, ptyAdapter, logsDir } = yield* createManager();
+        const terminalId = "term-action-a";
+        const target = { threadId: "thread-1", terminalId };
+        const unrelated = { threadId: "thread-1", terminalId: "term-action-b" };
+        yield* manager.open(openInput({ terminalId, terminalLinkProfileName: "Work account" }));
+        yield* manager.open(
+          openInput({ terminalId: unrelated.terminalId, terminalLinkProfileName: "Work account" }),
+        );
+        const output = yield* Queue.unbounded<string>();
+        const stop = yield* manager.subscribe((event) =>
+          event.type === "output"
+            ? Queue.offer(output, event.terminalId).pipe(Effect.asVoid)
+            : Effect.void,
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(stop));
+        yield* Effect.sync(() => ptyAdapter.processes[0]!.emitData("stale Action output\n"));
+        assert.equal(yield* Queue.take(output), terminalId);
+        yield* Effect.sync(() => ptyAdapter.processes[1]!.emitData("unrelated output\n"));
+        assert.equal(yield* Queue.take(output), unrelated.terminalId);
+        assert.equal(yield* manager.history(unrelated), "unrelated output\n");
+        yield* manager.close(target);
+        const fs = yield* FileSystem.FileSystem;
+        const logPath = yield* multiTerminalHistoryLogPath(logsDir, target.threadId, terminalId);
+        assert.equal(yield* fs.readFileString(logPath), "stale Action output\n");
+        yield* fs.writeFileString(`${logPath}.profile.json`, raw);
+
+        const replaced = yield* manager.open(
+          openInput({ terminalId, terminalLinkProfileName: profileName }),
+        );
+        assert.equal(replaced.history, "");
+        assert.equal(replaced.terminalLinkProfileName, profileName ?? undefined);
+        assert.equal(yield* fs.readFileString(logPath), "");
+        if (profileName === null) {
+          assert.equal(yield* fs.exists(`${logPath}.profile.json`), false);
+        } else {
+          assert.equal(
+            yield* fs.readFileString(`${logPath}.profile.json`),
+            encodeUnknownJson({ terminalLinkProfileName: profileName }),
+          );
+        }
+        expect(ptyAdapter.spawnInputs).toHaveLength(3);
+        const unrelatedSnapshot = yield* manager.open(
+          openInput({ terminalId: unrelated.terminalId }),
+        );
+        assert.equal(unrelatedSnapshot.history, "unrelated output\n");
+        assert.equal(unrelatedSnapshot.terminalLinkProfileName, "Work account");
+        assert.equal(yield* manager.history(unrelated), "unrelated output\n");
+        assert.equal(ptyAdapter.processes[1]!.killed, false);
+        expect(ptyAdapter.spawnInputs).toHaveLength(3);
+        yield* manager.close(target);
+        const reopened = yield* manager.open(openInput({ terminalId }));
+        assert.equal(reopened.history, "");
+        assert.equal(reopened.terminalLinkProfileName, profileName ?? undefined);
+      }),
   );
 
   it.effect("fails a named Action launch before spawning when its intent cannot be stored", () =>

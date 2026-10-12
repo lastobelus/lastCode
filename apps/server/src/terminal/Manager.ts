@@ -3176,15 +3176,21 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     if (Option.isNone(existing)) {
       yield* flushPersist(input.threadId, terminalId);
       const history = yield* readHistory(input.threadId, terminalId);
-      const retainedProfileName = yield* readHistoryProfile(input.threadId, terminalId);
+      const retainedProfile = yield* readHistoryProfile(input.threadId, terminalId).pipe(
+        Effect.result,
+      );
+      if (retainedProfile._tag === "Failure" && input.terminalLinkProfileName === undefined)
+        return yield* retainedProfile.failure;
+      const retainedProfileName =
+        retainedProfile._tag === "Success" ? retainedProfile.success : undefined;
       const terminalLinkProfileName =
         input.terminalLinkProfileName === undefined
           ? retainedProfileName
           : (input.terminalLinkProfileName ?? undefined);
-      // An explicit new Action cannot reinterpret another Action's retained output.
+      // Explicit intent replaces unreadable intent without reinterpreting its retained output.
       if (
         input.terminalLinkProfileName !== undefined &&
-        terminalLinkProfileName !== retainedProfileName
+        (retainedProfile._tag === "Failure" || terminalLinkProfileName !== retainedProfileName)
       ) {
         history.clear();
         yield* persistHistory(input.threadId, terminalId, history);
