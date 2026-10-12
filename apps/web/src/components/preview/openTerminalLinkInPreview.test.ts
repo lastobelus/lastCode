@@ -3,6 +3,8 @@ import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
+import * as previewRuntime from "~/browser/previewRuntime";
+
 import {
   openTerminalLinkInPreview,
   TerminalLinkPreviewOpenError,
@@ -69,6 +71,7 @@ const snapshot: PreviewSessionSnapshot = {
 };
 
 beforeEach(() => {
+  vi.stubGlobal("window", { desktopBridge: {} });
   hostingMocks.prepare
     .mockReset()
     .mockImplementation(async (_ref, url) => ({ url, managed: false, restored: false }));
@@ -79,9 +82,128 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("openTerminalLinkInPreview", () => {
+  it.each([
+    { forceBrowser: false, catalogue: "present" },
+    { forceBrowser: true, catalogue: "present" },
+    { forceBrowser: false, catalogue: "missing" },
+    { forceBrowser: true, catalogue: "missing" },
+    { forceBrowser: false, catalogue: "unreadable" },
+    { forceBrowser: true, catalogue: "unreadable" },
+  ])(
+    "directs hosted-web Action links to the owning desktop before $catalogue settings lookup (modifier=$forceBrowser)",
+    async ({ forceBrowser, catalogue }) => {
+      const externalOpen = vi.fn();
+      vi.stubGlobal("window", { open: externalOpen });
+      vi.spyOn(previewRuntime, "isPreviewAvailableFor").mockReturnValue(true);
+      vi.spyOn(previewRuntime, "previewRuntimeFor").mockReturnValue("server");
+      if (catalogue === "missing")
+        browserDefaultsMocks.resolve.mockResolvedValue({ ...hydratedDefaults, profiles: [] });
+      if (catalogue === "unreadable")
+        browserDefaultsMocks.resolve.mockRejectedValue(new Error("Settings read failed"));
+      const openPreview = vi.fn(async () => AsyncResult.success(snapshot));
+      const fallbackToBrowser = vi.fn();
+
+      await expect(
+        openTerminalLinkInPreview({
+          url: "https://example.com/sign-in",
+          threadRef,
+          terminalLinkProfileName: "Work account",
+          openPreview,
+          fallbackToBrowser,
+          forceBrowser,
+        }),
+      ).rejects.toMatchObject({
+        _tag: "TerminalLinkProfileUnavailableError",
+        message:
+          "Open this Action link in the desktop app that owns the configured browser profile.",
+      });
+      expect(browserDefaultsMocks.resolve).not.toHaveBeenCalled();
+      expect(hostingMocks.prepare).not.toHaveBeenCalled();
+      expect(openPreview).not.toHaveBeenCalled();
+      expect(externalOpen).not.toHaveBeenCalled();
+      expect(fallbackToBrowser).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([false, true])(
+    "keeps ordinary hosted-web links external after managed recovery (modifier=%s)",
+    async (forceBrowser) => {
+      const replace = vi.fn();
+      const externalOpen = vi.fn(() => ({
+        opener: {},
+        closed: false,
+        document: { createElement: () => ({}), head: { append: vi.fn() } },
+        location: { replace },
+        close: vi.fn(),
+      }));
+      vi.stubGlobal("window", { open: externalOpen });
+      vi.spyOn(previewRuntime, "isPreviewAvailableFor").mockReturnValue(true);
+      const url = "http://localhost:5173/qa";
+      const resolved = "http://workstation.example:5173/qa";
+      hostingMocks.prepare.mockResolvedValue({ url: resolved, managed: true, restored: true });
+      const openPreview = vi.fn(async () => AsyncResult.success(snapshot));
+      const fallbackToBrowser = vi.fn();
+      await openTerminalLinkInPreview({
+        url,
+        threadRef,
+        openPreview,
+        fallbackToBrowser,
+        forceBrowser,
+      });
+      expect(externalOpen).toHaveBeenCalledExactlyOnceWith("about:blank", "_blank");
+      expect(hostingMocks.prepare).toHaveBeenCalledExactlyOnceWith(threadRef, url);
+      expect(replace).toHaveBeenCalledExactlyOnceWith(resolved);
+      expect(browserDefaultsMocks.resolve).not.toHaveBeenCalled();
+      expect(openPreview).not.toHaveBeenCalled();
+      expect(fallbackToBrowser).not.toHaveBeenCalled();
+    },
+  );
+
+  it("allows the desktop modifier only after validating the named profile", async () => {
+    const openPreview = vi.fn(async () => AsyncResult.success(snapshot));
+    const fallbackToBrowser = vi.fn();
+    await openTerminalLinkInPreview({
+      url: "https://example.com/docs",
+      threadRef,
+      terminalLinkProfileName: "Work account",
+      openPreview,
+      fallbackToBrowser,
+      forceBrowser: true,
+    });
+    expect(browserDefaultsMocks.resolve).toHaveBeenCalledOnce();
+    expect(fallbackToBrowser).toHaveBeenCalledExactlyOnceWith("https://example.com/docs");
+    expect(openPreview).not.toHaveBeenCalled();
+  });
+
+  it("does not let a desktop modifier bypass ambiguous profile identity", async () => {
+    browserDefaultsMocks.resolve.mockResolvedValue({
+      ...hydratedDefaults,
+      profiles: [
+        ...hydratedDefaults.profiles,
+        { id: "other", name: "Work account", kind: "persistent" },
+      ],
+    });
+    const openPreview = vi.fn(async () => AsyncResult.success(snapshot));
+    const fallbackToBrowser = vi.fn();
+    await expect(
+      openTerminalLinkInPreview({
+        url: "https://example.com/docs",
+        threadRef,
+        terminalLinkProfileName: "Work account",
+        openPreview,
+        fallbackToBrowser,
+        forceBrowser: true,
+      }),
+    ).rejects.toMatchObject({ _tag: "PreviewAutomationProfileError", reason: "ambiguous" });
+    expect(hostingMocks.prepare).not.toHaveBeenCalled();
+    expect(openPreview).not.toHaveBeenCalled();
+    expect(fallbackToBrowser).not.toHaveBeenCalled();
+  });
+
   it("opens a generic Action link with the exact named profile without changing Default", async () => {
     const openPreview = vi.fn(async () => AsyncResult.success(snapshot));
     const fallbackToBrowser = vi.fn();

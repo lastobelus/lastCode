@@ -44,7 +44,7 @@ export class TerminalLinkProfileUnavailableError extends Schema.TaggedError<Term
   {},
 ) {
   override get message(): string {
-    return "Opening this Action link requires the integrated Browser with its named profile.";
+    return "Open this Action link in the desktop app that owns the configured browser profile.";
   }
 }
 
@@ -54,7 +54,7 @@ interface OpenTerminalLinkInPreviewInput<E> {
   readonly threadRef: ScopedThreadRef;
   readonly openPreview: OpenPreviewMutation<E>;
   readonly fallbackToBrowser: (url: string) => void;
-  /** Cmd/Ctrl-click bypasses the preference and opens in the system browser. */
+  /** Cmd/Ctrl-click opens externally after any named desktop profile is validated. */
   readonly forceBrowser: boolean;
 }
 
@@ -65,6 +65,15 @@ interface OpenTerminalLinkInPreviewInput<E> {
 export async function openTerminalLinkInPreview<E>(
   input: OpenTerminalLinkInPreviewInput<E>,
 ): Promise<void> {
+  // A web client cannot validate or reuse the owning desktop's cookie jar,
+  // including when a modifier requests an external browser.
+  if (
+    typeof window !== "undefined" &&
+    !window.desktopBridge &&
+    input.terminalLinkProfileName !== undefined
+  ) {
+    throw new TerminalLinkProfileUnavailableError();
+  }
   // Resolve explicit intent before either browser opens. Never infer it from the URL.
   const explicitDefaults =
     input.terminalLinkProfileName === undefined ? undefined : await resolveBrowserDefaults();
@@ -76,9 +85,6 @@ export async function openTerminalLinkInPreview<E>(
           explicitDefaults,
         );
   if (typeof window !== "undefined" && !window.desktopBridge) {
-    if (explicitProfileId !== undefined && !input.forceBrowser) {
-      throw new TerminalLinkProfileUnavailableError();
-    }
     await openPreparedExternalUrl(input.url, async () =>
       hostedPreviewNavigationUrl(await prepareHostedPreview(input.threadRef, input.url)),
     );

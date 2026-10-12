@@ -67,7 +67,7 @@ export const T3ProjectFileScript = Schema.Struct({
   terminalLinkProfileName: Schema.optionalKey(
     trimmedNonEmpty({
       description:
-        "Exact browser profile name for links printed by this Action. Runs in a dedicated terminal; the profile must exist uniquely on the browser host.",
+        "Exact name of an existing desktop browser profile for links printed by this Action. Runs in a dedicated terminal; open its links in the desktop app that owns the profile, where the name must be unique.",
     }),
   ),
   previewUrl: Schema.optionalKey(
