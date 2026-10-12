@@ -20,15 +20,21 @@ import { LastCodeThreadLeadingControls, LastCodeThreadTitle } from "./LastCodeTh
 import { resolveThreadStatusPill, type ThreadStatusPill } from "../Sidebar.logic";
 import { makeThreadFixture } from "../../test-fixtures";
 import { projectLastCodeSidebarFamilies } from "../lastcodeSidebarFamilies.logic";
-vi.mock("~/hooks/useSettings", () => ({
-  useClientSetting: (key: string) =>
-    (
-      ({
-        compactLegacySidebarStatuses: mocks.compact,
-        legacySidebarThreadGroupingStyle: "typed-groups",
-      }) as Record<string, unknown>
-    )[key],
-}));
+vi.mock("~/hooks/useSettings", async () => {
+  const { useSyncExternalStore } = await import("react");
+  return {
+    useClientSetting: (key: string) =>
+      useSyncExternalStore(
+        (listener) => {
+          mocks.settingListeners.add(listener);
+          return () => {
+            mocks.settingListeners.delete(listener);
+          };
+        },
+        () => (key === "compactLegacySidebarStatuses" ? mocks.compact : "typed-groups"),
+      ),
+  };
+});
 vi.mock("../ThreadStatusIndicators", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../ThreadStatusIndicators")>();
   return { ThreadStatusLabel: actual.ThreadStatusLabel };
@@ -61,6 +67,7 @@ const mocks = vi.hoisted(() => ({
   rowDoubleClick: vi.fn(),
   canOperate: true,
   compact: false,
+  settingListeners: new Set<() => void>(),
   navigate: vi.fn(async () => {}),
   openPr: vi.fn((event: React.MouseEvent) => {
     event.preventDefault();
@@ -336,7 +343,7 @@ describe("visible status transitions", () => {
     expect(container.querySelector('[aria-label="Waiting"]')?.textContent).toContain("Waiting");
     expect(container.querySelector('[aria-label^="Waiting for Fixture check."]')).toBeNull();
     mocks.compact = true;
-    await act(() => root?.render(<StatusHarness family={family} />));
+    await act(() => mocks.settingListeners.forEach((listener) => listener()));
     expect(container.querySelector('[aria-label="Waiting"]')?.textContent).toBe("");
     expect(mocks.update).not.toHaveBeenCalled();
   });

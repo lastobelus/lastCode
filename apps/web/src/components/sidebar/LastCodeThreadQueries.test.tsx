@@ -55,6 +55,7 @@ const mocks = vi.hoisted(() => ({
   previewPermission: true,
   readScope: vi.fn(),
   useScope: vi.fn(),
+  scopeListeners: new Set<() => void>(),
 }));
 vi.mock("../../lib/openPullRequestLink", () => ({ useOpenPrLink: () => mocks.openPr }));
 vi.mock("../../state/entities", () => ({ useProject: mocks.project }));
@@ -77,10 +78,24 @@ vi.mock("../../state/previewHosting", () => ({
   usePreviewProcessControlsSupported: mocks.supportsProcesses,
 }));
 vi.mock("../../portDiscoveryState", () => ({ useThreadDiscoveredPorts: mocks.ports }));
-vi.mock("../../state/session", () => ({
-  useEnvironmentScope: mocks.useScope,
-  readEnvironmentScope: mocks.readScope,
-}));
+vi.mock("../../state/session", async () => {
+  const { useSyncExternalStore } = await import("react");
+  return {
+    useEnvironmentScope: (...args: unknown[]) => {
+      mocks.useScope(...args);
+      return useSyncExternalStore(
+        (listener) => {
+          mocks.scopeListeners.add(listener);
+          return () => {
+            mocks.scopeListeners.delete(listener);
+          };
+        },
+        () => mocks.previewPermission,
+      );
+    },
+    readEnvironmentScope: mocks.readScope,
+  };
+});
 vi.mock("../../state/use-atom-command", () => ({ useAtomCommand: () => mocks.previewCommand }));
 vi.mock("../../state/preview", () => ({ previewEnvironment: { open: "open" } }));
 vi.mock("../preview/openDiscoveredPort", () => ({ openDiscoveredPort: mocks.openPort }));
@@ -432,7 +447,7 @@ describe("row-owned query and control seams", () => {
     expect(mocks.openPort).not.toHaveBeenCalled();
     expect(mocks.navigation).not.toHaveBeenCalled();
     expect(mocks.readScope).toHaveBeenCalledWith(ref.environmentId, AuthPreviewOperateScope);
-    await render();
+    await act(() => mocks.scopeListeners.forEach((listener) => listener()));
     expect(container!.querySelector("button")).toBeNull();
   });
   it("reports preview failure but suppresses interruption without changing navigation order", async () => {

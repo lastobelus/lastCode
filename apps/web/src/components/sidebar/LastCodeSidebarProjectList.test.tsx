@@ -14,10 +14,23 @@ const mocks = vi.hoisted(() => ({
   drag: null as ComponentProps<typeof DndContext> | null,
   animate: vi.fn(),
   props: null as ComponentProps<typeof LastCodeSidebarProject> | null,
+  settingListeners: new Set<() => void>(),
 }));
-vi.mock("~/hooks/useSettings", () => ({
-  useClientSetting: () => (mocks.manual ? "manual" : "recent"),
-}));
+vi.mock("~/hooks/useSettings", async () => {
+  const { useSyncExternalStore } = await import("react");
+  return {
+    useClientSetting: () =>
+      useSyncExternalStore(
+        (listener) => {
+          mocks.settingListeners.add(listener);
+          return () => {
+            mocks.settingListeners.delete(listener);
+          };
+        },
+        () => (mocks.manual ? "manual" : "recent"),
+      ),
+  };
+});
 vi.mock("@formkit/auto-animate", () => ({ autoAnimate: mocks.animate }));
 // Keep real list wrappers and the persisted reorder store; replace only the sensor transport.
 vi.mock("@dnd-kit/core", () => ({
@@ -174,7 +187,7 @@ describe("project list ordering and mount ownership", () => {
     expect(container.querySelector('input[aria-label="group"]')).toBe(editor);
     expect(editor.value).toBe("in progress");
     mocks.manual = false;
-    await act(() => root.render(<Harness />));
+    await act(() => mocks.settingListeners.forEach((listener) => listener()));
     const automaticEditor = container.querySelector<HTMLInputElement>('input[aria-label="group"]')!;
     expect(automaticEditor).not.toBe(editor);
     expect(automaticEditor.value).toBe("original");
