@@ -20,12 +20,14 @@ import { useResizeDrag } from "~/hooks/useResizeDrag";
 import { useIsMobile } from "~/hooks/useMediaQuery";
 import { getLocalStorageItem, setLocalStorageItem } from "~/hooks/useLocalStorage";
 import { resolveSidebarState, type ResponsiveSidebarState } from "./sidebarState";
+import { bindSidebarRailScroll } from "./sidebarRailScroll";
+import { bindSidebarPageScroll } from "./sidebarPageScroll";
 import * as Schema from "effect/Schema";
 
 const SIDEBAR_COOKIE_NAME = "sidebar_state";
 const SIDEBAR_COOKIE_MAX_AGE = 60 * 60 * 24 * 7;
 const SIDEBAR_WIDTH = "16rem";
-const SIDEBAR_WIDTH_MOBILE = "calc(100vw - var(--spacing(3)))";
+const SIDEBAR_WIDTH_MOBILE = "calc(100vw - 3 * var(--spacing))";
 const SIDEBAR_WIDTH_ICON = "3rem";
 const SIDEBAR_RESIZE_DEFAULT_MIN_WIDTH = 16 * 16;
 
@@ -167,8 +169,9 @@ function SidebarProvider({
           {
             "--sidebar-width": SIDEBAR_WIDTH,
             "--sidebar-width-icon": SIDEBAR_WIDTH_ICON,
-            "--workspace-titlebar-content-left":
-              "calc(var(--workspace-controls-left) + var(--workspace-titlebar-control-size) + var(--workspace-titlebar-control-gap))",
+            "--workspace-titlebar-content-left": (isMobile ? openMobile : open)
+              ? "calc(var(--workspace-controls-left) + 2 * var(--workspace-titlebar-control-size) + var(--workspace-titlebar-control-gap))"
+              : "calc(var(--workspace-controls-left) + var(--workspace-titlebar-control-size) + var(--workspace-titlebar-control-gap))",
             ...style,
           } as React.CSSProperties
         }
@@ -372,6 +375,11 @@ function SidebarRail({
   const canResize = resolvedResizable !== null && open;
   const railLabel = canResize ? "Resize Sidebar" : "Toggle Sidebar";
   const railTitle = canResize ? "Drag to resize sidebar" : "Toggle Sidebar";
+  React.useEffect(() => {
+    const rail = railRef.current;
+    if (!rail || !open || props.onWheel) return;
+    return bindSidebarRailScroll(rail);
+  }, [open, props.onWheel]);
   const resize = useResizeDrag<HTMLButtonElement>((event) => {
     if (!resolvedResizable || !open) return null;
     const rail = event.currentTarget;
@@ -604,12 +612,17 @@ function SidebarContent({
 }: React.ComponentProps<"div"> & {
   fixedHeader?: React.ReactNode;
 }) {
+  const scrollAreaRef = React.useRef<HTMLDivElement | null>(null);
+  React.useEffect(() => {
+    if (scrollAreaRef.current) return bindSidebarPageScroll(scrollAreaRef.current);
+  }, []);
   return (
     <>
       {fixedHeader ? <div className="w-full shrink-0">{fixedHeader}</div> : null}
       {/* Rows take focus on click. Scroll padding would make the browser nudge
           the list whenever a focused row sits under the fade. */}
       <ScrollArea
+        ref={scrollAreaRef}
         hideScrollbars
         scrollFade
         scrollFadePadding={false}
@@ -684,6 +697,7 @@ const sidebarMenuButtonVariants = cva(
       size: {
         default:
           "h-8 rounded-[var(--control-radius)] px-[var(--sidebar-row-content-inset)] py-1.5 text-sm",
+        tree: "h-8 gap-1 rounded-[var(--control-radius)] py-1.5 text-sm",
         icon: "size-8 justify-center rounded-[var(--control-radius)] p-0",
         lg: "h-12 rounded-lg p-2 text-sm group-data-[collapsible=icon]:p-0!",
         sm: "h-7 rounded-lg p-2 text-xs",
