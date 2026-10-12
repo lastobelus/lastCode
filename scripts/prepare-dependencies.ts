@@ -3,7 +3,7 @@
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
-import { lastCodeAction } from "./lib/lastcode-action-kit.ts";
+import { lastCodeAction as defaultActionReporter } from "./lib/lastcode-action-kit.ts";
 
 const PACKAGE_MANAGER = "pnpm@11.10.0";
 
@@ -44,13 +44,13 @@ export function runPreparation(
   argv: ReadonlyArray<string>,
   cwd = process.cwd(),
   prepare = prepareDependencies,
-  reporter = lastCodeAction,
+  lastCodeAction = defaultActionReporter,
 ) {
   try {
     if (argv.length > 1 || (argv.length === 1 && argv[0] !== "--for-ci")) {
       throw new Error("Usage: prepare-dependencies.ts [--for-ci] (run in the target checkout)");
     }
-    reporter.progress({
+    lastCodeAction.progress({
       state: "working",
       phase: "dependencies",
       summary: "Preparing checkout dependencies",
@@ -58,7 +58,7 @@ export function runPreparation(
     prepare(cwd);
     // CI follows in the same Action and owns its successful terminal result.
     if (argv[0] !== "--for-ci") {
-      reporter.result({
+      lastCodeAction.result({
         outcome: "success",
         reason: "dependencies-installed",
         summary: "Dependency installation completed",
@@ -68,7 +68,7 @@ export function runPreparation(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`[prepare-dependencies] ${message}`);
-    reporter.result({
+    lastCodeAction.result({
       outcome: "attention",
       reason: "dependency-preparation-failed",
       summary: message.slice(0, 280),
