@@ -341,12 +341,30 @@ export function layerWithRegistry<Error, SettingsError = never>(
   );
   const layerServerSettings =
     options.serverSettingsLayer ??
-    ServerSettings.layerTest({
-      responseStreamingMode: "turn",
-      ...(options.continueThreadsAfterServerUpdate === undefined
-        ? {}
-        : { continueThreadsAfterServerUpdate: options.continueThreadsAfterServerUpdate }),
-    }).pipe(Layer.orDie);
+    Layer.unwrap(
+      Effect.gen(function* () {
+        const registry = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
+        // Replay adapters represent configured providers. Continuation dispatches
+        // enforce settings enablement even though scenario commands go directly
+        // to the orchestrator, so default-disabled drivers must be enabled here.
+        const instances = yield* Effect.forEach(yield* registry.list(), (instanceId) =>
+          registry
+            .get(instanceId)
+            .pipe(
+              Effect.map(
+                (adapter) => [instanceId, { driver: adapter.driver, enabled: true }] as const,
+              ),
+            ),
+        );
+        return ServerSettings.layerTest({
+          providerInstances: Object.fromEntries(instances),
+          responseStreamingMode: "turn",
+          ...(options.continueThreadsAfterServerUpdate === undefined
+            ? {}
+            : { continueThreadsAfterServerUpdate: options.continueThreadsAfterServerUpdate }),
+        });
+      }),
+    ).pipe(Layer.provide(layerProvidedRegistry), Layer.orDie);
   const layerStores = Layer.mergeAll(
     EventStore.layer,
     ProjectionStore.layer,
