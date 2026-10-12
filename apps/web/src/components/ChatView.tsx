@@ -7024,7 +7024,7 @@ export default function ChatView(props: ChatViewProps) {
   useEffect(() => {
     if (!activeThread?.id || terminalUiState.terminalOpen) return;
     const frame = window.requestAnimationFrame(() => {
-      focusComposer();
+      if (shouldRefocusComposerOnWindowFocus(document.activeElement)) focusComposer();
     });
     return () => {
       window.cancelAnimationFrame(frame);
