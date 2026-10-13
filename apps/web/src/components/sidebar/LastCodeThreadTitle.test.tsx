@@ -31,7 +31,12 @@ vi.mock("~/hooks/useSettings", async () => {
             mocks.settingListeners.delete(listener);
           };
         },
-        () => (key === "compactLegacySidebarStatuses" ? mocks.compact : "typed-groups"),
+        () =>
+          key === "compactLegacySidebarStatuses"
+            ? mocks.compact
+            : key === "lastcodeSidebarFamilyStatusSubheaders"
+              ? mocks.subheaders
+              : "typed-groups",
       ),
   };
 });
@@ -67,6 +72,7 @@ const mocks = vi.hoisted(() => ({
   rowDoubleClick: vi.fn(),
   canOperate: true,
   compact: false,
+  subheaders: true,
   settingListeners: new Set<() => void>(),
   navigate: vi.fn(async () => {}),
   openPr: vi.fn((event: React.MouseEvent) => {
@@ -162,6 +168,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.canOperate = true;
   mocks.compact = false;
+  mocks.subheaders = true;
   mocks.update.mockResolvedValue(AsyncResult.success(undefined));
 });
 afterEach(async () => {
@@ -278,6 +285,15 @@ describe("compact child outcomes", () => {
       );
       expect(container.querySelector('[role="img"][aria-label="Completed"]')).not.toBeNull();
       expect(container.querySelector('[aria-label="Protected"]')).not.toBeNull();
+      const outcome = container.querySelector(`[role="img"][aria-label="${label}"]`);
+      for (const subheaders of [false, true]) {
+        mocks.subheaders = subheaders;
+        await act(() => mocks.settingListeners.forEach((listener) => listener()));
+        expect(container.querySelector(`[role="img"][aria-label="${label}"]`)).toBe(outcome);
+        expect(container.querySelector('[role="img"][aria-label="Completed"]')).not.toBeNull();
+        expect(container.querySelector('[aria-label="Protected"]')).not.toBeNull();
+      }
+
       expect(mocks.update).not.toHaveBeenCalled();
     },
   );

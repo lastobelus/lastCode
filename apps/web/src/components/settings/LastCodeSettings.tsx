@@ -585,6 +585,19 @@ export function LastCodeSettingsPanel() {
           }
         />
         <SettingsRow
+          {...searchableSetting("family-status-subheaders")}
+          description="Show a separate subagent count and status row for more visibility. Turn this off for a compact status indicator and +N count on the parent thread."
+          control={
+            <Switch
+              checked={clientSettings.lastcodeSidebarFamilyStatusSubheaders}
+              onCheckedChange={(checked) =>
+                updateClientSettings({ lastcodeSidebarFamilyStatusSubheaders: Boolean(checked) })
+              }
+              aria-label="Family status subheaders"
+            />
+          }
+        />
+        <SettingsRow
           {...searchableSetting("rounded-project-icons")}
           description="Round the corners of project favicon images. Leave this off to show each icon's original shape."
           control={

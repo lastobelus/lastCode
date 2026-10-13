@@ -17,6 +17,7 @@ export function useLastCodeSidebarOrder(
   const projectExpandedById = useUiStateStore((state) => state.projectExpandedById);
   const sidebarThreadSortOrder = useClientSetting("sidebarThreadSortOrder");
   const groupingStyle = useClientSetting("legacySidebarThreadGroupingStyle");
+  const showFamilyStatusSubheaders = useClientSetting("lastcodeSidebarFamilyStatusSubheaders");
   const sidebarThreadPreviewCount = useClientSetting("sidebarThreadPreviewCount");
   return useMemo(
     () =>
@@ -33,6 +34,7 @@ export function useLastCodeSidebarOrder(
           previewCount: sidebarThreadPreviewCount,
           listExpanded: expandedThreadListsByProject.has(project.projectKey),
           groupingStyle,
+          showFamilyStatusSubheaders,
         }).familyProjection.orderedThreadKeys;
       }),
     [
@@ -40,6 +42,7 @@ export function useLastCodeSidebarOrder(
       sidebarThreadPreviewCount,
       collapsedFamiliesByKey,
       groupingStyle,
+      showFamilyStatusSubheaders,
       expandedThreadListsByProject,
       projectExpandedById,
       routeThreadKey,

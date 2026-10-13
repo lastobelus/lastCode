@@ -22,6 +22,7 @@ export function useLastCodeProjectThreads(
   const sortOrder = useClientSetting("sidebarThreadSortOrder");
   const previewCount = useClientSetting("sidebarThreadPreviewCount");
   const groupingStyle = useClientSetting("legacySidebarThreadGroupingStyle");
+  const showFamilyStatusSubheaders = useClientSetting("lastcodeSidebarFamilyStatusSubheaders");
   const threadsByKey = useMemo(
     () =>
       new Map(
@@ -56,6 +57,7 @@ export function useLastCodeProjectThreads(
       previewCount,
       listExpanded,
       groupingStyle,
+      showFamilyStatusSubheaders,
       statusForThread,
     });
   }, [
@@ -68,6 +70,7 @@ export function useLastCodeProjectThreads(
     previewCount,
     listExpanded,
     groupingStyle,
+    showFamilyStatusSubheaders,
   ]);
   return { ...result, threadsByKey, groupingStyle };
 }

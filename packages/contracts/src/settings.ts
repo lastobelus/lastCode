@@ -558,6 +558,9 @@ export const ClientSettingsSchema = Schema.Struct({
   sidebarWorkingShelfEnabled: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(false)),
   ),
+  lastcodeSidebarFamilyStatusSubheaders: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(true)),
+  ),
   legacySidebarThreadGroupingStyle: LegacySidebarThreadGroupingStyle.pipe(
     Schema.withDecodingDefault(Effect.succeed("minimal")),
   ),
@@ -1892,6 +1895,7 @@ export const ClientSettingsPatch = Schema.Struct({
   followUpBehavior: Schema.optionalKey(Schema.Literals(["queue", "steer"])),
   proactivePanelsEnabled: Schema.optionalKey(Schema.Boolean),
   showSkillsInSlashMenu: Schema.optionalKey(Schema.Boolean),
+  lastcodeSidebarFamilyStatusSubheaders: Schema.optionalKey(Schema.Boolean),
   legacySidebarThreadGroupingStyle: Schema.optionalKey(LegacySidebarThreadGroupingStyle),
   legacySidebarEnabled: Schema.optionalKey(Schema.Boolean),
   lastcodeSidebarEnabled: Schema.optionalKey(Schema.Boolean),

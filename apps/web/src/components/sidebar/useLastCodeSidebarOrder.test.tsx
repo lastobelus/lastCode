@@ -13,6 +13,7 @@ import { useLastCodeProjectThreads } from "./useLastCodeProjectThreads";
 import { useLastCodeSidebarOrder } from "./useLastCodeSidebarOrder";
 import { lastcodeSidebarSubagentGroupKey } from "../lastcodeSidebarFamilies.logic";
 const settings = vi.hoisted(() => ({
+  lastcodeSidebarFamilyStatusSubheaders: true,
   sidebarThreadSortOrder: "created_at" as const,
   sidebarThreadPreviewCount: 1 as const,
   legacySidebarThreadGroupingStyle: "typed-groups" as "minimal" | "typed-groups",
@@ -116,35 +117,37 @@ afterEach(async () => {
   else Reflect.deleteProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT");
 });
 describe("actual root and project order parity", () => {
-  it("matches all32 grouping/expansion/selection/collapse inputs on one retained mount", async () => {
+  it("matches both subheader modes across all32 grouping/expansion/selection/collapse inputs on one retained mount", async () => {
     let input: HTMLInputElement | undefined;
-    for (const grouping of ["minimal", "typed-groups"] as const)
-      for (const expanded of [false, true])
-        for (const list of [false, true])
-          for (const active of [null, key(child)])
-            for (const collapsed of [false, true]) {
-              settings.legacySidebarThreadGroupingStyle = grouping;
-              await act(() => {
-                useUiStateStore.getState().setProjectExpanded([group.projectKey], expanded);
-                useLastCodeSidebarFamiliesStore.setState({
-                  collapsedByKey: {
-                    [key(parent)]: collapsed,
-                    [lastcodeSidebarSubagentGroupKey(key(parent))]: collapsed,
-                  },
+    for (const subheaders of [true, false])
+      for (const grouping of ["minimal", "typed-groups"] as const)
+        for (const expanded of [false, true])
+          for (const list of [false, true])
+            for (const active of [null, key(child)])
+              for (const collapsed of [false, true]) {
+                settings.lastcodeSidebarFamilyStatusSubheaders = subheaders;
+                settings.legacySidebarThreadGroupingStyle = grouping;
+                await act(() => {
+                  useUiStateStore.getState().setProjectExpanded([group.projectKey], expanded);
+                  useLastCodeSidebarFamiliesStore.setState({
+                    collapsedByKey: {
+                      [key(parent)]: collapsed,
+                      [lastcodeSidebarSubagentGroupKey(key(parent))]: collapsed,
+                    },
+                  });
+                  root.render(<Harness expanded={expanded} list={list} active={active} />);
                 });
-                root.render(<Harness expanded={expanded} list={list} active={active} />);
-              });
-              expect(container.querySelector('[data-testid="navigation"]')!.textContent).toBe(
-                container.querySelector('[data-testid="rendering"]')!.textContent,
-              );
-              const current = container.querySelector("input")!;
-              if (input) {
-                expect(current).toBe(input);
-                expect(current.value).toBe("retained draft");
-              } else {
-                input = current;
-                input.value = "retained draft";
+                expect(container.querySelector('[data-testid="navigation"]')!.textContent).toBe(
+                  container.querySelector('[data-testid="rendering"]')!.textContent,
+                );
+                const current = container.querySelector("input")!;
+                if (input) {
+                  expect(current).toBe(input);
+                  expect(current.value).toBe("retained draft");
+                } else {
+                  input = current;
+                  input.value = "retained draft";
+                }
               }
-            }
   });
 });

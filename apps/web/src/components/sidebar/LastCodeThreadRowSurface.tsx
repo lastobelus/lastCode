@@ -75,11 +75,12 @@ export function LastCodeThreadRowSurface({
     threadDetailsTooltipId,
   } = lifetime;
   const groupingStyle = useClientSetting("legacySidebarThreadGroupingStyle");
+  const showSubheaders = useClientSetting("lastcodeSidebarFamilyStatusSubheaders");
   const { thread } = family;
   const annotationActive = thread.annotation?.resolvedAt === null;
   const pending =
     thread.worktreeCleanup?.status === "deleting" || thread.worktreeCleanup?.status === "queued";
-  const tall = hasCollapsedFamilySummary(family, groupingStyle);
+  const tall = showSubheaders && hasCollapsedFamilySummary(family, groupingStyle);
   return (
     <ThreadAnnotationNavigationTrigger
       annotationActive={annotationActive}

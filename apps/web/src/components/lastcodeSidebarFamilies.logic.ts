@@ -250,6 +250,7 @@ type FamilyProjectionInput = {
   previewCount: number;
   listExpanded: boolean;
   groupingStyle?: "minimal" | "typed-groups";
+  showFamilyStatusSubheaders?: boolean;
   statusForThread?: (thread: SidebarThreadSummary) => ThreadStatusPill | null;
 };
 
@@ -396,6 +397,7 @@ function familyVisibility(
     collapsedByKey: input.collapsedByKey,
     projectExpanded: input.projectExpanded,
     renderedRootKeys,
+    showFamilyStatusSubheaders: input.showFamilyStatusSubheaders !== false,
   };
 }
 type FamilyVisibility = ReturnType<typeof familyVisibility>;
@@ -501,7 +503,7 @@ function renderFamilyRows(
     const disposition = familyRowVisibility(row, cursor, visibility);
     if (disposition === "hidden") hiddenThreads.push(row.thread);
     if (disposition !== "render") continue;
-    const group = getGroup(row);
+    const group = visibility.showFamilyStatusSubheaders ? getGroup(row) : null;
     if (group && !shownGroups.has(group)) {
       renderedItems.push(group);
       shownGroups.add(group);

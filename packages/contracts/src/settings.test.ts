@@ -970,6 +970,23 @@ describe("ClientSettings sidebar", () => {
     },
   );
 
+  it("defaults family status subheaders on and preserves an explicit opt-out", () => {
+    expect(decodeClientSettings({}).lastcodeSidebarFamilyStatusSubheaders).toBe(true);
+    expect(
+      decodeClientSettings({ legacySidebarEnabled: true }).lastcodeSidebarFamilyStatusSubheaders,
+    ).toBe(true);
+    expect(
+      decodeClientSettings({ lastcodeSidebarFamilyStatusSubheaders: false })
+        .lastcodeSidebarFamilyStatusSubheaders,
+    ).toBe(false);
+    expect(decodeClientSettingsPatch({ lastcodeSidebarFamilyStatusSubheaders: false })).toEqual({
+      lastcodeSidebarFamilyStatusSubheaders: false,
+    });
+    expect(() =>
+      decodeClientSettingsPatch({ lastcodeSidebarFamilyStatusSubheaders: "false" }),
+    ).toThrow();
+  });
+
   it("preserves an explicit legacy sidebar opt-in", () => {
     expect(decodeClientSettings({ legacySidebarEnabled: true }).legacySidebarEnabled).toBe(true);
     expect(decodeClientSettingsPatch({ legacySidebarEnabled: true }).legacySidebarEnabled).toBe(

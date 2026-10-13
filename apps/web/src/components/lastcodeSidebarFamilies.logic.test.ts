@@ -76,6 +76,43 @@ describe("legacy sidebar subagent families", () => {
       expect(rendering.orderedThreadKeys).toEqual(rendering.renderedRows.map((row) => row.key));
     }
   });
+  it.each(["minimal", "typed-groups"] as const)(
+    "compact %s families retain aggregate outcomes, order and the selected path",
+    (groupingStyle) => {
+      const parent = thread("parent");
+      const child = thread("child", "parent", { hasPendingUserInput: true });
+      const failed = thread("failed", "child", {
+        runtime: { ...child.runtime!, lastError: "Failed" },
+      });
+      const shells = [parent, child, failed];
+      const result = project(shells, {
+        groupingStyle,
+        showFamilyStatusSubheaders: false,
+        collapsedByKey: {
+          [lastcodeSidebarThreadKey(parent)]: false,
+          [lastcodeSidebarSubagentGroupKey(lastcodeSidebarThreadKey(parent))]: true,
+          [lastcodeSidebarThreadKey(child)]: false,
+        },
+      });
+      expect(result.renderedItems.every((item) => item.type === "thread")).toBe(true);
+      expect(keys(result)).toEqual(["parent", "child", "failed"]);
+      expect(result.orderedThreadKeys).toEqual(result.renderedRows.map((row) => row.key));
+      expect(result.allRows[0]).toMatchObject({
+        descendantCount: 2,
+        descendantsStatus: { label: "Failed" },
+      });
+      expect(lastcodeSidebarFamilySummary(result.allRows[0]!)).toContain("failed");
+      const selected = project(shells, {
+        groupingStyle,
+        showFamilyStatusSubheaders: false,
+        projectExpanded: false,
+        activeThreadKey: lastcodeSidebarThreadKey(failed),
+        collapsedByKey: { [lastcodeSidebarThreadKey(parent)]: true },
+      });
+      expect(keys(selected)).toEqual(["parent", "child", "failed"]);
+      expect(selected.renderedItems.every((item) => item.type === "thread")).toBe(true);
+    },
+  );
   it("shows released subagents as independent roots while preserving their owned descendants", () => {
     const released = thread("helper", "archived-parent", {
       lineage: {

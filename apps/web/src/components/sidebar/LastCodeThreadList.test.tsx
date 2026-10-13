@@ -16,9 +16,13 @@ import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environ
 import { makeThreadFixture } from "../../test-fixtures";
 import { projectLastCodeSidebarFamilies } from "../lastcodeSidebarFamilies.logic";
 import { useLastCodeSidebarFamiliesStore } from "../lastcodeSidebarFamilies.store";
-import { LastCodeThreadFamilyDisclosure } from "./LastCodeThreadFamily";
+import {
+  LastCodeThreadFamilyDisclosure,
+  LastCodeThreadFamilySummary,
+} from "./LastCodeThreadFamily";
 import { LastCodeThreadList } from "./LastCodeThreadList";
 const mocks = vi.hoisted(() => ({
+  subheaders: true,
   navigate: vi.fn(async () => {}),
   expansion: vi.fn(),
   animate: vi.fn(),
@@ -26,7 +30,11 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@formkit/auto-animate", () => ({ autoAnimate: mocks.animate }));
 vi.mock("~/hooks/useSettings", () => ({
   useClientSetting: (key: string) =>
-    key === "legacySidebarThreadGroupingStyle" ? "typed-groups" : false,
+    key === "legacySidebarThreadGroupingStyle"
+      ? "typed-groups"
+      : key === "lastcodeSidebarFamilyStatusSubheaders"
+        ? mocks.subheaders
+        : false,
 }));
 vi.mock("../ThreadStatusIndicators", () => ({ ThreadStatusLabel: () => null }));
 const parent = makeThreadFixture({
@@ -45,10 +53,12 @@ function Harness({
   selectedChild = false,
   projectExpanded = true,
   empty = false,
+  subheaders = true,
 }: {
   selectedChild?: boolean;
   projectExpanded?: boolean;
   empty?: boolean;
+  subheaders?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   const collapsedByKey = useLastCodeSidebarFamiliesStore((s) => s.collapsedByKey);
@@ -62,6 +72,7 @@ function Harness({
     previewCount: 1,
     listExpanded: expanded,
     groupingStyle: "typed-groups",
+    showFamilyStatusSubheaders: subheaders,
     statusForThread: () => null,
   });
   return (
@@ -83,6 +94,8 @@ function Harness({
             navigateToThread={mocks.navigate}
           />
           <span>{family.thread.title}</span>
+          <LastCodeThreadFamilySummary family={family} display="inline" />
+          <LastCodeThreadFamilySummary family={family} display="line" />
           <input aria-label={`Draft ${family.thread.title}`} defaultValue="retained" />
         </li>
       )}
@@ -104,6 +117,7 @@ afterAll(() => {
 });
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.subheaders = true;
   useLastCodeSidebarFamiliesStore.setState({
     collapsedByKey: { [scopedThreadKey(scopeThreadRef(parent.environmentId, parent.id))]: false },
   });
@@ -124,6 +138,49 @@ const named = (name: string) =>
     b.getAttribute("aria-label")?.startsWith(name),
   )!;
 describe("project thread list composition", () => {
+  it("switches to compact parent counts without hiding children behind an invisible subagent group", async () => {
+    useLastCodeSidebarFamiliesStore.setState({
+      collapsedByKey: {
+        [scopedThreadKey(scopeThreadRef(parent.environmentId, parent.id))]: false,
+        [scopedThreadKey(scopeThreadRef(parent.environmentId, parent.id)) + ":subagents"]: false,
+      },
+    });
+    await act(() => root?.render(<Harness />));
+    const draft = container.querySelector<HTMLInputElement>('input[aria-label="Draft Parent"]')!;
+    draft.value = "still editing";
+    await act(() => named("Collapse subagents of Parent").click());
+    expect(container.textContent).not.toContain("Child");
+    mocks.subheaders = false;
+    await act(() => root?.render(<Harness subheaders={false} />));
+    expect(container.textContent).toContain("Child");
+    expect(container.textContent).toContain("+1");
+    expect(named("Expand subagents")).toBeUndefined();
+    expect(named("Collapse subagents")).toBeUndefined();
+    expect(container.querySelector('input[aria-label="Draft Parent"]')).toBe(draft);
+    expect(draft.value).toBe("still editing");
+    expect(mocks.navigate).not.toHaveBeenCalled();
+    await act(() => named("Collapse children of Parent").click());
+    expect(container.textContent).not.toContain("Child");
+    expect(container.textContent).toContain("+1");
+    await act(() => named("Expand children of Parent").click());
+    expect(container.textContent).toContain("Child");
+    mocks.subheaders = true;
+    await act(() => root?.render(<Harness />));
+    expect(container.textContent).not.toContain("Child");
+    expect(named("Expand subagents of Parent")).toBeDefined();
+  });
+  it("keeps selected ancestry in compact mode and uses the parent disclosure for route return", async () => {
+    mocks.subheaders = false;
+    await act(() => root?.render(<Harness selectedChild subheaders={false} />));
+    await act(() => named("Collapse children and return to Parent").click());
+    expect(mocks.navigate).toHaveBeenCalledExactlyOnceWith(
+      scopeThreadRef(parent.environmentId, parent.id),
+    );
+    expect(container.textContent).toContain("Child");
+    expect(container.textContent).toContain("+1");
+    await act(() => root?.render(<Harness subheaders={false} />));
+    expect(container.textContent).not.toContain("Child");
+  });
   it("changes preview expansion in its owner without remounting the retained family row", async () => {
     await act(() => root?.render(<Harness />));
     const draft = container.querySelector<HTMLInputElement>('input[aria-label="Draft Parent"]')!;

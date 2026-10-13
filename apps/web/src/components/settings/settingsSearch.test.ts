@@ -110,6 +110,7 @@ describe("searchSettings", () => {
     }
     expect(searchSettings("compact status").map((item) => item.id)).toEqual([
       "compact-status-indicators",
+      "family-status-subheaders",
     ]);
     expect(searchSettings("worktree indicators").map((item) => item.id)).toEqual([
       "show-worktree-indicators",

@@ -1103,6 +1103,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["LastCode sidebar subagents agent-created minimal typed groups relationships"],
   },
   {
+    id: "family-status-subheaders",
+    title: "Family status subheaders",
+    to: "/settings/lastcode",
+    searchTerms: ["LastCode sidebar subagents count status density compact parent visibility"],
+  },
+  {
     id: "compact-status-indicators",
     title: "Compact status indicators",
     to: "/settings/lastcode",

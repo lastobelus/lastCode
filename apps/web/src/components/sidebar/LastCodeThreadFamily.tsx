@@ -70,6 +70,7 @@ export function LastCodeThreadFamilyDisclosure({
   navigateToThread: Navigate;
 }) {
   const typedGroups = useClientSetting("legacySidebarThreadGroupingStyle") === "typed-groups";
+  const showSubheaders = useClientSetting("lastcodeSidebarFamilyStatusSubheaders");
   const toggle = useFamilyToggle({ type: "thread", row: family }, navigateToThread);
   const thread = family.thread;
   return (
@@ -89,7 +90,11 @@ export function LastCodeThreadFamilyDisclosure({
                 aria-expanded={family.expanded}
                 className={cn(
                   "relative z-30 inline-flex size-4 shrink-0 items-center justify-center rounded-sm outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring",
-                  typedGroups && !family.expanded && !renameTarget && "-translate-y-1.5",
+                  typedGroups &&
+                    showSubheaders &&
+                    !family.expanded &&
+                    !renameTarget &&
+                    "-translate-y-1.5",
                 )}
                 onPointerDown={(event) => event.stopPropagation()}
                 onDoubleClick={(event) => event.stopPropagation()}
@@ -216,9 +221,11 @@ export function LastCodeThreadFamilySummary({
 }) {
   const typedGroups = useClientSetting("legacySidebarThreadGroupingStyle") === "typed-groups";
   const compactStatusIndicators = useClientSetting("compactLegacySidebarStatuses");
+  const showSubheaders = useClientSetting("lastcodeSidebarFamilyStatusSubheaders");
+  const summaryOnLine = typedGroups && showSubheaders;
   if (family.descendantCount === 0) return null;
-  if (family.expanded) return null;
-  if ((display === "line") !== typedGroups) return null;
+  if (family.expanded && showSubheaders) return null;
+  if ((display === "line") !== summaryOnLine) return null;
   if (display === "line")
     return (
       <span className="flex items-center gap-1 truncate text-3xs leading-3 text-sidebar-muted-foreground">
@@ -238,7 +245,7 @@ export function LastCodeThreadFamilySummary({
           <span className="hidden min-w-0 overflow-hidden @sm/lastcode-sidebar:inline-flex">
             <ThreadStatusLabel
               status={family.descendantsStatus}
-              compact={compactStatusIndicators}
+              compact={!showSubheaders || compactStatusIndicators}
             />
           </span>
         </>

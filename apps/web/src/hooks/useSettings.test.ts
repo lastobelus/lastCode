@@ -603,3 +603,26 @@ describe("LastCode sidebar persistence", () => {
     },
   );
 });
+
+it("persists a family subheader opt-out independently of grouping and compact status", async () => {
+  let saved: ClientSettings = {
+    ...DEFAULT_CLIENT_SETTINGS,
+    legacySidebarThreadGroupingStyle: "typed-groups",
+  };
+  persistenceMocks.getClientSettings.mockImplementation(async () => saved);
+  persistenceMocks.setClientSettings.mockImplementation(async (settings) => {
+    saved = settings;
+  });
+  await ensureClientSettingsHydrated();
+  expect(getClientSettings().lastcodeSidebarFamilyStatusSubheaders).toBe(true);
+  await updateClientSettings({ lastcodeSidebarFamilyStatusSubheaders: false });
+  __resetClientSettingsPersistenceForTests();
+  await ensureClientSettingsHydrated();
+  expect(getClientSettings().lastcodeSidebarFamilyStatusSubheaders).toBe(false);
+  expect(
+    mergeEnvironmentSettings(DEFAULT_SERVER_SETTINGS, getClientSettings())
+      .lastcodeSidebarFamilyStatusSubheaders,
+  ).toBe(false);
+  expect(saved.legacySidebarThreadGroupingStyle).toBe("typed-groups");
+  expect(saved.compactLegacySidebarStatuses).toBe(false);
+});
