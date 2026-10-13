@@ -13,6 +13,7 @@ import {
   useNativeLayoutMetrics,
 } from "../../native/native-layout-metrics";
 import { HomeRouteScreen } from "../home/HomeRouteScreen";
+import { useEnvironmentPauseControl } from "../threads/EnvironmentPauseControl";
 import { dispatchHardwareKeyboardCommand } from "../keyboard/hardwareKeyboardCommands";
 import { WorkspaceConnectionTitle } from "../home/WorkspaceConnectionTitle";
 import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
@@ -53,6 +54,7 @@ function WorkspaceRootTitle(props: {
 
 function WorkspaceRootContent() {
   const navigation = useNavigation();
+  const pauseControl = useEnvironmentPauseControl();
   const { width: windowWidth } = useWindowDimensions();
   const { layout } = useAdaptiveWorkspaceLayout();
   const primaryColumn = use(NativePrimaryColumnContext);
@@ -73,7 +75,7 @@ function WorkspaceRootContent() {
   const renderHeaderTitle = useCallback(
     () => (
       <WorkspaceRootTitle
-        maxWidth={Math.max(0, width - 160)}
+        maxWidth={Math.max(0, width - 160 - (pauseControl.visible ? 44 : 0))}
         onOpenEnvironments={() =>
           navigation.navigate("SettingsSheet", {
             screen: "SettingsContent",
@@ -82,7 +84,7 @@ function WorkspaceRootContent() {
         }
       />
     ),
-    [width, navigation],
+    [width, navigation, pauseControl.visible],
   );
   const tab = state.tabs[state.selectedTab];
   const bottomClearance =
@@ -104,7 +106,13 @@ function WorkspaceRootContent() {
       >
         {Platform.OS === "ios" ? (
           <NativeStackScreenOptions
-            optionsVersion={[state.selectedTab, state.selectionRevision, width, sidebarNavigation]}
+            optionsVersion={[
+              state.selectedTab,
+              state.selectionRevision,
+              width,
+              sidebarNavigation,
+              pauseControl.visible,
+            ]}
             options={{
               title: TAB_TITLES[state.selectedTab],
               headerShown: true,
@@ -117,6 +125,17 @@ function WorkspaceRootContent() {
             title="T3 Code"
             titleContent={renderHeaderTitle()}
             actions={[
+              ...(pauseControl.visible
+                ? [
+                    {
+                      accessibilityLabel: pauseControl.hasSession
+                        ? "Resume environment"
+                        : "Pause environment",
+                      icon: pauseControl.hasSession ? ("play" as const) : ("pause" as const),
+                      onPress: pauseControl.onPress,
+                    },
+                  ]
+                : []),
               {
                 accessibilityLabel:
                   state.selectedTab === "threads" ? "Search threads" : "Search pull requests",
@@ -144,8 +163,11 @@ function WorkspaceRootContent() {
         </SafeAreaInsetsContext>
         <WorkspaceToolbar
           sidebar={sidebarNavigation}
+          onOpenPause={pauseControl.visible ? pauseControl.onPress : undefined}
+          hasPauseSession={pauseControl.hasSession}
           onNewTask={() => navigation.navigate("NewTaskSheet", { screen: "NewTask" })}
         />
+        {pauseControl.modal}
       </View>
     </WorkspaceTabsContext>
   );

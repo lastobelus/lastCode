@@ -9,7 +9,7 @@ import {
   ProjectScript,
 } from "@t3tools/contracts";
 import { T3ProjectFileFromJson } from "@t3tools/shared/t3ProjectFile";
-import { writeFileStringAtomically } from "../atomicWrite.ts";
+import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 import {
   ManagedProjectActionState,
   ProjectActionReconciliationError,
@@ -33,8 +33,6 @@ import { Argument, Command, Flag, GlobalFlag } from "effect/cli";
 import { FetchHttpClient, HttpClient, HttpClientError } from "effect/http";
 import * as HttpApiClient from "effect/http-api/HttpApiClient";
 
-import * as ServerSettings from "../serverSettings.ts";
-import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 

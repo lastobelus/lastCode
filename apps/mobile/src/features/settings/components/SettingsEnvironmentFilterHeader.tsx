@@ -14,6 +14,7 @@ import { useSettingsEnvironmentFilter } from "../settings-environment-filter";
 export function SettingsEnvironmentFilterHeader(props: {
   readonly closeSettings?: boolean;
   readonly trailingItems?: readonly NativeStackHeaderItem[];
+  readonly environmentOnly?: boolean;
 }) {
   const navigation = useNavigation();
   const { layout } = useAdaptiveWorkspaceLayout();
@@ -29,13 +30,18 @@ export function SettingsEnvironmentFilterHeader(props: {
     selectProject,
   } = useSettingsEnvironmentFilter();
   if (Platform.OS !== "ios") return null;
+  const environmentOnly = props.environmentOnly === true;
+  const filterLabel = environmentOnly
+    ? "Filter settings environments"
+    : "Filter settings environments and projects";
 
   const filterIcon =
-    selectedIds === null && selectedProjectKey === null
+    selectedIds === null && (environmentOnly || selectedProjectKey === null)
       ? "line.3.horizontal.decrease"
       : "line.3.horizontal.decrease.circle.fill";
   const filterVersion = JSON.stringify({
     closeSettings,
+    environmentOnly,
     selection: selectedIds === null ? null : [...selectedIds].sort(),
     targets: availableTargets.map((entry) => [
       entry.environmentId,
@@ -43,8 +49,10 @@ export function SettingsEnvironmentFilterHeader(props: {
       entry.displayUrl,
       resolveEnvironmentMachineKind(entry.serverConfig),
     ]),
-    project: selectedProjectKey,
-    projects: selectableProjectGroups.map((group) => [group.key, group.label]),
+    project: environmentOnly ? null : selectedProjectKey,
+    projects: environmentOnly
+      ? []
+      : selectableProjectGroups.map((group) => [group.key, group.label]),
     trailingItems: props.trailingItems,
   });
 
@@ -55,7 +63,7 @@ export function SettingsEnvironmentFilterHeader(props: {
         unstable_headerRightItems: () => [
           withNativeGlassHeaderItem({
             axisBehavior: "horizontalOnly",
-            accessibilityLabel: "Filter settings environments and projects",
+            accessibilityLabel: filterLabel,
             icon: { name: filterIcon, type: "sfSymbol" },
             label: "",
             type: "menu",
@@ -93,27 +101,31 @@ export function SettingsEnvironmentFilterHeader(props: {
                     })),
                   ],
                 },
-                {
-                  type: "submenu",
-                  label:
-                    selectableProjectGroups.find((group) => group.key === selectedProjectKey)
-                      ?.label ??
-                    (selectedProjectKey === null ? "All projects" : "Unavailable project"),
-                  items: [
-                    {
-                      type: "action",
-                      label: "All projects",
-                      state: selectedProjectKey === null ? "on" : undefined,
-                      onPress: () => selectProject(null),
-                    },
-                    ...selectableProjectGroups.map((group) => ({
-                      type: "action" as const,
-                      label: group.label,
-                      state: selectedProjectKey === group.key ? ("on" as const) : undefined,
-                      onPress: () => selectProject(group.key),
-                    })),
-                  ],
-                },
+                ...(!environmentOnly
+                  ? [
+                      {
+                        type: "submenu" as const,
+                        label:
+                          selectableProjectGroups.find((group) => group.key === selectedProjectKey)
+                            ?.label ??
+                          (selectedProjectKey === null ? "All projects" : "Unavailable project"),
+                        items: [
+                          {
+                            type: "action" as const,
+                            label: "All projects",
+                            state: selectedProjectKey === null ? ("on" as const) : undefined,
+                            onPress: () => selectProject(null),
+                          },
+                          ...selectableProjectGroups.map((group) => ({
+                            type: "action" as const,
+                            label: group.label,
+                            state: selectedProjectKey === group.key ? ("on" as const) : undefined,
+                            onPress: () => selectProject(group.key),
+                          })),
+                        ],
+                      },
+                    ]
+                  : []),
               ],
             },
           }),
@@ -137,7 +149,9 @@ export function SettingsEnvironmentFilterHeader(props: {
   );
 }
 
-export function AndroidSettingsEnvironmentFilter() {
+export function AndroidSettingsEnvironmentFilter(
+  props: { readonly environmentOnly?: boolean } = {},
+) {
   const {
     availableTargets,
     selectedIds,
@@ -147,8 +161,12 @@ export function AndroidSettingsEnvironmentFilter() {
     selectedProjectKey,
     selectProject,
   } = useSettingsEnvironmentFilter();
+  const environmentOnly = props.environmentOnly === true;
+  const filterLabel = environmentOnly
+    ? "Filter settings environments"
+    : "Filter settings environments and projects";
   const filterIcon =
-    selectedIds === null && selectedProjectKey === null
+    selectedIds === null && (environmentOnly || selectedProjectKey === null)
       ? "line.3.horizontal.decrease"
       : "line.3.horizontal.decrease.circle.fill";
 
@@ -156,7 +174,7 @@ export function AndroidSettingsEnvironmentFilter() {
     <ControlPillMenu
       accessible
       accessibilityRole="button"
-      accessibilityLabel="Filter settings environments and projects"
+      accessibilityLabel={filterLabel}
       title="Settings scope"
       actions={[
         {
@@ -174,16 +192,20 @@ export function AndroidSettingsEnvironmentFilter() {
               ? ("on" as const)
               : ("off" as const),
         })),
-        {
-          id: "project:all",
-          title: "All projects",
-          state: selectedProjectKey === null ? ("on" as const) : ("off" as const),
-        },
-        ...selectableProjectGroups.map((group) => ({
-          id: `project:${group.key}`,
-          title: `Project · ${group.label}`,
-          state: selectedProjectKey === group.key ? ("on" as const) : ("off" as const),
-        })),
+        ...(!environmentOnly
+          ? [
+              {
+                id: "project:all",
+                title: "All projects",
+                state: selectedProjectKey === null ? ("on" as const) : ("off" as const),
+              },
+              ...selectableProjectGroups.map((group) => ({
+                id: `project:${group.key}`,
+                title: `Project · ${group.label}`,
+                state: selectedProjectKey === group.key ? ("on" as const) : ("off" as const),
+              })),
+            ]
+          : []),
       ]}
       onPressAction={({ nativeEvent }) => {
         if (nativeEvent.event === "all") selectAll();
@@ -203,7 +225,7 @@ export function AndroidSettingsEnvironmentFilter() {
     >
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel="Filter settings environments and projects"
+        accessibilityLabel={filterLabel}
         className="size-11 items-center justify-center rounded-full"
       >
         <SymbolView name={filterIcon} size={22} tintColorClassName="accent-icon" />

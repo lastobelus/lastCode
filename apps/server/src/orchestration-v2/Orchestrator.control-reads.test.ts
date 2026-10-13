@@ -50,6 +50,92 @@ const layerTest = Layer.mergeAll(
 );
 
 it.effect(
+  "checks archive stopping without hydrating the shell and preserves tombstone and read failures",
+  () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("thread:archive-control");
+      const now = yield* DateTime.now;
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("create-archive-control"),
+        threadId,
+        projectId: ProjectId.make("project:archive-control"),
+        title: "Before",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      yield* sql`INSERT INTO orchestration_v2_projection_provider_threads
+      (provider_thread_id, thread_id, owner_node_id, provider, driver, provider_instance_id,
+       provider_session_id, status, first_run_ordinal, last_run_ordinal, updated_at, payload_json)
+      VALUES ('obsolete-provider', ${threadId}, NULL, 'codex', 'codex', 'codex', NULL,
+              'ready', NULL, NULL, ${DateTime.formatIso(now)}, '{"obsolete":true}')`;
+      assert.equal((yield* Effect.exit(projections.getThreadShell(threadId)))._tag, "Failure");
+      const rename = (suffix: string, target = threadId) => ({
+        type: "thread.metadata.update" as const,
+        commandId: CommandId.make(`rename-archive:${suffix}`),
+        threadId: target,
+        title: suffix,
+      });
+      yield* orchestrator.dispatch(rename("ordinary"));
+      assert.equal((yield* projections.getThread(threadId)).title, "ordinary");
+      const thread = yield* projections.getThread(threadId);
+      for (const state of ["active", "deleted", "cleanup"] as const) {
+        yield* projections.apply({
+          id: EventId.make(`archive-control:${state}`),
+          type: "thread.metadata-updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            ...thread,
+            deletedAt: state === "active" ? null : now,
+            archivePending: {
+              threadId,
+              commandId: CommandId.make("archive-control"),
+              status: "stopping",
+            },
+            worktreeCleanup:
+              state === "cleanup"
+                ? {
+                    status: "deleting",
+                    repositoryRoot: "/example/repository",
+                    worktreePath: "/example/worktree",
+                    startedAt: DateTime.formatIso(now),
+                  }
+                : null,
+          },
+        });
+        if (state === "deleted") {
+          const error = yield* Effect.flip(orchestrator.dispatch(rename(state)));
+          assert.include(String(error.cause), "is deleted");
+          assert.notInclude(String(error.cause), "stopping before it is archived");
+        } else {
+          const error = yield* Effect.flip(orchestrator.dispatch(rename(state)));
+          assert.equal(error._tag, "OrchestratorThreadArchivingError");
+          assert.include(error.message, "stopping before it is archived");
+          assert.equal((yield* projections.getThread(threadId)).title, thread.title);
+        }
+      }
+      const missing = yield* Effect.flip(
+        orchestrator.dispatch(rename("missing", ThreadId.make("thread:missing"))),
+      );
+      assert.equal(missing._tag, "OrchestratorProjectionError");
+      assert.notInclude(String(missing.cause), "stopping before it is archived");
+      yield* sql`UPDATE orchestration_v2_projection_threads SET payload_json = '{"obsolete":true}' WHERE thread_id = ${threadId}`;
+      const invalid = yield* Effect.flip(orchestrator.dispatch(rename("invalid")));
+      assert.equal(invalid._tag, "OrchestratorDispatchError");
+      assert.instanceOf(invalid.cause, ProjectionStore.ProjectionStoreReadError);
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect(
   "dispatches metadata, queue resume and request controls without hydrating unrelated history",
   () =>
     Effect.gen(function* () {
@@ -266,11 +352,15 @@ it.effect(
         turnItemTypes: ["user_message"],
       });
       assert.isAbove(fresh.turnItems.at(-1)!.ordinal, 900);
-      yield* orchestrator.dispatch({
-        type: "thread.archive",
-        commandId: CommandId.make("archive-with-old-history"),
-        threadId,
-      });
+      const archiveRefusal = yield* orchestrator
+        .dispatch({
+          type: "thread.archive",
+          commandId: CommandId.make("archive-with-old-history"),
+          threadId,
+        })
+        .pipe(Effect.flip);
+      assert.equal(archiveRefusal._tag, "OrchestratorDispatchError");
+      assert.isNull((yield* projections.getThread(threadId)).archivedAt);
       yield* orchestrator.dispatch({
         type: "thread.delete",
         commandId: CommandId.make("delete-with-old-history"),
