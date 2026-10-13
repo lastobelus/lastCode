@@ -11,6 +11,7 @@ import { isProviderNativeSubagentThread } from "@t3tools/contracts";
 import { Atom } from "effect/reactivity";
 
 import type { EnvironmentThreadShell } from "./models.ts";
+import { getArchiveRecoveryRows } from "./threadArchive.ts";
 import {
   presentThreadShell,
   threadShellIsCleanupRecovery,
@@ -252,11 +253,15 @@ export function createEnvironmentThreadShellAtoms(input: {
   const navigationThreadShellsAtom = Atom.make((get) => {
     const next: EnvironmentThreadShell[] = [];
     for (const environmentId of enabledEnvironmentIds(get(input.catalogValueAtom))) {
-      for (const thread of get(environmentThreadsAtom(environmentId))) {
+      const environmentThreads = get(environmentThreadsAtom(environmentId));
+      const archiveRecoveryRows = getArchiveRecoveryRows(environmentThreads);
+      for (const thread of environmentThreads) {
         if (
           !threadShellIsVisible(thread) ||
           (!threadShellIsCleanupRecovery(thread) &&
-            thread.lineage.relationshipToParent === "subagent")
+            !archiveRecoveryRows.has(thread) &&
+            thread.lineage.relationshipToParent === "subagent" &&
+            thread.lineage.independent !== true)
         )
           continue;
         next.push(scopedThread(environmentId, thread));

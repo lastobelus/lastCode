@@ -66,5 +66,6 @@ existing checkpoint workflow.
 
 Report both branch names and PR URLs, their bases and current heads, validation
 performed for each, review status, and whether either delivery remains local.
-Call out that an open LastCode PR pauses branch promotion while immutable nightly
-checkpoint tags continue.
+Open LastCode PRs do not pause checkpoint creation, repaired-checkpoint
+publication, or branch promotion. Report any validation that needs refreshing
+after the LastCode base changes.

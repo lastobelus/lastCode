@@ -134,7 +134,7 @@ export function projectLegacySidebarFamilies(input: {
   const creatorGroupingWarningByKey = new Map<string, string>();
   const creatorEdges = new Set<string>();
   for (const [key, thread] of byKey) {
-    if (thread.lineage.relationshipToParent !== "subagent") continue;
+    if (!isSidebarSubagentThread(thread)) continue;
     const parentId = thread.lineage.parentThreadId;
     const parentKey = parentId
       ? scopedThreadKey(scopeThreadRef(thread.environmentId, parentId))
@@ -213,12 +213,8 @@ export function projectLegacySidebarFamilies(input: {
   // Keep delegated work together after ordinary conversations in both layouts.
   for (const [key, children] of childrenByKey) {
     childrenByKey.set(key, [
-      ...children.filter(
-        (childKey) => byKey.get(childKey)!.lineage.relationshipToParent !== "subagent",
-      ),
-      ...children.filter(
-        (childKey) => byKey.get(childKey)!.lineage.relationshipToParent === "subagent",
-      ),
+      ...children.filter((childKey) => !isSidebarSubagentThread(byKey.get(childKey)!)),
+      ...children.filter((childKey) => isSidebarSubagentThread(byKey.get(childKey)!)),
     ]);
   }
   const selectedPath = new Set<string>();
@@ -288,10 +284,9 @@ export function projectLegacySidebarFamilies(input: {
     parent.descendantCount += row.descendantCount + 1;
     const rowStatus = statusByKey.get(row.key) ?? null;
     const label = legacySidebarSubagentStatusLabel(row.thread, rowStatus);
-    const ownCounts =
-      row.thread.lineage.relationshipToParent === "subagent"
-        ? parent.descendantStatusCounts
-        : parent.createdThreadStatusCounts;
+    const ownCounts = isSidebarSubagentThread(row.thread)
+      ? parent.descendantStatusCounts
+      : parent.createdThreadStatusCounts;
     ownCounts.set(label, (ownCounts.get(label) ?? 0) + 1);
     const addCounts = (target: Map<string, number>, source: ReadonlyMap<string, number>) => {
       for (const [descendantLabel, count] of source) {
@@ -335,8 +330,8 @@ export function projectLegacySidebarFamilies(input: {
       const groupKey = legacySidebarSubagentGroupKey(row.parentKey);
       let group = subagentGroups.get(groupKey);
       if (!group) {
-        const subagents = (childrenByKey.get(row.parentKey) ?? []).filter(
-          (key) => byKey.get(key)!.lineage.relationshipToParent === "subagent",
+        const subagents = (childrenByKey.get(row.parentKey) ?? []).filter((key) =>
+          isSidebarSubagentThread(byKey.get(key)!),
         );
         const selectedDescendant = subagents.some((key) => selectedPath.has(key));
         group = {
@@ -371,7 +366,7 @@ export function projectLegacySidebarFamilies(input: {
   if (typedGroups) {
     const shownGroups = new Set<string>();
     for (const row of renderedRows) {
-      if (!row.parentKey || row.thread.lineage.relationshipToParent === "subagent") continue;
+      if (!row.parentKey || isSidebarSubagentThread(row.thread)) continue;
       const heading = "Created by this thread";
       const groupKey = `${row.parentKey}:${heading}`;
       if (!shownGroups.has(groupKey)) {

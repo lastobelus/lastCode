@@ -17,6 +17,10 @@ const legacyReaders = ["orchestration-v2/legacy/", "persistence/Migrations/"] as
  * list short; new V1 reads belong in the importer.
  */
 const legacyReaderFiles: Record<string, string> = {
+  // Retained Action state is copied into its native ledger by migration 11.
+  "actionResume/ActionRunMigration.ts": "one-time Action run ledger migration",
+  // Startup validates and converts historical migration ledgers and schemas.
+  "persistence/DatabaseMigrations.ts": "legacy database history validation and conversion",
   // Provider history for settings migration reads V1 thread sessions once at load.
   "serverSettings.ts": "one-time provider history for settings migration",
 };
@@ -55,7 +59,7 @@ it("keeps the V1 agent runtime and engine deleted", () => {
   assert.deepEqual(violations, []);
 });
 
-it("reads the V1 tables only from the legacy importer", () => {
+it("reads the V1 tables only from the legacy importer and migration boundaries", () => {
   const readers = relativeSources
     .filter(({ source }) => legacyTable.test(source))
     .map(({ path }) => path)
@@ -80,10 +84,12 @@ it("keeps the legacy importer out of reach of new code", () => {
     )
     .map(({ path }) => path)
     .toSorted();
-  // Startup imports pending transcripts, the V2 runtime wires the importer, and
-  // thread and project services hydrate a V1 transcript before they act on it.
+  // Startup imports pending transcripts, the V2 runtime wires the importer,
+  // cleanup reconciles legacy shells before its V2 sweep, and thread and project
+  // services hydrate a V1 transcript before they act on it.
   assert.deepEqual(importers, [
     "orchestration-v2/ThreadManagementService.ts",
+    "orchestration-v2/WorktreeCleanupService.ts",
     "orchestration-v2/runtimeLayer.ts",
     "project/ProjectService.ts",
     "serverRuntimeStartup.ts",

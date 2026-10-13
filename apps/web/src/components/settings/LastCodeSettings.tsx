@@ -1,16 +1,30 @@
-import { type DesktopLastCodeSettingsState, ProviderDriverKind, ThreadId } from "@t3tools/contracts";
+import {
+  DEFAULT_SERVER_SETTINGS,
+  DesktopLastCodeSettingsState,
+  LastCodeSettingsImportPreview,
+  ProviderDriverKind,
+  ThreadId,
+} from "@t3tools/contracts";
 import {
   DEFAULT_LEGACY_SIDEBAR_SCALE,
+  DEFAULT_SCROLLBAR_MARGIN,
+  DEFAULT_SCROLLBAR_WIDTH,
   LEGACY_SIDEBAR_SCALE_REFERENCE,
   MAX_LEGACY_SIDEBAR_SCALE,
+  MAX_SCROLLBAR_MARGIN,
+  MAX_SCROLLBAR_WIDTH,
+  MAX_HANDOFFS_MENU_LIMIT,
   MIN_THREAD_PROVIDER_BADGE_SIZE,
   MAX_THREAD_PROVIDER_BADGE_SIZE,
   MIN_THREAD_PROVIDER_BADGE_TRANSPARENCY,
   MAX_THREAD_PROVIDER_BADGE_TRANSPARENCY,
   MIN_LEGACY_SIDEBAR_SCALE,
+  MIN_SCROLLBAR_MARGIN,
+  MIN_SCROLLBAR_WIDTH,
+  MIN_HANDOFFS_MENU_LIMIT,
 } from "@t3tools/contracts/settings";
 import { useAtomValue } from "@effect/atom-react";
-import { MoonStarIcon, PaletteIcon, ServerIcon } from "lucide-react";
+import { DownloadIcon, MoonStarIcon, PaletteIcon, ServerIcon } from "lucide-react";
 import { type CSSProperties, useCallback, useEffect, useMemo, useState } from "react";
 
 import { environmentCatalog } from "../../connection/catalog";
@@ -23,6 +37,7 @@ import {
 import { usePrimarySettings, useUpdateClientSettings } from "../../hooks/useSettings";
 import { useDesktopUpdateState } from "../../state/desktopUpdate";
 import { usePrimaryEnvironmentId } from "../../state/environments";
+import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
 import { SidebarEnvironmentIcon } from "../sidebar/SidebarEnvironmentIcon";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
@@ -32,6 +47,14 @@ import { searchableSetting } from "./settingsSearch";
 import { ProviderAccentColorPicker } from "./ProviderAccentColorPicker";
 import { deriveLastCodeEnvironmentSettingEntries } from "./LastCodeSettings.logic";
 import { LocalCiSettingsSection } from "./LocalCiSettings";
+import { ScopedSwitch } from "./ScopedSwitch";
+import { useSettingsScope } from "./SettingsScopeContext";
+import {
+  useScopedSettings,
+  useScopedSettingsMixed,
+  useScopedSettingsWriteAllowed,
+  useUpdateScopedSettings,
+} from "./useScopedSettings";
 import {
   SettingResetButton,
   SettingsPageContainer,
@@ -116,6 +139,56 @@ function SettingsSlider({
   );
 }
 
+function EnvironmentPauseSettingsSection() {
+  const enabled = useScopedSettings((settings) => settings.environmentPauseEnabled);
+  const mixed = useScopedSettingsMixed(["environmentPauseEnabled"]);
+  const updateSettings = useUpdateScopedSettings();
+  const { scope, connectedEnvironments } = useSettingsScope();
+  const canWrite = useScopedSettingsWriteAllowed();
+  const supported =
+    connectedEnvironments.length > 0 &&
+    connectedEnvironments.every(
+      (environment) => environment.serverConfig?.environment.capabilities.environmentPause === true,
+    );
+  const disabled = !supported || !canWrite || scope.kind === "project" || scope.kind === "checkout";
+
+  return (
+    <SettingsSection title="Environment controls">
+      <SettingsRow
+        serverScoped
+        settingKeys={["environmentPauseEnabled"]}
+        {...searchableSetting("environment-pause")}
+        description="Show a sidebar button to ask active threads on this environment to pause before you go offline, then resume them when you return."
+        status={supported ? undefined : "Update the environment to enable this feature."}
+        resetAction={
+          mixed || enabled !== DEFAULT_SERVER_SETTINGS.environmentPauseEnabled ? (
+            <SettingResetButton
+              label="environment pause button"
+              disabled={disabled}
+              onClick={() =>
+                updateSettings({
+                  environmentPauseEnabled: DEFAULT_SERVER_SETTINGS.environmentPauseEnabled,
+                })
+              }
+            />
+          ) : null
+        }
+        control={
+          <ScopedSwitch
+            settingKeys={["environmentPauseEnabled"]}
+            checked={enabled}
+            disabled={disabled}
+            onCheckedChange={(checked) =>
+              updateSettings({ environmentPauseEnabled: Boolean(checked) })
+            }
+            aria-label="Environment pause button"
+          />
+        }
+      />
+    </SettingsSection>
+  );
+}
+
 export function LastCodeSettingsPanel() {
   const updateState = useDesktopUpdateState();
   const clientSettings = usePrimarySettings();
@@ -123,7 +196,9 @@ export function LastCodeSettingsPanel() {
   const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const [settings, setSettings] = useState<DesktopLastCodeSettingsState | null>(null);
+  const [importPreview, setImportPreview] = useState<LastCodeSettingsImportPreview | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
 
   useEffect(() => {
     const bridge = window.desktopBridge;
@@ -137,6 +212,23 @@ export function LastCodeSettingsPanel() {
             type: "error",
             title: "Could not load LastCode settings",
             description: error instanceof Error ? error.message : "Desktop settings read failed.",
+          }),
+        );
+      });
+  }, []);
+
+  useEffect(() => {
+    const bridge = window.desktopBridge;
+    if (!bridge || typeof bridge.previewT3SettingsImport !== "function") return;
+    void bridge
+      .previewT3SettingsImport()
+      .then(setImportPreview)
+      .catch((error: unknown) => {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not inspect T3 Code settings",
+            description: error instanceof Error ? error.message : "Settings preview failed.",
           }),
         );
       });
@@ -158,6 +250,31 @@ export function LastCodeSettingsPanel() {
       );
     } finally {
       setIsSaving(false);
+    }
+  }, []);
+
+  const importSettings = useCallback(async () => {
+    const bridge = window.desktopBridge;
+    if (!bridge || typeof bridge.importT3Settings !== "function") return;
+    setIsImporting(true);
+    try {
+      const result = await bridge.importT3Settings();
+      toastManager.add(
+        stackedThreadToast({
+          type: "success",
+          title: "T3 Code settings imported",
+          description: `Backed up the previous LastCode settings to ${result.backupDirectory}. Restarting LastCode…`,
+        }),
+      );
+    } catch (error) {
+      setIsImporting(false);
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Could not import T3 Code settings",
+          description: error instanceof Error ? error.message : "Settings import failed.",
+        }),
+      );
     }
   }, []);
 
@@ -207,8 +324,163 @@ export function LastCodeSettingsPanel() {
           }
         />
       </SettingsSection>
+      <EnvironmentPauseSettingsSection />
       <LocalCiSettingsSection />
       <SettingsSection title="Appearance" icon={<PaletteIcon className="size-5" />}>
+        <SettingsRow
+          {...searchableSetting("incoming-message-style")}
+          description="Choose how agent and automation messages appear in the conversation."
+          resetAction={
+            clientSettings.incomingMessageStyle !== "neutral" ? (
+              <SettingResetButton
+                label="incoming message style"
+                onClick={() => updateClientSettings({ incomingMessageStyle: "neutral" })}
+              />
+            ) : null
+          }
+          control={
+            <Select
+              value={clientSettings.incomingMessageStyle}
+              onValueChange={(value) => {
+                if (value === "neutral" || value === "outline") {
+                  updateClientSettings({ incomingMessageStyle: value });
+                }
+              }}
+            >
+              <SelectTrigger size="sm" className="w-44" aria-label="Incoming message style">
+                <SelectValue>
+                  {clientSettings.incomingMessageStyle === "neutral" ? "Neutral fill" : "Outline"}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectPopup>
+                <SelectItem value="neutral">Neutral fill</SelectItem>
+                <SelectItem value="outline">Outline</SelectItem>
+              </SelectPopup>
+            </Select>
+          }
+        />
+        {clientSettings.incomingMessageStyle === "neutral" ? (
+          <SettingsRow
+            {...searchableSetting("incoming-message-fill-color")}
+            description="Experiment with a fill color for agent and automation messages. Automatic follows your theme."
+            resetAction={
+              clientSettings.incomingMessageFillColor !== null ? (
+                <SettingResetButton
+                  label="incoming message fill color"
+                  onClick={() => updateClientSettings({ incomingMessageFillColor: null })}
+                />
+              ) : null
+            }
+            control={
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-muted-foreground">
+                  {clientSettings.incomingMessageFillColor ?? "Automatic"}
+                </span>
+                <ProviderAccentColorPicker
+                  displayName="incoming messages"
+                  label="Fill color"
+                  value={clientSettings.incomingMessageFillColor ?? undefined}
+                  defaultOptionLabel="Automatic"
+                  layout="inline"
+                  commitDelayMs={120}
+                  onCommit={(value) =>
+                    updateClientSettings({ incomingMessageFillColor: value || null })
+                  }
+                />
+              </div>
+            }
+          />
+        ) : null}
+        <SettingsRow
+          {...searchableSetting("handoffs-menu-limit")}
+          description="Choose how many recently opened handoffs appear in thread menus."
+          control={
+            <input
+              aria-label="Handoffs shown in menus"
+              className="w-16 rounded-md border bg-background px-2 py-1 text-center"
+              max={MAX_HANDOFFS_MENU_LIMIT}
+              min={MIN_HANDOFFS_MENU_LIMIT}
+              onChange={(event) => {
+                const value = Number(event.currentTarget.value);
+                if (
+                  Number.isInteger(value) &&
+                  value >= MIN_HANDOFFS_MENU_LIMIT &&
+                  value <= MAX_HANDOFFS_MENU_LIMIT
+                ) {
+                  void updateClientSettings({ handoffsMenuLimit: value });
+                }
+              }}
+              type="number"
+              value={clientSettings.handoffsMenuLimit}
+            />
+          }
+        />
+        <SettingsRow
+          {...searchableSetting("larger-scrollbars")}
+          description="Make scrollbar thumbs easier to grab. Margin keeps the thumb clear of pane resize handles."
+          status="Exact native scrollbar width and margin require LastCode desktop or a Chromium-based browser. Firefox uses its larger system scrollbar; styled app scroll areas still follow both sliders."
+          control={
+            <Switch
+              checked={clientSettings.largerScrollbarsEnabled}
+              onCheckedChange={(checked) =>
+                updateClientSettings({ largerScrollbarsEnabled: Boolean(checked) })
+              }
+              aria-label="Larger scrollbars"
+            />
+          }
+        />
+        {clientSettings.largerScrollbarsEnabled ? (
+          <>
+            <SettingsRow
+              title="Scrollbar width"
+              description="Set the visible scrollbar thumb width in one-pixel increments."
+              resetAction={
+                clientSettings.scrollbarWidth !== DEFAULT_SCROLLBAR_WIDTH ? (
+                  <SettingResetButton
+                    label="scrollbar width"
+                    onClick={() =>
+                      updateClientSettings({ scrollbarWidth: DEFAULT_SCROLLBAR_WIDTH })
+                    }
+                  />
+                ) : null
+              }
+              control={
+                <SettingsSlider
+                  id="scrollbar-width"
+                  label="Scrollbar width"
+                  min={MIN_SCROLLBAR_WIDTH}
+                  max={MAX_SCROLLBAR_WIDTH}
+                  value={clientSettings.scrollbarWidth}
+                  onChange={(scrollbarWidth) => updateClientSettings({ scrollbarWidth })}
+                />
+              }
+            />
+            <SettingsRow
+              title="Scrollbar margin"
+              description="Set the clear space between a scrollbar thumb and the pane edge."
+              resetAction={
+                clientSettings.scrollbarMargin !== DEFAULT_SCROLLBAR_MARGIN ? (
+                  <SettingResetButton
+                    label="scrollbar margin"
+                    onClick={() =>
+                      updateClientSettings({ scrollbarMargin: DEFAULT_SCROLLBAR_MARGIN })
+                    }
+                  />
+                ) : null
+              }
+              control={
+                <SettingsSlider
+                  id="scrollbar-margin"
+                  label="Scrollbar margin"
+                  min={MIN_SCROLLBAR_MARGIN}
+                  max={MAX_SCROLLBAR_MARGIN}
+                  value={clientSettings.scrollbarMargin}
+                  onChange={(scrollbarMargin) => updateClientSettings({ scrollbarMargin })}
+                />
+              }
+            />
+          </>
+        ) : null}
         <SettingsRow
           {...searchableSetting("scale-legacy-sidebar")}
           description="Scale legacy project and thread rows while leaving the sidebar header, Search field, and Projects heading unchanged. The 75% marker matches the normalized version of the original compact-sidebar patch."
@@ -491,6 +763,46 @@ export function LastCodeSettingsPanel() {
             </SettingsRow>
           );
         })}
+      </SettingsSection>
+      <SettingsSection title="Import from T3 Code" icon={<DownloadIcon className="size-5" />}>
+        <SettingsRow
+          {...searchableSetting("import-t3-settings")}
+          description="Copy selected preferences into LastCode once, back up the current LastCode files, then restart. The two apps remain independent after the import."
+          status={
+            !isElectron ? (
+              "Open this page in the LastCode desktop app to import settings."
+            ) : importPreview ? (
+              <div className="space-y-1.5">
+                <p>Source: {importPreview.sourceDirectory}</p>
+                {importPreview.message ? <p>{importPreview.message}</p> : null}
+                <ul className="space-y-0.5">
+                  {importPreview.categories.map((category) => (
+                    <li key={category.id}>
+                      <span className="text-foreground/80">{category.label}</span>{" "}
+                      <span>
+                        ({category.sourceFile}) — {category.status}
+                      </span>
+                      {category.status === "ready" ? <span>: {category.detail}</span> : null}
+                    </li>
+                  ))}
+                </ul>
+                <p>Not imported: {importPreview.excluded.join("; ")}.</p>
+              </div>
+            ) : (
+              "Inspecting ~/.t3/userdata…"
+            )
+          }
+          control={
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!importPreview?.canImport || isImporting}
+              onClick={() => void importSettings()}
+            >
+              {isImporting ? "Importing…" : "Import and restart"}
+            </Button>
+          }
+        />
       </SettingsSection>
     </SettingsPageContainer>
   );

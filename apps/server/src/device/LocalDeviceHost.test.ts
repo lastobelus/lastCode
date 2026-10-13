@@ -318,9 +318,9 @@ it.effect.each([true, false, "activation"] as const)(
       const host = yield* LocalDeviceHost.make().pipe(
         Effect.provideService(ServerConfig.ServerConfig, config),
         Effect.provide(NetService.layer),
-        Effect.provideService(HostProcessEnvironment, { HOME: directory, PATH: "" }),
-        Effect.provideService(HostProcessPlatform, "linux"),
-        Effect.provideService(HostProcessIsExecutable, false),
+        Effect.provideService(HostProcess.Environment, { HOME: directory, PATH: "" }),
+        Effect.provideService(HostProcess.Platform, "linux"),
+        Effect.provideService(HostProcess.IsExecutable, false),
         Effect.provideService(ProcessRunner.ProcessRunner, runner),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
         Effect.provideService(
@@ -457,9 +457,9 @@ it.effect.each([
         }),
         Effect.provideService(ServerConfig.ServerConfig, config),
         Effect.provide(NetService.layer),
-        Effect.provideService(HostProcessEnvironment, { HOME: directory, PATH: "" }),
-        Effect.provideService(HostProcessPlatform, "linux"),
-        Effect.provideService(HostProcessIsExecutable, false),
+        Effect.provideService(HostProcess.Environment, { HOME: directory, PATH: "" }),
+        Effect.provideService(HostProcess.Platform, "linux"),
+        Effect.provideService(HostProcess.IsExecutable, false),
         Effect.provideService(ProcessRunner.ProcessRunner, runner),
         Effect.provideService(
           ChildProcessSpawner.ChildProcessSpawner,

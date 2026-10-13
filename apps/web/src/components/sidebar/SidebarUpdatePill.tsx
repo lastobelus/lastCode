@@ -1,4 +1,8 @@
-import type { DesktopBridge, DesktopLocalBuildFailure, DesktopUpdateState } from "@t3tools/contracts";
+import type {
+  DesktopBridge,
+  DesktopLocalBuildFailure,
+  DesktopUpdateState,
+} from "@t3tools/contracts";
 import { CheckIcon, CopyIcon, TriangleAlertIcon } from "lucide-react";
 import { type ComponentProps, useCallback, useEffect, useId, useRef, useState } from "react";
 import { flushSync } from "react-dom";
@@ -197,7 +201,10 @@ function SidebarUpdateArchitectureWarningContent() {
     failures toast and resolve false. */
 async function downloadLocalUpdate(
   bridge: DesktopBridge,
-  { notifyDownloaded, isLocalBuild }: { readonly notifyDownloaded: boolean; readonly isLocalBuild: boolean },
+  {
+    notifyDownloaded,
+    isLocalBuild,
+  }: { readonly notifyDownloaded: boolean; readonly isLocalBuild: boolean },
 ): Promise<boolean> {
   try {
     const result = await bridge.downloadUpdate();
@@ -221,7 +228,9 @@ async function downloadLocalUpdate(
     toastManager.add(
       stackedThreadToast({
         type: "error",
-        title: isLocalBuild ? "Could not start local nightly build" : "Could not start update download",
+        title: isLocalBuild
+          ? "Could not start local nightly build"
+          : "Could not start update download",
         description: error instanceof Error ? error.message : "An unexpected error occurred.",
       }),
     );
@@ -381,9 +390,10 @@ function SidebarUpdateControl() {
     setIsActionPending(true);
 
     if (action === "download") {
-      void downloadLocalUpdate(bridge, { notifyDownloaded: true, isLocalBuild: state?.source === "lastcode-local" }).finally(() =>
-        setIsActionPending(false),
-      );
+      void downloadLocalUpdate(bridge, {
+        notifyDownloaded: true,
+        isLocalBuild: state?.source === "lastcode-local",
+      }).finally(() => setIsActionPending(false));
       return;
     }
 
@@ -451,7 +461,13 @@ function SidebarUpdateControl() {
     try {
       await everything.run({
         ...(bridge && action === "download"
-          ? { downloadLocal: () => downloadLocalUpdate(bridge, { notifyDownloaded: false, isLocalBuild: state?.source === "lastcode-local" }) }
+          ? {
+              downloadLocal: () =>
+                downloadLocalUpdate(bridge, {
+                  notifyDownloaded: false,
+                  isLocalBuild: state?.source === "lastcode-local",
+                }),
+            }
           : {}),
         ...(bridge && action !== "none" ? { installLocal: () => installLocalUpdate(bridge) } : {}),
       });
@@ -481,7 +497,13 @@ function SidebarUpdateControl() {
   // Web has no local app to check, so it only shows the button for remote work.
   if (!isElectron && !runsEverything && !isUpdatingEverything) return null;
 
-  if (!runsEverything && !isUpdatingEverything && state?.source === "lastcode-local" && !state.enabled) return null;
+  if (
+    !runsEverything &&
+    !isUpdatingEverything &&
+    state?.source === "lastcode-local" &&
+    !state.enabled
+  )
+    return null;
 
   const updateButton = (
     <button

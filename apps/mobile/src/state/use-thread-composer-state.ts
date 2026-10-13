@@ -3,6 +3,7 @@ import { readEnvironmentScope } from "./session";
 import type { ComposerTextPaste } from "../native/T3ComposerEditor.types";
 import { useAtomValue } from "@effect/atom-react";
 import { threadRuntimeIsActive } from "@t3tools/client-runtime/state/shell";
+import { recoveryQueuesFollowUps } from "@t3tools/client-runtime/state/thread-recovery";
 import {
   deriveProviderSubagentStatus,
   deriveRunlessWorkStartedAt,
@@ -317,7 +318,6 @@ export function useThreadComposerState() {
           threadId: selectedThreadShell.id,
         }),
   );
-  const canSteerActiveTurn = queueWorkflow?.canPromoteToSteer === true;
   const queuedRunEdit = useQueuedRunEdit(selectedThreadKey);
   const composerDraftKey =
     selectedThreadKey === null
@@ -362,6 +362,11 @@ export function useThreadComposerState() {
         : (selectedThreadShell?.runtime ?? null),
     [selectedThreadProjection, selectedThreadShell?.runtime],
   );
+  const forceQueue = recoveryQueuesFollowUps(
+    selectedThreadShell?.recovery,
+    selectedThreadRuntime?.activeRunId,
+  );
+  const canSteerActiveTurn = !forceQueue && queueWorkflow?.canPromoteToSteer === true;
   const selectedThreadActivityRun = useMemo(
     () =>
       selectedThreadProjection
@@ -681,6 +686,7 @@ export function useThreadComposerState() {
         running: activeThreadBusy && canSteerActiveTurn,
         alternateModifier: followUpOverride !== undefined && followUpOverride !== followUpBehavior,
         activeTurnDefault: followUpBehavior,
+        forceQueue,
       });
       // A send while the worktree is still being set up waits behind that setup,
       // so the server can hold it if the setup ends without a worktree.
@@ -749,6 +755,7 @@ export function useThreadComposerState() {
       activeThreadBusy,
       canSteerActiveTurn,
       followUpBehavior,
+      forceQueue,
       saveQueuedRunEdit,
       selectedEnvironmentRuntime?.connectionState,
       selectedEnvironmentRuntime?.serverConfig,
@@ -1086,6 +1093,7 @@ export function useThreadComposerState() {
     composerDraftKey,
     followUpBehavior,
     canSteerActiveTurn,
+    forceQueue,
     queuedRunEdit,
     isSavingQueuedEdit,
     cancelQueuedRunEdit,

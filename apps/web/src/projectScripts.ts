@@ -5,6 +5,8 @@ import {
   type ProjectScript,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
+import { nextTerminalId } from "@t3tools/shared/terminalLabels";
+import { randomUUID } from "./lib/utils";
 const isScriptRunCommand = Schema.is(SCRIPT_RUN_COMMAND_PATTERN);
 
 export interface ProjectScriptInput {
@@ -17,6 +19,7 @@ export interface ProjectScriptInput {
   readonly previewUrl: Exclude<ProjectScript["previewUrl"], undefined> | null;
   readonly autoOpenPreview: boolean;
   readonly allowAgentResume?: boolean;
+  readonly terminalLinkProfileName?: string;
 }
 
 export function buildProjectScript(id: string, input: ProjectScriptInput): ProjectScript {
@@ -29,12 +32,50 @@ export function buildProjectScript(id: string, input: ProjectScriptInput): Proje
     ...(input.runOnWorktreeCreate && input.waitForSetup ? { async: false } : {}),
     ...(input.runOnSettle ? { runOnSettle: true } : {}),
     ...(input.allowAgentResume ? { allowAgentResume: true } : {}),
+    ...(input.terminalLinkProfileName === undefined
+      ? {}
+      : { terminalLinkProfileName: input.terminalLinkProfileName }),
     ...(input.previewUrl === null
       ? {}
       : {
           previewUrl: input.previewUrl,
           autoOpenPreview: input.autoOpenPreview,
         }),
+  };
+}
+
+/** Keep Action link intent out of reused shells, including a later ordinary Action. */
+export function selectProjectScriptTerminal(input: {
+  readonly script: ProjectScript;
+  readonly baseTerminalId: string;
+  readonly existingTerminalIds?: ReadonlyArray<string>;
+  readonly baseTerminalLinkProfileName?: string | undefined;
+  readonly pendingTerminalLinkProfiles?: Readonly<Record<string, string>> | undefined;
+  readonly isBaseTerminalBusy: boolean;
+  readonly preferNewTerminal: boolean;
+  readonly canReuseTerminal: boolean;
+  readonly canReadTerminal: boolean;
+  readonly allocateTerminalId: () => string;
+}) {
+  const createNewTerminal =
+    input.script.terminalLinkProfileName !== undefined ||
+    input.baseTerminalLinkProfileName !== undefined ||
+    input.pendingTerminalLinkProfiles?.[input.baseTerminalId] !== undefined ||
+    input.preferNewTerminal ||
+    input.isBaseTerminalBusy ||
+    !input.canReuseTerminal ||
+    !input.canReadTerminal;
+  return {
+    createNewTerminal,
+    terminalId:
+      input.script.terminalLinkProfileName !== undefined
+        ? nextTerminalId(input.existingTerminalIds ?? [input.baseTerminalId], randomUUID())
+        : createNewTerminal
+          ? input.allocateTerminalId()
+          : input.baseTerminalId,
+    ...(input.script.terminalLinkProfileName === undefined
+      ? {}
+      : { terminalLinkProfileName: input.script.terminalLinkProfileName }),
   };
 }
 

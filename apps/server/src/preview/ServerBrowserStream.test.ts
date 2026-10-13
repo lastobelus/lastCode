@@ -65,14 +65,15 @@ const mutations = [
 ];
 
 it.effect.each([
-  { hasOperateScope: false, interactive: true },
-  { hasOperateScope: true, interactive: true },
-  { hasOperateScope: true, interactive: false },
-])("streams frames and acks while gating page mutations (%s)", ({ hasOperateScope, interactive }) =>
+  { operateScope: undefined, interactive: true },
+  { operateScope: AuthOrchestrationOperateScope, interactive: true },
+  { operateScope: AuthPreviewOperateScope, interactive: true },
+  { operateScope: AuthPreviewOperateScope, interactive: false },
+])("streams frames and acks while gating page mutations (%s)", ({ operateScope, interactive }) =>
   Effect.gen(function* () {
-    const canOperate = hasOperateScope && interactive;
-    const scopes = hasOperateScope
-      ? [AuthOrchestrationReadScope, AuthPreviewOperateScope]
+    const canOperate = operateScope === AuthPreviewOperateScope && interactive;
+    const scopes = operateScope
+      ? [AuthOrchestrationReadScope, operateScope]
       : [AuthOrchestrationReadScope];
     const auth = makeAuth(scopes);
     const inputs: unknown[] = [];
@@ -158,6 +159,7 @@ it.effect.each([
 it.effect.each([
   { scopes: [], error: undefined, status: 403 },
   { scopes: [AuthOrchestrationOperateScope], error: undefined, status: 403 },
+  { scopes: [AuthPreviewOperateScope], error: undefined, status: 403 },
   { scopes: [], error: new EnvironmentAuth.ServerAuthMissingCredentialError({}), status: 401 },
 ])("rejects unauthorized stream connections before attaching a viewer (%s)", (testCase) =>
   Effect.gen(function* () {
@@ -249,7 +251,7 @@ it.effect("serves a tab's download only to an authorized session", () =>
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
-it.effect("passes uploaded files to the page's open picker and needs operate scope", () =>
+it.effect("passes uploaded files to the page's open picker and needs preview operate scope", () =>
   Effect.gen(function* () {
     const answers: Array<{ chooserId: string; files: Array<{ name: string; text: string }> }> = [];
     const browser = ServerBrowser.ServerBrowser.of({
@@ -293,8 +295,8 @@ it.effect("passes uploaded files to the page's open picker and needs operate sco
         );
       });
     expect((yield* upload([AuthOrchestrationReadScope], "chooser-1")).status).toBe(403);
-    expect(answers).toEqual([]);
     expect((yield* upload([AuthOrchestrationOperateScope], "chooser-1")).status).toBe(403);
+    expect(answers).toEqual([]);
     expect((yield* upload([AuthPreviewOperateScope], "chooser-1")).status).toBe(204);
     expect(answers).toEqual([
       { chooserId: "chooser-1", files: [{ name: "notes.txt", text: "hello" }] },

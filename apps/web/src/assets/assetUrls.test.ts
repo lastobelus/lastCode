@@ -1,5 +1,6 @@
 import {
   AuthFilesystemReadScope,
+  AuthOrchestrationReadScope,
   EnvironmentAuthorizationError,
   EnvironmentId,
   ThreadId,
@@ -10,7 +11,7 @@ import { AsyncResult } from "effect/reactivity";
 import { beforeEach, expect, it, vi } from "vite-plus/test";
 
 const state = vi.hoisted(() => ({
-  session: null as Pick<AuthSessionState, "authenticated" | "scopes"> | null,
+  session: null as Pick<AuthSessionState, "authenticated" | "scopes" | "permissions"> | null,
   phase: "connected" as "connected" | "offline",
   assetAtom: {},
   mint: vi.fn(),
@@ -30,13 +31,17 @@ vi.mock("~/state/session", () => ({
 vi.mock("~/state/filesystem", async () => {
   const { resolveFilesystemReadAccess } = await import("@t3tools/client-runtime/state/filesystem");
   return {
-    useFilesystemReadAccess: () =>
-      resolveFilesystemReadAccess({
+    useFilesystemReadAccess: () => ({
+      ...resolveFilesystemReadAccess({
         isCatalogReady: true,
         connection: { phase: state.phase, error: null },
         session: state.session,
         sessionError: null,
       }),
+      canReadThreadFiles:
+        state.session?.authenticated === true &&
+        state.session.permissions?.includes("orchestration:read") === true,
+    }),
   };
 });
 vi.mock("~/state/assets", () => ({
@@ -70,6 +75,20 @@ it.each(["workspace-file", "media-file"] as const)(
       _tag: "Success",
       expiresAt: 1,
       url: "https://host.test/api/assets/image.png",
+    });
+  },
+);
+
+it.each(["workspace-file", "media-file"] as const)(
+  "requests only the linked file capability for restricted %s previews",
+  (_tag) => {
+    state.session = { authenticated: true, permissions: [AuthOrchestrationReadScope] };
+    expect(useAssetUrlState(environmentId, { ...resource, _tag })).toMatchObject({
+      _tag: "Success",
+    });
+    expect(state.assetQuery).toHaveBeenCalledWith({
+      environmentId,
+      input: { resource: { ...resource, linkedThreadFile: true } },
     });
   },
 );

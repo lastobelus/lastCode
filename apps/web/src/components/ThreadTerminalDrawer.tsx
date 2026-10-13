@@ -496,6 +496,7 @@ export function TerminalViewport({
       ...(providerInstanceId ? { providerInstanceId } : {}),
     },
   });
+  const readTerminalLinkProfileName = useEffectEvent(() => terminalSession.terminalLinkProfileName);
   const canResizeTerminal =
     canOperateTerminal && terminalSession.version > 0 && terminalSession.status === "running";
   const resizeSessionGeneration = canResizeTerminal ? terminalSession.output.generation : null;
@@ -913,20 +914,24 @@ export function TerminalViewport({
             writeSystemMessage(latestTerminal, "Opening links is unavailable in this browser.");
             return;
           }
-          const fallbackToBrowser = () => {
-            void localApi.shell.openExternal(text).catch((error: unknown) => {
+          const fallbackToBrowser = (url: string) => {
+            void localApi.shell.openExternal(url).catch((error: unknown) => {
               writeSystemMessage(
                 latestTerminal,
                 error instanceof Error ? error.message : "Unable to open link",
               );
             });
           };
-          if (!readEnvironmentScope(environmentId, AuthPreviewOperateScope)) {
-            fallbackToBrowser();
+          if (
+            !readEnvironmentScope(environmentId, AuthPreviewOperateScope) &&
+            readTerminalLinkProfileName() === undefined
+          ) {
+            fallbackToBrowser(text);
             return;
           }
           void openTerminalLinkInPreview({
             url: text,
+            terminalLinkProfileName: readTerminalLinkProfileName(),
             threadRef,
             openPreview,
             fallbackToBrowser,

@@ -1,6 +1,7 @@
 import { useAtomRefresh, useAtomValue } from "@effect/atom-react";
 import {
   type EnvironmentId,
+  type ThreadId,
   type ProjectListEntriesResult,
   ProjectReadFileError,
   type ProjectReadFileResult,
@@ -70,10 +71,15 @@ export function getProjectFileQueryAtom(
   environmentId: EnvironmentId,
   cwd: string,
   relativePath: string | null,
+  linkedThreadId?: ThreadId,
 ) {
   return projectEnvironment.readFile({
     environmentId,
-    input: { cwd, relativePath: relativePath ?? EMPTY_PROJECT_FILE_PATH },
+    input: {
+      cwd,
+      relativePath: relativePath ?? EMPTY_PROJECT_FILE_PATH,
+      ...(linkedThreadId === undefined ? {} : { linkedThreadId }),
+    },
   });
 }
 
@@ -252,15 +258,22 @@ export function useProjectFileQuery(
   cwd: string,
   relativePath: string | null,
   enabled = true,
+  linkedThreadId?: ThreadId,
 ): ProjectFileQueryState {
   // The caller decides what to read. A media path is not skipped here: a folder
   // named `assets.png` is only knowable as a folder from the read failure.
   const fileAccess = useFilesystemReadAccess(environmentId);
   const { canReadFiles } = fileAccess;
   const isQueryEnabled = enabled;
+  const canReadLinkedFile = linkedThreadId !== undefined && fileAccess.canReadThreadFiles;
   const atom =
-    enabled && canReadFiles
-      ? getProjectFileQueryAtom(environmentId, cwd, relativePath)
+    enabled && (canReadFiles || canReadLinkedFile)
+      ? getProjectFileQueryAtom(
+          environmentId,
+          cwd,
+          relativePath,
+          canReadFiles ? undefined : linkedThreadId,
+        )
       : EMPTY_PROJECT_FILE_QUERY_ATOM;
   const result = useAtomValue(atom);
   const refreshAtom = useAtomRefresh(atom);
@@ -274,11 +287,11 @@ export function useProjectFileQuery(
   const readError = isProjectReadFileError(cause) ? cause : null;
 
   return {
-    data: canReadFiles ? (optimisticFile?.data ?? data) : null,
+    data: canReadFiles ? (optimisticFile?.data ?? data) : canReadLinkedFile ? data : null,
     error:
       !isQueryEnabled || fileAccess.isPending
         ? null
-        : canReadFiles
+        : canReadFiles || canReadLinkedFile
           ? errorMessage(cause)
           : (fileAccess.error ?? "This connection cannot read host files."),
     isPending: isQueryEnabled && (fileAccess.isPending || result.waiting),
