@@ -10,14 +10,18 @@ import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as SqlError from "effect/sql/SqlError";
 import {
   DEFAULT_SERVER_SETTINGS,
+  GitCommandError,
+  OrchestrationV2AppThreadJson,
   StorageCleanupReport,
   type WorktreeKeepWhen,
 } from "@t3tools/contracts";
 import * as ServerConfig from "./config.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
+import * as GeneratedDependencies from "./workspace/GeneratedDependencies.ts";
 import * as VcsProcess from "./vcs/VcsProcess.ts";
 import * as PreviewHosting from "./preview/Hosting.ts";
 import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManager.ts";
@@ -49,6 +53,8 @@ import {
 const NOW_MS = Date.parse("2026-06-10T12:00:00.000Z");
 const DAY_MS = 24 * 60 * 60 * 1_000;
 const decodeCleanupReport = Schema.decodeSync(StorageCleanupReport);
+const decodeFullThread = Schema.decodeUnknownSync(OrchestrationV2AppThreadJson);
+const encodeFullThread = Schema.encodeSync(Schema.fromJsonString(OrchestrationV2AppThreadJson));
 
 function at(offsetMs: number): DateTime.Utc {
   return DateTime.makeUnsafe(NOW_MS + offsetMs);
@@ -258,6 +264,9 @@ const cleanupFixture = Effect.gen(function* () {
   yield* command(repo, ["init", "-b", "main"]);
   yield* command(repo, ["config", "user.email", "cleanup@example.test"]);
   yield* command(repo, ["config", "user.name", "Cleanup test"]);
+  const globalExcludes = `${baseDir}/empty-global-excludes`;
+  yield* fs.writeFileString(globalExcludes, "");
+  yield* command(repo, ["config", "core.excludesFile", globalExcludes]);
   yield* fs.writeFileString(`${repo}/tracked.txt`, "original\n");
   yield* fs.writeFileString(`${repo}/.gitignore`, ".env\ndist/\nnode_modules/\n");
   yield* command(repo, ["add", "."]);
@@ -270,32 +279,140 @@ const cleanupFixture = Effect.gen(function* () {
     storageCleanup: { ...DEFAULT_SERVER_SETTINGS.storageCleanup, worktreeAfterDays: 8 },
   };
   let threads = [shell({ branch: "feature", worktreePath: worktree })];
+  let projectRoots = [{ id: ProjectId.make("project-1"), workspaceRoot: repo }];
   let editBeforeRemoval = false;
+  let onDependencyInspection: (() => void) | null = null;
+  let onWorktreeInventory: (() => void) | null = null;
+  let worktreeInventoryCalls = 0;
+  let failManagedRootCanonicalization = false;
+  let failNextGitInventory = false;
+  let inventoryIdentityMode: "command-error" | "malformed" | "missing-git-dir" | "not-git" | null =
+    null;
+  let failProjectInventory = false;
+  const activation = yield* Deferred.make<void>();
+  let failDependencyRead = false;
+  let failWorktreeRead = false;
+  let failEligibilityRevalidation = false;
+  let deletedDependencyRows: Array<{
+    payload_json: string;
+    workspaceRoot: string;
+    latestEventAt: string | null;
+  }> = [];
   let openSessionCwd: string | null = null;
   let fullStatusCalls = 0;
   let previewPaths: ReadonlyArray<string> = [];
   let ownershipRevision = 0;
   const context = yield* Layer.build(StorageCleanup.layer).pipe(
     Effect.provideService(ServerConfig.ServerConfig, config),
+    Effect.provideService(FileSystem.FileSystem, {
+      ...fs,
+      exists: (target: string) =>
+        failManagedRootCanonicalization && target === config.worktreesDir
+          ? Effect.sync(() => {
+              failManagedRootCanonicalization = false;
+            }).pipe(
+              Effect.flatMap(() => fs.remove(target, { recursive: true })),
+              Effect.as(true),
+            )
+          : fs.exists(target),
+    }),
+    Effect.provideService(GeneratedDependencies.ProcessWorkingDirectories, Effect.succeed([])),
     Effect.provideService(GitVcsDriver.GitVcsDriver, {
       ...git,
       execute: (input) =>
         Effect.gen(function* () {
           if (editBeforeRemoval && input.args.includes("remove"))
             yield* fs.writeFileString(`${worktree}/tracked.txt`, "late edit\n");
+          if (input.operation === "GeneratedDependencies.inspect" && onDependencyInspection) {
+            const callback = onDependencyInspection;
+            onDependencyInspection = null;
+            callback();
+          }
+          if (input.operation === "StorageCleanup.inventoryRepository" && inventoryIdentityMode) {
+            const mode = inventoryIdentityMode;
+            inventoryIdentityMode = null;
+            if (mode === "command-error")
+              return yield* Effect.fail(
+                new GitCommandError({
+                  operation: input.operation,
+                  command: "git rev-parse --git-common-dir",
+                  cwd: input.cwd,
+                  detail: "Fixture Git identity execution failure",
+                }),
+              );
+            if (mode === "malformed")
+              return {
+                exitCode: 0,
+                stdout: "",
+                stderr: "",
+                stdoutTruncated: false,
+                stderrTruncated: false,
+              };
+            if (mode === "missing-git-dir")
+              return {
+                exitCode: 0,
+                stdout: "missing-git-dir",
+                stderr: "",
+                stdoutTruncated: false,
+                stderrTruncated: false,
+              };
+            if (mode === "not-git")
+              return {
+                exitCode: 128,
+                stdout: "",
+                stderr: "fatal: not a git repository (or any parent up to mount point)",
+                stdoutTruncated: false,
+                stderrTruncated: false,
+              };
+          }
           return yield* git.execute(input);
         }),
       statusDetailsLocal: (...args) => {
         fullStatusCalls++;
         return git.statusDetailsLocal(...args);
       },
+      listWorktreePaths: (cwd) =>
+        (failNextGitInventory
+          ? Effect.sync(() => {
+              failNextGitInventory = false;
+            }).pipe(
+              Effect.flatMap(() =>
+                Effect.fail(
+                  new GitCommandError({
+                    operation: "listWorktreePaths",
+                    command: "git worktree list",
+                    cwd,
+                    detail: "Fixture Git inventory failure",
+                  }),
+                ),
+              ),
+            )
+          : git.listWorktreePaths(cwd)
+        ).pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              worktreeInventoryCalls++;
+              const callback = onWorktreeInventory;
+              onWorktreeInventory = null;
+              callback?.();
+            }),
+          ),
+        ),
     }),
     Effect.provideService(Settings.ServerSettingsService, {
       getSettings: Effect.sync(() => settings),
       subscribeChanges: Effect.succeed(Stream.empty),
     } as unknown as Settings.ServerSettingsService["Service"]),
     Effect.provideService(ProjectStore.ProjectStoreV2, {
-      listShells: () => Effect.succeed([{ id: ProjectId.make("project-1"), workspaceRoot: repo }]),
+      listShells: () =>
+        failProjectInventory
+          ? Effect.fail(
+              new ProjectStore.ProjectStoreV2Error({
+                operation: "listShells",
+                cause: new Error("Fixture project inventory failure"),
+              }),
+            )
+          : Effect.sync(() => projectRoots),
     } as unknown as ProjectStore.ProjectStoreV2["Service"]),
     Effect.provideService(ProjectionStore.ProjectionStoreV2, {
       getShellSnapshot: (input?: { location?: string }) =>
@@ -303,6 +420,8 @@ const cleanupFixture = Effect.gen(function* () {
           threads: input?.location === "archive" ? [] : threads,
           archivedThreads: [],
         })),
+      getThreadShell: (id: ThreadId) =>
+        Effect.sync(() => threads.find((thread) => thread.id === id) ?? null),
     } as unknown as ProjectionStore.ProjectionStoreV2["Service"]),
     Effect.provideService(Orchestrator.OrchestratorV2, {
       streamDomainEvents: Stream.empty,
@@ -310,10 +429,48 @@ const cleanupFixture = Effect.gen(function* () {
     Effect.provideService(
       SqlClient.SqlClient,
       Object.assign(
-        (strings: TemplateStringsArray) =>
-          Effect.sync(() => {
-            const query = strings.join("");
+        (strings: TemplateStringsArray) => {
+          const query = strings.join("");
+          if (failDependencyRead && query.includes("FROM orchestration_v2_projection_threads t")) {
+            failDependencyRead = false;
+            return Effect.fail(
+              new SqlError.SqlError({
+                reason: new SqlError.SqlSyntaxError({
+                  cause: new Error("Fixture dependency query failure"),
+                  message: "Fixture dependency query failure",
+                }),
+              }),
+            );
+          }
+          if (failWorktreeRead && query.includes("WHERE t.deleted_at IS NOT NULL")) {
+            failWorktreeRead = false;
+            return Effect.fail(
+              new SqlError.SqlError({
+                reason: new SqlError.SqlSyntaxError({
+                  cause: new Error("Fixture worktree query failure"),
+                  message: "Fixture worktree query failure",
+                }),
+              }),
+            );
+          }
+          if (
+            failEligibilityRevalidation &&
+            query.includes("OR (aggregate_kind = 'thread' AND stream_id")
+          ) {
+            failEligibilityRevalidation = false;
+            return Effect.fail(
+              new SqlError.SqlError({
+                reason: new SqlError.SqlSyntaxError({
+                  cause: new Error("Fixture eligibility revalidation failure"),
+                  message: "Failed to execute statement",
+                }),
+              }),
+            );
+          }
+          return Effect.sync(() => {
             if (query.includes("COALESCE(MAX(sequence)")) return [{ sequence: 0 }];
+            if (query.includes("SELECT t.payload_json, p.workspace_root"))
+              return deletedDependencyRows;
             return openSessionCwd !== null && query.includes("projection_provider_sessions")
               ? [
                   {
@@ -332,7 +489,8 @@ const cleanupFixture = Effect.gen(function* () {
                   },
                 ]
               : [];
-          }),
+          });
+        },
         { in: (values: ReadonlyArray<unknown>) => values },
       ) as unknown as SqlClient.SqlClient,
     ),
@@ -349,10 +507,12 @@ const cleanupFixture = Effect.gen(function* () {
     Effect.provideService(TerminalManager.TerminalManager, {
       subscribeMetadata: () => Effect.succeed(() => {}),
     } as unknown as TerminalManager.TerminalManager["Service"]),
-    Effect.provideService(ServerActivation, Effect.never),
+    Effect.provideService(ServerActivation, Deferred.await(activation)),
   );
   return {
     service: Context.get(context, StorageCleanup.StorageCleanup),
+    activate: () => Deferred.succeed(activation, undefined),
+    worktreeInventoryCalls: () => worktreeInventoryCalls,
     setPreviewPaths: (paths: ReadonlyArray<string>) => {
       previewPaths = paths;
     },
@@ -364,6 +524,7 @@ const cleanupFixture = Effect.gen(function* () {
     },
     fs,
     worktree,
+    repo,
     config,
     command,
     enableFiles: () => {
@@ -379,6 +540,12 @@ const cleanupFixture = Effect.gen(function* () {
     setPolicy: (worktreeKeepWhen: WorktreeKeepWhen) => {
       settings = { ...settings, storageCleanup: { ...settings.storageCleanup, worktreeKeepWhen } };
     },
+    setDependencyPolicy: (days: number | null) => {
+      settings = {
+        ...settings,
+        storageCleanup: { ...settings.storageCleanup, worktreeDependenciesAfterDays: days },
+      };
+    },
     disable: () => {
       settings = {
         ...settings,
@@ -387,6 +554,59 @@ const cleanupFixture = Effect.gen(function* () {
     },
     setThreads: (next: typeof threads) => {
       threads = next;
+    },
+    setProjectRoots: (next: typeof projectRoots) => {
+      projectRoots = next;
+    },
+    addThreadOnDependencyInspection: (thread: OrchestrationV2ThreadShell) => {
+      onDependencyInspection = () => {
+        threads = [...threads, thread];
+      };
+    },
+    addThreadOnWorktreeInventory: (thread: OrchestrationV2ThreadShell) => {
+      onWorktreeInventory = () => {
+        threads = [...threads, thread];
+      };
+    },
+    failNextDependencyRead: () => {
+      failDependencyRead = true;
+    },
+    failNextWorktreeRead: () => {
+      failWorktreeRead = true;
+    },
+    failNextGitInventory: () => {
+      failNextGitInventory = true;
+    },
+    setInventoryIdentityMode: (mode: typeof inventoryIdentityMode) => {
+      inventoryIdentityMode = mode;
+    },
+    failProjectInventory: () => {
+      failProjectInventory = true;
+    },
+    failManagedRootCanonicalization: () => {
+      failManagedRootCanonicalization = true;
+    },
+    failEligibilityRevalidation: () => {
+      failEligibilityRevalidation = true;
+    },
+    setDeletedDependencyRows: (rows: typeof deletedDependencyRows) => {
+      deletedDependencyRows = rows;
+    },
+    setProjectWorktreeCleanupOff: (projectId: ProjectId) => {
+      settings = {
+        ...settings,
+        projectSettingsOverrides: {
+          ...settings.projectSettingsOverrides,
+          [projectId]: { worktreeCleanup: { mode: "off" } },
+        },
+      };
+    },
+    setManagedWorktreeDirectories: (current: string, previous: ReadonlyArray<string>) => {
+      settings = {
+        ...settings,
+        worktreesDirectory: current,
+        previousWorktreesDirectories: previous,
+      };
     },
     setOpenSessionCwd: (cwd: string | null) => {
       openSessionCwd = cwd;
@@ -612,7 +832,11 @@ describe("storage cleanup reports and local file policies", () => {
         const report = yield* service.runNow;
         yield* service.drain;
         expect(report.trigger).toBe("manual");
-        expect(report.entries.filter((entry) => entry.kind === "worktree")).toMatchObject([
+        expect(
+          report.entries.filter(
+            (entry) => entry.kind === "worktree" && entry.scope !== "dependencies",
+          ),
+        ).toMatchObject([
           {
             outcome,
             path: worktree,
@@ -661,7 +885,7 @@ describe("storage cleanup reports and local file policies", () => {
         );
         expect(reports[0]).toBeNull();
         expect(reports[1]).toEqual(yield* service.latestReport);
-        expect(reports[1]?.counts).toEqual({ removed: 1, kept: 0, failed: 0 });
+        expect(reports[1]?.counts).toEqual({ removed: 1, kept: 1, failed: 0 });
       }),
     ),
   );
@@ -686,8 +910,8 @@ describe("storage cleanup reports and local file policies", () => {
         setThreads(threads);
         const report = yield* service.runNow;
         expect(report.entries).toHaveLength(200);
-        expect(report.omittedCount).toBe(6);
-        expect(report.counts).toEqual({ removed: 1, kept: 205, failed: 0 });
+        expect(report.omittedCount).toBe(7);
+        expect(report.counts).toEqual({ removed: 1, kept: 206, failed: 0 });
         expect(report.entries[0]?.outcome).toBe("removed");
         expect(report.entries[0]?.bytes).toBeGreaterThan(0);
         expect(report.bytesFreed).toBe(report.entries[0]?.bytes);
@@ -723,12 +947,738 @@ describe("storage cleanup reports and local file policies", () => {
             shell({ id: ThreadId.make("thread-2"), branch: "feature", worktreePath: worktree }),
           ]);
           expect((yield* service.runNow).entries[0]?.reason).toBe("Shared by 2 threads");
+          const audit = yield* fs.readFileString(
+            `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
+          );
+          expect(audit).toContain('"event":"worktree-decision"');
+          expect(audit).toContain('"reason":"Shared by 2 threads"');
           fixture.disable();
-          expect((yield* service.runNow).entries).toEqual([]);
+          expect(
+            (yield* service.runNow).entries.filter(
+              (entry) => entry.kind === "worktree" && entry.scope !== "dependencies",
+            ),
+          ).toEqual([]);
           yield* fs.remove(worktree, { recursive: true });
           expect(
-            (yield* service.runNow).entries.filter((entry) => entry.kind === "worktree"),
+            (yield* service.runNow).entries.filter(
+              (entry) => entry.kind === "worktree" && entry.scope !== "dependencies",
+            ),
           ).toEqual([]);
+        }),
+      ),
+  );
+  it.live("persists sweep and dependency decision records in the local audit file", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture;
+        fixture.disable();
+        fixture.setDependencyPolicy(8);
+        const report = yield* fixture.service.runNow;
+        expect(report.entries).toContainEqual(
+          expect.objectContaining({
+            kind: "worktree",
+            scope: "dependencies",
+            outcome: "kept",
+            reason:
+              "Dependency install is unsupported, missing its install marker, shared, or unsafe to inspect",
+          }),
+        );
+        const audit = yield* fixture.fs.readFileString(
+          `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
+        );
+        expect(audit).toContain('"event":"sweep-start"');
+        expect(audit).toContain('"event":"sweep-finish"');
+        expect(audit).toContain('"event":"candidate"');
+        expect(audit).toContain('"trigger":"manual"');
+      }),
+    ),
+  );
+  it.live("removes a supported old dependency install and reports estimated bytes", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture;
+        fixture.disable();
+        fixture.setDependencyPolicy(8);
+        yield* fixture.fs.writeFileString(
+          `${fixture.worktree}/package.json`,
+          '{"name":"fixture","version":"1.0.0"}',
+        );
+        yield* fixture.fs.writeFileString(
+          `${fixture.worktree}/package-lock.json`,
+          '{"name":"fixture","version":"1.0.0","lockfileVersion":3,"packages":{"":{"name":"fixture","version":"1.0.0"}}}',
+        );
+        yield* fixture.command(fixture.worktree, [
+          "add",
+          ".gitignore",
+          "package.json",
+          "package-lock.json",
+        ]);
+        yield* fixture.command(fixture.worktree, ["commit", "-m", "add dependency markers"]);
+        yield* fixture.fs.makeDirectory(`${fixture.worktree}/node_modules`, { recursive: true });
+        yield* fixture.fs.writeFileString(
+          `${fixture.worktree}/node_modules/.package-lock.json`,
+          '{"name":"fixture","lockfileVersion":3,"packages":{}}',
+        );
+        const report = yield* fixture.service.runNow;
+        expect(report.entries).toContainEqual(
+          expect.objectContaining({
+            kind: "worktree",
+            scope: "dependencies",
+            outcome: "removed",
+            reason: "Dependency install removed",
+            path: `${fixture.worktree}/node_modules`,
+            bytes: expect.any(Number),
+          }),
+        );
+        expect(yield* fixture.fs.exists(`${fixture.worktree}/node_modules`)).toBe(false);
+        const audit = yield* fixture.fs.readFileString(
+          `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
+        );
+        expect(audit).toContain('"event":"candidate"');
+        expect(audit).toContain('"outcome":"removed"');
+      }),
+    ),
+  );
+  it.live("reports revalidation query failures and retains dependency installs", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture;
+        fixture.disable();
+        fixture.setDependencyPolicy(8);
+        yield* fixture.fs.writeFileString(
+          `${fixture.worktree}/package.json`,
+          '{"name":"fixture","version":"1.0.0"}',
+        );
+        yield* fixture.fs.writeFileString(
+          `${fixture.worktree}/package-lock.json`,
+          '{"name":"fixture","version":"1.0.0","lockfileVersion":3,"packages":{"":{"name":"fixture","version":"1.0.0"}}}',
+        );
+        yield* fixture.command(fixture.worktree, [
+          "add",
+          ".gitignore",
+          "package.json",
+          "package-lock.json",
+        ]);
+        yield* fixture.command(fixture.worktree, ["commit", "-m", "add dependency markers"]);
+        yield* fixture.fs.makeDirectory(`${fixture.worktree}/node_modules`, { recursive: true });
+        yield* fixture.fs.writeFileString(
+          `${fixture.worktree}/node_modules/.package-lock.json`,
+          '{"name":"fixture","lockfileVersion":3,"packages":{}}',
+        );
+        fixture.failEligibilityRevalidation();
+        const report = yield* fixture.service.runNow;
+        const detail = "Fixture eligibility revalidation failure";
+        const failed = report.entries.find(
+          (entry) => entry.scope === "dependencies" && entry.outcome === "failed",
+        );
+        expect(failed?.reason).toContain(detail);
+        expect(report.counts.failed).toBe(1);
+        expect(yield* fixture.fs.exists(`${fixture.worktree}/node_modules`)).toBe(true);
+        const auditText = yield* fixture.fs.readFileString(
+          `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
+        );
+        expect(auditText).toContain('"event":"candidate"');
+        expect(auditText).toContain('"outcome":"failed"');
+        expect(auditText).toContain(detail);
+      }),
+    ),
+  );
+  it.live("does not report dependency cleanup after its worktree was removed", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture;
+        fixture.setDependencyPolicy(8);
+
+        const report = yield* fixture.service.runNow;
+        expect(report.entries).toContainEqual(
+          expect.objectContaining({
+            kind: "worktree",
+            outcome: "removed",
+            path: fixture.worktree,
+          }),
+        );
+        expect(report.counts).toEqual({ removed: 1, kept: 0, failed: 0 });
+        expect(report.entries.filter((entry) => entry.scope === "dependencies")).toEqual([]);
+        const auditText = yield* fixture.fs.readFileString(
+          `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
+        );
+        const auditRecords = auditText
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as { event?: string; scope?: string });
+        expect(
+          auditRecords.filter(
+            (record) => record.event === "candidate" && record.scope === "dependencies",
+          ),
+        ).toEqual([]);
+      }),
+    ),
+  );
+  it.live("does not report deleted threads with disabled dependency cleanup", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture;
+        fixture.disable();
+        fixture.setDependencyPolicy(8);
+        const disabledProjectId = ProjectId.make("disabled-dependency-project");
+        const deletedThread = shell({
+          id: ThreadId.make("deleted-disabled-dependency"),
+          projectId: disabledProjectId,
+          branch: "feature",
+          worktreePath: fixture.worktree,
+          createdAt: at(-40 * DAY_MS),
+          updatedAt: at(-30 * DAY_MS),
+          deletedAt: at(-30 * DAY_MS),
+        });
+        const payload = encodeFullThread(
+          decodeFullThread({
+            ...deletedThread,
+            createdAt: DateTime.formatIso(deletedThread.createdAt),
+            updatedAt: DateTime.formatIso(deletedThread.updatedAt),
+            deletedAt: DateTime.formatIso(deletedThread.deletedAt!),
+          }),
+        );
+        fixture.setThreads([]);
+        fixture.setProjectWorktreeCleanupOff(disabledProjectId);
+        fixture.setDeletedDependencyRows([
+          { payload_json: payload, workspaceRoot: fixture.repo, latestEventAt: null },
+        ]);
+
+        const report = yield* fixture.service.runNow;
+        expect(
+          report.entries.some(
+            (entry) =>
+              entry.scope === "dependencies" &&
+              entry.threadId === deletedThread.id &&
+              entry.path === fixture.worktree,
+          ),
+        ).toBe(false);
+        const auditText = yield* fixture.fs.readFileString(
+          `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
+        );
+        expect(auditText).not.toContain(String(deletedThread.id));
+        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(true);
+      }),
+    ),
+  );
+  it.live("reports a preview-protected dependency candidate once", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture;
+        fixture.disable();
+        fixture.setDependencyPolicy(8);
+        fixture.setPreviewPaths([fixture.worktree]);
+        yield* fixture.fs.writeFileString(
+          `${fixture.worktree}/package.json`,
+          '{"name":"fixture","version":"1.0.0"}',
+        );
+        yield* fixture.fs.writeFileString(
+          `${fixture.worktree}/package-lock.json`,
+          '{"name":"fixture","version":"1.0.0","lockfileVersion":3,"packages":{"":{"name":"fixture","version":"1.0.0"}}}',
+        );
+        yield* fixture.command(fixture.worktree, [
+          "add",
+          ".gitignore",
+          "package.json",
+          "package-lock.json",
+        ]);
+        yield* fixture.command(fixture.worktree, ["commit", "-m", "add dependency markers"]);
+        yield* fixture.fs.makeDirectory(`${fixture.worktree}/node_modules`, { recursive: true });
+        yield* fixture.fs.writeFileString(
+          `${fixture.worktree}/node_modules/.package-lock.json`,
+          '{"name":"fixture","lockfileVersion":3,"packages":{}}',
+        );
+
+        const report = yield* fixture.service.runNow;
+        const dependencyEntries = report.entries.filter((entry) => entry.scope === "dependencies");
+        expect(dependencyEntries).toHaveLength(1);
+        expect(dependencyEntries[0]).toMatchObject({
+          outcome: "kept",
+          reason:
+            "Active owner, session, terminal, preview, changed branch, or cleanup settings blocked removal",
+          path: fixture.worktree,
+        });
+        expect(yield* fixture.fs.exists(`${fixture.worktree}/node_modules`)).toBe(true);
+      }),
+    ),
+  );
+  it.live("skips disabled automatic Git inventories while retaining manual discovery", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture;
+        fixture.disable();
+        const orphan = `${fixture.config.worktreesDir}/manual-only-orphan`;
+        yield* fixture.command(fixture.repo, ["worktree", "add", "--detach", orphan, "HEAD"]);
+        const automatic = yield* fixture.service.reports.pipe(
+          Stream.filter((report) => report?.trigger === "automatic"),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        yield* fixture.activate();
+        const [automaticReport] = yield* Fiber.join(automatic);
+        expect(automaticReport?.trigger).toBe("automatic");
+        expect(fixture.worktreeInventoryCalls()).toBe(0);
+        expect(automaticReport?.entries.some((entry) => entry.path === orphan)).toBe(false);
+
+        const manual = yield* fixture.service.runNow;
+        expect(fixture.worktreeInventoryCalls()).toBe(1);
+        expect(manual.entries).toContainEqual(
+          expect.objectContaining({
+            path: orphan,
+            reason: "No owning thread; retained for review",
+          }),
+        );
+        expect(yield* fixture.fs.exists(orphan)).toBe(true);
+      }),
+    ),
+  );
+  it.live("inventories automatic runs when dependency cleanup is enabled", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture;
+        fixture.disable();
+        fixture.setDependencyPolicy(8);
+        const orphan = `${fixture.config.worktreesDir}/automatic-orphan`;
+        yield* fixture.command(fixture.repo, ["worktree", "add", "--detach", orphan, "HEAD"]);
+        const automatic = yield* fixture.service.reports.pipe(
+          Stream.filter((report) => report?.trigger === "automatic"),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        yield* fixture.activate();
+        const [report] = yield* Fiber.join(automatic);
+        expect(fixture.worktreeInventoryCalls()).toBe(1);
+        expect(report?.entries).toContainEqual(
+          expect.objectContaining({
+            path: orphan,
+            reason: "No owning thread; retained for review",
+          }),
+        );
+        expect(yield* fixture.fs.exists(orphan)).toBe(true);
+      }),
+    ),
+  );
+  it.live("reports and retains a registered worktree without a thread owner", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture;
+        const orphan = `${fixture.config.worktreesDir}/orphan`;
+        yield* fixture.command(fixture.repo, ["worktree", "add", "--detach", orphan, "HEAD"]);
+        const report = yield* fixture.service.runNow;
+        expect(report.entries).toContainEqual(
+          expect.objectContaining({
+            kind: "worktree",
+            outcome: "kept",
+            path: orphan,
+            reason: "No owning thread; retained for review",
+            threadId: null,
+          }),
+        );
+        expect(yield* fixture.fs.exists(orphan)).toBe(true);
+      }),
+    ),
+  );
+  it.live("matches registered worktrees under a symlinked managed root", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture;
+        fixture.disable();
+        const realRoot = `${fixture.config.baseDir}/real-worktrees`;
+        const linkedRoot = `${fixture.config.baseDir}/linked-worktrees`;
+        const orphan = `${realRoot}/orphan`;
+        const ownedViaAlias = `${linkedRoot}/owned`;
+        const canonicalOwnedPath = `${realRoot}/owned`;
+        yield* fixture.fs.makeDirectory(realRoot, { recursive: true });
+        yield* fixture.fs.symlink(realRoot, linkedRoot);
+        fixture.setManagedWorktreeDirectories(linkedRoot, []);
+        yield* fixture.command(fixture.repo, ["worktree", "add", "--detach", orphan, "HEAD"]);
+        yield* fixture.command(fixture.repo, [
+          "worktree",
+          "add",
+          "--detach",
+          ownedViaAlias,
+          "HEAD",
+        ]);
+        fixture.setThreads([
+          shell({ branch: "feature", worktreePath: fixture.worktree }),
+          shell({ id: ThreadId.make("symlink-owner"), worktreePath: ownedViaAlias }),
+        ]);
+
+        const report = yield* fixture.service.runNow;
+        expect(report.entries).toContainEqual(
+          expect.objectContaining({
+            kind: "worktree",
+            outcome: "kept",
+            path: orphan,
+            reason: "No owning thread; retained for review",
+          }),
+        );
+        expect(
+          report.entries.some(
+            (entry) =>
+              entry.path === canonicalOwnedPath &&
+              entry.reason === "No owning thread; retained for review",
+          ),
+        ).toBe(false);
+        expect(yield* fixture.fs.exists(orphan)).toBe(true);
+        expect(yield* fixture.fs.exists(canonicalOwnedPath)).toBe(true);
+      }),
+    ),
+  );
+  it.live("uses fresh thread ownership after dependency inspection before orphan inventory", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture;
+        fixture.disable();
+        fixture.setDependencyPolicy(8);
+        const newlyOwned = `${fixture.config.worktreesDir}/newly-owned`;
+        yield* fixture.command(fixture.repo, ["worktree", "add", "--detach", newlyOwned, "HEAD"]);
+        fixture.addThreadOnDependencyInspection(
+          shell({
+            id: ThreadId.make("new-owner"),
+            branch: "main",
+            worktreePath: newlyOwned,
+          }),
+        );
+        yield* fixture.fs.writeFileString(
+          `${fixture.worktree}/package.json`,
+          '{"name":"fixture","version":"1.0.0"}',
+        );
+        yield* fixture.fs.writeFileString(
+          `${fixture.worktree}/package-lock.json`,
+          '{"name":"fixture","version":"1.0.0","lockfileVersion":3,"packages":{"":{"name":"fixture","version":"1.0.0"}}}',
+        );
+        yield* fixture.command(fixture.worktree, [
+          "add",
+          ".gitignore",
+          "package.json",
+          "package-lock.json",
+        ]);
+        yield* fixture.command(fixture.worktree, ["commit", "-m", "add dependency markers"]);
+        yield* fixture.fs.makeDirectory(`${fixture.worktree}/node_modules`, { recursive: true });
+        yield* fixture.fs.writeFileString(
+          `${fixture.worktree}/node_modules/.package-lock.json`,
+          '{"name":"fixture","lockfileVersion":3,"packages":{}}',
+        );
+
+        const report = yield* fixture.service.runNow;
+        expect(
+          report.entries.filter(
+            (entry) =>
+              entry.path === newlyOwned && entry.reason === "No owning thread; retained for review",
+          ),
+        ).toEqual([]);
+        expect(yield* fixture.fs.exists(newlyOwned)).toBe(true);
+      }),
+    ),
+  );
+  it.live("does not label a worktree unowned when ownership appears during Git inventory", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture;
+        fixture.disable();
+        const ownedDuringInventory = `${fixture.config.worktreesDir}/owned-during-inventory`;
+        yield* fixture.command(fixture.repo, [
+          "worktree",
+          "add",
+          "--detach",
+          ownedDuringInventory,
+          "HEAD",
+        ]);
+        fixture.addThreadOnWorktreeInventory(
+          shell({
+            id: ThreadId.make("inventory-owner"),
+            branch: "main",
+            worktreePath: ownedDuringInventory,
+          }),
+        );
+
+        const report = yield* fixture.service.runNow;
+        expect(
+          report.entries.some(
+            (entry) =>
+              entry.path === ownedDuringInventory &&
+              entry.reason === "No owning thread; retained for review",
+          ),
+        ).toBe(false);
+        const auditText = yield* fixture.fs.readFileString(
+          `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
+        );
+        const auditRecords = auditText
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as { event?: string; path?: string });
+        expect(
+          auditRecords.some(
+            (record) => record.event === "unowned-worktree" && record.path === ownedDuringInventory,
+          ),
+        ).toBe(false);
+        expect(yield* fixture.fs.exists(ownedDuringInventory)).toBe(true);
+      }),
+    ),
+  );
+  it.live(
+    "finds retained worktrees across configured roots once when projects share a repository",
+    () =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          const fixture = yield* cleanupFixture;
+          fixture.disable();
+          const current = `${fixture.config.baseDir}/configured-worktrees`;
+          const previous = `${fixture.config.baseDir}/previous-worktrees`;
+          const first = `${current}/orphan-one`;
+          const second = `${previous}/orphan-two`;
+          yield* fixture.fs.makeDirectory(current, { recursive: true });
+          yield* fixture.fs.makeDirectory(previous, { recursive: true });
+          yield* fixture.fs.makeDirectory(`${fixture.repo}/nested-project`, { recursive: true });
+          fixture.setManagedWorktreeDirectories(current, [previous]);
+          fixture.setProjectRoots([
+            { id: ProjectId.make("project-1"), workspaceRoot: fixture.repo },
+            { id: ProjectId.make("project-2"), workspaceRoot: `${fixture.repo}/nested-project` },
+          ]);
+          yield* fixture.command(fixture.repo, ["worktree", "add", "--detach", first, "HEAD"]);
+          yield* fixture.command(fixture.repo, ["worktree", "add", "--detach", second, "HEAD"]);
+
+          const report = yield* fixture.service.runNow;
+          const orphanEntries = report.entries.filter(
+            (entry) => entry.reason === "No owning thread; retained for review",
+          );
+          expect(orphanEntries.map((entry) => entry.path).sort()).toEqual([first, second].sort());
+          expect(fixture.worktreeInventoryCalls()).toBe(1);
+          expect(yield* fixture.fs.exists(first)).toBe(true);
+          expect(yield* fixture.fs.exists(second)).toBe(true);
+        }),
+      ),
+  );
+  it.live("keeps concurrent dependency audit writes valid across rotation", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture;
+        fixture.disable();
+        fixture.setDependencyPolicy(8);
+        const worktrees = Array.from(
+          { length: 4 },
+          (_, index) => `${fixture.config.worktreesDir}/dependency-${index}`,
+        );
+        yield* Effect.forEach(worktrees, (worktree, index) =>
+          fixture.command(fixture.repo, ["worktree", "add", "-b", `dependency-${index}`, worktree]),
+        );
+        fixture.setThreads(
+          worktrees.map((worktree, index) =>
+            shell({
+              id: ThreadId.make(`dependency-thread-${index}`),
+              branch: `dependency-${index}`,
+              worktreePath: worktree,
+            }),
+          ),
+        );
+        const auditPath = `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`;
+        yield* fixture.fs.writeFileString(
+          auditPath,
+          `${JSON.stringify({ event: "padding", value: "x".repeat(512 * 1024 - 600) })}\n`,
+        );
+
+        yield* fixture.service.runNow;
+        const files = [auditPath, `${auditPath}.1`];
+        const records = yield* Effect.forEach(files, (file) =>
+          fixture.fs.readFileString(file).pipe(
+            Effect.map((contents) =>
+              contents
+                .trim()
+                .split("\n")
+                .filter(Boolean)
+                .map((line) => JSON.parse(line) as { event?: string }),
+            ),
+            Effect.catch(() => Effect.succeed([] as Array<{ event?: string }>)),
+          ),
+        );
+        expect(records.flat().filter((record) => record.event === "candidate")).toHaveLength(4);
+      }),
+    ),
+  );
+  it.live("continues cleanup when the durable audit destination cannot be created", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const fixture = yield* cleanupFixture.pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            writeFileString: (target, contents, options) =>
+              target.endsWith("storage-cleanup.audit.ndjson")
+                ? fs.writeFileString(`${target}/child`, contents, options)
+                : fs.writeFileString(target, contents, options),
+          }),
+        );
+        const report = yield* fixture.service.runNow;
+        expect(report.entries).toContainEqual(
+          expect.objectContaining({ kind: "worktree", outcome: "removed" }),
+        );
+        expect(
+          yield* fixture.fs.exists(`${fixture.config.logsDir}/storage-cleanup.audit.ndjson`),
+        ).toBe(false);
+      }),
+    ),
+  );
+  it.live("reports and audits a dependency inventory failure while continuing file cleanup", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture;
+        fixture.disable();
+        fixture.setDependencyPolicy(8);
+        fixture.enableFiles();
+        fixture.failNextDependencyRead();
+
+        const report = yield* fixture.service.runNow;
+        expect(report.entries).toContainEqual(
+          expect.objectContaining({
+            kind: "worktree",
+            scope: "dependencies",
+            outcome: "failed",
+            reason: expect.stringContaining("Fixture dependency query failure"),
+            path: null,
+            threadId: null,
+            threadTitle: null,
+          }),
+        );
+        expect(report.counts.failed).toBe(1);
+        expect(report.entries.some((entry) => entry.kind === "browser-artifacts")).toBe(true);
+        expect(report.entries.some((entry) => entry.kind === "logs")).toBe(true);
+
+        const auditText = yield* fixture.fs.readFileString(
+          `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
+        );
+        expect(auditText).toContain('"event":"dependency-cleanup-failed"');
+        expect(auditText).toContain('"scope":"dependencies"');
+        expect(auditText).toContain('"Fixture dependency query failure"');
+      }),
+    ),
+  );
+  it.live("reports and audits a Git inventory failure without labeling paths unowned", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture;
+        fixture.failNextGitInventory();
+        const report = yield* fixture.service.runNow;
+        const failed = report.entries.find(
+          (entry) => entry.kind === "worktree" && entry.outcome === "failed",
+        );
+        expect(failed).toMatchObject({
+          outcome: "failed",
+          reason: expect.stringContaining("Fixture Git inventory failure"),
+          path: fixture.repo,
+        });
+        expect(report.counts.failed).toBeGreaterThanOrEqual(1);
+        expect(report.entries).not.toContainEqual(
+          expect.objectContaining({ reason: "No owning thread; retained for review" }),
+        );
+        const auditText = yield* fixture.fs.readFileString(
+          `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
+        );
+        expect(auditText).toContain('"event":"worktree-inventory-failed"');
+        expect(auditText).toContain('"reason":"git worktree list: Fixture Git inventory failure"');
+      }),
+    ),
+  );
+  it.live(
+    "reports repository identity and canonical path failures but ignores non-Git projects",
+    () =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          const fixture = yield* cleanupFixture;
+          fixture.disable();
+          for (const [mode, expectedReason] of [
+            ["command-error", "Fixture Git identity execution failure"],
+            ["malformed", "successful Git identity output was empty or malformed"],
+            ["missing-git-dir", "FileSystem.realPath"],
+          ] as const) {
+            fixture.setInventoryIdentityMode(mode);
+            const report = yield* fixture.service.runNow;
+            expect(report.entries).toContainEqual(
+              expect.objectContaining({
+                kind: "worktree",
+                outcome: "failed",
+                path: fixture.repo,
+                reason: expect.stringContaining(expectedReason),
+              }),
+            );
+            const auditText = yield* fixture.fs.readFileString(
+              `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
+            );
+            expect(auditText).toContain('"event":"worktree-inventory-failed"');
+            expect(auditText).toContain(expectedReason);
+          }
+
+          fixture.setInventoryIdentityMode("not-git");
+          const auditBefore = yield* fixture.fs.readFileString(
+            `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
+          );
+          const report = yield* fixture.service.runNow;
+          expect(report.entries).not.toContainEqual(
+            expect.objectContaining({
+              kind: "worktree",
+              outcome: "failed",
+              path: fixture.repo,
+            }),
+          );
+          const auditText = yield* fixture.fs.readFileString(
+            `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
+          );
+          expect(auditText.match(/"event":"worktree-inventory-failed"/g)?.length).toBe(
+            auditBefore.match(/"event":"worktree-inventory-failed"/g)?.length,
+          );
+        }),
+      ),
+  );
+  it.live("audits managed worktree root canonicalization failures", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture;
+        fixture.disable();
+        fixture.failManagedRootCanonicalization();
+        const report = yield* fixture.service.runNow;
+        expect(report.entries).toContainEqual(
+          expect.objectContaining({
+            kind: "worktree",
+            outcome: "failed",
+            path: fixture.config.worktreesDir,
+            reason: expect.stringContaining("FileSystem.realPath"),
+          }),
+        );
+        expect(report.counts.failed).toBe(1);
+        const auditText = yield* fixture.fs.readFileString(
+          `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
+        );
+        expect(auditText).toContain('"event":"worktree-inventory-failed"');
+        expect(auditText).toContain("FileSystem.realPath (");
+      }),
+    ),
+  );
+  it.live(
+    "reports and audits outer worktree inventory failures while continuing file cleanup",
+    () =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          const fixture = yield* cleanupFixture;
+          fixture.failProjectInventory();
+          fixture.enableFiles();
+          const report = yield* fixture.service.runNow;
+          expect(report.entries).toContainEqual(
+            expect.objectContaining({
+              kind: "worktree",
+              outcome: "failed",
+              reason: "Project store operation 'listShells' failed.",
+            }),
+          );
+          expect(report.counts.failed).toBeGreaterThanOrEqual(1);
+          expect(report.entries.some((entry) => entry.kind === "browser-artifacts")).toBe(true);
+          expect(report.entries.some((entry) => entry.kind === "logs")).toBe(true);
+          const auditText = yield* fixture.fs.readFileString(
+            `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
+          );
+          expect(auditText).toContain('"event":"worktree-ownership-audit-failed"');
+          expect(auditText).toContain("Project store operation 'listShells' failed.");
         }),
       ),
   );
@@ -741,7 +1691,9 @@ describe("storage cleanup reports and local file policies", () => {
         });
         yield* service.drain;
         expect(
-          reports.flatMap((report) => report.entries).filter((entry) => entry.kind === "worktree"),
+          reports
+            .flatMap((report) => report.entries)
+            .filter((entry) => entry.kind === "worktree" && entry.scope !== "dependencies"),
         ).toMatchObject([{ outcome: "removed" }]);
         expect(yield* service.latestReport).toEqual(reports[1]);
       }),
@@ -766,7 +1718,11 @@ describe("storage cleanup reports and local file policies", () => {
           yield* fs.utimes(file, 1, 1);
         }
         const report = yield* service.runNow;
-        expect(report.entries.filter((entry) => entry.kind !== "worktree")).toMatchObject([
+        expect(
+          report.entries.filter(
+            (entry) => entry.kind === "browser-artifacts" || entry.kind === "logs",
+          ),
+        ).toMatchObject([
           {
             kind: "browser-artifacts",
             outcome: "removed",
@@ -793,7 +1749,8 @@ describe("storage cleanup reports and local file policies", () => {
   it.live("reports git failures without aborting the remaining categories", () =>
     runCleanupTest(
       Effect.gen(function* () {
-        const { service, worktree, command, enableFiles } = yield* cleanupFixture;
+        const fixture = yield* cleanupFixture;
+        const { service, worktree, command, enableFiles } = fixture;
         enableFiles();
         yield* command(worktree, ["worktree", "lock", worktree]);
         const report = yield* service.runNow;
@@ -801,9 +1758,66 @@ describe("storage cleanup reports and local file policies", () => {
         expect(report.entries[0]?.reason).toContain("git worktree remove: fatal:");
         expect(report.entries.map((entry) => entry.kind)).toEqual([
           "worktree",
+          "worktree",
           "browser-artifacts",
           "logs",
         ]);
+        const auditText = yield* fixture.fs.readFileString(
+          `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
+        );
+        expect(auditText).toContain('"event":"worktree-decision"');
+        expect(auditText).toContain("cannot remove a locked working tree");
+      }),
+    ),
+  );
+  it.live("audits top-level worktree cleanup failures and continues file cleanup", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture;
+        fixture.failNextWorktreeRead();
+        fixture.enableFiles();
+        const report = yield* fixture.service.runNow;
+        expect(report.entries).toContainEqual(
+          expect.objectContaining({
+            kind: "worktree",
+            outcome: "failed",
+            reason: expect.stringContaining("Fixture worktree query failure"),
+          }),
+        );
+        expect(report.counts.failed).toBe(1);
+        expect(report.entries.some((entry) => entry.kind === "browser-artifacts")).toBe(true);
+        expect(report.entries.some((entry) => entry.kind === "logs")).toBe(true);
+        const auditText = yield* fixture.fs.readFileString(
+          `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
+        );
+        expect(auditText).toContain('"event":"worktree-cleanup-failed"');
+        expect(auditText).toContain('"Fixture worktree query failure"');
+      }),
+    ),
+  );
+  it.live("reports and audits file cleanup failures while continuing other categories", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture;
+        fixture.disable();
+        fixture.enableFiles();
+        yield* fixture.fs.makeDirectory(fixture.config.browserArtifactsDir, { recursive: true });
+        yield* fixture.fs.remove(fixture.config.browserArtifactsDir, { recursive: true });
+        yield* fixture.fs.writeFileString(fixture.config.browserArtifactsDir, "not a directory");
+
+        const report = yield* fixture.service.runNow;
+        const failed = report.entries.find(
+          (entry) => entry.kind === "browser-artifacts" && entry.outcome === "failed",
+        );
+        expect(failed?.reason).toEqual(expect.any(String));
+        expect(report.counts.failed).toBe(1);
+        expect(report.entries.some((entry) => entry.kind === "logs")).toBe(true);
+        const auditText = yield* fixture.fs.readFileString(
+          `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
+        );
+        expect(auditText).toContain('"event":"file-cleanup-failed"');
+        expect(auditText).toContain('"kind":"browser-artifacts"');
+        expect(auditText).toContain(JSON.stringify(failed?.reason));
       }),
     ),
   );

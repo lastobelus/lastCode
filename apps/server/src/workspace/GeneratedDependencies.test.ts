@@ -10,6 +10,7 @@ import * as DateTime from "effect/DateTime";
 import * as Stream from "effect/Stream";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as SqlError from "effect/sql/SqlError";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as TestClock from "effect/testing/TestClock";
 import {
@@ -584,26 +585,105 @@ it.effect("one dependency removal error leaves its sibling eligible for deletion
       }),
       () => Effect.sync(() => rm.mockImplementation(original)),
     );
-    const removed = yield* first.cleanup.removeBatch([
-      {
-        inspection: first.inspection,
-        canRemove: Effect.succeed(true),
-        isStillEligible: Effect.succeed(true),
-      },
-      {
-        inspection: second.inspection,
-        canRemove: Effect.succeed(true),
-        isStillEligible: Effect.succeed(true),
-      },
-    ]);
+    const decisions: Array<{ path: string; outcome: string; reason: string }> = [];
+    const removed = yield* first.cleanup.removeBatch(
+      [
+        {
+          inspection: first.inspection,
+          canRemove: Effect.succeed(true),
+          isStillEligible: Effect.succeed(true),
+        },
+        {
+          inspection: second.inspection,
+          canRemove: Effect.succeed(true),
+          isStillEligible: Effect.succeed(true),
+        },
+      ],
+      (inspection, decision) =>
+        Effect.sync(() =>
+          decisions.push({
+            path: inspection.dependencyPath,
+            outcome: decision.outcome,
+            reason: decision.reason,
+          }),
+        ),
+    );
     assert.deepStrictEqual(
       removed.map((entry) => entry.dependencyPath),
       [second.dependencyPath],
     );
     assert.isTrue(yield* first.fs.exists(first.dependencyPath));
     assert.isFalse(yield* second.fs.exists(second.dependencyPath));
+    assert.deepStrictEqual(decisions, [
+      {
+        path: first.dependencyPath,
+        outcome: "failed",
+        reason: "Fixture removal failure",
+      },
+      {
+        path: second.dependencyPath,
+        outcome: "removed",
+        reason: "Dependency install removed",
+      },
+    ]);
     yield* assertBatchWorkspacePreserved(first);
     yield* assertBatchWorkspacePreserved(second);
+  }).pipe(Effect.scoped, Effect.provide(testLayer())),
+);
+
+it.effect("reports typed eligibility failures and removes a healthy batch sibling", () =>
+  Effect.gen(function* () {
+    const first = yield* inspectedBatchFixture();
+    const second = yield* inspectedBatchFixture();
+    const healthy = yield* inspectedBatchFixture();
+    const sqlFailure = (message: string) =>
+      new SqlError.SqlError({
+        reason: new SqlError.SqlSyntaxError({
+          cause: new Error(message),
+          message: "Failed to execute statement",
+        }),
+      });
+    const decisions: Array<{ path: string; outcome: string; reason: string }> = [];
+    const removed = yield* first.cleanup.removeBatch(
+      [
+        {
+          inspection: first.inspection,
+          canRemove: Effect.fail(sqlFailure("Fixture canRemove failure")),
+          isStillEligible: Effect.succeed(true),
+        },
+        {
+          inspection: second.inspection,
+          canRemove: Effect.succeed(true),
+          isStillEligible: Effect.fail(sqlFailure("Fixture revalidation failure")),
+        },
+        {
+          inspection: healthy.inspection,
+          canRemove: Effect.succeed(true),
+          isStillEligible: Effect.succeed(true),
+        },
+      ],
+      (inspection, decision) =>
+        Effect.sync(() =>
+          decisions.push({
+            path: inspection.dependencyPath,
+            outcome: decision.outcome,
+            reason: decision.reason,
+          }),
+        ),
+    );
+    assert.deepStrictEqual(
+      removed.map((entry) => entry.dependencyPath),
+      [healthy.dependencyPath],
+    );
+    assert.isTrue(yield* first.fs.exists(first.dependencyPath));
+    assert.isTrue(yield* second.fs.exists(second.dependencyPath));
+    assert.isFalse(yield* healthy.fs.exists(healthy.dependencyPath));
+    assert.include(decisions[0]!.reason, "Fixture canRemove failure");
+    assert.include(decisions[1]!.reason, "Fixture revalidation failure");
+    assert.deepStrictEqual(
+      decisions.map((decision) => decision.outcome),
+      ["failed", "failed", "removed"],
+    );
   }).pipe(Effect.scoped, Effect.provide(testLayer())),
 );
 
@@ -1316,7 +1396,8 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
       yield* Deferred.succeed(workerControl.releaseInitialInventory, undefined);
       yield* worker.drain;
     }).pipe(Effect.ensuring(Deferred.succeed(workerControl.releaseInitialInventory, undefined)));
-    assert.equal(reads, mode === "worker-ready-burst" ? 1 : 2);
+    // Each sweep reads dependency owners once and refreshes them once for the audit.
+    assert.equal(reads, mode === "worker-ready-burst" ? 2 : 4);
     assert.equal(processReads, mode === "worker-terminal-burst" ? 3 : 2);
     assert.equal(
       yield* f.fs.readFileString(f.path.join(f.input.worktreePath, "tmp/notes.md")),
@@ -1349,7 +1430,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     mode === "worker-terminal-burst" ||
     (batch && mode !== "batch-process-started" && mode !== "batch-process-unknown");
   if (batch) {
-    assert.equal(reads, 1);
+    assert.equal(reads, 2);
     assert.equal(processReads, mode === "batch-five" ? 3 : 2);
     assert.include(targetedReads, threadId);
     for (const candidate of additionalThreads) {
@@ -1392,7 +1473,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     assert.equal(dependencyInspections(), 0);
   }
   if (mode === "revision-changed") {
-    assert.equal(reads, 1);
+    assert.equal(reads, 2);
     assert.equal(dependencyInspections(), 0);
   }
   if (mode === "deleted-event-after-capture") assert.isTrue(deletedEventInserted);
@@ -1401,7 +1482,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     assert.equal(mountReads, mode === "final-mount-unchanged" ? 3 : 2);
     assert.equal(targetedReads.length, 4);
     assert.equal(processReads, 2);
-    assert.equal(reads, 1);
+    assert.equal(reads, 2);
     if (mode === "final-mount-policy-off")
       assert.isNull(settings.storageCleanup.worktreeDependenciesAfterDays);
     if (mode === "final-mount-queued-run")

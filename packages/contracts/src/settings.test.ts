@@ -13,6 +13,7 @@ import {
   resolveProviderInstanceEnabled,
   ServerSettings,
   ServerSettingsPatch,
+  StorageCleanupReport,
   DEFAULT_HANDOFFS_MENU_LIMIT,
   MAX_HANDOFFS_MENU_LIMIT,
   MIN_HANDOFFS_MENU_LIMIT,
@@ -25,6 +26,68 @@ const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
+
+const encodeCleanupReport = Schema.encodeSync(StorageCleanupReport);
+const decodeCleanupReport = Schema.decodeUnknownSync(StorageCleanupReport);
+const previousReport = Schema.Struct({
+  trigger: Schema.Literals(["automatic", "manual"]),
+  startedAt: Schema.String,
+  finishedAt: Schema.String,
+  entries: Schema.Array(
+    Schema.Struct({
+      kind: Schema.Literals(["worktree", "browser-artifacts", "logs"]),
+      outcome: Schema.Literals(["removed", "kept", "failed"]),
+      reason: Schema.String,
+      path: Schema.NullOr(Schema.String),
+      threadId: Schema.NullOr(Schema.String),
+      threadTitle: Schema.NullOr(Schema.String),
+      bytes: Schema.NullOr(Schema.Number),
+      files: Schema.NullOr(Schema.Number),
+    }),
+  ),
+  counts: Schema.Struct({ removed: Schema.Number, kept: Schema.Number, failed: Schema.Number }),
+  omittedCount: Schema.Number,
+  bytesFreed: Schema.Number,
+});
+const decodePreviousCleanupReport = Schema.decodeUnknownSync(previousReport);
+
+describe("storage cleanup report wire format", () => {
+  it("keeps dependency outcomes decodable by clients predating dependency reports", () => {
+    // This is the report decoder shipped before dependency reporting. Unknown
+    // additive fields can be ignored, but a new kind would reject the whole report.
+    const report = {
+      trigger: "manual" as const,
+      startedAt: "2026-06-10T12:00:00.000Z",
+      finishedAt: "2026-06-10T12:00:01.000Z",
+      entries: [
+        {
+          kind: "worktree" as const,
+          scope: "dependencies" as const,
+          outcome: "removed" as const,
+          reason: "Dependency install removed",
+          path: "/managed-worktrees/example/node_modules",
+          threadId: null,
+          threadTitle: null,
+          bytes: 1024,
+          files: null,
+        },
+      ],
+      counts: { removed: 1, kept: 0, failed: 0 },
+      omittedCount: 0,
+      bytesFreed: 1024,
+    };
+    const wire = encodeCleanupReport(report);
+    expect(decodePreviousCleanupReport(wire).entries).toEqual([
+      expect.objectContaining({
+        kind: "worktree",
+        outcome: "removed",
+        reason: "Dependency install removed",
+        path: report.entries[0]!.path,
+      }),
+    ]);
+    expect(decodeCleanupReport(wire).entries[0]?.scope).toBe("dependencies");
+  });
+});
 
 describe("ServerSettings local CI limits", () => {
   it("uses responsive defaults and fills omitted persisted limits", () => {
