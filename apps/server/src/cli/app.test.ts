@@ -15,6 +15,8 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import { Command } from "effect/cli";
+import type { QuitError } from "effect/Terminal";
+import type { CliError } from "effect/cli/CliError";
 import { describe, expect } from "vite-plus/test";
 
 import { makeCli } from "../binCli.ts";
@@ -22,8 +24,19 @@ import { PersistedServerRuntimeState } from "../serverRuntimeState.ts";
 
 const encodeRuntimeState = Schema.encodeEffect(Schema.fromJsonString(PersistedServerRuntimeState));
 
-const runCli = (args: ReadonlyArray<string>, env: Record<string, string> = {}) =>
-  Command.runWith(makeCli(), { version: "0.0.0" })(args).pipe(
+const testCli = makeCli();
+const runCommand: (
+  args: ReadonlyArray<string>,
+) => Effect.Effect<
+  void,
+  Exclude<Command.Error<typeof testCli>, QuitError> | CliError,
+  NodeServices.NodeServices | NetService.NetService
+> = Command.runWith(testCli, { version: "0.0.0" });
+const runCli = (
+  args: ReadonlyArray<string>,
+  env: Record<string, string> = {},
+): Effect.Effect<void, Effect.Error<ReturnType<typeof runCommand>>> =>
+  runCommand(args).pipe(
     Effect.provide(
       Layer.mergeAll(
         NodeServices.layer,
