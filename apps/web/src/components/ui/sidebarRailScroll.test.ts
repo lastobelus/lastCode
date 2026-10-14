@@ -60,3 +60,30 @@ it("normalizes mouse line and page deltas while leaving zoom, header and non-scr
   expect(viewport.scrollBy).toHaveBeenCalledTimes(2);
   dispose();
 });
+
+it("follows the visible retained presentation after mode switches without rebinding", () => {
+  const first = sidebar();
+  const second = sidebar();
+  first.rail.before(second.viewport);
+  const firstBounds = vi.mocked(first.viewport.getBoundingClientRect);
+  const secondBounds = vi.mocked(second.viewport.getBoundingClientRect);
+  firstBounds.mockReturnValue({ top: 0, bottom: 0 } as DOMRect);
+  const dispose = bindSidebarRailScroll(first.rail);
+  const event = wheel();
+  first.rail.dispatchEvent(event);
+  expect(event.defaultPrevented).toBe(true);
+  expect(first.viewport.scrollBy).not.toHaveBeenCalled();
+  expect(second.viewport.scrollBy).toHaveBeenCalledOnce();
+
+  secondBounds.mockReturnValue({ top: 0, bottom: 0 } as DOMRect);
+  firstBounds.mockReturnValue({ top: 100, bottom: 700 } as DOMRect);
+  first.rail.dispatchEvent(wheel());
+  expect(first.viewport.scrollBy).toHaveBeenCalledOnce();
+  expect(second.viewport.scrollBy).toHaveBeenCalledOnce();
+
+  firstBounds.mockReturnValue({ top: 0, bottom: 0 } as DOMRect);
+  const hidden = wheel();
+  first.rail.dispatchEvent(hidden);
+  expect(hidden.defaultPrevented).toBe(false);
+  dispose();
+});

@@ -263,11 +263,13 @@ and copying a thread reference. A copied reference uses the thread's pull reques
 link when available, otherwise its thread ID. See [keybindings](./keybindings.md)
 for custom configuration.
 
-## Choose the LastCode sidebar
+## Read and unread replies
 
 On web and desktop, use **Mark unread** in a thread's menu to return to a completed reply
 later. **Mark read** acknowledges it without sending a message. Both actions also work on a
 selection; threads with no completed reply cannot be marked unread.
+
+## Choose the LastCode sidebar
 
 On web and desktop, enable **Settings → LastCode → Appearance → LastCode sidebar**
 for the LastCode project tree, annotations, and family controls. It is off by default.
