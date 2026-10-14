@@ -85,13 +85,21 @@ export const layer: Layer.Layer<ThreadForkServiceV2> = Layer.succeed(
             cause: forkableSourceRunStatusError(input.sourceRun),
           });
         }
+        const {
+          creatorThreadId: _creatorThreadId,
+          creatorGrouping: _creatorGrouping,
+          ...sourceThread
+        } = input.sourceProjection.thread;
         const targetThread: OrchestrationV2AppThread = {
-          ...input.sourceProjection.thread,
+          ...sourceThread,
           createdBy: input.createdBy,
           creationSource: input.creationSource,
           id: input.targetThreadId,
           title: input.title ?? `${input.sourceProjection.thread.title} fork`,
           activeProviderThreadId: null,
+          subagentPromotion: null,
+          dashboardItems: [],
+          actionResume: null,
           lineage: {
             parentThreadId: input.sourceProjection.thread.id,
             relationshipToParent: "fork",
