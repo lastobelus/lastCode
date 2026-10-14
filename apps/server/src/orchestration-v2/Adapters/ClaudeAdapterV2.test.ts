@@ -10093,16 +10093,15 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             attachments: [],
           }),
         );
-        yield* Queue.offer(harness.sdkMessages, subagentTaskStarted);
-        yield* awaitUntil(() => subagentEvents().length >= 1, "subagent node created");
-        yield* Queue.offer(
-          harness.sdkMessages,
+        yield* harness.offerAndWait(subagentTaskStarted);
+        assert.equal((yield* Queue.take(harness.subagentReceipts)).subagent.status, "running");
+        yield* harness.offerAndWait(
           makeResultFrame({
             uuid: "00000000-0000-4000-8000-000000000303",
             result: "Spawned the subagent in the background.",
           }),
         );
-        yield* awaitUntil(() => harness.terminalEvents().length === 1, "first turn terminal");
+        yield* Queue.take(harness.terminalReceipts);
         assert.isTrue(yield* harness.hasPendingBackgroundWork);
         assert.isTrue(
           yield* harness.runtime.hasPendingBackgroundWorkForThread!(harness.providerThread),
@@ -10115,21 +10114,27 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           }),
         );
 
-        yield* Queue.offer(harness.sdkMessages, subagentStoppedNotification);
-        yield* awaitUntil(() => harness.continuationRequests.length === 1, "continuation request");
-        // The completion is buffered for the continuation, but the task is
-        // already finished. Its saved running row must not pin recovery.
+        yield* harness.offerAndWait(subagentStoppedNotification);
+        yield* Queue.take(harness.continuationReceipts);
+        assert.lengthOf(harness.continuationRequests, 1);
+        // A stopped task and its system notification leave no running work or
+        // root output to pin the session while its continuation is queued.
         assert.isFalse(
           yield* harness.runtime.hasPendingBackgroundWorkForThread!(harness.providerThread),
         );
-        assert.isTrue(yield* harness.hasPendingBackgroundWork);
+        assert.isFalse(yield* harness.hasPendingBackgroundWork);
 
-        yield* Queue.offer(
-          harness.sdkMessages,
+        yield* harness.offerAndWait(
           makeResultFrame({
             uuid: "00000000-0000-4000-8000-000000000304",
             result: "The subagent was stopped.",
           }),
+        );
+        // Root output pins the session until the continuation drains it, while
+        // the stopped subagent still cannot keep its own thread running.
+        assert.isTrue(yield* harness.hasPendingBackgroundWork);
+        assert.isFalse(
+          yield* harness.runtime.hasPendingBackgroundWorkForThread!(harness.providerThread),
         );
         yield* harness.runtime.startTurn(
           makeClaudeTestTurnInput({
@@ -10144,7 +10149,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             messageCreationSource: "provider",
           }),
         );
-        yield* awaitUntil(() => harness.terminalEvents().length === 2, "continuation terminal");
+        yield* Queue.take(harness.terminalReceipts);
 
         assert.equal(subagentEvents().at(-1)?.subagent.status, "cancelled");
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
