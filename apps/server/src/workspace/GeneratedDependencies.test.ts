@@ -41,6 +41,7 @@ import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as GeneratedDependencies from "./GeneratedDependencies.ts";
 import * as DependencyMounts from "./DependencyMounts.ts";
 import * as WorktreeConsumers from "./WorktreeConsumers.ts";
+import * as WorktreeCleanup from "../orchestration-v2/WorktreeCleanupService.ts";
 import * as StorageCleanup from "../storageCleanup.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
@@ -1825,6 +1826,20 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
         )
       : Stream.empty;
   const dependencies = Layer.mergeAll(
+    Layer.mock(WorktreeCleanup.WorktreeCleanupService)({
+      historicalWorktreeOwners: Effect.succeed(
+        mode === "ownerless-history"
+          ? [
+              {
+                threadId: "legacy-owner",
+                worktreePath: f.input.worktreePath,
+                branch: "feature",
+                projectId,
+              },
+            ]
+          : [],
+      ),
+    }),
     Layer.succeed(ServerConfig.ServerConfig, {
       ...config,
       worktreesDir: f.input.managedWorktreesRoot,

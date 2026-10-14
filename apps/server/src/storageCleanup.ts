@@ -37,6 +37,7 @@ import * as SubscriptionRef from "effect/SubscriptionRef";
 
 import * as ServerConfig from "./config.ts";
 import * as GitManager from "./git/GitManager.ts";
+import * as WorktreeCleanup from "./orchestration-v2/WorktreeCleanupService.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "./orchestration-v2/ProjectionStore.ts";
@@ -198,6 +199,7 @@ const make = Effect.gen(function* () {
   const projectStore = yield* ProjectStore.ProjectStoreV2;
   const engine = yield* Orchestrator.OrchestratorV2;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
+  const worktreeCleanup = yield* WorktreeCleanup.WorktreeCleanupService;
   const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
   const sql = yield* SqlClient.SqlClient;
   const git = yield* GitVcsDriver.GitVcsDriver;
@@ -966,23 +968,11 @@ const make = Effect.gen(function* () {
     const historicalOwners = yield* Effect.forEach(durableOwners, (row) =>
       decodeCleanupThread(row.payload_json),
     );
-    const legacyExists =
-      yield* sql`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'projection_threads'`;
-    const legacyOwners =
-      legacyExists.length === 0
-        ? []
-        : yield* sql<{
-            thread_id: string;
-            worktree_path: string | null;
-            branch: string | null;
-            project_id: string;
-          }>`
-      SELECT thread_id, worktree_path, branch, project_id FROM projection_threads
-    `;
+    const legacyOwners = yield* worktreeCleanup.historicalWorktreeOwners;
     const knownPaths = new Set([...groups.keys(), ...deletedGroups.keys()]);
     for (const owner of [
       ...historicalOwners.map((thread) => thread.worktreePath),
-      ...legacyOwners.map((thread) => thread.worktree_path),
+      ...legacyOwners.map((thread) => thread.worktreePath),
     ]) {
       if (owner !== null) knownPaths.add(yield* resolveOwnerPath(owner));
     }
@@ -1077,7 +1067,7 @@ const make = Effect.gen(function* () {
         ([...snapshot.threads, ...historicalOwners].some(
           (owner) => owner.projectId === project.id && owner.branch === branch,
         ) ||
-          legacyOwners.some((owner) => owner.project_id === project.id && owner.branch === branch))
+          legacyOwners.some((owner) => owner.projectId === project.id && owner.branch === branch))
       ) {
         entry.reason = "Thread history still names this branch";
         continue;
@@ -1265,7 +1255,7 @@ const make = Effect.gen(function* () {
         const ownerIds = new Set(owners.map((owner) => owner.id));
         for (const historical of [
           ...historicalOwners.map((owner) => ({ id: owner.id, path: owner.worktreePath })),
-          ...legacyOwners.map((owner) => ({ id: owner.thread_id, path: owner.worktree_path })),
+          ...legacyOwners.map((owner) => ({ id: owner.threadId, path: owner.worktreePath })),
         ]) {
           if (
             historical.path !== null &&
@@ -1754,14 +1744,7 @@ const make = Effect.gen(function* () {
       SELECT thread_id AS "threadId", json_extract(payload_json, '$.worktreePath') AS "worktreePath"
       FROM orchestration_v2_projection_threads
     `;
-    const legacyExists =
-      yield* sql`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'projection_threads'`;
-    const legacyRows =
-      legacyExists.length === 0
-        ? []
-        : yield* sql<{ threadId: ThreadId; worktreePath: string | null }>`
-      SELECT thread_id AS "threadId", worktree_path AS "worktreePath" FROM projection_threads
-    `;
+    const legacyRows = yield* worktreeCleanup.historicalWorktreeOwners;
     const historicalPaths = yield* Effect.forEach([...historicalRows, ...legacyRows], (owner) =>
       Effect.gen(function* () {
         return {

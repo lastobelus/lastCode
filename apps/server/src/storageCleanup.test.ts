@@ -33,6 +33,7 @@ import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManag
 import * as GitManager from "./git/GitManager.ts";
 import * as Settings from "./serverSettings.ts";
 import * as ProjectionStore from "./orchestration-v2/ProjectionStore.ts";
+import * as WorktreeCleanup from "./orchestration-v2/WorktreeCleanupService.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
@@ -343,6 +344,13 @@ const cleanupFixture = Effect.gen(function* () {
     storageCleanup: { ...DEFAULT_SERVER_SETTINGS.storageCleanup, worktreeAfterDays: 8 },
   };
   let threads = [shell({ branch: "feature", worktreePath: worktree })];
+  let historicalOwners: Array<{
+    threadId: string;
+    projectId: string;
+    branch: string | null;
+    worktreePath: string | null;
+  }> = [];
+  let failHistoricalOwners = false;
   let projectRoots = [{ id: ProjectId.make("project-1"), workspaceRoot: repo }];
   let editBeforeRemoval = false;
   let onDependencyInspection: (() => void) | null = null;
@@ -378,6 +386,20 @@ const cleanupFixture = Effect.gen(function* () {
     TerminalManager.TerminalManager["Service"]["subscribeMetadata"]
   >[0][] = [];
   const context = yield* Layer.build(StorageCleanup.layer).pipe(
+    Effect.provide(
+      Layer.mock(WorktreeCleanup.WorktreeCleanupService)({
+        historicalWorktreeOwners: Effect.suspend(() =>
+          failHistoricalOwners
+            ? Effect.fail(
+                new WorktreeCleanup.WorktreeCleanupError({
+                  threadId: ThreadId.make("cleanup-owner-scan"),
+                  cause: new Error("Historical owner inventory unavailable"),
+                }),
+              )
+            : Effect.succeed(historicalOwners),
+        ),
+      }),
+    ),
     Effect.provideService(ServerConfig.ServerConfig, config),
     Effect.provideService(FileSystem.FileSystem, {
       ...fs,
@@ -618,6 +640,12 @@ const cleanupFixture = Effect.gen(function* () {
     Effect.provideService(ServerActivation, Deferred.await(activation)),
   );
   return {
+    setHistoricalOwners: (owners: typeof historicalOwners) => {
+      historicalOwners = owners;
+    },
+    failHistoricalOwners: () => {
+      failHistoricalOwners = true;
+    },
     service: Context.get(context, StorageCleanup.StorageCleanup),
     activate: () => Deferred.succeed(activation, undefined),
     worktreeInventoryCalls: () => worktreeInventoryCalls,
@@ -1201,6 +1229,42 @@ describe("dependency cleanup reports", () => {
       Effect.provideService(GeneratedDependencies.ProcessWorkingDirectories, Effect.succeed([])),
       Effect.provideService(DependencyMounts.MountPoints, Effect.succeed([])),
     );
+
+  it.live.each(["path", "branch", "unavailable"] as const)(
+    "protects historical ownership through the cleanup boundary: %s",
+    (mode) =>
+      runCleanupTest(
+        isolatedDependencies(
+          Effect.gen(function* () {
+            const fixture = yield* cleanupFixture;
+            yield* fixture.enableDependencies;
+            if (mode === "unavailable") fixture.failHistoricalOwners();
+            else
+              fixture.setHistoricalOwners([
+                {
+                  threadId: "unresolved-legacy-owner",
+                  projectId: mode === "branch" ? "project-1" : "missing-project",
+                  branch: mode === "branch" ? "feature" : null,
+                  worktreePath: mode === "path" ? fixture.worktree : null,
+                },
+              ]);
+            if (mode === "branch") fixture.setThreads([]);
+            const report = yield* fixture.service.runNow;
+            expect(yield* fixture.fs.exists(`${fixture.worktree}/node_modules`)).toBe(true);
+            expect(report.counts.removed).toBe(0);
+            expect(
+              report.entries.some((entry) =>
+                mode === "unavailable"
+                  ? entry.outcome === "failed"
+                  : entry.reason.includes(
+                      mode === "branch" ? "history still names" : "historical owner",
+                    ),
+              ),
+            ).toBe(true);
+          }),
+        ),
+      ),
+  );
 
   it.live("counts removed dependency installs and their allocated-byte estimate", () =>
     runCleanupTest(
@@ -2066,6 +2130,39 @@ describe("storage cleanup reports and local file policies", () => {
       expect(decodeLegacyCleanupReport(encodeCleanupReport(report)).counts).toEqual(report.counts);
     },
   );
+  it.live("retains clean archived source when an unresolved historical owner claims its path", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture;
+        fixture.setThreads([
+          shell({ branch: "feature", worktreePath: fixture.worktree, archivedAt: fixture.at(-1) }),
+        ]);
+        fixture.setHistoricalOwners([
+          {
+            threadId: "unresolved-legacy-owner",
+            projectId: "missing-project",
+            branch: null,
+            worktreePath: fixture.worktree,
+          },
+        ]);
+        const report = yield* fixture.service.runNow;
+        expect(report.entries).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              outcome: "kept",
+              reason: expect.stringContaining("Historical thread ownership"),
+            }),
+          ]),
+        );
+        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(true);
+        expect(
+          (yield* fixture.command(fixture.repo, ["show-ref", "--verify", "refs/heads/feature"]))
+            .exitCode,
+        ).toBe(0);
+      }),
+    ),
+  );
+
   it.live.each([
     ["any-local-files", ".env", "kept"],
     ["uncommitted-changes", ".env", "kept"],

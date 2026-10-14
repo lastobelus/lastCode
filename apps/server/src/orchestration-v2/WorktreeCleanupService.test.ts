@@ -64,6 +64,7 @@ const makeHarness = Effect.fn(function* (
   const state = yield* Ref.make(initial);
   const timeline = yield* Ref.make<ReadonlyArray<string>>([]);
   const projectRoots = yield* Ref.make<ReadonlyArray<OrchestrationProjectShell>>([]);
+  const historicalOwners = yield* Ref.make<ReadonlyArray<LegacyImporter.LegacyV1WorktreeOwner>>([]);
   const updates = yield* Ref.make<ReadonlyArray<CleanupUpdate>>([]);
   const append = (value: string) => Ref.update(timeline, (values) => [...values, value]);
   const getThread = (threadId: ThreadId) =>
@@ -148,6 +149,7 @@ const makeHarness = Effect.fn(function* (
               : resolve(cwd),
         }),
         Layer.mock(LegacyImporter.LegacyV1ThreadImporter)({
+          worktreeOwners: Ref.get(historicalOwners),
           reconcileShells: append("import").pipe(
             Effect.as({ importedThreadCount: 0, importedMessageCount: 0 }),
           ),
@@ -156,8 +158,30 @@ const makeHarness = Effect.fn(function* (
     ),
     Layer.provide(NodeServices.layer),
   );
-  return { state, timeline, projectRoots, updates, layer };
+  return { state, timeline, projectRoots, updates, historicalOwners, layer };
 });
+
+it.effect(
+  "reads current historical owner protection without scheduling deletion or hydrating transcripts",
+  () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness([]);
+      yield* Effect.gen(function* () {
+        const service = yield* Cleanup.WorktreeCleanupService;
+        const owner = {
+          threadId: "legacy-owner",
+          projectId: "missing-project",
+          branch: "old-branch",
+          worktreePath: "/example/worktrees/old",
+        };
+        yield* Ref.set(harness.historicalOwners, [owner]);
+        assert.deepStrictEqual(yield* service.historicalWorktreeOwners, [owner]);
+        yield* Ref.set(harness.historicalOwners, []);
+        assert.deepStrictEqual(yield* service.historicalWorktreeOwners, []);
+        assert.deepStrictEqual(yield* Ref.get(harness.timeline), []);
+      }).pipe(Effect.provide(harness.layer));
+    }),
+);
 
 it.effect("retries completion persistence with the same command before advancing the queue", () =>
   Effect.gen(function* () {
