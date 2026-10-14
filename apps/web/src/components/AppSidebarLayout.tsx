@@ -400,12 +400,12 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
           // The narrow-window sidebar is a sheet, portaled outside the provider's styles.
           style={windowControlsInsetStyle}
         >
-          {isOnSettings ? (
+          {isOnSettings && (
             <>
               <SidebarChromeHeader isElectron={isElectron} />
               <SettingsSidebarNav pathname={pathname} />
             </>
-          ) : null}
+          )}
           {Object.entries(THREAD_SIDEBARS).map(([mode, sidebar]) => (
             <SidebarPresentation
               key={mode}

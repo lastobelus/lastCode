@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import type { ScopedThreadRef } from "@t3tools/contracts";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import { threadEnvironment } from "../../state/threads";
@@ -27,17 +27,16 @@ export function LastCodeThreadTitleEditor({
     reportFailure: false,
   });
   const setInput = useCallback((element: HTMLInputElement | null) => {
-    if (element && inputRef.current !== element) {
+    if (!element) return;
+    if (inputRef.current !== element) {
       inputRef.current = element;
       element.focus();
       element.select();
+    } else if (document.activeElement === document.body) {
+      element.focus();
     }
   }, []);
   const finish = () => finishRename(threadRef, target.session);
-  useLayoutEffect(() => {
-    if (!document.activeElement || document.activeElement === document.body)
-      inputRef.current?.focus();
-  }, []);
   const submit = () => {
     if (committed.current) return;
     committed.current = true;

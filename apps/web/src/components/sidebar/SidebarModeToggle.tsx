@@ -13,14 +13,16 @@ export function SidebarModeToggle({ onBackdrop = false }: { onBackdrop?: boolean
   const sidebarMode = useSidebarMode();
   const hydrated = useClientSettingsHydrated();
   const lastcodeEnabled = useClientSetting("lastcodeSidebarEnabled");
+  const label = lastcodeEnabled ? "LastCode" : "Legacy";
+  const active = sidebarMode === (lastcodeEnabled ? "lastcode" : "legacy");
 
   return (
     <Tooltip>
       <TooltipTrigger
         render={
           <Button
-            aria-label={lastcodeEnabled ? "LastCode sidebar" : "Legacy sidebar"}
-            aria-pressed={sidebarMode === (lastcodeEnabled ? "lastcode" : "legacy")}
+            aria-label={`${label} sidebar`}
+            aria-pressed={active}
             disabled={!hydrated}
             size="titlebar-icon"
             variant={onBackdrop ? "media-toggle" : "ghost-toggle"}
@@ -40,15 +42,7 @@ export function SidebarModeToggle({ onBackdrop = false }: { onBackdrop?: boolean
           </Button>
         }
       />
-      <TooltipPopup side="bottom">
-        {sidebarMode === "lastcode"
-          ? "Switch to v2 sidebar"
-          : lastcodeEnabled
-            ? "Switch to LastCode sidebar"
-            : sidebarMode === "legacy"
-              ? "Switch to v2 sidebar"
-              : "Switch to legacy sidebar"}
-      </TooltipPopup>
+      <TooltipPopup side="bottom">{`Switch to ${active ? "v2" : label} sidebar`}</TooltipPopup>
     </Tooltip>
   );
 }
