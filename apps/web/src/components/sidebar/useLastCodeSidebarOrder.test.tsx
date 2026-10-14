@@ -117,7 +117,7 @@ afterEach(async () => {
   else Reflect.deleteProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT");
 });
 describe("actual root and project order parity", () => {
-  it("matches both subheader modes across all32 grouping/expansion/selection/collapse inputs on one retained mount", async () => {
+  it("matches both subheader modes with independent parent and group collapse inputs on one retained mount", async () => {
     let input: HTMLInputElement | undefined;
     for (const subheaders of [true, false])
       for (const grouping of ["minimal", "typed-groups"] as const)
@@ -125,28 +125,40 @@ describe("actual root and project order parity", () => {
           for (const list of [false, true])
             for (const active of [null, key(child)])
               for (const collapsed of [false, true]) {
-                settings.lastcodeSidebarFamilyStatusSubheaders = subheaders;
-                settings.legacySidebarThreadGroupingStyle = grouping;
-                await act(() => {
-                  useUiStateStore.getState().setProjectExpanded([group.projectKey], expanded);
-                  useLastCodeSidebarFamiliesStore.setState({
-                    collapsedByKey: {
-                      [key(parent)]: collapsed,
-                      [lastcodeSidebarSubagentGroupKey(key(parent))]: collapsed,
-                    },
+                for (const groupCollapsed of [undefined, false, true]) {
+                  settings.lastcodeSidebarFamilyStatusSubheaders = subheaders;
+                  settings.legacySidebarThreadGroupingStyle = grouping;
+                  await act(() => {
+                    useUiStateStore.getState().setProjectExpanded([group.projectKey], expanded);
+                    useLastCodeSidebarFamiliesStore.setState({
+                      collapsedByKey: {
+                        [key(parent)]: collapsed,
+                        ...(groupCollapsed === undefined
+                          ? {}
+                          : { [lastcodeSidebarSubagentGroupKey(key(parent))]: groupCollapsed }),
+                      },
+                    });
+                    root.render(<Harness expanded={expanded} list={list} active={active} />);
                   });
-                  root.render(<Harness expanded={expanded} list={list} active={active} />);
-                });
-                expect(container.querySelector('[data-testid="navigation"]')!.textContent).toBe(
-                  container.querySelector('[data-testid="rendering"]')!.textContent,
-                );
-                const current = container.querySelector("input")!;
-                if (input) {
-                  expect(current).toBe(input);
-                  expect(current.value).toBe("retained draft");
-                } else {
-                  input = current;
-                  input.value = "retained draft";
+                  expect(container.querySelector('[data-testid="navigation"]')!.textContent).toBe(
+                    container.querySelector('[data-testid="rendering"]')!.textContent,
+                  );
+                  if (expanded && !collapsed && active === null) {
+                    const actual = container
+                      .querySelector('[data-testid="navigation"]')!
+                      .textContent!.split(",");
+                    expect(actual.includes(key(child))).toBe(
+                      !subheaders || groupCollapsed === false,
+                    );
+                  }
+                  const current = container.querySelector("input")!;
+                  if (input) {
+                    expect(current).toBe(input);
+                    expect(current.value).toBe("retained draft");
+                  } else {
+                    input = current;
+                    input.value = "retained draft";
+                  }
                 }
               }
   });

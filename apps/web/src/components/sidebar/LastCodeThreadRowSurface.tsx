@@ -28,13 +28,19 @@ interface Props {
   fileDragOver: boolean;
   children: ReactNode;
 }
-function relationshipLabel(family: LastCodeSidebarFamilyRow, relationship: Relationship) {
+function relationshipLabel(
+  family: LastCodeSidebarFamilyRow,
+  relationship: Relationship,
+  showSubheaders: boolean,
+) {
   if (!relationship.relationshipLabel) return undefined;
   const { thread } = family;
   const creator = relationship.creatorDescription ? `, ${relationship.creatorDescription}` : "";
   const protection = thread.persistent ? ", protected from archive and deletion" : "";
   const summary =
-    !family.expanded && family.descendantCount ? `, ${lastcodeSidebarFamilySummary(family)}` : "";
+    (!family.expanded || !showSubheaders) && family.descendantCount
+      ? `, ${lastcodeSidebarFamilySummary(family)}`
+      : "";
   return `${thread.title}, ${relationship.relationshipLabel}${creator}${protection}${summary}`;
 }
 function rowAppearance(
@@ -80,7 +86,7 @@ export function LastCodeThreadRowSurface({
   const annotationActive = thread.annotation?.resolvedAt === null;
   const pending =
     thread.worktreeCleanup?.status === "deleting" || thread.worktreeCleanup?.status === "queued";
-  const tall = showSubheaders && hasCollapsedFamilySummary(family, groupingStyle);
+  const tall = hasCollapsedFamilySummary(family, groupingStyle, showSubheaders);
   return (
     <ThreadAnnotationNavigationTrigger
       annotationActive={annotationActive}
@@ -96,7 +102,7 @@ export function LastCodeThreadRowSurface({
       tabIndex={0}
       aria-describedby={!annotationActive && threadRowActive ? threadDetailsTooltipId : undefined}
       data-active={active}
-      aria-label={relationshipLabel(family, relationship)}
+      aria-label={relationshipLabel(family, relationship, showSubheaders)}
       data-slot="sidebar-menu-sub-button"
       data-sidebar="menu-sub-button"
       data-size="sm"
@@ -114,8 +120,13 @@ export function LastCodeThreadRowSurface({
   );
 }
 
-/** Typed collapsed families reserve the second line used by their descendant summary. */
-function hasCollapsedFamilySummary(family: LastCodeSidebarFamilyRow, groupingStyle: string) {
+/** Only the enabled typed summary reserves a second line; compact mode stays inline. */
+function hasCollapsedFamilySummary(
+  family: LastCodeSidebarFamilyRow,
+  groupingStyle: string,
+  showSubheaders: boolean,
+) {
+  if (!showSubheaders) return false;
   if (groupingStyle !== "typed-groups") return false;
   if (family.descendantCount === 0) return false;
   return !family.expanded;

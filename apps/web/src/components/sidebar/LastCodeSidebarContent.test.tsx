@@ -27,6 +27,7 @@ const settings = {
   sidebarThreadSortOrder: "created_at",
   sidebarThreadPreviewCount: 1,
   legacySidebarThreadGroupingStyle: "minimal",
+  lastcodeSidebarFamilyStatusSubheaders: true,
   legacySidebarScale: "normal",
 };
 vi.mock("~/hooks/useSettings", () => ({

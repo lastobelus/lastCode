@@ -32,6 +32,7 @@ vi.mock("~/hooks/useSettings", () => ({
     (
       ({
         compactLegacySidebarStatuses: false,
+        lastcodeSidebarFamilyStatusSubheaders: true,
         legacySidebarThreadGroupingStyle: "typed-groups",
       }) as Record<string, unknown>
     )[key],

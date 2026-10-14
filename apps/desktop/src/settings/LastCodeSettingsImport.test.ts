@@ -95,6 +95,7 @@ describe("LastCodeSettingsImport", () => {
     Reflect.deleteProperty(sourceClient, "showThreadWorktreeIndicators");
     Reflect.deleteProperty(sourceClient, "legacySidebarScale");
     Reflect.deleteProperty(sourceClient, "lastcodeSidebarEnabled");
+    Reflect.deleteProperty(sourceClient, "lastcodeSidebarFamilyStatusSubheaders");
     sourceClient.legacySidebarEnabled = true;
     Reflect.deleteProperty(sourceClient, "roundedProjectIcons");
     Reflect.deleteProperty(sourceClient, "showThreadProviderBadge");
@@ -114,6 +115,7 @@ describe("LastCodeSettingsImport", () => {
       showThreadWorktreeIndicators: false,
       legacySidebarScale: 75,
       lastcodeSidebarEnabled: true,
+      lastcodeSidebarFamilyStatusSubheaders: false,
       roundedProjectIcons: true,
       environmentIconColors: { primary: "#2563eb", remote: "#7c3aed" },
       showLocalEnvironmentIcon: true,
@@ -234,6 +236,7 @@ describe("LastCodeSettingsImport", () => {
     assert.equal(importedClient.showThreadWorktreeIndicators, false);
     assert.equal(importedClient.legacySidebarScale, 75);
     assert.equal(importedClient.lastcodeSidebarEnabled, true);
+    assert.equal(importedClient.lastcodeSidebarFamilyStatusSubheaders, false);
     assert.equal(importedClient.legacySidebarEnabled, true);
     assert.equal(importedClient.roundedProjectIcons, true);
     assert.deepEqual(importedClient.environmentIconColors, {

@@ -16,6 +16,7 @@ import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environ
 import { AsyncResult } from "effect/reactivity";
 import * as Cause from "effect/Cause";
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
+import { LastCodeThreadFamilySummary } from "./LastCodeThreadFamily";
 import { LastCodeThreadLeadingControls, LastCodeThreadTitle } from "./LastCodeThreadTitle";
 import { resolveThreadStatusPill, type ThreadStatusPill } from "../Sidebar.logic";
 import { makeThreadFixture } from "../../test-fixtures";
@@ -243,6 +244,50 @@ function OutcomeHarness({
     />
   );
 }
+describe("mounted family status presentation", () => {
+  it("moves a real aggregate from the typed line into an inline compact count", async () => {
+    const family = familyFor(a, "Parent with a failed descendant");
+    family.depth = 6;
+    family.descendantCount = 2;
+    family.descendantStatusCounts = new Map([
+      ["Failed", 1],
+      ["Stopped", 1],
+    ]);
+    family.descendantsStatus = {
+      label: "Failed",
+      colorClass: "text-red-500",
+      dotClass: "bg-red-500",
+      pulse: false,
+    };
+    family.expanded = false;
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(() =>
+      root?.render(
+        <>
+          <LastCodeThreadFamilySummary family={family} display="line" />
+          <LastCodeThreadFamilySummary family={family} display="inline" />
+        </>,
+      ),
+    );
+    expect(container.textContent).toContain("2 subagents");
+    expect(container.textContent).not.toContain("+2");
+    expect(container.querySelector('[role="img"][aria-label="Failed"]')).not.toBeNull();
+    mocks.subheaders = false;
+    await act(() => mocks.settingListeners.forEach((listener) => listener()));
+    expect(container.textContent).toContain("+2");
+    expect(container.textContent).not.toContain("2 subagents");
+    expect(container.querySelector('[role="img"][aria-label="Failed"]')).not.toBeNull();
+    family.expanded = true;
+    await act(() =>
+      root?.render(<LastCodeThreadFamilySummary family={{ ...family }} display="inline" />),
+    );
+    expect(container.textContent).toContain("+2");
+    expect(container.querySelector('[role="img"][aria-label="Failed"]')).not.toBeNull();
+    expect(mocks.update).not.toHaveBeenCalled();
+  });
+});
 describe("compact child outcomes", () => {
   it.each([
     ["failed", null, "Failed"],
@@ -285,15 +330,6 @@ describe("compact child outcomes", () => {
       );
       expect(container.querySelector('[role="img"][aria-label="Completed"]')).not.toBeNull();
       expect(container.querySelector('[aria-label="Protected"]')).not.toBeNull();
-      const outcome = container.querySelector(`[role="img"][aria-label="${label}"]`);
-      for (const subheaders of [false, true]) {
-        mocks.subheaders = subheaders;
-        await act(() => mocks.settingListeners.forEach((listener) => listener()));
-        expect(container.querySelector(`[role="img"][aria-label="${label}"]`)).toBe(outcome);
-        expect(container.querySelector('[role="img"][aria-label="Completed"]')).not.toBeNull();
-        expect(container.querySelector('[aria-label="Protected"]')).not.toBeNull();
-      }
-
       expect(mocks.update).not.toHaveBeenCalled();
     },
   );

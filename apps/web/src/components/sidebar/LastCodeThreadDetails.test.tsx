@@ -35,7 +35,11 @@ const editing = {
 };
 vi.mock("../../hooks/useSettings", () => ({
   useClientSetting: (key: string) =>
-    key === "legacySidebarThreadGroupingStyle" ? "typed-groups" : mocks.worktrees,
+    key === "legacySidebarThreadGroupingStyle"
+      ? "typed-groups"
+      : key === "lastcodeSidebarFamilyStatusSubheaders"
+        ? true
+        : mocks.worktrees,
 }));
 vi.mock("../ThreadStatusIndicators", () => ({
   ThreadWorktreeIndicator: () => <span>Worktree</span>,
