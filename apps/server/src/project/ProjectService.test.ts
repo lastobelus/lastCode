@@ -70,6 +70,7 @@ const layerTestFor = (
 ) =>
   RuntimeLayer.layerProjectService.pipe(
     Layer.provide(UpdateDrainAdmissionTestkit.layerOpen),
+    Layer.provideMerge(ServerSettings.layerTest()),
     Layer.provideMerge(ProjectEnrichmentService.layer),
     Layer.provideMerge(layerWorkspacePaths),
     Layer.provideMerge(projectMetadataLayer),

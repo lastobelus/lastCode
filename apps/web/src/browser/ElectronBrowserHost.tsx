@@ -1,5 +1,7 @@
 "use client";
 
+import { DesktopCdpRelay } from "./DesktopCdpRelay";
+
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
 import { AuthPreviewOperateScope, FILL_PREVIEW_VIEWPORT } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
@@ -16,6 +18,7 @@ import { useActivePreviewSessions } from "~/previewStateStore";
 import { previewEnvironment } from "~/state/preview";
 import { useEnvironmentScope } from "~/state/session";
 import { useAtomCommand } from "~/state/use-atom-command";
+import { useEnvironmentHasLocalDesktopBrowser } from "~/state/entities";
 
 import { readPreviewAnnotationTheme } from "./annotationTheme";
 import { useBrowserDefaults } from "./browserDefaults";
@@ -38,7 +41,22 @@ export function ElectronBrowserHost() {
   const { resolvedTheme } = useTheme();
   const previewByThreadKey = useActivePreviewSessions();
   const primaryEnvironmentId = useAtomValue(primaryEnvironmentIdAtom);
+  const hasLocalDesktopBrowser = useEnvironmentHasLocalDesktopBrowser(primaryEnvironmentId);
   useDesktopBrowserSessions(primaryEnvironmentId);
+  useEffect(() => {
+    if (
+      primaryEnvironmentId === null ||
+      hasLocalDesktopBrowser !== true ||
+      !window.desktopBridge?.preview
+    )
+      return;
+    void window.desktopBridge.preview
+      .bindBrowserEnvironment({
+        desktopHostId: "local",
+        environmentId: primaryEnvironmentId,
+      })
+      .catch((cause) => console.error("Native browser environment binding failed", cause));
+  }, [primaryEnvironmentId, hasLocalDesktopBrowser]);
   const sessions = useMemo(
     () =>
       Object.entries(previewByThreadKey).flatMap(([threadKey, previewState]) => {
@@ -144,6 +162,7 @@ export function ElectronBrowserHost() {
   if (!isElectron) return null;
   return (
     <div className="contents" data-electron-browser-host>
+      <DesktopCdpRelay />
       {sessions.map(({ threadRef, snapshot, runtimeTabId, pictureInPicture, zoomFactor }) => {
         const url = snapshot.navStatus._tag === "Idle" ? null : snapshot.navStatus.url;
         return (
@@ -158,6 +177,7 @@ export function ElectronBrowserHost() {
             profileId={snapshot.profileId}
             zoomFactor={zoomFactor}
             serverDriven={snapshot.runtime === "server"}
+            desktopHostId={snapshot.desktopHostId}
             {...(snapshot.runtime === "server"
               ? {
                   serverRendering: {

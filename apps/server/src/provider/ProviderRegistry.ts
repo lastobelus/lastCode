@@ -400,7 +400,13 @@ const correlateSnapshotWithSource = (
       ),
     );
   }
-  return Effect.succeed(snapshot);
+  return source.threadCapabilities.pipe(
+    Effect.map((threadCapabilities) => ({ ...snapshot, threadCapabilities })),
+    Effect.catch(() => {
+      const { threadCapabilities: _staleCapabilities, ...withoutCapabilities } = snapshot;
+      return Effect.succeed(withoutCapabilities);
+    }),
+  );
 };
 
 /**
@@ -420,6 +426,9 @@ const snapshotInstanceKey = (provider: ServerProvider): ProviderInstanceId => {
 const buildSnapshotSource = (instance: ProviderInstance): ProviderSnapshotSource => ({
   instanceId: instance.instanceId,
   driverKind: instance.driverKind,
+  threadCapabilities: instance.orchestrationAdapter
+    .getCapabilities()
+    .pipe(Effect.map((capabilities) => capabilities.threads)),
   getSnapshot: instance.snapshot.getSnapshot,
   refresh: instance.snapshot.refresh,
   streamChanges: instance.snapshot.streamChanges,
