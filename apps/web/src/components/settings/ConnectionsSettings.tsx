@@ -3443,49 +3443,39 @@ export function ConnectionsSettings() {
             ) : null
           }
           control={
-            <div className="flex items-center gap-2">
-              {savedEnvironments
-                .filter((environment) => isDesktopLocalConnectionTarget(environment.entry.target))
-                .map((environment) => (
-                  <EnvironmentPauseControl
-                    key={environment.environmentId}
-                    environment={environment}
-                  />
-                ))}
-              <Select
-                value={selectValue}
-                onValueChange={(value) => {
-                  if (typeof value !== "string") return;
-                  handleSelectWslMode(value);
-                }}
+            <Select
+              value={selectValue}
+              onValueChange={(value) => {
+                if (typeof value !== "string") return;
+                handleSelectWslMode(value);
+              }}
+            >
+              <SelectTrigger
+                size="sm"
+                className="w-full sm:w-56"
+                aria-label="WSL backend"
+                disabled={isUpdatingWslBackend}
               >
-                <SelectTrigger
-                  size="sm"
-                  className="w-full sm:w-56"
-                  aria-label="WSL backend"
-                  disabled={isUpdatingWslBackend}
-                >
-                  <SelectValue>{selectLabel}</SelectValue>
-                </SelectTrigger>
-                <SelectPopup align="end" alignItemWithTrigger={false}>
-                  <SelectItem hideIndicator value={BACKEND_VALUE_WSL_OFF}>
-                    Off
+                <SelectValue>{selectLabel}</SelectValue>
+              </SelectTrigger>
+              <SelectPopup align="end" alignItemWithTrigger={false}>
+                <SelectItem hideIndicator value={BACKEND_VALUE_WSL_OFF}>
+                  Off
+                </SelectItem>
+                {desktopWslState.distros.length === 0 ? (
+                  <SelectItem hideIndicator value={BACKEND_VALUE_DEFAULT_WSL}>
+                    Default distro
                   </SelectItem>
-                  {desktopWslState.distros.length === 0 ? (
-                    <SelectItem hideIndicator value={BACKEND_VALUE_DEFAULT_WSL}>
-                      Default distro
+                ) : (
+                  desktopWslState.distros.map((distro) => (
+                    <SelectItem hideIndicator key={distro.name} value={distro.name}>
+                      {distro.name}
+                      {distro.isDefault ? " (default)" : ""}
                     </SelectItem>
-                  ) : (
-                    desktopWslState.distros.map((distro) => (
-                      <SelectItem hideIndicator key={distro.name} value={distro.name}>
-                        {distro.name}
-                        {distro.isDefault ? " (default)" : ""}
-                      </SelectItem>
-                    ))
-                  )}
-                </SelectPopup>
-              </Select>
-            </div>
+                  ))
+                )}
+              </SelectPopup>
+            </Select>
           }
         />
         {desktopWslState.enabled ? (
@@ -3628,6 +3618,13 @@ export function ConnectionsSettings() {
     />
   );
 
+  // Pause requires thread access, not permission or availability to manage the WSL backend.
+  const secondaryLocalPauseControls = savedEnvironments
+    .filter((environment) => isDesktopLocalConnectionTarget(environment.entry.target))
+    .map((environment) => (
+      <EnvironmentPauseControl key={environment.environmentId} environment={environment} />
+    ));
+
   const primarySettings = (
     <>
       {primaryEnvironmentId !== null ? (
@@ -3660,6 +3657,7 @@ export function ConnectionsSettings() {
             headerAction={
               primaryEnvironmentId !== null ? (
                 <div className="flex items-center gap-1">
+                  {secondaryLocalPauseControls}
                   {!desktopBridge && primaryEnvironment ? (
                     <EnvironmentPauseControl
                       key={primaryEnvironment.environmentId}
@@ -4094,7 +4092,12 @@ export function ConnectionsSettings() {
           </Dialog>
         </>
       ) : (
-        <SettingsSection {...searchableSetting("connections-environment")}>
+        <SettingsSection
+          {...searchableSetting("connections-environment")}
+          headerAction={
+            <div className="flex items-center gap-1">{secondaryLocalPauseControls}</div>
+          }
+        >
           <SettingsRow
             title="No environment selected"
             description="Connect an environment to view its settings and access."

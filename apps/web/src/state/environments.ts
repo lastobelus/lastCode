@@ -10,7 +10,8 @@ import * as Option from "effect/Option";
 import { useMemo } from "react";
 
 import { environmentCatalog } from "../connection/catalog";
-import { isLoopbackHostname, readPrimaryEnvironmentTarget } from "../environments/primary/target";
+import { isClientLocalPrimaryTarget } from "../connection/localPrimaryEnvironment";
+import { isElectron } from "../env";
 import {
   environmentPresentations,
   environmentSummaries,
@@ -85,13 +86,7 @@ export function usePrimaryEnvironment(): EnvironmentPresentation | null {
 /** A remote or hosted web client must never treat its server as the user's machine. */
 export function useLocalEnvironment(): EnvironmentPresentation | null {
   const primary = usePrimaryEnvironment();
-  if (primary === null) return null;
-  const target = readPrimaryEnvironmentTarget();
-  return target !== null &&
-    (target.source === "desktop-managed" ||
-      isLoopbackHostname(new URL(target.target.httpBaseUrl).hostname))
-    ? primary
-    : null;
+  return isClientLocalPrimaryTarget(primary?.entry.target, isElectron) ? primary : null;
 }
 
 export function useEnvironmentHttpBaseUrl(environmentId: EnvironmentId | null): string | null {

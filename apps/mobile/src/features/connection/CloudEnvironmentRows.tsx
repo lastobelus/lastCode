@@ -248,7 +248,9 @@ function ConnectedCloudEnvironmentRow(props: {
           value={enabled}
         />
       </Pressable>
-      <EnvironmentPauseControl environmentId={props.environment.environmentId} />
+      {props.onOpen ? (
+        <EnvironmentPauseControl environmentId={props.environment.environmentId} />
+      ) : null}
     </View>
   );
 }
