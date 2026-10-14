@@ -19,6 +19,7 @@ import { fromYaml } from "@t3tools/shared/schemaYaml";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { clerkFrontendApiHostnameFromPublishableKey } from "@t3tools/shared/relayAuth";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
+import { copyOwnedGeneratedBuild } from "@t3tools/shared/generatedBuildOwnership";
 import rootPackageJson from "../package.json" with { type: "json" };
 import desktopPackageJson from "../apps/desktop/package.json" with { type: "json" };
 import gnomeCaptureBundle from "../apps/desktop/gnome-extension/bundle.json" with { type: "json" };
@@ -3093,6 +3094,28 @@ export const packWindowsServerAsar = Effect.fn("packWindowsServerAsar")(function
   }
 });
 
+// Release branding belongs to the release copy, not the reusable compiler output.
+export const stageBrandedServerDist = Effect.fn("stageBrandedServerDist")(function* (input: {
+  readonly repoRoot: string;
+  readonly serverDistDir: string;
+  readonly destinationDir: string;
+  readonly brand: WebAssetBrand;
+}) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const copiedOwned = yield* Effect.try(() =>
+    copyOwnedGeneratedBuild(
+      input.repoRoot,
+      path.relative(input.repoRoot, input.serverDistDir).split(path.sep).join("/"),
+      input.destinationDir,
+    ),
+  );
+  if (!copiedOwned) yield* fs.copy(input.serverDistDir, input.destinationDir);
+  const clientDirectory = path.join(input.destinationDir, "client");
+  yield* applyWebBrandAssets(input.brand, clientDirectory);
+  yield* validateBundledClientAssets(clientDirectory);
+});
+
 export const stageWindowsServerSidecar = Effect.fn("stageWindowsServerSidecar")(function* (input: {
   readonly stageRoot: string;
   readonly repoRoot: string;
@@ -3112,7 +3135,12 @@ export const stageWindowsServerSidecar = Effect.fn("stageWindowsServerSidecar")(
 
   const serverStageDir = path.join(input.stageRoot, "server");
   yield* fs.makeDirectory(path.join(serverStageDir, "apps/server"), { recursive: true });
-  yield* fs.copy(input.serverDistDir, path.join(serverStageDir, "apps/server/dist"));
+  yield* stageBrandedServerDist({
+    repoRoot: input.repoRoot,
+    serverDistDir: input.serverDistDir,
+    destinationDir: path.join(serverStageDir, "apps/server/dist"),
+    brand: resolveDesktopWebAssetBrand(input.appVersion),
+  });
 
   const sidecarDependencies = {
     ...input.runtimeExternalDependencies,
@@ -3618,9 +3646,9 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   const iconAssets = resolveDesktopBuildIconAssets(appVersion);
   const commitHash = yield* resolveGitCommitHash(repoRoot);
   const mkdir = options.keepStage ? fs.makeTempDirectory : fs.makeTempDirectoryScoped;
-  const stageRoot = yield* mkdir({
-    prefix: `t3code-desktop-${options.platform}-stage-`,
-  });
+  const stageRoot = yield* fs.realPath(
+    yield* mkdir({ prefix: `t3code-desktop-${options.platform}-stage-` }),
+  );
 
   const stageAppDir = path.join(stageRoot, "app");
   const stageResourcesDir = path.join(stageAppDir, "apps/desktop/resources");
@@ -3729,8 +3757,6 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   }
 
   const webAssetBrand = resolveDesktopWebAssetBrand(appVersion);
-  yield* applyWebBrandAssets(webAssetBrand, "apps/server/dist/client");
-  yield* Effect.log(`[desktop-artifact] Applied ${webAssetBrand} web client branding.`);
   yield* validateBundledClientAssets(path.dirname(bundledClientEntry));
 
   yield* fs.makeDirectory(path.join(stageAppDir, "apps/desktop"), { recursive: true });
@@ -3761,7 +3787,12 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   // On Windows the server tree ships in the server.asar sidecar instead of
   // app.asar (see stageWindowsServerSidecar), so the app stage omits it.
   if (options.platform !== "win") {
-    yield* fs.copy(distDirs.serverDist, path.join(stageAppDir, "apps/server/dist"));
+    yield* stageBrandedServerDist({
+      repoRoot,
+      serverDistDir: distDirs.serverDist,
+      destinationDir: path.join(stageAppDir, "apps/server/dist"),
+      brand: webAssetBrand,
+    });
   }
   yield* stageResourceMonitor({
     repoRoot,

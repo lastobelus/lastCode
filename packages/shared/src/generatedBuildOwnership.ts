@@ -554,9 +554,17 @@ export function createGeneratedBuildStage(worktreePath: string, root: string) {
 /** Copy only the latest verified compiler emissions, never arbitrary additions in the real dist tree. */
 export function copyOwnedGeneratedBuild(worktreePath: string, root: string, destination: string) {
   const ctx = context(worktreePath, root);
-  const previous = ctx && readRecord(ctx);
-  if (!ctx || !previous)
-    throw new Error("Web build has no emission provenance; rebuild the web app first");
+  if (!ctx) {
+    try {
+      if (NodeFS.lstatSync(NodePath.join(NodeFS.realpathSync(worktreePath), ".git")).isDirectory())
+        return false; // Only positively recognized ordinary repositories use the caller's copy.
+    } catch (error) {
+      if (!missing(error)) throw error;
+    }
+    throw new Error("Generated build copy requires repository metadata");
+  }
+  const previous = readRecord(ctx);
+  if (!previous) throw new Error("Generated build has no emission provenance; rebuild first");
   // Historical owned chunks remain eligible for cleanup, but only the latest
   // compiler emission belongs in a newly built server client bundle.
   for (const file of previous.record.emissions) {
@@ -569,4 +577,5 @@ export function copyOwnedGeneratedBuild(worktreePath: string, root: string, dest
     if (fileEvidence(target).hash !== file.hash)
       throw new Error("Web output changed during server build");
   }
+  return true;
 }

@@ -33,7 +33,7 @@ export const applyWebBrandAssets = Effect.fn("applyWebBrandAssets")(function* (
     (override) =>
       fs.copyFile(
         path.join(repoRoot, override.sourceRelativePath),
-        path.join(repoRoot, override.targetRelativePath),
+        path.resolve(repoRoot, override.targetRelativePath),
       ),
     { concurrency: "unbounded" },
   );

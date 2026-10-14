@@ -14,6 +14,10 @@ import * as Path from "effect/Path";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
+import {
+  createGeneratedBuildStage,
+  inspectGeneratedBuildOwnership,
+} from "@t3tools/shared/generatedBuildOwnership";
 
 import {
   BundleNotSelfContainedError,
@@ -67,6 +71,7 @@ import {
   stageLinuxIconSize,
   stageDesktopDmgBackground,
   stageResourceMonitor,
+  stageBrandedServerDist,
   stageLinuxCaptureHelper,
   stageWslRuntimeArchive,
   bundlesWslRuntime,
@@ -94,9 +99,127 @@ import {
   WslRuntimeArchiveMissingError,
   wslRuntimeArchiveStem,
 } from "./build-desktop-artifact.ts";
-import { LASTCODE_BRAND_ASSET_PATHS } from "./lib/lastcode-brand-assets.ts";
+import {
+  LASTCODE_BRAND_ASSET_PATHS,
+  resolveLastCodeWebIconOverrides,
+} from "./lib/lastcode-brand-assets.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
+
+it.effect(
+  "release branding preserves compiler ownership across repeated packaging and rebuilds",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const tempDir = yield* fs.realPath(
+          yield* fs.makeTempDirectoryScoped({ prefix: "release-branding-" }),
+        );
+        const repoRoot = path.join(tempDir, "repository");
+        const metadata = path.join(tempDir, "git-metadata");
+        yield* fs.makeDirectory(repoRoot);
+        yield* fs.makeDirectory(metadata);
+        yield* fs.writeFileString(path.join(repoRoot, ".git"), `gitdir: ${metadata}\n`);
+        const root = "apps/server/dist";
+        const serverDistDir = path.join(repoRoot, root);
+        const missingOwnership = yield* Effect.exit(
+          stageBrandedServerDist({
+            repoRoot,
+            serverDistDir,
+            destinationDir: path.join(tempDir, "unrecognized-release"),
+            brand: "production",
+          }),
+        );
+        assert.equal(missingOwnership._tag, "Failure");
+        const icons = resolveLastCodeWebIconOverrides("development", "client");
+        const emit = (directory: string) =>
+          Effect.gen(function* () {
+            yield* fs.makeDirectory(path.join(directory, "client/assets"), { recursive: true });
+            yield* fs.writeFileString(
+              path.join(directory, "client/index.html"),
+              '<link href="/favicon.ico"><script src="/assets/main.js"></script>',
+            );
+            yield* fs.writeFileString(path.join(directory, "client/assets/main.js"), "compiled JS");
+            for (const icon of icons)
+              yield* fs.writeFileString(
+                path.join(directory, icon.targetRelativePath),
+                "development",
+              );
+          });
+        const original = createGeneratedBuildStage(repoRoot, root)!;
+        yield* emit(original.directory);
+        yield* fs.writeFileString(
+          path.join(original.directory, "client/assets/old.js"),
+          "old chunk",
+        );
+        original.publish(100);
+        const current = createGeneratedBuildStage(repoRoot, root)!;
+        yield* emit(current.directory);
+        current.publish(200);
+        yield* fs.writeFileString(
+          path.join(serverDistDir, "client/qa-note.txt"),
+          "retained addition",
+        );
+        const ownership = inspectGeneratedBuildOwnership(repoRoot, root)!;
+        const assetRepoRoot = yield* path.fromFileUrl(new URL("..", import.meta.url));
+        for (const [index, brand] of (["production", "nightly", "nightly"] as const).entries()) {
+          const destinationDir = path.join(tempDir, `release-${index}`);
+          yield* stageBrandedServerDist({
+            repoRoot,
+            serverDistDir,
+            destinationDir,
+            brand,
+          });
+          for (const override of resolveLastCodeWebIconOverrides(brand, "client"))
+            assert.deepEqual(
+              yield* fs.readFile(path.join(destinationDir, override.targetRelativePath)),
+              yield* fs.readFile(path.join(assetRepoRoot, override.sourceRelativePath)),
+            );
+          assert.isFalse(yield* fs.exists(path.join(destinationDir, "client/qa-note.txt")));
+          assert.isFalse(yield* fs.exists(path.join(destinationDir, "client/assets/old.js")));
+          assert.deepEqual(inspectGeneratedBuildOwnership(repoRoot, root), ownership);
+        }
+        const rebuild = createGeneratedBuildStage(repoRoot, root)!;
+        yield* emit(rebuild.directory);
+        rebuild.publish(300);
+        assert.isTrue(
+          inspectGeneratedBuildOwnership(repoRoot, root)!.files.every(
+            (file) => file.reason === null,
+          ),
+        );
+        assert.equal(
+          yield* fs.readFileString(path.join(serverDistDir, "client/qa-note.txt")),
+          "retained addition",
+        );
+        yield* fs.writeFileString(
+          path.join(serverDistDir, "client/favicon.ico"),
+          "retained user edit",
+        );
+        const collision = createGeneratedBuildStage(repoRoot, root)!;
+        yield* emit(collision.directory);
+        assert.throws(() => collision.publish(400), "requires file review");
+        collision.discard();
+        assert.equal(
+          yield* fs.readFileString(path.join(serverDistDir, "client/favicon.ico")),
+          "retained user edit",
+        );
+        // An ordinary repository has no linked-worktree ownership ledger.
+        yield* fs.remove(path.join(repoRoot, ".git"));
+        yield* fs.makeDirectory(path.join(repoRoot, ".git"));
+        yield* stageBrandedServerDist({
+          repoRoot,
+          serverDistDir,
+          destinationDir: path.join(tempDir, "ordinary-repository-release"),
+          brand: "production",
+        });
+        assert.equal(
+          yield* fs.readFileString(path.join(serverDistDir, "client/favicon.ico")),
+          "retained user edit",
+        );
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+);
 
 // Keeps pnpm from auto-installing TypeScript, a types-only peer, into the app.
 const stagePackageExtensions = {

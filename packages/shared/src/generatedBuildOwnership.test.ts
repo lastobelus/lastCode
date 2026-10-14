@@ -110,8 +110,15 @@ it("rejects linked or hardlinked destinations and forged roots; ordinary checkou
   assert.isFalse(NodeFS.existsSync(NodePath.join(retained, "index.html")));
   assert.throws(() => createGeneratedBuildStage(cwd, "notes"), "Unrecognized");
   NodeFS.unlinkSync(NodePath.join(cwd, ".git"));
+  assert.throws(
+    () => copyOwnedGeneratedBuild(cwd, "apps/web/dist", NodePath.join(temporary, "release")),
+    "requires repository metadata",
+  );
   NodeFS.mkdirSync(NodePath.join(cwd, ".git"));
   assert.equal(createGeneratedBuildStage(cwd, "apps/web/dist"), null);
+  assert.isFalse(
+    copyOwnedGeneratedBuild(cwd, "apps/web/dist", NodePath.join(temporary, "release")),
+  );
 });
 
 it("copies only verified web emissions into an owned server stage", () => {
