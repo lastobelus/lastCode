@@ -30,6 +30,8 @@ export interface ProviderHostPaths {
   readonly baseDir: string;
   /** Server-owned state directory under the T3 home. */
   readonly stateDir: string;
+  /** Settings file used by provider shells running local CI for this server. */
+  readonly settingsPath: string;
   /** Scratch space for provider probes and generated helper files. */
   readonly providerStatusCacheDir: string;
   /** Where chat attachments are stored; agents that sandbox file reads must be granted it. */
