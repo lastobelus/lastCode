@@ -35,7 +35,8 @@ export function LastCodeThreadTitleEditor({
   }, []);
   const finish = () => finishRename(threadRef, target.session);
   useLayoutEffect(() => {
-    inputRef.current?.focus();
+    if (!document.activeElement || document.activeElement === document.body)
+      inputRef.current?.focus();
   }, []);
   const submit = () => {
     if (committed.current) return;
@@ -44,6 +45,7 @@ export function LastCodeThreadTitleEditor({
   };
   return (
     <input
+      data-lastcode-title-editor=""
       ref={setInput}
       className="min-w-0 flex-1 truncate rounded border border-ring bg-transparent px-0.5 text-sm outline-none"
       // Reserve the leading column's physical width so controls wrap above the editor.

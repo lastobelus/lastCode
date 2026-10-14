@@ -31,7 +31,6 @@ describe("sidebar selection", () => {
     "restores upstream legacy=%s when LastCode is turned off",
     (legacySidebarEnabled) => {
       const preferences = { lastcodeSidebarEnabled: true, legacySidebarEnabled };
-      expect(toggleUpstreamSidebar(preferences)).toEqual({});
       const restored = { ...preferences, lastcodeSidebarEnabled: false };
       expect(resolveSidebarMode(restored)).toBe(legacySidebarEnabled ? "legacy" : "inbox");
       expect(resolveSidebarMode({ ...restored, ...toggleUpstreamSidebar(restored) })).toBe(

@@ -19,11 +19,9 @@ export function resolveSidebarMode(
   return settings.legacySidebarEnabled ? "legacy" : "inbox";
 }
 
-/** Upstream quick controls cannot change the visible sidebar while overridden. */
+/** Retained upstream preference, used only while the LastCode capability is off. */
 export function toggleUpstreamSidebar(settings: SidebarPreferences) {
-  return settings.lastcodeSidebarEnabled
-    ? {}
-    : { legacySidebarEnabled: !settings.legacySidebarEnabled };
+  return { legacySidebarEnabled: !settings.legacySidebarEnabled };
 }
 
 export function shouldChooseNewThreadProject(

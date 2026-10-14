@@ -27,7 +27,10 @@ export function SidebarModeToggle({ onBackdrop = false }: { onBackdrop?: boolean
             className="pointer-events-auto relative top-auto translate-y-0"
             onMouseDown={(event) => {
               // Let hiding pause a row editor without committing its draft on the button press.
-              if (document.activeElement?.matches('[data-testid^="thread-row-"] input')) {
+              if (
+                sidebarMode === "lastcode" &&
+                document.activeElement?.hasAttribute("data-lastcode-title-editor")
+              ) {
                 event.preventDefault();
               }
             }}

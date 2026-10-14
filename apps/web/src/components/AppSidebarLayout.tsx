@@ -290,6 +290,7 @@ function ProjectProjectionRetention() {
 export function AppSidebarLayout({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
   const sidebarMode = useSidebarMode();
+  const clientSettingsHydrated = useClientSettingsHydrated();
   const { active: panelAnimationsActive, durationMs: panelAnimationDurationMs } =
     usePanelAnimationSettings();
   // Settings routes show the settings nav in place of whichever thread
@@ -406,7 +407,11 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
             </>
           ) : null}
           {Object.entries(THREAD_SIDEBARS).map(([mode, sidebar]) => (
-            <SidebarPresentation key={mode} visible={!isOnSettings && sidebarMode === mode}>
+            <SidebarPresentation
+              key={mode}
+              visible={!isOnSettings && sidebarMode === mode}
+              retain={clientSettingsHydrated}
+            >
               {sidebar}
             </SidebarPresentation>
           ))}

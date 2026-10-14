@@ -446,43 +446,50 @@ describe("visible status transitions", () => {
   });
 });
 describe("row-local rename editor", () => {
-  it("retains the actual editor draft and restores focus after a presentation round trip", async () => {
-    await render();
-    await act(() =>
-      root?.render(
-        <SidebarPresentation visible>
-          <Harness />
-        </SidebarPresentation>,
-      ),
-    );
-    await click("Rename A");
-    await draft("Mode switch draft");
-    const editor = input()!;
-    useSidebarModeStore.setState({ lastcodeHidden: true });
-    await act(() =>
-      root?.render(
-        <SidebarPresentation visible={false}>
-          <Harness />
-        </SidebarPresentation>,
-      ),
-    );
-    await act(() => editor.blur());
-    expect(mocks.update).not.toHaveBeenCalled();
-    useSidebarModeStore.setState({ lastcodeHidden: false });
-    await act(() =>
-      root?.render(
-        <SidebarPresentation visible>
-          <Harness />
-        </SidebarPresentation>,
-      ),
-    );
-    expect(input()).toBe(editor);
-    expect(editor.value).toBe("Mode switch draft");
-    expect(document.activeElement).toBe(editor);
-    await key("Escape");
-    expect(input()).toBeNull();
-    expect(mocks.update).not.toHaveBeenCalled();
-  });
+  it.each([false, true])(
+    "retains the editor draft while respecting another focus owner=%s on mode return",
+    async (otherOwnsFocus) => {
+      await render();
+      await act(() =>
+        root?.render(
+          <SidebarPresentation visible>
+            <Harness />
+          </SidebarPresentation>,
+        ),
+      );
+      await click("Rename A");
+      await draft("Mode switch draft");
+      const editor = input()!;
+      useSidebarModeStore.setState({ lastcodeHidden: true });
+      await act(() =>
+        root?.render(
+          <SidebarPresentation visible={false}>
+            <Harness />
+          </SidebarPresentation>,
+        ),
+      );
+      await act(() => editor.blur());
+      expect(mocks.update).not.toHaveBeenCalled();
+      const composer = document.createElement("textarea");
+      document.body.append(composer);
+      if (otherOwnsFocus) composer.focus();
+      useSidebarModeStore.setState({ lastcodeHidden: false });
+      await act(() =>
+        root?.render(
+          <SidebarPresentation visible>
+            <Harness />
+          </SidebarPresentation>,
+        ),
+      );
+      expect(input()).toBe(editor);
+      expect(editor.value).toBe("Mode switch draft");
+      expect(document.activeElement).toBe(otherOwnsFocus ? composer : editor);
+      if (otherOwnsFocus) editor.focus();
+      await key("Escape");
+      expect(input()).toBeNull();
+      expect(mocks.update).not.toHaveBeenCalled();
+    },
+  );
   it("keeps an inline draft mounted when PR presentation changes beside it", async () => {
     await render();
     await click("Rename A");

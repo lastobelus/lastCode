@@ -4,6 +4,34 @@ import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vite-plus/test";
 import { SidebarPresentation } from "./SidebarPresentation";
 
+it("unmounts the pre-hydration placeholder rather than retaining its hidden effects and state", async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const render = (visible: boolean, retain: boolean) =>
+    act(() =>
+      root.render(
+        <SidebarPresentation visible={visible} retain={retain}>
+          <input defaultValue="Placeholder" />
+        </SidebarPresentation>,
+      ),
+    );
+  try {
+    await render(true, false);
+    const first = container.querySelector("input")!;
+    first.value = "Placeholder draft";
+    await render(false, true);
+    expect(container.querySelector("input")).toBeNull();
+    await render(true, true);
+    expect(container.querySelector("input")).not.toBe(first);
+    expect(container.querySelector("input")?.value).toBe("Placeholder");
+  } finally {
+    await act(() => root.unmount());
+    container.remove();
+  }
+});
+
 it("defers first mount and preserves drafts while hidden effects are released", async () => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   const container = document.createElement("div");
