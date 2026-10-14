@@ -1,5 +1,5 @@
 import * as NodeZlib from "node:zlib";
-import { fileURLToPath } from "node:url";
+import * as NodeURL from "node:url";
 import { createGeneratedBuildStage } from "@t3tools/shared/generatedBuildOwnership";
 
 import react, { reactCompilerPreset } from "@vitejs/plugin-react";
@@ -163,10 +163,8 @@ const configuredAllowedHosts = (process.env.T3CODE_DEV_ALLOWED_HOSTS ?? "")
 const allowedHosts = [".ts.net", ...configuredAllowedHosts];
 
 export default defineConfig(({ command }) => {
-  const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
-  const stage = command === "build"
-    ? createGeneratedBuildStage(repoRoot, "apps/web/dist")
-    : null;
+  const repoRoot = NodeURL.fileURLToPath(new URL("../..", import.meta.url));
+  const stage = command === "build" ? createGeneratedBuildStage(repoRoot, "apps/web/dist") : null;
   const provenancePlugin = createBuildOwnershipPlugin(repoRoot, stage);
   return {
     assetsInclude: ["**/*.wasm"],
