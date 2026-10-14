@@ -11,8 +11,11 @@ export function createBuildOwnershipPlugin(
   let emitted = false;
   let executing = false;
   const noteUse = () => {
-    try { recordDependencyUse(repoRoot, now()); }
-    catch { console.warn("[web:build] Could not record dependency use."); }
+    try {
+      recordDependencyUse(repoRoot, now());
+    } catch {
+      console.warn("[web:build] Could not record dependency use.");
+    }
   };
   const finishUse = () => {
     if (!executing) return;
@@ -34,14 +37,19 @@ export function createBuildOwnershipPlugin(
       executing = true;
       noteUse();
     },
-    writeBundle() { emitted = true; },
+    writeBundle() {
+      emitted = true;
+    },
     buildEnd(error) {
       if (error) {
         finishUse();
         if (!this.meta.watchMode) stage?.discard();
       }
     },
-    renderError() { emitted = false; finishUse(); },
+    renderError() {
+      emitted = false;
+      finishUse();
+    },
     closeBundle() {
       try {
         // A watched compiler retains its own private tree between emissions;
@@ -52,6 +60,9 @@ export function createBuildOwnershipPlugin(
         if (!this.meta.watchMode) stage?.discard();
       }
     },
-    closeWatcher() { finishUse(); stage?.discard(); },
+    closeWatcher() {
+      finishUse();
+      stage?.discard();
+    },
   };
 }

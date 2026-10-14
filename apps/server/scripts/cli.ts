@@ -14,7 +14,10 @@ import { LASTCODE_DEVELOPMENT_ICON_OVERRIDES } from "../../../scripts/lib/lastco
 import { findEsmImportsOfExternalPackages } from "../../../scripts/lib/cli-executable-imports.ts";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { recordDependencyUse } from "@t3tools/shared/dependencyActivity";
-import { createGeneratedBuildStage, copyOwnedGeneratedBuild } from "@t3tools/shared/generatedBuildOwnership";
+import {
+  createGeneratedBuildStage,
+  copyOwnedGeneratedBuild,
+} from "@t3tools/shared/generatedBuildOwnership";
 import {
   ServerCliBuildAssetMissingError,
   ServerCliCommandExitError,
@@ -86,44 +89,54 @@ const buildCmd = Command.make(
       const repoRoot = yield* RepoRoot;
       const serverDir = path.join(repoRoot, "apps/server");
 
-      yield* Effect.scoped(Effect.gen(function* () {
-        const stage = yield* Effect.acquireRelease(
-          Effect.sync(() => createGeneratedBuildStage(repoRoot, "apps/server/dist")),
-          (stage) => Effect.sync(() => stage?.discard()),
-        );
-        const noteDependencyUse = Effect.gen(function* () {
-          const now = yield* Clock.currentTimeMillis;
-          yield* Effect.try({ try: () => recordDependencyUse(repoRoot, now), catch: (cause) => cause }).pipe(
-            Effect.catch(() => Effect.logWarning("[cli] Could not record build dependency use.")),
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const stage = yield* Effect.acquireRelease(
+            Effect.sync(() => createGeneratedBuildStage(repoRoot, "apps/server/dist")),
+            (stage) => Effect.sync(() => stage?.discard()),
           );
-        });
-        // Actual dependency-backed compiler execution only. Command/config
-        // inspection does not run this callback; failures still record use.
-        yield* Effect.acquireRelease(noteDependencyUse, () => noteDependencyUse);
-        yield* Effect.log("[cli] Running tsdown...");
-        yield* runCommand(
-          ChildProcess.make(process.execPath, ["--run", "build:bundle"], {
-            cwd: serverDir,
-            stdout: config.verbose ? "inherit" : "ignore",
-            stderr: "inherit",
-            shell: false,
-            ...(stage ? { env: { ...process.env, T3CODE_SERVER_BUILD_STAGE: stage.directory } } : {}),
-          }),
-        );
-        const webDist = path.join(repoRoot, "apps/web/dist");
-        const outputDirectory = stage?.directory ?? path.join(serverDir, "dist");
-        const clientTarget = path.join(outputDirectory, "client");
-        if (yield* fs.exists(webDist)) {
-          if (stage) yield* Effect.sync(() => copyOwnedGeneratedBuild(repoRoot, "apps/web/dist", clientTarget));
-          else yield* fs.copy(webDist, clientTarget);
-          yield* applyDevelopmentIconOverrides(repoRoot, serverDir, outputDirectory);
-          yield* Effect.log("[cli] Bundled web app into dist/client");
-        } else {
-          yield* Effect.logWarning("[cli] Web dist not found — skipping client bundle.");
-        }
-        const completedAt = yield* Clock.currentTimeMillis;
-        yield* Effect.sync(() => stage?.publish(completedAt));
-      }));
+          const noteDependencyUse = Effect.gen(function* () {
+            const now = yield* Clock.currentTimeMillis;
+            yield* Effect.try({
+              try: () => recordDependencyUse(repoRoot, now),
+              catch: (cause) => cause,
+            }).pipe(
+              Effect.catch(() => Effect.logWarning("[cli] Could not record build dependency use.")),
+            );
+          });
+          // Actual dependency-backed compiler execution only. Command/config
+          // inspection does not run this callback; failures still record use.
+          yield* Effect.acquireRelease(noteDependencyUse, () => noteDependencyUse);
+          yield* Effect.log("[cli] Running tsdown...");
+          yield* runCommand(
+            ChildProcess.make(process.execPath, ["--run", "build:bundle"], {
+              cwd: serverDir,
+              stdout: config.verbose ? "inherit" : "ignore",
+              stderr: "inherit",
+              shell: false,
+              ...(stage
+                ? { env: { ...process.env, T3CODE_SERVER_BUILD_STAGE: stage.directory } }
+                : {}),
+            }),
+          );
+          const webDist = path.join(repoRoot, "apps/web/dist");
+          const outputDirectory = stage?.directory ?? path.join(serverDir, "dist");
+          const clientTarget = path.join(outputDirectory, "client");
+          if (yield* fs.exists(webDist)) {
+            if (stage)
+              yield* Effect.sync(() =>
+                copyOwnedGeneratedBuild(repoRoot, "apps/web/dist", clientTarget),
+              );
+            else yield* fs.copy(webDist, clientTarget);
+            yield* applyDevelopmentIconOverrides(repoRoot, serverDir, outputDirectory);
+            yield* Effect.log("[cli] Bundled web app into dist/client");
+          } else {
+            yield* Effect.logWarning("[cli] Web dist not found — skipping client bundle.");
+          }
+          const completedAt = yield* Clock.currentTimeMillis;
+          yield* Effect.sync(() => stage?.publish(completedAt));
+        }),
+      );
     }),
 ).pipe(Command.withDescription("Build the server package (tsdown + bundle web client)."));
 

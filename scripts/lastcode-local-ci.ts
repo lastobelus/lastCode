@@ -1140,12 +1140,16 @@ async function executeLocalCi(
           // Planned Vite+ steps execute installed test/lint/build tools. Git-only
           // admission, status, wait and dry-run paths don't count as dependency use.
           if (step.command !== "vp") return;
-          try { recordDependencyUse(repoRoot, Date.now()); }
-          catch { console.warn("[lastcode:ci] Could not record dependency use."); }
+          try {
+            recordDependencyUse(repoRoot, Date.now());
+          } catch {
+            console.warn("[lastcode:ci] Could not record dependency use.");
+          }
         };
-        const debugStage = step.command === "cargo" && step.args[0] === "test"
-          ? createGeneratedBuildStage(repoRoot, "native/resource-monitor/target/debug")
-          : null;
+        const debugStage =
+          step.command === "cargo" && step.args[0] === "test"
+            ? createGeneratedBuildStage(repoRoot, "native/resource-monitor/target/debug")
+            : null;
         noteDependencyUse();
         try {
           await runCiProcess({
