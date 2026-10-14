@@ -239,11 +239,21 @@ async function asynchronousFileEvidence(target: string, signal?: AbortSignal) {
   if (!before.isFile() || before.nlink !== 1)
     throw new Error("Generated output is not an exclusive regular file");
   const hash = NodeCrypto.createHash("sha256");
-  for await (const chunk of NodeFS.createReadStream(target, {
-    flags: NodeFS.constants.O_RDONLY | (NodeFS.constants.O_NOFOLLOW ?? 0),
-    ...(signal ? { signal } : {}),
-  }))
-    hash.update(chunk as Uint8Array);
+  const file = await NodeFS.promises.open(
+    target,
+    NodeFS.constants.O_RDONLY | (NodeFS.constants.O_NOFOLLOW ?? 0),
+  );
+  try {
+    if (signature(await file.stat()) !== signature(before))
+      throw new Error("Generated output identity changed before hashing");
+    for await (const chunk of file.createReadStream({
+      autoClose: false,
+      ...(signal ? { signal } : {}),
+    }))
+      hash.update(chunk as Uint8Array);
+  } finally {
+    await file.close();
+  }
   if (signature(await NodeFS.promises.lstat(target)) !== signature(before))
     throw new Error("Generated output changed during observation");
   return { identity: signature(before), hash: hash.digest("hex") };

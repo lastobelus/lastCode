@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off -- Native allocation and symlink fixtures exercise filesystem identity boundaries.
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
