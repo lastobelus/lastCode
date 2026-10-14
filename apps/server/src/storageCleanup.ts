@@ -687,6 +687,7 @@ const make = Effect.gen(function* () {
       ? "No verified compiler emissions; legacy build outputs need exact-file review"
       : "No dependency install could be safely recognized";
     if (!anyWorktreePolicy(serverSettings, dependencyCleanupEnabled)) {
+      if (generatedBuilds) return;
       entries.push({
         kind: "worktree",
         worktreeResource: resource,
@@ -1165,13 +1166,14 @@ const make = Effect.gen(function* () {
           );
         });
         if (!(yield* revalidate())) return false;
-        const canRemove = revalidate().pipe(Effect.catch(() => Effect.succeed(false)));
+        const canRemove = revalidate();
         if (generatedBuilds) {
           const removed = yield* builds.remove(input, now, days, false, canRemove, canRemove);
           entry.reason = removed.reason;
+          if (removed.failed) entry.outcome = "failed";
           if (removed.files > 0)
             Object.assign(entry, {
-              outcome: "removed",
+              outcome: removed.failed ? "failed" : "removed",
               bytes: removed.bytes,
               files: removed.files,
             });
@@ -1180,19 +1182,34 @@ const make = Effect.gen(function* () {
         const inspection = yield* dependencies.inspect(input);
         if (inspection === null)
           return keep("No dependency install could be safely recognized and measured");
-        const removed = yield* dependencies.removeBatch([
-          { inspection, canRemove, isStillEligible: canRemove },
-        ]);
+        dependencyEstimates.set(entry, inspection.estimatedReclaimedBytes);
+        const removed = yield* dependencies.removeBatch(
+          [{ inspection, canRemove, isStillEligible: canRemove }],
+          (_inspection, decision) =>
+            Effect.sync(() => {
+              const genericRefusal =
+                decision.outcome === "kept" &&
+                decision.reason === "Worktree ownership or cleanup eligibility changed";
+              Object.assign(entry, {
+                outcome: decision.outcome,
+                reason: genericRefusal ? entry.reason : decision.reason,
+                bytes: decision.outcome === "removed" ? inspection.estimatedReclaimedBytes : null,
+              });
+            }),
+        );
         if (removed.length > 0) {
           entry.outcome = "removed";
           entry.bytes = removed[0]!.estimatedReclaimedBytes;
           entry.reason = "Removed inactive ownerless dependencies; reclaimed size is estimated";
           return true;
         }
-        return keep("A final safety check prevented dependency removal");
+        return false;
       }).pipe(
-        Effect.catch(() =>
-          Effect.sync(() => keep("Could not safely verify dependency activity or ownership")),
+        Effect.catch((error) =>
+          Effect.sync(() => {
+            entry.outcome = "failed";
+            return keep(cleanupFailureReason(error));
+          }),
         ),
       );
       const leasedPaths = [...new Set([cwd, recordedPath])].sort();
@@ -1607,9 +1624,10 @@ const make = Effect.gen(function* () {
                   isStillEligible,
                 );
                 entry.reason = removed.reason;
+                if (removed.failed) entry.outcome = "failed";
                 if (removed.files > 0)
                   Object.assign(entry, {
-                    outcome: "removed",
+                    outcome: removed.failed ? "failed" : "removed",
                     bytes: removed.bytes,
                     files: removed.files,
                   });
@@ -2424,15 +2442,6 @@ const make = Effect.gen(function* () {
         }),
       ),
     );
-    for (const entry of entries.filter((entry) => entry.worktreeResource === "dependencies")) {
-      Object.assign(entry, { reason: `Dependencies: ${entry.reason}` });
-      yield* audit({
-        event: "candidate",
-        runId,
-        ...entry,
-        estimatedReclaimedBytes: dependencyEstimates.get(entry) ?? entry.bytes,
-      });
-    }
     if (
       trigger === "manual" ||
       anyWorktreePolicy(
@@ -2516,6 +2525,17 @@ const make = Effect.gen(function* () {
       if (entry.worktreeResource === "dependencies") entry.reason = `Dependencies: ${entry.reason}`;
       if (entry.worktreeResource === "generated-builds")
         entry.reason = `Build outputs: ${entry.reason}`;
+      if (
+        entry.worktreeResource === "dependencies" ||
+        entry.worktreeResource === "generated-builds"
+      ) {
+        yield* audit({
+          event: "candidate",
+          runId,
+          ...entry,
+          estimatedReclaimedBytes: dependencyEstimates.get(entry) ?? entry.bytes,
+        });
+      }
       counts[entry.outcome]++;
       bytesFreed += entry.bytes ?? 0;
     }

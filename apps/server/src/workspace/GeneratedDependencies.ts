@@ -703,7 +703,7 @@ const make = Effect.gen(function* () {
                 inspection,
                 removed === null ? "kept" : "removed",
                 removed === null
-                  ? "Dependency identity changed before removal"
+                  ? "Dependency activity or identity changed before removal"
                   : "Dependency install removed",
               ),
             ),

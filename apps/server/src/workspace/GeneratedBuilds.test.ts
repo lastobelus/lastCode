@@ -265,6 +265,34 @@ it.effect(
     }).pipe(Effect.provide(testLayer)),
 );
 
+it.effect.each([0, 64] as const)(
+  "reports eligibility errors after %s removals while preserving actual recovered totals",
+  (completed) =>
+    Effect.gen(function* () {
+      const { builds, input, emit, fs } = yield* fixture();
+      yield* emit(
+        "apps/web/dist",
+        1,
+        Array.from({ length: 65 }, (_, index) => `${String(index).padStart(2, "0")}.js`),
+      );
+      let checks = 0;
+      const eligibility = Effect.gen(function* () {
+        if (++checks > completed / 64) return yield* Effect.fail("fixture eligibility failure");
+        return true;
+      });
+      const result = yield* builds.remove(input, DAY, 3, true, Effect.succeed(true), eligibility);
+      assert.isTrue(result.failed);
+      assert.equal(result.files, completed);
+      assert.match(result.reason, /eligibility check failed/);
+      assert.equal(
+        yield* fs.exists(NodePath.join(input.worktreePath, "apps/web/dist/64.js")),
+        true,
+      );
+      if (completed === 0) assert.equal(result.bytes, 0);
+      else assert.isAbove(result.bytes, 0);
+    }).pipe(Effect.provide(testLayer)),
+);
+
 it.effect(
   "keeps an exact-delay boundary sibling even when an older root qualifies the worktree",
   () =>

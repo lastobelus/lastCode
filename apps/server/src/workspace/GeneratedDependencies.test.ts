@@ -536,23 +536,39 @@ it.effect.each(["eligibility", "native"] as const)(
       yield* f.cleanup.observe(f.input, NOW - 20 * day);
       const inspected = yield* f.cleanup.inspect(f.input);
       const target = f.path.join(f.dependencyPath, "package/index.js");
+      const decisions: GeneratedDependencies.DependencyRemovalDecision[] = [];
       assert.isNotNull(inspected);
       assert.deepStrictEqual(
-        yield* f.cleanup.removeBatch([
-          {
-            inspection: inspected!,
-            canRemove: Effect.sync(() => {
-              if (stage === "eligibility") paths = [target];
-              return true;
+        yield* f.cleanup.removeBatch(
+          [
+            {
+              inspection: inspected!,
+              canRemove: Effect.sync(() => {
+                if (stage === "eligibility") paths = [target];
+                return true;
+              }),
+              isStillEligible: Effect.sync(() => {
+                if (stage === "native") paths = [target];
+                return true;
+              }),
+            },
+          ],
+          (_inspection, decision) =>
+            Effect.sync(() => {
+              decisions.push(decision);
             }),
-            isStillEligible: Effect.sync(() => {
-              if (stage === "native") paths = [target];
-              return true;
-            }),
-          },
-        ]),
+        ),
         [],
       );
+      assert.deepStrictEqual(decisions, [
+        {
+          outcome: "kept",
+          reason:
+            stage === "eligibility"
+              ? "Dependency activity or identity changed before removal"
+              : "A process is using a file or directory in the worktree.",
+        },
+      ]);
       assert.isTrue(sawLateConsumer);
       assert.deepStrictEqual(paths, []);
       assert.isTrue(yield* f.fs.exists(target));
@@ -700,6 +716,59 @@ it.effect(
         yield* Effect.sync(() => dependencyActivitySnapshot(f.input.worktreePath)),
         before,
       );
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        testLayer(
+          Effect.succeed([]),
+          undefined,
+          undefined,
+          false,
+          undefined,
+          Effect.sync(() => paths),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect.each(["initial", "eligibility", "native"] as const)(
+  "reports the incomplete %s file-consumer inventory as a kept decision",
+  (stage) => {
+    let paths: ReadonlyArray<string> | null = [];
+    return Effect.gen(function* () {
+      const f = yield* fixture();
+      const inspected = yield* f.cleanup.inspect(f.input);
+      assert.isNotNull(inspected);
+      const decisions: GeneratedDependencies.DependencyRemovalDecision[] = [];
+      if (stage === "initial") paths = null;
+      const removed = yield* f.cleanup.removeBatch(
+        [
+          {
+            inspection: inspected!,
+            canRemove: Effect.sync(() => {
+              if (stage === "eligibility") paths = null;
+              return true;
+            }),
+            isStillEligible: Effect.sync(() => {
+              if (stage === "native") paths = null;
+              return true;
+            }),
+          },
+        ],
+        (_inspection, decision) =>
+          Effect.sync(() => {
+            decisions.push(decision);
+          }),
+      );
+      assert.deepStrictEqual(removed, []);
+      assert.deepStrictEqual(decisions, [
+        {
+          outcome: "kept",
+          reason: "Process file-consumer inspection is unavailable",
+        },
+      ]);
+      assert.isTrue(yield* f.fs.exists(f.dependencyPath));
     }).pipe(
       Effect.scoped,
       Effect.provide(
@@ -957,6 +1026,75 @@ it.effect("one dependency removal error leaves its sibling eligible for deletion
     yield* assertBatchWorkspacePreserved(first);
     yield* assertBatchWorkspacePreserved(second);
   }).pipe(Effect.scoped, Effect.provide(testLayer())),
+);
+
+it.effect(
+  "reports an installed-file consumer as kept while removing its healthy batch sibling",
+  () => {
+    let paths: ReadonlyArray<string> = [];
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(NOW);
+      const first = yield* inspectedBatchFixture();
+      const healthy = yield* inspectedBatchFixture();
+      yield* first.cleanup.observe(first.input, NOW - 20 * day);
+      const target = first.path.join(first.dependencyPath, "package/index.js");
+      const alias = first.path.join(first.root, "installed-consumer.js");
+      yield* first.fs.symlink(target, alias);
+      paths = [alias];
+      const decisions: Array<{ path: string; outcome: string; reason: string }> = [];
+      const removed = yield* first.cleanup.removeBatch(
+        [
+          {
+            inspection: first.inspection,
+            canRemove: Effect.succeed(true),
+            isStillEligible: Effect.succeed(true),
+          },
+          {
+            inspection: healthy.inspection,
+            canRemove: Effect.succeed(true),
+            isStillEligible: Effect.succeed(true),
+          },
+        ],
+        (inspection, decision) =>
+          Effect.sync(() => {
+            decisions.push({ path: inspection.dependencyPath, ...decision });
+          }),
+      );
+      assert.deepStrictEqual(
+        removed.map((entry) => entry.dependencyPath),
+        [healthy.dependencyPath],
+      );
+      assert.deepStrictEqual(decisions, [
+        {
+          path: first.dependencyPath,
+          outcome: "kept",
+          reason: "An active process owns the worktree",
+        },
+        { path: healthy.dependencyPath, outcome: "removed", reason: "Dependency install removed" },
+      ]);
+      assert.isTrue(yield* first.fs.exists(target));
+      assert.isFalse(yield* healthy.fs.exists(healthy.dependencyPath));
+      paths = [];
+      assert.equal(
+        (yield* first.cleanup.observe(first.input, NOW + day, false, false))!.lastUsedAt,
+        NOW,
+      );
+      yield* assertBatchWorkspacePreserved(first);
+      yield* assertBatchWorkspacePreserved(healthy);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        testLayer(
+          Effect.succeed(["/workspace/elsewhere"]),
+          undefined,
+          undefined,
+          false,
+          undefined,
+          Effect.sync(() => paths),
+        ),
+      ),
+    );
+  },
 );
 
 it.effect("reports typed eligibility failures and removes a healthy batch sibling", () =>
@@ -2070,7 +2208,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     // The mutation occurs only after both complete eligibility checks have run.
     assert.equal(
       mountReads,
-      mode === "final-mount-unchanged" || mode === "final-mount-late-dependency-use" ? 3 : 2,
+      mode === "final-mount-unchanged" || mode === "final-mount-late-dependency-use" ? 4 : 2,
     );
     assert.equal(targetedReads.length, 4);
     assert.equal(processReads, 2);

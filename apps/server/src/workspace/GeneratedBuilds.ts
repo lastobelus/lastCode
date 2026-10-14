@@ -24,6 +24,7 @@ interface BuildRemoval {
   readonly files: number;
   readonly kept: number;
   readonly reason: string;
+  readonly failed: boolean;
 }
 class GeneratedBuildsError extends Schema.TaggedError<GeneratedBuildsError>()(
   "GeneratedBuildsError",
@@ -43,13 +44,13 @@ export class GeneratedBuilds extends Context.Service<
       usedIgnored?: boolean,
       persist?: boolean,
     ) => Effect.Effect<{ lastUsedAt: number; renewed: boolean } | null, GeneratedBuildsError>;
-    readonly remove: (
+    readonly remove: <EligibilityError>(
       input: BuildInput,
       now: number,
       days: number,
       archived: boolean,
-      canRemove: Effect.Effect<boolean>,
-      isStillEligible: Effect.Effect<boolean>,
+      canRemove: Effect.Effect<boolean, EligibilityError>,
+      isStillEligible: Effect.Effect<boolean, EligibilityError>,
     ) => Effect.Effect<BuildRemoval>;
   }
 >()("t3/workspace/GeneratedBuilds") {}
@@ -296,15 +297,15 @@ const make = Effect.gen(function* () {
     }
     return oldest === null ? null : { lastUsedAt: oldest, renewed };
   });
-  const remove = Effect.fn("GeneratedBuilds.remove")(function* (
+  const remove = Effect.fn("GeneratedBuilds.remove")(function* <EligibilityError>(
     input: BuildInput,
     now: number,
     days: number,
     archived: boolean,
-    canRemove: Effect.Effect<boolean>,
-    isStillEligible: Effect.Effect<boolean>,
+    canRemove: Effect.Effect<boolean, EligibilityError>,
+    isStillEligible: Effect.Effect<boolean, EligibilityError>,
   ) {
-    const result = { bytes: 0, files: 0, kept: 0, reason: "" };
+    const result = { bytes: 0, files: 0, kept: 0, reason: "", failed: false };
     const reasons = new Set<string>();
     const context = yield* Effect.context<never>();
     const runPromise = Effect.runPromiseWith(context);
@@ -380,11 +381,26 @@ const make = Effect.gen(function* () {
               inspected.token,
               selected,
               (paths) =>
-                runPromise(guard(root, paths).pipe(Effect.catch(() => Effect.succeed(false))), {
-                  signal,
-                })
+                runPromise(
+                  guard(root, paths).pipe(
+                    Effect.catch(() =>
+                      Effect.sync(() => {
+                        result.failed = true;
+                        reasons.add("Build cleanup eligibility check failed; files were retained.");
+                        return false;
+                      }),
+                    ),
+                  ),
+                  {
+                    signal,
+                  },
+                )
                   .then((eligible) => eligible && !signal.aborted)
-                  .catch(() => false),
+                  .catch(() => {
+                    result.failed = true;
+                    reasons.add("Build cleanup protection failed; files were retained.");
+                    return false;
+                  }),
               signal,
             ),
           catch: (cause) => new GeneratedBuildsError({ path: input.worktreePath, cause }),
@@ -408,6 +424,7 @@ const make = Effect.gen(function* () {
     }).pipe(
       Effect.catch(() =>
         Effect.sync(() => {
+          result.failed = true;
           result.kept++;
           reasons.add("Build cleanup protection could not be verified.");
         }),
