@@ -16,6 +16,9 @@ describe("sidebar selection", () => {
     (lastcodeSidebarEnabled, legacySidebarEnabled, expected) => {
       const preferences = { lastcodeSidebarEnabled, legacySidebarEnabled };
       expect(resolveSidebarMode(preferences)).toBe(expected);
+      expect(resolveSidebarMode(preferences, true, true)).toBe(
+        lastcodeSidebarEnabled ? "inbox" : expected,
+      );
       expect(resolveSidebarMode(preferences, false)).toBe("inbox");
       expect(shouldChooseNewThreadProject(resolveSidebarMode(preferences), 2)).toBe(
         expected === "inbox",

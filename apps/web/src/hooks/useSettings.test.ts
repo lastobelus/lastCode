@@ -1,4 +1,4 @@
-import { resolveSidebarMode } from "../sidebarMode";
+import { resolveSidebarMode, useSidebarModeStore } from "../sidebarMode";
 import {
   DEFAULT_SERVER_SETTINGS,
   ProviderDriverKind,
@@ -27,6 +27,7 @@ import {
   prepareModelPreferencesPatch,
   resolveEnvironmentIdentificationMode,
   updateClientSettings,
+  toggleSidebarMode,
 } from "./useSettings";
 import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
 
@@ -34,6 +35,7 @@ beforeEach(() => {
   persistenceMocks.getClientSettings.mockReset().mockResolvedValue(null);
   persistenceMocks.setClientSettings.mockReset().mockResolvedValue(undefined);
   __resetClientSettingsPersistenceForTests();
+  useSidebarModeStore.setState({ lastcodeHidden: false });
 });
 
 afterEach(() => {
@@ -41,6 +43,69 @@ afterEach(() => {
 });
 
 describe("client settings hydration", () => {
+  it.each([false, true])(
+    "toggles LastCode presentation without writing either preference, legacy=%s",
+    (legacySidebarEnabled) => {
+      __setClientSettingsForTests({
+        ...DEFAULT_CLIENT_SETTINGS,
+        lastcodeSidebarEnabled: true,
+        legacySidebarEnabled,
+      });
+      toggleSidebarMode();
+      expect(
+        resolveSidebarMode(
+          getClientSettings(),
+          true,
+          useSidebarModeStore.getState().lastcodeHidden,
+        ),
+      ).toBe("inbox");
+      toggleSidebarMode();
+      expect(
+        resolveSidebarMode(
+          getClientSettings(),
+          true,
+          useSidebarModeStore.getState().lastcodeHidden,
+        ),
+      ).toBe("lastcode");
+      expect(getClientSettings()).toMatchObject({
+        lastcodeSidebarEnabled: true,
+        legacySidebarEnabled,
+      });
+      expect(persistenceMocks.setClientSettings).not.toHaveBeenCalled();
+    },
+  );
+  it("ignores mode toggles before hydration and retains normal upstream preference toggling when disabled", async () => {
+    toggleSidebarMode();
+    expect(persistenceMocks.setClientSettings).not.toHaveBeenCalled();
+    expect(useSidebarModeStore.getState().lastcodeHidden).toBe(false);
+    __setClientSettingsForTests({
+      ...DEFAULT_CLIENT_SETTINGS,
+      lastcodeSidebarEnabled: false,
+      legacySidebarEnabled: true,
+    });
+    toggleSidebarMode();
+    await updateClientSettings({});
+    expect(getClientSettings()).toMatchObject({
+      lastcodeSidebarEnabled: false,
+      legacySidebarEnabled: false,
+    });
+    expect(persistenceMocks.setClientSettings).toHaveBeenCalled();
+  });
+  it("explicitly enabling LastCode reveals it again without changing the upstream preference", async () => {
+    __setClientSettingsForTests({
+      ...DEFAULT_CLIENT_SETTINGS,
+      lastcodeSidebarEnabled: true,
+      legacySidebarEnabled: true,
+    });
+    toggleSidebarMode();
+    await updateClientSettings({ lastcodeSidebarEnabled: false });
+    expect(
+      resolveSidebarMode(getClientSettings(), true, useSidebarModeStore.getState().lastcodeHidden),
+    ).toBe("legacy");
+    await updateClientSettings({ lastcodeSidebarEnabled: true });
+    expect(useSidebarModeStore.getState().lastcodeHidden).toBe(false);
+    expect(getClientSettings().legacySidebarEnabled).toBe(true);
+  });
   const savedSettings = {
     ...DEFAULT_CLIENT_SETTINGS,
     timestampFormat: "12-hour" as const,

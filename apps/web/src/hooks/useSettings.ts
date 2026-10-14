@@ -63,7 +63,7 @@ import { useTheme } from "./useTheme";
 import { environmentSession, readEnvironmentScope, useEnvironmentScope } from "~/state/session";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 
-import { resolveSidebarMode } from "../sidebarMode";
+import { resolveSidebarMode, toggleUpstreamSidebar, useSidebarModeStore } from "../sidebarMode";
 
 const CLIENT_SETTINGS_PERSISTENCE_ERROR_SCOPE = "[CLIENT_SETTINGS]";
 
@@ -197,6 +197,9 @@ export function persistClientSettingsPatch(
   patch: ClientSettingsPatch,
   persist: (settings: ClientSettings) => Promise<void> = defaultClientSettingsPersistence,
 ): Promise<void> {
+  if (patch.lastcodeSidebarEnabled === true) {
+    useSidebarModeStore.setState({ lastcodeHidden: false });
+  }
   // Patches queued before hydration must publish before newer optimistic patches.
   const deferPatch =
     clientSettingsHydrationStatus !== "ready" || deferredClientSettingsPatchCount > 0;
@@ -434,7 +437,18 @@ export function useEnvironmentIdentificationMode(): EnvironmentIdentificationMod
 export function useSidebarMode() {
   const hydrated = useClientSettingsHydrated();
   const settings = useClientSettingsValue();
-  return resolveSidebarMode(settings, hydrated);
+  const lastcodeHidden = useSidebarModeStore((state) => state.lastcodeHidden);
+  return resolveSidebarMode(settings, hydrated, lastcodeHidden);
+}
+
+export function toggleSidebarMode(): void {
+  if (!getClientSettingsHydratedSnapshot()) return;
+  const settings = getClientSettings();
+  if (settings.lastcodeSidebarEnabled) {
+    useSidebarModeStore.setState((state) => ({ lastcodeHidden: !state.lastcodeHidden }));
+    return;
+  }
+  void updateClientSettings(toggleUpstreamSidebar(settings));
 }
 
 /** Hydrate legacy preferences before a mutation can claim either server-owned list. */

@@ -36,10 +36,10 @@ import {
   useClientSettingsHydrated,
   useEnvironmentIdentificationMode,
   useSidebarMode,
-  useUpdateClientSettings,
+  toggleSidebarMode,
 } from "../hooks/useSettings";
 import LegacyThreadSidebar from "./LegacySidebar";
-import { toggleUpstreamSidebar } from "../sidebarMode";
+import { SidebarPresentation } from "./sidebar/SidebarPresentation";
 import { useThreadVisitedMigration } from "../hooks/useThreadVisitedMigration";
 import ThreadSidebar from "./Sidebar";
 import { SettingsSidebarNav } from "./settings/SettingsSidebarNav";
@@ -103,8 +103,6 @@ function SidebarControl() {
   const usagePageOpen = useLocation({ select: (location) => location.pathname === "/usage" });
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const { toggleSidebar, isMobile, mobileSheetMounted } = useSidebar();
-  const updateClientSettings = useUpdateClientSettings();
-  const sidebarMode = useSidebarMode();
   const clientSettingsHydrated = useClientSettingsHydrated();
   const routeTarget = useParams({
     strict: false,
@@ -168,7 +166,7 @@ function SidebarControl() {
           if (!clientSettingsHydrated) return;
           event.preventDefault();
           event.stopPropagation();
-          if (sidebarMode !== "lastcode") updateClientSettings(toggleUpstreamSidebar);
+          toggleSidebarMode();
           return;
       }
     };
@@ -178,6 +176,7 @@ function SidebarControl() {
     // A focused desktop browser page forwards the chord as a menu action.
     const unsubscribe = window.desktopBridge?.onMenuAction((action) => {
       if (action === "sidebar.toggle") toggleSidebar();
+      if (action === "sidebar.mode.toggle") toggleSidebarMode();
     });
     return () => {
       window.removeEventListener("keydown", onKeyDown, true);
@@ -188,9 +187,7 @@ function SidebarControl() {
     keybindings,
     previewOpen,
     terminalOpen,
-    sidebarMode,
     toggleSidebar,
-    updateClientSettings,
     usagePageOpen,
   ]);
 
@@ -407,9 +404,12 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
               <SidebarChromeHeader isElectron={isElectron} />
               <SettingsSidebarNav pathname={pathname} />
             </>
-          ) : (
-            THREAD_SIDEBARS[sidebarMode]
-          )}
+          ) : null}
+          {Object.entries(THREAD_SIDEBARS).map(([mode, sidebar]) => (
+            <SidebarPresentation key={mode} visible={!isOnSettings && sidebarMode === mode}>
+              {sidebar}
+            </SidebarPresentation>
+          ))}
           <SidebarRail onDoubleClick={resetSidebarWidth} />
         </Sidebar>
         {children}

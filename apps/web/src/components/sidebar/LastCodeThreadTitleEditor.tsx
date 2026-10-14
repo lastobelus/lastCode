@@ -1,8 +1,9 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import type { ScopedThreadRef } from "@t3tools/contracts";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import { threadEnvironment } from "../../state/threads";
 import { renameLastCodeThread } from "./lastcodeThreadRename";
+import { useSidebarModeStore } from "../../sidebarMode";
 import type {
   LastCodeRenameTarget,
   LastCodeThreadEditingCapabilities,
@@ -33,6 +34,9 @@ export function LastCodeThreadTitleEditor({
     }
   }, []);
   const finish = () => finishRename(threadRef, target.session);
+  useLayoutEffect(() => {
+    inputRef.current?.focus();
+  }, []);
   const submit = () => {
     if (committed.current) return;
     committed.current = true;
@@ -57,7 +61,9 @@ export function LastCodeThreadTitleEditor({
           finish();
         }
       }}
-      onBlur={submit}
+      onBlur={() => {
+        if (!useSidebarModeStore.getState().lastcodeHidden) submit();
+      }}
       onClick={(event) => event.stopPropagation()}
       onDoubleClick={(event) => event.stopPropagation()}
     />

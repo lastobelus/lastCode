@@ -373,7 +373,7 @@ export function commandLabel(command: KeybindingCommand): string {
   if (command === "preview.focusUrl") return "Preview: Focus URL";
   const raw = String(command);
   if (raw === "sidebar.mode.toggle") {
-    return "Sidebar: Toggle Inbox/Legacy";
+    return "Sidebar: Toggle Presentation";
   }
   if (raw.startsWith("script.") && raw.endsWith(".run")) {
     return `Run Script: ${titleCaseCommandSegment(raw.slice("script.".length, -".run".length))}`;

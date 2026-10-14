@@ -67,6 +67,8 @@ function familyFor(ref: typeof a, title: string) {
   }).renderedRows[0]!;
 }
 import { useLastCodeThreadEditing } from "./useLastCodeThreadEditing";
+import { SidebarPresentation } from "./SidebarPresentation";
+import { useSidebarModeStore } from "../../sidebarMode";
 const mocks = vi.hoisted(() => ({
   update: vi.fn<(value: unknown) => Promise<AtomCommandResult<unknown, unknown>>>(),
   toast: vi.fn(),
@@ -166,6 +168,7 @@ afterAll(() => {
   else Reflect.deleteProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT");
 });
 beforeEach(() => {
+  useSidebarModeStore.setState({ lastcodeHidden: false });
   vi.clearAllMocks();
   mocks.canOperate = true;
   mocks.compact = false;
@@ -443,6 +446,43 @@ describe("visible status transitions", () => {
   });
 });
 describe("row-local rename editor", () => {
+  it("retains the actual editor draft and restores focus after a presentation round trip", async () => {
+    await render();
+    await act(() =>
+      root?.render(
+        <SidebarPresentation visible>
+          <Harness />
+        </SidebarPresentation>,
+      ),
+    );
+    await click("Rename A");
+    await draft("Mode switch draft");
+    const editor = input()!;
+    useSidebarModeStore.setState({ lastcodeHidden: true });
+    await act(() =>
+      root?.render(
+        <SidebarPresentation visible={false}>
+          <Harness />
+        </SidebarPresentation>,
+      ),
+    );
+    await act(() => editor.blur());
+    expect(mocks.update).not.toHaveBeenCalled();
+    useSidebarModeStore.setState({ lastcodeHidden: false });
+    await act(() =>
+      root?.render(
+        <SidebarPresentation visible>
+          <Harness />
+        </SidebarPresentation>,
+      ),
+    );
+    expect(input()).toBe(editor);
+    expect(editor.value).toBe("Mode switch draft");
+    expect(document.activeElement).toBe(editor);
+    await key("Escape");
+    expect(input()).toBeNull();
+    expect(mocks.update).not.toHaveBeenCalled();
+  });
   it("keeps an inline draft mounted when PR presentation changes beside it", async () => {
     await render();
     await click("Rename A");
