@@ -90,6 +90,7 @@ vi.mock("../../localApi", () => ({
   readLocalApi: () => ({ contextMenu: { show: mocks.menu }, dialogs: { confirm: mocks.confirm } }),
 }));
 vi.mock("../../state/entities", () => ({
+  readEnvironmentSupportsVisitedTracking: () => true,
   readProject: mocks.readProject,
   readThreadShell: mocks.shell,
   readEnvironmentSupportsThreadAnnotations: () => true,
@@ -303,10 +304,9 @@ describe("thread menu binding and scoped targets", () => {
       to: "/dashboard",
       search: { environmentId: env, projectId: id },
     });
-    await select("mark-unread");
-    expect(mocks.unread).toHaveBeenCalledWith(ref);
-    await select("mark-read");
-    expect(mocks.read).toHaveBeenCalledWith(ref);
+    const items = mocks.menu.mock.calls.at(-1)![0];
+    expect(items.find((item) => item.id === "mark-unread")?.disabled).toBe(true);
+    expect(items.find((item) => item.id === "mark-read")?.disabled).toBe(true);
   });
   it("routes handoff IDs with colons from the menu snapshot without normal selection navigation", async () => {
     const handoff: HandoffEntry = {
@@ -378,6 +378,17 @@ describe("thread menu binding and scoped targets", () => {
 });
 
 describe("bulk menu selection snapshot", () => {
+  it("disables synced read actions when the selected destination is read-only", async () => {
+    useThreadSelectionStore.getState().toggleThread(scopedThreadKey(ref));
+    mocks.canOperate = false;
+    await render(true);
+    await select(null);
+    const items = mocks.menu.mock.calls.at(-1)![0];
+    expect(items.find((item) => item.id === "mark-unread")?.disabled).toBe(true);
+    expect(items.find((item) => item.id === "mark-read")?.disabled).toBe(true);
+    expect(mocks.read).not.toHaveBeenCalled();
+    expect(mocks.unread).not.toHaveBeenCalled();
+  });
   it.each(["mark-read", "mark-unread"] as const)(
     "applies %s to the original selection and preserves later selection",
     async (action) => {
