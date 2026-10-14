@@ -20,9 +20,9 @@ const allocation = (stat: NodeFS.Stats) => JSON.stringify([stat.dev, stat.ino, s
 const missing = (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT";
 const allowedRoot = (root: string) =>
   /^apps\/[a-zA-Z0-9_-]+\/dist$/.test(root) || root === "native/resource-monitor/target/debug";
-// oxlint-disable-next-line no-control-regex -- Reject control characters in emitted relative paths.
 const safeRelative = (path: string) =>
   path.length > 0 &&
+  // oxlint-disable-next-line no-control-regex -- Reject control characters in emitted relative paths.
   !/[\\:\x00-\x1f]/.test(path) &&
   !NodePath.posix.isAbsolute(path) &&
   path.split("/").every((part) => part !== "" && part !== "." && part !== "..");
