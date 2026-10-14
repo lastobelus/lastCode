@@ -1,3 +1,4 @@
+import { shouldRecordThreadVisit } from "./ChatView.logic";
 import { findRecordedWorktreeSetup, resolveVisibleWorktreeSetup } from "./ChatView.logic";
 import {
   recallCheckoutIsRepo,
@@ -2221,5 +2222,16 @@ describe("waitForRevertedMessage", () => {
     await vi.advanceTimersByTimeAsync(50);
     await settled;
     vi.useRealTimers();
+  });
+});
+
+describe("explicit read marker visit decisions", () => {
+  it("keeps a deliberate unread rewind sticky on open threads and acknowledges reopening/new activity", () => {
+    expect(shouldRecordThreadVisit(100, 100, false)).toBe(false);
+    expect(shouldRecordThreadVisit(100, 99, true)).toBe(false);
+    expect(shouldRecordThreadVisit(100, 101, true)).toBe(false);
+    expect(shouldRecordThreadVisit(100, 99, false)).toBe(true);
+    expect(shouldRecordThreadVisit(200, 100, false)).toBe(true);
+    expect(shouldRecordThreadVisit(NaN, 100, false)).toBe(false);
   });
 });

@@ -107,6 +107,7 @@ describe("buildThreadActionMenuItems", () => {
     expect(denied.filter((item) => !item.disabled).map((item) => item.id)).toEqual([
       "new-thread-on-branch",
       "mark-unread",
+      "mark-read",
       "copy",
       "project-settings",
     ]);
@@ -169,6 +170,7 @@ describe("buildThreadActionMenuItems", () => {
       "rename",
       "annotate",
       "mark-unread",
+      "mark-read",
       "mark-persistent",
       "stop-thread-processes",
       "copy-path",
@@ -200,6 +202,7 @@ describe("buildThreadActionMenuItems", () => {
     ).toEqual([
       "rename",
       "mark-unread",
+      "mark-read",
       "copy",
       "project-settings",
       "handoffs-heading",
@@ -238,7 +241,7 @@ describe("buildThreadActionMenuItems", () => {
     });
     const filterIndex = items.findIndex((candidate) => candidate.id === "filter-by-project");
     expect(items[filterIndex]).toMatchObject({ label: "Show all projects", icon: "folder-tree" });
-    expect(items[filterIndex - 1]?.id).toBe("mark-unread");
+    expect(items[filterIndex - 1]?.id).toBe("mark-read");
     expect(items[filterIndex + 1]?.id).toBe("auto-settle");
   });
 
@@ -270,7 +273,7 @@ describe("buildThreadActionMenuItems", () => {
     expect(off?.children?.map((child) => child.checked)).toEqual([false, true]);
     // Sits with the per-thread settings after Mark unread, not the lifecycle verbs.
     const items = buildThreadActionMenuItems(baseState);
-    expect(items[items.findIndex((item) => item.id === "mark-unread") + 1]?.id).toBe("auto-settle");
+    expect(items[items.findIndex((item) => item.id === "mark-read") + 1]?.id).toBe("auto-settle");
     expect(
       ids({ ...baseState, supports: { ...baseState.supports, autoSettleOptOut: false } }),
     ).not.toContain("auto-settle");

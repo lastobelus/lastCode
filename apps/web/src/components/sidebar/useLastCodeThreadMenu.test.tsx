@@ -53,6 +53,7 @@ const mocks = vi.hoisted(() => ({
   handoffs: [] as HandoffEntry[],
   metadata: vi.fn<(value: unknown) => Promise<AtomCommandResult<unknown, unknown>>>(),
   unread: vi.fn(),
+  read: vi.fn(),
   archive: vi.fn<LastCodeThreadActions["archiveThreads"]>(),
   persistence: vi.fn<LastCodeThreadActions["setThreadPersistence"]>(),
   unarchive: vi.fn<LastCodeThreadActions["unarchiveThread"]>(),
@@ -79,6 +80,7 @@ vi.mock("./LastCodeThreadActions", () => ({
   useLastCodeThreadActions: () => ({
     archiveThreads: mocks.archive,
     markThreadUnread: mocks.unread,
+    markThreadRead: mocks.read,
     setThreadPersistence: mocks.persistence,
     unarchiveThread: mocks.unarchive,
     deleteThread: mocks.delete,
@@ -303,6 +305,8 @@ describe("thread menu binding and scoped targets", () => {
     });
     await select("mark-unread");
     expect(mocks.unread).toHaveBeenCalledWith(ref);
+    await select("mark-read");
+    expect(mocks.read).toHaveBeenCalledWith(ref);
   });
   it("routes handoff IDs with colons from the menu snapshot without normal selection navigation", async () => {
     const handoff: HandoffEntry = {
@@ -374,6 +378,43 @@ describe("thread menu binding and scoped targets", () => {
 });
 
 describe("bulk menu selection snapshot", () => {
+  it.each(["mark-read", "mark-unread"] as const)(
+    "applies %s to the original selection and preserves later selection",
+    async (action) => {
+      const firstKey = scopedThreadKey(ref),
+        laterRef = scopeThreadRef(env, ThreadId.make("later")),
+        laterKey = scopedThreadKey(laterRef);
+      mocks.shell.mockImplementation((target) =>
+        target.threadId === thread.id ? thread : { ...thread, id: laterRef.threadId },
+      );
+      useThreadSelectionStore.getState().toggleThread(firstKey);
+      await render(true);
+      const menu = deferred<string | null>();
+      mocks.menu.mockReturnValueOnce(menu.promise);
+      await act(() => container!.querySelector<HTMLButtonElement>("button")!.click());
+      await act(() => useThreadSelectionStore.getState().toggleThread(laterKey));
+      await act(async () => {
+        menu.resolve(action);
+        await pending;
+      });
+      expect(action === "mark-read" ? mocks.read : mocks.unread).toHaveBeenCalledExactlyOnceWith(
+        ref,
+      );
+      expect([...useThreadSelectionStore.getState().selectedThreadKeys]).toEqual([
+        firstKey,
+        laterKey,
+      ]);
+    },
+  );
+  it("retains selection and does not acknowledge anything when a bulk menu is cancelled", async () => {
+    const key = scopedThreadKey(ref);
+    useThreadSelectionStore.getState().toggleThread(key);
+    await render(true);
+    await select(null);
+    expect(mocks.read).not.toHaveBeenCalled();
+    expect(mocks.unread).not.toHaveBeenCalled();
+    expect([...useThreadSelectionStore.getState().selectedThreadKeys]).toEqual([key]);
+  });
   it("clears original excluded keys after full archive success while retaining later selection", async () => {
     const cleanup = makeThreadFixture({
       id: ThreadId.make("cleanup"),

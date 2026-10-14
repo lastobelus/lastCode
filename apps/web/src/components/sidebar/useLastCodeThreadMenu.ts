@@ -47,7 +47,7 @@ export function useLastCodeThreadMenu(
   navigateToThread: (ref: ScopedThreadRef) => Promise<void>,
   handleNewThread: ReturnType<typeof useNewThreadHandler>,
 ) {
-  const { unarchiveThread, deleteThread, setThreadPersistence, markThreadUnread } =
+  const { unarchiveThread, deleteThread, setThreadPersistence, markThreadUnread, markThreadRead } =
     useLastCodeThreadActions();
   const updateMetadata = useOrchestrationCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
@@ -163,6 +163,7 @@ export function useLastCodeThreadMenu(
         rename: () => startRename(scopedThreadKey(ref), thread.title),
         annotate: () => editAnnotation(thread),
         "mark-unread": () => markThreadUnread(ref),
+        "mark-read": () => markThreadRead(ref),
         "stop-thread-processes": async () => {
           await stopProcesses(ref);
         },
@@ -199,6 +200,7 @@ export function useLastCodeThreadMenu(
     [
       deleteThread,
       markThreadUnread,
+      markThreadRead,
       setThreadPersistence,
       unarchiveThread,
       copyId,

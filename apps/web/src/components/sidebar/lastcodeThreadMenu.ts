@@ -15,6 +15,7 @@ export const LASTCODE_THREAD_ACTION_POLICY = {
   rename: true,
   annotate: true,
   "mark-unread": false,
+  "mark-read": false,
   "creator-independent": true,
   "creator-grouped": true,
   "open-creator": false,
@@ -69,6 +70,7 @@ function metadataItems(input: ThreadMenuInput): ContextMenuItem<string>[] {
   items.push({ id: "rename", label: "Rename thread" });
   if (input.canAnnotate) items.push({ id: "annotate", label: "Annotate thread…" });
   items.push({ id: "mark-unread", label: "Mark unread" });
+  items.push({ id: "mark-read", label: "Mark read" });
   if (input.creator.groupingEligible) {
     const grouped = input.thread.creatorGrouping === "grouped";
     items.push({

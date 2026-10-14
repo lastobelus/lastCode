@@ -107,6 +107,7 @@ describe("LastCode thread context menu", () => {
     for (const action of [
       null,
       "mark-unread",
+      "mark-read",
       "open-creator",
       "copy-path",
       "copy-thread-id",
@@ -126,6 +127,7 @@ describe("LastCode thread context menu", () => {
       "rename",
       "annotate",
       "mark-unread",
+      "mark-read",
       "creator-independent",
       "open-creator",
       "mark-persistent",
@@ -158,6 +160,7 @@ describe("LastCode thread context menu", () => {
     }
     for (const id of [
       "mark-unread",
+      "mark-read",
       "open-creator",
       "copy-path",
       "open-dashboard",

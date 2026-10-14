@@ -9,6 +9,7 @@ export type LastCodeThreadActions = Pick<
   | "deleteThread"
   | "setThreadPersistence"
   | "markThreadUnread"
+  | "markThreadRead"
 >;
 const ThreadActionsContext = createContext<LastCodeThreadActions | null>(null);
 export function LastCodeThreadActionsProvider({ children }: { children: ReactNode }) {
@@ -19,6 +20,7 @@ export function LastCodeThreadActionsProvider({ children }: { children: ReactNod
     deleteThread,
     setThreadPersistence,
     markThreadUnread,
+    markThreadRead,
   } = useThreadActions();
   const actions = useMemo(
     () => ({
@@ -28,6 +30,7 @@ export function LastCodeThreadActionsProvider({ children }: { children: ReactNod
       deleteThread,
       setThreadPersistence,
       markThreadUnread,
+      markThreadRead,
     }),
     [
       archiveThread,
@@ -36,6 +39,7 @@ export function LastCodeThreadActionsProvider({ children }: { children: ReactNod
       deleteThread,
       setThreadPersistence,
       markThreadUnread,
+      markThreadRead,
     ],
   );
   return <ThreadActionsContext.Provider value={actions}>{children}</ThreadActionsContext.Provider>;

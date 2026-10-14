@@ -1355,3 +1355,14 @@ export function restorePlanFollowUpComposer(input: {
     detectTrigger: true,
   });
 }
+
+/** A current conversation's explicit unread rewind does not itself create new activity. */
+export function shouldRecordThreadVisit(
+  updatedAt: number,
+  visitedAt: number,
+  sameActivitySeen: boolean,
+) {
+  if (!Number.isFinite(updatedAt)) return false;
+  if (Number.isFinite(visitedAt) && visitedAt >= updatedAt) return false;
+  return !sameActivitySeen;
+}

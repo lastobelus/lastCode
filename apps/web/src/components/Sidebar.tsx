@@ -2633,6 +2633,7 @@ export default function Sidebar() {
     reorderPinnedThread,
     reorderActiveThread,
     markThreadUnread,
+    markThreadRead,
     archiveThread,
     unarchiveThread,
     deleteThread,
@@ -4662,6 +4663,7 @@ export default function Sidebar() {
                 ]
               : []),
             { id: "mark-unread", label: `Mark unread (${count})` },
+            { id: "mark-read", label: `Mark read (${count})` },
             {
               ...buildBulkThreadDeleteContextMenuItem({ count, hasPersistentThread }),
               disabled: hasPersistentThread || !canOperateThreads(selectedThreads),
@@ -4685,7 +4687,12 @@ export default function Sidebar() {
                 })
               : selectedThreads;
       if (clicked.value === "settle" && actionTargets.length === 0) return;
-      if (clicked.value !== "mark-unread" && !checkThreadOperations(actionTargets)) return;
+      if (
+        clicked.value !== "mark-unread" &&
+        clicked.value !== "mark-read" &&
+        !checkThreadOperations(actionTargets)
+      )
+        return;
       if (clicked.value?.startsWith("snooze:")) {
         const preset =
           clicked.value === "snooze:custom"
@@ -4766,12 +4773,14 @@ export default function Sidebar() {
         clearSelection();
         return;
       }
-      if (clicked.value === "mark-unread") {
+      if (clicked.value === "mark-unread" || clicked.value === "mark-read") {
         for (const threadKey of threadKeys) {
           const thread = threadByKeyRef.current.get(threadKey);
-          if (thread) markThreadUnread(scopeThreadRef(thread.environmentId, thread.id));
+          if (thread)
+            (clicked.value === "mark-read" ? markThreadRead : markThreadUnread)(
+              scopeThreadRef(thread.environmentId, thread.id),
+            );
         }
-        clearSelection();
         return;
       }
       if (clicked.value !== "delete") return;
@@ -4844,6 +4853,7 @@ export default function Sidebar() {
       confirmThreadDelete,
       deleteThread,
       markThreadUnread,
+      markThreadRead,
       performSnooze,
       removeFromSelection,
       serverConfigs,
@@ -5169,6 +5179,9 @@ export default function Sidebar() {
           case "stop-thread-processes":
             await stopThreadProcesses(threadRef);
             return;
+          case "mark-read":
+            markThreadRead(threadRef);
+            return;
           case "mark-unread":
             markThreadUnread(threadRef);
             return;
@@ -5291,6 +5304,7 @@ export default function Sidebar() {
       router,
       setOpenMobile,
       markThreadUnread,
+      markThreadRead,
       openProjectSettings,
       projectScopeKey,
       openHandoff,

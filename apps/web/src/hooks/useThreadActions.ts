@@ -314,13 +314,23 @@ export async function navigateAfterThreadDeletion(navigate: () => Promise<void>)
  * (thread.mark-unread rewinds the server-side visited watermark, syncing the
  * marker to every device); older servers keep the browser-local marker.
  */
-function useMarkThreadUnread() {
-  const markThreadUnreadMutation = useAtomCommand(threadEnvironment.markUnread, {
-    reportFailure: false,
-  });
+export function useMarkThreadUnread() {
+  const markThreadUnreadMutation = useAtomCommand(threadEnvironment.markUnread);
   const markThreadUnreadLocal = useUiStateStore((state) => state.markThreadUnread);
   return useCallback(
     (target: ScopedThreadRef) => {
+      const thread = readThreadShell(target);
+      const completedAt = thread?.latestRun?.completedAt;
+      if (!completedAt || !Number.isFinite(Date.parse(completedAt))) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "info",
+            title: "Nothing to mark unread",
+            description: "This thread has no completed reply yet.",
+          }),
+        );
+        return;
+      }
       if (readEnvironmentSupportsVisitedTracking(target.environmentId)) {
         void markThreadUnreadMutation({
           environmentId: target.environmentId,
@@ -328,10 +338,37 @@ function useMarkThreadUnread() {
         });
         return;
       }
-      const thread = readThreadShell(target);
-      markThreadUnreadLocal(scopedThreadKey(target), thread?.latestRun?.completedAt);
+      markThreadUnreadLocal(scopedThreadKey(target), completedAt);
     },
     [markThreadUnreadLocal, markThreadUnreadMutation],
+  );
+}
+
+/** Explicit acknowledgement uses the existing visit command, without provider activity. */
+export function useMarkThreadRead() {
+  const visit = useAtomCommand(threadEnvironment.visit);
+  const markVisited = useUiStateStore((state) => state.markThreadVisited);
+  return useCallback(
+    (target: ScopedThreadRef) => {
+      const thread = readThreadShell(target);
+      if (!thread) return;
+      const visitedAt = new Date(
+        Math.max(
+          Date.now(),
+          Date.parse(thread.updatedAt) || 0,
+          Date.parse(thread.latestRun?.completedAt ?? "") || 0,
+        ),
+      ).toISOString();
+      if (readEnvironmentSupportsVisitedTracking(target.environmentId)) {
+        void visit({
+          environmentId: target.environmentId,
+          input: { threadId: target.threadId, visitedAt },
+        });
+        return;
+      }
+      markVisited(scopedThreadKey(target), visitedAt);
+    },
+    [markVisited, visit],
   );
 }
 
@@ -413,6 +450,7 @@ export function useThreadActions() {
     reportFailure: false,
   });
   const markThreadUnread = useMarkThreadUnread();
+  const markThreadRead = useMarkThreadRead();
   const stopThreadSession = useOrchestrationCommand(threadEnvironment.stopSession);
   const removeWorktree = useAtomCommand(vcsEnvironment.removeWorktree, {
     reportFailure: false,
@@ -1468,6 +1506,7 @@ export function useThreadActions() {
       reorderPinnedThread,
       reorderActiveThread,
       markThreadUnread,
+      markThreadRead,
       setThreadAutoSettle,
     }),
     [
@@ -1477,6 +1516,7 @@ export function useThreadActions() {
       confirmAndUnpinThread,
       deleteThread,
       markThreadUnread,
+      markThreadRead,
       pinThread,
       reorderPinnedThread,
       reorderActiveThread,

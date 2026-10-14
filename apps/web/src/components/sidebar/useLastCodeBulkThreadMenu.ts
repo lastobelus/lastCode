@@ -46,9 +46,9 @@ function selectionMenu(entries: ReturnType<typeof readSelectedThreadEntries>) {
 }
 
 export function useLastCodeBulkThreadMenu() {
-  const { archiveThreads, deleteThread, markThreadUnread } = useLastCodeThreadActions();
+  const { archiveThreads, deleteThread, markThreadUnread, markThreadRead } =
+    useLastCodeThreadActions();
   const appSettingsConfirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
-  const clearSelection = useThreadSelectionStore((s) => s.clearSelection);
   const removeFromSelection = useThreadSelectionStore((s) => s.removeFromSelection);
   return useCallback(
     async (position: { x: number; y: number }) => {
@@ -63,8 +63,11 @@ export function useLastCodeBulkThreadMenu() {
 
       if (!selectionActionPermitted(clicked, selectedThreadEntries, persistent)) return;
 
-      if (clicked === "mark-unread") {
-        markSelectionUnread(selectedThreadEntries, markThreadUnread, clearSelection);
+      if (clicked === "mark-unread" || clicked === "mark-read") {
+        markSelectionReadState(
+          selectedThreadEntries,
+          clicked === "mark-read" ? markThreadRead : markThreadUnread,
+        );
         return;
       }
 
@@ -91,21 +94,19 @@ export function useLastCodeBulkThreadMenu() {
     [
       appSettingsConfirmThreadDelete,
       archiveThreads,
-      clearSelection,
       deleteThread,
       markThreadUnread,
+      markThreadRead,
       removeFromSelection,
     ],
   );
 }
 
-function markSelectionUnread(
+function markSelectionReadState(
   entries: ReturnType<typeof readSelectedThreadEntries>,
-  markUnread: ReturnType<typeof useLastCodeThreadActions>["markThreadUnread"],
-  clearSelection: () => void,
+  markReadState: ReturnType<typeof useLastCodeThreadActions>["markThreadUnread"],
 ) {
-  for (const { threadRef } of entries) markUnread(threadRef);
-  clearSelection();
+  for (const { threadRef } of entries) markReadState(threadRef);
 }
 
 /** Only archive/delete require a fresh authority check after the native menu closes. */

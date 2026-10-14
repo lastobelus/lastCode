@@ -1,3 +1,4 @@
+import { shouldRecordThreadVisit } from "./ChatView.logic";
 import { ThreadFind, ThreadFindCanvas, type ThreadFindControls } from "./chat/ThreadFindProvider";
 import { THREAD_FIND_BAR_RESERVED_HEIGHT } from "./chat/ThreadFindBar";
 import { recordServerBrowserHandoff } from "./preview/serverBrowserHandoff";
@@ -3000,15 +3001,27 @@ export default function ChatView(props: ChatViewProps) {
   );
 
   useEffect(() => {
-    if (!serverThread?.id) return;
+    if (!serverThread?.id) {
+      lastDispatchedVisitRef.current = null;
+      return;
+    }
     const threadUpdatedAt = Date.parse(serverThread.updatedAt);
-    if (Number.isNaN(threadUpdatedAt)) return;
     const effectiveLastVisitedAt = resolveThreadLastVisitedAt(
       serverThread.lastVisitedAt,
       activeThreadLocalLastVisitedAt,
     );
     const lastVisitedAt = effectiveLastVisitedAt ? Date.parse(effectiveLastVisitedAt) : NaN;
-    if (!Number.isNaN(lastVisitedAt) && lastVisitedAt >= threadUpdatedAt) return;
+    const dispatchKey = `${routeThreadKey}:${serverThread.updatedAt}`;
+    if (
+      !shouldRecordThreadVisit(
+        threadUpdatedAt,
+        lastVisitedAt,
+        lastDispatchedVisitRef.current === dispatchKey,
+      )
+    ) {
+      if (lastVisitedAt >= threadUpdatedAt) lastDispatchedVisitRef.current = dispatchKey;
+      return;
+    }
 
     if (serverThread.lastVisitedAt !== undefined) {
       // Server-tracked visited state: record the watermark server-side so it
@@ -3017,8 +3030,6 @@ export default function ChatView(props: ChatViewProps) {
       // dedupe also keeps a mark-unread on the open thread sticky: the rewind
       // leaves updatedAt untouched, so the already-dispatched key skips a
       // fresh visit until new activity lands or the thread is reopened.
-      const dispatchKey = `${routeThreadKey}:${serverThread.updatedAt}`;
-      if (lastDispatchedVisitRef.current === dispatchKey) return;
       const dispatch = () => {
         lastDispatchedVisitRef.current = dispatchKey;
         lastVisitDispatchAtRef.current = Date.now();
@@ -3047,6 +3058,7 @@ export default function ChatView(props: ChatViewProps) {
       return () => clearTimeout(timer);
     }
 
+    lastDispatchedVisitRef.current = dispatchKey;
     markThreadVisited(
       scopedThreadKey(scopeThreadRef(serverThread.environmentId, serverThread.id)),
       serverThread.updatedAt,

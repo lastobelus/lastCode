@@ -311,6 +311,9 @@ export function showContextMenuFallback<T extends string>(
       menu.style.left = `${preferredLeft}px`;
       menu.style.top = `${preferredTop}px`;
       menu.dataset.level = String(level);
+      // The detached menu owns presses, including SVG targets; row selection
+      // dismissal must not consume the press before the leaf action runs.
+      menu.addEventListener("mousedown", (event) => event.stopPropagation());
 
       const inner = document.createElement("div");
       // Fit the viewport (minus clampMenuPosition's 4px margins) so menus only
