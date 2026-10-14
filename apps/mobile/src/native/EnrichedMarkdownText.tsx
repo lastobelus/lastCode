@@ -4,7 +4,7 @@ import {
   formatComposerContextHref,
   formatComposerContextReference,
 } from "@t3tools/shared/composerContextReferences";
-import { markdownWithHtml } from "../lib/markdownDocument";
+import { prepareEnrichedMarkdown } from "../lib/enrichedMarkdown";
 import { useCallback, useMemo, useState } from "react";
 import { ActionSheetIOS, Platform, Share, StyleSheet, View } from "react-native";
 import {
@@ -140,7 +140,10 @@ function enrichedStyle(
 
 export function MobileEnrichedMarkdownText(props: SelectableMarkdownTextProps) {
   const { renderImage, resolveImageSource } = props;
-  const markdown = useMemo(() => markdownWithHtml(props.markdown), [props.markdown]);
+  const { markdown, authoredFileLinks } = useMemo(
+    () => prepareEnrichedMarkdown(props.markdown),
+    [props.markdown],
+  );
   const { themeAppearance } = useAppearancePreferences();
   const [documentAssets, setDocumentAssets] = useState<DocumentAssetsEvent["assets"]>([]);
   const onDocumentAssets = useCallback(({ assets }: DocumentAssetsEvent) => {
@@ -162,7 +165,11 @@ export function MobileEnrichedMarkdownText(props: SelectableMarkdownTextProps) {
         : assets,
     );
   }, []);
-  const { linkVariants, linkPillContent } = useEnrichedLinkVariants(documentAssets, props);
+  const { linkVariants, linkPillContent } = useEnrichedLinkVariants(
+    documentAssets,
+    props,
+    authoredFileLinks,
+  );
   const linkRecognition = useMemo(
     () => ({
       text: enrichedSkillLinkRegex(props.skills) ?? undefined,

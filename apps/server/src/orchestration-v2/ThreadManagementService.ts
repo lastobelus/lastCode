@@ -48,6 +48,7 @@ import * as Orchestrator from "./Orchestrator.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import { DispatchModeLimit, exceededDispatchModeLimit } from "./DispatchModeLimit.ts";
+import { ThreadReadAuthorization } from "./ThreadReadAuthorization.ts";
 import { projectTurnItemForDetail } from "./WireProjection.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -308,7 +309,7 @@ export interface ThreadManagementServiceShape {
     threadId: ThreadId,
   ) => Effect.Effect<void, LegacyV1ThreadImporter.LegacyV1ThreadImportError>;
   /**
-   * The single chokepoint for commands that can start or wake provider work:
+   * Commands that can start or wake provider work:
    * `message.dispatch` and `delegated_task.request` are refused here when the
    * resolved instance is off for the project, except a command id that
    * already has a receipt, which only replays its recorded result.
@@ -317,6 +318,12 @@ export interface ThreadManagementServiceShape {
     command: OrchestrationV2ServerCommand,
   ) => Effect.Effect<
     Orchestrator.OrchestratorV2DispatchResult,
+    Orchestrator.OrchestratorV2Error | ThreadManagementProviderInstanceDisabledError
+  >;
+  readonly dispatchLaunch: (
+    input: Orchestrator.OrchestratorV2LaunchDispatchInput,
+  ) => Effect.Effect<
+    Orchestrator.OrchestratorV2LaunchDispatchResult,
     Orchestrator.OrchestratorV2Error | ThreadManagementProviderInstanceDisabledError
   >;
   readonly getThreadHistoryPage: Orchestrator.OrchestratorV2["Service"]["getThreadHistoryPage"];
@@ -596,12 +603,13 @@ const make = Effect.gen(function* () {
 
   const ensureCommandTranscripts = Effect.fn(
     "orchestrationV2.threadManagement.ensureCommandTranscripts",
-  )(function* (command: OrchestrationV2ServerCommand) {
-    yield* Effect.forEach(
-      existingThreadIdsForCommand(command),
-      (threadId) => ensureLegacyTranscript(threadId),
-      { discard: true },
-    ).pipe(
+  )(function* (
+    command: OrchestrationV2ServerCommand,
+    threadIds: ReadonlyArray<ThreadId> = existingThreadIdsForCommand(command),
+  ) {
+    yield* Effect.forEach(threadIds, (threadId) => ensureLegacyTranscript(threadId), {
+      discard: true,
+    }).pipe(
       Effect.mapError(
         (cause) =>
           new Orchestrator.OrchestratorDispatchError({
@@ -635,9 +643,8 @@ const make = Effect.gen(function* () {
       Effect.andThen(orchestrator.getThreadSnapshotWindow(threadId, options)),
     );
 
-  // Every path that can start or wake a provider turn funnels through this
-  // dispatch, so resolving and checking the target instance here (instead of
-  // at each caller) is the one place "off" is enforced.
+  // Ordinary dispatches and combined launches enforce the same project policy
+  // before accepting provider work, while allowing recorded receipt replays.
   const assertDispatchTargetEnabled = (command: OrchestrationV2ServerCommand) => {
     switch (command.type) {
       case "message.dispatch":
@@ -670,6 +677,26 @@ const make = Effect.gen(function* () {
       Effect.andThen(assertDispatchTargetEnabled(command)),
       Effect.andThen(orchestrator.dispatch(command)),
     );
+
+  const dispatchLaunch: ThreadManagementServiceShape["dispatchLaunch"] = Effect.fn(
+    "orchestrationV2.threadManagement.dispatchLaunch",
+  )(function* (input) {
+    yield* ensureCommandTranscripts(input.claim);
+    const { senderThreadId, threadId } = input.initialMessage;
+    if (senderThreadId !== undefined && senderThreadId !== threadId) {
+      yield* ensureCommandTranscripts(input.initialMessage, [senderThreadId]);
+    }
+    if (input.claim.type === "thread.create") {
+      yield* assertProviderInstanceEnabled({
+        projectId: input.claim.projectId,
+        commandId: input.initialMessage.commandId,
+        instanceId: (input.initialMessage.modelSelection ?? input.claim.modelSelection).instanceId,
+      });
+    } else {
+      yield* assertDispatchTargetEnabled(input.initialMessage);
+    }
+    return yield* orchestrator.dispatchLaunch(input);
+  });
 
   const getProjectThread: ThreadManagementServiceShape["getProjectThread"] = (input) =>
     getThreadProjection(input.threadId).pipe(
@@ -776,6 +803,8 @@ const make = Effect.gen(function* () {
         };
       }
 
+      const authorization = yield* ThreadReadAuthorization;
+      yield* authorization.authorize(input.threadId, input.messageId);
       const dispatched = yield* dispatch({
         type: "message.dispatch",
         commandId: input.commandId,
@@ -1135,6 +1164,7 @@ const make = Effect.gen(function* () {
         Effect.andThen(orchestrator.searchThread(input)),
       ),
     dispatch,
+    dispatchLaunch,
     getThreadHistoryPage: (threadId, cursor, throughEntryId, conversationOnly) =>
       ensureProjectionTranscript(threadId).pipe(
         Effect.andThen(
