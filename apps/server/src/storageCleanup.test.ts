@@ -5,7 +5,6 @@ import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 import type * as Path from "effect/Path";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -341,9 +340,6 @@ const cleanupFixture = Effect.gen(function* () {
   const terminalListeners: Parameters<
     TerminalManager.TerminalManager["Service"]["subscribeMetadata"]
   >[0][] = [];
-  const processDirectories = yield* Effect.serviceOption(
-    GeneratedDependencies.ProcessWorkingDirectories,
-  );
   const context = yield* Layer.build(StorageCleanup.layer).pipe(
     Effect.provideService(ServerConfig.ServerConfig, config),
     Effect.provideService(FileSystem.FileSystem, {
@@ -358,10 +354,6 @@ const cleanupFixture = Effect.gen(function* () {
             )
           : fs.exists(target),
     }),
-    Effect.provideService(
-      GeneratedDependencies.ProcessWorkingDirectories,
-      Option.getOrElse(processDirectories, () => Effect.succeed([])),
-    ),
     Effect.provideService(GitVcsDriver.GitVcsDriver, {
       ...git,
       execute: (input) =>
@@ -801,7 +793,14 @@ const runCleanupTest = <A, E>(
     | Path.Path
     | Scope.Scope
   >,
-) => effect.pipe(Effect.provide(cleanupTestLayer), Effect.scoped);
+) =>
+  effect.pipe(
+    // Context.Reference falls back to the real host inventory. Keep this test
+    // default outside the fixture so individual tests can override it.
+    Effect.provideService(GeneratedDependencies.ProcessWorkingDirectories, Effect.succeed([])),
+    Effect.provide(cleanupTestLayer),
+    Effect.scoped,
+  );
 
 describe("provider protection during storage cleanup", () => {
   it.live.each(["stopped", "error"] as const)(
