@@ -113,6 +113,7 @@ export function useThreadActionMenu(input: {
     unarchiveThread,
     deleteThread,
     markThreadUnread,
+    markThreadRead,
   } = useThreadActions();
   const updateThreadMetadata = useOrchestrationCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
@@ -330,6 +331,9 @@ export function useThreadActionMenu(input: {
           case "mark-unread":
             markThreadUnread(threadRef);
             return;
+          case "mark-read":
+            markThreadRead(threadRef);
+            return;
           case "stop-thread-processes":
             await stopThreadProcesses(threadRef);
             return;
@@ -432,6 +436,7 @@ export function useThreadActionMenu(input: {
       handoffsMenuLimit,
       logicalProjectKeyByPhysicalKey,
       markThreadUnread,
+      markThreadRead,
       onStartRename,
       openHandoff,
       pinThread,

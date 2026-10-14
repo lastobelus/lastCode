@@ -4,7 +4,12 @@ import {
   scopeThreadRef,
   scopedThreadKey,
 } from "@t3tools/client-runtime/environment";
-import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import {
+  settlePromise,
+  squashAtomCommandFailure,
+  isAtomCommandInterrupted,
+  type AtomCommandResult,
+} from "@t3tools/client-runtime/state/runtime";
 import { canSnooze, threadWokeAt } from "@t3tools/client-runtime/state/thread-settled";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import {
@@ -314,31 +319,45 @@ export async function navigateAfterThreadDeletion(navigate: () => Promise<void>)
  * (thread.mark-unread rewinds the server-side visited watermark, syncing the
  * marker to every device); older servers keep the browser-local marker.
  */
+function reportReadMarkerFailure(result: AtomCommandResult<unknown, unknown>) {
+  if (result._tag !== "Failure" || isAtomCommandInterrupted(result)) return;
+  const error = squashAtomCommandFailure(result);
+  toastManager.add(
+    stackedThreadToast({
+      type: "error",
+      title: "Read marker could not be saved",
+      description: error instanceof Error ? error.message : "Reconnect and try again.",
+    }),
+  );
+}
+
 export function useMarkThreadUnread() {
   const markThreadUnreadMutation = useAtomCommand(threadEnvironment.markUnread);
   const markThreadUnreadLocal = useUiStateStore((state) => state.markThreadUnread);
   return useCallback(
-    (target: ScopedThreadRef) => {
+    (target: ScopedThreadRef, reportUnsupported = true) => {
       const thread = readThreadShell(target);
       const completedAt = thread?.latestRun?.completedAt;
       if (!completedAt || !Number.isFinite(Date.parse(completedAt))) {
-        toastManager.add(
-          stackedThreadToast({
-            type: "info",
-            title: "Nothing to mark unread",
-            description: "This thread has no completed reply yet.",
-          }),
-        );
-        return;
+        if (reportUnsupported)
+          toastManager.add(
+            stackedThreadToast({
+              type: "info",
+              title: "Nothing to mark unread",
+              description: "This thread has no completed reply yet.",
+            }),
+          );
+        return false;
       }
       if (readEnvironmentSupportsVisitedTracking(target.environmentId)) {
         void markThreadUnreadMutation({
           environmentId: target.environmentId,
           input: { threadId: target.threadId },
-        });
-        return;
+        }).then(reportReadMarkerFailure);
+        return true;
       }
       markThreadUnreadLocal(scopedThreadKey(target), completedAt);
+      return true;
     },
     [markThreadUnreadLocal, markThreadUnreadMutation],
   );
@@ -354,7 +373,6 @@ export function useMarkThreadRead() {
       if (!thread) return;
       const visitedAt = new Date(
         Math.max(
-          Date.now(),
           Date.parse(thread.updatedAt) || 0,
           Date.parse(thread.latestRun?.completedAt ?? "") || 0,
         ),
@@ -363,7 +381,7 @@ export function useMarkThreadRead() {
         void visit({
           environmentId: target.environmentId,
           input: { threadId: target.threadId, visitedAt },
-        });
+        }).then(reportReadMarkerFailure);
         return;
       }
       markVisited(scopedThreadKey(target), visitedAt);

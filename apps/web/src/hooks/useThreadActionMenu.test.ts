@@ -158,6 +158,7 @@ vi.mock("./useThreadActions", () => ({
     ...Object.fromEntries(
       [
         "markThreadUnread",
+        "markThreadRead",
         "settleThread",
         "unsettleThread",
         "snoozeThread",
@@ -170,7 +171,13 @@ vi.mock("./useThreadActions", () => ({
         action,
         async (...args: unknown[]) => {
           if (action === "archiveThread") state.archiveRequests.push(args);
-          recordEffect(action === "markThreadUnread" ? "mark-unread" : action);
+          recordEffect(
+            action === "markThreadUnread"
+              ? "mark-unread"
+              : action === "markThreadRead"
+                ? "mark-read"
+                : action,
+          );
           return AsyncResult.success(undefined);
         },
       ]),
@@ -255,6 +262,7 @@ describe("thread menu permissions", () => {
     ["new-thread-on-branch", "draft"],
     ["copy-thread-id", "copy"],
     ["mark-unread", "mark-unread"],
+    ["mark-read", "mark-read"],
     ["project-settings", "project-settings"],
   ] as const)("keeps %s available without task permission", async (action, effect) => {
     state.show.mockResolvedValue(action);

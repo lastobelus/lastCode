@@ -1,4 +1,4 @@
-import { shouldRecordThreadVisit } from "./ChatView.logic";
+import { resolveThreadVisitDecision } from "./ChatView.logic";
 import { ThreadFind, ThreadFindCanvas, type ThreadFindControls } from "./chat/ThreadFindProvider";
 import { THREAD_FIND_BAR_RESERVED_HEIGHT } from "./chat/ThreadFindBar";
 import { recordServerBrowserHandoff } from "./preview/serverBrowserHandoff";
@@ -3002,7 +3002,12 @@ export default function ChatView(props: ChatViewProps) {
 
   useEffect(() => {
     if (!serverThread?.id) {
-      lastDispatchedVisitRef.current = null;
+      lastDispatchedVisitRef.current = resolveThreadVisitDecision(
+        NaN,
+        NaN,
+        null,
+        lastDispatchedVisitRef.current,
+      ).nextKey;
       return;
     }
     const threadUpdatedAt = Date.parse(serverThread.updatedAt);
@@ -3012,14 +3017,14 @@ export default function ChatView(props: ChatViewProps) {
     );
     const lastVisitedAt = effectiveLastVisitedAt ? Date.parse(effectiveLastVisitedAt) : NaN;
     const dispatchKey = `${routeThreadKey}:${serverThread.updatedAt}`;
-    if (
-      !shouldRecordThreadVisit(
-        threadUpdatedAt,
-        lastVisitedAt,
-        lastDispatchedVisitRef.current === dispatchKey,
-      )
-    ) {
-      if (lastVisitedAt >= threadUpdatedAt) lastDispatchedVisitRef.current = dispatchKey;
+    const visitDecision = resolveThreadVisitDecision(
+      threadUpdatedAt,
+      lastVisitedAt,
+      dispatchKey,
+      lastDispatchedVisitRef.current,
+    );
+    if (!visitDecision.record) {
+      lastDispatchedVisitRef.current = visitDecision.nextKey;
       return;
     }
 
@@ -3058,7 +3063,7 @@ export default function ChatView(props: ChatViewProps) {
       return () => clearTimeout(timer);
     }
 
-    lastDispatchedVisitRef.current = dispatchKey;
+    lastDispatchedVisitRef.current = visitDecision.nextKey;
     markThreadVisited(
       scopedThreadKey(scopeThreadRef(serverThread.environmentId, serverThread.id)),
       serverThread.updatedAt,

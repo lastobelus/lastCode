@@ -1,4 +1,5 @@
 import { useCallback } from "react";
+import { markThreadsUnread } from "../../hooks/threadReadActions";
 import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
 import { useClientSettings } from "~/hooks/useSettings";
@@ -63,11 +64,15 @@ export function useLastCodeBulkThreadMenu() {
 
       if (!selectionActionPermitted(clicked, selectedThreadEntries, persistent)) return;
 
-      if (clicked === "mark-unread" || clicked === "mark-read") {
-        markSelectionReadState(
-          selectedThreadEntries,
-          clicked === "mark-read" ? markThreadRead : markThreadUnread,
+      if (clicked === "mark-unread") {
+        markThreadsUnread(
+          selectedThreadEntries.map(({ threadRef }) => threadRef),
+          markThreadUnread,
         );
+        return;
+      }
+      if (clicked === "mark-read") {
+        markSelectionReadState(selectedThreadEntries, markThreadRead);
         return;
       }
 
@@ -104,7 +109,7 @@ export function useLastCodeBulkThreadMenu() {
 
 function markSelectionReadState(
   entries: ReturnType<typeof readSelectedThreadEntries>,
-  markReadState: ReturnType<typeof useLastCodeThreadActions>["markThreadUnread"],
+  markReadState: ReturnType<typeof useLastCodeThreadActions>["markThreadRead"],
 ) {
   for (const { threadRef } of entries) markReadState(threadRef);
 }

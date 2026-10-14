@@ -162,7 +162,9 @@ export function useLastCodeThreadMenu(
         },
         rename: () => startRename(scopedThreadKey(ref), thread.title),
         annotate: () => editAnnotation(thread),
-        "mark-unread": () => markThreadUnread(ref),
+        "mark-unread": () => {
+          markThreadUnread(ref);
+        },
         "mark-read": () => markThreadRead(ref),
         "stop-thread-processes": async () => {
           await stopProcesses(ref);

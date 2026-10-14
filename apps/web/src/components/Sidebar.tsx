@@ -155,6 +155,7 @@ import {
   useThreadSelectionStore,
 } from "../threadSelectionStore";
 import { useAcknowledgeThreadWoke, useThreadActions } from "../hooks/useThreadActions";
+import { markThreadsUnread } from "../hooks/threadReadActions";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { useTerminalFocus } from "../hooks/useTerminalFocus";
 import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
@@ -4774,13 +4775,15 @@ export default function Sidebar() {
         return;
       }
       if (clicked.value === "mark-unread" || clicked.value === "mark-read") {
-        for (const threadKey of threadKeys) {
+        const refs = threadKeys.flatMap((threadKey) => {
           const thread = threadByKeyRef.current.get(threadKey);
-          if (thread)
-            (clicked.value === "mark-read" ? markThreadRead : markThreadUnread)(
-              scopeThreadRef(thread.environmentId, thread.id),
-            );
+          return thread ? [scopeThreadRef(thread.environmentId, thread.id)] : [];
+        });
+        if (clicked.value === "mark-unread") {
+          markThreadsUnread(refs, markThreadUnread);
+          return;
         }
+        for (const ref of refs) markThreadRead(ref);
         return;
       }
       if (clicked.value !== "delete") return;

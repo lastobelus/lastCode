@@ -1357,12 +1357,15 @@ export function restorePlanFollowUpComposer(input: {
 }
 
 /** A current conversation's explicit unread rewind does not itself create new activity. */
-export function shouldRecordThreadVisit(
+export function resolveThreadVisitDecision(
   updatedAt: number,
   visitedAt: number,
-  sameActivitySeen: boolean,
+  currentKey: string | null,
+  previousKey: string | null,
 ) {
-  if (!Number.isFinite(updatedAt)) return false;
-  if (Number.isFinite(visitedAt) && visitedAt >= updatedAt) return false;
-  return !sameActivitySeen;
+  if (currentKey === null) return { record: false, nextKey: null };
+  if (!Number.isFinite(updatedAt)) return { record: false, nextKey: previousKey };
+  if (Number.isFinite(visitedAt) && visitedAt >= updatedAt)
+    return { record: false, nextKey: currentKey };
+  return { record: currentKey !== previousKey, nextKey: currentKey };
 }
