@@ -819,10 +819,9 @@ export function runDevRunnerWithInput(input: DevRunnerCliInput) {
     const usageCwd = yield* HostProcess.WorkingDirectory;
     const noteDependencyUse = Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis;
-      yield* Effect.try({
-        try: () => recordDependencyUse(usageCwd, now),
-        catch: (cause) => cause,
-      }).pipe(Effect.catch(() => Effect.logDebug("Could not record development dependency use")));
+      yield* Effect.try(() => recordDependencyUse(usageCwd, now)).pipe(
+        Effect.catch(() => Effect.logDebug("Could not record development dependency use")),
+      );
     });
     yield* Effect.acquireRelease(noteDependencyUse, () => noteDependencyUse);
     const child = yield* ChildProcess.make(spawnCommand.command, spawnCommand.args, {

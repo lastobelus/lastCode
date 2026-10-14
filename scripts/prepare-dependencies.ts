@@ -48,6 +48,7 @@ export function prepareDependencies(cwd: string, execute = NodeChildProcess.spaw
     )
       return;
     try {
+      // @effect-diagnostics-next-line globalDate:off -- This dependency-free Node bootstrap cannot import the Effect clock.
       observeDependencyActivity(location.stdout.trim(), target, Date.now(), true);
     } catch {
       // Optional aging evidence must not prevent repairing or preparing packages.

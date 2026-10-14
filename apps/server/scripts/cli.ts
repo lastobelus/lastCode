@@ -97,10 +97,7 @@ const buildCmd = Command.make(
           );
           const noteDependencyUse = Effect.gen(function* () {
             const now = yield* Clock.currentTimeMillis;
-            yield* Effect.try({
-              try: () => recordDependencyUse(repoRoot, now),
-              catch: (cause) => cause,
-            }).pipe(
+            yield* Effect.try(() => recordDependencyUse(repoRoot, now)).pipe(
               Effect.catch(() => Effect.logWarning("[cli] Could not record build dependency use.")),
             );
           });

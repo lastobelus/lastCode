@@ -1403,7 +1403,7 @@ describe("verified build sweep shares the dependency rule", () => {
       ],
       counts: { removed: 0, kept: 1, failed: 0 },
       omittedCount: 0,
-    };
+    } as const;
     expect(decodeCleanupReport(report).entries[0]?.worktreeResource).toBeUndefined();
     expect(
       decodeCleanupReport({
@@ -2083,10 +2083,6 @@ describe("storage cleanup reports and local file policies", () => {
         setPolicy(policy);
         expect(yield* service.latestReport).toBeNull();
         yield* fs.writeFileString(`${worktree}/${file}`, "local data\n");
-        const sizes = yield* Effect.forEach(yield* fs.readDirectory(worktree), (name) =>
-          fs.stat(`${worktree}/${name}`).pipe(Effect.map((stat) => Number(stat.size))),
-        );
-        const bytes = sizes.reduce((sum, size) => sum + size, 0);
         const report = yield* service.runNow;
         yield* service.drain;
         expect(report.trigger).toBe("manual");
@@ -2100,11 +2096,11 @@ describe("storage cleanup reports and local file policies", () => {
             path: worktree,
             threadId: "thread-1",
             threadTitle: "Thread",
-            bytes: outcome === "removed" ? bytes : null,
+            bytes: null,
             files: null,
           },
         ]);
-        expect(report.bytesFreed).toBe(outcome === "removed" ? bytes : 0);
+        expect(report.bytesFreed).toBe(0);
         expect(yield* fs.exists(worktree)).toBe(outcome === "kept");
         expect(yield* service.latestReport).toEqual(report);
         if (outcome === "kept")

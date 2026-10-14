@@ -68,6 +68,10 @@ const sentence = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 const REPORT_ENTRY_LIMIT = 200;
 const isGitCommandError = Schema.is(GitCommandError);
 
+type CleanupWorkingEntry = {
+  -readonly [Key in keyof StorageCleanupReportEntry]: StorageCleanupReportEntry[Key];
+};
+
 function cleanupFailureReason(error: { readonly message: string }) {
   return isGitCommandError(error)
     ? `${error.command}: ${error.detail.split(/\r?\n/)[0]}${error.reason ? ` (${error.reason})` : ""}`
@@ -667,22 +671,22 @@ const make = Effect.gen(function* () {
   const cleanDisposableOutputs = Effect.fn("StorageCleanup.cleanDisposableOutputs")(function* (
     serverSettings: ServerSettings,
     now: number,
-    entries: StorageCleanupReportEntry[],
+    entries: CleanupWorkingEntry[],
     resource: "dependencies" | "generated-builds",
   ) {
     const generatedBuilds = resource === "generated-builds";
     const outputPath = (cwd: string) => (generatedBuilds ? cwd : path.join(cwd, "node_modules"));
     const outputExists = (cwd: string) =>
       generatedBuilds ? builds.hasOutputs(cwd) : fs.exists(outputPath(cwd));
-    const observe = (
+    const observe = Effect.fnUntraced(function* (
       input: { managedWorktreesRoot: string; repositoryRoot: string; worktreePath: string },
       time: number,
       used = false,
       persist = true,
-    ) =>
-      generatedBuilds
-        ? builds.observe(input, time, used, persist)
-        : dependencies.observe(input, time, used, persist);
+    ) {
+      if (generatedBuilds) return yield* builds.observe(input, time, used, persist);
+      return yield* dependencies.observe(input, time, used, persist);
+    });
     const unrecognizedReason = generatedBuilds
       ? "No verified compiler emissions; legacy build outputs need exact-file review"
       : "No dependency install could be safely recognized";
@@ -864,12 +868,12 @@ const make = Effect.gen(function* () {
         activity === null ? null : { ...activity, protectedReason },
       );
     }
-    const reports = new Map<string, StorageCleanupReportEntry>();
+    const reports = new Map<string, CleanupWorkingEntry>();
     const noteCandidate = (
       thread: Pick<OrchestrationV2ThreadShell, "id" | "title">,
       worktreePath: string,
     ) => {
-      const entry: StorageCleanupReportEntry = {
+      const entry: CleanupWorkingEntry = {
         kind: "worktree",
         worktreeResource: resource,
         outcome: "kept",
@@ -1036,7 +1040,7 @@ const make = Effect.gen(function* () {
     }
     for (const [cwd, mappings] of registeredGroups) {
       if (knownPaths.has(cwd) || !(yield* outputExists(cwd))) continue;
-      const entry: StorageCleanupReportEntry = {
+      const entry: CleanupWorkingEntry = {
         kind: "worktree",
         worktreeResource: resource,
         outcome: "kept",
@@ -1711,7 +1715,7 @@ const make = Effect.gen(function* () {
   const cleanWorktrees = Effect.fn("StorageCleanup.cleanWorktrees")(function* (
     serverSettings: ServerSettings,
     now: number,
-    entries: StorageCleanupReportEntry[],
+    entries: CleanupWorkingEntry[],
     runId: string,
   ) {
     if (!anyWorktreePolicy(serverSettings, worktreeCleanupEnabled)) return;
@@ -1781,7 +1785,7 @@ const make = Effect.gen(function* () {
       const project = deleted
         ? { workspaceRoot: thread.workspaceRoot }
         : snapshot.projects.find((entry) => entry.id === thread.projectId);
-      const entry: StorageCleanupReportEntry = {
+      const entry: CleanupWorkingEntry = {
         kind: "worktree",
         outcome: "kept",
         reason: "",
@@ -2171,7 +2175,7 @@ const make = Effect.gen(function* () {
   });
 
   const reportUnownedWorktrees = Effect.fn("StorageCleanup.reportUnownedWorktrees")(function* (
-    entries: StorageCleanupReportEntry[],
+    entries: CleanupWorkingEntry[],
     runId: string,
   ) {
     const seenWorktrees = new Set<string>();
@@ -2179,7 +2183,7 @@ const make = Effect.gen(function* () {
     const managedRoots: string[] = [];
     const recordInventoryFailure = (failedPath: string, error: { readonly message: string }) =>
       Effect.gen(function* () {
-        const entry: StorageCleanupReportEntry = {
+        const entry: CleanupWorkingEntry = {
           kind: "worktree",
           outcome: "failed",
           reason: cleanupFailureReason(error),
@@ -2321,7 +2325,7 @@ const make = Effect.gen(function* () {
     }
     for (const worktreePath of worktrees) {
       if (owned.has(worktreePath)) continue;
-      const entry: StorageCleanupReportEntry = {
+      const entry: CleanupWorkingEntry = {
         kind: "worktree",
         outcome: "kept",
         reason: "No owning thread; retained for review",
@@ -2382,7 +2386,7 @@ const make = Effect.gen(function* () {
     const serverSettings = yield* settingsService.getSettings;
     const settings = serverSettings.storageCleanup;
     const runId = `${now}-${++sweepSequence}`;
-    const entries: StorageCleanupReportEntry[] = [];
+    const entries: CleanupWorkingEntry[] = [];
     yield* audit({
       event: "sweep-start",
       runId,
@@ -2393,7 +2397,7 @@ const make = Effect.gen(function* () {
     yield* cleanDisposableOutputs(serverSettings, now, entries, "dependencies").pipe(
       Effect.catch((error) =>
         Effect.gen(function* () {
-          const entry: StorageCleanupReportEntry = {
+          const entry: CleanupWorkingEntry = {
             kind: "worktree",
             worktreeResource: "dependencies",
             outcome: "failed",
@@ -2430,7 +2434,7 @@ const make = Effect.gen(function* () {
     yield* cleanWorktrees(serverSettings, now, entries, runId).pipe(
       Effect.catch((error) =>
         Effect.gen(function* () {
-          const entry: StorageCleanupReportEntry = {
+          const entry: CleanupWorkingEntry = {
             kind: "worktree",
             outcome: "failed",
             reason: cleanupFailureReason(error),
@@ -2456,7 +2460,7 @@ const make = Effect.gen(function* () {
       yield* reportUnownedWorktrees(entries, runId).pipe(
         Effect.catch((error) =>
           Effect.gen(function* () {
-            const entry: StorageCleanupReportEntry = {
+            const entry: CleanupWorkingEntry = {
               kind: "worktree",
               outcome: "failed",
               reason: cleanupFailureReason(error),
@@ -2504,7 +2508,7 @@ const make = Effect.gen(function* () {
         ),
         Effect.catch((error) =>
           Effect.gen(function* () {
-            const entry: StorageCleanupReportEntry = {
+            const entry: CleanupWorkingEntry = {
               kind: category.kind,
               outcome: "failed",
               reason: cleanupFailureReason(error),
