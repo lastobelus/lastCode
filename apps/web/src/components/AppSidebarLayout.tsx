@@ -358,19 +358,10 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
       return;
     }
 
-    const unsubscribe = onMenuAction((action) => {
-      if (action === "open-settings") {
-        const isSettingsRoute = /^\/settings(\/|$)/.test(pathname);
-        if (!isSettingsRoute) {
-          void navigate({ to: "/settings" });
-        }
-      }
+    return onMenuAction((action) => {
+      if (action === "open-settings" && !isOnSettings) void navigate({ to: "/settings" });
     });
-
-    return () => {
-      unsubscribe?.();
-    };
-  }, [navigate, pathname]);
+  }, [navigate, isOnSettings]);
 
   return (
     <PanelAnimationSuppressionProvider value={panelAnimationsSuppressed}>
