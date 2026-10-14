@@ -79,6 +79,10 @@ function SubagentOutcome({
             role="img"
             aria-label={label}
             className="inline-flex shrink-0 items-center text-3xs text-sidebar-muted-foreground"
+            style={{
+              minWidth: "calc(14px * var(--lastcode-sidebar-content-zoom))",
+              minHeight: "calc(14px * var(--lastcode-sidebar-content-zoom))",
+            }}
           />
         }
       >
