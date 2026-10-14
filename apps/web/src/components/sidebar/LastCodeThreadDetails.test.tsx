@@ -2,7 +2,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vite-plus/test";
-import { MessageId } from "@t3tools/contracts";
+import { ThreadId, MessageId } from "@t3tools/contracts";
 import { makeThreadFixture } from "../../test-fixtures";
 import { LastCodeThreadMetadata } from "./LastCodeThreadMetadata";
 import { LastCodeThreadDetails } from "./LastCodeThreadDetails";
@@ -13,13 +13,17 @@ import {
   handleLastCodeThreadRowKeyDown,
   useLastCodeThreadFileDrop,
 } from "./lastcodeThreadRowInteractions";
-import { projectLastCodeSidebarFamilies } from "../lastcodeSidebarFamilies.logic";
+import {
+  lastcodeSidebarThreadKey,
+  projectLastCodeSidebarFamilies,
+} from "../lastcodeSidebarFamilies.logic";
 const mocks = vi.hoisted(() => ({
   lease: vi.fn(),
   drop: vi.fn(),
   navigate: vi.fn(),
   context: vi.fn(),
   archive: vi.fn(),
+  subheaders: true,
   worktrees: true,
   edit: vi.fn(),
   resolve: vi.fn(),
@@ -38,7 +42,7 @@ vi.mock("../../hooks/useSettings", () => ({
     key === "legacySidebarThreadGroupingStyle"
       ? "typed-groups"
       : key === "lastcodeSidebarFamilyStatusSubheaders"
-        ? true
+        ? mocks.subheaders
         : mocks.worktrees,
 }));
 vi.mock("../ThreadStatusIndicators", () => ({
@@ -56,7 +60,15 @@ const thread = makeThreadFixture({
     resolvedAt: null,
   },
 });
-function Harness({ jump = null, active = true }: { jump?: string | null; active?: boolean }) {
+function Harness({
+  jump = null,
+  active = true,
+  withChildren = false,
+}: {
+  jump?: string | null;
+  active?: boolean;
+  withChildren?: boolean;
+}) {
   const lifetime = useLastCodeThreadDetails(
     { environmentId: thread.environmentId, threadId: thread.id },
     editing,
@@ -83,8 +95,21 @@ function Harness({ jump = null, active = true }: { jump?: string | null; active?
       <LastCodeThreadRowSurface
         family={
           projectLastCodeSidebarFamilies({
-            threads: [value],
-            collapsedByKey: {},
+            threads: withChildren
+              ? [
+                  value,
+                  makeThreadFixture({
+                    id: ThreadId.make("descendant"),
+                    environmentId: value.environmentId,
+                    lineage: {
+                      rootThreadId: value.id,
+                      parentThreadId: value.id,
+                      relationshipToParent: "subagent",
+                    },
+                  }),
+                ]
+              : [value],
+            collapsedByKey: withChildren ? { [lastcodeSidebarThreadKey(value)]: false } : {},
             activeThreadKey: null,
             projectExpanded: true,
             previewCount: 5,
@@ -92,7 +117,10 @@ function Harness({ jump = null, active = true }: { jump?: string | null; active?
             groupingStyle: "typed-groups",
           }).renderedItems.flatMap((item) => (item.type === "thread" ? [item.row] : []))[0]!
         }
-        relationship={{ relationshipLabel: null, creatorDescription: null }}
+        relationship={{
+          relationshipLabel: withChildren ? "Subagent" : null,
+          creatorDescription: null,
+        }}
         lifetime={lifetime}
         gestures={{
           handleRowClick: mocks.navigate,
@@ -158,6 +186,7 @@ afterEach(async () => {
   document.body.replaceChildren();
   vi.clearAllMocks();
   mocks.permission.mockReturnValue(true);
+  mocks.subheaders = true;
   root = null;
 });
 async function render(jump: string | null, active = true) {
@@ -179,6 +208,20 @@ async function open() {
   await act(() => trigger().click());
 }
 describe("row details composition", () => {
+  it("announces the expanded compact family summary only while subheaders are off", async () => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(() => root?.render(<Harness withChildren active={false} />));
+    const row = () => container.querySelector(`[data-testid="thread-row-${thread.id}"]`)!;
+    expect(row().getAttribute("aria-label")).not.toContain("1 subagent");
+    mocks.subheaders = false;
+    await act(() => root?.render(<Harness withChildren />));
+    expect(row().getAttribute("aria-label")).toContain("1 subagent");
+    mocks.subheaders = true;
+    await act(() => root?.render(<Harness withChildren active={false} />));
+    expect(row().getAttribute("aria-label")).not.toContain("1 subagent");
+  });
   it("keeps the lease on the li and cancels confirmation when an unannotated row loses hover", async () => {
     await render(null, false);
     const li = container.querySelector<HTMLLIElement>("li[data-thread-item]")!;

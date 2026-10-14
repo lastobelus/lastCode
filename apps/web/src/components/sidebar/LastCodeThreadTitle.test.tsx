@@ -247,7 +247,6 @@ function OutcomeHarness({
 describe("mounted family status presentation", () => {
   it("moves a real aggregate from the typed line into an inline compact count", async () => {
     const family = familyFor(a, "Parent with a failed descendant");
-    family.depth = 6;
     family.descendantCount = 2;
     family.descendantStatusCounts = new Map([
       ["Failed", 1],
@@ -277,6 +276,7 @@ describe("mounted family status presentation", () => {
     mocks.subheaders = false;
     await act(() => mocks.settingListeners.forEach((listener) => listener()));
     expect(container.textContent).toContain("+2");
+    expect(container.textContent).not.toContain("Failed");
     expect(container.textContent).not.toContain("2 subagents");
     expect(container.querySelector('[role="img"][aria-label="Failed"]')).not.toBeNull();
     family.expanded = true;
@@ -284,6 +284,7 @@ describe("mounted family status presentation", () => {
       root?.render(<LastCodeThreadFamilySummary family={{ ...family }} display="inline" />),
     );
     expect(container.textContent).toContain("+2");
+    expect(container.textContent).not.toContain("Failed");
     expect(container.querySelector('[role="img"][aria-label="Failed"]')).not.toBeNull();
     expect(mocks.update).not.toHaveBeenCalled();
   });
