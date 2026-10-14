@@ -110,6 +110,20 @@ function hasLivingChild(
   );
 }
 
+function isPositivePid(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+function isStartIdentity(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+/** A child may lack a captured identity; an identity must never lack its child PID. */
+function isChildIdentity(pid: unknown, identity: unknown) {
+  if (pid === null) return identity === null;
+  return isPositivePid(pid) && (identity === null || isStartIdentity(identity));
+}
+
 function readLeases(directory: string) {
   const leases: Lease[] = [];
   for (const name of NodeFS.readdirSync(directory)) {
@@ -136,26 +150,13 @@ function readLeases(directory: string) {
     }
     if (
       !isRecord(lease) ||
-      !Number.isSafeInteger(lease.pid) ||
-      typeof lease.pid !== "number" ||
-      lease.pid <= 0 ||
-      typeof lease.startIdentity !== "string" ||
-      lease.startIdentity.length === 0 ||
-      !(
-        lease.childPid === null ||
-        (typeof lease.childPid === "number" &&
-          Number.isSafeInteger(lease.childPid) &&
-          lease.childPid > 0)
-      ) ||
-      !(
-        lease.childStartIdentity === null ||
-        (typeof lease.childStartIdentity === "string" && lease.childStartIdentity.length > 0)
-      ) ||
-      (lease.childPid === null && lease.childStartIdentity !== null) ||
+      !isPositivePid(lease.pid) ||
+      !isStartIdentity(lease.startIdentity) ||
+      !isChildIdentity(lease.childPid, lease.childStartIdentity) ||
       typeof lease.token !== "string" ||
       `${lease.token}${LEASE_SUFFIX}` !== name ||
-      !Number.isSafeInteger(lease.maxConcurrentRuns) ||
       typeof lease.maxConcurrentRuns !== "number" ||
+      !Number.isSafeInteger(lease.maxConcurrentRuns) ||
       lease.maxConcurrentRuns < 1 ||
       lease.maxConcurrentRuns > 4 ||
       typeof lease.repoRoot !== "string"
@@ -167,8 +168,8 @@ function readLeases(directory: string) {
     leases.push({
       pid: lease.pid,
       startIdentity: lease.startIdentity,
-      childPid: lease.childPid,
-      childStartIdentity: lease.childStartIdentity,
+      childPid: lease.childPid as number | null,
+      childStartIdentity: lease.childStartIdentity as string | null,
       token: lease.token,
       maxConcurrentRuns: lease.maxConcurrentRuns,
       repoRoot: lease.repoRoot,
