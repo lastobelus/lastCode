@@ -20,7 +20,7 @@ import {
 import { loadRepoEnv } from "../../scripts/lib/public-config";
 import { thirdPartyLicensesPlugin } from "../../scripts/lib/third-party-licenses";
 import { tailwindPlugins } from "./vite/tailwind";
-import { createBuildOwnershipPlugin } from "./vite/buildOwnership.ts";
+import { createBuildOwnershipPlugin, resolveHostedWebAssetBrand } from "./vite/buildOwnership.ts";
 
 const repoEnv = loadRepoEnv();
 Object.assign(process.env, repoEnv);
@@ -164,8 +164,9 @@ const allowedHosts = [".ts.net", ...configuredAllowedHosts];
 
 export default defineConfig(({ command }) => {
   const repoRoot = NodeURL.fileURLToPath(new URL("../..", import.meta.url));
+  const brand = command === "build" ? resolveHostedWebAssetBrand(configuredHostedAppChannel) : null;
   const stage = command === "build" ? createGeneratedBuildStage(repoRoot, "apps/web/dist") : null;
-  const provenancePlugin = createBuildOwnershipPlugin(repoRoot, stage);
+  const provenancePlugin = createBuildOwnershipPlugin(repoRoot, stage, Date.now, brand);
   return {
     assetsInclude: ["**/*.wasm"],
     plugins: [

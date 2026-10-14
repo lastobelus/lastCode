@@ -53,6 +53,28 @@ function context(worktreePath: string, root: string) {
 }
 type Context = NonNullable<ReturnType<typeof context>>;
 
+/** Branding belongs to private compiler/release stages, never published managed output. */
+export function assertUnpublishedGeneratedBuildTarget(directory: string) {
+  const target = NodeFS.realpathSync(directory);
+  let ancestor = target;
+  while (true) {
+    const relative = NodePath.relative(ancestor, target).split(NodePath.sep).join("/");
+    if (/^apps\/[a-zA-Z0-9_-]+\/dist(?:\/|$)/.test(relative)) {
+      let metadata;
+      try {
+        metadata = NodeFS.lstatSync(NodePath.join(ancestor, ".git"));
+      } catch (error) {
+        if (!missing(error)) throw error;
+      }
+      if (metadata && !metadata.isDirectory())
+        throw new Error("Branding managed output requires a fresh compiler or release stage");
+    }
+    const parent = NodePath.dirname(ancestor);
+    if (parent === ancestor) return;
+    ancestor = parent;
+  }
+}
+
 /** Every existing component must be a real directory; neither links nor files may redirect a build path. */
 function safePath(base: string, relative: string) {
   if (!safeRelative(relative)) throw new Error("Unsafe generated file path");
