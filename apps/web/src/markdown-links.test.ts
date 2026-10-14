@@ -299,3 +299,20 @@ it("routes the project-root code link to the workspace explorer", () => {
     filePath: cwd,
   });
 });
+
+describe("authored bare filename destinations", () => {
+  it.each([
+    ["report.md", true],
+    ["report.md:12", true],
+    ["report.md#L12", true],
+    ["<report%20name.md>", true],
+    ["./report.md", false],
+    ["../report.md", false],
+    ["docs/report.md", false],
+    ["/repo/report.md", false],
+    ["file:///repo/report.md", false],
+    ["C:/repo/report.md", false],
+  ])("classifies %s before resolving against the workspace", (href, isBareFilename) => {
+    expect(resolveMarkdownFileLinkMeta(href, "/repo")).toMatchObject({ isBareFilename });
+  });
+});

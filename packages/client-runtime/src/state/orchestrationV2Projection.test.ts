@@ -4,6 +4,9 @@ import {
   type OrchestrationV2Run,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2TurnItem,
+  EventId,
+  CommandId,
+  ProviderDriverKind,
   MessageId,
   ProjectId,
   ProviderInstanceId,
@@ -105,6 +108,72 @@ const emptyProjection = {
 } as OrchestrationV2ThreadProjection;
 
 describe("applyOrchestrationV2ProjectionEvent", () => {
+  it("updates durable promotion without replacing source conversation data", () => {
+    const promotion = {
+      createdBy: "user" as const,
+      creationSource: "web" as const,
+      requestId: CommandId.make("promote-subagent"),
+      targetThreadId: ThreadId.make("interactive-subagent"),
+      status: "waiting" as const,
+      error: null,
+      requestedAt: now,
+      updatedAt: now,
+    };
+    let projection = emptyProjection;
+    for (const subagentPromotion of [
+      promotion,
+      { ...promotion, status: "promoted" as const },
+      null,
+    ]) {
+      const next = applyOrchestrationV2ProjectionEvent(projection, {
+        id: EventId.make(`promotion-${subagentPromotion?.status ?? "cancelled"}`),
+        type: "thread.metadata-updated",
+        threadId,
+        driver: ProviderDriverKind.make("codex"),
+        occurredAt: now,
+        payload: { ...projection.thread, subagentPromotion },
+      });
+      expect(next?.thread.subagentPromotion).toEqual(subagentPromotion);
+      expect(next?.thread.lineage).toBe(emptyProjection.thread.lineage);
+      expect(next?.visibleTurnItems).toBe(emptyProjection.visibleTurnItems);
+      expect(next?.runs).toBe(emptyProjection.runs);
+      projection = next!;
+    }
+  });
+
+  it.each([
+    "thread.persistence-changed",
+    "thread.annotation-upserted",
+    "thread.annotation-resolved",
+    "thread.annotation-reopened",
+    "thread.attention-set",
+    "thread.attention-cleared",
+  ] as const)("keeps LastCode metadata updates live through %s", (type) => {
+    const thread = {
+      ...emptyProjection.thread,
+      persistent: true,
+      annotation: {
+        body: "Keep this review open",
+        anchorMessageId: MessageId.make("annotation-anchor"),
+        createdAt: "2026-06-20T00:00:00.000Z",
+        updatedAt: "2026-06-20T00:00:00.000Z",
+        resolvedAt: null,
+      },
+      attention: { kind: "question" as const, raisedAt: "2026-06-20T00:00:00.000Z" },
+    };
+    const next = applyOrchestrationV2ProjectionEvent(emptyProjection, {
+      id: EventId.make(`metadata-${type}`),
+      type,
+      threadId,
+      driver: ProviderDriverKind.make("codex"),
+      occurredAt: now,
+      payload: thread,
+    });
+    expect(next?.thread).toBe(thread);
+    expect(next?.visibleTurnItems).toBe(emptyProjection.visibleTurnItems);
+    expect(next?.runs).toBe(emptyProjection.runs);
+  });
+
   it("keeps live token usage when the terminal provider turn omits it", () => {
     const providerTurnId = ProviderTurnId.make("provider-turn-reducer");
     const running = {

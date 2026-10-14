@@ -1,3 +1,4 @@
+import { ThreadAnnotation, ThreadAttention, ThreadWorktreeCleanup } from "@t3tools/contracts";
 import {
   threadPullRequestKeysEqual,
   threadPullRequestsOf,
@@ -11,6 +12,8 @@ import {
   ModelSelection,
   type OrchestrationV2AppThread,
   OrchestrationV2AppThreadJson,
+  OrchestrationV2ConversationMessageJson,
+  OrchestrationV2TurnItemJson,
   type OrchestrationV2ConversationMessage,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2TurnItem,
@@ -60,6 +63,10 @@ interface LegacyThreadRow {
   readonly linked_pull_request_json: string | null;
   readonly branch_pull_request_json: string | null;
   readonly active_order_key: string | null;
+  readonly annotation_json: string | null;
+  readonly attention_json: string | null;
+  readonly persistent: number;
+  readonly worktree_cleanup_json: string | null;
   readonly deleted_at: string | null;
 }
 
@@ -74,6 +81,7 @@ interface LegacyMessageRow {
   readonly text: string;
   readonly attachments_json: string | null;
   readonly context_json?: string | null;
+  readonly source_thread_id: string | null;
   readonly is_streaming: number;
   readonly created_at: string;
   readonly updated_at: string;
@@ -126,6 +134,15 @@ const decodeLinkedPullRequest = Schema.decodeUnknownOption(ThreadLinkedPullReque
 const decodeStoredThread = Schema.decodeUnknownOption(
   Schema.fromJsonString(OrchestrationV2AppThreadJson),
 );
+const decodeAnnotation = Schema.decodeEffect(Schema.fromJsonString(ThreadAnnotation));
+const decodeAttention = Schema.decodeEffect(Schema.fromJsonString(ThreadAttention));
+const decodeCleanup = Schema.decodeEffect(Schema.fromJsonString(ThreadWorktreeCleanup));
+const decodeMessage = Schema.decodeEffect(
+  Schema.fromJsonString(OrchestrationV2ConversationMessageJson),
+);
+const decodeTurnItem = Schema.decodeEffect(Schema.fromJsonString(OrchestrationV2TurnItemJson));
+const decodeThread = Schema.decodeEffect(Schema.fromJsonString(OrchestrationV2AppThreadJson));
+const decodeMessageContext = Schema.decodeUnknownSync(OrchestrationMessageContext);
 
 function parseJson(json: string): unknown {
   try {
@@ -186,61 +203,68 @@ function nullableDateTime(value: string | null): DateTime.Utc | null {
   return value === null ? null : dateTime(value);
 }
 
-function importedThread(row: LegacyThreadRow): OrchestrationV2AppThread {
-  const threadId = ThreadId.make(row.thread_id);
-  const modelSelection = modelSelectionFor(row);
-  const branch = row.branch?.trim() || null;
-  const worktreePath = row.worktree_path?.trim() || null;
-  const pullRequests = Option.getOrElse(
-    decodePullRequests(parseJson(row.pull_requests_json)),
-    () => [],
-  );
-  const linkedPullRequest = linkedPullRequestFor(row);
-  const legacyLink = threadPullRequestsOf({ linkedPullRequest })[0];
-  const importedPullRequests =
-    legacyLink !== undefined &&
-    !pullRequests.some((link) => threadPullRequestKeysEqual(link, legacyLink))
-      ? [...pullRequests, legacyLink]
-      : pullRequests;
-  return {
-    createdBy: "system",
-    creationSource: "server",
-    id: threadId,
-    projectId: ProjectId.make(row.project_id),
-    title: row.title.trim() === "" ? "Untitled thread" : row.title,
-    providerInstanceId: modelSelection.instanceId,
-    modelSelection,
-    runtimeMode: runtimeModeFor(row.runtime_mode),
-    interactionMode: interactionModeFor(row.interaction_mode),
-    branch,
-    worktreePath,
-    linkedPullRequest,
-    pullRequests: importedPullRequests,
-    branchPullRequest: branchPullRequestFor(row),
-    activeOrderKey: row.active_order_key?.trim() || null,
-    activeProviderThreadId: null,
-    historyOrigin: "v1_import",
-    lineage: {
-      parentThreadId: null,
-      relationshipToParent: null,
-      rootThreadId: threadId,
-    },
-    forkedFrom: null,
-    createdAt: dateTime(row.created_at),
-    updatedAt: dateTime(row.updated_at),
-    archivedAt: nullableDateTime(row.archived_at),
-    settledOverride: settledOverrideFor(row.settled_override),
-    settledAt: nullableDateTime(row.settled_at),
-    unsettledAt: nullableDateTime(row.unsettled_at),
-    snoozedUntil: nullableDateTime(row.snoozed_until),
-    snoozedAt: nullableDateTime(row.snoozed_at),
-    pinnedAt: nullableDateTime(row.pinned_at),
-    autoSettleDisabledAt: nullableDateTime(row.auto_settle_disabled_at),
-    pinOrderKey: row.pin_order_key?.trim() || null,
-    lastVisitedAt: null,
-    deletedAt: nullableDateTime(row.deleted_at),
-  };
-}
+const importedThread = (row: LegacyThreadRow) =>
+  Effect.gen(function* () {
+    const threadId = ThreadId.make(row.thread_id);
+    const modelSelection = modelSelectionFor(row);
+    const branch = row.branch?.trim() || null;
+    const worktreePath = row.worktree_path?.trim() || null;
+    const pullRequests = Option.getOrElse(
+      decodePullRequests(parseJson(row.pull_requests_json)),
+      () => [],
+    );
+    const linkedPullRequest = linkedPullRequestFor(row);
+    const legacyLink = threadPullRequestsOf({ linkedPullRequest })[0];
+    const importedPullRequests =
+      legacyLink !== undefined &&
+      !pullRequests.some((link) => threadPullRequestKeysEqual(link, legacyLink))
+        ? [...pullRequests, legacyLink]
+        : pullRequests;
+    return {
+      createdBy: "system",
+      creationSource: "server",
+      id: threadId,
+      projectId: ProjectId.make(row.project_id),
+      title: row.title.trim() === "" ? "Untitled thread" : row.title,
+      providerInstanceId: modelSelection.instanceId,
+      modelSelection,
+      runtimeMode: runtimeModeFor(row.runtime_mode),
+      interactionMode: interactionModeFor(row.interaction_mode),
+      branch,
+      worktreePath,
+      linkedPullRequest,
+      pullRequests: importedPullRequests,
+      branchPullRequest: branchPullRequestFor(row),
+      activeOrderKey: row.active_order_key?.trim() || null,
+      activeProviderThreadId: null,
+      historyOrigin: "v1_import",
+      persistent: row.persistent === 1,
+      annotation:
+        row.annotation_json === null ? null : yield* decodeAnnotation(row.annotation_json),
+      attention: row.attention_json === null ? null : yield* decodeAttention(row.attention_json),
+      worktreeCleanup:
+        row.worktree_cleanup_json === null ? null : yield* decodeCleanup(row.worktree_cleanup_json),
+      lineage: {
+        parentThreadId: null,
+        relationshipToParent: null,
+        rootThreadId: threadId,
+      },
+      forkedFrom: null,
+      createdAt: dateTime(row.created_at),
+      updatedAt: dateTime(row.updated_at),
+      archivedAt: nullableDateTime(row.archived_at),
+      settledOverride: settledOverrideFor(row.settled_override),
+      settledAt: nullableDateTime(row.settled_at),
+      unsettledAt: nullableDateTime(row.unsettled_at),
+      snoozedUntil: nullableDateTime(row.snoozed_until),
+      snoozedAt: nullableDateTime(row.snoozed_at),
+      pinnedAt: nullableDateTime(row.pinned_at),
+      autoSettleDisabledAt: nullableDateTime(row.auto_settle_disabled_at),
+      pinOrderKey: row.pin_order_key?.trim() || null,
+      lastVisitedAt: null,
+      deletedAt: nullableDateTime(row.deleted_at),
+    } satisfies OrchestrationV2AppThread;
+  });
 
 function messageEvents(row: LegacyMessageRow): ReadonlyArray<OrchestrationV2DomainEvent> {
   const threadId = ThreadId.make(row.thread_id);
@@ -256,12 +280,13 @@ function messageEvents(row: LegacyMessageRow): ReadonlyArray<OrchestrationV2Doma
     runId: null,
     nodeId: null,
     role: row.role,
+    ...(row.source_thread_id === null
+      ? {}
+      : { senderThreadId: ThreadId.make(row.source_thread_id) }),
     text: row.text,
     ...(row.context_json
       ? {
-          context: Schema.decodeUnknownSync(OrchestrationMessageContext)(
-            parseJson(row.context_json),
-          ),
+          context: decodeMessageContext(parseJson(row.context_json)),
         }
       : {}),
     attachments,
@@ -293,13 +318,14 @@ function messageEvents(row: LegacyMessageRow): ReadonlyArray<OrchestrationV2Doma
           creationSource: "server",
           type: "user_message",
           messageId,
+          ...(row.source_thread_id === null
+            ? {}
+            : { senderThreadId: ThreadId.make(row.source_thread_id) }),
           inputIntent: "turn_start",
           text: row.text,
           ...(row.context_json
             ? {
-                context: Schema.decodeUnknownSync(OrchestrationMessageContext)(
-                  parseJson(row.context_json),
-                ),
+                context: decodeMessageContext(parseJson(row.context_json)),
               }
             : {}),
           attachments,
@@ -311,9 +337,7 @@ function messageEvents(row: LegacyMessageRow): ReadonlyArray<OrchestrationV2Doma
           text: row.text,
           ...(row.context_json
             ? {
-                context: Schema.decodeUnknownSync(OrchestrationMessageContext)(
-                  parseJson(row.context_json),
-                ),
+                context: decodeMessageContext(parseJson(row.context_json)),
               }
             : {}),
           streaming: false,
@@ -358,6 +382,7 @@ const make = Effect.gen(function* () {
         text,
         attachments_json,
         context_json,
+        source_thread_id,
         is_streaming,
         created_at,
         updated_at,
@@ -381,6 +406,7 @@ const make = Effect.gen(function* () {
           message.text,
           message.attachments_json,
           message.context_json,
+          message.source_thread_id,
           message.is_streaming,
           message.created_at,
           message.updated_at,
@@ -411,6 +437,7 @@ const make = Effect.gen(function* () {
           message.text,
           message.attachments_json,
           message.context_json,
+          message.source_thread_id,
           message.is_streaming,
           message.created_at,
           message.updated_at,
@@ -467,6 +494,10 @@ const make = Effect.gen(function* () {
         thread.linked_pull_request_json,
         thread.branch_pull_request_json,
         thread.active_order_key,
+        thread.annotation_json,
+        thread.attention_json,
+        thread.persistent,
+        thread.worktree_cleanup_json,
         thread.deleted_at,
         projection.payload_json
       FROM orchestration_v2_legacy_imports AS legacy_import
@@ -483,6 +514,10 @@ const make = Effect.gen(function* () {
          OR json_type(projection.payload_json, '$.pullRequests') IS NULL
          OR json_type(projection.payload_json, '$.branchPullRequest') IS NULL
          OR json_type(projection.payload_json, '$.activeOrderKey') IS NULL
+         OR json_type(projection.payload_json, '$.annotation') IS NULL
+         OR json_type(projection.payload_json, '$.attention') IS NULL
+         OR json_type(projection.payload_json, '$.persistent') IS NULL
+         OR json_type(projection.payload_json, '$.worktreeCleanup') IS NULL
       ORDER BY thread.created_at ASC, thread.thread_id ASC
     `;
     let repairedThreadCount = 0;
@@ -490,10 +525,15 @@ const make = Effect.gen(function* () {
       const decoded = decodeStoredThread(row.payload_json);
       if (Option.isNone(decoded)) continue;
       const current = decoded.value;
-      const legacy = importedThread(row);
+      const legacy = yield* importedThread(row);
       const legacyPullRequests = legacy.pullRequests ?? [];
       const repaired: OrchestrationV2AppThread = {
         ...current,
+        annotation: current.annotation === undefined ? legacy.annotation : current.annotation,
+        attention: current.attention === undefined ? legacy.attention : current.attention,
+        persistent: current.persistent === undefined ? legacy.persistent : current.persistent,
+        worktreeCleanup:
+          current.worktreeCleanup === undefined ? legacy.worktreeCleanup : current.worktreeCleanup,
         pinnedAt: current.pinnedAt === undefined ? legacy.pinnedAt : current.pinnedAt,
         autoSettleDisabledAt:
           current.autoSettleDisabledAt === undefined
@@ -546,6 +586,54 @@ const make = Effect.gen(function* () {
       });
       repairedThreadCount += 1;
     }
+    // Earlier V2 imports kept the transcript but omitted LastCode sender
+    // attribution. Repair only absent fields; a later V2 sender is authoritative.
+    const messageRepairs = yield* sql<{
+      readonly payload_json: string;
+      readonly source_thread_id: string;
+      readonly thread_payload_json: string;
+    }>`
+      SELECT message.payload_json, legacy.source_thread_id, thread.payload_json AS thread_payload_json
+      FROM orchestration_v2_projection_messages AS message
+      INNER JOIN projection_thread_messages AS legacy ON legacy.message_id = message.message_id
+      INNER JOIN orchestration_v2_legacy_imports AS imported ON imported.thread_id = message.thread_id
+      INNER JOIN orchestration_v2_projection_threads AS thread ON thread.thread_id = message.thread_id
+      WHERE legacy.source_thread_id IS NOT NULL
+        AND json_type(message.payload_json, '$.senderThreadId') IS NULL
+    `;
+    for (const row of messageRepairs) {
+      const message = yield* decodeMessage(row.payload_json);
+      const thread = yield* decodeThread(row.thread_payload_json);
+      const senderThreadId = ThreadId.make(row.source_thread_id);
+      const events: Array<OrchestrationV2DomainEvent> = [
+        {
+          id: EventId.make(`${IMPORT_EVENT_PREFIX}:message:${message.id}:sender-repair`),
+          type: "message.updated",
+          threadId: message.threadId,
+          occurredAt: thread.updatedAt,
+          payload: { ...message, senderThreadId },
+        },
+      ];
+      const itemRows = yield* sql<{ readonly payload_json: string }>`
+        SELECT payload_json FROM orchestration_v2_projection_turn_items
+        WHERE thread_id = ${message.threadId}
+          AND json_extract(payload_json, '$.messageId') = ${message.id}
+          AND json_extract(payload_json, '$.type') = 'user_message'
+          AND json_type(payload_json, '$.senderThreadId') IS NULL
+      `;
+      for (const itemRow of itemRows) {
+        const item = yield* decodeTurnItem(itemRow.payload_json);
+        if (item.type !== "user_message") continue;
+        events.push({
+          id: EventId.make(`${IMPORT_EVENT_PREFIX}:turn-item:${item.id}:sender-repair`),
+          type: "turn-item.updated",
+          threadId: message.threadId,
+          occurredAt: thread.updatedAt,
+          payload: { ...item, senderThreadId },
+        });
+      }
+      yield* eventSink.write({ events });
+    }
     const rows = yield* sql<LegacyThreadRow>`
       SELECT
         thread.thread_id,
@@ -571,6 +659,10 @@ const make = Effect.gen(function* () {
         thread.linked_pull_request_json,
         thread.branch_pull_request_json,
         thread.active_order_key,
+        thread.annotation_json,
+        thread.attention_json,
+        thread.persistent,
+        thread.worktree_cleanup_json,
         thread.deleted_at
       FROM projection_threads AS thread
       WHERE NOT EXISTS (
@@ -584,9 +676,9 @@ const make = Effect.gen(function* () {
       ORDER BY thread.created_at ASC, thread.thread_id ASC
     `;
     let importedThreadCount = repairedThreadCount;
-    let importedMessageCount = 0;
+    let importedMessageCount = messageRepairs.length;
     for (const row of rows) {
-      const thread = importedThread(row);
+      const thread = yield* importedThread(row);
       const previews = yield* listShellMessages(thread.id);
       const events: Array<OrchestrationV2DomainEvent> = [
         {
