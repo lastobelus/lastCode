@@ -136,7 +136,7 @@ import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { useDesktopUpdateState } from "../state/desktopUpdate";
 
 import { useThreadActions } from "../hooks/useThreadActions";
-import { markThreadsUnread } from "../hooks/threadReadActions";
+import { markThreadsReadState } from "../hooks/threadReadActions";
 import { projectEnvironment } from "../state/projects";
 import { threadEnvironment, useEnvironmentThread } from "../state/threads";
 import { useEnvironment, useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
@@ -2062,17 +2062,11 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
       if (hasPersistentThread && (clicked === "archive" || clicked === "delete")) return;
 
-      if (clicked === "mark-unread") {
-        markThreadsUnread(
+      if (clicked === "mark-unread" || clicked === "mark-read") {
+        await markThreadsReadState(
           selectedThreadEntries.map(({ threadRef }) => threadRef),
-          markThreadUnread,
+          clicked === "mark-read" ? markThreadRead : markThreadUnread,
         );
-        return;
-      }
-      if (clicked === "mark-read") {
-        for (const { threadRef } of selectedThreadEntries) {
-          markThreadRead(threadRef);
-        }
         return;
       }
 

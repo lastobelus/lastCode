@@ -2234,6 +2234,10 @@ describe("explicit read marker visit decisions", () => {
     expect(left.nextKey).toBeNull();
     const reopened = resolveThreadVisitDecision(100, 99, "a:100", left.nextKey);
     expect(reopened.record).toBe(true);
+    expect(resolveThreadVisitDecision(200, 99, "a:200", "a:100", true)).toEqual({
+      record: false,
+      nextKey: "a:200",
+    });
     expect(resolveThreadVisitDecision(100, 99, "a:100", reopened.nextKey).record).toBe(false);
     const other = resolveThreadVisitDecision(100, 99, "b:100", reopened.nextKey);
     expect(resolveThreadVisitDecision(100, 99, "a:100", other.nextKey).record).toBe(true);

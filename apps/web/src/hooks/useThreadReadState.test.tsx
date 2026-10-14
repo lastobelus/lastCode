@@ -3,7 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
-import { RunId } from "@t3tools/contracts";
+import { RunId, ThreadId } from "@t3tools/contracts";
 import { AsyncResult } from "effect/reactivity";
 import * as Cause from "effect/Cause";
 import { makeThreadFixture } from "../test-fixtures";
@@ -14,10 +14,16 @@ const mocks = vi.hoisted(() => ({
   failed: false,
   calls: [] as Array<{ kind: string; input: { threadId: string; visitedAt?: string } }>,
   toast: vi.fn(),
+  unsupportedIds: new Set<string>(),
 }));
 vi.mock("../state/entities", async (original) => ({
   ...(await original<typeof import("../state/entities")>()),
-  readThreadShell: () => mocks.thread,
+  readThreadShell: (target: { threadId: string }) =>
+    mocks.thread && {
+      ...mocks.thread,
+      id: target.threadId,
+      latestRun: mocks.unsupportedIds.has(target.threadId) ? null : mocks.thread.latestRun,
+    },
   readEnvironmentSupportsVisitedTracking: () => mocks.tracking,
 }));
 vi.mock("../components/ui/toast", () => ({
@@ -42,7 +48,7 @@ vi.mock("../state/use-atom-command", () => ({
     },
 }));
 import { useMarkThreadRead, useMarkThreadUnread } from "./useThreadActions";
-import { markThreadsUnread } from "./threadReadActions";
+import { markThreadsReadState } from "./threadReadActions";
 let root: Root, container: HTMLDivElement;
 const initial = makeThreadFixture({
   updatedAt: "2026-01-01T00:01:00Z",
@@ -58,6 +64,11 @@ const initial = makeThreadFixture({
 });
 const ref = scopeThreadRef(initial.environmentId, initial.id),
   key = scopedThreadKey(ref);
+const bulkRefs = [
+  ref,
+  scopeThreadRef(initial.environmentId, ThreadId.make("second")),
+  scopeThreadRef(initial.environmentId, ThreadId.make("third")),
+];
 function Harness() {
   const read = useMarkThreadRead(),
     unread = useMarkThreadUnread();
@@ -65,7 +76,8 @@ function Harness() {
     <>
       <button onClick={() => unread(ref)}>Mark unread</button>
       <button onClick={() => read(ref)}>Mark read</button>
-      <button onClick={() => markThreadsUnread([ref, ref, ref], unread)}>Bulk unread</button>
+      <button onClick={() => markThreadsReadState(bulkRefs, unread)}>Bulk unread</button>
+      <button onClick={() => markThreadsReadState(bulkRefs, read)}>Bulk read</button>
     </>
   );
 }
@@ -80,6 +92,7 @@ beforeEach(async () => {
   mocks.thread = initial;
   mocks.calls = [];
   mocks.toast.mockClear();
+  mocks.unsupportedIds.clear();
   useUiStateStore.setState({ threadLastVisitedAtById: { [key]: initial.lastVisitedAt! } });
   container = document.createElement("div");
   document.body.append(container);
@@ -93,6 +106,45 @@ afterEach(async () => {
   useUiStateStore.setState({ threadLastVisitedAtById: {} });
 });
 describe("explicit read-state actions", () => {
+  it("marks supported bulk targets while counting only unsupported ones", async () => {
+    mocks.unsupportedIds.add(bulkRefs[1]!.threadId);
+    await action("Bulk unread");
+    expect(mocks.calls.map((x) => x.input.threadId)).toEqual([ref.threadId, bulkRefs[2]!.threadId]);
+    expect(mocks.toast).toHaveBeenCalledTimes(1);
+    expect(mocks.toast).toHaveBeenCalledWith(
+      expect.objectContaining({ description: "1 of 3 threads have no completed reply yet." }),
+    );
+  });
+  it.each(["Bulk unread", "Bulk read"])(
+    "reports rejected %s once for distinct targets",
+    async (label) => {
+      mocks.failed = true;
+      mocks.thread = { ...initial, lastVisitedAt: null };
+      useUiStateStore.setState({ threadLastVisitedAtById: {} });
+      await action(label);
+      expect(mocks.calls.map((x) => x.input.threadId)).toEqual(bulkRefs.map((x) => x.threadId));
+      expect(mocks.toast).toHaveBeenCalledTimes(1);
+      expect(mocks.toast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "Read markers could not be saved",
+          description: "3 of 3 read markers could not be saved. Reconnect and try again.",
+        }),
+      );
+    },
+  );
+  it.each([true, false])(
+    "skips already-acknowledged read markers with tracking=%s",
+    async (tracking) => {
+      mocks.tracking = tracking;
+      await action("Mark unread");
+      await action("Mark read");
+      const calls = [...mocks.calls];
+      const state = useUiStateStore.getState();
+      await action("Mark read");
+      expect(mocks.calls).toEqual(calls);
+      expect(useUiStateStore.getState()).toBe(state);
+    },
+  );
   it("reports unsupported bulk targets once", async () => {
     mocks.thread = { ...initial, latestRun: null };
     await action("Bulk unread");
@@ -160,8 +212,14 @@ describe("explicit read-state actions", () => {
     "reports rejected %s and leaves the existing marker intact",
     async (label) => {
       mocks.failed = true;
+      if (label === "Mark read") {
+        mocks.thread = { ...initial, lastVisitedAt: null };
+        useUiStateStore.setState({ threadLastVisitedAtById: {} });
+      }
       await action(label);
-      expect(mocks.thread!.lastVisitedAt).toBe(initial.lastVisitedAt);
+      expect(mocks.thread!.lastVisitedAt).toBe(
+        label === "Mark read" ? null : initial.lastVisitedAt,
+      );
       expect(mocks.toast).toHaveBeenCalledWith(
         expect.objectContaining({ title: "Read marker could not be saved" }),
       );
@@ -174,7 +232,8 @@ describe("explicit read-state actions", () => {
     };
     await action("Mark unread");
     expect(mocks.thread!.lastVisitedAt).toBe("2026-01-01T00:04:59.999Z");
-    mocks.thread = { ...mocks.thread!, latestRun: null };
+    mocks.thread = { ...mocks.thread!, latestRun: null, lastVisitedAt: null };
+    useUiStateStore.setState({ threadLastVisitedAtById: {} });
     await action("Mark read");
     expect(mocks.calls.at(-1)?.kind).toBe("visit");
   });

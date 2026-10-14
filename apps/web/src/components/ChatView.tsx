@@ -1844,6 +1844,7 @@ export default function ChatView(props: ChatViewProps) {
   );
   const visitThreadMutation = useAtomCommand(threadEnvironment.visit, { reportFailure: false });
   const lastDispatchedVisitRef = useRef<string | null>(null);
+  const lastObservedVisitRef = useRef<{ threadKey: string; visitedAt: number } | null>(null);
   const lastVisitDispatchAtRef = useRef(0);
   const settings = useEnvironmentSettings(environmentId);
   const clientSettingsHydrated = useClientSettingsHydrated();
@@ -3002,6 +3003,7 @@ export default function ChatView(props: ChatViewProps) {
 
   useEffect(() => {
     if (!serverThread?.id) {
+      lastObservedVisitRef.current = null;
       lastDispatchedVisitRef.current = resolveThreadVisitDecision(
         NaN,
         NaN,
@@ -3017,11 +3019,16 @@ export default function ChatView(props: ChatViewProps) {
     );
     const lastVisitedAt = effectiveLastVisitedAt ? Date.parse(effectiveLastVisitedAt) : NaN;
     const dispatchKey = `${routeThreadKey}:${serverThread.updatedAt}`;
+    const previousVisit = lastObservedVisitRef.current;
+    const rewound =
+      previousVisit?.threadKey === routeThreadKey && lastVisitedAt < previousVisit.visitedAt;
+    lastObservedVisitRef.current = { threadKey: routeThreadKey, visitedAt: lastVisitedAt };
     const visitDecision = resolveThreadVisitDecision(
       threadUpdatedAt,
       lastVisitedAt,
       dispatchKey,
       lastDispatchedVisitRef.current,
+      rewound,
     );
     if (!visitDecision.record) {
       lastDispatchedVisitRef.current = visitDecision.nextKey;

@@ -47,6 +47,7 @@ import { isScratchProject } from "@t3tools/client-runtime/state/projects";
 import { threadEnvironment } from "../state/threads";
 import { vcsEnvironment } from "../state/vcs";
 import { useNewThreadHandler } from "./useHandleNewThread";
+import type { ThreadReadOutcome } from "./threadReadActions";
 import {
   loadArchivedThreadsForEnvironment,
   refreshArchivedThreadsForEnvironment,
@@ -314,32 +315,34 @@ export async function navigateAfterThreadDeletion(navigate: () => Promise<void>)
   }
 }
 
-/**
- * Marks a thread unread. Servers with visited tracking own the unread marker
- * (thread.mark-unread rewinds the server-side visited watermark, syncing the
- * marker to every device); older servers keep the browser-local marker.
- */
-function reportReadMarkerFailure(result: AtomCommandResult<unknown, unknown>) {
-  if (result._tag !== "Failure" || isAtomCommandInterrupted(result)) return;
+function readMarkerOutcome(
+  result: AtomCommandResult<unknown, unknown>,
+  report: boolean,
+): ThreadReadOutcome {
+  if (result._tag !== "Failure") return "applied";
+  if (isAtomCommandInterrupted(result)) return "unchanged";
   const error = squashAtomCommandFailure(result);
-  toastManager.add(
-    stackedThreadToast({
-      type: "error",
-      title: "Read marker could not be saved",
-      description: error instanceof Error ? error.message : "Reconnect and try again.",
-    }),
-  );
+  if (report)
+    toastManager.add(
+      stackedThreadToast({
+        type: "error",
+        title: "Read marker could not be saved",
+        description: error instanceof Error ? error.message : "Reconnect and try again.",
+      }),
+    );
+  return "failed";
 }
 
+/** Server-tracked unread markers sync across devices; older servers use the local marker. */
 export function useMarkThreadUnread() {
   const markThreadUnreadMutation = useAtomCommand(threadEnvironment.markUnread);
   const markThreadUnreadLocal = useUiStateStore((state) => state.markThreadUnread);
   return useCallback(
-    (target: ScopedThreadRef, reportUnsupported = true) => {
+    async (target: ScopedThreadRef, report = true): Promise<ThreadReadOutcome> => {
       const thread = readThreadShell(target);
       const completedAt = thread?.latestRun?.completedAt;
       if (!completedAt || !Number.isFinite(Date.parse(completedAt))) {
-        if (reportUnsupported)
+        if (report)
           toastManager.add(
             stackedThreadToast({
               type: "info",
@@ -347,17 +350,17 @@ export function useMarkThreadUnread() {
               description: "This thread has no completed reply yet.",
             }),
           );
-        return false;
+        return "unsupported";
       }
       if (readEnvironmentSupportsVisitedTracking(target.environmentId)) {
-        void markThreadUnreadMutation({
+        const result = await markThreadUnreadMutation({
           environmentId: target.environmentId,
           input: { threadId: target.threadId },
-        }).then(reportReadMarkerFailure);
-        return true;
+        });
+        return readMarkerOutcome(result, report);
       }
       markThreadUnreadLocal(scopedThreadKey(target), completedAt);
-      return true;
+      return "applied";
     },
     [markThreadUnreadLocal, markThreadUnreadMutation],
   );
@@ -368,23 +371,29 @@ export function useMarkThreadRead() {
   const visit = useAtomCommand(threadEnvironment.visit);
   const markVisited = useUiStateStore((state) => state.markThreadVisited);
   return useCallback(
-    (target: ScopedThreadRef) => {
+    async (target: ScopedThreadRef, report = true): Promise<ThreadReadOutcome> => {
       const thread = readThreadShell(target);
-      if (!thread) return;
+      if (!thread) return "unchanged";
       const visitedAt = new Date(
         Math.max(
           Date.parse(thread.updatedAt) || 0,
           Date.parse(thread.latestRun?.completedAt ?? "") || 0,
         ),
       ).toISOString();
-      if (readEnvironmentSupportsVisitedTracking(target.environmentId)) {
-        void visit({
+      const tracksVisits = readEnvironmentSupportsVisitedTracking(target.environmentId);
+      const previousVisit = tracksVisits
+        ? thread.lastVisitedAt
+        : useUiStateStore.getState().threadLastVisitedAtById[scopedThreadKey(target)];
+      if (previousVisit && Date.parse(previousVisit) >= Date.parse(visitedAt)) return "unchanged";
+      if (tracksVisits) {
+        const result = await visit({
           environmentId: target.environmentId,
           input: { threadId: target.threadId, visitedAt },
-        }).then(reportReadMarkerFailure);
-        return;
+        });
+        return readMarkerOutcome(result, report);
       }
       markVisited(scopedThreadKey(target), visitedAt);
+      return "applied";
     },
     [markVisited, visit],
   );

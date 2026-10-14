@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import { markThreadsUnread } from "../../hooks/threadReadActions";
+import { markThreadsReadState } from "../../hooks/threadReadActions";
 import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
 import { useClientSettings } from "~/hooks/useSettings";
@@ -64,15 +64,11 @@ export function useLastCodeBulkThreadMenu() {
 
       if (!selectionActionPermitted(clicked, selectedThreadEntries, persistent)) return;
 
-      if (clicked === "mark-unread") {
-        markThreadsUnread(
+      if (clicked === "mark-unread" || clicked === "mark-read") {
+        await markThreadsReadState(
           selectedThreadEntries.map(({ threadRef }) => threadRef),
-          markThreadUnread,
+          clicked === "mark-read" ? markThreadRead : markThreadUnread,
         );
-        return;
-      }
-      if (clicked === "mark-read") {
-        markSelectionReadState(selectedThreadEntries, markThreadRead);
         return;
       }
 
@@ -105,13 +101,6 @@ export function useLastCodeBulkThreadMenu() {
       removeFromSelection,
     ],
   );
-}
-
-function markSelectionReadState(
-  entries: ReturnType<typeof readSelectedThreadEntries>,
-  markReadState: ReturnType<typeof useLastCodeThreadActions>["markThreadRead"],
-) {
-  for (const { threadRef } of entries) markReadState(threadRef);
 }
 
 /** Only archive/delete require a fresh authority check after the native menu closes. */

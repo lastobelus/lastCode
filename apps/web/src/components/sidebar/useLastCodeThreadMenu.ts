@@ -165,7 +165,9 @@ export function useLastCodeThreadMenu(
         "mark-unread": () => {
           markThreadUnread(ref);
         },
-        "mark-read": () => markThreadRead(ref),
+        "mark-read": () => {
+          void markThreadRead(ref);
+        },
         "stop-thread-processes": async () => {
           await stopProcesses(ref);
         },

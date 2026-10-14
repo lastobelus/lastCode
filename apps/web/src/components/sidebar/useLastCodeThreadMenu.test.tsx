@@ -397,7 +397,7 @@ describe("bulk menu selection snapshot", () => {
         menu.resolve(action);
         await pending;
       });
-      if (action === "mark-read") expect(mocks.read).toHaveBeenCalledExactlyOnceWith(ref);
+      if (action === "mark-read") expect(mocks.read).toHaveBeenCalledExactlyOnceWith(ref, false);
       else expect(mocks.unread).toHaveBeenCalledExactlyOnceWith(ref, false);
       expect([...useThreadSelectionStore.getState().selectedThreadKeys]).toEqual([
         firstKey,
