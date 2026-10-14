@@ -11,7 +11,10 @@ Nightly source tracking is documented separately in
 
 Worktrees created by LastCode initially contain source and linked environment files.
 When tests, development, or a build need dependencies, run the **Prepare Dependencies**
-Project Action in that worktree. It requires the exact pnpm version pinned by that
+Project Action in that worktree. Grant agent resume permission before first use;
+managed installations use `--trusted-project-action lc-prepare-dependencies`
+as described in the [setup trust instructions](setup.md#clone-and-bootstrap).
+It requires the exact pnpm version pinned by that
 worktree's `package.json` and installs from its lockfile without building or warming
 web caches. **Run Quick CI** includes this preparation
 automatically. For a saved Full CI Action, copy the **Run Quick CI** command from
