@@ -16,9 +16,11 @@ const MAX_PROCESS_PATHS = 100_000;
 const MAX_TARGET_OBJECTS = 1_000_000;
 const nativeIdentities = Symbol("captured vnode identities");
 type ObjectIdentity = { readonly device: bigint | null; readonly inode: bigint };
+type CapturedObject = ObjectIdentity | "unix-socket" | null;
 type CapturedPaths = ReadonlyArray<string> & {
-  readonly [nativeIdentities]?: ReadonlyArray<ObjectIdentity | null>;
+  readonly [nativeIdentities]?: ReadonlyArray<CapturedObject>;
 };
+class ObjectProofUnavailable extends Error {}
 const decodeRuntime = Schema.decodeUnknownSync(Schema.fromJsonString(PersistedServerRuntimeState));
 const gone = (error: unknown) =>
   ["ENOENT", "ESRCH"].includes((error as NodeJS.ErrnoException).code ?? "");
@@ -166,7 +168,7 @@ const decodeLsofPath = (printed: string): string | null => {
 const lsofPaths = (output: string): ReadonlyArray<string> | null => {
   if (!output.endsWith("\0\n") || output.includes("\uFFFD")) return null;
   const paths: string[] = [];
-  const identities: Array<ObjectIdentity | null> = [];
+  const identities: CapturedObject[] = [];
   let processes = 0;
   let cwdSeen = false;
   let file:
@@ -190,10 +192,19 @@ const lsofPaths = (output: string): ReadonlyArray<string> | null => {
       // Darwin omits the device field for FIFO vnodes. A positive inode can
       // still prove absence only by treating every same-inode target as a match.
       const fifoWithoutDevice = file.type === "FIFO" && /^\d+$/.test(file.descriptor);
+      // AF_UNIX names are cached sockaddr_un addresses, not vnode D/i evidence.
+      // Vendor source: lsof-org/lsof, darwin/dsock.c process_socket_common.
       identities.push(
-        inode !== null && inode > 0n && (file.device !== undefined || fifoWithoutDevice)
-          ? Object.freeze({ device: file.device === undefined ? null : BigInt(file.device), inode })
-          : null,
+        file.type === "unix"
+          ? /^\d+$/.test(file.descriptor) && file.device === undefined && file.inode === undefined
+            ? "unix-socket"
+            : null
+          : inode !== null && inode > 0n && (file.device !== undefined || fifoWithoutDevice)
+            ? Object.freeze({
+                device: file.device === undefined ? null : BigInt(file.device),
+                inode,
+              })
+            : null,
       );
       if (file.descriptor === "cwd") cwdSeen = true;
       return paths.length <= MAX_PROCESS_PATHS;
@@ -296,6 +307,7 @@ const targetIdentities = async (root: string) => {
   const directories: Array<{ path: string; token: string }> = [];
   const identities = new Set<string>();
   const inodes = new Set<bigint>();
+  let hasSockets = false;
   let objects = 0;
   const visit = async (path: string, depth: number): Promise<void> => {
     if (++objects > MAX_TARGET_OBJECTS || depth > 128 || performance.now() > deadline)
@@ -310,6 +322,7 @@ const targetIdentities = async (root: string) => {
       throw new Error("Consumer target object identity is unavailable or crosses a device");
     identities.add(identityKey({ device: stat.dev, inode: stat.ino }));
     inodes.add(stat.ino);
+    if (stat.isSocket()) hasSockets = true;
     if (!stat.isDirectory()) return; // Record links themselves; never traverse their targets.
     if (typeof stat.mtimeNs !== "bigint" || typeof stat.ctimeNs !== "bigint")
       throw new Error("Consumer target directory timestamps are unavailable");
@@ -337,13 +350,15 @@ const targetIdentities = async (root: string) => {
     (await NodeFSP.realpath(root)) !== root
   )
     throw new Error("Consumer target root changed during observation");
-  return { identities, inodes };
+  return { identities, inodes, hasSockets };
 };
 
 /**
  * Captured Darwin D/i fields describe the opened vnode's stat identity, not an
  * unconditional canonical pathname. Only an unresolved captured object can use
  * a complete, unchanged no-follow target inventory as an alternative alias proof.
+ * Unix socket names come from sockaddr_un, not vnode identity. A vanished name
+ * can prove absence only when the entire target contains no socket objects.
  * Callers retain fresh mount protection under the canonical workspace lease.
  */
 export const processPathsUseRoot = async (
@@ -353,6 +368,7 @@ export const processPathsUseRoot = async (
   if (!NodePath.isAbsolute(canonicalRoot)) throw new Error("Consumer target root is not absolute");
   const captured = (paths as CapturedPaths)[nativeIdentities];
   const unresolved: ObjectIdentity[] = [];
+  let vanishedSocket = false;
   for (const [index, path] of paths.entries()) {
     if (!NodePath.isAbsolute(path)) throw new Error("Process consumer path is not absolute");
     if (within(canonicalRoot, path)) return true;
@@ -370,20 +386,38 @@ export const processPathsUseRoot = async (
       }
       const identity = captured[index];
       if (!identity)
-        throw new Error("Unresolved process object identity is unavailable", { cause: error });
-      if (identity.device === null && (error as NodeJS.ErrnoException).code !== "ENOENT")
-        throw new Error("Device-unknown FIFO evidence is not a vanished pathname", {
+        throw new ObjectProofUnavailable("Unresolved process object identity is unavailable", {
           cause: error,
         });
+      if (identity === "unix-socket") {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+          throw new ObjectProofUnavailable("Unix socket evidence is not a vanished pathname", {
+            cause: error,
+          });
+        vanishedSocket = true;
+        continue;
+      }
+      if (identity.device === null && (error as NodeJS.ErrnoException).code !== "ENOENT")
+        throw new ObjectProofUnavailable(
+          "Device-unknown FIFO evidence is not a vanished pathname",
+          {
+            cause: error,
+          },
+        );
       unresolved.push(identity);
     }
   }
-  if (unresolved.length === 0) return false;
-  const identities = await targetIdentities(canonicalRoot);
-  return unresolved.some((identity) =>
-    identity.device === null
-      ? identities.inodes.has(identity.inode)
-      : identities.identities.has(identityKey(identity)),
+  if (unresolved.length === 0 && !vanishedSocket) return false;
+  const identities = await targetIdentities(canonicalRoot).catch((cause: unknown) => {
+    throw new ObjectProofUnavailable("Consumer target inventory could not be verified", { cause });
+  });
+  return (
+    (vanishedSocket && identities.hasSockets) ||
+    unresolved.some((identity) =>
+      identity.device === null
+        ? identities.inodes.has(identity.inode)
+        : identities.identities.has(identityKey(identity)),
+    )
   );
 };
 
@@ -442,7 +476,10 @@ export const worktreeConsumerReason = Effect.fn("WorktreeConsumers.worktreeConsu
           return "A process is using a file or directory in the worktree.";
         return runtimeKeptReason(canonicalRoot);
       },
-      catch: () => "Worktree consumer protection could not be verified.",
+      catch: (cause) =>
+        cause instanceof ObjectProofUnavailable
+          ? "Process object identity or target inventory could not be verified."
+          : "Worktree consumer protection could not be verified.",
     }).pipe(Effect.catch((reason) => Effect.succeed(reason)));
   },
 );

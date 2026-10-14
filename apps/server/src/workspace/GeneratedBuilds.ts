@@ -302,22 +302,63 @@ const make = Effect.gen(function* () {
       root: string,
       paths: readonly string[],
     ) {
-      if (!(yield* canRemove)) return false;
-      const processes = yield* yield* WorktreeConsumers.ProcessPaths;
-      if (processes === null) return false;
-      if (yield* actualOutputUse(input.worktreePath, root, processes)) {
-        yield* Effect.try({
-          try: () => recordGeneratedBuildUse(input.worktreePath, root, now),
-          catch: (cause) => new GeneratedBuildsError({ path: input.worktreePath, cause }),
-        });
-      }
-      if ((yield* WorktreeConsumers.worktreeConsumerReason(input.worktreePath)) !== null)
-        return false;
-      // File-specific Git recognition follows the potentially slower OS inventory.
-      if (!(yield* validate(input, root))) return false;
-      const ignored = yield* ignoredFiles(input.worktreePath, root, paths);
-      if (paths.some((path) => !ignored.has(path))) return false;
-      return yield* isStillEligible;
+      let failureReason = "Build cleanup workspace ownership check failed; files were retained.";
+      return yield* Effect.gen(function* () {
+        if (!(yield* canRemove)) {
+          reasons.add("Current workspace ownership or policy protects build files.");
+          return false;
+        }
+        failureReason = "Build cleanup process inventory check failed; files were retained.";
+        const processes = yield* yield* WorktreeConsumers.ProcessPaths;
+        if (processes === null) {
+          reasons.add("Process file-consumer inventory is unavailable; build files were retained.");
+          return false;
+        }
+        failureReason = "Build cleanup output-consumer identity check failed; files were retained.";
+        if (yield* actualOutputUse(input.worktreePath, root, processes)) {
+          failureReason = "Build cleanup usage renewal check failed; files were retained.";
+          yield* Effect.try({
+            try: () => recordGeneratedBuildUse(input.worktreePath, root, now),
+            catch: (cause) => new GeneratedBuildsError({ path: input.worktreePath, cause }),
+          });
+        }
+        failureReason = "Build cleanup worktree consumer check failed; files were retained.";
+        const consumerReason = yield* WorktreeConsumers.worktreeConsumerReason(
+          input.worktreePath,
+          processes,
+        );
+        if (consumerReason !== null) {
+          reasons.add(`Build files were retained: ${consumerReason}`);
+          return false;
+        }
+        // File-specific Git recognition follows the potentially slower OS inventory.
+        failureReason =
+          "Build cleanup Git and generated-path validation check failed; files were retained.";
+        if (!(yield* validate(input, root))) {
+          reasons.add("Git or generated-path eligibility changed before build removal.");
+          return false;
+        }
+        failureReason = "Build cleanup Git-ignore verification check failed; files were retained.";
+        const ignored = yield* ignoredFiles(input.worktreePath, root, paths);
+        if (paths.some((path) => !ignored.has(path))) {
+          reasons.add("Git-ignore eligibility changed before build removal.");
+          return false;
+        }
+        failureReason = "Build cleanup final eligibility check failed; files were retained.";
+        if (!(yield* isStillEligible)) {
+          reasons.add("Build cleanup policy or ownership changed before removal.");
+          return false;
+        }
+        return true;
+      }).pipe(
+        Effect.catch(() =>
+          Effect.sync(() => {
+            result.failed = true;
+            reasons.add(failureReason);
+            return false;
+          }),
+        ),
+      );
     });
     const operation = Effect.gen(function* () {
       if (!Number.isFinite(days) || days <= 0 || !Number.isSafeInteger(now) || now < 0) {

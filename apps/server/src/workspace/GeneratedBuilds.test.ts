@@ -310,7 +310,7 @@ it.effect(
 );
 
 it.effect(
-  "a compiled-file consumer first observed in final guards renews that root even if it exits before the final consumer check",
+  "a compiled-file consumer observed in final guards renews that root and protects its output",
   () =>
     Effect.gen(function* () {
       const { input, emit, remove } = yield* fixture();
@@ -356,5 +356,72 @@ it.effect(
       yield* Effect.sync(() => NodeFS.symlinkSync(retained, output, "junction"));
       assert.equal((yield* remove(DAY, 3, true)).files, 0);
       assert.equal(yield* fs.exists(NodePath.join(retained, "main.js")), true);
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect(
+  "reports unavailable inventory and active consumers without disclosing process names",
+  () =>
+    Effect.gen(function* () {
+      const { input, emit, remove } = yield* fixture();
+      yield* emit("apps/web/dist", 1);
+      const unavailable = yield* remove(DAY, 3, true).pipe(
+        Effect.provideService(WorktreeConsumers.ProcessPaths, Effect.succeed(null)),
+      );
+      assert.equal(unavailable.files, 0);
+      assert.include(unavailable.reason, "Process file-consumer inventory is unavailable");
+      const active = yield* remove(DAY, 3, true).pipe(
+        Effect.provideService(
+          WorktreeConsumers.ProcessPaths,
+          Effect.succeed([NodePath.join(input.worktreePath, "apps/web/dist/main.js")]),
+        ),
+      );
+      assert.equal(active.files, 0);
+      assert.include(active.reason, "A process is using a file or directory in the worktree");
+      assert.notInclude(active.reason, input.worktreePath);
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("reports the failing consumer proof stage without copying native errors", () =>
+  Effect.gen(function* () {
+    const { emit, remove } = yield* fixture();
+    yield* emit("apps/web/dist", 1);
+    const result = yield* remove(DAY, 3, true).pipe(
+      Effect.provideService(
+        WorktreeConsumers.ProcessPaths,
+        Effect.succeed(["invalid-native-path"]),
+      ),
+    );
+    assert.equal(result.files, 0);
+    assert.isTrue(result.failed);
+    assert.include(result.reason, "output-consumer identity check failed");
+    assert.notInclude(result.reason, "invalid-native-path");
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect(
+  "reports changed Git recognition and workspace policy as distinct protection stages",
+  () =>
+    Effect.gen(function* () {
+      const { builds, input, emit, remove, fs } = yield* fixture();
+      yield* emit("apps/web/dist", 1);
+      const protectedResult = yield* remove(DAY, 3, true, Effect.succeed(false));
+      assert.equal(protectedResult.files, 0);
+      assert.include(
+        protectedResult.reason,
+        "Current workspace ownership or policy protects build files",
+      );
+      const changed = yield* builds.remove(
+        input,
+        DAY,
+        3,
+        true,
+        fs
+          .writeFileString(NodePath.join(input.worktreePath, ".gitignore"), "")
+          .pipe(Effect.as(true)),
+        Effect.succeed(true),
+      );
+      assert.equal(changed.files, 0);
+      assert.include(changed.reason, "Git or generated-path eligibility changed");
     }).pipe(Effect.provide(testLayer)),
 );

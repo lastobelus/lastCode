@@ -344,6 +344,7 @@ const objectStat = (inode: bigint, directory = false, device = 18n, modified = 1
   mtimeNs: modified,
   ctimeNs: modified,
   isDirectory: () => directory,
+  isSocket: () => false,
 });
 const targetFixture = (fileInode = 9007199254740993n) => {
   const stats = new Map([
@@ -370,6 +371,8 @@ const targetFixture = (fileInode = 9007199254740993n) => {
   });
   return stats;
 };
+
+const objectProofReason = "Process object identity or target inventory could not be verified.";
 
 describe("Captured vnode identity proof", () => {
   it.effect("includes target directories in the device-unknown FIFO inode comparison", () =>
@@ -406,25 +409,19 @@ describe("Captured vnode identity proof", () => {
     (fields) =>
       Effect.gen(function* () {
         vnodeFixture(fields, "FIFO", "ENOENT");
-        expect(yield* guard(yield* inventory("darwin"))).toBe(
-          "Worktree consumer protection could not be verified.",
-        );
+        expect(yield* guard(yield* inventory("darwin"))).toBe(objectProofReason);
         expect(native.opendir).not.toHaveBeenCalled();
       }),
   );
   it.effect("keeps device-unknown FIFO permission evidence and nonnumeric descriptors", () =>
     Effect.gen(function* () {
       vnodeFixture("i123\0", "FIFO", "EACCES");
-      expect(yield* guard(yield* inventory("darwin"))).toBe(
-        "Worktree consumer protection could not be verified.",
-      );
+      expect(yield* guard(yield* inventory("darwin"))).toBe(objectProofReason);
       vnodeFixture("i123\0", "FIFO", "ENOENT");
       darwinFixture(
         "p123\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\nftxt\0tFIFO\0i123\0n/system/example/file\0\n",
       );
-      expect(yield* guard(yield* inventory("darwin"))).toBe(
-        "Worktree consumer protection could not be verified.",
-      );
+      expect(yield* guard(yield* inventory("darwin"))).toBe(objectProofReason);
     }),
   );
   it.effect.each(["EACCES", "EPERM"])(
@@ -476,7 +473,7 @@ describe("Captured vnode identity proof", () => {
         vnodeFixture(fields);
         const paths = yield* inventory("darwin");
         expect(paths).not.toBeNull();
-        expect(yield* guard(paths)).toBe("Worktree consumer protection could not be verified.");
+        expect(yield* guard(paths)).toBe(objectProofReason);
         expect(native.opendir).not.toHaveBeenCalled();
       }),
   );
@@ -499,9 +496,7 @@ describe("Captured vnode identity proof", () => {
     Effect.gen(function* () {
       vnodeFixture();
       targetFixture().set("/workspace/example/dist/output.js", objectStat(8n, false, 19n));
-      expect(yield* guard(yield* inventory("darwin"))).toBe(
-        "Worktree consumer protection could not be verified.",
-      );
+      expect(yield* guard(yield* inventory("darwin"))).toBe(objectProofReason);
     }),
   );
   it.effect("keeps when a target directory changes during traversal", () =>
@@ -516,9 +511,7 @@ describe("Captured vnode identity proof", () => {
           } else yield { name: "output.js" };
         })(),
       );
-      expect(yield* guard(yield* inventory("darwin"))).toBe(
-        "Worktree consumer protection could not be verified.",
-      );
+      expect(yield* guard(yield* inventory("darwin"))).toBe(objectProofReason);
     }),
   );
   it.effect("keeps when traversal is incomplete despite a matching previously seen object", () =>
@@ -526,9 +519,7 @@ describe("Captured vnode identity proof", () => {
       vnodeFixture();
       targetFixture();
       native.opendir.mockRejectedValue(Object.assign(new Error("denied"), { code: "EACCES" }));
-      expect(yield* guard(yield* inventory("darwin"))).toBe(
-        "Worktree consumer protection could not be verified.",
-      );
+      expect(yield* guard(yield* inventory("darwin"))).toBe(objectProofReason);
     }),
   );
   it.effect("keeps when traversal exceeds the bounded depth", () =>
@@ -542,9 +533,7 @@ describe("Captured vnode identity proof", () => {
           yield { name: "nested" };
         })(),
       );
-      expect(yield* guard(yield* inventory("darwin"))).toBe(
-        "Worktree consumer protection could not be verified.",
-      );
+      expect(yield* guard(yield* inventory("darwin"))).toBe(objectProofReason);
     }),
   );
   it.effect.each(["EIO", "ELOOP", "ENOSYS", undefined])(
@@ -571,6 +560,149 @@ describe("Captured vnode identity proof", () => {
         "Worktree consumer protection could not be verified.",
       );
       expect(native.opendir).not.toHaveBeenCalled();
+    }),
+  );
+});
+
+const socketFixture = (
+  record = "f7\0tunix\0",
+  code = "ENOENT",
+  name = "/system/example/socket",
+) => {
+  darwinFixture(`p123\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n${record}n${name}\0\n`);
+  native.realpath.mockImplementation(async (path: string) => {
+    if (path === name) throw Object.assign(new Error("unresolved"), { code });
+    return path;
+  });
+};
+
+describe("Captured vanished Unix socket proof", () => {
+  it.effect("accepts a vanished external socket only after a complete socket-free inventory", () =>
+    Effect.gen(function* () {
+      socketFixture();
+      targetFixture();
+      const paths = yield* inventory("darwin");
+      expect(paths).toEqual(["/workspace/elsewhere", "/system/example/socket"]);
+      expect(yield* guard(paths)).toBeNull();
+      expect(native.opendir).toHaveBeenCalledWith("/workspace/example/dist");
+      expect(native.opendir).not.toHaveBeenCalledWith("/workspace/example/link");
+    }),
+  );
+  it.effect("protects any target socket even under a different name or hardlink", () =>
+    Effect.gen(function* () {
+      socketFixture();
+      targetFixture().set("/workspace/example/dist/output.js", {
+        ...objectStat(42n),
+        isSocket: () => true,
+      });
+      expect(yield* guard(yield* inventory("darwin"))).toBe(
+        "A process is using a file or directory in the worktree.",
+      );
+    }),
+  );
+  it.effect("keeps a cross-device target socket without using a device shortcut", () =>
+    Effect.gen(function* () {
+      socketFixture();
+      targetFixture().set("/workspace/example/dist/output.js", {
+        ...objectStat(42n, false, 99n),
+        isSocket: () => true,
+      });
+      expect(yield* guard(yield* inventory("darwin"))).toBe(objectProofReason);
+    }),
+  );
+  it.effect.each(["direct", "canonical"] as const)(
+    "protects %s in-root socket evidence before attempting absence proof",
+    (kind) =>
+      Effect.gen(function* () {
+        socketFixture(
+          undefined,
+          undefined,
+          kind === "direct" ? "/workspace/example/socket" : undefined,
+        );
+        if (kind === "canonical")
+          native.realpath.mockImplementation(async (path: string) =>
+            path === "/system/example/socket" ? "/workspace/example/socket" : path,
+          );
+        expect(yield* guard(yield* inventory("darwin"))).toBe(
+          "A process is using a file or directory in the worktree.",
+        );
+        expect(native.opendir).not.toHaveBeenCalled();
+      }),
+  );
+  it.effect("keeps an incomplete target inventory for a vanished socket", () =>
+    Effect.gen(function* () {
+      socketFixture();
+      targetFixture();
+      native.opendir.mockRejectedValue(Object.assign(new Error("denied"), { code: "EACCES" }));
+      expect(yield* guard(yield* inventory("darwin"))).toBe(objectProofReason);
+    }),
+  );
+  it.effect("keeps when the target changes while a socket-free inventory is being collected", () =>
+    Effect.gen(function* () {
+      socketFixture();
+      const stats = targetFixture();
+      native.opendir.mockImplementation(async (path: string) =>
+        (async function* () {
+          if (path === "/workspace/example") {
+            yield { name: "dist" };
+            stats.set(path, objectStat(1n, true, 18n, 2n));
+          } else yield { name: "output.js" };
+        })(),
+      );
+      expect(yield* guard(yield* inventory("darwin"))).toBe(objectProofReason);
+    }),
+  );
+  it.effect.each([
+    "f7\0tunix\0D0x12\0",
+    "f7\0tunix\0i42\0",
+    "f7\0tunix\0D0x12\0i42\0",
+    "f7\0tREG\0",
+    "f7\0tFIFO\0",
+    "fcwd\0tunix\0",
+    "ftxt\0tunix\0",
+    "ffp.7\0tunix\0",
+    "f7u\0tunix\0",
+  ])(
+    "keeps unresolved shapes outside the precise no-identity numeric Unix descriptor (%s)",
+    (record) =>
+      Effect.gen(function* () {
+        socketFixture(record);
+        targetFixture();
+        expect(yield* guard(yield* inventory("darwin"))).toBe(objectProofReason);
+        expect(native.opendir).not.toHaveBeenCalled();
+      }),
+  );
+  it.effect.each(["EACCES", "EPERM", "ESRCH"])(
+    "keeps Unix socket evidence for %s rather than treating it as a vanished name",
+    (code) =>
+      Effect.gen(function* () {
+        socketFixture(undefined, code);
+        targetFixture();
+        expect(yield* guard(yield* inventory("darwin"))).toBe(objectProofReason);
+        expect(native.opendir).not.toHaveBeenCalled();
+      }),
+  );
+  it.effect.each([
+    "f7\0tunix\0D\0n/system/example/socket\0\n",
+    "f7\0tunix\0iinvalid\0n/system/example/socket\0\n",
+    "f7\0tunix\0D0x12\0D0x12\0n/system/example/socket\0\n",
+    "f7\0tunix\0n/system/example/socket-\\q\0\n",
+  ])("never mints socket proof from malformed evidence (%s)", (record) =>
+    Effect.gen(function* () {
+      darwinFixture(`p123\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n${record}`);
+      expect(yield* inventory("darwin")).toBeNull();
+      expect(native.opendir).not.toHaveBeenCalled();
+    }),
+  );
+  it.effect("does not grant socket class proof to injected paths", () =>
+    Effect.gen(function* () {
+      socketFixture();
+      expect(yield* guard(["/system/example/socket"])).toBeNull();
+      expect(native.opendir).not.toHaveBeenCalled();
+      socketFixture(undefined, "EACCES");
+      expect(yield* guard(["/system/example/socket"])).toBe(
+        "Worktree consumer protection could not be verified.",
+      );
     }),
   );
 });
