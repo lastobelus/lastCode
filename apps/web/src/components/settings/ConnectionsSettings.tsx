@@ -3622,7 +3622,11 @@ export function ConnectionsSettings() {
   const secondaryLocalPauseControls = savedEnvironments
     .filter((environment) => isDesktopLocalConnectionTarget(environment.entry.target))
     .map((environment) => (
-      <EnvironmentPauseControl key={environment.environmentId} environment={environment} />
+      <EnvironmentPauseControl
+        key={environment.environmentId}
+        environment={environment}
+        showEnvironmentLabel
+      />
     ));
 
   const primarySettings = (

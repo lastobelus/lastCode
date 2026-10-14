@@ -25,6 +25,7 @@ type EnvironmentPauseControlProps = {
   environment: EnvironmentPresentation;
   onBackdrop?: boolean;
   size?: "titlebar-icon" | "icon-sm";
+  showEnvironmentLabel?: boolean;
 };
 
 /** Every entry point stays bound to one machine, including while its dialog is open. */
@@ -38,6 +39,7 @@ function EnvironmentPauseButton({
   environment,
   onBackdrop = false,
   size = "icon-sm",
+  showEnvironmentLabel = false,
 }: EnvironmentPauseControlProps) {
   const [open, setOpen] = useState(false);
   const result = useAtomValue(
@@ -49,7 +51,10 @@ function EnvironmentPauseButton({
   const label = hasSession ? `Pause and resume ${environment.label}` : `Pause ${environment.label}`;
 
   return (
-    <div className="relative z-10 flex shrink-0">
+    <div className="relative z-10 flex shrink-0 items-center gap-1">
+      {showEnvironmentLabel ? (
+        <span className="text-sm text-muted-foreground">{environment.label}</span>
+      ) : null}
       <Tooltip>
         <TooltipTrigger
           render={
