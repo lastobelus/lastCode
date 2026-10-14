@@ -3,6 +3,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeChildProcess from "node:child_process";
+import * as NodeBuffer from "node:buffer";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -114,6 +115,48 @@ const linuxPaths = async (uid: number): Promise<ReadonlyArray<string> | null> =>
   return paths.length > 0 ? paths : null;
 };
 
+const cEscapeBytes = new Map([
+  [92, 92],
+  [98, 8],
+  [102, 12],
+  [114, 13],
+  [110, 10],
+  [116, 9],
+]);
+
+const decodeLsofPath = (printed: string): string | null => {
+  const input = NodeBuffer.Buffer.from(printed, "utf8");
+  if (input.toString("utf8") !== printed) return null;
+  const bytes: number[] = [];
+  for (let index = 0; index < input.length; index++) {
+    const byte = input[index]!;
+    if (byte === 92) {
+      const escaped = input[++index];
+      if (escaped === 120) {
+        const hex = input.subarray(index + 1, index + 3).toString("utf8");
+        if (!/^[\da-fA-F]{2}$/.test(hex)) return null;
+        bytes.push(Number.parseInt(hex, 16));
+        index += 2;
+      } else {
+        const decoded = cEscapeBytes.get(escaped ?? -1);
+        if (decoded === undefined) return null;
+        bytes.push(decoded);
+      }
+    } else {
+      // lsof's safepup uses caret notation for controls but safestrprt leaves
+      // literal '^' printable. These raw shapes cannot be uniquely inverted.
+      const next = input[index + 1];
+      if (byte === 94 && next !== undefined && (next === 63 || (next >= 64 && next <= 95)))
+        return null;
+      if (byte < 32 || byte === 127) return null;
+      bytes.push(byte);
+    }
+  }
+  const decoded = NodeBuffer.Buffer.from(bytes);
+  if (decoded.includes(0) || !NodeBuffer.isUtf8(decoded)) return null;
+  return decoded.toString("utf8");
+};
+
 const lsofPaths = (output: string): ReadonlyArray<string> | null => {
   if (!output.endsWith("\0\n") || output.includes("\uFFFD")) return null;
   const paths: string[] = [];
@@ -128,10 +171,12 @@ const lsofPaths = (output: string): ReadonlyArray<string> | null => {
     // evidence protected. Vendor source: lsof-org/lsof, darwin/dfile.c process_vnode.
     if (!file.type)
       return file.type === undefined && /^\d+$/.test(file.descriptor) && file.name === "(revoked)";
-    const name = stripDeleted(file.name ?? "");
-    if (name.startsWith("/") && name.includes("\\")) return false;
-    if (name.startsWith("/") && !name.includes("\\")) {
-      paths.push(name);
+    if (file.name?.startsWith("/")) {
+      // Hex escapes represent UTF-8 bytes, not individual Unicode characters.
+      // Decode once so doubled backslashes keep literal escape-looking names.
+      const name = decodeLsofPath(file.name);
+      if (name === null) return false;
+      paths.push(stripDeleted(name));
       if (file.descriptor === "cwd") cwdSeen = true;
       return paths.length <= MAX_PROCESS_PATHS;
     }

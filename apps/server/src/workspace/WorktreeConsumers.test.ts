@@ -183,7 +183,6 @@ describe("Darwin worktree consumers", () => {
     lsof.replace("tREG", ""),
     lsof.replace("n/workspace/elsewhere", "nrelative"),
     lsof + "p20\0\nftxt\0tREG\0n/bin/tool\0\n",
-    lsof.replace("file with spaces.js", "file\\nname.js"),
     lsof.replace("file with spaces.js", "file\uFFFDname.js"),
   ])("keeps malformed or partial lsof output", (output) =>
     Effect.gen(function* () {
@@ -194,6 +193,73 @@ describe("Darwin worktree consumers", () => {
   it.effect("keeps when lsof reports warnings despite valid output", () =>
     Effect.gen(function* () {
       darwinFixture(lsof, "partial inventory");
+      expect(yield* inventory("darwin")).toBeNull();
+    }),
+  );
+  it.effect.each([
+    ["unicode-\\xc3\\xa9.txt", "unicode-é.txt"],
+    ["unicode-\\xf0\\x9f\\x98\\x80.txt", "unicode-😀.txt"],
+    ["literal-\\\\xc3\\\\xa9.txt", "literal-\\xc3\\xa9.txt"],
+    ["newline-\\nnote.txt", "newline-\nnote.txt"],
+    ["literal-\\\\nnote.txt", "literal-\\nnote.txt"],
+    ["mixed-\\\\x41-\\xc3\\xa9.txt", "mixed-\\x41-é.txt"],
+    ["raw-é-😀.txt", "raw-é-😀.txt"],
+    ["controls-\\b\\f\\r\\t.txt", "controls-\b\f\r\t.txt"],
+    ["ordinary-^lower.txt", "ordinary-^lower.txt"],
+  ] as const)("decodes an emitted pathname once (%s)", ([printed, actual]) =>
+    Effect.gen(function* () {
+      const name = `/workspace/example/${printed}`;
+      darwinFixture(`p123\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\nf4\0tREG\0n${name}\0\n`);
+      const paths = yield* inventory("darwin");
+      expect(paths).toEqual(["/workspace/elsewhere", `/workspace/example/${actual}`]);
+      expect(yield* guard(paths)).toBe("A process is using a file or directory in the worktree.");
+    }),
+  );
+  it.effect.each(["cwd", "txt", "4"] as const)(
+    "decoded %s pathname evidence protects its canonical worktree root",
+    (descriptor) =>
+      Effect.gen(function* () {
+        const actualRoot = "/workspace/example/unicode-é";
+        const actual = descriptor === "cwd" ? actualRoot : `${actualRoot}/file\nnote.txt`;
+        const printed =
+          descriptor === "cwd"
+            ? "/workspace/example/unicode-\\xc3\\xa9"
+            : "/workspace/example/unicode-\\xc3\\xa9/file\\nnote.txt";
+        const prefix =
+          descriptor === "cwd" ? "p123\0\n" : "p123\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n";
+        darwinFixture(
+          `${prefix}f${descriptor}\0t${descriptor === "cwd" ? "DIR" : "REG"}\0n${printed}\0\n`,
+        );
+        const paths = yield* inventory("darwin");
+        expect(paths).toContain(actual);
+        expect(
+          yield* WorktreeConsumers.worktreeConsumerReason(actualRoot).pipe(
+            Effect.provideService(WorktreeConsumers.ProcessPaths, Effect.succeed(paths)),
+            Effect.provideService(DependencyMounts.MountPoints, Effect.succeed(["/"])),
+          ),
+        ).toBe("A process is using a file or directory in the worktree.");
+      }),
+  );
+  it.effect.each([
+    "trailing-\\",
+    "short-\\x",
+    "short-\\x0",
+    "nonhex-\\xgg",
+    "unknown-\\q",
+    "overlong-\\xc0\\xaf",
+    "truncated-\\xc3",
+    "invalid-\\xc3\\x28",
+    "surrogate-\\xed\\xa0\\x80",
+    "too-high-\\xf4\\x90\\x80\\x80",
+    "nul-\\x00",
+    "caret-^A",
+    "caret-^?",
+    "raw-line\nbreak",
+    "raw-tab\tname",
+    "raw-\uD800name",
+  ])("keeps malformed, invalid UTF-8 or ambiguous pathname evidence (%s)", (name) =>
+    Effect.gen(function* () {
+      darwinFixture(`p123\0\nfcwd\0tDIR\0n/workspace\0\nf4\0tREG\0n/workspace/${name}\0\n`);
       expect(yield* inventory("darwin")).toBeNull();
     }),
   );
