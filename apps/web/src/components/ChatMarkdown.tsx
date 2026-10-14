@@ -103,10 +103,9 @@ import { createIncrementalMarkdownPlugin } from "../markdown-incremental";
 import { defaultUrlTransform } from "react-markdown";
 import { parseAssistantCitationHref } from "@t3tools/shared/assistantCitations";
 import { parseComposerContextHref } from "@t3tools/shared/composerContextReferences";
-import { parseThreadLinkHref } from "@t3tools/shared/threadLinks";
+import { parseThreadLinkHref, parseThreadLinkReference } from "@t3tools/shared/threadLinks";
 import { AssistantCitationChip } from "./chat/AssistantCitationChip";
 import { MarkdownThreadLink } from "./chat/MarkdownThreadLink";
-import { isWindowsAbsolutePath } from "@t3tools/shared/path";
 import {
   artifactTemplateFromHastProperties,
   renderCodexFileCitationsAsMarkdown,
@@ -505,17 +504,43 @@ type MarkdownAstNode = {
   children?: MarkdownAstNode[];
 };
 
-function nodeToPlainText(node: ReactNode): string {
+function nodeToPlainText(node: ReactNode, normalizeSoftBreaks = false): string {
   if (typeof node === "string" || typeof node === "number") {
-    return String(node);
+    return normalizeSoftBreaks ? String(node).replace(/\r?\n/g, " ") : String(node);
   }
   if (Array.isArray(node)) {
-    return node.map((child) => nodeToPlainText(child)).join("");
+    return node.map((child) => nodeToPlainText(child, normalizeSoftBreaks)).join("");
   }
   if (isValidElement<{ children?: ReactNode }>(node)) {
-    return nodeToPlainText(node.props.children);
+    if (node.type === "br") return "\n";
+    return nodeToPlainText(node.props.children, normalizeSoftBreaks);
   }
   return "";
+}
+
+function nodeImageCount(node: ReactNode): number {
+  if (Array.isArray(node)) return node.reduce((count, child) => count + nodeImageCount(child), 0);
+  if (!isValidElement<{ children?: ReactNode; node?: { tagName?: string } }>(node)) return 0;
+  if (node.type === "img" || node.props.node?.tagName === "img") return 1;
+  return nodeImageCount(node.props.children);
+}
+
+function markFileLabelMedia(node: ReactNode): ReactNode {
+  return React.Children.map(node, (child) => {
+    if (!isValidElement<{ children?: ReactNode; node?: { tagName?: string } }>(child)) return child;
+    if (child.type === "img" || child.props.node?.tagName === "img") {
+      return (
+        <span data-markdown-copy-media>
+          <span data-markdown-copy-media-start />
+          {child}
+          <span data-markdown-copy-media-end />
+        </span>
+      );
+    }
+    return child.props.children === undefined
+      ? child
+      : React.cloneElement(child, undefined, markFileLabelMedia(child.props.children));
+  });
 }
 
 function extractCodeBlock(
@@ -1195,6 +1220,7 @@ function UncachedShikiCodeBlock({
 
 interface MarkdownFileLinkProps {
   environmentId: EnvironmentId | null;
+  children?: ReactNode;
   href: string;
   targetPath: string;
   iconPath: string;
@@ -1351,13 +1377,22 @@ function ChatMarkdownMediaUnavailableLabel(props: {
   readonly kind?: "image" | "video" | undefined;
 }) {
   const label = props.kind === "video" ? "Video unavailable" : "Image unavailable";
+  const text = props.alt.length > 0 ? `${label} · ${props.alt}` : label;
   return (
     // Find indexes no image text, so this fallback must not highlight either.
-    <span data-thread-find-ignore className="inline-flex items-center gap-1.5">
+    <span
+      data-thread-find-ignore
+      className="inline-flex items-center gap-1.5"
+      data-markdown-copy-media-text={text}
+    >
       <TriangleAlertIcon aria-hidden className="size-3.5 shrink-0" />
-      {props.alt.length > 0 ? `${label} · ${props.alt}` : label}
+      {text}
     </span>
   );
+}
+
+function MarkdownImageActions(props: ComponentProps<typeof MediaActions>) {
+  return use(MarkdownLinkContext) ? props.children : <MediaActions {...props} />;
 }
 
 /** Inline chip for an image that sits in a line of text or can never load. */
@@ -1379,7 +1414,7 @@ function ChatMarkdownImageFallback(props: {
     </span>
   );
   return props.actionsSource ? (
-    <MediaActions source={props.actionsSource}>{content}</MediaActions>
+    <MarkdownImageActions source={props.actionsSource}>{content}</MarkdownImageActions>
   ) : (
     content
   );
@@ -1454,7 +1489,7 @@ function ChatMarkdownImage(props: {
 
   if (settled) {
     return (
-      <MediaActions source={props.actionsSource}>
+      <MarkdownImageActions source={props.actionsSource}>
         <img
           {...props.imageProps}
           ref={markLoadedIfComplete}
@@ -1472,7 +1507,7 @@ function ChatMarkdownImage(props: {
           {...expandableMarkdownImageProps(props.onImageExpand, props.alt)}
           {...imageEvents(src)}
         />
-      </MediaActions>
+      </MarkdownImageActions>
     );
   }
   if (!props.standalone) {
@@ -1493,7 +1528,7 @@ function ChatMarkdownImage(props: {
     );
   }
   return (
-    <MediaActions source={props.actionsSource}>
+    <MarkdownImageActions source={props.actionsSource}>
       <span
         id={props.imageProps?.id}
         data-markdown-copy={props.copyMarkdown}
@@ -1523,7 +1558,7 @@ function ChatMarkdownImage(props: {
           />
         ) : null}
       </span>
-    </MediaActions>
+    </MarkdownImageActions>
   );
 }
 
@@ -1538,6 +1573,30 @@ function ChatMarkdownVideo(props: {
   readonly actionsSource?: MediaActionSource | undefined;
   readonly onRetry?: (() => Promise<unknown>) | undefined;
 }) {
+  const insideLink = use(MarkdownLinkContext);
+  if (insideLink) {
+    return props.src && !props.sourceFailed ? (
+      <video
+        src={props.src}
+        aria-label={props.alt}
+        preload="metadata"
+        playsInline
+        controls={false}
+        tabIndex={-1}
+        data-markdown-copy={props.copyMarkdown}
+        className={CHAT_MARKDOWN_MEDIA_BOUNDS_CLASS_NAME}
+        style={props.style}
+      />
+    ) : (
+      <span
+        data-thread-find-ignore
+        data-markdown-copy={props.copyMarkdown}
+        data-markdown-copy-media-text={props.alt}
+      >
+        {props.alt}
+      </span>
+    );
+  }
   return (
     <MediaVideoPlayer
       key={props.mediaIdentity ?? props.copyMarkdown ?? props.src}
@@ -1725,6 +1784,12 @@ function plainHastText(node: unknown): string | null {
     return null;
   });
   return parts.every((part) => part !== null) ? parts.join("") : null;
+}
+
+function hastHasImage(node: unknown): boolean {
+  if (!node || typeof node !== "object") return false;
+  if ("tagName" in node && node.tagName === "img") return true;
+  return "children" in node && Array.isArray(node.children) && node.children.some(hastHasImage);
 }
 
 /**
@@ -1933,6 +1998,7 @@ function MarkdownExternalLinkContent({
 
 const MarkdownFileLink = memo(function MarkdownFileLink({
   environmentId,
+  children,
   href,
   targetPath,
   iconPath,
@@ -2214,59 +2280,69 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
     canOpenInPanel,
   });
 
+  const chip = (
+    <FileTagChipContent
+      path={iconPath}
+      environmentId={environmentId}
+      label={label}
+      theme={theme}
+    />
+  );
+  const content = children ? (
+    <>
+      {children} (<ContextChip kind="mention">{chip}</ContextChip>)
+    </>
+  ) : (
+    chip
+  );
+
+  const link = hasPrimaryAction ? (
+    <a
+      href={href}
+      className={cn(children ? "text-left" : undefined, MARKDOWN_FILE_LINK_CLASS_NAME)}
+      data-markdown-copy={copyMarkdown}
+      data-markdown-copy-images={children ? nodeImageCount(children) : undefined}
+      data-markdown-copy-text={children ? `${nodeToPlainText(children)} (${label})` : undefined}
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (onOpen && shouldOpenMarkdownFileLinkInEditor(event)) {
+          handleOpenInEditor();
+          return;
+        }
+        if (useBrowserPrimaryAction) {
+          handleOpenInBrowser();
+          return;
+        }
+        handleOpenInFilePreview();
+      }}
+      onContextMenu={handleContextMenu}
+    >
+      {content}
+    </a>
+  ) : (
+    <button
+      type="button"
+      aria-label={children ? undefined : `File options for ${label}`}
+      aria-haspopup="menu"
+      className={cn(
+        children ? "text-left" : undefined,
+        MARKDOWN_FILE_LINK_CLASS_NAME,
+        "select-text",
+      )}
+      data-markdown-copy={copyMarkdown}
+      data-markdown-copy-images={children ? nodeImageCount(children) : undefined}
+      data-markdown-copy-text={children ? `${nodeToPlainText(children)} (${label})` : undefined}
+      onClick={handleContextMenu}
+      onContextMenu={handleContextMenu}
+    >
+      {content}
+    </button>
+  );
+
   return (
     <Tooltip>
-      <TooltipTrigger
-        render={
-          hasPrimaryAction ? (
-            <ContextChip
-              kind="mention"
-              render={<a href={href} />}
-              className={MARKDOWN_FILE_LINK_CLASS_NAME}
-              data-markdown-copy={copyMarkdown}
-              onClick={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                if (onOpen && shouldOpenMarkdownFileLinkInEditor(event)) {
-                  handleOpenInEditor();
-                  return;
-                }
-                if (useBrowserPrimaryAction) {
-                  handleOpenInBrowser();
-                  return;
-                }
-                handleOpenInFilePreview();
-              }}
-              onContextMenu={handleContextMenu}
-            >
-              <FileTagChipContent
-                path={iconPath}
-                environmentId={environmentId}
-                label={label}
-                theme={theme}
-              />
-            </ContextChip>
-          ) : (
-            <ContextChip
-              kind="mention"
-              render={<button type="button" />}
-              aria-label={`File options for ${label}`}
-              aria-haspopup="menu"
-              className={cn(MARKDOWN_FILE_LINK_CLASS_NAME, "select-text")}
-              data-markdown-copy={copyMarkdown}
-              onClick={handleContextMenu}
-              onContextMenu={handleContextMenu}
-            >
-              <FileTagChipContent
-                path={iconPath}
-                environmentId={environmentId}
-                label={label}
-                theme={theme}
-              />
-            </ContextChip>
-          )
-        }
-      />
+      <TooltipTrigger render={children ? link : <ContextChip kind="mention" render={link} />} />
       <TooltipPopup side="top" variant="code">
         {/* The full path: the chip already shows the shortened form, and a link
             to the workspace root collapses to a bare label that repeats it. */}
@@ -2283,6 +2359,7 @@ function areMarkdownFileLinkPropsEqual(
   next: Readonly<MarkdownFileLinkProps>,
 ): boolean {
   return (
+    previous.children === next.children &&
     previous.href === next.href &&
     previous.targetPath === next.targetPath &&
     previous.iconPath === next.iconPath &&
@@ -2643,7 +2720,12 @@ function useChatMarkdownState({
     [cwd, findWorkspaceBasenameMatch, revealFileInFileManager],
   );
   const fileLinkChip = useCallback(
-    (fileLinkMeta: MarkdownFileLinkMeta, copyMarkdown: string, mediaSource?: string) => {
+    (
+      fileLinkMeta: MarkdownFileLinkMeta,
+      copyMarkdown: string,
+      mediaSource?: string,
+      children?: ReactNode,
+    ) => {
       const mediaPath = mediaSource ?? fileLinkMeta.filePath;
       const canPreviewMedia =
         mediaMimeTypeFromExtension(
@@ -2697,7 +2779,9 @@ function useChatMarkdownState({
               ? () => openMarkdownFileInPreview(fileLinkMeta.filePath)
               : undefined
           }
-        />
+        >
+          {children}
+        </MarkdownFileLink>
       );
     },
     [
@@ -2913,6 +2997,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
     const {
       canOperateHost,
       canOperatePreview,
+      text,
       cwd,
       environmentId,
       imageBaseDir,
@@ -2930,16 +3015,20 @@ const CHAT_MARKDOWN_COMPONENTS = {
       updateThreadPullRequestLink,
       fileLinkChip,
       renderContextReference,
-      text,
     } = use(ChatMarkdownRendererContext);
     const citation = href ? parseAssistantCitationHref(href) : null;
     if (citation) return <AssistantCitationChip citation={citation} />;
-    // A thread link names a thread in this message's environment and opens it in the app.
-    const linkedThreadId = href ? parseThreadLinkHref(href) : null;
-    if (linkedThreadId) {
-      const label = hastPlainTextDeep(node) || linkedThreadId;
-      return environmentId ? (
-        <MarkdownThreadLink environmentId={environmentId} threadId={linkedThreadId} label={label} />
+    const linkedThread = href ? parseThreadLinkReference(href) : null;
+    if (linkedThread) {
+      const label = hastPlainTextDeep(node) || linkedThread.threadId;
+      const linkedEnvironmentId = linkedThread.environmentId ?? environmentId;
+      return linkedEnvironmentId ? (
+        <MarkdownThreadLink
+          environmentId={linkedEnvironmentId}
+          reference={linkedThread}
+          messageEnvironmentId={environmentId ?? undefined}
+          label={label}
+        />
       ) : (
         <span>{label}</span>
       );
@@ -3171,21 +3260,25 @@ const CHAT_MARKDOWN_COMPONENTS = {
       );
     }
 
-    const label = nodeToPlainText(children);
-    const start = node?.position?.start.offset;
-    const end = node?.position?.end.offset;
-    const source = start !== undefined && end !== undefined ? text.slice(start, end) : "";
-    const copyMarkdown =
-      source.startsWith("[") && source.includes("](")
-        ? source
-        : `[${(label || fileLinkMeta.basename).replace(/[\\[\]]/g, "\\$&")}](${normalizedHref})`;
-    const chip = fileLinkChip(fileLinkMeta, copyMarkdown, normalizedHref);
-    return isMarkdownFileLinkLabel(label, normalizedHref) ? (
-      chip
-    ) : (
-      <span data-markdown-copy={copyMarkdown}>
-        {children} {chip}
-      </span>
+    const label = nodeToPlainText(children, true);
+    const escapedLabel = (label.trim() ? label : fileLinkMeta.basename)
+      .replaceAll("\\", "\\\\")
+      .replaceAll("[", "\\[")
+      .replaceAll("]", "\\]");
+    const labelStart = node?.children[0]?.position?.start.offset;
+    const labelEnd = node?.children.at(-1)?.position?.end.offset;
+    const authoredLabel =
+      (label.trim() || hastHasImage(node)) && labelStart !== undefined && labelEnd !== undefined
+        ? text.slice(labelStart, labelEnd)
+        : undefined;
+    const copyMarkdown = `[${authoredLabel ?? escapedLabel}](${normalizedHref})`;
+    return fileLinkChip(
+      fileLinkMeta,
+      copyMarkdown,
+      normalizedHref,
+      !hastHasImage(node) && isMarkdownFileLinkLabel(label, normalizedHref) ? undefined : (
+        <MarkdownLinkContext value>{markFileLabelMedia(children)}</MarkdownLinkContext>
+      ),
     );
   },
   code: function MarkdownCode({ node, children, className, ...props }) {
