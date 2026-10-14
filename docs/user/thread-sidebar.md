@@ -265,12 +265,19 @@ for custom configuration.
 
 ## Choose the LastCode sidebar
 
+On web and desktop, use **Mark unread** in a thread's menu to return to a completed reply
+later. **Mark read** acknowledges it without sending a message. Both actions also work on a
+selection; threads with no completed reply cannot be marked unread.
+
 On web and desktop, enable **Settings → LastCode → Appearance → LastCode sidebar**
 for the LastCode project tree, annotations, and family controls. It is off by default.
 While enabled, use the tree button or the **Sidebar: Toggle Presentation** shortcut to switch
 between LastCode and the v2 sidebar without changing either saved sidebar preference.
 Turn it off to return to the sidebar selected by **Settings → General → Legacy features → Sidebar (legacy)**.
 With LastCode off, the same control switches between the upstream legacy and v2 sidebars.
+
+**Family status subheaders**, in the same Appearance settings, is on by default. Turn it off
+to show the family status and child count in the parent row while keeping the child tree.
 
 ## Thread annotations in LastCode
 
