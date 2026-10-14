@@ -1813,14 +1813,18 @@ const make = Effect.gen(function* () {
           cwd: worktreePath,
           args: ["rev-parse", "--path-format=absolute", "--git-common-dir"],
           maxOutputBytes: 64 * 1024,
+          allowNonZeroExit: true,
         });
         const expected = yield* git.execute({
           operation: "StorageCleanup.worktreeRepository",
           cwd: project.workspaceRoot,
           args: ["rev-parse", "--path-format=absolute", "--git-common-dir"],
           maxOutputBytes: 64 * 1024,
+          allowNonZeroExit: true,
         });
         if (
+          common.exitCode !== 0 ||
+          expected.exitCode !== 0 ||
           common.stdoutTruncated ||
           expected.stdoutTruncated ||
           common.stderrTruncated ||

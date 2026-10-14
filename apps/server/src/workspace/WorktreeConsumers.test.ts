@@ -197,6 +197,49 @@ describe("Darwin worktree consumers", () => {
       expect(yield* inventory("darwin")).toBeNull();
     }),
   );
+  it.effect.each(["NPOLICY", "CHAN", "NEXUS"] as const)(
+    "accepts anonymous %s descriptors without inventing filesystem paths",
+    (type) =>
+      Effect.gen(function* () {
+        darwinFixture(lsof + `f10\0t${type}\0n0x12345678\0\nf11\0t${type}\0\n`);
+        expect(yield* inventory("darwin")).toEqual([
+          "/workspace/elsewhere",
+          "/workspace/example/native/resource-monitor/target/debug/monitor",
+          "/workspace/example/apps/web/dist/file with spaces.js",
+        ]);
+      }),
+  );
+  it.effect(
+    "accepts the exact numeric ENOENT no-current-path marker without treating unknown descriptors as safe",
+    () =>
+      Effect.gen(function* () {
+        darwinFixture("p123\0\nfcwd\0tDIR\0n/workspace\0\nf0\0n(revoked)\0\nf17\0n(revoked)\0\n");
+        expect(yield* inventory("darwin")).toEqual(["/workspace"]);
+      }),
+  );
+  it.effect.each([
+    "f0\0nrelative/file\0\n",
+    "f0\0n/workspace/file\0\n",
+    "f0\0\n",
+    "f0\0n(revoked) \0\n",
+    "f0u\0n(revoked)\0\n",
+    "ftxt\0n(revoked)\0\n",
+    "fcwd\0n(revoked)\0\n",
+    "ffp.17\0n(revoked)\0\n",
+    "f0\0n(proc_pidfdinfo error)\0\n",
+    "f0\0t\0n(revoked)\0\n",
+    "f1\0tUNKNOWN\0n0x1234\0\n",
+    "f1\0tREG\0n0x1234\0\n",
+    "fcwd\0tNPOLICY\0n0x1234\0\n",
+    "ftxt\0tNEXUS\0n0x1234\0\n",
+  ])(
+    "keeps missing or unknown file evidence that does not match an explicit revoked descriptor",
+    (record) =>
+      Effect.gen(function* () {
+        darwinFixture(lsof + record);
+        expect(yield* inventory("darwin")).toBeNull();
+      }),
+  );
   it.effect(
     "accepts normal non-file socket and kernel descriptors without inventing filesystem paths",
     () =>

@@ -305,12 +305,16 @@ const cleanupFixture = Effect.gen(function* () {
   const initialConfig = yield* ServerConfig.ServerConfig;
   // macOS temporary directories can be reached through /var's symlink. Use
   // canonical roots so these tests exercise cleanup rather than its link guard.
-  const baseDir = yield* fs.realPath(initialConfig.baseDir);
+  const baseDir = yield* fs.makeTempDirectory({
+    directory: yield* fs.realPath(initialConfig.baseDir),
+    prefix: "fixture-",
+  });
   const config = {
     ...initialConfig,
     baseDir,
     ...(yield* ServerConfig.deriveServerPaths(baseDir, undefined)),
   };
+  yield* fs.makeDirectory(config.logsDir, { recursive: true });
   const git = yield* GitVcsDriver.GitVcsDriver;
   const repo = yield* fs.makeTempDirectoryScoped({ prefix: "cleanup-repo-" });
   const command = (cwd: string, args: string[]) =>
@@ -618,6 +622,7 @@ const cleanupFixture = Effect.gen(function* () {
     activate: () => Deferred.succeed(activation, undefined),
     worktreeInventoryCalls: () => worktreeInventoryCalls,
     now: fixtureNow,
+    seedAgedDependencyUse,
     at: (offset: number) => DateTime.makeUnsafe(fixtureNow + offset),
     setPreviewPaths: (paths: ReadonlyArray<string>) => {
       previewPaths = paths;
@@ -878,6 +883,11 @@ const runCleanupTest = <A, E>(
     Effect.scoped,
   );
 
+const checkoutEntries = (report: import("@t3tools/contracts").StorageCleanupReport) =>
+  report.entries.filter(
+    (entry) => entry.kind === "worktree" && entry.worktreeResource === undefined,
+  );
+
 describe("provider protection during storage cleanup", () => {
   it.live.each(["stopped", "error"] as const)(
     "keeps an unfinished runtime close even when the durable session is %s",
@@ -890,7 +900,7 @@ describe("provider protection during storage cleanup", () => {
           fixture.setSessionStatus(status);
           fixture.setSessionLive(true);
           const report = yield* fixture.service.runNow;
-          expect(report.entries[0]).toMatchObject({
+          expect(checkoutEntries(report)[0]).toMatchObject({
             outcome: "kept",
             reason: "Provider session is still open",
           });
@@ -908,7 +918,7 @@ describe("provider protection during storage cleanup", () => {
           if (row === "older cwd") fixture.setOpenSessionCwd(fixture.repo);
           fixture.protectUnpersistedWorkspace();
           const report = yield* fixture.service.runNow;
-          expect(report.entries[0]).toMatchObject({
+          expect(checkoutEntries(report)[0]).toMatchObject({
             outcome: "kept",
             reason: "Provider session is still open",
           });
@@ -972,7 +982,7 @@ describe("provider protection during storage cleanup", () => {
             fixture.publishProviderChange();
           });
           const report = yield* fixture.service.runNow;
-          expect(report.entries[0]).toMatchObject({
+          expect(checkoutEntries(report)[0]).toMatchObject({
             outcome: "kept",
             reason: "Provider session is still open",
           });
@@ -1491,6 +1501,7 @@ describe("verified build sweep shares the dependency rule", () => {
               archivedAt: fixture.at(-1),
               latestUserMessageAt: fixture.at(-1),
               latestRunCompletedAt: fixture.at(-1),
+              latestRunId: RunId.make("completed-administrative-run"),
             }),
           ]);
           yield* seedCompilerOutput(fixture, root, fixture.now);
@@ -1517,7 +1528,7 @@ describe("verified build sweep shares the dependency rule", () => {
     [14, 4, "kept"],
   ] as const)(
     "uses configured dependency delay %s for outputs idle %s days",
-    (days, idleDays, outcome) =>
+    ([days, idleDays, outcome]) =>
       runCleanupTest(
         Effect.gen(function* () {
           const fixture = yield* cleanupFixture;
@@ -1607,6 +1618,7 @@ describe("verified build sweep shares the dependency rule", () => {
             worktreePath: fixture.worktree,
             latestUserMessageAt: fixture.at(-1),
             latestRunCompletedAt: fixture.at(-1),
+            latestRunId: RunId.make("completed-administrative-run"),
           }),
         ]);
         paths = [`${fixture.worktree}/apps/web/dist/assets/emitted.bin`];
@@ -1635,6 +1647,7 @@ describe("verified build sweep shares the dependency rule", () => {
             worktreePath: statusOnly.worktree,
             latestUserMessageAt: statusOnly.at(-1),
             latestRunCompletedAt: statusOnly.at(-1),
+            latestRunId: RunId.make("completed-administrative-run"),
           }),
         ]);
         expect(
@@ -1661,6 +1674,7 @@ describe("storage cleanup reports and local file policies", () => {
             createdAt: fixture.at(-1),
             latestUserMessageAt: fixture.at(-1),
             latestRunCompletedAt: fixture.at(-1),
+            latestRunId: RunId.make("completed-administrative-run"),
           }),
         ]);
         yield* fixture.fs.writeFileString(
@@ -1674,7 +1688,7 @@ describe("storage cleanup reports and local file policies", () => {
         const checkpoint = "refs/t3/orchestration-v2/checkpoints/generic-checkpoint";
         yield* fixture.command(fixture.repo, ["update-ref", checkpoint, before.trim()]);
         const report = yield* fixture.service.runNow;
-        expect(report.entries[0]).toMatchObject({
+        expect(checkoutEntries(report)[0]).toMatchObject({
           outcome: "removed",
           reason: "All thread owners are archived",
         });
@@ -1702,7 +1716,9 @@ describe("storage cleanup reports and local file policies", () => {
               latestUserMessageAt: fixture.at(-DAY_MS),
             }),
           ]);
-          expect((yield* fixture.service.runNow).entries[0]).toMatchObject({ outcome: "kept" });
+          expect(checkoutEntries(yield* fixture.service.runNow)[0]).toMatchObject({
+            outcome: "kept",
+          });
           expect(yield* fixture.fs.exists(fixture.worktree)).toBe(true);
         }),
       ),
@@ -1723,15 +1739,19 @@ describe("storage cleanup reports and local file policies", () => {
           archivedAt: fixture.at(-1),
         });
         fixture.setThreads([first, { ...sibling, archivedAt: null }]);
-        expect((yield* fixture.service.runNow).entries[0]?.reason).toBe("Shared by 2 threads");
+        expect(checkoutEntries(yield* fixture.service.runNow)[0]?.reason).toBe(
+          "Shared by 2 threads",
+        );
         const otherProject = ProjectId.make("off-owner-project");
         fixture.setProjectWholeCleanupOff(otherProject);
         fixture.setThreads([first, { ...sibling, projectId: otherProject }]);
-        expect((yield* fixture.service.runNow).entries[0]?.reason).toBe(
+        expect(checkoutEntries(yield* fixture.service.runNow)[0]?.reason).toBe(
           "Whole-worktree cleanup is off for an owner",
         );
         fixture.setThreads([first, sibling]);
-        expect((yield* fixture.service.runNow).entries[0]).toMatchObject({ outcome: "removed" });
+        expect(checkoutEntries(yield* fixture.service.runNow)[0]).toMatchObject({
+          outcome: "removed",
+        });
       }),
     ),
   );
@@ -1750,10 +1770,12 @@ describe("storage cleanup reports and local file policies", () => {
         ]);
         processPaths = [`${fixture.worktree}/dist/bin.mjs`];
         const report = yield* fixture.service.runNow;
-        expect(report.entries[0]?.reason).toContain("process is using a file");
+        expect(checkoutEntries(report)[0]?.reason).toContain("process is using a file");
         expect(yield* fixture.fs.exists(fixture.worktree)).toBe(true);
         processPaths = [];
-        expect((yield* fixture.service.runNow).entries[0]).toMatchObject({ outcome: "removed" });
+        expect(checkoutEntries(yield* fixture.service.runNow)[0]).toMatchObject({
+          outcome: "removed",
+        });
       }),
     ),
   );
@@ -1784,7 +1806,7 @@ describe("storage cleanup reports and local file policies", () => {
         fixture.setThreads([
           shell({ branch: "feature", worktreePath: fixture.worktree, archivedAt: fixture.at(-1) }),
         ]);
-        expect((yield* fixture.service.runNow).entries[0]).toMatchObject({
+        expect(checkoutEntries(yield* fixture.service.runNow)[0]).toMatchObject({
           outcome: "kept",
           bytes: null,
         });
@@ -1825,7 +1847,7 @@ describe("storage cleanup reports and local file policies", () => {
             "unique retained bytes\n",
           );
           const report = yield* fixture.service.runNow;
-          expect(report.entries[0]).toMatchObject({ outcome: "kept", bytes: null });
+          expect(checkoutEntries(report)[0]).toMatchObject({ outcome: "kept", bytes: null });
           expect(yield* fixture.fs.readFileString(`${fixture.worktree}/${relative}`)).toBe(
             "unique retained bytes\n",
           );
@@ -1849,8 +1871,12 @@ describe("storage cleanup reports and local file policies", () => {
         yield* fs.symlink(`${outside}/missing`, `${worktree}/node_modules/dangling-link`);
         const report = yield* service.runNow;
         expect(sizes.length).toBeGreaterThan(0);
-        expect(report.entries[0]).toMatchObject({ outcome: "kept", bytes: null, files: null });
-        expect(report.entries[0]?.reason).toContain("ignored files (node_modules/)");
+        expect(checkoutEntries(report)[0]).toMatchObject({
+          outcome: "kept",
+          bytes: null,
+          files: null,
+        });
+        expect(checkoutEntries(report)[0]?.reason).toContain("ignored files (node_modules/)");
         expect(report.bytesFreed).toBe(0);
         expect(yield* fs.exists(`${worktree}/node_modules/nested/file`)).toBe(true);
         expect(yield* fs.readFileString(`${outside}/external`)).toBe("must not count");
@@ -1868,7 +1894,11 @@ describe("storage cleanup reports and local file policies", () => {
           }),
         );
         const report = yield* service.runNow;
-        expect(report.entries[0]).toMatchObject({ outcome: "removed", bytes: null, files: null });
+        expect(checkoutEntries(report)[0]).toMatchObject({
+          outcome: "removed",
+          bytes: null,
+          files: null,
+        });
         expect(report.bytesFreed).toBe(0);
         expect(yield* fs.exists(worktree)).toBe(false);
       }),
@@ -1910,7 +1940,7 @@ describe("storage cleanup reports and local file policies", () => {
         else fixture.acquireProviderOwnership();
         yield* Deferred.succeed(resume, undefined);
         const report = yield* Fiber.join(cleanup);
-        expect(report.entries[0]).toMatchObject({
+        expect(checkoutEntries(report)[0]).toMatchObject({
           outcome: "kept",
           reason,
           bytes: null,
@@ -1937,7 +1967,7 @@ describe("storage cleanup reports and local file policies", () => {
         const root = yield* fs.realPath(fixture.worktree);
         fixture.setOpenSessionCwd(fixture.worktree);
         const kept = yield* fixture.service.runNow;
-        expect(kept.entries[0]).toMatchObject({
+        expect(checkoutEntries(kept)[0]).toMatchObject({
           outcome: "kept",
           reason: "Provider session is still open",
           bytes: null,
@@ -1945,8 +1975,8 @@ describe("storage cleanup reports and local file policies", () => {
         expect(walked.filter((directory) => directory.startsWith(root))).toEqual([]);
         fixture.setOpenSessionCwd(null);
         const removed = yield* fixture.service.runNow;
-        expect(removed.entries[0]).toMatchObject({ outcome: "removed" });
-        expect(removed.entries[0]?.bytes).toBeGreaterThan(0);
+        expect(checkoutEntries(removed)[0]).toMatchObject({ outcome: "removed" });
+        expect(checkoutEntries(removed)[0]?.bytes).toBeGreaterThan(0);
         expect(walked).toContain(root);
       }),
     ),
@@ -1958,14 +1988,14 @@ describe("storage cleanup reports and local file policies", () => {
           yield* cleanupFixture;
         const changed = { outcome: "kept", reason: "Repository or branch changed" };
         yield* command(worktree, ["checkout", "--detach"]);
-        expect((yield* service.runNow).entries[0]).toMatchObject(changed);
+        expect(checkoutEntries(yield* service.runNow)[0]).toMatchObject(changed);
         // A branch that has no commit yet is still a different branch.
         yield* command(worktree, ["switch", "--orphan", "other"]);
-        expect((yield* service.runNow).entries[0]).toMatchObject(changed);
+        expect(checkoutEntries(yield* service.runNow)[0]).toMatchObject(changed);
         // Status output reserves a leading "(" for a detached HEAD.
         yield* command(worktree, ["switch", "-c", "(feature)", "feature"]);
         setThreads([shell({ branch: "(feature)", worktreePath: worktree })]);
-        expect((yield* service.runNow).entries[0]).toMatchObject(changed);
+        expect(checkoutEntries(yield* service.runNow)[0]).toMatchObject(changed);
         setThreads([shell({ branch: "feature", worktreePath: worktree })]);
         // Tags named after the branch or HEAD make Git's short names ambiguous.
         yield* command(worktree, ["tag", "feature", "feature"]);
@@ -1974,15 +2004,18 @@ describe("storage cleanup reports and local file policies", () => {
         yield* command(worktree, ["switch", "feature"]);
         const index = (yield* command(worktree, ["rev-parse", "--git-path", "index"])).stdout;
         yield* fs.writeFileString(`${index.trim()}.lock`, "");
-        const locked = (yield* service.runNow).entries[0];
+        const locked = checkoutEntries(yield* service.runNow)[0];
         expect(locked).toMatchObject({ outcome: "failed" });
         expect(locked?.reason).toContain("Git index is locked");
         yield* fs.remove(`${index.trim()}.lock`);
         const gitFile = yield* fs.readFileString(`${worktree}/.git`);
         yield* fs.writeFileString(`${worktree}/.git`, "gitdir: /missing-git-directory\n");
-        expect((yield* service.runNow).entries[0]).toMatchObject(changed);
+        expect(checkoutEntries(yield* service.runNow)[0]).toMatchObject({
+          outcome: "kept",
+          reason: "Repository and project mapping changed",
+        });
         yield* fs.writeFileString(`${worktree}/.git`, gitFile);
-        expect((yield* service.runNow).entries[0]).toMatchObject({ outcome: "removed" });
+        expect(checkoutEntries(yield* service.runNow)[0]).toMatchObject({ outcome: "removed" });
         expect(fullStatusCalls()).toBe(0);
       }),
     ),
@@ -2006,7 +2039,7 @@ describe("storage cleanup reports and local file policies", () => {
       omittedCount: 0,
     });
     expect(report.bytesFreed).toBe(0);
-    expect(report.entries[0]).toMatchObject({ bytes: null, files: null });
+    expect(checkoutEntries(report)[0]).toMatchObject({ bytes: null, files: null });
   });
   it.each([undefined, "dependencies", "future-resource"])(
     "decodes omitted and unfamiliar worktree resource detail: %s",
@@ -2075,7 +2108,7 @@ describe("storage cleanup reports and local file policies", () => {
         expect(yield* fs.exists(worktree)).toBe(outcome === "kept");
         expect(yield* service.latestReport).toEqual(report);
         if (outcome === "kept")
-          expect(report.entries[0]?.reason).toContain(
+          expect(checkoutEntries(report)[0]?.reason).toContain(
             file === ".env" ? "ignored files (.env)" : "uncommitted changes (1 file)",
           );
       }),
@@ -2088,9 +2121,15 @@ describe("storage cleanup reports and local file policies", () => {
         fixture.setPolicy("tracked-changes");
         fixture.editBeforeRemoval();
         const report = yield* fixture.service.runNow;
-        expect(report.entries[0]).toMatchObject({ outcome: "failed", bytes: null, files: null });
+        expect(checkoutEntries(report)[0]).toMatchObject({
+          outcome: "failed",
+          bytes: null,
+          files: null,
+        });
         expect(report.bytesFreed).toBe(0);
-        expect(report.entries[0]?.reason).toContain("contains modified or untracked files");
+        expect(checkoutEntries(report)[0]?.reason).toContain(
+          "contains modified or untracked files",
+        );
         expect(yield* fixture.fs.readFileString(`${fixture.worktree}/tracked.txt`)).toBe(
           "late edit\n",
         );
@@ -2135,9 +2174,9 @@ describe("storage cleanup reports and local file policies", () => {
         expect(report.entries).toHaveLength(200);
         expect(report.omittedCount).toBe(7);
         expect(report.counts).toEqual({ removed: 1, kept: 206, failed: 0 });
-        expect(report.entries[0]?.outcome).toBe("removed");
-        expect(report.entries[0]?.bytes).toBeGreaterThan(0);
-        expect(report.bytesFreed).toBe(report.entries[0]?.bytes);
+        expect(checkoutEntries(report)[0]?.outcome).toBe("removed");
+        expect(checkoutEntries(report)[0]?.bytes).toBeGreaterThan(0);
+        expect(report.bytesFreed).toBe(checkoutEntries(report)[0]?.bytes);
       }),
     ),
   );
@@ -2148,7 +2187,7 @@ describe("storage cleanup reports and local file policies", () => {
         setPolicy("tracked-changes");
         yield* fs.writeFileString(`${worktree}/tracked.txt`, "staged\n");
         yield* command(worktree, ["add", "tracked.txt"]);
-        expect((yield* service.runNow).entries[0]).toMatchObject({
+        expect(checkoutEntries(yield* service.runNow)[0]).toMatchObject({
           outcome: "kept",
           reason: "Has uncommitted changes (1 file)",
         });
@@ -2164,12 +2203,12 @@ describe("storage cleanup reports and local file policies", () => {
           const fixture = yield* cleanupFixture;
           const { service, fs, worktree, setThreads } = fixture;
           setThreads([shell({ branch: "feature", worktreePath: worktree, status: "running" })]);
-          expect((yield* service.runNow).entries[0]?.reason).toContain("Thread is running");
+          expect(checkoutEntries(yield* service.runNow)[0]?.reason).toContain("Thread is running");
           setThreads([
             shell({ branch: "feature", worktreePath: worktree }),
             shell({ id: ThreadId.make("thread-2"), branch: "feature", worktreePath: worktree }),
           ]);
-          expect((yield* service.runNow).entries[0]?.reason).toBe("Shared by 2 threads");
+          expect(checkoutEntries(yield* service.runNow)[0]?.reason).toBe("Shared by 2 threads");
           const audit = yield* fs.readFileString(
             `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
           );
@@ -2203,7 +2242,7 @@ describe("storage cleanup reports and local file policies", () => {
             kind: "worktree",
             worktreeResource: "dependencies",
             outcome: "kept",
-            reason: "Dependencies: No dependency install could be safely recognized and measured",
+            reason: "Dependencies: No dependency install could be safely recognized",
           }),
         );
         const audit = yield* fixture.fs.readFileString(
@@ -2242,6 +2281,7 @@ describe("storage cleanup reports and local file policies", () => {
           `${fixture.worktree}/node_modules/.package-lock.json`,
           '{"name":"fixture","lockfileVersion":3,"packages":{}}',
         );
+        yield* fixture.seedAgedDependencyUse;
         const report = yield* fixture.service.runNow;
         expect(report.entries).toContainEqual(
           expect.objectContaining({
@@ -2289,6 +2329,7 @@ describe("storage cleanup reports and local file policies", () => {
           '{"name":"fixture","lockfileVersion":3,"packages":{}}',
         );
         fixture.failEligibilityRevalidation();
+        yield* fixture.seedAgedDependencyUse;
         const report = yield* fixture.service.runNow;
         const detail = "Fixture eligibility revalidation failure";
         const failed = report.entries.find(
@@ -2606,6 +2647,7 @@ describe("storage cleanup reports and local file policies", () => {
           '{"name":"fixture","lockfileVersion":3,"packages":{}}',
         );
 
+        yield* fixture.seedAgedDependencyUse;
         const report = yield* fixture.service.runNow;
         expect(
           report.entries.filter(
@@ -3000,8 +3042,8 @@ describe("storage cleanup reports and local file policies", () => {
         enableFiles();
         yield* command(worktree, ["worktree", "lock", worktree]);
         const report = yield* service.runNow;
-        expect(report.entries[0]).toMatchObject({ outcome: "failed" });
-        expect(report.entries[0]?.reason).toContain("git worktree remove: fatal:");
+        expect(checkoutEntries(report)[0]).toMatchObject({ outcome: "failed" });
+        expect(checkoutEntries(report)[0]?.reason).toContain("git worktree remove: fatal:");
         expect(report.entries.map((entry) => entry.kind)).toEqual([
           "worktree",
           "worktree",

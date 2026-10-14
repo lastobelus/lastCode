@@ -122,7 +122,12 @@ const lsofPaths = (output: string): ReadonlyArray<string> | null => {
   let file: { descriptor: string; type?: string; name?: string } | undefined;
   const finishFile = () => {
     if (!file) return true;
-    if (!file.type) return false;
+    // Darwin lsof emits this exact marker when its numeric-FD vnode-path query
+    // returns ENOENT. It is a no-current-path observation, like a vanished Linux
+    // fd, not proof of revocation. Keep cwd/text, fileport and other missing-type
+    // evidence protected. Vendor source: lsof-org/lsof, darwin/dfile.c process_vnode.
+    if (!file.type)
+      return file.type === undefined && /^\d+$/.test(file.descriptor) && file.name === "(revoked)";
     const name = stripDeleted(file.name ?? "");
     if (name.startsWith("/") && name.includes("\\")) return false;
     if (name.startsWith("/") && !name.includes("\\")) {
@@ -131,9 +136,19 @@ const lsofPaths = (output: string): ReadonlyArray<string> | null => {
       return paths.length <= MAX_PROCESS_PATHS;
     }
     if (file.descriptor === "cwd" || file.descriptor === "txt") return false;
-    return ["IPv4", "IPv6", "unix", "PIPE", "KQUEUE", "PSXSEM", "PSXSHM", "systm"].includes(
-      file.type,
-    );
+    return [
+      "IPv4",
+      "IPv6",
+      "unix",
+      "PIPE",
+      "NPOLICY",
+      "CHAN",
+      "NEXUS",
+      "KQUEUE",
+      "PSXSEM",
+      "PSXSHM",
+      "systm",
+    ].includes(file.type);
   };
   for (const raw of output.split("\0")) {
     const field = raw.replace(/^\n/, "");

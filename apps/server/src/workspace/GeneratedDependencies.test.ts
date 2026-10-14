@@ -1861,8 +1861,6 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
       getShellSnapshot: (options) =>
         Effect.gen(function* () {
           reads++;
-          if (reads === 2 && mode === "whole-shared-session-error-ownership-changed")
-            acquireManagerOwnership();
           if (reads === 1 && mode === "initial-revision-changed")
             yield* sql`INSERT INTO orchestration_events (sequence, aggregate_kind, stream_id, event_type, application_event_version) VALUES (1, 'thread', ${threadId}, 'thread.metadata-updated', 2)`;
           const threads =
@@ -1911,7 +1909,8 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
           }
           if (
             targetedReads.length === 1 &&
-            (mode === "shared-session-error-ownership-changed" ||
+            (mode === "whole-shared-session-error-ownership-changed" ||
+              mode === "shared-session-error-ownership-changed" ||
               mode === "shared-session-stopped-ownership-changed")
           )
             acquireManagerOwnership();
@@ -2067,9 +2066,12 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
       yield* Deferred.succeed(workerControl.releaseInitialInventory, undefined);
       yield* worker.drain;
     }).pipe(Effect.ensuring(Deferred.succeed(workerControl.releaseInitialInventory, undefined)));
-    // Each sweep reads dependency owners once and refreshes them once for the audit.
-    assert.equal(reads, mode === "worker-ready-burst" ? 2 : 4);
-    assert.equal(processReads, mode === "worker-terminal-burst" ? 3 : 2);
+    // Each sweep inventories dependency and build owners, then refreshes ownership for the audit.
+    assert.equal(reads, mode === "worker-ready-burst" ? 3 : 6);
+    assert.equal(
+      processReads,
+      mode === "worker-terminal-burst" ? 5 : mode === "worker-ready-burst" ? 3 : 4,
+    );
     assert.equal(
       yield* f.fs.readFileString(f.path.join(f.input.worktreePath, "tmp/notes.md")),
       "private notes",
@@ -2132,7 +2134,9 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
       ((stoppedSession && !liveStoppedSession) || detachedSession || releasedErrorSession))
   ) {
     assert.isFalse(yield* f.fs.exists(f.input.worktreePath));
-    assert.equal(dependencyInspections(), 0);
+    // The lifecycle removes dependencies before attempting the source checkout.
+    // One recognition plus one removal revalidation each make four Git checks.
+    assert.equal(dependencyInspections(), 8);
     return;
   }
   const expectedRemoval =
@@ -2147,6 +2151,8 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     mode === "owned-custom-short" ||
     mode === "deleted" ||
     mode === "deleted-recent" ||
+    mode === "deleted-canonical-event" ||
+    mode === "deleted-out-of-order-event" ||
     mode === "deleted-unrelated-events" ||
     mode === "whole-policy" ||
     releasedErrorSession ||
@@ -2157,8 +2163,8 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     mode === "worker-terminal-burst" ||
     (batch && mode !== "batch-process-started" && mode !== "batch-process-unknown");
   if (batch) {
-    assert.equal(reads, 2);
-    assert.equal(processReads, mode === "batch-five" ? 3 : 2);
+    assert.equal(reads, 3);
+    assert.equal(processReads, mode === "batch-five" ? 4 : 3);
     assert.include(targetedReads, threadId);
     for (const candidate of additionalThreads) {
       assert.include(targetedReads, candidate.id);
@@ -2181,7 +2187,8 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   }
   if (mode === "provider-history-batch") {
     assert.equal(sessionLookups.size, 40);
-    for (const count of sessionLookups.values()) assert.equal(count, 1);
+    // Dependency and build cleanup each cache shared historical-session reads.
+    for (const count of sessionLookups.values()) assert.equal(count, 2);
   }
   if (managerOwnershipCase) {
     assert.equal(ownershipRevision, 1);
@@ -2200,7 +2207,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     assert.equal(dependencyInspections(), 0);
   }
   if (mode === "revision-changed") {
-    assert.equal(reads, 2);
+    assert.equal(reads, 3);
     assert.equal(dependencyInspections(), 0);
   }
   if (mode === "deleted-event-after-capture") assert.isTrue(deletedEventInserted);
@@ -2211,8 +2218,8 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
       mode === "final-mount-unchanged" || mode === "final-mount-late-dependency-use" ? 4 : 2,
     );
     assert.equal(targetedReads.length, 4);
-    assert.equal(processReads, 2);
-    assert.equal(reads, 2);
+    assert.equal(processReads, 3);
+    assert.equal(reads, 3);
     if (mode === "final-mount-policy-off")
       assert.isNull(settings.storageCleanup.worktreeDependenciesAfterDays);
     if (mode === "final-mount-queued-run")
