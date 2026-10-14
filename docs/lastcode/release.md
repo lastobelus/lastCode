@@ -7,6 +7,25 @@ for an exact Intel checkpoint or revision; releases have no schedule.
 Nightly source tracking is documented separately in
 [Nightly Checkpoint Workflow](nightly-workflow.md).
 
+## Worktree preparation
+
+Worktrees created by LastCode initially contain source and linked environment files.
+When tests, development, or a build need dependencies, run the **Prepare Dependencies**
+Project Action in that worktree. Grant agent resume permission before first use;
+managed installations use `--trusted-project-action lc-prepare-dependencies`
+as described in the [setup trust instructions](setup.md#clone-and-bootstrap).
+It requires the exact pnpm version pinned by that
+worktree's `package.json` and installs from its lockfile without building or warming
+web caches. **Run Quick CI** includes this preparation
+automatically. For a saved Full CI Action, copy the **Run Quick CI** command from
+`t3.json` and change its final `--quick` argument to `--full`. The Node launcher
+resolves the primary preparation helper while preserving the target worktree cwd,
+and stops before CI if preparation fails. It works without shell-specific environment
+expansion or command chaining. Repeat preparation after dependency
+cleanup. A successful install does not verify every file inside existing packages: if a tool
+still reports missing package files, diagnose the affected installation before retrying or
+removing anything.
+
 ## Pull Request CI
 
 Ordinary branch pushes apply the Quick CI policy through `.vite-hooks/pre-push`:

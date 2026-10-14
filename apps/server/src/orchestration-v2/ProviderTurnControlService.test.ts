@@ -542,6 +542,7 @@ it.effect(
           isLive: (providerSessionId) => Effect.succeed(providerSessionId === oldSessionId),
           pendingExecution: Effect.succeed([]),
           ownershipRevision: Effect.succeed(0),
+          workspaceOwnership: Effect.succeed([]),
           get: (providerSessionId) =>
             Effect.succeed(
               providerSessionId === oldSessionId ? Option.some(runtime) : Option.none(),

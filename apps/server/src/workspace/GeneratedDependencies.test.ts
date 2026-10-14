@@ -1321,10 +1321,25 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     Layer.mock(Orchestrator.OrchestratorV2)({ streamDomainEvents: events }),
     Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
       ownershipRevision: Effect.sync(() => ownershipRevision),
+      workspaceOwnership: Effect.sync(() =>
+        managerOwnsSession
+          ? [
+              {
+                cwd: f.input.worktreePath,
+                threadIds: [threadId],
+              },
+            ]
+          : [],
+      ),
       isLive: (sessionId) =>
         Effect.gen(function* () {
           sessionLookups.set(sessionId, (sessionLookups.get(sessionId) ?? 0) + 1);
-          const live = managerOwnsSession || mode === "provider-binding-changed";
+          const live =
+            managerOwnsSession ||
+            mode === "provider-binding-changed" ||
+            mode === "provider-cwd-changed" ||
+            sessionId === "sibling-session" ||
+            (sessionId === "session" && !mode.includes("session-error") && !stoppedSession);
           if (
             mode === "shared-session-error-ownership-during-capture" &&
             sessionLookups.get(sessionId) === 1

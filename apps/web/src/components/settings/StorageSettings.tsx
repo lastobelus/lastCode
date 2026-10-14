@@ -183,17 +183,18 @@ function CleanupResults({
   return (
     <>
       {report.entries.map((entry, index) => {
-        const name =
-          entry.scope === "dependencies"
-            ? (entry.path?.split(/[\\/]/).findLast(Boolean) ?? "Dependency installs")
-            : entry.kind === "worktree"
-              ? (entry.path?.split(/[\\/]/).findLast(Boolean) ?? "Worktrees")
-              : entry.kind === "logs"
-                ? "Rotated logs"
-                : "Browser artifacts";
+        const dependencyInstall =
+          entry.kind === "worktree" && entry.worktreeResource === "dependencies";
+        const name = dependencyInstall
+          ? `Dependencies: ${entry.path?.split(/[\\/]/).filter(Boolean).at(-2) ?? "worktree"}`
+          : entry.kind === "worktree"
+            ? (entry.path?.split(/[\\/]/).findLast(Boolean) ?? "Worktrees")
+            : entry.kind === "logs"
+              ? "Rotated logs"
+              : "Browser artifacts";
         return (
           <SettingsRow
-            key={`${entry.kind}:${entry.scope ?? "all"}:${entry.path ?? entry.kind}:${entry.threadId ?? index}`}
+            key={`${entry.kind}:${entry.worktreeResource ?? "all"}:${entry.path ?? entry.kind}:${entry.threadId ?? index}`}
             title={environmentLabel ? `${environmentLabel}: ${name}` : name}
             description={
               <span
@@ -207,10 +208,14 @@ function CleanupResults({
               entry.outcome === "removed" && (
                 <span className="text-xs text-muted-foreground">
                   {[
-                    entry.kind !== "worktree" && entry.files !== null
+                    (dependencyInstall || entry.kind !== "worktree") && entry.files !== null
                       ? `${entry.files.toLocaleString()} ${entry.files === 1 ? "file" : "files"}`
                       : null,
-                    entry.bytes !== null ? formatBytes(entry.bytes) : null,
+                    entry.bytes !== null
+                      ? `${formatBytes(entry.bytes)}${dependencyInstall ? " estimated" : ""}`
+                      : dependencyInstall
+                        ? "Size unknown"
+                        : null,
                   ]
                     .filter(Boolean)
                     .join(" · ")}
@@ -276,6 +281,7 @@ function CleanupSection() {
     const settings = environment.serverConfig?.settings;
     if (!settings) return false;
     const enabled = (rules: WorktreeCleanupRules) =>
+      rules.worktreeDependenciesAfterDays !== null ||
       rules.worktreeAfterDays !== null ||
       rules.worktreeOnMerge ||
       rules.worktreeOnDelete ||
@@ -298,7 +304,9 @@ function CleanupSection() {
       environment,
       report,
       description: report
-        ? `Last run ${formatRelativeTimeLabel(report.finishedAt)}. ${formatBytes(report.bytesFreed)} recovered.${report.counts.failed > 0 ? ` ${report.counts.failed} ${report.counts.failed === 1 ? "item" : "items"} couldn't be removed.` : ""}`
+        ? // File sizes cannot prove the change in free disk space, and individual
+          // dependency results may be omitted from a capped report.
+          `Last run ${formatRelativeTimeLabel(report.finishedAt)}. Estimated space recovered: ${formatBytes(report.bytesFreed)}.${report.counts.failed > 0 ? ` ${report.counts.failed} ${report.counts.failed === 1 ? "item" : "items"} couldn't be removed.` : ""}`
         : query?.failed
           ? "Could not load the last run."
           : query?.loading

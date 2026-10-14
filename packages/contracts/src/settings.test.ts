@@ -62,7 +62,7 @@ describe("storage cleanup report wire format", () => {
       entries: [
         {
           kind: "worktree" as const,
-          scope: "dependencies" as const,
+          worktreeResource: "dependencies" as const,
           outcome: "removed" as const,
           reason: "Dependency install removed",
           path: "/managed-worktrees/example/node_modules",
@@ -85,7 +85,7 @@ describe("storage cleanup report wire format", () => {
         path: report.entries[0]!.path,
       }),
     ]);
-    expect(decodeCleanupReport(wire).entries[0]?.scope).toBe("dependencies");
+    expect(decodeCleanupReport(wire).entries[0]?.worktreeResource).toBe("dependencies");
   });
 });
 
