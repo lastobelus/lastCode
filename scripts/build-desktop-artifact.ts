@@ -3114,6 +3114,7 @@ export const stageBrandedServerDist = Effect.fn("stageBrandedServerDist")(functi
   const clientDirectory = path.join(input.destinationDir, "client");
   yield* applyWebBrandAssets(input.brand, clientDirectory);
   yield* validateBundledClientAssets(clientDirectory);
+  yield* Effect.log("[desktop-artifact] Applied web client branding to staged release assets.");
 });
 
 export const stageWindowsServerSidecar = Effect.fn("stageWindowsServerSidecar")(function* (input: {

@@ -29,8 +29,8 @@ const expectedLabels = [
   "Building artifacts",
   "Building artifacts",
   "Building artifacts",
-  "Branding",
   "Staging app",
+  "Branding",
   "Installing deps",
   "Building DMG",
   "Finalizing",
@@ -124,6 +124,30 @@ describe("LastCode local build progress model", () => {
     expect(reusedPhase).toBeGreaterThan(
       BUILD_PHASES.findIndex(({ marker }) => marker.includes("11/11 Release smoke")),
     );
+  });
+
+  it("tracks staged branding in mac/Linux and Windows order without moving backward", () => {
+    const staging = "[desktop-artifact] Staging release app";
+    const branding = "[desktop-artifact] Applied web client branding to staged release assets.";
+    const installing = "[desktop-artifact] Installing staged production dependencies";
+    const phaseLabels = (markers: ReadonlyArray<string>) => {
+      let index = 0;
+      return markers.map((marker) => {
+        index = resolveBuildPhaseIndex(marker, index);
+        return BUILD_PHASES[index]!.label;
+      });
+    };
+
+    expect(phaseLabels([staging, branding, installing])).toEqual([
+      "Staging app",
+      "Branding",
+      "Installing deps",
+    ]);
+    expect(phaseLabels([staging, installing, branding])).toEqual([
+      "Staging app",
+      "Installing deps",
+      "Installing deps",
+    ]);
   });
 
   it("keeps estimates monotonic and below completion", () => {

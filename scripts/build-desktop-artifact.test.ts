@@ -9,6 +9,7 @@ import * as ConfigProvider from "effect/ConfigProvider";
 import * as FileSystem from "effect/FileSystem";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Sink from "effect/Sink";
@@ -123,15 +124,22 @@ it.effect(
         yield* fs.writeFileString(path.join(repoRoot, ".git"), `gitdir: ${metadata}\n`);
         const root = "apps/server/dist";
         const serverDistDir = path.join(repoRoot, root);
+        const brandingLogs: string[] = [];
+        const captureBrandingLogs = Logger.layer([
+          Logger.make((options) => {
+            brandingLogs.push(Logger.formatJson.log(options));
+          }),
+        ]);
         const missingOwnership = yield* Effect.exit(
           stageBrandedServerDist({
             repoRoot,
             serverDistDir,
             destinationDir: path.join(tempDir, "unrecognized-release"),
             brand: "production",
-          }),
+          }).pipe(Effect.provide(captureBrandingLogs)),
         );
         assert.equal(missingOwnership._tag, "Failure");
+        assert.equal(brandingLogs.length, 0);
         const icons = resolveLastCodeWebIconOverrides("development", "client");
         const emit = (directory: string) =>
           Effect.gen(function* () {
@@ -170,7 +178,9 @@ it.effect(
             serverDistDir,
             destinationDir,
             brand,
-          });
+          }).pipe(Effect.provide(captureBrandingLogs));
+          assert.equal(brandingLogs.length, index + 1);
+          assert.include(brandingLogs[index]!, "web client branding");
           for (const override of resolveLastCodeWebIconOverrides(brand, "client"))
             assert.deepEqual(
               yield* fs.readFile(path.join(destinationDir, override.targetRelativePath)),
