@@ -53,7 +53,7 @@ import { withWorkspaceLease } from "./workspace/workspaceLease.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as GeneratedDependencies from "./workspace/GeneratedDependencies.ts";
 import * as GeneratedBuilds from "./workspace/GeneratedBuilds.ts";
-import { worktreeConsumerReason } from "./workspace/WorktreeConsumers.ts";
+import * as WorktreeConsumers from "./workspace/WorktreeConsumers.ts";
 
 const decodeCleanupThread = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationV2AppThreadJson),
@@ -675,23 +675,36 @@ const make = Effect.gen(function* () {
     now: number,
     entries: CleanupWorkingEntry[],
     resource: "dependencies" | "generated-builds",
+    observationProcessPaths: Effect.Effect<ReadonlyArray<string> | null>,
   ) {
     const generatedBuilds = resource === "generated-builds";
     const outputPath = (cwd: string) => (generatedBuilds ? cwd : path.join(cwd, "node_modules"));
     const outputExists = (cwd: string) =>
       generatedBuilds ? builds.hasOutputs(cwd) : fs.exists(outputPath(cwd));
+    let observationUnavailable = false;
+    const processObservation = observationProcessPaths.pipe(
+      Effect.tap((paths) =>
+        Effect.sync(() => {
+          observationUnavailable = paths === null;
+        }),
+      ),
+    );
     const observe = Effect.fnUntraced(function* (
       input: { managedWorktreesRoot: string; repositoryRoot: string; worktreePath: string },
       time: number,
       used = false,
       persist = true,
     ) {
-      if (generatedBuilds) return yield* builds.observe(input, time, used, persist);
-      return yield* dependencies.observe(input, time, used, persist);
+      if (generatedBuilds)
+        return yield* builds.observe(input, time, used, persist, processObservation);
+      return yield* dependencies.observe(input, time, used, persist, processObservation);
     });
-    const unrecognizedReason = generatedBuilds
-      ? "No verified compiler emissions; legacy build outputs need exact-file review"
-      : "No dependency install could be safely recognized";
+    const unrecognizedReason = () =>
+      observationUnavailable
+        ? "Process file-consumer observation is unavailable"
+        : generatedBuilds
+          ? "No verified compiler emissions; legacy build outputs need exact-file review"
+          : "No dependency install could be safely recognized";
     if (!anyWorktreePolicy(serverSettings, dependencyCleanupEnabled)) {
       if (generatedBuilds) return;
       entries.push({
@@ -1110,7 +1123,7 @@ const make = Effect.gen(function* () {
               inside(path.join(cwd, "node_modules"), processCwd),
           ) ?? false,
         );
-        if (observation === null) return keep(unrecognizedReason);
+        if (observation === null) return keep(unrecognizedReason());
         if (protectedReason !== null) return keep(protectedReason);
         if (observation.lastUsedAt >= now - days * DAY_MS) {
           return keep(
@@ -1299,7 +1312,7 @@ const make = Effect.gen(function* () {
           return keep("Repository and project mapping could not be verified uniquely");
         if (!archived) {
           const dependencyActivity = dependencyActivityByPath.get(worktreePath) ?? null;
-          if (dependencyActivity === null) return keep(unrecognizedReason);
+          if (dependencyActivity === null) return keep(unrecognizedReason());
           if (dependencyActivity.protectedReason !== null)
             return keep(dependencyActivity.protectedReason);
           if (dependencyActivity.lastUsedAt >= now - days * DAY_MS)
@@ -1438,7 +1451,7 @@ const make = Effect.gen(function* () {
                   )
                     return keep(
                       generatedBuilds
-                        ? unrecognizedReason
+                        ? unrecognizedReason()
                         : "Shared owners do not map to the same recognized repository",
                     );
                 }
@@ -2082,7 +2095,7 @@ const make = Effect.gen(function* () {
             if ((yield* canonicalWorkspacePath(owner.recordedPath)) !== worktreePath)
               return "worktree location changed";
           }
-          const consumer = yield* worktreeConsumerReason(worktreePath);
+          const consumer = yield* WorktreeConsumers.worktreeConsumerReason(worktreePath);
           if (consumer !== null) return consumer;
           return null;
         });
@@ -2370,6 +2383,9 @@ const make = Effect.gen(function* () {
     const settings = serverSettings.storageCleanup;
     const runId = `${now}-${++sweepSequence}`;
     const entries: CleanupWorkingEntry[] = [];
+    // One lazy observation for both resource passes; retain the original array's
+    // native identity metadata. Final removal scans remain independent and fresh.
+    const observationProcessPaths = yield* Effect.cached(yield* WorktreeConsumers.ProcessPaths);
     yield* audit({
       event: "sweep-start",
       runId,
@@ -2377,7 +2393,13 @@ const make = Effect.gen(function* () {
       startedAt: DateTime.formatIso(DateTime.makeUnsafe(now)),
       settings,
     });
-    yield* cleanDisposableOutputs(serverSettings, now, entries, "dependencies").pipe(
+    yield* cleanDisposableOutputs(
+      serverSettings,
+      now,
+      entries,
+      "dependencies",
+      observationProcessPaths,
+    ).pipe(
       Effect.catch((error) =>
         Effect.gen(function* () {
           const entry: CleanupWorkingEntry = {
@@ -2397,7 +2419,13 @@ const make = Effect.gen(function* () {
         }),
       ),
     );
-    yield* cleanDisposableOutputs(serverSettings, now, entries, "generated-builds").pipe(
+    yield* cleanDisposableOutputs(
+      serverSettings,
+      now,
+      entries,
+      "generated-builds",
+      observationProcessPaths,
+    ).pipe(
       Effect.catch((error) =>
         Effect.sync(() =>
           entries.push({

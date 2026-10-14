@@ -131,6 +131,7 @@ export class GeneratedDependencies extends Context.Service<
       now: number,
       used?: boolean,
       persist?: boolean,
+      observationProcessPaths?: Effect.Effect<ReadonlyArray<string> | null>,
     ) => Effect.Effect<
       { readonly lastUsedAt: number; readonly renewed: boolean } | null,
       GeneratedDependenciesError
@@ -385,6 +386,7 @@ const make = Effect.gen(function* () {
     now: number,
     used = false,
     persist = true,
+    observationProcessPaths?: Effect.Effect<ReadonlyArray<string> | null>,
   ) {
     const current = yield* validate(input, "GeneratedDependencies.observe");
     if (current === null) return null;
@@ -392,7 +394,8 @@ const make = Effect.gen(function* () {
     // Read-only eligibility compares durable metadata only. Unsaved OS evidence
     // must be captured by a writing observer or the native removal guards.
     if (persist) {
-      const paths = yield* processPaths;
+      const capture = observationProcessPaths ?? processPaths;
+      const paths = yield* capture;
       if (paths === null) return null;
       consumed = yield* Effect.tryPromise({
         try: () => consumesPath(current.dependencyPath, paths),

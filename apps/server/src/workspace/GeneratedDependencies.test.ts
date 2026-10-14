@@ -2424,3 +2424,138 @@ it.effect.each([
     );
   });
 });
+
+it.effect(
+  "supplied dependency observations renew actual use without evaluating default inventory",
+  () => {
+    let defaultReads = 0;
+    return Effect.gen(function* () {
+      const f = yield* fixture();
+      yield* f.cleanup.observe(f.input, NOW - 20 * day, false, true, Effect.succeed([]));
+      let suppliedReads = 0;
+      const supplied = Effect.sync(() => {
+        suppliedReads++;
+        return [f.path.join(f.dependencyPath, "package/index.js")];
+      });
+      assert.deepEqual(yield* f.cleanup.observe(f.input, NOW, false, true, supplied), {
+        lastUsedAt: NOW,
+        renewed: true,
+      });
+      assert.equal(suppliedReads, 1);
+      assert.equal(defaultReads, 0);
+      assert.isNull(
+        yield* f.cleanup.observe(f.input, NOW + day, false, true, Effect.succeed(null)),
+      );
+      assert.equal((yield* f.cleanup.observe(f.input, NOW + day, false, false))!.lastUsedAt, NOW);
+      assert.equal(defaultReads, 0);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        testLayer(
+          undefined,
+          undefined,
+          undefined,
+          false,
+          undefined,
+          Effect.sync(() => {
+            defaultReads++;
+            return null;
+          }),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect(
+  "dependency observations skip inventory for read-only, invalid and missing installs",
+  () => {
+    let reads = 0;
+    return Effect.gen(function* () {
+      const f = yield* fixture();
+      yield* f.cleanup.observe(f.input, NOW - 20 * day);
+      assert.equal(reads, 1);
+      assert.equal(
+        (yield* f.cleanup.observe(f.input, NOW, false, false))!.lastUsedAt,
+        NOW - 20 * day,
+      );
+      const supplied = Effect.sync(() => {
+        reads++;
+        return [] as readonly string[];
+      });
+      yield* f.cleanup.observe(f.input, NOW, false, false, supplied);
+      assert.equal(reads, 1);
+      yield* f.fs.remove(f.path.join(f.dependencyPath, f.marker));
+      assert.isNull(yield* f.cleanup.observe(f.input, NOW));
+      assert.isNull(yield* f.cleanup.observe(f.input, NOW, false, true, supplied));
+      yield* f.fs.remove(f.dependencyPath, { recursive: true });
+      assert.isNull(yield* f.cleanup.observe(f.input, NOW));
+      assert.equal(reads, 1);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        testLayer(
+          undefined,
+          undefined,
+          undefined,
+          false,
+          undefined,
+          Effect.sync(() => {
+            reads++;
+            return [];
+          }),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect(
+  "cached empty dependency observation never authorizes removal after a new installed-file consumer",
+  () => {
+    let paths: readonly string[] = [];
+    let freshReads = 0;
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(NOW);
+      const f = yield* fixture();
+      let observationReads = 0;
+      const cachedPaths = yield* Effect.cached(
+        Effect.sync(() => {
+          observationReads++;
+          return [] as readonly string[];
+        }),
+      );
+      yield* f.cleanup.observe(f.input, NOW - 20 * day, false, true, cachedPaths);
+      paths = [f.path.join(f.dependencyPath, "package/index.js")];
+      assert.equal(
+        (yield* f.cleanup.observe(f.input, NOW, false, true, cachedPaths))!.lastUsedAt,
+        NOW - 20 * day,
+      );
+      assert.equal(observationReads, 1);
+      assert.equal(freshReads, 0);
+      const inspection = yield* f.cleanup.inspect(f.input);
+      assert.isNotNull(inspection);
+      assert.isNull(yield* f.cleanup.remove(inspection!, Effect.succeed(true)));
+      assert.isAbove(freshReads, 0);
+      assert.equal(observationReads, 1);
+      assert.isTrue(yield* f.fs.exists(f.dependencyPath));
+      paths = [];
+      assert.equal((yield* f.cleanup.observe(f.input, NOW + day, false, false))!.lastUsedAt, NOW);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        testLayer(
+          undefined,
+          undefined,
+          undefined,
+          false,
+          undefined,
+          Effect.sync(() => {
+            freshReads++;
+            return paths;
+          }),
+        ),
+      ),
+    );
+  },
+);

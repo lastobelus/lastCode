@@ -2,6 +2,7 @@ import { observeDependencyActivity } from "@t3tools/shared/dependencyActivity";
 import {
   createGeneratedBuildStage,
   generatedBuildActivity,
+  recordGeneratedBuildUse,
 } from "@t3tools/shared/generatedBuildOwnership";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
@@ -1425,6 +1426,255 @@ const seedCompilerOutput = Effect.fnUntraced(function* (
     "compiler-emitted bytes\n",
   );
   yield* Effect.sync(() => stage.publish(usedAt));
+});
+
+const seedObservationResources = Effect.fnUntraced(function* (
+  fixture: Effect.Success<typeof cleanupFixture>,
+) {
+  yield* fixture.enableDependencies;
+  fixture.setDependencyRetention(14);
+  yield* seedCompilerOutput(fixture, "apps/web/dist", fixture.now - 4 * DAY_MS);
+  yield* seedCompilerOutput(fixture, "apps/server/dist", fixture.now - 4 * DAY_MS);
+  const other = `${fixture.config.worktreesDir}/observation-other`;
+  yield* fixture.command(fixture.repo, [
+    "worktree",
+    "add",
+    "-b",
+    "observation-other",
+    other,
+    "feature",
+  ]);
+  yield* fixture.fs.makeDirectory(`${other}/node_modules/package`, { recursive: true });
+  yield* fixture.fs.writeFileString(`${other}/node_modules/.package-lock.json`, "{}\n");
+  yield* fixture.fs.writeFileString(
+    `${other}/node_modules/package/index.js`,
+    "module.exports = 2;\n",
+  );
+  yield* seedCompilerOutput(
+    { ...fixture, worktree: other },
+    "native/resource-monitor/target/debug",
+    fixture.now - 4 * DAY_MS,
+  );
+  for (const cwd of [fixture.worktree, other]) {
+    const location = yield* fixture.command(cwd, ["rev-parse", "--absolute-git-dir"]);
+    yield* Effect.sync(() =>
+      observeDependencyActivity(location.stdout.trim(), cwd, fixture.now - 4 * DAY_MS, true),
+    );
+  }
+  return other;
+});
+
+const disposableEntries = (report: import("@t3tools/contracts").StorageCleanupReport) =>
+  report.entries.filter(
+    (entry) =>
+      entry.worktreeResource === "dependencies" || entry.worktreeResource === "generated-builds",
+  );
+
+describe("one initial process observation per storage sweep", () => {
+  it.live(
+    "shares one observation across owned and ownerless installs and emitted roots, resetting each sweep",
+    () =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          let captures = 0;
+          const fixture = yield* cleanupFixture.pipe(
+            Effect.provideService(
+              WorktreeConsumers.ProcessPaths,
+              Effect.sync(() => {
+                captures++;
+                return [];
+              }),
+            ),
+          );
+          const other = yield* seedObservationResources(fixture);
+          for (const expectedCaptures of [1, 2]) {
+            const report = yield* fixture.service.runNow;
+            expect(disposableEntries(report)).toHaveLength(4);
+            expect(disposableEntries(report).every((entry) => entry.outcome === "kept")).toBe(true);
+            expect(captures).toBe(expectedCaptures);
+          }
+          const automatic = yield* fixture.service.reports.pipe(
+            Stream.filter((report) => report?.trigger === "automatic"),
+            Stream.take(1),
+            Stream.runCollect,
+            Effect.forkScoped,
+          );
+          yield* fixture.activate();
+          const [report] = yield* Fiber.join(automatic);
+          expect(report?.trigger).toBe("automatic");
+          expect(disposableEntries(report!)).toHaveLength(4);
+          expect(disposableEntries(report!).every((entry) => entry.outcome === "kept")).toBe(true);
+          expect(captures).toBe(3);
+          for (const cwd of [fixture.worktree, other])
+            expect(yield* fixture.fs.exists(`${cwd}/node_modules/package/index.js`)).toBe(true);
+          expect(
+            yield* fixture.fs.exists(`${fixture.worktree}/apps/web/dist/assets/emitted.bin`),
+          ).toBe(true);
+          expect(
+            yield* fixture.fs.exists(`${fixture.worktree}/apps/server/dist/assets/emitted.bin`),
+          ).toBe(true);
+          expect(
+            yield* fixture.fs.exists(
+              `${other}/native/resource-monitor/target/debug/assets/emitted.bin`,
+            ),
+          ).toBe(true);
+        }),
+      ),
+  );
+  it.live.each(["off", "no recognized work"] as const)(
+    "does not capture an initial inventory for %s",
+    (mode) =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          let captures = 0;
+          const fixture = yield* cleanupFixture.pipe(
+            Effect.provideService(
+              WorktreeConsumers.ProcessPaths,
+              Effect.sync(() => {
+                captures++;
+                return [];
+              }),
+            ),
+          );
+          if (mode === "off") {
+            yield* seedObservationResources(fixture);
+            fixture.setDependencyRetention(null);
+          } else fixture.setDependencyRetention(14);
+          yield* fixture.service.runNow;
+          expect(captures).toBe(0);
+          expect(yield* fixture.fs.exists(fixture.worktree)).toBe(true);
+        }),
+      ),
+  );
+  it.live("shares unavailable evidence without candidate fallback or renewal", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        let captures = 0;
+        const fixture = yield* cleanupFixture.pipe(
+          Effect.provideService(
+            WorktreeConsumers.ProcessPaths,
+            Effect.sync(() => {
+              captures++;
+              return captures === 1 ? null : [];
+            }),
+          ),
+        );
+        const other = yield* seedObservationResources(fixture);
+        fixture.setDependencyRetention(3);
+        const report = yield* fixture.service.runNow;
+        expect(disposableEntries(report)).toHaveLength(4);
+        expect(disposableEntries(report).every((entry) => entry.outcome === "kept")).toBe(true);
+        expect(
+          disposableEntries(report).every((entry) =>
+            entry.reason.includes("Process file-consumer observation is unavailable"),
+          ),
+        ).toBe(true);
+        expect(report.bytesFreed).toBe(0);
+        expect(captures).toBe(1);
+        for (const cwd of [fixture.worktree, other]) {
+          expect(yield* fixture.fs.exists(`${cwd}/node_modules/package/index.js`)).toBe(true);
+          const location = yield* fixture.command(cwd, ["rev-parse", "--absolute-git-dir"]);
+          expect(
+            yield* Effect.sync(
+              () =>
+                observeDependencyActivity(location.stdout.trim(), cwd, fixture.now, false, false)
+                  .lastUsedAt,
+            ),
+          ).toBe(fixture.now - 4 * DAY_MS);
+        }
+        expect(
+          yield* Effect.sync(
+            () => generatedBuildActivity(fixture.worktree, "apps/web/dist")?.lastUsedAt,
+          ),
+        ).toBe(fixture.now - 4 * DAY_MS);
+        expect(
+          yield* fixture.fs.exists(
+            `${other}/native/resource-monitor/target/debug/assets/emitted.bin`,
+          ),
+        ).toBe(true);
+      }),
+    ),
+  );
+  it.live.each([
+    ["dependencies", "consumer"],
+    ["dependencies", "usage mutation"],
+    ["generated-builds", "consumer"],
+    ["generated-builds", "usage mutation"],
+  ] as const)("keeps %s after a late %s with independent final observation", ([resource, change]) =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        let captures = 0;
+        let output = "";
+        let renew = () => {};
+        const fixture = yield* cleanupFixture.pipe(
+          Effect.provideService(
+            WorktreeConsumers.ProcessPaths,
+            Effect.sync(() => {
+              captures++;
+              if (captures !== 2) return [];
+              if (change === "consumer") return [output];
+              renew();
+              return [];
+            }),
+          ),
+        );
+        if (resource === "dependencies") {
+          yield* fixture.enableDependencies;
+          fixture.setDependencyRetention(3);
+          output = `${fixture.worktree}/node_modules/package/index.js`;
+          const location = yield* fixture.command(fixture.worktree, [
+            "rev-parse",
+            "--absolute-git-dir",
+          ]);
+          renew = () => {
+            observeDependencyActivity(location.stdout.trim(), fixture.worktree, fixture.now, true);
+          };
+        } else {
+          fixture.setDependencyRetention(3);
+          yield* seedCompilerOutput(fixture, "apps/web/dist", fixture.now - 4 * DAY_MS);
+          output = `${fixture.worktree}/apps/web/dist/assets/emitted.bin`;
+          renew = () => recordGeneratedBuildUse(fixture.worktree, "apps/web/dist", fixture.now);
+        }
+        const report = yield* fixture.service.runNow;
+        expect(report.entries.filter((entry) => entry.worktreeResource === resource)).toMatchObject(
+          [{ outcome: "kept" }],
+        );
+        expect(captures).toBeGreaterThanOrEqual(2);
+        expect(yield* fixture.fs.exists(output)).toBe(true);
+        if (resource === "dependencies") {
+          const location = yield* fixture.command(fixture.worktree, [
+            "rev-parse",
+            "--absolute-git-dir",
+          ]);
+          expect(
+            yield* Effect.sync(
+              () =>
+                observeDependencyActivity(
+                  location.stdout.trim(),
+                  fixture.worktree,
+                  fixture.now,
+                  false,
+                  false,
+                ).lastUsedAt,
+            ),
+          ).toBeGreaterThanOrEqual(fixture.now);
+        } else
+          expect(
+            yield* Effect.sync(
+              () => generatedBuildActivity(fixture.worktree, "apps/web/dist")?.lastUsedAt,
+            ),
+          ).toBeGreaterThanOrEqual(fixture.now);
+        const beforeNextSweep = captures;
+        expect(
+          (yield* fixture.service.runNow).entries.filter(
+            (entry) => entry.worktreeResource === resource,
+          ),
+        ).toMatchObject([{ outcome: "kept" }]);
+        expect(captures).toBe(beforeNextSweep + 1);
+        expect(yield* fixture.fs.exists(output)).toBe(true);
+      }),
+    ),
+  );
 });
 
 describe("verified build sweep shares the dependency rule", () => {

@@ -461,6 +461,20 @@ describe("Captured vnode identity proof", () => {
         expect(native.opendir).toHaveBeenCalledWith("/workspace/example/dist");
       }),
   );
+  it.effect("a lazy cached observation retains its native array and device/inode proof", () =>
+    Effect.gen(function* () {
+      vnodeFixture();
+      targetFixture(9007199254740992n);
+      const capture = yield* Effect.cached(inventory("darwin"));
+      const original = yield* capture;
+      const shared = yield* capture;
+      expect(shared).toBe(original);
+      expect(yield* guard(shared)).toBeNull();
+      targetFixture();
+      expect(yield* guard(shared)).toBe("A process is using a file or directory in the worktree.");
+      expect(native.execFile).toHaveBeenCalledTimes(1);
+    }),
+  );
   it.effect("does not equate accessible external hardlinks with use of this checkout", () =>
     Effect.gen(function* () {
       vnodeFixture();

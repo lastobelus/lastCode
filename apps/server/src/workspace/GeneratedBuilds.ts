@@ -43,6 +43,7 @@ export class GeneratedBuilds extends Context.Service<
       now: number,
       usedIgnored?: boolean,
       persist?: boolean,
+      observationProcessPaths?: Effect.Effect<ReadonlyArray<string> | null>,
     ) => Effect.Effect<{ lastUsedAt: number; renewed: boolean } | null, GeneratedBuildsError>;
     readonly remove: <EligibilityError>(
       input: BuildInput,
@@ -263,9 +264,10 @@ const make = Effect.gen(function* () {
     now: number,
     _usedIgnored = false,
     persist = true,
+    observationProcessPaths?: Effect.Effect<ReadonlyArray<string> | null>,
   ) {
     const roots = yield* io(input.worktreePath, () => discover(input.worktreePath));
-    const paths = yield* yield* WorktreeConsumers.ProcessPaths;
+    let paths: ReadonlyArray<string> | null | undefined;
     let oldest: number | null = null;
     let renewed = false;
     for (const root of roots) {
@@ -273,7 +275,14 @@ const make = Effect.gen(function* () {
       let clock = yield* activity(input.worktreePath, root);
       if (!clock) continue;
       const output = NodePath.join(input.worktreePath, root);
-      const used = yield* actualOutputUse(input.worktreePath, root, paths);
+      // Read-only revalidation reads the durable token/clock. Writing observation
+      // shares the sweep snapshot, while removal guards still capture fresh evidence.
+      if (persist && paths === undefined) {
+        const capture = observationProcessPaths ?? (yield* WorktreeConsumers.ProcessPaths);
+        paths = yield* capture;
+      }
+      if (persist && paths === null) return null;
+      const used = persist && (yield* actualOutputUse(input.worktreePath, root, paths ?? null));
       if (used && persist) {
         yield* Effect.try({
           try: () => recordGeneratedBuildUse(input.worktreePath, root, now),

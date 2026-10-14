@@ -425,3 +425,111 @@ it.effect(
       assert.include(changed.reason, "Git or generated-path eligibility changed");
     }).pipe(Effect.provide(testLayer)),
 );
+
+it.effect(
+  "writing build observations share supplied inventory but final removal checks fresh consumers",
+  () =>
+    Effect.gen(function* () {
+      const { builds, input, emit, remove, fs } = yield* fixture();
+      yield* emit("apps/web/dist", 1);
+      yield* emit("apps/server/dist", 2);
+      let observationReads = 0;
+      let freshReads = 0;
+      const cachedPaths = yield* Effect.cached(
+        Effect.sync(() => {
+          observationReads++;
+          return [] as readonly string[];
+        }),
+      );
+      const freshPaths = Effect.sync(() => {
+        freshReads++;
+        return [NodePath.join(input.worktreePath, "apps/web/dist/main.js")];
+      });
+      assert.deepEqual(
+        yield* builds
+          .observe(input, DAY, false, true, cachedPaths)
+          .pipe(Effect.provideService(WorktreeConsumers.ProcessPaths, freshPaths)),
+        { lastUsedAt: 1, renewed: false },
+      );
+      yield* builds.observe(input, 2 * DAY, false, true, cachedPaths);
+      assert.equal(observationReads, 1);
+      assert.equal(freshReads, 0);
+      const removed = yield* remove(5 * DAY, 3).pipe(
+        Effect.provideService(WorktreeConsumers.ProcessPaths, freshPaths),
+      );
+      assert.equal(removed.files, 0);
+      assert.isAbove(freshReads, 0);
+      assert.equal(observationReads, 1);
+      assert.isTrue(yield* fs.exists(NodePath.join(input.worktreePath, "apps/web/dist/main.js")));
+      assert.equal(
+        generatedBuildActivity(input.worktreePath, "apps/web/dist")?.lastUsedAt,
+        5 * DAY,
+      );
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect(
+  "build observations capture once for verified roots and skip read-only or unrecognized outputs",
+  () =>
+    Effect.gen(function* () {
+      const { builds, input, emit, fs } = yield* fixture();
+      let reads = 0;
+      const paths = Effect.sync(() => {
+        reads++;
+        return [] as readonly string[];
+      });
+      const observe = (persist = true) =>
+        builds
+          .observe(input, DAY, false, persist)
+          .pipe(Effect.provideService(WorktreeConsumers.ProcessPaths, paths));
+      assert.isNull(yield* observe());
+      yield* fs.makeDirectory(NodePath.join(input.worktreePath, "apps/web/dist"));
+      yield* fs.writeFileString(
+        NodePath.join(input.worktreePath, "apps/web/dist/legacy.js"),
+        "legacy",
+      );
+      assert.isNull(yield* observe());
+      assert.equal(reads, 0);
+      yield* emit("apps/web/dist", 1);
+      yield* emit("apps/server/dist", 2);
+      assert.deepEqual(yield* observe(false), { lastUsedAt: 1, renewed: false });
+      assert.equal(reads, 0);
+      assert.deepEqual(yield* observe(), { lastUsedAt: 1, renewed: false });
+      assert.equal(reads, 1);
+      assert.isNull(yield* builds.observe(input, DAY, false, true, Effect.succeed(null)));
+      assert.equal(generatedBuildActivity(input.worktreePath, "apps/web/dist")?.lastUsedAt, 1);
+      yield* fs.writeFileString(NodePath.join(input.worktreePath, ".gitignore"), "");
+      assert.isNull(yield* observe());
+      assert.equal(reads, 1);
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect(
+  "supplied build consumer evidence renews the matching root without evaluating default inventory",
+  () =>
+    Effect.gen(function* () {
+      const { builds, input, emit } = yield* fixture();
+      yield* emit("apps/web/dist", 1);
+      yield* emit("apps/server/dist", 2);
+      let suppliedReads = 0;
+      let defaultReads = 0;
+      const supplied = Effect.sync(() => {
+        suppliedReads++;
+        return [NodePath.join(input.worktreePath, "apps/web/dist/main.js")];
+      });
+      const result = yield* builds.observe(input, DAY, false, true, supplied).pipe(
+        Effect.provideService(
+          WorktreeConsumers.ProcessPaths,
+          Effect.sync(() => {
+            defaultReads++;
+            return null;
+          }),
+        ),
+      );
+      assert.deepEqual(result, { lastUsedAt: 2, renewed: true });
+      assert.equal(suppliedReads, 1);
+      assert.equal(defaultReads, 0);
+      assert.equal(generatedBuildActivity(input.worktreePath, "apps/web/dist")?.lastUsedAt, DAY);
+      assert.equal(generatedBuildActivity(input.worktreePath, "apps/server/dist")?.lastUsedAt, 2);
+    }).pipe(Effect.provide(testLayer)),
+);
