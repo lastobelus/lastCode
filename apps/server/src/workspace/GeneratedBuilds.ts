@@ -249,18 +249,7 @@ const make = Effect.gen(function* () {
   const actualOutputUse = (cwd: string, root: string, paths: readonly string[] | null) =>
     io(cwd, async () => {
       if (paths === null) return false;
-      const output = NodePath.join(cwd, root);
-      for (const path of paths) {
-        if (!NodePath.isAbsolute(path)) continue;
-        if (inside(output, path, true)) return true;
-        try {
-          if (inside(output, await NodeFSP.realpath(path), true)) return true;
-        } catch (error) {
-          if (!["ENOENT", "ESRCH"].includes((error as NodeJS.ErrnoException).code ?? ""))
-            throw error;
-        }
-      }
-      return false;
+      return WorktreeConsumers.processPathsUseRoot(NodePath.join(cwd, root), paths);
     });
   const activity = (cwd: string, root: string) =>
     Effect.try({

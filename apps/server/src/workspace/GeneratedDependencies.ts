@@ -195,19 +195,7 @@ const lstatIfPresent = async (target: string) => {
   }
 };
 
-const consumesPath = async (root: string, paths: ReadonlyArray<string>) => {
-  for (const path of paths) {
-    if (!NodePath.isAbsolute(path)) throw new Error("Invalid process file-consumer path");
-    if (NodePath.resolve(path) === root || inside(root, NodePath.resolve(path))) return true;
-    try {
-      const canonical = await NodeFSP.realpath(path);
-      if (canonical === root || inside(root, canonical)) return true;
-    } catch (error) {
-      if (!["ENOENT", "ESRCH"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
-    }
-  }
-  return false;
-};
+const consumesPath = WorktreeConsumers.processPathsUseRoot;
 
 // Check each component, including ancestors above the managed root. realpath
 // alone would accept a symlink whose resolved target happens to be in the tree.
@@ -560,9 +548,14 @@ const make = Effect.gen(function* () {
       validated,
       ({ current, inspection, canRemove, isStillEligible, usageSnapshot }) =>
         Effect.gen(function* () {
-          yield* rememberConsumed(current, [...paths, ...processes]);
+          // Preserve the captured native object evidence on the path observation.
+          // Plain cwd evidence remains an independent conservative check.
+          yield* rememberConsumed(current, paths);
+          yield* rememberConsumed(current, processes);
           const rootConsumed = yield* Effect.tryPromise({
-            try: () => consumesPath(current.worktreePath, [...paths, ...processes]),
+            try: async () =>
+              (await consumesPath(current.worktreePath, paths)) ||
+              (await consumesPath(current.worktreePath, processes)),
             catch: (cause) =>
               new GeneratedDependenciesError({ path: current.dependencyPath, cause }),
           });

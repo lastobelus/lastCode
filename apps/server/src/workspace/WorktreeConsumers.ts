@@ -13,6 +13,12 @@ import * as DependencyMounts from "./DependencyMounts.ts";
 
 const MAX_INVENTORY_BYTES = 16 * 1024 * 1024;
 const MAX_PROCESS_PATHS = 100_000;
+const MAX_TARGET_OBJECTS = 1_000_000;
+const nativeIdentities = Symbol("captured vnode identities");
+type ObjectIdentity = { readonly device: bigint | null; readonly inode: bigint };
+type CapturedPaths = ReadonlyArray<string> & {
+  readonly [nativeIdentities]?: ReadonlyArray<ObjectIdentity | null>;
+};
 const decodeRuntime = Schema.decodeUnknownSync(Schema.fromJsonString(PersistedServerRuntimeState));
 const gone = (error: unknown) =>
   ["ENOENT", "ESRCH"].includes((error as NodeJS.ErrnoException).code ?? "");
@@ -160,9 +166,12 @@ const decodeLsofPath = (printed: string): string | null => {
 const lsofPaths = (output: string): ReadonlyArray<string> | null => {
   if (!output.endsWith("\0\n") || output.includes("\uFFFD")) return null;
   const paths: string[] = [];
+  const identities: Array<ObjectIdentity | null> = [];
   let processes = 0;
   let cwdSeen = false;
-  let file: { descriptor: string; type?: string; name?: string } | undefined;
+  let file:
+    | { descriptor: string; type?: string; name?: string; device?: string; inode?: string }
+    | undefined;
   const finishFile = () => {
     if (!file) return true;
     // Darwin lsof emits this exact marker when its numeric-FD vnode-path query
@@ -177,6 +186,15 @@ const lsofPaths = (output: string): ReadonlyArray<string> | null => {
       const name = decodeLsofPath(file.name);
       if (name === null) return false;
       paths.push(stripDeleted(name));
+      const inode = file.inode === undefined ? null : BigInt(file.inode);
+      // Darwin omits the device field for FIFO vnodes. A positive inode can
+      // still prove absence only by treating every same-inode target as a match.
+      const fifoWithoutDevice = file.type === "FIFO" && /^\d+$/.test(file.descriptor);
+      identities.push(
+        inode !== null && inode > 0n && (file.device !== undefined || fifoWithoutDevice)
+          ? Object.freeze({ device: file.device === undefined ? null : BigInt(file.device), inode })
+          : null,
+      );
       if (file.descriptor === "cwd") cwdSeen = true;
       return paths.length <= MAX_PROCESS_PATHS;
     }
@@ -218,11 +236,21 @@ const lsofPaths = (output: string): ReadonlyArray<string> | null => {
         if (!file || file.name !== undefined) return null;
         file.name = value;
         break;
+      case "D":
+        if (!file || file.device !== undefined || !/^0x[\da-fA-F]+$/.test(value)) return null;
+        file.device = value;
+        break;
+      case "i":
+        if (!file || file.inode !== undefined || !/^\d+$/.test(value)) return null;
+        file.inode = value;
+        break;
       default:
         return null;
     }
   }
-  return finishFile() && cwdSeen && processes > 0 ? paths : null;
+  if (!finishFile() || !cwdSeen || processes === 0) return null;
+  Object.defineProperty(paths, nativeIdentities, { value: Object.freeze(identities) });
+  return Object.freeze(paths);
 };
 
 const processPaths = async (platform: NodeJS.Platform, uid: number | undefined) => {
@@ -232,7 +260,7 @@ const processPaths = async (platform: NodeJS.Platform, uid: number | undefined) 
   return await new Promise<ReadonlyArray<string> | null>((resolve) => {
     NodeChildProcess.execFile(
       "lsof",
-      ["-a", "-u", String(uid), "-F0pftn", "-n", "-P"],
+      ["-a", "-u", String(uid), "-F0pftnDi", "-n", "-P"],
       { timeout: 10_000, maxBuffer: MAX_INVENTORY_BYTES },
       (error, stdout, stderr) => resolve(error || stderr.trim() !== "" ? null : lsofPaths(stdout)),
     );
@@ -254,6 +282,110 @@ export class ProcessPaths extends Context.Reference<Effect.Effect<ReadonlyArray<
       }),
   },
 ) {}
+
+const identityKey = ({ device, inode }: ObjectIdentity) => `${device}:${inode}`;
+const directoryToken = (stat: Awaited<ReturnType<typeof targetStat>>) =>
+  `${stat.dev}:${stat.ino}:${stat.mtimeNs}:${stat.ctimeNs}`;
+const targetStat = (path: string) => NodeFSP.lstat(path, { bigint: true });
+
+const targetIdentities = async (root: string) => {
+  const deadline = performance.now() + 30_000;
+  const rootStat = await targetStat(root);
+  if (!rootStat.isDirectory() || (await NodeFSP.realpath(root)) !== root)
+    throw new Error("Consumer target root is not a canonical directory");
+  const directories: Array<{ path: string; token: string }> = [];
+  const identities = new Set<string>();
+  const inodes = new Set<bigint>();
+  let objects = 0;
+  const visit = async (path: string, depth: number): Promise<void> => {
+    if (++objects > MAX_TARGET_OBJECTS || depth > 128 || performance.now() > deadline)
+      throw new Error("Consumer target inventory limit exceeded");
+    const stat = await targetStat(path);
+    if (
+      typeof stat.dev !== "bigint" ||
+      typeof stat.ino !== "bigint" ||
+      stat.ino <= 0n ||
+      stat.dev !== rootStat.dev
+    )
+      throw new Error("Consumer target object identity is unavailable or crosses a device");
+    identities.add(identityKey({ device: stat.dev, inode: stat.ino }));
+    inodes.add(stat.ino);
+    if (!stat.isDirectory()) return; // Record links themselves; never traverse their targets.
+    if (typeof stat.mtimeNs !== "bigint" || typeof stat.ctimeNs !== "bigint")
+      throw new Error("Consumer target directory timestamps are unavailable");
+    const token = directoryToken(stat);
+    directories.push({ path, token });
+    const directory = await NodeFSP.opendir(path);
+    for await (const entry of directory) {
+      if (entry.name === "." || entry.name === ".." || NodePath.basename(entry.name) !== entry.name)
+        throw new Error("Consumer target directory entry is malformed");
+      await visit(NodePath.join(path, entry.name), depth + 1);
+    }
+    if (directoryToken(await targetStat(path)) !== token)
+      throw new Error("Consumer target directory changed during observation");
+  };
+  await visit(root, 0);
+  for (const directory of directories) {
+    if (
+      performance.now() > deadline ||
+      directoryToken(await targetStat(directory.path)) !== directory.token
+    )
+      throw new Error("Consumer target directory changed during observation");
+  }
+  if (
+    directoryToken(await targetStat(root)) !== directoryToken(rootStat) ||
+    (await NodeFSP.realpath(root)) !== root
+  )
+    throw new Error("Consumer target root changed during observation");
+  return { identities, inodes };
+};
+
+/**
+ * Captured Darwin D/i fields describe the opened vnode's stat identity, not an
+ * unconditional canonical pathname. Only an unresolved captured object can use
+ * a complete, unchanged no-follow target inventory as an alternative alias proof.
+ * Callers retain fresh mount protection under the canonical workspace lease.
+ */
+export const processPathsUseRoot = async (
+  canonicalRoot: string,
+  paths: ReadonlyArray<string>,
+): Promise<boolean> => {
+  if (!NodePath.isAbsolute(canonicalRoot)) throw new Error("Consumer target root is not absolute");
+  const captured = (paths as CapturedPaths)[nativeIdentities];
+  const unresolved: ObjectIdentity[] = [];
+  for (const [index, path] of paths.entries()) {
+    if (!NodePath.isAbsolute(path)) throw new Error("Process consumer path is not absolute");
+    if (within(canonicalRoot, path)) return true;
+    try {
+      if (within(canonicalRoot, await NodeFSP.realpath(path))) return true;
+    } catch (error) {
+      if (
+        !gone(error) &&
+        !["EACCES", "EPERM"].includes((error as NodeJS.ErrnoException).code ?? "")
+      )
+        throw error;
+      if (captured === undefined) {
+        if (!gone(error)) throw error;
+        continue;
+      }
+      const identity = captured[index];
+      if (!identity)
+        throw new Error("Unresolved process object identity is unavailable", { cause: error });
+      if (identity.device === null && (error as NodeJS.ErrnoException).code !== "ENOENT")
+        throw new Error("Device-unknown FIFO evidence is not a vanished pathname", {
+          cause: error,
+        });
+      unresolved.push(identity);
+    }
+  }
+  if (unresolved.length === 0) return false;
+  const identities = await targetIdentities(canonicalRoot);
+  return unresolved.some((identity) =>
+    identity.device === null
+      ? identities.inodes.has(identity.inode)
+      : identities.identities.has(identityKey(identity)),
+  );
+};
 
 const runtimeKeptReason = async (root: string): Promise<string | null> => {
   for (const location of ["userdata", "dev"]) {
@@ -306,17 +438,8 @@ export const worktreeConsumerReason = Effect.fn("WorktreeConsumers.worktreeConsu
           (await NodeFSP.realpath(canonicalRoot)) !== canonicalRoot
         )
           return "Worktree root is not canonical.";
-        for (const path of paths) {
-          if (!NodePath.isAbsolute(path)) return "Process file-consumer inventory is unavailable.";
-          if (within(canonicalRoot, path))
-            return "A process is using a file or directory in the worktree.";
-          try {
-            if (within(canonicalRoot, await NodeFSP.realpath(path)))
-              return "A process is using a file or directory in the worktree.";
-          } catch (error) {
-            if (!gone(error)) throw error;
-          }
-        }
+        if (await processPathsUseRoot(canonicalRoot, paths))
+          return "A process is using a file or directory in the worktree.";
         return runtimeKeptReason(canonicalRoot);
       },
       catch: () => "Worktree consumer protection could not be verified.",

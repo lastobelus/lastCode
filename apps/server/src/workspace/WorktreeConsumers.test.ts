@@ -8,6 +8,7 @@ import * as WorktreeConsumers from "./WorktreeConsumers.ts";
 
 const native = vi.hoisted(() => ({
   open: vi.fn(),
+  opendir: vi.fn(),
   stat: vi.fn(),
   lstat: vi.fn(),
   readdir: vi.fn(),
@@ -170,7 +171,7 @@ describe("Darwin worktree consumers", () => {
       ]);
       expect(native.execFile).toHaveBeenCalledWith(
         "lsof",
-        ["-a", "-u", "1000", "-F0pftn", "-n", "-P"],
+        ["-a", "-u", "1000", "-F0pftnDi", "-n", "-P"],
         { timeout: 10_000, maxBuffer: 16 * 1024 * 1024 },
         expect.any(Function),
       );
@@ -324,6 +325,253 @@ describe("Darwin worktree consumers", () => {
           "/var/run/example.sock",
         ]);
       }),
+  );
+});
+
+const vnodeFixture = (fields = "D0x12\0i9007199254740993\0", type = "REG", code = "EACCES") => {
+  darwinFixture(
+    "p123\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n" +
+      `f4\0t${type}\0${fields}n/system/example/file\0\n`,
+  );
+  native.realpath.mockImplementation(async (path: string) => {
+    if (path === "/system/example/file") throw Object.assign(new Error("denied"), { code });
+    return path;
+  });
+};
+const objectStat = (inode: bigint, directory = false, device = 18n, modified = 1n) => ({
+  dev: device,
+  ino: inode,
+  mtimeNs: modified,
+  ctimeNs: modified,
+  isDirectory: () => directory,
+});
+const targetFixture = (fileInode = 9007199254740993n) => {
+  const stats = new Map([
+    ["/workspace/example", objectStat(1n, true)],
+    ["/workspace/example/dist", objectStat(2n, true)],
+    ["/workspace/example/dist/output.js", objectStat(fileInode)],
+    ["/workspace/example/link", objectStat(3n)],
+  ]);
+  native.lstat.mockImplementation(async (path: string) => {
+    const stat = stats.get(path);
+    if (!stat) throw missing();
+    return stat;
+  });
+  native.opendir.mockImplementation(async (path: string) => {
+    const names =
+      path === "/workspace/example"
+        ? ["dist", "link"]
+        : path.endsWith("/dist")
+          ? ["output.js"]
+          : [];
+    return (async function* () {
+      for (const name of names) yield { name };
+    })();
+  });
+  return stats;
+};
+
+describe("Captured vnode identity proof", () => {
+  it.effect("includes target directories in the device-unknown FIFO inode comparison", () =>
+    Effect.gen(function* () {
+      vnodeFixture("i2\0", "FIFO", "ENOENT");
+      targetFixture();
+      expect(yield* guard(yield* inventory("darwin"))).toBe(
+        "A process is using a file or directory in the worktree.",
+      );
+    }),
+  );
+  it.effect.each([18n, 99n])(
+    "protects an unlinked FIFO inode match regardless of device (%s)",
+    (device) =>
+      Effect.gen(function* () {
+        vnodeFixture("i9007199254740993\0", "FIFO", "ENOENT");
+        const stats = targetFixture();
+        for (const [path, stat] of stats) stats.set(path, { ...stat, dev: device });
+        expect(yield* guard(yield* inventory("darwin"))).toBe(
+          "A process is using a file or directory in the worktree.",
+        );
+      }),
+  );
+  it.effect("proves an unlinked positive-inode FIFO absent from the complete target", () =>
+    Effect.gen(function* () {
+      vnodeFixture("i9007199254740993\0", "FIFO", "ENOENT");
+      targetFixture(9007199254740992n);
+      expect(yield* guard(yield* inventory("darwin"))).toBeNull();
+      expect(native.opendir).toHaveBeenCalledWith("/workspace/example/dist");
+    }),
+  );
+  it.effect.each(["", "i0\0"])(
+    "keeps a vanished FIFO without positive native inode (%s)",
+    (fields) =>
+      Effect.gen(function* () {
+        vnodeFixture(fields, "FIFO", "ENOENT");
+        expect(yield* guard(yield* inventory("darwin"))).toBe(
+          "Worktree consumer protection could not be verified.",
+        );
+        expect(native.opendir).not.toHaveBeenCalled();
+      }),
+  );
+  it.effect("keeps device-unknown FIFO permission evidence and nonnumeric descriptors", () =>
+    Effect.gen(function* () {
+      vnodeFixture("i123\0", "FIFO", "EACCES");
+      expect(yield* guard(yield* inventory("darwin"))).toBe(
+        "Worktree consumer protection could not be verified.",
+      );
+      vnodeFixture("i123\0", "FIFO", "ENOENT");
+      darwinFixture(
+        "p123\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\nftxt\0tFIFO\0i123\0n/system/example/file\0\n",
+      );
+      expect(yield* guard(yield* inventory("darwin"))).toBe(
+        "Worktree consumer protection could not be verified.",
+      );
+    }),
+  );
+  it.effect.each(["EACCES", "EPERM"])(
+    "protects an unresolved %s open file by exact bigint identity",
+    (code) =>
+      Effect.gen(function* () {
+        vnodeFixture(undefined, undefined, code);
+        targetFixture();
+        const paths = yield* inventory("darwin");
+        expect(paths).toEqual(["/workspace/elsewhere", "/system/example/file"]);
+        expect(yield* guard(paths)).toBe("A process is using a file or directory in the worktree.");
+        expect(native.lstat).toHaveBeenCalledWith("/workspace/example/dist/output.js", {
+          bigint: true,
+        });
+        expect(native.opendir).not.toHaveBeenCalledWith("/workspace/example/link");
+      }),
+  );
+  it.effect("protects directory objects even when the observed cwd name is elsewhere", () =>
+    Effect.gen(function* () {
+      vnodeFixture("D0x12\0i2\0", "DIR");
+      targetFixture();
+      expect(yield* guard(yield* inventory("darwin"))).toBe(
+        "A process is using a file or directory in the worktree.",
+      );
+    }),
+  );
+  it.effect.each(["EACCES", "EPERM"])(
+    "proves an inaccessible %s external object absent only after a complete stable inventory",
+    (code) =>
+      Effect.gen(function* () {
+        vnodeFixture(undefined, undefined, code);
+        targetFixture(9007199254740992n);
+        expect(yield* guard(yield* inventory("darwin"))).toBeNull();
+        expect(native.opendir).toHaveBeenCalledWith("/workspace/example/dist");
+      }),
+  );
+  it.effect("does not equate accessible external hardlinks with use of this checkout", () =>
+    Effect.gen(function* () {
+      vnodeFixture();
+      native.realpath.mockImplementation(async (path: string) => path);
+      expect(yield* guard(yield* inventory("darwin"))).toBeNull();
+      expect(native.opendir).not.toHaveBeenCalled();
+    }),
+  );
+  it.effect.each(["", "D0x12\0", "i2\0", "D0x12\0i0\0"])(
+    "keeps unresolved captured objects without usable complete identity (%s)",
+    (fields) =>
+      Effect.gen(function* () {
+        vnodeFixture(fields);
+        const paths = yield* inventory("darwin");
+        expect(paths).not.toBeNull();
+        expect(yield* guard(paths)).toBe("Worktree consumer protection could not be verified.");
+        expect(native.opendir).not.toHaveBeenCalled();
+      }),
+  );
+  it.effect.each([
+    "D\0i2\0",
+    "D12\0i2\0",
+    "D0xgg\0i2\0",
+    "D0x12\0i\0",
+    "D0x12\0i-2\0",
+    "D0x12\0i2.0\0",
+    "D0x12\0D0x12\0i2\0",
+    "D0x12\0i2\0i2\0",
+  ])("rejects malformed or duplicated captured identity fields (%s)", (fields) =>
+    Effect.gen(function* () {
+      vnodeFixture(fields);
+      expect(yield* inventory("darwin")).toBeNull();
+    }),
+  );
+  it.effect("keeps a target with a cross-device child, including a file", () =>
+    Effect.gen(function* () {
+      vnodeFixture();
+      targetFixture().set("/workspace/example/dist/output.js", objectStat(8n, false, 19n));
+      expect(yield* guard(yield* inventory("darwin"))).toBe(
+        "Worktree consumer protection could not be verified.",
+      );
+    }),
+  );
+  it.effect("keeps when a target directory changes during traversal", () =>
+    Effect.gen(function* () {
+      vnodeFixture();
+      const stats = targetFixture();
+      native.opendir.mockImplementation(async (path: string) =>
+        (async function* () {
+          if (path === "/workspace/example") {
+            yield { name: "dist" };
+            stats.set(path, objectStat(1n, true, 18n, 2n));
+          } else yield { name: "output.js" };
+        })(),
+      );
+      expect(yield* guard(yield* inventory("darwin"))).toBe(
+        "Worktree consumer protection could not be verified.",
+      );
+    }),
+  );
+  it.effect("keeps when traversal is incomplete despite a matching previously seen object", () =>
+    Effect.gen(function* () {
+      vnodeFixture();
+      targetFixture();
+      native.opendir.mockRejectedValue(Object.assign(new Error("denied"), { code: "EACCES" }));
+      expect(yield* guard(yield* inventory("darwin"))).toBe(
+        "Worktree consumer protection could not be verified.",
+      );
+    }),
+  );
+  it.effect("keeps when traversal exceeds the bounded depth", () =>
+    Effect.gen(function* () {
+      vnodeFixture();
+      native.lstat.mockImplementation(async (path: string) =>
+        objectStat(BigInt(path.length), true),
+      );
+      native.opendir.mockImplementation(async () =>
+        (async function* () {
+          yield { name: "nested" };
+        })(),
+      );
+      expect(yield* guard(yield* inventory("darwin"))).toBe(
+        "Worktree consumer protection could not be verified.",
+      );
+    }),
+  );
+  it.effect.each(["EIO", "ELOOP", "ENOSYS", undefined])(
+    "does not use native identity to bypass an unrelated resolution error (%s)",
+    (code) =>
+      Effect.gen(function* () {
+        vnodeFixture();
+        targetFixture();
+        native.realpath.mockImplementation(async (path: string) => {
+          if (path === "/system/example/file") throw Object.assign(new Error("unknown"), { code });
+          return path;
+        });
+        expect(yield* guard(yield* inventory("darwin"))).toBe(
+          "Worktree consumer protection could not be verified.",
+        );
+        expect(native.opendir).not.toHaveBeenCalled();
+      }),
+  );
+  it.effect("retains fail-closed alias resolution for plain injected paths", () =>
+    Effect.gen(function* () {
+      vnodeFixture();
+      targetFixture();
+      expect(yield* guard(["/system/example/file"])).toBe(
+        "Worktree consumer protection could not be verified.",
+      );
+      expect(native.opendir).not.toHaveBeenCalled();
+    }),
   );
 });
 
