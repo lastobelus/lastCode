@@ -264,8 +264,7 @@ const lsofPaths = (output: string): ReadonlyArray<string> | null => {
   return Object.freeze(paths);
 };
 
-const processPaths = async (platform: NodeJS.Platform, uid: number | undefined) => {
-  if (uid === undefined) return null;
+const captureProcessPaths = async (platform: NodeJS.Platform, uid: number) => {
   if (platform === "linux") return linuxPaths(uid);
   if (platform !== "darwin") return null;
   return await new Promise<ReadonlyArray<string> | null>((resolve) => {
@@ -276,6 +275,21 @@ const processPaths = async (platform: NodeJS.Platform, uid: number | undefined) 
       (error, stdout, stderr) => resolve(error || stderr.trim() !== "" ? null : lsofPaths(stdout)),
     );
   });
+};
+
+const processPaths = async (platform: NodeJS.Platform, uid: number | undefined) => {
+  if (uid === undefined || (platform !== "linux" && platform !== "darwin")) return null;
+  const capture = async () => {
+    try {
+      return await captureProcessPaths(platform, uid);
+    } catch {
+      return null;
+    }
+  };
+  const first = await capture();
+  // A closing descriptor can make an observation incomplete. Retry once with
+  // an entirely new inventory; no paths or object evidence survive a failed one.
+  return first === null ? capture() : first;
 };
 
 /** Actual file consumers, observed afresh; generic startup does not renew usage clocks. */

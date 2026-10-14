@@ -74,7 +74,10 @@ const linuxFixture = (table = maps) => {
     return { bytesRead };
   });
   const close = vi.fn(async () => undefined);
-  native.open.mockResolvedValue({ read, close });
+  native.open.mockImplementation(async () => {
+    position = 0;
+    return { read, close };
+  });
   return { close, read };
 };
 
@@ -107,7 +110,7 @@ describe("Linux worktree consumers", () => {
     Effect.gen(function* () {
       const file = linuxFixture(table);
       expect(yield* inventory("linux")).toBeNull();
-      expect(file.close).toHaveBeenCalledOnce();
+      expect(file.close).toHaveBeenCalledTimes(2);
     }),
   );
 
@@ -703,6 +706,126 @@ describe("Captured vanished Unix socket proof", () => {
       expect(yield* guard(["/system/example/socket"])).toBe(
         "Worktree consumer protection could not be verified.",
       );
+    }),
+  );
+});
+
+describe("Fresh native observation retry", () => {
+  const incomplete =
+    "p123\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n" +
+    "f4\0tREG\0D0x12\0i42\0n/workspace/example/discarded.js\0\n" +
+    "f7\0nunknown-current-path\0\n";
+
+  it.effect(
+    "discards the incomplete capture and retains only the second capture's native metadata",
+    () =>
+      Effect.gen(function* () {
+        vnodeFixture();
+        targetFixture();
+        native.execFile.mockImplementationOnce((_file, _args, _options, callback) =>
+          callback(null, incomplete, ""),
+        );
+        const paths = yield* inventory("darwin");
+        expect(paths).toEqual(["/workspace/elsewhere", "/system/example/file"]);
+        expect(paths).not.toContain("/workspace/example/discarded.js");
+        expect(yield* guard(paths)).toBe("A process is using a file or directory in the worktree.");
+        expect(native.execFile).toHaveBeenCalledTimes(2);
+      }),
+  );
+  it.effect("keeps a consumer that appears in the fresh retry", () =>
+    Effect.gen(function* () {
+      darwinFixture(
+        "p123\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n" +
+          "f8\0tREG\0n/workspace/example/dist/new-consumer.js\0\n",
+      );
+      native.execFile.mockImplementationOnce((_file, _args, _options, callback) =>
+        callback(null, incomplete, ""),
+      );
+      expect(yield* guard(yield* inventory("darwin"))).toBe(
+        "A process is using a file or directory in the worktree.",
+      );
+      expect(native.execFile).toHaveBeenCalledTimes(2);
+    }),
+  );
+  it.effect("does not retry a complete first capture", () =>
+    Effect.gen(function* () {
+      darwinFixture(lsof);
+      expect(yield* inventory("darwin")).toEqual([
+        "/workspace/elsewhere",
+        "/workspace/example/native/resource-monitor/target/debug/monitor",
+        "/workspace/example/apps/web/dist/file with spaces.js",
+      ]);
+      expect(native.execFile).toHaveBeenCalledOnce();
+    }),
+  );
+  it.effect.each([incomplete, "unknown-frame\0\n"])(
+    "keeps after a malformed first capture and an incomplete second (%s)",
+    (second) =>
+      Effect.gen(function* () {
+        darwinFixture(second);
+        native.execFile.mockImplementationOnce((_file, _args, _options, callback) =>
+          callback(null, incomplete, ""),
+        );
+        const paths = yield* inventory("darwin");
+        expect(paths).toBeNull();
+        expect(yield* guard(paths)).toBe("Process file-consumer inventory is unavailable.");
+        expect(native.execFile).toHaveBeenCalledTimes(2);
+      }),
+  );
+  it.effect.each(["error", "warning"] as const)(
+    "discards a failed native %s capture even when its stdout looks complete",
+    (failure) =>
+      Effect.gen(function* () {
+        const second = "p123\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n";
+        darwinFixture(second);
+        native.execFile.mockImplementationOnce((_file, _args, _options, callback) =>
+          callback(
+            failure === "error"
+              ? Object.assign(new Error("capture failed"), { code: "ETIMEDOUT" })
+              : null,
+            lsof,
+            failure === "warning" ? "incomplete observation" : "",
+          ),
+        );
+        expect(yield* inventory("darwin")).toEqual(["/workspace/elsewhere"]);
+        expect(native.execFile).toHaveBeenCalledTimes(2);
+      }),
+  );
+  it.effect("keeps after two failed native captures", () =>
+    Effect.gen(function* () {
+      darwinFixture(lsof, "", Object.assign(new Error("capture failed"), { code: "EACCES" }));
+      expect(yield* inventory("darwin")).toBeNull();
+      expect(native.execFile).toHaveBeenCalledTimes(2);
+    }),
+  );
+  it.effect("retries a Linux native read failure with a new complete inventory", () =>
+    Effect.gen(function* () {
+      const file = linuxFixture();
+      native.readdir.mockRejectedValueOnce(Object.assign(new Error("denied"), { code: "EACCES" }));
+      const paths = yield* inventory("linux");
+      expect(paths).toContain("/workspace/example/apps/web/dist/index.html");
+      expect(yield* guard(paths)).toBe("A process is using a file or directory in the worktree.");
+      expect(native.readdir.mock.calls.filter(([path]) => path === "/proc")).toHaveLength(2);
+      expect(file.close).toHaveBeenCalledOnce();
+    }),
+  );
+  it.effect("keeps after exactly two Linux native read failures", () =>
+    Effect.gen(function* () {
+      native.readdir.mockRejectedValue(Object.assign(new Error("denied"), { code: "EACCES" }));
+      expect(yield* inventory("linux")).toBeNull();
+      expect(native.readdir).toHaveBeenCalledTimes(2);
+    }),
+  );
+  it.effect("does not capture or retry when the native user identity is unavailable", () =>
+    Effect.gen(function* () {
+      expect(
+        yield* WorktreeConsumers.ProcessPaths.defaultValue().pipe(
+          Effect.provideService(HostProcess.Platform, "darwin"),
+          Effect.provideService(HostProcess.UserId, undefined),
+        ),
+      ).toBeNull();
+      expect(native.execFile).not.toHaveBeenCalled();
+      expect(native.readdir).not.toHaveBeenCalled();
     }),
   );
 });
