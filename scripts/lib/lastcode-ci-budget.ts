@@ -110,18 +110,18 @@ function hasLivingChild(
   );
 }
 
-function isPositivePid(value: unknown): value is number {
+function isPositiveSafeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 }
 
-function isStartIdentity(value: unknown): value is string {
+function isNonemptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
 /** A child may lack a captured identity; an identity must never lack its child PID. */
 function isChildIdentity(pid: unknown, identity: unknown) {
   if (pid === null) return identity === null;
-  return isPositivePid(pid) && (identity === null || isStartIdentity(identity));
+  return isPositiveSafeInteger(pid) && (identity === null || isNonemptyString(identity));
 }
 
 function readLeases(directory: string) {
@@ -150,8 +150,8 @@ function readLeases(directory: string) {
     }
     if (
       !isRecord(lease) ||
-      !isPositivePid(lease.pid) ||
-      !isStartIdentity(lease.startIdentity) ||
+      !isPositiveSafeInteger(lease.pid) ||
+      !isNonemptyString(lease.startIdentity) ||
       !isChildIdentity(lease.childPid, lease.childStartIdentity) ||
       typeof lease.token !== "string" ||
       `${lease.token}${LEASE_SUFFIX}` !== name ||
@@ -176,14 +176,6 @@ function readLeases(directory: string) {
     });
   }
   return leases;
-}
-
-function isPositiveSafeInteger(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
-}
-
-function isNonemptyString(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0;
 }
 
 function matchesWaiterName(token: unknown, name: string): token is string {
