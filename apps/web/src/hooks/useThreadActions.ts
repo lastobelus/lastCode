@@ -376,8 +376,8 @@ export function useMarkThreadRead() {
       if (!thread) return "unchanged";
       const visitedAt = new Date(
         Math.max(
-          Date.parse(thread.updatedAt) || 0,
-          Date.parse(thread.latestRun?.completedAt ?? "") || 0,
+          Date.parse(thread.updatedAt),
+          Date.parse(thread.latestRun?.completedAt ?? thread.updatedAt),
         ),
       ).toISOString();
       const tracksVisits = readEnvironmentSupportsVisitedTracking(target.environmentId);
