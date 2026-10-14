@@ -541,7 +541,21 @@ it.layer(layerTest)("ProjectService", (it) => {
         WHERE stream_id = ${projectId} AND event_type = 'project.deleted'
       `;
       assert.deepEqual(events, [{ command_id: input.commandId }]);
-    }),
+    }).pipe(
+      // Optional metadata resolves independently of command receipt replay.
+      Effect.provide(
+        layerTestFor(
+          Layer.merge(
+            Layer.succeed(RepositoryIdentityResolver.RepositoryIdentityResolver, {
+              resolve: () => Effect.succeed(null),
+            }),
+            Layer.succeed(ProjectFaviconResolver.ProjectFaviconResolver, {
+              resolvePath: () => Effect.succeed(null),
+            }),
+          ),
+        ),
+      ),
+    ),
   );
 
   it.effect("treats a deleted project as missing for updates and new deletes", () =>
