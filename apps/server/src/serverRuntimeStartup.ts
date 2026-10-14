@@ -31,6 +31,7 @@ import { flushCompileCache } from "./compileCache.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as EffectWorker from "./orchestration-v2/EffectWorker.ts";
+import { repairHistoricalThreadCreators } from "./orchestration-v2/repairHistoricalThreadCreators.ts";
 import * as LegacyV1ThreadImporter from "./orchestration-v2/legacy/LegacyV1ThreadImporter.ts";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as ProviderRuntimeRecovery from "./orchestration-v2/ProviderRuntimeRecoveryService.ts";
@@ -515,7 +516,20 @@ const make = (options?: StartupOptions) =>
             ),
           ),
         ),
-        recover: runStartupPhase("orchestration-v2.recovery", providerRuntimeRecovery.recover),
+        recover: runStartupPhase(
+          "orchestration-v2.creator-history.repair",
+          repairHistoricalThreadCreators.pipe(
+            Effect.tap((repairedThreadCount) =>
+              repairedThreadCount === 0
+                ? Effect.void
+                : Effect.logInfo("Repaired historical thread creators", { repairedThreadCount }),
+            ),
+          ),
+        ).pipe(
+          Effect.andThen(
+            runStartupPhase("orchestration-v2.recovery", providerRuntimeRecovery.recover),
+          ),
+        ),
         recoverDelegatedTasks: runStartupPhase(
           "orchestration-v2.delegated-tasks.recover",
           orchestrator.recoverDelegatedTasks,
