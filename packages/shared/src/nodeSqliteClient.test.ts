@@ -165,8 +165,11 @@ it.effect("keeps large text and blob parameters off cached statements", () =>
     const cached = new Set<NodeSqlite.StatementSync>();
     const large = new Set<NodeSqlite.StatementSync>();
     const [nodeMajor = 0, nodeMinor = 0] = NodeProcess.versions.node.split(".").map(Number);
-    // Raw ArrayBuffer bindings were added in Node 26.8; older versions accept views.
-    const supportsRawArrayBuffer = nodeMajor > 26 || (nodeMajor === 26 && nodeMinor >= 8);
+    // Raw ArrayBuffer bindings landed in Node 26.8 and were backported to Node 24.21.
+    const supportsRawArrayBuffer =
+      (nodeMajor === 24 && nodeMinor >= 21) ||
+      nodeMajor > 26 ||
+      (nodeMajor === 26 && nodeMinor >= 8);
     const largeBlobs = [
       new Uint8Array(64 * 1024 + 1),
       new DataView(new ArrayBuffer(64 * 1024 + 1)),
