@@ -1,3 +1,4 @@
+import { EnvironmentPauseControl } from "../threads/EnvironmentPauseControl";
 import { AppActivityIndicator } from "../../components/AppActivityIndicator";
 import { ConnectionTraceId } from "./ConnectionTraceId";
 import { useAuth } from "@clerk/expo";
@@ -220,30 +221,37 @@ function ConnectedCloudEnvironmentRow(props: {
     setLastDescriptor(props.descriptor);
   }
   return (
-    <Pressable
-      accessibilityHint="Long press to remove from this device"
-      accessibilityRole={props.onOpen ? "button" : undefined}
-      accessibilityLabel={props.onOpen ? `Manage ${props.environment.environmentLabel}` : undefined}
-      onPress={props.onOpen}
-      onLongPress={props.onRemove}
-    >
-      <CloudEnvironmentRowShell
-        opensDetails={props.onOpen !== undefined}
-        connectionError={enabled || unsupported ? props.environment.connectionError : null}
-        connectionErrorTraceId={enabled ? props.environment.connectionErrorTraceId : null}
-        connectionState={enabled || unsupported ? props.environment.connectionState : "available"}
-        errorExpanded={props.errorExpanded}
-        label={props.environment.environmentLabel}
-        machine={resolveEnvironmentMachineKind(
-          serverConfig ?? (lastDescriptor === undefined ? null : { environment: lastDescriptor }),
-        )}
-        onValueChange={props.onSetEnabled}
-        onToggleError={props.onToggleError}
-        disabled={unsupported}
-        {...(enabled || unsupported ? {} : { statusText: "Off" })}
-        value={enabled}
-      />
-    </Pressable>
+    <View>
+      <Pressable
+        accessibilityHint="Long press to remove from this device"
+        accessibilityRole={props.onOpen ? "button" : undefined}
+        accessibilityLabel={
+          props.onOpen ? `Manage ${props.environment.environmentLabel}` : undefined
+        }
+        onPress={props.onOpen}
+        onLongPress={props.onRemove}
+      >
+        <CloudEnvironmentRowShell
+          opensDetails={props.onOpen !== undefined}
+          connectionError={enabled || unsupported ? props.environment.connectionError : null}
+          connectionErrorTraceId={enabled ? props.environment.connectionErrorTraceId : null}
+          connectionState={enabled || unsupported ? props.environment.connectionState : "available"}
+          errorExpanded={props.errorExpanded}
+          label={props.environment.environmentLabel}
+          machine={resolveEnvironmentMachineKind(
+            serverConfig ?? (lastDescriptor === undefined ? null : { environment: lastDescriptor }),
+          )}
+          onValueChange={props.onSetEnabled}
+          onToggleError={props.onToggleError}
+          disabled={unsupported}
+          {...(enabled || unsupported ? {} : { statusText: "Off" })}
+          value={enabled}
+        />
+      </Pressable>
+      {props.onOpen ? (
+        <EnvironmentPauseControl environmentId={props.environment.environmentId} />
+      ) : null}
+    </View>
   );
 }
 

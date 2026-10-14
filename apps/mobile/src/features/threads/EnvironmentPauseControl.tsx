@@ -4,7 +4,7 @@ import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime"
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { useCallback, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, Modal, Pressable, ScrollView, View } from "react-native";
+import { ActivityIndicator, Modal, ScrollView, View } from "react-native";
 
 import { AppText as Text } from "../../components/AppText";
 import { ControlPill } from "../../components/ControlPill";
@@ -16,69 +16,73 @@ import {
   environmentPauseBlockerLabel,
 } from "./environment-pause-model";
 
-export function useEnvironmentPauseControl() {
+export function useEnvironmentPauseControl(environmentId: EnvironmentId) {
   const targets = useAtomValue(environmentPauseConnectionsAtom);
+  const target = targets.find((candidate) => candidate.environmentId === environmentId);
   const [open, setOpen] = useState(false);
-  const [selectedId, setSelectedId] = useState<EnvironmentId | null>(null);
-  const entriesAtom = useMemo(
+  const entryAtom = useMemo(
     () =>
-      Atom.make((get) =>
-        targets.map((target) => {
-          const request = { environmentId: target.environmentId, input: {} };
-          const config = get(serverEnvironment.configValueAtom(target.environmentId));
-          const supported = config?.environment.capabilities.environmentPause === true;
-          const initial = supported
-            ? get(environmentPause.monitorStatus(request))
-            : AsyncResult.initial<EnvironmentPauseStatus>();
-          const saved = Option.getOrNull(AsyncResult.value(initial));
-          const polling =
-            supported && target.connected && open && selectedId === target.environmentId;
-          const result = polling ? get(environmentPause.activeStatus(request)) : initial;
-          const latest = Option.getOrNull(AsyncResult.value(result));
-          const status = latest ?? saved;
-          const enabled = supported && config.settings.environmentPauseEnabled === true;
-          const availability = environmentPauseAvailability({
+      Atom.make((get) => {
+        if (!target) return null;
+        const request = { environmentId, input: {} };
+        const config = get(serverEnvironment.configValueAtom(environmentId));
+        const supported = config?.environment.capabilities.environmentPause === true;
+        const initial = supported
+          ? get(environmentPause.monitorStatus(request))
+          : AsyncResult.initial<EnvironmentPauseStatus>();
+        const saved = Option.getOrNull(AsyncResult.value(initial));
+        const result =
+          supported && target.connected && open
+            ? get(environmentPause.activeStatus(request))
+            : initial;
+        const status = Option.getOrNull(AsyncResult.value(result)) ?? saved;
+        const enabled = supported && config.settings.environmentPauseEnabled === true;
+        return {
+          ...target,
+          status,
+          availability: environmentPauseAvailability({
             enabled,
             connected: target.connected,
             fresh: AsyncResult.isSuccess(result) && result.timestamp >= target.since,
             status,
-          });
-          return {
-            ...target,
-            status,
-            availability,
-            queryFailed: AsyncResult.isFailure(result),
-            canStart: get(environmentPause.start.permissionAtom(target.environmentId)),
-            canRetry: get(environmentPause.retry.permissionAtom(target.environmentId)),
-            canResume: get(environmentPause.resume.permissionAtom(target.environmentId)),
-          };
-        }),
-      ),
-    [open, selectedId, targets],
+          }),
+          queryFailed: AsyncResult.isFailure(result),
+          canStart: get(environmentPause.start.permissionAtom(environmentId)),
+          canRetry: get(environmentPause.retry.permissionAtom(environmentId)),
+          canResume: get(environmentPause.resume.permissionAtom(environmentId)),
+        };
+      }),
+    [environmentId, open, target],
   );
-  const entries = useAtomValue(entriesAtom);
-  const candidates = entries.filter((entry) => entry.availability.visible);
-  const onPress = useCallback(() => {
-    setSelectedId(candidates.length === 1 ? candidates[0]!.environmentId : null);
-    setOpen(true);
-  }, [candidates]);
+  const entry = useAtomValue(entryAtom);
+  const onPress = useCallback(() => setOpen(true), []);
   return {
-    visible: candidates.length > 0,
-    hasSession: entries.some(
-      (entry) => entry.status?.session !== null && entry.status?.session !== undefined,
-    ),
+    visible: entry?.availability.visible ?? false,
+    hasSession: entry?.status?.session != null,
+    environmentLabel: entry?.environmentLabel ?? "Environment",
     onPress,
-    modal: open ? (
-      <EnvironmentPauseModal
-        entries={entries.filter(
-          (entry) => entry.availability.visible || entry.environmentId === selectedId,
-        )}
-        selectedId={selectedId}
-        onSelect={setSelectedId}
-        onClose={() => setOpen(false)}
-      />
-    ) : null,
+    modal:
+      open && entry ? <EnvironmentPauseModal entry={entry} onClose={() => setOpen(false)} /> : null,
   };
+}
+
+/** Pause controls always belong to the environment named on the connection card. */
+export function EnvironmentPauseControl(props: { readonly environmentId: EnvironmentId }) {
+  const control = useEnvironmentPauseControl(props.environmentId);
+  return (
+    <>
+      {control.visible ? (
+        <View className="items-start px-4 pb-3">
+          <ControlPill
+            label={`${control.hasSession ? "Resume" : "Pause"} ${control.environmentLabel}`}
+            variant="pill"
+            onPress={control.onPress}
+          />
+        </View>
+      ) : null}
+      {control.modal}
+    </>
+  );
 }
 
 type PauseEntry = {
@@ -94,12 +98,9 @@ type PauseEntry = {
 };
 
 function EnvironmentPauseModal(props: {
-  readonly entries: readonly PauseEntry[];
-  readonly selectedId: EnvironmentId | null;
-  readonly onSelect: (environmentId: EnvironmentId) => void;
+  readonly entry: PauseEntry;
   readonly onClose: () => void;
 }) {
-  const entry = props.entries.find((candidate) => candidate.environmentId === props.selectedId);
   return (
     <Modal visible transparent animationType="fade" onRequestClose={props.onClose}>
       <View className="flex-1 items-center justify-center bg-backdrop px-6">
@@ -107,42 +108,11 @@ function EnvironmentPauseModal(props: {
           className="max-h-[80%] w-full max-w-md grow-0 rounded-3xl bg-screen"
           contentContainerStyle={{ padding: 24, gap: 20 }}
         >
-          {entry ? (
-            <EnvironmentPauseDetails
-              key={entry.environmentId}
-              entry={entry}
-              onClose={props.onClose}
-            />
-          ) : (
-            <>
-              <Text accessibilityRole="header" className="text-xl font-t3-semibold">
-                Pause an environment
-              </Text>
-              <Text className="text-base text-foreground-secondary">
-                Choose the environment to pause or resume.
-              </Text>
-              {props.entries.map((candidate) => (
-                <Pressable
-                  key={candidate.environmentId}
-                  accessibilityRole="button"
-                  accessibilityLabel={`${candidate.status?.session ? "Resume" : "Pause"} controls for ${candidate.environmentLabel}`}
-                  className="min-h-12 justify-center rounded-xl bg-subtle px-4 py-3"
-                  onPress={() => props.onSelect(candidate.environmentId)}
-                >
-                  <Text className="font-t3-medium">{candidate.environmentLabel}</Text>
-                  <Text className="text-sm text-foreground-muted">
-                    {candidate.status?.session
-                      ? "Saved pause session"
-                      : candidate.connected
-                        ? "Connected"
-                        : "Disconnected"}
-                  </Text>
-                </Pressable>
-              ))}
-              {props.entries.length === 0 ? <Text>No pause controls are enabled.</Text> : null}
-              <ControlPill label="Close" variant="pill" onPress={props.onClose} />
-            </>
-          )}
+          <EnvironmentPauseDetails
+            key={props.entry.environmentId}
+            entry={props.entry}
+            onClose={props.onClose}
+          />
         </ScrollView>
       </View>
     </Modal>

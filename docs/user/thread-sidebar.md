@@ -6,10 +6,16 @@ need a separate branch and working directory.
 ## Pause before going offline
 
 Enable **Environment pause button** in **Settings → LastCode** for each environment
-where you want it. It is off by default. Use the pause control in the sidebar
-header, choose an environment, and confirm to send “pause to go offline” to its
-active threads. The dialog counts down while the agents finish pausing and other
-thread work stops.
+where you want it. It is off by default. The sidebar control pauses only the
+environment running on this computer, so you can take it offline. To pause a
+remote environment, use its control in **Settings → Connections**. Each control
+shows that environment's own pause state. On mobile, use Connections.
+
+If this computer also runs a WSL environment, pause it separately in Connections
+before taking the computer offline.
+
+Confirm to send “pause to go offline” to that environment's active threads. The
+dialog counts down while the agents finish pausing and other thread work stops.
 If new work starts while you wait, choose **Pause remaining threads** to include it.
 
 Automatic thread wake-ups are blocked until you resume, including after
