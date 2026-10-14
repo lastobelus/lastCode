@@ -2,10 +2,18 @@
 export function bindSidebarRailScroll(rail: HTMLElement) {
   const handleWheel = (event: WheelEvent) => {
     if (event.defaultPrevented || event.ctrlKey || event.deltaY === 0) return;
-    const viewport = rail
+    const contents = rail
       .closest("[data-slot='sidebar-inner']")
-      ?.querySelector("[data-sidebar='content']")
-      ?.closest<HTMLElement>("[data-slot='scroll-area-viewport']");
+      ?.querySelectorAll("[data-sidebar='content']");
+    // Activity retains previously visited sidebars with zero rendered bounds.
+    // Resolve on each wheel event so mode switches need no listener rebinding.
+    const viewport = Array.from(contents ?? [], (content) =>
+      content.closest<HTMLElement>("[data-slot='scroll-area-viewport']"),
+    ).find((candidate) => {
+      if (!candidate) return false;
+      const bounds = candidate.getBoundingClientRect();
+      return bounds.bottom > bounds.top;
+    });
     if (!viewport || viewport.scrollHeight <= viewport.clientHeight) return;
     const bounds = viewport.getBoundingClientRect();
     if (event.clientY < bounds.top || event.clientY >= bounds.bottom) return;

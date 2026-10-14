@@ -920,6 +920,7 @@ describe("ClientSettings sidebar", () => {
     expect(settings.legacySidebarScale).toBe(100);
     expect(settings.legacySidebarThreadGroupingStyle).toBe("minimal");
     expect(settings.legacySidebarEnabled).toBe(false);
+    expect(settings.lastcodeSidebarEnabled).toBe(false);
   });
 
   it("preserves an explicit thread grouping choice", () => {
@@ -949,6 +950,41 @@ describe("ClientSettings sidebar", () => {
     expect(decoded).not.toHaveProperty("compactSidebarEnabled");
     expect(decoded).not.toHaveProperty("sidebarCompactThreadRows");
     expect(decodeClientSettingsPatch(stored)).toEqual({});
+  });
+
+  it.each([false, true])(
+    "decodes the independent LastCode choice with legacy=%s",
+    (legacySidebarEnabled) => {
+      const input = { lastcodeSidebarEnabled: true, legacySidebarEnabled, legacySidebarScale: 75 };
+      expect(decodeClientSettings(input)).toMatchObject(input);
+      expect(decodeClientSettingsPatch(input)).toEqual(input);
+      expect(decodeClientSettings({ legacySidebarEnabled }).lastcodeSidebarEnabled).toBe(false);
+    },
+  );
+
+  it.each(["yes", 1, null])(
+    "rejects an invalid LastCode sidebar choice: %s",
+    (lastcodeSidebarEnabled) => {
+      expect(() => decodeClientSettings({ lastcodeSidebarEnabled })).toThrow();
+      expect(() => decodeClientSettingsPatch({ lastcodeSidebarEnabled })).toThrow();
+    },
+  );
+
+  it("defaults family status subheaders on and preserves an explicit opt-out", () => {
+    expect(decodeClientSettings({}).lastcodeSidebarFamilyStatusSubheaders).toBe(true);
+    expect(
+      decodeClientSettings({ legacySidebarEnabled: true }).lastcodeSidebarFamilyStatusSubheaders,
+    ).toBe(true);
+    expect(
+      decodeClientSettings({ lastcodeSidebarFamilyStatusSubheaders: false })
+        .lastcodeSidebarFamilyStatusSubheaders,
+    ).toBe(false);
+    expect(decodeClientSettingsPatch({ lastcodeSidebarFamilyStatusSubheaders: false })).toEqual({
+      lastcodeSidebarFamilyStatusSubheaders: false,
+    });
+    expect(() =>
+      decodeClientSettingsPatch({ lastcodeSidebarFamilyStatusSubheaders: "false" }),
+    ).toThrow();
   });
 
   it("preserves an explicit legacy sidebar opt-in", () => {

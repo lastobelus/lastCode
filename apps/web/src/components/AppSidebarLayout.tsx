@@ -1,6 +1,8 @@
 import { useAtomValue } from "@effect/atom-react";
 import * as Schema from "effect/Schema";
 import {
+  lazy,
+  Suspense,
   useEffect,
   useState,
   useSyncExternalStore,
@@ -33,10 +35,11 @@ import {
 import {
   useClientSettingsHydrated,
   useEnvironmentIdentificationMode,
-  useLegacySidebarEnabled,
-  useUpdateClientSettings,
+  useSidebarMode,
+  toggleSidebarMode,
 } from "../hooks/useSettings";
 import LegacyThreadSidebar from "./LegacySidebar";
+import { SidebarPresentation } from "./sidebar/SidebarPresentation";
 import { useThreadVisitedMigration } from "../hooks/useThreadVisitedMigration";
 import ThreadSidebar from "./Sidebar";
 import { SettingsSidebarNav } from "./settings/SettingsSidebarNav";
@@ -64,6 +67,16 @@ import {
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 
 const MACOS_TRAFFIC_LIGHTS_LEFT_INSET = "var(--desktop-window-controls-inset, 90px)";
+const LastCodeSidebar = lazy(() => import("./LastCodeSidebar"));
+const THREAD_SIDEBARS = {
+  lastcode: (
+    <Suspense fallback={<SidebarChromeHeader isElectron={isElectron} />}>
+      <LastCodeSidebar />
+    </Suspense>
+  ),
+  legacy: <LegacyThreadSidebar />,
+  inbox: <ThreadSidebar />,
+};
 
 function subscribeToViewportWidth(onChange: () => void): () => void {
   window.addEventListener("resize", onChange);
@@ -90,7 +103,6 @@ function SidebarControl() {
   const usagePageOpen = useLocation({ select: (location) => location.pathname === "/usage" });
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const { toggleSidebar, isMobile, mobileSheetMounted } = useSidebar();
-  const updateClientSettings = useUpdateClientSettings();
   const clientSettingsHydrated = useClientSettingsHydrated();
   const routeTarget = useParams({
     strict: false,
@@ -144,18 +156,19 @@ function SidebarControl() {
           modelPickerOpen: isModelPickerOpen(),
         },
       });
-      if (command !== "sidebar.toggle" && command !== "sidebar.mode.toggle") return;
-      if (command === "sidebar.mode.toggle" && !clientSettingsHydrated) return;
-
-      event.preventDefault();
-      event.stopPropagation();
-      if (command === "sidebar.toggle") {
-        toggleSidebar();
-        return;
+      switch (command) {
+        case "sidebar.toggle":
+          event.preventDefault();
+          event.stopPropagation();
+          toggleSidebar();
+          return;
+        case "sidebar.mode.toggle":
+          if (!clientSettingsHydrated) return;
+          event.preventDefault();
+          event.stopPropagation();
+          toggleSidebarMode();
+          return;
       }
-      updateClientSettings((settings) => ({
-        legacySidebarEnabled: !settings.legacySidebarEnabled,
-      }));
     };
 
     // Capture before focused editors consume commands such as Mod+B for rich-text formatting.
@@ -163,6 +176,7 @@ function SidebarControl() {
     // A focused desktop browser page forwards the chord as a menu action.
     const unsubscribe = window.desktopBridge?.onMenuAction((action) => {
       if (action === "sidebar.toggle") toggleSidebar();
+      if (action === "sidebar.mode.toggle") toggleSidebarMode();
     });
     return () => {
       window.removeEventListener("keydown", onKeyDown, true);
@@ -174,7 +188,6 @@ function SidebarControl() {
     previewOpen,
     terminalOpen,
     toggleSidebar,
-    updateClientSettings,
     usagePageOpen,
   ]);
 
@@ -276,7 +289,8 @@ function ProjectProjectionRetention() {
 
 export function AppSidebarLayout({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
-  const legacySidebarEnabled = useLegacySidebarEnabled();
+  const sidebarMode = useSidebarMode();
+  const clientSettingsHydrated = useClientSettingsHydrated();
   const { active: panelAnimationsActive, durationMs: panelAnimationDurationMs } =
     usePanelAnimationSettings();
   // Settings routes show the settings nav in place of whichever thread
@@ -344,19 +358,10 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
       return;
     }
 
-    const unsubscribe = onMenuAction((action) => {
-      if (action === "open-settings") {
-        const isSettingsRoute = /^\/settings(\/|$)/.test(pathname);
-        if (!isSettingsRoute) {
-          void navigate({ to: "/settings" });
-        }
-      }
+    return onMenuAction((action) => {
+      if (action === "open-settings" && !isOnSettings) void navigate({ to: "/settings" });
     });
-
-    return () => {
-      unsubscribe?.();
-    };
-  }, [navigate, pathname]);
+  }, [navigate, isOnSettings]);
 
   return (
     <PanelAnimationSuppressionProvider value={panelAnimationsSuppressed}>
@@ -386,16 +391,21 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
           // The narrow-window sidebar is a sheet, portaled outside the provider's styles.
           style={windowControlsInsetStyle}
         >
-          {isOnSettings ? (
+          {isOnSettings && (
             <>
               <SidebarChromeHeader isElectron={isElectron} />
               <SettingsSidebarNav pathname={pathname} />
             </>
-          ) : legacySidebarEnabled ? (
-            <LegacyThreadSidebar />
-          ) : (
-            <ThreadSidebar />
           )}
+          {Object.entries(THREAD_SIDEBARS).map(([mode, sidebar]) => (
+            <SidebarPresentation
+              key={mode}
+              visible={!isOnSettings && sidebarMode === mode}
+              retain={clientSettingsHydrated}
+            >
+              {sidebar}
+            </SidebarPresentation>
+          ))}
           <SidebarRail onDoubleClick={resetSidebarWidth} />
         </Sidebar>
         {children}

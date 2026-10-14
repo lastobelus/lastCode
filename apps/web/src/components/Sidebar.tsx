@@ -155,6 +155,11 @@ import {
   useThreadSelectionStore,
 } from "../threadSelectionStore";
 import { useAcknowledgeThreadWoke, useThreadActions } from "../hooks/useThreadActions";
+import {
+  markThreadsReadState,
+  canMarkThreadReadState,
+  withThreadReadPermissions,
+} from "../hooks/threadReadActions";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { useTerminalFocus } from "../hooks/useTerminalFocus";
 import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
@@ -2633,6 +2638,7 @@ export default function Sidebar() {
     reorderPinnedThread,
     reorderActiveThread,
     markThreadUnread,
+    markThreadRead,
     archiveThread,
     unarchiveThread,
     deleteThread,
@@ -4661,7 +4667,20 @@ export default function Sidebar() {
                   },
                 ]
               : []),
-            { id: "mark-unread", label: `Mark unread (${count})` },
+            {
+              id: "mark-unread",
+              label: `Mark unread (${count})`,
+              disabled: !selectedThreads.every((thread) =>
+                canMarkThreadReadState(scopeThreadRef(thread.environmentId, thread.id)),
+              ),
+            },
+            {
+              id: "mark-read",
+              label: `Mark read (${count})`,
+              disabled: !selectedThreads.every((thread) =>
+                canMarkThreadReadState(scopeThreadRef(thread.environmentId, thread.id)),
+              ),
+            },
             {
               ...buildBulkThreadDeleteContextMenuItem({ count, hasPersistentThread }),
               disabled: hasPersistentThread || !canOperateThreads(selectedThreads),
@@ -4685,7 +4704,12 @@ export default function Sidebar() {
                 })
               : selectedThreads;
       if (clicked.value === "settle" && actionTargets.length === 0) return;
-      if (clicked.value !== "mark-unread" && !checkThreadOperations(actionTargets)) return;
+      if (
+        clicked.value !== "mark-unread" &&
+        clicked.value !== "mark-read" &&
+        !checkThreadOperations(actionTargets)
+      )
+        return;
       if (clicked.value?.startsWith("snooze:")) {
         const preset =
           clicked.value === "snooze:custom"
@@ -4766,12 +4790,15 @@ export default function Sidebar() {
         clearSelection();
         return;
       }
-      if (clicked.value === "mark-unread") {
-        for (const threadKey of threadKeys) {
+      if (clicked.value === "mark-unread" || clicked.value === "mark-read") {
+        const refs = threadKeys.flatMap((threadKey) => {
           const thread = threadByKeyRef.current.get(threadKey);
-          if (thread) markThreadUnread(scopeThreadRef(thread.environmentId, thread.id));
-        }
-        clearSelection();
+          return thread ? [scopeThreadRef(thread.environmentId, thread.id)] : [];
+        });
+        await markThreadsReadState(
+          refs,
+          clicked.value === "mark-read" ? markThreadRead : markThreadUnread,
+        );
         return;
       }
       if (clicked.value !== "delete") return;
@@ -4844,6 +4871,7 @@ export default function Sidebar() {
       confirmThreadDelete,
       deleteThread,
       markThreadUnread,
+      markThreadRead,
       performSnooze,
       removeFromSelection,
       serverConfigs,
@@ -4963,42 +4991,45 @@ export default function Sidebar() {
           api.contextMenu.show(
             [
               { id: "open-dashboard" as const, label: "Open dashboard", icon: "layout-dashboard" },
-              ...buildThreadActionMenuItems({
-                canOperate: readEnvironmentScope(
-                  threadRef.environmentId,
-                  AuthOrchestrationOperateScope,
-                ),
-                branch: thread.branch ?? null,
-                projectFilter: threadProjectGroup
-                  ? {
-                      label: threadProjectGroup.displayName,
-                      isActive: projectScopeKey === threadProjectGroup.projectKey,
-                    }
-                  : null,
-                isPinned,
-                isPersistent: thread.persistent === true,
-                archiveFailed: thread.archivePending?.status === "failed",
-                isSettled,
-                autoSettleEnabled: thread.autoSettleDisabledAt == null,
-                isSnoozed,
-                canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
-                isRegeneratingTitle,
-                hasRunningAction: thread.actionResume?.outcome === "running",
-                hasStoppableProcesses,
-                supports: {
-                  settlement: supportsSettlement,
-                  autoSettleOptOut: supportsAutoSettleOptOut,
-                  snooze: supportsSnooze,
-                  pinning: supportsPinning,
-                  persistence:
-                    serverConfigs.get(thread.environmentId)?.environment.capabilities
-                      .threadPersistence === true,
-                  titleRegeneration: supportsTitleRegeneration,
-                },
-                snoozePresets,
-                handoffs: handoffDescriptors,
-                handoffsOverflow: handoffs.length > handoffDescriptors.length,
-              }),
+              ...withThreadReadPermissions(
+                buildThreadActionMenuItems({
+                  canOperate: readEnvironmentScope(
+                    threadRef.environmentId,
+                    AuthOrchestrationOperateScope,
+                  ),
+                  branch: thread.branch ?? null,
+                  projectFilter: threadProjectGroup
+                    ? {
+                        label: threadProjectGroup.displayName,
+                        isActive: projectScopeKey === threadProjectGroup.projectKey,
+                      }
+                    : null,
+                  isPinned,
+                  isPersistent: thread.persistent === true,
+                  archiveFailed: thread.archivePending?.status === "failed",
+                  isSettled,
+                  autoSettleEnabled: thread.autoSettleDisabledAt == null,
+                  isSnoozed,
+                  canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
+                  isRegeneratingTitle,
+                  hasRunningAction: thread.actionResume?.outcome === "running",
+                  hasStoppableProcesses,
+                  supports: {
+                    settlement: supportsSettlement,
+                    autoSettleOptOut: supportsAutoSettleOptOut,
+                    snooze: supportsSnooze,
+                    pinning: supportsPinning,
+                    persistence:
+                      serverConfigs.get(thread.environmentId)?.environment.capabilities
+                        .threadPersistence === true,
+                    titleRegeneration: supportsTitleRegeneration,
+                  },
+                  snoozePresets,
+                  handoffs: handoffDescriptors,
+                  handoffsOverflow: handoffs.length > handoffDescriptors.length,
+                }),
+                [threadRef],
+              ),
             ],
             position,
           ),
@@ -5169,6 +5200,9 @@ export default function Sidebar() {
           case "stop-thread-processes":
             await stopThreadProcesses(threadRef);
             return;
+          case "mark-read":
+            markThreadRead(threadRef);
+            return;
           case "mark-unread":
             markThreadUnread(threadRef);
             return;
@@ -5291,6 +5325,7 @@ export default function Sidebar() {
       router,
       setOpenMobile,
       markThreadUnread,
+      markThreadRead,
       openProjectSettings,
       projectScopeKey,
       openHandoff,

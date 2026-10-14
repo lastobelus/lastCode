@@ -63,6 +63,8 @@ import { useTheme } from "./useTheme";
 import { environmentSession, readEnvironmentScope, useEnvironmentScope } from "~/state/session";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 
+import { resolveSidebarMode, toggleUpstreamSidebar, useSidebarModeStore } from "../sidebarMode";
+
 const CLIENT_SETTINGS_PERSISTENCE_ERROR_SCOPE = "[CLIENT_SETTINGS]";
 
 type UnifiedSettingsPatch = ServerSettingsPatch & ClientSettingsPatch;
@@ -195,6 +197,9 @@ export function persistClientSettingsPatch(
   patch: ClientSettingsPatch,
   persist: (settings: ClientSettings) => Promise<void> = defaultClientSettingsPersistence,
 ): Promise<void> {
+  if (patch.lastcodeSidebarEnabled === true) {
+    useSidebarModeStore.setState({ lastcodeHidden: false });
+  }
   // Patches queued before hydration must publish before newer optimistic patches.
   const deferPatch =
     clientSettingsHydrationStatus !== "ready" || deferredClientSettingsPatchCount > 0;
@@ -387,6 +392,13 @@ export function useClientSettings<T = ClientSettings>(
   return useMemo(() => (selector ? selector(settings) : (settings as T)), [selector, settings]);
 }
 
+/** Subscribe to one setting so unrelated snapshot updates do not rerender the consumer. */
+export function useClientSetting<Key extends keyof ClientSettings>(key: Key): ClientSettings[Key] {
+  const getSnapshot = useCallback(() => getClientSettingsSnapshot()[key], [key]);
+  const getServerSnapshot = useCallback(() => DEFAULT_CLIENT_SETTINGS[key], [key]);
+  return useSyncExternalStore(subscribeClientSettings, getSnapshot, getServerSnapshot);
+}
+
 export function resolveEnvironmentIdentificationMode(input: {
   mode: EnvironmentIdentificationMode;
   settingsHydrated: boolean;
@@ -421,19 +433,22 @@ export function useEnvironmentIdentificationMode(): EnvironmentIdentificationMod
   });
 }
 
-/**
- * Whether the legacy sidebar (Settings → General → Legacy features) replaces
- * the default one.
- *
- * Held at the default sidebar until client settings hydrate: the pre-hydration
- * snapshot is just the schema defaults, so resolving against it could mount one
- * sidebar and then swap it out once persisted settings land — remounting the
- * whole tree for everyone instead of only for legacy opt-ins.
- */
-export function useLegacySidebarEnabled(): boolean {
-  const settingsHydrated = useClientSettingsHydrated();
-  const legacySidebarEnabled = useClientSettingsValue().legacySidebarEnabled;
-  return settingsHydrated && legacySidebarEnabled;
+/** Resolve navigation only after persisted client preferences hydrate. */
+export function useSidebarMode() {
+  const hydrated = useClientSettingsHydrated();
+  const settings = useClientSettingsValue();
+  const lastcodeHidden = useSidebarModeStore((state) => state.lastcodeHidden);
+  return resolveSidebarMode(settings, hydrated, lastcodeHidden);
+}
+
+export function toggleSidebarMode(): void {
+  if (!getClientSettingsHydratedSnapshot()) return;
+  const settings = getClientSettings();
+  if (settings.lastcodeSidebarEnabled) {
+    useSidebarModeStore.setState((state) => ({ lastcodeHidden: !state.lastcodeHidden }));
+    return;
+  }
+  void updateClientSettings(toggleUpstreamSidebar(settings));
 }
 
 /** Hydrate legacy preferences before a mutation can claim either server-owned list. */

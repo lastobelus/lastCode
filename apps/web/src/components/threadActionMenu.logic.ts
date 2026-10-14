@@ -28,6 +28,7 @@ export type ThreadActionMenuId =
   | "cancel-action"
   | "stop-thread-processes"
   | "mark-unread"
+  | "mark-read"
   | "copy"
   | "copy-path"
   | "copy-branch"
@@ -142,7 +143,7 @@ export function withThreadActionMenuDividers<A extends string>(
   });
 }
 
-/** Local navigation, read markers, and copying remain available to read-only clients. */
+/** Local actions need no operate grant; synced read markers are gated by their destination. */
 export function threadActionRequiresOperate(action: ThreadActionMenuId): boolean {
   if (action.startsWith("handoff:")) return false;
   return ![
@@ -153,6 +154,7 @@ export function threadActionRequiresOperate(action: ThreadActionMenuId): boolean
     "handoffs-heading",
     "handoffs-empty",
     "mark-unread",
+    "mark-read",
     "copy",
     "copy-path",
     "copy-branch",
@@ -246,6 +248,7 @@ export function buildThreadActionMenuItems(
       ? [{ id: "cancel-action" as const, label: "Cancel running Action", destructive: true }]
       : []),
     { id: "mark-unread", label: "Mark unread", icon: "mail-open" },
+    { id: "mark-read", label: "Mark read", icon: "check" },
     ...(state.projectFilter
       ? [
           {

@@ -1,3 +1,4 @@
+import { resolveSidebarMode, useSidebarModeStore } from "../sidebarMode";
 import {
   DEFAULT_SERVER_SETTINGS,
   ProviderDriverKind,
@@ -26,6 +27,7 @@ import {
   prepareModelPreferencesPatch,
   resolveEnvironmentIdentificationMode,
   updateClientSettings,
+  toggleSidebarMode,
 } from "./useSettings";
 import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
 
@@ -33,6 +35,7 @@ beforeEach(() => {
   persistenceMocks.getClientSettings.mockReset().mockResolvedValue(null);
   persistenceMocks.setClientSettings.mockReset().mockResolvedValue(undefined);
   __resetClientSettingsPersistenceForTests();
+  useSidebarModeStore.setState({ lastcodeHidden: false });
 });
 
 afterEach(() => {
@@ -40,6 +43,69 @@ afterEach(() => {
 });
 
 describe("client settings hydration", () => {
+  it.each([false, true])(
+    "toggles LastCode presentation without writing either preference, legacy=%s",
+    (legacySidebarEnabled) => {
+      __setClientSettingsForTests({
+        ...DEFAULT_CLIENT_SETTINGS,
+        lastcodeSidebarEnabled: true,
+        legacySidebarEnabled,
+      });
+      toggleSidebarMode();
+      expect(
+        resolveSidebarMode(
+          getClientSettings(),
+          true,
+          useSidebarModeStore.getState().lastcodeHidden,
+        ),
+      ).toBe("inbox");
+      toggleSidebarMode();
+      expect(
+        resolveSidebarMode(
+          getClientSettings(),
+          true,
+          useSidebarModeStore.getState().lastcodeHidden,
+        ),
+      ).toBe("lastcode");
+      expect(getClientSettings()).toMatchObject({
+        lastcodeSidebarEnabled: true,
+        legacySidebarEnabled,
+      });
+      expect(persistenceMocks.setClientSettings).not.toHaveBeenCalled();
+    },
+  );
+  it("ignores mode toggles before hydration and retains normal upstream preference toggling when disabled", async () => {
+    toggleSidebarMode();
+    expect(persistenceMocks.setClientSettings).not.toHaveBeenCalled();
+    expect(useSidebarModeStore.getState().lastcodeHidden).toBe(false);
+    __setClientSettingsForTests({
+      ...DEFAULT_CLIENT_SETTINGS,
+      lastcodeSidebarEnabled: false,
+      legacySidebarEnabled: true,
+    });
+    toggleSidebarMode();
+    await updateClientSettings({});
+    expect(getClientSettings()).toMatchObject({
+      lastcodeSidebarEnabled: false,
+      legacySidebarEnabled: false,
+    });
+    expect(persistenceMocks.setClientSettings).toHaveBeenCalled();
+  });
+  it("explicitly enabling LastCode reveals it again without changing the upstream preference", async () => {
+    __setClientSettingsForTests({
+      ...DEFAULT_CLIENT_SETTINGS,
+      lastcodeSidebarEnabled: true,
+      legacySidebarEnabled: true,
+    });
+    toggleSidebarMode();
+    await updateClientSettings({ lastcodeSidebarEnabled: false });
+    expect(
+      resolveSidebarMode(getClientSettings(), true, useSidebarModeStore.getState().lastcodeHidden),
+    ).toBe("legacy");
+    await updateClientSettings({ lastcodeSidebarEnabled: true });
+    expect(useSidebarModeStore.getState().lastcodeHidden).toBe(false);
+    expect(getClientSettings().legacySidebarEnabled).toBe(true);
+  });
   const savedSettings = {
     ...DEFAULT_CLIENT_SETTINGS,
     timestampFormat: "12-hour" as const,
@@ -577,4 +643,51 @@ it("uses the environment's model preferences after migration, including empty li
   );
   expect(merged.favorites).toEqual([]);
   expect(merged.providerModelPreferences).toEqual({});
+});
+
+describe("LastCode sidebar persistence", () => {
+  it.each([false, true])(
+    "preserves upstream legacy=%s through override, reload and restore",
+    async (legacySidebarEnabled) => {
+      let saved = { ...DEFAULT_CLIENT_SETTINGS, legacySidebarEnabled, legacySidebarScale: 75 };
+      persistenceMocks.getClientSettings.mockImplementation(async () => saved);
+      persistenceMocks.setClientSettings.mockImplementation(async (settings) => {
+        saved = settings;
+      });
+      await ensureClientSettingsHydrated();
+      expect(getClientSettings().lastcodeSidebarEnabled).toBe(false);
+      await updateClientSettings({ lastcodeSidebarEnabled: true });
+      expect(saved.legacySidebarEnabled).toBe(legacySidebarEnabled);
+      __resetClientSettingsPersistenceForTests();
+      await ensureClientSettingsHydrated();
+      expect(resolveSidebarMode(getClientSettings())).toBe("lastcode");
+      expect(getClientSettings().legacySidebarScale).toBe(75);
+      await updateClientSettings({ lastcodeSidebarEnabled: false });
+      expect(saved.legacySidebarEnabled).toBe(legacySidebarEnabled);
+      expect(resolveSidebarMode(saved)).toBe(legacySidebarEnabled ? "legacy" : "inbox");
+    },
+  );
+});
+
+it("persists a family subheader opt-out independently of grouping and compact status", async () => {
+  let saved: ClientSettings = {
+    ...DEFAULT_CLIENT_SETTINGS,
+    legacySidebarThreadGroupingStyle: "typed-groups",
+  };
+  persistenceMocks.getClientSettings.mockImplementation(async () => saved);
+  persistenceMocks.setClientSettings.mockImplementation(async (settings) => {
+    saved = settings;
+  });
+  await ensureClientSettingsHydrated();
+  expect(getClientSettings().lastcodeSidebarFamilyStatusSubheaders).toBe(true);
+  await updateClientSettings({ lastcodeSidebarFamilyStatusSubheaders: false });
+  __resetClientSettingsPersistenceForTests();
+  await ensureClientSettingsHydrated();
+  expect(getClientSettings().lastcodeSidebarFamilyStatusSubheaders).toBe(false);
+  expect(
+    mergeEnvironmentSettings(DEFAULT_SERVER_SETTINGS, getClientSettings())
+      .lastcodeSidebarFamilyStatusSubheaders,
+  ).toBe(false);
+  expect(saved.legacySidebarThreadGroupingStyle).toBe("typed-groups");
+  expect(saved.compactLegacySidebarStatuses).toBe(false);
 });
