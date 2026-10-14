@@ -19,6 +19,7 @@ vi.mock("@effect/atom-react", async () => {
   };
 });
 vi.mock("../connection/runtime", () => ({ connectionAtomRuntime: {} }));
+vi.mock("../connection/catalog", () => ({ environmentCatalog: {} }));
 vi.mock("@t3tools/client-runtime/state/session", () => ({
   createEnvironmentSessionAtoms: () => ({
     sessionStateAtom: Atom.family((_id: EnvironmentId) =>

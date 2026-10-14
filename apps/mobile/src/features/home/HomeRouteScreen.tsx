@@ -216,7 +216,7 @@ export function HomeRouteScreen() {
             status surface while an environment reconnects. */}
         {workspace !== null && Platform.OS === "ios" ? null : (
           <NativeStackScreenOptions
-            optionsVersion={headerWidth}
+            optionsVersion={[headerWidth]}
             options={{
               ...getConnectionAwareBrandHeaderOptions({
                 headerWidth,

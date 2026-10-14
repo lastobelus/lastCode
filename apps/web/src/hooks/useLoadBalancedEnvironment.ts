@@ -1,5 +1,5 @@
 import { RegistryContext, useAtomValue } from "@effect/atom-react";
-import { chooseLoadBalancedEnvironment } from "@t3tools/client-runtime/load-balancing";
+import { evaluateLoadBalancedEnvironments } from "@t3tools/client-runtime/load-balancing";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { Atom } from "effect/reactivity";
 import { useCallback, useContext, useMemo } from "react";
@@ -28,7 +28,8 @@ export function useLoadBalancedEnvironment(
           return {
             environmentId,
             resources: result._tag === "Success" ? result.value : null,
-            receivedAt: result._tag === "Success" ? result.timestamp : 0,
+            ...(result._tag === "Success" ? { receivedAt: result.timestamp } : {}),
+            resourcesRequestFailed: result._tag === "Failure",
             pending: result._tag === "Initial" || result.waiting,
             failed: result._tag === "Failure",
           };
@@ -38,14 +39,16 @@ export function useLoadBalancedEnvironment(
   );
   const resources = useAtomValue(resourcesAtom);
   const pending = resources.some((resource) => resource.pending);
-  const environmentId = chooseLoadBalancedEnvironment(
+  const decision = evaluateLoadBalancedEnvironments(
     resources.map((resource) => ({
       ...resource,
       weight: weights[resource.environmentId] ?? 50,
     })),
     Date.now(),
-  ) as EnvironmentId | null;
+  );
+  const environmentId = decision.selectedEnvironmentId as EnvironmentId | null;
   return {
+    decision,
     refresh,
     pending,
     environmentId,

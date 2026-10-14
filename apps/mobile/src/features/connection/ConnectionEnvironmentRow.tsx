@@ -1,3 +1,4 @@
+import { EnvironmentPauseControl } from "../threads/EnvironmentPauseControl";
 import { ConnectionTraceId } from "./ConnectionTraceId";
 import { SymbolView } from "../../components/AppSymbol";
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
@@ -147,6 +148,8 @@ export function ConnectionEnvironmentRow(props: {
           }}
         />
       </Pressable>
+
+      <EnvironmentPauseControl environmentId={props.environment.environmentId} />
 
       {props.expanded ? (
         <Animated.View

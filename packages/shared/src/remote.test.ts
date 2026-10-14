@@ -6,9 +6,47 @@ import {
   RemotePairingTokenMissingError,
   RemotePairingUrlInvalidError,
   resolveRemotePairingTarget,
+  getPairingTokenFromUrl,
+  setPairingTokenOnUrl,
+  stripPairingTokenFromUrl,
+  setPreviewBootstrapTokenOnUrl,
+  stripPreviewBootstrapTokenFromUrl,
 } from "./remote.ts";
 
 describe("remote", () => {
+  it.each(["", "#details", "#token=invite-code", "#/reset?token=route-token&view=qa"])(
+    "strips only the issued preview credential and restores application tokens (%s)",
+    (hash) => {
+      const original = new URL(`http://localhost:5173/reset?token=app-code&view=qa${hash}`);
+      expect(stripPreviewBootstrapTokenFromUrl(original).href).toBe(original.href);
+      const navigation = setPreviewBootstrapTokenOnUrl(original, "issued-preview-credential");
+      expect(getPairingTokenFromUrl(navigation)).toBe("issued-preview-credential");
+      expect(navigation.search).toBe(original.search);
+      expect(stripPreviewBootstrapTokenFromUrl(navigation).href).toBe(original.href);
+      // The preview's auth bootstrap uses the general pairing consumer.
+      expect(stripPairingTokenFromUrl(navigation).href).toBe(original.href);
+      const next = setPreviewBootstrapTokenOnUrl(navigation, "next-preview-credential");
+      expect(stripPreviewBootstrapTokenFromUrl(next).href).toBe(original.href);
+      expect(next.href).not.toContain("issued-preview-credential");
+    },
+  );
+  it("does not treat an application's token fragment as an issued preview credential", () => {
+    const applicationUrl = new URL("https://app.example/invite?token=query-code#token=hash-code");
+    expect(stripPreviewBootstrapTokenFromUrl(applicationUrl).href).toBe(applicationUrl.href);
+  });
+  it.each(["", "#details", "#section%20two?x=1&y=2", "#/thread/a?view=qa"])(
+    "restores the exact destination after private preview pairing (%s)",
+    (hash) => {
+      const original = new URL(`http://localhost:5173/threads/qa?view=preview${hash}`);
+      const entry = setPairingTokenOnUrl(original, "one-time-credential");
+      expect(getPairingTokenFromUrl(entry)).toBe("one-time-credential");
+      expect(entry.search).toBe(original.search);
+      expect(stripPairingTokenFromUrl(entry).href).toBe(original.href);
+      const refreshed = setPairingTokenOnUrl(entry, "next-credential");
+      expect(getPairingTokenFromUrl(refreshed)).toBe("next-credential");
+      expect(stripPairingTokenFromUrl(refreshed).href).toBe(original.href);
+    },
+  );
   it("derives backend urls and token from a pairing url", () => {
     expect(
       resolveRemotePairingTarget({
