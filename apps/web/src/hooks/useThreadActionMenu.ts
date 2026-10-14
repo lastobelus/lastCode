@@ -1,3 +1,4 @@
+import { withThreadReadPermissions } from "./threadReadActions";
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { requestCustomSnooze } from "../components/CustomSnoozeDialog";
 import {
@@ -197,7 +198,9 @@ export function useThreadActionMenu(input: {
           handoffs: handoffDescriptors,
           handoffsOverflow: handoffs.length > handoffDescriptors.length,
         });
-        const clicked = await settlePromise(() => api.contextMenu.show(items, position));
+        const clicked = await settlePromise(() =>
+          api.contextMenu.show(withThreadReadPermissions(items, [threadRef]), position),
+        );
         if (clicked._tag === "Failure" || clicked.value === null) return;
         const action: ThreadActionMenuId = clicked.value;
         if (action === "handoff-show-all") {

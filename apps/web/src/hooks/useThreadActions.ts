@@ -353,6 +353,8 @@ export function useMarkThreadUnread() {
         return "unsupported";
       }
       if (readEnvironmentSupportsVisitedTracking(target.environmentId)) {
+        const failure = threadOperationFailure(target);
+        if (failure) return readMarkerOutcome(failure, report);
         const result = await markThreadUnreadMutation({
           environmentId: target.environmentId,
           input: { threadId: target.threadId },
@@ -386,6 +388,8 @@ export function useMarkThreadRead() {
         : useUiStateStore.getState().threadLastVisitedAtById[scopedThreadKey(target)];
       if (previousVisit && Date.parse(previousVisit) >= Date.parse(visitedAt)) return "unchanged";
       if (tracksVisits) {
+        const failure = threadOperationFailure(target);
+        if (failure) return readMarkerOutcome(failure, report);
         const result = await visit({
           environmentId: target.environmentId,
           input: { threadId: target.threadId, visitedAt },

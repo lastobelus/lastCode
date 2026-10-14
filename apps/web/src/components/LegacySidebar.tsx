@@ -136,7 +136,11 @@ import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { useDesktopUpdateState } from "../state/desktopUpdate";
 
 import { useThreadActions } from "../hooks/useThreadActions";
-import { markThreadsReadState } from "../hooks/threadReadActions";
+import {
+  markThreadsReadState,
+  canMarkThreadReadState,
+  withThreadReadPermissions,
+} from "../hooks/threadReadActions";
 import { projectEnvironment } from "../state/projects";
 import { threadEnvironment, useEnvironmentThread } from "../state/threads";
 import { useEnvironment, useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
@@ -2049,13 +2053,16 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         ({ thread }) => thread.persistent === true,
       );
       const clicked = await api.contextMenu.show(
-        protectLegacyThreadActions(
-          buildMultiSelectThreadContextMenuItems({ count }),
-          hasPersistentThread,
-        ).map((item) =>
-          item.id === "archive" || item.id === "delete"
-            ? { ...item, disabled: item.disabled || !canOperateSelection }
-            : item,
+        withThreadReadPermissions(
+          protectLegacyThreadActions(
+            buildMultiSelectThreadContextMenuItems({ count }),
+            hasPersistentThread,
+          ).map((item) =>
+            item.id === "archive" || item.id === "delete"
+              ? { ...item, disabled: item.disabled || !canOperateSelection }
+              : item,
+          ),
+          selectedThreadEntries.map(({ threadRef }) => threadRef),
         ),
         position,
       );
@@ -2455,8 +2462,12 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
               ? [{ id: "new-thread-on-branch", label: `New thread on ${thread.branch}` }]
               : []),
             { id: "rename", label: "Rename thread", disabled: !canOperateThread },
-            { id: "mark-unread", label: "Mark unread" },
-            { id: "mark-read", label: "Mark read" },
+            {
+              id: "mark-unread",
+              label: "Mark unread",
+              disabled: !canMarkThreadReadState(threadRef),
+            },
+            { id: "mark-read", label: "Mark read", disabled: !canMarkThreadReadState(threadRef) },
             ...(persistenceAction ? [{ ...persistenceAction, disabled: !canOperateThread }] : []),
             { id: "copy-path", label: "Copy Path" },
             { id: "copy-thread-id", label: "Copy Thread ID" },

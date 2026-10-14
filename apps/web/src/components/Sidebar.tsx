@@ -155,7 +155,11 @@ import {
   useThreadSelectionStore,
 } from "../threadSelectionStore";
 import { useAcknowledgeThreadWoke, useThreadActions } from "../hooks/useThreadActions";
-import { markThreadsReadState } from "../hooks/threadReadActions";
+import {
+  markThreadsReadState,
+  canMarkThreadReadState,
+  withThreadReadPermissions,
+} from "../hooks/threadReadActions";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { useTerminalFocus } from "../hooks/useTerminalFocus";
 import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
@@ -4663,8 +4667,20 @@ export default function Sidebar() {
                   },
                 ]
               : []),
-            { id: "mark-unread", label: `Mark unread (${count})` },
-            { id: "mark-read", label: `Mark read (${count})` },
+            {
+              id: "mark-unread",
+              label: `Mark unread (${count})`,
+              disabled: !selectedThreads.every((thread) =>
+                canMarkThreadReadState(scopeThreadRef(thread.environmentId, thread.id)),
+              ),
+            },
+            {
+              id: "mark-read",
+              label: `Mark read (${count})`,
+              disabled: !selectedThreads.every((thread) =>
+                canMarkThreadReadState(scopeThreadRef(thread.environmentId, thread.id)),
+              ),
+            },
             {
               ...buildBulkThreadDeleteContextMenuItem({ count, hasPersistentThread }),
               disabled: hasPersistentThread || !canOperateThreads(selectedThreads),
@@ -4975,42 +4991,45 @@ export default function Sidebar() {
           api.contextMenu.show(
             [
               { id: "open-dashboard" as const, label: "Open dashboard", icon: "layout-dashboard" },
-              ...buildThreadActionMenuItems({
-                canOperate: readEnvironmentScope(
-                  threadRef.environmentId,
-                  AuthOrchestrationOperateScope,
-                ),
-                branch: thread.branch ?? null,
-                projectFilter: threadProjectGroup
-                  ? {
-                      label: threadProjectGroup.displayName,
-                      isActive: projectScopeKey === threadProjectGroup.projectKey,
-                    }
-                  : null,
-                isPinned,
-                isPersistent: thread.persistent === true,
-                archiveFailed: thread.archivePending?.status === "failed",
-                isSettled,
-                autoSettleEnabled: thread.autoSettleDisabledAt == null,
-                isSnoozed,
-                canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
-                isRegeneratingTitle,
-                hasRunningAction: thread.actionResume?.outcome === "running",
-                hasStoppableProcesses,
-                supports: {
-                  settlement: supportsSettlement,
-                  autoSettleOptOut: supportsAutoSettleOptOut,
-                  snooze: supportsSnooze,
-                  pinning: supportsPinning,
-                  persistence:
-                    serverConfigs.get(thread.environmentId)?.environment.capabilities
-                      .threadPersistence === true,
-                  titleRegeneration: supportsTitleRegeneration,
-                },
-                snoozePresets,
-                handoffs: handoffDescriptors,
-                handoffsOverflow: handoffs.length > handoffDescriptors.length,
-              }),
+              ...withThreadReadPermissions(
+                buildThreadActionMenuItems({
+                  canOperate: readEnvironmentScope(
+                    threadRef.environmentId,
+                    AuthOrchestrationOperateScope,
+                  ),
+                  branch: thread.branch ?? null,
+                  projectFilter: threadProjectGroup
+                    ? {
+                        label: threadProjectGroup.displayName,
+                        isActive: projectScopeKey === threadProjectGroup.projectKey,
+                      }
+                    : null,
+                  isPinned,
+                  isPersistent: thread.persistent === true,
+                  archiveFailed: thread.archivePending?.status === "failed",
+                  isSettled,
+                  autoSettleEnabled: thread.autoSettleDisabledAt == null,
+                  isSnoozed,
+                  canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
+                  isRegeneratingTitle,
+                  hasRunningAction: thread.actionResume?.outcome === "running",
+                  hasStoppableProcesses,
+                  supports: {
+                    settlement: supportsSettlement,
+                    autoSettleOptOut: supportsAutoSettleOptOut,
+                    snooze: supportsSnooze,
+                    pinning: supportsPinning,
+                    persistence:
+                      serverConfigs.get(thread.environmentId)?.environment.capabilities
+                        .threadPersistence === true,
+                    titleRegeneration: supportsTitleRegeneration,
+                  },
+                  snoozePresets,
+                  handoffs: handoffDescriptors,
+                  handoffsOverflow: handoffs.length > handoffDescriptors.length,
+                }),
+                [threadRef],
+              ),
             ],
             position,
           ),

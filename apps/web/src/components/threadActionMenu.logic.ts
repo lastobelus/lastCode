@@ -143,7 +143,7 @@ export function withThreadActionMenuDividers<A extends string>(
   });
 }
 
-/** Local navigation, read markers, and copying remain available to read-only clients. */
+/** Local actions need no operate grant; synced read markers are gated by their destination. */
 export function threadActionRequiresOperate(action: ThreadActionMenuId): boolean {
   if (action.startsWith("handoff:")) return false;
   return ![

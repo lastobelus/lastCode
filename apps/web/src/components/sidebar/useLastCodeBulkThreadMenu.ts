@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import { markThreadsReadState } from "../../hooks/threadReadActions";
+import { markThreadsReadState, withThreadReadPermissions } from "../../hooks/threadReadActions";
 import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
 import { useClientSettings } from "~/hooks/useSettings";
@@ -43,7 +43,13 @@ function selectionMenu(entries: ReturnType<typeof readSelectedThreadEntries>) {
   ).map((item) =>
     isSelectionMutation(item.id) ? { ...item, disabled: item.disabled || !canOperate } : item,
   );
-  return { items, persistent };
+  return {
+    items: withThreadReadPermissions(
+      items,
+      entries.map(({ threadRef }) => threadRef),
+    ),
+    persistent,
+  };
 }
 
 export function useLastCodeBulkThreadMenu() {

@@ -1,7 +1,33 @@
-import type { ScopedThreadRef } from "@t3tools/contracts";
+import {
+  AuthOrchestrationOperateScope,
+  type ContextMenuItem,
+  type ScopedThreadRef,
+} from "@t3tools/contracts";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
+import { readEnvironmentSupportsVisitedTracking } from "../state/entities";
+import { readEnvironmentScope } from "../state/session";
 
 export type ThreadReadOutcome = "applied" | "unchanged" | "unsupported" | "failed";
+
+/** Older servers keep browser-local markers; synced markers require destination authority. */
+export function canMarkThreadReadState(target: ScopedThreadRef) {
+  return (
+    !readEnvironmentSupportsVisitedTracking(target.environmentId) ||
+    readEnvironmentScope(target.environmentId, AuthOrchestrationOperateScope)
+  );
+}
+
+export function withThreadReadPermissions<A extends string>(
+  items: readonly ContextMenuItem<A>[],
+  targets: readonly ScopedThreadRef[],
+): readonly ContextMenuItem<A>[] {
+  const permitted = targets.every(canMarkThreadReadState);
+  return items.map((item) =>
+    item.id === "mark-read" || item.id === "mark-unread"
+      ? { ...item, disabled: item.disabled || !permitted }
+      : item,
+  );
+}
 
 /** Bulk menus report each failure class once, without discarding their selection. */
 export async function markThreadsReadState(

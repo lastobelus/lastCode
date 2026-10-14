@@ -1,3 +1,4 @@
+import { withThreadReadPermissions } from "../../hooks/threadReadActions";
 import { useCallback, useMemo } from "react";
 import type { ScopedThreadRef } from "@t3tools/contracts";
 import {
@@ -86,7 +87,10 @@ export function useLastCodeThreadMenu(
         handoffsLimit,
         hasStoppableProcesses,
       );
-      const clicked = await api.contextMenu.show(target.items, position);
+      const clicked = await api.contextMenu.show(
+        withThreadReadPermissions(target.items, [ref]),
+        position,
+      );
       const handoff = parseLastCodeHandoffAction(clicked);
       if (handoff) {
         await openHandoff(target, handoff);
