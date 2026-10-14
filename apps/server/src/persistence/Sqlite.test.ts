@@ -99,6 +99,10 @@ it.effect("collects planner statistics for an existing database on open", () => 
         WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1000)
         INSERT INTO stats_probe(thread_id) SELECT 'thread-' || (i % 10) FROM n
       `;
+      const rows = yield* sql`
+        SELECT stat FROM sqlite_stat1 WHERE idx = 'stats_probe_thread_idx'
+      `;
+      assert.isEmpty(rows);
     }).pipe(Effect.provide(persistence()));
 
     // A database written before statistics existed gets them on the next open.
@@ -107,7 +111,9 @@ it.effect("collects planner statistics for an existing database on open", () => 
       const rows = yield* sql<{ readonly stat: string }>`
         SELECT stat FROM sqlite_stat1 WHERE idx = 'stats_probe_thread_idx'
       `;
-      assert.deepEqual([...rows], [{ stat: "1000 100" }]);
+      assert.lengthOf(rows, 1);
+      // PRAGMA optimize uses bounded ANALYZE, so both row counts are estimates.
+      assert.match(rows[0]?.stat ?? "", /^[1-9]\d* [1-9]\d*(?: |$)/);
     }).pipe(Effect.provide(persistence()));
   }).pipe(
     Effect.ensuring(Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true }))),
