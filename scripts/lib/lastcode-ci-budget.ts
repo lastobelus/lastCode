@@ -110,18 +110,18 @@ function hasLivingChild(
   );
 }
 
-function isPositivePid(value: unknown): value is number {
+function isPositiveSafeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 }
 
-function isStartIdentity(value: unknown): value is string {
+function isNonemptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
 /** A child may lack a captured identity; an identity must never lack its child PID. */
 function isChildIdentity(pid: unknown, identity: unknown) {
   if (pid === null) return identity === null;
-  return isPositivePid(pid) && (identity === null || isStartIdentity(identity));
+  return isPositiveSafeInteger(pid) && (identity === null || isNonemptyString(identity));
 }
 
 function readLeases(directory: string) {
@@ -150,8 +150,8 @@ function readLeases(directory: string) {
     }
     if (
       !isRecord(lease) ||
-      !isPositivePid(lease.pid) ||
-      !isStartIdentity(lease.startIdentity) ||
+      !isPositiveSafeInteger(lease.pid) ||
+      !isNonemptyString(lease.startIdentity) ||
       !isChildIdentity(lease.childPid, lease.childStartIdentity) ||
       typeof lease.token !== "string" ||
       `${lease.token}${LEASE_SUFFIX}` !== name ||
@@ -178,6 +178,10 @@ function readLeases(directory: string) {
   return leases;
 }
 
+function matchesWaiterName(token: unknown, name: string): token is string {
+  return typeof token === "string" && `${token}${WAITER_SUFFIX}` === name;
+}
+
 function readWaiters(directory: string) {
   const waiters: Waiter[] = [];
   for (const name of NodeFS.readdirSync(directory)) {
@@ -196,18 +200,13 @@ function readWaiters(directory: string) {
     } catch {
       throw new Error("Invalid local CI waiter JSON. Admission has stopped.");
     }
+    // Malformed queue records stop admission; skipping them could allow overtaking.
     if (
       !isRecord(waiter) ||
-      typeof waiter.pid !== "number" ||
-      !Number.isSafeInteger(waiter.pid) ||
-      waiter.pid <= 0 ||
-      typeof waiter.startIdentity !== "string" ||
-      waiter.startIdentity.length === 0 ||
-      typeof waiter.token !== "string" ||
-      `${waiter.token}${WAITER_SUFFIX}` !== name ||
-      typeof waiter.order !== "number" ||
-      !Number.isSafeInteger(waiter.order) ||
-      waiter.order <= 0
+      !isPositiveSafeInteger(waiter.pid) ||
+      !isNonemptyString(waiter.startIdentity) ||
+      !matchesWaiterName(waiter.token, name) ||
+      !isPositiveSafeInteger(waiter.order)
     ) {
       throw new Error("Invalid local CI waiter. Admission has stopped.");
     }
@@ -218,6 +217,7 @@ function readWaiters(directory: string) {
       order: waiter.order,
     });
   }
+  // FIFO order is numeric; token ties use the host's native locale and stable sort.
   return waiters.sort(
     (left, right) => left.order - right.order || left.token.localeCompare(right.token),
   );
