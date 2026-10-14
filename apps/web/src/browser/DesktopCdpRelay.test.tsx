@@ -8,6 +8,7 @@ import {
   type PreviewEvent,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
 import { createElement } from "react";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
@@ -23,6 +24,9 @@ const state = vi.hoisted(() => ({
   browserListeners: new Set<(input: BrowserEventInput) => void>(),
   streams: [] as Stream.Stream<unknown>[],
   browserCommand: vi.fn<DesktopPreviewBridge["browserCommand"]>(async () => undefined),
+  bindBrowserEnvironment: vi.fn<DesktopPreviewBridge["bindBrowserEnvironment"]>(
+    async () => undefined,
+  ),
   sendEvent: vi.fn(async () => undefined),
   previewEvents: [] as PreviewEvent[],
   applyPreviewEvent: vi.fn(),
@@ -117,6 +121,7 @@ beforeEach(() => {
   state.localDesktopBrowser = true;
   state.streams = [];
   state.browserCommand.mockClear();
+  state.bindBrowserEnvironment.mockClear();
   state.sendEvent.mockClear();
   state.previewEvents = [];
   state.applyPreviewEvent.mockClear();
@@ -128,6 +133,7 @@ beforeEach(() => {
     desktopBridge: {
       preview: {
         browserCommand: state.browserCommand,
+        bindBrowserEnvironment: state.bindBrowserEnvironment,
         onBrowserEvent: (listener: (input: BrowserEventInput) => void) => {
           state.browserListeners.add(listener);
           return () => state.browserListeners.delete(listener);
@@ -148,10 +154,50 @@ it.effect("relays a primary environment only when its local desktop IPC is unava
       }),
     );
     yield* Effect.all(state.streams.map(Stream.runDrain));
+    expect(state.bindBrowserEnvironment.mock.calls.map(([input]) => input)).toEqual([
+      { desktopHostId: "host-primary", environmentId: primary },
+      { desktopHostId: "host-remote", environmentId: remote },
+    ]);
     expect(state.browserCommand.mock.calls.map(([input]) => input)).toEqual([
       expect.objectContaining({ desktopHostId: "host-primary" }),
       expect.objectContaining({ desktopHostId: "host-remote" }),
     ]);
+  }),
+);
+
+it.effect("waits for each transport's native environment binding before forwarding commands", () =>
+  Effect.gen(function* () {
+    state.allowed = true;
+    let reportEntered!: () => void;
+    let releaseBinding!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      reportEntered = resolve;
+    });
+    const bound = new Promise<void>((resolve) => {
+      releaseBinding = resolve;
+    });
+    state.bindBrowserEnvironment.mockImplementationOnce(() => {
+      reportEntered();
+      return bound;
+    });
+    const { DesktopCdpRelay } = yield* Effect.promise(() => import("./DesktopCdpRelay"));
+    yield* Effect.promise(() =>
+      act(async () => {
+        renderer = create(createElement(DesktopCdpRelay));
+      }),
+    );
+    const running = yield* Effect.all(state.streams.map(Stream.runDrain)).pipe(Effect.forkScoped);
+    yield* Effect.promise(() => entered);
+    expect(state.bindBrowserEnvironment).toHaveBeenCalledExactlyOnceWith({
+      desktopHostId: "host-remote",
+      environmentId: remote,
+    });
+    expect(state.browserCommand).not.toHaveBeenCalled();
+    releaseBinding();
+    yield* Fiber.join(running);
+    expect(state.browserCommand).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ desktopHostId: "host-remote" }),
+    );
   }),
 );
 

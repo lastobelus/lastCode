@@ -994,8 +994,7 @@ export const layer: Layer.Layer<
               : input.event.type === "provider_turn.updated" ||
                   input.event.type === "runtime_request.updated"
                 ? threadCommands.withLock(input.event.threadId ?? input.threadId, ingest)
-                : input.event.type === "message.updated" ||
-                    input.event.type === "turn_item.updated"
+                : input.event.type === "message.updated" || input.event.type === "turn_item.updated"
                   ? threadCommands.withLock(
                       input.event.type === "message.updated"
                         ? input.event.message.threadId

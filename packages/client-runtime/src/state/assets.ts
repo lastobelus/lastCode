@@ -63,6 +63,22 @@ export function resolveAssetUrl(httpBaseUrl: string, relativeUrl: string): strin
   }
 }
 
+/** A conversation link grants one published file, never its directory or another environment. */
+export function fileAssetResourceForAccess(
+  resource: AssetResource,
+  canReadFiles: boolean,
+): AssetResource {
+  if (canReadFiles || (resource._tag !== "workspace-file" && resource._tag !== "media-file")) {
+    return resource;
+  }
+  return {
+    _tag: "media-file",
+    threadId: resource.threadId,
+    path: resource.path,
+    linkedThreadFile: true,
+  };
+}
+
 export const EMPTY_ASSET_URL_ATOM = Atom.make(AsyncResult.initial<never, never>(false)).pipe(
   Atom.withLabel("asset-url:empty"),
 );
@@ -91,14 +107,15 @@ export const MISSING_FILE_ACCESS_MESSAGE =
 
 /**
  * The state for a host file this session cannot read yet, or null when the client
- * should ask the host. The host requires `filesystem:read` for these resources, so
- * clients skip the request. A connected session without the scope gets its own
+ * should ask the host. Published thread files use their narrower read grant;
+ * other host files require `filesystem:read`. A connected session without the scope gets its own
  * reason, so the UI can say to pair again instead of implying the file is gone.
  */
 export function blockedAssetUrlState(
   resource: AssetResource | null,
   fileAccess: {
     readonly canReadFiles: boolean;
+    readonly canReadThreadFiles: boolean;
     readonly isPending: boolean;
     readonly error: string | null;
   },
@@ -106,6 +123,9 @@ export function blockedAssetUrlState(
   if (
     resource === null ||
     fileAccess.canReadFiles ||
+    (resource._tag === "media-file" &&
+      resource.linkedThreadFile === true &&
+      fileAccess.canReadThreadFiles) ||
     (resource._tag !== "workspace-file" &&
       resource._tag !== "media-file" &&
       resource._tag !== "draft-workspace-file")
@@ -163,6 +183,7 @@ export function createAssetEnvironmentAtoms<R, E>(
         error._tag === "AssetWorkspaceContextNotFoundError"
       ) ||
       resource._tag !== "media-file" ||
+      resource.linkedThreadFile === true ||
       !(resource.path.startsWith("/") || isWindowsAbsolutePath(resource.path)) ||
       mediaMimeTypeFromExtension(resource.path.slice(resource.path.lastIndexOf("."))) === null
     )

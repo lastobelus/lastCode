@@ -1,6 +1,11 @@
 import { remapComposerContextAttachments } from "@t3tools/shared/composerContextReferences";
 import { appendUserInputAttachmentPaths } from "../provider/userInputAttachments.ts";
-import type { ChatAttachment, OrchestrationV2Command } from "@t3tools/contracts";
+import {
+  UpdateDrainAdmissionError,
+  UpdateDrainError,
+  type ChatAttachment,
+  type OrchestrationV2Command,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { resolveAttachmentPath } from "../attachmentStore.ts";
@@ -15,6 +20,8 @@ import * as ThreadManagement from "./ThreadManagementService.ts";
 // commitCommand. Generic dispatch errors can follow a commit and remain uncertain.
 // A disabled-instance refusal comes from ThreadManagementService.dispatch's
 // own enablement check, which also runs before any commit is attempted.
+const isAdmissionError = Schema.is(UpdateDrainAdmissionError);
+const isDrainError = Schema.is(UpdateDrainError);
 function dispatchWasNotAccepted(
   error: Orchestrator.OrchestratorV2Error | ThreadManagement.ThreadManagementError,
 ) {
@@ -27,7 +34,12 @@ function dispatchWasNotAccepted(
     case "OrchestratorSubagentThreadReadOnlyError":
     case "OrchestratorThreadAboveModeLimitError":
     case "ThreadManagementProviderInstanceDisabledError":
+    case "OrchestratorThreadArchivingError":
       return true;
+    case "OrchestratorDispatchError":
+      // Admission fails before dispatch starts. Other dispatch errors can occur
+      // after a commit and must retain the provider's attachment copies.
+      return isAdmissionError(error.cause) || isDrainError(error.cause);
     default:
       return false;
   }
