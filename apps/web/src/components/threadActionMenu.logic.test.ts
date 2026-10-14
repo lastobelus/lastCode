@@ -85,6 +85,7 @@ describe("buildThreadActionMenuItems", () => {
     expect(denied.filter((item) => !item.disabled).map((item) => item.id)).toEqual([
       "new-thread-on-branch",
       "mark-unread",
+      "mark-read",
       "copy",
       "project-settings",
     ]);
@@ -92,6 +93,73 @@ describe("buildThreadActionMenuItems", () => {
     expect(allowed.every((item) => !item.disabled)).toBe(true);
   });
 
+  it("keeps handoff and project navigation available while disabling persistence and process mutations", () => {
+    const items = buildThreadActionMenuItems({
+      ...baseState,
+      canOperate: false,
+      hasStoppableProcesses: true,
+      projectFilter: { label: "Example", isActive: false },
+      handoffs: [handoff],
+      handoffsOverflow: true,
+    });
+    for (const id of ["mark-persistent", "stop-thread-processes"]) {
+      expect(items.find((item) => item.id === id)?.disabled).toBe(true);
+    }
+    for (const id of ["filter-by-project", "handoff:file:/src/app.ts", "handoff-show-all"]) {
+      expect(items.find((item) => item.id === id)?.disabled).not.toBe(true);
+    }
+    expect(items.find((item) => item.id === "handoffs-heading")?.disabled).toBe(true);
+  });
+
+  it("offers stopping only when the thread owns a preview or running subprocess", () => {
+    expect(buildStopThreadProcessesMenuItem(false)).toBeNull();
+    expect(ids(baseState)).not.toContain("stop-thread-processes");
+    const items = buildThreadActionMenuItems({ ...baseState, hasStoppableProcesses: true });
+    const persistenceIndex = items.findIndex((item) => item.id === "mark-persistent");
+    expect(items[persistenceIndex + 1]).toEqual({
+      id: "stop-thread-processes",
+      label: "Stop all previews & processes",
+      destructive: true,
+    });
+    expect(items[persistenceIndex + 2]?.separatorBefore).toBe(true);
+  });
+
+  it("separates branch creation and persistence without separating persistence from stop", () => {
+    const items = buildThreadActionMenuItems({ ...baseState, branch: "feature/preview" });
+    expect(items[1]?.separatorBefore).toBe(true);
+    const persistenceIndex = items.findIndex((item) => item.id === "mark-persistent");
+    expect(items[persistenceIndex + 1]?.separatorBefore).toBe(true);
+    const withoutPersistence = buildThreadActionMenuItems({
+      ...baseState,
+      hasStoppableProcesses: true,
+      supports: { ...baseState.supports, persistence: false },
+    });
+    const stopIndex = withoutPersistence.findIndex((item) => item.id === "stop-thread-processes");
+    expect(withoutPersistence[stopIndex + 1]?.separatorBefore).toBe(true);
+  });
+
+  it("groups legacy thread commands with dividers after creation, annotation, and stop", () => {
+    const commands = [
+      "new-thread-on-branch",
+      "rename",
+      "annotate",
+      "mark-unread",
+      "mark-read",
+      "mark-persistent",
+      "stop-thread-processes",
+      "copy-path",
+    ];
+    const items = withThreadActionMenuDividers(commands.map((id) => ({ id, label: id })));
+    expect(items.filter((item) => item.separatorBefore).map((item) => item.id)).toEqual([
+      "rename",
+      "mark-unread",
+      "copy-path",
+    ]);
+    const withoutStop = withThreadActionMenuDividers(
+      commands.filter((id) => id !== "stop-thread-processes").map((id) => ({ id, label: id })),
+    );
+    expect(withoutStop.find((item) => item.id === "copy-path")?.separatorBefore).toBe(true);
+  });
   it("hides lifecycle items when the environment lacks the capabilities", () => {
     expect(
       ids({
@@ -104,7 +172,17 @@ describe("buildThreadActionMenuItems", () => {
           titleRegeneration: false,
         },
       }),
-    ).toEqual(["rename", "mark-unread", "copy", "project-settings", "archive", "delete"]);
+    ).toEqual([
+      "rename",
+      "mark-unread",
+      "mark-read",
+      "copy",
+      "project-settings",
+      "handoffs-heading",
+      "handoffs-empty",
+      "archive",
+      "delete",
+    ]);
   });
 
   it("groups project settings with utility actions before archive", () => {
@@ -135,7 +213,7 @@ describe("buildThreadActionMenuItems", () => {
     });
     const filterIndex = items.findIndex((candidate) => candidate.id === "filter-by-project");
     expect(items[filterIndex]).toMatchObject({ label: "Show all projects", icon: "folder-tree" });
-    expect(items[filterIndex - 1]?.id).toBe("mark-unread");
+    expect(items[filterIndex - 1]?.id).toBe("mark-read");
     expect(items[filterIndex + 1]?.id).toBe("auto-settle");
   });
 
@@ -167,7 +245,7 @@ describe("buildThreadActionMenuItems", () => {
     expect(off?.children?.map((child) => child.checked)).toEqual([false, true]);
     // Sits with the per-thread settings after Mark unread, not the lifecycle verbs.
     const items = buildThreadActionMenuItems(baseState);
-    expect(items[items.findIndex((item) => item.id === "mark-unread") + 1]?.id).toBe("auto-settle");
+    expect(items[items.findIndex((item) => item.id === "mark-read") + 1]?.id).toBe("auto-settle");
     expect(
       ids({ ...baseState, supports: { ...baseState.supports, autoSettleOptOut: false } }),
     ).not.toContain("auto-settle");

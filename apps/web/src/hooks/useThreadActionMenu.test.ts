@@ -19,6 +19,7 @@ function deferred<T>() {
 
 const state = vi.hoisted(() => ({
   granted: new Set<string>(),
+  tracksVisits: true,
   effects: [] as string[],
   completed: deferred<void>(),
   show: vi.fn<
@@ -48,6 +49,7 @@ vi.mock("../state/session", () => ({
     scope === AuthOrchestrationOperateScope && state.granted.has(environmentId),
 }));
 vi.mock("../state/entities", () => ({
+  readEnvironmentSupportsVisitedTracking: () => state.tracksVisits,
   readEnvironmentSupportsAutoSettleOptOut: () => true,
   readEnvironmentSupportsPinning: () => true,
   readEnvironmentSupportsPersistence: () => true,
@@ -137,6 +139,7 @@ vi.mock("./useThreadActions", () => ({
     Object.fromEntries(
       [
         "markThreadUnread",
+        "markThreadRead",
         "settleThread",
         "unsettleThread",
         "snoozeThread",
@@ -147,8 +150,14 @@ vi.mock("./useThreadActions", () => ({
         "deleteThread",
       ].map((action) => [
         action,
-        async () => {
-          recordEffect(action === "markThreadUnread" ? "mark-unread" : action);
+        async (...args: unknown[]) => {
+          recordEffect(
+            action === "markThreadUnread"
+              ? "mark-unread"
+              : action === "markThreadRead"
+                ? "mark-read"
+                : action,
+          );
           return AsyncResult.success(undefined);
         },
       ]),
@@ -170,6 +179,7 @@ const createMenu = () =>
   });
 
 beforeEach(() => {
+  state.tracksVisits = true;
   state.granted = new Set(["primary"]);
   state.effects = [];
   state.completed = deferred<void>();
@@ -183,6 +193,8 @@ describe("thread menu permissions", () => {
     expect(items.find((item) => item.id === "rename")?.disabled).toBe(true);
     expect(items.find((item) => item.id === "delete")?.disabled).toBe(true);
     expect(items.find((item) => item.id === "copy")?.disabled).not.toBe(true);
+    expect(items.find((item) => item.id === "mark-read")?.disabled).toBe(true);
+    expect(items.find((item) => item.id === "mark-unread")?.disabled).toBe(true);
   });
 
   it("allows the target grant even when the primary environment is denied", () => {
@@ -222,8 +234,10 @@ describe("thread menu permissions", () => {
     ["new-thread-on-branch", "draft"],
     ["copy-thread-id", "copy"],
     ["mark-unread", "mark-unread"],
+    ["mark-read", "mark-read"],
     ["project-settings", "project-settings"],
   ] as const)("keeps %s available without task permission", async (action, effect) => {
+    state.tracksVisits = false;
     state.show.mockResolvedValue(action);
     createMenu().openMenu(position);
     await state.completed.promise;

@@ -46,6 +46,7 @@ import { toastManager } from "./ui/toast";
 /** Layout commands a focused desktop browser page hands back to the app. */
 const PREVIEW_FORWARDED_LAYOUT_COMMANDS = [
   "sidebar.toggle",
+  "sidebar.mode.toggle",
   "rightPanel.toggle",
   "rightPanel.toggleMaximized",
 ] as const;
