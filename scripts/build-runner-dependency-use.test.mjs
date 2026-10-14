@@ -2,34 +2,19 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
 import * as NodeChildProcess from "node:child_process";
-import * as NodeTest from "node:test";
+import { it, onTestFinished, vi } from "vite-plus/test";
 import * as NodeAssert from "node:assert/strict";
-import * as NodeModule from "node:module";
-
-// Resolve the real shared source for this dependency-free runner test. Product
-// code uses its ordinary workspace package; no fallback is shipped in the app.
-const hooks = NodeModule.registerHooks({
-  resolve(specifier, context, nextResolve) {
-    if (specifier === "@t3tools/shared/dependencyActivity")
-      return {
-        url: new URL("../packages/shared/src/dependencyActivity.ts", import.meta.url).href,
-        shortCircuit: true,
-      };
-    return nextResolve(specifier, context);
-  },
-});
-const { createBuildOwnershipPlugin } = await import("../apps/web/vite/buildOwnership.ts");
-hooks.deregister();
+import { createBuildOwnershipPlugin } from "../apps/web/vite/buildOwnership.ts";
 import {
   observeDependencyActivity,
   dependencyActivitySnapshot,
 } from "../packages/shared/src/dependencyActivity.ts";
 
-const fixture = (t) => {
+const fixture = () => {
   const root = NodeFS.realpathSync(
     NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "direct-build-use-")),
   );
-  t.after(() => NodeFS.rmSync(root, { recursive: true, force: true }));
+  onTestFinished(() => NodeFS.rmSync(root, { recursive: true, force: true }));
   const cwd = NodePath.join(root, "worktree");
   const git = NodePath.join(root, "git-metadata");
   NodeFS.mkdirSync(git);
@@ -65,80 +50,72 @@ const syntheticCompiler = (cwd, fail = false) => {
   NodeAssert.equal(result.status, fail ? 1 : 0, result.stderr);
 };
 
-NodeTest.test(
-  "config inspection alone leaves aged dependencies unchanged; direct compiler execution renews start and completion",
-  (t) => {
-    const { cwd, git, readClock, context } = fixture(t);
-    let now = 100;
-    const before = dependencyActivitySnapshot(cwd);
-    const plugin = createBuildOwnershipPlugin(cwd, null, () => now);
-    plugin.configResolved.call(context, { build: { outDir: "dist" } });
-    plugin.closeBundle.call(context);
-    NodeAssert.equal(readClock(), 1);
-    NodeAssert.equal(dependencyActivitySnapshot(cwd), before);
-    plugin.buildStart.call(context);
-    NodeAssert.equal(readClock(), 100);
-    syntheticCompiler(cwd);
-    plugin.buildEnd.call(context);
-    plugin.writeBundle.call(context);
-    now = 200;
-    plugin.closeBundle.call(context);
-    NodeAssert.equal(readClock(), 200);
-    now = 300;
-    plugin.closeWatcher.call(context);
-    NodeAssert.equal(readClock(), 200);
-    NodeAssert.equal(observeDependencyActivity(git, cwd, 500, false, false).renewed, false);
-  },
-);
+it("config inspection alone leaves aged dependencies unchanged; direct compiler execution renews start and completion", () => {
+  const { cwd, git, readClock, context } = fixture();
+  let now = 100;
+  const before = dependencyActivitySnapshot(cwd);
+  const plugin = createBuildOwnershipPlugin(cwd, null, () => now);
+  plugin.configResolved.call(context, { build: { outDir: "dist" } });
+  plugin.closeBundle.call(context);
+  NodeAssert.equal(readClock(), 1);
+  NodeAssert.equal(dependencyActivitySnapshot(cwd), before);
+  plugin.buildStart.call(context);
+  NodeAssert.equal(readClock(), 100);
+  syntheticCompiler(cwd);
+  plugin.buildEnd.call(context);
+  plugin.writeBundle.call(context);
+  now = 200;
+  plugin.closeBundle.call(context);
+  NodeAssert.equal(readClock(), 200);
+  now = 300;
+  plugin.closeWatcher.call(context);
+  NodeAssert.equal(readClock(), 200);
+  NodeAssert.equal(observeDependencyActivity(git, cwd, 500, false, false).renewed, false);
+});
 
-NodeTest.test(
-  "watch rebuilds renew each executed run and compiler failure remains positive use",
-  (t) => {
-    const { cwd, readClock, context } = fixture(t);
-    context.meta.watchMode = true;
-    let now = 100;
-    const plugin = createBuildOwnershipPlugin(cwd, null, () => now);
-    for (const startedAt of [100, 300]) {
-      now = startedAt;
-      plugin.buildStart.call(context);
-      syntheticCompiler(cwd);
-      plugin.writeBundle.call(context);
-      now = startedAt + 50;
-      plugin.closeBundle.call(context);
-      NodeAssert.equal(readClock(), startedAt + 50);
-    }
-    now = 500;
+it("watch rebuilds renew each executed run and compiler failure remains positive use", () => {
+  const { cwd, readClock, context } = fixture();
+  context.meta.watchMode = true;
+  let now = 100;
+  const plugin = createBuildOwnershipPlugin(cwd, null, () => now);
+  for (const startedAt of [100, 300]) {
+    now = startedAt;
     plugin.buildStart.call(context);
-    syntheticCompiler(cwd, true);
-    now = 550;
-    plugin.buildEnd.call(context, new Error("Synthetic compiler failure"));
-    NodeAssert.equal(readClock(), 550);
-    now = 600;
-    plugin.closeBundle.call(context);
-    NodeAssert.equal(readClock(), 550);
-  },
-);
-
-NodeTest.test(
-  "output generation failure renews actual use; malformed optional clock cannot block compiler execution or reset records",
-  (t) => {
-    const { cwd, git, readClock, context } = fixture(t);
-    let now = 100;
-    const plugin = createBuildOwnershipPlugin(cwd, null, () => now);
-    plugin.buildStart.call(context);
-    now = 200;
-    plugin.renderError.call(context);
-    NodeAssert.equal(readClock(), 200);
-    const target = NodePath.join(git, "t3-dependency-activity.json");
-    NodeFS.writeFileSync(target, "retained malformed clock");
-    const warning = t.mock.method(console, "warn", () => {});
-    now = 300;
-    NodeAssert.doesNotThrow(() => plugin.buildStart.call(context));
     syntheticCompiler(cwd);
     plugin.writeBundle.call(context);
-    now = 400;
-    NodeAssert.doesNotThrow(() => plugin.closeBundle.call(context));
-    NodeAssert.equal(warning.mock.callCount(), 2);
-    NodeAssert.equal(NodeFS.readFileSync(target, "utf8"), "retained malformed clock");
-  },
-);
+    now = startedAt + 50;
+    plugin.closeBundle.call(context);
+    NodeAssert.equal(readClock(), startedAt + 50);
+  }
+  now = 500;
+  plugin.buildStart.call(context);
+  syntheticCompiler(cwd, true);
+  now = 550;
+  plugin.buildEnd.call(context, new Error("Synthetic compiler failure"));
+  NodeAssert.equal(readClock(), 550);
+  now = 600;
+  plugin.closeBundle.call(context);
+  NodeAssert.equal(readClock(), 550);
+});
+
+it("output generation failure renews actual use; malformed optional clock cannot block compiler execution or reset records", () => {
+  const { cwd, git, readClock, context } = fixture();
+  let now = 100;
+  const plugin = createBuildOwnershipPlugin(cwd, null, () => now);
+  plugin.buildStart.call(context);
+  now = 200;
+  plugin.renderError.call(context);
+  NodeAssert.equal(readClock(), 200);
+  const target = NodePath.join(git, "t3-dependency-activity.json");
+  NodeFS.writeFileSync(target, "retained malformed clock");
+  const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+  onTestFinished(() => warning.mockRestore());
+  now = 300;
+  NodeAssert.doesNotThrow(() => plugin.buildStart.call(context));
+  syntheticCompiler(cwd);
+  plugin.writeBundle.call(context);
+  now = 400;
+  NodeAssert.doesNotThrow(() => plugin.closeBundle.call(context));
+  NodeAssert.equal(warning.mock.calls.length, 2);
+  NodeAssert.equal(NodeFS.readFileSync(target, "utf8"), "retained malformed clock");
+});

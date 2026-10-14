@@ -15,6 +15,7 @@ import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as DependencyMounts from "./DependencyMounts.ts";
 import * as GeneratedDependencies from "./GeneratedDependencies.ts";
+import * as WorktreeConsumers from "./WorktreeConsumers.ts";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const original = await importOriginal<typeof NodeFSP>();
@@ -30,6 +31,7 @@ const testLayer = (mounts: Effect.Effect<ReadonlyArray<string> | null>) =>
     Layer.provideMerge(
       Layer.succeed(GeneratedDependencies.ProcessWorkingDirectories, Effect.succeed([])),
     ),
+    Layer.provideMerge(Layer.succeed(WorktreeConsumers.ProcessPaths, Effect.succeed([]))),
     Layer.provideMerge(Layer.succeed(DependencyMounts.MountPoints, mounts)),
   );
 
@@ -224,7 +226,8 @@ it.effect(
         })),
       );
       assert.lengthOf(removed, 2);
-      assert.deepEqual(snapshotCompletions, [0, 0, 0, 0, 4, 4, 4]);
+      // Each surviving candidate also refreshes mounts in its full-root consumer guard.
+      assert.deepEqual(snapshotCompletions, [0, 0, 0, 0, 4, 4, 4, 4, 4]);
       for (const f of [fixtures[0]!, fixtures[3]!]) {
         assert.equal(yield* f.fs.readFileString(f.data), "preserve mounted data\n");
       }
@@ -307,7 +310,7 @@ it.effect("preserves an earlier cohort member invalidated by a later eligibility
       removed.map((entry) => entry.dependencyPath),
       [fixtures[1]!.dependencyPath],
     );
-    assert.equal(reads, 4);
+    assert.equal(reads, 5);
     assert.equal(
       yield* fixtures[0]!.fs.readFileString(fixtures[0]!.data),
       "preserve mounted data\n",
@@ -532,7 +535,7 @@ it.effect(
         })),
       );
       assert.lengthOf(removed, 3);
-      assert.equal(reads, 8);
+      assert.equal(reads, 11);
       assert.equal(
         yield* fixtures[0]!.fs.readFileString(fixtures[0]!.data),
         "preserve mounted data\n",
@@ -552,11 +555,11 @@ it.effect(
   },
 );
 
-it.effect("allows mount ancestors and path-prefix siblings outside the dependency root", () => {
+it.effect("allows mount ancestors and path-prefix siblings outside the worktree root", () => {
   let points: ReadonlyArray<string> | null = ["/"];
   return Effect.gen(function* () {
     const f = yield* fixture();
-    points = ["/", f.input.worktreePath, `${f.dependencyPath}-other`];
+    points = ["/", f.input.managedWorktreesRoot, `${f.input.worktreePath}-other`];
     const inspected = yield* f.cleanup.inspect(f.input);
     assert.isNotNull(inspected);
     assert.lengthOf(
@@ -572,6 +575,37 @@ it.effect("allows mount ancestors and path-prefix siblings outside the dependenc
     assert.isFalse(yield* f.fs.exists(f.dependencyPath));
   }).pipe(Effect.scoped, Effect.provide(testLayer(Effect.sync(() => points))));
 });
+
+it.effect.each(["root", "dependency-prefix sibling"] as const)(
+  "preserves dependencies when the full-worktree guard finds a mounted %s",
+  (location) => {
+    let points: ReadonlyArray<string> | null = ["/"];
+    return Effect.gen(function* () {
+      const f = yield* fixture();
+      points = ["/", location === "root" ? f.input.worktreePath : `${f.dependencyPath}-other`];
+      const inspected = yield* f.cleanup.inspect(f.input);
+      assert.isNotNull(inspected);
+      const reasons: string[] = [];
+      assert.isEmpty(
+        yield* f.cleanup.removeBatch(
+          [
+            {
+              inspection: inspected!,
+              canRemove: Effect.succeed(true),
+              isStillEligible: Effect.succeed(true),
+            },
+          ],
+          (_inspection, decision) =>
+            Effect.sync(() => {
+              reasons.push(decision.reason);
+            }),
+        ),
+      );
+      assert.deepEqual(reasons, ["A mounted path is inside the worktree."]);
+      assert.equal(yield* f.fs.readFileString(f.data), "preserve mounted data\n");
+    }).pipe(Effect.scoped, Effect.provide(testLayer(Effect.sync(() => points))));
+  },
+);
 
 it.effect("rejects a filesystem-device boundary encountered during measurement", () =>
   Effect.gen(function* () {
