@@ -18,7 +18,5 @@ export interface HomeHeaderProps {
   readonly onProjectChange: (projectKey: string | null) => void;
   readonly onOpenEnvironments: () => void;
   readonly onOpenSettings: () => void;
-  readonly onOpenPause?: () => void;
-  readonly hasPauseSession?: boolean;
   readonly onStartNewTask: () => void;
 }

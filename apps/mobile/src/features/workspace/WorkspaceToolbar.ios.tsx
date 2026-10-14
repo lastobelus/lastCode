@@ -13,8 +13,6 @@ import { useWorkspaceTabs } from "./WorkspaceTabsContext";
 /** Root actions stay in the header; UIKit owns the bottom compose button. */
 export function WorkspaceToolbar(props: {
   readonly onNewTask: () => void;
-  readonly onOpenPause?: () => void;
-  readonly hasPauseSession?: boolean;
   readonly sidebar?: boolean;
 }) {
   const workspace = useWorkspaceTabs()!;
@@ -94,13 +92,6 @@ export function WorkspaceToolbar(props: {
       />
       {/* UIKit lays trailing items out from the edge inward. */}
       <NativeHeaderToolbar placement="right">
-        {props.onOpenPause ? (
-          <NativeHeaderToolbar.Button
-            accessibilityLabel={props.hasPauseSession ? "Resume environment" : "Pause environment"}
-            icon={props.hasPauseSession ? "play" : "pause"}
-            onPress={props.onOpenPause}
-          />
-        ) : null}
         <NativeHeaderToolbar.Button
           accessibilityLabel="Settings"
           icon="gearshape"

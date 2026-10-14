@@ -50,8 +50,6 @@ function ToolbarButton(props: {
 export function WorkspaceToolbar(props: {
   readonly sidebar?: boolean;
   readonly onNewTask: () => void;
-  readonly onOpenPause?: () => void;
-  readonly hasPauseSession?: boolean;
 }) {
   const workspace = useWorkspaceTabs();
   const input = useRef<TextInputInstance>(null);

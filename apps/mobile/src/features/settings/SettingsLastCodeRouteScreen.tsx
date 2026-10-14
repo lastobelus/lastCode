@@ -129,7 +129,7 @@ export function SettingsLastCodeRouteScreen() {
                 <SettingsSwitchRow
                   icon="pause"
                   label="Show environment pause button"
-                  subtitle="Ask active threads to pause, wait for quiet, then resume the same threads."
+                  subtitle="Show pause and resume controls on this environment's Connections card."
                   value={uniformMobileSetting(displayTargets, "environmentPauseEnabled")}
                   disabled={!canWrite || pendingTargets !== null}
                   onValueChange={(enabled) => void setPauseEnabled(enabled)}

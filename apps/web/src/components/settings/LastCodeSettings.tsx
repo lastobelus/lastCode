@@ -158,7 +158,7 @@ function EnvironmentPauseSettingsSection() {
         serverScoped
         settingKeys={["environmentPauseEnabled"]}
         {...searchableSetting("environment-pause")}
-        description="Show a sidebar button to ask active threads on this environment to pause before you go offline, then resume them when you return."
+        description="Enable pause and resume controls for this environment in Connections. The sidebar control pauses only the environment running on this computer."
         status={supported ? undefined : "Update the environment to enable this feature."}
         resetAction={
           mixed || enabled !== DEFAULT_SERVER_SETTINGS.environmentPauseEnabled ? (

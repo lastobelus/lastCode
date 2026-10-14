@@ -80,6 +80,7 @@ import {
   useRelativeTimeTick,
 } from "./settingsLayout";
 import { LocalEnvironmentSetting } from "./LocalEnvironmentSetting";
+import { EnvironmentPauseControl } from "../EnvironmentPauseControl";
 import { searchableSetting } from "./settingsSearch";
 import { EnvironmentIconMenu } from "./EnvironmentIconPicker";
 import { EnvironmentRoutesList } from "./EnvironmentRoutesList";
@@ -1747,6 +1748,7 @@ function SavedBackendListRow({
           appearance="icon"
         />
       ) : null}
+      <EnvironmentPauseControl key={environmentId} environment={environment} />
       <Tooltip>
         <TooltipTrigger
           render={
@@ -3441,39 +3443,49 @@ export function ConnectionsSettings() {
             ) : null
           }
           control={
-            <Select
-              value={selectValue}
-              onValueChange={(value) => {
-                if (typeof value !== "string") return;
-                handleSelectWslMode(value);
-              }}
-            >
-              <SelectTrigger
-                size="sm"
-                className="w-full sm:w-56"
-                aria-label="WSL backend"
-                disabled={isUpdatingWslBackend}
+            <div className="flex items-center gap-2">
+              {savedEnvironments
+                .filter((environment) => isDesktopLocalConnectionTarget(environment.entry.target))
+                .map((environment) => (
+                  <EnvironmentPauseControl
+                    key={environment.environmentId}
+                    environment={environment}
+                  />
+                ))}
+              <Select
+                value={selectValue}
+                onValueChange={(value) => {
+                  if (typeof value !== "string") return;
+                  handleSelectWslMode(value);
+                }}
               >
-                <SelectValue>{selectLabel}</SelectValue>
-              </SelectTrigger>
-              <SelectPopup align="end" alignItemWithTrigger={false}>
-                <SelectItem hideIndicator value={BACKEND_VALUE_WSL_OFF}>
-                  Off
-                </SelectItem>
-                {desktopWslState.distros.length === 0 ? (
-                  <SelectItem hideIndicator value={BACKEND_VALUE_DEFAULT_WSL}>
-                    Default distro
+                <SelectTrigger
+                  size="sm"
+                  className="w-full sm:w-56"
+                  aria-label="WSL backend"
+                  disabled={isUpdatingWslBackend}
+                >
+                  <SelectValue>{selectLabel}</SelectValue>
+                </SelectTrigger>
+                <SelectPopup align="end" alignItemWithTrigger={false}>
+                  <SelectItem hideIndicator value={BACKEND_VALUE_WSL_OFF}>
+                    Off
                   </SelectItem>
-                ) : (
-                  desktopWslState.distros.map((distro) => (
-                    <SelectItem hideIndicator key={distro.name} value={distro.name}>
-                      {distro.name}
-                      {distro.isDefault ? " (default)" : ""}
+                  {desktopWslState.distros.length === 0 ? (
+                    <SelectItem hideIndicator value={BACKEND_VALUE_DEFAULT_WSL}>
+                      Default distro
                     </SelectItem>
-                  ))
-                )}
-              </SelectPopup>
-            </Select>
+                  ) : (
+                    desktopWslState.distros.map((distro) => (
+                      <SelectItem hideIndicator key={distro.name} value={distro.name}>
+                        {distro.name}
+                        {distro.isDefault ? " (default)" : ""}
+                      </SelectItem>
+                    ))
+                  )}
+                </SelectPopup>
+              </Select>
+            </div>
           }
         />
         {desktopWslState.enabled ? (
@@ -3647,30 +3659,47 @@ export function ConnectionsSettings() {
             }
             headerAction={
               primaryEnvironmentId !== null ? (
-                <Menu>
-                  <MenuTrigger
-                    render={
-                      <Button
-                        type="button"
-                        variant="ghost-muted"
-                        size="icon-xs"
-                        aria-label="More actions for this machine"
-                      />
-                    }
-                  >
-                    <EllipsisIcon className="size-3.5" />
-                  </MenuTrigger>
-                  <MenuPopup align="end">
-                    <EnvironmentIconMenu
-                      environmentId={primaryEnvironmentId}
-                      serverConfig={primaryServerConfig}
+                <div className="flex items-center gap-1">
+                  {!desktopBridge && primaryEnvironment ? (
+                    <EnvironmentPauseControl
+                      key={primaryEnvironment.environmentId}
+                      environment={primaryEnvironment}
                     />
-                  </MenuPopup>
-                </Menu>
+                  ) : null}
+                  <Menu>
+                    <MenuTrigger
+                      render={
+                        <Button
+                          type="button"
+                          variant="ghost-muted"
+                          size="icon-xs"
+                          aria-label="More actions for this machine"
+                        />
+                      }
+                    >
+                      <EllipsisIcon className="size-3.5" />
+                    </MenuTrigger>
+                    <MenuPopup align="end">
+                      <EnvironmentIconMenu
+                        environmentId={primaryEnvironmentId}
+                        serverConfig={primaryServerConfig}
+                      />
+                    </MenuPopup>
+                  </Menu>
+                </div>
               ) : null
             }
           >
-            <LocalEnvironmentSetting />
+            <LocalEnvironmentSetting
+              pauseControl={
+                primaryEnvironment ? (
+                  <EnvironmentPauseControl
+                    key={primaryEnvironment.environmentId}
+                    environment={primaryEnvironment}
+                  />
+                ) : null
+              }
+            />
             {canManageLocalBackend ? (
               <SettingsRow
                 title="Version"
