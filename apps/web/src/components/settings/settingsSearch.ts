@@ -174,6 +174,7 @@ export const SETTINGS_SEARCH_ITEMS = [
     scope: "project-defaults",
     searchTerms: [
       "local files uncommitted changes notes ignored env build output cleanup preserved",
+      "keep worktrees with local changes",
     ],
   },
   {

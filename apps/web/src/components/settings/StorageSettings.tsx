@@ -167,6 +167,12 @@ function RetentionControl({
   );
 }
 
+const KEEP_WHEN_LABELS = {
+  "any-local-files": "Any local files",
+  "uncommitted-changes": "Uncommitted changes",
+  "tracked-changes": "Edited tracked files",
+} as const;
+
 function CleanupResults({
   report,
   environmentLabel,
@@ -446,6 +452,18 @@ export function StorageSettingsPanel() {
   const disposableOutputsLabel = buildsSupported
     ? "Remove inactive dependencies and build outputs"
     : "Remove inactive worktree dependencies";
+  const legacyKeepWhenDescription =
+    settings.worktreeKeepWhen === "any-local-files"
+      ? "Includes ignored files, except node_modules."
+      : settings.worktreeKeepWhen === "tracked-changes"
+        ? "Deletes untracked and ignored files, including .env."
+        : "Keeps edits and untracked files. Deletes ignored files, including .env.";
+  const mixedPreservationSupport =
+    !buildsSupported &&
+    connectedEnvironments.some(
+      (environment) =>
+        environment.serverConfig?.environment.capabilities.worktreeBuildCleanup === true,
+    );
 
   const updateWorktree = (patch: Partial<WorktreeCleanupRules>) =>
     isProjectScope
@@ -620,14 +638,46 @@ export function StorageSettingsPanel() {
             ) && (
               <SettingsRow
                 {...searchableSetting("storage-worktree-keep-when")}
-                title="Local work is preserved"
+                title={
+                  buildsSupported ? "Local work is preserved" : "Keep worktrees with local changes"
+                }
+                status={buildsSupported ? undefined : ruleStatus("worktreeKeepWhen")}
                 description={
                   buildsSupported
                     ? "Edits, untracked files and unknown ignored files keep the checkout. Verified generated files are reclaimed separately."
-                    : "Older selected environments use their existing local-file policy. Update them for automatic preservation of unknown local files."
+                    : mixedPreservationSupport
+                      ? `${ruleStatus("worktreeKeepWhen") ? "Older selected environments use their own local-file preferences." : `Older selected environments: ${legacyKeepWhenDescription}`} Updated environments preserve unknown local files regardless of this preference; verified generated files are reclaimed separately.`
+                      : legacyKeepWhenDescription
                 }
                 serverScoped={!isProjectScope}
-                control={null}
+                control={
+                  buildsSupported ? null : (
+                    <Select
+                      value={ruleStatus("worktreeKeepWhen") ? null : settings.worktreeKeepWhen}
+                      onValueChange={(next) => {
+                        if (
+                          next === "any-local-files" ||
+                          next === "uncommitted-changes" ||
+                          next === "tracked-changes"
+                        )
+                          updateWorktree({ worktreeKeepWhen: next });
+                      }}
+                    >
+                      <SelectTrigger size="sm" aria-label="Keep worktrees with local changes">
+                        <SelectValue>
+                          {ruleStatus("worktreeKeepWhen")
+                            ? "Mixed"
+                            : KEEP_WHEN_LABELS[settings.worktreeKeepWhen]}
+                        </SelectValue>
+                      </SelectTrigger>
+                      <SelectPopup align="end" alignItemWithTrigger={false}>
+                        <SelectItem value="any-local-files">Any local files</SelectItem>
+                        <SelectItem value="uncommitted-changes">Uncommitted changes</SelectItem>
+                        <SelectItem value="tracked-changes">Edited tracked files</SelectItem>
+                      </SelectPopup>
+                    </Select>
+                  )
+                }
               />
             )}
           </>
