@@ -47,6 +47,10 @@ export class WorktreeCleanupError extends Schema.TaggedError<WorktreeCleanupErro
 export class WorktreeCleanupService extends Context.Service<
   WorktreeCleanupService,
   {
+    readonly historicalWorktreeOwners: Effect.Effect<
+      ReadonlyArray<LegacyImporter.LegacyV1WorktreeOwner>,
+      WorktreeCleanupError
+    >;
     readonly start: () => Effect.Effect<void, never, Scope.Scope>;
     readonly drain: Effect.Effect<void>;
     readonly reconcile: Effect.Effect<void, WorktreeCleanupError, Scope.Scope>;
@@ -322,6 +326,12 @@ const make = Effect.gen(function* () {
       );
     });
   return WorktreeCleanupService.of({
+    historicalWorktreeOwners: legacyImporter.worktreeOwners.pipe(
+      Effect.mapError(
+        (cause) =>
+          new WorktreeCleanupError({ threadId: ThreadId.make("cleanup-owner-scan"), cause }),
+      ),
+    ),
     start,
     reconcile: reconcile.pipe(
       Effect.mapError(

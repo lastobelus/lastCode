@@ -5,6 +5,8 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import { lastCodeAction as defaultActionReporter } from "./lib/lastcode-action-kit.ts";
 
+import { observeDependencyActivity } from "../packages/shared/src/dependencyActivity.ts";
+
 /** Install the target checkout's locked dependency graph without a separate readiness stamp. */
 export function prepareDependencies(cwd: string, execute = NodeChildProcess.spawnSync) {
   const target = NodePath.resolve(cwd);
@@ -33,10 +35,34 @@ export function prepareDependencies(cwd: string, execute = NodeChildProcess.spaw
       `Dependency preparation requires ${packageManager}; found ${String(version.stdout).trim()}.`,
     );
   }
+  const recordUse = () => {
+    if (!NodeFS.existsSync(NodePath.join(target, "node_modules"))) return;
+    const location = execute("git", ["rev-parse", "--absolute-git-dir"], {
+      ...options,
+      encoding: "utf8",
+    });
+    if (
+      location.status !== 0 ||
+      typeof location.stdout !== "string" ||
+      !NodePath.isAbsolute(location.stdout.trim())
+    )
+      return;
+    try {
+      // @effect-diagnostics-next-line globalDate:off -- This dependency-free Node bootstrap cannot import the Effect clock.
+      observeDependencyActivity(location.stdout.trim(), target, Date.now(), true);
+    } catch {
+      // Optional aging evidence must not prevent repairing or preparing packages.
+      console.warn(
+        "[prepare-dependencies] Could not record dependency use; cleanup will keep unverified activity.",
+      );
+    }
+  };
+  recordUse();
   const installed = execute("pnpm", ["install", "--frozen-lockfile"], {
     ...options,
     stdio: "inherit",
   });
+  recordUse();
   if (installed.error) throw installed.error;
   if (installed.status !== 0) {
     throw new Error(

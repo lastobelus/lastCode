@@ -1395,6 +1395,7 @@ const layerLegacyV1ThreadImporterNoop = Layer.succeed(
   LegacyV1ThreadImporter.LegacyV1ThreadImporter,
   LegacyV1ThreadImporter.LegacyV1ThreadImporter.of({
     pendingThreadCount: Effect.succeed(0),
+    worktreeOwners: Effect.succeed([]),
     reconcileShells: Effect.succeed({ importedThreadCount: 0, importedMessageCount: 0 }),
     ensureTranscript: () => Effect.succeed({ importedThreadCount: 0, importedMessageCount: 0 }),
     importPendingTranscripts: Effect.succeed({ importedThreadCount: 0, importedMessageCount: 0 }),

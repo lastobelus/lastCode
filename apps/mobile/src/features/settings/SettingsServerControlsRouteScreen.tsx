@@ -194,6 +194,40 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
     reportFailure: true,
   });
   const supportsDependencies = supportsMobileWorktreeDependencyCleanup(targets, projectSelected);
+  const supportsBuilds =
+    targets.length > 0 &&
+    targets.every(
+      (target) =>
+        target.environment.serverConfig.environment.capabilities.worktreeBuildCleanup === true,
+    );
+  const anyBuildsSupported = targets.some(
+    (target) =>
+      target.environment.serverConfig.environment.capabilities.worktreeBuildCleanup === true,
+  );
+  const preservationSupported =
+    targets.length > 0 &&
+    targets.every(
+      (target) =>
+        target.environment.serverConfig.environment.capabilities.worktreeLocalPreservation === true,
+    );
+  const anyPreservationSupported = targets.some(
+    (target) =>
+      target.environment.serverConfig.environment.capabilities.worktreeLocalPreservation === true,
+  );
+  const disposableOutputsLabel = anyBuildsSupported
+    ? "Remove inactive dependencies and build outputs"
+    : "Remove inactive worktree dependencies";
+  const disposableOutputsResources = supportsBuilds
+    ? "Remove recognized dependencies and unchanged verified build outputs on supported selected environments."
+    : anyBuildsSupported
+      ? "Remove recognized dependencies where supported. Build outputs are reclaimed only on selected environments with build cleanup support."
+      : "Remove recognized npm or pnpm dependencies where supported. Build outputs are kept.";
+  const disposableOutputsTiming = preservationSupported
+    ? "When this rule is enabled, every shared owner must be archived for immediate cleanup. Unarchived and ownerless worktrees use the configured delay since actual use."
+    : anyPreservationSupported
+      ? "Updated environments clean archived owners immediately when every owner is archived and cleanup is enabled; unarchived and ownerless worktrees use the configured delay since actual use. Older selected environments use their existing thread-inactivity rule."
+      : "Selected environments use their existing thread-inactivity rule.";
+  const disposableOutputsDescription = `${disposableOutputsResources} ${disposableOutputsTiming} This rule keeps source and other files. Active consumers prevent cleanup. Reinstall or rebuild before resuming work.`;
   const pageProjectKeys = PAGE_PROJECT_KEYS[props.page].filter(
     (key) => key !== "worktreeCleanup" || supportsDependencies,
   );
@@ -547,8 +581,8 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                       >
                         <SettingsSwitchRow
                           icon="archivebox"
-                          label="Remove inactive worktree dependencies"
-                          subtitle="Remove recognized npm or pnpm node_modules installations after inactive days. Keep the worktree, source, tmp, notes, and other files. Active agents, terminals, and previews prevent cleanup. Reinstall dependencies before resuming work."
+                          label={disposableOutputsLabel}
+                          subtitle={disposableOutputsDescription}
                           value={dependencySettings.enabled}
                           disabled={dependenciesDisabled}
                           onValueChange={(enabled) =>

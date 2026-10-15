@@ -102,13 +102,13 @@ export const BUILD_PHASES = [
     start: 0.78,
     estimateMs: 35_000,
   },
-  { label: "Branding", marker: "web client branding", start: 0.84, estimateMs: 10_000 },
   {
     label: "Staging app",
     marker: "[desktop-artifact] Staging release app",
     start: 0.86,
     estimateMs: 15_000,
   },
+  { label: "Branding", marker: "web client branding", start: 0.87, estimateMs: 10_000 },
   {
     label: "Installing deps",
     marker: "[desktop-artifact] Installing staged production dependencies",

@@ -1,3 +1,8 @@
+import {
+  observeDependencyActivity,
+  recordDependencyUse,
+  dependencyActivitySnapshot,
+} from "@t3tools/shared/dependencyActivity";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 // @effect-diagnostics nodeBuiltinImport:off - FileSystem lacks lstat; dependency
 // installs contain links, which must be measured and removed without following them.
@@ -5,6 +10,7 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeChildProcess from "node:child_process";
 import * as Context from "effect/Context";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -12,6 +18,7 @@ import * as Schema from "effect/Schema";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { PersistedServerRuntimeState, isProcessAlive } from "../serverRuntimeState.ts";
 import * as DependencyMounts from "./DependencyMounts.ts";
+import * as WorktreeConsumers from "./WorktreeConsumers.ts";
 
 const decodeRuntimeState = Schema.decodeUnknownSync(
   Schema.fromJsonString(PersistedServerRuntimeState),
@@ -118,6 +125,18 @@ export class GeneratedDependencies extends Context.Service<
   GeneratedDependencies,
   {
     readonly processWorkingDirectories: Effect.Effect<ReadonlyArray<string> | null>;
+    /** Recognize and age an install without recursively measuring it. */
+    readonly observe: (
+      input: DependencyInput,
+      now: number,
+      used?: boolean,
+      persist?: boolean,
+      observationProcessPaths?: Effect.Effect<ReadonlyArray<string> | null>,
+      observationTargets?: WorktreeConsumers.TargetObservation,
+    ) => Effect.Effect<
+      { readonly lastUsedAt: number; readonly renewed: boolean } | null,
+      GeneratedDependenciesError
+    >;
     readonly inspect: (
       input: DependencyInput,
     ) => Effect.Effect<DependencyInspection | null, GeneratedDependenciesError>;
@@ -177,6 +196,8 @@ const lstatIfPresent = async (target: string) => {
     throw error;
   }
 };
+
+const consumesPath = WorktreeConsumers.processPathsUseRoot;
 
 // Check each component, including ancestors above the managed root. realpath
 // alone would accept a symlink whose resolved target happens to be in the tree.
@@ -246,8 +267,12 @@ const measure = async (root: string, device: number): Promise<number | null> => 
 const make = Effect.gen(function* () {
   const git = yield* GitVcsDriver.GitVcsDriver;
   const processCwds = yield* ProcessWorkingDirectories;
+  const processPaths = yield* WorktreeConsumers.ProcessPaths;
   const mountPoints = yield* DependencyMounts.MountPoints;
-  const validate = Effect.fn("GeneratedDependencies.validate")(function* (input: DependencyInput) {
+  const validate = Effect.fn("GeneratedDependencies.validate")(function* (
+    input: DependencyInput,
+    operation = "GeneratedDependencies.inspect",
+  ) {
     const worktreePath = NodePath.resolve(input.worktreePath);
     const managedWorktreesRoot = NodePath.resolve(input.managedWorktreesRoot);
     const repositoryRoot = NodePath.resolve(input.repositoryRoot);
@@ -279,7 +304,7 @@ const make = Effect.gen(function* () {
     const runGit = (args: ReadonlyArray<string>, cwd = worktreePath) =>
       git
         .execute({
-          operation: "GeneratedDependencies.inspect",
+          operation,
           cwd,
           args,
           allowNonZeroExit: true,
@@ -357,6 +382,54 @@ const make = Effect.gen(function* () {
         } satisfies Omit<DependencyInspection, "estimatedReclaimedBytes">);
   });
 
+  const observe = Effect.fn("GeneratedDependencies.observe")(function* (
+    input: DependencyInput,
+    now: number,
+    used = false,
+    persist = true,
+    observationProcessPaths?: Effect.Effect<ReadonlyArray<string> | null>,
+    observationTargets?: WorktreeConsumers.TargetObservation,
+  ) {
+    const current = yield* validate(input, "GeneratedDependencies.observe");
+    if (current === null) return null;
+    let consumed = false;
+    // Read-only eligibility compares durable metadata only. Unsaved OS evidence
+    // must be captured by a writing observer or the native removal guards.
+    if (persist) {
+      const capture = observationProcessPaths ?? processPaths;
+      const paths = yield* capture;
+      if (paths === null) return null;
+      consumed = yield* Effect.tryPromise({
+        try: () => consumesPath(current.dependencyPath, paths, observationTargets),
+        catch: (cause) => new GeneratedDependenciesError({ path: current.dependencyPath, cause }),
+      });
+    }
+    const location = yield* git
+      .execute({
+        operation: "GeneratedDependencies.observe",
+        cwd: current.worktreePath,
+        args: ["rev-parse", "--absolute-git-dir"],
+        maxOutputBytes: 64 * 1024,
+      })
+      .pipe(
+        Effect.mapError(
+          (cause) => new GeneratedDependenciesError({ path: current.dependencyPath, cause }),
+        ),
+      );
+    if (location.stdoutTruncated || location.stderrTruncated) return null;
+    return yield* Effect.try({
+      try: () =>
+        observeDependencyActivity(
+          location.stdout.trim(),
+          current.worktreePath,
+          now,
+          used || consumed,
+          persist,
+        ),
+      catch: (cause) => new GeneratedDependenciesError({ path: current.dependencyPath, cause }),
+    });
+  });
+
   const inspect = Effect.fn("GeneratedDependencies.inspect")(function* (input: DependencyInput) {
     const current = yield* validate(input);
     if (current === null) return null;
@@ -384,6 +457,22 @@ const make = Effect.gen(function* () {
 
   const skip = (error: unknown) =>
     Effect.logDebug("storage cleanup skipped dependency install", { error }).pipe(Effect.as(null));
+  const rememberConsumed = Effect.fn("GeneratedDependencies.rememberConsumed")(function* (
+    current: Pick<DependencyInspection, "worktreePath" | "dependencyPath">,
+    paths: ReadonlyArray<string>,
+  ) {
+    const consumed = yield* Effect.tryPromise({
+      try: () => consumesPath(current.dependencyPath, paths),
+      catch: (cause) => new GeneratedDependenciesError({ path: current.dependencyPath, cause }),
+    });
+    if (consumed) {
+      const now = yield* Clock.currentTimeMillis;
+      yield* Effect.try({
+        try: () => recordDependencyUse(current.worktreePath, now),
+        catch: (cause) => new GeneratedDependenciesError({ path: current.dependencyPath, cause }),
+      });
+    }
+  });
   const removeBatch = Effect.fn("GeneratedDependencies.removeBatch")(function* <EligibilityError>(
     entries: ReadonlyArray<{
       readonly inspection: DependencyInspection;
@@ -427,7 +516,12 @@ const make = Effect.gen(function* () {
               "kept",
               "Dependency identity changed before removal",
             ).pipe(Effect.as(null));
-          return { current, inspection, canRemove, isStillEligible };
+          const usageSnapshot = yield* Effect.try({
+            try: () => dependencyActivitySnapshot(current.worktreePath),
+            catch: (cause) =>
+              new GeneratedDependenciesError({ path: current.dependencyPath, cause }),
+          });
+          return { current, inspection, canRemove, isStillEligible, usageSnapshot };
         }).pipe(
           Effect.catch((error) =>
             skip(error).pipe(
@@ -448,17 +542,29 @@ const make = Effect.gen(function* () {
       );
       return [];
     }
+    const paths = yield* processPaths;
+    if (paths === null) {
+      yield* Effect.forEach(validated, ({ inspection }) =>
+        decide(inspection, "kept", "Process file-consumer inspection is unavailable"),
+      );
+      return [];
+    }
     const eligible = (yield* Effect.forEach(
       validated,
-      ({ current, inspection, canRemove, isStillEligible }) =>
+      ({ current, inspection, canRemove, isStillEligible, usageSnapshot }) =>
         Effect.gen(function* () {
-          if (
-            processes.some(
-              (cwd) =>
-                NodePath.resolve(cwd) === current.worktreePath ||
-                inside(current.worktreePath, NodePath.resolve(cwd)),
-            )
-          ) {
+          // Preserve the captured native object evidence on the path observation.
+          // Plain cwd evidence remains an independent conservative check.
+          yield* rememberConsumed(current, paths);
+          yield* rememberConsumed(current, processes);
+          const rootConsumed = yield* Effect.tryPromise({
+            try: async () =>
+              (await consumesPath(current.worktreePath, paths)) ||
+              (await consumesPath(current.worktreePath, processes)),
+            catch: (cause) =>
+              new GeneratedDependenciesError({ path: current.dependencyPath, cause }),
+          });
+          if (rootConsumed) {
             yield* decide(inspection, "kept", "An active process owns the worktree");
             return null;
           }
@@ -466,7 +572,7 @@ const make = Effect.gen(function* () {
             yield* decide(inspection, "kept", "Worktree ownership or cleanup eligibility changed");
             return null;
           }
-          return { current, inspection, isStillEligible };
+          return { current, inspection, isStillEligible, usageSnapshot };
         }).pipe(
           Effect.catch((error) =>
             skip(error).pipe(
@@ -489,12 +595,20 @@ const make = Effect.gen(function* () {
     }
     const removed = yield* Effect.forEach(
       eligible,
-      ({ current, inspection, isStillEligible }) =>
+      ({ current, inspection, isStillEligible, usageSnapshot }) =>
         Effect.gen(function* () {
           if (DependencyMounts.containsMount(current.dependencyPath, mounts)) {
             yield* decide(inspection, "kept", "Dependency path is a mount");
             return null;
           }
+          const eligibilityPaths = yield* processPaths;
+          if (eligibilityPaths === null)
+            return yield* decide(
+              inspection,
+              "kept",
+              "Process file-consumer inspection is unavailable",
+            ).pipe(Effect.as(null));
+          yield* rememberConsumed(current, eligibilityPaths);
           if (!(yield* isStillEligible)) {
             yield* decide(inspection, "kept", "Worktree ownership or cleanup eligibility changed");
             return null;
@@ -526,13 +640,50 @@ const make = Effect.gen(function* () {
             yield* decide(inspection, "kept", "Dependency path became a mount");
             return null;
           }
+          const finalIdentity = yield* Effect.tryPromise({
+            try: async () => {
+              if (!(await realDirectoryChain(current.dependencyPath))) return false;
+              const stat = await NodeFSP.lstat(current.dependencyPath);
+              return (
+                stat.isDirectory() && stat.dev === current.device && stat.ino === current.inode
+              );
+            },
+            catch: (cause) =>
+              new GeneratedDependenciesError({ path: inspection.dependencyPath, cause }),
+          });
+          if (!finalIdentity)
+            return yield* decide(
+              inspection,
+              "kept",
+              "Dependency identity changed before removal",
+            ).pipe(Effect.as(null));
+          // Preserve the policy recheck after OS inspection, then take another
+          // fresh native snapshot for consumers starting during that callback.
+          // Neither proof uses the sweep's observation cache.
+          const consumerReason = Effect.gen(function* () {
+            const paths = yield* processPaths;
+            if (paths === null) return "Process file-consumer inspection is unavailable";
+            yield* rememberConsumed(current, paths);
+            return yield* WorktreeConsumers.worktreeConsumerReason(current.worktreePath, paths);
+          });
+          const beforeEligibility = yield* consumerReason;
+          if (beforeEligibility !== null)
+            return yield* decide(inspection, "kept", beforeEligibility).pipe(Effect.as(null));
+          if (!(yield* isStillEligible))
+            return yield* decide(
+              inspection,
+              "kept",
+              "Worktree ownership or cleanup eligibility changed",
+            ).pipe(Effect.as(null));
+          const finalConsumerReason = yield* consumerReason;
+          if (finalConsumerReason !== null)
+            return yield* decide(inspection, "kept", finalConsumerReason).pipe(Effect.as(null));
           // Keep the caller's leases until native removal settles on cancellation.
           return yield* Effect.tryPromise({
             try: async () => {
-              if (!(await realDirectoryChain(current.dependencyPath))) return null;
-              const stat = await NodeFSP.lstat(current.dependencyPath);
-              if (!stat.isDirectory() || stat.dev !== current.device || stat.ino !== current.inode)
-                return null;
+              // All asynchronous eligibility and mount work is complete. Read the
+              // tiny usage evidence synchronously just before submitting removal.
+              if (dependencyActivitySnapshot(current.worktreePath) !== usageSnapshot) return null;
               // fs.rm unlinks internal symlinks; it does not traverse their targets.
               await NodeFSP.rm(current.dependencyPath, { recursive: true });
               return { ...current, estimatedReclaimedBytes: inspection.estimatedReclaimedBytes };
@@ -546,7 +697,7 @@ const make = Effect.gen(function* () {
                 inspection,
                 removed === null ? "kept" : "removed",
                 removed === null
-                  ? "Dependency identity changed before removal"
+                  ? "Dependency activity or identity changed before removal"
                   : "Dependency install removed",
               ),
             ),
@@ -563,7 +714,12 @@ const make = Effect.gen(function* () {
     );
     return removed.filter((entry) => entry !== null);
   });
-  return GeneratedDependencies.of({ inspect, removeBatch, processWorkingDirectories: processCwds });
+  return GeneratedDependencies.of({
+    observe,
+    inspect,
+    removeBatch,
+    processWorkingDirectories: processCwds,
+  });
 });
 
 export const layer = Layer.effect(GeneratedDependencies, make);

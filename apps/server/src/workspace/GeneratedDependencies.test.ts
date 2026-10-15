@@ -1,3 +1,7 @@
+import {
+  recordDependencyUse,
+  dependencyActivitySnapshot,
+} from "@t3tools/shared/dependencyActivity";
 import * as Path from "effect/Path";
 import * as Context from "effect/Context";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -15,6 +19,7 @@ import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as TestClock from "effect/testing/TestClock";
 import {
   DEFAULT_SERVER_SETTINGS,
+  GitCommandError,
   OrchestrationV2ThreadShell,
   OrchestrationV2AppThreadJson,
   OrchestrationV2ProviderSessionJson,
@@ -35,6 +40,8 @@ import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as GeneratedDependencies from "./GeneratedDependencies.ts";
 import * as DependencyMounts from "./DependencyMounts.ts";
+import * as WorktreeConsumers from "./WorktreeConsumers.ts";
+import * as WorktreeCleanup from "../orchestration-v2/WorktreeCleanupService.ts";
 import * as StorageCleanup from "../storageCleanup.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
@@ -58,6 +65,9 @@ const testLayer = (
   processCwds: Effect.Effect<ReadonlyArray<string> | null> = Effect.succeed([]),
   onDependencyInspection: () => void = () => undefined,
   mountPoints?: Effect.Effect<ReadonlyArray<string> | null>,
+  failSharedProjectInventory = false,
+  onDependencyObservation: (cwd: string) => void = () => undefined,
+  processPaths: Effect.Effect<ReadonlyArray<string> | null> = Effect.succeed([]),
 ) => {
   const gitLayer = Layer.effect(
     GitVcsDriver.GitVcsDriver,
@@ -67,7 +77,22 @@ const testLayer = (
         ...git,
         execute: (request: Parameters<typeof git.execute>[0]) =>
           Effect.gen(function* () {
+            if (
+              failSharedProjectInventory &&
+              request.operation === "StorageCleanup.registeredDependencies" &&
+              request.cwd.endsWith("/project-alias")
+            )
+              return yield* Effect.fail(
+                new GitCommandError({
+                  operation: request.operation,
+                  command: "git",
+                  cwd: request.cwd,
+                  detail: "Fixture inventory failure",
+                }),
+              );
             if (request.operation === "GeneratedDependencies.inspect") onDependencyInspection();
+            if (request.operation === "GeneratedDependencies.observe")
+              onDependencyObservation(request.cwd);
             return yield* git.execute(request);
           }),
       };
@@ -79,12 +104,12 @@ const testLayer = (
     Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-dependencies-test-" })),
     Layer.provideMerge(NodeServices.layer),
     Layer.provideMerge(Layer.succeed(GeneratedDependencies.ProcessWorkingDirectories, processCwds)),
+    Layer.provideMerge(Layer.succeed(WorktreeConsumers.ProcessPaths, processPaths)),
+    Layer.provideMerge(
+      Layer.succeed(DependencyMounts.MountPoints, mountPoints ?? Effect.succeed(["/"])),
+    ),
   );
-  return mountPoints === undefined
-    ? dependencies
-    : dependencies.pipe(
-        Layer.provideMerge(Layer.succeed(DependencyMounts.MountPoints, mountPoints)),
-      );
+  return dependencies;
 };
 
 const fixture = Effect.fn("test.dependencyFixture")(function* (manager: "npm" | "pnpm" = "pnpm") {
@@ -464,6 +489,464 @@ it.effect("preserves a worktree's live dev runtime even when its process cwd is 
   }).pipe(Effect.scoped, Effect.provide(testLayer())),
 );
 
+it.effect.each(["executable", "open", "mapped", "canonical-alias"] as const)(
+  "retains and renews an install consumed through an %s path while cwd is elsewhere",
+  (consumer) => {
+    let paths: ReadonlyArray<string> = [];
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(NOW);
+      const f = yield* fixture();
+      const original = yield* f.cleanup.observe(f.input, NOW - 20 * day);
+      assert.equal(original!.lastUsedAt, NOW - 20 * day);
+      const target = f.path.join(f.dependencyPath, "package", `${consumer}.js`);
+      yield* f.fs.writeFileString(target, "module.exports = 1;\n");
+      const reference =
+        consumer === "canonical-alias" ? f.path.join(f.root, "consumer-alias.js") : target;
+      if (consumer === "canonical-alias") yield* f.fs.symlink(target, reference);
+      paths = [reference];
+      const inspected = yield* f.cleanup.inspect(f.input);
+      assert.isNotNull(inspected);
+      assert.isNull(yield* f.cleanup.remove(inspected!, Effect.succeed(true)));
+      assert.isTrue(yield* f.fs.exists(target));
+      paths = [];
+      assert.equal((yield* f.cleanup.observe(f.input, NOW + day, false, false))!.lastUsedAt, NOW);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        testLayer(
+          Effect.succeed(["/workspace/elsewhere"]),
+          undefined,
+          undefined,
+          false,
+          undefined,
+          Effect.sync(() => paths),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect.each(["eligibility", "native"] as const)(
+  "a late %s installed-file consumer renews age even when it exits before the last guard",
+  (stage) => {
+    let paths: ReadonlyArray<string> = [];
+    let sawLateConsumer = false;
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(NOW);
+      const f = yield* fixture();
+      yield* f.cleanup.observe(f.input, NOW - 20 * day);
+      const inspected = yield* f.cleanup.inspect(f.input);
+      const target = f.path.join(f.dependencyPath, "package/index.js");
+      const decisions: GeneratedDependencies.DependencyRemovalDecision[] = [];
+      assert.isNotNull(inspected);
+      assert.deepStrictEqual(
+        yield* f.cleanup.removeBatch(
+          [
+            {
+              inspection: inspected!,
+              canRemove: Effect.sync(() => {
+                if (stage === "eligibility") paths = [target];
+                return true;
+              }),
+              isStillEligible: Effect.sync(() => {
+                if (stage === "native") paths = [target];
+                return true;
+              }),
+            },
+          ],
+          (_inspection, decision) =>
+            Effect.sync(() => {
+              decisions.push(decision);
+            }),
+        ),
+        [],
+      );
+      assert.deepStrictEqual(decisions, [
+        {
+          outcome: "kept",
+          reason:
+            stage === "eligibility"
+              ? "Dependency activity or identity changed before removal"
+              : "A process is using a file or directory in the worktree.",
+        },
+      ]);
+      assert.isTrue(sawLateConsumer);
+      assert.deepStrictEqual(paths, []);
+      assert.isTrue(yield* f.fs.exists(target));
+      assert.equal((yield* f.cleanup.observe(f.input, NOW + day, false, false))!.lastUsedAt, NOW);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        testLayer(
+          Effect.succeed(["/workspace/elsewhere"]),
+          undefined,
+          Effect.sync(() => {
+            if (sawLateConsumer) paths = []; // The consumer exits after its positive observation.
+            return ["/"];
+          }),
+          false,
+          undefined,
+          Effect.sync(() => {
+            if (paths.length > 0) sawLateConsumer = true;
+            return paths;
+          }),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect.each(["installed-file", "root", "unavailable", "none"] as const)(
+  "checks fresh consumers after the last awaited eligibility callback: %s",
+  (consumer) => {
+    let paths: ReadonlyArray<string> | null = [];
+    let finalGuardFinished = false;
+    let observedAfterGuard = false;
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(NOW);
+      const f = yield* fixture();
+      yield* f.cleanup.observe(f.input, NOW - 20 * day);
+      const before = yield* Effect.sync(() => dependencyActivitySnapshot(f.input.worktreePath));
+      const inspected = yield* f.cleanup.inspect(f.input);
+      assert.isNotNull(inspected);
+      const target = f.path.join(f.dependencyPath, "package/index.js");
+      const decisions: GeneratedDependencies.DependencyRemovalDecision[] = [];
+      let guards = 0;
+      const removed = yield* f.cleanup.removeBatch(
+        [
+          {
+            inspection: inspected!,
+            canRemove: Effect.succeed(true),
+            isStillEligible: Effect.gen(function* () {
+              if (++guards === 2) {
+                // Await an external-style milestone without recording application usage.
+                yield* f.fs.readFileString(target);
+                paths =
+                  consumer === "unavailable"
+                    ? null
+                    : consumer === "installed-file"
+                      ? [target]
+                      : consumer === "root"
+                        ? [f.input.worktreePath]
+                        : [];
+                finalGuardFinished = true;
+              }
+              return true;
+            }),
+          },
+        ],
+        (_inspection, decision) => Effect.sync(() => decisions.push(decision)),
+      );
+      assert.equal(guards, 2);
+      assert.isTrue(observedAfterGuard);
+      assert.equal(removed.length, consumer === "none" ? 1 : 0);
+      assert.equal(yield* f.fs.exists(f.dependencyPath), consumer !== "none");
+      assert.equal(decisions[0]!.outcome, consumer === "none" ? "removed" : "kept");
+      if (consumer === "unavailable")
+        assert.equal(decisions[0]!.reason, "Process file-consumer inspection is unavailable");
+      if (consumer === "root" || consumer === "installed-file")
+        assert.equal(
+          decisions[0]!.reason,
+          "A process is using a file or directory in the worktree.",
+        );
+      if (consumer === "installed-file") {
+        assert.notEqual(
+          yield* Effect.sync(() => dependencyActivitySnapshot(f.input.worktreePath)),
+          before,
+        );
+        paths = [];
+        assert.equal((yield* f.cleanup.observe(f.input, NOW, false, false))!.lastUsedAt, NOW);
+      } else if (consumer !== "none") {
+        assert.equal(
+          yield* Effect.sync(() => dependencyActivitySnapshot(f.input.worktreePath)),
+          before,
+        );
+      }
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        testLayer(
+          Effect.succeed(["/workspace/elsewhere"]),
+          undefined,
+          undefined,
+          false,
+          undefined,
+          Effect.sync(() => {
+            observedAfterGuard ||= finalGuardFinished;
+            return paths;
+          }),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect(
+  "generic checkout cwd and source-file consumers protect while live without renewing dependency use",
+  () => {
+    let paths: ReadonlyArray<string> = [];
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(NOW);
+      const f = yield* fixture();
+      yield* f.cleanup.observe(f.input, NOW - 20 * day);
+      const before = yield* Effect.sync(() => dependencyActivitySnapshot(f.input.worktreePath));
+      const inspected = yield* f.cleanup.inspect(f.input);
+      assert.isNotNull(inspected);
+      for (const reference of [
+        f.input.worktreePath,
+        f.path.join(f.input.worktreePath, "source.ts"),
+      ]) {
+        paths = [reference];
+        assert.isNull(yield* f.cleanup.remove(inspected!, Effect.succeed(true)));
+        assert.equal(
+          (yield* f.cleanup.observe(f.input, NOW, false, false))!.lastUsedAt,
+          NOW - 20 * day,
+        );
+        assert.equal(
+          yield* Effect.sync(() => dependencyActivitySnapshot(f.input.worktreePath)),
+          before,
+        );
+      }
+      paths = [];
+      assert.isNotNull(yield* f.cleanup.remove(inspected!, Effect.succeed(true)));
+      assert.isFalse(yield* f.fs.exists(f.dependencyPath));
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        testLayer(
+          Effect.succeed([]),
+          undefined,
+          undefined,
+          false,
+          undefined,
+          Effect.sync(() => paths),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect(
+  "read-only observation compares metadata without sampling or renewing unsaved installed-file use",
+  () => {
+    let paths: ReadonlyArray<string> = [];
+    let inventoryReads = 0;
+    return Effect.gen(function* () {
+      const f = yield* fixture();
+      yield* f.cleanup.observe(f.input, NOW - 20 * day);
+      const before = yield* Effect.sync(() => dependencyActivitySnapshot(f.input.worktreePath));
+      paths = [f.path.join(f.dependencyPath, "package/index.js")];
+      const readonly = yield* f.cleanup.observe(f.input, NOW, false, false);
+      assert.equal(readonly!.lastUsedAt, NOW - 20 * day);
+      assert.isFalse(readonly!.renewed);
+      assert.equal(inventoryReads, 1);
+      assert.equal(
+        yield* Effect.sync(() => dependencyActivitySnapshot(f.input.worktreePath)),
+        before,
+      );
+      paths = [];
+      assert.equal(
+        (yield* f.cleanup.observe(f.input, NOW + day, false, false))!.lastUsedAt,
+        NOW - 20 * day,
+      );
+      assert.equal(inventoryReads, 1);
+      paths = [f.path.join(f.dependencyPath, "package/index.js")];
+      yield* f.cleanup.observe(f.input, NOW);
+      paths = [];
+      assert.equal((yield* f.cleanup.observe(f.input, NOW + day, false, false))!.lastUsedAt, NOW);
+      assert.equal(inventoryReads, 2);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        testLayer(
+          Effect.succeed([]),
+          undefined,
+          undefined,
+          false,
+          undefined,
+          Effect.sync(() => {
+            inventoryReads++;
+            return paths;
+          }),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect(
+  "keeps dependencies when the full process inventory is unknown, including at the final seam",
+  () => {
+    let paths: ReadonlyArray<string> | null = [];
+    return Effect.gen(function* () {
+      const f = yield* fixture();
+      yield* f.cleanup.observe(f.input, NOW - 20 * day);
+      const before = yield* Effect.sync(() => dependencyActivitySnapshot(f.input.worktreePath));
+      const inspected = yield* f.cleanup.inspect(f.input);
+      assert.isNotNull(inspected);
+      paths = null;
+      assert.isNull(yield* f.cleanup.observe(f.input, NOW));
+      assert.isNull(yield* f.cleanup.remove(inspected!, Effect.succeed(true)));
+      paths = [];
+      assert.isNull(
+        yield* f.cleanup.remove(
+          inspected!,
+          Effect.sync(() => {
+            paths = null;
+            return true;
+          }),
+        ),
+      );
+      assert.isTrue(yield* f.fs.exists(f.dependencyPath));
+      assert.equal(
+        yield* Effect.sync(() => dependencyActivitySnapshot(f.input.worktreePath)),
+        before,
+      );
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        testLayer(
+          Effect.succeed([]),
+          undefined,
+          undefined,
+          false,
+          undefined,
+          Effect.sync(() => paths),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect.each(["initial", "eligibility", "native"] as const)(
+  "reports the incomplete %s file-consumer inventory as a kept decision",
+  (stage) => {
+    let paths: ReadonlyArray<string> | null = [];
+    return Effect.gen(function* () {
+      const f = yield* fixture();
+      const inspected = yield* f.cleanup.inspect(f.input);
+      assert.isNotNull(inspected);
+      const decisions: GeneratedDependencies.DependencyRemovalDecision[] = [];
+      if (stage === "initial") paths = null;
+      const removed = yield* f.cleanup.removeBatch(
+        [
+          {
+            inspection: inspected!,
+            canRemove: Effect.sync(() => {
+              if (stage === "eligibility") paths = null;
+              return true;
+            }),
+            isStillEligible: Effect.sync(() => {
+              if (stage === "native") paths = null;
+              return true;
+            }),
+          },
+        ],
+        (_inspection, decision) =>
+          Effect.sync(() => {
+            decisions.push(decision);
+          }),
+      );
+      assert.deepStrictEqual(removed, []);
+      assert.deepStrictEqual(decisions, [
+        {
+          outcome: "kept",
+          reason: "Process file-consumer inspection is unavailable",
+        },
+      ]);
+      assert.isTrue(yield* f.fs.exists(f.dependencyPath));
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        testLayer(
+          Effect.succeed([]),
+          undefined,
+          undefined,
+          false,
+          undefined,
+          Effect.sync(() => paths),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect(
+  "rechecks application eligibility after policy changes during the final file-consumer inventory",
+  () => {
+    let inventoryReads = 0;
+    let eligible = true;
+    let eligibilityChecks = 0;
+    return Effect.gen(function* () {
+      const f = yield* fixture();
+      const inspected = yield* f.cleanup.inspect(f.input);
+      assert.isNotNull(inspected);
+      const removed = yield* f.cleanup.removeBatch([
+        {
+          inspection: inspected!,
+          canRemove: Effect.succeed(true),
+          isStillEligible: Effect.sync(() => {
+            eligibilityChecks++;
+            return eligible;
+          }),
+        },
+      ]);
+      assert.deepStrictEqual(removed, []);
+      assert.equal(inventoryReads, 3);
+      assert.equal(eligibilityChecks, 2);
+      assert.isTrue(yield* f.fs.exists(f.dependencyPath));
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        testLayer(
+          Effect.succeed([]),
+          undefined,
+          undefined,
+          false,
+          undefined,
+          Effect.sync(() => {
+            if (++inventoryReads === 3) eligible = false;
+            return [];
+          }),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect(
+  "malformed optional usage evidence keeps dependencies even with positively observed consumers",
+  () => {
+    let paths: ReadonlyArray<string> = [];
+    return Effect.gen(function* () {
+      const f = yield* fixture();
+      const inspected = yield* f.cleanup.inspect(f.input);
+      assert.isNotNull(inspected);
+      const location = yield* f.runGit(f.input.worktreePath, ["rev-parse", "--absolute-git-dir"]);
+      const record = f.path.join(location.stdout.trim(), "t3-dependency-activity.json");
+      yield* f.fs.writeFileString(record, "invalid usage evidence");
+      paths = [f.path.join(f.dependencyPath, "package/index.js")];
+      const error = yield* f.cleanup.observe(f.input, NOW).pipe(Effect.flip);
+      assert.equal(error._tag, "GeneratedDependenciesError");
+      assert.isNull(yield* f.cleanup.remove(inspected!, Effect.succeed(true)));
+      assert.equal(yield* f.fs.readFileString(record), "invalid usage evidence");
+      assert.isTrue(yield* f.fs.exists(f.dependencyPath));
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        testLayer(
+          Effect.succeed([]),
+          undefined,
+          undefined,
+          false,
+          undefined,
+          Effect.sync(() => paths),
+        ),
+      ),
+    );
+  },
+);
+
 it.effect(
   "preserves shared pnpm store hardlinks and excludes them from estimated reclaimed bytes",
   () =>
@@ -631,6 +1114,75 @@ it.effect("one dependency removal error leaves its sibling eligible for deletion
   }).pipe(Effect.scoped, Effect.provide(testLayer())),
 );
 
+it.effect(
+  "reports an installed-file consumer as kept while removing its healthy batch sibling",
+  () => {
+    let paths: ReadonlyArray<string> = [];
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(NOW);
+      const first = yield* inspectedBatchFixture();
+      const healthy = yield* inspectedBatchFixture();
+      yield* first.cleanup.observe(first.input, NOW - 20 * day);
+      const target = first.path.join(first.dependencyPath, "package/index.js");
+      const alias = first.path.join(first.root, "installed-consumer.js");
+      yield* first.fs.symlink(target, alias);
+      paths = [alias];
+      const decisions: Array<{ path: string; outcome: string; reason: string }> = [];
+      const removed = yield* first.cleanup.removeBatch(
+        [
+          {
+            inspection: first.inspection,
+            canRemove: Effect.succeed(true),
+            isStillEligible: Effect.succeed(true),
+          },
+          {
+            inspection: healthy.inspection,
+            canRemove: Effect.succeed(true),
+            isStillEligible: Effect.succeed(true),
+          },
+        ],
+        (inspection, decision) =>
+          Effect.sync(() => {
+            decisions.push({ path: inspection.dependencyPath, ...decision });
+          }),
+      );
+      assert.deepStrictEqual(
+        removed.map((entry) => entry.dependencyPath),
+        [healthy.dependencyPath],
+      );
+      assert.deepStrictEqual(decisions, [
+        {
+          path: first.dependencyPath,
+          outcome: "kept",
+          reason: "An active process owns the worktree",
+        },
+        { path: healthy.dependencyPath, outcome: "removed", reason: "Dependency install removed" },
+      ]);
+      assert.isTrue(yield* first.fs.exists(target));
+      assert.isFalse(yield* healthy.fs.exists(healthy.dependencyPath));
+      paths = [];
+      assert.equal(
+        (yield* first.cleanup.observe(first.input, NOW + day, false, false))!.lastUsedAt,
+        NOW,
+      );
+      yield* assertBatchWorkspacePreserved(first);
+      yield* assertBatchWorkspacePreserved(healthy);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        testLayer(
+          Effect.succeed(["/workspace/elsewhere"]),
+          undefined,
+          undefined,
+          false,
+          undefined,
+          Effect.sync(() => paths),
+        ),
+      ),
+    );
+  },
+);
+
 it.effect("reports typed eligibility failures and removes a healthy batch sibling", () =>
   Effect.gen(function* () {
     const first = yield* inspectedBatchFixture();
@@ -734,8 +1286,37 @@ const makeShell = (worktreePath: string) =>
   });
 
 type SweepCase =
+  | "ownerless-eligible"
+  | "ownerless-legacy"
+  | "ownerless-reprepared"
+  | "ownerless-regenerated"
+  | "ownerless-off"
+  | "ownerless-process"
+  | "ownerless-preview"
+  | "ownerless-history"
+  | "ownerless-use-during-inspection"
+  | "ownerless-project-off"
+  | "ownerless-shared-project"
+  | "ownerless-shared-project-failed-inventory"
+  | "ownerless-non-git-project"
   | "eligible"
   | "archived"
+  | "archived-status-only"
+  | "archived-unknown-age"
+  | "archived-reprepared"
+  | "archived-off"
+  | "archived-shared"
+  | "archived-shared-active"
+  | "archived-shared-off"
+  | "archived-shared-unarchived"
+  | "archived-shared-reopened"
+  | "archived-shared-pending"
+  | "archived-shared-policy-race"
+  | "owned-use-recent"
+  | "owned-custom-short"
+  | "owned-custom-long"
+  | "owned-inherited-use"
+  | "owned-project-custom"
   | "whole-policy"
   | "whole-removal"
   | "whole-shared-deleted-visible-pending"
@@ -808,6 +1389,8 @@ type SweepCase =
   | "final-mount-queued-run"
   | "final-mount-candidate-event"
   | "final-mount-provider-ownership"
+  | "final-mount-dependency-use"
+  | "final-mount-late-dependency-use"
   | "worker-ready-burst"
   | "worker-terminal-burst"
   | "worker-settings-burst";
@@ -821,6 +1404,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     readonly releaseInitialInventory: Deferred.Deferred<void>;
   },
   setMountReader: (reader: Effect.Effect<ReadonlyArray<string> | null>) => void,
+  setObservationHook: (hook: (cwd: string) => void) => void,
 ) {
   yield* TestClock.setTime(NOW);
   const f = yield* fixture();
@@ -843,6 +1427,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   ])
     yield* sql.unsafe(query);
   let thread = makeShell(f.input.worktreePath);
+  const ownerless = mode.startsWith("ownerless-");
   const workerLifecycle = mode.startsWith("worker-");
   const batch =
     mode === "batch" ||
@@ -911,7 +1496,31 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
         },
       }
     : null;
-  if (mode === "archived") thread = { ...thread, archivedAt: at(15) };
+  const archivedShared = mode.startsWith("archived-shared");
+  if (mode === "archived" || mode.startsWith("archived-"))
+    thread = { ...thread, archivedAt: at(15) };
+  if (mode === "archived-status-only" || mode === "recent")
+    thread = {
+      ...thread,
+      latestUserMessageAt: at(1),
+      latestRunRequestedAt: at(1),
+      latestRunStartedAt: at(1),
+      latestRunCompletedAt: at(1),
+    };
+  let sharedSibling = archivedShared
+    ? {
+        ...thread,
+        id: ThreadId.make("archived-sibling"),
+        projectId:
+          mode === "archived-shared-off" || mode === "archived-shared-policy-race"
+            ? ProjectId.make("sibling-project")
+            : thread.projectId,
+        archivedAt: mode === "archived-shared-unarchived" ? null : at(15),
+        status: mode === "archived-shared-active" ? ("queued" as const) : ("idle" as const),
+      }
+    : null;
+  if (mode === "archived-shared-pending")
+    yield* sql`INSERT INTO orchestration_v2_projection_runs VALUES (${sharedSibling!.id}, 'queued')`;
   if (mode === "deleted-visible-pending")
     thread = {
       ...thread,
@@ -933,7 +1542,14 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
         mode === "whole-policy"
           ? "any-local-files"
           : DEFAULT_SERVER_SETTINGS.storageCleanup.worktreeKeepWhen,
-      worktreeDependenciesAfterDays: mode === "disabled" ? null : 7,
+      worktreeDependenciesAfterDays:
+        mode === "disabled" || mode === "ownerless-off" || mode === "archived-off"
+          ? null
+          : mode === "owned-custom-short"
+            ? 3
+            : mode === "owned-custom-long" || mode === "owned-inherited-use"
+              ? 14
+              : 7,
       worktreeAfterDays:
         wholeSharedDeleted || wholeSession
           ? 7
@@ -945,6 +1561,48 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
       worktreeUnchanged: false,
     },
   };
+  if (mode === "ownerless-project-off")
+    settings = {
+      ...settings,
+      projectSettingsOverrides: { [projectId]: { worktreeCleanup: { mode: "off" } } },
+    };
+  if (mode === "archived-shared-off")
+    settings = {
+      ...settings,
+      projectSettingsOverrides: {
+        [sharedSibling!.projectId]: { worktreeCleanup: { mode: "off" } },
+      },
+    };
+  if (mode === "owned-inherited-use")
+    settings = {
+      ...settings,
+      projectSettingsOverrides: { [projectId]: { worktreeCleanup: null } },
+    };
+  if (mode === "owned-project-custom")
+    settings = {
+      ...settings,
+      projectSettingsOverrides: {
+        [projectId]: {
+          worktreeCleanup: {
+            mode: "custom",
+            rules: { ...settings.storageCleanup, worktreeDependenciesAfterDays: 14 },
+          },
+        },
+      },
+    };
+  const siblingProjectRoot = f.path.join(f.root, "sibling-project");
+  if (mode === "archived-shared-policy-race") {
+    yield* f.fs.symlink(f.repository, siblingProjectRoot);
+    setObservationHook((cwd) => {
+      if (cwd === siblingProjectRoot)
+        settings = {
+          ...settings,
+          projectSettingsOverrides: {
+            [sharedSibling!.projectId]: { worktreeCleanup: { mode: "off" } },
+          },
+        };
+    });
+  }
   let mountReads = 0;
   setMountReader(
     Effect.gen(function* () {
@@ -960,7 +1618,10 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
         if (mode === "final-mount-candidate-event")
           yield* sql`INSERT INTO orchestration_events (aggregate_kind, stream_id, event_type, occurred_at, application_event_version) VALUES ('thread', ${threadId}, 'turn-item.updated', ${DateTime.formatIso(at(0))}, 2)`;
         if (mode === "final-mount-provider-ownership") acquireManagerOwnership();
+        if (mode === "final-mount-dependency-use") yield* f.cleanup.observe(f.input, NOW, true);
       }
+      if (mountReads === 3 && mode === "final-mount-late-dependency-use")
+        yield* f.cleanup.observe(f.input, NOW, true);
       return ["/"];
     }).pipe(Effect.orDie),
   );
@@ -1092,6 +1753,36 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
       yield* sql`INSERT INTO orchestration_v2_projection_threads VALUES (${deletedHistoryId}, ${projectId}, ${payload}, 'deleted')`;
     }
   }
+  // These existing guard cases start with a positively observed old installation.
+  if (mode !== "ownerless-legacy" && mode !== "archived-unknown-age")
+    for (const candidate of [thread, ...additionalThreads])
+      yield* f.cleanup.observe(
+        { ...f.input, worktreePath: candidate.worktreePath! },
+        NOW - 30 * day,
+      );
+  if (mode === "ownerless-reprepared") yield* f.cleanup.observe(f.input, NOW - day, true);
+  if (mode === "archived-reprepared" || mode === "owned-use-recent")
+    yield* Effect.sync(() => recordDependencyUse(f.input.worktreePath, NOW - day));
+  if (
+    mode === "owned-custom-short" ||
+    mode === "owned-custom-long" ||
+    mode === "owned-inherited-use" ||
+    mode === "owned-project-custom"
+  )
+    yield* Effect.sync(() => recordDependencyUse(f.input.worktreePath, NOW - 10 * day));
+  if (mode === "ownerless-regenerated") {
+    yield* f.fs.remove(f.dependencyPath, { recursive: true });
+    yield* f.fs.makeDirectory(f.path.join(f.dependencyPath, "package"), { recursive: true });
+    yield* f.fs.writeFileString(f.path.join(f.dependencyPath, f.marker), "layoutVersion: 5\n");
+    yield* f.fs.writeFileString(
+      f.path.join(f.dependencyPath, "package/index.js"),
+      "module.exports = 2;\n",
+    );
+  }
+  if (mode === "ownerless-history") {
+    yield* sql`CREATE TABLE projection_threads (thread_id TEXT, worktree_path TEXT, branch TEXT, project_id TEXT)`;
+    yield* sql`INSERT INTO projection_threads VALUES ('legacy-owner', ${f.input.worktreePath}, 'feature', ${projectId})`;
+  }
   const project = {
     id: projectId,
     workspaceRoot: mode === "project-root" ? f.input.worktreePath : f.repository,
@@ -1101,6 +1792,10 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     createdAt: "2026-05-01T00:00:00.000Z",
     updatedAt: "2026-05-01T00:00:00.000Z",
   };
+  const otherProjectRoot = f.path.join(f.root, "project-alias");
+  if (mode === "ownerless-shared-project-failed-inventory")
+    yield* f.fs.symlink(f.repository, otherProjectRoot);
+  if (mode === "ownerless-non-git-project") yield* f.fs.makeDirectory(otherProjectRoot);
   let reads = 0;
   let deletedEventInserted = false;
   const sessionLookups = new Map<string, number>();
@@ -1110,6 +1805,9 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   let processStartedDuringInspection = false;
   setProcessReader(() => {
     processReads++;
+    if (mode === "ownerless-process") return [f.input.worktreePath];
+    if (mode === "ownerless-use-during-inspection" && dependencyInspections() > 0)
+      return [f.path.join(f.dependencyPath, "package")];
     if (mode === "process-unknown" || (mode === "batch-process-unknown" && processReads > 1))
       return null;
     if (mode === "batch-process-started" && dependencyInspections() > 0) {
@@ -1213,20 +1911,60 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
         )
       : Stream.empty;
   const dependencies = Layer.mergeAll(
+    Layer.mock(WorktreeCleanup.WorktreeCleanupService)({
+      historicalWorktreeOwners: Effect.succeed(
+        mode === "ownerless-history"
+          ? [
+              {
+                threadId: "legacy-owner",
+                worktreePath: f.input.worktreePath,
+                branch: "feature",
+                projectId,
+              },
+            ]
+          : [],
+      ),
+    }),
     Layer.succeed(ServerConfig.ServerConfig, {
       ...config,
       worktreesDir: f.input.managedWorktreesRoot,
     }),
-    Layer.mock(ProjectStore.ProjectStoreV2)({ listShells: () => Effect.succeed([project]) }),
+    Layer.mock(ProjectStore.ProjectStoreV2)({
+      listShells: () =>
+        Effect.succeed(
+          mode === "ownerless-shared-project" ||
+            mode === "ownerless-shared-project-failed-inventory" ||
+            mode === "ownerless-non-git-project"
+            ? [
+                project,
+                {
+                  ...project,
+                  id: ProjectId.make("other-project"),
+                  workspaceRoot:
+                    mode === "ownerless-shared-project" ? f.repository : otherProjectRoot,
+                },
+              ]
+            : mode === "archived-shared-off" || mode === "archived-shared-policy-race"
+              ? [
+                  project,
+                  {
+                    ...project,
+                    id: sharedSibling!.projectId,
+                    workspaceRoot:
+                      mode === "archived-shared-policy-race" ? siblingProjectRoot : f.repository,
+                  },
+                ]
+              : [project],
+        ),
+    }),
     Layer.mock(ProjectionStore.ProjectionStoreV2)({
       getShellSnapshot: (options) =>
         Effect.gen(function* () {
           reads++;
-          if (reads === 2 && mode === "whole-shared-session-error-ownership-changed")
-            acquireManagerOwnership();
           if (reads === 1 && mode === "initial-revision-changed")
             yield* sql`INSERT INTO orchestration_events (sequence, aggregate_kind, stream_id, event_type, application_event_version) VALUES (1, 'thread', ${threadId}, 'thread.metadata-updated', 2)`;
           const threads =
+            ownerless ||
             options?.location === "archive" ||
             (deleted && mode !== "deleted-visible-pending") ||
             mode === "archived"
@@ -1242,15 +1980,24 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
             schemaVersion: 1 as const,
             snapshotSequence: 0,
             projects: [project],
-            threads,
-            archivedThreads:
-              mode === "batch"
-                ? unrelatedHistory
-                : mode === "archived"
-                  ? [thread]
-                  : mode === "shared-archived"
-                    ? [{ ...thread, id: ThreadId.make("archived-other"), archivedAt: at(15) }]
-                    : [],
+            threads: archivedShared
+              ? sharedSibling!.archivedAt === null
+                ? [sharedSibling!]
+                : []
+              : mode.startsWith("archived-")
+                ? []
+                : threads,
+            archivedThreads: archivedShared
+              ? [thread, ...(sharedSibling!.archivedAt !== null ? [sharedSibling!] : [])]
+              : mode.startsWith("archived-")
+                ? [thread]
+                : mode === "batch"
+                  ? unrelatedHistory
+                  : mode === "archived"
+                    ? [thread]
+                    : mode === "shared-archived"
+                      ? [{ ...thread, id: ThreadId.make("archived-other"), archivedAt: at(15) }]
+                      : [],
           };
         }).pipe(Effect.orDie),
       getThreadShell: (requestedId) =>
@@ -1262,7 +2009,8 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
           }
           if (
             targetedReads.length === 1 &&
-            (mode === "shared-session-error-ownership-changed" ||
+            (mode === "whole-shared-session-error-ownership-changed" ||
+              mode === "shared-session-error-ownership-changed" ||
               mode === "shared-session-stopped-ownership-changed")
           )
             acquireManagerOwnership();
@@ -1307,6 +2055,11 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
               }),
             );
             providerEventInserted = true;
+          }
+          if (requestedId === sharedSibling?.id) {
+            if (mode === "archived-shared-reopened")
+              sharedSibling = { ...sharedSibling, archivedAt: null };
+            return sharedSibling;
           }
           const additionalThread = additionalThreads.find(
             (candidate) => candidate.id === requestedId,
@@ -1369,7 +2122,9 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     }),
     Layer.mock(PreviewHosting.PreviewHosting)({
       protectedWorkspacePaths: () =>
-        Effect.succeed(mode === "preview" ? [f.input.worktreePath] : []),
+        Effect.succeed(
+          mode === "preview" || mode === "ownerless-preview" ? [f.input.worktreePath] : [],
+        ),
     }),
   );
   const cleanupContext = yield* Layer.build(StorageCleanup.layer).pipe(
@@ -1411,9 +2166,12 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
       yield* Deferred.succeed(workerControl.releaseInitialInventory, undefined);
       yield* worker.drain;
     }).pipe(Effect.ensuring(Deferred.succeed(workerControl.releaseInitialInventory, undefined)));
-    // Each sweep reads dependency owners once and refreshes them once for the audit.
-    assert.equal(reads, mode === "worker-ready-burst" ? 2 : 4);
-    assert.equal(processReads, mode === "worker-terminal-burst" ? 3 : 2);
+    // Each sweep inventories dependency and build owners, then refreshes ownership for the audit.
+    assert.equal(reads, mode === "worker-ready-burst" ? 3 : 6);
+    assert.equal(
+      processReads,
+      mode === "worker-terminal-burst" ? 5 : mode === "worker-ready-burst" ? 3 : 4,
+    );
     assert.equal(
       yield* f.fs.readFileString(f.path.join(f.input.worktreePath, "tmp/notes.md")),
       "private notes",
@@ -1421,20 +2179,80 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     if (mode === "worker-settings-burst")
       assert.equal(settings.storageCleanup.worktreeDependenciesAfterDays, 30);
   } else yield* worker.runNow;
+  if (ownerless) {
+    const report = yield* worker.latestReport;
+    const removed = mode === "ownerless-eligible" || mode === "ownerless-non-git-project";
+    assert.equal(yield* f.fs.exists(f.dependencyPath), !removed);
+    assert.equal(
+      yield* f.fs.readFileString(f.path.join(f.input.worktreePath, "source.ts")),
+      source,
+    );
+    assert.equal(
+      yield* f.fs.readFileString(f.path.join(f.input.worktreePath, "research/notes.md")),
+      "private research",
+    );
+    if (removed) {
+      assert.isAtLeast(report!.bytesFreed, 0);
+      assert.isTrue(
+        report!.entries.some((entry) => entry.outcome === "removed" && entry.threadId === null),
+      );
+    }
+    if (mode === "ownerless-legacy") {
+      assert.isTrue(
+        report!.entries.some((entry) => entry.reason.includes("full inactivity period")),
+      );
+      yield* TestClock.setTime(NOW + 8 * day);
+      yield* worker.runNow;
+      assert.isFalse(yield* f.fs.exists(f.dependencyPath));
+    }
+    if (mode === "ownerless-use-during-inspection") {
+      assert.equal(report!.bytesFreed, 0);
+      setProcessReader(() => []);
+      yield* TestClock.setTime(NOW + day);
+      yield* worker.runNow;
+      assert.isTrue(yield* f.fs.exists(f.dependencyPath));
+      yield* TestClock.setTime(NOW + 8 * day);
+      yield* worker.runNow;
+      assert.isFalse(yield* f.fs.exists(f.dependencyPath));
+    }
+    if (mode === "ownerless-process") {
+      setProcessReader(() => []);
+      yield* TestClock.setTime(NOW + day);
+      yield* worker.runNow;
+      assert.isFalse(yield* f.fs.exists(f.dependencyPath));
+    }
+    if (mode === "ownerless-reprepared") {
+      yield* TestClock.setTime(NOW + 8 * day);
+      yield* worker.runNow;
+      assert.isFalse(yield* f.fs.exists(f.dependencyPath));
+    }
+    return;
+  }
   if (
     mode === "whole-removal" ||
     (wholeSession &&
       ((stoppedSession && !liveStoppedSession) || detachedSession || releasedErrorSession))
   ) {
     assert.isFalse(yield* f.fs.exists(f.input.worktreePath));
-    assert.equal(dependencyInspections(), 0);
+    // The lifecycle removes dependencies before attempting the source checkout.
+    // One recognition plus one removal revalidation each make four Git checks.
+    assert.equal(dependencyInspections(), 8);
     return;
   }
   const expectedRemoval =
     mode === "eligible" ||
     mode === "final-mount-unchanged" ||
     mode === "archived" ||
+    mode === "archived-status-only" ||
+    mode === "archived-unknown-age" ||
+    mode === "archived-reprepared" ||
+    mode === "archived-shared" ||
+    mode === "recent" ||
+    mode === "owned-custom-short" ||
     mode === "deleted" ||
+    mode === "deleted-recent" ||
+    mode === "deleted-canonical-event" ||
+    mode === "deleted-out-of-order-event" ||
     mode === "deleted-unrelated-events" ||
     mode === "whole-policy" ||
     releasedErrorSession ||
@@ -1445,8 +2263,8 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     mode === "worker-terminal-burst" ||
     (batch && mode !== "batch-process-started" && mode !== "batch-process-unknown");
   if (batch) {
-    assert.equal(reads, 2);
-    assert.equal(processReads, mode === "batch-five" ? 3 : 2);
+    assert.equal(reads, 3);
+    assert.equal(processReads, mode === "batch-five" ? 4 : 3);
     assert.include(targetedReads, threadId);
     for (const candidate of additionalThreads) {
       assert.include(targetedReads, candidate.id);
@@ -1469,7 +2287,8 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   }
   if (mode === "provider-history-batch") {
     assert.equal(sessionLookups.size, 40);
-    for (const count of sessionLookups.values()) assert.equal(count, 1);
+    // Dependency and build cleanup each cache shared historical-session reads.
+    for (const count of sessionLookups.values()) assert.equal(count, 2);
   }
   if (managerOwnershipCase) {
     assert.equal(ownershipRevision, 1);
@@ -1488,16 +2307,20 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     assert.equal(dependencyInspections(), 0);
   }
   if (mode === "revision-changed") {
-    assert.equal(reads, 2);
+    assert.equal(reads, 3);
     assert.equal(dependencyInspections(), 0);
   }
   if (mode === "deleted-event-after-capture") assert.isTrue(deletedEventInserted);
   if (mode.startsWith("final-mount-")) {
-    // The mutation occurs only after both complete eligibility checks have run.
-    assert.equal(mountReads, mode === "final-mount-unchanged" ? 3 : 2);
+    // The mutation occurs after both complete eligibility checks. Only the
+    // unchanged candidate reaches the additional post-callback consumer proof.
+    assert.equal(
+      mountReads,
+      mode === "final-mount-unchanged" ? 5 : mode === "final-mount-late-dependency-use" ? 4 : 2,
+    );
     assert.equal(targetedReads.length, 4);
-    assert.equal(processReads, 2);
-    assert.equal(reads, 2);
+    assert.equal(processReads, 3);
+    assert.equal(reads, 3);
     if (mode === "final-mount-policy-off")
       assert.isNull(settings.storageCleanup.worktreeDependenciesAfterDays);
     if (mode === "final-mount-queued-run")
@@ -1532,8 +2355,37 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
 });
 
 it.effect.each([
+  "ownerless-eligible",
+  "ownerless-legacy",
+  "ownerless-reprepared",
+  "ownerless-regenerated",
+  "ownerless-off",
+  "ownerless-process",
+  "ownerless-preview",
+  "ownerless-history",
+  "ownerless-use-during-inspection",
+  "ownerless-project-off",
+  "ownerless-shared-project",
+  "ownerless-shared-project-failed-inventory",
+  "ownerless-non-git-project",
   "eligible",
   "archived",
+  "archived-status-only",
+  "archived-unknown-age",
+  "archived-reprepared",
+  "archived-off",
+  "archived-shared",
+  "archived-shared-active",
+  "archived-shared-off",
+  "archived-shared-unarchived",
+  "archived-shared-reopened",
+  "archived-shared-pending",
+  "archived-shared-policy-race",
+  "owned-use-recent",
+  "owned-custom-short",
+  "owned-custom-long",
+  "owned-inherited-use",
+  "owned-project-custom",
   "whole-policy",
   "whole-removal",
   "whole-shared-deleted-visible-pending",
@@ -1606,6 +2458,8 @@ it.effect.each([
   "final-mount-queued-run",
   "final-mount-candidate-event",
   "final-mount-provider-ownership",
+  "final-mount-dependency-use",
+  "final-mount-late-dependency-use",
   "worker-ready-burst",
   "worker-terminal-burst",
   "worker-settings-burst",
@@ -1615,6 +2469,7 @@ it.effect.each([
     let dependencyInspections = 0;
     let processEffectReads = 0;
     let readMounts: Effect.Effect<ReadonlyArray<string> | null> = Effect.succeed(["/"]);
+    let observationHook: (cwd: string) => void = () => undefined;
     const initialInventoryEntered = yield* Deferred.make<void>();
     const releaseInitialInventory = yield* Deferred.make<void>();
     const processes = Effect.gen(function* () {
@@ -1635,6 +2490,9 @@ it.effect.each([
       (reader) => {
         readMounts = reader;
       },
+      (hook) => {
+        observationHook = hook;
+      },
     ).pipe(
       Effect.scoped,
       Effect.provide(
@@ -1643,6 +2501,8 @@ it.effect.each([
             processes,
             () => dependencyInspections++,
             Effect.suspend(() => readMounts),
+            mode === "ownerless-shared-project-failed-inventory",
+            (cwd) => observationHook(cwd),
           ),
           NodeSqliteClient.layer({ filename: ":memory:" }).pipe(Layer.provide(NodeServices.layer)),
         ),
@@ -1650,3 +2510,147 @@ it.effect.each([
     );
   });
 });
+
+it.effect(
+  "supplied dependency observations renew actual use without evaluating default inventory",
+  () => {
+    let defaultReads = 0;
+    return Effect.gen(function* () {
+      const f = yield* fixture();
+      yield* f.cleanup.observe(f.input, NOW - 20 * day, false, true, Effect.succeed([]));
+      let suppliedReads = 0;
+      const supplied = Effect.sync(() => {
+        suppliedReads++;
+        return [f.path.join(f.dependencyPath, "package/index.js")];
+      });
+      assert.deepEqual(yield* f.cleanup.observe(f.input, NOW, false, true, supplied), {
+        lastUsedAt: NOW,
+        renewed: true,
+      });
+      assert.equal(suppliedReads, 1);
+      assert.equal(defaultReads, 0);
+      assert.isNull(
+        yield* f.cleanup.observe(f.input, NOW + day, false, true, Effect.succeed(null)),
+      );
+      assert.equal((yield* f.cleanup.observe(f.input, NOW + day, false, false))!.lastUsedAt, NOW);
+      assert.equal(defaultReads, 0);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        testLayer(
+          undefined,
+          undefined,
+          undefined,
+          false,
+          undefined,
+          Effect.sync(() => {
+            defaultReads++;
+            return null;
+          }),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect(
+  "dependency observations skip inventory for read-only, invalid and missing installs",
+  () => {
+    let reads = 0;
+    return Effect.gen(function* () {
+      const f = yield* fixture();
+      yield* f.cleanup.observe(f.input, NOW - 20 * day);
+      assert.equal(reads, 1);
+      assert.equal(
+        (yield* f.cleanup.observe(f.input, NOW, false, false))!.lastUsedAt,
+        NOW - 20 * day,
+      );
+      const supplied = Effect.sync(() => {
+        reads++;
+        return [] as readonly string[];
+      });
+      yield* f.cleanup.observe(f.input, NOW, false, false, supplied);
+      assert.equal(reads, 1);
+      yield* f.fs.remove(f.path.join(f.dependencyPath, f.marker));
+      assert.isNull(yield* f.cleanup.observe(f.input, NOW));
+      assert.isNull(yield* f.cleanup.observe(f.input, NOW, false, true, supplied));
+      yield* f.fs.remove(f.dependencyPath, { recursive: true });
+      assert.isNull(yield* f.cleanup.observe(f.input, NOW));
+      assert.equal(reads, 1);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        testLayer(
+          undefined,
+          undefined,
+          undefined,
+          false,
+          undefined,
+          Effect.sync(() => {
+            reads++;
+            return [];
+          }),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect(
+  "cached empty dependency observation never authorizes removal after a new installed-file consumer",
+  () => {
+    let paths: readonly string[] = [];
+    let freshReads = 0;
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(NOW);
+      const f = yield* fixture();
+      const observationTargets = WorktreeConsumers.createTargetObservation();
+      let observationReads = 0;
+      const cachedPaths = yield* Effect.cached(
+        Effect.sync(() => {
+          observationReads++;
+          return [] as readonly string[];
+        }),
+      );
+      yield* f.cleanup.observe(
+        f.input,
+        NOW - 20 * day,
+        false,
+        true,
+        cachedPaths,
+        observationTargets,
+      );
+      paths = [f.path.join(f.dependencyPath, "package/index.js")];
+      assert.equal(
+        (yield* f.cleanup.observe(f.input, NOW, false, true, cachedPaths, observationTargets))!
+          .lastUsedAt,
+        NOW - 20 * day,
+      );
+      assert.equal(observationReads, 1);
+      assert.equal(freshReads, 0);
+      const inspection = yield* f.cleanup.inspect(f.input);
+      assert.isNotNull(inspection);
+      assert.isNull(yield* f.cleanup.remove(inspection!, Effect.succeed(true)));
+      assert.isAbove(freshReads, 0);
+      assert.equal(observationReads, 1);
+      assert.isTrue(yield* f.fs.exists(f.dependencyPath));
+      paths = [];
+      assert.equal((yield* f.cleanup.observe(f.input, NOW + day, false, false))!.lastUsedAt, NOW);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        testLayer(
+          undefined,
+          undefined,
+          undefined,
+          false,
+          undefined,
+          Effect.sync(() => {
+            freshReads++;
+            return paths;
+          }),
+        ),
+      ),
+    );
+  },
+);
