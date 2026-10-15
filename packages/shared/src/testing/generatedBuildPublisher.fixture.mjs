@@ -76,12 +76,12 @@ if (role === "paused" || role.startsWith("remove-")) {
       NodeProcess.disconnect();
       return;
     }
-    if (!stage) {
-      stage = createGeneratedBuildStage(cwd, root);
-      NodeFS.writeFileSync(NodePath.join(stage.directory, "old.js"), contents);
-      send("stage-created");
-    }
     try {
+      if (!stage) {
+        stage = createGeneratedBuildStage(cwd, root);
+        NodeFS.writeFileSync(NodePath.join(stage.directory, "old.js"), contents);
+        send("stage-created");
+      }
       stage.publish(300);
       send("published");
     } catch (error) {

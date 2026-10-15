@@ -432,7 +432,7 @@ const startPublisher = (
 };
 
 it.each(["complete", "throw", "owner-death"] as const)(
-  "publication exclusion protects identical competing emissions and permits same-stage retry after %s",
+  "publication exclusion protects identical competing emissions and permits recovery retry after %s",
   async (completion) => {
     const { cwd, emit } = fixture();
     const root = "apps/web/dist";
@@ -441,14 +441,10 @@ it.each(["complete", "throw", "owner-death"] as const)(
     first.publish(100);
     const publisherA = startPublisher(cwd, root, "paused");
     assert.equal(await publisherA.next(), "paused-before-retirement");
-    assert.deepEqual(
-      inspectGeneratedBuildOwnership(cwd, root)!.files.map((file) => file.path),
-      ["current.js"],
-    );
+    assert.throws(() => inspectGeneratedBuildOwnership(cwd, root), "pending recovery");
     const publisherB = startPublisher(cwd, root, "competitor");
     assert.equal(await publisherB.next(), "ready");
     publisherB.child.send("publish");
-    assert.equal(await publisherB.next(), "stage-created");
     const blocked = await publisherB.next();
     assert.match(blocked, /^blocked:PortableLockContentionError:/);
     assert.match(blocked, /publication|publish|already running|retry/i);
@@ -469,6 +465,7 @@ it.each(["complete", "throw", "owner-death"] as const)(
     if (completion === "complete")
       assert.isFalse(NodeFS.existsSync(NodePath.join(cwd, root, "old.js")));
     publisherB.child.send("retry");
+    assert.equal(await publisherB.next(), "stage-created");
     assert.equal(await publisherB.next(), "published");
     assert.equal(
       NodeFS.readFileSync(NodePath.join(cwd, root, "old.js"), "utf8"),
@@ -477,7 +474,7 @@ it.each(["complete", "throw", "owner-death"] as const)(
     assert.isFalse(NodeFS.existsSync(NodePath.join(cwd, root, "current.js")));
     assert.deepEqual(
       inspectGeneratedBuildOwnership(cwd, root)!.files.map((file) => file.path),
-      completion === "complete" ? ["old.js"] : [],
+      ["old.js"],
     );
     publisherB.child.send("close");
     await publisherB.exit;
@@ -544,9 +541,9 @@ it("usage renewal leaves committed ownership unchanged while publication holds e
   original.publish(100);
   const publisher = startPublisher(cwd, root, "paused");
   assert.equal(await publisher.next(), "paused-before-retirement");
-  const committed = inspectGeneratedBuildOwnership(cwd, root)!;
+  assert.throws(() => inspectGeneratedBuildOwnership(cwd, root), "pending recovery");
   assert.isFalse(recordGeneratedBuildUse(cwd, root, 1000));
-  assert.deepEqual(inspectGeneratedBuildOwnership(cwd, root), committed);
+  assert.throws(() => inspectGeneratedBuildOwnership(cwd, root), "pending recovery");
   publisher.child.stdin!.write("r");
   assert.equal(await publisher.next(), "published");
   await publisher.exit;

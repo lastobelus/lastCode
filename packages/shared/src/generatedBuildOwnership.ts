@@ -147,7 +147,8 @@ function fileEvidence(target: string, allowStageHardlinks = false) {
     mode: before.mode,
   };
 }
-function readRecord(ctx: Context) {
+function readRecord(ctx: Context, allowPending = false) {
+  if (!allowPending) assertNoPendingPublication(ctx);
   let stat;
   try {
     stat = NodeFS.lstatSync(ctx.recordPath);
@@ -159,6 +160,16 @@ function readRecord(ctx: Context) {
     throw new Error("Unsafe build ownership record");
   const raw = NodeFS.readFileSync(ctx.recordPath, "utf8");
   const value: unknown = JSON.parse(raw);
+  validateRecord(ctx, value);
+  if (signature(NodeFS.lstatSync(ctx.recordPath)) !== signature(stat))
+    throw new Error("Build ownership changed during observation");
+  return {
+    record: value as BuildRecord,
+    recordIdentity: signature(stat),
+    token: NodeCrypto.createHash("sha256").update(raw).update(signature(stat)).digest("hex"),
+  };
+}
+function validateRecord(ctx: Context, value: unknown): asserts value is BuildRecord {
   if (
     typeof value !== "object" ||
     value === null ||
@@ -212,24 +223,28 @@ function readRecord(ctx: Context) {
       throw new Error("Invalid compiler emission");
     emittedPaths.add(emission.path);
   }
-  if (signature(NodeFS.lstatSync(ctx.recordPath)) !== signature(stat))
-    throw new Error("Build ownership changed during observation");
-  return {
-    record: value as BuildRecord,
-    recordIdentity: signature(stat),
-    token: NodeCrypto.createHash("sha256").update(raw).update(signature(stat)).digest("hex"),
-  };
 }
-const ownershipSnapshot = (previous: ReturnType<typeof readRecord>) =>
-  previous === null
+const recordOwnership = (record: BuildRecord | null) =>
+  record === null
     ? null
     : JSON.stringify({
-        version: previous.record.version,
-        worktreeIdentity: previous.record.worktreeIdentity,
-        root: previous.record.root,
-        files: previous.record.files,
-        emissions: previous.record.emissions,
+        version: record.version,
+        worktreeIdentity: record.worktreeIdentity,
+        root: record.root,
+        files: record.files,
+        emissions: record.emissions,
       });
+const ownershipSnapshot = (previous: ReturnType<typeof readRecord>) =>
+  recordOwnership(previous?.record ?? null);
+
+function flushPreparedFile(path: string) {
+  const fd = NodeFS.openSync(path, NodeFS.constants.O_RDONLY | (NodeFS.constants.O_NOFOLLOW ?? 0));
+  try {
+    NodeFS.fsyncSync(fd);
+  } finally {
+    NodeFS.closeSync(fd);
+  }
+}
 
 function writeRecord(ctx: Context, record: BuildRecord, expectedIdentity?: string) {
   const raw = JSON.stringify(record);
@@ -238,6 +253,7 @@ function writeRecord(ctx: Context, record: BuildRecord, expectedIdentity?: strin
   const temporary = `${ctx.recordPath}.${NodeCrypto.randomUUID()}.tmp`;
   try {
     NodeFS.writeFileSync(temporary, raw, { flag: "wx", mode: 0o600 });
+    flushPreparedFile(temporary);
     // Mutations hold the root lock; also reject an unexpected native record replacement.
     if (
       expectedIdentity !== undefined &&
@@ -253,6 +269,334 @@ function writeRecord(ctx: Context, record: BuildRecord, expectedIdentity?: strin
 function evidenceMatches(file: OwnedFile, target: string) {
   const current = fileEvidence(target);
   return current.identity === file.identity && current.hash === file.hash;
+}
+
+type Publication = {
+  version: 1;
+  id: string;
+  worktreeIdentity: string;
+  root: string;
+  phase: "preparing" | "installing" | "committed";
+  previous: BuildRecord | null;
+  nextOwnership: string | null;
+  now: number;
+  emissions: BuildRecord["emissions"];
+  directories: Array<{ path: string; allocation: string }>;
+  files: Array<{
+    path: string;
+    temporary: string;
+    prior: OwnedFile | null;
+    hash: string;
+    mode: number;
+    prepared: string | null;
+  }>;
+};
+const pendingPath = (ctx: Context) => `${ctx.recordPath}.pending`;
+function hasPendingPublication(ctx: Context) {
+  try {
+    NodeFS.lstatSync(pendingPath(ctx));
+    return true;
+  } catch (error) {
+    if (missing(error)) return false;
+    throw error;
+  }
+}
+function assertNoPendingPublication(ctx: Context) {
+  if (hasPendingPublication(ctx)) throw new Error("Build publication is pending recovery");
+}
+function writePublication(ctx: Context, publication: Publication) {
+  const raw = JSON.stringify(publication);
+  // Leave room for the final ownership digest before admitting any replacement.
+  if (
+    publication.files.length > MAX_FILES ||
+    Buffer.byteLength(raw) + (publication.nextOwnership === null ? 128 : 0) > MAX_RECORD_BYTES
+  )
+    throw new Error("Build publication exceeds its recovery limit");
+  const temporary = `${pendingPath(ctx)}.${NodeCrypto.randomUUID()}.tmp`;
+  try {
+    const fd = NodeFS.openSync(temporary, "wx", 0o600);
+    try {
+      NodeFS.writeFileSync(fd, raw);
+      NodeFS.fsyncSync(fd);
+    } finally {
+      NodeFS.closeSync(fd);
+    }
+    NodeFS.renameSync(temporary, pendingPath(ctx));
+  } finally {
+    NodeFS.rmSync(temporary, { force: true });
+  }
+}
+function readPublication(ctx: Context) {
+  const path = pendingPath(ctx);
+  const stat = NodeFS.lstatSync(path);
+  if (!stat.isFile() || stat.nlink !== 1 || stat.size > MAX_RECORD_BYTES)
+    throw new Error("Unsafe build publication journal");
+  const value: unknown = JSON.parse(NodeFS.readFileSync(path, "utf8"));
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !("version" in value) ||
+    value.version !== 1 ||
+    !("id" in value) ||
+    typeof value.id !== "string" ||
+    !/^[a-f0-9-]{36}$/.test(value.id) ||
+    !("worktreeIdentity" in value) ||
+    value.worktreeIdentity !== ctx.worktreeIdentity ||
+    !("root" in value) ||
+    value.root !== ctx.root ||
+    !("phase" in value) ||
+    !["preparing", "installing", "committed"].includes(String(value.phase)) ||
+    !("now" in value) ||
+    typeof value.now !== "number" ||
+    !Number.isSafeInteger(value.now) ||
+    value.now < 0 ||
+    !("previous" in value) ||
+    !("nextOwnership" in value) ||
+    (value.nextOwnership !== null &&
+      (typeof value.nextOwnership !== "string" || !/^[a-f0-9]{64}$/.test(value.nextOwnership))) ||
+    !("directories" in value) ||
+    !Array.isArray(value.directories) ||
+    value.directories.length > MAX_FILES ||
+    !("files" in value) ||
+    !Array.isArray(value.files) ||
+    value.files.length > MAX_FILES ||
+    !("emissions" in value)
+  )
+    throw new Error("Invalid build publication journal");
+  if (value.previous !== null) validateRecord(ctx, value.previous);
+  if (value.phase === "committed" && value.nextOwnership === null)
+    throw new Error("Committed publication has no ownership record");
+  validateRecord(ctx, {
+    version: 1,
+    worktreeIdentity: ctx.worktreeIdentity,
+    root: ctx.root,
+    lastUsedAt: value.now,
+    files: [],
+    emissions: value.emissions,
+  });
+  const emissionHashes = new Map(
+    (value.emissions as BuildRecord["emissions"]).map((file) => [file.path, file.hash]),
+  );
+  const previousFiles = new Map(
+    (value.previous as BuildRecord | null)?.files.map((file) => [
+      file.path,
+      JSON.stringify(file),
+    ]) ?? [],
+  );
+  const directories = new Set<string>();
+  for (const directory of value.directories) {
+    if (
+      typeof directory !== "object" ||
+      directory === null ||
+      typeof directory.path !== "string" ||
+      !safeRelative(directory.path) ||
+      !NodePath.posix.basename(directory.path).startsWith(".t3-build-publication-") ||
+      directories.has(directory.path) ||
+      typeof directory.allocation !== "string"
+    )
+      throw new Error("Invalid build preparation directory");
+    directories.add(directory.path);
+  }
+  const files = new Set<string>();
+  const temporaries = new Set<string>();
+  for (const file of value.files) {
+    if (
+      typeof file !== "object" ||
+      file === null ||
+      typeof file.path !== "string" ||
+      !safeRelative(file.path) ||
+      files.has(file.path) ||
+      typeof file.temporary !== "string" ||
+      !safeRelative(file.temporary) ||
+      !directories.has(NodePath.posix.dirname(file.temporary)) ||
+      !/^[0-9]+\.tmp$/.test(NodePath.posix.basename(file.temporary)) ||
+      temporaries.has(file.temporary) ||
+      typeof file.hash !== "string" ||
+      !/^[a-f0-9]{64}$/.test(file.hash) ||
+      typeof file.mode !== "number" ||
+      !Number.isSafeInteger(file.mode) ||
+      file.mode < 0 ||
+      file.mode > 0xffff ||
+      !("prior" in file) ||
+      !("prepared" in file) ||
+      (file.prepared !== null && typeof file.prepared !== "string") ||
+      (value.phase !== "preparing" && typeof file.prepared !== "string")
+    )
+      throw new Error("Invalid prepared build file");
+    if (file.prior !== null)
+      validateRecord(ctx, {
+        version: 1,
+        worktreeIdentity: ctx.worktreeIdentity,
+        root: ctx.root,
+        lastUsedAt: value.now,
+        files: [file.prior],
+        emissions: [],
+      });
+    if (file.prior !== null && file.prior.path !== file.path)
+      throw new Error("Invalid prior build destination");
+    if (
+      NodePath.posix.dirname(NodePath.posix.dirname(file.temporary)) !==
+      NodePath.posix.dirname(file.path)
+    )
+      throw new Error("Prepared output is not beside its destination");
+    if (emissionHashes.get(file.path) !== file.hash)
+      throw new Error("Prepared output has no compiler emission");
+    if (file.prior !== null && JSON.stringify(file.prior) !== previousFiles.get(file.path))
+      throw new Error("Prepared output has no prior ownership");
+    files.add(file.path);
+    temporaries.add(file.temporary);
+  }
+  if (signature(NodeFS.lstatSync(path)) !== signature(stat))
+    throw new Error("Build publication journal changed");
+  return value as Publication;
+}
+function preparationDirectory(ctx: Context, directory: Publication["directories"][number]) {
+  const path = safePath(ctx.cwd, `${ctx.root}/${directory.path}`);
+  const stat = NodeFS.lstatSync(path);
+  if (!stat.isDirectory() || allocation(stat) !== directory.allocation)
+    throw new Error("Build preparation directory changed identity");
+  return path;
+}
+function cleanupPreparation(ctx: Context, publication: Publication) {
+  const byDirectory = new Map<string, Publication["files"]>();
+  for (const file of publication.files) {
+    const directory = NodePath.posix.dirname(file.temporary);
+    const files = byDirectory.get(directory) ?? [];
+    files.push(file);
+    byDirectory.set(directory, files);
+  }
+  for (const directory of publication.directories) {
+    let path;
+    try {
+      path = preparationDirectory(ctx, directory);
+    } catch (error) {
+      if (missing(error)) continue;
+      throw error;
+    }
+    // Only explicitly intended scratch files in this fresh private directory.
+    // Arbitrary additions are never traversed or removed.
+    for (const file of byDirectory.get(directory.path) ?? []) {
+      const temporary = safePath(ctx.cwd, `${ctx.root}/${file.temporary}`);
+      try {
+        const stat = NodeFS.lstatSync(temporary);
+        if (
+          !stat.isFile() ||
+          stat.nlink !== 1 ||
+          (file.prepared !== null &&
+            (allocation(stat) !== file.prepared || fileEvidence(temporary).hash !== file.hash))
+        )
+          throw new Error("Build preparation changed before cleanup");
+        NodeFS.unlinkSync(temporary);
+      } catch (error) {
+        if (!missing(error)) throw error;
+      }
+    }
+    try {
+      NodeFS.rmdirSync(path);
+    } catch (error) {
+      if (!["ENOTEMPTY", "EEXIST", "ENOENT"].includes((error as NodeJS.ErrnoException).code ?? ""))
+        throw error;
+    }
+  }
+}
+/** Complete only the exact admitted files, under the root mutex. No output glob can mint ownership. */
+function recoverPublication(ctx: Context) {
+  const publication = readPublication(ctx);
+  if (publication.phase === "preparing") {
+    cleanupPreparation(ctx, publication);
+    NodeFS.unlinkSync(pendingPath(ctx));
+    return;
+  }
+  const current = readRecord(ctx, true);
+  const previousSnapshot = recordOwnership(publication.previous);
+  const currentSnapshot = ownershipSnapshot(current);
+  const currentDigest =
+    currentSnapshot === null
+      ? null
+      : NodeCrypto.createHash("sha256").update(currentSnapshot).digest("hex");
+  if (
+    currentSnapshot !== previousSnapshot &&
+    (publication.nextOwnership === null || currentDigest !== publication.nextOwnership)
+  )
+    throw new Error("Build ownership changed before recovery");
+  if (publication.phase !== "committed") {
+    for (const directory of publication.directories) preparationDirectory(ctx, directory);
+    const files: OwnedFile[] = [];
+    for (const file of publication.files) {
+      const destination = safePath(ctx.cwd, `${ctx.root}/${file.path}`);
+      const temporary = safePath(ctx.cwd, `${ctx.root}/${file.temporary}`);
+      if (NodeFS.existsSync(temporary)) {
+        const evidence = fileEvidence(temporary);
+        if (
+          allocation(NodeFS.lstatSync(temporary)) !== file.prepared ||
+          evidence.hash !== file.hash ||
+          evidence.mode !== file.mode
+        )
+          throw new Error("Prepared build output changed before recovery");
+        if (file.prior ? !evidenceMatches(file.prior, destination) : NodeFS.existsSync(destination))
+          throw new Error("Build destination changed before recovery");
+        // Preparation is beside the destination on its actual filesystem.
+        // Atomic replacement never exposes partial copied bytes.
+        NodeFS.renameSync(temporary, destination);
+      }
+      const evidence = fileEvidence(destination);
+      if (
+        allocation(NodeFS.lstatSync(destination)) !== file.prepared ||
+        evidence.hash !== file.hash ||
+        evidence.mode !== file.mode
+      )
+        throw new Error("Installed build output changed before recovery");
+      files.push({
+        path: file.path,
+        identity: evidence.identity,
+        hash: evidence.hash,
+        bytes: evidence.bytes,
+      });
+    }
+    const next: BuildRecord = {
+      version: 1,
+      worktreeIdentity: ctx.worktreeIdentity,
+      root: ctx.root,
+      lastUsedAt: Math.max(publication.now, current?.record.lastUsedAt ?? 0),
+      files,
+      emissions: publication.emissions,
+    };
+    publication.nextOwnership = NodeCrypto.createHash("sha256")
+      .update(recordOwnership(next)!)
+      .digest("hex");
+    writePublication(ctx, publication);
+    const latest = readRecord(ctx, true);
+    if (ownershipSnapshot(latest) !== ownershipSnapshot(current))
+      throw new Error("Build ownership changed during recovery");
+    if (!writeRecord(ctx, next, latest?.recordIdentity))
+      throw new Error("Build ownership changed during recovery");
+    publication.phase = "committed";
+    writePublication(ctx, publication);
+  }
+  const emitted = new Set(publication.emissions.map((file) => file.path));
+  for (const file of publication.previous?.files ?? []) {
+    if (emitted.has(file.path)) continue;
+    let destination;
+    try {
+      destination = safePath(ctx.cwd, `${ctx.root}/${file.path}`);
+      if (!evidenceMatches(file, destination)) continue;
+    } catch {
+      continue;
+    } // Edited, missing or unverifiable history remains unowned.
+    NodeFS.unlinkSync(destination);
+    let parent = NodePath.dirname(destination);
+    const output = NodePath.join(ctx.cwd, ctx.root);
+    while (parent.startsWith(`${output}${NodePath.sep}`) || parent === output) {
+      try {
+        NodeFS.rmdirSync(parent);
+      } catch {
+        break;
+      }
+      parent = NodePath.dirname(parent);
+    }
+  }
+  cleanupPreparation(ctx, publication);
+  NodeFS.unlinkSync(pendingPath(ctx));
 }
 
 /** Metadata-only clock observation; does not hash, adopt or renew any output. */
@@ -394,6 +738,7 @@ export async function removeGeneratedBuildFilesAsync(
     const release = tryAcquireBuildMutationLock(ctx);
     if (!release) return stop(offset, "Build output is busy; retry cleanup");
     try {
+      if (hasPendingPublication(ctx)) return stop(offset, "Build publication is pending recovery");
       for (const [index, file] of batch.entries()) {
         if (!verified.has(file.path)) continue;
         if (signal?.aborted) return stop(offset + index, "Build cleanup was cancelled");
@@ -445,6 +790,7 @@ export function recordGeneratedBuildUse(worktreePath: string, root: string, now:
   const release = tryAcquireBuildMutationLock(ctx);
   if (!release) return false;
   try {
+    if (hasPendingPublication(ctx)) return false;
     const previous = readRecord(ctx);
     if (!previous) return false;
     return writeRecord(
@@ -491,6 +837,7 @@ export function removeGeneratedBuildFiles(
       const release = tryAcquireBuildMutationLock(ctx);
       if (!release) return stop(index, "Build output is busy; retry cleanup");
       try {
+        if (hasPendingPublication(ctx)) return stop(index, "Build publication is pending recovery");
         if (signature(NodeFS.lstatSync(ctx.recordPath)) !== previous.recordIdentity)
           return stop(index, "Build ownership changed before removal");
         const stat = NodeFS.lstatSync(target);
@@ -536,10 +883,19 @@ export function removeGeneratedBuildFiles(
 export function createGeneratedBuildStage(worktreePath: string, root: string) {
   const ctx = context(worktreePath, root);
   if (!ctx) return null; // Ordinary repository builds keep their existing output behavior.
+  if (hasPendingPublication(ctx)) {
+    const release = acquireBuildMutationLock(ctx);
+    try {
+      recoverPublication(ctx);
+    } finally {
+      release();
+    }
+  }
   let initial = readRecord(ctx);
   const directory = NodeFS.mkdtempSync(NodePath.join(ctx.gitDir, "t3-build-stage-"));
   const initialAllocation = allocation(NodeFS.lstatSync(directory));
   let finished = false;
+  let pendingPublicationId: string | null = null;
   const discard = () => {
     if (finished) return;
     if (
@@ -563,7 +919,6 @@ export function createGeneratedBuildStage(worktreePath: string, root: string) {
         throw new Error("Build stage changed identity");
       // Cleanup can observe an actual compiler consumer while this runner is
       // staging. Timestamp-only renewal does not supersede emitted ownership.
-      const initialOwnership = ownershipSnapshot(initial);
       const emitted: Array<OwnedFile & { source: string; mode: number }> = [];
       const stageLinks = new Map<string, { count: number; links: number }>();
       const visit = (dir: string, prefix: string) => {
@@ -591,11 +946,21 @@ export function createGeneratedBuildStage(worktreePath: string, root: string) {
       // Contention preserves the stage for retry; every transaction exits the lock.
       const release = acquireBuildMutationLock(ctx);
       try {
+        // A watch runner can recover its own interrupted publication without
+        // treating a competing publication as permission to refresh its baseline.
+        if (
+          pendingPublicationId !== null &&
+          hasPendingPublication(ctx) &&
+          readPublication(ctx).id === pendingPublicationId
+        ) {
+          recoverPublication(ctx);
+          initial = readRecord(ctx);
+          pendingPublicationId = null;
+        }
+        const initialOwnership = ownershipSnapshot(initial);
         if (ownershipSnapshot(readRecord(ctx)) !== initialOwnership)
           throw new Error("Another build changed output ownership");
         const priorFiles = new Map(initial?.record.files.map((file) => [file.path, file]) ?? []);
-        const nextFiles = new Map<string, OwnedFile>();
-        const emittedPaths = new Set(emitted.map((file) => file.path));
         const plans = emitted.map((file) => {
           const destination = safePath(ctx.cwd, `${root}/${file.path}`);
           try {
@@ -611,67 +976,79 @@ export function createGeneratedBuildStage(worktreePath: string, root: string) {
             throw error;
           }
         });
-        for (const { file, destination, prior, skip } of plans) {
-          if (skip) continue; // Identical unknown bytes remain unowned; do not adopt them.
-          safePath(ctx.cwd, `${root}/${file.path}`);
-          if (prior ? !evidenceMatches(prior, destination) : NodeFS.existsSync(destination))
-            throw new Error("Build destination changed during publication");
-          NodeFS.mkdirSync(NodePath.dirname(destination), { recursive: true });
-          // wx also prevents unexpected files appearing in newly emitted destinations.
-          if (prior) NodeFS.unlinkSync(destination);
-          NodeFS.copyFileSync(file.source, destination, NodeFS.constants.COPYFILE_EXCL);
-          NodeFS.chmodSync(destination, file.mode);
-          nextFiles.set(file.path, { path: file.path, ...fileEvidence(destination) });
-        }
         const latest = readRecord(ctx);
         if (ownershipSnapshot(latest) !== initialOwnership)
           throw new Error("Another build changed output ownership");
-        writeRecord(ctx, {
+        const transaction: Publication = {
           version: 1,
+          id: NodeCrypto.randomUUID(),
           worktreeIdentity: ctx.worktreeIdentity,
           root,
-          lastUsedAt: Math.max(now, latest?.record.lastUsedAt ?? 0),
-          files: [...nextFiles.values()],
+          phase: "preparing",
+          previous: latest?.record ?? null,
+          nextOwnership: null,
+          now: Math.max(now, latest?.record.lastUsedAt ?? 0),
           emissions: emitted.map(({ path, hash }) => ({ path, hash })),
-        });
-        initial = readRecord(ctx);
-        // Retire old chunks only after every destination collision was admitted,
-        // current emissions were installed, and their ownership was persisted.
-        // Edited/unknown additions stay on disk but cannot accumulate in the ledger.
-        const publishedOwnership = ownershipSnapshot(initial);
-        let publishedIdentity = initial!.recordIdentity;
-        const checkPublishedOwnership = () => {
-          if (signature(NodeFS.lstatSync(ctx.recordPath)) !== publishedIdentity) {
-            const current = readRecord(ctx);
-            if (ownershipSnapshot(current) !== publishedOwnership)
-              throw new Error("Another build changed output ownership");
-            publishedIdentity = current!.recordIdentity; // Timestamp-only use renewal is allowed.
-          }
+          directories: [],
+          files: [],
         };
-        for (const file of priorFiles.values()) {
-          if (emittedPaths.has(file.path)) continue;
-          checkPublishedOwnership();
-          let destination;
-          try {
-            destination = safePath(ctx.cwd, `${root}/${file.path}`);
-            if (!evidenceMatches(file, destination)) continue;
-          } catch {
-            continue; // Missing or no longer verifiable historical outputs remain unowned.
-          }
-          checkPublishedOwnership();
-          NodeFS.unlinkSync(destination);
-          let parent = NodePath.dirname(destination);
-          const output = NodePath.join(ctx.cwd, root);
-          while (parent.startsWith(`${output}${NodePath.sep}`) || parent === output) {
-            try {
-              NodeFS.rmdirSync(parent);
-            } catch {
-              break;
+        try {
+          const directories = new Map<string, string>();
+          for (const [index, { file, destination, prior, skip }] of plans.entries()) {
+            if (skip) continue; // Identical unknown bytes remain unowned.
+            safePath(ctx.cwd, `${root}/${file.path}`);
+            NodeFS.mkdirSync(NodePath.dirname(destination), { recursive: true });
+            const parent = NodePath.dirname(destination);
+            let directory = directories.get(parent);
+            if (!directory) {
+              directory = NodeFS.mkdtempSync(NodePath.join(parent, ".t3-build-publication-"));
+              directories.set(parent, directory);
+              transaction.directories.push({
+                path: NodePath.relative(NodePath.join(ctx.cwd, root), directory)
+                  .split(NodePath.sep)
+                  .join("/"),
+                allocation: allocation(NodeFS.lstatSync(directory)),
+              });
             }
-            parent = NodePath.dirname(parent);
+            transaction.files.push({
+              path: file.path,
+              temporary: NodePath.relative(
+                NodePath.join(ctx.cwd, root),
+                NodePath.join(directory, `${index}.tmp`),
+              )
+                .split(NodePath.sep)
+                .join("/"),
+              prior: prior ?? null,
+              hash: file.hash,
+              mode: file.mode,
+              prepared: null,
+            });
           }
+          // Preparation has its own lifetime; compiler-stage discard cannot erase it.
+          writePublication(ctx, transaction);
+          const emittedByPath = new Map(emitted.map((file) => [file.path, file]));
+          for (const plan of transaction.files) {
+            const file = emittedByPath.get(plan.path)!;
+            const temporary = safePath(ctx.cwd, `${root}/${plan.temporary}`);
+            NodeFS.copyFileSync(file.source, temporary, NodeFS.constants.COPYFILE_EXCL);
+            NodeFS.chmodSync(temporary, plan.mode);
+            flushPreparedFile(temporary);
+            const evidence = fileEvidence(temporary);
+            if (evidence.hash !== plan.hash) throw new Error("Prepared compiler output changed");
+            plan.prepared = allocation(NodeFS.lstatSync(temporary));
+          }
+          transaction.phase = "installing";
+          writePublication(ctx, transaction);
+          pendingPublicationId = transaction.id;
+        } catch (error) {
+          // No published byte changes before a complete verified intent is persisted.
+          cleanupPreparation(ctx, transaction);
+          if (hasPendingPublication(ctx)) NodeFS.unlinkSync(pendingPath(ctx));
+          throw error;
         }
+        recoverPublication(ctx);
         initial = readRecord(ctx);
+        pendingPublicationId = null;
       } finally {
         release();
       }
