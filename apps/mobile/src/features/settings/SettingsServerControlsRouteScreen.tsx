@@ -200,9 +200,18 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
       (target) =>
         target.environment.serverConfig.environment.capabilities.worktreeBuildCleanup === true,
     );
-  const disposableOutputsLabel = supportsBuilds
+  const anyBuildsSupported = targets.some(
+    (target) =>
+      target.environment.serverConfig.environment.capabilities.worktreeBuildCleanup === true,
+  );
+  const disposableOutputsLabel = anyBuildsSupported
     ? "Remove inactive dependencies and build outputs"
     : "Remove inactive worktree dependencies";
+  const disposableOutputsDescription = supportsBuilds
+    ? "Remove recognized dependencies and unchanged verified build outputs immediately for archived owners, or after the configured delay since actual use for unarchived and ownerless worktrees. Every shared owner must be archived with cleanup enabled. Retain additions, notes and source until its separate worktree rule permits removal. Active consumers prevent cleanup. Reinstall or rebuild before resuming work."
+    : anyBuildsSupported
+      ? "Older selected environments remove dependencies only, where supported, under their existing thread-inactivity rule. Newer environments remove dependencies and unchanged verified build outputs immediately when every owner is archived and cleanup is enabled, or after the configured delay since actual use for unarchived and ownerless worktrees. Active consumers prevent removal. Additions are kept; source uses its separate worktree rule. Reinstall or rebuild before resuming work."
+      : "Remove recognized npm or pnpm dependencies only, where supported, using each selected environment's existing thread-inactivity rule. Build outputs, source and other files are kept. Active consumers prevent cleanup. Reinstall before resuming work.";
   const pageProjectKeys = PAGE_PROJECT_KEYS[props.page].filter(
     (key) => key !== "worktreeCleanup" || supportsDependencies,
   );
@@ -557,11 +566,7 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                         <SettingsSwitchRow
                           icon="archivebox"
                           label={disposableOutputsLabel}
-                          subtitle={
-                            supportsBuilds
-                              ? "Remove recognized dependencies and unchanged verified build outputs immediately for archived owners, or after the configured delay since actual use for unarchived and ownerless worktrees. Every shared owner must be archived with cleanup enabled. Retain additions, notes and source until its separate worktree rule permits removal. Active consumers prevent cleanup. Reinstall or rebuild before resuming work."
-                              : "Remove recognized npm or pnpm dependencies using the selected environment's inactivity rule. Source and other files are kept. Active consumers prevent cleanup. Reinstall before resuming work."
-                          }
+                          subtitle={disposableOutputsDescription}
                           value={dependencySettings.enabled}
                           disabled={dependenciesDisabled}
                           onValueChange={(enabled) =>

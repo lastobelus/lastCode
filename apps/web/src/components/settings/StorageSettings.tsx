@@ -449,21 +449,25 @@ export function StorageSettingsPanel() {
     (environment) =>
       environment.serverConfig?.environment.capabilities.worktreeBuildCleanup === true,
   );
-  const disposableOutputsLabel = buildsSupported
+  const anyBuildsSupported = connectedEnvironments.some(
+    (environment) =>
+      environment.serverConfig?.environment.capabilities.worktreeBuildCleanup === true,
+  );
+  const disposableOutputsLabel = anyBuildsSupported
     ? "Remove inactive dependencies and build outputs"
     : "Remove inactive worktree dependencies";
+  const disposableOutputsDescription = buildsSupported
+    ? "Remove recognized dependencies and unchanged verified build outputs immediately for archived owners, or after the configured delay since actual use for unarchived and ownerless worktrees. Every shared owner must be archived with cleanup enabled. Retain additions, notes and source until its separate worktree rule permits removal. Active consumers prevent cleanup. Reinstall or rebuild before resuming work."
+    : anyBuildsSupported
+      ? "Older selected environments remove dependencies only, where supported, under their existing thread-inactivity rule. Newer environments remove dependencies and unchanged verified build outputs immediately when every owner is archived and cleanup is enabled, or after the configured delay since actual use for unarchived and ownerless worktrees. Active consumers prevent removal. Additions are kept; source uses its separate worktree rule. Reinstall or rebuild before resuming work."
+      : "Remove recognized npm or pnpm dependencies only, where supported, using each selected environment's existing thread-inactivity rule. Build outputs, source and other files are kept. Active consumers prevent cleanup. Reinstall before resuming work.";
   const legacyKeepWhenDescription =
     settings.worktreeKeepWhen === "any-local-files"
       ? "Includes ignored files, except node_modules."
       : settings.worktreeKeepWhen === "tracked-changes"
         ? "Deletes untracked and ignored files, including .env."
         : "Keeps edits and untracked files. Deletes ignored files, including .env.";
-  const mixedPreservationSupport =
-    !buildsSupported &&
-    connectedEnvironments.some(
-      (environment) =>
-        environment.serverConfig?.environment.capabilities.worktreeBuildCleanup === true,
-    );
+  const mixedPreservationSupport = !buildsSupported && anyBuildsSupported;
 
   const updateWorktree = (patch: Partial<WorktreeCleanupRules>) =>
     isProjectScope
@@ -559,10 +563,8 @@ export function StorageSettingsPanel() {
               status={ruleStatus("worktreeDependenciesAfterDays")}
               description={
                 dependenciesSupported
-                  ? buildsSupported
-                    ? "Remove recognized dependencies and unchanged verified build outputs immediately for archived owners, or after the configured delay since actual use for unarchived and ownerless worktrees. Every shared owner must be archived with cleanup enabled. Retain additions, notes and source until its separate worktree rule permits removal. Active consumers prevent cleanup. Reinstall or rebuild before resuming work."
-                    : "Remove recognized npm or pnpm dependencies using the selected environment's inactivity rule. Source and other files are kept. Active consumers prevent cleanup. Reinstall before resuming work."
-                  : "Choose updated macOS or Linux machines to use dependency cleanup."
+                  ? disposableOutputsDescription
+                  : `Choose updated macOS or Linux machines to change this rule. ${disposableOutputsDescription}`
               }
               serverScoped={!isProjectScope}
               control={
