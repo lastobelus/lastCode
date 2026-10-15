@@ -5,19 +5,18 @@ description: Prepare and deliver an explicitly requested upstream contribution t
 
 # Upstream Fix
 
-Deliver an explicitly requested upstream improvement through two independent
-branches: an upstream-pure contribution and a LastCode port. Keep their bases,
-reviews, CI, and merge decisions separate.
+Deliver a requested upstream improvement through two independent branches: an
+upstream-pure contribution and a LastCode port. Keep their bases, reviews, CI,
+and merge decisions separate.
 
-## Confirm the Requested Delivery
+## Confirm the Request
 
-Use this workflow only when the user specifically requests an upstream PR or
-contribution. General usefulness, a generic request to fix, ship, or open a PR,
-and a plan's paired-delivery instructions do not authorize upstream filing.
-Without that request, continue implementation, validation, review, and authorized
-LastCode delivery through `lastcode-pr`; do not pause to ask about upstream.
+Use this workflow only when the user specifically asks for an upstream PR or
+contribution. General usefulness, a generic fix or PR request, and a plan's
+paired-delivery steps are not that request; continue those through
+`lastcode-pr` without asking about upstream.
 
-An upstream contribution must make sense to a T3 Code user with no LastCode or
+The upstream change must make sense to a T3 Code user with no LastCode or
 Markover context. Keep fork identity, Markover integration, personal
 conveniences, nightly automation, and local release machinery in LastCode.
 
@@ -41,8 +40,8 @@ repository `AGENTS.md` on both branches.
 8. Follow upstream CI and review conventions. Verify review findings against the
    source, address real issues, and explain false positives.
 
-Open the upstream PR only under the user's specific upstream request. A request
-for a LastCode PR does not authorize this step.
+Open the upstream PR only when the user asked for it; a LastCode PR request
+does not count.
 
 ## Prepare the LastCode Delivery
 
@@ -57,8 +56,9 @@ for a LastCode PR does not authorize this step.
    and review. These trailers belong only on the LastCode delivery.
 4. Run focused validation and follow `lastcode-pr` for optional local Quick CI.
    The pre-push hook follows the configured mode; GitHub CI remains required.
-5. When asked to open a PR, target `lastobelus/lastCode:lastcode/main` and link
-   the upstream PR in both descriptions.
+5. Open the LastCode PR only when the user also asks for it. Otherwise keep the
+   validated port local and report it. Target `lastobelus/lastCode:lastcode/main`
+   and link the upstream PR in both descriptions.
 6. Before merge, require a current-head clean Codex review, zero unresolved
    review threads, and successful exact-head/base GitHub CI and `CI Gate`. Merge
    through `pnpm lastcode:merge`. If the base changes, refresh the branch as
@@ -71,7 +71,7 @@ existing checkpoint workflow.
 
 ## Handoff
 
-Report both branch names and PR URLs, their bases and current heads, validation
+Report both branch names and any PR URLs, their bases and current heads, validation
 performed for each, review status, and whether either delivery remains local.
 Open LastCode PRs do not pause checkpoint creation, repaired-checkpoint
 publication, or branch promotion. Report any validation that needs refreshing

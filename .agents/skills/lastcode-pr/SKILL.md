@@ -32,10 +32,9 @@ links.
 ## Classify and Branch
 
 Read `docs/lastcode/fork-conventions.md` and the repository `AGENTS.md` first.
-Keep general fixes and improvements on the LastCode path. Switch to
-`upstream-fix` only when the user specifically requests an upstream contribution.
-Otherwise continue the task here without asking for an upstream decision. A
-generic request to open a PR authorizes only the LastCode PR.
+This is the default path, including for general fixes, and a generic PR request
+means a LastCode PR. Switch to `upstream-fix` only when the user specifically
+asks for an upstream contribution; never pause to ask whether to go upstream.
 
 1. Ensure the worktree is clean and fetch `origin` with pruning.
 2. Create `lastcode/markover/<topic>` for Markover integration or

@@ -1,4 +1,4 @@
 interface:
   display_name: "LastCode PR"
   short_description: "Deliver a LastCode change through its PR workflow"
-  default_prompt: "Use $lastcode-pr to deliver this LastCode change through the LastCode PR workflow."
+  default_prompt: "Use $lastcode-pr to deliver this change through the LastCode PR workflow."

@@ -29,11 +29,10 @@ Implement a reviewed plan in this repository.
 
 1. Read the plan and `AGENTS.md`.
 2. Confirm branch intent:
-   - explicitly requested upstream contribution work should branch from `upstream/main`
-   - all other LastCode work, including general fixes, should branch from `lastcode/main`
-   - a plan's upstream-delivery instructions do not authorize an upstream PR;
-     without the user's specific upstream request, continue the LastCode task
-     without pausing for an upstream decision
+   - work branches from `lastcode/main`, including general fixes
+   - only the user's specific upstream request uses `upstream-fix` and
+     `upstream/main`; a plan's upstream-delivery steps are not that request, so
+     continue on LastCode without asking
 3. Fetch relevant remotes before rebasing.
 4. Rebase only when the target branch is unambiguous and the worktree is clean enough.
 5. Treat the plan as source of truth. Use

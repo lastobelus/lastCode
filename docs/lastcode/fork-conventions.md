@@ -13,31 +13,28 @@ upstream contributions, contribution bases, and evaluation of other forks.
 
 ## Two Workstreams
 
-Use LastCode delivery by default, including for general T3 Code fixes and
-improvements. An unqualified request to open a PR means a LastCode PR. Submit
-to `pingdotgg/t3code` only when the user specifically asks for an upstream PR.
-General usefulness and a plan or skill's paired-delivery instructions do not
-supply that authorization. Continue implementation, validation, review, and
-authorized LastCode delivery without pausing to ask about upstream submission.
+LastCode is the default, including for general T3 Code fixes, and a generic PR
+request means a LastCode PR. Submit to `pingdotgg/t3code` only when the user
+specifically asks for an upstream PR; general usefulness and plan or skill
+instructions are not that request. Never pause work to ask about upstream.
 
 ### LastCode delivery (default)
 
-This stream includes general fixes and improvements, Markover integration,
+This stream covers general fixes and improvements, Markover integration,
 LastCode identity and branding, personal conveniences, local release and nightly
 automation, and features that depend on private workflow assumptions. These
 changes:
 
 - branch from `origin/lastcode/main`;
 - use `lastcode/markover/<topic>` for Markover integration or
-  `lastcode/<topic>` for other LastCode work;
-- target `lastobelus/lastCode:lastcode/main`; and
-- are not proposed to T3 Code upstream.
+  `lastcode/<topic>` for other LastCode work; and
+- target `lastobelus/lastCode:lastcode/main`.
 
-### Explicitly requested upstream contributions retained by LastCode
+### Requested upstream contributions
 
-Use this stream when the user specifically requests an upstream contribution
-that LastCode also wants regardless of the upstream decision or schedule. Treat
-it as two independent deliveries of one logical change:
+When the user specifically requests an upstream contribution, LastCode keeps its
+own copy regardless of the upstream decision or schedule. Treat it as two
+independent deliveries of one logical change:
 
 1. an upstream-pure PR branched from `upstream/main`; and
 2. a LastCode port branched from `origin/lastcode/main`.
@@ -105,7 +102,7 @@ contribution branches clean.
 Never use `lastcode/main` as the base for an upstream PR. It contains the entire
 [downstream carry set](glossary.md#downstream-carry-set) and would contaminate the upstream diff.
 
-Before starting an explicitly requested upstream contribution:
+Before starting a requested upstream contribution:
 
 ```bash
 git fetch upstream --prune
@@ -267,7 +264,7 @@ git switch -c port/aadit/opencode-adapter-parity lastcode/main
 git cherry-pick <commit-sha>
 ```
 
-### Start an explicitly requested upstream pull request branch
+### Start a requested upstream pull request branch
 
 ```bash
 git fetch upstream --prune
@@ -341,8 +338,8 @@ git switch -c pr/upstream/1943-port-token-clamp lastcode/main
 - If the user specifically requests an upstream contribution, branch from
   `upstream/main` and use `fix/` or `feat/`, then create an independent
   `port/upstream/` branch when LastCode should retain it.
-- Otherwise, branch LastCode implementation work from `lastcode/main` and use
-  `lastcode/` or a more specific local prefix, including for general fixes.
+- Otherwise, including general fixes, branch from `lastcode/main` and use
+  `lastcode/` or a more specific local prefix.
 
 The key distinction is that branches describe intent, while snapshot tags record
 states worth remembering.

@@ -1,6 +1,6 @@
 ---
 name: import-upstream-pr
-description: Evaluate, port, validate, and deliver an open-unmerged or closed-unmerged pingdotgg/t3code pull request into LastCode while preserving exact upstream provenance. Use when LastCode wants an existing upstream PR before it merges, after it closes without merge, or when re-evaluating a force-pushed upstream candidate. Do not use to author a new upstream contribution; use upstream-fix only when specifically requested by the user. Changes with no existing upstream PR use lastcode-pr by default.
+description: Evaluate, port, validate, and deliver an open-unmerged or closed-unmerged pingdotgg/t3code pull request into LastCode while preserving exact upstream provenance. Use when LastCode wants an existing upstream PR before it merges, after it closes without merge, or when re-evaluating a force-pushed upstream candidate. Changes with no existing upstream PR use lastcode-pr, or upstream-fix when the user specifically requests an upstream contribution.
 ---
 
 # Import Upstream PR
