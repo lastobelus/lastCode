@@ -2,6 +2,7 @@
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
+import * as NodeChildProcess from "node:child_process";
 import { assert, it, onTestFinished } from "vite-plus/test";
 import {
   createGeneratedBuildStage,
@@ -383,3 +384,96 @@ it("watched changing emissions retire obsolete files while preserving usage-only
   );
   watcher.discard();
 });
+
+it.each(["complete", "throw", "owner-death"] as const)(
+  "publication exclusion protects identical competing emissions and permits same-stage retry after %s",
+  async (completion) => {
+    const { cwd, emit } = fixture();
+    const root = "apps/web/dist";
+    const first = createGeneratedBuildStage(cwd, root)!;
+    emit(first.directory, "old.js", "original emission");
+    first.publish(100);
+    const startPublisher = (role: string) => {
+      const child = NodeChildProcess.fork(
+        new URL("./testing/generatedBuildPublisher.fixture.mjs", import.meta.url),
+        [cwd, root, role],
+        { silent: true, execArgv: [] },
+      );
+      const messages: string[] = [];
+      const readers: Array<{ resolve: (message: string) => void; reject: (error: Error) => void }> =
+        [];
+      let stderr = "";
+      child.stderr!.on("data", (chunk) => {
+        stderr += String(chunk);
+      });
+      child.on("message", (message) => {
+        if (typeof message !== "string") return;
+        const reader = readers.shift();
+        if (reader) reader.resolve(message);
+        else messages.push(message);
+      });
+      let exited = false;
+      const exit = new Promise<void>((resolve) => {
+        child.on("exit", () => {
+          exited = true;
+          for (const reader of readers.splice(0))
+            reader.reject(new Error(`Publisher exited: ${stderr}`));
+          resolve();
+        });
+      });
+      onTestFinished(async () => {
+        if (!exited) child.kill("SIGKILL");
+        await exit;
+      });
+      const next = () => {
+        const message = messages.shift();
+        if (message !== undefined) return Promise.resolve(message);
+        if (exited) return Promise.reject(new Error(`Publisher already exited: ${stderr}`));
+        return new Promise<string>((resolve, reject) => readers.push({ resolve, reject }));
+      };
+      return { child, next, exit };
+    };
+    const publisherA = startPublisher("paused");
+    assert.equal(await publisherA.next(), "paused-before-retirement");
+    assert.deepEqual(
+      inspectGeneratedBuildOwnership(cwd, root)!.files.map((file) => file.path),
+      ["current.js"],
+    );
+    const publisherB = startPublisher("competitor");
+    assert.equal(await publisherB.next(), "ready");
+    publisherB.child.send("publish");
+    assert.equal(await publisherB.next(), "stage-created");
+    const blocked = await publisherB.next();
+    assert.match(blocked, /^blocked:PortableLockContentionError:/);
+    assert.match(blocked, /publication|publish|already running|retry/i);
+    assert.equal(
+      NodeFS.readFileSync(NodePath.join(cwd, root, "old.js"), "utf8"),
+      "original emission",
+    );
+    if (completion === "owner-death") {
+      publisherA.child.kill("SIGKILL");
+    } else {
+      publisherA.child.stdin!.write(completion === "throw" ? "f" : "r");
+      assert.equal(
+        await publisherA.next(),
+        completion === "throw" ? "failed:Injected retirement failure" : "published",
+      );
+    }
+    await publisherA.exit;
+    if (completion === "complete")
+      assert.isFalse(NodeFS.existsSync(NodePath.join(cwd, root, "old.js")));
+    publisherB.child.send("retry");
+    assert.equal(await publisherB.next(), "published");
+    assert.equal(
+      NodeFS.readFileSync(NodePath.join(cwd, root, "old.js"), "utf8"),
+      "original emission",
+    );
+    assert.isFalse(NodeFS.existsSync(NodePath.join(cwd, root, "current.js")));
+    assert.deepEqual(
+      inspectGeneratedBuildOwnership(cwd, root)!.files.map((file) => file.path),
+      completion === "complete" ? ["old.js"] : [],
+    );
+    publisherB.child.send("close");
+    await publisherB.exit;
+  },
+);

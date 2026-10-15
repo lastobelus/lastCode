@@ -2,6 +2,10 @@
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeCrypto from "node:crypto";
+import {
+  acquirePortableLock,
+  PortableLockContentionError,
+} from "../../../scripts/lastcode-lock.mjs";
 
 type OwnedFile = { path: string; identity: string; hash: string; bytes: number };
 type BuildRecord = {
@@ -52,6 +56,20 @@ function context(worktreePath: string, root: string) {
   return { cwd, gitDir, root, recordPath, worktreeIdentity };
 }
 type Context = NonNullable<ReturnType<typeof context>>;
+
+function acquirePublicationLock(ctx: Context) {
+  const name = `${NodePath.basename(ctx.recordPath)}.publish`;
+  try {
+    return acquirePortableLock(ctx.gitDir, name, "generated build publication");
+  } catch (error) {
+    if (error instanceof PortableLockContentionError)
+      throw new PortableLockContentionError(
+        `${error.message} Retry publication after it finishes. If the owner is unknown, inspect ${NodePath.join(ctx.gitDir, name)} lock metadata before recovery; do not clear a live publisher's lock.`,
+        { cause: error },
+      );
+    throw error;
+  }
+}
 
 /** Branding belongs to private compiler/release stages, never published managed output. */
 export function assertUnpublishedGeneratedBuildTarget(directory: string) {
@@ -504,8 +522,6 @@ export function createGeneratedBuildStage(worktreePath: string, root: string) {
       // Cleanup can observe an actual compiler consumer while this runner is
       // staging. Timestamp-only renewal does not supersede emitted ownership.
       const initialOwnership = ownershipSnapshot(initial);
-      if (ownershipSnapshot(readRecord(ctx)) !== initialOwnership)
-        throw new Error("Another build changed output ownership");
       const emitted: Array<OwnedFile & { source: string; mode: number }> = [];
       const stageLinks = new Map<string, { count: number; links: number }>();
       const visit = (dir: string, prefix: string) => {
@@ -528,85 +544,95 @@ export function createGeneratedBuildStage(worktreePath: string, root: string) {
       // be accounted for inside the fresh stage; a link outside it is not owned.
       if ([...stageLinks.values()].some((entry) => entry.count !== entry.links))
         throw new Error("Build stage contains an external hardlink");
-      const priorFiles = new Map(initial?.record.files.map((file) => [file.path, file]) ?? []);
-      const nextFiles = new Map<string, OwnedFile>();
-      const emittedPaths = new Set(emitted.map((file) => file.path));
-      const plans = emitted.map((file) => {
-        const destination = safePath(ctx.cwd, `${root}/${file.path}`);
-        try {
-          const existing = fileEvidence(destination);
-          const prior = priorFiles.get(file.path);
-          if (prior && existing.identity === prior.identity && existing.hash === prior.hash)
-            return { file, destination, prior, skip: false };
-          if (existing.hash === file.hash)
-            return { file, destination, prior: undefined, skip: true };
-          throw new Error(`Build output collision requires file review: ${root}/${file.path}`);
-        } catch (error) {
-          if (missing(error)) return { file, destination, prior: undefined, skip: false };
-          throw error;
-        }
-      });
-      for (const { file, destination, prior, skip } of plans) {
-        if (skip) continue; // Identical unknown bytes remain unowned; do not adopt them.
-        safePath(ctx.cwd, `${root}/${file.path}`);
-        if (prior ? !evidenceMatches(prior, destination) : NodeFS.existsSync(destination))
-          throw new Error("Build destination changed during publication");
-        NodeFS.mkdirSync(NodePath.dirname(destination), { recursive: true });
-        // wx also prevents unexpected files appearing in newly emitted destinations.
-        if (prior) NodeFS.unlinkSync(destination);
-        NodeFS.copyFileSync(file.source, destination, NodeFS.constants.COPYFILE_EXCL);
-        NodeFS.chmodSync(destination, file.mode);
-        nextFiles.set(file.path, { path: file.path, ...fileEvidence(destination) });
-      }
-      const latest = readRecord(ctx);
-      if (ownershipSnapshot(latest) !== initialOwnership)
-        throw new Error("Another build changed output ownership");
-      writeRecord(ctx, {
-        version: 1,
-        worktreeIdentity: ctx.worktreeIdentity,
-        root,
-        lastUsedAt: Math.max(now, latest?.record.lastUsedAt ?? 0),
-        files: [...nextFiles.values()],
-        emissions: emitted.map(({ path, hash }) => ({ path, hash })),
-      });
-      initial = readRecord(ctx);
-      // Retire old chunks only after every destination collision was admitted,
-      // current emissions were installed, and their ownership was persisted.
-      // Edited/unknown additions stay on disk but cannot accumulate in the ledger.
-      const publishedOwnership = ownershipSnapshot(initial);
-      let publishedIdentity = initial!.recordIdentity;
-      const checkPublishedOwnership = () => {
-        if (signature(NodeFS.lstatSync(ctx.recordPath)) !== publishedIdentity) {
-          const current = readRecord(ctx);
-          if (ownershipSnapshot(current) !== publishedOwnership)
-            throw new Error("Another build changed output ownership");
-          publishedIdentity = current!.recordIdentity; // Timestamp-only use renewal is allowed.
-        }
-      };
-      for (const file of priorFiles.values()) {
-        if (emittedPaths.has(file.path)) continue;
-        checkPublishedOwnership();
-        let destination;
-        try {
-          destination = safePath(ctx.cwd, `${root}/${file.path}`);
-          if (!evidenceMatches(file, destination)) continue;
-        } catch {
-          continue; // Missing or no longer verifiable historical outputs remain unowned.
-        }
-        checkPublishedOwnership();
-        NodeFS.unlinkSync(destination);
-        let parent = NodePath.dirname(destination);
-        const output = NodePath.join(ctx.cwd, root);
-        while (parent.startsWith(`${output}${NodePath.sep}`) || parent === output) {
+      // Compilation and stage hashing stay parallel. Serialize admission through
+      // retirement across processes, including identical-but-unowned emissions.
+      // Contention preserves the stage for retry; every transaction exits the lock.
+      const release = acquirePublicationLock(ctx);
+      try {
+        if (ownershipSnapshot(readRecord(ctx)) !== initialOwnership)
+          throw new Error("Another build changed output ownership");
+        const priorFiles = new Map(initial?.record.files.map((file) => [file.path, file]) ?? []);
+        const nextFiles = new Map<string, OwnedFile>();
+        const emittedPaths = new Set(emitted.map((file) => file.path));
+        const plans = emitted.map((file) => {
+          const destination = safePath(ctx.cwd, `${root}/${file.path}`);
           try {
-            NodeFS.rmdirSync(parent);
-          } catch {
-            break;
+            const existing = fileEvidence(destination);
+            const prior = priorFiles.get(file.path);
+            if (prior && existing.identity === prior.identity && existing.hash === prior.hash)
+              return { file, destination, prior, skip: false };
+            if (existing.hash === file.hash)
+              return { file, destination, prior: undefined, skip: true };
+            throw new Error(`Build output collision requires file review: ${root}/${file.path}`);
+          } catch (error) {
+            if (missing(error)) return { file, destination, prior: undefined, skip: false };
+            throw error;
           }
-          parent = NodePath.dirname(parent);
+        });
+        for (const { file, destination, prior, skip } of plans) {
+          if (skip) continue; // Identical unknown bytes remain unowned; do not adopt them.
+          safePath(ctx.cwd, `${root}/${file.path}`);
+          if (prior ? !evidenceMatches(prior, destination) : NodeFS.existsSync(destination))
+            throw new Error("Build destination changed during publication");
+          NodeFS.mkdirSync(NodePath.dirname(destination), { recursive: true });
+          // wx also prevents unexpected files appearing in newly emitted destinations.
+          if (prior) NodeFS.unlinkSync(destination);
+          NodeFS.copyFileSync(file.source, destination, NodeFS.constants.COPYFILE_EXCL);
+          NodeFS.chmodSync(destination, file.mode);
+          nextFiles.set(file.path, { path: file.path, ...fileEvidence(destination) });
         }
+        const latest = readRecord(ctx);
+        if (ownershipSnapshot(latest) !== initialOwnership)
+          throw new Error("Another build changed output ownership");
+        writeRecord(ctx, {
+          version: 1,
+          worktreeIdentity: ctx.worktreeIdentity,
+          root,
+          lastUsedAt: Math.max(now, latest?.record.lastUsedAt ?? 0),
+          files: [...nextFiles.values()],
+          emissions: emitted.map(({ path, hash }) => ({ path, hash })),
+        });
+        initial = readRecord(ctx);
+        // Retire old chunks only after every destination collision was admitted,
+        // current emissions were installed, and their ownership was persisted.
+        // Edited/unknown additions stay on disk but cannot accumulate in the ledger.
+        const publishedOwnership = ownershipSnapshot(initial);
+        let publishedIdentity = initial!.recordIdentity;
+        const checkPublishedOwnership = () => {
+          if (signature(NodeFS.lstatSync(ctx.recordPath)) !== publishedIdentity) {
+            const current = readRecord(ctx);
+            if (ownershipSnapshot(current) !== publishedOwnership)
+              throw new Error("Another build changed output ownership");
+            publishedIdentity = current!.recordIdentity; // Timestamp-only use renewal is allowed.
+          }
+        };
+        for (const file of priorFiles.values()) {
+          if (emittedPaths.has(file.path)) continue;
+          checkPublishedOwnership();
+          let destination;
+          try {
+            destination = safePath(ctx.cwd, `${root}/${file.path}`);
+            if (!evidenceMatches(file, destination)) continue;
+          } catch {
+            continue; // Missing or no longer verifiable historical outputs remain unowned.
+          }
+          checkPublishedOwnership();
+          NodeFS.unlinkSync(destination);
+          let parent = NodePath.dirname(destination);
+          const output = NodePath.join(ctx.cwd, root);
+          while (parent.startsWith(`${output}${NodePath.sep}`) || parent === output) {
+            try {
+              NodeFS.rmdirSync(parent);
+            } catch {
+              break;
+            }
+            parent = NodePath.dirname(parent);
+          }
+        }
+        initial = readRecord(ctx);
+      } finally {
+        release();
       }
-      initial = readRecord(ctx);
       if (!retainStage) discard();
     },
   };
