@@ -54,8 +54,9 @@ does not count.
    upstream provenance using
    `docs/lastcode/nightly-workflow.md#carry-replay-ownership` before validation
    and review. These trailers belong only on the LastCode delivery.
-4. Run focused validation and follow `lastcode-pr` for optional local Quick CI.
-   The pre-push hook follows the configured mode; GitHub CI remains required.
+4. Run focused local validation and follow `lastcode-pr` for optional local Quick
+   CI. GitHub CI is required only for a requested LastCode PR. The pre-push hook
+   follows the configured mode.
 5. Open the LastCode PR only when the user also asks for it. Otherwise keep the
    validated port local and report it. Target `lastobelus/lastCode:lastcode/main`
    and link the upstream PR in both descriptions.
