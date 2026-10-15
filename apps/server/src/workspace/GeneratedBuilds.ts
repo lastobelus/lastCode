@@ -330,30 +330,39 @@ const make = Effect.gen(function* () {
           reasons.add("Current workspace ownership or policy protects build files.");
           return false;
         }
-        failureReason = "Build cleanup process inventory check failed; files were retained.";
-        const processes = yield* yield* WorktreeConsumers.ProcessPaths;
-        if (processes === null) {
-          reasons.add("Process file-consumer inventory is unavailable; build files were retained.");
-          return false;
-        }
-        failureReason = "Build cleanup output-consumer identity check failed; files were retained.";
-        if (yield* actualOutputUse(input.worktreePath, root, processes)) {
-          failureReason = "Build cleanup usage renewal check failed; files were retained.";
-          yield* Effect.try({
-            try: () => recordGeneratedBuildUse(input.worktreePath, root, now),
-            catch: (cause) => new GeneratedBuildsError({ path: input.worktreePath, cause }),
-          });
-        }
-        failureReason = "Build cleanup worktree consumer check failed; files were retained.";
-        const consumerReason = yield* WorktreeConsumers.worktreeConsumerReason(
-          input.worktreePath,
-          processes,
-        );
-        if (consumerReason !== null) {
-          reasons.add(`Build files were retained: ${consumerReason}`);
-          return false;
-        }
-        // File-specific Git recognition follows the potentially slower OS inventory.
+        // Keep the policy check after OS inspection, and repeat the native
+        // proof afterward for consumers starting during awaited Git/app guards.
+        // Both captures omit the sweep's observation cache.
+        const consumersClear = Effect.gen(function* () {
+          failureReason = "Build cleanup process inventory check failed; files were retained.";
+          const processes = yield* yield* WorktreeConsumers.ProcessPaths;
+          if (processes === null) {
+            reasons.add(
+              "Process file-consumer inventory is unavailable; build files were retained.",
+            );
+            return false;
+          }
+          failureReason =
+            "Build cleanup output-consumer identity check failed; files were retained.";
+          if (yield* actualOutputUse(input.worktreePath, root, processes)) {
+            failureReason = "Build cleanup usage renewal check failed; files were retained.";
+            yield* Effect.try({
+              try: () => recordGeneratedBuildUse(input.worktreePath, root, now),
+              catch: (cause) => new GeneratedBuildsError({ path: input.worktreePath, cause }),
+            });
+          }
+          failureReason = "Build cleanup worktree consumer check failed; files were retained.";
+          const consumerReason = yield* WorktreeConsumers.worktreeConsumerReason(
+            input.worktreePath,
+            processes,
+          );
+          if (consumerReason !== null) {
+            reasons.add(`Build files were retained: ${consumerReason}`);
+            return false;
+          }
+          return true;
+        });
+        if (!(yield* consumersClear)) return false;
         failureReason =
           "Build cleanup Git and generated-path validation check failed; files were retained.";
         if (!(yield* validate(input, root))) {
@@ -371,6 +380,7 @@ const make = Effect.gen(function* () {
           reasons.add("Build cleanup policy or ownership changed before removal.");
           return false;
         }
+        if (!(yield* consumersClear)) return false;
         return true;
       }).pipe(
         Effect.catch(() =>

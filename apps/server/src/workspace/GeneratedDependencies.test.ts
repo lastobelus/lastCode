@@ -596,6 +596,91 @@ it.effect.each(["eligibility", "native"] as const)(
   },
 );
 
+it.effect.each(["installed-file", "root", "unavailable", "none"] as const)(
+  "checks fresh consumers after the last awaited eligibility callback: %s",
+  (consumer) => {
+    let paths: ReadonlyArray<string> | null = [];
+    let finalGuardFinished = false;
+    let observedAfterGuard = false;
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(NOW);
+      const f = yield* fixture();
+      yield* f.cleanup.observe(f.input, NOW - 20 * day);
+      const before = yield* Effect.sync(() => dependencyActivitySnapshot(f.input.worktreePath));
+      const inspected = yield* f.cleanup.inspect(f.input);
+      assert.isNotNull(inspected);
+      const target = f.path.join(f.dependencyPath, "package/index.js");
+      const decisions: GeneratedDependencies.DependencyRemovalDecision[] = [];
+      let guards = 0;
+      const removed = yield* f.cleanup.removeBatch(
+        [
+          {
+            inspection: inspected!,
+            canRemove: Effect.succeed(true),
+            isStillEligible: Effect.gen(function* () {
+              if (++guards === 2) {
+                // Await an external-style milestone without recording application usage.
+                yield* f.fs.readFileString(target);
+                paths =
+                  consumer === "unavailable"
+                    ? null
+                    : consumer === "installed-file"
+                      ? [target]
+                      : consumer === "root"
+                        ? [f.input.worktreePath]
+                        : [];
+                finalGuardFinished = true;
+              }
+              return true;
+            }),
+          },
+        ],
+        (_inspection, decision) => Effect.sync(() => decisions.push(decision)),
+      );
+      assert.equal(guards, 2);
+      assert.isTrue(observedAfterGuard);
+      assert.equal(removed.length, consumer === "none" ? 1 : 0);
+      assert.equal(yield* f.fs.exists(f.dependencyPath), consumer !== "none");
+      assert.equal(decisions[0]!.outcome, consumer === "none" ? "removed" : "kept");
+      if (consumer === "unavailable")
+        assert.equal(decisions[0]!.reason, "Process file-consumer inspection is unavailable");
+      if (consumer === "root" || consumer === "installed-file")
+        assert.equal(
+          decisions[0]!.reason,
+          "A process is using a file or directory in the worktree.",
+        );
+      if (consumer === "installed-file") {
+        assert.notEqual(
+          yield* Effect.sync(() => dependencyActivitySnapshot(f.input.worktreePath)),
+          before,
+        );
+        paths = [];
+        assert.equal((yield* f.cleanup.observe(f.input, NOW, false, false))!.lastUsedAt, NOW);
+      } else if (consumer !== "none") {
+        assert.equal(
+          yield* Effect.sync(() => dependencyActivitySnapshot(f.input.worktreePath)),
+          before,
+        );
+      }
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        testLayer(
+          Effect.succeed(["/workspace/elsewhere"]),
+          undefined,
+          undefined,
+          false,
+          undefined,
+          Effect.sync(() => {
+            observedAfterGuard ||= finalGuardFinished;
+            return paths;
+          }),
+        ),
+      ),
+    );
+  },
+);
+
 it.effect(
   "generic checkout cwd and source-file consumers protect while live without renewing dependency use",
   () => {
@@ -2227,10 +2312,11 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   }
   if (mode === "deleted-event-after-capture") assert.isTrue(deletedEventInserted);
   if (mode.startsWith("final-mount-")) {
-    // The mutation occurs only after both complete eligibility checks have run.
+    // The mutation occurs after both complete eligibility checks. Only the
+    // unchanged candidate reaches the additional post-callback consumer proof.
     assert.equal(
       mountReads,
-      mode === "final-mount-unchanged" || mode === "final-mount-late-dependency-use" ? 4 : 2,
+      mode === "final-mount-unchanged" ? 5 : mode === "final-mount-late-dependency-use" ? 4 : 2,
     );
     assert.equal(targetedReads.length, 4);
     assert.equal(processReads, 3);

@@ -2,9 +2,11 @@
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as TestClock from "effect/testing/TestClock";
 import { it, assert } from "@effect/vitest";
 import {
   createGeneratedBuildStage,
@@ -329,6 +331,65 @@ it.effect(
       assert.equal(
         generatedBuildActivity(input.worktreePath, "apps/web/dist")?.lastUsedAt,
         5 * DAY,
+      );
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect.each(["output file", "worktree root", "unavailable", "no consumer"] as const)(
+  "captures %s evidence after the last awaited eligibility check before build removal",
+  (consumer) =>
+    Effect.gen(function* () {
+      const { input, emit, remove, fs } = yield* fixture();
+      yield* TestClock.setTime(5 * DAY);
+      const now = yield* Clock.currentTimeMillis;
+      yield* emit("apps/web/dist", 1);
+      yield* emit("apps/server/dist", 4 * DAY);
+      const output = NodePath.join(input.worktreePath, "apps/web/dist/main.js");
+      let processes: readonly string[] | null = [];
+      let eligibilityChecks = 0;
+      const eligible = Effect.gen(function* () {
+        // The consumer arrives while the final app guard is awaiting real I/O;
+        // it is external evidence and does not itself update build provenance.
+        yield* fs
+          .readFileString(NodePath.join(input.worktreePath, "apps/web/package.json"))
+          .pipe(Effect.orDie);
+        eligibilityChecks++;
+        processes =
+          consumer === "output file"
+            ? [output]
+            : consumer === "worktree root"
+              ? [input.worktreePath]
+              : consumer === "unavailable"
+                ? null
+                : [];
+        return true;
+      });
+      const result = yield* remove(now, 3, false, Effect.succeed(true), eligible).pipe(
+        Effect.provideService(
+          WorktreeConsumers.ProcessPaths,
+          Effect.sync(() => processes),
+        ),
+      );
+      assert.equal(eligibilityChecks, 1);
+      assert.isFalse(result.failed);
+      assert.equal(result.files, consumer === "no consumer" ? 1 : 0);
+      if (consumer === "no consumer") assert.isAbove(result.bytes, 0);
+      else assert.equal(result.bytes, 0);
+      assert.equal(yield* fs.exists(output), consumer !== "no consumer");
+      if (consumer === "unavailable")
+        assert.include(result.reason, "Process file-consumer inventory is unavailable");
+      else if (consumer !== "no consumer")
+        assert.include(result.reason, "A process is using a file or directory in the worktree");
+      assert.equal(
+        generatedBuildActivity(input.worktreePath, "apps/web/dist")?.lastUsedAt,
+        consumer === "output file" ? now : 1,
+      );
+      assert.equal(
+        generatedBuildActivity(input.worktreePath, "apps/server/dist")?.lastUsedAt,
+        4 * DAY,
+      );
+      assert.isTrue(
+        yield* fs.exists(NodePath.join(input.worktreePath, "apps/server/dist/main.js")),
       );
     }).pipe(Effect.provide(testLayer)),
 );

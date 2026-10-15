@@ -657,31 +657,27 @@ const make = Effect.gen(function* () {
               "kept",
               "Dependency identity changed before removal",
             ).pipe(Effect.as(null));
-          // Executables, mapped and open installed files remain consumers even
-          // when their process has a cwd outside this checkout. Remember actual
-          // dependency use before a later inventory can observe that process exit.
-          const finalPaths = yield* processPaths;
-          if (finalPaths === null)
-            return yield* decide(
-              inspection,
-              "kept",
-              "Process file-consumer inspection is unavailable",
-            ).pipe(Effect.as(null));
-          yield* rememberConsumed(current, finalPaths);
-          const consumerReason = yield* WorktreeConsumers.worktreeConsumerReason(
-            current.worktreePath,
-            finalPaths,
-          );
-          if (consumerReason !== null)
-            return yield* decide(inspection, "kept", consumerReason).pipe(Effect.as(null));
-          // OS/runtime checks can await I/O. Keep the final application decision
-          // after them; this callback only compares durable metadata and policy.
+          // Preserve the policy recheck after OS inspection, then take another
+          // fresh native snapshot for consumers starting during that callback.
+          // Neither proof uses the sweep's observation cache.
+          const consumerReason = Effect.gen(function* () {
+            const paths = yield* processPaths;
+            if (paths === null) return "Process file-consumer inspection is unavailable";
+            yield* rememberConsumed(current, paths);
+            return yield* WorktreeConsumers.worktreeConsumerReason(current.worktreePath, paths);
+          });
+          const beforeEligibility = yield* consumerReason;
+          if (beforeEligibility !== null)
+            return yield* decide(inspection, "kept", beforeEligibility).pipe(Effect.as(null));
           if (!(yield* isStillEligible))
             return yield* decide(
               inspection,
               "kept",
               "Worktree ownership or cleanup eligibility changed",
             ).pipe(Effect.as(null));
+          const finalConsumerReason = yield* consumerReason;
+          if (finalConsumerReason !== null)
+            return yield* decide(inspection, "kept", finalConsumerReason).pipe(Effect.as(null));
           // Keep the caller's leases until native removal settles on cancellation.
           return yield* Effect.tryPromise({
             try: async () => {

@@ -226,8 +226,9 @@ it.effect(
         })),
       );
       assert.lengthOf(removed, 2);
-      // Each surviving candidate also refreshes mounts in its full-root consumer guard.
-      assert.deepEqual(snapshotCompletions, [0, 0, 0, 0, 4, 4, 4, 4, 4]);
+      // Both surviving candidates refresh mounts again in the post-callback
+      // consumer proof, after every cohort eligibility callback completed.
+      assert.deepEqual(snapshotCompletions, [0, 0, 0, 0, 4, 4, 4, 4, 4, 4, 4]);
       for (const f of [fixtures[0]!, fixtures[3]!]) {
         assert.equal(yield* f.fs.readFileString(f.data), "preserve mounted data\n");
       }
@@ -310,7 +311,7 @@ it.effect("preserves an earlier cohort member invalidated by a later eligibility
       removed.map((entry) => entry.dependencyPath),
       [fixtures[1]!.dependencyPath],
     );
-    assert.equal(reads, 5);
+    assert.equal(reads, 6); // The surviving sibling reaches the post-callback proof.
     assert.equal(
       yield* fixtures[0]!.fs.readFileString(fixtures[0]!.data),
       "preserve mounted data\n",
@@ -535,7 +536,7 @@ it.effect(
         })),
       );
       assert.lengthOf(removed, 3);
-      assert.equal(reads, 11);
+      assert.equal(reads, 14); // Each of the three removals refreshes its final consumer proof.
       assert.equal(
         yield* fixtures[0]!.fs.readFileString(fixtures[0]!.data),
         "preserve mounted data\n",
