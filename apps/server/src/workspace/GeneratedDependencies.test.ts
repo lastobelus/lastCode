@@ -2518,6 +2518,7 @@ it.effect(
     return Effect.gen(function* () {
       yield* TestClock.setTime(NOW);
       const f = yield* fixture();
+      const observationTargets = WorktreeConsumers.createTargetObservation();
       let observationReads = 0;
       const cachedPaths = yield* Effect.cached(
         Effect.sync(() => {
@@ -2525,10 +2526,18 @@ it.effect(
           return [] as readonly string[];
         }),
       );
-      yield* f.cleanup.observe(f.input, NOW - 20 * day, false, true, cachedPaths);
+      yield* f.cleanup.observe(
+        f.input,
+        NOW - 20 * day,
+        false,
+        true,
+        cachedPaths,
+        observationTargets,
+      );
       paths = [f.path.join(f.dependencyPath, "package/index.js")];
       assert.equal(
-        (yield* f.cleanup.observe(f.input, NOW, false, true, cachedPaths))!.lastUsedAt,
+        (yield* f.cleanup.observe(f.input, NOW, false, true, cachedPaths, observationTargets))!
+          .lastUsedAt,
         NOW - 20 * day,
       );
       assert.equal(observationReads, 1);

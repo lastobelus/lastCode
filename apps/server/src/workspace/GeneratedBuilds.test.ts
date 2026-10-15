@@ -436,6 +436,7 @@ it.effect(
       const { builds, input, emit, remove, fs } = yield* fixture();
       yield* emit("apps/web/dist", 1);
       yield* emit("apps/server/dist", 2);
+      const observationTargets = WorktreeConsumers.createTargetObservation();
       let observationReads = 0;
       let freshReads = 0;
       const cachedPaths = yield* Effect.cached(
@@ -450,11 +451,11 @@ it.effect(
       });
       assert.deepEqual(
         yield* builds
-          .observe(input, DAY, false, true, cachedPaths)
+          .observe(input, DAY, false, true, cachedPaths, observationTargets)
           .pipe(Effect.provideService(WorktreeConsumers.ProcessPaths, freshPaths)),
         { lastUsedAt: 1, renewed: false },
       );
-      yield* builds.observe(input, 2 * DAY, false, true, cachedPaths);
+      yield* builds.observe(input, 2 * DAY, false, true, cachedPaths, observationTargets);
       assert.equal(observationReads, 1);
       assert.equal(freshReads, 0);
       const removed = yield* remove(5 * DAY, 3).pipe(

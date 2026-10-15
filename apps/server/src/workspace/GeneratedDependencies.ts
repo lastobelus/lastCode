@@ -132,6 +132,7 @@ export class GeneratedDependencies extends Context.Service<
       used?: boolean,
       persist?: boolean,
       observationProcessPaths?: Effect.Effect<ReadonlyArray<string> | null>,
+      observationTargets?: WorktreeConsumers.TargetObservation,
     ) => Effect.Effect<
       { readonly lastUsedAt: number; readonly renewed: boolean } | null,
       GeneratedDependenciesError
@@ -387,6 +388,7 @@ const make = Effect.gen(function* () {
     used = false,
     persist = true,
     observationProcessPaths?: Effect.Effect<ReadonlyArray<string> | null>,
+    observationTargets?: WorktreeConsumers.TargetObservation,
   ) {
     const current = yield* validate(input, "GeneratedDependencies.observe");
     if (current === null) return null;
@@ -398,7 +400,7 @@ const make = Effect.gen(function* () {
       const paths = yield* capture;
       if (paths === null) return null;
       consumed = yield* Effect.tryPromise({
-        try: () => consumesPath(current.dependencyPath, paths),
+        try: () => consumesPath(current.dependencyPath, paths, observationTargets),
         catch: (cause) => new GeneratedDependenciesError({ path: current.dependencyPath, cause }),
       });
     }

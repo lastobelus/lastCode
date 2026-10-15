@@ -313,14 +313,34 @@ const directoryToken = (stat: Awaited<ReturnType<typeof targetStat>>) =>
   `${stat.dev}:${stat.ino}:${stat.mtimeNs}:${stat.ctimeNs}`;
 const targetStat = (path: string) => NodeFSP.lstat(path, { bigint: true });
 
-const targetIdentities = async (root: string) => {
+const targetIdentities = async (
+  root: string,
+  collectIdentities: boolean,
+  paths: ReadonlyArray<string>,
+) => {
   const deadline = performance.now() + 30_000;
   const rootStat = await targetStat(root);
   if (!rootStat.isDirectory() || (await NodeFSP.realpath(root)) !== root)
     throw new Error("Consumer target root is not a canonical directory");
   const directories: Array<{ path: string; token: string }> = [];
-  const identities = new Set<string>();
-  const inodes = new Set<bigint>();
+  // Socket absence needs complete type/device evidence, not every vnode identity.
+  const identities = collectIdentities ? new Set<string>() : null;
+  const inodes = collectIdentities ? new Set<bigint>() : null;
+  // Keep only possible matches for this exact native capture, rather than
+  // retaining every dependency inode for the lifetime of an observation.
+  const wantedDevices = collectIdentities ? new Map<bigint, Set<bigint>>() : null;
+  const wantedInodes = collectIdentities ? new Set<bigint>() : null;
+  if (collectIdentities) {
+    for (const object of (paths as CapturedPaths)[nativeIdentities] ?? []) {
+      if (object === null || object === "unix-socket") continue;
+      if (object.device === null) wantedInodes!.add(object.inode);
+      else {
+        const inodes = wantedDevices!.get(object.device) ?? new Set<bigint>();
+        inodes.add(object.inode);
+        wantedDevices!.set(object.device, inodes);
+      }
+    }
+  }
   let hasSockets = false;
   let objects = 0;
   const visit = async (path: string, depth: number): Promise<void> => {
@@ -334,8 +354,9 @@ const targetIdentities = async (root: string) => {
       stat.dev !== rootStat.dev
     )
       throw new Error("Consumer target object identity is unavailable or crosses a device");
-    identities.add(identityKey({ device: stat.dev, inode: stat.ino }));
-    inodes.add(stat.ino);
+    if (wantedDevices?.get(stat.dev)?.has(stat.ino))
+      identities!.add(identityKey({ device: stat.dev, inode: stat.ino }));
+    if (wantedInodes?.has(stat.ino)) inodes!.add(stat.ino);
     if (stat.isSocket()) hasSockets = true;
     if (!stat.isDirectory()) return; // Record links themselves; never traverse their targets.
     if (typeof stat.mtimeNs !== "bigint" || typeof stat.ctimeNs !== "bigint")
@@ -364,7 +385,90 @@ const targetIdentities = async (root: string) => {
     (await NodeFSP.realpath(root)) !== root
   )
     throw new Error("Consumer target root changed during observation");
-  return { identities, inodes, hasSockets };
+  return { identities, inodes, hasSockets, directories, rootToken: directoryToken(rootStat) };
+};
+
+type TargetEvidence = Awaited<ReturnType<typeof targetIdentities>>;
+type TargetEntry = {
+  readonly proof: Promise<TargetEvidence>;
+  readonly collectIdentities: boolean;
+  unavailable: boolean;
+  cause?: unknown;
+};
+export type TargetObservation = WeakMap<ReadonlyArray<string>, Map<string, TargetEntry>>;
+
+/** A sweep owns this context; default and final removal proofs never use it. */
+export const createTargetObservation = (): TargetObservation => new WeakMap();
+
+const targetUnchanged = async (root: string, evidence: TargetEvidence) => {
+  const deadline = performance.now() + 30_000;
+  try {
+    for (const directory of evidence.directories) {
+      if (performance.now() > deadline)
+        throw new Error("Consumer target validation limit exceeded");
+      const stat = await targetStat(directory.path);
+      if (!stat.isDirectory() || directoryToken(stat) !== directory.token) return false;
+    }
+    const rootStat = await targetStat(root);
+    return (
+      rootStat.isDirectory() &&
+      directoryToken(rootStat) === evidence.rootToken &&
+      (await NodeFSP.realpath(root)) === root
+    );
+  } catch (cause) {
+    if (gone(cause)) return false; // Removed directories require a new complete walk.
+    throw cause;
+  }
+};
+
+const targetEvidence = async (
+  root: string,
+  paths: ReadonlyArray<string>,
+  collectIdentities: boolean,
+  observation?: TargetObservation,
+): Promise<TargetEvidence> => {
+  if (observation === undefined) return targetIdentities(root, collectIdentities, paths);
+  let targets = observation.get(paths);
+  if (!targets) {
+    targets = new Map();
+    observation.set(paths, targets);
+  }
+  const collect = (identities: boolean) => {
+    const entry: TargetEntry = {
+      proof: targetIdentities(root, identities, paths),
+      collectIdentities: identities,
+      unavailable: false,
+    };
+    targets.set(root, entry);
+    return entry;
+  };
+  let entry = targets.get(root);
+  const existing = entry !== undefined;
+  entry ??= collect(collectIdentities);
+  if (entry.unavailable) throw entry.cause;
+  try {
+    let evidence = await entry.proof;
+    if (
+      existing &&
+      (!(await targetUnchanged(root, evidence)) || (collectIdentities && !entry.collectIdentities))
+    ) {
+      // Another concurrent observer may already have replaced this entry.
+      entry =
+        targets.get(root) === entry
+          ? collect(collectIdentities || entry.collectIdentities)
+          : targets.get(root)!;
+      if (entry.unavailable) throw entry.cause;
+      evidence = await entry.proof;
+      if (collectIdentities && !entry.collectIdentities)
+        return targetEvidence(root, paths, true, observation);
+    }
+    return evidence;
+  } catch (cause) {
+    // An incomplete proof remains unavailable for this capture, without repeated walks.
+    entry.unavailable = true;
+    entry.cause = cause;
+    throw cause;
+  }
 };
 
 /**
@@ -378,6 +482,7 @@ const targetIdentities = async (root: string) => {
 export const processPathsUseRoot = async (
   canonicalRoot: string,
   paths: ReadonlyArray<string>,
+  observation?: TargetObservation,
 ): Promise<boolean> => {
   if (!NodePath.isAbsolute(canonicalRoot)) throw new Error("Consumer target root is not absolute");
   const captured = (paths as CapturedPaths)[nativeIdentities];
@@ -422,15 +527,20 @@ export const processPathsUseRoot = async (
     }
   }
   if (unresolved.length === 0 && !vanishedSocket) return false;
-  const identities = await targetIdentities(canonicalRoot).catch((cause: unknown) => {
+  const identities = await targetEvidence(
+    canonicalRoot,
+    paths,
+    unresolved.length > 0,
+    observation,
+  ).catch((cause: unknown) => {
     throw new ObjectProofUnavailable("Consumer target inventory could not be verified", { cause });
   });
   return (
     (vanishedSocket && identities.hasSockets) ||
     unresolved.some((identity) =>
       identity.device === null
-        ? identities.inodes.has(identity.inode)
-        : identities.identities.has(identityKey(identity)),
+        ? identities.inodes!.has(identity.inode)
+        : identities.identities!.has(identityKey(identity)),
     )
   );
 };

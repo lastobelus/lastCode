@@ -676,6 +676,7 @@ const make = Effect.gen(function* () {
     entries: CleanupWorkingEntry[],
     resource: "dependencies" | "generated-builds",
     observationProcessPaths: Effect.Effect<ReadonlyArray<string> | null>,
+    observationTargets: WorktreeConsumers.TargetObservation,
   ) {
     const generatedBuilds = resource === "generated-builds";
     const outputPath = (cwd: string) => (generatedBuilds ? cwd : path.join(cwd, "node_modules"));
@@ -696,8 +697,22 @@ const make = Effect.gen(function* () {
       persist = true,
     ) {
       if (generatedBuilds)
-        return yield* builds.observe(input, time, used, persist, processObservation);
-      return yield* dependencies.observe(input, time, used, persist, processObservation);
+        return yield* builds.observe(
+          input,
+          time,
+          used,
+          persist,
+          processObservation,
+          persist ? observationTargets : undefined,
+        );
+      return yield* dependencies.observe(
+        input,
+        time,
+        used,
+        persist,
+        processObservation,
+        persist ? observationTargets : undefined,
+      );
     });
     const unrecognizedReason = () =>
       observationUnavailable
@@ -2386,6 +2401,7 @@ const make = Effect.gen(function* () {
     // One lazy observation for both resource passes; retain the original array's
     // native identity metadata. Final removal scans remain independent and fresh.
     const observationProcessPaths = yield* Effect.cached(yield* WorktreeConsumers.ProcessPaths);
+    const observationTargets = WorktreeConsumers.createTargetObservation();
     yield* audit({
       event: "sweep-start",
       runId,
@@ -2399,6 +2415,7 @@ const make = Effect.gen(function* () {
       entries,
       "dependencies",
       observationProcessPaths,
+      observationTargets,
     ).pipe(
       Effect.catch((error) =>
         Effect.gen(function* () {
@@ -2425,6 +2442,7 @@ const make = Effect.gen(function* () {
       entries,
       "generated-builds",
       observationProcessPaths,
+      observationTargets,
     ).pipe(
       Effect.catch((error) =>
         Effect.sync(() =>

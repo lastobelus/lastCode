@@ -724,6 +724,341 @@ describe("Captured vanished Unix socket proof", () => {
   );
 });
 
+describe("Observation-scoped target evidence", () => {
+  const root = "/workspace/example";
+  const prove = (
+    paths: ReadonlyArray<string>,
+    observation?: ReturnType<typeof WorktreeConsumers.createTargetObservation>,
+    target = root,
+  ) =>
+    Effect.promise(() =>
+      observation === undefined
+        ? WorktreeConsumers.processPathsUseRoot(target, paths)
+        : WorktreeConsumers.processPathsUseRoot(target, paths, observation),
+    );
+  const regularFileReads = () =>
+    native.lstat.mock.calls.filter(([path]) =>
+      ["/workspace/example/dist/output.js", "/workspace/example/link"].includes(path),
+    ).length;
+
+  it.effect("reuses a complete target walk while checking every directory again", () =>
+    Effect.gen(function* () {
+      socketFixture();
+      targetFixture();
+      const paths = (yield* inventory("darwin"))!;
+      const observation = WorktreeConsumers.createTargetObservation();
+      expect(yield* prove(paths, observation)).toBe(false);
+      const opens = native.opendir.mock.calls.length;
+      const files = regularFileReads();
+      native.lstat.mockClear();
+      expect(yield* prove(paths, observation)).toBe(false);
+      expect(yield* prove(paths, observation)).toBe(false);
+      expect(opens).toBe(2);
+      expect(files).toBe(2);
+      expect(native.opendir).toHaveBeenCalledTimes(opens);
+      expect(regularFileReads()).toBe(0);
+      for (const directory of [root, `${root}/dist`]) {
+        expect(
+          native.lstat.mock.calls.filter(([path]) => path === directory).length,
+        ).toBeGreaterThanOrEqual(2);
+      }
+      expect(native.execFile).toHaveBeenCalledOnce();
+    }),
+  );
+
+  it.effect("does not share a target walk with another native capture or observation", () =>
+    Effect.gen(function* () {
+      socketFixture();
+      targetFixture();
+      const paths = (yield* inventory("darwin"))!;
+      const observation = WorktreeConsumers.createTargetObservation();
+      expect(yield* prove(paths, observation)).toBe(false);
+      const freshPaths = (yield* inventory("darwin"))!;
+      expect(freshPaths).toEqual(paths);
+      expect(freshPaths).not.toBe(paths);
+      expect(yield* prove(freshPaths, observation)).toBe(false);
+      expect(yield* prove(paths, WorktreeConsumers.createTargetObservation())).toBe(false);
+      expect(native.opendir).toHaveBeenCalledTimes(6);
+      expect(regularFileReads()).toBe(6);
+    }),
+  );
+
+  it.effect("keeps evidence for different target roots separate", () =>
+    Effect.gen(function* () {
+      socketFixture();
+      const stats = targetFixture();
+      stats.set("/workspace/other", objectStat(20n, true));
+      stats.set("/workspace/other/dist", objectStat(21n, true));
+      stats.set("/workspace/other/dist/output.js", {
+        ...objectStat(22n),
+        isSocket: () => true,
+      });
+      native.opendir.mockImplementation(async (path: string) =>
+        (async function* () {
+          for (const name of path.endsWith("/dist") ? ["output.js"] : ["dist"]) yield { name };
+        })(),
+      );
+      const paths = (yield* inventory("darwin"))!;
+      const observation = WorktreeConsumers.createTargetObservation();
+      expect(yield* prove(paths, observation)).toBe(false);
+      expect(yield* prove(paths, observation, "/workspace/other")).toBe(true);
+      expect(native.opendir).toHaveBeenCalledTimes(4);
+      expect(yield* prove(paths, observation)).toBe(false);
+      expect(native.opendir).toHaveBeenCalledTimes(4);
+    }),
+  );
+
+  it.effect(
+    "always walks afresh without an explicit observation, including after cached proof",
+    () =>
+      Effect.gen(function* () {
+        socketFixture();
+        const stats = targetFixture();
+        const paths = (yield* inventory("darwin"))!;
+        expect(yield* prove(paths, WorktreeConsumers.createTargetObservation())).toBe(false);
+        expect(yield* prove(paths)).toBe(false);
+        stats.set(`${root}/dist`, objectStat(2n, true, 18n, 2n));
+        stats.set(`${root}/dist/output.js`, { ...objectStat(42n), isSocket: () => true });
+        expect(yield* prove(paths)).toBe(true);
+        expect(native.opendir).toHaveBeenCalledTimes(6);
+        expect(regularFileReads()).toBe(6);
+      }),
+  );
+
+  it.effect.each(["inode", "device", "mtime", "ctime"] as const)(
+    "invalidates nested directory evidence when its %s changes",
+    (changed) =>
+      Effect.gen(function* () {
+        socketFixture();
+        const stats = targetFixture();
+        const paths = (yield* inventory("darwin"))!;
+        const observation = WorktreeConsumers.createTargetObservation();
+        expect(yield* prove(paths, observation)).toBe(false);
+        const previous = stats.get(`${root}/dist`)!;
+        stats.set(`${root}/dist`, {
+          ...previous,
+          ...(changed === "inode" ? { ino: 9n } : {}),
+          ...(changed === "device" ? { dev: 99n } : {}),
+          ...(changed === "mtime" ? { mtimeNs: 2n } : {}),
+          ...(changed === "ctime" ? { ctimeNs: 2n } : {}),
+        });
+        if (changed === "device") {
+          yield* Effect.promise(() =>
+            expect(provePromise(paths, observation)).rejects.toThrow("inventory"),
+          );
+        } else {
+          expect(yield* prove(paths, observation)).toBe(false);
+        }
+        expect(native.opendir.mock.calls.length).toBeGreaterThan(2);
+      }),
+  );
+
+  const provePromise = (
+    paths: ReadonlyArray<string>,
+    observation: ReturnType<typeof WorktreeConsumers.createTargetObservation>,
+  ) => WorktreeConsumers.processPathsUseRoot(root, paths, observation);
+
+  it.effect("protects a socket created in a nested directory after cached absence", () =>
+    Effect.gen(function* () {
+      socketFixture();
+      const stats = targetFixture();
+      const paths = (yield* inventory("darwin"))!;
+      const observation = WorktreeConsumers.createTargetObservation();
+      expect(yield* prove(paths, observation)).toBe(false);
+      stats.set(`${root}/dist`, objectStat(2n, true, 18n, 2n));
+      stats.set(`${root}/dist/output.js`, { ...objectStat(42n), isSocket: () => true });
+      expect(yield* prove(paths, observation)).toBe(true);
+      expect(native.opendir).toHaveBeenCalledTimes(4);
+    }),
+  );
+
+  it.effect("recollects a complete target after a previously observed directory is removed", () =>
+    Effect.gen(function* () {
+      socketFixture();
+      const stats = targetFixture();
+      let removed = false;
+      native.opendir.mockImplementation(async (path: string) =>
+        (async function* () {
+          const names = path === root ? (removed ? ["link"] : ["dist", "link"]) : ["output.js"];
+          for (const name of names) yield { name };
+        })(),
+      );
+      const paths = (yield* inventory("darwin"))!;
+      const observation = WorktreeConsumers.createTargetObservation();
+      expect(yield* prove(paths, observation)).toBe(false);
+      removed = true;
+      stats.delete(`${root}/dist`);
+      stats.delete(`${root}/dist/output.js`);
+      stats.set(root, objectStat(1n, true, 18n, 2n));
+      expect(yield* prove(paths, observation)).toBe(false);
+      expect(native.opendir).toHaveBeenCalledTimes(3);
+      expect(yield* prove(paths, observation)).toBe(false);
+      expect(native.opendir).toHaveBeenCalledTimes(3);
+    }),
+  );
+
+  it.effect("rechecks root identity before accepting cached socket absence", () =>
+    Effect.gen(function* () {
+      socketFixture();
+      const stats = targetFixture();
+      const paths = (yield* inventory("darwin"))!;
+      const observation = WorktreeConsumers.createTargetObservation();
+      expect(yield* prove(paths, observation)).toBe(false);
+      stats.set(root, objectStat(50n, true));
+      stats.set(`${root}/link`, { ...objectStat(42n), isSocket: () => true });
+      expect(yield* prove(paths, observation)).toBe(true);
+      expect(native.opendir).toHaveBeenCalledTimes(4);
+    }),
+  );
+
+  it.effect("rechecks canonical root ownership before accepting cached evidence", () =>
+    Effect.gen(function* () {
+      socketFixture();
+      targetFixture();
+      const paths = (yield* inventory("darwin"))!;
+      const observation = WorktreeConsumers.createTargetObservation();
+      expect(yield* prove(paths, observation)).toBe(false);
+      native.realpath.mockImplementation(async (path: string) => {
+        if (path === "/system/example/socket") throw missing();
+        return path === root ? "/workspace/replaced" : path;
+      });
+      yield* Effect.promise(() =>
+        expect(provePromise(paths, observation)).rejects.toThrow("inventory"),
+      );
+    }),
+  );
+
+  it.effect.each(["EACCES", "EIO", undefined])(
+    "does not retry a failed directory-token revalidation (%s) within an observation",
+    (code) =>
+      Effect.gen(function* () {
+        socketFixture();
+        const stats = targetFixture();
+        const paths = (yield* inventory("darwin"))!;
+        const observation = WorktreeConsumers.createTargetObservation();
+        expect(yield* prove(paths, observation)).toBe(false);
+        native.lstat.mockImplementation(async (path: string) => {
+          if (path === `${root}/dist`) throw Object.assign(new Error("denied"), { code });
+          const stat = stats.get(path);
+          if (!stat) throw missing();
+          return stat;
+        });
+        yield* Effect.promise(() =>
+          expect(provePromise(paths, observation)).rejects.toThrow("inventory"),
+        );
+        targetFixture();
+        yield* Effect.promise(() =>
+          expect(provePromise(paths, observation)).rejects.toThrow("inventory"),
+        );
+        expect(native.opendir).toHaveBeenCalledTimes(2);
+        expect(yield* prove(paths, WorktreeConsumers.createTargetObservation())).toBe(false);
+        expect(native.opendir).toHaveBeenCalledTimes(4);
+      }),
+  );
+
+  it.effect("does not repeatedly restart an incomplete target walk within an observation", () =>
+    Effect.gen(function* () {
+      socketFixture();
+      targetFixture();
+      const paths = (yield* inventory("darwin"))!;
+      const observation = WorktreeConsumers.createTargetObservation();
+      native.opendir.mockRejectedValue(Object.assign(new Error("denied"), { code: "EACCES" }));
+      yield* Effect.promise(() =>
+        expect(provePromise(paths, observation)).rejects.toThrow("inventory"),
+      );
+      targetFixture();
+      yield* Effect.promise(() =>
+        expect(provePromise(paths, observation)).rejects.toThrow("inventory"),
+      );
+      expect(native.opendir).toHaveBeenCalledOnce();
+      expect(yield* prove(paths, WorktreeConsumers.createTargetObservation())).toBe(false);
+      expect(native.opendir).toHaveBeenCalledTimes(3);
+    }),
+  );
+
+  it.effect.each(["REG", "FIFO"] as const)(
+    "upgrades socket-only evidence when the same native capture needs %s identity proof",
+    (type) =>
+      Effect.gen(function* () {
+        darwinFixture(
+          "p123\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n" +
+            "f7\0tunix\0n/system/example/socket\0\n" +
+            `f8\0t${type}\0${type === "REG" ? "D0x12\0" : ""}i9007199254740993\0n/system/example/file\0\n`,
+        );
+        let inaccessible = false;
+        native.realpath.mockImplementation(async (path: string) => {
+          if (path === "/system/example/socket") throw missing();
+          if (path === "/system/example/file" && inaccessible)
+            throw Object.assign(new Error("unresolved"), {
+              code: type === "REG" ? "EACCES" : "ENOENT",
+            });
+          return path;
+        });
+        targetFixture();
+        const paths = (yield* inventory("darwin"))!;
+        const observation = WorktreeConsumers.createTargetObservation();
+        expect(yield* prove(paths, observation)).toBe(false);
+        inaccessible = true;
+        expect(yield* prove(paths, observation)).toBe(true);
+        expect(native.opendir).toHaveBeenCalledTimes(4);
+        native.lstat.mockClear();
+        expect(yield* prove(paths, observation)).toBe(true);
+        expect(native.opendir).toHaveBeenCalledTimes(4);
+        expect(regularFileReads()).toBe(0);
+        expect(native.execFile).toHaveBeenCalledOnce();
+      }),
+  );
+
+  it.effect("retains matches for accessible native vnodes that become unresolved on reuse", () =>
+    Effect.gen(function* () {
+      darwinFixture(
+        "p123\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n" +
+          "f8\0tREG\0D0x12\0i99\0n/system/example/first\0\n" +
+          "f9\0tREG\0D0x12\0i9007199254740993\0n/system/example/later\0\n",
+      );
+      let laterUnresolved = false;
+      native.realpath.mockImplementation(async (path: string) => {
+        if (
+          path === "/system/example/first" ||
+          (path === "/system/example/later" && laterUnresolved)
+        )
+          throw Object.assign(new Error("unresolved"), { code: "EACCES" });
+        return path;
+      });
+      targetFixture();
+      const paths = (yield* inventory("darwin"))!;
+      const observation = WorktreeConsumers.createTargetObservation();
+      expect(yield* prove(paths, observation)).toBe(false);
+      laterUnresolved = true;
+      native.lstat.mockClear();
+      expect(yield* prove(paths, observation)).toBe(true);
+      expect(native.opendir).toHaveBeenCalledTimes(2);
+      expect(regularFileReads()).toBe(0);
+    }),
+  );
+
+  it.effect.each(["direct", "canonical"] as const)(
+    "protects a late %s consumer in a fresh capture despite earlier cached absence",
+    (kind) =>
+      Effect.gen(function* () {
+        socketFixture();
+        targetFixture();
+        const observation = WorktreeConsumers.createTargetObservation();
+        expect(yield* prove((yield* inventory("darwin"))!, observation)).toBe(false);
+        socketFixture(undefined, undefined, kind === "direct" ? `${root}/socket` : undefined);
+        if (kind === "canonical")
+          native.realpath.mockImplementation(async (path: string) =>
+            path === "/system/example/socket" ? `${root}/socket` : path,
+          );
+        const freshPaths = (yield* inventory("darwin"))!;
+        expect(yield* prove(freshPaths, observation)).toBe(true);
+        expect(yield* prove(freshPaths)).toBe(true);
+        expect(native.opendir).toHaveBeenCalledTimes(2);
+        expect(native.execFile).toHaveBeenCalledTimes(2);
+      }),
+  );
+});
+
 describe("Fresh native observation retry", () => {
   const incomplete =
     "p123\0\nfcwd\0tDIR\0n/workspace/elsewhere\0\n" +

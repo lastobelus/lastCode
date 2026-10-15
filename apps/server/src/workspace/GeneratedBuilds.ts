@@ -44,6 +44,7 @@ export class GeneratedBuilds extends Context.Service<
       usedIgnored?: boolean,
       persist?: boolean,
       observationProcessPaths?: Effect.Effect<ReadonlyArray<string> | null>,
+      observationTargets?: WorktreeConsumers.TargetObservation,
     ) => Effect.Effect<{ lastUsedAt: number; renewed: boolean } | null, GeneratedBuildsError>;
     readonly remove: <EligibilityError>(
       input: BuildInput,
@@ -247,10 +248,19 @@ const make = Effect.gen(function* () {
         .map((path) => path.slice(root.length + 1)),
     );
   });
-  const actualOutputUse = (cwd: string, root: string, paths: readonly string[] | null) =>
+  const actualOutputUse = (
+    cwd: string,
+    root: string,
+    paths: readonly string[] | null,
+    observationTargets?: WorktreeConsumers.TargetObservation,
+  ) =>
     io(cwd, async () => {
       if (paths === null) return false;
-      return WorktreeConsumers.processPathsUseRoot(NodePath.join(cwd, root), paths);
+      return WorktreeConsumers.processPathsUseRoot(
+        NodePath.join(cwd, root),
+        paths,
+        observationTargets,
+      );
     });
   const activity = (cwd: string, root: string) =>
     Effect.try({
@@ -265,6 +275,7 @@ const make = Effect.gen(function* () {
     _usedIgnored = false,
     persist = true,
     observationProcessPaths?: Effect.Effect<ReadonlyArray<string> | null>,
+    observationTargets?: WorktreeConsumers.TargetObservation,
   ) {
     const roots = yield* io(input.worktreePath, () => discover(input.worktreePath));
     let paths: ReadonlyArray<string> | null | undefined;
@@ -282,7 +293,9 @@ const make = Effect.gen(function* () {
         paths = yield* capture;
       }
       if (persist && paths === null) return null;
-      const used = persist && (yield* actualOutputUse(input.worktreePath, root, paths ?? null));
+      const used =
+        persist &&
+        (yield* actualOutputUse(input.worktreePath, root, paths ?? null, observationTargets));
       if (used && persist) {
         const updated = yield* Effect.try({
           try: () => recordGeneratedBuildUse(input.worktreePath, root, now),
