@@ -182,6 +182,68 @@ function sourceComposer(source: string, platform = "MacIntel") {
 }
 
 describe("composer source transactions", () => {
+  it("maps a caret after a converted chip and leaves text literal when the fence is removed", () => {
+    const source = "\n[example.ts](src/example.ts)\n";
+    const composer = sourceComposer(source);
+    expect(composer.atoms()).toHaveLength(1);
+    composer.select(source.length);
+    composer.view.dispatch(composer.state.tr.insertText("```", 1));
+    expect(composer.value()).toBe("```" + source);
+    expect(composer.atoms()).toHaveLength(0);
+    expect(composer.selection()).toEqual({ from: source.length + 3, to: source.length + 3 });
+    composer.view.dispatch(composer.state.tr.delete(1, 4));
+    expect(composer.value()).toBe(source);
+    expect(composer.atoms()).toHaveLength(0);
+    expect(composer.selection()).toEqual({ from: source.length, to: source.length });
+    expect(composer.undo()).toBe(true);
+    expect(composer.value()).toBe("```" + source);
+    expect(composer.atoms()).toHaveLength(0);
+    expect(composer.undo()).toBe(true);
+    expect(composer.value()).toBe(source);
+    expect(composer.atoms()).toHaveLength(1);
+  });
+
+  it.each([
+    { preview: false, composing: false, padding: 0 },
+    { preview: true, composing: false, padding: 0 },
+    { preview: false, composing: true, padding: 0 },
+    { preview: true, composing: true, padding: 0 },
+    { preview: false, composing: false, padding: 13_000 },
+    { preview: true, composing: false, padding: 13_000 },
+  ])(
+    "makes existing fence atoms literal with $preview preview, $composing composition and $padding padding",
+    ({ preview, composing, padding }) => {
+      const outside = "x".repeat(padding) + (padding ? "\n" : "") + "[outside.ts](outside.ts)\n";
+      const body = "[first.ts](first.ts) [second.ts](second.ts)\n";
+      const source = outside + "\n" + body;
+      const composer = sourceComposer(source);
+      expect(composer.atoms()).toHaveLength(3);
+      const outsideAtom = composer.atoms()[0]!;
+      composer.view.dispatch(
+        composer.state.tr.setMeta(composerLivePreviewKey, { enabled: preview, composing }),
+      );
+      composer.select(outside.length);
+      composer.type("```text");
+      const fenced = outside + "```text\n" + body;
+      expect(composer.value()).toBe(fenced);
+      expect(composer.atoms()).toHaveLength(1);
+      expect(composer.atoms()[0]!.eq(outsideAtom)).toBe(true);
+      expect(composer.selection()).toEqual({ from: outside.length + 7, to: outside.length + 7 });
+      expect(composer.undo()).toBe(true);
+      expect(composer.value()).toBe(source);
+      expect(composer.atoms()).toHaveLength(3);
+      expect(composer.redo()).toBe(true);
+      expect(composer.value()).toBe(fenced);
+      expect(composer.atoms()).toHaveLength(1);
+      const inside = fenced.indexOf("first.ts") + 3;
+      composer.select(inside);
+      composer.type("X");
+      expect(composer.value()).toBe(fenced.slice(0, inside) + "X" + fenced.slice(inside));
+      expect(composer.undo()).toBe(true);
+      expect(composer.value()).toBe(fenced);
+    },
+  );
+
   it("wraps Select All with typed backticks in one source paragraph and one undo step", () => {
     const composer = sourceComposer("hello");
     composer.view.dispatch(composer.state.tr.setSelection(new AllSelection(composer.state.doc)));

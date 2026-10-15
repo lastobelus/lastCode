@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 
 import type { Editor } from "@tiptap/core";
+import { EnvironmentId, MessageId, ThreadId } from "@t3tools/contracts";
+import { serializeAssistantCitation } from "@t3tools/shared/assistantCitations";
 import { act, createRef, useState, type ComponentProps, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
@@ -95,6 +97,85 @@ function paste(text: string) {
     handler(editor().view, event as ClipboardEvent, editor().state.doc.slice(0, 0)),
   );
 }
+
+it.each([false, true])(
+  "makes existing chips editable when a fence is typed around them with preview %s",
+  async (preview) => {
+    const outside = "[outside.ts](src/outside.ts)\n";
+    const citation = serializeAssistantCitation({
+      version: 1,
+      environmentId: EnvironmentId.make("test-environment"),
+      threadId: ThreadId.make("test-thread"),
+      messageId: MessageId.make("test-message"),
+      text: "quoted text",
+      start: 0,
+      end: 11,
+      prefix: "",
+      suffix: "",
+    });
+    const body = `[example.ts](src/example.ts) $review [Trace](t3-context://v1/terminal/trace-1) ${citation}`;
+    const source = outside + "\n" + body + "\n";
+    await act(async () => root.render(<Composer source={source} preview={preview} />));
+    const atoms = () => {
+      const names: string[] = [];
+      editor().state.doc.descendants((node) => {
+        if (node.isAtom && !node.isText) names.push(node.type.name);
+      });
+      return names;
+    };
+    expect(atoms()).toEqual([
+      "composer-mention",
+      "composer-mention",
+      "composer-skill",
+      "composer-context-reference",
+      "composer-citation",
+    ]);
+    await act(async () => editorRef.current?.focusAt(outside.length));
+    for (const character of "```text") {
+      await act(async () => {
+        editor().view.dispatch(editor().state.tr.insertText(character));
+      });
+    }
+    const openFence = outside + "```text\n" + body + "\n";
+    expect(editorRef.current?.readSnapshot()).toMatchObject({
+      value: openFence,
+      expandedCursor: outside.length + 7,
+    });
+    expect(atoms()).toEqual(["composer-mention"]);
+    await act(async () => {
+      expect(editor().commands.undo()).toBe(true);
+    });
+    expect(editorRef.current?.readSnapshot().value).toBe(source);
+    expect(atoms()).toHaveLength(5);
+    await act(async () => {
+      expect(editor().commands.redo()).toBe(true);
+    });
+    expect(editorRef.current?.readSnapshot().value).toBe(openFence);
+    expect(atoms()).toEqual(["composer-mention"]);
+    await act(async () => editorRef.current?.focusAt(openFence.length));
+    for (const character of "```") {
+      await act(async () => {
+        editor().view.dispatch(editor().state.tr.insertText(character));
+      });
+    }
+    const fenced = openFence + "```";
+    expect(editorRef.current?.readSnapshot().value).toBe(fenced);
+    const offset = fenced.indexOf("example") + 3;
+    await act(async () => editorRef.current?.focusAt(offset));
+    expect(editorRef.current?.readSnapshot().expandedCursor).toBe(offset);
+    await act(async () => {
+      editor().view.dispatch(editor().state.tr.insertText("X"));
+    });
+    expect(editorRef.current?.readSnapshot().value).toBe(
+      fenced.slice(0, offset) + "X" + fenced.slice(offset),
+    );
+    await act(async () => {
+      expect(editor().commands.undo()).toBe(true);
+    });
+    expect(editorRef.current?.readSnapshot().value).toBe(fenced);
+    expect(atoms()).toEqual(["composer-mention"]);
+  },
+);
 
 it.each([
   { preview: false, composing: false },

@@ -413,6 +413,37 @@ export const ComposerLivePreviewExtension = Extension.create<{
     return [
       new Plugin<ComposerLivePreviewState>({
         key: composerLivePreviewKey,
+        appendTransaction(transactions, _oldState, state) {
+          if (!transactions.some((transaction) => transaction.docChanged)) return null;
+          const preview = composerLivePreviewKey.getState(state)!;
+          const atoms = preview.map.runs.filter((run) => run.kind === "token" && run.mdLen > 0);
+          if (!atoms.length) return null;
+          const fences = composerFences(preview);
+          const literalAtoms = atoms.filter((run) =>
+            fences.some(
+              (fence) => run.flatStart < fence.to && run.flatStart + run.docLen > fence.from,
+            ),
+          );
+          if (!literalAtoms.length) return null;
+
+          // Appended replacements share the initiating edit's history and map its selection.
+          // Only demote enclosed atoms: deleting a fence never recreates chips from literal text.
+          const tr = state.tr;
+          for (const run of literalAtoms.toReversed()) {
+            const source = preview.map.value.slice(run.mdStart, run.mdStart + run.mdLen);
+            const paragraphs = source
+              .split("\n")
+              .map((line) =>
+                state.schema.nodes.paragraph!.create(null, line ? state.schema.text(line) : null),
+              );
+            tr.replaceRange(
+              run.pmPos,
+              run.pmPos + run.docLen,
+              new Slice(Fragment.fromArray(paragraphs), 1, 1),
+            );
+          }
+          return tr;
+        },
         state: {
           init(_, state) {
             const source = collapsedSource(state);
