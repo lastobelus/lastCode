@@ -11,7 +11,7 @@ type InlineJson = {
   text?: string;
   attrs?: Record<string, unknown>;
 };
-/** `styling` keeps upstream's spelling: live preview on, fence text literal; omitted means off. */
+/** `styling` retains the upstream caller option; fence text stays literal in either preview mode. */
 type BuildOptions = { literalText?: boolean; literalLength?: number; styling?: boolean };
 
 function randomNodeKey(): string {
@@ -80,7 +80,7 @@ export function buildTiptapContent(
     return paragraphs;
   }
 
-  const fences = options?.styling ? collectMarkdownSourceRanges(value).fences : [];
+  const fences = collectMarkdownSourceRanges(value).fences;
   const literalLength = Math.max(0, Math.min(options?.literalLength ?? 0, value.length));
   appendText(value.slice(0, literalLength));
   let offset = literalLength;

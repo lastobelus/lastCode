@@ -252,13 +252,10 @@ describe("literal fence regions", () => {
     assertMappingRoundTrip(doc);
   });
 
-  it("keeps the plain builder's token behavior when styling is disabled", () => {
-    const source = "```\n@README.md $review \n```";
-    const doc = makeDoc(source);
-    expect(atoms(doc).map((node) => node.type.name)).toEqual([
-      "composer-mention",
-      "composer-skill",
-    ]);
+  it.each([undefined, false, true])("keeps fences literal with styling %s", (styling) => {
+    const source = "[outside.ts](outside.ts)\n```\n@README.md $review \n```";
+    const doc = makeDoc(source, styling === undefined ? undefined : { styling });
+    expect(atoms(doc).map((node) => node.attrs.source)).toEqual(["[outside.ts](outside.ts)"]);
     expect(serializeEditorDoc(doc).value).toBe(source);
     assertMappingRoundTrip(doc);
   });

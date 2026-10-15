@@ -22,9 +22,11 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 
 import { ComposerPromptEditor, type ComposerPromptEditorHandle } from "./ComposerPromptEditor";
+import { composerLivePreviewKey } from "~/lastcodeComposerLivePreviewTiptap";
 
 let root: Root;
 let container: HTMLDivElement;
+let lastSuppressTrigger: boolean | undefined;
 const editorRef = createRef<ComposerPromptEditorHandle>();
 const rangeGeometry = ["getClientRects", "getBoundingClientRect"] as const;
 const originalGeometry = rangeGeometry.map((name) =>
@@ -32,6 +34,7 @@ const originalGeometry = rangeGeometry.map((name) =>
 );
 
 beforeEach(() => {
+  lastSuppressTrigger = undefined;
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   Object.defineProperty(Range.prototype, "getClientRects", { configurable: true, value: () => [] });
   Object.defineProperty(Range.prototype, "getBoundingClientRect", {
@@ -68,7 +71,8 @@ function Composer({ source, preview = true }: { source: string; preview?: boolea
       skills={[]}
       disabled={false}
       placeholder=""
-      onChange={(nextValue, _cursor, sourceCursor) => {
+      onChange={(nextValue, _cursor, sourceCursor, suppressTrigger) => {
+        lastSuppressTrigger = suppressTrigger;
         setValue(nextValue);
         setCursor(sourceCursor);
       }}
@@ -92,24 +96,82 @@ function paste(text: string) {
   );
 }
 
-it("keeps fence paste literal and restores source positions inside token-looking text", async () => {
+it.each([
+  { preview: false, composing: false },
+  { preview: true, composing: false },
+  { preview: false, composing: true },
+  { preview: true, composing: true },
+])(
+  "suppresses fenced suggestions with preview $preview and composing $composing",
+  async ({ preview, composing }) => {
+    const source = "```text\n\n```\n";
+    await act(async () => root.render(<Composer source={source} preview={preview} />));
+    await act(async () => editorRef.current?.focusAt(source.indexOf("\n") + 1));
+    await act(async () => {
+      if (composing) {
+        editor().view.dispatch(
+          editor().state.tr.setMeta(composerLivePreviewKey, { composing: true }),
+        );
+      }
+      editor().view.dispatch(editor().state.tr.insertText("@foobar"));
+    });
+    expect(lastSuppressTrigger).toBe(true);
+    const changed = editorRef.current!.readSnapshot().value;
+    await act(async () => editorRef.current?.focusAt(changed.length));
+    await act(async () => {
+      editor().view.dispatch(editor().state.tr.insertText("@foo"));
+    });
+    expect(lastSuppressTrigger).toBe(false);
+  },
+);
+
+it.each([false, true])(
+  "keeps fence paste literal with preview %s and restores source positions inside token-looking text",
+  async (preview) => {
+    const source = "```text\n[example.ts](src/example.ts)\n```";
+    await act(async () => root.render(<Composer source={source} preview={preview} />));
+    const offset = source.indexOf("example") + 3;
+    await act(async () => editorRef.current?.focusAt(offset));
+    expect(editorRef.current?.readSnapshot().expandedCursor).toBe(offset);
+    await act(async () => {
+      expect(paste("**a**\n[pasted.ts](src/pasted.ts)")).toBe(true);
+    });
+    expect(editorRef.current?.readSnapshot().value).toBe(
+      source.slice(0, offset) + "**a**\n[pasted.ts](src/pasted.ts)" + source.slice(offset),
+    );
+    expect(editor().state.doc.textContent).toContain("[exa**a**");
+    const atoms: string[] = [];
+    editor().state.doc.descendants((node) => {
+      if (node.isAtom && !node.isText) atoms.push(node.type.name);
+    });
+    expect(atoms).toEqual([]);
+    expect(editorRef.current?.readSnapshot().expandedCursor).toBe(
+      offset + "**a**\n[pasted.ts](src/pasted.ts)".length,
+    );
+    await act(async () => {
+      expect(editor().commands.undo()).toBe(true);
+    });
+    expect(editorRef.current?.readSnapshot().value).toBe(source);
+  },
+);
+
+it.each([false, true])("pastes a complete literal fence with preview %s", async (preview) => {
   const source = "```text\n[example.ts](src/example.ts)\n```";
-  await act(async () => root.render(<Composer source={source} />));
-  const offset = source.indexOf("example") + 3;
-  await act(async () => editorRef.current?.focusAt(offset));
-  expect(editorRef.current?.readSnapshot().expandedCursor).toBe(offset);
+  await act(async () => root.render(<Composer source="" preview={preview} />));
   await act(async () => {
-    expect(paste("**a**\nb")).toBe(true);
+    expect(paste(source)).toBe(true);
   });
-  expect(editorRef.current?.readSnapshot().value).toBe(
-    source.slice(0, offset) + "**a**\nb" + source.slice(offset),
-  );
-  expect(editor().state.doc.textContent).toContain("[exa**a**");
+  expect(editorRef.current?.readSnapshot().value).toBe(source);
   const atoms: string[] = [];
   editor().state.doc.descendants((node) => {
     if (node.isAtom && !node.isText) atoms.push(node.type.name);
   });
   expect(atoms).toEqual([]);
+  expect(editorRef.current?.readSnapshot().expandedCursor).toBe(source.length);
+  await act(async () => {
+    expect(editor().commands.undo()).toBe(true);
+  });
+  expect(editorRef.current?.readSnapshot().value).toBe("");
 });
 
 it("preserves real chips and context references when copying source through the wrapper", async () => {
@@ -149,6 +211,42 @@ it("retains the editor and its paste undo step when preview is toggled", async (
     expect(editor().commands.undo()).toBe(true);
   });
   expect(editorRef.current?.readSnapshot().value).toBe("before ");
+});
+
+it("keeps fenced tokens literal across a preview toggle without losing source selection or undo", async () => {
+  const outside = "[outside.ts](src/outside.ts)";
+  const source = `${outside}\n\`\`\`text\n[example.ts](src/example.ts)\n\`\`\``;
+  await act(async () => root.render(<Composer source={source} preview={false} />));
+  const mounted = editor();
+  const atomSources = () => {
+    const sources: string[] = [];
+    editor().state.doc.descendants((node) => {
+      if (node.isAtom && !node.isText) sources.push(node.attrs.source);
+    });
+    return sources;
+  };
+  expect(atomSources()).toEqual([outside]);
+  const offset = source.indexOf("example") + 3;
+  await act(async () => editorRef.current?.focusAt(offset));
+  expect(editorRef.current?.readSnapshot().expandedCursor).toBe(offset);
+  await act(async () => {
+    editor().view.dispatch(editor().state.tr.insertText("X"));
+  });
+  const editedSource = source.slice(0, offset) + "X" + source.slice(offset);
+  expect(editorRef.current?.readSnapshot().value).toBe(editedSource);
+
+  await act(async () => root.render(<Composer source={source} preview />));
+  expect(editor()).toBe(mounted);
+  expect(atomSources()).toEqual([outside]);
+  expect(editorRef.current?.readSnapshot()).toMatchObject({
+    value: editedSource,
+    expandedCursor: offset + 1,
+  });
+  await act(async () => {
+    expect(editor().commands.undo()).toBe(true);
+  });
+  expect(editorRef.current?.readSnapshot().value).toBe(source);
+  expect(atomSources()).toEqual([outside]);
 });
 
 it("normalizes HTML clipboard breaks through the active source editor", async () => {

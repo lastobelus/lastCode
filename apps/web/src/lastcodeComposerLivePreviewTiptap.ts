@@ -232,10 +232,9 @@ function parseSource(source: string, enabled: boolean): MarkdownSourceRanges {
 
 const fenceCache = new WeakMap<RichDocMap, MarkdownSourceRanges["fences"]>();
 
-/** Large source drafts parse fences only for a fence gesture or a possible suggestion. */
+/** Plain or large drafts parse fences on demand; literal fence semantics do not depend on preview. */
 function composerFences(preview: ComposerLivePreviewState) {
-  if (!preview.enabled) return [];
-  if (preview.parsed || preview.composing) return preview.ranges.fences;
+  if (preview.parsed && !preview.composing) return preview.ranges.fences;
   let fences = fenceCache.get(preview.map);
   if (!fences) {
     fences = collectMarkdownSourceRanges(preview.source).fences;
@@ -393,7 +392,7 @@ function decorationsForState(
 
 export function isComposerCaretInFence(state: EditorState): boolean {
   const preview = composerLivePreviewKey.getState(state);
-  if (!preview?.enabled) return false;
+  if (!preview) return false;
   const from = pmToFlat(preview.map, state.selection.from);
   const to = pmToFlat(preview.map, state.selection.to);
   return composerFences(preview).some((fence) => from >= fence.from && to <= fence.to);
