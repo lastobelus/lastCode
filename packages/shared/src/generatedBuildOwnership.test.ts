@@ -257,3 +257,129 @@ it("usage-only renewal does not invalidate an in-progress compiler stage or eras
   assert.equal(inspectGeneratedBuildOwnership(cwd, root)!.lastUsedAt, 1000);
   assert.equal(inspectGeneratedBuildOwnership(cwd, root)!.files[0]?.reason, null);
 });
+
+it.each(["apps/web/dist", "apps/server/dist", "native/resource-monitor/target/debug"])(
+  "repeated changing compiler filenames keep only current emissions on disk and in ownership (%s)",
+  (root) => {
+    const { cwd, emit } = fixture();
+    const output = NodePath.join(cwd, root);
+    for (let generation = 0; generation < 12; generation++) {
+      const build = createGeneratedBuildStage(cwd, root)!;
+      const filename = `assets/chunk-${generation}.js`;
+      emit(build.directory, filename, `compiler generation ${generation}`);
+      emit(build.directory, "index.html", `entrypoint ${generation}`);
+      build.publish(100 + generation);
+      const inspection = inspectGeneratedBuildOwnership(cwd, root)!;
+      assert.deepEqual(inspection.files.map((file) => file.path).sort(), [filename, "index.html"]);
+      assert.isTrue(inspection.files.every((file) => file.reason === null));
+      assert.deepEqual(NodeFS.readdirSync(NodePath.join(output, "assets")), [
+        `chunk-${generation}.js`,
+      ]);
+      assert.equal(
+        NodeFS.readFileSync(NodePath.join(output, "index.html"), "utf8"),
+        `entrypoint ${generation}`,
+      );
+    }
+  },
+);
+
+it("publication prunes missing ownership and preserves edited obsolete outputs and unknown additions unowned", () => {
+  const { cwd, emit, temporary } = fixture();
+  const root = "apps/web/dist";
+  const output = NodePath.join(cwd, root);
+  const first = createGeneratedBuildStage(cwd, root)!;
+  for (const file of ["old.js", "missing.js", "edited.js"])
+    emit(first.directory, file, `original ${file}`);
+  first.publish(100);
+  NodeFS.unlinkSync(NodePath.join(output, "missing.js"));
+  emit(output, "edited.js", "retained user edit");
+  emit(output, "notes.txt", "unknown addition");
+  const next = createGeneratedBuildStage(cwd, root)!;
+  emit(next.directory, "current.js", "current compiler output");
+  next.publish(200);
+  assert.deepEqual(
+    inspectGeneratedBuildOwnership(cwd, root)!.files.map((file) => file.path),
+    ["current.js"],
+  );
+  assert.isFalse(NodeFS.existsSync(NodePath.join(output, "old.js")));
+  assert.isFalse(NodeFS.existsSync(NodePath.join(output, "missing.js")));
+  assert.equal(
+    NodeFS.readFileSync(NodePath.join(output, "edited.js"), "utf8"),
+    "retained user edit",
+  );
+  assert.equal(NodeFS.readFileSync(NodePath.join(output, "notes.txt"), "utf8"), "unknown addition");
+  const release = NodePath.join(temporary, "release");
+  copyOwnedGeneratedBuild(cwd, root, release);
+  assert.deepEqual(NodeFS.readdirSync(release), ["current.js"]);
+  const collision = createGeneratedBuildStage(cwd, root)!;
+  emit(collision.directory, "edited.js", "replacement compiler output");
+  assert.throws(() => collision.publish(300), "requires file review");
+  collision.discard();
+  assert.equal(
+    NodeFS.readFileSync(NodePath.join(output, "current.js"), "utf8"),
+    "current compiler output",
+  );
+});
+
+it("a destination collision preserves every prior emission and ownership before obsolete retirement", () => {
+  const { cwd, emit } = fixture();
+  const root = "apps/server/dist";
+  const output = NodePath.join(cwd, root);
+  const original = createGeneratedBuildStage(cwd, root)!;
+  emit(original.directory, "obsolete.js", "still-needed prior chunk");
+  emit(original.directory, "index.html", "still-needed prior entrypoint");
+  original.publish(100);
+  emit(output, "zzz-collision.js", "unknown retained output");
+  const previous = inspectGeneratedBuildOwnership(cwd, root)!;
+  const colliding = createGeneratedBuildStage(cwd, root)!;
+  emit(colliding.directory, "index.html", "new entrypoint");
+  emit(colliding.directory, "zzz-collision.js", "new compiler output");
+  assert.throws(() => colliding.publish(200), "requires file review");
+  assert.deepEqual(inspectGeneratedBuildOwnership(cwd, root), previous);
+  assert.equal(
+    NodeFS.readFileSync(NodePath.join(output, "obsolete.js"), "utf8"),
+    "still-needed prior chunk",
+  );
+  assert.equal(
+    NodeFS.readFileSync(NodePath.join(output, "index.html"), "utf8"),
+    "still-needed prior entrypoint",
+  );
+  assert.equal(
+    NodeFS.readFileSync(NodePath.join(output, "zzz-collision.js"), "utf8"),
+    "unknown retained output",
+  );
+  colliding.discard();
+});
+
+it("watched changing emissions retire obsolete files while preserving usage-only renewal", () => {
+  const { cwd, emit } = fixture();
+  const root = "apps/web/dist";
+  const output = NodePath.join(cwd, root);
+  const watcher = createGeneratedBuildStage(cwd, root)!;
+  emit(watcher.directory, "old.js", "first watched emission");
+  watcher.publish(100, undefined, true);
+  NodeFS.unlinkSync(NodePath.join(watcher.directory, "old.js"));
+  emit(watcher.directory, "current.js", "second watched emission");
+  assert.isTrue(recordGeneratedBuildUse(cwd, root, 1000));
+  watcher.publish(500, undefined, true);
+  assert.isFalse(NodeFS.existsSync(NodePath.join(output, "old.js")));
+  const current = inspectGeneratedBuildOwnership(cwd, root)!;
+  assert.equal(current.lastUsedAt, 1000);
+  assert.deepEqual(
+    current.files.map((file) => file.path),
+    ["current.js"],
+  );
+  const competitor = createGeneratedBuildStage(cwd, root)!;
+  emit(competitor.directory, "competitor.js", "competing generation");
+  competitor.publish(1100);
+  assert.throws(
+    () => watcher.publish(1200, undefined, true),
+    "Another build changed output ownership",
+  );
+  assert.isFalse(NodeFS.existsSync(NodePath.join(output, "current.js")));
+  assert.equal(
+    NodeFS.readFileSync(NodePath.join(output, "competitor.js"), "utf8"),
+    "competing generation",
+  );
+  watcher.discard();
+});

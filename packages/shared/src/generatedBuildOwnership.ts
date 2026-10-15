@@ -529,6 +529,8 @@ export function createGeneratedBuildStage(worktreePath: string, root: string) {
       if ([...stageLinks.values()].some((entry) => entry.count !== entry.links))
         throw new Error("Build stage contains an external hardlink");
       const priorFiles = new Map(initial?.record.files.map((file) => [file.path, file]) ?? []);
+      const nextFiles = new Map<string, OwnedFile>();
+      const emittedPaths = new Set(emitted.map((file) => file.path));
       const plans = emitted.map((file) => {
         const destination = safePath(ctx.cwd, `${root}/${file.path}`);
         try {
@@ -554,7 +556,7 @@ export function createGeneratedBuildStage(worktreePath: string, root: string) {
         if (prior) NodeFS.unlinkSync(destination);
         NodeFS.copyFileSync(file.source, destination, NodeFS.constants.COPYFILE_EXCL);
         NodeFS.chmodSync(destination, file.mode);
-        priorFiles.set(file.path, { path: file.path, ...fileEvidence(destination) });
+        nextFiles.set(file.path, { path: file.path, ...fileEvidence(destination) });
       }
       const latest = readRecord(ctx);
       if (ownershipSnapshot(latest) !== initialOwnership)
@@ -564,9 +566,46 @@ export function createGeneratedBuildStage(worktreePath: string, root: string) {
         worktreeIdentity: ctx.worktreeIdentity,
         root,
         lastUsedAt: Math.max(now, latest?.record.lastUsedAt ?? 0),
-        files: [...priorFiles.values()],
+        files: [...nextFiles.values()],
         emissions: emitted.map(({ path, hash }) => ({ path, hash })),
       });
+      initial = readRecord(ctx);
+      // Retire old chunks only after every destination collision was admitted,
+      // current emissions were installed, and their ownership was persisted.
+      // Edited/unknown additions stay on disk but cannot accumulate in the ledger.
+      const publishedOwnership = ownershipSnapshot(initial);
+      let publishedIdentity = initial!.recordIdentity;
+      const checkPublishedOwnership = () => {
+        if (signature(NodeFS.lstatSync(ctx.recordPath)) !== publishedIdentity) {
+          const current = readRecord(ctx);
+          if (ownershipSnapshot(current) !== publishedOwnership)
+            throw new Error("Another build changed output ownership");
+          publishedIdentity = current!.recordIdentity; // Timestamp-only use renewal is allowed.
+        }
+      };
+      for (const file of priorFiles.values()) {
+        if (emittedPaths.has(file.path)) continue;
+        checkPublishedOwnership();
+        let destination;
+        try {
+          destination = safePath(ctx.cwd, `${root}/${file.path}`);
+          if (!evidenceMatches(file, destination)) continue;
+        } catch {
+          continue; // Missing or no longer verifiable historical outputs remain unowned.
+        }
+        checkPublishedOwnership();
+        NodeFS.unlinkSync(destination);
+        let parent = NodePath.dirname(destination);
+        const output = NodePath.join(ctx.cwd, root);
+        while (parent.startsWith(`${output}${NodePath.sep}`) || parent === output) {
+          try {
+            NodeFS.rmdirSync(parent);
+          } catch {
+            break;
+          }
+          parent = NodePath.dirname(parent);
+        }
+      }
       initial = readRecord(ctx);
       if (!retainStage) discard();
     },
@@ -587,8 +626,7 @@ export function copyOwnedGeneratedBuild(worktreePath: string, root: string, dest
   }
   const previous = readRecord(ctx);
   if (!previous) throw new Error("Generated build has no emission provenance; rebuild first");
-  // Historical owned chunks remain eligible for cleanup, but only the latest
-  // compiler emission belongs in a newly built server client bundle.
+  // Only the latest compiler emission belongs in a newly built server client bundle.
   for (const file of previous.record.emissions) {
     const source = safePath(ctx.cwd, `${root}/${file.path}`);
     if (fileEvidence(source).hash !== file.hash)

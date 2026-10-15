@@ -186,7 +186,9 @@ it.effect(
         yield* fs.exists(NodePath.join(input.worktreePath, "apps/web/dist/retained.js")),
         true,
       );
-      yield* emit("apps/web/dist", 2, ["main.js"]);
+      // Keep the file in the current compiler generation for the tracked-output guard;
+      // a successful build now retires unchanged files omitted by its new emissions.
+      yield* emit("apps/web/dist", 2, ["main.js", "retained.js"]);
       yield* fs.writeFileString(
         NodePath.join(input.worktreePath, ".gitignore"),
         "dist/\ntarget/\n",
