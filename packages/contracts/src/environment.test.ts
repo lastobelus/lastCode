@@ -15,6 +15,30 @@ const descriptor = {
 
 describe("ExecutionEnvironmentDescriptor", () => {
   it.each([undefined, false, true])(
+    "requires explicit local-file preservation support (%s)",
+    (supported) => {
+      const decoded = decodeDescriptor({
+        ...descriptor,
+        capabilities: {
+          ...descriptor.capabilities,
+          ...(supported === undefined ? {} : { worktreeLocalPreservation: supported }),
+        },
+      });
+      expect(decoded.capabilities.worktreeLocalPreservation).toBe(supported);
+      expect(decoded.capabilities.worktreeLocalPreservation === true).toBe(supported === true);
+    },
+  );
+
+  it("does not infer local-file preservation from build cleanup support", () => {
+    const decoded = decodeDescriptor({
+      ...descriptor,
+      capabilities: { ...descriptor.capabilities, worktreeBuildCleanup: true },
+    });
+    expect(decoded.capabilities.worktreeBuildCleanup).toBe(true);
+    expect(decoded.capabilities.worktreeLocalPreservation).toBeUndefined();
+  });
+
+  it.each([undefined, false, true])(
     "requires explicit archive family support (%s)",
     (supported) => {
       const decoded = decodeDescriptor({

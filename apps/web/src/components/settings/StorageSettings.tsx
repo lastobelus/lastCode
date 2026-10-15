@@ -453,21 +453,36 @@ export function StorageSettingsPanel() {
     (environment) =>
       environment.serverConfig?.environment.capabilities.worktreeBuildCleanup === true,
   );
+  const preservationSupported = connectedEnvironments.every(
+    (environment) =>
+      environment.serverConfig?.environment.capabilities.worktreeLocalPreservation === true,
+  );
+  const anyPreservationSupported = connectedEnvironments.some(
+    (environment) =>
+      environment.serverConfig?.environment.capabilities.worktreeLocalPreservation === true,
+  );
   const disposableOutputsLabel = anyBuildsSupported
     ? "Remove inactive dependencies and build outputs"
     : "Remove inactive worktree dependencies";
-  const disposableOutputsDescription = buildsSupported
-    ? "Remove recognized dependencies and unchanged verified build outputs immediately for archived owners, or after the configured delay since actual use for unarchived and ownerless worktrees. Every shared owner must be archived with cleanup enabled. Retain additions, notes and source until its separate worktree rule permits removal. Active consumers prevent cleanup. Reinstall or rebuild before resuming work."
+  const disposableOutputsResources = buildsSupported
+    ? "Remove recognized dependencies and unchanged verified build outputs on supported selected environments."
     : anyBuildsSupported
-      ? "Older selected environments remove dependencies only, where supported, under their existing thread-inactivity rule. Newer environments remove dependencies and unchanged verified build outputs immediately when every owner is archived and cleanup is enabled, or after the configured delay since actual use for unarchived and ownerless worktrees. Active consumers prevent removal. Additions are kept; source uses its separate worktree rule. Reinstall or rebuild before resuming work."
-      : "Remove recognized npm or pnpm dependencies only, where supported, using each selected environment's existing thread-inactivity rule. Build outputs, source and other files are kept. Active consumers prevent cleanup. Reinstall before resuming work.";
+      ? "Remove recognized dependencies where supported. Build outputs are reclaimed only on selected environments with build cleanup support."
+      : "Remove recognized npm or pnpm dependencies where supported. Build outputs are kept.";
+  const disposableOutputsTiming = preservationSupported
+    ? "When this rule is enabled, every shared owner must be archived for immediate cleanup. Unarchived and ownerless worktrees use the configured delay since actual use."
+    : anyPreservationSupported
+      ? "Updated environments clean archived owners immediately when every owner is archived and cleanup is enabled; unarchived and ownerless worktrees use the configured delay since actual use. Older selected environments use their existing thread-inactivity rule."
+      : "Selected environments use their existing thread-inactivity rule.";
+  const disposableOutputsDescription = `${disposableOutputsResources} ${disposableOutputsTiming} This rule keeps source and other files. Active consumers prevent cleanup. Reinstall or rebuild before resuming work.`;
+  const preservedFilesDescription = `Edits, untracked files and unknown ignored files keep the checkout.${anyBuildsSupported ? " Verified generated files are reclaimed separately on environments that support their cleanup." : ""}`;
   const legacyKeepWhenDescription =
     settings.worktreeKeepWhen === "any-local-files"
       ? "Includes ignored files, except node_modules."
       : settings.worktreeKeepWhen === "tracked-changes"
         ? "Deletes untracked and ignored files, including .env."
         : "Keeps edits and untracked files. Deletes ignored files, including .env.";
-  const mixedPreservationSupport = !buildsSupported && anyBuildsSupported;
+  const mixedPreservationSupport = !preservationSupported && anyPreservationSupported;
 
   const updateWorktree = (patch: Partial<WorktreeCleanupRules>) =>
     isProjectScope
@@ -595,9 +610,11 @@ export function StorageSettingsPanel() {
               title="Delete inactive worktrees"
               status={ruleStatus("worktreeAfterDays")}
               description={
-                buildsSupported
+                preservationSupported
                   ? "Clean archived worktrees are eligible immediately when enabled. Unarchived worktrees use the configured delay. Branches and thread history are kept."
-                  : "Remove worktrees using the selected environment’s inactivity rule. Branches and thread history are kept."
+                  : anyPreservationSupported
+                    ? "Updated environments allow clean archived worktrees immediately when enabled and use the configured delay for unarchived worktrees. Older environments use their existing inactivity rule. Branches and thread history are kept."
+                    : "Remove worktrees using the selected environment’s inactivity rule. Branches and thread history are kept."
               }
               serverScoped={!isProjectScope}
               control={
@@ -641,19 +658,21 @@ export function StorageSettingsPanel() {
               <SettingsRow
                 {...searchableSetting("storage-worktree-keep-when")}
                 title={
-                  buildsSupported ? "Local work is preserved" : "Keep worktrees with local changes"
+                  preservationSupported
+                    ? "Local work is preserved"
+                    : "Keep worktrees with local changes"
                 }
-                status={buildsSupported ? undefined : ruleStatus("worktreeKeepWhen")}
+                status={preservationSupported ? undefined : ruleStatus("worktreeKeepWhen")}
                 description={
-                  buildsSupported
-                    ? "Edits, untracked files and unknown ignored files keep the checkout. Verified generated files are reclaimed separately."
+                  preservationSupported
+                    ? preservedFilesDescription
                     : mixedPreservationSupport
-                      ? `${ruleStatus("worktreeKeepWhen") ? "Older selected environments use their own local-file preferences." : `Older selected environments: ${legacyKeepWhenDescription}`} Updated environments preserve unknown local files regardless of this preference; verified generated files are reclaimed separately.`
+                      ? `${ruleStatus("worktreeKeepWhen") ? "Older selected environments use their own local-file preferences." : `Older selected environments: ${legacyKeepWhenDescription}`} Updated environments preserve unknown local files regardless of this preference.${anyBuildsSupported ? " Verified generated files are reclaimed separately on environments that support their cleanup." : ""}`
                       : legacyKeepWhenDescription
                 }
                 serverScoped={!isProjectScope}
                 control={
-                  buildsSupported ? null : (
+                  preservationSupported ? null : (
                     <Select
                       value={ruleStatus("worktreeKeepWhen") ? null : settings.worktreeKeepWhen}
                       onValueChange={(next) => {
