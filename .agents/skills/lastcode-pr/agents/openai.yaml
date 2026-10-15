@@ -1,4 +1,4 @@
 interface:
   display_name: "LastCode PR"
-  short_description: "Ship a fork-only change through LastCode local CI"
-  default_prompt: "Use $lastcode-pr to deliver this fork-only change through the LastCode PR workflow."
+  short_description: "Deliver a LastCode change through its PR workflow"
+  default_prompt: "Use $lastcode-pr to deliver this change through the LastCode PR workflow."

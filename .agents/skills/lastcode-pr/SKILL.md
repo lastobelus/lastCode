@@ -1,11 +1,11 @@
 ---
 name: lastcode-pr
-description: Deliver a LastCode-only change through its branch, Quick CI, GitHub CI, Codex review, and guarded merge workflow. Use for Markover integration, LastCode identity or branding, personal conveniences, nightly checkpointing, ad-hoc releases, and any change intentionally not proposed to pingdotgg/t3code. Use upstream-fix instead when a general improvement should also be offered upstream.
+description: Deliver a LastCode change through its branch, Quick CI, GitHub CI, Codex review, and guarded merge workflow. Default delivery path for all LastCode work, including general T3 Code fixes and improvements, Markover integration, branding, personal conveniences, checkpointing, and releases. Use upstream-fix only when the user specifically requests an upstream contribution.
 ---
 
 # LastCode PR
 
-Ship fork-only work from the canonical downstream base without contaminating the
+Ship LastCode work from the canonical downstream base without contaminating the
 clean upstream mirror.
 
 When `scripts/lastcode-carry-set.json` enables carry replay, prepare source
@@ -32,12 +32,13 @@ links.
 ## Classify and Branch
 
 Read `docs/lastcode/fork-conventions.md` and the repository `AGENTS.md` first.
-If the change makes sense to a T3 Code user without LastCode or Markover context
-and should be proposed upstream, switch to `upstream-fix`.
+This is the default path, including for general fixes, and a generic PR request
+means a LastCode PR. Switch to `upstream-fix` only when the user specifically
+asks for an upstream contribution; never pause to ask whether to go upstream.
 
 1. Ensure the worktree is clean and fetch `origin` with pruning.
 2. Create `lastcode/markover/<topic>` for Markover integration or
-   `lastcode/<topic>` for other fork-only work from the exact
+   `lastcode/<topic>` for other LastCode work from the exact
    `origin/lastcode/main`.
 3. Keep one concern per branch and PR. Put LastCode-only contributor and
    operations documentation under the fork's deliberate `docs/lastcode/`
