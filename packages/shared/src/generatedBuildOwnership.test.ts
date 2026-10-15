@@ -8,6 +8,7 @@ import {
   createGeneratedBuildStage,
   inspectGeneratedBuildOwnership,
   removeGeneratedBuildFiles,
+  removeGeneratedBuildFilesAsync,
   copyOwnedGeneratedBuild,
   recordGeneratedBuildUse,
 } from "./generatedBuildOwnership.ts";
@@ -385,6 +386,51 @@ it("watched changing emissions retire obsolete files while preserving usage-only
   watcher.discard();
 });
 
+const startPublisher = (
+  cwd: string,
+  root: string,
+  role: string,
+  contents = "original emission",
+) => {
+  const child = NodeChildProcess.fork(
+    new URL("./testing/generatedBuildPublisher.fixture.mjs", import.meta.url),
+    [cwd, root, role, contents],
+    { silent: true, execArgv: [] },
+  );
+  const messages: string[] = [];
+  const readers: Array<{ resolve: (message: string) => void; reject: (error: Error) => void }> = [];
+  let stderr = "";
+  child.stderr!.on("data", (chunk) => {
+    stderr += String(chunk);
+  });
+  child.on("message", (message) => {
+    if (typeof message !== "string") return;
+    const reader = readers.shift();
+    if (reader) reader.resolve(message);
+    else messages.push(message);
+  });
+  let exited = false;
+  const exit = new Promise<void>((resolve) => {
+    child.on("exit", () => {
+      exited = true;
+      for (const reader of readers.splice(0))
+        reader.reject(new Error(`Publisher exited: ${stderr}`));
+      resolve();
+    });
+  });
+  onTestFinished(async () => {
+    if (!exited) child.kill("SIGKILL");
+    await exit;
+  });
+  const next = () => {
+    const message = messages.shift();
+    if (message !== undefined) return Promise.resolve(message);
+    if (exited) return Promise.reject(new Error(`Publisher already exited: ${stderr}`));
+    return new Promise<string>((resolve, reject) => readers.push({ resolve, reject }));
+  };
+  return { child, next, exit };
+};
+
 it.each(["complete", "throw", "owner-death"] as const)(
   "publication exclusion protects identical competing emissions and permits same-stage retry after %s",
   async (completion) => {
@@ -393,53 +439,13 @@ it.each(["complete", "throw", "owner-death"] as const)(
     const first = createGeneratedBuildStage(cwd, root)!;
     emit(first.directory, "old.js", "original emission");
     first.publish(100);
-    const startPublisher = (role: string) => {
-      const child = NodeChildProcess.fork(
-        new URL("./testing/generatedBuildPublisher.fixture.mjs", import.meta.url),
-        [cwd, root, role],
-        { silent: true, execArgv: [] },
-      );
-      const messages: string[] = [];
-      const readers: Array<{ resolve: (message: string) => void; reject: (error: Error) => void }> =
-        [];
-      let stderr = "";
-      child.stderr!.on("data", (chunk) => {
-        stderr += String(chunk);
-      });
-      child.on("message", (message) => {
-        if (typeof message !== "string") return;
-        const reader = readers.shift();
-        if (reader) reader.resolve(message);
-        else messages.push(message);
-      });
-      let exited = false;
-      const exit = new Promise<void>((resolve) => {
-        child.on("exit", () => {
-          exited = true;
-          for (const reader of readers.splice(0))
-            reader.reject(new Error(`Publisher exited: ${stderr}`));
-          resolve();
-        });
-      });
-      onTestFinished(async () => {
-        if (!exited) child.kill("SIGKILL");
-        await exit;
-      });
-      const next = () => {
-        const message = messages.shift();
-        if (message !== undefined) return Promise.resolve(message);
-        if (exited) return Promise.reject(new Error(`Publisher already exited: ${stderr}`));
-        return new Promise<string>((resolve, reject) => readers.push({ resolve, reject }));
-      };
-      return { child, next, exit };
-    };
-    const publisherA = startPublisher("paused");
+    const publisherA = startPublisher(cwd, root, "paused");
     assert.equal(await publisherA.next(), "paused-before-retirement");
     assert.deepEqual(
       inspectGeneratedBuildOwnership(cwd, root)!.files.map((file) => file.path),
       ["current.js"],
     );
-    const publisherB = startPublisher("competitor");
+    const publisherB = startPublisher(cwd, root, "competitor");
     assert.equal(await publisherB.next(), "ready");
     publisherB.child.send("publish");
     assert.equal(await publisherB.next(), "stage-created");
@@ -477,3 +483,158 @@ it.each(["complete", "throw", "owner-death"] as const)(
     await publisherB.exit;
   },
 );
+
+it.each([
+  ["sync", "complete"],
+  ["sync", "throw"],
+  ["sync", "owner-death"],
+  ["async", "complete"],
+  ["async", "throw"],
+  ["async", "owner-death"],
+] as const)(
+  "%s removal excludes replacement publication until %s and permits same-stage retry",
+  async (kind, completion) => {
+    const { cwd, emit } = fixture();
+    const root = "apps/web/dist";
+    const initial = createGeneratedBuildStage(cwd, root)!;
+    emit(initial.directory, "old.js", "original emission");
+    initial.publish(100);
+    const remover = startPublisher(cwd, root, `remove-${kind}`);
+    assert.equal(await remover.next(), "paused-before-removal");
+    const publisher = startPublisher(cwd, root, "competitor", "replacement compiler emission");
+    assert.equal(await publisher.next(), "ready");
+    publisher.child.send("publish");
+    assert.equal(await publisher.next(), "stage-created");
+    assert.match(await publisher.next(), /^blocked:PortableLockContentionError:/);
+    assert.equal(
+      NodeFS.readFileSync(NodePath.join(cwd, root, "old.js"), "utf8"),
+      "original emission",
+    );
+    if (completion === "owner-death") remover.child.kill("SIGKILL");
+    else {
+      remover.child.stdin!.write(completion === "throw" ? "f" : "r");
+      const result = await remover.next();
+      if (completion === "complete") assert.match(result, /^removed:.*"files":1/);
+      else if (kind === "async") assert.match(result, /^removed:.*"files":0/);
+      else assert.equal(result, "failed:Injected retirement failure");
+    }
+    await remover.exit;
+    publisher.child.send("retry");
+    assert.equal(await publisher.next(), "published");
+    assert.equal(
+      NodeFS.readFileSync(NodePath.join(cwd, root, "old.js"), "utf8"),
+      "replacement compiler emission",
+    );
+    const current = inspectGeneratedBuildOwnership(cwd, root)!;
+    assert.deepEqual(
+      current.files.map((file) => file.path),
+      ["old.js"],
+    );
+    assert.equal(current.files[0]!.reason, null);
+    publisher.child.send("close");
+    await publisher.exit;
+  },
+);
+
+it("usage renewal leaves committed ownership unchanged while publication holds exclusion", async () => {
+  const { cwd, emit } = fixture();
+  const root = "apps/web/dist";
+  const original = createGeneratedBuildStage(cwd, root)!;
+  emit(original.directory, "old.js", "original emission");
+  original.publish(100);
+  const publisher = startPublisher(cwd, root, "paused");
+  assert.equal(await publisher.next(), "paused-before-retirement");
+  const committed = inspectGeneratedBuildOwnership(cwd, root)!;
+  assert.isFalse(recordGeneratedBuildUse(cwd, root, 1000));
+  assert.deepEqual(inspectGeneratedBuildOwnership(cwd, root), committed);
+  publisher.child.stdin!.write("r");
+  assert.equal(await publisher.next(), "published");
+  await publisher.exit;
+  assert.equal(inspectGeneratedBuildOwnership(cwd, root)!.lastUsedAt, 200);
+});
+
+it("a usage writer excludes publication until its clock commits without clobbering new ownership", async () => {
+  const { cwd, emit } = fixture();
+  const root = "apps/web/dist";
+  const original = createGeneratedBuildStage(cwd, root)!;
+  emit(original.directory, "old.js", "original emission");
+  original.publish(100);
+  const usage = startPublisher(cwd, root, "usage");
+  assert.equal(await usage.next(), "paused-before-usage-write");
+  const publisher = startPublisher(cwd, root, "competitor", "replacement compiler emission");
+  assert.equal(await publisher.next(), "ready");
+  publisher.child.send("publish");
+  assert.equal(await publisher.next(), "stage-created");
+  assert.match(await publisher.next(), /^blocked:PortableLockContentionError:/);
+  usage.child.stdin!.write("r");
+  assert.equal(await usage.next(), "usage:true");
+  await usage.exit;
+  publisher.child.send("retry");
+  assert.equal(await publisher.next(), "published");
+  const current = inspectGeneratedBuildOwnership(cwd, root)!;
+  assert.equal(current.lastUsedAt, 1000);
+  assert.deepEqual(
+    current.files.map((file) => file.path),
+    ["old.js"],
+  );
+  assert.equal(current.files[0]!.reason, null);
+  assert.equal(
+    NodeFS.readFileSync(NodePath.join(cwd, root, "old.js"), "utf8"),
+    "replacement compiler emission",
+  );
+  publisher.child.send("close");
+  await publisher.exit;
+});
+
+it("async removal preserves prior 64-file totals when the next revalidation encounters publication contention", async () => {
+  const { cwd, emit } = fixture();
+  const root = "apps/web/dist";
+  const initial = createGeneratedBuildStage(cwd, root)!;
+  const paths = Array.from({ length: 65 }, (_, index) => `${String(index).padStart(2, "0")}.js`);
+  for (const file of paths) emit(initial.directory, file, "emitted");
+  emit(initial.directory, "old.js", "original emission");
+  initial.publish(100);
+  const inspected = inspectGeneratedBuildOwnership(cwd, root)!;
+  let guards = 0;
+  let publisher: ReturnType<typeof startPublisher> | undefined;
+  const result = await removeGeneratedBuildFilesAsync(
+    cwd,
+    root,
+    inspected.token,
+    paths,
+    async () => {
+      guards++;
+      if (guards === 2) {
+        publisher = startPublisher(cwd, root, "paused");
+        assert.equal(await publisher.next(), "paused-before-retirement");
+      }
+      return true;
+    },
+  );
+  assert.equal(guards, 2);
+  assert.equal(result.files, 64);
+  const firstBatch = new Set(paths.slice(0, 64));
+  assert.equal(
+    result.bytes,
+    inspected.files
+      .filter((file) => firstBatch.has(file.path))
+      .reduce((total, file) => total + file.bytes, 0),
+  );
+  assert.deepEqual(
+    result.kept.map((file) => file.path),
+    ["64.js"],
+  );
+  assert.match(result.kept[0]!.reason, /busy|running|retry|publication/i);
+  assert.isDefined(publisher);
+  publisher!.child.stdin!.write("r");
+  assert.equal(await publisher!.next(), "published");
+  await publisher!.exit;
+  assert.deepEqual(
+    inspectGeneratedBuildOwnership(cwd, root)!.files.map((file) => file.path),
+    ["current.js"],
+  );
+  assert.equal(
+    NodeFS.readFileSync(NodePath.join(cwd, root, "current.js"), "utf8"),
+    "publisher A emission",
+  );
+});

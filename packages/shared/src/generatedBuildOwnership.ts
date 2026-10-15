@@ -57,16 +57,25 @@ function context(worktreePath: string, root: string) {
 }
 type Context = NonNullable<ReturnType<typeof context>>;
 
-function acquirePublicationLock(ctx: Context) {
+function acquireBuildMutationLock(ctx: Context) {
   const name = `${NodePath.basename(ctx.recordPath)}.publish`;
   try {
-    return acquirePortableLock(ctx.gitDir, name, "generated build publication");
+    return acquirePortableLock(ctx.gitDir, name, "generated build update");
   } catch (error) {
     if (error instanceof PortableLockContentionError)
       throw new PortableLockContentionError(
-        `${error.message} Retry publication after it finishes. If the owner is unknown, inspect ${NodePath.join(ctx.gitDir, name)} lock metadata before recovery; do not clear a live publisher's lock.`,
+        `${error.message} Retry after the current output operation finishes. If the owner is unknown, inspect ${NodePath.join(ctx.gitDir, name)} lock metadata before recovery; do not clear a live owner's lock.`,
         { cause: error },
       );
+    throw error;
+  }
+}
+
+function tryAcquireBuildMutationLock(ctx: Context) {
+  try {
+    return acquireBuildMutationLock(ctx);
+  } catch (error) {
+    if (error instanceof PortableLockContentionError) return null;
     throw error;
   }
 }
@@ -229,8 +238,7 @@ function writeRecord(ctx: Context, record: BuildRecord, expectedIdentity?: strin
   const temporary = `${ctx.recordPath}.${NodeCrypto.randomUUID()}.tmp`;
   try {
     NodeFS.writeFileSync(temporary, raw, { flag: "wx", mode: 0o600 });
-    // Best-effort native admission immediately before replacement. Usage must
-    // not overwrite an ownership generation published while its temp was written.
+    // Mutations hold the root lock; also reject an unexpected native record replacement.
     if (
       expectedIdentity !== undefined &&
       signature(NodeFS.lstatSync(ctx.recordPath)) !== expectedIdentity
@@ -381,41 +389,49 @@ export async function removeGeneratedBuildFilesAsync(
     if (signal?.aborted) return stop(offset, "Build cleanup was cancelled");
     if (!(await revalidate([...verified])))
       return stop(offset, "Build cleanup guards changed before removal");
-    for (const [index, file] of batch.entries()) {
-      if (!verified.has(file.path)) continue;
-      if (signal?.aborted) return stop(offset + index, "Build cleanup was cancelled");
-      try {
-        if (signature(NodeFS.lstatSync(ctx.recordPath)) !== previous.recordIdentity)
-          return stop(offset + index, "Build ownership changed before removal");
-        const target = safePath(ctx.cwd, `${root}/${file.path}`);
-        const stat = NodeFS.lstatSync(target);
-        // Async hashing is accepted only while inode, immutable ctime, size and
-        // timestamps still match. No content hashing or await in this final seam.
-        if (!stat.isFile() || stat.nlink !== 1 || signature(stat) !== file.identity) {
-          kept.push({ path: file.path, reason: "Generated file changed before removal" });
-          continue;
-        }
-        NodeFS.unlinkSync(target);
-        bytes += file.bytes;
-        files++;
-        let parent = NodePath.dirname(target);
-        const output = NodePath.join(ctx.cwd, root);
-        while (parent.startsWith(`${output}${NodePath.sep}`) || parent === output) {
-          try {
-            NodeFS.rmdirSync(parent);
-          } catch {
-            break;
+    if (signal?.aborted) return stop(offset, "Build cleanup was cancelled");
+    // Hashes and live policy/process checks stay outside this short native seam.
+    const release = tryAcquireBuildMutationLock(ctx);
+    if (!release) return stop(offset, "Build output is busy; retry cleanup");
+    try {
+      for (const [index, file] of batch.entries()) {
+        if (!verified.has(file.path)) continue;
+        if (signal?.aborted) return stop(offset + index, "Build cleanup was cancelled");
+        try {
+          if (signature(NodeFS.lstatSync(ctx.recordPath)) !== previous.recordIdentity)
+            return stop(offset + index, "Build ownership changed before removal");
+          const target = safePath(ctx.cwd, `${root}/${file.path}`);
+          const stat = NodeFS.lstatSync(target);
+          // Async hashing is accepted only while inode, immutable ctime, size and
+          // timestamps still match. No content hashing or await in this final seam.
+          if (!stat.isFile() || stat.nlink !== 1 || signature(stat) !== file.identity) {
+            kept.push({ path: file.path, reason: "Generated file changed before removal" });
+            continue;
           }
-          parent = NodePath.dirname(parent);
+          NodeFS.unlinkSync(target);
+          bytes += file.bytes;
+          files++;
+          let parent = NodePath.dirname(target);
+          const output = NodePath.join(ctx.cwd, root);
+          while (parent.startsWith(`${output}${NodePath.sep}`) || parent === output) {
+            try {
+              NodeFS.rmdirSync(parent);
+            } catch {
+              break;
+            }
+            parent = NodePath.dirname(parent);
+          }
+        } catch (error) {
+          kept.push({
+            path: file.path,
+            reason: missing(error)
+              ? "Generated file is absent"
+              : "Generated file could not be removed safely",
+          });
         }
-      } catch (error) {
-        kept.push({
-          path: file.path,
-          reason: missing(error)
-            ? "Generated file is absent"
-            : "Generated file could not be removed safely",
-        });
       }
+    } finally {
+      release();
     }
   }
   return { bytes, files, kept };
@@ -425,13 +441,20 @@ export async function removeGeneratedBuildFilesAsync(
 export function recordGeneratedBuildUse(worktreePath: string, root: string, now: number) {
   if (!Number.isSafeInteger(now) || now < 0) throw new Error("Invalid build use time");
   const ctx = context(worktreePath, root);
-  const previous = ctx && readRecord(ctx);
-  if (!ctx || !previous) return false;
-  return writeRecord(
-    ctx,
-    { ...previous.record, lastUsedAt: Math.max(now, previous.record.lastUsedAt) },
-    previous.recordIdentity,
-  );
+  if (!ctx) return false;
+  const release = tryAcquireBuildMutationLock(ctx);
+  if (!release) return false;
+  try {
+    const previous = readRecord(ctx);
+    if (!previous) return false;
+    return writeRecord(
+      ctx,
+      { ...previous.record, lastUsedAt: Math.max(now, previous.record.lastUsedAt) },
+      previous.recordIdentity,
+    );
+  } finally {
+    release();
+  }
 }
 
 /** Exact selective deletion only. Keep provenance and approvals, including after partial removal or regeneration. */
@@ -450,34 +473,53 @@ export function removeGeneratedBuildFiles(
   let bytes = 0;
   let files = 0;
   const kept: Array<{ path: string; reason: string }> = [];
-  for (const relative of new Set(paths)) {
+  const requested = [...new Set(paths)];
+  const stop = (offset: number, reason: string) => ({
+    bytes,
+    files,
+    kept: [...kept, ...requested.slice(offset).map((path) => ({ path, reason }))],
+  });
+  for (const [index, relative] of requested.entries()) {
     const file = owned.get(relative);
     if (!file) throw new Error("Requested file has no emission provenance");
     const target = safePath(ctx.cwd, `${root}/${relative}`);
     try {
-      if (signature(NodeFS.lstatSync(ctx.recordPath)) !== previous.recordIdentity)
-        throw new Error("Build ownership changed before removal");
       if (!evidenceMatches(file, target)) {
         kept.push({ path: relative, reason: "Generated file changed since emission" });
         continue;
       }
-      // No async gap after the caller's guards and this final identity/content check.
-      NodeFS.unlinkSync(target);
-      bytes += file.bytes;
-      files++;
-      let parent = NodePath.dirname(target);
-      const output = NodePath.join(ctx.cwd, root);
-      while (parent.startsWith(`${output}${NodePath.sep}`) || parent === output) {
-        try {
-          NodeFS.rmdirSync(parent);
-        } catch (error) {
-          if (
-            ["ENOTEMPTY", "EEXIST", "ENOENT"].includes((error as NodeJS.ErrnoException).code ?? "")
-          )
-            break;
-          break; // Empty-directory pruning is optional after a successful unlink.
+      const release = tryAcquireBuildMutationLock(ctx);
+      if (!release) return stop(index, "Build output is busy; retry cleanup");
+      try {
+        if (signature(NodeFS.lstatSync(ctx.recordPath)) !== previous.recordIdentity)
+          return stop(index, "Build ownership changed before removal");
+        const stat = NodeFS.lstatSync(target);
+        if (!stat.isFile() || stat.nlink !== 1 || signature(stat) !== file.identity) {
+          kept.push({ path: relative, reason: "Generated file changed before removal" });
+          continue;
         }
-        parent = NodePath.dirname(parent);
+        // No async gap after the caller's guards and this final identity/content check.
+        NodeFS.unlinkSync(target);
+        bytes += file.bytes;
+        files++;
+        let parent = NodePath.dirname(target);
+        const output = NodePath.join(ctx.cwd, root);
+        while (parent.startsWith(`${output}${NodePath.sep}`) || parent === output) {
+          try {
+            NodeFS.rmdirSync(parent);
+          } catch (error) {
+            if (
+              ["ENOTEMPTY", "EEXIST", "ENOENT"].includes(
+                (error as NodeJS.ErrnoException).code ?? "",
+              )
+            )
+              break;
+            break; // Empty-directory pruning is optional after a successful unlink.
+          }
+          parent = NodePath.dirname(parent);
+        }
+      } finally {
+        release();
       }
     } catch (error) {
       if (missing(error)) {
@@ -547,7 +589,7 @@ export function createGeneratedBuildStage(worktreePath: string, root: string) {
       // Compilation and stage hashing stay parallel. Serialize admission through
       // retirement across processes, including identical-but-unowned emissions.
       // Contention preserves the stage for retry; every transaction exits the lock.
-      const release = acquirePublicationLock(ctx);
+      const release = acquireBuildMutationLock(ctx);
       try {
         if (ownershipSnapshot(readRecord(ctx)) !== initialOwnership)
           throw new Error("Another build changed output ownership");

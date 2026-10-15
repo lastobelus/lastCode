@@ -284,12 +284,12 @@ const make = Effect.gen(function* () {
       if (persist && paths === null) return null;
       const used = persist && (yield* actualOutputUse(input.worktreePath, root, paths ?? null));
       if (used && persist) {
-        yield* Effect.try({
+        const updated = yield* Effect.try({
           try: () => recordGeneratedBuildUse(input.worktreePath, root, now),
           catch: (cause) => new GeneratedBuildsError({ path: output, cause }),
         });
         clock = yield* activity(input.worktreePath, root);
-        renewed = true;
+        renewed ||= updated;
       }
       if (clock) oldest = Math.min(oldest ?? clock.lastUsedAt, clock.lastUsedAt);
     }

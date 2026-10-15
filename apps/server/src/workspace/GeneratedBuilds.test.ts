@@ -16,6 +16,7 @@ import * as ServerConfig from "../config.ts";
 import * as GeneratedBuilds from "./GeneratedBuilds.ts";
 import * as WorktreeConsumers from "./WorktreeConsumers.ts";
 import * as DependencyMounts from "./DependencyMounts.ts";
+import { acquirePortableLock } from "../../../../scripts/lastcode-lock.mjs";
 
 const DAY = 86_400_000;
 const testLayer = GeneratedBuilds.layer.pipe(
@@ -534,4 +535,34 @@ it.effect(
       assert.equal(generatedBuildActivity(input.worktreePath, "apps/web/dist")?.lastUsedAt, DAY);
       assert.equal(generatedBuildActivity(input.worktreePath, "apps/server/dist")?.lastUsedAt, 2);
     }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("a busy output mutation does not claim or persist a usage renewal", () =>
+  Effect.gen(function* () {
+    const { builds, input, emit } = yield* fixture();
+    yield* emit("apps/web/dist", 1);
+    const metadata = NodePath.resolve(
+      input.worktreePath,
+      NodeFS.readFileSync(NodePath.join(input.worktreePath, ".git"), "utf8").trim().slice(8),
+    );
+    const record = NodeFS.readdirSync(metadata).find(
+      (name) => name.startsWith("t3-build-") && name.endsWith(".json"),
+    )!;
+    const before = generatedBuildActivity(input.worktreePath, "apps/web/dist");
+    const paths = Effect.succeed([NodePath.join(input.worktreePath, "apps/web/dist/main.js")]);
+    const release = acquirePortableLock(metadata, `${record}.publish`, "test output mutation");
+    try {
+      assert.deepEqual(yield* builds.observe(input, DAY, false, true, paths), {
+        lastUsedAt: 1,
+        renewed: false,
+      });
+      assert.deepEqual(generatedBuildActivity(input.worktreePath, "apps/web/dist"), before);
+    } finally {
+      release();
+    }
+    assert.deepEqual(yield* builds.observe(input, DAY, false, true, paths), {
+      lastUsedAt: DAY,
+      renewed: true,
+    });
+  }).pipe(Effect.provide(testLayer)),
 );
