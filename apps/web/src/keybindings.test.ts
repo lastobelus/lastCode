@@ -13,6 +13,7 @@ import {
 } from "@t3tools/contracts";
 import {
   effectiveShortcutsForCommand,
+  composerFormattingDelimiterForShortcut,
   formatShortcutLabel,
   isDiffToggleShortcut,
   isRichTextBoldShortcut,
@@ -1306,13 +1307,13 @@ describe("isTerminalClearShortcut", () => {
 
 describe("isRichTextBoldShortcut", () => {
   it("matches Mod+B without extra modifiers", () => {
-    assert.isTrue(isRichTextBoldShortcut(event({ key: "b", metaKey: true })));
-    assert.isTrue(isRichTextBoldShortcut(event({ key: "B", ctrlKey: true })));
+    assert.isTrue(isRichTextBoldShortcut(event({ key: "b", metaKey: true }), "MacIntel"));
+    assert.isTrue(isRichTextBoldShortcut(event({ key: "B", ctrlKey: true }), "Win32"));
   });
 
   it("matches the B key on non-Latin layouts, like the sidebar toggle does", () => {
     const cyrillicB = event({ key: "и", code: "KeyB", ctrlKey: true });
-    assert.isTrue(isRichTextBoldShortcut(cyrillicB));
+    assert.isTrue(isRichTextBoldShortcut(cyrillicB, "Win32"));
     assert.strictEqual(
       resolveShortcutCommand(cyrillicB, DEFAULT_BINDINGS, { platform: "Win32" }),
       "sidebar.toggle",
@@ -1320,16 +1321,80 @@ describe("isRichTextBoldShortcut", () => {
   });
 
   it("follows the letter a Latin layout types, not the physical key", () => {
-    assert.isFalse(isRichTextBoldShortcut(event({ key: "x", code: "KeyB", ctrlKey: true })));
-    assert.isTrue(isRichTextBoldShortcut(event({ key: "b", code: "KeyN", ctrlKey: true })));
+    assert.isFalse(
+      isRichTextBoldShortcut(event({ key: "x", code: "KeyB", ctrlKey: true }), "Win32"),
+    );
+    assert.isTrue(
+      isRichTextBoldShortcut(event({ key: "b", code: "KeyN", ctrlKey: true }), "Win32"),
+    );
   });
 
   it("ignores shifted, alted, bare, and non-keydown presses", () => {
-    assert.isFalse(isRichTextBoldShortcut(event({ key: "b", metaKey: true, shiftKey: true })));
-    assert.isFalse(isRichTextBoldShortcut(event({ key: "b", metaKey: true, altKey: true })));
-    assert.isFalse(isRichTextBoldShortcut(event({ key: "b" })));
-    assert.isFalse(isRichTextBoldShortcut(event({ key: "i", metaKey: true })));
-    assert.isFalse(isRichTextBoldShortcut(event({ type: "keyup", key: "b", metaKey: true })));
+    assert.isFalse(
+      isRichTextBoldShortcut(event({ key: "b", metaKey: true, shiftKey: true }), "MacIntel"),
+    );
+    assert.isFalse(
+      isRichTextBoldShortcut(event({ key: "b", metaKey: true, altKey: true }), "MacIntel"),
+    );
+    assert.isFalse(isRichTextBoldShortcut(event({ key: "b" }), "MacIntel"));
+    assert.isFalse(isRichTextBoldShortcut(event({ key: "i", metaKey: true }), "MacIntel"));
+    assert.isFalse(
+      isRichTextBoldShortcut(event({ type: "keyup", key: "b", metaKey: true }), "MacIntel"),
+    );
+  });
+});
+
+describe("composer formatting shortcuts", () => {
+  it.each([
+    ["b", false, "**"],
+    ["i", false, "*"],
+    ["e", false, "`"],
+    ["s", true, "~~"],
+  ] as const)("uses the platform's Mod key for %s", (key, shiftKey, delimiter) => {
+    assert.strictEqual(
+      composerFormattingDelimiterForShortcut(event({ key, shiftKey, metaKey: true }), "MacIntel"),
+      delimiter,
+    );
+    assert.isNull(
+      composerFormattingDelimiterForShortcut(event({ key, shiftKey, ctrlKey: true }), "MacIntel"),
+    );
+    for (const platform of ["Win32", "Linux"]) {
+      assert.strictEqual(
+        composerFormattingDelimiterForShortcut(event({ key, shiftKey, ctrlKey: true }), platform),
+        delimiter,
+      );
+      assert.isNull(
+        composerFormattingDelimiterForShortcut(event({ key, shiftKey, metaKey: true }), platform),
+      );
+    }
+  });
+
+  it("rejects extra modifiers and matches the app's non-Latin layout policy", () => {
+    assert.isNull(
+      composerFormattingDelimiterForShortcut(
+        event({ key: "b", metaKey: true, ctrlKey: true }),
+        "MacIntel",
+      ),
+    );
+    assert.isNull(
+      composerFormattingDelimiterForShortcut(
+        event({ key: "s", metaKey: true, shiftKey: true, altKey: true }),
+        "MacIntel",
+      ),
+    );
+    assert.strictEqual(
+      composerFormattingDelimiterForShortcut(
+        event({ key: "ы", code: "KeyS", metaKey: true, shiftKey: true }),
+        "MacIntel",
+      ),
+      "~~",
+    );
+    assert.isNull(
+      composerFormattingDelimiterForShortcut(
+        event({ key: "x", code: "KeyS", metaKey: true, shiftKey: true }),
+        "MacIntel",
+      ),
+    );
   });
 });
 

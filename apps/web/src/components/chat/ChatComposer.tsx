@@ -82,14 +82,11 @@ import {
 } from "react";
 import { createPortal, flushSync } from "react-dom";
 import {
-  clampCollapsedComposerCursor,
   type ComposerTrigger,
   type ComposerSubmissionIntent,
   collapseExpandedComposerCursor,
   composerSubmissionIntentForKey,
-  composerStateAtPromptEnd,
   detectComposerTrigger,
-  expandCollapsedComposerCursor,
   formatAssistantCitationForComposer,
   replaceTextRange,
 } from "../../composer-logic";
@@ -1469,6 +1466,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
 
 export interface ChatComposerHandle {
   focusAtEnd: () => void;
+  /** Focus at an expanded source offset, independent of the current atom representation. */
   focusAt: (cursor: number) => void;
   /** Expand the desktop composer at the timeline end without taking focus. */
   restoreAfterTimelineReachedEnd: () => void;
@@ -1499,7 +1497,7 @@ export interface ChatComposerHandle {
     expandedCursor: number;
     contextIds: string[];
   };
-  /** Reset composer cursor/trigger/highlight after external prompt mutations (e.g. onSend). */
+  /** Reset selection from an expanded source cursor after external prompt mutations. */
   resetCursorState: (options?: {
     cursor?: number;
     prompt?: string;
@@ -2469,9 +2467,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // ------------------------------------------------------------------
   // Composer-local state
   // ------------------------------------------------------------------
-  const [composerCursor, setComposerCursor] = useState(() => {
+  // Controlled selection uses source offsets; snapshots also expose actual document offsets.
+  const [composerSourceCursor, setComposerSourceCursor] = useState(() => {
     const value = isLiteralPendingAnswer ? (activePendingProgress?.customAnswer ?? prompt) : prompt;
-    return collapseExpandedComposerCursor(value, value.length, isLiteralPendingAnswer);
+    return value.length;
   });
   const {
     trigger: composerTrigger,
@@ -3037,8 +3036,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       }
       promptRef.current = nextPrompt;
       setComposerDraftPrompt(composerDraftTarget, nextPrompt);
-      const nextCursor = collapseExpandedComposerCursor(nextPrompt, nextPrompt.length);
-      setComposerCursor(nextCursor);
+      setComposerSourceCursor(nextPrompt.length);
       setComposerTrigger(detectComposerTrigger(nextPrompt, nextPrompt.length));
       scheduleComposerFocus();
     },
@@ -3566,7 +3564,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   useEffect(() => {
     if (isLiteralPendingAnswer) return;
     promptRef.current = prompt;
-    setComposerCursor((existing) => clampCollapsedComposerCursor(prompt, existing));
+    setComposerSourceCursor((existing) => Math.max(0, Math.min(prompt.length, existing)));
   }, [isLiteralPendingAnswer, prompt, promptRef]);
 
   useEffect(() => {
@@ -3643,9 +3641,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       // the caret at the end so the next keystroke appends.
       if (lastSyncedPendingInputRef.current !== null) {
         promptRef.current = prompt;
-        const { cursor, trigger } = composerStateAtPromptEnd(prompt);
-        setComposerCursor(cursor);
-        resetComposerTrigger(trigger);
+        setComposerSourceCursor(prompt.length);
+        resetComposerTrigger(detectComposerTrigger(prompt, prompt.length));
       }
       lastSyncedPendingInputRef.current = null;
       return;
@@ -3668,9 +3665,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     }
 
     promptRef.current = nextCustomAnswer;
-    const { cursor, trigger } = composerStateAtPromptEnd(nextCustomAnswer, isLiteralPendingAnswer);
-    setComposerCursor(cursor);
-    resetComposerTrigger(trigger);
+    setComposerSourceCursor(nextCustomAnswer.length);
+    resetComposerTrigger(
+      isLiteralPendingAnswer
+        ? null
+        : detectComposerTrigger(nextCustomAnswer, nextCustomAnswer.length),
+    );
     setComposerHighlightedItemId(null);
   }, [
     activePendingProgress?.customAnswer,
@@ -3690,9 +3690,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     setComposerHighlightedSearchKey(null);
     setComposerSubmissionError(null);
     setProviderInputSubmissionError(null);
-    const { cursor, trigger } = composerStateAtPromptEnd(promptRef.current, isLiteralPendingAnswer);
-    setComposerCursor(cursor);
-    resetComposerTrigger(trigger);
+    setComposerSourceCursor(promptRef.current.length);
+    resetComposerTrigger(
+      isLiteralPendingAnswer
+        ? null
+        : detectComposerTrigger(promptRef.current, promptRef.current.length),
+    );
     setIsDragOverComposer(false);
     setIsComposerScrollCollapsed(false);
   }, [
@@ -3857,7 +3860,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       expandComposerForEditorChange();
       if (activePendingProgress?.activeQuestion && pendingUserInputs.length > 0) {
         if (activePendingProgress.activeQuestion.allowCustomAnswer === false) return;
-        setComposerCursor(nextCursor);
+        setComposerSourceCursor(expandedCursor);
         setComposerTrigger(
           cursorAdjacentToMention ? null : detectComposerTrigger(nextPrompt, expandedCursor),
         );
@@ -3969,7 +3972,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       if (attachmentChanges.filesToRestore.length > 0) {
         addComposerDraftFiles(attachmentDraftTarget, attachmentChanges.filesToRestore);
       }
-      setComposerCursor(nextCursor);
+      setComposerSourceCursor(expandedCursor);
       setComposerTrigger(
         cursorAdjacentToMention ? null : detectComposerTrigger(nextPrompt, expandedCursor),
       );
@@ -4038,14 +4041,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         return false;
       }
       const next = replaceTextRange(promptRef.current, rangeStart, rangeEnd, replacement);
+      const requestedCursor = options?.expandedCursorAfterReplace ?? next.cursor;
+      const nextExpandedCursor = Math.max(0, Math.min(next.text.length, requestedCursor));
+      // Pending-answer metadata still reports a collapsed cursor; positioning uses source only.
       const nextCursor = collapseExpandedComposerCursor(
         next.text,
-        options?.expandedCursorAfterReplace ?? next.cursor,
-        isLiteralPendingAnswer,
-      );
-      const nextExpandedCursor = expandCollapsedComposerCursor(
-        next.text,
-        nextCursor,
+        nextExpandedCursor,
         isLiteralPendingAnswer,
       );
       if (options?.citationComment) {
@@ -4071,7 +4072,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         setPrompt(next.text);
         onTypingGuardDraftChange();
       }
-      setComposerCursor(nextCursor);
+      setComposerSourceCursor(nextExpandedCursor);
       setComposerTrigger(
         isLiteralPendingAnswer ? null : detectComposerTrigger(next.text, nextExpandedCursor),
       );
@@ -4082,7 +4083,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           // Skip the deferred caret placement when the draft has moved on,
           // or it drags the caret back behind what was typed since.
           if (promptRef.current !== next.text) return;
-          composerEditorRef.current?.focusAt(nextCursor);
+          composerEditorRef.current?.focusAt(nextExpandedCursor);
         });
       }
       return true;
@@ -4109,17 +4110,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     if (editorSnapshot) {
       return editorSnapshot;
     }
+    // With no document to inspect, only fallback metadata uses the token lexer.
+    // The source cursor remains authoritative for every selection request.
     return {
       value: promptRef.current,
-      cursor: composerCursor,
-      expandedCursor: expandCollapsedComposerCursor(
+      cursor: collapseExpandedComposerCursor(
         promptRef.current,
-        composerCursor,
+        composerSourceCursor,
         isLiteralPendingAnswer,
       ),
+      expandedCursor: composerSourceCursor,
       contextIds: isLiteralPendingAnswer ? [] : collectInlineContextIds(promptRef.current),
     };
-  }, [composerCursor, isLiteralPendingAnswer, promptRef]);
+  }, [composerSourceCursor, isLiteralPendingAnswer, promptRef]);
 
   const resolveActiveComposerTrigger = useCallback((): {
     snapshot: { value: string; cursor: number; expandedCursor: number };
@@ -4576,7 +4579,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     (nextPrompt: string) => {
       promptRef.current = nextPrompt;
       setComposerDraftPrompt(composerDraftTarget, nextPrompt);
-      setComposerCursor(collapseExpandedComposerCursor(nextPrompt, nextPrompt.length));
+      setComposerSourceCursor(nextPrompt.length);
       setComposerTrigger(null);
       setComposerHighlightedItemId(null);
     },
@@ -4638,7 +4641,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // ------------------------------------------------------------------
   // Callbacks: command key
   // ------------------------------------------------------------------
-  const onComposerCommandKey = (key: string, event: KeyboardEvent, isTaskItem = false) => {
+  const onComposerCommandKey = (key: string, event: KeyboardEvent) => {
     const submissionIntent = composerSubmissionIntentForKey({
       event,
       keybindings,
@@ -4694,8 +4697,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       );
       return true;
     }
-    // Native task splitting preserves marks and chips on both sides of the caret.
-    if (key === "Enter" && isTaskItem) return false;
+    // Continue lists and quotes by editing their source.
     if (
       !isLiteralPendingAnswer &&
       !event.isComposing &&
@@ -4835,7 +4837,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       if (promptChanged) {
         promptRef.current = nextPrompt;
         setComposerDraftPrompt(composerDraftTarget, nextPrompt);
-        setComposerCursor(collapseExpandedComposerCursor(nextPrompt, nextPrompt.length));
+        setComposerSourceCursor(nextPrompt.length);
         setComposerTrigger(null);
       }
 
@@ -4946,9 +4948,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           const restoredFilePrompt = getComposerDraft(composerDraftTarget)?.prompt;
           if (restoredFilePrompt !== undefined && restoredFilePrompt !== promptRef.current) {
             promptRef.current = restoredFilePrompt;
-            setComposerCursor(
-              collapseExpandedComposerCursor(restoredFilePrompt, restoredFilePrompt.length),
-            );
+            setComposerSourceCursor(restoredFilePrompt.length);
             setComposerTrigger(null);
             promptChanged = true;
           }
@@ -5220,7 +5220,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       for (const image of images) {
         releaseAttachmentUpload(image.id);
       }
-      setComposerCursor(0);
+      setComposerSourceCursor(0);
       setComposerTrigger(null);
       pulseStashBadge();
 
@@ -6731,19 +6731,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         detectTrigger?: boolean;
       }) => {
         const promptForState = options?.prompt ?? promptRef.current;
-        const cursor = clampCollapsedComposerCursor(
-          promptForState,
-          options?.cursor ?? 0,
-          isLiteralPendingAnswer,
+        const requestedCursor = options?.cursor ?? 0;
+        const cursor = Math.max(
+          0,
+          Math.min(
+            promptForState.length,
+            Number.isFinite(requestedCursor) ? Math.floor(requestedCursor) : promptForState.length,
+          ),
         );
         setComposerHighlightedItemId(null);
-        setComposerCursor(cursor);
+        setComposerSourceCursor(cursor);
         resetComposerTrigger(
           options?.detectTrigger && !isLiteralPendingAnswer
-            ? detectComposerTrigger(
-                promptForState,
-                expandCollapsedComposerCursor(promptForState, cursor),
-              )
+            ? detectComposerTrigger(promptForState, cursor)
             : null,
         );
       },
@@ -6761,10 +6761,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           snapshot.expandedCursor,
           terminalContextReference(context),
         );
-        const nextCollapsedCursor = collapseExpandedComposerCursor(
-          insertion.prompt,
-          insertion.cursor,
-        );
         const inserted = insertComposerDraftTerminalContext(
           composerDraftTarget,
           insertion.prompt,
@@ -6773,10 +6769,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         );
         if (!inserted) return;
         promptRef.current = insertion.prompt;
-        setComposerCursor(nextCollapsedCursor);
+        setComposerSourceCursor(insertion.cursor);
         setComposerTrigger(detectComposerTrigger(insertion.prompt, insertion.cursor));
         window.requestAnimationFrame(() => {
-          composerEditorRef.current?.focusAt(nextCollapsedCursor);
+          composerEditorRef.current?.focusAt(insertion.cursor);
         });
       },
       getSendContext: () => ({
@@ -6826,7 +6822,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       addComposerAttachments,
       foldPastedText,
       composerDraftTarget,
-      composerCursor,
+      composerSourceCursor,
       activePendingProgress,
       composerTerminalContexts,
       insertComposerDraftTerminalContext,
@@ -7724,7 +7720,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                           ? activePendingProgress.customAnswer
                           : prompt
                     }
-                    cursor={composerCursor}
+                    cursor={composerSourceCursor}
                     contextRecords={composerContextRecords}
                     buildContextClipboardFragment={buildContextClipboardFragment}
                     importContextFragment={importContextFragment}

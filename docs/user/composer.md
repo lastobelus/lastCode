@@ -14,20 +14,30 @@ to keep a large paste editable in the composer instead.
 
 ## Formatting
 
-The composer writes Markdown and shows it styled as you type. Markers such as
-`**` stay in the text and show beside the styled words when your cursor is on
-them. Lines starting with `- `, `1. `, `- [ ] `, `> `, `# ` or `---` become lists,
-task lists, quotes, headings and rules; ` ``` ` followed by Enter opens a code
-block. What you typed is what the agent receives, markers and numbering
-included, and `#1234` without a space still looks up a pull request.
+The composer keeps the Markdown you type, including every delimiter. With
+**Settings → General → Rich text composer** enabled, formatting appears while markers
+hide away from the cursor. Move the cursor into a formatted span to edit its
+markers directly. Backticks keep names such as `_build` and `node_modules`
+literal. What you typed is what the agent receives.
 
-Enter sends. In a list or quote, **Shift+Enter** continues it, and Shift+Enter
-on an empty line leaves it; **Tab** nests a list item. In a code block, Enter
-starts a new line at the current indentation, **Tab** and **Shift+Tab** indent
-the selected lines, and a closing ` ``` ` followed by Enter, or two blank lines
-at the end, leave the block. **Backspace** at the start of a code block turns it
-back into plain lines. Choose the language in a code block's corner to change
-it. Very large code blocks are shown without syntax highlighting.
+Lines starting with `- `, `1. `, `- [ ] `, `> `, `# ` or `---` show as lists,
+tasks, quotes, headings and rules. Click a task checkbox to change `[ ]` to
+`[x]`. Formatting shortcuts wrap or unwrap the selection: **Cmd+B / Ctrl+B**
+for bold, **Cmd+I / Ctrl+I** for italics, **Cmd+E / Ctrl+E** for inline code,
+and **Cmd+Shift+S / Ctrl+Shift+S** for strikethrough.
+Use Cmd on Mac and Ctrl elsewhere. Strikethrough takes priority over the
+settle-thread shortcut while the Rich text composer is focused.
+
+Enter sends. **Shift+Enter** continues a list or quote; on an empty item it
+leaves it. **Tab** nests a list item. Typing a code fence such as ` ```ts `
+and pressing Enter adds a matching closing fence. Inside the fence, Enter
+adds a line with the current indentation; **Tab** and **Shift+Tab** indent
+or outdent code. To write after the block, move beyond its closing fence.
+Choose its language while the cursor is outside the block. Formatting shortcuts,
+checkbox changes and code-block actions can each be undone in one step.
+
+Drafts above 12,000 characters show plain Markdown for responsiveness. `#1234`
+without a space still looks up a pull request.
 
 ## Attach files
 

@@ -71,6 +71,70 @@ describe("composer list continuation", () => {
   });
 });
 
+describe("composer quote continuation", () => {
+  it.each(["> ", ">", ">> ", "> > ", "  >  >\t ", ">\t"])(
+    "continues the exact quote prefix %j",
+    (prefix) => {
+      const value = `${prefix}quoted text`;
+      const edit = listContinuationForEnter(value, value.length);
+      expect(edit).toEqual({ start: value.length, end: value.length, replacement: `\n${prefix}` });
+      expect(applyEdit(value, edit!)).toBe(`${value}\n${prefix}`);
+    },
+  );
+
+  it("splits a quote in the middle without rewriting either side", () => {
+    const value = "before\n  >  > quoted text\nafter";
+    const cursor = value.indexOf("text");
+    const edit = listContinuationForEnter(value, cursor);
+    expect(applyEdit(value, edit!)).toBe("before\n  >  > quoted \n  >  > text\nafter");
+  });
+
+  it.each([">", "> ", ">   ", ">> ", "  > >\t "])(
+    "exits every quote level on an empty %j line",
+    (prefix) => {
+      const value = `before\n${prefix}\nafter`;
+      const cursor = value.indexOf("\nafter");
+      const edit = listContinuationForEnter(value, cursor);
+      expect(edit).toEqual({ start: 7, end: cursor, replacement: "" });
+      expect(applyEdit(value, edit!)).toBe("before\n\nafter");
+      expect(applyEdit(prefix, listContinuationForEnter(prefix, prefix.length)!)).toBe("");
+    },
+  );
+
+  it("does not remove or split a quote prefix before the caret reaches its end", () => {
+    const value = "  > >  text";
+    for (const cursor of [0, 1, 2, 3, 4, 5, 6]) {
+      expect(listContinuationForEnter(value, cursor)).toBeNull();
+    }
+    expect(listContinuationForEnter(value, 7)?.replacement).toBe("\n  > >  ");
+    expect(listContinuationForEnter(">  ", 1)).toBeNull();
+  });
+
+  it("does not infer quotes from escaped, inline, or code-indented markers", () => {
+    for (const value of ["\\> literal", "words > literal", "    > code", "\t> code"]) {
+      expect(listContinuationForEnter(value, value.length)).toBeNull();
+    }
+  });
+
+  it("refuses to split an inline chip inside a quote", () => {
+    const value = "> > @README.md go";
+    expect(listContinuationForEnter(value, value.indexOf("README") + 2)).toBeNull();
+    const skill = "> 𑿝review go";
+    expect(listContinuationForEnter(skill, skill.indexOf(" go") - 1)).toBeNull();
+  });
+
+  it("preserves list and task spellings inside a quote without converting them", () => {
+    const value = ">  - [X] done";
+    const edit = listContinuationForEnter(value, value.length);
+    expect(applyEdit(value, edit!)).toBe(">  - [X] done\n>  ");
+  });
+
+  it("keeps Tab handling restricted to list items", () => {
+    const value = "> quoted";
+    expect(listIndentForTab(value, value.length, value.length)).toBeNull();
+  });
+});
+
 describe("nextOrderedMarkerText", () => {
   it.each([
     ["1.", "2."],

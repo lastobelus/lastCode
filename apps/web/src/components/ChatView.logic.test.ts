@@ -2248,3 +2248,33 @@ describe("explicit read marker visit decisions", () => {
     });
   });
 });
+
+describe("restorePlanFollowUpComposer source cursor", () => {
+  it("restores the caret after a literal fenced file link so the next edit appends", () => {
+    const source = "```\n[package.json](package.json) \n```";
+    let restoredPrompt = "";
+    let sourceCursor = 0;
+    restorePlanFollowUpComposer({
+      snapshot: {
+        prompt: source,
+        terminalContexts: [],
+        reviewComments: [],
+        previewAnnotations: [],
+        threadContexts: [],
+      },
+      writePrompt: (value) => {
+        restoredPrompt = value;
+      },
+      writeTerminalContexts: () => {},
+      writeReviewComments: () => {},
+      writePreviewAnnotations: () => {},
+      writeThreadContexts: () => {},
+      resetCursor: ({ cursor }) => {
+        sourceCursor = cursor;
+      },
+    });
+    const edited =
+      restoredPrompt.slice(0, sourceCursor) + "\nnext" + restoredPrompt.slice(sourceCursor);
+    expect(edited).toBe(`${source}\nnext`);
+  });
+});

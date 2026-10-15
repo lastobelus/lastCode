@@ -1,13 +1,12 @@
 import { splitPromptIntoComposerSegments } from "./composer-editor-mentions";
 
 /**
- * List continuation and indentation for the composer.
+ * List and quote continuation, plus list indentation, for the composer.
  *
  * Implemented once at the ChatComposer level (store replacement), so both
  * composer modes behave identically and serialize identically:
- * Shift+Enter on a list item continues it, Enter on an empty item exits the
- * list, and Tab indents the item. Plain Markdown markers only — no real list
- * nodes anywhere.
+ * Shift+Enter continues a list item or quote, or exits it on an empty line.
+ * Tab indents a list item. All edits operate on literal Markdown source.
  */
 
 export interface ComposerListEdit {
@@ -53,6 +52,11 @@ function parseListMarker(line: string): { marker: ListMarker; markerEnd: number 
     };
   }
   return null;
+}
+
+/** Keep every typed quote marker and its spacing, including nested prefixes. */
+function quotePrefix(line: string): string | null {
+  return /^ {0,3}(?:>[ \t]*)+/.exec(line)?.[0] ?? null;
 }
 
 /**
@@ -106,26 +110,27 @@ function currentLine(value: string, cursor: number): { start: number; end: numbe
 }
 
 /**
- * Enter on a list item line: continue the list, or exit it when the item is
- * empty. Returns null for non-list lines, carets inside the marker, and
- * carets inside an inline chip — all fall through to a plain newline.
+ * Shift+Enter on a list or quote line: continue its marker, or remove the
+ * marker when the line is empty. Carets inside markers or inline chips and
+ * other lines fall through to a plain newline.
  */
 export function listContinuationForEnter(value: string, cursor: number): ComposerListEdit | null {
   if (!Number.isInteger(cursor) || cursor < 0 || cursor > value.length) return null;
   const line = currentLine(value, cursor);
   const parsed = parseListMarker(line.text);
-  if (!parsed) return null;
-  const markerEnd = line.start + parsed.markerEnd;
+  const quote = parsed ? null : quotePrefix(line.text);
+  if (!parsed && quote === null) return null;
+  const markerEnd = line.start + (parsed ? parsed.markerEnd : quote!.length);
   if (cursor < markerEnd) return null;
   if (isInsideInlineToken(value, cursor)) return null;
   if (value.slice(markerEnd, line.end).trim() === "") {
-    // Empty item: Enter exits the list by removing the marker.
+    // An empty line exits the list or all quote levels by removing its prefix.
     return { start: line.start, end: Math.max(cursor, markerEnd), replacement: "" };
   }
   return {
     start: cursor,
     end: cursor,
-    replacement: `\n${nextMarkerText(parsed.marker)}`,
+    replacement: `\n${parsed ? nextMarkerText(parsed.marker) : quote}`,
   };
 }
 

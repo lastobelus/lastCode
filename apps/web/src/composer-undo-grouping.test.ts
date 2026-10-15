@@ -9,6 +9,7 @@ import {
   type ComposerChangeKind,
   groupUndoByChangeKind,
   markAsClipboardEdit,
+  markAsOneOffEdit,
 } from "./composer-undo-grouping";
 
 const schema = getSchema([StarterKit]);
@@ -60,6 +61,17 @@ function composer(text = "") {
     paste: (s: string) => {
       clock += 80;
       dispatch(markAsClipboardEdit(state.tr.insertText(s), "paste"));
+      return api;
+    },
+    oneOffInsert: (text: string) => {
+      clock += 80;
+      dispatch(markAsOneOffEdit(state.tr.insertText(text)));
+      return api;
+    },
+    oneOffDelete: (count: number) => {
+      clock += 80;
+      const at = state.selection.from;
+      dispatch(markAsOneOffEdit(state.tr.delete(at - count, at)));
       return api;
     },
     /** The composer's cut handler: a plain delete of the selection, tagged. */
@@ -122,6 +134,22 @@ describe("composer undo grouping", () => {
     const editor = composer().type("see ").paste("pasted text").type(" ok");
     expect(editor.undo().text()).toBe("see pasted text");
     expect(editor.undo().text()).toBe("see ");
+  });
+
+  it("gives consecutive explicit source gestures separate undo steps between typing", () => {
+    const editor = composer().type("one").oneOffInsert("**").oneOffInsert("~~").type("tail");
+    expect(editor.undo().text()).toBe("one**~~");
+    expect(editor.undo().text()).toBe("one**");
+    expect(editor.undo().text()).toBe("one");
+    expect(editor.undo().text()).toBe("");
+  });
+
+  it("separates an explicit source deletion from adjacent backspaces", () => {
+    const editor = composer("abcd").backspace(1).oneOffDelete(1).backspace(1);
+    expect(editor.text()).toBe("a");
+    expect(editor.undo().text()).toBe("ab");
+    expect(editor.undo().text()).toBe("abc");
+    expect(editor.undo().text()).toBe("abcd");
   });
 
   it("gives a cut its own step between deletions", () => {

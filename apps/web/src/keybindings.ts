@@ -355,21 +355,29 @@ export function isOpenFavoriteEditorShortcut(
   );
 }
 
-/**
- * Whether the keypress is the rich-text bold chord (Mod+B without extra
- * modifiers). Tiptap binds the same chord, so app shortcuts captured ahead
- * of the editor must yield when the rich-text composer is focused.
- */
-export function isRichTextBoldShortcut(event: ShortcutEventLike): boolean {
-  if (event.type !== undefined && event.type !== "keydown") {
-    return false;
-  }
-  return (
-    resolveEventKeys(event).has("b") &&
-    (event.metaKey || event.ctrlKey) &&
-    !event.altKey &&
-    !event.shiftKey
-  );
+/** Focused rich-text composers claim these source edits before app shortcuts. */
+export function composerFormattingDelimiterForShortcut(
+  event: ShortcutEventLike,
+  platform = navigator.platform,
+): "**" | "*" | "`" | "~~" | null {
+  if (event.type !== undefined && event.type !== "keydown") return null;
+  const mod = isMacPlatform(platform)
+    ? event.metaKey && !event.ctrlKey
+    : event.ctrlKey && !event.metaKey;
+  if (!mod || event.altKey) return null;
+  const keys = resolveEventKeys(event);
+  if (event.shiftKey) return keys.has("s") ? "~~" : null;
+  if (keys.has("b")) return "**";
+  if (keys.has("i")) return "*";
+  if (keys.has("e")) return "`";
+  return null;
+}
+
+export function isRichTextBoldShortcut(
+  event: ShortcutEventLike,
+  platform = navigator.platform,
+): boolean {
+  return composerFormattingDelimiterForShortcut(event, platform) === "**";
 }
 
 export function isTerminalClearShortcut(
