@@ -123,10 +123,44 @@ describe("composer quote continuation", () => {
     expect(listContinuationForEnter(skill, skill.indexOf(" go") - 1)).toBeNull();
   });
 
-  it("preserves list and task spellings inside a quote without converting them", () => {
-    const value = ">  - [X] done";
+  it.each([
+    ["> - item", "> - item\n> - "],
+    ["> > + item", "> > + item\n> > + "],
+    ["  >  * item", "  >  * item\n  >  * "],
+    ["> 09) item", "> 09) item\n> 10) "],
+    ["> > 001. item", "> > 001. item\n> > 002. "],
+    [">  - [X] done", ">  - [X] done\n>  - [ ] "],
+  ])("continues the nested list in %j", (value, expected) => {
     const edit = listContinuationForEnter(value, value.length);
-    expect(applyEdit(value, edit!)).toBe(">  - [X] done\n>  ");
+    expect(applyEdit(value, edit!)).toBe(expected);
+  });
+
+  it.each([
+    ["> - ", "> "],
+    ["> *", "> "],
+    ["> 2. ", "> "],
+    ["> - [x] ", "> "],
+    ["> > + ", "> > "],
+    ["  >  - [ ]\t", "  >  "],
+  ])("exits an empty quoted list %j while keeping its quote", (value, expected) => {
+    const edit = listContinuationForEnter(value, value.length);
+    expect(applyEdit(value, edit!)).toBe(expected);
+    expect(applyEdit(expected, listContinuationForEnter(expected, expected.length)!)).toBe("");
+  });
+
+  it("does not split a quoted list before the caret reaches the marker end", () => {
+    const value = "> > - [ ] item";
+    for (let cursor = 0; cursor < 10; cursor++) {
+      expect(listContinuationForEnter(value, cursor)).toBeNull();
+    }
+    expect(listContinuationForEnter(value, 10)?.replacement).toBe("\n> > - [ ] ");
+  });
+
+  it("splits a quoted list in the middle without rewriting the remaining text", () => {
+    const value = "before\n> 3) first second\nafter";
+    const cursor = value.indexOf("second");
+    const edit = listContinuationForEnter(value, cursor);
+    expect(applyEdit(value, edit!)).toBe("before\n> 3) first \n> 4) second\nafter");
   });
 
   it("keeps Tab handling restricted to list items", () => {

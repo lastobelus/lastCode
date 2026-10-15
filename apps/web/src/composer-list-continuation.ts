@@ -117,20 +117,25 @@ function currentLine(value: string, cursor: number): { start: number; end: numbe
 export function listContinuationForEnter(value: string, cursor: number): ComposerListEdit | null {
   if (!Number.isInteger(cursor) || cursor < 0 || cursor > value.length) return null;
   const line = currentLine(value, cursor);
-  const parsed = parseListMarker(line.text);
-  const quote = parsed ? null : quotePrefix(line.text);
-  if (!parsed && quote === null) return null;
-  const markerEnd = line.start + (parsed ? parsed.markerEnd : quote!.length);
+  const quote = quotePrefix(line.text) ?? "";
+  const parsed = parseListMarker(line.text.slice(quote.length));
+  if (!parsed && quote === "") return null;
+  const markerStart = line.start + quote.length;
+  const markerEnd = markerStart + (parsed?.markerEnd ?? 0);
   if (cursor < markerEnd) return null;
   if (isInsideInlineToken(value, cursor)) return null;
   if (value.slice(markerEnd, line.end).trim() === "") {
-    // An empty line exits the list or all quote levels by removing its prefix.
-    return { start: line.start, end: Math.max(cursor, markerEnd), replacement: "" };
+    // An empty list exits its marker but keeps the quote; an empty quote exits all levels.
+    return {
+      start: parsed ? markerStart : line.start,
+      end: Math.max(cursor, markerEnd),
+      replacement: "",
+    };
   }
   return {
     start: cursor,
     end: cursor,
-    replacement: `\n${parsed ? nextMarkerText(parsed.marker) : quote}`,
+    replacement: `\n${quote}${parsed ? nextMarkerText(parsed.marker) : ""}`,
   };
 }
 
