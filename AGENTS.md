@@ -131,6 +131,8 @@ When given a budget for local reviews (e.g., example: "up to 5 rounds of Astra H
 ## Pull requests
 
 - Never make a PR unless the developer explicitly asks you to do so.
+- LastCode is the default delivery target, including for general T3 Code fixes and improvements. An unqualified request to open a PR means `lastobelus/lastCode:lastcode/main`. Create a PR against `pingdotgg/t3code` only when the user specifically asks for an upstream PR; usefulness to upstream, a generic PR request, or a plan/skill's paired-delivery instructions do not supply that authorization.
+- This upstream restriction does not block the task. Continue implementation, validation, review, and authorized LastCode delivery without pausing to ask whether the change should also go upstream. Use `lastcode-pr` for the default delivery path and `upstream-fix` only for an explicitly requested upstream contribution.
 - For LastCode PRs targeting `lastcode/main`, including authorized checkpoint or build repair PRs, follow `.agents/skills/lastcode-pr/SKILL.md`. When CI or review is passive and no current finding needs judgement, list Project Actions, launch the eligible **Wait for PR** action by its returned ID (prefer `lc-wait-for-pr`), and end the turn immediately. Use the action again after a fixing push when another wait is needed; do not spend agent turns polling GitHub or the running action. This applies without a separate “babysit” request and does not authorize creating or merging a PR.
 - Conventional commit titles, plain language: `fix(web): new threads no longer spike CPU`.
 - Body: the problem in a sentence or two, then how you fixed it. End with the model and harness that did the work.

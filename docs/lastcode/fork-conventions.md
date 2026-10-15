@@ -1,7 +1,7 @@
 # LastCode Contribution and Fork Conventions
 
-This document defines how LastCode separates fork-only work from changes offered
-upstream, keeps both contribution bases current, and evaluates other forks.
+This document defines LastCode's default delivery path, explicitly requested
+upstream contributions, contribution bases, and evaluation of other forks.
 
 ## Goals
 
@@ -13,39 +13,40 @@ upstream, keeps both contribution bases current, and evaluates other forks.
 
 ## Two Workstreams
 
-Every change belongs to one of two workstreams before implementation begins.
+Use LastCode delivery by default, including for general T3 Code fixes and
+improvements. An unqualified request to open a PR means a LastCode PR. Submit
+to `pingdotgg/t3code` only when the user specifically asks for an upstream PR.
+General usefulness and a plan or skill's paired-delivery instructions do not
+supply that authorization. Continue implementation, validation, review, and
+authorized LastCode delivery without pausing to ask about upstream submission.
 
-### LastCode-only work
+### LastCode delivery (default)
 
-This stream includes Markover integration, LastCode identity and branding,
-personal conveniences, local release and nightly automation, and any feature
-that depends on private workflow assumptions. These changes:
+This stream includes general fixes and improvements, Markover integration,
+LastCode identity and branding, personal conveniences, local release and nightly
+automation, and features that depend on private workflow assumptions. These
+changes:
 
 - branch from `origin/lastcode/main`;
 - use `lastcode/markover/<topic>` for Markover integration or
-  `lastcode/<topic>` for other fork-only work;
+  `lastcode/<topic>` for other LastCode work;
 - target `lastobelus/lastCode:lastcode/main`; and
 - are not proposed to T3 Code upstream.
 
-### Upstream candidates retained by LastCode
+### Explicitly requested upstream contributions retained by LastCode
 
-This stream includes general T3 Code fixes and improvements that should be
-offered to `pingdotgg/t3code` but that LastCode wants regardless of the upstream
-decision or schedule. Treat it as two independent deliveries of one logical
-change:
+Use this stream when the user specifically requests an upstream contribution
+that LastCode also wants regardless of the upstream decision or schedule. Treat
+it as two independent deliveries of one logical change:
 
 1. an upstream-pure PR branched from `upstream/main`; and
 2. a LastCode port branched from `origin/lastcode/main`.
 
 The upstream branch contains no LastCode branding, Markover integration, local
-release automation, or `docs/lastcode` material. Link the two PRs for provenance,
-but do not make either merge depend on the other. If upstream later merges the
-change, the nightly rebase reconciles the duplicate patch in the normal conflict
-resolution process.
-
-When classification is uncertain, ask whether the change would make sense for a
-T3 Code user with no LastCode or Markover context. If yes, use the paired
-upstream-candidate workflow. Otherwise, keep it LastCode-only.
+release automation, or `docs/lastcode` material. When both PRs are requested,
+link them for provenance, but do not make either merge depend on the other. If
+upstream later merges the change, the nightly rebase reconciles the duplicate
+patch in the normal conflict resolution process.
 
 ## Repository Layout
 
@@ -90,9 +91,10 @@ Use two long-lived mainline branches with distinct jobs:
   - Do not add LastCode-only commits directly to `main`.
 - `lastcode/main`: canonical LastCode branch.
   - This is the default branch for `lastobelus/lastCode`.
-  - Use this branch for LastCode-specific documentation, experiments that become part
-    of the fork, and ongoing project state that should not appear in upstream PRs.
-  - Branch fork-only work from `lastcode/main`, or use a `lastcode/<topic>` branch
+  - Use this branch for general fixes and improvements, LastCode-specific
+    documentation, experiments that become part of the fork, and ongoing project
+    state that should not appear in upstream PRs.
+  - Branch LastCode work from `lastcode/main`, or use a `lastcode/<topic>` branch
     when the work is not ready for the canonical branch.
 
 This split keeps the GitHub fork useful as a project while keeping upstream
@@ -103,7 +105,7 @@ contribution branches clean.
 Never use `lastcode/main` as the base for an upstream PR. It contains the entire
 [downstream carry set](glossary.md#downstream-carry-set) and would contaminate the upstream diff.
 
-Before starting upstream-facing work:
+Before starting an explicitly requested upstream contribution:
 
 ```bash
 git fetch upstream --prune
@@ -158,7 +160,7 @@ Keep `main` clean and upstream-oriented.
 Rules:
 
 - `main` tracks `upstream/main`.
-- `lastcode/main` is the canonical branch for LastCode-only project state.
+- `lastcode/main` is the canonical branch for LastCode work, including general fixes.
 - Do not do evaluation work directly on either long-lived branch.
 - Create short-lived branches for comparison, import, and spike work.
 - Delete branches once their result is merged, rejected, or superseded.
@@ -182,7 +184,7 @@ Rules:
 - `port/upstream/<topic>`
   - The independent LastCode copy of an upstream candidate.
 - `lastcode/<topic>`
-  - Fork-only work branched from `lastcode/main`.
+  - Default LastCode work branched from `lastcode/main`, including general fixes.
 - `lastcode/markover/<topic>`
   - Fork-only Markover integration branched from `lastcode/main`.
 
@@ -265,7 +267,7 @@ git switch -c port/aadit/opencode-adapter-parity lastcode/main
 git cherry-pick <commit-sha>
 ```
 
-### Start an upstream pull request branch
+### Start an explicitly requested upstream pull request branch
 
 ```bash
 git fetch upstream --prune
@@ -288,10 +290,10 @@ git switch -c port/upstream/subagent-output-interleaving origin/lastcode/main
 git cherry-pick <upstream-change-commit>
 ```
 
-Open this PR against `lastcode/main`, link it to the upstream PR, and let the two
-reviews and merge decisions proceed independently.
+When the LastCode PR is requested, open it against `lastcode/main`, link it to
+the upstream PR, and let the two reviews and merge decisions proceed independently.
 
-### Start LastCode-only work
+### Start LastCode work
 
 ```bash
 git fetch origin --prune
@@ -336,11 +338,11 @@ git switch -c pr/upstream/1943-port-token-clamp lastcode/main
 - If work maps to a concrete PR, use `pr/`.
 - If work is an explicit sync attempt, use `sync/`.
 - If work is messy or disposable, use `spike/`.
-- If work is an upstream bug fix or feature, branch from `upstream/main` and use `fix/`
-  or `feat/`, then create an independent `port/upstream/` branch when LastCode
-  should retain it.
-- If work is fork-only, branch from `lastcode/main` and use `lastcode/` or a
-  more specific local prefix.
+- If the user specifically requests an upstream contribution, branch from
+  `upstream/main` and use `fix/` or `feat/`, then create an independent
+  `port/upstream/` branch when LastCode should retain it.
+- Otherwise, branch LastCode implementation work from `lastcode/main` and use
+  `lastcode/` or a more specific local prefix, including for general fixes.
 
 The key distinction is that branches describe intent, while snapshot tags record
 states worth remembering.

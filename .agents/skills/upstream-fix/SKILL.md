@@ -1,19 +1,25 @@
 ---
 name: upstream-fix
-description: Prepare and deliver a general T3 Code fix or improvement that should be proposed to pingdotgg/t3code while LastCode retains an independent copy. Use for upstream-worthy bugs and features, paired upstream and LastCode PRs, refreshing the clean contribution base, or porting an upstream candidate into lastcode/main. Do not use for Markover integration, LastCode branding, personal workflow assumptions, or release automation; use lastcode-pr for those.
+description: Prepare and deliver an explicitly requested upstream contribution to pingdotgg/t3code while LastCode retains an independent copy. Use only when the user specifically asks for an upstream PR or contribution. General fixes and generic PR requests use lastcode-pr; importing an existing upstream PR uses import-upstream-pr.
 ---
 
 # Upstream Fix
 
-Deliver one logical improvement through two independent branches: an
-upstream-pure contribution and a LastCode port. Keep their bases, reviews, CI,
-and merge decisions separate.
+Deliver an explicitly requested upstream improvement through two independent
+branches: an upstream-pure contribution and a LastCode port. Keep their bases,
+reviews, CI, and merge decisions separate.
 
-## Classify the Change
+## Confirm the Requested Delivery
 
-Use this workflow only when the behavior makes sense to a T3 Code user with no
-LastCode or Markover context. Route fork identity, Markover integration, personal
-conveniences, nightly automation, and local release machinery to `lastcode-pr`.
+Use this workflow only when the user specifically requests an upstream PR or
+contribution. General usefulness, a generic request to fix, ship, or open a PR,
+and a plan's paired-delivery instructions do not authorize upstream filing.
+Without that request, continue implementation, validation, review, and authorized
+LastCode delivery through `lastcode-pr`; do not pause to ask about upstream.
+
+An upstream contribution must make sense to a T3 Code user with no LastCode or
+Markover context. Keep fork identity, Markover integration, personal
+conveniences, nightly automation, and local release machinery in LastCode.
 
 Read `docs/lastcode/fork-conventions.md` before changing branches. Follow the
 repository `AGENTS.md` on both branches.
@@ -35,7 +41,8 @@ repository `AGENTS.md` on both branches.
 8. Follow upstream CI and review conventions. Verify review findings against the
    source, address real issues, and explain false positives.
 
-Do not open a PR unless the user explicitly asks.
+Open the upstream PR only under the user's specific upstream request. A request
+for a LastCode PR does not authorize this step.
 
 ## Prepare the LastCode Delivery
 
