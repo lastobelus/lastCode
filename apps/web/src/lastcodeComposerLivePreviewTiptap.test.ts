@@ -20,9 +20,12 @@ import {
   composerLivePreviewKey,
   handleComposerSourceKey,
   wrapComposerSourceSelection,
-} from "~/composerLivePreviewTiptap";
+} from "~/lastcodeComposerLivePreviewTiptap";
 import { groupUndoByChangeKind, type ComposerChangeKind } from "~/composer-undo-grouping";
-import { replaceComposerFenceLanguage, toggleComposerTaskCheckbox } from "~/composerSourceEdits";
+import {
+  replaceComposerFenceLanguage,
+  toggleComposerTaskCheckbox,
+} from "~/lastcodeComposerSourceEdits";
 
 const mention = TiptapNode.create({
   name: "composer-mention",
@@ -48,7 +51,7 @@ function createSourceState(source: string) {
       ComposerLivePreviewExtension.configure({ enabled: true }),
     ],
     content: buildDocJson(source, () => ({ label: "skill", description: null }), {
-      fenceLiteral: true,
+      styling: true,
     }),
   });
   return editor.state.reconfigure({ plugins: editor.extensionManager.plugins });

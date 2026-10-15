@@ -131,7 +131,7 @@ describe("plain source document", () => {
 
   it("bypasses every atom for literal answers while retaining exact source", () => {
     const value = `**keep** @README.md $review ${citationSource} ${contextSource}\r\n\n`;
-    const doc = makeDoc(value, { literalText: true, fenceLiteral: true });
+    const doc = makeDoc(value, { literalText: true, styling: true });
     expect(atoms(doc)).toEqual([]);
     expect(serializeEditorDoc(doc).value).toBe(value);
     expect(serializeSelection(doc, 1, doc.content.size - 1)).toBe(value);
@@ -206,7 +206,7 @@ describe("composer atom fidelity", () => {
   it("keeps context IDs unique and in source order, including literal fence references", () => {
     const second = "[Other](t3-context://v1/file/file_2)";
     const source = `${contextSource}${second}${contextSource}\n\`\`\`\n${second}\n\`\`\``;
-    const map = serializeEditorDoc(makeDoc(source, { fenceLiteral: true }));
+    const map = serializeEditorDoc(makeDoc(source, { styling: true }));
     expect(map.value).toBe(source);
     expect(map.contextIds).toEqual(["terminal_1", "file_2"]);
   });
@@ -236,7 +236,7 @@ describe("composer atom fidelity", () => {
 describe("literal fence regions", () => {
   it("keeps token sources literal in the opener and body while preserving atoms outside", () => {
     const source = `@README.md before\n\`\`\`ts $review\n@decorator ${citationSource}${contextSource}\n\`\`\`\n@AGENTS.md after`;
-    const doc = makeDoc(source, { fenceLiteral: true });
+    const doc = makeDoc(source, { styling: true });
     expect(atoms(doc).map((node) => node.attrs.path)).toEqual(["README.md", "AGENTS.md"]);
     expect(serializeEditorDoc(doc).value).toBe(source);
     expect(doc.childCount).toBe(source.split("\n").length);
@@ -245,14 +245,14 @@ describe("literal fence regions", () => {
 
   it("keeps unclosed and nested tilde fences literal without building semantic nodes", () => {
     const source = "> - ~~~\n>   @README.md $review \n>   @AGENTS.md ";
-    const doc = makeDoc(source, { fenceLiteral: true });
+    const doc = makeDoc(source, { styling: true });
     expect(atoms(doc)).toEqual([]);
     expect(serializeEditorDoc(doc).value).toBe(source);
     expect(doc.childCount).toBe(3);
     assertMappingRoundTrip(doc);
   });
 
-  it("keeps the plain builder's token behavior when fenceLiteral is disabled", () => {
+  it("keeps the plain builder's token behavior when styling is disabled", () => {
     const source = "```\n@README.md $review \n```";
     const doc = makeDoc(source);
     expect(atoms(doc).map((node) => node.type.name)).toEqual([
@@ -267,7 +267,7 @@ describe("literal fence regions", () => {
 describe("source and ProseMirror offset maps", () => {
   it("places source-requested edits inside literal fence token text at the requested character", () => {
     const source = "```\n[package.json](package.json) \n```";
-    const doc = makeDoc(source, { fenceLiteral: true });
+    const doc = makeDoc(source, { styling: true });
     const map = serializeEditorDoc(doc);
     expect(atoms(doc)).toEqual([]);
     for (const cursor of [6, 15, 22, source.length]) {

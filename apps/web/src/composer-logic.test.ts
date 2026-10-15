@@ -14,14 +14,19 @@ import {
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  clampCollapsedComposerCursor,
   collapseExpandedComposerCursor,
   composerSubmissionIntentForKey,
+  composerStateAtPromptEnd,
   detectComposerTrigger,
+  expandCollapsedComposerCursor,
   formatAssistantCitationForComposer,
+  isCollapsedCursorAdjacentToInlineToken,
   parseStandaloneComposerSlashCommand,
   parseThreadAnnotationSlashCommand,
   replaceTextRange,
 } from "./composer-logic";
+import { carryDisplacedCustomAnswerIntoPrompt } from "./pendingUserInput";
 import { formatTerminalContextReference } from "./lib/terminalContext";
 
 const terminalReference = formatTerminalContextReference({
@@ -532,6 +537,88 @@ describe("replaceTextRange", () => {
   });
 });
 
+describe("expandCollapsedComposerCursor", () => {
+  it("keeps cursor unchanged when no mention segment is present", () => {
+    expect(expandCollapsedComposerCursor("plain text", 5)).toBe(5);
+  });
+
+  it("maps collapsed mention cursor to expanded text cursor", () => {
+    const text = "what's in my @AGENTS.md fsfdas";
+    const collapsedCursorAfterMention = "what's in my ".length + 2;
+    const expandedCursorAfterMention = "what's in my @AGENTS.md ".length;
+
+    expect(expandCollapsedComposerCursor(text, collapsedCursorAfterMention)).toBe(
+      expandedCursorAfterMention,
+    );
+  });
+
+  it("maps collapsed quoted mention cursor to expanded text cursor", () => {
+    const text = 'what is in @"My File.md" please';
+    const collapsedCursorAfterMention = "what is in ".length + 2;
+    const expandedCursorAfterMention = 'what is in @"My File.md" '.length;
+
+    expect(expandCollapsedComposerCursor(text, collapsedCursorAfterMention)).toBe(
+      expandedCursorAfterMention,
+    );
+  });
+
+  it("maps collapsed markdown file links to their expanded source offsets", () => {
+    const text = "what's in [AGENTS.md](AGENTS.md) please";
+    const collapsedCursorAfterMention = "what's in ".length + 2;
+    const expandedCursorAfterMention = "what's in [AGENTS.md](AGENTS.md) ".length;
+
+    expect(expandCollapsedComposerCursor(text, collapsedCursorAfterMention)).toBe(
+      expandedCursorAfterMention,
+    );
+  });
+
+  it("allows path trigger detection to close after selecting a mention", () => {
+    const text = "what's in my @AGENTS.md ";
+    const collapsedCursorAfterMention = "what's in my ".length + 2;
+    const expandedCursor = expandCollapsedComposerCursor(text, collapsedCursorAfterMention);
+
+    expect(detectComposerTrigger(text, expandedCursor)).toBeNull();
+  });
+
+  it.each(["$", "€", "𑿝"])("maps collapsed %s skill cursor to expanded text cursor", (prefix) => {
+    const text = `run ${prefix}review-follow-up then`;
+    const collapsedCursorAfterSkill = "run ".length + 2;
+    const expandedCursorAfterSkill = `run ${prefix}review-follow-up `.length;
+
+    expect(expandCollapsedComposerCursor(text, collapsedCursorAfterSkill)).toBe(
+      expandedCursorAfterSkill,
+    );
+  });
+});
+
+describe("composerStateAtPromptEnd", () => {
+  it("puts the caret at the end of a restored parked draft", () => {
+    const prompt = carryDisplacedCustomAnswerIntoPrompt("first half\n", "second half");
+
+    expect(composerStateAtPromptEnd(prompt)).toEqual({
+      cursor: prompt.length,
+      trigger: null,
+    });
+  });
+
+  it("collapses mention chips so the next keystroke lands after the draft", () => {
+    const prompt = carryDisplacedCustomAnswerIntoPrompt("", "see @AGENTS.md please");
+
+    expect(composerStateAtPromptEnd(prompt).cursor).toBe("see ".length + 1 + " please".length);
+    expect(composerStateAtPromptEnd(prompt).cursor).not.toBe(0);
+    expect(composerStateAtPromptEnd(prompt).cursor).not.toBe(prompt.length);
+  });
+
+  it("keeps a trailing mention trigger when the restored draft ends with @", () => {
+    const prompt = "look at @";
+
+    expect(composerStateAtPromptEnd(prompt)).toEqual({
+      cursor: prompt.length,
+      trigger: { kind: "path", query: "", rangeStart: "look at ".length, rangeEnd: prompt.length },
+    });
+  });
+});
+
 describe("collapseExpandedComposerCursor", () => {
   it("keeps cursor unchanged when no mention segment is present", () => {
     expect(collapseExpandedComposerCursor("plain text", 5)).toBe(5);
@@ -573,6 +660,7 @@ describe("collapseExpandedComposerCursor", () => {
     const collapsedCursor = collapseExpandedComposerCursor(text, expandedCursor);
 
     expect(collapsedCursor).toBe("open ".length + 1 + " then @src/index.ts ".length);
+    expect(expandCollapsedComposerCursor(text, collapsedCursor)).toBe(expandedCursor);
   });
 
   it("collapses only genuine mentions when package-like text exists earlier", () => {
@@ -581,6 +669,7 @@ describe("collapseExpandedComposerCursor", () => {
     const collapsedCursor = collapseExpandedComposerCursor(text, expandedCursor);
 
     expect(collapsedCursor).toBe("install @scope/pkg then ".length + 1 + " ".length);
+    expect(expandCollapsedComposerCursor(text, collapsedCursor)).toBe(expandedCursor);
   });
 
   it.each(["$", "€", "𑿝"])("maps expanded %s skill cursor back to collapsed cursor", (prefix) => {
@@ -598,10 +687,24 @@ it("preserves the caret before trailing text after mixed-width skill chips", () 
   const text = "𑿝ui a $review tail";
   const expanded = "𑿝ui a $review ".length;
   expect(collapseExpandedComposerCursor(text, expanded)).toBe(6);
+  expect(expandCollapsedComposerCursor(text, 6)).toBe(expanded);
+});
+
+describe("clampCollapsedComposerCursor", () => {
+  it("clamps to collapsed prompt length when mentions are present", () => {
+    const text = "open @AGENTS.md then ";
+
+    expect(clampCollapsedComposerCursor(text, text.length)).toBe(
+      "open ".length + 1 + " then ".length,
+    );
+    expect(clampCollapsedComposerCursor(text, Number.POSITIVE_INFINITY)).toBe(
+      "open ".length + 1 + " then ".length,
+    );
+  });
 });
 
 describe("assistant citation cursor offsets", () => {
-  it("maps source boundaries across citations, mentions, skills, and Unicode", () => {
+  it("roundtrips every collapsed offset across citations, mentions, skills, and Unicode", () => {
     const prefix = "👋(";
     const between = "),雪";
     const after = " @AGENTS.md $review ";
@@ -619,8 +722,15 @@ describe("assistant citation cursor offsets", () => {
     ] as const;
 
     for (const [collapsed, expanded] of boundaries) {
+      expect(expandCollapsedComposerCursor(text, collapsed)).toBe(expanded);
       expect(collapseExpandedComposerCursor(text, expanded)).toBe(collapsed);
     }
+    for (let cursor = 0; cursor <= collapsedLength; cursor += 1) {
+      expect(
+        collapseExpandedComposerCursor(text, expandCollapsedComposerCursor(text, cursor)),
+      ).toBe(cursor);
+    }
+    expect(clampCollapsedComposerCursor(text, Number.POSITIVE_INFINITY)).toBe(collapsedLength);
   });
 
   it("snaps serialized offsets inside a citation to the end of its chip", () => {
@@ -630,11 +740,19 @@ describe("assistant citation cursor offsets", () => {
     for (const offset of [1, citationSource.length - 1, citationSource.length]) {
       expect(collapseExpandedComposerCursor(text, prefix.length + offset)).toBe(prefix.length + 1);
     }
+    expect(isCollapsedCursorAdjacentToInlineToken(text, prefix.length, "right")).toBe(true);
+    expect(isCollapsedCursorAdjacentToInlineToken(text, prefix.length + 1, "left")).toBe(true);
+    expect(isCollapsedCursorAdjacentToInlineToken(text, prefix.length + 2, "left")).toBe(false);
   });
 
-  it("deletes one citation without changing its neighbor or surrounding punctuation", () => {
+  it("deletes one collapsed citation without changing its neighbor or surrounding punctuation", () => {
     const text = `(${citationSource}),${citationSource}!`;
-    const result = replaceTextRange(text, 1, 1 + citationSource.length, "");
+    const result = replaceTextRange(
+      text,
+      expandCollapsedComposerCursor(text, 1),
+      expandCollapsedComposerCursor(text, 2),
+      "",
+    );
 
     expect(result).toEqual({ text: `(),${citationSource}!`, cursor: 1 });
     expect(collapseExpandedComposerCursor(result.text, result.text.length)).toBe("(),□!".length);
@@ -661,6 +779,57 @@ describe("replaceTextRange trailing space consumption", () => {
   });
 });
 
+describe("isCollapsedCursorAdjacentToInlineToken", () => {
+  it("returns false when no mention exists", () => {
+    expect(isCollapsedCursorAdjacentToInlineToken("plain text", 6, "left")).toBe(false);
+    expect(isCollapsedCursorAdjacentToInlineToken("plain text", 6, "right")).toBe(false);
+  });
+
+  it("keeps @query typing non-adjacent while no mention pill exists", () => {
+    const text = "hello @pac";
+    expect(isCollapsedCursorAdjacentToInlineToken(text, text.length, "left")).toBe(false);
+    expect(isCollapsedCursorAdjacentToInlineToken(text, text.length, "right")).toBe(false);
+  });
+
+  it("detects left adjacency only when cursor is directly after a mention", () => {
+    const text = "open @AGENTS.md next";
+    const mentionStart = "open ".length;
+    const mentionEnd = mentionStart + 1;
+
+    expect(isCollapsedCursorAdjacentToInlineToken(text, mentionEnd, "left")).toBe(true);
+    expect(isCollapsedCursorAdjacentToInlineToken(text, mentionStart, "left")).toBe(false);
+    expect(isCollapsedCursorAdjacentToInlineToken(text, mentionEnd + 1, "left")).toBe(false);
+  });
+
+  it("detects right adjacency only when cursor is directly before a mention", () => {
+    const text = "open @AGENTS.md next";
+    const mentionStart = "open ".length;
+    const mentionEnd = mentionStart + 1;
+
+    expect(isCollapsedCursorAdjacentToInlineToken(text, mentionStart, "right")).toBe(true);
+    expect(isCollapsedCursorAdjacentToInlineToken(text, mentionEnd, "right")).toBe(false);
+    expect(isCollapsedCursorAdjacentToInlineToken(text, mentionStart - 1, "right")).toBe(false);
+  });
+
+  it("treats context reference pills as inline tokens for adjacency checks", () => {
+    const text = `open ${terminalReference} next`;
+    const tokenStart = "open ".length;
+    const tokenEnd = tokenStart + 1;
+
+    expect(isCollapsedCursorAdjacentToInlineToken(text, tokenEnd, "left")).toBe(true);
+    expect(isCollapsedCursorAdjacentToInlineToken(text, tokenStart, "right")).toBe(true);
+  });
+
+  it("treats skill pills as inline tokens for adjacency checks", () => {
+    const text = "run $review-follow-up next";
+    const tokenStart = "run ".length;
+    const tokenEnd = tokenStart + 1;
+
+    expect(isCollapsedCursorAdjacentToInlineToken(text, tokenEnd, "left")).toBe(true);
+    expect(isCollapsedCursorAdjacentToInlineToken(text, tokenStart, "right")).toBe(true);
+  });
+});
+
 describe("parseStandaloneComposerSlashCommand", () => {
   it("parses standalone /plan command", () => {
     expect(parseStandaloneComposerSlashCommand(" /plan ")).toBe("plan");
@@ -684,11 +853,24 @@ describe("literal editor answer cursor state", () => {
       const cursor = collapseExpandedComposerCursor(next.text, next.cursor, true);
       expect(next.text).toBe(prefill + replacement);
       expect(cursor).toBe(next.text.length);
+      expect(expandCollapsedComposerCursor(next.text, cursor, true)).toBe(next.cursor);
+      expect(clampCollapsedComposerCursor(next.text, cursor, true)).toBe(next.cursor);
     }
     const replaced = replaceTextRange(prefill, 11, 20, "$another-skill");
     const cursor = collapseExpandedComposerCursor(replaced.text, replaced.cursor, true);
     expect(replaced.text).toBe("- [X] done $another-skill ");
     expect(cursor).toBe(25);
+    expect(expandCollapsedComposerCursor(replaced.text, cursor, true)).toBe(25);
+  });
+
+  it("does not open a skill or path menu when restoring an editor answer", () => {
+    for (const value of ["- [X] done $my-skill", "Use @README", ""]) {
+      expect(composerStateAtPromptEnd(value, true)).toEqual({
+        cursor: value.length,
+        trigger: null,
+      });
+    }
+    expect(composerStateAtPromptEnd("Use $my").trigger?.kind).toBe("skill");
   });
 });
 

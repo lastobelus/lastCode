@@ -6,8 +6,11 @@ import StarterKit from "@tiptap/starter-kit";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { flatToPm, serializeEditorDoc } from "~/composer-rich-text-doc";
-import { ComposerLivePreviewExtension, composerLivePreviewKey } from "~/composerLivePreviewTiptap";
-import { MAX_COMPOSER_LIVE_PREVIEW_LENGTH } from "~/composerLivePreview";
+import {
+  ComposerLivePreviewExtension,
+  composerLivePreviewKey,
+} from "~/lastcodeComposerLivePreviewTiptap";
+import { MAX_COMPOSER_LIVE_PREVIEW_LENGTH } from "~/lastcodeComposerLivePreview";
 import type { DiffThemeName } from "~/lib/diffRendering";
 import { getSyntaxHighlighterPromise } from "~/lib/syntaxHighlighting";
 

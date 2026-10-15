@@ -2,9 +2,12 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   collectMarkdownSourceRanges,
   type MarkdownSourceRanges,
-} from "@t3tools/shared/markdownSourceRanges";
+} from "@t3tools/shared/lastcodeMarkdownSourceRanges";
 
-import { buildComposerLivePreview, MAX_COMPOSER_LIVE_PREVIEW_LENGTH } from "./composerLivePreview";
+import {
+  buildComposerLivePreview,
+  MAX_COMPOSER_LIVE_PREVIEW_LENGTH,
+} from "./lastcodeComposerLivePreview";
 
 function preview(source: string, from = source.length, to = from) {
   return buildComposerLivePreview(

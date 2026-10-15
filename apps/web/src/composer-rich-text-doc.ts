@@ -1,5 +1,5 @@
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
-import { collectMarkdownSourceRanges } from "@t3tools/shared/markdownSourceRanges";
+import { collectMarkdownSourceRanges } from "@t3tools/shared/lastcodeMarkdownSourceRanges";
 
 import { splitPromptIntoComposerSegments } from "~/composer-editor-mentions";
 import { collectInlineContextIds } from "~/lib/composerContextReferences";
@@ -11,7 +11,8 @@ type InlineJson = {
   text?: string;
   attrs?: Record<string, unknown>;
 };
-type BuildOptions = { literalText?: boolean; literalLength?: number; fenceLiteral?: boolean };
+/** `styling` keeps upstream's spelling: live preview on, fence text literal; omitted means off. */
+type BuildOptions = { literalText?: boolean; literalLength?: number; styling?: boolean };
 
 function randomNodeKey(): string {
   return `tiptap-${Math.random().toString(36).slice(2)}`;
@@ -79,7 +80,7 @@ export function buildTiptapContent(
     return paragraphs;
   }
 
-  const fences = options?.fenceLiteral ? collectMarkdownSourceRanges(value).fences : [];
+  const fences = options?.styling ? collectMarkdownSourceRanges(value).fences : [];
   const literalLength = Math.max(0, Math.min(options?.literalLength ?? 0, value.length));
   appendText(value.slice(0, literalLength));
   let offset = literalLength;

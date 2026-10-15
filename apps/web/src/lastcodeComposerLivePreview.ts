@@ -2,7 +2,7 @@ import type {
   MarkdownInlineKind,
   MarkdownLineKind,
   MarkdownSourceRanges,
-} from "@t3tools/shared/markdownSourceRanges";
+} from "@t3tools/shared/lastcodeMarkdownSourceRanges";
 
 export const MAX_COMPOSER_LIVE_PREVIEW_LENGTH = 12_000;
 

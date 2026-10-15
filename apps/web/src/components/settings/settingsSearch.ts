@@ -481,7 +481,7 @@ export const SETTINGS_SEARCH_ITEMS = [
     id: "composer-rich-text",
     title: "Rich text composer",
     to: "/settings/general",
-    searchTerms: ["composer rich text tiptap bold italic markdown preview styled"],
+    searchTerms: ["composer rich text tiptap bold italic markdown styled wysiwyg"],
   },
   {
     id: "composer-collapse",

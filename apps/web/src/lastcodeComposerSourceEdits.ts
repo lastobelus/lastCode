@@ -1,4 +1,4 @@
-import { collectMarkdownSourceRanges } from "@t3tools/shared/markdownSourceRanges";
+import { collectMarkdownSourceRanges } from "@t3tools/shared/lastcodeMarkdownSourceRanges";
 
 import { withInfoStringLanguage } from "./composer-code-languages";
 

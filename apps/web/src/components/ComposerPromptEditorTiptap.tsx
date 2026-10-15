@@ -38,7 +38,7 @@ import {
 } from "react";
 import { EditorContent, useEditor } from "@tiptap/react";
 
-import { detectComposerTrigger, pastedPathQueryLength } from "~/composer-logic";
+import { pastedPathQueryLength } from "~/composer-logic";
 import {
   collectComposerPromptInlineTokens,
   selectionTouchesMentionBoundary,
@@ -46,9 +46,7 @@ import {
 import {
   buildDocJson,
   buildTiptapContent,
-  expandedMarkdownToFlat,
   flatToMarkdown,
-  flatToPm,
   pmToFlat,
   serializeEditorDoc,
   serializeSelection,
@@ -86,12 +84,15 @@ import { didComposerSelectionChangeVisibly } from "./composerSelection";
 import {
   ComposerLivePreviewExtension,
   composerLivePreviewKey,
-  isComposerCaretInFence,
   handleComposerSourceKey,
   wrapComposerSourceSelection,
-  applyComposerSourceEdit,
-} from "~/composerLivePreviewTiptap";
-import { normalizeComposerSourceSlice } from "~/composerSourceSlice";
+} from "~/lastcodeComposerLivePreviewTiptap";
+import { normalizeComposerSourceSlice } from "~/lastcodeComposerSourceSlice";
+import {
+  handleComposerSourcePaste,
+  resolveComposerSourcePosition,
+  suppressComposerSourceTrigger,
+} from "~/lastcodeComposerSourceHooks";
 import type { ComposerDraftContextRecords } from "./composerContextPresentation";
 
 export interface ComposerPromptEditorHandle {
@@ -160,7 +161,7 @@ export interface ComposerPromptEditorProps {
     contextIds: string[],
   ) => void;
   onVisibleSelectionChange?: () => void;
-  onCommandKeyDown?: (key: string, event: KeyboardEvent) => boolean;
+  onCommandKeyDown?: (key: string, event: KeyboardEvent, isTaskItem?: boolean) => boolean;
   onPageScrollKeyDown?: (key: "PageUp" | "PageDown") => void;
   onPageScrollKeyUp?: (key: string) => void;
   onPageScrollRelease?: () => void;
@@ -724,18 +725,7 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
         expandedCursor: nextExpandedCursor,
         contextIds,
       };
-      const adjacentToAtom = map.runs.some(
-        (run) =>
-          run.kind === "token" &&
-          (fromFlat === run.flatStart || fromFlat === run.flatStart + run.docLen),
-      );
-      // Fence parsing is only needed when a real suggestion trigger could open a menu.
-      // Actual atom edges suppress suggestions without parsing Markdown.
-      const suppressTrigger =
-        literalText ||
-        adjacentToAtom ||
-        (detectComposerTrigger(nextValue, nextExpandedCursor) !== null &&
-          isComposerCaretInFence(updated.state));
+      const suppressTrigger = suppressComposerSourceTrigger(updated.state, map, literalText);
       onChangeRef.current(nextValue, nextCursor, nextExpandedCursor, suppressTrigger, contextIds);
     },
     [literalText],
@@ -749,6 +739,7 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
       ),
       "data-testid": "composer-editor",
       "data-composer-rich-text": richText ? "true" : "false",
+      "data-lastcode-source-composer": "true",
       role: "textbox",
       "aria-multiline": "true",
       ...(ariaLabel ? { "aria-label": ariaLabel } : {}),
@@ -823,7 +814,7 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
             description: shortDescription || found.description?.trim() || null,
           };
         },
-        { fenceLiteral: richText, literalText },
+        { styling: richText, literalText },
       ),
       editable: !disabled,
       editorProps: {
@@ -984,20 +975,7 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
           const pastedText = clipboardData.getData("text/plain");
           if (!pastedText) return false;
           event.preventDefault();
-          // A fence takes clipboard source verbatim, preserving literal token text.
-          if (isComposerCaretInFence(view.state)) {
-            const map = serializeEditorDoc(view.state.doc);
-            const from = flatToMarkdown(map, pmToFlat(map, view.state.selection.from));
-            const to = flatToMarkdown(map, pmToFlat(map, view.state.selection.to));
-            return applyComposerSourceEdit(
-              view,
-              {
-                value: map.value.slice(0, from) + pastedText + map.value.slice(to),
-                selection: { from: from + pastedText.length, to: from + pastedText.length },
-              },
-              { from, to },
-            );
-          }
+          if (handleComposerSourcePaste(view, pastedText)) return true;
           const importFragment = importFragmentRef.current;
           let text =
             !literalText && importFragment
@@ -1031,7 +1009,7 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
               text,
               skillLabelFor,
               {
-                fenceLiteral: composerLivePreviewKey.getState(view.state)?.enabled ?? false,
+                styling: composerLivePreviewKey.getState(view.state)?.enabled ?? false,
                 literalText,
                 literalLength,
               },
@@ -1104,11 +1082,11 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
     if (!editor) return snapshot;
     const map = serializeEditorDoc(editor.state.doc);
     const { from, to } = editor.state.selection;
-    const fromFlat = pmToFlat(map, from);
+    const position = resolveComposerSourcePosition(map, { document: from });
     const next: typeof snapshot = {
       value: map.value,
-      cursor: fromFlat,
-      expandedCursor: Math.max(0, Math.min(map.value.length, flatToMarkdown(map, fromFlat))),
+      cursor: position.flat,
+      expandedCursor: position.source,
       contextIds: literalText ? [] : map.contextIds,
     };
     const toFlat = pmToFlat(map, to);
@@ -1178,15 +1156,18 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
     if (previousSnapshot.value !== value) {
       saveCitationDraft(editor, previousSnapshot.value);
       editor.commands.setContent(
-        buildDocJson(value, skillLabelFor, { fenceLiteral: richText, literalText }),
+        buildDocJson(value, skillLabelFor, { styling: richText, literalText }),
         {
           emitUpdate: false,
         },
       );
     }
     const map = serializeEditorDoc(editor.state.doc);
-    const flat = expandedMarkdownToFlat(map, requestedSourceCursor);
-    const expandedCursor = flatToMarkdown(map, flat);
+    const {
+      flat,
+      source: expandedCursor,
+      document: documentPosition,
+    } = resolveComposerSourcePosition(map, { source: requestedSourceCursor });
     snapshotRef.current = {
       value: map.value,
       cursor: flat,
@@ -1194,7 +1175,7 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
       contextIds: literalText ? [] : map.contextIds,
     };
     selectionRangeRef.current = { start: expandedCursor, end: expandedCursor };
-    editor.commands.setTextSelection(flatToPm(map, flat));
+    editor.commands.setTextSelection(documentPosition);
     if (isFocused) scrollTiptapCaretIntoView(editor);
     if (pendingCitation) {
       citationRequestRef.current = null;
@@ -1235,9 +1216,12 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
       if (snapshotRef.current.value !== latestValueRef.current) return;
       const map = serializeEditorDoc(editor.state.doc);
       const sourceCursor = clampEditorCursor(map.value, nextCursor);
-      const flat = expandedMarkdownToFlat(map, sourceCursor);
-      const expandedCursor = flatToMarkdown(map, flat);
-      editor.commands.setTextSelection(flatToPm(map, flat));
+      const {
+        flat,
+        source: expandedCursor,
+        document: documentPosition,
+      } = resolveComposerSourcePosition(map, { source: sourceCursor });
+      editor.commands.setTextSelection(documentPosition);
       scrollTiptapCaretIntoView(editor);
       if (expandedCursor === snapshotRef.current.expandedCursor) return;
       snapshotRef.current = {
@@ -1444,7 +1428,7 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
 function insertMarkdownParagraphs(
   value: string,
   skillLabelFor: (name: string) => SkillMeta,
-  options: { fenceLiteral?: boolean; literalText?: boolean; literalLength?: number },
+  options: { styling?: boolean; literalText?: boolean; literalLength?: number },
   insertContent: (content: JSONContent[] | JSONContent) => void,
 ): void {
   const blocks = buildTiptapContent(value, skillLabelFor, options);

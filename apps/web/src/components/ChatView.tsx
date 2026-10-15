@@ -212,6 +212,7 @@ import {
   type ComposerSubmissionIntent,
   parseStandaloneComposerSlashCommand,
 } from "../composer-logic";
+import { composerFormattingDelimiterForShortcut } from "../lastcodeComposerSourceShortcuts";
 import {
   derivePendingApprovals,
   derivePendingUserInputs,
@@ -326,11 +327,7 @@ import { BranchToolbar, type BranchToolbarHandle } from "./BranchToolbar";
 import { makeWorkspaceFileDropHandlers } from "./chat/workspaceFileDrop";
 import { isEditableFocused } from "../lib/editableFocus";
 import { DEFAULT_RESOLVED_KEYBINDINGS } from "@t3tools/shared/keybindings";
-import {
-  composerFormattingDelimiterForShortcut,
-  resolveChatShortcutCommand,
-  shortcutLabelForCommand,
-} from "../keybindings";
+import { resolveChatShortcutCommand, shortcutLabelForCommand } from "../keybindings";
 import ThreadTerminalDrawer from "./ThreadTerminalDrawer";
 import {
   AlarmClockIcon,

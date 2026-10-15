@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { collectMarkdownSourceRanges } from "./markdownSourceRanges.ts";
+import { collectMarkdownSourceRanges } from "./lastcodeMarkdownSourceRanges.ts";
 
 function inlineSlices(source: string) {
   return collectMarkdownSourceRanges(source).inline.map((range) => ({

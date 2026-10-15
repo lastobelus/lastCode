@@ -4,15 +4,18 @@ import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
 import {
   collectMarkdownSourceRanges,
   type MarkdownSourceRanges,
-} from "@t3tools/shared/markdownSourceRanges";
+} from "@t3tools/shared/lastcodeMarkdownSourceRanges";
 
-import { buildComposerLivePreview, MAX_COMPOSER_LIVE_PREVIEW_LENGTH } from "~/composerLivePreview";
+import {
+  buildComposerLivePreview,
+  MAX_COMPOSER_LIVE_PREVIEW_LENGTH,
+} from "~/lastcodeComposerLivePreview";
 import { createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Fragment, Slice } from "@tiptap/pm/model";
 import { ComposerCodeBlockLanguagePicker } from "~/components/chat/ComposerCodeBlockLanguagePicker";
 import { markAsOneOffEdit } from "~/composer-undo-grouping";
-import { composerFormattingDelimiterForShortcut } from "~/keybindings";
+import { composerFormattingDelimiterForShortcut } from "~/lastcodeComposerSourceShortcuts";
 import {
   toggleComposerTaskCheckbox,
   replaceComposerFenceLanguage,
@@ -21,7 +24,7 @@ import {
   type ComposerSourceEdit,
   type ComposerFormattingDelimiter,
   composerSourceFormattingEdits,
-} from "~/composerSourceEdits";
+} from "~/lastcodeComposerSourceEdits";
 import {
   pmToFlat,
   flatToPm,

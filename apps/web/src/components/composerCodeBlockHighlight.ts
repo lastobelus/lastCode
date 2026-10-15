@@ -5,9 +5,9 @@ import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 
 import type { DiffThemeName } from "~/lib/diffRendering";
 import { flatToPm } from "~/composer-rich-text-doc";
-import { composerFenceCode } from "~/composerSourceEdits";
-import { MAX_COMPOSER_LIVE_PREVIEW_LENGTH } from "~/composerLivePreview";
-import { composerLivePreviewKey } from "~/composerLivePreviewTiptap";
+import { composerFenceCode } from "~/lastcodeComposerSourceEdits";
+import { MAX_COMPOSER_LIVE_PREVIEW_LENGTH } from "~/lastcodeComposerLivePreview";
+import { composerLivePreviewKey } from "~/lastcodeComposerLivePreviewTiptap";
 import { getSyntaxHighlighterPromise } from "~/lib/syntaxHighlighting";
 
 interface HighlightedBlock {

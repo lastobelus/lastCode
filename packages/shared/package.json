@@ -475,9 +475,9 @@
       "types": "./src/markdownPipeline.ts",
       "import": "./src/markdownPipeline.ts"
     },
-    "./markdownSourceRanges": {
-      "types": "./src/markdownSourceRanges.ts",
-      "import": "./src/markdownSourceRanges.ts"
+    "./lastcodeMarkdownSourceRanges": {
+      "types": "./src/lastcodeMarkdownSourceRanges.ts",
+      "import": "./src/lastcodeMarkdownSourceRanges.ts"
     },
     "./threadFindText": {
       "types": "./src/threadFindText.ts",

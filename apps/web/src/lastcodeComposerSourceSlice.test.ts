@@ -3,7 +3,7 @@ import { Fragment, Slice } from "@tiptap/pm/model";
 import StarterKit from "@tiptap/starter-kit";
 import { describe, expect, it } from "vite-plus/test";
 
-import { normalizeComposerSourceSlice } from "./composerSourceSlice";
+import { normalizeComposerSourceSlice } from "./lastcodeComposerSourceSlice";
 import { serializeEditorDoc } from "./composer-rich-text-doc";
 
 const mention = Node.create({

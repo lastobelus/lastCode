@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { collectMarkdownSourceRanges } from "@t3tools/shared/markdownSourceRanges";
+import { collectMarkdownSourceRanges } from "@t3tools/shared/lastcodeMarkdownSourceRanges";
 
 import {
   composerFenceCode,
@@ -10,7 +10,7 @@ import {
   toggleComposerTaskCheckbox,
   type ComposerFormattingDelimiter,
   type ComposerSourceFence,
-} from "./composerSourceEdits";
+} from "./lastcodeComposerSourceEdits";
 
 function toggleComposerSourceFormatting(
   value: string,
