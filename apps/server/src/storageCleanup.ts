@@ -334,9 +334,9 @@ const make = Effect.gen(function* () {
   // Include archived owners for disposal policy; keep the full snapshot on the
   // reader worker and use narrow projection reads for per-worktree rechecks.
   const readThreads = Effect.fn("StorageCleanup.readThreads")(function* () {
-    const { threads } = yield* projections.getShellSnapshot().pipe(NodeSqliteClient.readOnly);
+    const snapshot = yield* projections.getShellSnapshot().pipe(NodeSqliteClient.readOnly);
     const projects = yield* projectStore.listShells();
-    return { projects, threads };
+    return { projects, threads: [...snapshot.threads, ...snapshot.archivedThreads] };
   });
 
   const canonicalWorkspacePath = Effect.fnUntraced(function* (cwd: string) {
