@@ -809,6 +809,16 @@ export function runDevRunnerWithInput(input: DevRunnerCliInput) {
       argumentCount: args.length,
       shell: spawnCommand.shell,
     } as const;
+    // This runner is a concrete dependency-backed execution, unlike opening a
+    // terminal or asking an agent for status. Renew again after its child stops.
+    const usageCwd = yield* HostProcess.WorkingDirectory;
+    const noteDependencyUse = Effect.gen(function* () {
+      const now = yield* Clock.currentTimeMillis;
+      yield* Effect.try(() => recordDependencyUse(usageCwd, now)).pipe(
+        Effect.catch(() => Effect.logDebug("Could not record development dependency use")),
+      );
+    });
+    yield* Effect.acquireRelease(noteDependencyUse, () => noteDependencyUse);
     const child = yield* ChildProcess.make(spawnCommand.command, spawnCommand.args, {
       stdin: "inherit",
       stdout: "inherit",

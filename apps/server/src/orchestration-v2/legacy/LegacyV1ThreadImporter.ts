@@ -105,7 +105,18 @@ export class LegacyV1ThreadImportError extends Schema.TaggedError<LegacyV1Thread
   }
 }
 
+export interface LegacyV1WorktreeOwner {
+  readonly threadId: string;
+  readonly projectId: string;
+  readonly branch: string | null;
+  readonly worktreePath: string | null;
+}
+
 export interface LegacyV1ThreadImporterShape {
+  readonly worktreeOwners: Effect.Effect<
+    ReadonlyArray<LegacyV1WorktreeOwner>,
+    LegacyV1ThreadImportError
+  >;
   readonly pendingThreadCount: Effect.Effect<number, LegacyV1ThreadImportError>;
   readonly reconcileShells: Effect.Effect<LegacyV1ImportSummary, LegacyV1ThreadImportError>;
   readonly ensureTranscript: (
@@ -818,7 +829,24 @@ const make = Effect.gen(function* () {
     ),
   );
 
+  // Preserve historical path/branch claims even when the V2 shell has since moved,
+  // or its project is gone. These claims are protection, never cleanup authority.
+  const worktreeOwners = Effect.gen(function* () {
+    const tables =
+      yield* sql`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'projection_threads'`;
+    if (tables.length === 0) return [];
+    return yield* sql<LegacyV1WorktreeOwner>`
+      SELECT thread_id AS "threadId", project_id AS "projectId", branch,
+             worktree_path AS "worktreePath" FROM projection_threads
+    `;
+  }).pipe(
+    Effect.mapError(
+      (cause) => new LegacyV1ThreadImportError({ operation: "read worktree owners", cause }),
+    ),
+  );
+
   return LegacyV1ThreadImporter.of({
+    worktreeOwners,
     pendingThreadCount,
     reconcileShells,
     ensureTranscript,

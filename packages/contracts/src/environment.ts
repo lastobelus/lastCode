@@ -134,6 +134,12 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   worktreesDirectory: Schema.optionalKey(Schema.Boolean),
   /** Server can exclude PR-linked threads from inactivity settlement. */
   threadAutoSettlementScope: Schema.optionalKey(Schema.Boolean),
+  worktreeDependencyCleanup: Schema.optionalKey(Schema.Boolean),
+  /** Verified compiler outputs share the resolved dependency-cleanup rule. */
+  worktreeBuildCleanup: Schema.optionalKey(Schema.Boolean),
+  /** Whole-worktree cleanup preserves unknown, untracked, and ignored local files
+      regardless of `worktreeKeepWhen`. Missing on servers with the legacy policy. */
+  worktreeLocalPreservation: Schema.optionalKey(Schema.Boolean),
   /** Server persists the opt-in for continuing interrupted threads after restarts. */
   threadRestartContinuation: Schema.optionalKey(Schema.Boolean),
   /** Server resolves `projectSettingsOverrides`; older servers ignore the key. */
@@ -187,6 +193,9 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   /** Server understands thread.pull-request.watch and wakes agents on pull request changes. */
   threadPullRequestWatch: Schema.optionalKey(Schema.Boolean),
   pullRequestStackActions: Schema.optionalKey(Schema.Boolean),
+  /** Server durably owns thread worktree cleanup after deletion and understands
+      deleteWorktree plus cleanup retry/abandon commands. */
+  threadWorktreeCleanup: Schema.optionalKey(Schema.Boolean),
   /** The update path clients should offer for this server. Absent on
       servers that must be relaunched manually (dev checkouts, Windows
       foreground runs, pre-update servers). */
