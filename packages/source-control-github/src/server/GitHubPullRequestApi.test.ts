@@ -4,6 +4,7 @@ import { afterEach, assert, expect, it, vi } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
+import * as DateTime from "effect/DateTime";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -4196,6 +4197,94 @@ layer("GitHubPullRequestApi.layer", (it) => {
       expect(varsAt(1)["cursor"]).toBe("Y3Vyc29yOjE");
       expect(conversation.comments.map((comment) => comment.id)).toEqual(["c1", "c2"]);
       assert.isFalse(conversation.truncated);
+    }),
+  );
+
+  it.effect("hydrates review-request reactions past the first hundred issue comments", () =>
+    Effect.gen(function* () {
+      const comments = Array.from({ length: 101 }, (_, index) => ({
+        id: `IC_${index + 1}`,
+        body: index === 100 ? "@codex review" : `Comment ${index + 1}`,
+        createdAt: DateTime.formatIso(
+          DateTime.add(DateTime.makeUnsafe("2026-07-01T00:00:00Z"), { minutes: index }),
+        ),
+      }));
+      mockedExecute.mockImplementation((call) => {
+        if (call.kind !== "graphql") throw new Error("Expected a GraphQL activity read");
+        if (call.operation === "getPullRequestActivity") {
+          const start = call.variables?.commentsAfter === null ? 0 : 100;
+          return Effect.succeed(
+            output(
+              encodeJson({
+                data: {
+                  repository: {
+                    pullRequest: {
+                      comments: {
+                        pageInfo: {
+                          hasNextPage: start === 0,
+                          endCursor: start === 0 ? "comments-100" : null,
+                        },
+                        nodes: comments.slice(start, start + 100),
+                      },
+                      reviews: { nodes: [] },
+                    },
+                  },
+                },
+              }),
+            ),
+          );
+        }
+        // GitHub defaults to the oldest comments; the watch fingerprints the newest updates.
+        const newestFirst = call.query.includes(
+          "comments(first: 100, orderBy: { field: UPDATED_AT, direction: DESC })",
+        );
+        const metadataPage = (newestFirst ? comments.toReversed() : comments).slice(0, 100);
+        return Effect.succeed(
+          output(
+            encodeJson({
+              data: {
+                viewer: { login: "maintainer" },
+                repository: {
+                  pullRequest: {
+                    reviewThreads: { nodes: [] },
+                    comments: {
+                      nodes: metadataPage.map(({ id }) => ({
+                        id,
+                        reactionGroups:
+                          id === "IC_101"
+                            ? [
+                                {
+                                  content: "THUMBS_UP",
+                                  reactors: { totalCount: 1, nodes: [{ login: "codex[bot]" }] },
+                                },
+                              ]
+                            : [],
+                      })),
+                    },
+                  },
+                },
+              },
+            }),
+          ),
+        );
+      });
+      const provider = yield* GitHubPullRequestProvider.make;
+
+      const activity = yield* provider.getChangeRequestActivity({
+        cwd: "/w",
+        repository: "acme/web",
+        host: "github.com",
+        number: 7,
+      });
+
+      expect(activity.comments).toHaveLength(101);
+      expect(activity.comments.find(({ id }) => id === "IC_101")).toMatchObject({
+        body: "@codex review",
+        reactions: [
+          { content: "thumbs-up", count: 1, actors: ["codex[bot]"], viewerHasReacted: false },
+        ],
+      });
+      expect(mockedExecute).toHaveBeenCalledTimes(3);
     }),
   );
 

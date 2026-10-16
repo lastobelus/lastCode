@@ -940,6 +940,9 @@ export const PULL_REQUEST_ACTIVITY_GRAPHQL_QUERY = `query($owner: String!, $name
 /** GitHub's own ceiling on a connection page, which is what both thread reads ask for. */
 const GRAPHQL_PAGE_SIZE = 100;
 
+// Hydrate reaction actors for the same comment page the watch fingerprints.
+const RECENTLY_UPDATED_COMMENTS_GRAPHQL_FIELD = `comments(first: ${GRAPHQL_PAGE_SIZE}, orderBy: { field: UPDATED_AT, direction: DESC })`;
+
 /**
  * The ceiling on `search`, which refuses anything larger with EXCESSIVE_PAGINATION (measured:
  * `first: 101` is an error, `first: 100` is not).
@@ -1070,7 +1073,7 @@ export const REVIEW_THREADS_GRAPHQL_QUERY = `query($owner: String!, $name: Strin
       viewerDidAuthor
       author { __typename login avatarUrl }
       ${REACTION_GROUPS_FIELDS}
-      comments(first: ${GRAPHQL_PAGE_SIZE}) {
+      ${RECENTLY_UPDATED_COMMENTS_GRAPHQL_FIELD} {
         nodes { id lastEditedAt author { __typename login avatarUrl } ${REACTION_GROUPS_FIELDS} }
       }
       reviews(first: ${GRAPHQL_PAGE_SIZE}) { nodes { id lastEditedAt author { __typename login avatarUrl } ${REACTION_GROUPS_FIELDS} } }
@@ -2235,7 +2238,7 @@ const WATCH_FINGERPRINT_CHECK_COUNTS =
  */
 const PULL_REQUEST_WATCH_FINGERPRINT_SELECTION =
   "state mergeable headRefOid " +
-  `comments(first: 100, orderBy: { field: UPDATED_AT, direction: DESC }) { totalCount nodes { id lastEditedAt reactionGroups { content reactors { totalCount } } } } ` +
+  `${RECENTLY_UPDATED_COMMENTS_GRAPHQL_FIELD} { totalCount nodes { id lastEditedAt reactionGroups { content reactors { totalCount } } } } ` +
   `reviews(last: 100) { ${WATCH_FINGERPRINT_EDITS} } ` +
   "reviewThreads { totalCount } " +
   `commits(last: 1) { nodes { commit { statusCheckRollup { contexts { ${WATCH_FINGERPRINT_CHECK_COUNTS} } } } } }`;
