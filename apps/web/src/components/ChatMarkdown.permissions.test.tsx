@@ -73,6 +73,7 @@ vi.mock("../state/session", async () => {
         () => readEnvironmentScope(id, scope),
       ),
     usePreparedConnection: () => ({ _tag: "None" }),
+    readPreparedConnection: () => null,
   };
 });
 vi.mock("../state/server", () => ({
@@ -102,12 +103,13 @@ vi.mock("../hooks/useCopyToClipboard", () => ({
   writeTextToClipboard: state.copy,
   useCopyToClipboard: () => ({ copyToClipboard: state.copy, isCopied: false }),
 }));
-vi.mock("../localApi", () => ({
-  readLocalApi: () => ({
+vi.mock("../localApi", () => {
+  const api = {
     contextMenu: { show: state.choose },
     shell: { openExternal: state.openExternal },
-  }),
-}));
+  };
+  return { readLocalApi: () => api, ensureLocalApi: () => api };
+});
 vi.mock("~/lib/openPullRequestLink", () => ({
   resolvePullRequestPreviewTarget: () => null,
   findProjectForChangeRequest: (projects: readonly { id: ProjectId }[]) => projects[0],
@@ -157,7 +159,7 @@ beforeEach(() => {
   state.copy.mockReset().mockResolvedValue(undefined);
   state.toast.mockReset();
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  vi.stubGlobal("window", {});
+  vi.stubGlobal("window", { desktopBridge: {} });
   vi.stubGlobal("navigator", { clipboard: { writeText: state.copy } });
 });
 
