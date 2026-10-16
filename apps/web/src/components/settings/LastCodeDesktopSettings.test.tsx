@@ -1,3 +1,4 @@
+import type { DesktopBridge } from "@t3tools/contracts";
 import { type ReactNode, act } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
@@ -65,6 +66,30 @@ afterEach(async () => {
   await act(() => renderer?.unmount());
   vi.unstubAllGlobals();
 });
+function setDesktopBridge(
+  desktopBridge: Partial<
+    Pick<
+      DesktopBridge,
+      | "getLastCodeSettings"
+      | "setShowAndInstallLocalNightlies"
+      | "previewT3SettingsImport"
+      | "importT3Settings"
+    >
+  >,
+) {
+  vi.stubGlobal("window", { desktopBridge });
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 function button() {
   return renderer.root.findByType("button");
 }
@@ -82,12 +107,12 @@ describe("LastCode desktop settings", () => {
   });
 
   it("loads the saved preference, disables during persistence and recovers after rejection", async () => {
-    const write = Promise.withResolvers<typeof preference>();
+    const write = deferred<typeof preference>();
     const save = vi.fn(() => write.promise);
-    window.desktopBridge = {
+    setDesktopBridge({
       getLastCodeSettings: async () => preference,
       setShowAndInstallLocalNightlies: save,
-    } as typeof window.desktopBridge;
+    });
     await act(() => {
       renderer = create(<LastCodeLocalUpdatesSettings />);
     });
@@ -107,13 +132,13 @@ describe("LastCode desktop settings", () => {
   });
 
   it("uses the persisted response and blocks toggles while a local update is ready", async () => {
-    window.desktopBridge = {
+    setDesktopBridge({
       getLastCodeSettings: async () => preference,
       setShowAndInstallLocalNightlies: async () => ({
         ...preference,
         showAndInstallLocalNightlies: true,
       }),
-    } as typeof window.desktopBridge;
+    });
     await act(() => {
       renderer = create(<LastCodeLocalUpdatesSettings />);
     });
@@ -125,11 +150,11 @@ describe("LastCode desktop settings", () => {
   });
 
   it("leaves import disabled after success for restart, and reports the backup location", async () => {
-    const operation = Promise.withResolvers<{ imported: []; backupDirectory: string }>();
-    window.desktopBridge = {
+    const operation = deferred<{ imported: []; backupDirectory: string }>();
+    setDesktopBridge({
       previewT3SettingsImport: async () => preview,
       importT3Settings: () => operation.promise,
-    } as typeof window.desktopBridge;
+    });
     await act(() => {
       renderer = create(<LastCodeImportSettings />);
     });
@@ -152,10 +177,10 @@ describe("LastCode desktop settings", () => {
       .mockRejectedValueOnce(new Error("import failed"))
       .mockResolvedValue({ imported: [], backupDirectory: "/example/backup" });
     const inspect = vi.fn(async () => preview);
-    window.desktopBridge = {
+    setDesktopBridge({
       previewT3SettingsImport: inspect,
       importT3Settings: run,
-    } as typeof window.desktopBridge;
+    });
     await act(() => {
       renderer = create(<LastCodeImportSettings />);
     });
@@ -168,11 +193,11 @@ describe("LastCode desktop settings", () => {
   });
 
   it("reports a preview read failure and keeps import unavailable", async () => {
-    window.desktopBridge = {
+    setDesktopBridge({
       previewT3SettingsImport: async () => {
         throw new Error("preview failed");
       },
-    } as typeof window.desktopBridge;
+    });
     await act(() => {
       renderer = create(<LastCodeImportSettings />);
     });

@@ -1,6 +1,6 @@
 import { EnvironmentId, DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts";
 import { DEFAULT_CLIENT_SETTINGS, type ClientSettings } from "@t3tools/contracts/settings";
-import { type ReactNode, act } from "react";
+import { type ReactElement, type ReactNode, act } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { LastCodeEnvironmentPauseSettings } from "./LastCodeEnvironmentPauseSettings";
@@ -129,7 +129,7 @@ afterEach(async () => {
 function button(label: string) {
   return renderer.root.findAllByType("button").find((node) => node.props["aria-label"] === label)!;
 }
-async function render(node: ReactNode) {
+async function render(node: ReactElement) {
   await act(() => {
     renderer = create(node);
   });

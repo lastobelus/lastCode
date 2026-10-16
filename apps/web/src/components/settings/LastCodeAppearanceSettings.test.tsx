@@ -1,5 +1,5 @@
 import { DEFAULT_CLIENT_SETTINGS, type ClientSettings } from "@t3tools/contracts/settings";
-import { type ReactNode, act } from "react";
+import { type ReactElement, type ReactNode, act } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { LastCodeMessageAppearanceSettings } from "./LastCodeMessageAppearanceSettings";
@@ -79,12 +79,12 @@ function control(label: string) {
     .findAllByProps({ "aria-label": label })
     .find((node) => typeof node.type === "string")!;
 }
-async function render(node: ReactNode) {
+async function render(node: ReactElement) {
   await act(() => {
     renderer = create(node);
   });
 }
-async function refresh(node: ReactNode) {
+async function refresh(node: ReactElement) {
   await act(() => renderer.update(node));
 }
 async function input(label: string, value: string) {
@@ -93,7 +93,7 @@ async function input(label: string, value: string) {
 
 describe("LastCode appearance preferences", () => {
   it("retains a custom fill across outline mode and resets style and fill independently", async () => {
-    state.settings.incomingMessageFillColor = "#123456";
+    state.settings = { ...state.settings, incomingMessageFillColor: "#123456" };
     await render(<LastCodeMessageAppearanceSettings />);
     await act(() => renderer.root.findByType(Select).props.onValueChange("outline"));
     await refresh(<LastCodeMessageAppearanceSettings />);
