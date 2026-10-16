@@ -170,11 +170,14 @@ pending. When the check is still `pending` and nothing needs action, end the
 turn; the watch continues. If the watch has ended (for example after repeated
 comment-only wakes) while the PR is still pending, start it again.
 
-The watch has no review or CI-registration timeout, so a review request that
-Codex never answers, or a workflow that never registers, does not wake the
-thread. Requesting review before ending the turn keeps the normal wake path in
-place. When a later snapshot shows such a gate still missing, treat it as a
-blocker to handle rather than waiting again.
+The watch has no review timeout, so a review request that Codex never answers
+does not wake the thread. Requesting review before ending the turn keeps the
+normal wake path in place. When a later snapshot shows review still missing,
+treat it as a blocker to handle rather than waiting again. A CI run that never
+registers cannot wake the watch either, so the check reports it as `pending`
+only while review is pending and as `ci-not-registered` attention otherwise. A
+base that moved without a push starts no run; otherwise check the workflow
+trigger and Actions configuration.
 
 A `stacked-ready` result means validation against the current parent, not
 permission to merge into main. If `watch_pull_request` is unavailable, report

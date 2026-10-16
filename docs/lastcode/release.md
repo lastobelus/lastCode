@@ -152,7 +152,9 @@ whose identity records the PR number, head, base, and synthetic merge commit
 behind one stable aggregate `CI Gate`, together with exact-head Codex review
 and unresolved review threads. Head or base drift invalidates earlier evidence
 and requires the agent to decide whether to rebase, republish, and request
-review again. The watch has no review or CI-registration timeout.
+review again. The watch has no review timeout. A CI run that never registers
+cannot wake it, so the check reports `ci-not-registered` attention once review
+is no longer pending.
 
 For sequential stacked PRs, `--pr` checks one PR independently of the current
 checkout and rebuilds its parent chain live on every run. See

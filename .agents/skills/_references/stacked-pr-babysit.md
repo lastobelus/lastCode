@@ -101,8 +101,9 @@ mergeability against the selected base. Missing CI registration, a disabled
 workflow, or CI for an old base is not successful stack validation.
 
 Parent pushes and retargets can invalidate CI without changing the child's head.
-Wait for fresh evidence. The watch never wakes for a run that never registers;
-if a later check still reports missing registration, handle that blocker. Rerunning an old workflow alone does not prove the current base. Quick
+Wait for fresh evidence. The watch never wakes for a run that never registers,
+so once review is not pending the check reports `ci-not-registered` attention;
+handle that blocker. Rerunning an old workflow alone does not prove the current base. Quick
 CI continues to validate against the canonical workstream base; do not describe
 its receipt as parent-relative validation.
 
