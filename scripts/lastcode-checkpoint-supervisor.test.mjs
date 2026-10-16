@@ -461,7 +461,7 @@ describe("LastCode checkpoint supervisor", () => {
     reconcilePrimaryProjectActions(
       "/srv/example/lastCode",
       "/Users/example",
-      ["lc-wait-for-pr"],
+      ["lc-wait-for-checkpoint"],
       { HOME: "/Users/example" },
       execute,
     );
@@ -478,7 +478,7 @@ describe("LastCode checkpoint supervisor", () => {
         "--base-dir",
         "/Users/example/.lastcode",
         "--trusted-source-id",
-        "lc-wait-for-pr",
+        "lc-wait-for-checkpoint",
       ],
       { HOME: "/Users/example" },
     );
@@ -487,12 +487,12 @@ describe("LastCode checkpoint supervisor", () => {
   it("validates and normalizes the environment-local Project Action trust allowlist", () => {
     expect(
       projectActionTrustAllowlist({
-        trustedProjectActionIds: ["lc-wait-for-pr", "lc-wait-for-pr"],
+        trustedProjectActionIds: ["lc-wait-for-checkpoint", "lc-wait-for-checkpoint"],
       }),
-    ).toEqual(["lc-wait-for-pr"]);
-    expect(() => projectActionTrustAllowlist({ trustedProjectActionIds: ["wait-for-pr"] })).toThrow(
-      "trust entries are invalid",
-    );
+    ).toEqual(["lc-wait-for-checkpoint"]);
+    expect(() =>
+      projectActionTrustAllowlist({ trustedProjectActionIds: ["wait-for-checkpoint"] }),
+    ).toThrow("trust entries are invalid");
   });
 
   it("detects every changed submodule gitlink", () => {

@@ -59,8 +59,6 @@ source alone does not explain. Most code changes do not need an internal documen
 - [Voice input](./internals/voice-input.md)
 - [Agent implementation guide to resumable Project
   Actions](./internals/resumable-project-actions-for-agents.md)
-- [Implementation tutorial: build a resumable wait like Wait for
-  PR](./internals/resumable-project-actions-wait-for-pr.md)
 - [Implementation runbook: set up resumable Project Actions with an
   agent](./internals/resumable-project-actions-setup.md)
 

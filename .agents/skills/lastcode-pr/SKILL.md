@@ -109,34 +109,25 @@ current GitHub thread and review-query mechanics.
    concrete reason when a finding is false. Resolve only addressed threads.
    When rejecting a top-level issue-comment or body-only formal finding without
    pushing a fix or resolving an inline thread, post the exact handled marker
-   documented in the external-review reference before relaunching `Wait for PR`.
+   documented in the external-review reference before rerunning the gate check.
 3. After each fix push, request review using the exact-head format in
    `../_references/external-review-mechanics.md`. Do not merge until Codex gives
    an explicit clean result or every finding for the exact current head has a
    durable handled state, and no review thread remains unresolved.
-4. For stacks or a PR outside the Action checkout, prepare the single explicit
-   target using the stack reference before listing Actions. For checkout-derived
-   waits, clear any old explicit target first. While exact-head GitHub CI or
-   Codex review is passive and no current finding
-   needs judgement, call `list_project_actions`. Select the eligible **Wait for
-   PR** action by its returned stable ID, preferring repository-managed
-   `lc-wait-for-pr` over the older saved `wait-for-pr` if both exist. Call
-   `run_project_action_and_resume` and end the turn immediately. Do not follow
-   the launch with GitHub queries, sleeps, process checks, or output polling.
-   Do not execute the wait script's polling mode through a shell tool: running
-   it directly keeps the agent turn open and loses the resume handoff. Its
-   bounded `--target` and `--clear-target` commands only prepare the selection.
-   After resume, inspect the wake reason and verify the current head/base before
-   deciding whether to fix, rebase, retry, or request another review. If the
-   action is missing or disabled, report the setup blocker; do not substitute a
-   manual polling loop.
-   A succeeded Action with pending delivery still owns the continuation slot;
-   end the turn so that follow-up can arrive. For an interrupted continuation
-   requiring Resume, report the actual blocker. Neither a stack nor a new user
-   message permits bypassing the single-continuation guard.
+4. While exact-head GitHub CI or Codex review is passive and no current finding
+   needs judgement, follow the babysit skill's
+   [Wait for Remote Gates](../babysit/SKILL.md#wait-for-remote-gates): run
+   `pnpm lastcode:pr-gates` once (add `--pr PR_NUMBER` for a stack or a PR
+   outside a clean matching checkout), and on `pending` call
+   `watch_pull_request` with the PR's explicit URL and end the turn. Do not
+   poll GitHub, sleep, or start a polling Action or watcher. On each wake,
+   rerun the check and fix actionable failures or findings even while another
+   gate is pending; otherwise end the turn and let the watch continue. Call
+   `unwatch_pull_request` before handing the work back.
 5. Use `pnpm lastcode:merge`; do not bypass the guarded merge in the GitHub UI.
    The wrapper independently revalidates a successful exact-head/base GitHub CI
-   run and aggregate `CI Gate`, a clean current PR, and an unchanged fetched
+   run and aggregate `CI Gate`, strict exact-head review readiness with zero
+   unresolved review threads, a clean current PR, and an unchanged fetched
    base under the shared remote main-write lock immediately before its exact-head
    squash merge. Checkpoint promotion uses the same lock; open PRs and CI waits
    never hold it. Use the updated guarded command rather than the GitHub UI or
@@ -153,7 +144,7 @@ current GitHub thread and review-query mechanics.
    ```
 
 One immediate status snapshot can establish that a wait is needed. For this
-LastCode workflow, the resumable action owns subsequent passive checks; the
+LastCode workflow, the native PR watch owns subsequent passive checks; the
 general repository CI polling rule does not require agent-side sleeps or
 repeated queries. Stop at the requested ready/merged state or a real blocker.
 

@@ -127,7 +127,7 @@ matches), and gives an explicit no-issues result or terminal clean reaction. A
 generic review wrapper, silence, or absence of inline findings is insufficient by
 itself. After a push, request review once unless a current request is already
 active. Bind the request to the full current head SHA using exactly these two
-lines so resumable PR actions can distinguish it from an older request:
+lines so the gate check and merge guard can distinguish it from an older request:
 
 ```text
 @codex review
@@ -189,8 +189,8 @@ gh api graphql \
 
 When a current-head finding exists only as a top-level issue comment or
 body-only formal review and the agent rejects it without pushing a fix, record
-that judgement with this exact single-line issue comment before relaunching
-`Wait for PR`. Use `comment:COMMENT_ID` for an issue comment or
+that judgement with this exact single-line issue comment before rerunning
+`pnpm lastcode:pr-gates`. Use `comment:COMMENT_ID` for an issue comment or
 `review:REVIEW_ID` for a formal review, plus the full current head SHA:
 
 ```text
