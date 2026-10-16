@@ -40,6 +40,19 @@ The rest of this document is meant to help you navigate the codebase and make ch
 
 Of note: Most T3 Code contributions will come from T3 Code itself, often controlled remotely. This means you should be careful about accessing data, killing dev servers, and other things that may damage the T3 Code instance that the contributor is using.
 
+## Done condition
+
+If I haven't said what done looks like for a task, state the done condition
+you're assuming in your first reply, then proceed without waiting for me to
+confirm it. Report status as distance from that condition.
+
+## Status and next steps
+
+A status answer, including one given mid-task, ends with what happens next:
+what you are doing about each open item, and what, if anything, you need from
+me. If the next step is within what I already asked for, do it rather than
+offering it. Do not add offers for work beyond the request.
+
 ## A small glossary
 
 We need to be on the same page with terminology. When communicating, use this language:
