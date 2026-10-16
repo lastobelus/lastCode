@@ -490,6 +490,7 @@ const RawActivityConnection = <S extends Schema.Top>(node: S) =>
     Schema.NullOr(
       Schema.Struct({
         pageInfo: Schema.optional(RawPageInfoSchemaFields()),
+        totalCount: Schema.optional(Schema.Int),
         nodes: Schema.Array(node),
       }),
     ),
@@ -906,6 +907,9 @@ export function decodePullRequestPreviewJson(
  * The conversation a pull request carries outside its review threads: who opened it, its issue
  * comments, its reviews and its newest commits. The two remark connections page independently, so
  * each is switched on only while it has more to give; the first read asks for everything.
+ * Read issue comments newest-updated first so a fresh review request stays
+ * within the existing comment cap on long PRs. Results are re-sorted into
+ * chronological order before they are returned.
  */
 export const PULL_REQUEST_ACTIVITY_GRAPHQL_QUERY = `query($owner: String!, $name: String!, $number: Int!, $head: Boolean!, $withComments: Boolean!, $commentsAfter: String, $withReviews: Boolean!, $reviewsAfter: String) {
   viewer { login }
@@ -915,11 +919,13 @@ export const PULL_REQUEST_ACTIVITY_GRAPHQL_QUERY = `query($owner: String!, $name
       commits(last: 100) @include(if: $head) {
         nodes { commit { oid messageHeadline committedDate authors(first: 10) { nodes { name email user { login } } } } }
       }
-      comments(first: 100, after: $commentsAfter) @include(if: $withComments) {
+      comments(first: 100, after: $commentsAfter, orderBy: { field: UPDATED_AT, direction: DESC }) @include(if: $withComments) {
+        totalCount
         pageInfo { hasNextPage endCursor }
         nodes { id body createdAt lastEditedAt url author { __typename login avatarUrl ... on User { name } } ${REACTION_GROUPS_FIELDS} }
       }
       reviews(first: 100, after: $reviewsAfter) @include(if: $withReviews) {
+        totalCount
         pageInfo { hasNextPage endCursor }
         nodes { id body state submittedAt lastEditedAt url author { __typename login avatarUrl ... on User { name } } }
       }
@@ -1386,6 +1392,8 @@ export interface GitHubPullRequestHead {
 export interface GitHubPullRequestActivity {
   readonly author: PullRequestActor | null;
   readonly comments: ReadonlyArray<PullRequestComment>;
+  readonly commentCount: number;
+  readonly truncated: boolean;
   readonly commits: ReadonlyArray<PullRequestCommit>;
 }
 
@@ -2496,6 +2504,8 @@ export interface GitHubPullRequestActivityPage {
   readonly commits?: ReadonlyArray<PullRequestCommit>;
   /** Issue comments and reviews, each list unsorted. */
   readonly remarks: ReadonlyArray<PullRequestComment>;
+  readonly rawCount: number;
+  readonly totalCount: number;
   readonly nextCommentsCursor: string | null;
   readonly nextReviewsCursor: string | null;
 }
@@ -2507,6 +2517,8 @@ export function decodePullRequestActivityJson(
   const decoded = decodeActivity(raw);
   if (!Result.isSuccess(decoded)) return Result.fail(decoded.failure);
   const pr = decoded.success.data.repository.pullRequest;
+  const comments = pr.comments?.nodes ?? [];
+  const reviews = pr.reviews?.nodes ?? [];
   return Result.succeed({
     ...(pr.author === undefined ? {} : { author: toActor(pr.author) }),
     ...(pr.commits === undefined
@@ -2524,11 +2536,14 @@ export function decodePullRequestActivityJson(
         }),
     remarks: toComments(
       {
-        comments: pr.comments?.nodes ?? [],
-        reviews: pr.reviews?.nodes ?? [],
+        comments,
+        reviews,
       },
       trimmed(decoded.success.data.viewer?.login),
     ),
+    rawCount: comments.length + reviews.length,
+    totalCount:
+      (pr.comments?.totalCount ?? comments.length) + (pr.reviews?.totalCount ?? reviews.length),
     nextCommentsCursor: nextCursorOf(pr.comments?.pageInfo),
     nextReviewsCursor: nextCursorOf(pr.reviews?.pageInfo),
   });
