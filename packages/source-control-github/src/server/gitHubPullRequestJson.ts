@@ -2235,7 +2235,7 @@ const WATCH_FINGERPRINT_CHECK_COUNTS =
  */
 const PULL_REQUEST_WATCH_FINGERPRINT_SELECTION =
   "state mergeable headRefOid " +
-  `comments(first: 100, orderBy: { field: UPDATED_AT, direction: DESC }) { totalCount nodes { id lastEditedAt reactionGroups { content reactions { totalCount } } } } ` +
+  `comments(first: 100, orderBy: { field: UPDATED_AT, direction: DESC }) { totalCount nodes { id lastEditedAt reactionGroups { content reactors { totalCount } } } } ` +
   `reviews(last: 100) { ${WATCH_FINGERPRINT_EDITS} } ` +
   "reviewThreads { totalCount } " +
   `commits(last: 1) { nodes { commit { statusCheckRollup { contexts { ${WATCH_FINGERPRINT_CHECK_COUNTS} } } } } }`;
@@ -2275,7 +2275,7 @@ const RawReactionEditedSchema = Schema.Struct({
         reactionGroups: Schema.Array(
           Schema.Struct({
             content: Schema.String,
-            reactions: Schema.Struct({ totalCount: Schema.Int }),
+            reactors: Schema.Struct({ totalCount: Schema.Int }),
           }),
         ),
       }),
@@ -2359,7 +2359,7 @@ export function decodePullRequestWatchFingerprintsJson(
             node === null
               ? []
               : node.reactionGroups.map(
-                  (group) => `${node.id}:${group.content}:${group.reactions.totalCount}`,
+                  (group) => `${node.id}:${group.content}:${group.reactors.totalCount}`,
                 ),
           )
           .toSorted()

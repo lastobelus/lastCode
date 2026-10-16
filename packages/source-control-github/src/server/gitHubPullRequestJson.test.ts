@@ -2115,7 +2115,7 @@ describe("pull request watch fingerprints", () => {
     );
     expect(document?.query).toContain("w1: repository(owner: $w1_owner, name: $w1_name)");
     expect(document?.query).toContain(
-      "id lastEditedAt reactionGroups { content reactions { totalCount } }",
+      "id lastEditedAt reactionGroups { content reactors { totalCount } }",
     );
     expect(document?.variables).toEqual({
       w0_owner: "pingdotgg",
@@ -2148,7 +2148,7 @@ describe("pull request watch fingerprints", () => {
             id: "comment-1",
             lastEditedAt: input.commentEditedAt,
             reactionGroups: [
-              { content: "THUMBS_UP", reactions: { totalCount: input.reactions ?? 0 } },
+              { content: "THUMBS_UP", reactors: { totalCount: input.reactions ?? 0 } },
             ],
           },
         ],
