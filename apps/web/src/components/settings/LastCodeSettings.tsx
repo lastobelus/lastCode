@@ -1,10 +1,6 @@
-import {
-  DEFAULT_SERVER_SETTINGS,
-  DesktopLastCodeSettingsState,
-  LastCodeSettingsImportPreview,
-  ProviderDriverKind,
-  ThreadId,
-} from "@t3tools/contracts";
+import { LastCodeImportSettings } from "./LastCodeImportSettings";
+import { LastCodeLocalUpdatesSettings } from "./LastCodeLocalUpdatesSettings";
+import { DEFAULT_SERVER_SETTINGS, ProviderDriverKind, ThreadId } from "@t3tools/contracts";
 import {
   DEFAULT_LEGACY_SIDEBAR_SCALE,
   DEFAULT_SCROLLBAR_MARGIN,
@@ -24,24 +20,20 @@ import {
   MIN_HANDOFFS_MENU_LIMIT,
 } from "@t3tools/contracts/settings";
 import { useAtomValue } from "@effect/atom-react";
-import { DownloadIcon, MoonStarIcon, PaletteIcon, ServerIcon } from "lucide-react";
-import { type CSSProperties, useEffect, useState } from "react";
+import { PaletteIcon, ServerIcon } from "lucide-react";
+import { type CSSProperties, useMemo } from "react";
 
 import { environmentCatalog } from "../../connection/catalog";
-import { isElectron } from "../../env";
 import {
   ConnectedEnvironmentIcon,
   EnvironmentIcon,
   updateEnvironmentIconColors,
 } from "../../environmentIcons";
 import { usePrimarySettings, updateClientSettings } from "../../hooks/useSettings";
-import { useDesktopUpdateState } from "../../state/desktopUpdate";
 import { usePrimaryEnvironmentId } from "../../state/environments";
-import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
 import { SidebarEnvironmentIcon } from "../sidebar/SidebarEnvironmentIcon";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
-import { stackedThreadToast, toastManager } from "../ui/toast";
 import { ThreadStatusLabel, ThreadWorktreeIndicator } from "../ThreadStatusIndicators";
 import { searchableSetting } from "./settingsSearch";
 import { ProviderAccentColorPicker } from "./ProviderAccentColorPicker";
@@ -190,106 +182,9 @@ function EnvironmentPauseSettingsSection() {
 }
 
 export function LastCodeSettingsPanel() {
-  const updateState = useDesktopUpdateState();
   const clientSettings = usePrimarySettings();
   const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const [settings, setSettings] = useState<DesktopLastCodeSettingsState | null>(null);
-  const [importPreview, setImportPreview] = useState<LastCodeSettingsImportPreview | null>(null);
-  const [isSaving, setIsSaving] = useState(false);
-  const [isImporting, setIsImporting] = useState(false);
-
-  useEffect(() => {
-    const bridge = window.desktopBridge;
-    if (!bridge || typeof bridge.getLastCodeSettings !== "function") return;
-    void bridge
-      .getLastCodeSettings()
-      .then(setSettings)
-      .catch((error: unknown) => {
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Could not load LastCode settings",
-            description: error instanceof Error ? error.message : "Desktop settings read failed.",
-          }),
-        );
-      });
-  }, []);
-
-  useEffect(() => {
-    const bridge = window.desktopBridge;
-    if (!bridge || typeof bridge.previewT3SettingsImport !== "function") return;
-    void bridge
-      .previewT3SettingsImport()
-      .then(setImportPreview)
-      .catch((error: unknown) => {
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Could not inspect T3 Code settings",
-            description: error instanceof Error ? error.message : "Settings preview failed.",
-          }),
-        );
-      });
-  }, []);
-
-  const setLocalNightlies = async (enabled: boolean) => {
-    const bridge = window.desktopBridge;
-    if (!bridge || typeof bridge.setShowAndInstallLocalNightlies !== "function") return;
-    setIsSaving(true);
-    await (async () => {
-      setSettings(await bridge.setShowAndInstallLocalNightlies(enabled));
-    })()
-      .catch((error: unknown) => {
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Could not change local nightly updates",
-            description: error instanceof Error ? error.message : "Desktop settings write failed.",
-          }),
-        );
-      })
-      .finally(() => {
-        setIsSaving(false);
-      });
-  };
-
-  const importSettings = async () => {
-    const bridge = window.desktopBridge;
-    if (!bridge || typeof bridge.importT3Settings !== "function") return;
-    setIsImporting(true);
-    try {
-      const result = await bridge.importT3Settings();
-      toastManager.add(
-        stackedThreadToast({
-          type: "success",
-          title: "T3 Code settings imported",
-          description: `Backed up the previous LastCode settings to ${result.backupDirectory}. Restarting LastCode…`,
-        }),
-      );
-    } catch (error) {
-      setIsImporting(false);
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Could not import T3 Code settings",
-          description: error instanceof Error ? error.message : "Settings import failed.",
-        }),
-      );
-    }
-  };
-
-  const localUpdateActive =
-    updateState?.source === "lastcode-local" &&
-    (updateState.status === "downloading" || updateState.status === "downloaded");
-  const status = !isElectron
-    ? "Open this page in the LastCode desktop app to configure local builds."
-    : (settings?.message ??
-      (updateState?.source === "lastcode-local" && updateState.status === "downloading"
-        ? "A local update build is running. Progress and failures are recorded in ~/.lastcode/local-updates/build.log."
-        : settings?.showAndInstallLocalNightlies
-          ? "Enabled. LastCode checks your local repository and shows new checkpoints and LastCode revisions in the sidebar."
-          : "Off by default. No local repositories, builds, or installers are touched while disabled."));
   const legacySidebarScaleRatio =
     (clientSettings.legacySidebarScale - MIN_LEGACY_SIDEBAR_SCALE) /
     (MAX_LEGACY_SIDEBAR_SCALE - MIN_LEGACY_SIDEBAR_SCALE);
@@ -297,30 +192,18 @@ export function LastCodeSettingsPanel() {
     "--settings-slider-progress": `${legacySidebarScaleRatio * 100}%`,
     "--settings-slider-fill-offset": `${0.5 - legacySidebarScaleRatio}rem`,
   } as CSSProperties;
-  const environmentSettings = deriveLastCodeEnvironmentSettingEntries({
-    entries: catalog.entries,
-    primaryEnvironmentId,
-  });
+  const environmentSettings = useMemo(
+    () =>
+      deriveLastCodeEnvironmentSettingEntries({
+        entries: catalog.entries,
+        primaryEnvironmentId,
+      }),
+    [catalog.entries, primaryEnvironmentId],
+  );
 
   return (
     <SettingsPageContainer>
-      <SettingsSection title="LastCode" icon={<MoonStarIcon className="size-5" />}>
-        <SettingsRow
-          {...searchableSetting("local-nightlies")}
-          description="Show local LastCode checkpoints and revisions as app updates. The first sidebar click runs full local CI and builds and validates a DMG; the second restarts and installs it."
-          status={status}
-          control={
-            <Switch
-              checked={settings?.showAndInstallLocalNightlies ?? false}
-              disabled={
-                !isElectron || !settings || !settings.supported || isSaving || localUpdateActive
-              }
-              onCheckedChange={(checked) => void setLocalNightlies(Boolean(checked))}
-              aria-label="Show and install local nightlies"
-            />
-          }
-        />
-      </SettingsSection>
+      <LastCodeLocalUpdatesSettings />
       <EnvironmentPauseSettingsSection />
       <LocalCiSettingsSection />
       <SettingsSection title="Appearance" icon={<PaletteIcon className="size-5" />}>
@@ -787,46 +670,7 @@ export function LastCodeSettingsPanel() {
           );
         })}
       </SettingsSection>
-      <SettingsSection title="Import from T3 Code" icon={<DownloadIcon className="size-5" />}>
-        <SettingsRow
-          {...searchableSetting("import-t3-settings")}
-          description="Copy selected preferences into LastCode once, back up the current LastCode files, then restart. The two apps remain independent after the import."
-          status={
-            !isElectron ? (
-              "Open this page in the LastCode desktop app to import settings."
-            ) : importPreview ? (
-              <div className="space-y-1.5">
-                <p>Source: {importPreview.sourceDirectory}</p>
-                {importPreview.message ? <p>{importPreview.message}</p> : null}
-                <ul className="space-y-0.5">
-                  {importPreview.categories.map((category) => (
-                    <li key={category.id}>
-                      <span className="text-foreground/80">{category.label}</span>{" "}
-                      <span>
-                        ({category.sourceFile}) — {category.status}
-                      </span>
-                      {category.status === "ready" ? <span>: {category.detail}</span> : null}
-                    </li>
-                  ))}
-                </ul>
-                <p>Not imported: {importPreview.excluded.join("; ")}.</p>
-              </div>
-            ) : (
-              "Inspecting ~/.t3/userdata…"
-            )
-          }
-          control={
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={!importPreview?.canImport || isImporting}
-              onClick={() => void importSettings()}
-            >
-              {isImporting ? "Importing…" : "Import and restart"}
-            </Button>
-          }
-        />
-      </SettingsSection>
+      <LastCodeImportSettings />
     </SettingsPageContainer>
   );
 }
