@@ -218,6 +218,26 @@ describe("one-shot PR gates CLI", () => {
       reason: "ci-not-registered",
     });
   });
+  it("reports unknown mergeability once CI and review can no longer wake the watch", () => {
+    const test = fixture();
+    test.state.pullRequests[0]!.mergeable = "UNKNOWN";
+    test.state.reviewMode = "pending";
+    test.save();
+    const pending = test.run("--pr", "302");
+    expect(pending.status, pending.stdout).toBe(0);
+    expect(JSON.parse(pending.stdout)).toMatchObject({
+      status: "pending",
+      reason: "review-pending",
+    });
+    test.state.reviewMode = "clean";
+    test.save();
+    const unknown = test.run("--pr", "302");
+    expect(unknown.status).toBe(1);
+    expect(JSON.parse(unknown.stdout)).toMatchObject({
+      status: "attention",
+      reason: "mergeability-unknown",
+    });
+  });
   it("reports CI failure even while review is pending", () => {
     const test = fixture();
     test.state.ciConclusion = "failure";

@@ -201,6 +201,48 @@ describe("lastcode-pr-gates", () => {
       detail: expect.stringContaining(`head ${HEAD} and base ${BASE}`),
     });
   });
+  it("reports unknown mergeability as attention once no wake source remains", () => {
+    const unregisteredCi: GateObservation["ci"] = { state: "pending", reason: "run-registration" };
+    for (const unknown of [{ mergeable: "UNKNOWN" }, { mergeStateStatus: "UNKNOWN" }]) {
+      expect(
+        evaluatePullRequestGates(
+          observation({ ci: satisfiedCi, review: handledReview, ...unknown }),
+        ),
+      ).toMatchObject({ status: "attention", reason: "mergeability-unknown" });
+      expect(evaluatePullRequestGates(observation({ ...unknown }))).toMatchObject({
+        status: "pending",
+        reason: "review-pending",
+      });
+      expect(
+        evaluatePullRequestGates(observation({ review: handledReview, ...unknown })),
+      ).toMatchObject({ status: "pending", reason: "ci-pending" });
+      expect(
+        evaluatePullRequestGates(
+          observation({ ci: unregisteredCi, review: handledReview, ...unknown }),
+        ),
+      ).toMatchObject({ status: "attention", reason: "ci-not-registered" });
+    }
+  });
+  it("returns pending only while a review reply or running CI can wake the watch", () => {
+    const ciStates: ReadonlyArray<GateObservation["ci"]> = [
+      pendingCi,
+      { state: "pending", reason: "run-registration" },
+      satisfiedCi,
+    ];
+    for (const ci of ciStates)
+      for (const review of [pendingReview, handledReview])
+        for (const mergeable of ["MERGEABLE", "UNKNOWN"])
+          for (const mergeStateStatus of ["CLEAN", "BLOCKED", "UNKNOWN"]) {
+            const decision = evaluatePullRequestGates(
+              observation({ ci, review, mergeable, mergeStateStatus }),
+            );
+            if (decision.status === "pending")
+              expect(
+                review.pending || (ci.state === "pending" && ci.reason === "run-in-progress"),
+                JSON.stringify({ ci, review: review.pending, mergeable, mergeStateStatus }),
+              ).toBe(true);
+          }
+  });
   it("rejects disabled CI, missing reviews, dirty checkout, and blocked mergeability", () => {
     expect(
       evaluatePullRequestGates(
@@ -220,11 +262,6 @@ describe("lastcode-pr-gates", () => {
         observation({ ci: satisfiedCi, review: handledReview, mergeStateStatus: "BLOCKED" }),
       ),
     ).toMatchObject({ status: "attention", reason: "merge-blocked" });
-    expect(
-      evaluatePullRequestGates(
-        observation({ ci: satisfiedCi, review: handledReview, mergeable: "UNKNOWN" }),
-      ),
-    ).toMatchObject({ status: "pending", reason: "mergeability-pending" });
     expect(
       evaluatePullRequestGates(
         observation({ review: { ...pendingReview, requestPresent: false } }),

@@ -660,9 +660,14 @@ export function evaluatePullRequestGates(
     );
   if (!current.review.pending && !current.review.ready)
     return attention("review-unhandled", "The current-head Codex review has an unhandled finding.");
-  if (pr.mergeable === "UNKNOWN" || pr.mergeStateStatus === "UNKNOWN")
-    return pending("mergeability-pending");
   if (current.ci.state === "satisfied" && !current.review.pending && current.review.ready) {
+    // The native watch does not wake when GitHub finishes computing mergeability, so unknown
+    // mergeability cannot be pending once CI and review are complete.
+    if (pr.mergeable === "UNKNOWN" || pr.mergeStateStatus === "UNKNOWN")
+      return attention(
+        "mergeability-unknown",
+        `GitHub has not computed mergeability for pull request #${pr.number}; CI and review are complete. Rerun the check once, then report the blocker if it persists.`,
+      );
     if (pr.mergeStateStatus === "BLOCKED")
       return attention("merge-blocked", "A repository merge requirement remains unsatisfied.");
     const status = expectedBase === LASTCODE_BASE_BRANCH ? "ready" : "stacked-ready";
