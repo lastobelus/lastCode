@@ -8667,6 +8667,190 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     { type: "emit_inbound", label: method, frame: { id, result } },
   ];
 
+  describe("stale native turn shutdown", () => {
+    const outcomes = [
+      "interrupted",
+      "completed",
+      "failed",
+      "inProgress",
+      "missing",
+      "newer-running",
+      "active",
+      "read-error",
+      "repeated-cursor",
+    ] as const;
+    it.effect.each(
+      (["legacy", "paginated"] as const).flatMap((historyMode) =>
+        outcomes
+          .filter((outcome) => historyMode === "paginated" || outcome !== "repeated-cursor")
+          .map((outcome) => [historyMode, outcome] as const),
+      ),
+    )("checks %s history for an untracked %s native turn", ([historyMode, outcome]) =>
+      Effect.gen(function* () {
+        const nativeThreadId = "old-native-child";
+        const nativeTurnId = "old-native-turn";
+        const requestedTurn = makeCodexReplayTurn({
+          id: outcome === "missing" ? "another-native-turn" : nativeTurnId,
+          status:
+            outcome === "completed" || outcome === "failed" || outcome === "inProgress"
+              ? outcome
+              : "interrupted",
+        });
+        const newerTurn = makeCodexReplayTurn({
+          id: "newer-native-turn",
+          status: outcome === "newer-running" ? "inProgress" : "completed",
+        });
+        const thread = {
+          ...codexReplayThreadResult({ nativeThreadId, forkedFromId: null }).thread,
+          projectId: null,
+          historyMode,
+          // An unloaded thread is accepted only with terminal evidence for the exact turn.
+          status: { type: outcome === "active" ? "active" : "notLoaded", activeFlags: [] },
+        };
+        const exchange = (id: number, method: string, params: unknown, result: unknown) =>
+          [
+            { type: "expect_outbound", label: method, frame: { id, method, params } },
+            { type: "emit_inbound", label: method, frame: { id, result } },
+          ] satisfies Array<CodexReplay.CodexAppServerReplayEntry>;
+        const entries = codexReplayPreamble({
+          nativeThreadId: "unrelated-shared-runtime-owner",
+          nativeTurnId: "unused",
+          prompt: "unused",
+        }).slice(0, 5);
+        entries.push({
+          type: "expect_outbound",
+          label: "thread/read",
+          frame: {
+            id: 3,
+            method: "thread/read",
+            params: { threadId: nativeThreadId, includeTurns: false },
+          },
+        });
+        entries.push({
+          type: "emit_inbound",
+          label: "thread/read",
+          frame:
+            outcome === "read-error"
+              ? { id: 3, error: { code: -32600, message: "Native history is unavailable." } }
+              : { id: 3, result: { thread } },
+        });
+        let nextRequestId = 4;
+        if (outcome !== "active" && outcome !== "read-error") {
+          if (historyMode === "legacy") {
+            entries.push(
+              ...exchange(
+                nextRequestId++,
+                "thread/read",
+                { threadId: nativeThreadId, includeTurns: true },
+                { thread: { ...thread, turns: [requestedTurn, newerTurn] } },
+              ),
+            );
+          } else {
+            entries.push(
+              ...exchange(
+                nextRequestId++,
+                "thread/turns/list",
+                {
+                  threadId: nativeThreadId,
+                  cursor: null,
+                  limit: 100,
+                  sortDirection: "desc",
+                  itemsView: "notLoaded",
+                },
+                { data: [newerTurn], nextCursor: "older-turns" },
+              ),
+            );
+            if (outcome !== "newer-running")
+              entries.push(
+                ...exchange(
+                  nextRequestId++,
+                  "thread/turns/list",
+                  {
+                    threadId: nativeThreadId,
+                    cursor: "older-turns",
+                    limit: 100,
+                    sortDirection: "desc",
+                    itemsView: "notLoaded",
+                  },
+                  {
+                    data: outcome === "repeated-cursor" ? [] : [requestedTurn],
+                    nextCursor: outcome === "repeated-cursor" ? "older-turns" : null,
+                  },
+                ),
+              );
+          }
+        }
+        const terminal = ["interrupted", "completed", "failed"].includes(outcome);
+        if (terminal)
+          entries.push(
+            ...exchange(
+              nextRequestId++,
+              "thread/unsubscribe",
+              { threadId: nativeThreadId },
+              { status: "notLoaded" },
+            ),
+          );
+        const outbound: Array<{ readonly method: string; readonly params: unknown }> = [];
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario: `stale-native-${historyMode}-${outcome}`,
+            entries,
+          }),
+          () => Effect.void,
+          (method, params) => Effect.sync(() => outbound.push({ method, params })),
+        );
+        const providerThread = {
+          ...harness.providerThread,
+          id: ProviderThreadId.make("old-native-child-provider-thread"),
+          appThreadId: ThreadId.make("old-native-child-thread"),
+          nativeThreadRef: {
+            driver: CodexAdapterV2.CODEX_DRIVER_KIND,
+            nativeId: nativeThreadId,
+            strength: "strong" as const,
+          },
+        };
+        const interrupt = harness.runtime.interruptTurn({
+          providerThread,
+          providerTurnId: (yield* IdAllocator.IdAllocatorV2).derive.providerTurn({
+            driver: CodexAdapterV2.CODEX_DRIVER_KIND,
+            nativeTurnId,
+          }),
+        });
+        if (terminal) {
+          yield* interrupt;
+          yield* harness.runtime.unloadThread!({ providerThread });
+          assert.equal(outbound.at(-1)?.method, "thread/unsubscribe");
+        } else {
+          const error = yield* interrupt.pipe(Effect.flip);
+          assert.equal(error._tag, "ProviderAdapterInterruptError");
+          assert.isFalse(outbound.some((request) => request.method === "thread/unsubscribe"));
+        }
+        // Only the unrelated owner was opened. Native shutdown must not load the
+        // old child, replay a turn, or interrupt another turn in the shared runtime.
+        assert.deepEqual(
+          outbound
+            .filter((request) =>
+              ["thread/start", "thread/resume", "turn/start", "turn/interrupt"].includes(
+                request.method,
+              ),
+            )
+            .map((request) => request.method),
+          ["thread/start"],
+        );
+        assert.equal(
+          harness.providerThread.nativeThreadRef?.nativeId,
+          "unrelated-shared-runtime-owner",
+        );
+        assert.isEmpty(harness.terminalEvents());
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    );
+  });
+
   it.effect.each(["legacy", "paginated"] as const)(
     "hydrates %s Codex snapshot history into the fork target without fabricating runs",
     (historyMode) =>

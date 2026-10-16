@@ -6548,6 +6548,65 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             }).pipe(Effect.mapError(mcpAppsError("Codex MCP resource read failed."))),
         };
 
+        const hasEndedNativeTurn = Effect.fnUntraced(function* (
+          turnInput: ProviderAdapter.ProviderAdapterV2InterruptInput,
+        ) {
+          const threadId = yield* getNativeThreadId(turnInput.providerThread);
+          const { thread } = yield* ensureInitialized.pipe(
+            Effect.andThen(client.request("thread/read", { threadId, includeTurns: false })),
+          );
+          if (
+            thread.id !== threadId ||
+            thread.status.type === "active" ||
+            thread.status.type === "systemError"
+          )
+            return false;
+          const isRequestedTerminalTurn = (
+            turn: Pick<CodexSchema.V2ThreadTurnsListResponse__Turn, "id" | "status">,
+          ) =>
+            idAllocator.derive.providerTurn({ driver: CODEX_PROVIDER, nativeTurnId: turn.id }) ===
+              turnInput.providerTurnId &&
+            (turn.status === "completed" ||
+              turn.status === "interrupted" ||
+              turn.status === "failed");
+          if (thread.historyMode !== "paginated") {
+            const { thread: history } = yield* client.request("thread/read", {
+              threadId,
+              includeTurns: true,
+            });
+            return (
+              history.id === threadId &&
+              history.status.type !== "active" &&
+              history.status.type !== "systemError" &&
+              history.turns.every((turn) => turn.status !== "inProgress") &&
+              history.turns.some(isRequestedTerminalTurn)
+            );
+          }
+          // Read newest first so every newer turn is checked before accepting the
+          // exact saved turn. Missing or unloaded runtime state alone proves nothing.
+          let cursor: string | null = null;
+          const visited = new Set<string | null>();
+          for (let pageIndex = 0; pageIndex < 10; pageIndex++) {
+            if (visited.has(cursor)) return false;
+            visited.add(cursor);
+            const page: CodexSchema.V2ThreadTurnsListResponse = yield* client.request(
+              "thread/turns/list",
+              {
+                threadId,
+                cursor,
+                limit: 100,
+                sortDirection: "desc",
+                itemsView: "notLoaded",
+              },
+            );
+            if (page.data.some((turn) => turn.status === "inProgress")) return false;
+            if (page.data.some(isRequestedTerminalTurn)) return true;
+            cursor = page.nextCursor ?? null;
+            if (cursor === null) return false;
+          }
+          return false;
+        }, Effect.timeout("5 seconds"));
+
         const runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime = {
           instanceId: adapterOptions.instanceId,
           driver: CODEX_PROVIDER,
@@ -6917,6 +6976,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 // Stop on a settled turn this process retains nothing for
                 // (released, restarted, or every command already reported).
                 if (turnInput.requestRuntimeRestart === true) return;
+                // A replacement runtime can retain a saved running native child
+                // whose exact turn already ended. Verify history before unloading it.
+                if (yield* hasEndedNativeTurn(turnInput)) return;
                 return yield* toProtocolError(
                   `Provider turn ${turnInput.providerTurnId} is not active and cannot be interrupted.`,
                 );
