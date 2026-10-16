@@ -875,7 +875,9 @@ export function ThreadStatusLabel({
   status,
   compact = false,
 }: {
-  status: ThreadStatusPill;
+  status: Pick<ThreadStatusPill, "colorClass" | "dotClass" | "marker" | "pulse" | "description"> & {
+    label: string;
+  };
   compact?: boolean;
 }) {
   if (compact) {
@@ -885,7 +887,9 @@ export function ThreadStatusLabel({
           render={
             <span
               role="img"
-              aria-label={status.label}
+              aria-label={
+                status.description ? `${status.label}. ${status.description}` : status.label
+              }
               className={`inline-flex size-3.5 shrink-0 items-center justify-center ${status.colorClass}`}
             />
           }
@@ -906,7 +910,7 @@ export function ThreadStatusLabel({
             />
           )}
         </TooltipTrigger>
-        <TooltipPopup side="top">{status.label}</TooltipPopup>
+        <TooltipPopup side="top">{status.description ?? status.label}</TooltipPopup>
       </Tooltip>
     );
   }
@@ -917,7 +921,9 @@ export function ThreadStatusLabel({
         render={
           <span
             role="img"
-            aria-label={status.label}
+            aria-label={
+              status.description ? `${status.label}. ${status.description}` : status.label
+            }
             className={`inline-flex items-center gap-1 text-3xs ${status.colorClass}`}
           />
         }
@@ -939,7 +945,7 @@ export function ThreadStatusLabel({
         )}
         <span className="hidden md:inline">{status.label}</span>
       </TooltipTrigger>
-      <TooltipPopup side="top">{status.label}</TooltipPopup>
+      <TooltipPopup side="top">{status.description ?? status.label}</TooltipPopup>
     </Tooltip>
   );
 }

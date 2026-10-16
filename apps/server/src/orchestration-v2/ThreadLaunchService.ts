@@ -23,6 +23,7 @@ import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -328,6 +329,7 @@ const make = Effect.gen(function* () {
     const tracked = input.workspaceStrategy.type === "worktree" || reused !== undefined;
     let createdWorktreePath: string | null = null;
     let setupTerminalId: string | null = null;
+    let branchRenameFiber: Fiber.Fiber<void, never> | null = null;
     let workspaceRecorded = false;
     let runReleased = false;
     if (input.workspaceStrategy.type === "worktree") {
@@ -521,7 +523,7 @@ const make = Effect.gen(function* () {
       ) {
         const oldBranch = branch;
         const worktreeCwd = worktreePath;
-        yield* generateBranchNameFor(worktreeCwd, initialMessage).pipe(
+        branchRenameFiber = yield* generateBranchNameFor(worktreeCwd, initialMessage).pipe(
           Effect.flatMap(({ branch: newBranch, exactName }) =>
             git.renameBranch({
               cwd: worktreeCwd,
@@ -550,6 +552,7 @@ const make = Effect.gen(function* () {
               cause,
             }),
           ),
+          Effect.asVoid,
           Effect.forkIn(preparationScope),
         );
       }
@@ -673,6 +676,9 @@ const make = Effect.gen(function* () {
             createdWorktreePath &&
             ((cancelled && !runReleased) || !workspaceRecorded)
           ) {
+            // Stop the rename before removing its checkout so it cannot restore
+            // the removed workspace through a late metadata update.
+            if (branchRenameFiber !== null) yield* Fiber.interrupt(branchRenameFiber);
             const removedPath = createdWorktreePath;
             // The thread forgets the worktree only once it is gone; a failed
             // removal leaves the directory for the user to clean up rather than

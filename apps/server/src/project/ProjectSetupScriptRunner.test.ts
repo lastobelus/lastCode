@@ -16,7 +16,7 @@ import * as Ref from "effect/Ref";
 import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as UpdateDrainRepositoryPersistence from "../persistence/UpdateDrainRepository.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -34,7 +34,11 @@ const startDrain = {
 };
 
 function makeHarness(
-  options: { readonly setupScript?: boolean; readonly writeEffect?: Effect.Effect<void> } = {},
+  options: {
+    readonly setupScript?: boolean;
+    readonly writeEffect?: Effect.Effect<void>;
+    readonly terminalLinkProfileName?: string;
+  } = {},
 ) {
   const open = vi.fn((input: Parameters<TerminalManager.TerminalManager["Service"]["open"]>[0]) =>
     Effect.succeed({
@@ -83,6 +87,9 @@ function makeHarness(
               command: "vp install",
               icon: "configure" as const,
               runOnWorktreeCreate: true,
+              ...(options.terminalLinkProfileName === undefined
+                ? {}
+                : { terminalLinkProfileName: options.terminalLinkProfileName }),
             },
             {
               id: "clean",
@@ -104,7 +111,7 @@ function makeHarness(
           Layer.mergeAll(
             UpdateDrain.layer.pipe(
               Layer.provide(UpdateDrainRepositoryPersistence.layer),
-              Layer.provide(SqlitePersistenceMemory),
+              Layer.provide(SqlitePersistence.layerMemory),
             ),
             Layer.mock(EffectOutbox.EffectOutboxV2)({ pendingCleanup: Effect.succeed([]) }),
             Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({}),
@@ -139,11 +146,11 @@ function makeHarness(
     ),
   );
 
-  return { layer, open, write, listeners, projectId };
+  return { layer, open, write, listeners, projectId, closeIdle, project };
 }
 
 it.effect("resolves setup scripts through the standalone project service", () => {
-  const { layer, open, write, listeners, projectId } = makeHarness();
+  const { layer, open, write, listeners, projectId, closeIdle } = makeHarness();
   return Effect.gen(function* () {
     const runner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
     const result = yield* runner.runForThread({
@@ -338,3 +345,44 @@ it.effect("holds admission through command write and releases it before setup co
     }).pipe(Effect.provide(layer));
   }),
 );
+
+it.effect("preserves an opted-in setup Action's profile in its own terminal", () => {
+  const { layer, open, projectId } = makeHarness({ terminalLinkProfileName: "Work account" });
+  return Effect.gen(function* () {
+    const runner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
+    const result = yield* runner.runForThread({
+      threadId: "thread-1",
+      projectId,
+      worktreePath: "/workspace/example",
+      trigger: "setup",
+    });
+    assert.equal(result.status, "started");
+    assert.equal(open.mock.calls[0]?.[0].terminalLinkProfileName, "Work account");
+    assert.match(open.mock.calls[0]?.[0].terminalId ?? "", /^setup-/u);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("clears a reused setup terminal's profile after the Action removes its selection", () => {
+  const { layer, open, projectId, project } = makeHarness({
+    terminalLinkProfileName: "Work account",
+  });
+  return Effect.gen(function* () {
+    const runner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
+    const input = {
+      threadId: "thread-1",
+      projectId,
+      worktreePath: "/workspace/example",
+      trigger: "setup" as const,
+    };
+    assert.equal((yield* runner.runForThread(input)).status, "started");
+    const script = project.scripts[0]!;
+    if ("terminalLinkProfileName" in script) delete script.terminalLinkProfileName;
+    assert.equal((yield* runner.runForThread(input)).status, "started");
+
+    const initial = open.mock.calls[0]?.[0];
+    const rerun = open.mock.calls[1]?.[0];
+    assert.equal(initial?.terminalLinkProfileName, "Work account");
+    assert.equal(rerun?.terminalId, initial?.terminalId);
+    assert.equal(rerun?.terminalLinkProfileName, null);
+  }).pipe(Effect.provide(layer));
+});

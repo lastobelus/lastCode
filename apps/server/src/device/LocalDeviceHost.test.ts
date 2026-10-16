@@ -8,8 +8,6 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as FileSystem from "effect/FileSystem";
-import * as Sink from "effect/Sink";
-import * as Stream from "effect/Stream";
 import * as PlatformError from "effect/PlatformError";
 
 import * as LocalDeviceHost from "./LocalDeviceHost.ts";
@@ -30,11 +28,6 @@ import {
 import * as NetService from "@t3tools/shared/Net";
 import * as ServerConfig from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
-import {
-  AGENT_DEVICE_VERSION,
-  DEVICE_HUB_VERSION,
-  agentDeviceStateDir,
-} from "./DeviceToolchain.ts";
 
 const processOutput = (code: number, stdout = "", stderr = "", timedOut = false) => ({
   code: ChildProcessSpawner.ExitCode(code),
@@ -540,9 +533,9 @@ it.effect.each([true, false, "activation"] as const)(
       const host = yield* LocalDeviceHost.make().pipe(
         Effect.provideService(ServerConfig.ServerConfig, config),
         Effect.provide(NetService.layer),
-        Effect.provideService(HostProcessEnvironment, { HOME: directory, PATH: "" }),
-        Effect.provideService(HostProcessPlatform, "linux"),
-        Effect.provideService(HostProcessIsExecutable, false),
+        Effect.provideService(HostProcess.Environment, { HOME: directory, PATH: "" }),
+        Effect.provideService(HostProcess.Platform, "linux"),
+        Effect.provideService(HostProcess.IsExecutable, false),
         Effect.provideService(ProcessRunner.ProcessRunner, runner),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
         Effect.provideService(
@@ -679,9 +672,9 @@ it.effect.each([
         }),
         Effect.provideService(ServerConfig.ServerConfig, config),
         Effect.provide(NetService.layer),
-        Effect.provideService(HostProcessEnvironment, { HOME: directory, PATH: "" }),
-        Effect.provideService(HostProcessPlatform, "linux"),
-        Effect.provideService(HostProcessIsExecutable, false),
+        Effect.provideService(HostProcess.Environment, { HOME: directory, PATH: "" }),
+        Effect.provideService(HostProcess.Platform, "linux"),
+        Effect.provideService(HostProcess.IsExecutable, false),
         Effect.provideService(ProcessRunner.ProcessRunner, runner),
         Effect.provideService(
           ChildProcessSpawner.ChildProcessSpawner,

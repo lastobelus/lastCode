@@ -151,9 +151,9 @@ environments. Policies are off by default and run on the server at startup, when
 hourly. Offline machines keep their existing policies.
 
 Select a project to set **Automatic worktree cleanup** to **Inherit**, **Off**, or **Custom**.
-Inherit follows each machine's rules; Off keeps that project's worktrees until you remove them
-manually. Custom applies separate worktree rules to the selected project or checkout. Browser
-captures and log retention remain machine-wide.
+Inherit follows each machine's rules; Off disables automatic worktree deletion and dependency
+removal for that project. Custom applies separate worktree rules to the selected project or checkout.
+Browser captures and log retention remain machine-wide.
 
 When **Delete inactive worktrees** is enabled, clean archived checkouts are eligible
 immediately. Unarchived checkouts use the delay configured in settings. Worktrees can also
@@ -252,7 +252,6 @@ output line.
 
 To delegate the workflow design and one-time setup, see
 [use an agent to add resumable Project Actions](./resumable-project-actions-for-agents.md).
-
 
 ## Keep the default branch current
 
