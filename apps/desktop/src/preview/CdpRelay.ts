@@ -143,6 +143,10 @@ export function createCdpRelayConnection(
       case "Target.setAutoAttach": {
         if (attached) return {};
         attached = true;
+        // The real debugger survives relay reconnects. Runtime.enable is a
+        // no-op while its domain is already enabled, so reset old reporting
+        // before the new client can initialize its announced root session.
+        await target.send("Runtime.disable", {}, undefined);
         // The page is announced once, right after this reply, as Chromium does.
         const info = await targetInfo();
         return {
