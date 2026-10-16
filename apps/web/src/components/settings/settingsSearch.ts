@@ -167,11 +167,12 @@ export const SETTINGS_SEARCH_ITEMS = [
   {
     id: "storage-worktree-keep-when",
     targetId: "storage-worktrees",
-    title: "Keep worktrees with local changes",
+    title: "Local work is preserved",
     to: "/settings/storage",
     scope: "project-defaults",
     searchTerms: [
-      "any local files uncommitted changes edited tracked files ignored env build output cleanup",
+      "local files uncommitted changes notes ignored env build output cleanup preserved",
+      "keep worktrees with local changes",
     ],
   },
   {
@@ -187,7 +188,7 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/storage",
     scope: "project-defaults",
     searchTerms: [
-      "disk storage delete deleted archived threads old inactive merged unchanged worktrees retention days project inherit off custom",
+      "disk storage delete deleted archived threads old inactive merged unchanged worktrees dependencies builds dist compiler cargo npm pnpm node_modules retention days project inherit off custom",
     ],
   },
   {
