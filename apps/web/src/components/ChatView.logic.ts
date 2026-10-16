@@ -55,7 +55,7 @@ import { waitForAtomValue } from "../state/waitForAtomValue";
 import { filterTerminalContextsWithText, type TerminalContextDraft } from "../lib/terminalContext";
 import { stripInlineContextReferences } from "~/lib/composerContextReferences";
 import type { DraftThreadEnvMode } from "../composerDraftStore";
-import { collapseExpandedComposerCursor, type ComposerSubmissionIntent } from "../composer-logic";
+import type { ComposerSubmissionIntent } from "../composer-logic";
 import type { ReviewCommentContext } from "../reviewCommentContext";
 import { derivePhase, type TimelineEntry } from "../session-logic";
 import type { PreviewMiniPlayerSource } from "../previewMiniPlayerStore";
@@ -1350,7 +1350,7 @@ export function restorePlanFollowUpComposer(input: {
   input.writePreviewAnnotations(input.snapshot.previewAnnotations);
   input.writeThreadContexts(input.snapshot.threadContexts);
   input.resetCursor({
-    cursor: collapseExpandedComposerCursor(input.snapshot.prompt, input.snapshot.prompt.length),
+    cursor: input.snapshot.prompt.length,
     prompt: input.snapshot.prompt,
     detectTrigger: true,
   });

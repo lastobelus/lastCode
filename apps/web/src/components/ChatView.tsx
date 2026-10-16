@@ -210,9 +210,9 @@ import { useDiffPanelStore } from "../diffPanelStore";
 import { useActiveThreadRef } from "../hooks/useActiveThreadRef";
 import {
   type ComposerSubmissionIntent,
-  collapseExpandedComposerCursor,
   parseStandaloneComposerSlashCommand,
 } from "../composer-logic";
+import { composerFormattingDelimiterForShortcut } from "../lastcodeComposerSourceShortcuts";
 import {
   derivePendingApprovals,
   derivePendingUserInputs,
@@ -8619,6 +8619,16 @@ export default function ChatView(props: ChatViewProps) {
         }
       }
 
+      if (
+        composerFormattingDelimiterForShortcut(event) &&
+        event.target instanceof HTMLElement &&
+        event.target.closest('[data-composer-rich-text="true"]')
+      ) {
+        // Source formatting owns the chord while this editor is focused, including
+        // Mod+Shift+S, which settles the thread elsewhere.
+        return;
+      }
+
       const command = resolveChatShortcutCommand(event, keybindings, scriptKeybindings, {
         context: shortcutContext,
       });
@@ -10357,10 +10367,7 @@ export default function ChatView(props: ChatViewProps) {
             if (composerRef.current && currentRouteThreadKeyRef.current === routeThreadKey) {
               promptRef.current = messageTextForSend;
               composerRef.current.resetCursorState({
-                cursor: collapseExpandedComposerCursor(
-                  messageTextForSend,
-                  messageTextForSend.length,
-                ),
+                cursor: messageTextForSend.length,
                 prompt: messageTextForSend,
                 detectTrigger: true,
               });
@@ -10766,7 +10773,7 @@ export default function ChatView(props: ChatViewProps) {
         setComposerDraftReviewComments(composerDraftTarget, composerReviewCommentsSnapshot);
         setComposerDraftThreadContexts(composerDraftTarget, composerThreadContextsSnapshot);
         composerRef.current?.resetCursorState({
-          cursor: collapseExpandedComposerCursor(messageTextForSend, messageTextForSend.length),
+          cursor: messageTextForSend.length,
           prompt: messageTextForSend,
           detectTrigger: true,
         });

@@ -777,16 +777,14 @@ function MarkdownDetails({
 }
 
 /**
- * The code block frame, shared with the composer so an editable fence and a
- * rendered one cannot drift apart: the wrapper, its header row with the
- * language title, an optional actions slot, and the body as children. The
- * composer passes Tiptap's node view wrapper as the outer element.
+ * The rendered code block frame includes its wrapper, language title,
+ * optional header actions, and body as children.
  */
 const THREAD_FIND_IGNORE_PROPS = {
   "data-thread-find-ignore": "",
 } as React.HTMLAttributes<HTMLDivElement>;
 
-export function MarkdownCodeBlockFrame({
+function MarkdownCodeBlockFrame({
   as: Wrapper = "div",
   language,
   fenceTitle,
@@ -802,7 +800,7 @@ export function MarkdownCodeBlockFrame({
   fenceTitle: string | null;
   theme: "light" | "dark";
   wrapped?: boolean;
-  /** Replaces the language title, as the composer does with its language picker. */
+  /** Replaces the language title. */
   title?: React.ReactNode;
   actions?: React.ReactNode;
   headerProps?: React.HTMLAttributes<HTMLDivElement>;
