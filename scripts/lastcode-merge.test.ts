@@ -122,7 +122,7 @@ describe("lastcode-merge", () => {
     );
     expect(() =>
       validateGithubCiForMerge({ state: "pending", reason: "run-in-progress", runId: 456 }),
-    ).toThrow("run Wait for PR again");
+    ).toThrow("lastcode:pr-gates");
     expect(() =>
       validateGithubCiForMerge({
         state: "failure",

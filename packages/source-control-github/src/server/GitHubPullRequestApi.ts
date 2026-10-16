@@ -2241,6 +2241,8 @@ export const make = Effect.gen(function* () {
         let author: PullRequestActor | null = null;
         let commits: ReadonlyArray<PullRequestCommit> = [];
         const remarks: PullRequestComment[] = [];
+        let totalCount = 0;
+        let rawCount = 0;
         let commentsAfter: string | null = null;
         let reviewsAfter: string | null = null;
         let withComments = true;
@@ -2267,8 +2269,10 @@ export const make = Effect.gen(function* () {
           if (page === 0) {
             author = read.author ?? null;
             commits = read.commits ?? [];
+            totalCount = read.totalCount;
           }
           remarks.push(...read.remarks);
+          rawCount += read.rawCount;
           commentsAfter = read.nextCommentsCursor;
           reviewsAfter = read.nextReviewsCursor;
           withComments = withComments && commentsAfter !== null;
@@ -2279,6 +2283,8 @@ export const make = Effect.gen(function* () {
           comments: remarks.toSorted((left, right) =>
             left.createdAt.localeCompare(right.createdAt),
           ),
+          commentCount: remarks.length + Math.max(0, totalCount - rawCount),
+          truncated: withComments || withReviews,
           commits,
         } satisfies GitHubPullRequestActivity;
       }),

@@ -5,13 +5,18 @@ may take long enough that keeping an agent turn open would be wasteful. The Acti
 dedicated terminal. When it exits, LastCode queues one automated follow-up in the same thread for
 the agent to handle after its current turn finishes.
 
-Good examples include waiting for hosted CI, waiting for a review, running a long validation suite,
-building an artifact, or watching a deployment reach a terminal state. Ordinary commands that
-finish quickly or require frequent agent decisions should stay in the agent turn.
+Good examples include running a long validation suite, building an artifact, or watching a
+deployment or service run reach a terminal state. Ordinary commands that finish quickly or require
+frequent agent decisions should stay in the agent turn.
 
-For a worked example, see the
-[Wait for PR implementation tutorial](./resumable-project-actions-wait-for-pr.md). For the one-time
-LastCode configuration flow, see the
+Do not use an Action to wait on a pull request. `watch_pull_request` already wakes the thread when
+checks finish, someone else comments or reacts to the agent's comment, or the branch conflicts; a second waiter for the same PR wakes the
+thread twice and disagrees about timing. Put any readiness rules in a one-shot check that the agent
+runs on each wake, as LastCode does with `pnpm lastcode:pr-gates`.
+
+For a worked example, see `scripts/lastcode-wait-for-checkpoint.ts`, behind the **Wait for
+Checkpoint** Action: it binds to one service run, reports coarse progress, and returns one result,
+including an `attention` result for a replaced run or timeout. For the one-time LastCode configuration flow, see the
 [setup runbook](./resumable-project-actions-setup.md).
 
 ## The agent contract
@@ -43,17 +48,16 @@ for the thread's project and explicitly opted in before it is eligible.
 The Action should own waiting and mechanical observation. The agent should own interpretation and
 decisions.
 
-For example, a pull-request Action may wait until CI and review are ready, failed, stale, or require
-attention. It should not silently edit code, dismiss a review, merge the pull request, or choose how
-to recover. Those decisions belong in the resumed agent turn, where the current repository state
+For example, a deployment Action may wait until a deployment is healthy, failed, or superseded. It
+should not silently roll back, retry, promote the release, or choose how to recover. Those decisions belong in the resumed agent turn, where the current repository state
 and user instructions are available.
 
 A useful Action has these properties:
 
-- **Explicit starting conditions.** Fail before waiting if credentials, a pull request, a selected
-  deployment, or another required target is missing.
-- **Stable identity.** Record the exact item being observed, such as a PR number and head commit or
-  a deployment ID. Do not accidentally follow a moving branch or "latest" result.
+- **Explicit starting conditions.** Fail before waiting if credentials, a selected deployment, or
+  another required target is missing.
+- **Stable identity.** Record the exact item being observed, such as a deployment ID or a build's
+  immutable tag. Do not accidentally follow a moving branch or "latest" result.
 - **Bounded wake conditions.** Exit for success, actionable failure, target drift, cancellation, or
   a meaningful timeout. An Action that can wait forever should do so only deliberately.
 - **Idempotent observation.** Re-running the Action should observe current state rather than repeat
@@ -78,22 +82,22 @@ import { lastCodeAction } from "./lib/lastcode-action-kit.ts";
 
 lastCodeAction.progress({
   state: "waiting",
-  phase: "review",
-  summary: "Waiting for Codex review",
+  phase: "rollout",
+  summary: "Waiting for the deployment to become healthy",
 });
 
 lastCodeAction.result({
   outcome: "attention",
-  reason: "review-findings",
-  summary: "Two review findings need changes",
+  reason: "health-check-failed",
+  summary: "Two health checks failed after rollout",
   subject: {
-    type: "pull-request",
-    id: "42",
-    revision: headCommit,
-    url: pullRequestUrl,
+    type: "deployment",
+    id: deploymentId,
+    revision: releaseCommit,
+    url: deploymentUrl,
   },
-  facts: { findings: "2", ci: "passed" },
-  artifacts: [{ label: "Pull request", url: pullRequestUrl }],
+  facts: { failedChecks: "2" },
+  artifacts: [{ label: "Deployment", url: deploymentUrl }],
 });
 ```
 
@@ -147,13 +151,13 @@ the exact transition that launches it; a passing mention of the Action is easy t
 For example:
 
 ```markdown
-After publishing a pull-request head and requesting review:
+After starting a deployment:
 
 1. Call `list_project_actions`.
-2. Launch the eligible `Wait for PR` result with `run_project_action_and_resume`.
-3. End the turn immediately. Do not poll GitHub in the agent turn.
-4. On resume, handle the reported failure, drift, or review findings. Relaunch the Action after a
-   new head or review request. Merge only when the Action reports the exact head ready.
+2. Launch the eligible `Wait for deployment` result with `run_project_action_and_resume`.
+3. End the turn immediately. Do not poll the deployment in the agent turn.
+4. On resume, check the reported deployment ID, then handle a failure or supersession. Relaunch the
+   Action only for a new deployment. Promote only when the Action reports that deployment healthy.
 5. Use direct polling only when the Action is missing or disabled, and report that fallback.
 ```
 
@@ -180,18 +184,16 @@ If LastCode restarted after the command finished but before the follow-up was qu
 **Resume agent** to send the saved follow-up or **Discard** to remove it. LastCode does not rerun
 the command automatically.
 
-## Adapt an existing PR babysitting skill
+## Adapt an existing waiting workflow
 
-When asked to adapt a project's existing PR babysitting skill to resumable Actions, treat the task
-as an end-to-end workflow change rather than a wording-only skill edit:
+When asked to adapt a project's existing waiting workflow to resumable Actions, treat the task as an
+end-to-end workflow change rather than a wording-only skill edit:
 
-1. Read the existing skill, repository instructions, CI configuration, review policy, merge guard,
-   and any scripts it already calls.
-2. Preserve that project's actual acceptance gates. Use **Wait for PR** as a design pattern, but do
-   not copy LastCode-specific branch names, review markers, GitHub checks, or merge policy unless
+1. Read the existing skill, repository instructions, and any scripts it already calls.
+2. Preserve that project's actual acceptance gates. Do not copy LastCode-specific conventions unless
    the target project already uses them.
-3. Move only the passive observation into a focused wait command. Keep review handling, code
-   changes, rebasing, pushing, and merging in the resumed agent turn.
+3. Move only the passive observation into a focused wait command. Keep fixes, retries, publishing,
+   and other decisions in the resumed agent turn.
 4. Add focused tests for the wait decisions and an importable `t3.json` Action.
 5. Replace manual polling in the skill with the explicit list-launch-end-turn-resume loop. Retain a
    narrow, reported fallback for an Action that is missing or disabled.
@@ -202,8 +204,8 @@ as an end-to-end workflow change rather than a wording-only skill edit:
 7. Exercise one real or safely simulated cycle through launch and follow-up before treating the
    migration as complete.
 
-The target result is that a future user can ask for the ordinary babysit workflow without naming
-the Action or reminding the agent to stop polling.
+The target result is that a future user can ask for the ordinary workflow without naming the Action
+or reminding the agent to stop polling.
 
 ## Review checklist
 

@@ -1308,28 +1308,24 @@ describe("review thread decoding", () => {
     expect(threads).toHaveLength(1);
   });
 
-  it("reads edit times for issue comments and reviews without using reaction updates", () => {
+  it("reads review edit times without using reaction updates", () => {
     const editedAt = "2026-10-02T12:06:00Z";
     const result = expectSuccess(
       decodeReviewThreadsJson(
         threadsJson([], {
-          comments: {
+          reviews: {
             nodes: [
-              { id: "edited", lastEditedAt: editedAt },
+              { id: "review", lastEditedAt: editedAt },
               { id: "reaction-only", lastEditedAt: null, updatedAt: editedAt },
             ],
           },
-          reviews: { nodes: [{ id: "review", lastEditedAt: editedAt }] },
         }),
       ),
     );
-    expect([...result.editedAtById]).toEqual([
-      ["edited", editedAt],
-      ["review", editedAt],
-    ]);
+    expect([...result.editedAtById]).toEqual([["review", editedAt]]);
   });
 
-  it("puts an issue comment's and a review's reactions in reactionsById, and the pull request's own in reactions", () => {
+  it("puts a review's reactions in reactionsById, and the pull request's own in reactions", () => {
     const result = expectSuccess(
       decodeReviewThreadsJson(
         threadsJson([], {
@@ -1340,19 +1336,6 @@ describe("review thread decoding", () => {
               reactors: { totalCount: 1, nodes: [{ login: "bilal" }] },
             },
           ],
-          comments: {
-            nodes: [
-              {
-                id: "c1",
-                reactionGroups: [
-                  {
-                    content: "THUMBS_UP",
-                    reactors: { totalCount: 1, nodes: [{ login: "julius" }] },
-                  },
-                ],
-              },
-            ],
-          },
           reviews: {
             nodes: [
               {
@@ -1371,7 +1354,6 @@ describe("review thread decoding", () => {
       { content: "heart", count: 1, actors: ["bilal"], viewerHasReacted: true },
     ]);
     expect([...result.reactionsById]).toEqual([
-      ["c1", [{ content: "thumbs-up", count: 1, actors: ["julius"], viewerHasReacted: false }]],
       ["r1", [{ content: "eyes", count: 1, actors: ["hubot"], viewerHasReacted: false }]],
     ]);
   });
@@ -1428,8 +1410,8 @@ describe("REVIEW_THREADS_GRAPHQL_QUERY", () => {
     expect(Number(match[1]) * Number(match[2])).toBeLessThanOrEqual(1_000);
   });
 
-  it("asks for reactionGroups on the pull request itself, its comments, its reviews and each thread's comments", () => {
-    expect(REVIEW_THREADS_GRAPHQL_QUERY.match(/reactionGroups/g)).toHaveLength(4);
+  it("asks for reactionGroups on the pull request itself, its reviews and each thread's comments", () => {
+    expect(REVIEW_THREADS_GRAPHQL_QUERY.match(/reactionGroups/g)).toHaveLength(3);
     // The reviews connection is new: only reactions were ever wanted off it.
     expect(REVIEW_THREADS_GRAPHQL_QUERY).toContain("reviews(first:");
   });
@@ -2114,6 +2096,9 @@ describe("pull request watch fingerprints", () => {
       "w0: repository(owner: $w0_owner, name: $w0_name) { pullRequest(number: $w0_number)",
     );
     expect(document?.query).toContain("w1: repository(owner: $w1_owner, name: $w1_name)");
+    expect(document?.query.replace(/\s+/g, " ")).toContain(
+      "id lastEditedAt reactionGroups { content reactors(first: 10) { totalCount nodes {",
+    );
     expect(document?.variables).toEqual({
       w0_owner: "pingdotgg",
       w0_name: "t3code",
@@ -2133,11 +2118,30 @@ describe("pull request watch fingerprints", () => {
       readonly failed: number;
       readonly commentEditedAt: string | null;
       readonly reviews: number;
+      readonly reactions?: number;
+      readonly reactors?: ReadonlyArray<string>;
     }) => ({
       state: "OPEN",
       mergeable: "MERGEABLE",
       headRefOid: "abc123",
-      comments: { totalCount: 1, nodes: [{ lastEditedAt: input.commentEditedAt }] },
+      comments: {
+        totalCount: 1,
+        nodes: [
+          {
+            id: "comment-1",
+            lastEditedAt: input.commentEditedAt,
+            reactionGroups: [
+              {
+                content: "THUMBS_UP",
+                reactors: {
+                  totalCount: input.reactions ?? 0,
+                  nodes: (input.reactors ?? []).map((login) => ({ login })),
+                },
+              },
+            ],
+          },
+        ],
+      },
       reviews: { totalCount: input.reviews, nodes: [] },
       reviewThreads: { totalCount: 0 },
       commits: {
@@ -2177,6 +2181,31 @@ describe("pull request watch fingerprints", () => {
     const checkFinished = fingerprint({ ...base, running: 1, failed: 1 });
     const summaryEdited = fingerprint({ ...base, commentEditedAt: "2026-10-05T23:47:43Z" });
     const replied = fingerprint({ ...base, reviews: 2 });
+    const reacted = fingerprint({ ...base, reactions: 1 });
+    expect(reacted.remarks).not.toBe(before.remarks);
+    expect(reacted.status).toBe(before.status);
+    expect(fingerprint({ ...base, reactions: 0 }).remarks).toBe(before.remarks);
+
+    const namedReaction = { ...base, reactions: 2, reactors: ["maintainer", "reviewer"] };
+    const named = fingerprint(namedReaction);
+    const actorReplaced = fingerprint({
+      ...namedReaction,
+      reactors: ["maintainer", "codex[bot]"],
+    });
+    expect(actorReplaced.remarks).not.toBe(named.remarks);
+    expect(actorReplaced.status).toBe(named.status);
+    expect(fingerprint({ ...namedReaction, reactors: ["reviewer", "maintainer"] }).remarks).toBe(
+      named.remarks,
+    );
+    // Counts still reveal reactions outside the bounded actor page.
+    const bounded = {
+      ...base,
+      reactions: 11,
+      reactors: Array.from({ length: 10 }, (_, index) => `reviewer-${index}`),
+    };
+    expect(fingerprint({ ...bounded, reactions: 12 }).remarks).not.toBe(
+      fingerprint(bounded).remarks,
+    );
 
     expect(checkFinished.status).not.toBe(before.status);
     expect(checkFinished.remarks).toBe(before.remarks);

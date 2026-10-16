@@ -4,6 +4,7 @@ import { afterEach, assert, expect, it, vi } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
+import * as DateTime from "effect/DateTime";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -4197,6 +4198,149 @@ layer("GitHubPullRequestApi.layer", (it) => {
       expect(conversation.comments.map((comment) => comment.id)).toEqual(["c1", "c2"]);
       assert.isFalse(conversation.truncated);
     }),
+  );
+
+  it.effect.each([
+    { commentCount: 101, requestIndex: 0 },
+    { commentCount: 101, requestIndex: 100 },
+    { commentCount: 1000, requestIndex: 999 },
+    { commentCount: 1001, requestIndex: 1000 },
+  ])(
+    "hydrates review-request reactions at index $requestIndex of $commentCount comments",
+    ({ commentCount, requestIndex }) =>
+      Effect.gen(function* () {
+        const requestId = `IC_${requestIndex + 1}`;
+        const requestEditedAt = DateTime.formatIso(
+          DateTime.add(DateTime.makeUnsafe("2026-07-01T00:00:00Z"), { minutes: requestIndex }),
+        );
+        const reactionGroups = [
+          {
+            content: "THUMBS_UP",
+            viewerHasReacted: true,
+            reactors: {
+              totalCount: 2,
+              nodes: [{ login: "MAINTAINER" }, { login: "codex[bot]" }],
+            },
+          },
+        ];
+        const comments = Array.from({ length: commentCount }, (_, index) => ({
+          id: `IC_${index + 1}`,
+          body: index === requestIndex ? "@codex review" : `Comment ${index + 1}`,
+          createdAt: DateTime.formatIso(
+            DateTime.add(DateTime.makeUnsafe("2026-07-01T00:00:00Z"), { minutes: index }),
+          ),
+          lastEditedAt: index === requestIndex ? requestEditedAt : null,
+        }));
+        mockedExecute.mockImplementation((call) => {
+          if (call.kind !== "graphql") throw new Error("Expected a GraphQL activity read");
+          if (call.operation === "getPullRequestActivity") {
+            const start = Number(call.variables?.commentsAfter ?? 0);
+            const newestFirst = call.query.includes(
+              "orderBy: { field: UPDATED_AT, direction: DESC }",
+            );
+            const orderedComments = newestFirst ? comments.toReversed() : comments;
+            const hasNextPage = start + 100 < commentCount;
+            return Effect.succeed(
+              output(
+                encodeJson({
+                  data: {
+                    viewer: { login: "maintainer" },
+                    repository: {
+                      pullRequest: {
+                        comments: {
+                          totalCount: commentCount,
+                          pageInfo: {
+                            hasNextPage,
+                            endCursor: hasNextPage ? String(start + 100) : null,
+                          },
+                          nodes: orderedComments.slice(start, start + 100).map((comment) => ({
+                            ...comment,
+                            ...(call.query.includes("reactionGroups")
+                              ? { reactionGroups: comment.id === requestId ? reactionGroups : [] }
+                              : {}),
+                          })),
+                        },
+                        ...(call.variables?.withReviews
+                          ? {
+                              reviews: {
+                                totalCount: 1,
+                                nodes: [
+                                  {
+                                    id: "PRR_empty",
+                                    body: "",
+                                    state: "COMMENTED",
+                                    submittedAt: "2026-07-01T00:00:00Z",
+                                  },
+                                ],
+                              },
+                            }
+                          : {}),
+                      },
+                    },
+                  },
+                }),
+              ),
+            );
+          }
+          // GitHub defaults to the oldest comments; the watch fingerprints the newest updates.
+          const newestFirst = call.query.includes(
+            "comments(first: 100, orderBy: { field: UPDATED_AT, direction: DESC })",
+          );
+          const metadataPage = (
+            newestFirst
+              ? comments.toReversed()
+              : call.query.includes("comments(first: 100)")
+                ? comments
+                : []
+          ).slice(0, 100);
+          return Effect.succeed(
+            output(
+              encodeJson({
+                data: {
+                  viewer: { login: "maintainer" },
+                  repository: {
+                    pullRequest: {
+                      reviewThreads: { nodes: [] },
+                      comments: {
+                        nodes: metadataPage.map(({ id }) => ({
+                          id,
+                          reactionGroups: id === requestId ? reactionGroups : [],
+                        })),
+                      },
+                    },
+                  },
+                },
+              }),
+            ),
+          );
+        });
+        const provider = yield* GitHubPullRequestProvider.make;
+
+        const activity = yield* provider.getChangeRequestActivity({
+          cwd: "/w",
+          repository: "acme/web",
+          host: "github.com",
+          number: 7,
+        });
+
+        expect(activity.comments).toHaveLength(Math.min(commentCount, 1000));
+        expect(activity.comments.find(({ id }) => id === requestId)).toMatchObject({
+          body: "@codex review",
+          editedAt: requestEditedAt,
+          reactions: [
+            { content: "thumbs-up", count: 2, actors: ["codex[bot]"], viewerHasReacted: true },
+          ],
+        });
+        expect(activity.comments.map(({ id }) => id)).toEqual(
+          comments.slice(-1000).map(({ id }) => id),
+        );
+        expect(activity.commentsTruncated).toBe(commentCount > 1000);
+        expect(activity.reviewThreadsTruncated).toBe(false);
+        expect(activity.commentCount).toBe(commentCount);
+        expect(mockedExecute).toHaveBeenCalledTimes(
+          Math.ceil(Math.min(commentCount, 1000) / 100) + 1,
+        );
+      }),
   );
 
   it.effect("stops at the thread bound and says the conversation was cut short", () =>

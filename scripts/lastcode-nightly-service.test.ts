@@ -83,13 +83,13 @@ it("configures one durable recovery thread only during installation", () => {
       "--recovery-thread",
       "e01b7101-0713-4df7-9b6b-5c46f9d507db",
       "--trusted-project-action",
-      "lc-wait-for-pr",
+      "lc-wait-for-checkpoint",
     ]),
   ).toEqual({
     command: "install",
     intervalSeconds: 1234,
     recoveryThreadId: "e01b7101-0713-4df7-9b6b-5c46f9d507db",
-    trustedProjectActionIds: ["lc-wait-for-pr"],
+    trustedProjectActionIds: ["lc-wait-for-checkpoint"],
   });
   expect(
     parseNightlyServiceArgs(["install", "--interval-seconds", "1234", "--no-recovery-thread"]),
@@ -212,19 +212,19 @@ it("persists the Project Action trust allowlist without discarding recovery deli
   expect(
     nextCheckpointSupervisorConfig(
       { schemaVersion: 1, recoveryThreadId: "thread-maintenance" },
-      { trustedProjectActionIds: ["lc-wait-for-pr"] },
+      { trustedProjectActionIds: ["lc-wait-for-checkpoint"] },
     ),
   ).toEqual({
     schemaVersion: 1,
     recoveryThreadId: "thread-maintenance",
-    trustedProjectActionIds: ["lc-wait-for-pr"],
+    trustedProjectActionIds: ["lc-wait-for-checkpoint"],
   });
   expect(
     nextCheckpointSupervisorConfig(
       {
         schemaVersion: 1,
         recoveryThreadId: "thread-maintenance",
-        trustedProjectActionIds: ["lc-wait-for-pr"],
+        trustedProjectActionIds: ["lc-wait-for-checkpoint"],
       },
       { clearRecoveryThread: true, trustedProjectActionIds: [] },
     ),

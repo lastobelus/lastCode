@@ -52,7 +52,8 @@ const READ_FAILURE_LIMIT = 8;
 const QUIET_REREAD_MS = 10 * 60_000;
 /**
  * With a host fingerprint, how long until the activity is read again anyway: the fingerprint
- * does not see edits to comments inside review threads.
+ * does not see edits to comments inside review threads, or reactions on reviews and their
+ * comments.
  */
 const FINGERPRINT_REREAD_MS = 30 * 60_000;
 
@@ -206,6 +207,8 @@ function watchesEqual(left: ThreadPullRequestWatch, right: ThreadPullRequestWatc
     left.passedChecks.join("\n") === right.passedChecks.join("\n") &&
     left.remarksThrough === right.remarksThrough &&
     left.remarkIds.join("\n") === right.remarkIds.join("\n") &&
+    left.reactionKeys.join("\n") === right.reactionKeys.join("\n") &&
+    JSON.stringify(left.reactionCounts) === JSON.stringify(right.reactionCounts) &&
     left.conflicting === right.conflicting &&
     left.wakes === right.wakes
   );

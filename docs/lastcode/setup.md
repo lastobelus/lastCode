@@ -78,8 +78,7 @@ Reconciled Actions are available immediately but are not granted agent resume
 permission by default. Existing imported Actions keep their IDs, keybindings,
 and local permission. To make a repository-owned Action resumable as an
 explicit setup choice, repeat `--trusted-project-action` with its stable source
-ID: `lc-prepare-dependencies`, `lc-wait-for-pr`, `lc-local-ci`, or
-`lc-build-intel-package`. Include `lc-prepare-dependencies` when agents should
+ID: `lc-prepare-dependencies`, `lc-local-ci`, or `lc-build-intel-package`. Include `lc-prepare-dependencies` when agents should
 prepare worktree dependencies on demand. Setup saves the selected allowlist for
 reconciliation after later managed checkout
 refreshes; rerunning setup without an ID removes only the corresponding managed

@@ -295,6 +295,16 @@ const RawStackMembershipsSchema = Schema.Struct({
 /** How many of a reaction's people the hover names before it counts the rest. */
 const REACTORS_PER_GROUP = 10;
 
+const REACTORS_FIELDS = `reactors(first: ${REACTORS_PER_GROUP}) {
+  totalCount
+  nodes {
+    ... on User { login }
+    ... on Bot { login }
+    ... on Organization { login }
+    ... on Mannequin { login }
+  }
+}`;
+
 /**
  * A reaction group as every reactable node reports it. `reactors` is bounded rather than paged:
  * a hover says who reacted, and a hundred and forty names is a count, not a sentence.
@@ -302,15 +312,7 @@ const REACTORS_PER_GROUP = 10;
 const REACTION_GROUPS_FIELDS = `reactionGroups {
   content
   viewerHasReacted
-  reactors(first: ${REACTORS_PER_GROUP}) {
-    totalCount
-    nodes {
-      ... on User { login }
-      ... on Bot { login }
-      ... on Organization { login }
-      ... on Mannequin { login }
-    }
-  }
+  ${REACTORS_FIELDS}
 }`;
 
 /** GitHub's reaction names, which are the same eight the contract carries under other spellings. */
@@ -488,6 +490,7 @@ const RawActivityConnection = <S extends Schema.Top>(node: S) =>
     Schema.NullOr(
       Schema.Struct({
         pageInfo: Schema.optional(RawPageInfoSchemaFields()),
+        totalCount: Schema.optional(Schema.Int),
         nodes: Schema.Array(node),
       }),
     ),
@@ -495,6 +498,7 @@ const RawActivityConnection = <S extends Schema.Top>(node: S) =>
 
 const RawActivitySchema = Schema.Struct({
   data: Schema.Struct({
+    viewer: Schema.optional(Schema.NullOr(RawActorSchema)),
     repository: Schema.Struct({
       pullRequest: Schema.Struct({
         author: Schema.optional(Schema.NullOr(RawActorSchema)),
@@ -605,20 +609,6 @@ const RawReviewThreadsSchema = Schema.Struct({
         ...RawViewerFieldsSchema.fields,
         author: Schema.optional(Schema.NullOr(RawActorSchema)),
         reactionGroups: RawReactionGroupsSchema,
-        comments: Schema.optional(
-          Schema.NullOr(
-            Schema.Struct({
-              nodes: Schema.Array(
-                Schema.Struct({
-                  id: Schema.optional(Schema.NullOr(Schema.String)),
-                  author: Schema.optional(Schema.NullOr(RawActorSchema)),
-                  lastEditedAt: Schema.optional(Schema.NullOr(Schema.String)),
-                  reactionGroups: RawReactionGroupsSchema,
-                }),
-              ),
-            }),
-          ),
-        ),
         /**
          * Reviews for their reactions and actor identity: the words and the verdict arrive with
          * `gh pr view --json reviews`, which reports no reaction of any kind.
@@ -917,19 +907,25 @@ export function decodePullRequestPreviewJson(
  * The conversation a pull request carries outside its review threads: who opened it, its issue
  * comments, its reviews and its newest commits. The two remark connections page independently, so
  * each is switched on only while it has more to give; the first read asks for everything.
+ * Read issue comments newest-updated first so a fresh review request stays
+ * within the existing comment cap on long PRs. Results are re-sorted into
+ * chronological order before they are returned.
  */
 export const PULL_REQUEST_ACTIVITY_GRAPHQL_QUERY = `query($owner: String!, $name: String!, $number: Int!, $head: Boolean!, $withComments: Boolean!, $commentsAfter: String, $withReviews: Boolean!, $reviewsAfter: String) {
+  viewer { login }
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       author @include(if: $head) { __typename login avatarUrl ... on User { name } }
       commits(last: 100) @include(if: $head) {
         nodes { commit { oid messageHeadline committedDate authors(first: 10) { nodes { name email user { login } } } } }
       }
-      comments(first: 100, after: $commentsAfter) @include(if: $withComments) {
+      comments(first: 100, after: $commentsAfter, orderBy: { field: UPDATED_AT, direction: DESC }) @include(if: $withComments) {
+        totalCount
         pageInfo { hasNextPage endCursor }
-        nodes { id body createdAt lastEditedAt url author { __typename login avatarUrl ... on User { name } } }
+        nodes { id body createdAt lastEditedAt url author { __typename login avatarUrl ... on User { name } } ${REACTION_GROUPS_FIELDS} }
       }
       reviews(first: 100, after: $reviewsAfter) @include(if: $withReviews) {
+        totalCount
         pageInfo { hasNextPage endCursor }
         nodes { id body state submittedAt lastEditedAt url author { __typename login avatarUrl ... on User { name } } }
       }
@@ -939,6 +935,8 @@ export const PULL_REQUEST_ACTIVITY_GRAPHQL_QUERY = `query($owner: String!, $name
 
 /** GitHub's own ceiling on a connection page, which is what both thread reads ask for. */
 const GRAPHQL_PAGE_SIZE = 100;
+
+const RECENTLY_UPDATED_COMMENTS_GRAPHQL_FIELD = `comments(first: ${GRAPHQL_PAGE_SIZE}, orderBy: { field: UPDATED_AT, direction: DESC })`;
 
 /**
  * The ceiling on `search`, which refuses anything larger with EXCESSIVE_PAGINATION (measured:
@@ -1070,9 +1068,6 @@ export const REVIEW_THREADS_GRAPHQL_QUERY = `query($owner: String!, $name: Strin
       viewerDidAuthor
       author { __typename login avatarUrl }
       ${REACTION_GROUPS_FIELDS}
-      comments(first: ${GRAPHQL_PAGE_SIZE}) {
-        nodes { id lastEditedAt author { __typename login avatarUrl } ${REACTION_GROUPS_FIELDS} }
-      }
       reviews(first: ${GRAPHQL_PAGE_SIZE}) { nodes { id lastEditedAt author { __typename login avatarUrl } ${REACTION_GROUPS_FIELDS} } }
       reviewRequests(first: 50) {
         nodes {
@@ -1397,6 +1392,8 @@ export interface GitHubPullRequestHead {
 export interface GitHubPullRequestActivity {
   readonly author: PullRequestActor | null;
   readonly comments: ReadonlyArray<PullRequestComment>;
+  readonly commentCount: number;
+  readonly truncated: boolean;
   readonly commits: ReadonlyArray<PullRequestCommit>;
 }
 
@@ -1715,10 +1712,13 @@ function isReviewVerdict(reviewState: string | null): boolean {
   }
 }
 
-function toComments(raw: {
-  readonly comments?: ReadonlyArray<Schema.Schema.Type<typeof RawCommentSchema>> | undefined;
-  readonly reviews?: ReadonlyArray<Schema.Schema.Type<typeof RawReviewSchema>> | undefined;
-}): ReadonlyArray<PullRequestComment> {
+function toComments(
+  raw: {
+    readonly comments?: ReadonlyArray<Schema.Schema.Type<typeof RawCommentSchema>> | undefined;
+    readonly reviews?: ReadonlyArray<Schema.Schema.Type<typeof RawReviewSchema>> | undefined;
+  },
+  viewer: string | null,
+): ReadonlyArray<PullRequestComment> {
   const issueComments = (raw.comments ?? []).map((comment): PullRequestComment => ({
     id: comment.id,
     kind: "issue-comment",
@@ -1729,6 +1729,7 @@ function toComments(raw: {
     url: trimmed(comment.url),
     path: null,
     reviewState: null,
+    reactions: toReactions(comment.reactionGroups, viewer),
   }));
   // A review with no body is kept only when its state is the event itself — an approval, a
   // request for changes, a dismissal. GitHub also opens a bodiless `COMMENTED` review as the
@@ -2224,18 +2225,20 @@ const WATCH_FINGERPRINT_CHECK_COUNTS =
   "checkRunCountsByState { state count } statusContextCountsByState { state count }";
 
 /**
- * What a pull request watch needs to notice, priced by GitHub at one point for twenty-five pull
- * requests, where the detail and activity reads it gates cost sixteen for one. Counts and the
+ * What a pull request watch needs to notice, with every connection bounded so each poll stays far
+ * cheaper than the detail and activity reads it gates. Counts and the
  * newest edit cover new comments, reviews (a reply in a review thread is a review), threads, and
  * a bot rewriting its summary; check counts by state move whenever a check starts or finishes.
  * Comments come most recently updated first, since an edit moves `updatedAt`, so an edit to an
  * old comment on a long pull request is still in the page. Reviews have no such order: an edit
  * to a review older than the last hundred waits for the watch's periodic full read, as do edits
- * to comments inside review threads, which cost a point per pull request to ask for.
+ * to comments inside review threads, which cost a point per pull request to ask for. Reactions
+ * are fingerprinted only on that comment page, where a reviewer bot reacts to a review request;
+ * reactions on reviews and inline comments also wait for the full read.
  */
 const PULL_REQUEST_WATCH_FINGERPRINT_SELECTION =
   "state mergeable headRefOid " +
-  `comments(first: 100, orderBy: { field: UPDATED_AT, direction: DESC }) { ${WATCH_FINGERPRINT_EDITS} } ` +
+  `${RECENTLY_UPDATED_COMMENTS_GRAPHQL_FIELD} { totalCount nodes { id lastEditedAt reactionGroups { content ${REACTORS_FIELDS} } } } ` +
   `reviews(last: 100) { ${WATCH_FINGERPRINT_EDITS} } ` +
   "reviewThreads { totalCount } " +
   `commits(last: 1) { nodes { commit { statusCheckRollup { contexts { ${WATCH_FINGERPRINT_CHECK_COUNTS} } } } } }`;
@@ -2265,6 +2268,26 @@ const RawEditedSchema = Schema.Struct({
   totalCount: Schema.Int,
   nodes: Schema.Array(Schema.NullOr(Schema.Struct({ lastEditedAt: Schema.NullOr(Schema.String) }))),
 });
+const RawReactionEditedSchema = Schema.Struct({
+  totalCount: Schema.Int,
+  nodes: Schema.Array(
+    Schema.NullOr(
+      Schema.Struct({
+        id: Schema.String,
+        lastEditedAt: Schema.NullOr(Schema.String),
+        reactionGroups: Schema.Array(
+          Schema.Struct({
+            content: Schema.String,
+            reactors: Schema.Struct({
+              totalCount: Schema.Int,
+              nodes: Schema.Array(Schema.NullOr(RawActorSchema)),
+            }),
+          }),
+        ),
+      }),
+    ),
+  ),
+});
 const RawStateCountsSchema = Schema.NullOr(
   Schema.Array(Schema.Struct({ state: Schema.String, count: Schema.Int })),
 );
@@ -2273,7 +2296,7 @@ const decodeWatchFingerprintEntry = Schema.decodeUnknownExit(
     state: Schema.String,
     mergeable: Schema.NullOr(Schema.String),
     headRefOid: Schema.String,
-    comments: RawEditedSchema,
+    comments: RawReactionEditedSchema,
     reviews: RawEditedSchema,
     reviewThreads: Schema.Struct({ totalCount: Schema.Int }),
     commits: Schema.Struct({
@@ -2337,6 +2360,20 @@ export function decodePullRequestWatchFingerprintsJson(
       remarks: [
         pr.comments.totalCount,
         newestEdit(pr.comments),
+        pr.comments.nodes
+          .flatMap((node) =>
+            node === null
+              ? []
+              : node.reactionGroups.map(
+                  (group) =>
+                    `${node.id}:${group.content}:${group.reactors.totalCount}:${group.reactors.nodes
+                      .flatMap((actor) => trimmed(actor?.login) ?? [])
+                      .toSorted()
+                      .join(";")}`,
+                ),
+          )
+          .toSorted()
+          .join(","),
         pr.reviews.totalCount,
         newestEdit(pr.reviews),
         pr.reviewThreads.totalCount,
@@ -2467,6 +2504,8 @@ export interface GitHubPullRequestActivityPage {
   readonly commits?: ReadonlyArray<PullRequestCommit>;
   /** Issue comments and reviews, each list unsorted. */
   readonly remarks: ReadonlyArray<PullRequestComment>;
+  readonly rawCount: number;
+  readonly totalCount: number;
   readonly nextCommentsCursor: string | null;
   readonly nextReviewsCursor: string | null;
 }
@@ -2478,6 +2517,8 @@ export function decodePullRequestActivityJson(
   const decoded = decodeActivity(raw);
   if (!Result.isSuccess(decoded)) return Result.fail(decoded.failure);
   const pr = decoded.success.data.repository.pullRequest;
+  const comments = pr.comments?.nodes ?? [];
+  const reviews = pr.reviews?.nodes ?? [];
   return Result.succeed({
     ...(pr.author === undefined ? {} : { author: toActor(pr.author) }),
     ...(pr.commits === undefined
@@ -2493,10 +2534,16 @@ export function decodePullRequestActivityJson(
             })),
           ),
         }),
-    remarks: toComments({
-      comments: pr.comments?.nodes ?? [],
-      reviews: pr.reviews?.nodes ?? [],
-    }),
+    remarks: toComments(
+      {
+        comments,
+        reviews,
+      },
+      trimmed(decoded.success.data.viewer?.login),
+    ),
+    rawCount: comments.length + reviews.length,
+    totalCount:
+      (pr.comments?.totalCount ?? comments.length) + (pr.reviews?.totalCount ?? reviews.length),
     nextCommentsCursor: nextCursorOf(pr.comments?.pageInfo),
     nextReviewsCursor: nextCursorOf(pr.reviews?.pageInfo),
   });
@@ -2808,7 +2855,6 @@ export function decodeReviewThreadsJson(
   const botLogins = new Set<string>();
   for (const raw of [
     pullRequest.author,
-    ...(pullRequest.comments?.nodes ?? []).map((node) => node.author),
     ...(pullRequest.reviews?.nodes ?? []).map((node) => node.author),
     ...(pullRequest.reviewRequests?.nodes ?? []).map((node) => node.requestedReviewer),
     ...(pullRequest.latestReviews?.nodes ?? []).map((node) => node.author),
@@ -2861,10 +2907,7 @@ export function decodeReviewThreadsJson(
   }
   const reactionsById = new Map<string, ReadonlyArray<PullRequestReaction>>();
   const editedAtById = new Map<string, string>();
-  for (const node of [
-    ...(pullRequest.comments?.nodes ?? []),
-    ...(pullRequest.reviews?.nodes ?? []),
-  ]) {
+  for (const node of pullRequest.reviews?.nodes ?? []) {
     const id = trimmed(node.id);
     if (id === null) continue;
     const editedAt = trimmed(node.lastEditedAt);
