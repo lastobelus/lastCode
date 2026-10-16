@@ -40,7 +40,7 @@ afterEach(() => {
     NodeFS.rmSync(directory, { recursive: true, force: true });
 });
 
-describe("admission publication (controlled platform fixtures, not native Windows proof)", () => {
+describe("admission publication (controlled platform fixtures)", () => {
   it("publishes a prepared owner atomically and releases it once", async () => {
     const directory = temporaryDirectory();
     const rename = vi.spyOn(NodeFS, "renameSync");
@@ -108,9 +108,6 @@ describe("admission publication (controlled platform fixtures, not native Window
     ["linux", "ENOTEMPTY"],
     ["darwin", "EEXIST"],
     ["darwin", "ENOTEMPTY"],
-    ["win32", "EEXIST"],
-    ["win32", "ENOTEMPTY"],
-    ["win32", "EPERM"],
   ])("retries publication after controlled %s/%s contention", async (platform, code) => {
     const directory = temporaryDirectory();
     fixture.platform = platform;
@@ -121,10 +118,8 @@ describe("admission publication (controlled platform fixtures, not native Window
       .mockImplementationOnce(() => {
         throw { code };
       });
-    const exists = vi.spyOn(NodeFS, "existsSync").mockReturnValue(true);
     const release = await acquireLocalCiAdmissionLock(directory, { forceDirectoryLock: true });
     expect(rename).toHaveBeenCalledTimes(2);
-    expect(exists).toHaveBeenCalledTimes(code === "EPERM" ? 1 : 0);
     expect(NodeFS.readdirSync(directory)).toEqual(["admission.lock.d"]);
     release();
     expect(NodeFS.readdirSync(directory)).toEqual([]);
@@ -133,8 +128,6 @@ describe("admission publication (controlled platform fixtures, not native Window
   it.each([
     ["linux", "EPERM"],
     ["darwin", "EPERM"],
-    ["win32", "EPERM"],
-    ["win32", "EACCES"],
   ])(
     "rethrows the identical error for controlled %s/%s without an existing lock",
     async (platform, code) => {
@@ -144,30 +137,12 @@ describe("admission publication (controlled platform fixtures, not native Window
       vi.spyOn(NodeFS, "renameSync").mockImplementation(() => {
         throw error;
       });
-      const exists = vi.spyOn(NodeFS, "existsSync").mockReturnValue(false);
       await expect(
         acquireLocalCiAdmissionLock(directory, { forceDirectoryLock: true }),
       ).rejects.toBe(error);
-      expect(exists).toHaveBeenCalledTimes(platform === "win32" && code === "EPERM" ? 1 : 0);
       expect(NodeFS.readdirSync(directory)).toEqual([]);
     },
   );
-
-  it("preserves an exception from the Windows existence probe", async () => {
-    const directory = temporaryDirectory();
-    fixture.platform = "win32";
-    const existsError = new Error("controlled existence failure");
-    vi.spyOn(NodeFS, "renameSync").mockImplementation(() => {
-      throw { code: "EPERM" };
-    });
-    vi.spyOn(NodeFS, "existsSync").mockImplementation(() => {
-      throw existsError;
-    });
-    await expect(acquireLocalCiAdmissionLock(directory, { forceDirectoryLock: true })).rejects.toBe(
-      existsError,
-    );
-    expect(NodeFS.readdirSync(directory)).toEqual([]);
-  });
 });
 
 describe("empty admission directory cleanup", () => {

@@ -75,6 +75,16 @@ The most common defect in this repo is a change that works on the path you teste
 - **Connection modes.** Local, remote/relay, and tunnel behave differently. Multi-device and multi-environment cases are real.
 - **Docs.** Check whether the change makes existing guidance inaccurate. Apply the [documentation rules](#documentation) before adding anything.
 
+## Platforms
+
+LastCode supports macOS and Linux only. Windows is unsupported and will stay that way, so it must never cost time in checkpoints, package builds, CI, or review. Upstream contributions (`upstream-fix`) follow upstream's platform support instead.
+
+- LastCode-owned code (`scripts/lastcode-*`, `scripts/lib/lastcode-*`, LastCode features and Actions) assumes POSIX. Do not add `win32` branches, PowerShell launchers, Windows path handling, or Windows test cases to it.
+- Leave upstream's Windows code, tests, and workflows (`windows-tests.yml`, the Windows release jobs) in place, because deleting them only creates rebase conflicts. Do not dispatch, fix, or extend them.
+- When upstream Windows changes conflict during a checkpoint rebase, keep both sides' entries as they are. Do not reconcile how anything behaves on Windows.
+- When a Windows-only test, assertion, or type fails a macOS or Linux gate (Quick CI, Full CI, a package build, or `CI Gate`), make the smallest change that clears it: a type annotation, an updated expectation, or `it.skip` with a one-line reason. Do not investigate or repair Windows runtime behavior.
+- Dismiss review findings that affect only Windows with the reason "Windows is unsupported in LastCode."
+
 ## Dev servers
 
 - Worktree setup only links environment files. Inspect the task and actual branch/PR base before preparing dependencies; Git, docs, and thread research do not need an install. When tests, dev, or builds need packages, list Project Actions, launch **Prepare Dependencies** (`lc-prepare-dependencies`) with `run_project_action_and_resume`, and end the turn immediately. Resume after its result, then run the intended work. The Action uses the target checkout's cwd and lockfile, including on older branches, and may be repeated after cleanup. **Run Quick CI** prepares dependencies before CI. For a saved Full CI Action, copy the **Run Quick CI** command from `t3.json` and change its final `--quick` argument to `--full`. Its Node launcher resolves the primary helper from `process.env.T3CODE_PROJECT_ROOT`, keeps the target cwd, and runs CI only after preparation succeeds, without shell-specific environment expansion or chaining. Do not assume tests or dev entry points install packages themselves. Preparation does not warm web caches or build outputs.

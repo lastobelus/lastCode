@@ -3,7 +3,6 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
-import * as NodeProcess from "node:process";
 import { ACTION_EVENT_TOKEN_ENV, ACTION_RUN_ID_ENV } from "@t3tools/shared/actionResumeProtocol";
 import { expect, it } from "vite-plus/test";
 import { getCurrentProcessStartIdentity } from "./lib/lastcode-ci-process-identity.ts";
@@ -14,7 +13,7 @@ import {
   resolveQuickCiReceiptPath,
 } from "./lastcode-local-ci.ts";
 
-it.skipIf(NodeProcess.platform === "win32").each([0, 1])(
+it.each([0, 1])(
   "checks Homebrew prerequisites without background work and preserves exit code %i",
   async (exitCode) => {
     const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-brew-check-"));
@@ -65,77 +64,74 @@ it.skipIf(NodeProcess.platform === "win32").each([0, 1])(
   },
 );
 
-it.skipIf(NodeProcess.platform === "win32")(
-  "runs the affected-workspace command through the installed task runner",
-  () => {
-    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-ci-runner-"));
-    const callsPath = NodePath.join(directory, "calls.jsonl");
-    const testArgsPath = NodePath.join(directory, "test-args.jsonl");
-    try {
+it("runs the affected-workspace command through the installed task runner", () => {
+  const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-ci-runner-"));
+  const callsPath = NodePath.join(directory, "calls.jsonl");
+  const testArgsPath = NodePath.join(directory, "test-args.jsonl");
+  try {
+    NodeFS.writeFileSync(
+      NodePath.join(directory, "package.json"),
+      JSON.stringify({ name: "fixture-root", private: true }),
+    );
+    NodeFS.writeFileSync(
+      NodePath.join(directory, "pnpm-workspace.yaml"),
+      "packages:\n  - 'packages/*'\n",
+    );
+    for (const name of ["selected", "unrelated"]) {
+      const packageRoot = NodePath.join(directory, "packages", name);
+      NodeFS.mkdirSync(packageRoot, { recursive: true });
       NodeFS.writeFileSync(
-        NodePath.join(directory, "package.json"),
-        JSON.stringify({ name: "fixture-root", private: true }),
+        NodePath.join(packageRoot, "package.json"),
+        JSON.stringify({
+          name: `@fixture/${name}`,
+          scripts: { typecheck: "node check.cjs", test: "node test.cjs" },
+        }),
       );
       NodeFS.writeFileSync(
-        NodePath.join(directory, "pnpm-workspace.yaml"),
-        "packages:\n  - 'packages/*'\n",
+        NodePath.join(packageRoot, "check.cjs"),
+        `require('node:fs').appendFileSync(${JSON.stringify(callsPath)}, ${JSON.stringify(`${name}\n`)});`,
       );
-      for (const name of ["selected", "unrelated"]) {
-        const packageRoot = NodePath.join(directory, "packages", name);
-        NodeFS.mkdirSync(packageRoot, { recursive: true });
-        NodeFS.writeFileSync(
-          NodePath.join(packageRoot, "package.json"),
-          JSON.stringify({
-            name: `@fixture/${name}`,
-            scripts: { typecheck: "node check.cjs", test: "node test.cjs" },
-          }),
-        );
-        NodeFS.writeFileSync(
-          NodePath.join(packageRoot, "check.cjs"),
-          `require('node:fs').appendFileSync(${JSON.stringify(callsPath)}, ${JSON.stringify(`${name}\n`)});`,
-        );
-        NodeFS.writeFileSync(
-          NodePath.join(packageRoot, "test.cjs"),
-          `require('node:fs').appendFileSync(${JSON.stringify(testArgsPath)}, JSON.stringify({name:${JSON.stringify(name)},args:process.argv.slice(2)})+${JSON.stringify("\n")});`,
-        );
-      }
-      const step = resolveLocalCiSteps("quick", {
-        kind: "affected",
-        packages: ["@fixture/selected"],
-        changedFiles: [],
-        reason: "Fixture source edit",
-      }).find(({ label }) => label === "Workspace typecheck");
-      if (step?.kind !== "command") throw new Error("Missing workspace typecheck command.");
-      const result = NodeChildProcess.spawnSync(
-        NodePath.resolve(import.meta.dirname, "../node_modules/.bin/vp"),
-        step.args,
-        { cwd: directory, encoding: "utf8", timeout: 15_000 },
+      NodeFS.writeFileSync(
+        NodePath.join(packageRoot, "test.cjs"),
+        `require('node:fs').appendFileSync(${JSON.stringify(testArgsPath)}, JSON.stringify({name:${JSON.stringify(name)},args:process.argv.slice(2)})+${JSON.stringify("\n")});`,
       );
-      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
-      expect(NodeFS.readFileSync(callsPath, "utf8")).toBe("selected\n");
-      const tests = resolveLocalCiSteps("full").find(({ label }) => label === "Workspace tests");
-      if (tests?.kind !== "command") throw new Error("Missing workspace tests command.");
-      const tested = NodeChildProcess.spawnSync(
-        NodePath.resolve(import.meta.dirname, "../node_modules/.bin/vp"),
-        tests.args,
-        { cwd: directory, encoding: "utf8", timeout: 15_000 },
-      );
-      expect(tested.status, `${tested.stdout}\n${tested.stderr}`).toBe(0);
-      const argumentsByPackage = NodeFS.readFileSync(testArgsPath, "utf8")
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line));
-      expect(argumentsByPackage).toEqual(
-        expect.arrayContaining([
-          { name: "selected", args: ["--maxWorkers=1", "--maxConcurrency=1"] },
-          { name: "unrelated", args: ["--maxWorkers=1", "--maxConcurrency=1"] },
-        ]),
-      );
-    } finally {
-      NodeFS.rmSync(directory, { recursive: true, force: true });
     }
-  },
-);
+    const step = resolveLocalCiSteps("quick", {
+      kind: "affected",
+      packages: ["@fixture/selected"],
+      changedFiles: [],
+      reason: "Fixture source edit",
+    }).find(({ label }) => label === "Workspace typecheck");
+    if (step?.kind !== "command") throw new Error("Missing workspace typecheck command.");
+    const result = NodeChildProcess.spawnSync(
+      NodePath.resolve(import.meta.dirname, "../node_modules/.bin/vp"),
+      step.args,
+      { cwd: directory, encoding: "utf8", timeout: 15_000 },
+    );
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(NodeFS.readFileSync(callsPath, "utf8")).toBe("selected\n");
+    const tests = resolveLocalCiSteps("full").find(({ label }) => label === "Workspace tests");
+    if (tests?.kind !== "command") throw new Error("Missing workspace tests command.");
+    const tested = NodeChildProcess.spawnSync(
+      NodePath.resolve(import.meta.dirname, "../node_modules/.bin/vp"),
+      tests.args,
+      { cwd: directory, encoding: "utf8", timeout: 15_000 },
+    );
+    expect(tested.status, `${tested.stdout}\n${tested.stderr}`).toBe(0);
+    const argumentsByPackage = NodeFS.readFileSync(testArgsPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(argumentsByPackage).toEqual(
+      expect.arrayContaining([
+        { name: "selected", args: ["--maxWorkers=1", "--maxConcurrency=1"] },
+        { name: "unrelated", args: ["--maxWorkers=1", "--maxConcurrency=1"] },
+      ]),
+    );
+  } finally {
+    NodeFS.rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 function fixtureNodeExecutable(): string {
   // Vite+ can execute tests with its own newer Node. The actual CI CLI must
@@ -162,7 +158,7 @@ function fixtureNodeExecutable(): string {
   throw new Error("The CI integration fixture requires the supported project Node on PATH.");
 }
 
-it.skipIf(NodeProcess.platform === "win32").each(["standalone", "enclosing Action"] as const)(
+it.each(["standalone", "enclosing Action"] as const)(
   "checks docs once and reuses the exact receipt from both entrypoints under %s",
   (context) => {
     const directory = NodeFS.mkdtempSync(
@@ -391,137 +387,130 @@ it.skipIf(NodeProcess.platform === "win32").each(["standalone", "enclosing Actio
   240_000,
 );
 
-for (const { signal, milestone } of [
+it.each([
   { signal: "SIGTERM", milestone: "diff-whitespace" },
   { signal: "SIGINT", milestone: "diff-whitespace" },
   { signal: "SIGTERM", milestone: "final-worktree-check" },
-] as const) {
-  it.skipIf(NodeProcess.platform === "win32")(
-    `does not publish a deletion-only docs receipt after ${signal} during ${milestone}`,
-    () => {
-      const directory = NodeFS.mkdtempSync(
-        NodePath.join(NodeOS.tmpdir(), "lastcode-quick-cancel-"),
+] as const)(
+  "does not publish a deletion-only docs receipt after $signal during $milestone",
+  ({ signal, milestone }) => {
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-quick-cancel-"));
+    const repoRoot = NodePath.join(directory, "repo");
+    const nodeExecutable = fixtureNodeExecutable();
+    const realGit = process.env.PATH?.split(NodePath.delimiter)
+      .map((path) => NodePath.join(path, "git"))
+      .find((path) => NodeFS.existsSync(path));
+    if (!realGit) throw new Error("The CI integration fixture requires Git on PATH.");
+    NodeFS.mkdirSync(repoRoot);
+    const git = (...args: string[]) =>
+      NodeChildProcess.execFileSync(realGit, args, {
+        cwd: repoRoot,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }).trim();
+    try {
+      git("init", "-b", "lastcode/main");
+      git("config", "user.name", "CI fixture");
+      git("config", "user.email", "fixture@example.com");
+      NodeFS.writeFileSync(NodePath.join(repoRoot, ".gitignore"), "node_modules\n");
+      NodeFS.writeFileSync(NodePath.join(repoRoot, "README.md"), "Initial documentation.\n");
+      NodeFS.writeFileSync(
+        NodePath.join(repoRoot, "pnpm-workspace.yaml"),
+        "packages:\n  - 'packages/*'\n",
       );
-      const repoRoot = NodePath.join(directory, "repo");
-      const nodeExecutable = fixtureNodeExecutable();
-      const realGit = process.env.PATH?.split(NodePath.delimiter)
-        .map((path) => NodePath.join(path, "git"))
-        .find((path) => NodeFS.existsSync(path));
-      if (!realGit) throw new Error("The CI integration fixture requires Git on PATH.");
-      NodeFS.mkdirSync(repoRoot);
-      const git = (...args: string[]) =>
-        NodeChildProcess.execFileSync(realGit, args, {
+      const packageRoot = NodePath.join(repoRoot, "packages/example");
+      NodeFS.mkdirSync(NodePath.join(packageRoot, "src"), { recursive: true });
+      NodeFS.writeFileSync(
+        NodePath.join(packageRoot, "package.json"),
+        JSON.stringify({ name: "@fixture/example", scripts: { typecheck: "tsc --noEmit" } }),
+      );
+      NodeFS.writeFileSync(
+        NodePath.join(packageRoot, "tsconfig.json"),
+        JSON.stringify({ include: ["src"] }),
+      );
+      NodeFS.writeFileSync(NodePath.join(packageRoot, "src/index.ts"), "export const value = 1;\n");
+      git("add", ".");
+      git("commit", "-m", "fixture base");
+      git("remote", "add", "origin", repoRoot);
+      git("switch", "-c", "lastcode/fixture-docs");
+      git("rm", "README.md");
+      git("commit", "-m", "fixture documentation deletion");
+      const head = git("rev-parse", "HEAD");
+      const receiptPath = resolveQuickCiReceiptPath(NodePath.join(repoRoot, ".git"), head);
+      const milestonePath = NodePath.join(directory, "signal-sent.json");
+      const checkedDiffPath = NodePath.join(directory, "diff-checked");
+      const gitWrapper = NodePath.join(repoRoot, "node_modules/.bin/git");
+      NodeFS.mkdirSync(NodePath.dirname(gitWrapper), { recursive: true });
+      NodeFS.writeFileSync(
+        gitWrapper,
+        [
+          `#!${nodeExecutable}`,
+          "const fs = require('node:fs');",
+          "const cp = require('node:child_process');",
+          "const args = process.argv.slice(2);",
+          "const diffCheck = args[0] === 'diff' && args[1] === '--check';",
+          `if (diffCheck) fs.writeFileSync(${JSON.stringify(checkedDiffPath)}, 'checked');`,
+          // The synchronous diff and the later worker-based Git guard both
+          // target the exact CLI, whose PID is inherited from its preload.
+          `const cancel = ${JSON.stringify(milestone)} === 'diff-whitespace' ? diffCheck : args[0] === 'status' && fs.existsSync(${JSON.stringify(checkedDiffPath)});`,
+          `if (cancel && !fs.existsSync(${JSON.stringify(milestonePath)})) {`,
+          "  const parent = Number(process.env.LASTCODE_FIXTURE_CLI_PID);",
+          `  fs.writeFileSync(${JSON.stringify(milestonePath)}, JSON.stringify({signal:${JSON.stringify(signal)},parent}));`,
+          `  process.kill(parent, ${JSON.stringify(signal)});`,
+          "}",
+          `try { cp.execFileSync(${JSON.stringify(realGit)}, args, { stdio: 'inherit' }); } catch (error) { process.exit(error.status ?? 1); }`,
+        ].join("\n"),
+      );
+      NodeFS.chmodSync(gitWrapper, 0o755);
+      const settingsPath = NodePath.join(directory, "settings.json");
+      NodeFS.writeFileSync(
+        settingsPath,
+        JSON.stringify({ lastcodeLocalCi: { backgroundPriority: false } }),
+      );
+      const preload = NodePath.join(directory, "isolated-home.mjs");
+      NodeFS.writeFileSync(
+        preload,
+        [
+          "import os from 'node:os';",
+          "import { syncBuiltinESMExports } from 'node:module';",
+          `os.homedir = () => ${JSON.stringify(NodePath.join(directory, "home"))};`,
+          "process.env.LASTCODE_FIXTURE_CLI_PID = String(process.pid);",
+          "syncBuiltinESMExports();",
+        ].join("\n"),
+      );
+      const result = NodeChildProcess.spawnSync(
+        nodeExecutable,
+        [
+          "--import",
+          preload,
+          NodePath.resolve(import.meta.dirname, "lastcode-local-ci.ts"),
+          "--quick",
+        ],
+        {
           cwd: repoRoot,
           encoding: "utf8",
-          stdio: ["ignore", "pipe", "pipe"],
-        }).trim();
-      try {
-        git("init", "-b", "lastcode/main");
-        git("config", "user.name", "CI fixture");
-        git("config", "user.email", "fixture@example.com");
-        NodeFS.writeFileSync(NodePath.join(repoRoot, ".gitignore"), "node_modules\n");
-        NodeFS.writeFileSync(NodePath.join(repoRoot, "README.md"), "Initial documentation.\n");
-        NodeFS.writeFileSync(
-          NodePath.join(repoRoot, "pnpm-workspace.yaml"),
-          "packages:\n  - 'packages/*'\n",
-        );
-        const packageRoot = NodePath.join(repoRoot, "packages/example");
-        NodeFS.mkdirSync(NodePath.join(packageRoot, "src"), { recursive: true });
-        NodeFS.writeFileSync(
-          NodePath.join(packageRoot, "package.json"),
-          JSON.stringify({ name: "@fixture/example", scripts: { typecheck: "tsc --noEmit" } }),
-        );
-        NodeFS.writeFileSync(
-          NodePath.join(packageRoot, "tsconfig.json"),
-          JSON.stringify({ include: ["src"] }),
-        );
-        NodeFS.writeFileSync(
-          NodePath.join(packageRoot, "src/index.ts"),
-          "export const value = 1;\n",
-        );
-        git("add", ".");
-        git("commit", "-m", "fixture base");
-        git("remote", "add", "origin", repoRoot);
-        git("switch", "-c", "lastcode/fixture-docs");
-        git("rm", "README.md");
-        git("commit", "-m", "fixture documentation deletion");
-        const head = git("rev-parse", "HEAD");
-        const receiptPath = resolveQuickCiReceiptPath(NodePath.join(repoRoot, ".git"), head);
-        const milestonePath = NodePath.join(directory, "signal-sent.json");
-        const checkedDiffPath = NodePath.join(directory, "diff-checked");
-        const gitWrapper = NodePath.join(repoRoot, "node_modules/.bin/git");
-        NodeFS.mkdirSync(NodePath.dirname(gitWrapper), { recursive: true });
-        NodeFS.writeFileSync(
-          gitWrapper,
-          [
-            `#!${nodeExecutable}`,
-            "const fs = require('node:fs');",
-            "const cp = require('node:child_process');",
-            "const args = process.argv.slice(2);",
-            "const diffCheck = args[0] === 'diff' && args[1] === '--check';",
-            `if (diffCheck) fs.writeFileSync(${JSON.stringify(checkedDiffPath)}, 'checked');`,
-            // The synchronous diff and the later worker-based Git guard both
-            // target the exact CLI, whose PID is inherited from its preload.
-            `const cancel = ${JSON.stringify(milestone)} === 'diff-whitespace' ? diffCheck : args[0] === 'status' && fs.existsSync(${JSON.stringify(checkedDiffPath)});`,
-            `if (cancel && !fs.existsSync(${JSON.stringify(milestonePath)})) {`,
-            "  const parent = Number(process.env.LASTCODE_FIXTURE_CLI_PID);",
-            `  fs.writeFileSync(${JSON.stringify(milestonePath)}, JSON.stringify({signal:${JSON.stringify(signal)},parent}));`,
-            `  process.kill(parent, ${JSON.stringify(signal)});`,
-            "}",
-            `try { cp.execFileSync(${JSON.stringify(realGit)}, args, { stdio: 'inherit' }); } catch (error) { process.exit(error.status ?? 1); }`,
-          ].join("\n"),
-        );
-        NodeFS.chmodSync(gitWrapper, 0o755);
-        const settingsPath = NodePath.join(directory, "settings.json");
-        NodeFS.writeFileSync(
-          settingsPath,
-          JSON.stringify({ lastcodeLocalCi: { backgroundPriority: false } }),
-        );
-        const preload = NodePath.join(directory, "isolated-home.mjs");
-        NodeFS.writeFileSync(
-          preload,
-          [
-            "import os from 'node:os';",
-            "import { syncBuiltinESMExports } from 'node:module';",
-            `os.homedir = () => ${JSON.stringify(NodePath.join(directory, "home"))};`,
-            "process.env.LASTCODE_FIXTURE_CLI_PID = String(process.pid);",
-            "syncBuiltinESMExports();",
-          ].join("\n"),
-        );
-        const result = NodeChildProcess.spawnSync(
-          nodeExecutable,
-          [
-            "--import",
-            preload,
-            NodePath.resolve(import.meta.dirname, "lastcode-local-ci.ts"),
-            "--quick",
-          ],
-          {
-            cwd: repoRoot,
-            encoding: "utf8",
-            env: {
-              ...process.env,
-              [ACTION_RUN_ID_ENV]: undefined,
-              [ACTION_EVENT_TOKEN_ENV]: undefined,
-              T3CODE_LOCAL_CI_SETTINGS_PATH: settingsPath,
-            },
-            timeout: 60_000,
+          env: {
+            ...process.env,
+            [ACTION_RUN_ID_ENV]: undefined,
+            [ACTION_EVENT_TOKEN_ENV]: undefined,
+            T3CODE_LOCAL_CI_SETTINGS_PATH: settingsPath,
           },
-        );
-        expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1);
-        expect(result.signal).toBeNull();
-        expect(JSON.parse(NodeFS.readFileSync(milestonePath, "utf8"))).toEqual({
-          signal,
-          parent: result.pid,
-        });
-        expect(result.stdout).toContain("Typecheck scope: none");
-        expect(result.stderr).toContain("Local CI cancelled");
-        expect(result.stdout).not.toContain('"outcome":"success"');
-        expect(NodeFS.existsSync(receiptPath)).toBe(false);
-      } finally {
-        NodeFS.rmSync(directory, { recursive: true, force: true });
-      }
-    },
-    90_000,
-  );
-}
+          timeout: 60_000,
+        },
+      );
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1);
+      expect(result.signal).toBeNull();
+      expect(JSON.parse(NodeFS.readFileSync(milestonePath, "utf8"))).toEqual({
+        signal,
+        parent: result.pid,
+      });
+      expect(result.stdout).toContain("Typecheck scope: none");
+      expect(result.stderr).toContain("Local CI cancelled");
+      expect(result.stdout).not.toContain('"outcome":"success"');
+      expect(NodeFS.existsSync(receiptPath)).toBe(false);
+    } finally {
+      NodeFS.rmSync(directory, { recursive: true, force: true });
+    }
+  },
+  90_000,
+);

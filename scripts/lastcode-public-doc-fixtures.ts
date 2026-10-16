@@ -164,9 +164,6 @@ export function resolvePackagedUserDataDirectory(
   if (platform === "darwin") {
     return NodePath.join(homeDirectory, "Library", "Application Support", "lastcode");
   }
-  if (platform === "win32") {
-    return NodePath.join(homeDirectory, "AppData", "Roaming", "lastcode");
-  }
   return NodePath.join(homeDirectory, ".config", "lastcode");
 }
 
@@ -256,7 +253,7 @@ function startDevRunner(
     ["scripts/dev-runner.ts", mode, "--home-dir", baseDir],
     {
       cwd: REPO_ROOT,
-      detached: NodeProcess.platform !== "win32",
+      detached: true,
       env: environment,
       stdio: ["ignore", "pipe", "pipe"],
     },
@@ -291,8 +288,7 @@ async function waitForReadiness(
 
 function signalOwnedProcess(child: NodeChildProcess.ChildProcess, signal: NodeJS.Signals): void {
   if (child.pid === undefined) return;
-  if (NodeProcess.platform === "win32") child.kill(signal);
-  else NodeProcess.kill(-child.pid, signal);
+  NodeProcess.kill(-child.pid, signal);
 }
 
 async function stopOwnedProcess(child: NodeChildProcess.ChildProcess): Promise<void> {

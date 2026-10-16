@@ -194,10 +194,6 @@ it("resolves isolated packaged-app data paths on every supported desktop platfor
     resolvePackagedUserDataDirectory("/fixture/home", "linux"),
     "/fixture/home/.config/lastcode",
   );
-  assert.equal(
-    resolvePackagedUserDataDirectory("C:\\fixture\\home", "win32"),
-    NodePath.join("C:\\fixture\\home", "AppData", "Roaming", "lastcode"),
-  );
 });
 
 it("seeds a one-project mobile companion workspace", async () => {

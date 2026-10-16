@@ -95,9 +95,6 @@ function hasLivingChild(
   identities = readProcessIdentities(lease.childPid === null ? [] : [lease.childPid]),
 ) {
   if (lease.childPid === null) return false;
-  if (NodeProcess.platform === "win32") {
-    return isProcessIdentityRunning(lease.childPid, lease.childStartIdentity, identities);
-  }
   if (!isProcessRunning(-lease.childPid)) return false;
   const leader = identities.get(lease.childPid);
   // A leaderless group can still contain owned descendants. Only a positively
@@ -233,7 +230,7 @@ type BudgetOptions = {
 
 export type LocalCiBudgetLease = {
   readonly release: () => void;
-  /** Records the exact detached child group on POSIX, or the child PID on Windows. */
+  /** Records the exact detached child process group. */
   readonly recordChild: (pid: number | undefined) => void;
 };
 
