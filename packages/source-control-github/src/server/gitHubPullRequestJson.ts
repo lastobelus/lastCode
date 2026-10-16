@@ -2235,7 +2235,7 @@ const WATCH_FINGERPRINT_CHECK_COUNTS =
  */
 const PULL_REQUEST_WATCH_FINGERPRINT_SELECTION =
   "state mergeable headRefOid " +
-  `comments(first: 100, orderBy: { field: UPDATED_AT, direction: DESC }) { ${WATCH_FINGERPRINT_EDITS} } ` +
+  `comments(first: 100, orderBy: { field: UPDATED_AT, direction: DESC }) { totalCount nodes { id lastEditedAt reactionGroups { content reactions { totalCount } } } } ` +
   `reviews(last: 100) { ${WATCH_FINGERPRINT_EDITS} } ` +
   "reviewThreads { totalCount } " +
   `commits(last: 1) { nodes { commit { statusCheckRollup { contexts { ${WATCH_FINGERPRINT_CHECK_COUNTS} } } } } }`;
@@ -2265,6 +2265,23 @@ const RawEditedSchema = Schema.Struct({
   totalCount: Schema.Int,
   nodes: Schema.Array(Schema.NullOr(Schema.Struct({ lastEditedAt: Schema.NullOr(Schema.String) }))),
 });
+const RawReactionEditedSchema = Schema.Struct({
+  totalCount: Schema.Int,
+  nodes: Schema.Array(
+    Schema.NullOr(
+      Schema.Struct({
+        id: Schema.String,
+        lastEditedAt: Schema.NullOr(Schema.String),
+        reactionGroups: Schema.Array(
+          Schema.Struct({
+            content: Schema.String,
+            reactions: Schema.Struct({ totalCount: Schema.Int }),
+          }),
+        ),
+      }),
+    ),
+  ),
+});
 const RawStateCountsSchema = Schema.NullOr(
   Schema.Array(Schema.Struct({ state: Schema.String, count: Schema.Int })),
 );
@@ -2273,7 +2290,7 @@ const decodeWatchFingerprintEntry = Schema.decodeUnknownExit(
     state: Schema.String,
     mergeable: Schema.NullOr(Schema.String),
     headRefOid: Schema.String,
-    comments: RawEditedSchema,
+    comments: RawReactionEditedSchema,
     reviews: RawEditedSchema,
     reviewThreads: Schema.Struct({ totalCount: Schema.Int }),
     commits: Schema.Struct({
@@ -2337,6 +2354,16 @@ export function decodePullRequestWatchFingerprintsJson(
       remarks: [
         pr.comments.totalCount,
         newestEdit(pr.comments),
+        pr.comments.nodes
+          .flatMap((node) =>
+            node === null
+              ? []
+              : node.reactionGroups.map(
+                  (group) => `${node.id}:${group.content}:${group.reactions.totalCount}`,
+                ),
+          )
+          .toSorted()
+          .join(","),
         pr.reviews.totalCount,
         newestEdit(pr.reviews),
         pr.reviewThreads.totalCount,

@@ -206,6 +206,7 @@ function watchesEqual(left: ThreadPullRequestWatch, right: ThreadPullRequestWatc
     left.passedChecks.join("\n") === right.passedChecks.join("\n") &&
     left.remarksThrough === right.remarksThrough &&
     left.remarkIds.join("\n") === right.remarkIds.join("\n") &&
+    left.reactionKeys.join("\n") === right.reactionKeys.join("\n") &&
     left.conflicting === right.conflicting &&
     left.wakes === right.wakes
   );

@@ -1116,6 +1116,7 @@ it.effect.each([
         passedChecks: [],
         remarksThrough: DateTime.formatIso(now),
         remarkIds: [],
+        reactionKeys: [],
         conflicting: false,
         wakes: 0,
       },

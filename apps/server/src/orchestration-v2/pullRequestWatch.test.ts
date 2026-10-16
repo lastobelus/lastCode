@@ -1,3 +1,6 @@
+import { ThreadPullRequestWatch as WatchSchema } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
+
 import type {
   PullRequestCheck,
   PullRequestComment,
@@ -11,6 +14,8 @@ import {
   pullRequestWatchMessage,
 } from "./pullRequestWatch.ts";
 
+const decodeWatch = Schema.decodeUnknownSync(WatchSchema);
+
 const STARTED = "2026-10-02T12:00:00.000Z";
 
 const watch = (overrides: Partial<ThreadPullRequestWatch> = {}): ThreadPullRequestWatch => ({
@@ -21,6 +26,7 @@ const watch = (overrides: Partial<ThreadPullRequestWatch> = {}): ThreadPullReque
   passedChecks: [],
   remarksThrough: STARTED,
   remarkIds: [],
+  reactionKeys: [],
   conflicting: false,
   wakes: 0,
   ...overrides,
@@ -62,6 +68,102 @@ const remark = (
 const noRemarks: ReadonlyArray<PullRequestComment> = [];
 
 describe("evaluatePullRequestWatch", () => {
+  it("reports named reactions on old own comments once, including after a durable replay", () => {
+    const own = {
+      ...remark("agent-user", "2026-10-01T12:00:00Z", "Please review."),
+      reactions: [
+        {
+          content: "thumbs-up" as const,
+          count: 1,
+          actors: ["review-bot"],
+          viewerHasReacted: false,
+        },
+      ],
+    };
+    const passed = detail({ checks: [check("lint", "success")] });
+    const baseline = evaluatePullRequestWatch(watch(), passed, []);
+    const report = evaluatePullRequestWatch(baseline.next, passed, [own]);
+    assert.deepEqual(report.changes, [
+      {
+        kind: "reactions",
+        reactions: [{ remark: own, content: "thumbs-up", actor: "review-bot" }],
+      },
+    ]);
+    assert.equal(report.next.wakes, 1);
+    const replay = decodeWatch(JSON.parse(JSON.stringify(report.next)));
+    assert.deepEqual(evaluatePullRequestWatch(replay, passed, [own]).changes, []);
+    const missing = evaluatePullRequestWatch(replay, passed, null);
+    assert.deepEqual(missing.next.reactionKeys, replay.reactionKeys);
+    const partial = evaluatePullRequestWatch(missing.next, passed, []);
+    assert.deepEqual(evaluatePullRequestWatch(partial.next, passed, [own]).changes, []);
+    assert.deepEqual(
+      evaluatePullRequestWatch(replay, { ...passed, headSha: "bbbbbbbbbb" }, [own]).changes.map(
+        (change) => change.kind,
+      ),
+      ["checks-passed"],
+    );
+    const message = pullRequestWatchMessage({
+      number: 12,
+      url: "https://github.com/o/r/pull/12",
+      baseBranch: "main",
+      headSha: passed.headSha ?? null,
+      report,
+    });
+    assert.include(message.text, 'review-bot: thumbs-up on "Please review."');
+    assert.equal(message.notification.summary, "#12: new reactions");
+  });
+
+  it("ignores own, unnamed, and other people's comment reactions", () => {
+    const self = {
+      ...remark("agent-user", STARTED),
+      reactions: [
+        { content: "thumbs-up" as const, count: 2, actors: ["AGENT-USER"], viewerHasReacted: true },
+      ],
+    };
+    const other = {
+      ...remark("reviewer", "2026-10-01T12:00:00Z"),
+      reactions: [
+        {
+          content: "thumbs-up" as const,
+          count: 1,
+          actors: ["another-reviewer"],
+          viewerHasReacted: false,
+        },
+      ],
+    };
+    const unnamed = {
+      ...self,
+      reactions: [{ ...self.reactions[0]!, actors: [], viewerHasReacted: false }],
+    };
+    const report = evaluatePullRequestWatch(watch(), detail(), [self, other, unnamed]);
+    assert.deepEqual(report.changes, []);
+    assert.deepEqual(report.next.reactionKeys, []);
+    const unknownOwn = evaluatePullRequestWatch(
+      watch(),
+      detail({ viewer: undefined, author: null }),
+      [{ ...unnamed, createdAt: "2026-10-01T12:00:00Z" }],
+    );
+    assert.deepEqual(unknownOwn.changes, []);
+  });
+
+  it("defaults persisted watches without reaction keys and bounds reaction-only wakes", () => {
+    const { reactionKeys: _keys, ...legacy } = watch();
+    const saved = decodeWatch(legacy);
+    assert.deepEqual(saved.reactionKeys, []);
+    const own = {
+      ...remark("agent-user", STARTED),
+      reactions: [
+        { content: "thumbs-up" as const, count: 1, actors: ["reviewer"], viewerHasReacted: false },
+      ],
+    };
+    const report = evaluatePullRequestWatch(
+      watch({ headSha: "aaaaaaaaaa", wakes: PULL_REQUEST_WATCH_WAKE_LIMIT - 1 }),
+      detail(),
+      [own],
+    );
+    assert.isTrue(report.exhausted);
+  });
+
   it("reports each failure at once, even while another check never finishes", () => {
     const bot = check("CodeRabbit", "pending");
     const first = detail({ checks: [check("lint", "failure"), check("test", "pending"), bot] });

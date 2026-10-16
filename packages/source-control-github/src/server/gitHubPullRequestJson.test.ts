@@ -2114,6 +2114,9 @@ describe("pull request watch fingerprints", () => {
       "w0: repository(owner: $w0_owner, name: $w0_name) { pullRequest(number: $w0_number)",
     );
     expect(document?.query).toContain("w1: repository(owner: $w1_owner, name: $w1_name)");
+    expect(document?.query).toContain(
+      "id lastEditedAt reactionGroups { content reactions { totalCount } }",
+    );
     expect(document?.variables).toEqual({
       w0_owner: "pingdotgg",
       w0_name: "t3code",
@@ -2133,11 +2136,23 @@ describe("pull request watch fingerprints", () => {
       readonly failed: number;
       readonly commentEditedAt: string | null;
       readonly reviews: number;
+      readonly reactions?: number;
     }) => ({
       state: "OPEN",
       mergeable: "MERGEABLE",
       headRefOid: "abc123",
-      comments: { totalCount: 1, nodes: [{ lastEditedAt: input.commentEditedAt }] },
+      comments: {
+        totalCount: 1,
+        nodes: [
+          {
+            id: "comment-1",
+            lastEditedAt: input.commentEditedAt,
+            reactionGroups: [
+              { content: "THUMBS_UP", reactions: { totalCount: input.reactions ?? 0 } },
+            ],
+          },
+        ],
+      },
       reviews: { totalCount: input.reviews, nodes: [] },
       reviewThreads: { totalCount: 0 },
       commits: {
@@ -2177,6 +2192,10 @@ describe("pull request watch fingerprints", () => {
     const checkFinished = fingerprint({ ...base, running: 1, failed: 1 });
     const summaryEdited = fingerprint({ ...base, commentEditedAt: "2026-10-05T23:47:43Z" });
     const replied = fingerprint({ ...base, reviews: 2 });
+    const reacted = fingerprint({ ...base, reactions: 1 });
+    expect(reacted.remarks).not.toBe(before.remarks);
+    expect(reacted.status).toBe(before.status);
+    expect(fingerprint({ ...base, reactions: 0 }).remarks).toBe(before.remarks);
 
     expect(checkFinished.status).not.toBe(before.status);
     expect(checkFinished.remarks).toBe(before.remarks);

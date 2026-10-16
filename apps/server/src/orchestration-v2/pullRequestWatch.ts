@@ -18,6 +18,14 @@ export type PullRequestWatchChange =
   | { readonly kind: "checks-failed"; readonly failed: ReadonlyArray<PullRequestCheck> }
   | { readonly kind: "checks-passed"; readonly count: number; readonly required: boolean }
   | { readonly kind: "remarks"; readonly remarks: ReadonlyArray<PullRequestComment> }
+  | {
+      readonly kind: "reactions";
+      readonly reactions: ReadonlyArray<{
+        readonly remark: PullRequestComment;
+        readonly content: string;
+        readonly actor: string;
+      }>;
+    }
   | { readonly kind: "conflicting" };
 
 export interface PullRequestWatchReport {
@@ -98,6 +106,30 @@ export function evaluatePullRequestWatch(
     ...atLatest.map((remark) => remark.id),
   ];
 
+  // Reactions have no timestamp, so scan own comments even when their text predates the watch.
+  // Keep identities across pushes and incomplete reads: neither makes an old reaction new.
+  const reactionKeys = new Set(watch.reactionKeys);
+  const reactions: Array<{
+    readonly remark: PullRequestComment;
+    readonly content: string;
+    readonly actor: string;
+  }> = [];
+  if (own !== undefined) {
+    for (const remark of remarks ?? []) {
+      if (remark.author?.login.toLowerCase() !== own) continue;
+      for (const reaction of remark.reactions ?? []) {
+        for (const actor of reaction.actors) {
+          if (actor.toLowerCase() === own) continue;
+          const key = JSON.stringify([remark.id, reaction.content, actor.toLowerCase()]);
+          if (reactionKeys.has(key)) continue;
+          reactionKeys.add(key);
+          reactions.push({ remark, content: reaction.content, actor });
+        }
+      }
+    }
+  }
+  if (reactions.length > 0) changes.push({ kind: "reactions", reactions });
+
   if (detail.mergeability === "conflicting" && !watch.conflicting) {
     changes.push({ kind: "conflicting" });
   }
@@ -105,7 +137,9 @@ export function evaluatePullRequestWatch(
   const conflicting =
     detail.mergeability === "unknown" ? watch.conflicting : detail.mergeability === "conflicting";
 
-  const commentsOnly = changes.length > 0 && changes.every((change) => change.kind === "remarks");
+  const commentsOnly =
+    changes.length > 0 &&
+    changes.every((change) => change.kind === "remarks" || change.kind === "reactions");
   const progress = headMoved || (changes.length > 0 && !commentsOnly);
   const wakes = (progress ? 0 : watch.wakes) + (commentsOnly ? 1 : 0);
   return {
@@ -118,6 +152,7 @@ export function evaluatePullRequestWatch(
       passedChecks,
       remarksThrough,
       remarkIds,
+      reactionKeys: [...reactionKeys].toSorted(),
       conflicting,
       wakes,
     },
@@ -167,6 +202,15 @@ function changeLines(
           return `  - ${remark.author?.login ?? "someone"}${where}: ${said}${remark.url ? ` ${remark.url}` : ""}`;
         }),
       ];
+    case "reactions":
+      return [
+        `- ${change.reactions.length} new ${change.reactions.length === 1 ? "reaction" : "reactions"} on your comments:`,
+        ...listed(
+          change.reactions,
+          ({ remark, content, actor }) =>
+            `  - ${actor}: ${content} on "${snippet(remark.body)}"${remark.url ? ` ${remark.url}` : ""}`,
+        ),
+      ];
     case "conflicting":
       return [`- The branch now conflicts with ${context.baseBranch}.`];
   }
@@ -176,6 +220,7 @@ const SUMMARY: Record<PullRequestWatchChange["kind"], string> = {
   "checks-failed": "checks failed",
   "checks-passed": "checks passed",
   remarks: "new comments",
+  reactions: "new reactions",
   conflicting: "merge conflict",
 };
 
