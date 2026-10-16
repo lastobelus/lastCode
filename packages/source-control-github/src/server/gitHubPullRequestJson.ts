@@ -497,6 +497,7 @@ const RawActivityConnection = <S extends Schema.Top>(node: S) =>
 
 const RawActivitySchema = Schema.Struct({
   data: Schema.Struct({
+    viewer: Schema.optional(Schema.NullOr(RawActorSchema)),
     repository: Schema.Struct({
       pullRequest: Schema.Struct({
         author: Schema.optional(Schema.NullOr(RawActorSchema)),
@@ -607,20 +608,6 @@ const RawReviewThreadsSchema = Schema.Struct({
         ...RawViewerFieldsSchema.fields,
         author: Schema.optional(Schema.NullOr(RawActorSchema)),
         reactionGroups: RawReactionGroupsSchema,
-        comments: Schema.optional(
-          Schema.NullOr(
-            Schema.Struct({
-              nodes: Schema.Array(
-                Schema.Struct({
-                  id: Schema.optional(Schema.NullOr(Schema.String)),
-                  author: Schema.optional(Schema.NullOr(RawActorSchema)),
-                  lastEditedAt: Schema.optional(Schema.NullOr(Schema.String)),
-                  reactionGroups: RawReactionGroupsSchema,
-                }),
-              ),
-            }),
-          ),
-        ),
         /**
          * Reviews for their reactions and actor identity: the words and the verdict arrive with
          * `gh pr view --json reviews`, which reports no reaction of any kind.
@@ -921,6 +908,7 @@ export function decodePullRequestPreviewJson(
  * each is switched on only while it has more to give; the first read asks for everything.
  */
 export const PULL_REQUEST_ACTIVITY_GRAPHQL_QUERY = `query($owner: String!, $name: String!, $number: Int!, $head: Boolean!, $withComments: Boolean!, $commentsAfter: String, $withReviews: Boolean!, $reviewsAfter: String) {
+  viewer { login }
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       author @include(if: $head) { __typename login avatarUrl ... on User { name } }
@@ -929,7 +917,7 @@ export const PULL_REQUEST_ACTIVITY_GRAPHQL_QUERY = `query($owner: String!, $name
       }
       comments(first: 100, after: $commentsAfter) @include(if: $withComments) {
         pageInfo { hasNextPage endCursor }
-        nodes { id body createdAt lastEditedAt url author { __typename login avatarUrl ... on User { name } } }
+        nodes { id body createdAt lastEditedAt url author { __typename login avatarUrl ... on User { name } } ${REACTION_GROUPS_FIELDS} }
       }
       reviews(first: 100, after: $reviewsAfter) @include(if: $withReviews) {
         pageInfo { hasNextPage endCursor }
@@ -942,7 +930,6 @@ export const PULL_REQUEST_ACTIVITY_GRAPHQL_QUERY = `query($owner: String!, $name
 /** GitHub's own ceiling on a connection page, which is what both thread reads ask for. */
 const GRAPHQL_PAGE_SIZE = 100;
 
-// Hydrate reaction actors for the same comment page the watch fingerprints.
 const RECENTLY_UPDATED_COMMENTS_GRAPHQL_FIELD = `comments(first: ${GRAPHQL_PAGE_SIZE}, orderBy: { field: UPDATED_AT, direction: DESC })`;
 
 /**
@@ -1075,9 +1062,6 @@ export const REVIEW_THREADS_GRAPHQL_QUERY = `query($owner: String!, $name: Strin
       viewerDidAuthor
       author { __typename login avatarUrl }
       ${REACTION_GROUPS_FIELDS}
-      ${RECENTLY_UPDATED_COMMENTS_GRAPHQL_FIELD} {
-        nodes { id lastEditedAt author { __typename login avatarUrl } ${REACTION_GROUPS_FIELDS} }
-      }
       reviews(first: ${GRAPHQL_PAGE_SIZE}) { nodes { id lastEditedAt author { __typename login avatarUrl } ${REACTION_GROUPS_FIELDS} } }
       reviewRequests(first: 50) {
         nodes {
@@ -1720,10 +1704,13 @@ function isReviewVerdict(reviewState: string | null): boolean {
   }
 }
 
-function toComments(raw: {
-  readonly comments?: ReadonlyArray<Schema.Schema.Type<typeof RawCommentSchema>> | undefined;
-  readonly reviews?: ReadonlyArray<Schema.Schema.Type<typeof RawReviewSchema>> | undefined;
-}): ReadonlyArray<PullRequestComment> {
+function toComments(
+  raw: {
+    readonly comments?: ReadonlyArray<Schema.Schema.Type<typeof RawCommentSchema>> | undefined;
+    readonly reviews?: ReadonlyArray<Schema.Schema.Type<typeof RawReviewSchema>> | undefined;
+  },
+  viewer: string | null,
+): ReadonlyArray<PullRequestComment> {
   const issueComments = (raw.comments ?? []).map((comment): PullRequestComment => ({
     id: comment.id,
     kind: "issue-comment",
@@ -1734,6 +1721,7 @@ function toComments(raw: {
     url: trimmed(comment.url),
     path: null,
     reviewState: null,
+    reactions: toReactions(comment.reactionGroups, viewer),
   }));
   // A review with no body is kept only when its state is the event itself — an approval, a
   // request for changes, a dismissal. GitHub also opens a bodiless `COMMENTED` review as the
@@ -2534,10 +2522,13 @@ export function decodePullRequestActivityJson(
             })),
           ),
         }),
-    remarks: toComments({
-      comments: pr.comments?.nodes ?? [],
-      reviews: pr.reviews?.nodes ?? [],
-    }),
+    remarks: toComments(
+      {
+        comments: pr.comments?.nodes ?? [],
+        reviews: pr.reviews?.nodes ?? [],
+      },
+      trimmed(decoded.success.data.viewer?.login),
+    ),
     nextCommentsCursor: nextCursorOf(pr.comments?.pageInfo),
     nextReviewsCursor: nextCursorOf(pr.reviews?.pageInfo),
   });
@@ -2849,7 +2840,6 @@ export function decodeReviewThreadsJson(
   const botLogins = new Set<string>();
   for (const raw of [
     pullRequest.author,
-    ...(pullRequest.comments?.nodes ?? []).map((node) => node.author),
     ...(pullRequest.reviews?.nodes ?? []).map((node) => node.author),
     ...(pullRequest.reviewRequests?.nodes ?? []).map((node) => node.requestedReviewer),
     ...(pullRequest.latestReviews?.nodes ?? []).map((node) => node.author),
@@ -2902,10 +2892,7 @@ export function decodeReviewThreadsJson(
   }
   const reactionsById = new Map<string, ReadonlyArray<PullRequestReaction>>();
   const editedAtById = new Map<string, string>();
-  for (const node of [
-    ...(pullRequest.comments?.nodes ?? []),
-    ...(pullRequest.reviews?.nodes ?? []),
-  ]) {
+  for (const node of pullRequest.reviews?.nodes ?? []) {
     const id = trimmed(node.id);
     if (id === null) continue;
     const editedAt = trimmed(node.lastEditedAt);

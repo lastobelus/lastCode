@@ -1308,28 +1308,24 @@ describe("review thread decoding", () => {
     expect(threads).toHaveLength(1);
   });
 
-  it("reads edit times for issue comments and reviews without using reaction updates", () => {
+  it("reads review edit times without using reaction updates", () => {
     const editedAt = "2026-10-02T12:06:00Z";
     const result = expectSuccess(
       decodeReviewThreadsJson(
         threadsJson([], {
-          comments: {
+          reviews: {
             nodes: [
-              { id: "edited", lastEditedAt: editedAt },
+              { id: "review", lastEditedAt: editedAt },
               { id: "reaction-only", lastEditedAt: null, updatedAt: editedAt },
             ],
           },
-          reviews: { nodes: [{ id: "review", lastEditedAt: editedAt }] },
         }),
       ),
     );
-    expect([...result.editedAtById]).toEqual([
-      ["edited", editedAt],
-      ["review", editedAt],
-    ]);
+    expect([...result.editedAtById]).toEqual([["review", editedAt]]);
   });
 
-  it("puts an issue comment's and a review's reactions in reactionsById, and the pull request's own in reactions", () => {
+  it("puts a review's reactions in reactionsById, and the pull request's own in reactions", () => {
     const result = expectSuccess(
       decodeReviewThreadsJson(
         threadsJson([], {
@@ -1340,19 +1336,6 @@ describe("review thread decoding", () => {
               reactors: { totalCount: 1, nodes: [{ login: "bilal" }] },
             },
           ],
-          comments: {
-            nodes: [
-              {
-                id: "c1",
-                reactionGroups: [
-                  {
-                    content: "THUMBS_UP",
-                    reactors: { totalCount: 1, nodes: [{ login: "julius" }] },
-                  },
-                ],
-              },
-            ],
-          },
           reviews: {
             nodes: [
               {
@@ -1371,7 +1354,6 @@ describe("review thread decoding", () => {
       { content: "heart", count: 1, actors: ["bilal"], viewerHasReacted: true },
     ]);
     expect([...result.reactionsById]).toEqual([
-      ["c1", [{ content: "thumbs-up", count: 1, actors: ["julius"], viewerHasReacted: false }]],
       ["r1", [{ content: "eyes", count: 1, actors: ["hubot"], viewerHasReacted: false }]],
     ]);
   });
@@ -1428,8 +1410,8 @@ describe("REVIEW_THREADS_GRAPHQL_QUERY", () => {
     expect(Number(match[1]) * Number(match[2])).toBeLessThanOrEqual(1_000);
   });
 
-  it("asks for reactionGroups on the pull request itself, its comments, its reviews and each thread's comments", () => {
-    expect(REVIEW_THREADS_GRAPHQL_QUERY.match(/reactionGroups/g)).toHaveLength(4);
+  it("asks for reactionGroups on the pull request itself, its reviews and each thread's comments", () => {
+    expect(REVIEW_THREADS_GRAPHQL_QUERY.match(/reactionGroups/g)).toHaveLength(3);
     // The reviews connection is new: only reactions were ever wanted off it.
     expect(REVIEW_THREADS_GRAPHQL_QUERY).toContain("reviews(first:");
   });

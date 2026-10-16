@@ -4200,92 +4200,114 @@ layer("GitHubPullRequestApi.layer", (it) => {
     }),
   );
 
-  it.effect("hydrates review-request reactions past the first hundred issue comments", () =>
-    Effect.gen(function* () {
-      const comments = Array.from({ length: 101 }, (_, index) => ({
-        id: `IC_${index + 1}`,
-        body: index === 100 ? "@codex review" : `Comment ${index + 1}`,
-        createdAt: DateTime.formatIso(
-          DateTime.add(DateTime.makeUnsafe("2026-07-01T00:00:00Z"), { minutes: index }),
-        ),
-      }));
-      mockedExecute.mockImplementation((call) => {
-        if (call.kind !== "graphql") throw new Error("Expected a GraphQL activity read");
-        if (call.operation === "getPullRequestActivity") {
-          const start = call.variables?.commentsAfter === null ? 0 : 100;
+  it.effect.each([0, 100])(
+    "hydrates review-request reactions at comment index %s",
+    (requestIndex) =>
+      Effect.gen(function* () {
+        const requestId = `IC_${requestIndex + 1}`;
+        const requestEditedAt = DateTime.formatIso(
+          DateTime.add(DateTime.makeUnsafe("2026-07-01T00:00:00Z"), { minutes: requestIndex }),
+        );
+        const reactionGroups = [
+          {
+            content: "THUMBS_UP",
+            viewerHasReacted: true,
+            reactors: {
+              totalCount: 2,
+              nodes: [{ login: "MAINTAINER" }, { login: "codex[bot]" }],
+            },
+          },
+        ];
+        const comments = Array.from({ length: 101 }, (_, index) => ({
+          id: `IC_${index + 1}`,
+          body: index === requestIndex ? "@codex review" : `Comment ${index + 1}`,
+          createdAt: DateTime.formatIso(
+            DateTime.add(DateTime.makeUnsafe("2026-07-01T00:00:00Z"), { minutes: index }),
+          ),
+          lastEditedAt: index === requestIndex ? requestEditedAt : null,
+        }));
+        mockedExecute.mockImplementation((call) => {
+          if (call.kind !== "graphql") throw new Error("Expected a GraphQL activity read");
+          if (call.operation === "getPullRequestActivity") {
+            const start = call.variables?.commentsAfter === null ? 0 : 100;
+            return Effect.succeed(
+              output(
+                encodeJson({
+                  data: {
+                    viewer: { login: "maintainer" },
+                    repository: {
+                      pullRequest: {
+                        comments: {
+                          pageInfo: {
+                            hasNextPage: start === 0,
+                            endCursor: start === 0 ? "comments-100" : null,
+                          },
+                          nodes: comments.slice(start, start + 100).map((comment) => ({
+                            ...comment,
+                            ...(call.query.includes("reactionGroups")
+                              ? { reactionGroups: comment.id === requestId ? reactionGroups : [] }
+                              : {}),
+                          })),
+                        },
+                        reviews: { nodes: [] },
+                      },
+                    },
+                  },
+                }),
+              ),
+            );
+          }
+          // GitHub defaults to the oldest comments; the watch fingerprints the newest updates.
+          const newestFirst = call.query.includes(
+            "comments(first: 100, orderBy: { field: UPDATED_AT, direction: DESC })",
+          );
+          const metadataPage = (
+            newestFirst
+              ? comments.toReversed()
+              : call.query.includes("comments(first: 100)")
+                ? comments
+                : []
+          ).slice(0, 100);
           return Effect.succeed(
             output(
               encodeJson({
                 data: {
+                  viewer: { login: "maintainer" },
                   repository: {
                     pullRequest: {
+                      reviewThreads: { nodes: [] },
                       comments: {
-                        pageInfo: {
-                          hasNextPage: start === 0,
-                          endCursor: start === 0 ? "comments-100" : null,
-                        },
-                        nodes: comments.slice(start, start + 100),
+                        nodes: metadataPage.map(({ id }) => ({
+                          id,
+                          reactionGroups: id === requestId ? reactionGroups : [],
+                        })),
                       },
-                      reviews: { nodes: [] },
                     },
                   },
                 },
               }),
             ),
           );
-        }
-        // GitHub defaults to the oldest comments; the watch fingerprints the newest updates.
-        const newestFirst = call.query.includes(
-          "comments(first: 100, orderBy: { field: UPDATED_AT, direction: DESC })",
-        );
-        const metadataPage = (newestFirst ? comments.toReversed() : comments).slice(0, 100);
-        return Effect.succeed(
-          output(
-            encodeJson({
-              data: {
-                viewer: { login: "maintainer" },
-                repository: {
-                  pullRequest: {
-                    reviewThreads: { nodes: [] },
-                    comments: {
-                      nodes: metadataPage.map(({ id }) => ({
-                        id,
-                        reactionGroups:
-                          id === "IC_101"
-                            ? [
-                                {
-                                  content: "THUMBS_UP",
-                                  reactors: { totalCount: 1, nodes: [{ login: "codex[bot]" }] },
-                                },
-                              ]
-                            : [],
-                      })),
-                    },
-                  },
-                },
-              },
-            }),
-          ),
-        );
-      });
-      const provider = yield* GitHubPullRequestProvider.make;
+        });
+        const provider = yield* GitHubPullRequestProvider.make;
 
-      const activity = yield* provider.getChangeRequestActivity({
-        cwd: "/w",
-        repository: "acme/web",
-        host: "github.com",
-        number: 7,
-      });
+        const activity = yield* provider.getChangeRequestActivity({
+          cwd: "/w",
+          repository: "acme/web",
+          host: "github.com",
+          number: 7,
+        });
 
-      expect(activity.comments).toHaveLength(101);
-      expect(activity.comments.find(({ id }) => id === "IC_101")).toMatchObject({
-        body: "@codex review",
-        reactions: [
-          { content: "thumbs-up", count: 1, actors: ["codex[bot]"], viewerHasReacted: false },
-        ],
-      });
-      expect(mockedExecute).toHaveBeenCalledTimes(3);
-    }),
+        expect(activity.comments).toHaveLength(101);
+        expect(activity.comments.find(({ id }) => id === requestId)).toMatchObject({
+          body: "@codex review",
+          editedAt: requestEditedAt,
+          reactions: [
+            { content: "thumbs-up", count: 2, actors: ["codex[bot]"], viewerHasReacted: true },
+          ],
+        });
+        expect(mockedExecute).toHaveBeenCalledTimes(3);
+      }),
   );
 
   it.effect("stops at the thread bound and says the conversation was cut short", () =>
