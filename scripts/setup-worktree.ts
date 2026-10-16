@@ -1,12 +1,11 @@
-// @effect-diagnostics nodeBuiltinImport:off - runs before `vp i`, so only Node built-ins exist.
+// @effect-diagnostics nodeBuiltinImport:off globalConsole:off - worktrees start without dependencies.
 /**
  * Worktree setup, run by the t3.json "Setup Worktree" action as
  * `node scripts/setup-worktree.ts`. Plain Node keeps one command working in
- * every shell T3 Code spawns (zsh, bash, fish, PowerShell): it installs
- * dependencies, links the main checkout's gitignored env files into this
- * worktree, then warms the web dependency cache.
+ * every shell T3 Code spawns (zsh, bash, fish, PowerShell): it links the main
+ * checkout's gitignored env files into the current worktree. Dependencies are
+ * prepared separately when tests, development, or builds need them.
  */
-import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
@@ -16,17 +15,7 @@ const projectRoot = process.env.T3CODE_PROJECT_ROOT;
 if (!projectRoot) {
   throw new Error("T3CODE_PROJECT_ROOT is not set. Run this through the t3.json setup action.");
 }
-const worktree = NodePath.dirname(import.meta.dirname);
-
-// `shell` resolves `vp` through PATH, including Windows command shims.
-// Setup has no one answering install prompts. Pass pnpm's confirmation flag
-// through vp and leave stdin closed so other prompts fail instead of hanging.
-const install = NodeChildProcess.spawnSync("vp i -- --yes", {
-  cwd: worktree,
-  shell: true,
-  stdio: ["ignore", "inherit", "inherit"],
-});
-if (install.status !== 0) process.exit(install.status ?? 1);
+const worktree = process.cwd();
 
 // Env files live as real files in the main checkout; worktrees only get
 // symlinks to them. Only a symlink is ever replaced, so a real env file is
@@ -42,13 +31,10 @@ for (const file of ENV_FILES) {
   const target = NodePath.join(worktree, file);
   const existing = NodeFS.lstatSync(target, { throwIfNoEntry: false });
   if (existing && !existing.isSymbolicLink()) continue;
+  if (source === target) continue;
+  NodeFS.mkdirSync(NodePath.dirname(target), { recursive: true });
   if (existing) NodeFS.rmSync(target);
   NodeFS.symlinkSync(source, target);
 }
 
-const warm = NodeChildProcess.spawnSync(
-  process.execPath,
-  [NodePath.join(worktree, "apps", "web", "scripts", "warm-dep-cache.ts")],
-  { cwd: worktree, stdio: "inherit" },
-);
-process.exit(warm.status ?? 1);
+console.log("[setup-worktree] Environment files linked. Dependencies are deferred until needed.");

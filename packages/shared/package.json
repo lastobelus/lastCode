@@ -498,6 +498,10 @@
     "./dependencyActivity": {
       "types": "./src/dependencyActivity.ts",
       "import": "./src/dependencyActivity.ts"
+    },
+    "./generatedBuildOwnership": {
+      "types": "./src/generatedBuildOwnership.ts",
+      "import": "./src/generatedBuildOwnership.ts"
     }
   },
   "scripts": {
