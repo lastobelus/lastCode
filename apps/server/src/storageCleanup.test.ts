@@ -544,14 +544,21 @@ const cleanupFixture = (
         getShellSnapshot: (input?: { location?: string }) =>
           Effect.sync(() => {
             snapshotReads++;
-            return {
-              threads: threads.filter((thread) =>
-                input?.location === "active"
-                  ? thread.archivedAt === null
+            const active = (thread: OrchestrationV2ThreadShell) =>
+              thread.archivedAt === null ||
+              (thread.deletedAt !== null && thread.worktreeCleanup != null);
+            const visible = threads.filter(
+              (thread) =>
+                (thread.deletedAt === null || thread.worktreeCleanup != null) &&
+                (input?.location === "active"
+                  ? active(thread)
                   : input?.location === "archive"
-                    ? thread.archivedAt !== null
-                    : true,
-              ),
+                    ? !active(thread)
+                    : true),
+            );
+            return {
+              threads: visible.filter(active),
+              archivedThreads: visible.filter((thread) => !active(thread)),
             };
           }),
         getThreadWorktreePaths: () =>
@@ -3643,89 +3650,91 @@ describe("settled worktree retention", () => {
     "project-custom",
     "inactive-settling",
   ] as const)("applies retention and safety checks (%s)", (scenario) =>
-    Effect.gen(function* () {
-      yield* TestClock.setTime(NOW_MS);
-      const fixture = yield* cleanupFixture();
-      const days = ["wait", "boundary", "expired", "recent-update"].includes(scenario) ? 8 : 0;
-      const rules = {
-        ...DEFAULT_SERVER_SETTINGS.storageCleanup,
-        worktreeSettledAfterDays:
-          scenario === "project-custom" || scenario === "inactive-settling" ? null : days,
-        // Another rule must not bypass the settle-script grace either.
-        worktreeAfterDays: scenario === "inactive-settling" ? 1 : null,
-      };
-      fixture.setSettings({
-        storageCleanup: rules,
-        projectSettingsOverrides: {
-          [ProjectId.make("project-1")]:
-            scenario === "project-off"
-              ? { worktreeCleanup: { mode: "off" } }
-              : scenario === "project-custom"
-                ? {
-                    worktreeCleanup: {
-                      mode: "custom",
-                      rules: { ...rules, worktreeSettledAfterDays: 0 },
-                    },
-                  }
-                : {},
-        },
-      });
-      const thread = shell({
-        branch: "feature",
-        worktreePath: fixture.worktree,
-        settledAt:
-          scenario === "active"
-            ? null
-            : at(
-                scenario === "expired" ||
-                  scenario === "recent-update" ||
-                  scenario === "inactive-settling"
-                  ? -20 * DAY_MS
-                  : scenario === "boundary"
-                    ? -8 * DAY_MS
-                    : scenario === "wait"
-                      ? -8 * DAY_MS + 1
-                      : scenario === "settle-script"
-                        ? 0
-                        : -60_000,
-              ),
-        updatedAt: at(
-          scenario === "recent-update" ||
-            scenario === "settle-script" ||
-            scenario === "inactive-settling"
-            ? 0
-            : -10 * DAY_MS,
-        ),
-      });
-      fixture.setThreads([thread]);
-      if (scenario === "dirty")
-        yield* fixture.fs.writeFileString(`${fixture.worktree}/tracked.txt`, "edit\n");
-      const report = yield* fixture.service.runNow;
-      const removed = ["immediate", "expired", "boundary", "project-custom"].includes(scenario);
-      expect(yield* fixture.fs.exists(fixture.worktree)).toBe(!removed);
-      expect(report.counts.removed).toBe(removed ? 1 : 0);
-      if (scenario !== "project-off") {
-        const reason =
-          scenario === "active"
-            ? "Not settled"
-            : scenario === "wait"
-              ? "Settled for 7 of 8 days"
-              : ["settle-script", "recent-update", "inactive-settling"].includes(scenario)
-                ? "Settled moments ago"
-                : scenario === "dirty"
-                  ? "Has uncommitted changes (1 file)"
-                  : `Settled for ${scenario === "expired" ? 20 : scenario === "boundary" ? 8 : 0} days`;
-        expect(checkoutEntries(report)[0]).toMatchObject({
-          outcome: removed ? "removed" : "kept",
-          reason,
+    runCleanupTest(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        const fixture = yield* cleanupFixture();
+        const days = ["wait", "boundary", "expired", "recent-update"].includes(scenario) ? 8 : 0;
+        const rules = {
+          ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+          worktreeSettledAfterDays:
+            scenario === "project-custom" || scenario === "inactive-settling" ? null : days,
+          // Another rule must not bypass the settle-script grace either.
+          worktreeAfterDays: scenario === "inactive-settling" ? 1 : null,
+        };
+        fixture.setSettings({
+          storageCleanup: rules,
+          projectSettingsOverrides: {
+            [ProjectId.make("project-1")]:
+              scenario === "project-off"
+                ? { worktreeCleanup: { mode: "off" } }
+                : scenario === "project-custom"
+                  ? {
+                      worktreeCleanup: {
+                        mode: "custom",
+                        rules: { ...rules, worktreeSettledAfterDays: 0 },
+                      },
+                    }
+                  : {},
+          },
         });
-      }
-      expect(thread.branch).toBe("feature");
-      expect(
-        (yield* fixture.command(fixture.repo, ["rev-parse", "--verify", "refs/heads/feature"]))
-          .exitCode,
-      ).toBe(0);
-    }).pipe(Effect.provide(cleanupTestLayer), Effect.scoped),
+        const thread = shell({
+          branch: "feature",
+          worktreePath: fixture.worktree,
+          settledAt:
+            scenario === "active"
+              ? null
+              : at(
+                  scenario === "expired" ||
+                    scenario === "recent-update" ||
+                    scenario === "inactive-settling"
+                    ? -20 * DAY_MS
+                    : scenario === "boundary"
+                      ? -8 * DAY_MS
+                      : scenario === "wait"
+                        ? -8 * DAY_MS + 1
+                        : scenario === "settle-script"
+                          ? 0
+                          : -60_000,
+                ),
+          updatedAt: at(
+            scenario === "recent-update" ||
+              scenario === "settle-script" ||
+              scenario === "inactive-settling"
+              ? 0
+              : -10 * DAY_MS,
+          ),
+        });
+        fixture.setThreads([thread]);
+        if (scenario === "dirty")
+          yield* fixture.fs.writeFileString(`${fixture.worktree}/tracked.txt`, "edit\n");
+        const report = yield* fixture.service.runNow;
+        const removed = ["immediate", "expired", "boundary", "project-custom"].includes(scenario);
+        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(!removed);
+        expect(report.counts.removed).toBe(removed ? 1 : 0);
+        if (scenario !== "project-off") {
+          const reason =
+            scenario === "active"
+              ? "Not settled"
+              : scenario === "wait"
+                ? "Settled for 7 of 8 days"
+                : ["settle-script", "recent-update", "inactive-settling"].includes(scenario)
+                  ? "Settled moments ago"
+                  : scenario === "dirty"
+                    ? "Has uncommitted changes (1 file)"
+                    : `Settled for ${scenario === "expired" ? 20 : scenario === "boundary" ? 8 : 0} days`;
+          expect(checkoutEntries(report)[0]).toMatchObject({
+            outcome: removed ? "removed" : "kept",
+            reason,
+          });
+        }
+        expect(thread.branch).toBe("feature");
+        expect(
+          (yield* fixture.command(fixture.repo, ["rev-parse", "--verify", "refs/heads/feature"]))
+            .exitCode,
+        ).toBe(0);
+      }),
+    ),
   );
 });
 

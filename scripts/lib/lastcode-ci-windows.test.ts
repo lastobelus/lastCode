@@ -46,17 +46,18 @@ describe("Windows CI command serialization", () => {
           () => "C:\\Program Files\\npm & tools\\vp.cmd",
         ),
       );
+      const commandLine = [
+        String.raw`^"C:\Program^ Files\npm^ ^&^ tools\vp.cmd^"`,
+        String.raw`^"run^"`,
+        String.raw`^"value^ ^&^ calc^"`,
+        String.raw`^"^%PATH^%^"`,
+        String.raw`^"quote\^"value^"`,
+      ].join(" ");
+      expect(resolved).toEqual({ command: commandLine, args: [], shell: true });
       expect(buildWindowsCiLaunch(resolved, env)).toEqual({
         filePath: env.ComSpec,
-        argumentLine: `/d /s /v:off /c "${[resolved.command, ...resolved.args].join(" ")}"`,
+        argumentLine: `/d /s /v:off /c "${commandLine}"`,
       });
-      expect(resolved.command).toContain("^&");
-      expect(resolved.args).toEqual([
-        '^"run^"',
-        '^"value^ ^&^ calc^"',
-        '^"^%PATH^%^"',
-        '^"quote\\^"value^"',
-      ]);
     }),
   );
 
