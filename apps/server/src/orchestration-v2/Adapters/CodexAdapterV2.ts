@@ -6586,8 +6586,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           // exact saved turn. Missing or unloaded runtime state alone proves nothing.
           let cursor: string | null = null;
           const visited = new Set<string | null>();
-          for (let pageIndex = 0; pageIndex < 10; pageIndex++) {
-            if (visited.has(cursor)) return false;
+          while (!visited.has(cursor)) {
             visited.add(cursor);
             const page: CodexSchema.V2ThreadTurnsListResponse = yield* client.request(
               "thread/turns/list",

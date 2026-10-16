@@ -8681,6 +8681,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       "final-active",
       "final-newer-running",
       "final-read-error",
+      "deep-history",
     ] as const;
     it.effect.each(
       (["legacy", "paginated"] as const).flatMap((historyMode) =>
@@ -8693,6 +8694,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 "final-active",
                 "final-newer-running",
                 "final-read-error",
+                "deep-history",
               ].includes(outcome),
           )
           .map((outcome) => [historyMode, outcome] as const),
@@ -8772,6 +8774,35 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 { data: [newerTurn], nextCursor: "older-turns" },
               ),
             );
+            let savedTurnCursor = "older-turns";
+            if (outcome === "deep-history") {
+              for (let pageNumber = 2; pageNumber <= 10; pageNumber++) {
+                const nextCursor = `older-turns-${pageNumber}`;
+                entries.push(
+                  ...exchange(
+                    nextRequestId++,
+                    "thread/turns/list",
+                    {
+                      threadId: nativeThreadId,
+                      cursor: savedTurnCursor,
+                      limit: 100,
+                      sortDirection: "desc",
+                      itemsView: "notLoaded",
+                    },
+                    {
+                      data: Array.from({ length: 100 }, (_, turnIndex) =>
+                        makeCodexReplayTurn({
+                          id: `page-${pageNumber}-turn-${turnIndex}`,
+                          status: "completed",
+                        }),
+                      ),
+                      nextCursor,
+                    },
+                  ),
+                );
+                savedTurnCursor = nextCursor;
+              }
+            }
             if (outcome !== "newer-running")
               entries.push(
                 ...exchange(
@@ -8779,7 +8810,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                   "thread/turns/list",
                   {
                     threadId: nativeThreadId,
-                    cursor: "older-turns",
+                    cursor: savedTurnCursor,
                     limit: 100,
                     sortDirection: "desc",
                     itemsView: "notLoaded",
@@ -8792,7 +8823,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               );
           }
         }
-        const terminal = ["interrupted", "completed", "failed"].includes(outcome);
+        const terminal = ["interrupted", "completed", "failed", "deep-history"].includes(outcome);
         if (
           historyMode === "paginated" &&
           (terminal ||
