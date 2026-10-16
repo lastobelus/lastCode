@@ -24,6 +24,7 @@ export type ThreadActionMenuId =
   | "regenerate-title"
   | "cancel-action"
   | "mark-unread"
+  | "mark-read"
   | "copy"
   | "copy-path"
   | "copy-branch"
@@ -103,12 +104,13 @@ export interface ThreadActionMenuState {
   readonly snoozePresets: ReadonlyArray<SnoozePreset>;
 }
 
-/** Local navigation, read markers, and copying remain available to read-only clients. */
+/** Local actions need no operate grant; synced read markers are gated by their destination. */
 export function threadActionRequiresOperate(action: ThreadActionMenuId): boolean {
   return ![
     "new-thread-on-branch",
     "project-settings",
     "mark-unread",
+    "mark-read",
     "copy",
     "copy-path",
     "copy-branch",
@@ -185,6 +187,7 @@ export function buildThreadActionMenuItems(
       ? [{ id: "cancel-action" as const, label: "Cancel running Action", destructive: true }]
       : []),
     { id: "mark-unread", label: "Mark unread", icon: "mail-open" },
+    { id: "mark-read", label: "Mark read", icon: "check" },
     ...(state.projectFilter
       ? [
           {

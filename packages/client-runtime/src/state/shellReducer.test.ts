@@ -447,6 +447,33 @@ describe("applyShellStreamEvent", () => {
     expect(active.archivedThreads).toEqual([]);
   });
 
+  it.each(["archive", "delete"] as const)(
+    "retains the scratch project after %s removes its last active thread",
+    (operation) => {
+      const project = { ...v2Project, title: "No project", workspaceRoot: "/state/scratch" };
+      const snapshot = { ...v2ShellSnapshot, projects: [project] };
+      const next = applyShellStreamEvent(
+        snapshot,
+        operation === "archive"
+          ? {
+              kind: "thread.updated",
+              sequence: 1,
+              location: "archive",
+              thread: { ...v2ThreadShell, archivedAt: v2ThreadShell.updatedAt },
+            }
+          : {
+              kind: "thread.removed",
+              sequence: 1,
+              location: "active",
+              threadId: v2ThreadShell.id,
+            },
+      );
+      expect(next.threads).toEqual([]);
+      expect(next.projects).toBe(snapshot.projects);
+      expect(next.projects[0]).toBe(project);
+    },
+  );
+
   it("removes a thread from either collection", () => {
     const next = applyShellStreamEvent(v2ShellSnapshot, {
       kind: "thread.removed",
