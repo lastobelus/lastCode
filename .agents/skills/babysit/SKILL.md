@@ -154,8 +154,9 @@ needs judgement:
    and parent chain. It exits non-zero only for `attention`. It never waits,
    approves, or merges.
 3. On `attention`, act on its reason now. For `observation-failed` (a GitHub
-   read failed, or the PR or evidence changed during the check), rerun the
-   check once; report the blocker if it persists. On `ready` or `stacked-ready`, continue
+   read failed, or the PR or evidence changed during the check) or
+   `mergeability-unknown` (GitHub had not computed mergeability after CI and
+   review finished), rerun the check once; report the blocker if it persists. On `ready` or `stacked-ready`, continue
    to the finish line below. On `pending`, call `watch_pull_request` with the
    PR's explicit URL and end the turn. For a stack, follow the
    [stack reference](../_references/stacked-pr-babysit.md#check-and-watch-stack-members).
