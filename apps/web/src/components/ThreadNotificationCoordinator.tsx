@@ -130,7 +130,11 @@ function EnvironmentNotifications({
     // Subagents are skipped below, so their requests notify through the thread above them.
     const subagentRequests = pendingSubagentRequestsByThread(threads);
     for (const rawThread of threads) {
-      if (rawThread.lineage.relationshipToParent === "subagent") continue;
+      if (
+        rawThread.lineage.relationshipToParent === "subagent" &&
+        rawThread.lineage.independent !== true
+      )
+        continue;
       const prior = previous.current.get(rawThread.id);
       const subagentRequest = subagentRequests.get(rawThread.id) ?? null;
       // The same object cannot produce a new notification.

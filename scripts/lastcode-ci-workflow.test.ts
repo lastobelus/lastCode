@@ -50,8 +50,11 @@ const gateScript = gateScriptBody
   .join("\n");
 
 const successfulGateEnvironment = {
-  CHECK_RESULT: "success",
+  LINT_RESULT: "success",
+  TYPECHECK_RESULT: "success",
+  BUILD_RESULT: "success",
   TEST_RESULT: "success",
+  TEST_WEB_RESULT: "success",
   TEST_SERVER_RESULT: "success",
   RUST_RESULT: "success",
   MOBILE_CHANGES_RESULT: "success",
@@ -202,8 +205,11 @@ describe("LastCode GitHub CI workflow", () => {
 
   it("makes the stable gate depend on every validation job", () => {
     for (const job of [
-      "check",
+      "lint",
+      "typecheck",
+      "build",
       "test",
+      "test_web",
       "test_server",
       "rust",
       "mobile_native_changes",
@@ -226,8 +232,11 @@ describe("LastCode GitHub CI workflow", () => {
 
   it("fails closed for every unsuccessful mandatory result", () => {
     for (const variable of [
-      "CHECK_RESULT",
+      "LINT_RESULT",
+      "TYPECHECK_RESULT",
+      "BUILD_RESULT",
       "TEST_RESULT",
+      "TEST_WEB_RESULT",
       "TEST_SERVER_RESULT",
       "RUST_RESULT",
       "MOBILE_CHANGES_RESULT",

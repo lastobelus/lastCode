@@ -7,7 +7,7 @@ import { View } from "react-native";
 
 import { AppText } from "../../../components/AppText";
 import { MaterialIconButton } from "../../../components/MaterialIconButton";
-import { SettingsControlRow } from "./SettingsControlRow";
+import { ListRowLayout } from "../../../components/ListRowLayout";
 import { SettingsChoiceRow } from "./SettingsChoiceRow";
 import { SettingsSection } from "./SettingsSection";
 import { SettingsSwitchRow } from "./SettingsSwitchRow";
@@ -82,34 +82,35 @@ export function LocalCiSettingsSection(props: {
         };
         return (
           <View key={row.key} className="border-t border-border-subtle">
-            <SettingsControlRow
+            <ListRowLayout
               icon="slider.horizontal.3"
               label={row.label}
-              subtitle={row.subtitle}
+              description={row.subtitle}
               disabled={props.disabled}
-            >
-              <View className="shrink-0 flex-row items-center">
-                <MaterialIconButton
-                  icon="minus"
-                  accessibilityLabel={`Decrease ${row.label.toLowerCase()}`}
-                  disabled={props.disabled || value === 1}
-                  onPress={() => adjust(-1)}
-                />
-                <AppText
-                  className="min-w-8 text-center text-base"
-                  accessibilityLabel={`${row.label}: ${value ?? "Mixed"}`}
-                  accessibilityLiveRegion="polite"
-                >
-                  {value ?? "Mixed"}
-                </AppText>
-                <MaterialIconButton
-                  icon="plus"
-                  accessibilityLabel={`Increase ${row.label.toLowerCase()}`}
-                  disabled={props.disabled || value === row.max}
-                  onPress={() => adjust(1)}
-                />
-              </View>
-            </SettingsControlRow>
+              accessory={
+                <View className="shrink-0 flex-row items-center">
+                  <MaterialIconButton
+                    icon="minus"
+                    accessibilityLabel={`Decrease ${row.label.toLowerCase()}`}
+                    disabled={props.disabled || value === 1}
+                    onPress={() => adjust(-1)}
+                  />
+                  <AppText
+                    className="min-w-8 text-center text-base"
+                    accessibilityLabel={`${row.label}: ${value ?? "Mixed"}`}
+                    accessibilityLiveRegion="polite"
+                  >
+                    {value ?? "Mixed"}
+                  </AppText>
+                  <MaterialIconButton
+                    icon="plus"
+                    accessibilityLabel={`Increase ${row.label.toLowerCase()}`}
+                    disabled={props.disabled || value === row.max}
+                    onPress={() => adjust(1)}
+                  />
+                </View>
+              }
+            />
           </View>
         );
       })}

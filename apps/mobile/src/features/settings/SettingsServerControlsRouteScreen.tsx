@@ -27,6 +27,8 @@ import {
 } from "./components/SettingsEnvironmentFilterHeader";
 import { BranchNamingSettings } from "./components/BranchNamingSettings";
 import { SettingsChoiceRow } from "./components/SettingsChoiceRow";
+import { ListRowLayout } from "../../components/ListRowLayout";
+import { RetentionDaysField } from "./components/RetentionDaysField";
 import { SettingsSection } from "./components/SettingsSection";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
 import { LocalCiSettingsSection } from "./components/LocalCiSettingsSection";
@@ -39,6 +41,12 @@ import {
   uniformMobileSetting,
   type ScopedMobileSettingsTarget,
 } from "./settings-scoped-server";
+import {
+  DEFAULT_MOBILE_DEPENDENCY_RETENTION_DAYS,
+  planMobileWorktreeDependencyCleanup,
+  resolveMobileWorktreeDependencySettings,
+  supportsMobileWorktreeDependencyCleanup,
+} from "./settings-worktree-dependencies";
 
 type SettingsPage = "new-threads" | "source-control" | "agent-behavior" | "maintenance";
 
@@ -60,8 +68,22 @@ const PAGE_PROJECT_KEYS: Record<SettingsPage, readonly ProjectScopedServerSettin
     "branchNameInstructions",
   ],
   "agent-behavior": ["responseStreamingMode", "enableAgentBrowserAccess"],
-  maintenance: ["continueThreadsAfterServerUpdate"],
+  maintenance: ["continueThreadsAfterServerUpdate", "worktreeCleanup"],
 };
+
+const WORKTREE_CLEANUP_CHOICES = [
+  {
+    mode: "inherit",
+    label: "Inherit",
+    description: "Use each environment's automatic cleanup rules.",
+  },
+  {
+    mode: "off",
+    label: "Off",
+    description: "Disable all automatic worktree and dependency cleanup for this project.",
+  },
+  { mode: "custom", label: "Custom", description: "Use this project's automatic cleanup rules." },
+] as const;
 
 const SUBMODULE_CHOICES: ReadonlyArray<{
   readonly mode: WorktreeSubmodules | null;
@@ -219,7 +241,6 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
       )
     )
       return;
-    const writes = planMobileScopedSettingsPatch(targets, projectSelected, patch);
     if (writes.length === 0) return;
     writeInFlight.current = true;
     setPendingTargets(targets);
@@ -234,28 +255,11 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
       setPendingWrites((count) => count - 1);
     });
   };
+  const write = (patch: ServerSettingsPatch) => {
+    persistWrites(planMobileScopedSettingsPatch(targets, projectSelected, patch));
+  };
   const clearProjectOverrides = () => {
-    if (
-      writeInFlight.current ||
-      !targets.every((target) =>
-        readEnvironmentScope(target.environment.environmentId, AuthSettingsWriteScope),
-      )
-    )
-      return;
-    const writes = planMobileScopedSettingsClear(targets, PAGE_PROJECT_KEYS[props.page]);
-    if (writes.length === 0) return;
-    writeInFlight.current = true;
-    setPendingTargets(targets);
-    setPendingWrites((count) => count + 1);
-    void Promise.allSettled(
-      writes.map((entry) =>
-        updateSettings({ environmentId: entry.environmentId, input: { patch: entry.patch } }),
-      ),
-    ).finally(() => {
-      writeInFlight.current = false;
-      setPendingTargets(null);
-      setPendingWrites((count) => count - 1);
-    });
+    persistWrites(planMobileScopedSettingsClear(targets, pageProjectKeys));
   };
   const supportsProjectOverrides = targets.every(
     (target) =>
@@ -281,6 +285,14 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
       !PROJECT_SCOPED_SERVER_SETTING_KEYS.includes(
         key as (typeof PROJECT_SCOPED_SERVER_SETTING_KEYS)[number],
       ));
+  const dependenciesDisabled =
+    disabled || !supportsDependencies || (projectSelected && dependencySettings.mode !== "custom");
+  const updateDependencyDays = (value: number | null) => {
+    if (dependenciesDisabled) return;
+    persistWrites(
+      planMobileWorktreeDependencyCleanup(targets, projectSelected, { kind: "days", value }),
+    );
+  };
 
   return (
     <>
@@ -291,6 +303,7 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
       >
         <ScrollView
           contentInsetAdjustmentBehavior="automatic"
+          keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
           className="flex-1"
           contentContainerClassName="gap-6 px-5 pt-4"
@@ -308,7 +321,7 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                 <SettingsProjectOverridesSection
                   projectLabel={selectedProject?.label ?? "Unavailable project"}
                   hasOverrides={targets.some((target) =>
-                    PAGE_PROJECT_KEYS[props.page].some((key) => target.sources[key] === "project"),
+                    pageProjectKeys.some((key) => target.sources[key] === "project"),
                   )}
                   supportsOverrides={supportsProjectOverrides}
                   pending={pendingWrites > 0}

@@ -278,6 +278,7 @@ export function resolveWorktreeCleanup(
   if (policy?.mode === "off")
     return {
       worktreeKeepWhen: settings.storageCleanup.worktreeKeepWhen,
+      worktreeDependenciesAfterDays: null,
       worktreeAfterDays: null,
       worktreeSettledAfterDays: null,
       worktreeOnMerge: false,
@@ -286,6 +287,7 @@ export function resolveWorktreeCleanup(
     };
   const {
     worktreeKeepWhen,
+    worktreeDependenciesAfterDays,
     worktreeAfterDays,
     worktreeSettledAfterDays,
     worktreeOnMerge,
@@ -294,6 +296,7 @@ export function resolveWorktreeCleanup(
   } = settings.storageCleanup;
   return {
     worktreeKeepWhen,
+    worktreeDependenciesAfterDays,
     worktreeAfterDays,
     worktreeSettledAfterDays,
     worktreeOnMerge,

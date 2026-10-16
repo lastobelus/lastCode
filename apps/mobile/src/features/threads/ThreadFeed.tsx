@@ -16,10 +16,14 @@ import { KeyboardAwareLegendList } from "@legendapp/list/keyboard";
 import { useViewabilityAmount, type LegendListRef } from "@legendapp/list/react-native";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { HandoffEndpoints } from "@t3tools/client-runtime/handoff";
-import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
+import {
+  resolveIncomingMessagePreview,
+  resolveUserMessagePresentation,
+} from "@t3tools/client-runtime/user-message";
 import { canForkProjectedAssistantItem } from "@t3tools/client-runtime/state/thread-workflows";
 import {
   type OrchestrationMessageContext,
+  type PreviewHostingLeaseSummary,
   ThreadId,
   type ChatAttachment,
   type ChatFileAttachment,
@@ -31,11 +35,7 @@ import {
 } from "@t3tools/contracts";
 import { renderAssistantCitationsAsText } from "@t3tools/shared/assistantCitations";
 import { encodeComposerContextFragment } from "@t3tools/shared/composerContextClipboard";
-import {
-  parseThreadLinkHref,
-  parseThreadLinkReference,
-  resolveThreadLinkReference,
-} from "@t3tools/shared/threadLinks";
+import { parseThreadLinkReference, resolveThreadLinkReference } from "@t3tools/shared/threadLinks";
 import { PROMPT_LINK_MAX_PROMPT_LENGTH } from "@t3tools/shared/promptLinks";
 import {
   parseComposerContextHref,
@@ -55,7 +55,7 @@ import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime"
 import {
   classifyMarkdownImageSource,
   markdownImageSourceFragment,
-} from "@t3tools/client-runtime/markdown-images";
+} from "@t3tools/shared/markdownImages";
 import { resolveViewedImageAsset } from "@t3tools/client-runtime/work-log/presentation";
 import {
   renderCodexInlineDirectivesAsMarkdown,
@@ -75,7 +75,6 @@ import { HeaderHeightContext } from "@react-navigation/elements";
 import { useFocusEffect, useNavigation } from "@react-navigation/native";
 import { useNativeWorkspaceColumnsSupported } from "../../native/NativeWorkspaceColumns";
 import {
-  createContext,
   memo,
   useCallback,
   useContext,
@@ -89,7 +88,6 @@ import {
   type RefObject,
 } from "react";
 import {
-  ActivityIndicator,
   Alert,
   Image,
   Platform,
@@ -99,7 +97,6 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
-  Text as NativeText,
   type ColorValue,
   useWindowDimensions,
   View,
@@ -124,7 +121,6 @@ import { copyTextWithHaptic } from "../../lib/copyTextWithHaptic";
 import { tryOpenExternalUrl } from "../../lib/openExternalUrl";
 import { downloadAndShareAttachment } from "../../lib/attachmentDownload";
 import { hasWideMarkdownBlock } from "../../lib/wideMarkdownBlocks";
-import { faviconUrlForOrigin } from "@t3tools/shared/favicon";
 import {
   SelectableMarkdownText,
   type MarkdownFileContextMenu,
@@ -138,19 +134,15 @@ import {
 import { AppText as Text } from "../../components/AppText";
 import { VideoPreviewModal, type VideoPreviewSource } from "../../components/VideoPreviewModal";
 import { VideoAttachmentTile } from "../../components/VideoAttachmentTile";
-import { MediaVideoPlayer } from "../../components/MediaVideoPlayer";
 import { resolveMarkdownMediaPreview } from "../../lib/markdownMedia";
 import {
   attachmentVideoPreviewSource,
-  mediaVideoPreviewUri,
-  mediaVideoThumbnailKey,
   type MediaVideoPreviewSource,
 } from "../../lib/videoPreviewSource";
 import { CopyTextButton } from "../../components/CopyTextButton";
 import { ControlPillMenu } from "../../components/ControlPill";
 import { copyPromptLink } from "../prompt-links/prompt-link-actions";
 import { parseReviewCommentMessageSegments } from "../review/reviewCommentSelection";
-import type { ReviewDiffTheme } from "../review/shikiReviewHighlighter";
 import {
   ReviewCommentCard,
   useReviewCommentColors,
@@ -164,18 +156,12 @@ import {
   type LayoutVariant,
 } from "../../lib/layout";
 import { uuidv4 } from "../../lib/uuid";
-import {
-  resolveMarkdownFontSizes,
-  resolveNativeMarkdownTypography,
-} from "../../lib/appearancePreferences";
+import { resolveNativeMarkdownTypography } from "../../lib/appearancePreferences";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import { markdownFileIconSource } from "../../lib/markdownFileIcons";
 import { PierreEntryIcon } from "../../components/PierreEntryIcon";
-import { markdownLinkIconSource } from "../../lib/markdownLinkIcons";
 import {
   normalizeNativeMarkdownUrl,
-  resolveMarkdownInlineCodePresentation,
-  resolveMarkdownLinkIcon,
   resolveMarkdownLinkPresentation,
 } from "../../lib/markdownLinks";
 import {
@@ -210,16 +196,16 @@ import { resolveThreadFeedFixedItemSize } from "./thread-feed-item-size";
 import { htmlRenderFrameHeight } from "@t3tools/shared/htmlRender";
 import { htmlRenderRowHeight, ThreadHtmlRender } from "./HtmlRenderWebView";
 import { ThreadMcpApp } from "./McpAppWebView";
-import { useMarkdownCodeHighlight } from "./markdownCodeHighlightState";
-import {
-  assetEnvironment,
-  useAssetUrl,
-  useAssetUrlState,
-  useRefreshAssetUrl,
-} from "../../state/assets";
+import { assetEnvironment, useAssetUrl, useRefreshAssetUrl } from "../../state/assets";
+import { previewEnvironment } from "../../state/preview";
 import { useAtomQueryRunner } from "../../state/use-atom-query-runner";
-import { usePreparedConnection } from "../../state/session";
 import { useLiveThreadLinkLabels } from "../../state/entities";
+import { usePreparedConnection, useConfiguredPreviewEnvironmentUrl } from "../../state/session";
+import {
+  openThreadFeedMarkdownUrl,
+  preparedThreadFeedMediaActionsSource,
+  prepareThenOpenThreadFeedUrl,
+} from "../../lib/prepareThreadFeedPreview";
 import { useThreadSelection } from "../../state/use-thread-selection";
 import { composerDocumentAttachmentRecord } from "../../lib/composerContext";
 import * as Option from "effect/Option";
@@ -227,19 +213,17 @@ import { appAtomRegistry } from "../../state/atom-registry";
 import { environmentThreadShells, threadEnvironment } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useV2ItemSupport } from "../../state/v2-item-support";
-import {
-  fileRoutePathSegments,
-  isAbsolutePath,
-  resolveWorkspaceRelativeFilePath,
-} from "../files/filePath";
+import { fileRoutePathSegments } from "../files/filePath";
 import { waitForThreadShellReady } from "./threadForkNavigation";
 import { resolveUserMessageIntentBadge } from "./userMessageIntentBadge";
+import { IncomingMessageDisclosure } from "./incoming-message-disclosure";
 import { fileChipMenu, resolveFileChipTarget, type FileChipAction } from "./fileChipMenu";
 import { useFileChipShare } from "./useFileChipShare";
 import {
   MarkdownImageAvailableWidthContext,
   ThreadMarkdownImage,
   ThreadMarkdownImageUnavailable,
+  ThreadMarkdownPreparedUri,
   ThreadMarkdownImageView,
 } from "./ThreadMarkdownImage";
 
@@ -346,13 +330,14 @@ const USER_MESSAGE_COPY_MENU_ACTIONS = [
  * with this prompt, unless the prompt is longer than a link can carry.
  */
 function UserMessageCopyButton(props: {
+  readonly accessibilityLabel: string;
   readonly text: string;
   readonly onCopy: (() => Promise<void>) | undefined;
   readonly tintColor: ColorValue;
 }) {
   const button = (
     <CopyTextButton
-      accessibilityLabel="Copy message"
+      accessibilityLabel={props.accessibilityLabel}
       text={props.text}
       onCopy={props.onCopy}
       tintColor={props.tintColor}
@@ -754,6 +739,21 @@ interface MarkdownLinkHandlers {
   readonly linkCustomization?: (href: string) => MarkdownLinkCustomization | undefined;
 }
 
+function ThreadMarkdownVideoPlaceholder(props: { readonly unavailable: boolean }) {
+  return (
+    <View
+      className="items-center justify-center rounded-[10px] bg-md-code-bg"
+      style={{ height: 180 }}
+    >
+      {props.unavailable ? (
+        <Text className="text-xs text-foreground-muted">Video unavailable</Text>
+      ) : (
+        <AppActivityIndicator />
+      )}
+    </View>
+  );
+}
+
 interface MarkdownStyleSets {
   readonly user: MarkdownStyleSet;
   readonly assistant: MarkdownStyleSet;
@@ -1042,6 +1042,10 @@ function renderFeedEntry(
 ) {
   const entry = info.item;
   const { markdownStyles, iconSubtleColor, userBubbleColor } = props;
+  const resolvedUserBubbleMaxWidth =
+    props.usesNativeWorkspaceColumns && Platform.OS === "ios" && !Platform.isPad
+      ? "85%"
+      : props.userBubbleMaxWidth;
 
   if (entry.type === "run-fold") {
     return (
@@ -1182,8 +1186,10 @@ function renderFeedEntry(
     }
     const isUser = message.role === "user";
     const presentation = resolveUserMessagePresentation(message);
+    const incomingPreview = resolveIncomingMessagePreview(message);
     const renderedText = renderAssistantCitationsAsText(presentation.text);
-    const styles = isUser ? markdownStyles.user : markdownStyles.assistant;
+    const styles =
+      isUser && !incomingPreview.isIncoming ? markdownStyles.user : markdownStyles.assistant;
     const timestampLabel = formatMessageTime(isUser ? message.createdAt : message.updatedAt);
     const attachments = message.attachments ?? [];
     const hasReviewCommentContext = presentation.text.includes("<review_comment");
@@ -1219,6 +1225,97 @@ function renderFeedEntry(
       const visibleAttachments = attachments.filter(
         (attachment) => isImageAttachment(attachment) || !inlineAttachmentIds.has(attachment.id),
       );
+
+      const messageAttachments = (
+        <>
+          {entry.pendingMessage?.attachments.map((attachment) =>
+            attachment.type === "image" && attachment.uploadedAttachmentId ? (
+              <MessageAttachmentImage
+                key={attachment.id}
+                environmentId={props.environmentId}
+                attachmentId={attachment.uploadedAttachmentId}
+                name={attachment.name}
+                mimeType={attachment.mimeType}
+                className="h-[140px] w-[180px] rounded-[14px]"
+                onPressPreview={props.onPressPreview}
+              />
+            ) : attachment.type === "image" ? (
+              <Pressable
+                key={attachment.id}
+                accessibilityRole="imagebutton"
+                accessibilityLabel={`Open ${attachment.name}`}
+                onPress={() =>
+                  props.onPressPreview({
+                    kind: "image",
+                    name: attachment.name,
+                    uri: attachment.dataUrl ?? attachment.previewUri,
+                    gallery: composerImageGallery(entry.pendingMessage?.attachments ?? []),
+                  })
+                }
+              >
+                <Image
+                  source={{ uri: attachment.previewUri }}
+                  style={{ width: 180, height: 140, borderRadius: 14 }}
+                />
+              </Pressable>
+            ) : (
+              <MessageAttachmentUnknown key={attachment.id} name={attachment.name} />
+            ),
+          )}
+          {/* An empty container still takes a gap, which pads every attachment-free bubble. */}
+          {visibleAttachments.length > 0 ? (
+            <View className={inlineAttachmentIds.size ? "flex-row flex-wrap gap-2" : "gap-2"}>
+              {visibleAttachments.map((attachment) => {
+                return isImageAttachment(attachment) ? (
+                  <MessageAttachmentImage
+                    key={attachment.id}
+                    environmentId={props.environmentId}
+                    attachmentId={attachment.id}
+                    name={attachment.name}
+                    mimeType={attachment.mimeType}
+                    className={
+                      inlineAttachmentIds.size
+                        ? "h-24 w-24 rounded-[14px] bg-user-bubble-foreground/15"
+                        : "aspect-[1.3] w-full rounded-[14px] bg-user-bubble-foreground/15"
+                    }
+                    onPressPreview={props.onPressPreview}
+                  />
+                ) : isFileAttachment(attachment) ? (
+                  <MessageAttachmentFile
+                    key={attachment.id}
+                    environmentId={props.environmentId}
+                    attachment={attachment}
+                    onPressPreview={props.onPressPreview}
+                    onPressVideo={props.onPressVideo}
+                  />
+                ) : (
+                  <MessageAttachmentUnknown key={attachment.id} name={attachment.name} />
+                );
+              })}
+            </View>
+          ) : null}
+        </>
+      );
+      const messageContent = (
+        <>
+          {renderedText.trim().length > 0 ? (
+            <MarkdownImageAvailableWidthContext
+              value={props.userBubbleMaxWidth - USER_BUBBLE_HORIZONTAL_PADDING * 2}
+            >
+              <UserMessageContent
+                text={renderedText}
+                environmentId={props.environmentId}
+                context={message.context}
+                markdownStyles={styles}
+                reviewCommentColors={props.reviewCommentColors}
+                skills={props.skills}
+                linkHandlers={props.markdownLinkHandlers}
+                renderImage={props.renderMarkdownImage}
+              />
+            </MarkdownImageAvailableWidthContext>
+          ) : null}
+        </>
+      );
       return (
         <Animated.View
           className="mb-5 items-end"
@@ -1239,107 +1336,37 @@ function renderFeedEntry(
             />
           ) : null}
           <View
-            className="min-w-0 gap-2 rounded-[20px] px-3.5 py-2.5"
+            className={cn(
+              "min-w-0 gap-2 px-3.5 py-2.5",
+              incomingPreview.isIncoming ? "rounded-xl bg-subtle" : "rounded-[20px]",
+            )}
             style={{
-              backgroundColor: userBubbleColor,
-              maxWidth:
-                props.usesNativeWorkspaceColumns && Platform.OS === "ios" && !Platform.isPad
-                  ? "85%"
-                  : props.userBubbleMaxWidth,
-              ...(hasReviewCommentContext
-                ? { width: props.reviewCommentBubbleWidth }
-                : hasWideBlock
-                  ? {
-                      width:
-                        props.usesNativeWorkspaceColumns && Platform.OS === "ios" && !Platform.isPad
-                          ? "85%"
-                          : props.userBubbleMaxWidth,
-                    }
-                  : null),
+              backgroundColor: incomingPreview.isIncoming ? undefined : userBubbleColor,
+              maxWidth: resolvedUserBubbleMaxWidth,
+              ...(incomingPreview.isIncoming
+                ? { width: resolvedUserBubbleMaxWidth }
+                : hasReviewCommentContext
+                  ? { width: props.reviewCommentBubbleWidth }
+                  : hasWideBlock
+                    ? { width: resolvedUserBubbleMaxWidth }
+                    : null),
             }}
           >
-            {entry.pendingMessage?.attachments.map((attachment) =>
-              attachment.type === "image" && attachment.uploadedAttachmentId ? (
-                <MessageAttachmentImage
-                  key={attachment.id}
-                  environmentId={props.environmentId}
-                  attachmentId={attachment.uploadedAttachmentId}
-                  name={attachment.name}
-                  mimeType={attachment.mimeType}
-                  className="h-[140px] w-[180px] rounded-[14px]"
-                  onPressPreview={props.onPressPreview}
-                />
-              ) : attachment.type === "image" ? (
-                <Pressable
-                  key={attachment.id}
-                  accessibilityRole="imagebutton"
-                  accessibilityLabel={`Open ${attachment.name}`}
-                  onPress={() =>
-                    props.onPressPreview({
-                      kind: "image",
-                      name: attachment.name,
-                      uri: attachment.dataUrl ?? attachment.previewUri,
-                      gallery: composerImageGallery(entry.pendingMessage?.attachments ?? []),
-                    })
-                  }
-                >
-                  <Image
-                    source={{ uri: attachment.previewUri }}
-                    style={{ width: 180, height: 140, borderRadius: 14 }}
-                  />
-                </Pressable>
-              ) : (
-                <MessageAttachmentUnknown key={attachment.id} name={attachment.name} />
-              ),
-            )}
-            {/* An empty container still takes a gap, which pads every attachment-free bubble. */}
-            {visibleAttachments.length > 0 ? (
-              <View className={inlineAttachmentIds.size ? "flex-row flex-wrap gap-2" : "gap-2"}>
-                {visibleAttachments.map((attachment) => {
-                  return isImageAttachment(attachment) ? (
-                    <MessageAttachmentImage
-                      key={attachment.id}
-                      environmentId={props.environmentId}
-                      attachmentId={attachment.id}
-                      name={attachment.name}
-                      mimeType={attachment.mimeType}
-                      className={
-                        inlineAttachmentIds.size
-                          ? "h-24 w-24 rounded-[14px] bg-user-bubble-foreground/15"
-                          : "aspect-[1.3] w-full rounded-[14px] bg-user-bubble-foreground/15"
-                      }
-                      onPressPreview={props.onPressPreview}
-                    />
-                  ) : isFileAttachment(attachment) ? (
-                    <MessageAttachmentFile
-                      key={attachment.id}
-                      environmentId={props.environmentId}
-                      attachment={attachment}
-                      onPressPreview={props.onPressPreview}
-                      onPressVideo={props.onPressVideo}
-                    />
-                  ) : (
-                    <MessageAttachmentUnknown key={attachment.id} name={attachment.name} />
-                  );
-                })}
-              </View>
-            ) : null}
-            {message.text.trim().length > 0 ? (
-              <MarkdownImageAvailableWidthContext
-                value={props.userBubbleMaxWidth - USER_BUBBLE_HORIZONTAL_PADDING * 2}
+            {incomingPreview.isIncoming ? (
+              <IncomingMessageDisclosure
+                key={message.id}
+                preview={incomingPreview}
+                attachmentCount={attachments.length}
+                attachments={messageAttachments}
               >
-                <UserMessageContent
-                  text={renderedText}
-                  environmentId={props.environmentId}
-                  context={message.context}
-                  markdownStyles={styles}
-                  reviewCommentColors={props.reviewCommentColors}
-                  skills={props.skills}
-                  linkHandlers={props.markdownLinkHandlers}
-                  renderImage={props.renderMarkdownImage}
-                />
-              </MarkdownImageAvailableWidthContext>
-            ) : null}
+                {messageContent}
+              </IncomingMessageDisclosure>
+            ) : (
+              <>
+                {messageAttachments}
+                {messageContent}
+              </>
+            )}
           </View>
           <View className="mt-1 flex-row items-center justify-end gap-1 pr-0.5">
             {intentBadge ? (
@@ -1390,6 +1417,9 @@ function renderFeedEntry(
             ) : null}
             {presentation.text.trim().length > 0 ? (
               <UserMessageCopyButton
+                accessibilityLabel={
+                  incomingPreview.isIncoming ? "Copy original message" : "Copy message"
+                }
                 text={presentation.text}
                 onCopy={
                   message.context
@@ -1870,6 +1900,77 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   const usesNativeWorkspaceColumns = useNativeWorkspaceColumnsSupported();
   const openPullRequest = useOpenPullRequest();
   const navigation = useNavigation();
+  const listHostedPreviews = useAtomCommand(previewEnvironment.hostingList, {
+    reportFailure: false,
+  });
+  const recoverHostedPreviewLease = useAtomCommand(previewEnvironment.hostingRecover, {
+    reportFailure: false,
+  });
+  const preparedConnection = usePreparedConnection(props.environmentId);
+  const hasPreparedConnection = Option.isSome(preparedConnection);
+  const environmentUrl = Option.isSome(preparedConnection)
+    ? preparedConnection.value.httpBaseUrl
+    : "";
+  const knownEnvironmentUrl = useConfiguredPreviewEnvironmentUrl(
+    props.environmentId,
+    Option.getOrNull(preparedConnection),
+  );
+  const previewPreparationInput = useCallback(
+    (url: string) => {
+      if (!hasPreparedConnection) return null;
+      return {
+        threadRef: { environmentId: props.environmentId, threadId: props.threadId },
+        url,
+        environmentUrl,
+        knownEnvironmentUrls: knownEnvironmentUrl === null ? [] : [knownEnvironmentUrl],
+        list: async () => {
+          const result = await listHostedPreviews({
+            environmentId: props.environmentId,
+            input: { threadId: props.threadId },
+          });
+          if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+          return result.value;
+        },
+        recover: async (
+          lease: PreviewHostingLeaseSummary,
+          options: { readonly bootstrap: boolean },
+        ) => {
+          const result = await recoverHostedPreviewLease({
+            environmentId: props.environmentId,
+            input: {
+              threadId: props.threadId,
+              leaseId: lease.leaseId,
+              url: lease.url,
+              bootstrap: options.bootstrap,
+            },
+          });
+          if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+          return result.value;
+        },
+      };
+    },
+    [
+      environmentUrl,
+      knownEnvironmentUrl,
+      listHostedPreviews,
+      hasPreparedConnection,
+      props.environmentId,
+      props.threadId,
+      recoverHostedPreviewLease,
+    ],
+  );
+  const prepareMarkdownMediaUrl = useCallback(
+    (url: string) => {
+      const input = previewPreparationInput(url);
+      return input
+        ? prepareThenOpenThreadFeedUrl(
+            { ...input, purpose: "resource" },
+            (preparedUrl) => preparedUrl,
+          )
+        : Promise.resolve(url);
+    },
+    [previewPreparationInput],
+  );
   const { themeAppearance } = useAppearancePreferences();
   const copyFeedbackTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const disclosureSettleFrameRef = useRef<number | null>(null);
@@ -2021,19 +2122,50 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       if (media) {
         void Haptics.selectionAsync();
         if (media.kind === "video") {
-          setExpandedVideo((current) => current ?? media.source);
+          const openVideo = (source: MediaVideoPreviewSource) =>
+            setExpandedVideo((current) => current ?? source);
+          const mediaUrl = "uri" in media.source ? media.source.uri : null;
+          if (mediaUrl !== null && /^https?:\/\//i.test(mediaUrl)) {
+            void openThreadFeedMarkdownUrl(previewPreparationInput(mediaUrl), mediaUrl, (url) =>
+              openVideo({
+                ...media.source,
+                uri: url,
+                actionsSource: preparedThreadFeedMediaActionsSource(
+                  media.source.actionsSource,
+                  url,
+                ),
+              }),
+            );
+          } else {
+            openVideo(media.source);
+          }
         } else {
-          setExpandedFile((current) => current ?? media.source);
+          const openImage = (source: FilePreviewSource) =>
+            setExpandedFile((current) => current ?? source);
+          const mediaUrl = "uri" in media.source ? media.source.uri : null;
+          if (mediaUrl !== null && /^https?:\/\//i.test(mediaUrl)) {
+            void openThreadFeedMarkdownUrl(previewPreparationInput(mediaUrl), mediaUrl, (url) =>
+              openImage({
+                ...media.source,
+                uri: url,
+                actionsSource: preparedThreadFeedMediaActionsSource(
+                  media.source.actionsSource,
+                  url,
+                ),
+              }),
+            );
+          } else {
+            openImage(media.source);
+          }
         }
         return;
       }
 
       const presentation = resolveMarkdownLinkPresentation(href);
+      const fileTarget =
+        presentation.kind === "file" ? resolveFileChipTarget(href, props.workspaceRoot) : null;
       if (presentation.kind === "file") {
-        const relativePath = resolveWorkspaceRelativeFilePath(
-          props.workspaceRoot,
-          presentation.path,
-        );
+        const relativePath = fileTarget?.relativePath;
         if (relativePath) {
           void Haptics.selectionAsync();
           navigation.navigate("ThreadFile", {
@@ -2048,34 +2180,79 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
 
       // A host file outside the workspace, such as a report an agent wrote to
       // a temp directory, opens read-only in the file screen.
-      if (presentation.kind === "file" && isAbsolutePath(presentation.path)) {
+      const hostFileTarget = fileTarget?.fullPath;
+      if (presentation.kind === "file" && hostFileTarget) {
         void Haptics.selectionAsync();
         navigation.navigate("ThreadFile", {
           environmentId: String(props.environmentId),
           threadId: String(props.threadId),
-          path: fileRoutePathSegments(presentation.path),
+          path: fileRoutePathSegments(hostFileTarget),
           ...(presentation.line ? { line: String(presentation.line) } : {}),
         });
         return;
       }
 
-      if (presentation.kind !== "file" && presentation.href) {
+      if (presentation.kind === "file") {
+        Alert.alert(
+          "File unavailable",
+          /^~(?:[\\/]|$)/.test(presentation.path)
+            ? "The host home directory is unknown. Ask for an absolute file link."
+            : "The workspace is unavailable, so this relative file link cannot be resolved.",
+        );
+        return;
+      }
+
+      if (presentation.href) {
         if (/^https?:\/\//i.test(presentation.href) && isPdfFile({ name: presentation.href })) {
-          setExpandedFile(
-            (current) => current ?? { kind: "pdf", uri: presentation.href!, name: "Document.pdf" },
+          void openThreadFeedMarkdownUrl(
+            previewPreparationInput(presentation.href),
+            presentation.href,
+            (url) =>
+              setExpandedFile(
+                (current) => current ?? { kind: "pdf", uri: url, name: "Document.pdf" },
+              ),
+          ).catch(() =>
+            Alert.alert(
+              "Preview unavailable",
+              "The preview could not be restored. Tap the link to retry.",
+            ),
           );
           return;
         }
-        void openPullRequest(presentation.href);
+        const linkUrl = presentation.href;
+        void openThreadFeedMarkdownUrl(previewPreparationInput(linkUrl), linkUrl, (url) =>
+          openPullRequest(url),
+        ).catch(() =>
+          Alert.alert(
+            "Preview unavailable",
+            "The preview could not be restored. Tap the link to retry.",
+          ),
+        );
       }
     },
-    [props.environmentId, props.threadId, props.workspaceRoot, navigation, openPullRequest],
+    [
+      navigation,
+      openPullRequest,
+      previewPreparationInput,
+      props.environmentId,
+      props.threadId,
+      props.workspaceRoot,
+    ],
   );
-  const resolveImageSource = useMarkdownImageSource({
+  const resolveNativeImageSource = useMarkdownImageSource({
     environmentId: props.environmentId,
     threadId: props.threadId,
     workspaceRoot: props.workspaceRoot ?? null,
   });
+  const resolveImageSource = useCallback<MarkdownImageSourceResolver>(
+    async (image) => {
+      const source = await resolveNativeImageSource(image);
+      return source && /^(?:https?:)?\/\//i.test(image.href)
+        ? { ...source, uri: await prepareMarkdownMediaUrl(source.uri) }
+        : source;
+    },
+    [resolveNativeImageSource, prepareMarkdownMediaUrl],
+  );
   const markdownLinkHandlers = useMemo<MarkdownLinkHandlers>(
     () => ({
       onLinkPress: onMarkdownLinkPress,
@@ -2115,30 +2292,86 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
         imageEmbed: true,
       });
       if (media?.kind === "video") {
-        return (
-          <ThreadMarkdownVideo
-            key={image.href}
-            source={{ ...media.source, name: image.alt ?? media.source.name }}
-          />
-        );
+        const source = { ...media.source, name: image.alt ?? media.source.name };
+        if ("uri" in source && /^https?:\/\//i.test(source.uri)) {
+          return (
+            <ThreadMarkdownPreparedUri
+              key={image.href}
+              uri={source.uri}
+              sourceKey={`${props.environmentId}:${props.threadId}:${environmentUrl}:${image.href}`}
+              prepareUrl={hasPreparedConnection ? prepareMarkdownMediaUrl : undefined}
+            >
+              {({ uri, status }) =>
+                uri === null ? (
+                  <ThreadMarkdownVideoPlaceholder unavailable={status === "unavailable"} />
+                ) : (
+                  <ThreadMarkdownVideo
+                    source={{
+                      ...source,
+                      uri,
+                      actionsSource: preparedThreadFeedMediaActionsSource(
+                        source.actionsSource,
+                        uri,
+                      ),
+                    }}
+                    recoveryUrl={source.uri}
+                    prepareUrl={hasPreparedConnection ? prepareMarkdownMediaUrl : undefined}
+                  />
+                )
+              }
+            </ThreadMarkdownPreparedUri>
+          );
+        }
+        return <ThreadMarkdownVideo key={image.href} source={source} />;
       }
       const imageSource = classifyMarkdownImageSource(image.href, props.workspaceRoot ?? null);
       if (imageSource._tag === "Direct") {
+        const uri = normalizeNativeMarkdownUrl(imageSource.uri);
         return (
-          <ThreadMarkdownImageView
-            uri={normalizeNativeMarkdownUrl(imageSource.uri)}
-            sourceKey={imageSource.uri}
-            format={
-              /\.svg(?:[?#]|$)/i.test(imageSource.uri) ||
-              imageSource.uri.startsWith("data:image/svg+xml")
-                ? "svg"
-                : undefined
-            }
-            unavailable={false}
-            alt={image.alt}
-            actionsSource={media?.source.actionsSource}
-            onPressPreview={(source) => setExpandedFile((current) => current ?? source)}
-          />
+          <ThreadMarkdownPreparedUri
+            key={image.href}
+            uri={uri}
+            sourceKey={`${props.environmentId}:${props.threadId}:${environmentUrl}:${image.href}`}
+            prepareUrl={hasPreparedConnection ? prepareMarkdownMediaUrl : undefined}
+          >
+            {({ uri: preparedUri, status }) => (
+              <ThreadMarkdownImageView
+                uri={preparedUri}
+                sourceKey={imageSource.uri}
+                unavailable={status === "unavailable"}
+                alt={image.alt}
+                format={
+                  /\.svg(?:[?#]|$)/i.test(imageSource.uri) ||
+                  imageSource.uri.startsWith("data:image/svg+xml")
+                    ? "svg"
+                    : undefined
+                }
+                actionsSource={
+                  status === "unavailable"
+                    ? undefined
+                    : preparedThreadFeedMediaActionsSource(
+                        media?.source.actionsSource,
+                        preparedUri ?? uri,
+                      )
+                }
+                onPressPreview={(source) => {
+                  void prepareMarkdownMediaUrl(uri).then((preparedUri) =>
+                    setExpandedFile(
+                      (current) =>
+                        current ?? {
+                          ...source,
+                          uri: preparedUri,
+                          actionsSource: preparedThreadFeedMediaActionsSource(
+                            media?.source.actionsSource,
+                            preparedUri,
+                          ),
+                        },
+                    ),
+                  );
+                }}
+              />
+            )}
+          </ThreadMarkdownPreparedUri>
         );
       }
       if (imageSource._tag === "Blocked") {
@@ -2159,7 +2392,14 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
         />
       );
     },
-    [props.environmentId, props.threadId, props.workspaceRoot],
+    [
+      hasPreparedConnection,
+      environmentUrl,
+      prepareMarkdownMediaUrl,
+      props.environmentId,
+      props.threadId,
+      props.workspaceRoot,
+    ],
   );
   const renderViewedImage = useCallback<MarkdownImageRenderer>(
     (image) => {
