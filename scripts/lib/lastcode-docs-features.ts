@@ -232,16 +232,16 @@ function markerRange(readme: string): { readonly start: number; readonly end: nu
   if (starts.length === 0 && ends.length === 0) {
     return null;
   }
-  const start = starts[0]?.index;
-  const endStart = ends[0]?.index;
-  if (starts.length !== 1 || ends.length !== 1 || start === undefined || endStart === undefined) {
+  if (starts.length !== 1 || ends.length !== 1) {
     throw new Error("README must contain one ordered LastCode feature marker pair.");
   }
-  const end = endStart + README_FEATURES_END.length;
+  // Exact counts guarantee both native matches and their UTF-16 indices.
+  const start = starts[0]!.index;
+  const endStart = ends[0]!.index;
   if (start >= endStart) {
     throw new Error("README must contain one ordered LastCode feature marker pair.");
   }
-  return { start, end };
+  return { start, end: endStart + README_FEATURES_END.length };
 }
 
 export function replaceLastCodeReadmeFeatureBlock(
