@@ -6600,7 +6600,27 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               },
             );
             if (page.data.some((turn) => turn.status === "inProgress")) return false;
-            if (page.data.some(isRequestedTerminalTurn)) return true;
+            if (page.data.some(isRequestedTerminalTurn)) {
+              // Pagination can miss a resumed turn on a page already examined.
+              const { thread: latestThread } = yield* client.request("thread/read", {
+                threadId,
+                includeTurns: false,
+              });
+              if (
+                latestThread.id !== threadId ||
+                latestThread.status.type === "active" ||
+                latestThread.status.type === "systemError"
+              )
+                return false;
+              const newestPage = yield* client.request("thread/turns/list", {
+                threadId,
+                cursor: null,
+                limit: 100,
+                sortDirection: "desc",
+                itemsView: "notLoaded",
+              });
+              return newestPage.data.every((turn) => turn.status !== "inProgress");
+            }
             cursor = page.nextCursor ?? null;
             if (cursor === null) return false;
           }

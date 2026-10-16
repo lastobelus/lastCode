@@ -8678,11 +8678,23 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       "active",
       "read-error",
       "repeated-cursor",
+      "final-active",
+      "final-newer-running",
+      "final-read-error",
     ] as const;
     it.effect.each(
       (["legacy", "paginated"] as const).flatMap((historyMode) =>
         outcomes
-          .filter((outcome) => historyMode === "paginated" || outcome !== "repeated-cursor")
+          .filter(
+            (outcome) =>
+              historyMode === "paginated" ||
+              ![
+                "repeated-cursor",
+                "final-active",
+                "final-newer-running",
+                "final-read-error",
+              ].includes(outcome),
+          )
           .map((outcome) => [historyMode, outcome] as const),
       ),
     )("checks %s history for an untracked %s native turn", ([historyMode, outcome]) =>
@@ -8781,6 +8793,72 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           }
         }
         const terminal = ["interrupted", "completed", "failed"].includes(outcome);
+        if (
+          historyMode === "paginated" &&
+          (terminal ||
+            ["final-active", "final-newer-running", "final-read-error"].includes(outcome))
+        ) {
+          // The child can resume after the initial metadata and newest-page
+          // reads while shutdown searches older pages for the saved turn.
+          const finalReadId = nextRequestId++;
+          entries.push(
+            {
+              type: "expect_outbound",
+              label: "thread/read",
+              frame: {
+                id: finalReadId,
+                method: "thread/read",
+                params: { threadId: nativeThreadId, includeTurns: false },
+              },
+            },
+            {
+              type: "emit_inbound",
+              label: "thread/read",
+              frame:
+                outcome === "final-read-error"
+                  ? {
+                      id: finalReadId,
+                      error: { code: -32600, message: "Native history is unavailable." },
+                    }
+                  : {
+                      id: finalReadId,
+                      result: {
+                        thread: {
+                          ...thread,
+                          status: {
+                            type: outcome === "final-active" ? "active" : "notLoaded",
+                            activeFlags: [],
+                          },
+                        },
+                      },
+                    },
+            },
+          );
+          if (outcome !== "final-active" && outcome !== "final-read-error")
+            entries.push(
+              ...exchange(
+                nextRequestId++,
+                "thread/turns/list",
+                {
+                  threadId: nativeThreadId,
+                  cursor: null,
+                  limit: 100,
+                  sortDirection: "desc",
+                  itemsView: "notLoaded",
+                },
+                {
+                  data:
+                    outcome === "final-newer-running"
+                      ? [
+                          makeCodexReplayTurn({ id: "resumed-native-turn", status: "inProgress" }),
+                          newerTurn,
+                        ]
+                      : [newerTurn],
+                  nextCursor: "older-turns",
+                },
+              ),
+            );
+        }
         if (terminal)
           entries.push(
             ...exchange(
