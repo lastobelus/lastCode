@@ -66,8 +66,8 @@ if (args[0] === "pr" && args[1] === "view") {
   } else if (endpoint?.includes("/rules/branches/")) {
     result = [];
   } else if (endpoint?.includes("/actions/workflows/ci.yml/runs?")) {
-    result = {workflow_runs:[{id:9,event:"pull_request",head_sha:selected.headRefOid,
-      display_title:"CI pull_request PR #302 head " + selected.headRefOid + " base " + selected.baseRefOid + " merge ${merge}",
+    result = {workflow_runs:state.ciConclusion === "missing" ? [] : [{id:9,event:"pull_request",head_sha:selected.headRefOid,
+      display_title:"CI pull_request PR #302 head " + selected.headRefOid + " base " + (state.ciRunBase || selected.baseRefOid) + " merge ${merge}",
       status:state.ciConclusion === "pending" ? "in_progress" : "completed",conclusion:state.ciConclusion || "success",created_at:"2026-09-01T12:00:00Z"}]};
   } else if (endpoint?.includes("/actions/runs/9/jobs?")) {
     result = {jobs:[{name:"CI Gate",status:"completed",conclusion:"success"}]};
@@ -104,6 +104,7 @@ function fixture(stacked = false) {
     pullRequests: [pullRequest(302, stacked), ...(stacked ? [pullRequest(301)] : [])],
     workflowState: "active",
     ciConclusion: "success",
+    ciRunBase: null as string | null,
     driftDuringObservation: false,
     reviewMode: "clean",
     changeReviewOnConfirmation: false,
@@ -187,6 +188,35 @@ describe("one-shot PR gates CLI", () => {
     const ci = test.run("--pr", "302");
     expect(ci.status, ci.stdout).toBe(0);
     expect(JSON.parse(ci.stdout)).toMatchObject({ status: "pending", reason: "ci-pending" });
+  });
+  it("hands a missing CI run to the watch only while review is pending", () => {
+    const test = fixture();
+    test.state.ciConclusion = "missing";
+    test.state.reviewMode = "pending";
+    test.save();
+    const pending = test.run("--pr", "302");
+    expect(pending.status, pending.stdout).toBe(0);
+    expect(JSON.parse(pending.stdout)).toMatchObject({
+      status: "pending",
+      reason: "ci-registration",
+    });
+    test.state.reviewMode = "clean";
+    test.save();
+    const missing = test.run("--pr", "302");
+    expect(missing.status).toBe(1);
+    expect(JSON.parse(missing.stdout)).toMatchObject({
+      status: "attention",
+      reason: "ci-not-registered",
+    });
+    test.state.ciConclusion = "success";
+    test.state.ciRunBase = "e".repeat(40);
+    test.save();
+    const staleBase = test.run("--pr", "302");
+    expect(staleBase.status).toBe(1);
+    expect(JSON.parse(staleBase.stdout)).toMatchObject({
+      status: "attention",
+      reason: "ci-not-registered",
+    });
   });
   it("reports CI failure even while review is pending", () => {
     const test = fixture();

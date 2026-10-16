@@ -187,6 +187,20 @@ describe("lastcode-pr-gates", () => {
       evaluatePullRequestGates(observation({ ci: satisfiedCi, review: handledReview })),
     ).toMatchObject({ status: "ready" });
   });
+  it("waits for an unregistered CI run only while a review reply can wake the watch", () => {
+    const unregisteredCi: GateObservation["ci"] = { state: "pending", reason: "run-registration" };
+    expect(evaluatePullRequestGates(observation({ ci: unregisteredCi }))).toMatchObject({
+      status: "pending",
+      reason: "ci-registration",
+    });
+    expect(
+      evaluatePullRequestGates(observation({ ci: unregisteredCi, review: handledReview })),
+    ).toMatchObject({
+      status: "attention",
+      reason: "ci-not-registered",
+      detail: expect.stringContaining(`head ${HEAD} and base ${BASE}`),
+    });
+  });
   it("rejects disabled CI, missing reviews, dirty checkout, and blocked mergeability", () => {
     expect(
       evaluatePullRequestGates(

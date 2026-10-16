@@ -672,8 +672,15 @@ export function evaluatePullRequestGates(
       detail: "Exact GitHub CI and the handled current-head Codex review are complete.",
     };
   }
-  if (current.ci.state === "pending" && current.ci.reason === "run-registration")
-    return pending("ci-registration");
+  if (current.ci.state === "pending" && current.ci.reason === "run-registration") {
+    // The native watch wakes for finished checks and new remarks, never for a run that does not
+    // exist. Waiting is safe only while Codex's reply to a pending review forces another check.
+    if (current.review.pending) return pending("ci-registration");
+    return attention(
+      "ci-not-registered",
+      `No exact GitHub CI run has registered for head ${pr.headRefOid} and base ${pr.baseRefOid}. A base change without a push starts no run; otherwise check the workflow trigger and Actions configuration.`,
+    );
+  }
   return pending(current.review.pending ? "review-pending" : "ci-pending");
 }
 
