@@ -1,40 +1,27 @@
+import { LastCodeMessageAppearanceSettings } from "./LastCodeMessageAppearanceSettings";
+import { LastCodeHandoffSettings } from "./LastCodeHandoffSettings";
+import { LastCodeScrollbarSettings } from "./LastCodeScrollbarSettings";
+import { LastCodeSidebarSettings } from "./LastCodeSidebarSettings";
+import { LastCodeSettingsSlider as SettingsSlider } from "./LastCodeSettingsSlider";
 import { LastCodeImportSettings } from "./LastCodeImportSettings";
 import { LastCodeLocalUpdatesSettings } from "./LastCodeLocalUpdatesSettings";
-import { DEFAULT_SERVER_SETTINGS, ProviderDriverKind, ThreadId } from "@t3tools/contracts";
+import { DEFAULT_SERVER_SETTINGS, ProviderDriverKind } from "@t3tools/contracts";
 import {
-  DEFAULT_LEGACY_SIDEBAR_SCALE,
-  DEFAULT_SCROLLBAR_MARGIN,
-  DEFAULT_SCROLLBAR_WIDTH,
-  LEGACY_SIDEBAR_SCALE_REFERENCE,
-  MAX_LEGACY_SIDEBAR_SCALE,
-  MAX_SCROLLBAR_MARGIN,
-  MAX_SCROLLBAR_WIDTH,
-  MAX_HANDOFFS_MENU_LIMIT,
   MIN_THREAD_PROVIDER_BADGE_SIZE,
   MAX_THREAD_PROVIDER_BADGE_SIZE,
   MIN_THREAD_PROVIDER_BADGE_TRANSPARENCY,
   MAX_THREAD_PROVIDER_BADGE_TRANSPARENCY,
-  MIN_LEGACY_SIDEBAR_SCALE,
-  MIN_SCROLLBAR_MARGIN,
-  MIN_SCROLLBAR_WIDTH,
-  MIN_HANDOFFS_MENU_LIMIT,
 } from "@t3tools/contracts/settings";
 import { useAtomValue } from "@effect/atom-react";
 import { PaletteIcon, ServerIcon } from "lucide-react";
-import { type CSSProperties, useMemo } from "react";
+import { useMemo } from "react";
 
 import { environmentCatalog } from "../../connection/catalog";
-import {
-  ConnectedEnvironmentIcon,
-  EnvironmentIcon,
-  updateEnvironmentIconColors,
-} from "../../environmentIcons";
-import { usePrimarySettings, updateClientSettings } from "../../hooks/useSettings";
+import { ConnectedEnvironmentIcon, updateEnvironmentIconColors } from "../../environmentIcons";
+import { usePrimarySettings, useUpdateClientSettings } from "../../hooks/useSettings";
 import { usePrimaryEnvironmentId } from "../../state/environments";
 import { Switch } from "../ui/switch";
 import { SidebarEnvironmentIcon } from "../sidebar/SidebarEnvironmentIcon";
-import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
-import { ThreadStatusLabel, ThreadWorktreeIndicator } from "../ThreadStatusIndicators";
 import { searchableSetting } from "./settingsSearch";
 import { ProviderAccentColorPicker } from "./ProviderAccentColorPicker";
 import { deriveLastCodeEnvironmentSettingEntries } from "./LastCodeSettings.logic";
@@ -64,72 +51,6 @@ const PROVIDER_BADGE_PREVIEWS = [
     provider: { driverKind: ProviderDriverKind.make("codex"), displayName: "Codex" },
   },
 ] as const;
-
-const STATUS_INDICATOR_PREVIEW = {
-  colorClass: "text-sky-600 dark:text-sky-300/80",
-  dotClass: "bg-sky-500 dark:bg-sky-300/80",
-  label: "Working",
-  pulse: false,
-} as const;
-
-const WORKTREE_INDICATOR_PREVIEW_THREAD = {
-  id: ThreadId.make("settings-worktree-preview"),
-  branch: "feature/example",
-  worktreePath: "/example/worktrees/example",
-};
-
-function SettingsSlider({
-  id,
-  label,
-  min,
-  max,
-  value,
-  onChange,
-  unit = "px",
-}: {
-  id: string;
-  label: string;
-  min: number;
-  max: number;
-  value: number;
-  onChange: (value: number) => void;
-  unit?: "px" | "%";
-}) {
-  const ratio = (value - min) / (max - min);
-  const sliderStyle = {
-    "--settings-slider-progress": `${ratio * 100}%`,
-    "--settings-slider-fill-offset": `${0.5 - ratio}rem`,
-  } as CSSProperties;
-
-  return (
-    <div className="flex w-full items-center gap-3 sm:w-64">
-      <output
-        className="min-w-12 rounded-md bg-muted px-2 py-1 text-center font-mono text-xs font-medium tabular-nums text-foreground"
-        htmlFor={id}
-      >
-        {value}
-        {unit}
-      </output>
-      <input
-        aria-label={label}
-        className="settings-slider block min-w-0 flex-1"
-        id={id}
-        max={max}
-        min={min}
-        onChange={(event) => {
-          const nextValue = Number(event.currentTarget.value);
-          if (Number.isInteger(nextValue) && nextValue >= min && nextValue <= max) {
-            onChange(nextValue);
-          }
-        }}
-        step={1}
-        style={sliderStyle}
-        type="range"
-        value={value}
-      />
-    </div>
-  );
-}
 
 function EnvironmentPauseSettingsSection() {
   const enabled = useScopedSettings((settings) => settings.environmentPauseEnabled);
@@ -183,15 +104,9 @@ function EnvironmentPauseSettingsSection() {
 
 export function LastCodeSettingsPanel() {
   const clientSettings = usePrimarySettings();
+  const updateClientSettings = useUpdateClientSettings();
   const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const legacySidebarScaleRatio =
-    (clientSettings.legacySidebarScale - MIN_LEGACY_SIDEBAR_SCALE) /
-    (MAX_LEGACY_SIDEBAR_SCALE - MIN_LEGACY_SIDEBAR_SCALE);
-  const legacySidebarScaleSliderStyle = {
-    "--settings-slider-progress": `${legacySidebarScaleRatio * 100}%`,
-    "--settings-slider-fill-offset": `${0.5 - legacySidebarScaleRatio}rem`,
-  } as CSSProperties;
   const environmentSettings = useMemo(
     () =>
       deriveLastCodeEnvironmentSettingEntries({
@@ -207,333 +122,10 @@ export function LastCodeSettingsPanel() {
       <EnvironmentPauseSettingsSection />
       <LocalCiSettingsSection />
       <SettingsSection title="Appearance" icon={<PaletteIcon className="size-5" />}>
-        <SettingsRow
-          {...searchableSetting("incoming-message-style")}
-          description="Choose how agent and automation messages appear in the conversation."
-          resetAction={
-            clientSettings.incomingMessageStyle !== "neutral" ? (
-              <SettingResetButton
-                label="incoming message style"
-                onClick={() => updateClientSettings({ incomingMessageStyle: "neutral" })}
-              />
-            ) : null
-          }
-          control={
-            <Select
-              value={clientSettings.incomingMessageStyle}
-              onValueChange={(value) => {
-                if (value === "neutral" || value === "outline") {
-                  updateClientSettings({ incomingMessageStyle: value });
-                }
-              }}
-            >
-              <SelectTrigger size="sm" className="w-44" aria-label="Incoming message style">
-                <SelectValue>
-                  {clientSettings.incomingMessageStyle === "neutral" ? "Neutral fill" : "Outline"}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectPopup>
-                <SelectItem value="neutral">Neutral fill</SelectItem>
-                <SelectItem value="outline">Outline</SelectItem>
-              </SelectPopup>
-            </Select>
-          }
-        />
-        {clientSettings.incomingMessageStyle === "neutral" ? (
-          <SettingsRow
-            {...searchableSetting("incoming-message-fill-color")}
-            description="Experiment with a fill color for agent and automation messages. Automatic follows your theme."
-            resetAction={
-              clientSettings.incomingMessageFillColor !== null ? (
-                <SettingResetButton
-                  label="incoming message fill color"
-                  onClick={() => updateClientSettings({ incomingMessageFillColor: null })}
-                />
-              ) : null
-            }
-            control={
-              <div className="flex items-center gap-3">
-                <span className="text-xs text-muted-foreground">
-                  {clientSettings.incomingMessageFillColor ?? "Automatic"}
-                </span>
-                <ProviderAccentColorPicker
-                  displayName="incoming messages"
-                  label="Fill color"
-                  value={clientSettings.incomingMessageFillColor ?? undefined}
-                  defaultOptionLabel="Automatic"
-                  layout="inline"
-                  commitDelayMs={120}
-                  onCommit={(value) =>
-                    updateClientSettings({ incomingMessageFillColor: value || null })
-                  }
-                />
-              </div>
-            }
-          />
-        ) : null}
-        <SettingsRow
-          {...searchableSetting("handoffs-menu-limit")}
-          description="Choose how many recently opened handoffs appear in thread menus."
-          control={
-            <input
-              aria-label="Handoffs shown in menus"
-              className="w-16 rounded-md border bg-background px-2 py-1 text-center"
-              max={MAX_HANDOFFS_MENU_LIMIT}
-              min={MIN_HANDOFFS_MENU_LIMIT}
-              onChange={(event) => {
-                const value = Number(event.currentTarget.value);
-                if (
-                  Number.isInteger(value) &&
-                  value >= MIN_HANDOFFS_MENU_LIMIT &&
-                  value <= MAX_HANDOFFS_MENU_LIMIT
-                ) {
-                  void updateClientSettings({ handoffsMenuLimit: value });
-                }
-              }}
-              type="number"
-              value={clientSettings.handoffsMenuLimit}
-            />
-          }
-        />
-        <SettingsRow
-          {...searchableSetting("larger-scrollbars")}
-          description="Make scrollbar thumbs easier to grab. Margin keeps the thumb clear of pane resize handles."
-          status="Exact native scrollbar width and margin require LastCode desktop or a Chromium-based browser. Firefox uses its larger system scrollbar; styled app scroll areas still follow both sliders."
-          control={
-            <Switch
-              checked={clientSettings.largerScrollbarsEnabled}
-              onCheckedChange={(checked) =>
-                updateClientSettings({ largerScrollbarsEnabled: Boolean(checked) })
-              }
-              aria-label="Larger scrollbars"
-            />
-          }
-        />
-        {clientSettings.largerScrollbarsEnabled ? (
-          <>
-            <SettingsRow
-              title="Scrollbar width"
-              description="Set the visible scrollbar thumb width in one-pixel increments."
-              resetAction={
-                clientSettings.scrollbarWidth !== DEFAULT_SCROLLBAR_WIDTH ? (
-                  <SettingResetButton
-                    label="scrollbar width"
-                    onClick={() =>
-                      updateClientSettings({ scrollbarWidth: DEFAULT_SCROLLBAR_WIDTH })
-                    }
-                  />
-                ) : null
-              }
-              control={
-                <SettingsSlider
-                  id="scrollbar-width"
-                  label="Scrollbar width"
-                  min={MIN_SCROLLBAR_WIDTH}
-                  max={MAX_SCROLLBAR_WIDTH}
-                  value={clientSettings.scrollbarWidth}
-                  onChange={(scrollbarWidth) => updateClientSettings({ scrollbarWidth })}
-                />
-              }
-            />
-            <SettingsRow
-              title="Scrollbar margin"
-              description="Set the clear space between a scrollbar thumb and the pane edge."
-              resetAction={
-                clientSettings.scrollbarMargin !== DEFAULT_SCROLLBAR_MARGIN ? (
-                  <SettingResetButton
-                    label="scrollbar margin"
-                    onClick={() =>
-                      updateClientSettings({ scrollbarMargin: DEFAULT_SCROLLBAR_MARGIN })
-                    }
-                  />
-                ) : null
-              }
-              control={
-                <SettingsSlider
-                  id="scrollbar-margin"
-                  label="Scrollbar margin"
-                  min={MIN_SCROLLBAR_MARGIN}
-                  max={MAX_SCROLLBAR_MARGIN}
-                  value={clientSettings.scrollbarMargin}
-                  onChange={(scrollbarMargin) => updateClientSettings({ scrollbarMargin })}
-                />
-              }
-            />
-          </>
-        ) : null}
-        <SettingsRow
-          {...searchableSetting("lastcode-sidebar")}
-          description="Use the LastCode project and thread tree. The tree button switches between LastCode and v2 without changing this setting; turning it off restores your General → Legacy features sidebar preference."
-          control={
-            <Switch
-              aria-label="LastCode sidebar"
-              checked={clientSettings.lastcodeSidebarEnabled}
-              onCheckedChange={(checked) =>
-                updateClientSettings({ lastcodeSidebarEnabled: Boolean(checked) })
-              }
-            />
-          }
-        />
-        <SettingsRow
-          {...searchableSetting("scale-legacy-sidebar")}
-          description="Scale LastCode project and thread rows while leaving the sidebar header, Search field, and Projects heading unchanged. The 75% marker matches the normalized version of the original compact-sidebar patch."
-          resetAction={
-            clientSettings.legacySidebarScale !== DEFAULT_LEGACY_SIDEBAR_SCALE ? (
-              <SettingResetButton
-                label="LastCode sidebar scale"
-                onClick={() =>
-                  updateClientSettings({ legacySidebarScale: DEFAULT_LEGACY_SIDEBAR_SCALE })
-                }
-              />
-            ) : null
-          }
-          control={
-            <div className="flex w-full items-center gap-3 sm:w-64">
-              <output
-                className="min-w-12 rounded-md bg-muted px-2 py-1 text-center font-mono text-xs font-medium tabular-nums text-foreground"
-                htmlFor="legacy-sidebar-scale"
-              >
-                {clientSettings.legacySidebarScale}%
-              </output>
-              <div className="relative min-w-0 flex-1 pb-3">
-                <input
-                  aria-label="Scale LastCode sidebar"
-                  className="settings-slider block w-full"
-                  id="legacy-sidebar-scale"
-                  max={MAX_LEGACY_SIDEBAR_SCALE}
-                  min={MIN_LEGACY_SIDEBAR_SCALE}
-                  onChange={(event) => {
-                    const legacySidebarScale = Number(event.currentTarget.value);
-                    if (
-                      Number.isInteger(legacySidebarScale) &&
-                      legacySidebarScale >= MIN_LEGACY_SIDEBAR_SCALE &&
-                      legacySidebarScale <= MAX_LEGACY_SIDEBAR_SCALE
-                    ) {
-                      updateClientSettings({ legacySidebarScale });
-                    }
-                  }}
-                  step={1}
-                  style={legacySidebarScaleSliderStyle}
-                  type="range"
-                  value={clientSettings.legacySidebarScale}
-                />
-                <span
-                  aria-hidden="true"
-                  className="pointer-events-none absolute top-5 left-1/2 flex -translate-x-1/2 flex-col items-center text-3xs leading-none text-muted-foreground"
-                >
-                  <span className="h-1.5 border-muted-foreground/60 border-l" />
-                  <span className="mt-0.5">{LEGACY_SIDEBAR_SCALE_REFERENCE}%</span>
-                </span>
-              </div>
-            </div>
-          }
-        />
-        <SettingsRow
-          {...searchableSetting("thread-grouping-style")}
-          description="Choose how the LastCode sidebar distinguishes subagents from ordinary threads created by an agent. This changes presentation, not thread relationships."
-          resetAction={
-            clientSettings.legacySidebarThreadGroupingStyle !== "minimal" ? (
-              <SettingResetButton
-                label="thread grouping style"
-                onClick={() =>
-                  updateClientSettings({ legacySidebarThreadGroupingStyle: "minimal" })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Select
-              value={clientSettings.legacySidebarThreadGroupingStyle}
-              onValueChange={(value) => {
-                if (value === "minimal" || value === "typed-groups") {
-                  updateClientSettings({ legacySidebarThreadGroupingStyle: value });
-                }
-              }}
-            >
-              <SelectTrigger size="sm" className="w-44" aria-label="Thread grouping style">
-                <SelectValue>
-                  {clientSettings.legacySidebarThreadGroupingStyle === "minimal"
-                    ? "Minimal"
-                    : "Typed groups"}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectPopup>
-                <SelectItem value="minimal">Minimal</SelectItem>
-                <SelectItem value="typed-groups">Typed groups</SelectItem>
-              </SelectPopup>
-            </Select>
-          }
-        />
-        <SettingsRow
-          {...searchableSetting("family-status-subheaders")}
-          description="Show a separate subagent count and status row for more visibility. Turn this off for a compact status indicator and +N count on the parent thread."
-          control={
-            <Switch
-              checked={clientSettings.lastcodeSidebarFamilyStatusSubheaders}
-              onCheckedChange={(checked) =>
-                updateClientSettings({ lastcodeSidebarFamilyStatusSubheaders: Boolean(checked) })
-              }
-              aria-label="Family status subheaders"
-            />
-          }
-        />
-        <SettingsRow
-          {...searchableSetting("rounded-project-icons")}
-          description="Round the corners of project favicon images. Leave this off to show each icon's original shape."
-          control={
-            <Switch
-              checked={clientSettings.roundedProjectIcons}
-              onCheckedChange={(checked) =>
-                updateClientSettings({ roundedProjectIcons: Boolean(checked) })
-              }
-              aria-label="Rounded project icons"
-            />
-          }
-        />
-        <SettingsRow
-          {...searchableSetting("compact-status-indicators")}
-          description="Show colored dot only for agent status, hiding labels like “Working” and “Completed.”"
-          status={
-            <span className="inline-flex items-center gap-1.5 rounded-full bg-sidebar px-2 py-1 text-sm text-foreground">
-              <ThreadStatusLabel
-                compact={clientSettings.compactLegacySidebarStatuses}
-                status={STATUS_INDICATOR_PREVIEW}
-              />
-              <span>Title</span>
-            </span>
-          }
-          control={
-            <Switch
-              checked={clientSettings.compactLegacySidebarStatuses}
-              onCheckedChange={(checked) =>
-                updateClientSettings({ compactLegacySidebarStatuses: Boolean(checked) })
-              }
-              aria-label="Compact status indicators"
-            />
-          }
-        />
-        <SettingsRow
-          {...searchableSetting("show-worktree-indicators")}
-          description="Show the worktree icon beside threads that use a dedicated worktree in the LastCode sidebar."
-          status={
-            <span className="inline-flex items-center gap-1 rounded-full bg-sidebar px-2 py-1 text-3xs tabular-nums text-secondary-label">
-              {clientSettings.showThreadWorktreeIndicators ? (
-                <ThreadWorktreeIndicator thread={WORKTREE_INDICATOR_PREVIEW_THREAD} />
-              ) : null}
-              <EnvironmentIcon kind="server" context="legacy-row" className="size-3" />
-              <span>5m ago</span>
-            </span>
-          }
-          control={
-            <Switch
-              checked={clientSettings.showThreadWorktreeIndicators}
-              onCheckedChange={(checked) =>
-                updateClientSettings({ showThreadWorktreeIndicators: Boolean(checked) })
-              }
-              aria-label="Show worktree indicators (LastCode sidebar)"
-            />
-          }
-        />
+        <LastCodeMessageAppearanceSettings />
+        <LastCodeHandoffSettings />
+        <LastCodeScrollbarSettings />
+        <LastCodeSidebarSettings />
       </SettingsSection>
       <SettingsSection
         id="environment-icons"
