@@ -188,13 +188,7 @@ describe("resolveQuickCiScope", () => {
     });
   });
 
-  it("resolves relative installed config references using Windows path separators", () => {
-    expect(
-      resolveQuickCiConfigReference(
-        "C:\\workspace\\node_modules\\astro\\tsconfigs\\strict.json",
-        "./base.json",
-      ),
-    ).toBe("C:\\workspace\\node_modules\\astro\\tsconfigs\\base.json");
+  it("resolves relative config references for repo and installed configs", () => {
     expect(
       resolveQuickCiConfigReference("apps/web/tsconfig.json", "../../tsconfig.base.json"),
     ).toBe("tsconfig.base.json");

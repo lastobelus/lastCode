@@ -1,8 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off globalTimers:off -- Host-side CI owns these subprocesses and cancellation timers.
 import * as NodeChildProcess from "node:child_process";
 import * as NodePath from "node:path";
-import * as NodeProcess from "node:process";
-import { runWindowsCiProcess } from "./lastcode-ci-windows.ts";
 
 export interface CiProcessOptions {
   readonly cwd: string;
@@ -19,7 +17,6 @@ export interface CiProcessOptions {
 /** Waits for an owned command and its cancellation cleanup before releasing CI capacity. */
 export function runCiProcess(options: CiProcessOptions): Promise<void> {
   options.signal.throwIfAborted();
-  if (NodeProcess.platform === "win32") return runWindowsCiProcess(options);
   return new Promise((resolve, reject) => {
     const child = NodeChildProcess.spawn(
       process.execPath,

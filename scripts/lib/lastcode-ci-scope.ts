@@ -92,17 +92,13 @@ function normalize(path: string): string {
   return NodePath.posix.normalize(path).replace(/^\.\//, "");
 }
 
-/** Git paths use slash separators; installed configuration paths use the host's native format. */
+/** Resolves a config's relative `extends` reference against the config's directory. */
 export function resolveQuickCiConfigReference(file: string, reference: string): string {
-  const paths =
-    /^[a-z]:[\\/]/i.test(file) || file.startsWith("\\\\") ? NodePath.win32 : NodePath.posix;
-  return paths.normalize(paths.join(paths.dirname(file), reference));
+  return NodePath.posix.normalize(NodePath.posix.join(NodePath.posix.dirname(file), reference));
 }
 
 function configDirectory(file: string): string {
-  return (
-    /^[a-z]:[\\/]/i.test(file) || file.startsWith("\\\\") ? NodePath.win32 : NodePath.posix
-  ).dirname(file);
+  return NodePath.posix.dirname(file);
 }
 
 function patternRegex(pattern: string): RegExp {

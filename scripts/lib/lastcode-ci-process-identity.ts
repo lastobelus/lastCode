@@ -5,7 +5,7 @@ import * as NodeProcess from "node:process";
 
 type ProcessIdentity = {
   readonly startIdentity: string;
-  readonly group: number | null;
+  readonly group: number;
 };
 
 let currentStartIdentity: string | undefined;
@@ -63,37 +63,24 @@ export function readProcessIdentities(requestedPids: readonly number[]) {
     return identities;
   }
 
-  const windows = NodeProcess.platform === "win32";
-  const command = windows ? "powershell.exe" : "/bin/ps";
-  const args = windows
-    ? [
-        "-NoLogo",
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        `foreach ($requestedId in @(${pids.join(",")})) { try { $p = [System.Diagnostics.Process]::GetProcessById($requestedId); Write-Output ("{0} {1}" -f $requestedId, $p.StartTime.ToUniversalTime().Ticks); $p.Dispose() } catch {} }`,
-      ]
-    : ["-p", pids.join(","), "-o", "pid=,pgid=,lstart="];
-  const result = NodeChildProcess.spawnSync(command, args, {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"],
-    timeout: 10_000,
-    windowsHide: true,
-    // ps must produce the same start identity across locales and time zones.
-    ...(windows ? {} : { env: { LC_ALL: "C", TZ: "UTC" } }),
-  });
+  const result = NodeChildProcess.spawnSync(
+    "/bin/ps",
+    ["-p", pids.join(","), "-o", "pid=,pgid=,lstart="],
+    {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 10_000,
+      // ps must produce the same start identity across locales and time zones.
+      env: { LC_ALL: "C", TZ: "UTC" },
+    },
+  );
   if (result.error !== undefined) return identities;
   for (const line of (result.stdout ?? "").split("\n")) {
-    const match = windows
-      ? /^\s*(\d+)\s+(\d+)\s*$/u.exec(line)
-      : /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/u.exec(line);
+    const match = /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/u.exec(line);
     if (match === null) continue;
     const pid = Number(match[1]);
     if (!pids.includes(pid)) continue;
-    identities.set(pid, {
-      startIdentity: windows ? `win32:${match[2]}` : `posix:${match[3]}`,
-      group: windows ? null : Number(match[2]),
-    });
+    identities.set(pid, { startIdentity: `posix:${match[3]}`, group: Number(match[2]) });
   }
   return identities;
 }

@@ -282,7 +282,7 @@ async function detachedCheck() {
     NodeProcess.stdout.write("ready\\n");
   `,
     ],
-    { detached: NodeProcess.platform !== "win32", stdio: ["pipe", "pipe", "pipe"] },
+    { detached: true, stdio: ["pipe", "pipe", "pipe"] },
   );
   children.push(child);
   const lines = NodeReadline.createInterface({ input: child.stdout });
@@ -829,40 +829,37 @@ describe("machine-wide local CI admission", () => {
     }
   });
 
-  it.skipIf(NodeProcess.platform === "win32")(
-    "keeps a leaderless owned group until its descendant exits",
-    async () => {
-      const directory = temporaryDirectory();
-      const owner = worker(directory, 1);
-      await owner.start();
-      await owner.next("acquired");
-      const check = await leaderlessCheck();
-      owner.send({ type: "record-child", pid: check.pid });
-      await owner.next("recorded");
-      const leasePath = NodeFS.readdirSync(directory).find((name) => name.endsWith(".lease.json"))!;
-      const stored = JSON.parse(NodeFS.readFileSync(NodePath.join(directory, leasePath), "utf8"));
-      expect(stored.startIdentity).toBe(
-        ProcessIdentity.readProcessIdentities([owner.pid]).get(owner.pid)?.startIdentity,
-      );
-      expect(stored.childStartIdentity).toBe(
-        ProcessIdentity.readProcessIdentities([check.pid]).get(check.pid)?.startIdentity,
-      );
-      check.send({ type: "exit-leader" });
-      await check.closed;
-      expect(ProcessIdentity.isProcessRunning(check.pid)).toBe(false);
-      expect(ProcessIdentity.isProcessRunning(check.descendantPid)).toBe(true);
-      owner.send({ type: "crash" });
-      await owner.closed;
-      const queued = worker(directory, 1);
-      await queued.start();
-      await queued.next("queued");
-      queued.send({ type: "status" });
-      expect((await queued.next("status")).acquired).toBe(false);
-      await check.stop();
-      await queued.next("acquired");
-      await queued.release();
-    },
-  );
+  it("keeps a leaderless owned group until its descendant exits", async () => {
+    const directory = temporaryDirectory();
+    const owner = worker(directory, 1);
+    await owner.start();
+    await owner.next("acquired");
+    const check = await leaderlessCheck();
+    owner.send({ type: "record-child", pid: check.pid });
+    await owner.next("recorded");
+    const leasePath = NodeFS.readdirSync(directory).find((name) => name.endsWith(".lease.json"))!;
+    const stored = JSON.parse(NodeFS.readFileSync(NodePath.join(directory, leasePath), "utf8"));
+    expect(stored.startIdentity).toBe(
+      ProcessIdentity.readProcessIdentities([owner.pid]).get(owner.pid)?.startIdentity,
+    );
+    expect(stored.childStartIdentity).toBe(
+      ProcessIdentity.readProcessIdentities([check.pid]).get(check.pid)?.startIdentity,
+    );
+    check.send({ type: "exit-leader" });
+    await check.closed;
+    expect(ProcessIdentity.isProcessRunning(check.pid)).toBe(false);
+    expect(ProcessIdentity.isProcessRunning(check.descendantPid)).toBe(true);
+    owner.send({ type: "crash" });
+    await owner.closed;
+    const queued = worker(directory, 1);
+    await queued.start();
+    await queued.next("queued");
+    queued.send({ type: "status" });
+    expect((await queued.next("status")).acquired).toBe(false);
+    await check.stop();
+    await queued.next("acquired");
+    await queued.release();
+  });
 
   it("retains a living child group after its owner exits and refuses early release", async () => {
     const directory = temporaryDirectory();
