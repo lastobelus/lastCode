@@ -1,9 +1,12 @@
+// @vitest-environment jsdom
+
 import { Editor, Node as TiptapNode } from "@tiptap/core";
 import { redo, undo } from "@tiptap/pm/history";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { AllSelection, TextSelection, type Transaction } from "@tiptap/pm/state";
+import { act } from "react";
 import StarterKit from "@tiptap/starter-kit";
-import { describe, expect, it } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   buildDocJson,
@@ -27,6 +30,30 @@ import {
   toggleComposerTaskCheckbox,
 } from "~/lastcodeComposerSourceEdits";
 
+// Exercise the mounted fence widget's editing callback without the picker popup/icon system.
+vi.mock("~/components/chat/ComposerCodeBlockLanguagePicker", async () => {
+  const { createElement } = await import("react");
+  return {
+    ComposerCodeBlockLanguagePicker: (props: {
+      language: string;
+      disabled: boolean;
+      onChange: (language: string) => void;
+    }) =>
+      createElement(
+        "select",
+        {
+          "aria-label": "Fence language",
+          value: props.language,
+          disabled: props.disabled,
+          onChange: (event: { currentTarget: HTMLSelectElement }) =>
+            props.onChange(event.currentTarget.value),
+        },
+        createElement("option", { value: "ts" }, "TypeScript"),
+        createElement("option", { value: "python" }, "Python"),
+      ),
+  };
+});
+
 const mention = TiptapNode.create({
   name: "composer-mention",
   group: "inline",
@@ -35,10 +62,14 @@ const mention = TiptapNode.create({
   addAttributes() {
     return { path: { default: "" }, source: { default: "" } };
   },
+  renderHTML({ node }) {
+    return ["span", { "data-mention": "" }, node.attrs.path];
+  },
 });
 
-function createSourceState(source: string) {
-  const editor = new Editor({
+function createSourceEditor(source: string, element?: HTMLElement) {
+  return new Editor({
+    ...(element ? { element } : {}),
     extensions: [
       StarterKit.configure({
         bold: false,
@@ -54,6 +85,10 @@ function createSourceState(source: string) {
       styling: true,
     }),
   });
+}
+
+function createSourceState(source: string) {
+  const editor = createSourceEditor(source);
   return editor.state.reconfigure({ plugins: editor.extensionManager.plugins });
 }
 
@@ -108,18 +143,23 @@ describe("source-preserving composer presentation", () => {
 });
 
 /** A real source document and history, with the composer's grouping applied at dispatch. */
-function sourceComposer(source: string, platform = "MacIntel") {
-  let state = createSourceState(source);
+function sourceComposer(source: string, platform = "MacIntel", mountedEditor?: Editor) {
+  let state = mountedEditor?.state ?? createSourceState(source);
   let previous: ComposerChangeKind | null = null;
   let clock = 0;
   const transactions: Transaction[] = [];
+  const nativeDispatch = mountedEditor?.view.props.dispatchTransaction;
   const dispatch = (transaction: Transaction) => {
     transaction.setTime((clock += 80));
     previous = groupUndoByChangeKind(transaction, previous);
     transactions.push(transaction);
-    state = state.apply(transaction);
+    if (nativeDispatch) {
+      nativeDispatch(transaction);
+      state = mountedEditor!.state;
+    } else state = state.apply(transaction);
   };
-  const view = {
+  if (mountedEditor) mountedEditor.view.setProps({ dispatchTransaction: dispatch });
+  const view = mountedEditor?.view ?? {
     get state() {
       return state;
     },
@@ -573,4 +613,150 @@ describe("composer source transactions", () => {
     expect(composer.undo()).toBe(true);
     expect(composer.value()).toBe(source);
   });
+});
+
+/** Mount real ProseMirror widgets while retaining the existing source/history harness. */
+function mountSourceWidgets(source: string) {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const editor = createSourceEditor(source, host);
+  const composer = sourceComposer(source, "MacIntel", editor);
+  const view = editor.view;
+  let editable = true;
+  view.setProps({
+    editable: () => editable,
+    handleScrollToSelection: () => true,
+  });
+  composer.select(source.length - 5, source.length);
+  return {
+    composer,
+    host,
+    view,
+    readOnly() {
+      editable = false;
+      view.updateState(composer.state);
+    },
+    destroy() {
+      editor.destroy();
+      host.remove();
+    },
+  };
+}
+
+describe("mounted composer widget edits", () => {
+  let mounted: ReturnType<typeof mountSourceWidgets>;
+  beforeEach(() => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  });
+  afterEach(async () => {
+    await act(async () => mounted?.destroy());
+    vi.unstubAllGlobals();
+  });
+
+  const cases = [
+    { kind: "task", body: "- [ ] task", selector: "input[type=checkbox]" },
+    { kind: "fence", body: "```ts title=example\ncode\n```", selector: "select" },
+  ] as const;
+
+  function change(control: HTMLInputElement | HTMLSelectElement) {
+    if (control instanceof HTMLInputElement) control.checked = true;
+    else control.value = "python";
+    control.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  it.each(cases)(
+    "$kind callback follows the live widget position and selection across source edits and undo",
+    async ({ kind, body, selector }) => {
+      const source = `@README.md lead\n${body}\nafter`;
+      await act(async () => {
+        mounted = mountSourceWidgets(source);
+      });
+      const { composer } = mounted;
+      const control = mounted.host.querySelector<HTMLInputElement | HTMLSelectElement>(selector)!;
+      expect(control).not.toBeNull();
+      const atom = composer.atoms()[0]!;
+      // Keep the original mounted callback, but move its target and change the live selection.
+      await act(async () => {
+        composer.select(0);
+        composer.type("prefix ");
+        composer.select(composer.value().length - 4, composer.value().length - 1);
+      });
+      expect(mounted.host.querySelector(selector)).toBe(control);
+      const before = composer.value();
+      const selection = composer.selection();
+      const edits = composer.transactions.filter((transaction) => transaction.docChanged).length;
+      const focus = vi.spyOn(mounted.view, "focus");
+      if (kind === "task") {
+        const event = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
+        control.dispatchEvent(event);
+        expect(event.defaultPrevented).toBe(true);
+      }
+      await act(async () => change(control));
+      const after =
+        kind === "task" ? before.replace("[ ]", "[x]") : before.replace("```ts", "```python");
+      const delta = kind === "task" ? 0 : 4;
+      expect(composer.value()).toBe(after);
+      expect(composer.selection()).toEqual({
+        from: selection.from + delta,
+        to: selection.to + delta,
+      });
+      expect(composer.transactions.filter((transaction) => transaction.docChanged)).toHaveLength(
+        edits + 1,
+      );
+      expect(composer.atoms()[0]!.eq(atom)).toBe(true);
+      expect(focus).toHaveBeenCalledTimes(kind === "task" ? 0 : 1);
+      await act(async () => {
+        expect(composer.undo()).toBe(true);
+      });
+      expect(composer.value()).toBe(before);
+      expect(composer.selection()).toEqual(selection);
+      await act(async () => {
+        expect(composer.redo()).toBe(true);
+      });
+      expect(composer.value()).toBe(after);
+      expect(composer.selection()).toEqual({
+        from: selection.from + delta,
+        to: selection.to + delta,
+      });
+    },
+  );
+
+  it.each(cases)(
+    "$kind callback ignores read-only and removed targets",
+    async ({ body, selector }) => {
+      const source = `@README.md lead\n${body}\nafter`;
+      await act(async () => {
+        mounted = mountSourceWidgets(source);
+      });
+      const { composer } = mounted;
+      const control = mounted.host.querySelector<HTMLInputElement | HTMLSelectElement>(selector)!;
+      expect(control).not.toBeNull();
+      const focus = vi.spyOn(mounted.view, "focus");
+      mounted.readOnly();
+      const dispatches = composer.transactions.length;
+      const selection = composer.selection();
+      await act(async () => change(control));
+      expect(composer.transactions).toHaveLength(dispatches);
+      expect(composer.value()).toBe(source);
+      expect(composer.selection()).toEqual(selection);
+      expect(focus).not.toHaveBeenCalled();
+      if (control instanceof HTMLInputElement) expect(control.checked).toBe(false);
+
+      // Return to editable before removing the target, so the missing-position guard is exercised.
+      mounted.view.setProps({ editable: () => true });
+      await act(async () => {
+        composer.select(source.indexOf(body), source.indexOf(body) + body.length);
+        composer.type("plain");
+        expect(mounted.host.querySelector(selector)).toBeNull();
+        const dispatchesAfterRemoval = composer.transactions.length;
+        const selectionAfterRemoval = composer.selection();
+        // Invoke the detached control before the fence root's queued unmount.
+        change(control);
+        expect(composer.transactions).toHaveLength(dispatchesAfterRemoval);
+        expect(composer.selection()).toEqual(selectionAfterRemoval);
+      });
+      expect(composer.value()).toBe("@README.md lead\nplain\nafter");
+      expect(focus).not.toHaveBeenCalled();
+    },
+  );
 });

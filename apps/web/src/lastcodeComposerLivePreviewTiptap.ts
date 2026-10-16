@@ -243,6 +243,60 @@ function composerFences(preview: ComposerLivePreviewState) {
   return fences;
 }
 
+/** Toggle the task currently anchored at the widget's live document position. */
+function toggleTaskCheckboxAtWidget(view: EditorView, getPos: () => number | undefined) {
+  if (!view.editable) return;
+  const current = composerLivePreviewKey.getState(view.state);
+  const position = getPos();
+  if (!current || position === undefined) return;
+  const offset = pmToFlat(current.map, position);
+  const line = current.ranges.lines.find(
+    (line) => line.line.kind === "task" && line.syntax[0]?.from === offset,
+  );
+  const checkbox = line?.syntax.at(-1);
+  if (!checkbox) return;
+  const map = current.map;
+  applyComposerSourceEdit(
+    view,
+    toggleComposerTaskCheckbox(map.value, sourceSelection(view.state, map), {
+      from: flatToMarkdown(map, checkbox.from + 1),
+      to: flatToMarkdown(map, checkbox.from + 2),
+    }),
+  );
+}
+
+/** Replace the language of the fence currently anchored at the widget's live position. */
+function replaceFenceLanguageAtWidget(
+  view: EditorView,
+  getPos: () => number | undefined,
+  language: string,
+): boolean {
+  if (!view.editable) return false;
+  const current = composerLivePreviewKey.getState(view.state);
+  const position = getPos();
+  if (!current || position === undefined) return false;
+  const offset = pmToFlat(current.map, position);
+  const opening = current.ranges.lines.find(
+    (line) => line.line.kind === "fenceOpen" && line.syntax[0]?.from === offset,
+  )?.line;
+  if (opening?.kind !== "fenceOpen") return false;
+  const map = current.map;
+  applyComposerSourceEdit(
+    view,
+    replaceComposerFenceLanguage(
+      map.value,
+      sourceSelection(view.state, map),
+      {
+        from: flatToMarkdown(map, opening.infoFrom),
+        to: flatToMarkdown(map, opening.infoTo),
+      },
+      language,
+    ),
+  );
+  // A resolved target restores editor focus even when the edit is a no-op.
+  return true;
+}
+
 function decorationsForState(
   state: EditorState,
   value: Omit<ComposerLivePreviewState, "decorations">,
@@ -300,24 +354,7 @@ function decorationsForState(
             input.addEventListener("change", () => {
               // Native checkbox state flips before change; source alone owns its state.
               input.checked = widget.checked;
-              if (!view.editable) return;
-              const current = composerLivePreviewKey.getState(view.state);
-              const position = getPos();
-              if (!current || position === undefined) return;
-              const offset = pmToFlat(current.map, position);
-              const line = current.ranges.lines.find(
-                (line) => line.line.kind === "task" && line.syntax[0]?.from === offset,
-              );
-              const checkbox = line?.syntax.at(-1);
-              if (!checkbox) return;
-              const map = current.map;
-              applyComposerSourceEdit(
-                view,
-                toggleComposerTaskCheckbox(map.value, sourceSelection(view.state, map), {
-                  from: flatToMarkdown(map, checkbox.from + 1),
-                  to: flatToMarkdown(map, checkbox.from + 2),
-                }),
-              );
+              toggleTaskCheckboxAtWidget(view, getPos);
             });
             element.append(input);
           } else {
@@ -332,29 +369,7 @@ function decorationsForState(
                   theme: value.theme,
                   disabled: !value.editable,
                   onChange: (language: string) => {
-                    if (!view.editable) return;
-                    const current = composerLivePreviewKey.getState(view.state);
-                    const position = getPos();
-                    if (!current || position === undefined) return;
-                    const offset = pmToFlat(current.map, position);
-                    const opening = current.ranges.lines.find(
-                      (line) => line.line.kind === "fenceOpen" && line.syntax[0]?.from === offset,
-                    )?.line;
-                    if (opening?.kind !== "fenceOpen") return;
-                    const map = current.map;
-                    applyComposerSourceEdit(
-                      view,
-                      replaceComposerFenceLanguage(
-                        map.value,
-                        sourceSelection(view.state, map),
-                        {
-                          from: flatToMarkdown(map, opening.infoFrom),
-                          to: flatToMarkdown(map, opening.infoTo),
-                        },
-                        language,
-                      ),
-                    );
-                    view.focus();
+                    if (replaceFenceLanguageAtWidget(view, getPos, language)) view.focus();
                   },
                 }),
               );
