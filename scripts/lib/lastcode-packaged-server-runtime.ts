@@ -401,11 +401,11 @@ export function validatePackagedServerRuntime(input: {
     input.identity,
     input.inspection ?? defaultPackagedAppInspection,
   );
+  // Keep checksum reads ordered and stop before reading fields after a mismatch.
+  const checksumKeys = ["executableSha256", "appAsarSha256", "serverEntrySha256"] as const;
   if (
     checksums.serverVersion !== descriptor.serverVersion ||
-    checksums.executableSha256 !== descriptor.checksums.executableSha256 ||
-    checksums.appAsarSha256 !== descriptor.checksums.appAsarSha256 ||
-    checksums.serverEntrySha256 !== descriptor.checksums.serverEntrySha256
+    checksumKeys.some((key) => checksums[key] !== descriptor.checksums[key])
   ) {
     throw new Error("Packaged runtime payload checksums do not match its descriptor.");
   }
