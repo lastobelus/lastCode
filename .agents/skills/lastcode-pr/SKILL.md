@@ -116,10 +116,10 @@ current GitHub thread and review-query mechanics.
    durable handled state, and no review thread remains unresolved.
 4. While exact-head GitHub CI or Codex review is passive and no current finding
    needs judgement, follow the babysit skill's
-   [Wait for Remote Gates](../babysit/SKILL.md#wait-for-remote-gates): run
+   [Wait for Remote Gates](../babysit/SKILL.md#wait-for-remote-gates): call
+   `watch_pull_request` with the PR's explicit URL, then run
    `pnpm lastcode:pr-gates` once (add `--pr PR_NUMBER` for a stack or a PR
-   outside a clean matching checkout), and on `pending` call
-   `watch_pull_request` with the PR's explicit URL and end the turn. Do not
+   outside a clean matching checkout), and on `pending` end the turn. Do not
    poll GitHub, sleep, or start a polling Action or watcher. On each wake,
    rerun the check and fix actionable failures or findings even while another
    gate is pending; otherwise end the turn and let the watch continue. Call

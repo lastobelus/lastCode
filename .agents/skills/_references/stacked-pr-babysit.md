@@ -43,7 +43,7 @@ and requires a clean matching `HEAD`. A `--pr` check reads remote state only;
 Quick CI and the merge guard still operate on the command's checkout.
 
 Watch only the member being driven, with `watch_pull_request` and its explicit
-URL. Parent watches are not needed: the check returns `pending` only while the
+URL, before checking it. Parent watches are not needed: the check returns `pending` only while the
 member's own review is pending or its own exact CI run is in progress, and both
 wake the member's watch. Each wake reruns the check against the live parent
 chain, so a parent push or retarget surfaces then. A `stacked-ready` result
@@ -60,8 +60,9 @@ does not redirect Quick CI. Remote waiting alone does not require this change.
 
 1. Start with the oldest unmerged authorized member. Handle current findings,
    release a draft only when its existing approval boundary permits, and request
-   exact-head Codex review. Run its gate check; on `pending`, watch it and end
-   the turn.
+   exact-head Codex review. Call `watch_pull_request` with the PR's explicit URL,
+   then run `pnpm lastcode:pr-gates` once (add `--pr PR_NUMBER` for a stack or a PR
+   outside a clean matching checkout), and on `pending` end the turn.
 2. On each wake, take a fresh snapshot and rerun the check for the member.
    Handle findings or drift before ending the turn again. Passing against a topic base is
    stack validation; final merge still requires current `lastcode/main`.

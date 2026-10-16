@@ -1882,6 +1882,11 @@ describe("LastCode checkpoint supervisor", () => {
     expect(message).toContain("sync/nightly/nightly-1");
     expect(message).toContain("lastcode-checkpoints --verbose");
     expect(message).toContain("nightly-checkpoint.stderr.log");
+    // A new watch ignores comments posted before it starts, so the gate check must follow it.
+    expect(message).toContain("call watch_pull_request");
+    expect(message.indexOf("call watch_pull_request")).toBeLessThan(
+      message.indexOf("run pnpm lastcode:pr-gates"),
+    );
   });
 
   it("distinguishes different recorded checkpoint blockers behind the same wrapper error", () => {

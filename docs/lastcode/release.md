@@ -144,10 +144,10 @@ case at a time. This takes longer than the task-runner defaults but avoids
 cross-suite state leaks plus memory and CPU contention between the web, mobile,
 desktop, and server suites on whichever CI node runs the gate.
 
-PR waits use the native pull-request watch, not a Project Action. Run the
-one-shot `pnpm lastcode:pr-gates [--pr PR_NUMBER]` check; when it reports
-`pending`, call `watch_pull_request` with the PR URL and end the turn. On each
-wake, run the check again. It reads the exact GitHub pull-request workflow run,
+PR waits use the native pull-request watch, not a Project Action. Call
+`watch_pull_request` with the PR URL, then run the one-shot
+`pnpm lastcode:pr-gates [--pr PR_NUMBER]` check; when it reports `pending`, end
+the turn. On each wake, run the check again. It reads the exact GitHub pull-request workflow run,
 whose identity records the PR number, head, base, and synthetic merge commit
 behind one stable aggregate `CI Gate`, together with exact-head Codex review
 and unresolved review threads. Head or base drift invalidates earlier evidence

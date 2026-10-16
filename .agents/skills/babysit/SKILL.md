@@ -144,32 +144,36 @@ loop, or repeated GitHub queries.
 When exact-head GitHub CI or Codex review is passive and no current artifact
 needs judgement:
 
-1. Handle current findings and request exact-head review first. The watch only
-   wakes for comments posted after it starts.
-2. Run the one-shot gate check: `pnpm lastcode:pr-gates` in a clean checkout
+1. Handle current findings and request exact-head review first.
+2. Call `watch_pull_request` with the PR's explicit URL. A new watch wakes only
+   for comments posted after it starts, so a finding that lands before this
+   call is visible only to the check in the next step. Calling it while the
+   watch is active keeps the existing watch.
+3. Run the one-shot gate check: `pnpm lastcode:pr-gates` in a clean checkout
    whose `HEAD` is the PR head, or `pnpm lastcode:pr-gates --pr PR_NUMBER` from
    any checkout. It takes one GitHub snapshot, confirming identity and
    evidence with a second read, and prints one JSON decision with the
    PR/head/base identity, CI evidence, review state, unresolved-thread count,
    and parent chain. It exits non-zero only for `attention`. It never waits,
    approves, or merges.
-3. On `attention`, act on its reason now. For `observation-failed` (a GitHub
+4. On `attention`, act on its reason now. For `observation-failed` (a GitHub
    read failed, or the PR or evidence changed during the check) or
    `mergeability-unknown` (GitHub had not computed mergeability after CI and
    review finished), rerun the check once; report the blocker if it persists. On `ready` or `stacked-ready`, continue
-   to the finish line below. On `pending`, call `watch_pull_request` with the
-   PR's explicit URL and end the turn. For a stack, follow the
+   to the finish line below. On `pending`, end the turn; the watch covers
+   anything newer. For a stack, follow the
    [stack reference](../_references/stacked-pr-babysit.md#check-and-watch-stack-members).
 
-On every wake, take the fresh snapshot above and run the gate check again. A
+On every wake, take the fresh snapshot above and run the gate check again. If
+the watch has ended (for example after repeated comment-only wakes) while the
+PR is still pending, start it again before that check. A
 wake is news, not a verdict: the watch also wakes when required checks pass
 while review is still pending, when a bot edits a remark, and when someone
 reacts to your comment (Codex's eyes reaction only means review started). The
 first wake after a watch starts can also report reactions that already existed. Fix an
 actionable CI failure or finding immediately, even while another gate is still
 pending. When the check is still `pending` and nothing needs action, end the
-turn; the watch continues. If the watch has ended (for example after repeated
-comment-only wakes) while the PR is still pending, start it again.
+turn; the watch continues.
 
 The watch has no review timeout, so a review request that Codex never answers
 does not wake the thread. Requesting review before ending the turn keeps the
