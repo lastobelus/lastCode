@@ -1,3 +1,4 @@
+import * as NodeProcess from "node:process";
 import * as NodeSqlite from "node:sqlite";
 import type * as NodeWorkerThreads from "node:worker_threads";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -159,17 +160,27 @@ it.effect("keeps large text and blob parameters off cached statements", () =>
 
     const small = "small";
     const queries = [
-      (value: string | Uint8Array | ArrayBuffer) => sql`SELECT length(${value}) AS size`,
-      (value: string | Uint8Array | ArrayBuffer) =>
+      (value: string | Uint8Array | DataView | ArrayBuffer) => sql`SELECT length(${value}) AS size`,
+      (value: string | Uint8Array | DataView | ArrayBuffer) =>
         sql.unsafe("SELECT length($value) AS size", [{ $value: value }]),
-      (value: string | Uint8Array | ArrayBuffer) =>
+      (value: string | Uint8Array | DataView | ArrayBuffer) =>
         sql.unsafe("SELECT length($value) AS callable", [
           Object.assign(() => {}, { $value: value }),
         ]),
     ];
     const cached = new Set<NodeSqlite.StatementSync>();
     const large = new Set<NodeSqlite.StatementSync>();
-    const largeBlobs = [new Uint8Array(64 * 1024 + 1), new ArrayBuffer(64 * 1024 + 1)];
+    const [nodeMajor = 0, nodeMinor = 0] = NodeProcess.versions.node.split(".").map(Number);
+    // Raw ArrayBuffer bindings landed in Node 26.8 and were backported to Node 24.21.
+    const supportsRawArrayBuffer =
+      (nodeMajor === 24 && nodeMinor >= 21) ||
+      nodeMajor > 26 ||
+      (nodeMajor === 26 && nodeMinor >= 8);
+    const largeBlobs = [
+      new Uint8Array(64 * 1024 + 1),
+      new DataView(new ArrayBuffer(64 * 1024 + 1)),
+      ...(supportsRawArrayBuffer ? [new ArrayBuffer(64 * 1024 + 1)] : []),
+    ];
     for (const value of [small, largeText, ...largeBlobs, small]) {
       const expected = typeof value === "string" ? value.length : value.byteLength;
       for (const query of queries) {
@@ -184,7 +195,7 @@ it.effect("keeps large text and blob parameters off cached statements", () =>
     // Small parameters keep reusing the one cached statement for each query.
     assert.equal(cached.size, queries.length);
     // Each large execution gets a statement that nothing holds on to afterwards.
-    assert.equal(large.size, queries.length * 6);
+    assert.equal(large.size, queries.length * (1 + largeBlobs.length) * 2);
     assert.isTrue(cached.isDisjointFrom(large));
   }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
 );
