@@ -159,7 +159,7 @@ is no longer pending.
 For sequential stacked PRs, `--pr` checks one PR independently of the current
 checkout and rebuilds its parent chain live on every run. See
 [Sequential Stack Babysitting](../../.agents/skills/_references/stacked-pr-babysit.md)
-for watched parents and ordered squash/restack requirements. Passing against a
+for which member to watch and ordered squash/restack requirements. Passing against a
 parent branch is stack validation; the final merge guard still requires current
 `lastcode/main` and fresh evidence.
 

@@ -2236,7 +2236,9 @@ const WATCH_FINGERPRINT_CHECK_COUNTS =
  * Comments come most recently updated first, since an edit moves `updatedAt`, so an edit to an
  * old comment on a long pull request is still in the page. Reviews have no such order: an edit
  * to a review older than the last hundred waits for the watch's periodic full read, as do edits
- * to comments inside review threads, which cost a point per pull request to ask for.
+ * to comments inside review threads, which cost a point per pull request to ask for. Reactions
+ * are fingerprinted only on that comment page, where a reviewer bot reacts to a review request;
+ * reactions on reviews and inline comments also wait for the full read.
  */
 const PULL_REQUEST_WATCH_FINGERPRINT_SELECTION =
   "state mergeable headRefOid " +

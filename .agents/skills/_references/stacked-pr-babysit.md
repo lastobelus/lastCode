@@ -42,10 +42,13 @@ silently. Without `--pr`, the check derives the PR from the checked-out branch
 and requires a clean matching `HEAD`. A `--pr` check reads remote state only;
 Quick CI and the merge guard still operate on the command's checkout.
 
-Watch the member being driven with `watch_pull_request` and its explicit URL.
-The watch does not notice base or parent drift on its own, so also watch an
-unmerged parent whose pushes or retargets would invalidate the member's
-evidence. Unwatch a member once it merges or is no longer being driven.
+Watch only the member being driven, with `watch_pull_request` and its explicit
+URL. Parent watches are not needed: the check returns `pending` only while the
+member's own review is pending or its own exact CI run is in progress, and both
+wake the member's watch. Each wake reruns the check against the live parent
+chain, so a parent push or retarget surfaces then. A `stacked-ready` result
+covers only the parent revision it captured. Unwatch a member once it merges or
+is no longer being driven.
 
 Before taking on fixes or restacking, establish that the thread's Action
 checkout can safely become the intended clean validation checkout. Preserve
@@ -57,8 +60,8 @@ does not redirect Quick CI. Remote waiting alone does not require this change.
 
 1. Start with the oldest unmerged authorized member. Handle current findings,
    release a draft only when its existing approval boundary permits, and request
-   exact-head Codex review. Run its gate check; on `pending`, watch it (and any
-   relevant parent) and end the turn.
+   exact-head Codex review. Run its gate check; on `pending`, watch it and end
+   the turn.
 2. On each wake, take a fresh snapshot and rerun the check for the member.
    Handle findings or drift before ending the turn again. Passing against a topic base is
    stack validation; final merge still requires current `lastcode/main`.
@@ -100,12 +103,13 @@ terminal-handled Codex review, no unresolved review threads, and clean
 mergeability against the selected base. Missing CI registration, a disabled
 workflow, or CI for an old base is not successful stack validation.
 
-Parent pushes and retargets can invalidate CI without changing the child's head.
-Wait for fresh evidence. The watch never wakes for a run that never registers,
-so once review is not pending the check reports `ci-not-registered` attention;
-handle that blocker. Rerunning an old workflow alone does not prove the current base. Quick
-CI continues to validate against the canonical workstream base; do not describe
-its receipt as parent-relative validation.
+Parent pushes and retargets can invalidate CI without changing the child's head,
+and they start no run for the child. The watch never wakes for a run that never
+registers, so once review is not pending the check reports `ci-not-registered`
+attention; obtain fresh evidence for the new base rather than waiting.
+Rerunning an old workflow alone does not prove the current base. Quick CI
+continues to validate against the canonical workstream base; do not describe its
+receipt as parent-relative validation.
 
 The gate check never restacks, pushes, or merges. The existing main-only merge
 guard and short shared main-write lock remain authoritative. After a verified
