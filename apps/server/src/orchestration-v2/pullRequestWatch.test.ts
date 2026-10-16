@@ -27,6 +27,7 @@ const watch = (overrides: Partial<ThreadPullRequestWatch> = {}): ThreadPullReque
   remarksThrough: STARTED,
   remarkIds: [],
   reactionKeys: [],
+  reactionCounts: {},
   conflicting: false,
   wakes: 0,
   ...overrides,
@@ -113,11 +114,11 @@ describe("evaluatePullRequestWatch", () => {
     assert.equal(message.notification.summary, "#12: new reactions");
   });
 
-  it("ignores own, unnamed, and other people's comment reactions", () => {
+  it("ignores own reactions and reactions on other people's comments", () => {
     const self = {
       ...remark("agent-user", STARTED),
       reactions: [
-        { content: "thumbs-up" as const, count: 2, actors: ["AGENT-USER"], viewerHasReacted: true },
+        { content: "thumbs-up" as const, count: 1, actors: ["AGENT-USER"], viewerHasReacted: true },
       ],
     };
     const other = {
@@ -135,9 +136,10 @@ describe("evaluatePullRequestWatch", () => {
       ...self,
       reactions: [{ ...self.reactions[0]!, actors: [], viewerHasReacted: false }],
     };
-    const report = evaluatePullRequestWatch(watch(), detail(), [self, other, unnamed]);
+    const report = evaluatePullRequestWatch(watch(), detail(), [self, other]);
     assert.deepEqual(report.changes, []);
     assert.deepEqual(report.next.reactionKeys, []);
+    assert.deepEqual(report.next.reactionCounts, {});
     const unknownOwn = evaluatePullRequestWatch(
       watch(),
       detail({ viewer: undefined, author: null }),
@@ -146,10 +148,75 @@ describe("evaluatePullRequestWatch", () => {
     assert.deepEqual(unknownOwn.changes, []);
   });
 
+  it("counts reactors past the named page once, keeping the total across pushes and gaps", () => {
+    const passed = detail({ checks: [check("lint", "success")] });
+    const named = Array.from({ length: 10 }, (_, index) => `reviewer-${index}`);
+    const own = (count: number, viewerHasReacted = false): PullRequestComment => ({
+      ...remark("agent-user", "2026-10-01T12:00:00Z", "Please review."),
+      reactions: [{ content: "heart", count, actors: named, viewerHasReacted }],
+    });
+    const told = watch({ headSha: "aaaaaaaaaa", passed: true, passedChecks: ["lint"] });
+    const first = evaluatePullRequestWatch(told, passed, [own(10)]);
+    assert.equal(first.changes.length, 1);
+    assert.deepEqual(first.next.reactionCounts, {});
+
+    // An eleventh reactor moves only the total; the named page stays the same ten.
+    const eleventh = evaluatePullRequestWatch(first.next, passed, [own(11)]);
+    assert.deepEqual(eleventh.changes, [
+      {
+        kind: "reactions",
+        reactions: [{ remark: own(11), content: "heart", actor: null, count: 1 }],
+      },
+    ]);
+    const message = pullRequestWatchMessage({
+      number: 12,
+      url: "https://github.com/o/r/pull/12",
+      baseBranch: "main",
+      headSha: passed.headSha ?? null,
+      report: eleventh,
+    });
+    assert.include(message.text, "- 1 new reaction on your comments:");
+    assert.include(message.text, '1 person the host did not name: heart on "Please review."');
+
+    // The same total, a removal, and its return are not news, nor is the agent's own reaction,
+    // across a durable replay, an unreadable conversation, and a push.
+    const replay = decodeWatch(JSON.parse(JSON.stringify(eleventh.next)));
+    const quiet = [[own(11)], [own(10)], null, [own(11)], [own(12, true)]].reduce(
+      (state, remarks) => {
+        const report = evaluatePullRequestWatch(state, passed, remarks);
+        assert.deepEqual(report.changes, []);
+        return report.next;
+      },
+      replay,
+    );
+    const pushed = evaluatePullRequestWatch(quiet, { ...passed, headSha: "bbbbbbbbbb" }, [
+      own(13, true),
+    ]);
+    assert.deepEqual(pushed.changes, [
+      { kind: "checks-passed", count: 1, required: false },
+      {
+        kind: "reactions",
+        reactions: [{ remark: own(13, true), content: "heart", actor: null, count: 1 }],
+      },
+    ]);
+
+    // A host that counts reactions it names no one for reports them the same way, once.
+    const nameless = { ...own(2), reactions: [{ ...own(2).reactions![0]!, actors: [] }] };
+    const unnamed = evaluatePullRequestWatch(told, passed, [nameless]);
+    assert.deepEqual(unnamed.changes, [
+      {
+        kind: "reactions",
+        reactions: [{ remark: nameless, content: "heart", actor: null, count: 2 }],
+      },
+    ]);
+    assert.deepEqual(evaluatePullRequestWatch(unnamed.next, passed, [nameless]).changes, []);
+  });
+
   it("defaults persisted watches without reaction keys and bounds reaction-only wakes", () => {
-    const { reactionKeys: _keys, ...legacy } = watch();
+    const { reactionKeys: _keys, reactionCounts: _counts, ...legacy } = watch();
     const saved = decodeWatch(legacy);
     assert.deepEqual(saved.reactionKeys, []);
+    assert.deepEqual(saved.reactionCounts, {});
     const own = {
       ...remark("agent-user", STARTED),
       reactions: [

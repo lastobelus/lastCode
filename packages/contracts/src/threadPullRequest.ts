@@ -122,6 +122,13 @@ export const ThreadPullRequestWatch = Schema.Struct({
   reactionKeys: Schema.Array(TrimmedNonEmptyString).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
+  /**
+   * The highest reaction total reported on an own comment whose reactors the host named only in
+   * part, keyed by comment/content, so people past the named page still count once.
+   */
+  reactionCounts: Schema.Record(TrimmedNonEmptyString, NonNegativeInt).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
   conflicting: Schema.Boolean,
   /** Comment-only wakes in a row. Watching stops at a limit, so bots cannot loop it. */
   wakes: NonNegativeInt,

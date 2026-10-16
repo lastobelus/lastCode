@@ -18,15 +18,14 @@ export type PullRequestWatchChange =
   | { readonly kind: "checks-failed"; readonly failed: ReadonlyArray<PullRequestCheck> }
   | { readonly kind: "checks-passed"; readonly count: number; readonly required: boolean }
   | { readonly kind: "remarks"; readonly remarks: ReadonlyArray<PullRequestComment> }
-  | {
-      readonly kind: "reactions";
-      readonly reactions: ReadonlyArray<{
-        readonly remark: PullRequestComment;
-        readonly content: string;
-        readonly actor: string;
-      }>;
-    }
+  | { readonly kind: "reactions"; readonly reactions: ReadonlyArray<PullRequestWatchReaction> }
   | { readonly kind: "conflicting" };
+
+/** A named reaction, or `count` more people past the names the host gave. */
+export type PullRequestWatchReaction = {
+  readonly remark: PullRequestComment;
+  readonly content: string;
+} & ({ readonly actor: string } | { readonly actor: null; readonly count: number });
 
 export interface PullRequestWatchReport {
   /** What the agent has not been told yet. Empty means no wake. */
@@ -109,22 +108,32 @@ export function evaluatePullRequestWatch(
   // Reactions have no timestamp, so scan own comments even when their text predates the watch.
   // Keep identities across pushes and incomplete reads: neither makes an old reaction new.
   const reactionKeys = new Set(watch.reactionKeys);
-  const reactions: Array<{
-    readonly remark: PullRequestComment;
-    readonly content: string;
-    readonly actor: string;
-  }> = [];
+  const reactionCounts: Record<string, number> = { ...watch.reactionCounts };
+  const reactions: Array<PullRequestWatchReaction> = [];
   if (own !== undefined) {
     for (const remark of remarks ?? []) {
       if (remark.author?.login.toLowerCase() !== own) continue;
       for (const reaction of remark.reactions ?? []) {
-        for (const actor of reaction.actors) {
-          if (actor.toLowerCase() === own) continue;
+        const named = reaction.actors.filter((actor) => actor.toLowerCase() !== own);
+        let newlyNamed = 0;
+        for (const actor of named) {
           const key = JSON.stringify([remark.id, reaction.content, actor.toLowerCase()]);
           if (reactionKeys.has(key)) continue;
           reactionKeys.add(key);
+          newlyNamed += 1;
           reactions.push({ remark, content: reaction.content, actor });
         }
+        // The host names only a page of reactors, and `count` includes the own account. Past
+        // the page, only a total above the highest one reported is news, so removals and the
+        // same total again stay quiet.
+        const ownReacted = reaction.viewerHasReacted || named.length < reaction.actors.length;
+        const others = reaction.count - (ownReacted ? 1 : 0);
+        if (others <= named.length) continue;
+        const countKey = JSON.stringify([remark.id, reaction.content]);
+        const told = reactionCounts[countKey] ?? 0;
+        const count = Math.min(others - named.length, others - told - newlyNamed);
+        if (count > 0) reactions.push({ remark, content: reaction.content, actor: null, count });
+        reactionCounts[countKey] = Math.max(told, others);
       }
     }
   }
@@ -153,6 +162,9 @@ export function evaluatePullRequestWatch(
       remarksThrough,
       remarkIds,
       reactionKeys: [...reactionKeys].toSorted(),
+      reactionCounts: Object.fromEntries(
+        Object.entries(reactionCounts).toSorted(([left], [right]) => left.localeCompare(right)),
+      ),
       conflicting,
       wakes,
     },
@@ -202,15 +214,21 @@ function changeLines(
           return `  - ${remark.author?.login ?? "someone"}${where}: ${said}${remark.url ? ` ${remark.url}` : ""}`;
         }),
       ];
-    case "reactions":
+    case "reactions": {
+      const total = change.reactions.reduce(
+        (sum, reaction) => sum + (reaction.actor === null ? reaction.count : 1),
+        0,
+      );
       return [
-        `- ${change.reactions.length} new ${change.reactions.length === 1 ? "reaction" : "reactions"} on your comments:`,
-        ...listed(
-          change.reactions,
-          ({ remark, content, actor }) =>
-            `  - ${actor}: ${content} on "${snippet(remark.body)}"${remark.url ? ` ${remark.url}` : ""}`,
-        ),
+        `- ${total} new ${total === 1 ? "reaction" : "reactions"} on your comments:`,
+        ...listed(change.reactions, (reaction) => {
+          const who =
+            reaction.actor ??
+            `${reaction.count} ${reaction.count === 1 ? "person" : "people"} the host did not name`;
+          return `  - ${who}: ${reaction.content} on "${snippet(reaction.remark.body)}"${reaction.remark.url ? ` ${reaction.remark.url}` : ""}`;
+        }),
       ];
+    }
     case "conflicting":
       return [`- The branch now conflicts with ${context.baseBranch}.`];
   }

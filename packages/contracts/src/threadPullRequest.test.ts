@@ -82,5 +82,6 @@ it.effect("decodes a watch saved before passed checks were recorded", () =>
 
     assert.deepStrictEqual(link?.watch?.passedChecks, []);
     assert.deepStrictEqual(link?.watch?.reactionKeys, []);
+    assert.deepStrictEqual(link?.watch?.reactionCounts, {});
   }),
 );

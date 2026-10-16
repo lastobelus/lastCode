@@ -528,6 +528,7 @@ describe("derivePendingBackgroundWork kinds", () => {
       remarksThrough: "2026-10-05T00:00:00.000Z",
       remarkIds: [],
       reactionKeys: [],
+      reactionCounts: {},
       conflicting: false,
       wakes: 0,
     };
