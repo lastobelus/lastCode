@@ -27,6 +27,55 @@ describe("T3 orchestration provider instructions", () => {
     assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "bindToCurrentThread=false");
   });
 
+  it.each([
+    ["system", t3OrchestrationSystemPrompt(true)!],
+    [
+      "first-run prompt",
+      t3OrchestrationPromptForFirstRun({
+        prompt: "Find the thread.",
+        runOrdinal: 1,
+        hasT3Mcp: true,
+      }),
+    ],
+    [
+      "ACP prompt",
+      t3AcpPromptWithInstructions({
+        prompt: "Find the thread.",
+        state: { interactionMode: "default", hasT3Mcp: true },
+      }),
+    ],
+  ])("emits the thread recovery contract in the %s", (_channel, instructions) => {
+    const recovery = instructions.split("### Find mentioned threads")[1]?.split("\n### ")[0] ?? "";
+    assert.include(recovery, "finding it is your job");
+    assert.match(recovery, /Thread IDs are opaque.*full ID unchanged/);
+    assert.include(recovery, "`mcp:<uuid>`");
+    assert.include(recovery, "`thread.environmentId`");
+    assert.include(recovery, "`thread_not_found`");
+    assert.include(recovery, "`environment_unavailable`");
+
+    let previousStep = -1;
+    for (const step of [
+      "Start with `t3_thread_read`",
+      "`t3_thread_search`",
+      "`lastcode-thread` CLI",
+      "owning installation's `thread` subcommand",
+      "Ask the user only after these routes are exhausted",
+    ]) {
+      const position = recovery.indexOf(step);
+      assert.isAbove(position, previousStep, `Recovery step is missing or out of order: ${step}`);
+      previousStep = position;
+    }
+    assert.include(recovery, "`threadsTruncated`");
+    assert.include(recovery, "only in this environment");
+    assert.include(recovery, "permission refusal is a boundary");
+    assert.include(recovery, '`"kind":"accepted"`');
+    assert.include(recovery, '`"kind":"completed"`');
+    assert.include(recovery, "`waitHandle`");
+    assert.include(recovery, "`dispatch-unknown`");
+    assert.include(recovery, "`transport-unknown`");
+    assert.include(recovery, "ready-to-paste `link`");
+  });
+
   it("injects prompt fallback only for an MCP-enabled first run", () => {
     const prompt = "Inspect the repository.";
     const injected = t3OrchestrationPromptForFirstRun({
