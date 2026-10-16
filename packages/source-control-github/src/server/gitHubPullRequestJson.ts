@@ -295,6 +295,16 @@ const RawStackMembershipsSchema = Schema.Struct({
 /** How many of a reaction's people the hover names before it counts the rest. */
 const REACTORS_PER_GROUP = 10;
 
+const REACTORS_FIELDS = `reactors(first: ${REACTORS_PER_GROUP}) {
+  totalCount
+  nodes {
+    ... on User { login }
+    ... on Bot { login }
+    ... on Organization { login }
+    ... on Mannequin { login }
+  }
+}`;
+
 /**
  * A reaction group as every reactable node reports it. `reactors` is bounded rather than paged:
  * a hover says who reacted, and a hundred and forty names is a count, not a sentence.
@@ -302,15 +312,7 @@ const REACTORS_PER_GROUP = 10;
 const REACTION_GROUPS_FIELDS = `reactionGroups {
   content
   viewerHasReacted
-  reactors(first: ${REACTORS_PER_GROUP}) {
-    totalCount
-    nodes {
-      ... on User { login }
-      ... on Bot { login }
-      ... on Organization { login }
-      ... on Mannequin { login }
-    }
-  }
+  ${REACTORS_FIELDS}
 }`;
 
 /** GitHub's reaction names, which are the same eight the contract carries under other spellings. */
@@ -2227,8 +2229,8 @@ const WATCH_FINGERPRINT_CHECK_COUNTS =
   "checkRunCountsByState { state count } statusContextCountsByState { state count }";
 
 /**
- * What a pull request watch needs to notice, priced by GitHub at one point for twenty-five pull
- * requests, where the detail and activity reads it gates cost sixteen for one. Counts and the
+ * What a pull request watch needs to notice, with every connection bounded so each poll stays far
+ * cheaper than the detail and activity reads it gates. Counts and the
  * newest edit cover new comments, reviews (a reply in a review thread is a review), threads, and
  * a bot rewriting its summary; check counts by state move whenever a check starts or finishes.
  * Comments come most recently updated first, since an edit moves `updatedAt`, so an edit to an
@@ -2238,7 +2240,7 @@ const WATCH_FINGERPRINT_CHECK_COUNTS =
  */
 const PULL_REQUEST_WATCH_FINGERPRINT_SELECTION =
   "state mergeable headRefOid " +
-  `${RECENTLY_UPDATED_COMMENTS_GRAPHQL_FIELD} { totalCount nodes { id lastEditedAt reactionGroups { content reactors { totalCount } } } } ` +
+  `${RECENTLY_UPDATED_COMMENTS_GRAPHQL_FIELD} { totalCount nodes { id lastEditedAt reactionGroups { content ${REACTORS_FIELDS} } } } ` +
   `reviews(last: 100) { ${WATCH_FINGERPRINT_EDITS} } ` +
   "reviewThreads { totalCount } " +
   `commits(last: 1) { nodes { commit { statusCheckRollup { contexts { ${WATCH_FINGERPRINT_CHECK_COUNTS} } } } } }`;
@@ -2278,7 +2280,10 @@ const RawReactionEditedSchema = Schema.Struct({
         reactionGroups: Schema.Array(
           Schema.Struct({
             content: Schema.String,
-            reactors: Schema.Struct({ totalCount: Schema.Int }),
+            reactors: Schema.Struct({
+              totalCount: Schema.Int,
+              nodes: Schema.Array(Schema.NullOr(RawActorSchema)),
+            }),
           }),
         ),
       }),
@@ -2362,7 +2367,11 @@ export function decodePullRequestWatchFingerprintsJson(
             node === null
               ? []
               : node.reactionGroups.map(
-                  (group) => `${node.id}:${group.content}:${group.reactors.totalCount}`,
+                  (group) =>
+                    `${node.id}:${group.content}:${group.reactors.totalCount}:${group.reactors.nodes
+                      .flatMap((actor) => trimmed(actor?.login) ?? [])
+                      .toSorted()
+                      .join(";")}`,
                 ),
           )
           .toSorted()

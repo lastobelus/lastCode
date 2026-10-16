@@ -2114,8 +2114,8 @@ describe("pull request watch fingerprints", () => {
       "w0: repository(owner: $w0_owner, name: $w0_name) { pullRequest(number: $w0_number)",
     );
     expect(document?.query).toContain("w1: repository(owner: $w1_owner, name: $w1_name)");
-    expect(document?.query).toContain(
-      "id lastEditedAt reactionGroups { content reactors { totalCount } }",
+    expect(document?.query.replace(/\s+/g, " ")).toContain(
+      "id lastEditedAt reactionGroups { content reactors(first: 10) { totalCount nodes {",
     );
     expect(document?.variables).toEqual({
       w0_owner: "pingdotgg",
@@ -2137,6 +2137,7 @@ describe("pull request watch fingerprints", () => {
       readonly commentEditedAt: string | null;
       readonly reviews: number;
       readonly reactions?: number;
+      readonly reactors?: ReadonlyArray<string>;
     }) => ({
       state: "OPEN",
       mergeable: "MERGEABLE",
@@ -2148,7 +2149,13 @@ describe("pull request watch fingerprints", () => {
             id: "comment-1",
             lastEditedAt: input.commentEditedAt,
             reactionGroups: [
-              { content: "THUMBS_UP", reactors: { totalCount: input.reactions ?? 0 } },
+              {
+                content: "THUMBS_UP",
+                reactors: {
+                  totalCount: input.reactions ?? 0,
+                  nodes: (input.reactors ?? []).map((login) => ({ login })),
+                },
+              },
             ],
           },
         ],
@@ -2196,6 +2203,27 @@ describe("pull request watch fingerprints", () => {
     expect(reacted.remarks).not.toBe(before.remarks);
     expect(reacted.status).toBe(before.status);
     expect(fingerprint({ ...base, reactions: 0 }).remarks).toBe(before.remarks);
+
+    const namedReaction = { ...base, reactions: 2, reactors: ["maintainer", "reviewer"] };
+    const named = fingerprint(namedReaction);
+    const actorReplaced = fingerprint({
+      ...namedReaction,
+      reactors: ["maintainer", "codex[bot]"],
+    });
+    expect(actorReplaced.remarks).not.toBe(named.remarks);
+    expect(actorReplaced.status).toBe(named.status);
+    expect(fingerprint({ ...namedReaction, reactors: ["reviewer", "maintainer"] }).remarks).toBe(
+      named.remarks,
+    );
+    // Counts still reveal reactions outside the bounded actor page.
+    const bounded = {
+      ...base,
+      reactions: 11,
+      reactors: Array.from({ length: 10 }, (_, index) => `reviewer-${index}`),
+    };
+    expect(fingerprint({ ...bounded, reactions: 12 }).remarks).not.toBe(
+      fingerprint(bounded).remarks,
+    );
 
     expect(checkFinished.status).not.toBe(before.status);
     expect(checkFinished.remarks).toBe(before.remarks);
