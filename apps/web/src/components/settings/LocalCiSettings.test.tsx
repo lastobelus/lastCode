@@ -18,7 +18,10 @@ function environment(id: string, supported = true, connected = true) {
     connection: { phase: connected ? "connected" : "offline" },
     serverConfig: {
       settings: DEFAULT_SERVER_SETTINGS,
-      environment: { capabilities: { lastcodeLocalCi: supported } },
+      environment: {
+        capabilities: { lastcodeLocalCi: supported },
+        platform: { machine: "server" },
+      },
     },
   };
 }
@@ -58,6 +61,7 @@ vi.mock("@tanstack/react-router", () => ({
 vi.mock("./SettingsScopeSentence", () => ({
   SettingsScopeSentence: () => <p>Applying settings for selected scope</p>,
 }));
+vi.mock("../ProjectFavicon", () => ({ ProjectFavicon: () => null }));
 vi.mock("./useSettingsProjectGroups", () => ({ useSettingsProjectGroups: () => [] }));
 vi.mock("./SettingsScopeContext", () => ({
   useOptionalSettingsScope: () => null,
