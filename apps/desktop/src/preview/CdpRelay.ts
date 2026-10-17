@@ -128,6 +128,10 @@ export function createCdpRelayConnection(
       case "Target.setAutoAttach": {
         if (attached) return {};
         attached = true;
+        // The real debugger survives relay reconnects. Runtime.enable is a
+        // no-op while its domain is already enabled, so reset old reporting
+        // before the new client can initialize its announced root session.
+        await target.send("Runtime.disable", {}, undefined);
         const info = await targetInfo();
         return {
           [ANNOUNCE]: {

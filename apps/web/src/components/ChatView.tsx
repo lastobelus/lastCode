@@ -232,6 +232,7 @@ import {
   isPreviewSupportedInRuntime,
   setActivePreviewTab,
   useThreadPreviewState,
+  hiddenPreviewTabIds,
 } from "../previewStateStore";
 import { BrowserSettingsReadError, openUrlInPreview } from "../browser/openFileInPreview";
 import { resolveDiscoveredServerUrl } from "../browser/browserTargetResolver";
@@ -1697,11 +1698,7 @@ export default function ChatView(props: ChatViewProps) {
 
   useEffect(() => {
     if (!activeThreadRef || !previewSessionsReady) return;
-    const hiddenTabIds = new Set(
-      Object.values(activePreviewState.sessions)
-        .filter((session) => session.runtime === "server" && session.reveal === false)
-        .map((session) => session.tabId),
-    );
+    const hiddenTabIds = hiddenPreviewTabIds(activePreviewState.sessions);
     useRightPanelStore
       .getState()
       .reconcileBrowserSurfaces(

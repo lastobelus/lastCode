@@ -35,9 +35,6 @@ const EMPTY_THREAD_ATOM = Atom.make<EnvironmentThread | null>(null).pipe(
   Atom.withLabel("mobile-thread:empty"),
 );
 const EMPTY_THREAD_TITLES: ReadonlyMap<ThreadId, string> = new Map();
-const EMPTY_THREAD_TITLES_ATOM = Atom.make(EMPTY_THREAD_TITLES).pipe(
-  Atom.withLabel("mobile-thread-titles:empty"),
-);
 
 const threadTitlesAtom = Atom.family((environmentId: EnvironmentId) => {
   let previous = EMPTY_THREAD_TITLES;
@@ -103,17 +100,20 @@ export function useChildThreadInputs(ref: ScopedThreadRef) {
   return useAtomValue(environmentThreadShells.childThreadInputsAtom(ref));
 }
 
+/** Labels links with current titles from their owning environment. */
 export function useLiveThreadLinkLabels(markdown: string, environmentId: EnvironmentId): string {
-  const titles = useAtomValue(
-    hasThreadLinks(markdown) ? threadTitlesAtom(environmentId) : EMPTY_THREAD_TITLES_ATOM,
-  );
-  return useMemo(
+  const labeledMarkdownAtom = useMemo(
     () =>
-      titles.size === 0
-        ? markdown
-        : relabelThreadLinks(markdown, (threadId) => titles.get(threadId)),
-    [markdown, titles],
+      Atom.make((get) =>
+        hasThreadLinks(markdown)
+          ? relabelThreadLinks(markdown, (threadId, linkedEnvironmentId) =>
+              get(threadTitlesAtom(linkedEnvironmentId ?? environmentId)).get(threadId),
+            )
+          : markdown,
+      ),
+    [markdown, environmentId],
   );
+  return useAtomValue(labeledMarkdownAtom);
 }
 
 export function useEnvironmentServerConfig(
