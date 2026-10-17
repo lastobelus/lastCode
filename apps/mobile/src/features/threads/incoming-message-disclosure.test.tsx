@@ -45,7 +45,7 @@ vi.mock("react-native", async () => {
   };
 });
 
-vi.mock("../../components/AppText", async () => {
+vi.mock("../../components/ui/AppText", async () => {
   const { useEffect } = await import("react");
   return {
     AppText: (props: {
@@ -74,7 +74,7 @@ vi.mock("../../components/AppText", async () => {
   };
 });
 
-vi.mock("../../components/AppSymbol", () => ({ SymbolView: () => <i aria-hidden /> }));
+vi.mock("../../components/ui/AppSymbol", () => ({ SymbolView: () => <i aria-hidden /> }));
 
 import { IncomingMessageDisclosure } from "./incoming-message-disclosure";
 

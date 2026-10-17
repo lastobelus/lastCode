@@ -42,22 +42,16 @@ vi.mock("react", () => ({
   useCallback: (callback: unknown) => callback,
   useRef: (current: unknown) => ({ current }),
 }));
-vi.mock("react-native", () => ({
-  Alert: {
-    alert: (title: string, message: string, buttons?: { text: string; onPress?: () => void }[]) => {
-      state.alerts.push({ title, buttons });
-      state.alertMessages.push(message);
-      state.afterAlert?.();
-    },
-  },
-}));
 vi.mock("expo-haptics", () => ({
   impactAsync: async () => {},
   ImpactFeedbackStyle: { Light: "light" },
 }));
 vi.mock("../../components/ui/Dialog", () => ({
-  alert: (title: string, _message: string, buttons?: { text: string; onPress?: () => void }[]) =>
-    state.alerts.push({ title, buttons }),
+  alert: (title: string, message: string, buttons?: { text: string; onPress?: () => void }[]) => {
+    state.alerts.push({ title, buttons });
+    state.alertMessages.push(message);
+    state.afterAlert?.();
+  },
   confirm: (dialog: { onConfirm: () => void }) => state.dialogs.push(dialog),
 }));
 vi.mock("../archive/useArchivedThreadSnapshots", () => ({
