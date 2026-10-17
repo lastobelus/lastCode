@@ -613,11 +613,11 @@ export declare namespace PullRequestPreview {
 }
 
 /** A user is an individual's account on GitHub that owns repositories and can make new content. */
-export const UserUser = Schema.Struct({
+export const ViewerUser = Schema.Struct({
   /** The username used to login. */
   login: Schema.String
 })
-export interface UserUser extends Schema.Struct.Type<typeof UserUser.fields> {}
+export interface ViewerUser extends Schema.Struct.Type<typeof ViewerUser.fields> {}
 
 /** Represents an actor in a Git commit (ie. an author or committer). */
 export const GitActor = Schema.Struct({
@@ -626,7 +626,7 @@ export const GitActor = Schema.Struct({
   /** The email in the Git commit. */
   email: Schema.NullOr(Schema.String),
   /** The GitHub user corresponding to the email field. Null if no such user exists. */
-  user: Schema.NullOr(UserUser)
+  user: Schema.NullOr(ViewerUser)
 })
 export interface GitActor extends Schema.Struct.Type<typeof GitActor.fields> {}
 
@@ -667,6 +667,62 @@ export const PullRequestActivityRepositoryPullRequestCommitsPullRequestCommitCon
 })
 export interface PullRequestActivityRepositoryPullRequestCommitsPullRequestCommitConnection extends Schema.Struct.Type<typeof PullRequestActivityRepositoryPullRequestCommitsPullRequestCommitConnection.fields> {}
 
+/** A user is an individual's account on GitHub that owns repositories and can make new content. */
+export const ReactorsNodesUser = Schema.Struct({
+  __typename: Schema.Literal("User"),
+  /** The username used to login. */
+  login: Schema.String
+})
+export interface ReactorsNodesUser extends Schema.Struct.Type<typeof ReactorsNodesUser.fields> {}
+
+/** An account on GitHub, with one or more owners, that has repositories, members and teams. */
+export const Organization = Schema.Struct({
+  __typename: Schema.Literal("Organization"),
+  /** The organization's login name. */
+  login: Schema.String
+})
+export interface Organization extends Schema.Struct.Type<typeof Organization.fields> {}
+
+/** A placeholder user for attribution of imported data on GitHub. */
+export const Mannequin = Schema.Struct({
+  __typename: Schema.Literal("Mannequin"),
+  /** The username of the actor. */
+  login: Schema.String
+})
+export interface Mannequin extends Schema.Struct.Type<typeof Mannequin.fields> {}
+
+/** Types that can be assigned to reactions. */
+export const ReactorOther = Schema.Struct({
+  __typename: GraphQL.otherTypename<Shared.Typename.Reactor>()(["User", "Bot", "Organization", "Mannequin"])
+})
+export interface ReactorOther extends Schema.Struct.Type<typeof ReactorOther.fields> {}
+
+/** The connection type for Reactor. */
+export const ReactorConnection = Schema.Struct({
+  /** Identifies the total count of items in the connection. */
+  totalCount: Shared.Int,
+  /** A list of nodes. */
+  nodes: Schema.NullOr(Schema.Array(Schema.NullOr(Schema.Union([
+    ReactorsNodesUser,
+    RequestedReviewerBot,
+    Organization,
+    Mannequin,
+    ReactorOther
+  ]))))
+})
+export interface ReactorConnection extends Schema.Struct.Type<typeof ReactorConnection.fields> {}
+
+/** A group of emoji reactions to a particular piece of content. */
+export const ReactionGroup = Schema.Struct({
+  /** Identifies the emoji reaction. */
+  content: GraphQL.enumLiterals(Shared.ReactionContent.literals),
+  /** Whether or not the authenticated user has left a reaction on the subject. */
+  viewerHasReacted: Schema.Boolean,
+  /** Reactors to the reaction subject with the emotion represented by this reaction group. */
+  reactors: ReactorConnection
+})
+export interface ReactionGroup extends Schema.Struct.Type<typeof ReactionGroup.fields> {}
+
 /** Represents a comment on an Issue. */
 export const NodesIssueComment = Schema.Struct({
   /** The Node ID of the IssueComment object */
@@ -683,12 +739,16 @@ export const NodesIssueComment = Schema.Struct({
   author: Schema.NullOr(Schema.Union([
     PullRequestPreviewRepositoryPullRequestAuthorUser,
     ActorOther
-  ]))
+  ])),
+  /** A list of reactions grouped by content left on the subject. */
+  reactionGroups: Schema.NullOr(Schema.Array(ReactionGroup))
 })
 export interface NodesIssueComment extends Schema.Struct.Type<typeof NodesIssueComment.fields> {}
 
 /** The connection type for IssueComment. */
 export const IssueCommentConnection = Schema.Struct({
+  /** Identifies the total count of items in the connection. */
+  totalCount: Shared.Int,
   /** Information to aid in pagination. */
   pageInfo: PullRequestCheckContextsRepositoryPullRequestCommitsNodesCommitStatusCheckRollupContextsPageInfoPageInfo,
   /** A list of nodes. */
@@ -720,6 +780,8 @@ export interface NodesPullRequestReview extends Schema.Struct.Type<typeof NodesP
 
 /** The connection type for PullRequestReview. */
 export const PullRequestReviewConnection = Schema.Struct({
+  /** Identifies the total count of items in the connection. */
+  totalCount: Shared.Int,
   /** Information to aid in pagination. */
   pageInfo: PullRequestCheckContextsRepositoryPullRequestCommitsNodesCommitStatusCheckRollupContextsPageInfoPageInfo,
   /** A list of nodes. */
@@ -764,9 +826,12 @@ export const PullRequestActivity = GraphQL.query("PullRequestActivity", {
       { name: "reviewsAfter", body: "String" }
     ],
     selections: [
-      { name: "repository", body: ["(owner:$", "owner", " name:$", "name", "){pullRequest(number:$", "number", "){author@include(if:$", "head", "){__typename login avatarUrl...on User{name}}commits(last:100)@include(if:$", "head", "){nodes{commit{oid messageHeadline committedDate authors(first:10){nodes{name email user{login}}}}}}comments(first:100 after:$", "commentsAfter", ")@include(if:$", "withComments", "){pageInfo{hasNextPage endCursor}nodes{id body createdAt lastEditedAt url author{__typename login avatarUrl...on User{name}}}}reviews(first:100 after:$", "reviewsAfter", ")@include(if:$", "withReviews", "){pageInfo{hasNextPage endCursor}nodes{id body state submittedAt lastEditedAt url author{__typename login avatarUrl...on User{name}}}}}}"] }
+      { name: "viewer", body: ["{login}"] },
+      { name: "repository", body: ["(owner:$", "owner", " name:$", "name", "){pullRequest(number:$", "number", "){author@include(if:$", "head", "){__typename login avatarUrl...on User{name}}commits(last:100)@include(if:$", "head", "){nodes{commit{oid messageHeadline committedDate authors(first:10){nodes{name email user{login}}}}}}comments(first:100 after:$", "commentsAfter", " orderBy:{field:UPDATED_AT direction:DESC})@include(if:$", "withComments", "){totalCount pageInfo{hasNextPage endCursor}nodes{id body createdAt lastEditedAt url author{__typename login avatarUrl...on User{name}}...Reactions}}reviews(first:100 after:$", "reviewsAfter", ")@include(if:$", "withReviews", "){totalCount pageInfo{hasNextPage endCursor}nodes{id body state submittedAt lastEditedAt url author{__typename login avatarUrl...on User{name}}}}}}"] }
     ],
-    fragments: []
+    fragments: [
+      { name: "Reactions", body: ["on Reactable{__typename reactionGroups{content viewerHasReacted reactors(first:10){totalCount nodes{__typename...on User{login}...on Bot{login}...on Organization{login}...on Mannequin{login}}}}}"] }
+    ]
   },
   variables: {
     owner: Schema.String,
@@ -779,6 +844,8 @@ export const PullRequestActivity = GraphQL.query("PullRequestActivity", {
     reviewsAfter: Schema.optional(Schema.NullOr(Schema.String))
   },
   result: Schema.Struct({
+    /** The currently authenticated user. */
+    viewer: ViewerUser,
     /** Lookup a given repository by the owner and repository name. */
     repository: Schema.NullOr(PullRequestActivityRepositoryRepository)
   })

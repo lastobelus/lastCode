@@ -42,6 +42,16 @@ describe("RPC authorization scopes", () => {
     );
   });
 
+  it("requires history read permission for each cross-environment routing operation", () => {
+    for (const method of [
+      WS_METHODS.threadReadLocal,
+      WS_METHODS.threadReadConnect,
+      WS_METHODS.threadReadRespond,
+    ]) {
+      expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationReadScope);
+    }
+  });
+
   it("authorizes background policy reporting and observation deliberately", () => {
     expect(requiredScopeForRpcMethod(WS_METHODS.serverReportClientActivity)).toBe(
       AuthOrchestrationReadScope,
