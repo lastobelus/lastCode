@@ -1,0 +1,1137 @@
+<!doctype html>
+<html lang="en" data-repo-doc-path="doc/design/2026-08-29__downstream-carry-set-eli5.html">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Keep every idea. Stop replaying every draft. — LastCode ELI5</title>
+    <style>
+      :root {
+        --ink: #18252c;
+        --muted: #59676d;
+        --paper: #f3f0e8;
+        --surface: #fffefa;
+        --surface-2: #f8f6ef;
+        --line: #d7d2c7;
+        --line-strong: #aaa69d;
+        --current: #a84622;
+        --current-soft: #f8e7de;
+        --proposed: #08766f;
+        --proposed-soft: #e0f2ee;
+        --same: #345d95;
+        --same-soft: #e8eef8;
+        --warning: #8a5a16;
+        --warning-soft: #fff1cd;
+        --shadow: 0 12px 34px rgba(36, 34, 28, 0.08);
+        --font: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        color: var(--ink);
+        background: var(--paper);
+        font-family: var(--font);
+        font-size: 17px;
+        line-height: 1.58;
+      }
+
+      a {
+        color: #185d78;
+        text-underline-offset: 0.18em;
+      }
+
+      a:hover {
+        color: #0b4055;
+      }
+
+      a[aria-disabled="true"] {
+        color: var(--muted);
+        cursor: help;
+        text-decoration-style: dotted;
+      }
+
+      code {
+        padding: 0.1em 0.32em;
+        border: 1px solid #ddd7cc;
+        border-radius: 0.35em;
+        background: #f3f0e9;
+        font-family: var(--mono);
+        font-size: 0.9em;
+      }
+
+      .page {
+        width: min(1100px, calc(100% - 32px));
+        margin: 0 auto;
+        padding: 54px 0 72px;
+      }
+
+      header,
+      .card,
+      .diagram-card,
+      .comparison,
+      details {
+        border: 1px solid var(--line);
+        background: var(--surface);
+        box-shadow: var(--shadow);
+      }
+
+      header {
+        padding: 42px 46px;
+        border-radius: 24px;
+      }
+
+      .eyebrow {
+        margin: 0 0 12px;
+        color: var(--proposed);
+        font-size: 0.78rem;
+        font-weight: 800;
+        letter-spacing: 0.11em;
+        text-transform: uppercase;
+      }
+
+      h1,
+      h2,
+      h3 {
+        line-height: 1.14;
+        letter-spacing: -0.025em;
+      }
+
+      h1 {
+        max-width: 900px;
+        margin: 0;
+        font-size: clamp(2.45rem, 6vw, 4.8rem);
+      }
+
+      h2 {
+        margin: 54px 0 14px;
+        font-size: clamp(1.8rem, 4vw, 2.65rem);
+      }
+
+      h3 {
+        margin: 0 0 8px;
+        font-size: 1.16rem;
+      }
+
+      p {
+        margin: 0 0 1em;
+      }
+
+      .lede {
+        max-width: 850px;
+        margin: 22px 0 0;
+        color: #34454c;
+        font-size: clamp(1.08rem, 2vw, 1.3rem);
+      }
+
+      .answer-first {
+        display: inline-block;
+        margin-top: 24px;
+        padding: 10px 14px;
+        border-left: 4px solid var(--proposed);
+        background: var(--proposed-soft);
+        font-weight: 750;
+      }
+
+      .section-intro {
+        max-width: 820px;
+        margin: 0 0 24px;
+        color: var(--muted);
+      }
+
+      details {
+        margin-top: 20px;
+        border-radius: 14px;
+        box-shadow: none;
+      }
+
+      summary {
+        display: flex;
+        justify-content: space-between;
+        gap: 18px;
+        padding: 15px 18px;
+        cursor: pointer;
+        font-weight: 760;
+      }
+
+      summary::marker {
+        color: var(--proposed);
+      }
+
+      .truth-state {
+        color: var(--proposed);
+        font-size: 0.9rem;
+        text-align: right;
+      }
+
+      .details-body {
+        padding: 0 20px 18px;
+        color: var(--muted);
+      }
+
+      .details-body p:last-child,
+      .details-body ul:last-child {
+        margin-bottom: 0;
+      }
+
+      .grid {
+        display: grid;
+        gap: 18px;
+      }
+
+      .grid.two {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .grid.three {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .card {
+        padding: 24px;
+        border-radius: 18px;
+      }
+
+      .card p:last-child,
+      .card ul:last-child {
+        margin-bottom: 0;
+      }
+
+      .card.current {
+        border-top: 5px solid var(--current);
+      }
+
+      .card.proposed {
+        border-top: 5px solid var(--proposed);
+      }
+
+      .card.same {
+        border-top: 5px solid var(--same);
+      }
+
+      .label {
+        display: inline-block;
+        margin-bottom: 12px;
+        padding: 4px 9px;
+        border-radius: 999px;
+        font-size: 0.76rem;
+        font-weight: 800;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+
+      .label.current {
+        color: var(--current);
+        background: var(--current-soft);
+      }
+
+      .label.proposed {
+        color: var(--proposed);
+        background: var(--proposed-soft);
+      }
+
+      .label.same {
+        color: var(--same);
+        background: var(--same-soft);
+      }
+
+      .number {
+        margin: 2px 0 8px;
+        color: var(--current);
+        font-size: clamp(2rem, 5vw, 3.2rem);
+        font-weight: 850;
+        letter-spacing: -0.05em;
+        line-height: 1;
+      }
+
+      .metric-note {
+        color: var(--muted);
+        font-size: 0.92rem;
+      }
+
+      .tiny-story strong {
+        color: var(--ink);
+      }
+
+      .diagram-card {
+        padding: 22px;
+        border-radius: 20px;
+      }
+
+      .diagram-card figcaption {
+        max-width: 780px;
+        margin-bottom: 18px;
+        color: var(--muted);
+      }
+
+      .diagram-scroll {
+        overflow-x: auto;
+        overscroll-behavior-inline: contain;
+        padding: 4px 0 10px;
+      }
+
+      .diagram-scroll svg {
+        display: block;
+        width: min(760px, 100%);
+        min-width: 650px;
+        height: auto;
+        margin: 0 auto;
+      }
+
+      .comparison {
+        overflow: hidden;
+        border-radius: 18px;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+
+      th,
+      td {
+        padding: 16px 18px;
+        border-bottom: 1px solid var(--line);
+        text-align: left;
+        vertical-align: top;
+      }
+
+      th {
+        background: var(--surface-2);
+        font-size: 0.88rem;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+
+      tr:last-child td {
+        border-bottom: 0;
+      }
+
+      th:first-child,
+      td:first-child {
+        width: 24%;
+        font-weight: 760;
+      }
+
+      .checklist,
+      .plain-list,
+      .references {
+        padding-left: 1.25em;
+      }
+
+      .checklist li,
+      .plain-list li,
+      .references li {
+        margin: 0.5em 0;
+      }
+
+      .decision {
+        padding: 24px;
+        border: 2px solid var(--proposed);
+        border-radius: 18px;
+        background: var(--proposed-soft);
+      }
+
+      .decision h3 {
+        color: #075d58;
+      }
+
+      .decision p:last-child {
+        margin-bottom: 0;
+      }
+
+      .caution {
+        padding: 18px 20px;
+        border-left: 5px solid var(--warning);
+        background: var(--warning-soft);
+      }
+
+      footer {
+        margin-top: 58px;
+        padding-top: 24px;
+        border-top: 1px solid var(--line-strong);
+        color: var(--muted);
+        font-size: 0.93rem;
+      }
+
+      footer details {
+        background: transparent;
+      }
+
+      @media (max-width: 780px) {
+        .page {
+          width: min(100% - 20px, 1100px);
+          padding-top: 20px;
+        }
+
+        header {
+          padding: 30px 24px;
+          border-radius: 18px;
+        }
+
+        .grid.two,
+        .grid.three {
+          grid-template-columns: 1fr;
+        }
+
+        .card,
+        .diagram-card,
+        .decision {
+          padding: 20px;
+        }
+
+        .comparison {
+          overflow-x: auto;
+        }
+
+        table {
+          min-width: 690px;
+        }
+
+        summary {
+          align-items: flex-start;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        html {
+          scroll-behavior: auto;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <header>
+        <p class="eyebrow">LastCode design proposal · ELI5</p>
+        <h1>Keep every idea. Stop replaying every draft.</h1>
+        <p class="lede">
+          Development can keep using small, ordinary pull requests. The nightly updater can carry
+          their final combined result as a small set of named feature patches instead of replaying
+          every implementation and repair commit forever.
+        </p>
+        <p class="answer-first">
+          Recommendation: compact the replayed history into a few coherent carry patches; do not
+          replace normal PRs with permanent umbrella PRs.
+        </p>
+      </header>
+
+      <details class="truth">
+        <summary>
+          <span>Where This Is True</span>
+          <span class="truth-state">Proposed · repository snapshot 2026-08-29</span>
+        </summary>
+        <div class="details-body">
+          <p>
+            This page explains a proposal for LastCode's downstream nightly workflow. It is not yet
+            implemented. The current checkpoint runner rebases commit history from
+            <code>lastcode/main</code>, validates the result, and publishes immutable checkpoint or
+            revision tags.
+          </p>
+          <p>
+            At this snapshot, the promoted downstream tree contains 117 commits after its upstream
+            nightly base. Its final delta touches 468 files, while walking the commits touches file
+            paths 1,082 times because later work revisits earlier files. Those measurements will
+            change; the stable point is that development history and the final downstream delta are
+            different things.
+          </p>
+          <p>
+            The proposal covers public repository structure and automation behavior. Concrete host
+            identities, schedules, and deployment topology are outside this document. Re-check the
+            nightly workflow and checkpoint source before treating this as current architecture.
+          </p>
+        </div>
+      </details>
+
+      <section aria-labelledby="tiny-story-title">
+        <h2 id="tiny-story-title">The Tiny Story</h2>
+        <p class="section-intro">
+          Imagine maintaining a recipe while the cookbook publisher releases a new edition every
+          night.
+        </p>
+        <div class="grid three tiny-story">
+          <article class="card current">
+            <span class="label current">Today</span>
+            <h3>Replay every edit</h3>
+            <p>
+              The updater replays “add salt,” “use less salt,” “fix the salt test,” and every other
+              historical edit, even though only the final recipe matters.
+            </p>
+          </article>
+          <article class="card proposed">
+            <span class="label proposed">Proposal</span>
+            <h3>Carry the finished sections</h3>
+            <p>
+              Keep the edit history for review, but give the nightly updater a few named sections of
+              the finished LastCode recipe: upstream bugfixes, tooling, resumable actions, legacy
+              sidebar, and an incubator for everything that has not earned its own section yet.
+            </p>
+          </article>
+          <article class="card same">
+            <span class="label same">Unchanged</span>
+            <h3>Ideas still move immediately</h3>
+            <p>
+              Make an idea, merge its normal PR, and let automation publish it. Interactive and
+              scheduled updates keep consuming the same ordered installable tags.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section aria-labelledby="pressure-title">
+        <h2 id="pressure-title">Why the pressure grows</h2>
+        <p class="section-intro">
+          The final downstream product naturally grows as LastCode gains capabilities. The avoidable
+          growth is replaying every intermediate correction that led to that product.
+        </p>
+        <div class="grid three">
+          <article class="card">
+            <p class="number">117</p>
+            <h3>commits replayed</h3>
+            <p class="metric-note">Current snapshot after upstream nightly 1219.</p>
+          </article>
+          <article class="card">
+            <p class="number">468</p>
+            <h3>files in the final delta</h3>
+            <p class="metric-note">The real semantic surface that compaction cannot erase.</p>
+          </article>
+          <article class="card">
+            <p class="number">1,082</p>
+            <h3>historical file applications</h3>
+            <p class="metric-note">
+              Repeated touches caused by applying the history commit-by-commit.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section aria-labelledby="flow-title">
+        <h2 id="flow-title">The proposed flow</h2>
+        <p class="section-intro">
+          The green step is new. Everything before and after it keeps the current human-facing
+          contract.
+        </p>
+        <figure class="diagram-card">
+          <figcaption>
+            Normal development history remains available for review and provenance. Nightly
+            automation receives a bounded downstream carry set built from coherent parts of the
+            final integrated tree.
+          </figcaption>
+          <div class="diagram-scroll" tabindex="0" aria-label="Scrollable proposal flow diagram">
+            <svg viewBox="0 0 760 930" role="img" aria-labelledby="diagram-title diagram-desc">
+              <title id="diagram-title">
+                Normal pull requests compiled into a compact carry set
+              </title>
+              <desc id="diagram-desc">
+                An idea becomes a normal pull request and merges as today. Automation generates a
+                compact downstream carry set containing a few named patches in a fixed order,
+                replays and validates it on an upstream nightly, publishes an immutable installable,
+                and makes it available to both interactive and scheduled update consumers.
+              </desc>
+              <defs>
+                <marker
+                  id="arrow"
+                  viewBox="0 0 10 10"
+                  refX="8"
+                  refY="5"
+                  markerWidth="7"
+                  markerHeight="7"
+                  orient="auto-start-reverse"
+                >
+                  <path d="M 0 0 L 10 5 L 0 10 z" fill="#64747a"></path>
+                </marker>
+              </defs>
+
+              <g
+                font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+              >
+                <rect
+                  x="100"
+                  y="20"
+                  width="560"
+                  height="105"
+                  rx="18"
+                  fill="#e8eef8"
+                  stroke="#345d95"
+                  stroke-width="2"
+                ></rect>
+                <text
+                  x="380"
+                  y="58"
+                  text-anchor="middle"
+                  font-size="18"
+                  font-weight="750"
+                  fill="#18252c"
+                >
+                  1 · Idea → ordinary pull request
+                </text>
+                <text x="380" y="88" text-anchor="middle" font-size="15" fill="#46565d">
+                  Small scope, normal review, normal CI
+                </text>
+
+                <line
+                  x1="380"
+                  y1="125"
+                  x2="380"
+                  y2="163"
+                  stroke="#64747a"
+                  stroke-width="3"
+                  marker-end="url(#arrow)"
+                ></line>
+
+                <rect
+                  x="100"
+                  y="170"
+                  width="560"
+                  height="105"
+                  rx="18"
+                  fill="#e8eef8"
+                  stroke="#345d95"
+                  stroke-width="2"
+                ></rect>
+                <text
+                  x="380"
+                  y="208"
+                  text-anchor="middle"
+                  font-size="18"
+                  font-weight="750"
+                  fill="#18252c"
+                >
+                  2 · Merge normally
+                </text>
+                <text x="380" y="238" text-anchor="middle" font-size="15" fill="#46565d">
+                  The merged PR remains the development and review record
+                </text>
+
+                <line
+                  x1="380"
+                  y1="275"
+                  x2="380"
+                  y2="313"
+                  stroke="#64747a"
+                  stroke-width="3"
+                  marker-end="url(#arrow)"
+                ></line>
+
+                <rect
+                  x="70"
+                  y="320"
+                  width="620"
+                  height="125"
+                  rx="18"
+                  fill="#e0f2ee"
+                  stroke="#08766f"
+                  stroke-width="4"
+                ></rect>
+                <text
+                  x="380"
+                  y="360"
+                  text-anchor="middle"
+                  font-size="19"
+                  font-weight="800"
+                  fill="#075d58"
+                >
+                  3 · Generate the downstream carry set
+                </text>
+                <text x="380" y="392" text-anchor="middle" font-size="15" fill="#355d5a">
+                  1 Upstream bugfixes → 2 Tooling → 3 Resumable Actions
+                </text>
+                <text x="380" y="418" text-anchor="middle" font-size="15" fill="#355d5a">
+                  → 4 Legacy Sidebar → 5 Incubator
+                </text>
+
+                <line
+                  x1="380"
+                  y1="445"
+                  x2="380"
+                  y2="483"
+                  stroke="#64747a"
+                  stroke-width="3"
+                  marker-end="url(#arrow)"
+                ></line>
+
+                <rect
+                  x="100"
+                  y="490"
+                  width="560"
+                  height="115"
+                  rx="18"
+                  fill="#fff1cd"
+                  stroke="#8a5a16"
+                  stroke-width="2"
+                ></rect>
+                <text
+                  x="380"
+                  y="528"
+                  text-anchor="middle"
+                  font-size="18"
+                  font-weight="750"
+                  fill="#18252c"
+                >
+                  4 · Apply to the nightly and validate
+                </text>
+                <text x="380" y="558" text-anchor="middle" font-size="15" fill="#5d512f">
+                  Exact tree check · smoke gate · provenance check
+                </text>
+                <text x="380" y="583" text-anchor="middle" font-size="15" fill="#5d512f">
+                  A real upstream incompatibility can still stop here
+                </text>
+
+                <line
+                  x1="380"
+                  y1="605"
+                  x2="380"
+                  y2="643"
+                  stroke="#64747a"
+                  stroke-width="3"
+                  marker-end="url(#arrow)"
+                ></line>
+
+                <rect
+                  x="100"
+                  y="650"
+                  width="560"
+                  height="105"
+                  rx="18"
+                  fill="#e8eef8"
+                  stroke="#345d95"
+                  stroke-width="2"
+                ></rect>
+                <text
+                  x="380"
+                  y="688"
+                  text-anchor="middle"
+                  font-size="18"
+                  font-weight="750"
+                  fill="#18252c"
+                >
+                  5 · Publish the immutable installable
+                </text>
+                <text x="380" y="718" text-anchor="middle" font-size="15" fill="#46565d">
+                  Same checkpoint and revision tag contract as today
+                </text>
+
+                <line x1="380" y1="755" x2="380" y2="788" stroke="#64747a" stroke-width="3"></line>
+                <line x1="205" y1="788" x2="555" y2="788" stroke="#64747a" stroke-width="3"></line>
+                <line
+                  x1="205"
+                  y1="788"
+                  x2="205"
+                  y2="823"
+                  stroke="#64747a"
+                  stroke-width="3"
+                  marker-end="url(#arrow)"
+                ></line>
+                <line
+                  x1="555"
+                  y1="788"
+                  x2="555"
+                  y2="823"
+                  stroke="#64747a"
+                  stroke-width="3"
+                  marker-end="url(#arrow)"
+                ></line>
+
+                <rect
+                  x="45"
+                  y="830"
+                  width="320"
+                  height="80"
+                  rx="16"
+                  fill="#e8eef8"
+                  stroke="#345d95"
+                  stroke-width="2"
+                ></rect>
+                <text
+                  x="205"
+                  y="864"
+                  text-anchor="middle"
+                  font-size="17"
+                  font-weight="750"
+                  fill="#18252c"
+                >
+                  Interactive update
+                </text>
+                <text x="205" y="890" text-anchor="middle" font-size="14" fill="#46565d">
+                  Ad hoc, when convenient
+                </text>
+
+                <rect
+                  x="395"
+                  y="830"
+                  width="320"
+                  height="80"
+                  rx="16"
+                  fill="#e8eef8"
+                  stroke="#345d95"
+                  stroke-width="2"
+                ></rect>
+                <text
+                  x="555"
+                  y="864"
+                  text-anchor="middle"
+                  font-size="17"
+                  font-weight="750"
+                  fill="#18252c"
+                >
+                  Scheduled update
+                </text>
+                <text x="555" y="890" text-anchor="middle" font-size="14" fill="#46565d">
+                  Still respects its version ceiling
+                </text>
+              </g>
+            </svg>
+          </div>
+        </figure>
+      </section>
+
+      <section aria-labelledby="comparison-title">
+        <h2 id="comparison-title">What changes—and what does not</h2>
+        <div class="comparison">
+          <table>
+            <thead>
+              <tr>
+                <th>Concern</th>
+                <th>Today</th>
+                <th>Proposed</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Development</td>
+                <td>One-purpose PRs merge to <code>lastcode/main</code>.</td>
+                <td><strong>Unchanged.</strong> No umbrella selection step for the user.</td>
+              </tr>
+              <tr>
+                <td>Replay input</td>
+                <td>Every retained implementation and repair commit.</td>
+                <td>A small, generated carry set with named ownership and a fixed order.</td>
+              </tr>
+              <tr>
+                <td>Later fixes</td>
+                <td>Each fix permanently adds another replay step.</td>
+                <td>The next version of the owning carry patch absorbs the fix.</td>
+              </tr>
+              <tr>
+                <td>Updates</td>
+                <td>Consumers select immutable checkpoint and revision tags.</td>
+                <td><strong>Unchanged.</strong> The tag contract and version ceiling remain.</td>
+              </tr>
+              <tr>
+                <td>Real incompatibility</td>
+                <td>Conflict or smoke failure stops publication.</td>
+                <td>
+                  <strong>Still stops publication.</strong> Compaction cannot erase semantic drift.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section aria-labelledby="words-title">
+        <h2 id="words-title">The words</h2>
+        <p class="section-intro">
+          Use these names so development workflow and release artifacts do not blur together.
+        </p>
+        <div class="grid three">
+          <article class="card proposed">
+            <h3>Downstream carry set</h3>
+            <p>Everything LastCode intentionally retains on top of an upstream T3 Code version.</p>
+          </article>
+          <article class="card">
+            <h3>Patch stack</h3>
+            <p>
+              A general Git term. In LastCode documentation, use
+              <strong>downstream carry set</strong> for the durable fork delta.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Carry patch</h3>
+            <p>
+              One maintainable final-state unit inside the downstream carry set, with explicit
+              ownership and a fixed place in the application order.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section aria-labelledby="first-step-title">
+        <h2 id="first-step-title">Start with the boundaries already visible</h2>
+        <p class="section-intro">
+          The current work already has feature families strong enough to justify separate carry
+          patches. Upstream-facing fixes need their own volatile group, and an explicit catch-all
+          prevents the first inventory from requiring premature taxonomy.
+        </p>
+        <div class="grid three">
+          <article class="card current">
+            <span class="label current">Carry patch · first</span>
+            <h3>Upstream bugfixes</h3>
+            <p>
+              Imports of existing upstream PRs and LastCode copies of fixes also proposed upstream.
+              Each fix keeps its upstream PR provenance because it may disappear, be partially
+              replaced, or be solved differently upstream.
+            </p>
+          </article>
+          <article class="card proposed">
+            <span class="label proposed">Carry patch</span>
+            <h3>Tooling</h3>
+            <p>
+              Checkpointing, builds, update machinery, contributor automation, and their operational
+              documentation. Its lifecycle and conflict surface are distinct from product features.
+            </p>
+          </article>
+          <article class="card proposed">
+            <span class="label proposed">Carry patch</span>
+            <h3>Resumable Actions</h3>
+            <p>
+              The essential action state, commands, composer controls, and resume behavior. The core
+              remains useful without any legacy-sidebar presentation.
+            </p>
+          </article>
+          <article class="card proposed">
+            <span class="label proposed">Carry patch</span>
+            <h3>Legacy Sidebar</h3>
+            <p>
+              Legacy sidebar behavior and its optional integrations, including resumable-action
+              visibility. Presentation belongs here because removing it does not remove the action
+              capability itself.
+            </p>
+          </article>
+          <article class="card same">
+            <span class="label same">Carry patch · last</span>
+            <h3>Incubator</h3>
+            <p>
+              The starting bucket for everything else. Its contents do not pretend to form one
+              feature; coherent clusters graduate into named patches when they accumulate enough
+              ownership, maintenance weight, or replay risk.
+            </p>
+          </article>
+        </div>
+        <div class="card same">
+          <h3>Fixed order, not an independence gate</h3>
+          <p>
+            Apply Upstream bugfixes, Tooling, Resumable Actions, Legacy Sidebar, then Incubator. A
+            later patch may rely on an earlier one, so Legacy Sidebar can show resumable-action
+            status without making the action capability depend on the sidebar. Initially, only the
+            complete ordered carry set needs to pass validation.
+          </p>
+        </div>
+        <p class="caution">
+          The Incubator is intentionally a catch-all. The guardrail is that its contents are not
+          permanent by default: periodically graduate coherent clusters instead of letting one patch
+          absorb every mature feature forever. Compaction changes the number of Git commits, not the
+          amount of product behavior; migration collisions, changed upstream APIs, and conflicting
+          edits still require strong validation.
+        </p>
+      </section>
+
+      <section aria-labelledby="alternatives-title">
+        <h2 id="alternatives-title">Why not the two bigger reorganizations?</h2>
+        <div class="grid two">
+          <article class="card current">
+            <h3>Permanent umbrella PRs</h3>
+            <ul class="plain-list">
+              <li>The diff, comments, and CI history grow without bound.</li>
+              <li>Stacked child PRs deepen the dependency graph we are trying to shrink.</li>
+              <li>
+                They permanently pause <code>lastcode/main</code> promotion, although installable
+                tags still publish.
+              </li>
+              <li>
+                A branch or generated artifact is a better durable container than an unfinished
+                review.
+              </li>
+            </ul>
+          </article>
+          <article class="card current">
+            <h3>A second fork</h3>
+            <ul class="plain-list">
+              <li>It does not reduce the final downstream delta or semantic conflicts.</li>
+              <li>It adds cross-fork mirroring, permissions, CI, and provenance failure modes.</li>
+              <li>
+                If source and integration roles later need separation, refs in this fork are enough.
+              </li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <section aria-labelledby="rails-title">
+        <h2 id="rails-title">Safety rails before shipping it</h2>
+        <ul class="checklist">
+          <li>
+            <strong>Exact combined tree:</strong> prove the ordered carry set produces the same
+            files and contents as the validated source tree.
+          </li>
+          <li>
+            <strong>Patch ownership:</strong> give every downstream change one owner, using
+            Incubator until a more coherent group has earned its own patch.
+          </li>
+          <li>
+            <strong>Upstream provenance:</strong> record the source or paired upstream PR for every
+            Upstream bugfixes entry and reevaluate it when upstream changes.
+          </li>
+          <li>
+            <strong>Incubator graduation:</strong> move a coherent cluster out when its ownership,
+            maintenance weight, or replay risk justifies a named patch.
+          </li>
+          <li>
+            <strong>Fixed application order:</strong> store and replay one canonical ordered list;
+            do not require every patch or prefix to pass independently.
+          </li>
+          <li>
+            <strong>Final-commit validation:</strong> run smoke and provenance checks against the
+            commit that will actually be tagged.
+          </li>
+          <li>
+            <strong>Release-note continuity:</strong> preserve and test
+            <code>Source-Commit</code> boundaries across the first compaction.
+          </li>
+          <li>
+            <strong>Bounded depth:</strong> fail loudly if an installable unexpectedly carries more
+            than the chosen patch budget.
+          </li>
+          <li>
+            <strong>Immutable rollback:</strong> retain existing checkpoint and revision tags so the
+            previous installable remains selectable.
+          </li>
+          <li>
+            <strong>No new human step:</strong> merging a PR must continue to request publication
+            automatically.
+          </li>
+        </ul>
+      </section>
+
+      <section aria-labelledby="open-pr-title">
+        <h2 id="open-pr-title">One subtle point about open PRs</h2>
+        <div class="card same">
+          <p>
+            Open PRs do <strong>not</strong> prevent checkpoint or revision tags from being
+            published, so they do not block updates. They only keep the moving
+            <code>lastcode/main</code> branch stable until the PR queue is empty. The compact
+            installable should preserve that behavior: publish the immutable tag now, promote the
+            branch when safe.
+          </p>
+        </div>
+      </section>
+
+      <section aria-labelledby="decision-title">
+        <h2 id="decision-title">The proposed decision</h2>
+        <div class="decision">
+          <h3>Approve automatic carry-set compaction as the next workflow change.</h3>
+          <p>
+            Keep normal PRs and the existing update experience. Begin with a small named carry set,
+            ordered as Upstream bugfixes, Tooling, Resumable Actions, Legacy Sidebar, and Incubator;
+            preserve provenance; fold fixes into their owning patch; and graduate coherent Incubator
+            contents when they earn a dedicated group.
+          </p>
+        </div>
+      </section>
+
+      <section aria-labelledby="references-title">
+        <h2 id="references-title">References</h2>
+        <ul class="references">
+          <li>
+            <a href="#" data-repo-path="docs/lastcode/glossary.md">docs/lastcode/glossary.md</a>
+            — canonical LastCode maintenance vocabulary.
+          </li>
+          <li>
+            <a href="#" data-repo-path="docs/lastcode/nightly-workflow.md" data-repo-line="47"
+              >docs/lastcode/nightly-workflow.md:47</a
+            >
+            — checkpointing, publication, promotion, and provenance behavior.
+          </li>
+          <li>
+            <a href="#" data-repo-path="scripts/lastcode-checkpoint.ts" data-repo-line="1125"
+              >scripts/lastcode-checkpoint.ts:1125</a
+            >
+            — the current commit-by-commit nightly rebase loop.
+          </li>
+          <li>
+            <a href="#" data-repo-path="scripts/lastcode-checkpoint.ts" data-repo-line="850"
+              >scripts/lastcode-checkpoint.ts:850</a
+            >
+            — the open-PR branch-promotion safeguard.
+          </li>
+          <li>
+            <a href="https://github.com/lastobelus/lastCode/pull/95">PR 95</a>,
+            <a href="https://github.com/lastobelus/lastCode/pull/105">PR 105</a>, and
+            <a href="https://github.com/lastobelus/lastCode/pull/141">PR 141</a>
+            — examples of semantic replay repairs and conflict-resolution fallout.
+          </li>
+        </ul>
+      </section>
+
+      <footer>
+        <details class="context">
+          <summary>
+            <span>Prompt/context</span>
+            <span class="truth-state">Why this page exists</span>
+          </summary>
+          <div class="details-body">
+            <p>
+              The nightly process repeatedly rebases LastCode's complete retained history onto new
+              T3 Code nightlies. Recent failures produced more repair PRs, which then enlarged later
+              replays. The requested constraint was strict: ideas, ordinary PR work, ad hoc
+              workstation updates, and scheduled server updates must not gain manual steps or become
+              more brittle.
+            </p>
+            <p>
+              This explanation recommends compiling merged development history into a compact
+              release artifact. Feedback on the first draft identified Tooling, Resumable Actions,
+              and Legacy Sidebar as existing feature boundaries; resumable-action sidebar visibility
+              belongs to Legacy Sidebar because it is optional presentation. Further feedback added
+              a changeable Upstream bugfixes group with PR provenance and an Incubator catch-all for
+              changes that have not yet earned a dedicated group. The proposal does not prescribe
+              private deployment topology or claim that compaction solves genuine upstream
+              incompatibilities.
+            </p>
+          </div>
+        </details>
+        <p>LastCode downstream carry set proposal · prepared 2026-08-29</p>
+      </footer>
+    </main>
+
+    <script>
+      function eli5RepoBase() {
+        const params = new URLSearchParams(window.location.search);
+        const explicit = params.get("baseUrl") || params.get("repoBase");
+        if (explicit) return explicit.replace(/\/$/, "");
+
+        const docPath = document.documentElement.dataset.repoDocPath;
+        if (window.location.protocol === "file:" && docPath) {
+          const fullPath = decodeURIComponent(window.location.pathname);
+          const suffix = `/${docPath.replace(/^\//, "")}`;
+          return fullPath.endsWith(suffix) ? fullPath.slice(0, -suffix.length) : "";
+        }
+
+        return "";
+      }
+
+      function eli5WireRepoLinks() {
+        const repoBase = eli5RepoBase();
+        for (const link of document.querySelectorAll("a[data-repo-path]")) {
+          if (!repoBase) {
+            link.removeAttribute("href");
+            link.setAttribute("aria-disabled", "true");
+            link.title = "Open the saved file directly or add ?baseUrl=/path/to/worktree.";
+            continue;
+          }
+
+          const repoPath = link.dataset.repoPath.replace(/^\//, "");
+          link.href = encodeURI(`file://${repoBase}/${repoPath}`);
+        }
+      }
+
+      eli5WireRepoLinks();
+    </script>
+  </body>
+</html>
