@@ -1,3 +1,23 @@
+/**
+ * Runs OpenCode 2 through the whole orchestrator with the real driver: the
+ * driver probes the binary, spawns `opencode serve`, and routes to the 2.x
+ * adapter. One thread reads a file, runs a shell command, and stops another;
+ * a Supervised thread approves one command, declines another, and answers a
+ * question; a plan-mode thread may write only its plan; and a thread steers,
+ * queues, forks and rolls back.
+ *
+ *   OPENCODE2_BIN=/path/to/opencode OPENCODE2_LIVE_ROOT=/scratch/dir \
+ *     vp test run src/orchestration-v2/OpenCode2OrchestratorV2.live.test.ts
+ *
+ * The server runs with isolated HOME and XDG directories on the free
+ * `opencode/big-pickle` model; `OPENCODE2_MODEL` picks another (its provider's
+ * key comes from the test's environment, which the spawned server inherits).
+ * A second run covers plan mode, a workspace command and skill, and `/compact`;
+ * a third a generated title, T3's MCP server (`OPENCODE2_MCP_URL` names a
+ * stand-in one) and a turn cut off by a killed server. Each step waits up to
+ * `OPENCODE2_STEP_WAIT` seconds (120 by default).
+ */
+import * as UpdateDrainAdmissionTestkit from "../updateDrain/UpdateDrainAdmission.testkit.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -181,6 +201,7 @@ const layerProviderInstanceRegistry = ProviderInstanceRegistryHydration.layer.pi
 const layerOrchestration = RuntimeLayer.layer.pipe(
   Layer.provide(ProviderTurnStartServiceTestkit.layer),
   Layer.provide(layerMcpRegistry),
+  Layer.provide(UpdateDrainAdmissionTestkit.layerOpen),
   Layer.provide(SqlitePersistence.layerMemory),
   Layer.provide(CheckpointStore.layer.pipe(Layer.provide(layerVcsDriverRegistry))),
   Layer.provide(layerServerConfig),

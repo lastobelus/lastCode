@@ -109,11 +109,13 @@ function RetentionControl({
   value,
   onChange,
   minimum = 1,
+  disabled = false,
 }: {
   label: string;
   value: number | null;
   onChange: (value: number | null) => void;
   minimum?: number;
+  disabled?: boolean;
 }) {
   const [draft, setDraft] = useState(value);
   const [savedValue, setSavedValue] = useState(value);
@@ -127,6 +129,7 @@ function RetentionControl({
       {value !== null ? (
         <NumberField
           value={draft}
+          disabled={disabled}
           min={minimum}
           max={3650}
           step={1}
@@ -160,6 +163,7 @@ function RetentionControl({
       )}
       <Switch
         aria-label={label}
+        disabled={disabled}
         checked={value !== null}
         onCheckedChange={(enabled) => onChange(enabled ? 8 : null)}
       />
@@ -298,6 +302,7 @@ function CleanupSection() {
     const settings = environment.serverConfig?.settings;
     if (!settings) return false;
     const enabled = (rules: WorktreeCleanupRules) =>
+      rules.worktreeDependenciesAfterDays !== null ||
       rules.worktreeAfterDays !== null ||
       rules.worktreeSettledAfterDays !== null ||
       rules.worktreeOnMerge ||
@@ -325,7 +330,9 @@ function CleanupSection() {
         ? `${report.counts.removed} removed, ${report.counts.kept} kept${report.counts.failed > 0 ? `, ${report.counts.failed} failed` : ""}`
         : "",
       description: report
-        ? `Last run ${formatRelativeTimeLabel(report.finishedAt)}. ${formatBytes(report.bytesFreed)} recovered.${report.counts.failed > 0 ? ` ${report.counts.failed} ${report.counts.failed === 1 ? "item" : "items"} couldn't be removed.` : ""}`
+        ? // File sizes cannot prove the change in free disk space, and individual
+          // dependency results may be omitted from a capped report.
+          `Last run ${formatRelativeTimeLabel(report.finishedAt)}. Estimated space recovered: ${formatBytes(report.bytesFreed)}.${report.counts.failed > 0 ? ` ${report.counts.failed} ${report.counts.failed === 1 ? "item" : "items"} couldn't be removed.` : ""}`
         : query?.failed
           ? "Could not load the last run."
           : query?.loading

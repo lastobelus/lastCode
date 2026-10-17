@@ -1910,6 +1910,38 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
           ),
         )
       : Stream.empty;
+  const projects =
+    mode === "ownerless-shared-project" ||
+    mode === "ownerless-shared-project-failed-inventory" ||
+    mode === "ownerless-non-git-project"
+      ? [
+          project,
+          {
+            ...project,
+            id: ProjectId.make("other-project"),
+            workspaceRoot: mode === "ownerless-shared-project" ? f.repository : otherProjectRoot,
+          },
+        ]
+      : mode === "archived-shared-off" || mode === "archived-shared-policy-race"
+        ? [
+            project,
+            {
+              ...project,
+              id: sharedSibling!.projectId,
+              workspaceRoot:
+                mode === "archived-shared-policy-race" ? siblingProjectRoot : f.repository,
+            },
+          ]
+        : [project];
+  const projectRows = projects.map(({ id, ...entry }) => ({
+    ...entry,
+    projectId: id,
+    defaultThreadEnvMode: null,
+    autoPull: false,
+    faviconPath: null,
+    projectIcon: null,
+    deletedAt: null,
+  }));
   const dependencies = Layer.mergeAll(
     Layer.mock(WorktreeCleanup.WorktreeCleanupService)({
       historicalWorktreeOwners: Effect.succeed(
@@ -1930,34 +1962,26 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
       worktreesDir: f.input.managedWorktreesRoot,
     }),
     Layer.mock(ProjectStore.ProjectStoreV2)({
-      listShells: () =>
+      listShells: () => Effect.succeed(projects),
+      list: (options) =>
         Effect.succeed(
-          mode === "ownerless-shared-project" ||
-            mode === "ownerless-shared-project-failed-inventory" ||
-            mode === "ownerless-non-git-project"
-            ? [
-                project,
-                {
-                  ...project,
-                  id: ProjectId.make("other-project"),
-                  workspaceRoot:
-                    mode === "ownerless-shared-project" ? f.repository : otherProjectRoot,
-                },
-              ]
-            : mode === "archived-shared-off" || mode === "archived-shared-policy-race"
-              ? [
-                  project,
-                  {
-                    ...project,
-                    id: sharedSibling!.projectId,
-                    workspaceRoot:
-                      mode === "archived-shared-policy-race" ? siblingProjectRoot : f.repository,
-                  },
-                ]
-              : [project],
+          projectRows.filter(
+            (entry) =>
+              options?.projectIds === undefined || options.projectIds.includes(entry.projectId),
+          ),
         ),
     }),
     Layer.mock(ProjectionStore.ProjectionStoreV2)({
+      getThreadWorktreePaths: () =>
+        Effect.sync(() =>
+          [thread, ...additionalThreads, ...(sharedSibling === null ? [] : [sharedSibling])]
+            .filter((candidate) => candidate.archivedAt === null && candidate.deletedAt === null)
+            .flatMap((candidate) =>
+              candidate.worktreePath === null
+                ? []
+                : [{ threadId: candidate.id, worktreePath: candidate.worktreePath }],
+            ),
+        ),
       getShellSnapshot: (options) =>
         Effect.gen(function* () {
           reads++;
