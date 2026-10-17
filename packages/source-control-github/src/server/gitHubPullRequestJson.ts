@@ -404,6 +404,8 @@ export interface GitHubPullRequestHead {
 export interface GitHubPullRequestActivity {
   readonly author: PullRequestActor | null;
   readonly comments: ReadonlyArray<PullRequestComment>;
+  readonly commentCount: number;
+  readonly truncated: boolean;
   readonly commits: ReadonlyArray<PullRequestCommit>;
 }
 
@@ -707,12 +709,20 @@ interface RemarkFields {
   readonly url: string | null;
 }
 
-function toComments(raw: {
-  readonly comments: ReadonlyArray<RemarkFields & { readonly createdAt: string }>;
-  readonly reviews: ReadonlyArray<
-    RemarkFields & { readonly state: string; readonly submittedAt: string | null }
-  >;
-}): ReadonlyArray<PullRequestComment> {
+function toComments(
+  raw: {
+    readonly comments: ReadonlyArray<
+      RemarkFields & {
+        readonly createdAt: string;
+        readonly reactionGroups: ReadonlyArray<ReactionGroup> | null;
+      }
+    >;
+    readonly reviews: ReadonlyArray<
+      RemarkFields & { readonly state: string; readonly submittedAt: string | null }
+    >;
+  },
+  viewer: string | null,
+): ReadonlyArray<PullRequestComment> {
   const issueComments = raw.comments.map((comment): PullRequestComment => ({
     id: comment.id,
     kind: "issue-comment",
@@ -723,6 +733,7 @@ function toComments(raw: {
     url: trimmed(comment.url),
     path: null,
     reviewState: null,
+    reactions: toReactions(comment.reactionGroups, viewer),
   }));
   // A review with no body is kept only when its state is the event itself — an approval, a
   // request for changes, a dismissal. GitHub also opens a bodiless `COMMENTED` review as the
@@ -1076,6 +1087,18 @@ export function toPullRequestWatchFingerprint(
     remarks: [
       pr.comments.totalCount,
       newestEdit(pr.comments),
+      nodesOf(pr.comments)
+        .flatMap((node) =>
+          (node.reactionGroups ?? []).map(
+            (group) =>
+              `${node.id}:${group.content}:${group.reactors.totalCount}:${nodesOf(group.reactors)
+                .flatMap((actor) => ("login" in actor ? (trimmed(actor.login) ?? []) : []))
+                .toSorted()
+                .join(";")}`,
+          ),
+        )
+        .toSorted()
+        .join(","),
       pr.reviews?.totalCount ?? 0,
       newestEdit(pr.reviews),
       pr.reviewThreads.totalCount,
@@ -1205,6 +1228,8 @@ export interface GitHubPullRequestActivityPage {
   readonly author?: PullRequestActor | null;
   readonly commits?: ReadonlyArray<PullRequestCommit>;
   readonly remarks: ReadonlyArray<PullRequestComment>;
+  readonly rawCount: number;
+  readonly totalCount: number;
   readonly nextCommentsCursor: string | null;
   readonly nextReviewsCursor: string | null;
 }
@@ -1215,6 +1240,8 @@ export function toPullRequestActivityPage(
 ): GitHubPullRequestActivityPage | null {
   const pr = result.repository?.pullRequest;
   if (pr == null) return null;
+  const comments = nodesOf(pr.comments);
+  const reviews = nodesOf(pr.reviews);
   return {
     ...(pr.author === undefined ? {} : { author: toActor(pr.author) }),
     ...(pr.commits === undefined
@@ -1230,7 +1257,9 @@ export function toPullRequestActivityPage(
             })),
           ),
         }),
-    remarks: toComments({ comments: nodesOf(pr.comments), reviews: nodesOf(pr.reviews) }),
+    remarks: toComments({ comments, reviews }, trimmed(result.viewer.login)),
+    rawCount: comments.length + reviews.length,
+    totalCount: (pr.comments?.totalCount ?? 0) + (pr.reviews?.totalCount ?? 0),
     nextCommentsCursor: nextCursorOf(pr.comments?.pageInfo),
     nextReviewsCursor: nextCursorOf(pr.reviews?.pageInfo),
   };
@@ -1417,13 +1446,11 @@ export function toReviewThreadPage(result: ReviewThreads.Result): GitHubReviewTh
     (node): ActorFields | null => node.requestedReviewer,
   );
   const latestReviews = nodesOf(pullRequest.latestReviews);
-  const comments = nodesOf(pullRequest.comments);
   const reviews = nodesOf(pullRequest.reviews);
   const avatarsByLogin = new Map<string, string>();
   const botLogins = new Set<string>();
   for (const raw of [
     pullRequest.author,
-    ...comments.map((node) => node.author),
     ...reviews.map((node) => node.author),
     ...requestedReviewers,
     ...latestReviews.map((node) => node.author),
@@ -1464,7 +1491,7 @@ export function toReviewThreadPage(result: ReviewThreads.Result): GitHubReviewTh
   }
   const reactionsById = new Map<string, ReadonlyArray<PullRequestReaction>>();
   const editedAtById = new Map<string, string>();
-  for (const node of [...comments, ...reviews]) {
+  for (const node of reviews) {
     const id = trimmed(node.id);
     if (id === null) continue;
     const editedAt = trimmed(node.lastEditedAt);

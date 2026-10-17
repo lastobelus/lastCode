@@ -1,4 +1,12 @@
 /**
+ * Shares a running dev server on the local tailnet via `tailscale serve`, so it
+ * can be opened from a phone, another laptop, or by whoever is reviewing the
+ * work.
+ *
+ * Thin wrapper over `@t3tools/tailscale` (the same client the server's own
+ * `--tailscale-serve` uses). What it adds is dev-share error reporting and
+ * lifecycle cleanup for the exact mapping this dev server owns.
+ *
  * Because browser dev is single-origin (Vite proxies the backend — see
  * `resolveDevProxyTarget` in apps/web/vite.config.ts), one proxy rule covering
  * the web port is enough; the backend needs no mapping of its own.
@@ -9,9 +17,10 @@ import {
   disableTailscaleServe,
   ensureTailscaleServe,
   readTailscaleStatus,
-  type TailscaleCommandError,
+  type TailscaleServeError,
   type TailscaleStderrDiagnostic,
 } from "@t3tools/tailscale";
+import { SHARED_DEV_LOOPBACK_HOST } from "@t3tools/shared/devProxy";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import type { ChildProcessSpawner } from "effect/process";
@@ -28,10 +37,16 @@ const DIAGNOSTIC_EXPLANATIONS: Record<TailscaleStderrDiagnostic, string | undefi
   unknown: undefined,
 };
 
-const explainCommandFailure = (error: TailscaleCommandError): string | undefined =>
+/**
+ * Our own wording for why a tailscale command failed, derived from the
+ * classified diagnostic. Never the CLI's text — see `stderrDiagnosticOf`.
+ */
+const explainCommandFailure = (error: TailscaleServeError): string | undefined =>
   error._tag === "TailscaleCommandExitError" && error.stderrDiagnostic !== undefined
     ? (DIAGNOSTIC_EXPLANATIONS[error.stderrDiagnostic] ?? "run the command by hand to see why")
-    : undefined;
+    : error._tag === "TailscaleServePortOccupiedError"
+      ? "the port already belongs to a different Tailscale Serve handler"
+      : undefined;
 
 export class TailscaleUnavailableError extends Schema.TaggedError<TailscaleUnavailableError>()(
   "TailscaleUnavailableError",
@@ -62,7 +77,6 @@ export class TailnetNameMissingError extends Schema.TaggedError<TailnetNameMissi
 export class DevServeFailedError extends Schema.TaggedError<DevServeFailedError>()(
   "DevServeFailedError",
   {
-    stage: Schema.Literals(["clear-existing", "serve"]),
     webPort: Schema.Number,
     explanation: Schema.optional(Schema.String),
     cause: Schema.optional(Schema.Defect()),
@@ -70,10 +84,7 @@ export class DevServeFailedError extends Schema.TaggedError<DevServeFailedError>
 ) {
   override get message(): string {
     const port = String(this.webPort);
-    const base =
-      this.stage === "clear-existing"
-        ? `could not clear the existing mapping for port ${port}. Run \`tailscale serve --https=${port} off\` and retry`
-        : `could not serve port ${port} on the tailnet (it is no longer served; any previous mapping for it was cleared before this attempt)`;
+    const base = `could not serve port ${port} on the tailnet`;
     return this.explanation ? `${base}: ${this.explanation}` : base;
   }
 
@@ -98,14 +109,20 @@ export const unshareDevServer = (
   {
     readonly cleared: boolean;
     readonly explanation?: string | undefined;
-    readonly cause?: TailscaleCommandError | undefined;
+    // Kept structured so a caller wrapping this can preserve the real error
+    // chain rather than a flattened string.
+    readonly cause?: TailscaleServeError | undefined;
   },
   never,
   ChildProcessSpawner.ChildProcessSpawner
 > =>
-  disableTailscaleServe({ servePort: webPort }).pipe(
+  disableTailscaleServe({
+    localHost: SHARED_DEV_LOOPBACK_HOST,
+    localPort: webPort,
+    servePort: webPort,
+  }).pipe(
     Effect.as({ cleared: true } as const),
-    Effect.catch((error: TailscaleCommandError) =>
+    Effect.catch((error: TailscaleServeError) =>
       Effect.succeed(
         error._tag === "TailscaleCommandExitError" &&
           error.stderrDiagnostic === "no-existing-handler"
@@ -137,32 +154,14 @@ export const shareDevServer = Effect.fn("devShare.shareDevServer")(function* (in
     return yield* new TailnetNameMissingError();
   }
 
-  const cleared = yield* unshareDevServer(input.webPort);
-  if (!cleared.cleared) {
-    // Serving over routes we failed to remove would hand out a URL that is
-    // broken in a way the user cannot see: the page loads while /ws and /api
-    // silently resolve to a dead backend. Better to refuse and say why.
-    return yield* new DevServeFailedError({
-      stage: "clear-existing",
-      webPort: input.webPort,
-      ...(cleared.explanation !== undefined ? { explanation: cleared.explanation } : {}),
-      ...(cleared.cause !== undefined ? { cause: cleared.cause } : {}),
-    });
-  }
-
-  // Proxy to the hostname Vite binds rather than the package default of
-  // 127.0.0.1. Vite listens on `localhost`, which Node 17+ resolves to `::1`
-  // first, so it only binds the IPv6 loopback and a 127.0.0.1 target has
-  // nothing behind it (tailscale answers 502).
   yield* ensureTailscaleServe({
+    localHost: SHARED_DEV_LOOPBACK_HOST,
     localPort: input.webPort,
     servePort: input.webPort,
-    localHost: "localhost",
   }).pipe(
     Effect.mapError((error) => {
       const explanation = explainCommandFailure(error);
       return new DevServeFailedError({
-        stage: "serve",
         webPort: input.webPort,
         ...(explanation !== undefined ? { explanation } : {}),
         cause: error,
