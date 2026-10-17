@@ -2,6 +2,7 @@ import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 
 import { ThreadEnvMode, WorktreeSubmodules } from "./environment.ts";
+import { MAX_SCRIPT_ID_LENGTH } from "./keybindings.ts";
 import { ProjectScriptIcon } from "./project.ts";
 import type { ProjectScopedServerSettingKey, ServerSettings } from "./settings.ts";
 
@@ -24,6 +25,14 @@ const trimmedNonEmpty = (annotations: { readonly description: string }, maxLengt
 };
 
 export const T3ProjectFileScript = Schema.Struct({
+  id: Schema.optionalKey(
+    trimmedNonEmpty(
+      {
+        description: "Stable identifier for reconciling this script with a saved Project Action.",
+      },
+      MAX_SCRIPT_ID_LENGTH,
+    ).check(Schema.isPattern(/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u)),
+  ),
   name: trimmedNonEmpty({
     description: "Display name for the script, shown in the T3 Code scripts menu.",
   }),
@@ -51,6 +60,12 @@ export const T3ProjectFileScript = Schema.Struct({
     Schema.Boolean.annotate({
       description:
         "Only for runOnWorktreeCreate scripts. When true (the default), the agent starts while the script is still running. Set false to hold the agent until the script exits.",
+    }),
+  ),
+  terminalLinkProfileName: Schema.optionalKey(
+    trimmedNonEmpty({
+      description:
+        "Exact name of an existing desktop browser profile for links printed by this Action. Runs in a dedicated terminal; open its links in the desktop app that owns the profile, where the name must be unique.",
     }),
   ),
   previewUrl: Schema.optionalKey(

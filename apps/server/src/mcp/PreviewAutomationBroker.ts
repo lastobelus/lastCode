@@ -5,10 +5,12 @@ import {
   PreviewAutomationControlReason,
   PreviewAutomationExecutionError,
   SERVER_BROWSER_AUTOMATION_CLIENT_ID,
+  PreviewAutomationProfileError,
   PreviewAutomationInvalidSelectorError,
   PreviewAutomationMalformedResponseError,
   PreviewAutomationNoAvailableHostError,
   PreviewAutomationRemoteUnavailableError,
+  PreviewAutomationAvailabilityReason,
   PreviewAutomationRecordingTransferError,
   PreviewAutomationRecordingDesktopUpdateRequiredError,
   PreviewAutomationRecordingTooLargeError,
@@ -190,6 +192,9 @@ const hostAssignmentKey = (scope: McpInvocationContext.McpThreadInvocationScope)
 
 const isPreviewTabId = Schema.is(PreviewTabId);
 const decodeControlReason = Schema.decodeUnknownOption(PreviewAutomationControlReason);
+const decodeAvailabilityReason = Schema.decodeUnknownOption(
+  Schema.Struct({ reason: PreviewAutomationAvailabilityReason }),
+);
 
 const readResultTabId = (result: unknown): PreviewTabId | null | undefined => {
   if (typeof result !== "object" || result === null || !("tabId" in result)) return undefined;
@@ -232,6 +237,22 @@ const classifyResponseError = (
     cause: error,
   };
   switch (error._tag) {
+    case "PreviewAutomationProfileError": {
+      const detail = error.detail;
+      if (
+        typeof detail === "object" &&
+        detail !== null &&
+        "reason" in detail &&
+        (detail.reason === "unknown" ||
+          detail.reason === "ambiguous" ||
+          detail.reason === "tab-mismatch") &&
+        "detail" in detail &&
+        typeof detail.detail === "string"
+      ) {
+        return new PreviewAutomationProfileError({ reason: detail.reason, detail: detail.detail });
+      }
+      return new PreviewAutomationMalformedResponseError(context);
+    }
     case "PreviewAutomationRecordingDesktopUpdateRequiredError":
       return new PreviewAutomationRecordingDesktopUpdateRequiredError({
         threadId: context.threadId,
@@ -340,10 +361,14 @@ const classifyResponseError = (
       });
     }
     case "PreviewAutomationUnavailableError":
+    case "PreviewAutomationRemoteUnavailableError": {
+      const detail = decodeAvailabilityReason(error.detail);
       return new PreviewAutomationRemoteUnavailableError({
         ...context,
         ...remoteDiagnostics,
+        ...(Option.isSome(detail) ? { reason: detail.value.reason } : {}),
       });
+    }
     default:
       return new PreviewAutomationExecutionError({
         ...context,
@@ -607,7 +632,11 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
       // The environment host may install Chromium on its first open (up to
       // ten minutes). Keep that request alive without replaying its effects.
       const timeoutMs =
-        input.timeoutMs ?? (input.operation === "open" && connection.preferred ? 660_000 : 15_000);
+        input.timeoutMs ??
+        ((input.operation === "open" || input.operation === "openWithProfile") &&
+        connection.preferred
+          ? 660_000
+          : 15_000);
       const canReuseAssignedTab =
         assigned !== undefined &&
         assigned.connectionId === connection.connectionId &&
