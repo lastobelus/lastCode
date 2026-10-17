@@ -2832,7 +2832,7 @@ describe("storage cleanup reports and local file policies", () => {
           }
           yield* Deferred.succeed(fixture.resume, undefined);
           const report = yield* Fiber.join(cleanup);
-          expect(report.entries[0]).toMatchObject({
+          expect(report.entries.find((entry) => entry.path === fixture.worktree)).toMatchObject({
             outcome: "kept",
             reason: "Contains a project checkout",
           });
