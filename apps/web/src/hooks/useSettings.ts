@@ -720,7 +720,6 @@ export function useUpdatePrimarySettings() {
 export function useUpdateClientSettings() {
   return (patch: ClientSettingsPatch) => persistClientSettingsPatch(patch);
 }
-
 export function __resetClientSettingsPersistenceForTests(): void {
   clientSettingsHydrationGeneration += 1;
   clientSettingsSnapshot = DEFAULT_CLIENT_SETTINGS;
