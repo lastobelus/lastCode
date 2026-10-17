@@ -134,6 +134,7 @@ test("resolves a fallback PR with a redacted head repo and exact main baseline",
     context: {
       repo: { owner: "pingdotgg", repo: "t3code" },
       payload: {
+        repository: { default_branch: "main" },
         workflow_run: {
           id: 2,
           event: "pull_request",
@@ -159,6 +160,62 @@ test("resolves a fallback PR with a redacted head repo and exact main baseline",
   assert.equal(outputs.pr_artifact, "true");
   assert.equal(outputs.baseline_run_id, "1");
   assert.equal(outputs.baseline_matches_base, "true");
+});
+
+test("uses the default-branch baseline for a stacked PR", async () => {
+  const outputs = {};
+  const listWorkflowRunArtifacts = () => {};
+  const listWorkflowRuns = () => {};
+  let baselineBranch;
+  await resolve({
+    github: {
+      paginate: async (method, input) => {
+        if (method === listWorkflowRunArtifacts) {
+          return [{ name: "thread-transfer-results", expired: false }];
+        }
+        if (method === listWorkflowRuns) {
+          baselineBranch = input.branch;
+          return [{ id: 1, head_sha: "main-sha" }];
+        }
+        throw new Error("unexpected pagination call");
+      },
+      rest: {
+        actions: { listWorkflowRunArtifacts, listWorkflowRuns },
+        pulls: {
+          get: async () => ({
+            data: {
+              head: { sha: "child-sha" },
+              base: { sha: "parent-sha", ref: "topic-parent" },
+            },
+          }),
+        },
+      },
+    },
+    context: {
+      repo: { owner: "lastobelus", repo: "lastCode" },
+      payload: {
+        repository: { default_branch: "lastcode/main" },
+        workflow_run: {
+          id: 2,
+          event: "pull_request",
+          workflow_id: 3,
+          head_sha: "child-sha",
+          pull_requests: [{ number: 222 }],
+          conclusion: "success",
+        },
+      },
+    },
+    core: {
+      setOutput: (key, value) => {
+        outputs[key] = value;
+      },
+    },
+  });
+
+  assert.equal(baselineBranch, "lastcode/main");
+  assert.equal(outputs.baseline_artifact, "true");
+  assert.equal(outputs.baseline_run_id, "1");
+  assert.equal(outputs.baseline_matches_base, "false");
 });
 
 test("does not guess when a fallback commit belongs to multiple PRs", async () => {
