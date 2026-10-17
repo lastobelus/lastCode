@@ -35,7 +35,8 @@ function recordEffect(action: string) {
 }
 
 vi.mock("../components/CustomSnoozeDialog", () => ({ requestCustomSnooze: vi.fn() }));
-vi.mock("react", () => ({
+vi.mock("react", async (original) => ({
+  ...(await original<typeof import("react")>()),
   useCallback: (callback: unknown) => callback,
   useMemo: (factory: () => unknown) => factory(),
 }));
@@ -49,6 +50,7 @@ vi.mock("../state/session", () => ({
 vi.mock("../state/entities", () => ({
   readEnvironmentSupportsAutoSettleOptOut: () => true,
   readEnvironmentSupportsPinning: () => true,
+  readEnvironmentSupportsPersistence: () => true,
   readEnvironmentSupportsSettlement: () => true,
   readEnvironmentSupportsSnooze: () => true,
   readEnvironmentSupportsTitleRegeneration: () => true,
@@ -66,6 +68,15 @@ vi.mock("../state/entities", () => ({
 }));
 vi.mock("../state/environments", () => ({ usePrimaryEnvironmentId: () => "primary" }));
 vi.mock("../state/threads", () => ({ threadEnvironment: { updateMetadata: "metadata" } }));
+vi.mock("../state/terminal", () => ({ terminalEnvironment: { close: "close" } }));
+vi.mock("../state/terminalSessions", () => ({ useThreadRunningTerminalIds: () => [] }));
+vi.mock("../state/previewHosting", () => ({
+  usePreviewProcessControlsSupported: () => false,
+  useThreadPreviewLeases: () => [],
+  useStopThreadProcesses: () => vi.fn(),
+}));
+vi.mock("../handoffs/handoffsStore", () => ({ useThreadHandoffs: () => [] }));
+vi.mock("../handoffs/useOpenHandoff", () => ({ useOpenHandoff: () => vi.fn() }));
 vi.mock("../state/use-atom-command", () => ({
   useAtomCommand: () => async () => {
     recordEffect("metadata");

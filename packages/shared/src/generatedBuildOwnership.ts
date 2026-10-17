@@ -2,6 +2,10 @@
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeCrypto from "node:crypto";
+import {
+  acquirePortableLock,
+  PortableLockContentionError,
+} from "../../../scripts/lastcode-lock.mjs";
 
 type OwnedFile = { path: string; identity: string; hash: string; bytes: number };
 type BuildRecord = {
@@ -52,6 +56,51 @@ function context(worktreePath: string, root: string) {
   return { cwd, gitDir, root, recordPath, worktreeIdentity };
 }
 type Context = NonNullable<ReturnType<typeof context>>;
+
+function acquireBuildMutationLock(ctx: Context) {
+  const name = `${NodePath.basename(ctx.recordPath)}.publish`;
+  try {
+    return acquirePortableLock(ctx.gitDir, name, "generated build update");
+  } catch (error) {
+    if (error instanceof PortableLockContentionError)
+      throw new PortableLockContentionError(
+        `${error.message} Retry after the current output operation finishes. If the owner is unknown, inspect ${NodePath.join(ctx.gitDir, name)} lock metadata before recovery; do not clear a live owner's lock.`,
+        { cause: error },
+      );
+    throw error;
+  }
+}
+
+function tryAcquireBuildMutationLock(ctx: Context) {
+  try {
+    return acquireBuildMutationLock(ctx);
+  } catch (error) {
+    if (error instanceof PortableLockContentionError) return null;
+    throw error;
+  }
+}
+
+/** Branding belongs to private compiler/release stages, never published managed output. */
+export function assertUnpublishedGeneratedBuildTarget(directory: string) {
+  const target = NodeFS.realpathSync(directory);
+  let ancestor = target;
+  while (true) {
+    const relative = NodePath.relative(ancestor, target).split(NodePath.sep).join("/");
+    if (/^apps\/[a-zA-Z0-9_-]+\/dist(?:\/|$)/.test(relative)) {
+      let metadata;
+      try {
+        metadata = NodeFS.lstatSync(NodePath.join(ancestor, ".git"));
+      } catch (error) {
+        if (!missing(error)) throw error;
+      }
+      if (metadata && !metadata.isDirectory())
+        throw new Error("Branding managed output requires a fresh compiler or release stage");
+    }
+    const parent = NodePath.dirname(ancestor);
+    if (parent === ancestor) return;
+    ancestor = parent;
+  }
+}
 
 /** Every existing component must be a real directory; neither links nor files may redirect a build path. */
 function safePath(base: string, relative: string) {
@@ -205,8 +254,7 @@ function writeRecord(ctx: Context, record: BuildRecord, expectedIdentity?: strin
   try {
     NodeFS.writeFileSync(temporary, raw, { flag: "wx", mode: 0o600 });
     flushPreparedFile(temporary);
-    // Best-effort native admission immediately before replacement. Usage must
-    // not overwrite an ownership generation published while its temp was written.
+    // Mutations hold the root lock; also reject an unexpected native record replacement.
     if (
       expectedIdentity !== undefined &&
       signature(NodeFS.lstatSync(ctx.recordPath)) !== expectedIdentity
@@ -685,42 +733,50 @@ export async function removeGeneratedBuildFilesAsync(
     if (signal?.aborted) return stop(offset, "Build cleanup was cancelled");
     if (!(await revalidate([...verified])))
       return stop(offset, "Build cleanup guards changed before removal");
-    if (hasPendingPublication(ctx)) return stop(offset, "Build publication is pending recovery");
-    for (const [index, file] of batch.entries()) {
-      if (!verified.has(file.path)) continue;
-      if (signal?.aborted) return stop(offset + index, "Build cleanup was cancelled");
-      try {
-        if (signature(NodeFS.lstatSync(ctx.recordPath)) !== previous.recordIdentity)
-          return stop(offset + index, "Build ownership changed before removal");
-        const target = safePath(ctx.cwd, `${root}/${file.path}`);
-        const stat = NodeFS.lstatSync(target);
-        // Async hashing is accepted only while inode, immutable ctime, size and
-        // timestamps still match. No content hashing or await in this final seam.
-        if (!stat.isFile() || stat.nlink !== 1 || signature(stat) !== file.identity) {
-          kept.push({ path: file.path, reason: "Generated file changed before removal" });
-          continue;
-        }
-        NodeFS.unlinkSync(target);
-        bytes += file.bytes;
-        files++;
-        let parent = NodePath.dirname(target);
-        const output = NodePath.join(ctx.cwd, root);
-        while (parent.startsWith(`${output}${NodePath.sep}`) || parent === output) {
-          try {
-            NodeFS.rmdirSync(parent);
-          } catch {
-            break;
+    if (signal?.aborted) return stop(offset, "Build cleanup was cancelled");
+    // Hashes and live policy/process checks stay outside this short native seam.
+    const release = tryAcquireBuildMutationLock(ctx);
+    if (!release) return stop(offset, "Build output is busy; retry cleanup");
+    try {
+      if (hasPendingPublication(ctx)) return stop(offset, "Build publication is pending recovery");
+      for (const [index, file] of batch.entries()) {
+        if (!verified.has(file.path)) continue;
+        if (signal?.aborted) return stop(offset + index, "Build cleanup was cancelled");
+        try {
+          if (signature(NodeFS.lstatSync(ctx.recordPath)) !== previous.recordIdentity)
+            return stop(offset + index, "Build ownership changed before removal");
+          const target = safePath(ctx.cwd, `${root}/${file.path}`);
+          const stat = NodeFS.lstatSync(target);
+          // Async hashing is accepted only while inode, immutable ctime, size and
+          // timestamps still match. No content hashing or await in this final seam.
+          if (!stat.isFile() || stat.nlink !== 1 || signature(stat) !== file.identity) {
+            kept.push({ path: file.path, reason: "Generated file changed before removal" });
+            continue;
           }
-          parent = NodePath.dirname(parent);
+          NodeFS.unlinkSync(target);
+          bytes += file.bytes;
+          files++;
+          let parent = NodePath.dirname(target);
+          const output = NodePath.join(ctx.cwd, root);
+          while (parent.startsWith(`${output}${NodePath.sep}`) || parent === output) {
+            try {
+              NodeFS.rmdirSync(parent);
+            } catch {
+              break;
+            }
+            parent = NodePath.dirname(parent);
+          }
+        } catch (error) {
+          kept.push({
+            path: file.path,
+            reason: missing(error)
+              ? "Generated file is absent"
+              : "Generated file could not be removed safely",
+          });
         }
-      } catch (error) {
-        kept.push({
-          path: file.path,
-          reason: missing(error)
-            ? "Generated file is absent"
-            : "Generated file could not be removed safely",
-        });
       }
+    } finally {
+      release();
     }
   }
   return { bytes, files, kept };
@@ -730,14 +786,21 @@ export async function removeGeneratedBuildFilesAsync(
 export function recordGeneratedBuildUse(worktreePath: string, root: string, now: number) {
   if (!Number.isSafeInteger(now) || now < 0) throw new Error("Invalid build use time");
   const ctx = context(worktreePath, root);
-  if (!ctx || hasPendingPublication(ctx)) return false;
-  const previous = readRecord(ctx);
-  if (!previous) return false;
-  return writeRecord(
-    ctx,
-    { ...previous.record, lastUsedAt: Math.max(now, previous.record.lastUsedAt) },
-    previous.recordIdentity,
-  );
+  if (!ctx) return false;
+  const release = tryAcquireBuildMutationLock(ctx);
+  if (!release) return false;
+  try {
+    if (hasPendingPublication(ctx)) return false;
+    const previous = readRecord(ctx);
+    if (!previous) return false;
+    return writeRecord(
+      ctx,
+      { ...previous.record, lastUsedAt: Math.max(now, previous.record.lastUsedAt) },
+      previous.recordIdentity,
+    );
+  } finally {
+    release();
+  }
 }
 
 /** Exact selective deletion only. Keep provenance and approvals, including after partial removal or regeneration. */
@@ -756,35 +819,54 @@ export function removeGeneratedBuildFiles(
   let bytes = 0;
   let files = 0;
   const kept: Array<{ path: string; reason: string }> = [];
-  for (const relative of new Set(paths)) {
+  const requested = [...new Set(paths)];
+  const stop = (offset: number, reason: string) => ({
+    bytes,
+    files,
+    kept: [...kept, ...requested.slice(offset).map((path) => ({ path, reason }))],
+  });
+  for (const [index, relative] of requested.entries()) {
     const file = owned.get(relative);
     if (!file) throw new Error("Requested file has no emission provenance");
     const target = safePath(ctx.cwd, `${root}/${relative}`);
     try {
-      if (signature(NodeFS.lstatSync(ctx.recordPath)) !== previous.recordIdentity)
-        throw new Error("Build ownership changed before removal");
       if (!evidenceMatches(file, target)) {
         kept.push({ path: relative, reason: "Generated file changed since emission" });
         continue;
       }
-      assertNoPendingPublication(ctx);
-      // No async gap after the caller's guards and this final identity/content check.
-      NodeFS.unlinkSync(target);
-      bytes += file.bytes;
-      files++;
-      let parent = NodePath.dirname(target);
-      const output = NodePath.join(ctx.cwd, root);
-      while (parent.startsWith(`${output}${NodePath.sep}`) || parent === output) {
-        try {
-          NodeFS.rmdirSync(parent);
-        } catch (error) {
-          if (
-            ["ENOTEMPTY", "EEXIST", "ENOENT"].includes((error as NodeJS.ErrnoException).code ?? "")
-          )
-            break;
-          break; // Empty-directory pruning is optional after a successful unlink.
+      const release = tryAcquireBuildMutationLock(ctx);
+      if (!release) return stop(index, "Build output is busy; retry cleanup");
+      try {
+        if (hasPendingPublication(ctx)) return stop(index, "Build publication is pending recovery");
+        if (signature(NodeFS.lstatSync(ctx.recordPath)) !== previous.recordIdentity)
+          return stop(index, "Build ownership changed before removal");
+        const stat = NodeFS.lstatSync(target);
+        if (!stat.isFile() || stat.nlink !== 1 || signature(stat) !== file.identity) {
+          kept.push({ path: relative, reason: "Generated file changed before removal" });
+          continue;
         }
-        parent = NodePath.dirname(parent);
+        // No async gap after the caller's guards and this final identity/content check.
+        NodeFS.unlinkSync(target);
+        bytes += file.bytes;
+        files++;
+        let parent = NodePath.dirname(target);
+        const output = NodePath.join(ctx.cwd, root);
+        while (parent.startsWith(`${output}${NodePath.sep}`) || parent === output) {
+          try {
+            NodeFS.rmdirSync(parent);
+          } catch (error) {
+            if (
+              ["ENOTEMPTY", "EEXIST", "ENOENT"].includes(
+                (error as NodeJS.ErrnoException).code ?? "",
+              )
+            )
+              break;
+            break; // Empty-directory pruning is optional after a successful unlink.
+          }
+          parent = NodePath.dirname(parent);
+        }
+      } finally {
+        release();
       }
     } catch (error) {
       if (missing(error)) {
@@ -978,11 +1060,18 @@ export function createGeneratedBuildStage(worktreePath: string, root: string) {
 /** Copy only the latest verified compiler emissions, never arbitrary additions in the real dist tree. */
 export function copyOwnedGeneratedBuild(worktreePath: string, root: string, destination: string) {
   const ctx = context(worktreePath, root);
-  const previous = ctx && readRecord(ctx);
-  if (!ctx || !previous)
-    throw new Error("Web build has no emission provenance; rebuild the web app first");
-  // Historical owned chunks remain eligible for cleanup, but only the latest
-  // compiler emission belongs in a newly built server client bundle.
+  if (!ctx) {
+    try {
+      if (NodeFS.lstatSync(NodePath.join(NodeFS.realpathSync(worktreePath), ".git")).isDirectory())
+        return false; // Only positively recognized ordinary repositories use the caller's copy.
+    } catch (error) {
+      if (!missing(error)) throw error;
+    }
+    throw new Error("Generated build copy requires repository metadata");
+  }
+  const previous = readRecord(ctx);
+  if (!previous) throw new Error("Generated build has no emission provenance; rebuild first");
+  // Only the latest compiler emission belongs in a newly built server client bundle.
   for (const file of previous.record.emissions) {
     const source = safePath(ctx.cwd, `${root}/${file.path}`);
     if (fileEvidence(source).hash !== file.hash)
@@ -993,4 +1082,5 @@ export function copyOwnedGeneratedBuild(worktreePath: string, root: string, dest
     if (fileEvidence(target).hash !== file.hash)
       throw new Error("Web output changed during server build");
   }
+  return true;
 }
