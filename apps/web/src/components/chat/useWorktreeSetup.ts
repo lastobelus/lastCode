@@ -89,8 +89,11 @@ export function useWorktreeSetup(input: {
     readonly routeThreadRef: ScopedThreadRef;
     readonly latestSnapshot: WorktreeSetupSnapshot | null | undefined;
   }>({ routeThreadRef, latestSnapshot: null });
-  if (heldFor.routeThreadRef !== routeThreadRef || heldFor.latestSnapshot !== latestSnapshot) {
-    const routeChanged = heldFor.routeThreadRef !== routeThreadRef;
+  // ChatView recreates scoped refs during render; only their durable ids mark a route change.
+  const routeChanged =
+    heldFor.routeThreadRef.environmentId !== routeThreadRef.environmentId ||
+    heldFor.routeThreadRef.threadId !== routeThreadRef.threadId;
+  if (routeChanged || heldFor.latestSnapshot !== latestSnapshot) {
     setHeldFor({ routeThreadRef, latestSnapshot });
     if (routeChanged) {
       setHeldSnapshot(null);
