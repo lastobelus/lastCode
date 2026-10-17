@@ -1,5 +1,6 @@
 import {
   AuthFilesystemReadScope,
+  AuthOrchestrationReadScope,
   EnvironmentAuthorizationError,
   EnvironmentId,
   ThreadId,
@@ -10,7 +11,7 @@ import { AsyncResult } from "effect/reactivity";
 import { beforeEach, expect, it, vi } from "vite-plus/test";
 
 const state = vi.hoisted(() => ({
-  session: null as Pick<AuthSessionState, "authenticated" | "scopes"> | null,
+  session: null as Pick<AuthSessionState, "authenticated" | "scopes" | "permissions"> | null,
   phase: "connected" as "connected" | "offline",
   assetAtom: {},
   mint: vi.fn(),
@@ -30,13 +31,17 @@ vi.mock("~/state/session", () => ({
 vi.mock("~/state/filesystem", async () => {
   const { resolveFilesystemReadAccess } = await import("@t3tools/client-runtime/state/filesystem");
   return {
-    useFilesystemReadAccess: () =>
-      resolveFilesystemReadAccess({
+    useFilesystemReadAccess: () => ({
+      ...resolveFilesystemReadAccess({
         isCatalogReady: true,
         connection: { phase: state.phase, error: null },
         session: state.session,
         sessionError: null,
       }),
+      canReadThreadFiles:
+        state.session?.authenticated === true &&
+        state.session.permissions?.includes("orchestration:read") === true,
+    }),
   };
 });
 vi.mock("~/state/assets", () => ({
@@ -74,6 +79,20 @@ it.each(["workspace-file", "media-file"] as const)(
   },
 );
 
+it.each(["workspace-file", "media-file"] as const)(
+  "requests only the linked file capability for restricted %s previews",
+  (_tag) => {
+    state.session = { authenticated: true, permissions: [AuthOrchestrationReadScope] };
+    expect(useAssetUrlState(environmentId, { ...resource, _tag })).toMatchObject({
+      _tag: "Success",
+    });
+    expect(state.assetQuery).toHaveBeenCalledWith({
+      environmentId,
+      input: { resource: { ...resource, linkedThreadFile: true } },
+    });
+  },
+);
+
 it("hides host assets with a denied grant while preserving attachments", () => {
   state.session = { authenticated: true, scopes: [] };
   expect(useAssetUrlState(environmentId, resource)).toEqual({
@@ -86,6 +105,18 @@ it("hides host assets with a denied grant while preserving attachments", () => {
     expiresAt: 1,
     url: "https://host.test/api/assets/image.png",
   });
+});
+
+it("keeps draft host files blocked when only published thread files are allowed", () => {
+  state.session = { authenticated: true, permissions: [AuthOrchestrationReadScope] };
+  expect(
+    useAssetUrlState(environmentId, {
+      _tag: "draft-workspace-file",
+      cwd: "/repo",
+      path: "image.png",
+    }),
+  ).toEqual({ _tag: "Failure", reason: "missing-file-access" });
+  expect(state.assetQuery).not.toHaveBeenCalled();
 });
 
 it("stops waiting for an unresolved grant when the connection is offline", () => {
