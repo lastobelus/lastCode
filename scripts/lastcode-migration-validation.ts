@@ -86,6 +86,9 @@ export function validateInstallableMigrations(input: {
       "test",
       "run",
       "apps/server/src/persistence/DatabaseMigrations.test.ts",
+      "apps/server/src/persistence/initializeV2Database.test.ts",
+      "apps/server/src/persistence/reconcileV2PreviewMigration.test.ts",
+      "apps/server/src/persistence/Migrations/055_OrchestrationV2.test.ts",
     ]);
     if (
       run(checkout, "git", ["rev-parse", "HEAD"]) !== candidateRef ||

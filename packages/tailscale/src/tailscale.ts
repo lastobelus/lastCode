@@ -101,7 +101,7 @@ export class TailscaleCommandTimeoutError extends Schema.TaggedError<TailscaleCo
   }
 }
 
-export type TailscaleCommandError =
+type TailscaleCommandError =
   | TailscaleCommandSpawnError
   | TailscaleCommandOutputError
   | TailscaleCommandExitError
