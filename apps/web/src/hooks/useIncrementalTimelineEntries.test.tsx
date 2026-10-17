@@ -1,7 +1,7 @@
 import { EnvironmentId, MessageId } from "@t3tools/contracts";
 import { transform } from "oxc-transform-react";
 import { act, createElement, type ComponentType } from "react";
-import { c } from "react/compiler-runtime";
+import * as compilerRuntime from "react/compiler-runtime";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -54,13 +54,21 @@ async function makeProbe(compiled: boolean): Promise<ComponentType<ProbeProps>> 
     /^const \{ c: _c \} = require\("react\/compiler-runtime"\);\n/m,
     "",
   );
+  if (!("c" in compilerRuntime) || typeof compilerRuntime.c !== "function") {
+    throw new Error("React Compiler runtime cache helper is unavailable.");
+  }
   return new Function(
     "useAssetUrls",
     "useIncrementalTimelineEntries",
     "environmentId",
     "_c",
     `${code}\nreturn TimelineProbe;`,
-  )(useAssetUrls, useIncrementalTimelineEntries, EnvironmentId.make("timeline-environment"), c);
+  )(
+    useAssetUrls,
+    useIncrementalTimelineEntries,
+    EnvironmentId.make("timeline-environment"),
+    compilerRuntime.c,
+  );
 }
 
 let renderer: ReactTestRenderer | undefined;
