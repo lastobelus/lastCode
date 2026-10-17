@@ -4,7 +4,7 @@ LastCode is a personal downstream of T3 Code that rebases its complete fork-only
 [downstream carry set](glossary.md#downstream-carry-set) onto upstream nightly releases. Tracking an upstream nightly and
 building an application are deliberately separate operations: every nightly can
 be checkpointed, merged LastCode work can become an ordered revision, and only
-selected checkpoints need full local CI and a build.
+selected installable tags need full local CI and a build.
 
 The workflow is described in terms of independent capabilities: GUI/controller
 nodes, server nodes, architecture-specific DMG builders, artifact consumers,
@@ -19,6 +19,9 @@ directories.
 
 ## Documents
 
+- [Plain-language product guide](../../doc/design/2026-10-06__lastcode-product-guide-eli5.html):
+  one tabbed ELI5 page covering scheduled tasks, usage limits, storage, dashboards,
+  environments, and browser profiles/captures.
 - [Documentation-site research archive](documentation-site-research/README.md):
   preserved design proposals, prototypes, delivery history, and issue ownership
   for the unfinished public site release.
@@ -39,6 +42,10 @@ directories.
   LastCode runtime validation and the headless LaunchAgent activation boundary.
 - [Remote update activation helper](update-activation-helper.md): the dormant,
   one-owner crash-safe app, plist, and database selection transaction.
+- [Settings import](settings-import.md): the one-time, selective migration from
+  T3 Code into an independent LastCode profile, including exclusions and backups.
+- [QA preview handoffs](preview-handoffs.md): recovery requests and the required
+  24-hour hosting and automatic cleanup contract for agent-delivered previews.
 - [Codex Computer Use lifecycle](computer-use-lifecycle.md): lingering native
   indicators, upstream findings, and the limits of LastCode cleanup.
 
@@ -53,8 +60,8 @@ pnpm run lastcode:setup -- \
 # Inspect what the checkpoint job would do.
 pnpm run lastcode:checkpoint -- --dry-run
 
-# Checkpoint every missing nightly and push immutable tags.
-pnpm run lastcode:checkpoint -- --push-tags --promote-if-no-open-prs
+# Checkpoint the newest available nightly and push immutable tags.
+pnpm run lastcode:checkpoint -- --push-tags --promote
 
 # Enable managed background checkpointing.
 pnpm lastcode:checkpoint:service install \
@@ -66,10 +73,11 @@ lastcode-checkpoints
 lastcode-checkpoints -n 20
 lastcode-checkpoints --verbose
 
-# Validate and build one explicit checkpoint.
+# Validate and build one explicit checkpoint or LastCode revision.
 pnpm run lastcode:ci -- --checkpoint lastcode/checkpoint/<upstream-nightly-tag>
 pnpm run lastcode:build:mac:arm64 -- --checkpoint lastcode/checkpoint/<upstream-nightly-tag>
 ```
 
-None of the checkpoint commands builds an application. No build is uploaded or
-published unless a separate explicit release operation is added later.
+None of the checkpoint commands builds an application. An opted-in packaged
+desktop app can build a selected checkpoint or LastCode revision locally from
+its sidebar update button; no build is uploaded or published.

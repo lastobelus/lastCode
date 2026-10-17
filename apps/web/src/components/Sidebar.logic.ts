@@ -1,3 +1,8 @@
+import { threadRecoveryStatusLabel } from "@t3tools/client-runtime/state/thread-recovery";
+import {
+  getArchiveRecoveryRows,
+  presentThreadArchive,
+} from "@t3tools/client-runtime/state/thread-archive";
 import {
   resolveThreadWorkingStartedAt,
   threadShellIsCleanupRecovery,
@@ -503,7 +508,6 @@ export async function archiveSelectedThreadEntries<
 
 export function buildMultiSelectThreadContextMenuItems(input: {
   count: number;
-  hasRunningThread: boolean;
 }): readonly ContextMenuItem<"mark-unread" | "mark-read" | "archive" | "delete">[] {
   return [
     { id: "mark-unread", label: `Mark unread (${input.count})` },
@@ -511,29 +515,32 @@ export function buildMultiSelectThreadContextMenuItems(input: {
     {
       id: "archive",
       label: `Archive (${input.count})`,
-      disabled: input.hasRunningThread,
     },
     { id: "delete", label: `Delete (${input.count})`, destructive: true },
   ];
 }
 
 export function isSidebarSubagentThread(thread: Pick<SidebarThreadSummary, "lineage">): boolean {
-  return thread.lineage.relationshipToParent === "subagent";
+  return thread.lineage.relationshipToParent === "subagent" && thread.lineage.independent !== true;
 }
 
 export function filterSidebarV2VisibleThreads<
   T extends Pick<
     SidebarThreadSummary,
-    "archivedAt" | "deletedAt" | "worktreeCleanup" | "lineage"
+    "archivedAt" | "deletedAt" | "worktreeCleanup" | "lineage" | "archivePending"
   > & {
+    id: string;
     environmentId: string;
     projectId: string;
   },
 >(threads: readonly T[], scopedProjectKeys: ReadonlySet<string> | null): T[] {
+  const archiveRecoveryRows = getArchiveRecoveryRows(threads);
   return threads.filter(
     (thread) =>
       threadShellIsVisible(thread) &&
-      (threadShellIsCleanupRecovery(thread) || !isSidebarSubagentThread(thread)) &&
+      (threadShellIsCleanupRecovery(thread) ||
+        archiveRecoveryRows.has(thread) ||
+        !isSidebarSubagentThread(thread)) &&
       (scopedProjectKeys === null ||
         scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`)),
   );
@@ -614,7 +621,12 @@ export interface ThreadStatusPill {
     | "Deleting (Queued)"
     | "Question"
     | "Cleanup failed"
-    | "Failed";
+    | "Failed"
+    | "Not responding"
+    | "Needs repair"
+    | "Archiving…"
+    | "Archive failed";
+  description?: string;
   colorClass: string;
   dotClass: string;
   pulse: boolean;
@@ -634,6 +646,10 @@ const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
   "Deleting (Queued)": 7,
   "Cleanup failed": 8,
   Failed: 8,
+  "Not responding": 8,
+  "Needs repair": 8,
+  "Archiving…": 7,
+  "Archive failed": 8,
 };
 
 type ThreadStatusInput = Pick<
@@ -648,6 +664,8 @@ type ThreadStatusInput = Pick<
   | "runtime"
   | "actionResume"
   | "worktreeCleanup"
+  | "recovery"
+  | "archivePending"
 > & {
   lastVisitedAt?: string | null | undefined;
   pendingBackgroundTasks?: SidebarThreadSummary["pendingBackgroundTasks"] | undefined;
@@ -922,6 +940,8 @@ export function resolveThreadRowClassName(input: {
 }
 
 export type SidebarThreadStatus =
+  | "archiving"
+  | "archive-failed"
   | "approval"
   | "input"
   | "question"
@@ -932,6 +952,8 @@ export type SidebarThreadStatus =
   | "cleanup-deleting"
   | "cleanup-queued"
   | "cleanup-failed"
+  | "not-responding"
+  | "needs-repair"
   | "ready";
 
 export function shouldRecedeSidebarThread(input: {
@@ -958,12 +980,18 @@ type SidebarThreadStatusInput = Pick<
   | "actionResume"
   | "attention"
   | "worktreeCleanup"
+  | "recovery"
+  | "archivePending"
 > & { pendingBackgroundTasks?: SidebarThreadSummary["pendingBackgroundTasks"] | undefined };
 
 export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): SidebarThreadStatus {
+  const archive = presentThreadArchive(thread);
+  if (archive) return archive.status;
   if (thread.worktreeCleanup?.status === "failed") return "cleanup-failed";
   if (thread.worktreeCleanup?.status === "queued") return "cleanup-queued";
   if (thread.worktreeCleanup?.status === "deleting") return "cleanup-deleting";
+  const recoveryLabel = threadRecoveryStatusLabel(thread.recovery);
+  if (recoveryLabel) return recoveryLabel === "Needs repair" ? "needs-repair" : "not-responding";
   if (thread.hasPendingApprovals || thread.pendingSubagentRequest === "approval") {
     return "approval";
   }
@@ -991,6 +1019,8 @@ export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): Si
 }
 
 export type SidebarV2TopStatusKind =
+  | "archiving"
+  | "archive-failed"
   | "approval"
   | "done"
   | "failed"
@@ -1002,7 +1032,9 @@ export type SidebarV2TopStatusKind =
   | "question"
   | "cleanup-deleting"
   | "cleanup-queued"
-  | "cleanup-failed";
+  | "cleanup-failed"
+  | "not-responding"
+  | "needs-repair";
 
 export function resolveSidebarV2TopStatus(input: {
   readonly status: SidebarThreadStatus;
@@ -1010,6 +1042,10 @@ export function resolveSidebarV2TopStatus(input: {
   readonly isWoke: boolean;
 }): SidebarV2TopStatusKind | null {
   if (
+    input.status === "archiving" ||
+    input.status === "archive-failed" ||
+    input.status === "not-responding" ||
+    input.status === "needs-repair" ||
     input.status === "question" ||
     input.status === "cleanup-deleting" ||
     input.status === "cleanup-queued" ||
@@ -1160,6 +1196,22 @@ export function resolveThreadStatusPill(input: {
 }): ThreadStatusPill | null {
   const { thread } = input;
 
+  const archive = presentThreadArchive(thread);
+  if (archive)
+    return {
+      label: archive.label,
+      description: archive.description,
+      colorClass:
+        archive.status === "archive-failed"
+          ? "text-amber-600 dark:text-amber-300/90"
+          : "text-sidebar-muted-foreground",
+      dotClass:
+        archive.status === "archive-failed"
+          ? "bg-amber-500 dark:bg-amber-300/90"
+          : "bg-sidebar-muted-foreground",
+      pulse: false,
+    };
+
   if (thread.worktreeCleanup?.status === "failed") {
     return {
       label: "Cleanup failed",
@@ -1186,6 +1238,15 @@ export function resolveThreadStatusPill(input: {
       pulse: false,
     };
   }
+
+  const recoveryLabel = threadRecoveryStatusLabel(thread.recovery);
+  if (recoveryLabel)
+    return {
+      label: recoveryLabel,
+      colorClass: "text-amber-600 dark:text-amber-300/90",
+      dotClass: "bg-amber-500 dark:bg-amber-300/90",
+      pulse: false,
+    };
 
   if (thread.hasPendingApprovals || thread.pendingSubagentRequest === "approval") {
     return {
@@ -1441,7 +1502,8 @@ export function sortLogicalProjectsForSidebar<
 
 export function sortSidebarV2ProjectGroups<
   TProject extends LogicalSidebarProject,
-  TThread extends ScopedSidebarThread & Pick<SidebarThreadSummary, "lineage">,
+  TThread extends ScopedSidebarThread &
+    Pick<SidebarThreadSummary, "id" | "lineage" | "archivePending">,
 >(
   projects: readonly TProject[],
   threads: readonly TThread[],

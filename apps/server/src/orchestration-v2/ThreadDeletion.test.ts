@@ -297,3 +297,59 @@ it.effect("queues provider and resource cleanup and preserves an earlier deletio
     );
   }).pipe(Effect.provide(IdAllocator.layer)),
 );
+
+it.effect(
+  "deletion detaches an unbound native child's referenced session and excludes inherited owners",
+  () =>
+    Effect.gen(function* () {
+      const projection = makeProjection();
+      const nativeSessionId = ProviderSessionId.make("session:native-without-binding");
+      const native = {
+        id: providerThreadId,
+        driver,
+        providerInstanceId,
+        providerSessionId: nativeSessionId,
+        appThreadId: threadId,
+        ownerNodeId: null,
+        nativeThreadRef: { driver, nativeId: "native-child", strength: "strong" as const },
+        nativeConversationHeadRef: null,
+        status: "active" as const,
+        firstRunOrdinal: null,
+        lastRunOrdinal: null,
+        handoffIds: [],
+        forkedFrom: null,
+        createdAt,
+        updatedAt: createdAt,
+      };
+      const plan = yield* planThreadDeletion({
+        command,
+        projection: {
+          ...projection,
+          providerSessions: [],
+          providerThreads: [
+            native,
+            { ...native, id: ProviderThreadId.make("native-child-duplicate-session") },
+            {
+              ...native,
+              id: ProviderThreadId.make("inherited-independent-thread"),
+              appThreadId: ThreadId.make("independent-owner"),
+              providerSessionId: ProviderSessionId.make("session:unrelated"),
+            },
+          ],
+        },
+        attachmentIds: [],
+        now: deletedAt,
+        idAllocator: yield* IdAllocator.IdAllocatorV2,
+      });
+      const detaches = plan.effects.filter(
+        (effect) => effect.request.type === "provider-session.detach",
+      );
+      assert.equal(detaches.length, 1);
+      assert.deepEqual(detaches[0]?.request, {
+        type: "provider-session.detach",
+        providerSessionId: nativeSessionId,
+        detail: "Thread deleted.",
+        revokeMcpCredential: true,
+      });
+    }).pipe(Effect.provide(IdAllocator.layer)),
+);

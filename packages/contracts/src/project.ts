@@ -10,6 +10,7 @@ import {
   NonNegativeInt,
   PositiveInt,
   ProjectId,
+  ThreadId,
   TrimmedNonEmptyString,
   TrimmedString,
   type UnknownUnionMember,
@@ -38,8 +39,11 @@ export const ProjectScript = Schema.Struct({
   runOnWorktreeCreate: Schema.Boolean,
   runOnSettle: Schema.optional(Schema.Boolean),
   async: Schema.optional(Schema.Boolean),
+  /** Exact existing desktop browser profile name for links in this Action's dedicated terminal. */
+  terminalLinkProfileName: Schema.optional(TrimmedNonEmptyString),
   previewUrl: Schema.optional(TrimmedNonEmptyString),
   autoOpenPreview: Schema.optional(Schema.Boolean),
+  allowAgentResume: Schema.optional(Schema.Boolean),
 });
 export type ProjectScript = typeof ProjectScript.Type;
 
@@ -204,6 +208,13 @@ export const ProjectUpdatePayload = Schema.Struct({
 export type ProjectUpdatePayload = typeof ProjectUpdatePayload.Type;
 
 export const ProjectMutation = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("project.scripts.reconcile"),
+    commandId: CommandId,
+    projectId: ProjectId,
+    expectedScripts: Schema.Array(ProjectScript),
+    scripts: Schema.Array(ProjectScript),
+  }),
   Schema.Struct({
     type: Schema.Literal("project.create"),
     commandId: CommandId,
@@ -415,6 +426,8 @@ export class ProjectListEntriesError extends Schema.TaggedError<ProjectListEntri
 
 export const ProjectReadFileInput = Schema.Struct({
   cwd: TrimmedNonEmptyString,
+  /** Read only a file linked in this thread's stored assistant messages or plans. */
+  linkedThreadId: Schema.optionalKey(ThreadId),
   // Workspace-relative, or an absolute host path for a file outside the
   // workspace. Only workspace-relative paths can be written back.
   relativePath: TrimmedNonEmptyString.check(Schema.isMaxLength(PROJECT_READ_FILE_PATH_MAX_LENGTH)),
