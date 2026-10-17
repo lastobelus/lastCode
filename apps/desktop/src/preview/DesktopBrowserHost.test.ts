@@ -1378,6 +1378,8 @@ it.effect.each(["Input.insertText", "Input.dispatchKeyEvent"])(
       const debuggee = makeDebuggee();
       const commands: Array<{ method: string; params: unknown; sessionId: string | undefined }> =
         [];
+      // CDP keyboard forwarding requires the guest to own keyboard focus.
+      Object.assign(debuggee.webContents, { focusedFrame: {} });
       debuggee.tab.debugger.sendCommand = async (method, params, sessionId) => {
         commands.push({ method, params, sessionId });
         return { method };
