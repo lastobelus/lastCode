@@ -282,7 +282,8 @@ such as a reviewer bot's 👍 on a review request, therefore still wakes the age
 time, so ones already present can be reported once when watching starts. Threads in a project that
 watch the same pull request share one check. On GitHub, a check first asks whether anything changed
 and reads the pull request only when it did, which keeps watching inside GitHub's rate limit. A
-reaction on an older comment of a busy pull request can take up to about 30 minutes to notice.
+reaction on a review, an inline review comment, or an older comment of a busy pull request can take
+up to about 30 minutes to notice.
 Comments from your own account do not wake it. Watching ends when the pull request merges or
 closes, after 10 wakes in a row that bring only comments or reactions, after 8
 failed reads in a row, or when you press Stop on the thread. A rate limit only pauses watching.
