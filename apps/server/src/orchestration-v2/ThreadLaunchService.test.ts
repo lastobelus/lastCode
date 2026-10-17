@@ -2085,12 +2085,22 @@ it.effect.each(
         });
       }
       if (archived) {
+        yield* threads.dispatch({
+          type: "thread.stop",
+          commandId: CommandId.make("command:stop:shared-branch-child"),
+          threadId: childThreadId,
+        });
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
         for (const threadId of [childThreadId, otherThreadId, otherPathThreadId]) {
-          yield* threads.dispatch({
+          const commandId = CommandId.make(`command:archive:${threadId}`);
+          yield* orchestrator.dispatch({
             type: "thread.archive",
-            commandId: CommandId.make(`command:archive:${threadId}`),
+            commandId,
             threadId,
           });
+          // This harness disables the worker, so complete the accepted teardown explicitly.
+          yield* threads.executeArchive({ threadId, requestId: commandId });
+          assert.isNotNull((yield* threads.getThreadProjection(threadId)).thread.archivedAt);
         }
       }
       const unrelatedBeforeRename = yield* threads.getThreadProjection(otherThreadId);
