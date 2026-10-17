@@ -30,6 +30,7 @@ import { DatabaseStorageNotice } from "./components/DatabaseStorageNotice";
 import { SettingsChoiceRow } from "./components/SettingsChoiceRow";
 import { SettingsSection } from "./components/SettingsSection";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
+import { LocalCiSettingsSection } from "./components/LocalCiSettingsSection";
 import { SettingsProjectOverridesSection } from "./components/SettingsProjectOverridesSection";
 import { useSettingsEnvironmentFilter } from "./settings-environment-filter";
 import {
@@ -268,6 +269,11 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
     (target) =>
       target.environment.serverConfig.environment.capabilities.threadRestartContinuation === true,
   );
+  const supportsLocalCi =
+    hasConnectedSelection &&
+    targets.every(
+      (target) => target.environment.serverConfig.environment.capabilities.lastcodeLocalCi === true,
+    );
   const disabledFor = (key: string) =>
     disabled ||
     (projectSelected &&
