@@ -392,6 +392,7 @@ export const make = Effect.gen(function* () {
               threadId: input.threadId,
               terminalId,
               cwd,
+              terminalLinkProfileName: script.terminalLinkProfileName ?? null,
               worktreePath: input.worktreePath,
               // Setup may run before a terminal client attaches to answer color probes.
               env: { ...env, NO_COLOR: "1", FORCE_COLOR: "0" },
@@ -441,15 +442,24 @@ export const make = Effect.gen(function* () {
         }),
       )
       .pipe(
-        Effect.catchTag(["UpdateDrainAdmissionError", "UpdateDrainError"], (cause) =>
-          Effect.fail(
-            new ProjectSetupScriptOperationError({
-              ...errorContext,
-              operation: "admitSetupScript",
-              cause,
-            }),
-          ),
-        ),
+        Effect.catchTags({
+          UpdateDrainAdmissionError: (cause) =>
+            Effect.fail(
+              new ProjectSetupScriptOperationError({
+                ...errorContext,
+                operation: "admitSetupScript",
+                cause,
+              }),
+            ),
+          UpdateDrainError: (cause) =>
+            Effect.fail(
+              new ProjectSetupScriptOperationError({
+                ...errorContext,
+                operation: "admitSetupScript",
+                cause,
+              }),
+            ),
+        }),
       );
 
     const completion = observed?.completion.pipe(

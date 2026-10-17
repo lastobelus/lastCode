@@ -77,6 +77,7 @@ vi.mock("~/state/environments", () => ({
 vi.mock("~/state/entities", () => ({
   useProjects: () => state.projects,
   useThreadShells: () => [],
+  readThreadShells: () => [],
   waitForProjectRemoval: async () => true,
 }));
 vi.mock("~/state/projects", () => ({

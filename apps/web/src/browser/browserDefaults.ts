@@ -1,5 +1,7 @@
 import {
   DEFAULT_BROWSER_PROFILE_ID,
+  PreviewAutomationProfileError,
+  type PreviewAutomationOpenInput,
   resolveBrowserProfiles,
   type BrowserProfile,
   type DesktopPreviewTabDefaults,
@@ -82,6 +84,32 @@ export function browserDefaultOpenProfileId(
   defaults: BrowserDefaults = getBrowserDefaults(),
 ): string {
   return defaults.profileId;
+}
+
+/** Explicit selection must resolve to an existing identity, never the fallback default. */
+export function resolveBrowserOpenProfileId(
+  input: Pick<PreviewAutomationOpenInput, "profileId" | "profileName">,
+  defaults: BrowserDefaults,
+): string | undefined {
+  if (input.profileId === undefined && input.profileName === undefined) return undefined;
+  const matches = defaults.profiles.filter((profile) =>
+    input.profileId !== undefined
+      ? profile.id === input.profileId
+      : profile.name === input.profileName,
+  );
+  if (matches.length === 0) {
+    throw new PreviewAutomationProfileError({
+      reason: "unknown",
+      detail: `Browser profile ${JSON.stringify(input.profileId ?? input.profileName)} does not exist on this desktop. Call preview_profiles to list available profiles.`,
+    });
+  }
+  if (matches.length > 1) {
+    throw new PreviewAutomationProfileError({
+      reason: "ambiguous",
+      detail: `Browser profile name ${JSON.stringify(input.profileName)} matches multiple profiles. Use profileId: ${matches.map((profile) => JSON.stringify(profile.id)).join(", ")}.`,
+    });
+  }
+  return matches[0]!.id;
 }
 
 export const FALLBACK_RESPONSIVE_VIEWPORT_SIZE = { width: 1024, height: 768 } as const;
