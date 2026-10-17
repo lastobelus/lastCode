@@ -79,6 +79,28 @@ it.layer(layerTest)("LegacyV1ThreadImporter", (it) => {
     }),
   );
 
+  it.effect("retains historical worktree claims independently of current shells and projects", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const importer = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+      yield* sql`INSERT INTO projection_threads
+        (thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode, branch, worktree_path, created_at, updated_at, deleted_at)
+        VALUES ('legacy-owner', 'missing-project', 'Historical owner', '{"instanceId":"codex","model":"gpt-6"}', 'full-access', 'default', 'historical-branch', '/example/worktrees/old', '2026-01-01T00:00:00.000Z', '2026-01-02T00:00:00.000Z', '2026-01-02T00:00:00.000Z')`;
+      assert.deepStrictEqual(yield* importer.worktreeOwners, [
+        {
+          threadId: "legacy-owner",
+          projectId: "missing-project",
+          branch: "historical-branch",
+          worktreePath: "/example/worktrees/old",
+        },
+      ]);
+      // Historical ownership is a fresh protection read, not a migration receipt.
+      yield* sql`UPDATE projection_threads SET worktree_path = '/example/worktrees/changed' WHERE thread_id = 'legacy-owner'`;
+      assert.equal((yield* importer.worktreeOwners)[0]?.worktreePath, "/example/worktrees/changed");
+      yield* sql`DELETE FROM projection_threads WHERE thread_id = 'legacy-owner'`;
+    }),
+  );
+
   it.effect("imports lightweight shells, hydrates transcripts, and remains idempotent", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
