@@ -57,8 +57,10 @@ const pendingClientRequestIds = new Map<string, string | number>();
 const pendingAgentRequestMethods = new Map<string, string>();
 
 function writeStatus(failure?: unknown): void {
+  const temporaryStatusPath = `${replayStatusPath}.tmp`;
+  // Readers must see a complete status while the next update is being written.
   NodeFS.writeFileSync(
-    replayStatusPath,
+    temporaryStatusPath,
     JSON.stringify({
       scenario: transcript.scenario,
       cursor,
@@ -67,6 +69,7 @@ function writeStatus(failure?: unknown): void {
     }),
     "utf8",
   );
+  NodeFS.renameSync(temporaryStatusPath, replayStatusPath);
 }
 
 function stableStringify(value: unknown): string {
