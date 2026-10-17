@@ -30,18 +30,20 @@ Do not create a PR unless the user separately asks. For a stack, read
 preparing the first target; it defines membership, sequential waits, and
 restacking after squash merges.
 
-At the start of every turn, including an action-resumed turn, take one fresh
-snapshot of the local branch and worktree plus the PR head, base, mergeability,
-checks, formal reviews, issue comments, and every review thread. Bind every
-result to the exact head and base. Never treat an older action result, review,
-or workflow run as evidence for a changed revision.
+At the start of every turn, including a PR-watch wake or action-resumed turn,
+take one fresh snapshot of the local branch and worktree plus the PR head, base,
+mergeability, checks, formal reviews, issue comments, and every review thread.
+Bind every result to the exact head and base. Never treat an older gate-check
+result, action result, review, or workflow run as evidence for a changed
+revision.
 If an already-known pending continuation requires this turn to end, follow
 **Handle an Unavailable Action** first; do not take another PR snapshot merely
 to repeat that blocker.
 
 ## Keep Judgement in the Agent
 
-Before launching an action, handle every artifact already present:
+Before running the gate check or starting a watch, handle every artifact
+already present:
 
 1. Verify each finding against the current source and diff.
 2. Fix real defects, run focused validation, and commit the intended change.
@@ -52,14 +54,14 @@ Before launching an action, handle every artifact already present:
    fix push, post the exact handled marker required by the external-review
    reference.
 4. Decide whether a failed gate merits a fix, rebase, GitHub retry, or no retry.
-   Actions observe or execute one bounded operation; they do not make these
-   decisions or invoke another action.
+   The gate check, PR watch, and Actions only observe or execute one bounded
+   operation; they do not make these decisions.
 
 A dirty worktree invalidates local validation and merge eligibility. A new
 commit, amend, rebase, changed PR head, or changed base invalidates the relevant
-revision-bound results. An explicitly selected remote wait remains independent
-of unrelated edits in the coordinator's checkout. Re-snapshot and repeat only
-the gates that apply to the new revision.
+revision-bound results. A `--pr` gate check reads remote state only and is
+independent of unrelated edits in the coordinator's checkout. Re-snapshot and
+repeat only the gates that apply to the new revision.
 
 ## Handle an Unavailable Action
 
@@ -72,9 +74,9 @@ follow-up. A maintenance alert or resolution notice can start a turn before an
 Action result is delivered. When that result is running or queued, preserve the
 next step in a short closing message and **end the turn immediately** so the
 existing follow-up can arrive. After it arrives, inspect its result and list
-Actions again before launching the next gate. Do not run Quick CI, Full CI, or
-the PR wait script directly, poll, ask for import/permission changes, or start a
-replacement turn to get around this guard. If the known retained follow-up is
+Actions again before launching the next gate. Do not run Quick CI or Full CI
+directly, poll, ask for import/permission changes, or start a replacement turn
+to get around this guard. If the known retained follow-up is
 interrupted and requires Resume, report that specific blocker instead of
 promising automatic delivery.
 
@@ -97,8 +99,8 @@ independent Quick Action:
 
 1. Require this thread's Action checkout to be the clean exact checkout being
    validated, then list Project Actions. A shell command's working directory
-   does not change the saved Action's checkout. An explicit PR wait target
-   does not redirect Quick CI.
+   does not change the saved Action's checkout. A `--pr` gate check does not
+   redirect Quick CI.
 2. Select the eligible `Run Quick CI` action by its returned stable ID. Prefer
    repository-managed `lc-local-ci` over the older saved `run-quick-ci` if both
    exist.
@@ -135,43 +137,65 @@ active, using exactly:
 <!-- lastcode-review-head: HEAD_SHA -->
 ```
 
+The native PR watch (`watch_pull_request`) is the only thing that waits on
+GitHub for this thread. Do not run a polling Action, background watcher, sleep
+loop, or repeated GitHub queries.
+
 When exact-head GitHub CI or Codex review is passive and no current artifact
 needs judgement:
 
-1. For a stack or a PR outside the thread's checkout, prepare the single target
-   using the [stack reference](../_references/stacked-pr-babysit.md#select-the-wait-target).
-   For an ordinary checkout-derived wait, clear any previous explicit target
-   first and require clean local `HEAD` equal to the PR head. List Project Actions.
-2. Select the eligible `Wait for PR` action by its returned stable ID. Prefer
-   repository-managed `lc-wait-for-pr` over the older saved `wait-for-pr` if
-   both exist.
-3. Launch it with `run_project_action_and_resume` and end the turn immediately.
-   Do not poll GitHub, inspect action output, or run another command afterward.
-   Do not execute the script's polling mode through a shell tool; the saved
-   Action provides the same-thread resume handoff. The bounded `--target` and
-   `--clear-target` preparation commands are allowed and do not wait.
+1. Handle current findings and request exact-head review first.
+2. Call `watch_pull_request` with the PR's explicit URL. A new watch wakes only
+   for comments posted after it starts, so a finding that lands before this
+   call is visible only to the check in the next step. Calling it while the
+   watch is active keeps the existing watch.
+3. Run the one-shot gate check: `pnpm lastcode:pr-gates` in a clean checkout
+   whose `HEAD` is the PR head, or `pnpm lastcode:pr-gates --pr PR_NUMBER` from
+   any checkout. It takes one GitHub snapshot, confirming identity and
+   evidence with a second read, and prints one JSON decision with the
+   PR/head/base identity, CI evidence, review state, unresolved-thread count,
+   and parent chain. It exits non-zero only for `attention`. It never waits,
+   approves, or merges.
+4. On `attention`, act on its reason now. For `observation-failed` (a GitHub
+   read failed, or the PR or evidence changed during the check) or
+   `mergeability-unknown` (GitHub had not computed mergeability after CI and
+   review finished), rerun the check once; report the blocker if it persists. On `ready` or `stacked-ready`, continue
+   to the finish line below. On `pending`, end the turn; the watch covers
+   anything newer. For a stack, follow the
+   [stack reference](../_references/stacked-pr-babysit.md#check-and-watch-stack-members).
 
-If that action is absent or ineligible, follow **Handle an Unavailable Action**
-above. Do not poll manually.
+On every wake, take the fresh snapshot above and run the gate check again. If
+the watch has ended (for example after repeated comment-only wakes) while the
+PR is still pending, start it again before that check. A
+wake is news, not a verdict: the watch also wakes when required checks pass
+while review is still pending, when a bot edits a remark, and when someone
+reacts to your comment (Codex's eyes reaction only means review started). The
+first wake after a watch starts can also report reactions that already existed. Fix an
+actionable CI failure or finding immediately, even while another gate is still
+pending. When the check is still `pending` and nothing needs action, end the
+turn; the watch continues.
 
-`Wait for PR` observes GitHub CI and Codex review together for one exact head and
-base. It may resume for a finding, failed or missing gate, timeout, conflict,
-head/base/parent drift, checkout drift in checkout-derived mode, unresolved
-thread, changed PR lifecycle, or completed validation. Inspect the reason and
-make the next decision in the agent. A clean
-review while CI still runs, or green CI while review still runs, is not a reason
-to spend an agent turn.
+The watch has no review timeout, so a review request that Codex never answers
+does not wake the thread. Requesting review before ending the turn keeps the
+normal wake path in place. When a later snapshot shows review still missing,
+treat it as a blocker to handle rather than waiting again. A CI run that never
+registers cannot wake the watch either, so the check reports it as `pending`
+only while review is pending and as `ci-not-registered` attention otherwise. A
+base that moved without a push starts no run; otherwise check the workflow
+trigger and Actions configuration.
 
-On resume, check the validated Action lifecycle and reported PR/head/base before
-using its wake reason. Process success alone is not a passed PR gate. A
-`stacked-ready` result means validation against the pinned parent, not permission
-to merge into main. Recheck GitHub before advancing either finish line.
+A `stacked-ready` result means validation against the current parent, not
+permission to merge into main. If `watch_pull_request` is unavailable, report
+that blocker; do not poll manually. A subagent cannot watch a PR; it reports the
+pending state and next step to the parent thread that owns the watch.
 
 ## Finish the Requested Mode
 
 Before finishing, take a fresh snapshot and require all of these on the same
 exact head and base:
 
+- a `ready` gate check, or `stacked-ready` for a child reported only as
+  validated against its parent;
 - terminal-clean Codex review or durable handled evidence for every finding;
 - zero unresolved review threads, including outdated threads;
 - one successful exact GitHub workflow run and aggregate `CI Gate`;
@@ -188,15 +212,19 @@ mergeability state for every requested member. Identify children validated
 against a parent separately from members ready for main. Do not merge.
 
 For **babysit and merge**, run `pnpm lastcode:merge`. Do not merge in the GitHub
-UI. The guard independently rereads exact GitHub CI, refetches the base, and
-checks the clean PR immediately before its exact-head squash merge. Verify that
+UI. The guard independently rereads exact GitHub CI, strict exact-head review
+readiness, and unresolved review threads, refetches the base, and checks the
+clean PR immediately before its exact-head squash merge. Verify that
 the PR merged, the merged tree matches the reviewed head, and
 `origin/lastcode/main` contains the result. Complete tracked-work bookkeeping
 required by `lastcode-pr`.
 
 For a stack, continue with the next authorized member using the stack reference;
-merging one member does not finish a whole-stack request. Clear the explicit
-wait target when the requested work finishes.
+merging one member does not finish a whole-stack request.
+
+Call `unwatch_pull_request` for every watched PR when the requested work
+finishes or you hand the work back for a blocker or decision, so the thread
+returns to the user's inbox.
 
 Stop and report a real blocker when a gate fails, a finding needs a user
 decision, or the exact head/base cannot satisfy the guarded merge requirements.
