@@ -1179,7 +1179,7 @@ describe("subagent worktree ownership", () => {
                       ? "Settled moments ago"
                       : "Not settled",
       });
-    }).pipe(Effect.provide(cleanupTestLayer), Effect.scoped),
+    }).pipe(runCleanupTest),
   );
 
   it.live.each([
