@@ -1,3 +1,4 @@
+import { shouldChooseNewThreadProject } from "../sidebarMode";
 import { AuthPreviewOperateScope } from "@t3tools/contracts";
 import { Outlet, createFileRoute, redirect, useParams } from "@tanstack/react-router";
 import { useAtomValue } from "@effect/atom-react";
@@ -7,7 +8,7 @@ import { isCommandPaletteOpen } from "../commandPaletteBus";
 import { ThreadRouteView } from "../components/ThreadRouteView";
 import { ThreadLinkPrompt } from "../components/promptLinks/ThreadLinkPrompt";
 import { resolveThreadRouteTarget } from "../threadRoutes";
-import { useClientSettings, useLegacySidebarEnabled } from "../hooks/useSettings";
+import { useClientSettings, useSidebarMode } from "../hooks/useSettings";
 import { openCommandPalette } from "../commandPaletteBus";
 import { useProjects } from "../state/entities";
 import { isPreviewAvailableFor } from "../browser/previewRuntime";
@@ -41,7 +42,7 @@ function ChatRouteGlobalShortcuts() {
     AuthPreviewOperateScope,
   );
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
-  const legacySidebarEnabled = useLegacySidebarEnabled();
+  const sidebarMode = useSidebarMode();
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
   const projects = useProjects();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
@@ -128,7 +129,7 @@ function ChatRouteGlobalShortcuts() {
       if (command === "chat.new") {
         event.preventDefault();
         event.stopPropagation();
-        if (!legacySidebarEnabled && projectGroupCount > 1) {
+        if (shouldChooseNewThreadProject(sidebarMode, projectGroupCount)) {
           openCommandPalette({ open: "new-thread-in" });
           return;
         }
@@ -202,7 +203,7 @@ function ChatRouteGlobalShortcuts() {
     scratchEnvironmentId,
     selectedThreadKeysSize,
     startScratchThread,
-    legacySidebarEnabled,
+    sidebarMode,
     terminalOpen,
   ]);
 
