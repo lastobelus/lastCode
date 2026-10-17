@@ -168,7 +168,7 @@ describe("DesktopEnvironment", () => {
       assert.equal(production.stateDir, "/Users/alice/.lastcode/userdata");
       assert.equal(production.userDataDirName, "lastcode-v2");
       assert.equal(production.appUserModelId, "codes.lastobelus.lastcode");
-      assert.equal(production.displayName, "LastCode (Alpha)");
+      assert.equal(production.displayName, "LastCode (Beta)");
     }),
   );
 
