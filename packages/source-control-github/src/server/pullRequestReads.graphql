@@ -210,6 +210,8 @@ query PullRequestPreview($owner: String!, $name: String!, $number: Int!) {
 # The conversation a pull request carries outside its review threads: who opened it, its issue
 # comments, its reviews and its newest commits. The two remark connections page independently, so
 # each is switched on only while it has more to give; the first read (`$head`) asks for everything.
+# Issue comments arrive newest-updated first so a fresh review request stays within the comment
+# cap on a long pull request. The activity mapping restores chronological order.
 query PullRequestActivity(
   $owner: String!
   $name: String!
@@ -220,6 +222,9 @@ query PullRequestActivity(
   $withReviews: Boolean!
   $reviewsAfter: String
 ) {
+  viewer {
+    login
+  }
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       author @include(if: $head) {
@@ -247,7 +252,9 @@ query PullRequestActivity(
           }
         }
       }
-      comments(first: 100, after: $commentsAfter) @include(if: $withComments) {
+      comments(first: 100, after: $commentsAfter, orderBy: { field: UPDATED_AT, direction: DESC })
+        @include(if: $withComments) {
+        totalCount
         pageInfo {
           hasNextPage
           endCursor
@@ -265,9 +272,11 @@ query PullRequestActivity(
               name
             }
           }
+          ...Reactions
         }
       }
       reviews(first: 100, after: $reviewsAfter) @include(if: $withReviews) {
+        totalCount
         pageInfo {
           hasNextPage
           endCursor
