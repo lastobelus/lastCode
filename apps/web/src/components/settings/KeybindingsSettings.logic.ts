@@ -365,6 +365,9 @@ export function commandLabel(command: KeybindingCommand): string {
   if (command === "view.reopenClosed") return "Reopen Closed Tab";
   if (command === "preview.focusUrl") return "Preview: Focus URL";
   const raw = String(command);
+  if (raw === "sidebar.mode.toggle") {
+    return "Sidebar: Toggle Presentation";
+  }
   if (raw.startsWith("script.") && raw.endsWith(".run")) {
     return `Run Script: ${titleCaseCommandSegment(raw.slice("script.".length, -".run".length))}`;
   }
