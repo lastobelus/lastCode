@@ -1,8 +1,17 @@
 import { resolveThreadVisitDecision } from "./ChatView.logic";
 import { ThreadFind, ThreadFindCanvas, type ThreadFindControls } from "./chat/ThreadFindProvider";
 import { THREAD_FIND_BAR_RESERVED_HEIGHT } from "./chat/ThreadFindBar";
+import {
+  recoveryQueuesFollowUps,
+  recoverySuppressesWorking,
+} from "@t3tools/client-runtime/state/thread-recovery";
+import { useThreadRecoveryBanner } from "./chat/useThreadRecoveryBanner";
+import {
+  parseThreadAnnotationSubmission,
+  saveThreadAnnotationSubmission,
+} from "./thread-annotation/threadAnnotationSubmission";
 import { RotateCcwClockIcon } from "./icons/RotateCcwClockIcon";
-import { CircleAlertIcon } from "lucide-react";
+import { CircleAlertIcon, StickyNoteIcon } from "lucide-react";
 import {
   ComposerActionResumeTitle,
   ComposerActionResumeDescription,
@@ -31,6 +40,10 @@ import {
   rememberCheckoutIsRepo,
 } from "./ChatView.logic";
 import { useLoadBalancedEnvironment } from "../hooks/useLoadBalancedEnvironment";
+import {
+  loadBalancingDecisionLog,
+  loadBalancingExclusionReason,
+} from "../lib/loadBalancingDiagnostics";
 import { useScratchProject } from "../hooks/useScratchProject";
 import { useStableCallback } from "../hooks/useStableCallback";
 import { useProjectScriptEditing } from "./chat/useProjectScriptEditing";
@@ -177,7 +190,6 @@ import { useDiffPanelStore } from "../diffPanelStore";
 import { useActiveThreadRef } from "../hooks/useActiveThreadRef";
 import {
   type ComposerSubmissionIntent,
-  collapseExpandedComposerCursor,
   parseStandaloneComposerSlashCommand,
 } from "../composer-logic";
 import {
@@ -236,6 +248,7 @@ import {
   type RightPanelSurface,
   useRightPanelStore,
 } from "../rightPanelStore";
+import { recordHandoff } from "../handoffs/handoffsStore";
 import {
   isPreviewSupportedInRuntime,
   setActivePreviewTab,
@@ -286,6 +299,7 @@ import { cn, randomUUID } from "~/lib/utils";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { projectScriptIdFromCommand } from "~/projectScripts";
+import { selectProjectScriptTerminal } from "~/projectScripts";
 import { newDraftId, newMessageId, newThreadId } from "~/lib/utils";
 import { registerFaviconProjectForThread } from "~/browserFaviconStore";
 import { getProviderModelCapabilities } from "../providerModels";
@@ -401,6 +415,7 @@ import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import type { AssistantCitationRequest } from "./chat/AssistantCitationSource";
 import { MessagesTimeline, type MessagesTimelineHistoryControls } from "./chat/MessagesTimeline";
 import { ProviderSubagentBar } from "./chat/ProviderSubagentBar";
+import { canPromoteSubagent } from "@t3tools/client-runtime/state/subagent-promotion";
 import { getTriggerDisplayModelName } from "./chat/providerIconUtils";
 import { resolveTimelineIsAtEnd } from "./chat/MessagesTimeline.logic";
 import {
@@ -460,13 +475,23 @@ import {
   latestProviderTurnTokenUsage,
 } from "../lib/contextWindow";
 import {
+  runThreadAnnotationBodySave,
+  threadAnnotationBannerPresentation,
+  ThreadAnnotationActions,
+  ThreadAnnotationEditorDialog,
+  useThreadAnnotationBodyPending,
+} from "./thread-annotation/ThreadAnnotation";
+import {
   DRAFT_HERO_TRANSITION_ANIMATION_ID,
   DRAFT_HERO_TRANSITION_EASING,
   MOBILE_COMPOSER_VIEW_TRANSITION_NAME,
   MOBILE_DRAFT_HEADLINE_VIEW_TRANSITION_NAME,
   runMobileComposerTransition,
 } from "./chat/draftHeroTransition";
-import type { ComposerDispatchMode } from "@t3tools/client-runtime/state/composer-dispatch";
+import {
+  applyComposerQueueConstraint,
+  type ComposerDispatchMode,
+} from "@t3tools/client-runtime/state/composer-dispatch";
 import {
   MAX_HIDDEN_MOUNTED_TERMINAL_THREADS,
   branchMismatchKey,
@@ -1066,6 +1091,19 @@ export default function ChatView(props: ChatViewProps) {
     reportFailure: false,
   });
   const canWriteSourceControl = useEnvironmentScope(environmentId, AuthSourceControlWriteScope);
+  const threadAnnotationExpanded = useUiStateStore(
+    (store) => store.threadAnnotationExpandedById[routeThreadKey] === true,
+  );
+  const setThreadAnnotationExpanded = useUiStateStore((store) => store.setThreadAnnotationExpanded);
+  const upsertThreadAnnotation = useOrchestrationCommand(threadEnvironment.upsertAnnotation, {
+    reportFailure: false,
+  });
+  const resolveThreadAnnotation = useOrchestrationCommand(threadEnvironment.resolveAnnotation, {
+    reportFailure: false,
+  });
+  const reopenThreadAnnotation = useOrchestrationCommand(threadEnvironment.reopenAnnotation, {
+    reportFailure: false,
+  });
   const switchGitRef = useAtomCommand(vcsEnvironment.switchRef, { reportFailure: false });
   const setThreadRuntimeMode = useOrchestrationCommand(threadEnvironment.setRuntimeMode, {
     reportFailure: false,
@@ -1096,15 +1134,27 @@ export default function ChatView(props: ChatViewProps) {
   const revertThreadCheckpoint = useOrchestrationCommand(threadEnvironment.revertCheckpoint, {
     reportFailure: false,
   });
+  const requestSubagentPromotion = useOrchestrationCommand(
+    threadEnvironment.requestSubagentPromotion,
+    {
+      reportFailure: false,
+    },
+  );
+  const cancelSubagentPromotion = useOrchestrationCommand(
+    threadEnvironment.cancelSubagentPromotion,
+    {
+      reportFailure: false,
+    },
+  );
   const forkThreadFromRun = useAtomCommand(threadEnvironment.forkFromRun, {
     reportFailure: false,
   });
   // Action cancellation keeps output history; normal terminal closing deletes it.
   const closeTerminalMutation = useAtomCommand(terminalEnvironment.close, { reportFailure: false });
-  const resumeActionFollowUp = useAtomCommand(threadEnvironment.resumeAction, {
+  const resumeActionFollowUp = useOrchestrationCommand(threadEnvironment.resumeAction, {
     reportFailure: false,
   });
-  const discardActionFollowUp = useAtomCommand(threadEnvironment.discardAction, {
+  const discardActionFollowUp = useOrchestrationCommand(threadEnvironment.discardAction, {
     reportFailure: false,
   });
   const openPreview = useAtomCommand(previewEnvironment.open, { reportFailure: false });
@@ -1510,7 +1560,8 @@ export default function ChatView(props: ChatViewProps) {
       : null;
   })();
   const parentSubagentThreadId =
-    activeThread?.lineage.relationshipToParent === "subagent"
+    activeThread?.lineage.relationshipToParent === "subagent" &&
+    activeThread.lineage.independent !== true
       ? activeThread.lineage.parentThreadId
       : null;
   const parentSubagentEnvironmentId = activeThread?.environmentId ?? null;
@@ -2778,6 +2829,11 @@ export default function ChatView(props: ChatViewProps) {
   const openFileAttachment = (attachment: ChatFileAttachment) => {
     if (activeThreadRef) {
       useRightPanelStore.getState().openAttachment(activeThreadRef, attachment);
+      recordHandoff(
+        activeThreadRef,
+        { kind: "attachment", attachment },
+        { label: attachment.name },
+      );
       return;
     }
   };
@@ -3223,40 +3279,77 @@ export default function ChatView(props: ChatViewProps) {
   const onToggleDiffStable = useStableCallback(onToggleDiff);
 
   const needsLoadBalancing = automaticEnvironment && !draftThread?.loadBalancedEnvironmentId;
-  const loadBalancingCandidates = needsLoadBalancing
-    ? logicalProjectEnvironments
-        .filter((candidate) => {
+  const loadBalancingHosts = (() =>
+    needsLoadBalancing
+      ? logicalProjectEnvironments.map((candidate) => {
           const environment = environmentById.get(candidate.environmentId);
-          return (
-            environment?.connection.phase === "connected" &&
-            (loadBalancingSettings.loadBalancingWeights[candidate.environmentId] ?? 50) > 0 &&
-            environment.serverConfig?.providers.some(
-              (provider) =>
-                (activeProviderInstanceId === null ||
-                  provider.instanceId === activeProviderInstanceId) &&
-                provider.driver === selectedProvider &&
-                (environment.serverConfig?.settings
+          const weight = loadBalancingSettings.loadBalancingWeights[candidate.environmentId] ?? 50;
+          const serverSettings = environment?.serverConfig?.settings;
+          return {
+            environmentId: candidate.environmentId,
+            label: candidate.label,
+            weight,
+            exclusionReason: loadBalancingExclusionReason({
+              connectionPhase: environment?.connection.phase,
+              weight,
+              providers: environment?.serverConfig?.providers.map((provider) => ({
+                ...provider,
+                // The destination project may override the machine switch.
+                enabled: serverSettings
                   ? resolveProjectProviderInstanceEnabled(
-                      environment.serverConfig.settings,
+                      serverSettings,
                       candidate.projectId,
                       provider.instanceId,
                     )
-                  : provider.enabled) &&
-                provider.installed &&
-                provider.status !== "error" &&
-                provider.auth.status !== "unauthenticated" &&
-                provider.availability !== "unavailable",
-            )
-          );
+                  : provider.enabled,
+              })),
+              providerInstanceId: activeProviderInstanceId,
+              providerDriver: selectedProvider,
+            }),
+          };
         })
-        .map((candidate) => candidate.environmentId)
-    : [];
+      : [])();
+  const loadBalancingCandidates = loadBalancingHosts
+    .filter((host) => host.exclusionReason === null)
+    .map((host) => host.environmentId);
   const loadBalancing = useLoadBalancedEnvironment(
     loadBalancingCandidates,
     loadBalancingSettings.loadBalancingWeights,
   );
   useEffect(() => {
     if (!needsLoadBalancing || loadBalancing.pending || !draftId || sendInFlightRef.current) return;
+    try {
+      loadBalancingDecisionLog.record({
+        draftId,
+        threadId: draftThread?.threadId ?? null,
+        providerInstanceId: activeProviderInstanceId,
+        providerDriver: selectedProvider,
+        selectedEnvironmentId: loadBalancing.environmentId,
+        candidates: loadBalancingHosts.map((host) => {
+          const evaluation = loadBalancing.decision.candidates.find(
+            (candidate) => candidate.environmentId === host.environmentId,
+          );
+          return evaluation
+            ? { ...evaluation, label: host.label }
+            : {
+                environmentId: host.environmentId,
+                label: host.label,
+                weight: host.weight,
+                receivedAt: null,
+                sampleAgeMs: null,
+                resources: null,
+                score: null,
+                reason: host.exclusionReason,
+              };
+        }),
+      });
+    } catch {
+      toastManager.add({
+        type: "error",
+        id: "auto-balance-log-failed",
+        title: "Could not save Auto balance decision logs",
+      });
+    }
     const target = logicalProjectEnvironments.find(
       (environment) => environment.environmentId === loadBalancing.environmentId,
     );
@@ -3270,6 +3363,11 @@ export default function ChatView(props: ChatViewProps) {
     needsLoadBalancing,
     loadBalancing.pending,
     loadBalancing.environmentId,
+    loadBalancing.decision,
+    loadBalancingHosts,
+    draftThread?.threadId,
+    activeProviderInstanceId,
+    selectedProvider,
     draftId,
     logicalProjectEnvironments,
     sendInFlightRef,
@@ -3300,7 +3398,7 @@ export default function ChatView(props: ChatViewProps) {
   const onAutoEnvironmentStable = useStableCallback(onAutoEnvironment);
   const autoEnvironmentLabel = automaticEnvironment
     ? draftThread?.loadBalancedEnvironmentId
-      ? "Auto balance"
+      ? `Auto balance · ${logicalProjectEnvironments.find((environment) => environment.environmentId === draftThread.loadBalancedEnvironmentId)?.label ?? "Selected machine"}`
       : loadBalancing.pending
         ? "Checking machines…"
         : loadBalancing.failed
@@ -3556,7 +3654,14 @@ export default function ChatView(props: ChatViewProps) {
       rememberAsLastInvoked?: boolean;
     },
   ) => {
-    if (!hasTerminalWriteAccess() || !activeThreadId || !activeProject || !activeThread) return;
+    if (
+      !hasTerminalWriteAccess() ||
+      !activeThreadId ||
+      !activeProject ||
+      !activeThread ||
+      !activeThreadRef
+    )
+      return;
     if (options?.rememberAsLastInvoked !== false) {
       setLastInvokedScriptByProjectId((current) => {
         if (current[activeProject.id] === script.id) return current;
@@ -3564,14 +3669,34 @@ export default function ChatView(props: ChatViewProps) {
       });
     }
     const targetCwd = options?.cwd ?? gitCwd ?? activeProject.workspaceRoot;
+    const terminalStore = useTerminalUiStateStore.getState();
+    const currentTerminalUiState = selectThreadTerminalUiState(
+      terminalStore.terminalUiStateByThreadKey,
+      activeThreadRef,
+    );
+    const existingTerminalIds = [
+      ...new Set([...activeKnownTerminalIds, ...currentTerminalUiState.terminalIds]),
+    ];
     const baseTerminalId =
-      terminalUiState.activeTerminalId || activeKnownTerminalIds[0] || DEFAULT_THREAD_TERMINAL_ID;
-    const isBaseTerminalBusy = runningTerminalIds.includes(baseTerminalId);
-    const wantsNewTerminal = Boolean(options?.preferNewTerminal) || isBaseTerminalBusy;
-    const shouldCreateNewTerminal =
-      wantsNewTerminal ||
-      !canReuseTerminal ||
-      !readEnvironmentScope(environmentId, AuthTerminalReadScope);
+      currentTerminalUiState.activeTerminalId ||
+      activeKnownTerminalIds[0] ||
+      DEFAULT_THREAD_TERMINAL_ID;
+    const terminalLaunch = selectProjectScriptTerminal({
+      script,
+      baseTerminalId,
+      existingTerminalIds,
+      pendingTerminalLinkProfiles:
+        terminalStore.pendingTerminalLinkProfilesByThreadKey[scopedThreadKey(activeThreadRef)],
+      baseTerminalLinkProfileName: activeThreadKnownSessions.find(
+        (session) => session.target.terminalId === baseTerminalId,
+      )?.state.terminalLinkProfileName,
+      isBaseTerminalBusy: runningTerminalIds.includes(baseTerminalId),
+      preferNewTerminal: Boolean(options?.preferNewTerminal),
+      canReuseTerminal,
+      canReadTerminal: readEnvironmentScope(environmentId, AuthTerminalReadScope),
+      allocateTerminalId: terminalActions.allocateTerminalId,
+    });
+    const shouldCreateNewTerminal = terminalLaunch.createNewTerminal;
     const targetWorktreePath = options?.worktreePath ?? activeThread.worktreePath ?? null;
 
     setTerminalUiLaunchContext({
@@ -3588,11 +3713,15 @@ export default function ChatView(props: ChatViewProps) {
     const launched = terminalActions.launchTerminal({
       place: (terminalId) =>
         shouldCreateNewTerminal
-          ? storeNewTerminal(activeThreadRef, terminalId)
+          ? storeNewTerminal(activeThreadRef, terminalId, terminalLaunch.terminalLinkProfileName)
           : storeSetActiveTerminal(activeThreadRef, terminalId),
+      terminalId: terminalLaunch.terminalId,
+      terminalLinkProfileName: shouldCreateNewTerminal
+        ? (terminalLaunch.terminalLinkProfileName ?? null)
+        : null,
       ...(shouldCreateNewTerminal
         ? { size: { cols: SCRIPT_TERMINAL_COLS, rows: SCRIPT_TERMINAL_ROWS } }
-        : { terminalId: baseTerminalId }),
+        : {}),
       location: { cwd: targetCwd, worktreePath: targetWorktreePath },
       ...(options?.env ? { extraEnv: options.env } : {}),
     });
@@ -3600,6 +3729,7 @@ export default function ChatView(props: ChatViewProps) {
     const targetTerminalId = launched.terminalId;
     const openResult = await launched.result;
     if (openResult._tag === "Failure") {
+      terminalStore.releasePendingTerminalLinkProfile(activeThreadRef, targetTerminalId);
       if (!isAtomCommandInterrupted(openResult)) {
         const error = squashAtomCommandFailure(openResult);
         setThreadError(
@@ -3755,6 +3885,11 @@ export default function ChatView(props: ChatViewProps) {
   const visiblePullRequestCount = visiblePullRequests.length;
   const pullRequestsSurfaceAvailable =
     isServerThread && supportsThreadPullRequests && visiblePullRequestCount > 0;
+  const addHandoffsSurface = () => {
+    if (!activeThreadRef) return;
+    useRightPanelStore.getState().open(activeThreadRef, "handoffs");
+  };
+  const addHandoffsSurfaceStable = useStableCallback(addHandoffsSurface);
   const addPullRequestsSurface = () => {
     if (!activeThreadRef || !pullRequestsSurfaceAvailable) return;
     useRightPanelStore.getState().open(activeThreadRef, "pull-requests");
@@ -4906,6 +5041,73 @@ export default function ChatView(props: ChatViewProps) {
   const supportsSnooze = serverConfig?.environment.capabilities.threadSnooze === true;
   const supportsPinning = serverConfig?.environment.capabilities.threadPinning === true;
   const activeThreadPinned = supportsPinning && activeThreadShell?.pinnedAt != null;
+  const supportsThreadAnnotations =
+    serverConfig?.environment.capabilities.threadAnnotations === true;
+  const threadAnnotation = activeThreadShell?.annotation ?? null;
+  const canAnnotateThread =
+    canOperateThread &&
+    isServerThread &&
+    supportsThreadAnnotations &&
+    (threadAnnotation !== null ||
+      serverProjection?.messages.some((message) => message.role === "user") === true);
+  const [annotationEditorOpen, setAnnotationEditorOpen] = useState(false);
+  const [annotationMutationPending, setAnnotationMutationPending] = useState(false);
+  const [dismissedAnnotationKey, setDismissedAnnotationKey] = useState<string | null>(null);
+  const annotationBodyChangePending = useThreadAnnotationBodyPending(routeThreadRef);
+  const annotationVersionKey = threadAnnotation
+    ? `${routeThreadKey}:${threadAnnotation.updatedAt}`
+    : null;
+
+  const [annotationRouteKey, setAnnotationRouteKey] = useState(routeThreadKey);
+  if (annotationRouteKey !== routeThreadKey) {
+    setAnnotationRouteKey(routeThreadKey);
+    setDismissedAnnotationKey(null);
+    setAnnotationEditorOpen(false);
+  }
+
+  const reportAnnotationFailure = (action: string, error: unknown) => {
+    toastManager.add(
+      stackedThreadToast({
+        type: "error",
+        title: `Failed to ${action} annotation`,
+        description: error instanceof Error ? error.message : "An error occurred.",
+      }),
+    );
+  };
+
+  const saveThreadAnnotation = async (body: string): Promise<boolean> => {
+    if (!activeThread || !canAnnotateThread) return false;
+    return runThreadAnnotationBodySave(
+      scopeThreadRef(activeThread.environmentId, activeThread.id),
+      async () => {
+        setAnnotationMutationPending(true);
+        const result = await upsertThreadAnnotation({
+          environmentId: activeThread.environmentId,
+          input: { threadId: activeThread.id, body },
+        });
+        setAnnotationMutationPending(false);
+        if (result._tag === "Success") return true;
+        if (!isAtomCommandInterrupted(result)) {
+          reportAnnotationFailure("save", squashAtomCommandFailure(result));
+        }
+        return false;
+      },
+    );
+  };
+
+  const changeThreadAnnotationResolution = async (next: "resolve" | "reopen") => {
+    if (!activeThread || !canAnnotateThread) return;
+    setAnnotationMutationPending(true);
+    const command = next === "resolve" ? resolveThreadAnnotation : reopenThreadAnnotation;
+    const result = await command({
+      environmentId: activeThread.environmentId,
+      input: { threadId: activeThread.id },
+    });
+    setAnnotationMutationPending(false);
+    if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+      reportAnnotationFailure(next, squashAtomCommandFailure(result));
+    }
+  };
   const activeThreadSnoozed =
     activeThreadShell !== null &&
     supportsSnooze &&
@@ -5278,6 +5480,17 @@ export default function ChatView(props: ChatViewProps) {
     };
   })() as ComposerBannerStackItem | null;
 
+  const threadRecoveryBanner = useThreadRecoveryBanner({
+    thread: activeThreadShell,
+    environmentId,
+    onOpenThread: onOpenRelatedThread,
+  });
+  const suppressStaleWorking = recoverySuppressesWorking(activeThreadShell?.recovery);
+  const forceQueueFollowUps = recoveryQueuesFollowUps(
+    activeThreadShell?.recovery,
+    activeRuntime?.activeRunId,
+  );
+
   const backgroundWorkBannerItem = (() => {
     const presentation = presentPendingBackgroundWork(activeBackgroundTasks);
     if (presentation === null || !activeThread) {
@@ -5338,15 +5551,18 @@ export default function ChatView(props: ChatViewProps) {
       ),
     };
   })() as ComposerBannerStackItem | null;
-  const [isResumingInterruptedAction, setIsResumingInterruptedAction] = useState(false);
-  const [isDiscardingInterruptedAction, setIsDiscardingInterruptedAction] = useState(false);
   const [cancellingResumableActionRunId, setCancellingResumableActionRunId] = useState<
     string | null
   >(null);
   const runningResumableAction =
     activeThreadShell?.actionResume?.outcome === "running" ? activeThreadShell.actionResume : null;
   const handleOpenResumableActionTerminal = () => {
-    if (activeThreadRef === null || runningResumableAction === null) return;
+    if (
+      activeThreadRef === null ||
+      runningResumableAction === null ||
+      !readEnvironmentScope(activeThreadRef.environmentId, AuthTerminalReadScope)
+    )
+      return;
     storeEnsureTerminal(activeThreadRef, runningResumableAction.terminalId, {
       open: true,
       active: true,
@@ -5357,7 +5573,8 @@ export default function ChatView(props: ChatViewProps) {
     handleOpenResumableActionTerminal,
   );
   const handleCancelResumableAction = async () => {
-    if (activeThreadRef === null || runningResumableAction === null) return;
+    if (activeThreadRef === null || runningResumableAction === null || !hasTerminalWriteAccess())
+      return;
     const runId = runningResumableAction.runId;
     if (cancellingResumableActionRunId === runId) return;
     setCancellingResumableActionRunId(runId);
@@ -5390,35 +5607,51 @@ export default function ChatView(props: ChatViewProps) {
       icon: <RotateCcwClockIcon aria-hidden className="size-4" />,
       title: <ComposerActionResumeTitle action={runningResumableAction} />,
       description: <ComposerActionResumeDescription action={runningResumableAction} />,
-      actions: (
+      actions: canOperateTerminal ? (
         <ComposerActionResumeActions
           action={runningResumableAction}
           cancelling={cancellingResumableActionRunId === runningResumableAction.runId}
           onCancel={() => void handleCancelResumableActionStable()}
           onOpenTerminal={handleOpenResumableActionTerminalStable}
         />
-      ),
+      ) : canReadTerminal ? (
+        <Button size="xs" variant="ghost" onClick={handleOpenResumableActionTerminal}>
+          Open terminal
+        </Button>
+      ) : undefined,
     };
   })() as ComposerBannerStackItem | null;
   const interruptedAction =
     activeThreadShell?.actionResume?.delivery === "available"
       ? activeThreadShell.actionResume
       : null;
-  useEffect(() => {
-    if (interruptedAction === null) {
-      setIsResumingInterruptedAction(false);
-      setIsDiscardingInterruptedAction(false);
-    }
-  }, [interruptedAction]);
+  const interruptedActionKey = interruptedAction
+    ? `${routeThreadKey}:${interruptedAction.runId}`
+    : null;
+  const [pendingInterruptedAction, setPendingInterruptedAction] = useState<{
+    key: string;
+    operation: "resume" | "discard";
+  } | null>(null);
+  if (pendingInterruptedAction !== null && pendingInterruptedAction.key !== interruptedActionKey) {
+    setPendingInterruptedAction(null);
+  }
+  const isResumingInterruptedAction =
+    pendingInterruptedAction?.key === interruptedActionKey &&
+    pendingInterruptedAction?.operation === "resume";
+  const isDiscardingInterruptedAction =
+    pendingInterruptedAction?.key === interruptedActionKey &&
+    pendingInterruptedAction?.operation === "discard";
   const handleResumeInterruptedAction = async () => {
-    if (!activeThreadRef || interruptedAction === null) return;
-    setIsResumingInterruptedAction(true);
+    if (!activeThreadRef || interruptedActionKey === null) return;
+    setPendingInterruptedAction({ key: interruptedActionKey, operation: "resume" });
     const result = await resumeActionFollowUp({
       environmentId: activeThreadRef.environmentId,
       input: { threadId: activeThreadRef.threadId },
     });
     if (result._tag === "Failure") {
-      setIsResumingInterruptedAction(false);
+      setPendingInterruptedAction((current) =>
+        current?.key === interruptedActionKey && current.operation === "resume" ? null : current,
+      );
       if (!isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
         setThreadError(
@@ -5430,14 +5663,16 @@ export default function ChatView(props: ChatViewProps) {
   };
   const handleResumeInterruptedActionStable = useStableCallback(handleResumeInterruptedAction);
   const handleDiscardInterruptedAction = async () => {
-    if (!activeThreadRef || interruptedAction === null) return;
-    setIsDiscardingInterruptedAction(true);
+    if (!activeThreadRef || interruptedActionKey === null) return;
+    setPendingInterruptedAction({ key: interruptedActionKey, operation: "discard" });
     const result = await discardActionFollowUp({
       environmentId: activeThreadRef.environmentId,
       input: { threadId: activeThreadRef.threadId },
     });
     if (result._tag === "Failure") {
-      setIsDiscardingInterruptedAction(false);
+      setPendingInterruptedAction((current) =>
+        current?.key === interruptedActionKey && current.operation === "discard" ? null : current,
+      );
       if (!isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
         setThreadError(
@@ -5462,7 +5697,9 @@ export default function ChatView(props: ChatViewProps) {
           <Button
             size="xs"
             variant="ghost"
-            disabled={isResumingInterruptedAction || isDiscardingInterruptedAction}
+            disabled={
+              !canOperateThread || isResumingInterruptedAction || isDiscardingInterruptedAction
+            }
             onClick={() => void handleDiscardInterruptedActionStable()}
           >
             {isDiscardingInterruptedAction ? "Discarding..." : "Discard"}
@@ -5470,7 +5707,9 @@ export default function ChatView(props: ChatViewProps) {
           <Button
             size="xs"
             variant="outline"
-            disabled={isResumingInterruptedAction || isDiscardingInterruptedAction}
+            disabled={
+              !canOperateThread || isResumingInterruptedAction || isDiscardingInterruptedAction
+            }
             onClick={() => void handleResumeInterruptedActionStable()}
           >
             {isResumingInterruptedAction ? "Resuming..." : "Resume agent"}
@@ -5614,7 +5853,56 @@ export default function ChatView(props: ChatViewProps) {
           },
         })
       : null;
+  const threadAnnotationBannerItem = (() => {
+    if (
+      threadAnnotation === null ||
+      threadAnnotation.resolvedAt !== null ||
+      annotationVersionKey === dismissedAnnotationKey
+    ) {
+      return null;
+    }
+    return {
+      id: `thread-annotation:${annotationVersionKey}`,
+      variant: "warning",
+      icon: <StickyNoteIcon aria-hidden className="size-3.5" />,
+      ...threadAnnotationBannerPresentation({
+        annotation: threadAnnotation,
+        cwd: gitCwd ?? undefined,
+        expanded: threadAnnotationExpanded,
+        onBodyChange: canAnnotateThread ? saveThreadAnnotation : undefined,
+        threadRef: routeThreadRef,
+      }),
+      actions: canOperateThread ? (
+        <ThreadAnnotationActions
+          annotation={threadAnnotation}
+          onEdit={() => setAnnotationEditorOpen(true)}
+          onReopen={() => undefined}
+          onResolve={() => void changeThreadAnnotationResolution("resolve")}
+          expanded={threadAnnotationExpanded}
+          onToggleExpanded={() =>
+            setThreadAnnotationExpanded(routeThreadKey, !threadAnnotationExpanded)
+          }
+          pending={annotationMutationPending || annotationBodyChangePending}
+        />
+      ) : (
+        <Button
+          aria-expanded={threadAnnotationExpanded}
+          aria-label={threadAnnotationExpanded ? "Collapse annotation" : "Expand annotation"}
+          size="icon-xs"
+          variant="ghost-warning"
+          onClick={() => setThreadAnnotationExpanded(routeThreadKey, !threadAnnotationExpanded)}
+        >
+          <ChevronDownIcon
+            className={threadAnnotationExpanded ? "size-3.5" : "size-3.5 -rotate-90"}
+          />
+        </Button>
+      ),
+      dismissLabel: "Dismiss thread annotation",
+      onDismiss: () => setDismissedAnnotationKey(annotationVersionKey),
+    };
+  })() as ComposerBannerStackItem | null;
   const composerBannerItems = (() => {
+    const threadRecoveryItems = threadRecoveryBanner === null ? [] : [threadRecoveryBanner];
     const limitRecoveryItems = limitRecoveryBanner === null ? [] : [limitRecoveryBanner];
     const backgroundWorkItems = [
       childInputBannerItem,
@@ -5627,8 +5915,10 @@ export default function ChatView(props: ChatViewProps) {
       runningResumableActionBannerItem === null ? [] : [runningResumableActionBannerItem];
     const usageLimitsItems = usageLimitsBanner === null ? [] : [usageLimitsBanner];
     const projectCloneItems = projectCloneBannerItem === null ? [] : [projectCloneBannerItem];
+    const annotationItems = threadAnnotationBannerItem === null ? [] : [threadAnnotationBannerItem];
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
       return [
+        ...threadRecoveryItems,
         ...feedbackBannerItems,
         ...limitRecoveryItems,
         ...usageLimitsItems,
@@ -5637,9 +5927,11 @@ export default function ChatView(props: ChatViewProps) {
         ...interruptedActionItems,
         ...runningActionItems,
         ...backgroundWorkItems,
+        ...annotationItems,
       ];
     }
     return [
+      ...threadRecoveryItems,
       ...feedbackBannerItems,
       ...limitRecoveryItems,
       ...usageLimitsItems,
@@ -5651,7 +5943,6 @@ export default function ChatView(props: ChatViewProps) {
       {
         id: `branch-mismatch:${activeBranchMismatchKey}`,
         variant: "info",
-        compact: true,
         icon: <GitBranchIcon />,
         title: (
           <span className="flex min-w-0 items-baseline gap-1.5">
@@ -5687,6 +5978,7 @@ export default function ChatView(props: ChatViewProps) {
           setBranchMismatchDismissTick((tick) => tick + 1);
         },
       },
+      ...annotationItems,
     ];
   })() as ComposerBannerStackItem[];
 
@@ -6213,7 +6505,7 @@ export default function ChatView(props: ChatViewProps) {
 
   const onSend = async (
     e?: { preventDefault: () => void },
-    dispatchMode: ComposerDispatchMode = "auto",
+    rawDispatchMode: ComposerDispatchMode = "auto",
     submissionIntent: ComposerSubmissionIntent = "foreground",
     directAnnotation?: {
       annotation: PreviewAnnotationPayload;
@@ -6221,6 +6513,7 @@ export default function ChatView(props: ChatViewProps) {
     },
   ) => {
     e?.preventDefault();
+    const dispatchMode = applyComposerQueueConstraint(rawDispatchMode, forceQueueFollowUps);
     if (
       usageLimitsOffered &&
       usageLimitsKey !== null &&
@@ -6296,7 +6589,58 @@ export default function ChatView(props: ChatViewProps) {
       onAdvanceActivePendingUserInput();
       return;
     }
-    if (!sendCtx?.providerAvailable) {
+    if (!sendCtx) {
+      notifyDirectAnnotationAttached();
+      return;
+    }
+    const submittedAnnotationPrompt = promptRef.current;
+    const submittedAnnotationDraft = useComposerDraftStore
+      .getState()
+      .getComposerDraft(composerDraftTarget);
+    const annotationSlashCommand = !directAnnotation
+      ? parseThreadAnnotationSubmission(submittedAnnotationPrompt, submittedAnnotationDraft)
+      : null;
+    if (annotationSlashCommand) {
+      if (!canAnnotateThread) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title:
+              isServerThread && !supportsThreadAnnotations
+                ? "Annotations unavailable"
+                : "Send a message first",
+            description:
+              isServerThread && !supportsThreadAnnotations
+                ? "This environment needs a newer LastCode server to annotate threads."
+                : "Annotations can be added after the thread has its first message.",
+          }),
+        );
+        return;
+      }
+      if (annotationSlashCommand.kind === "open-editor") {
+        promptRef.current = "";
+        clearComposerDraftContent(composerDraftTarget);
+        composerRef.current?.resetCursorState();
+        setAnnotationEditorOpen(true);
+        return;
+      }
+      await saveThreadAnnotationSubmission({
+        target: composerDraftTarget,
+        draft: submittedAnnotationDraft,
+        save: () => saveThreadAnnotation(annotationSlashCommand.body),
+        onDraftConsumed: () => {
+          if (
+            currentRouteThreadKeyRef.current !== routeThreadKey ||
+            promptRef.current !== submittedAnnotationPrompt
+          )
+            return;
+          promptRef.current = "";
+          composerRef.current?.resetCursorState();
+        },
+      });
+      return;
+    }
+    if (!sendCtx.providerAvailable) {
       notifyDirectAnnotationAttached();
       return;
     }
@@ -6615,7 +6959,7 @@ export default function ChatView(props: ChatViewProps) {
     const shouldQueueBehindActiveRun =
       compactBeforeSend ||
       sendQueuesBehindSetup ||
-      (phase === "running" && dispatchMode === "queue");
+      ((phase === "running" || forceQueueFollowUps) && dispatchMode === "queue");
     const outgoingMessageText = formatOutgoingPrompt({
       provider: ctxSelectedProvider,
       model: ctxSelectedModel,
@@ -6958,7 +7302,7 @@ export default function ChatView(props: ChatViewProps) {
           if (composerRef.current && currentRouteThreadKeyRef.current === routeThreadKey) {
             promptRef.current = messageTextForSend;
             composerRef.current.resetCursorState({
-              cursor: collapseExpandedComposerCursor(messageTextForSend, messageTextForSend.length),
+              cursor: messageTextForSend.length,
               prompt: messageTextForSend,
               detectTrigger: true,
             });
@@ -7247,6 +7591,9 @@ export default function ChatView(props: ChatViewProps) {
                 envMode: sendEnvMode,
                 branch: activeThreadBranch,
                 startFromOrigin,
+                canAutoBalance:
+                  canAutoBalanceEnvironments && loadBalancingSettings.loadBalancingEnabled,
+                environmentSelection: draftThread?.environmentSelection,
               }),
             ),
           );
@@ -7353,7 +7700,7 @@ export default function ChatView(props: ChatViewProps) {
         setComposerDraftReviewComments(composerDraftTarget, composerReviewCommentsSnapshot);
         setComposerDraftThreadContexts(composerDraftTarget, composerThreadContextsSnapshot);
         composerRef.current?.resetCursorState({
-          cursor: collapseExpandedComposerCursor(messageTextForSend, messageTextForSend.length),
+          cursor: messageTextForSend.length,
           prompt: messageTextForSend,
           detectTrigger: true,
         });
@@ -8266,14 +8613,30 @@ export default function ChatView(props: ChatViewProps) {
                   ? {
                       onCiteAssistantText: citeAssistantTextStable,
                       ...(activeProject ? { onRunShellCommand: runShellCommandStable } : {}),
+                      annotation: threadAnnotation,
+                      ...(canAnnotateThread
+                        ? {
+                            onAnnotationBodyChange: saveThreadAnnotation,
+                            onAnnotationEdit: () => setAnnotationEditorOpen(true),
+                            onAnnotationResolve: () =>
+                              void changeThreadAnnotationResolution("resolve"),
+                            onAnnotationReopen: () =>
+                              void changeThreadAnnotationResolution("reopen"),
+                          }
+                        : {}),
                     }
                   : {})}
-                isWorking={!paintOnlyDisplayedTimeline && isWorking}
-                runlessWorkActive={runlessWorkStartedAt !== null}
+                isWorking={!paintOnlyDisplayedTimeline && !suppressStaleWorking && isWorking}
+                runlessWorkActive={!suppressStaleWorking && runlessWorkStartedAt !== null}
                 activeTurnInProgress={
-                  !paintOnlyDisplayedTimeline && (isWorking || !latestRunSettled)
+                  !paintOnlyDisplayedTimeline &&
+                  !suppressStaleWorking &&
+                  (isWorking || !latestRunSettled)
                 }
-                isCompacting={!paintOnlyDisplayedTimeline && isCompacting}
+                isCompacting={!paintOnlyDisplayedTimeline && !suppressStaleWorking && isCompacting}
+                activeTurnStartedAt={
+                  paintOnlyDisplayedTimeline || suppressStaleWorking ? null : activeWorkStartedAt
+                }
                 awaitingUser={
                   !paintOnlyDisplayedTimeline &&
                   (activePendingApproval !== null ||
@@ -8281,7 +8644,6 @@ export default function ChatView(props: ChatViewProps) {
                     // A secret request has no runtime request; the shell carries it.
                     activeThreadShell?.hasPendingUserInput === true)
                 }
-                activeTurnStartedAt={paintOnlyDisplayedTimeline ? null : activeWorkStartedAt}
                 worktreeSetup={paintOnlyDisplayedTimeline ? null : worktreeSetup}
                 onCancelWorktreeSetup={onCancelWorktreeSetupStable}
                 {...(paintOnlyDisplayedTimeline
@@ -8458,6 +8820,61 @@ export default function ChatView(props: ChatViewProps) {
                         <div className="relative z-10">
                           {showProviderSubagentBar ? (
                             <ProviderSubagentBar
+                              key={activeThreadId}
+                              promotion={activeThread?.subagentPromotion ?? null}
+                              promotionAvailable={
+                                canOperateThread &&
+                                canPromoteSubagent(
+                                  selectedProviderEntry?.snapshot.threadCapabilities,
+                                )
+                              }
+                              onPromote={
+                                canOperateThread &&
+                                canPromoteSubagent(
+                                  selectedProviderEntry?.snapshot.threadCapabilities,
+                                ) &&
+                                !activeEnvironmentUnavailable
+                                  ? async () => {
+                                      if (!activeThread) return;
+                                      const result = await requestSubagentPromotion({
+                                        environmentId,
+                                        input: {
+                                          threadId: activeThread.id,
+                                          creationSource: "web",
+                                        },
+                                      });
+                                      if (result._tag === "Failure")
+                                        throw squashAtomCommandFailure(result);
+                                    }
+                                  : null
+                              }
+                              onCancelPromotion={
+                                canOperateThread &&
+                                activeThread?.subagentPromotion?.status === "waiting" &&
+                                !activeEnvironmentUnavailable
+                                  ? async () => {
+                                      const promotion = activeThread.subagentPromotion;
+                                      if (!promotion) return;
+                                      const result = await cancelSubagentPromotion({
+                                        environmentId,
+                                        input: {
+                                          threadId: activeThread.id,
+                                          requestId: promotion.requestId,
+                                        },
+                                      });
+                                      if (result._tag === "Failure")
+                                        throw squashAtomCommandFailure(result);
+                                    }
+                                  : null
+                              }
+                              onOpenPromoted={
+                                activeThread?.subagentPromotion?.status === "promoted"
+                                  ? () =>
+                                      onOpenRelatedThread(
+                                        activeThread.subagentPromotion!.targetThreadId,
+                                      )
+                                  : null
+                              }
                               provider={selectedProviderEntry ?? null}
                               showInstanceBadge={
                                 selectedProviderEntry !== undefined &&
@@ -8511,6 +8928,7 @@ export default function ChatView(props: ChatViewProps) {
                               }
                               phase={phase}
                               isCompacting={isCompacting}
+                              forceQueue={forceQueueFollowUps}
                               canInterrupt={canInterruptRunningThread}
                               isConnecting={isConnecting}
                               isSendBusy={
@@ -8543,6 +8961,7 @@ export default function ChatView(props: ChatViewProps) {
                               resumeCompactionTokens={resumeCompactionTokens}
                               keepFullHistory={keepFullHistory}
                               onToggleKeepFullHistory={toggleKeepFullHistoryStable}
+                              suppressStaleActivity={suppressStaleWorking}
                               onUsageLimitsCommand={
                                 usageLimitsOffered &&
                                 usageLimitsKey !== null &&
@@ -8604,6 +9023,7 @@ export default function ChatView(props: ChatViewProps) {
                               timelineOverflows={timelineOverflows}
                               onComposerOverlayHeightChange={publishComposerOverlayHeightStable}
                               onRestingChange={onComposerRestingChangeStable}
+                              threadAnnotationsSupported={canAnnotateThread}
                               promptRef={promptRef}
                               composerImagesRef={composerImagesRef}
                               composerFilesRef={composerFilesRef}
@@ -8645,6 +9065,7 @@ export default function ChatView(props: ChatViewProps) {
                               onRemoveEditingQueuedAttachment={
                                 queuedRunEdit.removeEditingAttachment
                               }
+                              onOpenThreadAnnotation={() => setAnnotationEditorOpen(true)}
                             />
                           )}
                         </div>
@@ -8773,6 +9194,13 @@ export default function ChatView(props: ChatViewProps) {
 
             <ThreadDetailsPanel {...threadDetailsPanelProps} />
 
+            <ThreadAnnotationEditorDialog
+              annotation={threadAnnotation}
+              open={annotationEditorOpen && canAnnotateThread}
+              onOpenChange={setAnnotationEditorOpen}
+              onSave={saveThreadAnnotation}
+            />
+
             {pullRequestDialogState ? (
               <PullRequestThreadDialog
                 key={pullRequestDialogState.key}
@@ -8847,6 +9275,8 @@ export default function ChatView(props: ChatViewProps) {
           onAddPullRequest={addPullRequestSurfaceStable}
           onAddPullRequests={addPullRequestsSurfaceStable}
           onAddDevice={addDeviceSurfaceStable}
+          onAddHandoffs={addHandoffsSurfaceStable}
+          threadRef={activeThreadRef ?? undefined}
           browserAvailable={canOperatePreview && browserAvailable}
           terminalAvailable={activeProject !== null && canOperateTerminal}
           diffAvailable={isServerThread && isGitRepo}
@@ -8902,6 +9332,8 @@ export default function ChatView(props: ChatViewProps) {
             onAddPullRequest={addPullRequestSurfaceStable}
             onAddPullRequests={addPullRequestsSurfaceStable}
             onAddDevice={addDeviceSurfaceStable}
+            onAddHandoffs={addHandoffsSurfaceStable}
+            threadRef={activeThreadRef ?? undefined}
             browserAvailable={canOperatePreview && browserAvailable}
             terminalAvailable={activeProject !== null && canOperateTerminal}
             diffAvailable={isServerThread && isGitRepo}

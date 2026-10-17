@@ -1958,6 +1958,16 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
         ),
     }),
     Layer.mock(ProjectionStore.ProjectionStoreV2)({
+      getThreadWorktreePaths: () =>
+        Effect.sync(() =>
+          [thread, ...additionalThreads, ...(sharedSibling === null ? [] : [sharedSibling])]
+            .filter((candidate) => candidate.archivedAt === null && candidate.deletedAt === null)
+            .flatMap((candidate) =>
+              candidate.worktreePath === null
+                ? []
+                : [{ threadId: candidate.id, worktreePath: candidate.worktreePath }],
+            ),
+        ),
       getShellSnapshot: (options) =>
         Effect.gen(function* () {
           reads++;
