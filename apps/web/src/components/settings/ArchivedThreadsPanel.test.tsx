@@ -12,8 +12,10 @@ import {
 } from "@t3tools/contracts";
 import { AsyncResult } from "effect/reactivity";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
 
 const state = vi.hoisted(() => ({
+  groups: [] as SidebarProjectSnapshot[],
   scope: null as unknown as {
     kind: "all" | "environment" | "project" | "checkout" | "unavailable";
     message?: string;
@@ -50,6 +52,7 @@ const state = vi.hoisted(() => ({
 
 vi.mock("./SettingsScopeContext", () => ({
   useSettingsScope: () => ({
+    groups: state.groups,
     scope: {
       ...state.scope,
       members: state.scope.members.map((member) => ({
@@ -246,6 +249,7 @@ function text(renderer: ReactTestRenderer): string {
 describe("ArchivedThreadsPanel", () => {
   beforeEach(() => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    state.groups = [];
     state.scope = { kind: "all", environmentIds: [envA, envB], members: [] };
     state.scopeReady = true;
     state.projectSnapshotsReady = true;
@@ -402,6 +406,7 @@ describe("ArchivedThreadsPanel", () => {
       const group = groups.find((entry) =>
         entry.memberProjectRefs.some((ref) => ref.projectId === "old"),
       )!;
+      state.groups = groups;
       expect(group.memberProjects.map((member) => member.id)).toEqual(["new"]);
       state.scope = resolveSettingsScope(
         {

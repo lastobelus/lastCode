@@ -5578,7 +5578,7 @@ export default function ChatView(props: ChatViewProps) {
     const runId = runningResumableAction.runId;
     if (cancellingResumableActionRunId === runId) return;
     setCancellingResumableActionRunId(runId);
-    try {
+    await (async () => {
       const result = await closeTerminalMutation({
         environmentId: activeThreadRef.environmentId,
         input: {
@@ -5593,9 +5593,9 @@ export default function ChatView(props: ChatViewProps) {
           error instanceof Error ? error.message : "Failed to cancel the running Action.",
         );
       }
-    } finally {
+    })().finally(() => {
       setCancellingResumableActionRunId((current) => (current === runId ? null : current));
-    }
+    });
   };
   const handleCancelResumableActionStable = useStableCallback(handleCancelResumableAction);
   const runningResumableActionBannerItem = (() => {

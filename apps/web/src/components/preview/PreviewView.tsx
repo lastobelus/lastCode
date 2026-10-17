@@ -516,29 +516,33 @@ export function PreviewView({
         // Preparation can finish before the streamed viewer attaches. Do not mint
         // or consume a one-use credential until that viewer confirms control.
         if (isServerTab && serverControlledTabId !== runtimeTabId) return;
-        attempt.navigation ??= prepareHostedPreview(
-          { environmentId: hostingEnvironmentId, threadId: hostingThreadId },
-          destination,
-        );
+        if (attempt.navigation === null) {
+          attempt.navigation = prepareHostedPreview(
+            { environmentId: hostingEnvironmentId, threadId: hostingThreadId },
+            destination,
+          );
+        }
         const authenticated = await attempt.navigation;
         if (cancelled || sequence !== navigationSequence.current.value) return;
-        attempt.dispatch ??= refreshRecoveredPreview(
-          isServerTab ? { ...authenticated, url: destination } : authenticated,
-        ).then((accepted) => {
-          attempt.completed = accepted;
-          if (accepted && requestedHostedRefresh && tabId) {
-            completeHostedPreviewRefresh(
-              { environmentId: hostingEnvironmentId, threadId: hostingThreadId },
-              tabId,
-              requestedHostedRefresh.id,
-            );
-          }
-          if (!accepted) {
-            attempt.navigation = null;
-            attempt.dispatch = null;
-          }
-          return accepted;
-        });
+        if (attempt.dispatch === null) {
+          attempt.dispatch = refreshRecoveredPreview(
+            isServerTab ? { ...authenticated, url: destination } : authenticated,
+          ).then((accepted) => {
+            attempt.completed = accepted;
+            if (accepted && requestedHostedRefresh && tabId) {
+              completeHostedPreviewRefresh(
+                { environmentId: hostingEnvironmentId, threadId: hostingThreadId },
+                tabId,
+                requestedHostedRefresh.id,
+              );
+            }
+            if (!accepted) {
+              attempt.navigation = null;
+              attempt.dispatch = null;
+            }
+            return accepted;
+          });
+        }
         await attempt.dispatch;
       })
       .catch((cause: unknown) => {
@@ -650,13 +654,15 @@ export function PreviewView({
       .then(async (prepared) => {
         if (cancelled || sequence !== navigationSequence.current.value) return;
         if (prepared.restored) {
-          attempt.dispatch ??= refreshRecoveredPreview(
-            isServerTab ? { ...prepared, url } : prepared,
-          ).then((accepted) => {
-            attempt.completed = accepted;
-            if (!accepted) hostingAttemptedByTab.current.delete(runtimeTabId);
-            return accepted;
-          });
+          if (attempt.dispatch === null) {
+            attempt.dispatch = refreshRecoveredPreview(
+              isServerTab ? { ...prepared, url } : prepared,
+            ).then((accepted) => {
+              attempt.completed = accepted;
+              if (!accepted) hostingAttemptedByTab.current.delete(runtimeTabId);
+              return accepted;
+            });
+          }
           await attempt.dispatch;
         } else attempt.completed = true;
         if (!cancelled) finishHostedRecovery(recoveryIdentity);

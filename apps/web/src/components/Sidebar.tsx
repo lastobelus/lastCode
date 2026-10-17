@@ -4295,7 +4295,9 @@ export default function Sidebar() {
         });
         if (result._tag === "Failure") {
           if (isAtomCommandInterrupted(result)) break;
-          firstError ??= squashAtomCommandFailure(result);
+          if (firstError === null || firstError === undefined) {
+            firstError = squashAtomCommandFailure(result);
+          }
           continue;
         }
         deletedThreadKeys.add(threadKey);
