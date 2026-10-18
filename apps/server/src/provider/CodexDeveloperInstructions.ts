@@ -4,8 +4,15 @@ import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeI
 
 import {
   T3_CODE_BROWSER_TOOL_INSTRUCTIONS,
-  T3_CODE_ORCHESTRATION_INSTRUCTIONS,
+  T3_CODE_ORCHESTRATION_SECTIONS,
 } from "@t3tools/provider-core/server/orchestrationInstructions";
+
+/**
+ * Codex cuts the middle out of any `additionalContext` value over 1,000 tokens,
+ * which it counts as UTF-8 bytes divided by four. It does this silently, so
+ * every value built here has to fit.
+ */
+export const CODEX_ADDITIONAL_CONTEXT_VALUE_MAX_BYTES = 4_000;
 
 const T3_CODE_DEVICE_TOOL_INSTRUCTIONS = `## T3 Code devices
 
@@ -22,19 +29,26 @@ const normalizeAvailability = (
   typeof availability === "boolean" ? { browser: availability, device: false } : availability;
 
 /**
- * Describing `preview_*` or `device_*` tools that aren't in the turn's tool list would be worse
- * than saying nothing: the instructions actively steer the model away from Playwright,
- * agent-browser, and raw simctl/adb, so leaving them in would talk it out of the only automation
- * it still has.
+ * Codex retains omitted keys, so unavailable tools need a replacement value
+ * that supersedes earlier guidance without steering away from alternatives.
  */
-const toolInstructions = (availability: boolean | T3CodeToolAvailability): string => {
+const toolInstructions = (availability: boolean | T3CodeToolAvailability) => {
   const tools = normalizeAvailability(availability);
-  return [
-    tools.browser ? T3_CODE_BROWSER_TOOL_INSTRUCTIONS : "",
-    tools.device ? T3_CODE_DEVICE_TOOL_INSTRUCTIONS : "",
-  ]
-    .filter(Boolean)
-    .join("\n\n");
+  // LastCode's browser guidance plus device guidance exceeds the per-entry cap.
+  return {
+    t3_code_tools_browser: {
+      kind: "application" as const,
+      value: tools.browser
+        ? T3_CODE_BROWSER_TOOL_INSTRUCTIONS
+        : "T3 Code browser tools are unavailable in this session. Disregard earlier T3 Code browser-tool guidance and use available alternatives.",
+    },
+    t3_code_tools_device: {
+      kind: "application" as const,
+      value: tools.device
+        ? T3_CODE_DEVICE_TOOL_INSTRUCTIONS
+        : "T3 Code device tools are unavailable in this session. Disregard earlier T3 Code device-tool guidance and use available alternatives.",
+    },
+  };
 };
 
 const CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS = `<collaboration_mode># Plan Mode (Conversational)
@@ -202,13 +216,19 @@ export function buildCodexAdditionalContext(
   toolsAvailable: boolean | T3CodeToolAvailability = true,
 ): Record<string, V2TurnStartParams__AdditionalContextEntry> {
   const tools = toolInstructions(toolsAvailable);
-  // Separate keys keep each value under Codex's per-entry token cap.
+  // Separate keys keep each value under Codex's per-entry cap. Codex emits
+  // entries in key order, so the numbering preserves the authored order.
   return {
-    t3_code_orchestration: { kind: "application", value: T3_CODE_ORCHESTRATION_INSTRUCTIONS },
+    ...Object.fromEntries(
+      T3_CODE_ORCHESTRATION_SECTIONS.map((section, index) => [
+        `t3_code_orchestration_${String(index + 1).padStart(2, "0")}`,
+        { kind: "application" as const, value: section },
+      ]),
+    ),
     t3_code_runtime: {
       kind: "application",
       value: buildRuntimeInstructions({ harness: "Codex", ...runtime }),
     },
-    ...(tools ? { t3_code_tools: { kind: "application", value: tools } } : {}),
+    ...tools,
   };
 }
