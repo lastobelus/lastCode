@@ -33,12 +33,25 @@ async function bundle(entry, format, output, native = false) {
     logLevel: "error",
     // Library builds retain React's environment probe unless explicitly replaced for a browser.
     ...(!native ? { define: { "process.env.NODE_ENV": JSON.stringify("production") } } : {}),
+    ...(native ? { resolve: { conditions: ["node"], mainFields: ["module", "main"] } } : {}),
     build: {
       write: false,
       minify: false,
       target: native ? "node24" : "chrome144",
       lib: { entry: NodePath.join(directory, entry), formats: [format], name: "SurfaceSmoke" },
-      rolldownOptions: { external: native ? [/^node:/, "electron", "playwright-core"] : [] },
+      rolldownOptions: {
+        ...(native ? { platform: "node" } : {}),
+        external: native
+          ? [
+              ...NodeModule.builtinModules,
+              /^node:/,
+              "electron",
+              "playwright-core",
+              "ffi-rs",
+              "@napi-rs/keyring",
+            ]
+          : [],
+      },
     },
   });
   const code = (Array.isArray(result) ? result[0] : result).output.find(
@@ -74,7 +87,7 @@ await bundle("browser-surface.preload.mjs", "cjs", "preload.cjs", true);
 await bundle("browser-surface.renderer.mjs", "iife", "renderer.js");
 await NodeFSP.writeFile(
   NodePath.join(scratch, "index.html"),
-  '<!doctype html><style>html,body{margin:0;overflow:hidden}body{background:#eee}</style><script src="renderer.js"></script>',
+  '<!doctype html><html><head><style>html,body{margin:0;overflow:hidden}body{background:#eee}</style></head><body><script src="renderer.js"></script></body></html>',
 );
 const manifest = {
   scratch,
@@ -99,6 +112,7 @@ if (!process.argv.includes("--build-only")) {
       encoding: "utf8",
       env: environment,
       timeout: 60000,
+      killSignal: "SIGKILL",
     },
   );
   if (child.stdout) process.stdout.write(child.stdout);
