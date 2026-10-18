@@ -28,6 +28,30 @@ describe("ExecutionEnvironmentDescriptor", () => {
     );
   });
 
+  it.each([undefined, false, true])(
+    "requires explicit local-file preservation support (%s)",
+    (supported) => {
+      const decoded = decodeDescriptor({
+        ...descriptor,
+        capabilities: {
+          ...descriptor.capabilities,
+          ...(supported === undefined ? {} : { worktreeLocalPreservation: supported }),
+        },
+      });
+      expect(decoded.capabilities.worktreeLocalPreservation).toBe(supported);
+      expect(decoded.capabilities.worktreeLocalPreservation === true).toBe(supported === true);
+    },
+  );
+
+  it("does not infer local-file preservation from build cleanup support", () => {
+    const decoded = decodeDescriptor({
+      ...descriptor,
+      capabilities: { ...descriptor.capabilities, worktreeBuildCleanup: true },
+    });
+    expect(decoded.capabilities.worktreeBuildCleanup).toBe(true);
+    expect(decoded.capabilities.worktreeLocalPreservation).toBeUndefined();
+  });
+
   it("decodes old, recognized and future manual installation descriptors", () => {
     expect(decodeDescriptor(descriptor).capabilities.serverInstallation).toBeUndefined();
     for (const installation of [{ kind: "npx" }, { kind: "npm-global", prefix: "/opt/node" }]) {
