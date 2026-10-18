@@ -58,16 +58,18 @@ function ThreadArchiveDialog({ request }: { request: Request }) {
     if (submitting.current) return;
     submitting.current = true;
     setChoice(next);
-    try {
+    await (async () => {
       const failure = await request.submit(next);
       if (failure === null) finish(next);
       else finish(null);
-    } catch {
-      finish(null);
-    } finally {
-      submitting.current = false;
-      setChoice(null);
-    }
+    })()
+      .catch(() => {
+        finish(null);
+      })
+      .finally(() => {
+        submitting.current = false;
+        setChoice(null);
+      });
   };
   return (
     <AlertDialog

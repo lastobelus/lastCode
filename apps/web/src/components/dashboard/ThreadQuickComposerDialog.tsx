@@ -81,7 +81,7 @@ export function ThreadQuickComposerDialog({
     sendingKeysRef.current.add(sendKey);
     setSendingKeys((current) => new Set(current).add(sendKey));
     setErrors((current) => ({ ...current, [sendKey]: undefined }));
-    try {
+    await (async () => {
       const result = await sender.submit(sendKey, () => {
         // Retries reuse the saved input and never need a current thread shell.
         if (!liveThread) throw new Error("Thread unavailable.");
@@ -121,22 +121,24 @@ export function ThreadQuickComposerDialog({
         onOpenChange(false);
       }
       onSent?.(sendTarget);
-    } catch (error) {
-      setErrors((current) => ({
-        ...current,
-        [sendKey]:
-          error instanceof Error
-            ? error.message
-            : "Could not confirm delivery. Retry this message.",
-      }));
-    } finally {
-      sendingKeysRef.current.delete(sendKey);
-      setSendingKeys((current) => {
-        const next = new Set(current);
-        next.delete(sendKey);
-        return next;
+    })()
+      .catch((error: unknown) => {
+        setErrors((current) => ({
+          ...current,
+          [sendKey]:
+            error instanceof Error
+              ? error.message
+              : "Could not confirm delivery. Retry this message.",
+        }));
+      })
+      .finally(() => {
+        sendingKeysRef.current.delete(sendKey);
+        setSendingKeys((current) => {
+          const next = new Set(current);
+          next.delete(sendKey);
+          return next;
+        });
       });
-    }
   };
 
   return (

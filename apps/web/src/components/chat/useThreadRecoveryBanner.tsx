@@ -57,7 +57,7 @@ export function useThreadRecoveryBanner({
     setPendingKey(key);
     setError(null);
     const input = { threadId: thread.id, runId: recovery.runId, attemptId: recovery.attemptId };
-    try {
+    await (async () => {
       if (presentation.action === "launch-repair" || presentation.action === "view-repair") {
         const result = await repair({ environmentId, input });
         if (result._tag === "Failure") throw squashAtomCommandFailure(result);
@@ -66,14 +66,16 @@ export function useThreadRecoveryBanner({
         const result = await recover({ environmentId, input });
         if (result._tag === "Failure") throw squashAtomCommandFailure(result);
       }
-    } catch (cause) {
-      setError({
-        key,
-        message: cause instanceof Error ? cause.message : "Could not recover this run.",
+    })()
+      .catch((cause: unknown) => {
+        setError({
+          key,
+          message: cause instanceof Error ? cause.message : "Could not recover this run.",
+        });
+      })
+      .finally(() => {
+        setPendingKey((value) => (value === key ? null : value));
       });
-    } finally {
-      setPendingKey((value) => (value === key ? null : value));
-    }
   };
   return {
     id: `thread-recovery:${key}`,
