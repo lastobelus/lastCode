@@ -96,6 +96,7 @@ export interface ThreadLaunchInput {
   };
   readonly createdBy: OrchestrationV2Actor;
   readonly creationSource: OrchestrationV2CreationSource;
+  readonly creatorThreadId?: ThreadId;
 }
 
 type PreparationInput = Pick<
@@ -977,6 +978,9 @@ const make = Effect.gen(function* () {
                   : { importedNativeThread: input.importedNativeThread }),
                 createdBy: input.createdBy,
                 creationSource: input.creationSource,
+                ...(input.creatorThreadId === undefined
+                  ? {}
+                  : { creatorThreadId: input.creatorThreadId }),
               };
         const claimOperation =
           input.reuseExistingThread === true ? "update-thread" : "create-thread";

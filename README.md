@@ -6,7 +6,7 @@ LastCode:
 
 - Tracks T3 Code nightly.
 - Takes over the update UI and installs a daemon that checkpoints T3 Code nightly, then rebases LastCode's changes on top.
-- Favors the legacy sidebar. We do not QA LastCode changes against the inbox sidebar, although fix pull requests are welcome.
+- Uses the upstream inbox sidebar by default and offers an optional LastCode sidebar under Settings → LastCode → Appearance. The upstream legacy choice remains independent. Automated checks cover sidebar selection and selected LastCode workflows; exhaustive cross-sidebar and desktop/manual acceptance remain incomplete.
 - Adds experimental features that increase both the security-sensitive surface area and the risk that agents could delete or mangle data on your machine. These changes have not been exhaustively reviewed for those risks. They include letting tools wake up threads, planned support for threads talking to each other, URL schemes that make emitted links clickable, and integrations with personal tools used by the maintainer, such as Markover.
 
 Use LastCode with that additional risk in mind. For the smaller upstream surface and its supported release path, use [T3 Code](https://github.com/pingdotgg/t3code).
