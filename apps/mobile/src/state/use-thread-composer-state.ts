@@ -5,6 +5,7 @@ import type { ComposerTextPaste } from "../native/T3ComposerEditor.types";
 import { useAtomValue } from "@effect/atom-react";
 import { threadRuntimeIsActive } from "@t3tools/client-runtime/state/shell";
 import { resolvePendingHandoff } from "@t3tools/client-runtime/handoff";
+import { recoveryQueuesFollowUps } from "@t3tools/client-runtime/state/thread-recovery";
 import {
   deriveProviderSubagentStatus,
   deriveRunlessWorkStartedAt,
@@ -355,6 +356,10 @@ export function useThreadComposerState() {
         : (selectedThreadShell?.runtime ?? null),
     [selectedThreadProjection, selectedThreadShell?.runtime],
   );
+  const forceQueue = recoveryQueuesFollowUps(
+    selectedThreadShell?.recovery,
+    selectedThreadRuntime?.activeRunId,
+  );
   const selectedThreadActivityRun = useMemo(
     () =>
       selectedThreadProjection
@@ -394,7 +399,8 @@ export function useThreadComposerState() {
     selectedThreadVisibleTurnItems,
   ]);
   // A compacting turn cannot take steering input, so follow-ups queue meanwhile.
-  const canSteerActiveTurn = queueWorkflow?.canPromoteToSteer === true && !isCompacting;
+  const canSteerActiveTurn =
+    !forceQueue && queueWorkflow?.canPromoteToSteer === true && !isCompacting;
 
   const runlessWorkStartedAt = useMemo(
     () =>
@@ -670,6 +676,7 @@ export function useThreadComposerState() {
         running: activeThreadBusy && canSteerActiveTurn,
         alternateModifier: followUpOverride !== undefined && followUpOverride !== followUpBehavior,
         activeTurnDefault: followUpBehavior,
+        forceQueue,
       });
       const setupRunning = [selectedThreadActivityRun?.status, selectedThreadRuntime?.status].some(
         (status) => status === "preparing" || status === "starting",
@@ -728,6 +735,7 @@ export function useThreadComposerState() {
       activeThreadBusy,
       canSteerActiveTurn,
       followUpBehavior,
+      forceQueue,
       saveQueuedRunEdit,
       selectedEnvironmentRuntime?.connectionState,
       selectedEnvironmentRuntime?.serverConfig,
@@ -1057,6 +1065,7 @@ export function useThreadComposerState() {
     composerDraftKey,
     followUpBehavior,
     canSteerActiveTurn,
+    forceQueue,
     queuedRunEdit,
     isSavingQueuedEdit,
     cancelQueuedRunEdit,

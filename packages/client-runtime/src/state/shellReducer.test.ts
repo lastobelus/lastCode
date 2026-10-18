@@ -27,6 +27,33 @@ const otherIdentity = {
 };
 
 describe("applyShellStreamEvent", () => {
+  it("applies related updates and removals before advancing an unchanged parent's cursor", () => {
+    const parent = { ...v2ThreadShell, id: ThreadId.make("parent") };
+    const child = { ...v2ThreadShell, id: ThreadId.make("child") };
+    const removed = { ...v2ThreadShell, id: ThreadId.make("removed-child") };
+    const sibling = { ...v2ThreadShell, id: ThreadId.make("unrelated") };
+    const updatedChild = { ...child, status: "running" as const };
+    const snapshot = {
+      ...v2ShellSnapshot,
+      threads: [parent, child, removed, sibling],
+      archivedThreads: [child, removed],
+    };
+    const event = {
+      kind: "thread.updated" as const,
+      sequence: 7,
+      location: "active" as const,
+      thread: parent,
+      relatedThreads: [updatedChild],
+      relatedRemovedThreadIds: [removed.id],
+    };
+    const next = applyShellStreamEvent(snapshot, event);
+    expect(next.threads).toEqual([parent, updatedChild, sibling]);
+    expect(next.threads[0]).toBe(parent);
+    expect(next.threads[2]).toBe(sibling);
+    expect(next.archivedThreads).toEqual([]);
+    expect(next.snapshotSequence).toBe(7);
+    expect(applyShellStreamEvent(next, event)).toBe(next);
+  });
   it("updates a thread in place without moving its siblings", () => {
     const threads = ["a", "b", "c"].map((id) => ({ ...v2ThreadShell, id: ThreadId.make(id) }));
     const updated = { ...threads[1]!, title: "Streaming" };

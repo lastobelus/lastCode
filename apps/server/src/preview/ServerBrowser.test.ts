@@ -26,7 +26,7 @@ import * as Queue from "effect/Queue";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
-import type { BrowserContext, Page } from "playwright-core";
+import type { BrowserContext, Page, Route } from "playwright-core";
 import { beforeEach, expect, vi } from "vite-plus/test";
 
 import * as ServerConfig from "../config.ts";
@@ -36,6 +36,8 @@ import * as DesktopChannel from "./DesktopBrowserChannel.ts";
 import * as Manager from "./Manager.ts";
 import * as ServerBrowser from "./ServerBrowser.ts";
 import * as PreviewBrowser from "./PreviewBrowser.ts";
+import * as Hosting from "./Hosting.ts";
+import * as HostingAuth from "./HostingAuth.ts";
 
 vi.mock("./ServerBrowserContexts.ts", () => ({
   presentAsChrome: async () => {},
@@ -69,6 +71,12 @@ vi.mock("./ServerBrowserContexts.ts", () => ({
     }
     async connectDesktopPage(endpoint: string) {
       const context = makeContext();
+      const creation = rootCreations.find((root) => endpoint === `ws://desktop/${root.tabId}`);
+      if (creation)
+        context.applyNativeRendering({
+          ...(creation.viewport === undefined ? {} : { viewport: creation.viewport }),
+          viewportSize: { width: 1024, height: 768 },
+        });
       await desktopPageSetup?.(context, endpoint);
       context.page.emulateMedia.mockImplementation(async () => {
         nativeRenderingEntered?.resolve();
@@ -93,15 +101,37 @@ function makeFrame() {
   return frame;
 }
 
-function makeSession(frame?: ReturnType<typeof makeFrame>) {
+function makeSession(
+  frame?: ReturnType<typeof makeFrame>,
+  viewport?: () => { width: number; height: number },
+  pixelRatio?: () => number,
+  zoom?: () => number,
+  history?: () => { currentIndex: number; entries: Array<{ url: string }> },
+) {
   const events = new NodeEvents.EventEmitter();
   return {
     on: vi.fn((name: string, listener: () => void) => events.on(name, listener)),
     emit: (name: string) => events.emit(name),
     detach: vi.fn(async () => {}),
     send: vi.fn(async (method: string, input?: unknown): Promise<Record<string, unknown>> => {
-      if (method === "Page.getNavigationHistory") return { currentIndex: 0, entries: [{}] };
-      if (method === "Page.getLayoutMetrics") return { cssVisualViewport: { pageX: 0, pageY: 0 } };
+      if (
+        method === "Runtime.evaluate" &&
+        (input as { expression?: string } | undefined)?.expression === "devicePixelRatio"
+      )
+        return { result: { value: pixelRatio?.() ?? 2 } };
+      if (method === "Page.getNavigationHistory")
+        return history?.() ?? { currentIndex: 0, entries: [{}] };
+      if (method === "Page.getLayoutMetrics") {
+        const size = viewport?.();
+        return {
+          cssVisualViewport: {
+            pageX: 0,
+            pageY: 0,
+            zoom: zoom?.() ?? 1,
+            ...(size ? { clientWidth: size.width, clientHeight: size.height } : {}),
+          },
+        };
+      }
       if (method === "Page.captureScreenshot") return { data: "ZnJhbWU=" };
       if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "main" } } };
       // Snapshots read password fields from their own isolated world in each frame.
@@ -133,9 +163,38 @@ function makeContext(onClose?: (context: BrowserContext) => void) {
   const events = new NodeEvents.EventEmitter();
   const sessions: ReturnType<typeof makeSession>[] = [];
   let url = "about:blank";
+  const history = [url];
+  let historyIndex = 0;
+  const cookies = new Set<string>();
   let viewport = { width: 1280, height: 800 };
+  let native = false;
+  let zoomFactor = 1;
+  const cssViewport = () => ({
+    width: Math.round(viewport.width / zoomFactor),
+    height: Math.round(viewport.height / zoomFactor),
+  });
   let closed = false;
   let contextClosed = false;
+  const routes = new Map<(url: URL) => boolean, (route: Route) => Promise<void>>();
+  const routedUrl = async (next: string) => {
+    let destination = next;
+    const url = new URL(next);
+    url.hash = "";
+    for (const [matches, handler] of routes) {
+      if (!matches(url)) continue;
+      await handler({
+        request: () => ({ isNavigationRequest: () => true, frame: () => page }),
+        fulfill: async ({ headers }: { headers: { location: string } }) => {
+          destination = headers.location;
+        },
+        fallback: async () => {},
+        abort: async () => {
+          throw new Error("Navigation aborted");
+        },
+      } as unknown as Route);
+    }
+    return destination;
+  };
   const page = {
     on: (name: string, callback: (...args: unknown[]) => void) => events.on(name, callback),
     once: (name: string, callback: (...args: unknown[]) => void) => events.once(name, callback),
@@ -150,17 +209,32 @@ function makeContext(onClose?: (context: BrowserContext) => void) {
     frames: () => [page],
     url: () => url,
     title: vi.fn(async () => "test page"),
-    viewportSize: () => viewport,
+    viewportSize: () => (native ? null : viewport),
     setViewportSize: vi.fn(async (size: typeof viewport) => {
       viewport = size;
     }),
     goto: vi.fn(async (next: string) => {
       url = next;
+      history.splice(++historyIndex, history.length, next);
       events.emit("load");
     }),
-    goBack: vi.fn(async () => {}),
-    goForward: vi.fn(async () => {}),
-    reload: vi.fn(async () => {}),
+    goBack: vi.fn(async () => {
+      historyIndex = Math.max(0, historyIndex - 1);
+      url = history[historyIndex] = await routedUrl(history[historyIndex]!);
+    }),
+    goForward: vi.fn(async () => {
+      historyIndex = Math.min(history.length - 1, historyIndex + 1);
+      url = history[historyIndex] = await routedUrl(history[historyIndex]!);
+    }),
+    reload: vi.fn(async () => {
+      url = history[historyIndex] = await routedUrl(url);
+    }),
+    route: async (matches: (url: URL) => boolean, handler: (route: Route) => Promise<void>) => {
+      routes.set(matches, handler);
+    },
+    unroute: async (matches: (url: URL) => boolean) => {
+      routes.delete(matches);
+    },
     emulateMedia: vi.fn(async () => {}),
     waitForLoadState: vi.fn(async () => {}),
     evaluate: vi.fn(async (expression?: unknown) =>
@@ -178,6 +252,7 @@ function makeContext(onClose?: (context: BrowserContext) => void) {
     locator: vi.fn(() => {
       throw new Error("Unexpected locator action");
     }),
+    keyboard: { press: vi.fn(async () => {}), insertText: vi.fn(async () => {}) },
     isClosed: () => closed,
     close: vi.fn(async () => {
       if (!closed) {
@@ -187,6 +262,24 @@ function makeContext(onClose?: (context: BrowserContext) => void) {
     }),
   };
   const context = {
+    cookies,
+    request: {
+      post: vi.fn(async (url: string, _options: unknown) => {
+        cookies.add(new URL(url).origin);
+        return { ok: () => true, dispose: vi.fn(async () => {}) };
+      }),
+    },
+    applyNativeRendering: (input: {
+      viewport?: PreviewViewportSetting;
+      viewportSize?: { width: number; height: number };
+      zoomFactor?: number;
+    }) => {
+      native = true;
+      const size =
+        input.viewport && input.viewport._tag !== "fill" ? input.viewport : input.viewportSize;
+      if (size) viewport = { width: size.width, height: size.height };
+      if (input.zoomFactor !== undefined) zoomFactor = input.zoomFactor;
+    },
     page,
     sessions,
     newPage: async () => page as unknown as Page,
@@ -194,6 +287,10 @@ function makeContext(onClose?: (context: BrowserContext) => void) {
     newCDPSession: async (target: unknown) => {
       const session = makeSession(
         target === page ? undefined : (target as ReturnType<typeof makeFrame>),
+        cssViewport,
+        () => 2 * zoomFactor,
+        () => zoomFactor,
+        () => ({ currentIndex: historyIndex, entries: history.map((url) => ({ url })) }),
       );
       sessions.push(session);
       if (recordingCdpGate) recordingStageEntered?.resolve();
@@ -220,6 +317,7 @@ let contextFailure: Error | null = null;
 let desktopRendersNext = false;
 let localDesktopAvailable = false;
 let remoteUrlAvailable = true;
+let remoteUrlHostname = "environment.example.test";
 let remoteUrlGate: ReturnType<typeof Promise.withResolvers<void>> | null = null;
 let remoteUrlEntered: ReturnType<typeof Promise.withResolvers<void>> | null = null;
 let encoderAcquireGate: ReturnType<typeof Promise.withResolvers<void>> | null = null;
@@ -227,11 +325,17 @@ let encoderSetupGate: ReturnType<typeof Promise.withResolvers<void>> | null = nu
 let recordingCdpGate: ReturnType<typeof Promise.withResolvers<void>> | null = null;
 let recordingStageEntered: ReturnType<typeof Promise.withResolvers<void>> | null = null;
 const encoderPages: Array<ReturnType<typeof makeContext>["page"]> = [];
-let profileCatalogue: {
-  desktopHostId: string;
-  profiles: Array<{ id: string; name: string; kind: "persistent" }>;
-  defaultProfileId: string;
-} | null = null;
+type ProfileCatalogue = Omit<
+  NonNullable<
+    Effect.Success<ReturnType<DesktopChannel.DesktopBrowserChannel["Service"]["getProfiles"]>>
+  >,
+  "supportsNativeRoots"
+> & { readonly supportsNativeRoots?: boolean };
+let profileCatalogue: ProfileCatalogue | null = null;
+let profileCatalogueUnavailable = false;
+const profileRequests: Array<{ desktopHostId?: string }> = [];
+const profileCatalogues = new Map<string, ProfileCatalogue>();
+/** Pages the fake desktop takes back or returns; the channel's streams emit them. */
 const desktopDetaches = new NodeEvents.EventEmitter();
 const desktopTabs = new Set<string>();
 const desktopRenders = (tabId: string) => {
@@ -255,6 +359,8 @@ let nativePopupCloseAttempted: PromiseWithResolvers<void> | null = null;
 let desktopPopupHostConnected = true;
 let nativePopupCloseFailure: "close-canceled" | null = null;
 let nativeCloseChannel: DesktopChannel.DesktopBrowserChannel["Service"] | null = null;
+let nativeRootCloseChannel: DesktopChannel.DesktopBrowserChannel["Service"] | null = null;
+let nativeRootCreationChannel: DesktopChannel.DesktopBrowserChannel["Service"] | null = null;
 let nativeCloseRejected: PromiseWithResolvers<void> | null = null;
 const nativePopupPresence = new Map<string, boolean>();
 let nativePopupProbeUnavailable = false;
@@ -275,6 +381,34 @@ const popupBindings: Array<{
   openerTabId: string;
 }> = [];
 const popupClosures: Array<{ threadId: string; tabId: string; popupId: string }> = [];
+const rootCreations: Array<
+  DesktopChannel.DesktopTabKey & {
+    serverEpoch: string;
+    profileId: string;
+    url: string;
+    viewport?: PreviewViewportSetting;
+  }
+> = [];
+const rootOwnerReconciliations: Array<{ desktopHostId: string; serverEpoch: string }> = [];
+const nativeRootPresence = new Map<string, boolean>();
+const nativeRootProbes: Array<DesktopChannel.DesktopTabKey & { rootId: string }> = [];
+let nativeRootProbeUnavailable = false;
+let nativeRootProbeEntered: PromiseWithResolvers<void> | null = null;
+let nativeRootProbeGate: PromiseWithResolvers<void> | null = null;
+let nativeRootProbeProcessed: PromiseWithResolvers<void> | null = null;
+const rootClosures: Array<DesktopChannel.DesktopTabKey & { rootId: string }> = [];
+const rootDiscards: Array<DesktopChannel.DesktopTabKey & { rootId: string }> = [];
+const rootAcceptances: Array<DesktopChannel.DesktopTabKey & { rootId: string }> = [];
+const rootPublications: Array<DesktopChannel.DesktopTabKey & { rootId: string }> = [];
+let rootAcceptanceGate: PromiseWithResolvers<void> | null = null;
+let rootAcceptanceEntered: PromiseWithResolvers<void> | null = null;
+let rootAcceptanceFailure: DesktopBrowserTransportError | null = null;
+let rootPublicationGate: PromiseWithResolvers<void> | null = null;
+let rootPublicationEntered: PromiseWithResolvers<void> | null = null;
+let rootPublicationFailure: DesktopBrowserTransportError | null = null;
+let rootCloseFailure: "close-canceled" | "host-unavailable" | null = null;
+let rootCloseAttempted: PromiseWithResolvers<void> | null = null;
+let releasedDesktopSeen: PromiseWithResolvers<void> | null = null;
 const nativePopupEvents = <T>(name: string) =>
   Stream.callback<T>((queue) =>
     Effect.acquireRelease(
@@ -295,6 +429,8 @@ const surfaceCalls: Array<{
   leaseId: string;
   action: "acquire" | "release";
   viewport?: PreviewViewportSetting;
+  viewportSize?: { width: number; height: number };
+  zoomFactor?: number;
 }> = [];
 const testThread = {
   threadId: ThreadId.make("browser-test-thread"),
@@ -313,9 +449,14 @@ const asSession = (providerSessionId: string) => ({
   ...scope,
   thread: { ...testThread, providerSessionId },
 });
+let hostingPreparation: Hosting.PreviewHosting["Service"]["prepareNavigation"] = () =>
+  Effect.succeed({ managed: false });
 const dependencies = Layer.mergeAll(
   Broker.layer,
   Manager.layer,
+  Layer.mock(Hosting.PreviewHosting)({
+    prepareNavigation: (input) => Effect.suspend(() => hostingPreparation(input)),
+  }),
   Layer.succeed(ServerEnvironment.ServerEnvironment, {
     getEnvironmentId: Effect.succeed(scope.environmentId),
     getDescriptor: Effect.die("unused descriptor"),
@@ -326,14 +467,34 @@ const dependencies = Layer.mergeAll(
   }),
   Layer.succeed(DesktopChannel.DesktopBrowserChannel, {
     available: true,
-    getProfiles: () => Effect.sync(() => profileCatalogue),
+    getProfiles: (input) =>
+      Effect.sync(() => {
+        profileRequests.push(input);
+        const selected =
+          input.desktopHostId === undefined
+            ? profileCatalogue
+            : (profileCatalogues.get(input.desktopHostId) ??
+              (profileCatalogue?.desktopHostId === input.desktopHostId ? profileCatalogue : null));
+        const catalogue: ProfileCatalogue | null =
+          selected ??
+          (!profileCatalogueUnavailable &&
+          (input.desktopHostId === undefined || input.desktopHostId === "local") &&
+          (desktopRendersNext || localDesktopAvailable)
+            ? {
+                desktopHostId: "local",
+                profiles: [{ id: "default", name: "Default", kind: "persistent" as const }],
+                defaultProfileId: "default",
+              }
+            : null);
+        return catalogue
+          ? { ...catalogue, supportsNativeRoots: catalogue.supportsNativeRoots ?? true }
+          : null;
+      }),
     resolveUrl: (input) =>
       Effect.promise(async () => {
         remoteUrlEntered?.resolve();
         await remoteUrlGate?.promise;
-        return remoteUrlAvailable
-          ? input.url.replace("localhost", "environment.example.test")
-          : null;
+        return remoteUrlAvailable ? input.url.replace("localhost", remoteUrlHostname) : null;
       }),
     subscribeCommands: () => Stream.empty,
     connectedHosts: nativePopupEvents<string>("host-connected"),
@@ -386,6 +547,105 @@ const dependencies = Layer.mergeAll(
           Effect.ensuring(Effect.sync(() => nativePopupProbeProcessed?.resolve())),
         );
       }),
+    closedRoots: nativePopupEvents<DesktopChannel.DesktopTabKey & { rootId: string }>(
+      "root-closed",
+    ),
+    reconcileRoots: (desktopHostId, serverEpoch) =>
+      Effect.sync(() => {
+        rootOwnerReconciliations.push({ desktopHostId, serverEpoch });
+      }),
+    probeRoot: (key, rootId) =>
+      Effect.suspend(() => {
+        nativeRootProbes.push({ ...key, rootId });
+        if (nativeRootCloseChannel) return nativeRootCloseChannel.probeRoot(key, rootId);
+        return Effect.promise(async () => {
+          nativeRootProbeEntered?.resolve();
+          await nativeRootProbeGate?.promise;
+          return nativeRootPresence.get(rootId) ?? true;
+        }).pipe(
+          Effect.flatMap((present) =>
+            nativeRootProbeUnavailable
+              ? Effect.fail(new DesktopBrowserTransportError({ reason: "host-unavailable" }))
+              : Effect.succeed(present),
+          ),
+          Effect.ensuring(Effect.sync(() => nativeRootProbeProcessed?.resolve())),
+        );
+      }),
+    createRoot: (key, input) =>
+      Effect.suspend(() => {
+        rootCreations.push({ ...key, ...input });
+        if (nativeRootCreationChannel) return nativeRootCreationChannel.createRoot(key, input);
+        return desktopRenders(key.tabId)
+          ? Effect.succeed(`root-${key.tabId}`)
+          : Effect.fail(new DesktopBrowserTransportError({ reason: "guest-unavailable" }));
+      }),
+    acceptRoot: (key, rootId) =>
+      Effect.promise(async () => {
+        rootAcceptances.push({ ...key, rootId });
+        rootAcceptanceEntered?.resolve();
+        await rootAcceptanceGate?.promise;
+      }).pipe(
+        Effect.andThen(
+          Effect.suspend(() =>
+            rootAcceptanceFailure
+              ? Effect.fail(rootAcceptanceFailure)
+              : (nativeRootCreationChannel?.acceptRoot(key, rootId) ?? Effect.void),
+          ),
+        ),
+      ),
+    publishRoot: (key, rootId) =>
+      Effect.promise(async () => {
+        rootPublications.push({ ...key, rootId });
+        rootPublicationEntered?.resolve();
+        await rootPublicationGate?.promise;
+      }).pipe(
+        Effect.andThen(
+          Effect.suspend(() =>
+            rootPublicationFailure
+              ? Effect.fail(rootPublicationFailure)
+              : (nativeRootCreationChannel?.publishRoot(key, rootId) ?? Effect.void),
+          ),
+        ),
+      ),
+    closeRoot: (key, rootId, options) =>
+      Effect.suspend(() => {
+        rootClosures.push({ ...key, rootId });
+        rootCloseAttempted?.resolve();
+        if (nativeRootCloseChannel) return nativeRootCloseChannel.closeRoot(key, rootId, options);
+        if (
+          options?.discardIfOffline &&
+          rootCloseFailure === "host-unavailable" &&
+          !desktopRenders(key.tabId)
+        ) {
+          rootDiscards.push({ ...key, rootId });
+          return Effect.succeed("discarded" as const);
+        }
+        if (rootCloseFailure)
+          return Effect.fail(new DesktopBrowserTransportError({ reason: rootCloseFailure }));
+        desktopPopupEvents.emit("root-closed", { ...key, rootId });
+        return Effect.succeed("closed" as const);
+      }),
+    discardRoot: (key, rootId) =>
+      Effect.sync(() => {
+        rootDiscards.push({ ...key, rootId });
+      }).pipe(
+        Effect.andThen(
+          Effect.suspend(
+            () =>
+              (nativeRootCreationChannel ?? nativeRootCloseChannel)?.discardRoot(key, rootId) ??
+              Effect.void,
+          ),
+        ),
+      ),
+    cancelRootCreation: (key, rootId) =>
+      Effect.suspend(() => {
+        rootClosures.push({ ...key, rootId });
+        rootCloseAttempted?.resolve();
+        if (nativeRootCreationChannel)
+          return nativeRootCreationChannel.cancelRootCreation(key, rootId);
+        desktopPopupEvents.emit("root-closed", { ...key, rootId });
+        return Effect.void;
+      }),
     bindPopup: (key, input) =>
       Effect.sync(() => {
         popupBindings.push({ ...key, ...input });
@@ -419,6 +679,11 @@ const dependencies = Layer.mergeAll(
       Effect.sync(() => {
         surfaceCalls.push({ tabId: key.tabId, ...input });
         if (input.action === "release") return null;
+        if (rootCreations.some((root) => root.tabId === key.tabId))
+          desktopConnections
+            .find((connection) => connection.endpoint === `ws://desktop/${key.tabId}`)
+            ?.context.applyNativeRendering(input);
+        if (input.viewportSize) return input.viewportSize;
         if (input.viewport && input.viewport._tag !== "fill") {
           return { width: input.viewport.width, height: input.viewport.height };
         }
@@ -432,7 +697,10 @@ const dependencies = Layer.mergeAll(
       ),
     endpoint: (key) =>
       Effect.acquireRelease(Effect.succeed(`ws://desktop/${key.tabId}`), () =>
-        Effect.sync(() => releasedDesktopTabs.push(key.tabId)),
+        Effect.sync(() => {
+          releasedDesktopTabs.push(key.tabId);
+          releasedDesktopSeen?.resolve();
+        }),
       ),
     pointer: () => Effect.void,
   }),
@@ -468,7 +736,7 @@ const observedManager = Layer.effect(
           .pipe(Effect.tapError(() => Effect.sync(() => nativeCloseRejected?.resolve()))),
       reportStatus: (input: Parameters<typeof manager.reportStatus>[0]) =>
         manager.reportStatus(input).pipe(
-          Effect.tap(() =>
+          Effect.ensuring(
             Effect.sync(() => {
               if (input.navStatus._tag === nativeNavigationReported?.status)
                 nativeNavigationReported.completed.resolve();
@@ -512,6 +780,7 @@ const viewerInput = (tabId: string, canOperate: boolean) => ({
 });
 
 beforeEach(() => {
+  hostingPreparation = () => Effect.succeed({ managed: false });
   surfaceCalls.length = 0;
   surfaceFailure = null;
   remoteUrlGate = null;
@@ -536,18 +805,45 @@ beforeEach(() => {
   desktopRendersNext = false;
   localDesktopAvailable = false;
   profileCatalogue = null;
+  profileCatalogueUnavailable = false;
+  profileRequests.length = 0;
+  profileCatalogues.clear();
   remoteUrlAvailable = true;
+  remoteUrlHostname = "environment.example.test";
   releasedDesktopTabs.length = 0;
   desktopConnections.length = 0;
   desktopPageSetup = null;
   popupBindings.length = 0;
   popupClosures.length = 0;
+  rootCreations.length = 0;
+  rootOwnerReconciliations.length = 0;
+  nativeRootPresence.clear();
+  nativeRootProbes.length = 0;
+  nativeRootProbeUnavailable = false;
+  nativeRootProbeEntered = null;
+  nativeRootProbeGate = null;
+  nativeRootProbeProcessed = null;
+  rootClosures.length = 0;
+  rootAcceptances.length = 0;
+  rootPublications.length = 0;
+  rootAcceptanceGate = null;
+  rootAcceptanceEntered = null;
+  rootAcceptanceFailure = null;
+  rootPublicationGate = null;
+  rootPublicationEntered = null;
+  rootPublicationFailure = null;
+  rootCloseFailure = null;
+  rootDiscards.length = 0;
+  rootCloseAttempted = null;
+  releasedDesktopSeen = null;
   nativePopupCreatedSeen = null;
   nativePopupClosedSeen = null;
   nativePopupCloseAttempted = null;
   desktopPopupHostConnected = true;
   nativePopupCloseFailure = null;
   nativeCloseChannel = null;
+  nativeRootCloseChannel = null;
+  nativeRootCreationChannel = null;
   nativeCloseRejected = null;
   nativePopupPresence.clear();
   nativePopupProbeUnavailable = false;
@@ -558,6 +854,881 @@ beforeEach(() => {
   nativeCloseProcessed = null;
   nativeNavigationReported = null;
 });
+
+it.live.each(["headless", "local", "remote"] as const)(
+  "recovers owned opens and installs auth only in the selected profile: %s",
+  (host) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const native = host !== "headless";
+        const remote = host === "remote";
+        const prepared: Array<{ threadId: string; url: string }> = [];
+        hostingPreparation = (input) =>
+          Effect.sync(() => {
+            prepared.push(input);
+            return { managed: true, bootstrapToken: "fixture-one-use-credential" };
+          });
+        if (native) {
+          profileCatalogue = {
+            desktopHostId: remote ? "fixture-desktop" : "local",
+            profiles: [{ id: "fixture-profile", name: "Fixture profile", kind: "persistent" }],
+            defaultProfileId: "fixture-profile",
+          };
+          desktopRendersNext = true;
+        }
+        const broker = yield* Broker.PreviewAutomationBroker;
+        const manager = yield* Manager.PreviewManager;
+        yield* Effect.yieldNow;
+        const url = "http://localhost:5173/qa/nested?theme=dark#section";
+        const browserUrl = remote ? url.replace("localhost", "environment.example.test") : url;
+        const opened = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: native ? "openWithProfile" : "open",
+          input: {
+            url,
+            open: false,
+            reuseExistingTab: false,
+            ...(native ? { profileName: "Fixture profile" } : {}),
+          },
+        });
+        const selected = native ? desktopConnections[0]!.context : contexts[0]!;
+        expect(prepared).toEqual([
+          { threadId: testThread.threadId, url, ...(remote ? { browserUrl } : {}) },
+        ]);
+        expect(selected.request.post).toHaveBeenCalledWith(
+          new URL("/api/auth/browser-session", browserUrl).href,
+          expect.objectContaining({
+            maxRedirects: 0,
+            data: { credential: "fixture-one-use-credential" },
+          }),
+        );
+        expect(selected.cookies).toEqual(new Set([new URL(browserUrl).origin]));
+        expect(selected.page.goto).toHaveBeenCalledExactlyOnceWith(browserUrl, expect.any(Object));
+        expect(opened.url).toBe(browserUrl);
+        expect(JSON.stringify(opened)).not.toContain("fixture-one-use");
+        expect(
+          JSON.stringify(yield* manager.list({ threadId: testThread.threadId })),
+        ).not.toContain("fixture-one-use");
+        expect(
+          contexts
+            .filter((context) => context !== selected)
+            .every((context) => context.cookies.size === 0),
+        ).toBe(true);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live("returns the actionable shared-route failure to the browser caller", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker, tabId } = yield* ready;
+      hostingPreparation = () =>
+        Effect.fail(
+          new HostingAuth.PreviewHostingAuthError({
+            reason: "bootstrap_failed",
+            boundary: "browser_descriptor",
+          }),
+        );
+      const result = yield* Effect.result(
+        broker.invoke({
+          scope,
+          tabId,
+          operation: "navigate",
+          input: { url: "http://localhost:5173/qa" },
+        }),
+      );
+      expect(result._tag).toBe("Failure");
+      if (result._tag === "Failure") {
+        expect(result.failure.message).toContain("descriptor");
+        expect(result.failure.message).toContain("--share");
+        expect(result.failure.message).toContain("HTTPS");
+        expect(result.failure.message).not.toContain("localhost");
+      }
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live.each(["environment.example.test", "127.0.0.1", "192.0.2.20"])(
+  "retains the owned HTTP origin after a first cold HTTPS native open (connection host: %s)",
+  (connectionHost) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        remoteUrlHostname = connectionHost;
+        profileCatalogue = {
+          desktopHostId: "fixture-desktop",
+          profiles: [{ id: "fixture-profile", name: "Fixture profile", kind: "persistent" }],
+          defaultProfileId: "fixture-profile",
+        };
+        desktopRendersNext = true;
+        const localUrl = "http://localhost:5173/qa?mode=dark#anchor";
+        const browserUrl = "https://environment.example.test:5173/qa?mode=dark#anchor";
+        const prepared: Array<{ threadId: string; url: string; browserUrl?: string }> = [];
+        hostingPreparation = (input) =>
+          Effect.sync(() => {
+            prepared.push(input);
+            return {
+              managed: true,
+              ...(input.url === browserUrl ? { localUrl } : {}),
+              bootstrapToken: "fixture-one-use-credential",
+            };
+          });
+        const broker = yield* Broker.PreviewAutomationBroker;
+        yield* Effect.yieldNow;
+        expect(desktopConnections).toHaveLength(0);
+        const opened = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "openWithProfile",
+          input: {
+            profileName: "Fixture profile",
+            url: browserUrl,
+            open: false,
+            reuseExistingTab: false,
+          },
+        });
+        const selected = desktopConnections[0]!.context;
+        expect(selected.request.post).toHaveBeenCalledExactlyOnceWith(
+          "https://environment.example.test:5173/api/auth/browser-session",
+          expect.objectContaining({
+            data: { credential: "fixture-one-use-credential" },
+            maxRedirects: 0,
+          }),
+        );
+        expect(selected.cookies).toEqual(new Set(["https://environment.example.test:5173"]));
+        expect(selected.page.goto).toHaveBeenCalledExactlyOnceWith(browserUrl, expect.any(Object));
+        const nextBrowserUrl = browserUrl.replace("/qa?", "/qa/next?");
+        const nextLocalUrl = localUrl.replace("/qa?", "/qa/next?");
+        yield* broker.invoke({
+          scope,
+          tabId: opened.tabId!,
+          operation: "navigate",
+          input: { url: nextBrowserUrl },
+        });
+        expect(prepared).toEqual([
+          { threadId: testThread.threadId, url: browserUrl },
+          { threadId: testThread.threadId, url: nextLocalUrl, browserUrl: nextBrowserUrl },
+        ]);
+        expect(selected.page.url()).toBe(nextBrowserUrl);
+        expect(selected.request.post).toHaveBeenCalledTimes(2);
+
+        const browser = yield* ServerBrowser.ServerBrowser;
+        const viewer = yield* browser.attachViewer(viewerInput(opened.tabId!, true));
+        yield* viewer.input({ type: "takeControl" });
+        for (const ignoreCache of [false, true]) {
+          const reloaded = Promise.withResolvers<void>();
+          const reload = selected.page.reload.getMockImplementation()!;
+          selected.page.reload.mockImplementationOnce(async () => {
+            await reload();
+            reloaded.resolve();
+          });
+          for (const session of selected.sessions) {
+            const send = session.send.getMockImplementation()!;
+            session.send.mockImplementation(async (method, input) => {
+              if (method === "Page.reload") reloaded.resolve();
+              return send(method, input);
+            });
+          }
+          yield* viewer.input({ type: "reload", ignoreCache });
+          yield* Effect.promise(() => reloaded.promise);
+          expect(selected.page.url()).toBe(nextBrowserUrl);
+        }
+        for (const delta of [-1, 1] as const) {
+          const committed = Promise.withResolvers<void>();
+          const method = delta < 0 ? "goBack" : "goForward";
+          const navigate = selected.page[method].getMockImplementation()!;
+          selected.page[method].mockImplementationOnce(async () => {
+            await navigate();
+            committed.resolve();
+          });
+          yield* viewer.input({ type: "history", delta });
+          yield* Effect.promise(() => committed.promise);
+          expect(selected.page.url()).toBe(delta < 0 ? browserUrl : nextBrowserUrl);
+        }
+        expect(prepared.slice(2)).toEqual(
+          [nextLocalUrl, nextLocalUrl, localUrl, nextLocalUrl].map((url) => ({
+            threadId: testThread.threadId,
+            url,
+            browserUrl: url.replace("http://localhost", "https://environment.example.test"),
+          })),
+        );
+        expect(selected.request.post).toHaveBeenCalledTimes(6);
+        expect(selected.cookies).toEqual(new Set(["https://environment.example.test:5173"]));
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live.each(["open", "openWithProfile", "navigate"] as const)(
+  "%s passes both origins to hosting and cannot navigate after identity rejection",
+  (operation) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        profileCatalogue = {
+          desktopHostId: "fixture-desktop",
+          profiles: [{ id: "fixture-profile", name: "Fixture profile", kind: "persistent" }],
+          defaultProfileId: "fixture-profile",
+        };
+        desktopRendersNext = true;
+        const { broker, tabId } = yield* ready;
+        const manager = yield* Manager.PreviewManager;
+        const owned = "http://localhost:5173/qa/nested?theme=dark#anchor";
+        const unowned = owned.replace("localhost", "environment.example.test");
+        const prepared: Array<{ threadId: string; url: string; browserUrl?: string }> = [];
+        hostingPreparation = (input) =>
+          Effect.sync(() => {
+            prepared.push(input);
+          }).pipe(
+            Effect.andThen(new HostingAuth.PreviewHostingAuthError({ reason: "bootstrap_failed" })),
+          );
+        const result = yield* Effect.result(
+          broker.invoke({
+            scope,
+            ...(operation === "navigate" ? { tabId } : {}),
+            operation,
+            input: {
+              url: owned,
+              open: false,
+              reuseExistingTab: false,
+              ...(operation === "openWithProfile" ? { profileName: "Fixture profile" } : {}),
+            },
+          }),
+        );
+        expect(new URL(owned).port).toBe(new URL(unowned).port);
+        expect(new URL(owned).origin).not.toBe(new URL(unowned).origin);
+        expect(prepared).toEqual([
+          { threadId: testThread.threadId, url: owned, browserUrl: unowned },
+        ]);
+        expect(result._tag).toBe("Failure");
+        if (result._tag === "Failure")
+          expect(result.failure._tag).toBe("PreviewAutomationExecutionError");
+        expect(JSON.stringify(result)).not.toContain("fixture-private-credential");
+        expect(desktopConnections).toHaveLength(1);
+        expect(desktopConnections[0]!.context.request.post).not.toHaveBeenCalled();
+        expect(desktopConnections[0]!.context.cookies.size).toBe(0);
+        expect(desktopConnections[0]!.context.page.goto).not.toHaveBeenCalled();
+        expect((yield* manager.list({ threadId: testThread.threadId })).sessions).toHaveLength(1);
+        expect(contexts.every((context) => context.cookies.size === 0)).toBe(true);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live(
+  "prepares environment-port navigation and both viewer reloads without changing the destination",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { browser, broker, tabId } = yield* ready;
+        const prepared: string[] = [];
+        hostingPreparation = ({ url }) =>
+          Effect.sync(() => {
+            prepared.push(url);
+            return { managed: true };
+          });
+        const url = "http://localhost:5173/qa?mode=one#anchor";
+        const navigated = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          tabId,
+          operation: "navigate",
+          input: { target: { kind: "environment-port", port: 5173, path: "/qa?mode=one#anchor" } },
+        });
+        expect(navigated.url).toBe(url);
+        const viewer = yield* browser.attachViewer(viewerInput(tabId, true));
+        yield* viewer.input({ type: "takeControl" });
+        const reloaded = Promise.withResolvers<void>();
+        contexts[0]!.page.reload.mockImplementationOnce(async () => reloaded.resolve());
+        yield* viewer.input({ type: "reload" });
+        yield* Effect.promise(() => reloaded.promise);
+        const hardReloaded = Promise.withResolvers<void>();
+        const cdp = contexts[0]!.sessions.at(-1)!;
+        const send = cdp.send.getMockImplementation()!;
+        cdp.send.mockImplementation(async (method, input) => {
+          if (method === "Page.reload") hardReloaded.resolve();
+          return send(method, input);
+        });
+        yield* viewer.input({ type: "reload", ignoreCache: true });
+        yield* Effect.promise(() => hardReloaded.promise);
+        expect(prepared).toEqual([url, url, url]);
+        expect(contexts[0]!.page.reload).toHaveBeenCalledOnce();
+        expect(
+          contexts[0]!.sessions.some((session) =>
+            session.send.mock.calls.some(
+              ([method, input]) =>
+                method === "Page.reload" &&
+                (input as { ignoreCache?: boolean })?.ignoreCache === true,
+            ),
+          ),
+        ).toBe(true);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live("reload recovers both owned remote origins after returning through public history", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      profileCatalogue = {
+        desktopHostId: "fixture-desktop",
+        profiles: [{ id: "fixture-profile", name: "Fixture profile", kind: "persistent" }],
+        defaultProfileId: "fixture-profile",
+      };
+      desktopRendersNext = true;
+      const { browser, broker, tabId } = yield* ready;
+      const context = desktopConnections[0]!.context;
+      const prepared: string[] = [];
+      hostingPreparation = ({ url }) =>
+        Effect.sync(() => {
+          prepared.push(url);
+          return { managed: new URL(url).hostname === "localhost" };
+        });
+      const destinations = [
+        "http://localhost:5173/qa/first?mode=dark#first",
+        "http://localhost:5180/qa/second?mode=light#second",
+        "https://public.example/other",
+      ];
+      for (const url of destinations)
+        yield* broker.invoke({ scope, tabId, operation: "navigate", input: { url } });
+      const viewer = yield* browser.attachViewer(viewerInput(tabId, true));
+      yield* viewer.input({ type: "takeControl" });
+      for (const url of destinations.slice(0, 2).toReversed()) {
+        const wentBack = Promise.withResolvers<void>();
+        const goBack = context.page.goBack.getMockImplementation()!;
+        context.page.goBack.mockImplementationOnce(async () => {
+          await goBack();
+          wentBack.resolve();
+        });
+        yield* viewer.input({ type: "history", delta: -1 });
+        yield* Effect.promise(() => wentBack.promise);
+        const reloaded = Promise.withResolvers<void>();
+        context.page.reload.mockImplementationOnce(async () => reloaded.resolve());
+        yield* viewer.input({ type: "reload" });
+        yield* Effect.promise(() => reloaded.promise);
+        expect(context.page.url()).toBe(url.replace("localhost", "environment.example.test"));
+      }
+      expect(prepared).toEqual([
+        ...destinations,
+        "http://localhost:5180/qa/second?mode=light#second",
+        "http://localhost:5180/qa/second?mode=light#second",
+        "http://localhost:5173/qa/first?mode=dark#first",
+        "http://localhost:5173/qa/first?mode=dark#first",
+      ]);
+      expect(context.page.reload).toHaveBeenCalledTimes(2);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live.each(["local", "remote", "changed address"])(
+  "client hard reload prepares managed access before reloading (%s)",
+  (connection) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const remote = connection !== "local";
+        if (remote) {
+          profileCatalogue = {
+            desktopHostId: "fixture-desktop",
+            profiles: [{ id: "fixture-profile", name: "Fixture profile", kind: "persistent" }],
+            defaultProfileId: "fixture-profile",
+          };
+          desktopRendersNext = true;
+        }
+        const { broker, tabId } = yield* ready;
+        const context = remote ? desktopConnections[0]!.context : contexts[0]!;
+        const url = "http://localhost:5173/qa/reload?mode=dark#anchor";
+        hostingPreparation = () => Effect.succeed({ managed: true });
+        yield* broker.invoke({ scope, tabId, operation: "navigate", input: { url } });
+        if (connection === "changed address")
+          remoteUrlHostname = "updated-environment.example.test";
+        const events: string[] = [];
+        const prepared: Array<{ threadId: string; url: string; browserUrl?: string }> = [];
+        hostingPreparation = (input) =>
+          Effect.sync(() => {
+            events.push("recovered");
+            prepared.push(input);
+            return { managed: true, bootstrapToken: "fixture-one-use-credential" };
+          });
+        const post = context.request.post.getMockImplementation()!;
+        context.request.post.mockImplementationOnce(async (...args) => {
+          events.push("authenticated");
+          return post(...args);
+        });
+        const reloaded = Promise.withResolvers<void>();
+        const reload = context.page.reload.getMockImplementation()!;
+        context.page.reload.mockImplementationOnce(async () => {
+          await reload();
+          events.push("reloaded");
+          reloaded.resolve();
+        });
+        const cdp = context.sessions[0]!;
+        const send = cdp.send.getMockImplementation()!;
+        cdp.send.mockImplementation(async (method, input) => {
+          if (method === "Network.clearBrowserCookies") events.push("cleared");
+          if (method === "Page.reload") {
+            events.push("reloaded");
+            reloaded.resolve();
+          }
+          return send(method, input);
+        });
+        const manager = yield* Manager.PreviewManager;
+        yield* manager.adjust({
+          threadId: scope.thread.threadId,
+          tabId,
+          clear: "cookies",
+          hardReload: true,
+        });
+        yield* Effect.promise(() => reloaded.promise);
+        const browserUrl = remote ? url.replace("localhost", remoteUrlHostname) : url;
+        expect(prepared).toEqual([
+          { threadId: scope.thread.threadId, url, ...(remote ? { browserUrl } : {}) },
+        ]);
+        expect(events).toEqual(["cleared", "recovered", "authenticated", "reloaded"]);
+        expect(context.request.post).toHaveBeenCalledExactlyOnceWith(
+          new URL("/api/auth/browser-session", browserUrl).href,
+          expect.objectContaining({ data: { credential: "fixture-one-use-credential" } }),
+        );
+        if (connection === "changed address") {
+          expect(context.page.url()).toBe(browserUrl);
+          expect(context.page.reload).toHaveBeenCalledOnce();
+          expect(cdp.send).not.toHaveBeenCalledWith("Page.reload", expect.anything());
+        } else expect(cdp.send).toHaveBeenCalledWith("Page.reload", { ignoreCache: true });
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live.each([
+  [-1, false],
+  [1, false],
+  [-1, true],
+  [1, true],
+] as const)(
+  "history delta %s prepares the managed destination before navigation (address changed: %s)",
+  ([delta, changed]) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        profileCatalogue = {
+          desktopHostId: "fixture-desktop",
+          profiles: [{ id: "fixture-profile", name: "Fixture profile", kind: "persistent" }],
+          defaultProfileId: "fixture-profile",
+        };
+        desktopRendersNext = true;
+        const { browser, broker, tabId } = yield* ready;
+        const context = desktopConnections[0]!.context;
+        const url = "http://localhost:5173/qa/history?mode=dark#anchor";
+        hostingPreparation = ({ url }) =>
+          Effect.succeed({ managed: new URL(url).hostname === "localhost" });
+        yield* broker.invoke({ scope, tabId, operation: "navigate", input: { url } });
+        yield* broker.invoke({
+          scope,
+          tabId,
+          operation: "navigate",
+          input: { url: "https://public.example/other" },
+        });
+        if (delta > 0) {
+          yield* Effect.promise(() => context.page.goBack());
+          yield* Effect.promise(() => context.page.goBack());
+        }
+        if (changed) remoteUrlHostname = "updated-environment.example.test";
+        const events: string[] = [];
+        const prepared: Array<{ threadId: string; url: string; browserUrl?: string }> = [];
+        hostingPreparation = (input) =>
+          Effect.sync(() => {
+            events.push("recovered");
+            prepared.push(input);
+            return { managed: true, bootstrapToken: "fixture-one-use-credential" };
+          });
+        const post = context.request.post.getMockImplementation()!;
+        context.request.post.mockImplementationOnce(async (...args) => {
+          events.push("authenticated");
+          return post(...args);
+        });
+        const method = delta < 0 ? "goBack" : "goForward";
+        const navigate = context.page[method].getMockImplementation()!;
+        const committed = Promise.withResolvers<void>();
+        context.page[method].mockImplementationOnce(async () => {
+          await navigate();
+          events.push("navigated");
+          committed.resolve();
+        });
+        const viewer = yield* browser.attachViewer(viewerInput(tabId, true));
+        yield* viewer.input({ type: "takeControl" });
+        yield* viewer.input({ type: "history", delta });
+        yield* Effect.promise(() => committed.promise);
+        const browserUrl = url.replace("localhost", remoteUrlHostname);
+        expect(context.page.url()).toBe(browserUrl);
+        expect(prepared).toEqual([{ threadId: scope.thread.threadId, url, browserUrl }]);
+        expect(events).toEqual(["recovered", "authenticated", "navigated"]);
+        expect(context.request.post).toHaveBeenCalledExactlyOnceWith(
+          new URL("/api/auth/browser-session", browserUrl).href,
+          expect.objectContaining({ data: { credential: "fixture-one-use-credential" } }),
+        );
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live.each(["open", "openWithProfile", "navigate", "viewer"] as const)(
+  "%s recovers reentered remote URLs and path edits using the verified local origin",
+  (operation) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        profileCatalogue = {
+          desktopHostId: "fixture-desktop",
+          profiles: [{ id: "fixture-profile", name: "Fixture profile", kind: "persistent" }],
+          defaultProfileId: "fixture-profile",
+        };
+        desktopRendersNext = true;
+        const { browser, broker, tabId } = yield* ready;
+        const context = desktopConnections[0]!.context;
+        const prepared: Array<{ threadId: string; url: string; browserUrl?: string }> = [];
+        hostingPreparation = (input) =>
+          Effect.sync(() => {
+            prepared.push(input);
+            return new URL(input.url).origin === "http://localhost:5173"
+              ? { managed: true, bootstrapToken: "fixture-one-use-credential" }
+              : { managed: false };
+          });
+        const owned = "http://localhost:5173/qa/original?mode=one#first";
+        const localUrls = [owned, "http://localhost:5173/qa/edited?mode=two#second"];
+        yield* broker.invoke({ scope, tabId, operation: "navigate", input: { url: owned } });
+        const viewer =
+          operation === "viewer"
+            ? yield* browser.attachViewer(viewerInput(tabId, true))
+            : undefined;
+        if (viewer) yield* viewer.input({ type: "takeControl" });
+        for (const localUrl of localUrls) {
+          const browserUrl = localUrl.replace("localhost", "environment.example.test");
+          if (viewer) {
+            const committed = Promise.withResolvers<void>();
+            const goto = context.page.goto.getMockImplementation()!;
+            context.page.goto.mockImplementationOnce(async (url) => {
+              await goto(url);
+              committed.resolve();
+            });
+            yield* viewer.input({ type: "navigate", url: browserUrl });
+            yield* Effect.promise(() => committed.promise);
+          } else {
+            yield* broker.invoke({
+              scope,
+              tabId,
+              operation: operation === "viewer" ? "navigate" : operation,
+              input: {
+                url: browserUrl,
+                open: false,
+                ...(operation === "openWithProfile" ? { profileName: "Fixture profile" } : {}),
+              },
+            });
+          }
+          expect(context.page.url()).toBe(browserUrl);
+        }
+        expect(prepared).toEqual(
+          [owned, ...localUrls].map((url) => ({
+            threadId: testThread.threadId,
+            url,
+            browserUrl: url.replace("localhost", "environment.example.test"),
+          })),
+        );
+        expect(context.request.post).toHaveBeenCalledTimes(3);
+        expect(context.request.post).toHaveBeenLastCalledWith(
+          "http://environment.example.test:5173/api/auth/browser-session",
+          expect.objectContaining({ data: { credential: "fixture-one-use-credential" } }),
+        );
+        expect(desktopConnections).toHaveLength(1);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live.each([
+  [false, false],
+  [true, false],
+  [false, true],
+  [true, true],
+] as const)(
+  "reattached desktop sessions retain verified origins for reload (ignoreCache=%s, address changed=%s)",
+  ([ignoreCache, changed]) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        profileCatalogue = {
+          desktopHostId: "fixture-desktop",
+          profiles: [{ id: "fixture-profile", name: "Fixture profile", kind: "persistent" }],
+          defaultProfileId: "fixture-profile",
+        };
+        desktopRendersNext = true;
+        const { browser, broker, tabId } = yield* ready;
+        const prepared: Array<{ threadId: string; url: string; browserUrl?: string }> = [];
+        hostingPreparation = (input) =>
+          Effect.sync(() => {
+            prepared.push(input);
+            return new URL(input.url).origin === "http://localhost:5173"
+              ? { managed: true, bootstrapToken: "fixture-one-use-credential" }
+              : { managed: false };
+          });
+        const localUrl = "http://localhost:5173/qa/retained?mode=dark#anchor";
+        const browserUrl = localUrl.replace("localhost", "environment.example.test");
+        yield* broker.invoke({ scope, tabId, operation: "navigate", input: { url: localUrl } });
+        const previous = desktopConnections[0]!.context;
+        const viewer = yield* browser.attachViewer(viewerInput(tabId, false));
+        desktopPageSetup = async (context) => {
+          await context.page.goto(previous.page.url());
+          context.page.goto.mockClear();
+        };
+        desktopDetaches.emit("detach", {
+          threadId: testThread.threadId,
+          tabId,
+          desktopHostId: "fixture-desktop",
+        });
+        let ending = yield* Queue.take(viewer.output);
+        while (ending._tag !== "reconnect") ending = yield* Queue.take(viewer.output);
+        desktopDetaches.emit("attach", {
+          threadId: testThread.threadId,
+          tabId,
+          desktopHostId: "fixture-desktop",
+        });
+        const reattached = yield* browser.attachViewer(viewerInput(tabId, true));
+        yield* reattached.input({ type: "takeControl" });
+        const current = desktopConnections[1]!.context;
+        if (changed) remoteUrlHostname = "updated-environment.example.test";
+        const resolvedUrl = localUrl.replace("localhost", remoteUrlHostname);
+        const reloaded = Promise.withResolvers<void>();
+        if (ignoreCache) {
+          const cdp = current.sessions.at(-1)!;
+          const send = cdp.send.getMockImplementation()!;
+          cdp.send.mockImplementation(async (method, input) => {
+            if (method === "Page.reload") reloaded.resolve();
+            return send(method, input);
+          });
+        }
+        const reload = current.page.reload.getMockImplementation()!;
+        current.page.reload.mockImplementationOnce(async () => {
+          await reload();
+          reloaded.resolve();
+        });
+        yield* reattached.input({ type: "reload", ignoreCache });
+        yield* Effect.promise(() => reloaded.promise);
+        expect(current.page.url()).toBe(resolvedUrl);
+        expect(prepared).toEqual([
+          { threadId: testThread.threadId, url: localUrl, browserUrl },
+          { threadId: testThread.threadId, url: localUrl, browserUrl: resolvedUrl },
+        ]);
+        expect(current.request.post).toHaveBeenCalledExactlyOnceWith(
+          new URL("/api/auth/browser-session", resolvedUrl).href,
+          expect.objectContaining({ data: { credential: "fixture-one-use-credential" } }),
+        );
+        expect(previous.page.close).not.toHaveBeenCalled();
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live("cancelled authentication drains cookie writes before takeover and typing", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { browser, broker, tabId } = yield* ready;
+      const viewer = yield* browser.attachViewer(viewerInput(tabId, true));
+      const context = contexts[0]!;
+      const entered = Promise.withResolvers<void>();
+      const response = Promise.withResolvers<void>();
+      const events: string[] = [];
+      hostingPreparation = () =>
+        Effect.succeed({ managed: true, bootstrapToken: "fixture-delayed-credential" });
+      context.request.post.mockImplementationOnce(async (url) => {
+        entered.resolve();
+        await response.promise;
+        context.cookies.add(new URL(url).origin);
+        events.push("cookie written");
+        return {
+          ok: () => true,
+          dispose: vi.fn(async () => {
+            events.push("response disposed");
+          }),
+        };
+      });
+      yield* Effect.addFinalizer(() => Effect.sync(() => response.resolve()));
+      const request = yield* broker
+        .invoke({ scope, tabId, operation: "navigate", input: { url: "http://localhost:5173/qa" } })
+        .pipe(Effect.forkScoped);
+      yield* Effect.promise(() => entered.promise);
+      yield* Fiber.interrupt(request);
+      yield* Queue.clear(viewer.output);
+      const takeover = yield* viewer.input({ type: "takeControl" }).pipe(Effect.forkScoped);
+      let control = yield* Queue.take(viewer.output);
+      while (control._tag !== "control" || control.controller !== "you")
+        control = yield* Queue.take(viewer.output);
+      const cdp = context.sessions.at(-1)!;
+      const send = cdp.send.getMockImplementation()!;
+      cdp.send.mockImplementation(async (method, input) => {
+        if (method === "Input.insertText") events.push("human typed");
+        return send(method, input);
+      });
+      const typing = yield* viewer.input({ type: "text", text: "hello" }).pipe(Effect.forkScoped);
+      yield* broker.invoke({ scope, tabId, operation: "status", input: {} });
+      expect(events).toEqual([]);
+      response.resolve();
+      yield* Fiber.join(takeover);
+      yield* Fiber.join(typing);
+      expect(events).toEqual(["cookie written", "response disposed", "human typed"]);
+      expect(context.page.goto).not.toHaveBeenCalled();
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live.each(["navigate", "history"] as const)(
+  "a newer viewer %s cancels preparation without blocking input",
+  (type) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { browser, tabId } = yield* ready;
+        const viewer = yield* browser.attachViewer(viewerInput(tabId, true));
+        yield* viewer.input({ type: "takeControl" });
+        const entered = Promise.withResolvers<void>();
+        const interrupted = Promise.withResolvers<void>();
+        const committed = Promise.withResolvers<void>();
+        const slowUrl = "http://localhost:5173/slow";
+        hostingPreparation = ({ url }) =>
+          url === slowUrl
+            ? Effect.sync(() => entered.resolve()).pipe(
+                Effect.andThen(Effect.never),
+                Effect.onInterrupt(() => Effect.sync(() => interrupted.resolve())),
+              )
+            : Effect.succeed({ managed: false });
+        yield* viewer.input({ type: "navigate", url: slowUrl });
+        yield* Effect.promise(() => entered.promise);
+        yield* viewer.input({ type: "text", text: "hello" });
+        expect(contexts[0]!.sessions.at(-1)!.send).toHaveBeenCalledWith("Input.insertText", {
+          text: "hello",
+        });
+        const corrected = "https://public.example/corrected?mode=dark#anchor";
+        if (type === "navigate") {
+          const goto = contexts[0]!.page.goto.getMockImplementation()!;
+          contexts[0]!.page.goto.mockImplementationOnce(async (url) => {
+            await goto(url);
+            committed.resolve();
+          });
+        } else contexts[0]!.page.goBack.mockImplementationOnce(async () => committed.resolve());
+        yield* viewer.input({ type, url: corrected, delta: -1 });
+        yield* Effect.promise(() => interrupted.promise);
+        yield* Effect.promise(() => committed.promise);
+        if (type === "navigate")
+          expect(contexts[0]!.page.goto).toHaveBeenCalledExactlyOnceWith(
+            corrected,
+            expect.objectContaining({ waitUntil: "commit" }),
+          );
+        else {
+          expect(contexts[0]!.page.goto).not.toHaveBeenCalled();
+          expect(contexts[0]!.page.goBack).toHaveBeenCalledOnce();
+        }
+        yield* viewer.input({ type: "releaseControl" });
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live.each(["navigate", "reload", "history"] as const)(
+  "control handoff cancels pending viewer %s preparation before page mutation",
+  (type) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { browser, broker, tabId } = yield* ready;
+        const url = "http://localhost:5173/qa?mode=dark#anchor";
+        hostingPreparation = () => Effect.succeed({ managed: true });
+        yield* broker.invoke({ scope, tabId, operation: "navigate", input: { url } });
+        if (type === "history")
+          yield* broker.invoke({
+            scope,
+            tabId,
+            operation: "navigate",
+            input: { url: "https://public.example/other" },
+          });
+        const viewer = yield* browser.attachViewer(viewerInput(tabId, true));
+        yield* viewer.input({ type: "takeControl" });
+        const entered = Promise.withResolvers<void>();
+        const interrupted = Promise.withResolvers<void>();
+        hostingPreparation = () =>
+          Effect.sync(() => entered.resolve()).pipe(
+            Effect.andThen(Effect.never),
+            Effect.onInterrupt(() => Effect.sync(() => interrupted.resolve())),
+          );
+        yield* viewer.input({ type, url, delta: -1 });
+        yield* Effect.promise(() => entered.promise);
+        yield* viewer.input({ type: "releaseControl" });
+        yield* Effect.promise(() => interrupted.promise);
+        expect(contexts[0]!.page.goto).toHaveBeenCalledTimes(type === "history" ? 2 : 1);
+        expect(contexts[0]!.page.reload).not.toHaveBeenCalled();
+        expect(contexts[0]!.page.goBack).not.toHaveBeenCalled();
+        expect(
+          yield* broker.invoke({
+            scope,
+            tabId,
+            operation: "evaluate",
+            input: { expression: "resumed()" },
+          }),
+        ).toBe("evaluated");
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live("a cancelled owned preparation cannot navigate or leave recovery running", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker, tabId } = yield* ready;
+      const entered = Promise.withResolvers<void>();
+      const interrupted = Promise.withResolvers<void>();
+      hostingPreparation = () =>
+        Effect.sync(() => entered.resolve()).pipe(
+          Effect.andThen(Effect.never),
+          Effect.onInterrupt(() => Effect.sync(() => interrupted.resolve())),
+        );
+      const request = yield* broker
+        .invoke({ scope, tabId, operation: "navigate", input: { url: "http://localhost:5173/qa" } })
+        .pipe(Effect.forkScoped);
+      yield* Effect.promise(() => entered.promise);
+      yield* Fiber.interrupt(request);
+      yield* Effect.promise(() => interrupted.promise);
+      expect(contexts[0]!.page.goto).not.toHaveBeenCalled();
+      expect(contexts[0]!.request.post).not.toHaveBeenCalled();
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("hosting preparation shares the navigation deadline", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker, tabId } = yield* ready;
+      const interrupted = Promise.withResolvers<void>();
+      hostingPreparation = () =>
+        Effect.never.pipe(Effect.onInterrupt(() => Effect.sync(() => interrupted.resolve())));
+      const result = yield* Effect.result(
+        broker.invoke({
+          scope,
+          tabId,
+          operation: "navigate",
+          input: { url: "http://localhost:5173/qa" },
+          timeoutMs: 30,
+        }),
+      );
+      expect(result._tag).toBe("Failure");
+      if (result._tag === "Failure")
+        expect(result.failure._tag).toBe("PreviewAutomationTimeoutError");
+      yield* Effect.promise(() => interrupted.promise);
+      expect(contexts[0]!.page.goto).not.toHaveBeenCalled();
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("a failed private browser-session exchange stays out of URLs and error results", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker, tabId } = yield* ready;
+      hostingPreparation = () =>
+        Effect.succeed({ managed: true, bootstrapToken: "fixture-private-credential" });
+      contexts[0]!.request.post.mockRejectedValueOnce(
+        new Error("Rejected fixture-private-credential"),
+      );
+      const result = yield* Effect.result(
+        broker.invoke({
+          scope,
+          tabId,
+          operation: "navigate",
+          input: { url: "http://localhost:5173/qa?theme=dark#anchor" },
+        }),
+      );
+      expect(result._tag).toBe("Failure");
+      expect(JSON.stringify(result)).not.toContain("fixture-private-credential");
+      expect(contexts[0]!.page.goto).not.toHaveBeenCalled();
+    }),
+  ).pipe(Effect.provide(layer)),
+);
 
 it.live("readiness none responds immediately but takeover input waits for navigation commit", () =>
   Effect.scoped(
@@ -704,6 +1875,7 @@ it.live.each(
         );
         expect(context.sessions.at(-1)!.send).toHaveBeenCalledWith("Input.insertText", {
           text: "hello",
+          ...(native ? { __t3InputSource: "viewer" } : {}),
         });
         if (native) {
           // Viewer navigation keeps the existing native lease until the viewer disconnects.
@@ -864,6 +2036,93 @@ it.live("applies any client's viewport, appearance, and zoom to a headless tab",
   ).pipe(Effect.provide(layer)),
 );
 
+it.live.each(["local", "host-a"])(
+  "native root viewers apply fill and fixed sizes with measured CSS coordinates (%s)",
+  (desktopHostId) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        profileCatalogue = {
+          desktopHostId,
+          profiles: [{ id: "default", name: "Default", kind: "persistent" }],
+          defaultProfileId: "default",
+        };
+        desktopRendersNext = true;
+        const { browser, broker, tabId } = yield* ready;
+        const manager = yield* Manager.PreviewManager;
+        const page = desktopConnections[0]!.context.page;
+        expect(page.viewportSize()).toBeNull();
+        const passive = yield* browser.attachViewer(viewerInput(tabId, false));
+        expect(yield* Queue.takeAll(passive.output)).toContainEqual({
+          _tag: "viewport",
+          width: 1024,
+          height: 768,
+        });
+        yield* passive.input({ type: "resize", width: 333, height: 444 });
+        yield* passive.input({
+          type: "viewport",
+          setting: { _tag: "freeform", width: 333, height: 444 },
+        });
+        expect(
+          (yield* broker.invoke<PreviewAutomationStatus>({
+            scope,
+            tabId,
+            operation: "status",
+            input: {},
+          })).viewport,
+        ).toEqual({ width: 1024, height: 768 });
+        const active = yield* browser.attachViewer(viewerInput(tabId, true));
+        yield* active.input({ type: "takeControl" });
+        yield* active.input({ type: "resize", width: 1200, height: 720 });
+        expect(yield* Queue.takeAll(active.output)).toContainEqual({
+          _tag: "viewport",
+          width: 1200,
+          height: 720,
+        });
+        expect(
+          surfaceCalls.find((call) => call.viewport?._tag === "fill" && call.viewportSize),
+        ).toMatchObject({ viewportSize: { width: 1200, height: 720 } });
+        yield* active.input({
+          type: "mouse",
+          action: "down",
+          button: "left",
+          x: 600,
+          y: 360,
+          buttons: 1,
+        });
+        expect(desktopConnections[0]!.context.sessions.at(-1)!.send).toHaveBeenCalledWith(
+          "Input.dispatchMouseEvent",
+          expect.objectContaining({ x: 600, y: 360 }),
+        );
+        yield* active.input({
+          type: "viewport",
+          setting: { _tag: "freeform", width: 390, height: 844 },
+        });
+        yield* active.input({ type: "resize", width: 1400, height: 900 });
+        expect(
+          (yield* broker.invoke<PreviewAutomationStatus>({
+            scope,
+            tabId,
+            operation: "status",
+            input: {},
+          })).viewport,
+        ).toEqual({ width: 390, height: 844 });
+        // Switching back to fill chooses the most recent active viewer, not the passive one.
+        yield* active.input({ type: "viewport", setting: { _tag: "fill" } });
+        expect(
+          (yield* broker.invoke<PreviewAutomationStatus>({
+            scope,
+            tabId,
+            operation: "status",
+            input: {},
+          })).viewport,
+        ).toEqual({ width: 1400, height: 900 });
+        expect((yield* manager.list({})).sessions[0]!.viewport).toEqual({ _tag: "fill" });
+        expect(page.setViewportSize).not.toHaveBeenCalled();
+        yield* active.input({ type: "releaseControl" });
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
 it.live.each(
   ["headless", "local", "host-a"].flatMap((host) =>
     [false, true].map((fixed) => ({ host, fixed })),
@@ -924,6 +2183,81 @@ it.live.each(
         );
       }),
     ).pipe(Effect.provide(layer)),
+);
+
+it.live("published root zoom keeps measured viewport, pointer and snapshot scale coherent", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      desktopRendersNext = true;
+      const { browser, broker, tabId } = yield* ready;
+      const manager = yield* Manager.PreviewManager;
+      const target = { threadId: scope.thread.threadId, tabId };
+      const page = desktopConnections[0]!.context.page;
+      expect(page.viewportSize()).toBeNull();
+      const viewer = yield* browser.attachViewer(viewerInput(tabId, true));
+      const session = desktopConnections[0]!.context.sessions[0]!;
+      const applied = Promise.withResolvers<void>();
+      const send = session.send.getMockImplementation()!;
+      session.send.mockImplementation(async (method, input) => {
+        if (method === "Page.reload") applied.resolve();
+        return send(method, input);
+      });
+      yield* manager.resize({
+        ...target,
+        viewport: { _tag: "freeform", width: 1000, height: 750 },
+      });
+      yield* manager.adjust({ ...target, zoomFactor: 1.25 });
+      yield* manager.adjust({ ...target, hardReload: true });
+      yield* Effect.promise(() => applied.promise);
+      expect(surfaceCalls).toContainEqual(
+        expect.objectContaining({ action: "acquire", zoomFactor: 1.25 }),
+      );
+      expect(yield* Queue.takeAll(viewer.output)).toContainEqual({
+        _tag: "viewport",
+        width: 800,
+        height: 600,
+      });
+      expect(
+        (yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          tabId,
+          operation: "status",
+          input: {},
+        })).viewport,
+      ).toEqual({ width: 800, height: 600 });
+      const snapshot = yield* broker.invoke<PreviewAutomationSnapshot>({
+        scope,
+        tabId,
+        operation: "snapshot",
+        input: { includeImage: true },
+      });
+      expect(snapshot.screenshot).toMatchObject({ width: 1280, height: 960 });
+      expect(session.send).toHaveBeenCalledWith(
+        "Page.captureScreenshot",
+        expect.objectContaining({
+          clip: expect.objectContaining({ width: 1000, height: 750, scale: 0.64 }),
+        }),
+      );
+      expect(
+        session.send.mock.calls.some(([method]) => method === "Emulation.setDeviceMetricsOverride"),
+      ).toBe(false);
+      expect(page.setViewportSize).not.toHaveBeenCalled();
+      yield* viewer.input({ type: "takeControl" });
+      yield* viewer.input({
+        type: "mouse",
+        action: "down",
+        button: "left",
+        x: 400,
+        y: 300,
+        buttons: 1,
+      });
+      expect(desktopConnections[0]!.context.sessions.at(-1)!.send).toHaveBeenCalledWith(
+        "Input.dispatchMouseEvent",
+        expect.objectContaining({ x: 400, y: 300 }),
+      );
+      yield* viewer.input({ type: "releaseControl" });
+    }),
+  ).pipe(Effect.provide(layer)),
 );
 
 it.live(
@@ -1284,6 +2618,99 @@ it.live.each([false, true])(
     ).pipe(Effect.provide(layer)),
 );
 
+it.live.each(["desktop attachment", "CDP setup"])(
+  "a managed remote native popup retains routing when its opener closes during %s",
+  (stage) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        profileCatalogue = {
+          desktopHostId: "fixture-desktop",
+          profiles: [{ id: "fixture-profile", name: "Fixture profile", kind: "persistent" }],
+          defaultProfileId: "fixture-profile",
+        };
+        desktopRendersNext = true;
+        const { browser, broker, tabId } = yield* ready;
+        const prepared: Array<{ threadId: string; url: string; browserUrl?: string }> = [];
+        hostingPreparation = (input) =>
+          Effect.sync(() => {
+            prepared.push(input);
+            return new URL(input.url).origin === "http://localhost:5173"
+              ? { managed: true, bootstrapToken: "fixture-one-use-credential" }
+              : { managed: false };
+          });
+        const localUrl = "http://localhost:5173/qa/opener";
+        yield* broker.invoke({ scope, tabId, operation: "navigate", input: { url: localUrl } });
+        const popupLocalUrl = "http://localhost:5173/qa/popup?mode=two#popup";
+        const popupBrowserUrl = popupLocalUrl.replace("localhost", "environment.example.test");
+        const setupEntered = Promise.withResolvers<void>();
+        const setupGate = Promise.withResolvers<void>();
+        yield* Effect.addFinalizer(() => Effect.sync(() => setupGate.resolve()));
+        if (stage === "CDP setup") {
+          recordingStageEntered = setupEntered;
+          recordingCdpGate = setupGate;
+        }
+        desktopPageSetup = async (context) => {
+          await context.page.goto(popupBrowserUrl);
+          if (stage === "desktop attachment") {
+            setupEntered.resolve();
+            await setupGate.promise;
+          }
+        };
+        const manager = yield* Manager.PreviewManager;
+        const events = yield* manager.subscribeEvents;
+        desktopPopupEvents.emit("created", {
+          threadId: scope.thread.threadId,
+          tabId,
+          desktopHostId: "fixture-desktop",
+          popupId: "managed-native-popup",
+          url: popupBrowserUrl,
+        });
+        yield* Effect.promise(() => setupEntered.promise);
+        yield* Effect.promise(() => desktopConnections[0]!.context.page.close());
+        setupGate.resolve();
+        const opened = Option.getOrThrow(
+          yield* Stream.fromSubscription(events).pipe(
+            Stream.filter((event) => event.type === "opened" && event.tabId !== tabId),
+            Stream.runHead,
+          ),
+        );
+        if (opened.type !== "opened") throw new Error("Expected managed popup opening");
+        const popupTabId = opened.tabId;
+        yield* broker.invoke({
+          scope,
+          tabId: popupTabId,
+          operation: "navigate",
+          input: { url: popupBrowserUrl },
+        });
+        const actualPopup = desktopConnections[1]!.context;
+        const viewer = yield* browser.attachViewer(viewerInput(popupTabId, true));
+        yield* viewer.input({ type: "takeControl" });
+        const reloaded = Promise.withResolvers<void>();
+        actualPopup.page.reload.mockImplementationOnce(async () => reloaded.resolve());
+        yield* viewer.input({ type: "reload", ignoreCache: false });
+        yield* Effect.promise(() => reloaded.promise);
+        expect(actualPopup.page.url()).toBe(popupBrowserUrl);
+        expect(prepared).toEqual([
+          {
+            threadId: scope.thread.threadId,
+            url: localUrl,
+            browserUrl: localUrl.replace("localhost", "environment.example.test"),
+          },
+          ...Array.from({ length: 2 }, () => ({
+            threadId: scope.thread.threadId,
+            url: popupLocalUrl,
+            browserUrl: popupBrowserUrl,
+          })),
+        ]);
+        expect(actualPopup.request.post).toHaveBeenCalledTimes(2);
+        expect(actualPopup.request.post).toHaveBeenLastCalledWith(
+          "http://environment.example.test:5173/api/auth/browser-session",
+          expect.objectContaining({ data: { credential: "fixture-one-use-credential" } }),
+        );
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
 it.live("an unbound native popup reconnects its retained opener without a pending tab", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -1559,6 +2986,349 @@ it.live("a native veto lost offline clears pending close intent without replacin
       ).toBe(false);
     }),
   ).pipe(Effect.provide(layer)),
+);
+
+it.live.each(["reconnect", "deliberate-offline-close"] as const)(
+  "an interrupted online native root close handles %s without losing user intent",
+  (nextAction) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        profileCatalogue = {
+          desktopHostId: "host-a",
+          profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+          defaultProfileId: "work",
+        };
+        desktopRendersNext = true;
+        const { broker, tabId } = yield* ready;
+        const manager = yield* Manager.PreviewManager;
+        const before = yield* manager.list({ threadId: scope.thread.threadId });
+        const snapshot = before.sessions[0]!;
+        const source = {
+          threadId: scope.thread.threadId,
+          tabId,
+          desktopHostId: "host-a",
+          rootId: snapshot.desktopRootId!,
+        };
+        expect(snapshot.backingPage).toBe("desktop-root");
+        if (nextAction === "deliberate-offline-close") {
+          for (let index = 1; index < 8; index++) {
+            desktopRendersNext = true;
+            yield* broker.invoke({
+              scope,
+              operation: "open",
+              input: { reuseExistingTab: false, show: false },
+            });
+          }
+          expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toHaveLength(
+            8,
+          );
+        }
+        const context = yield* Layer.build(
+          DesktopChannel.layer.pipe(
+            Layer.provide(
+              ServerConfig.layerTest(process.cwd(), { prefix: "t3-native-root-veto-channel-" }),
+            ),
+          ),
+        );
+        const channel = Context.get(context, DesktopChannel.DesktopBrowserChannel);
+        const connect = (owner: string) =>
+          Effect.gen(function* () {
+            const commands = yield* Queue.unbounded<DesktopBrowserCommand>();
+            const fiber = yield* channel.subscribeCommands(owner, "host-a").pipe(
+              Stream.runForEach((command) => Queue.offer(commands, command)),
+              Effect.forkScoped,
+            );
+            expect(yield* Queue.take(commands)).toEqual({ type: "announce" });
+            return { commands, fiber };
+          });
+        const first = yield* connect("socket-a");
+        // Mirror the mock-created server tab into the real channel's published-root registry.
+        const creating = yield* channel
+          .createRoot(source, {
+            profileId: "work",
+            serverEpoch: before.serverEpoch,
+            url: "about:blank",
+          })
+          .pipe(Effect.forkScoped);
+        const create = yield* Queue.take(first.commands);
+        if (create.type !== "createRoot") throw new Error("Expected native root creation");
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          type: "rootCreated",
+          ...source,
+          requestId: create.requestId,
+          profileId: "work",
+        });
+        expect(yield* Fiber.join(creating)).toBe(source.rootId);
+        const accepting = yield* channel.acceptRoot(source, source.rootId).pipe(Effect.forkScoped);
+        const accept = yield* Queue.take(first.commands);
+        if (accept.type !== "acceptRoot") throw new Error("Expected native root acceptance");
+        yield* channel.receiveEvent("socket-a", "host-a", {
+          type: "rootAccepted",
+          ...source,
+          requestId: accept.requestId,
+          profileId: "work",
+          accepted: true,
+        });
+        yield* Fiber.join(accepting);
+        yield* channel.publishRoot(source, source.rootId);
+        expect((yield* Queue.take(first.commands)).type).toBe("publishRoot");
+        nativeRootCloseChannel = channel;
+        const closing = yield* manager
+          .close({ threadId: scope.thread.threadId, tabId })
+          .pipe(Effect.flip, Effect.forkScoped);
+        const original = yield* Queue.take(first.commands);
+        if (original.type !== "closeRoot") throw new Error("Expected native root close");
+        // The native beforeunload veto happened after delivery, but its reply was lost offline.
+        desktopTabs.delete(tabId);
+        yield* Fiber.interrupt(first.fiber);
+        expect((yield* Fiber.join(closing))._tag).toBe("PreviewNativeCloseError");
+        expect(rootDiscards).toEqual([]);
+        if (nextAction === "deliberate-offline-close") {
+          // A fresh deliberate close can release ownership while the host remains offline.
+          yield* manager.close({ threadId: scope.thread.threadId, tabId });
+          const retained = (yield* manager.list({ threadId: scope.thread.threadId })).sessions;
+          expect(retained).toHaveLength(7);
+          expect(retained.some((session) => session.tabId === tabId)).toBe(false);
+          desktopRendersNext = true;
+          const replacement = yield* broker.invoke<PreviewAutomationStatus>({
+            scope,
+            operation: "open",
+            input: { reuseExistingTab: false, show: false },
+          });
+          expect(replacement.tabId).not.toBe(tabId);
+          expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toHaveLength(
+            8,
+          );
+          const reconnected = yield* connect("socket-b");
+          expect(yield* Queue.size(reconnected.commands)).toBe(0);
+          yield* channel.reconcileRoots("host-a", before.serverEpoch);
+          expect(yield* Queue.take(reconnected.commands)).toEqual({
+            type: "reconcileRoots",
+            serverEpoch: before.serverEpoch,
+            retainedRootRequestIds: [],
+          });
+          expect(yield* Queue.size(reconnected.commands)).toBe(0);
+          return;
+        }
+        expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toHaveLength(1);
+        const reconnected = yield* connect("socket-b");
+        expect(yield* Queue.take(reconnected.commands)).toMatchObject({
+          type: "publishRoot",
+          rootId: source.rootId,
+        });
+        desktopTabs.add(tabId);
+        nativeCloseRejected = Promise.withResolvers<void>();
+        desktopPopupEvents.emit("host-connected", "host-a");
+        const probe = yield* Queue.take(reconnected.commands);
+        if (probe.type !== "probeRoot") throw new Error("Expected native root presence probe");
+        yield* channel.receiveEvent("socket-b", "host-a", {
+          type: "rootPresence",
+          ...source,
+          requestId: probe.requestId,
+          present: true,
+        });
+        expect(yield* Queue.take(reconnected.commands)).toEqual(original);
+        yield* channel.receiveEvent("socket-b", "host-a", {
+          type: "rootCloseCanceled",
+          ...source,
+          requestId: original.requestId,
+        });
+        yield* Effect.promise(() => nativeCloseRejected!.promise);
+        expect(rootDiscards).toEqual([]);
+        expect(yield* Queue.size(reconnected.commands)).toBe(0);
+        expect(
+          (yield* manager.list({ threadId: scope.thread.threadId })).sessions[0],
+        ).toMatchObject({
+          tabId,
+          backingPage: "desktop-root",
+          desktopRootId: source.rootId,
+          desktopHostId: "host-a",
+          profileId: "work",
+          automationOwner: snapshot.automationOwner,
+        });
+        expect(
+          yield* broker.invoke({
+            scope,
+            tabId,
+            operation: "evaluate",
+            input: { expression: "stillOpen()" },
+          }),
+        ).toBe("evaluated");
+        const explicit = yield* manager
+          .close({ threadId: scope.thread.threadId, tabId })
+          .pipe(Effect.forkScoped);
+        const fresh = yield* Queue.take(reconnected.commands);
+        if (fresh.type !== "closeRoot") throw new Error("Expected deliberate native close");
+        expect(fresh.requestId).not.toBe(original.requestId);
+        yield* channel.receiveEvent("socket-b", "host-a", { type: "rootClosed", ...source });
+        yield* Fiber.join(explicit);
+        desktopPopupEvents.emit("root-closed", source);
+        expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toEqual([]);
+        expect(rootDiscards).toEqual([]);
+        expect(yield* Queue.size(reconnected.commands)).toBe(0);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live("status exposes detached roots so their owner can close them and recover capacity", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      profileCatalogue = {
+        desktopHostId: "host-a",
+        profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+        defaultProfileId: "work",
+      };
+      desktopRendersNext = true;
+      const { broker, browser, tabId } = yield* ready;
+      const tabIds = [tabId];
+      for (let index = 1; index < 8; index++) {
+        desktopRendersNext = true;
+        const opened = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { reuseExistingTab: false, show: false },
+        });
+        tabIds.push(opened.tabId!);
+      }
+      for (const detachedTabId of tabIds) {
+        const viewer = yield* browser.attachViewer(viewerInput(detachedTabId, false));
+        desktopTabs.delete(detachedTabId);
+        desktopDetaches.emit("detach", {
+          threadId: scope.thread.threadId,
+          tabId: detachedTabId,
+          desktopHostId: "host-a",
+        });
+        let ending = yield* Queue.take(viewer.output);
+        while (ending._tag !== "reconnect") ending = yield* Queue.take(viewer.output);
+      }
+      const connectionsBefore = desktopConnections.length;
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "status",
+        input: {},
+      });
+      expect(status.available).toBe(false);
+      expect(status.tabs).toHaveLength(8);
+      expect(status.tabs?.map((tab) => tab.tabId)).toEqual(tabIds);
+      expect(status.tabs?.every((tab) => tab.ownedByCaller && tab.owner === "agent")).toBe(true);
+      expect(status.tabs?.every((tab) => tab.profileId === "work" && !tab.visible)).toBe(true);
+      expect(desktopConnections).toHaveLength(connectionsBefore);
+      const otherScope = {
+        ...scope,
+        thread: { ...scope.thread, providerSessionId: "other-agent" },
+      };
+      const observed = yield* broker.invoke<PreviewAutomationStatus>({
+        scope: otherScope,
+        operation: "status",
+        input: {},
+      });
+      expect(observed.tabs?.every((tab) => !tab.ownedByCaller)).toBe(true);
+      profileCatalogue = { ...profileCatalogue, desktopHostId: "host-b" };
+      expect(
+        (yield* broker
+          .invoke<void>({
+            scope,
+            operation: "open",
+            input: { reuseExistingTab: false, show: false },
+          })
+          .pipe(Effect.flip)).message,
+      ).toContain("Too many");
+      rootCloseFailure = "host-unavailable";
+      const closableTabId = status.tabs![0]!.tabId;
+      expect(
+        (yield* broker
+          .invoke<void>({ scope: otherScope, tabId: closableTabId, operation: "close", input: {} })
+          .pipe(Effect.flip)).message,
+      ).toContain("another agent session");
+      yield* broker.invoke({ scope, tabId: closableTabId, operation: "close", input: {} });
+      rootCloseFailure = null;
+      desktopRendersNext = true;
+      const replacement = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { reuseExistingTab: false, show: false },
+      });
+      expect(replacement.tabId).not.toBe(closableTabId);
+      expect(replacement.tabs).toHaveLength(8);
+      expect(replacement.tabs?.some((tab) => tab.tabId === closableTabId)).toBe(false);
+      expect(rootDiscards).toEqual([
+        {
+          threadId: scope.thread.threadId,
+          tabId: closableTabId,
+          desktopHostId: "host-a",
+          rootId: `root-${closableTabId}`,
+        },
+      ]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live.each(["agent", "client"] as const)(
+  "explicit %s close retires an offline root without reopening it or consuming tab capacity",
+  (entry) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        profileCatalogue = {
+          desktopHostId: "host-a",
+          profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+          defaultProfileId: "work",
+        };
+        desktopRendersNext = true;
+        const { broker, browser, tabId } = yield* ready;
+        const manager = yield* Manager.PreviewManager;
+        const viewer = yield* browser.attachViewer(viewerInput(tabId, false));
+        desktopTabs.delete(tabId);
+        desktopDetaches.emit("detach", {
+          threadId: scope.thread.threadId,
+          tabId,
+          desktopHostId: "host-a",
+        });
+        let ending = yield* Queue.take(viewer.output);
+        while (ending._tag !== "reconnect") ending = yield* Queue.take(viewer.output);
+        for (let index = 1; index < 8; index++) {
+          desktopRendersNext = true;
+          yield* broker.invoke({
+            scope,
+            operation: "open",
+            input: { reuseExistingTab: false, show: false },
+          });
+        }
+        rootCloseFailure = "host-unavailable";
+        const mismatch = yield* broker
+          .invoke<void>({
+            scope: { ...scope, thread: { ...scope.thread, providerSessionId: "other-agent" } },
+            tabId,
+            operation: "close",
+            input: {},
+          })
+          .pipe(Effect.flip);
+        expect(mismatch.message).toContain("another agent session");
+        expect(rootDiscards).toEqual([]);
+        const connectionsBefore = desktopConnections.length;
+        if (entry === "agent")
+          yield* broker.invoke({ scope, tabId, operation: "close", input: {} });
+        else yield* manager.close({ threadId: scope.thread.threadId, tabId });
+        expect(desktopConnections).toHaveLength(connectionsBefore);
+        expect(rootDiscards).toEqual([
+          {
+            threadId: scope.thread.threadId,
+            tabId,
+            desktopHostId: "host-a",
+            rootId: `root-${tabId}`,
+          },
+        ]);
+        expect((yield* manager.list({})).sessions).toHaveLength(7);
+        rootCloseFailure = null;
+        desktopRendersNext = true;
+        const replacement = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { reuseExistingTab: false, show: false },
+        });
+        expect(replacement.tabId).not.toBe(tabId);
+        expect((yield* manager.list({})).sessions).toHaveLength(8);
+      }),
+    ).pipe(Effect.provide(layer)),
 );
 
 it.live.each(["absent", "present", "unavailable"] as const)(
@@ -2499,7 +4269,12 @@ it.live("viewers see the agent's pointer move to its target and click there", ()
   ).pipe(Effect.provide(layer)),
 );
 
-it.effect.each(["layout-timeout", "surface-unsupported"] as const)(
+it.effect.each([
+  "layout-timeout",
+  "surface-unsupported",
+  "guest-unavailable",
+  "host-unavailable",
+] as const)(
   "reports native %s without dispatching the page mutation or evicting the host",
   (reason) =>
     Effect.scoped(
@@ -2508,15 +4283,33 @@ it.effect.each(["layout-timeout", "surface-unsupported"] as const)(
         const { broker, tabId } = yield* ready;
         surfaceCalls.length = 0;
         surfaceFailure = new DesktopBrowserTransportError({ reason });
-        const error = yield* broker
-          .invoke<void>({ scope, tabId, operation: "click", input: { locator: "button" } })
-          .pipe(Effect.flip);
-        expect(error).toMatchObject({
-          _tag: "PreviewAutomationRemoteUnavailableError",
-          cause: { detail: { reason } },
-        });
+        for (const request of [
+          { operation: "click", input: { locator: "button" } },
+          { operation: "navigate", input: { url: "https://page.example/" } },
+          { operation: "waitFor", input: { text: "ready" } },
+          { operation: "evaluate", input: { expression: "1" } },
+        ] as const) {
+          const error = yield* broker.invoke<void>({ scope, tabId, ...request }).pipe(Effect.flip);
+          expect(error).toMatchObject({
+            _tag: "PreviewAutomationRemoteUnavailableError",
+            operation: request.operation,
+            requestId: expect.stringMatching(/^preview-\d+$/),
+            connectionId: expect.any(String),
+            reason,
+            cause: { detail: { reason } },
+          });
+        }
         expect(desktopConnections[0]!.context.page.locator).not.toHaveBeenCalled();
-        expect(surfaceCalls.map((call) => call.action)).toEqual(["acquire", "release"]);
+        expect(surfaceCalls.map((call) => call.action)).toEqual([
+          "acquire",
+          "release",
+          "acquire",
+          "release",
+          "acquire",
+          "release",
+          "acquire",
+          "release",
+        ]);
         surfaceFailure = null;
         expect(
           yield* broker.invoke({ scope, tabId, operation: "evaluate", input: { expression: "1" } }),
@@ -2847,6 +4640,583 @@ it.effect("a timed-out native snapshot preserves its connection and leaves both 
   ).pipe(Effect.provide(layer)),
 );
 
+it.live.each([
+  ["default", "Default", "local"],
+  ["developer", "Logged in Developer", "remote-desktop"],
+  ["incognito", "Incognito", "remote-desktop"],
+] as const)(
+  "agent opens %s on an independent native page owned by its selected host",
+  ([profileId, profileName, desktopHostId]) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const browser = yield* ServerBrowser.ServerBrowser;
+        const broker = yield* Broker.PreviewAutomationBroker;
+        const manager = yield* Manager.PreviewManager;
+        yield* Effect.yieldNow;
+        profileCatalogue = {
+          desktopHostId,
+          defaultProfileId: profileId,
+          profiles: [
+            {
+              id: profileId,
+              name: profileName,
+              kind: profileId === "incognito" ? "incognito" : "persistent",
+            },
+          ],
+        };
+        desktopRendersNext = true;
+        const setupEntered = Promise.withResolvers<void>();
+        const setupGate = Promise.withResolvers<void>();
+        desktopPageSetup = async () => {
+          setupEntered.resolve();
+          await setupGate.promise;
+        };
+        const events = yield* manager.subscribeEvents;
+        const opening = yield* broker
+          .invoke<PreviewAutomationStatus>({
+            scope,
+            operation: "openWithProfile",
+            input: {
+              profileId,
+              reuseExistingTab: false,
+              show: false,
+              url: "https://example.test/start",
+            },
+          })
+          .pipe(Effect.forkChild);
+        yield* Effect.promise(() => setupEntered.promise);
+        expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toEqual([]);
+        expect(yield* PubSub.takeUpTo(events, 100)).toEqual([]);
+        setupGate.resolve();
+        const opened = yield* Fiber.join(opening);
+        const snapshot = (yield* manager.list({ threadId: scope.thread.threadId })).sessions[0]!;
+        expect(snapshot).toMatchObject({
+          backingPage: "desktop-root",
+          desktopRootId: `root-${opened.tabId}`,
+          automationOwner: `${scope.environmentId}\u0000${scope.thread.providerSessionId}`,
+          desktopHostId,
+          profileId,
+        });
+        expect(rootCreations).toEqual([
+          expect.objectContaining({
+            tabId: opened.tabId,
+            desktopHostId,
+            profileId,
+            url: "https://example.test/start",
+          }),
+        ]);
+        expect(contexts).toHaveLength(0);
+        expect(desktopConnections).toHaveLength(1);
+        const page = desktopConnections[0]!.context.page;
+        expect(page.goto).toHaveBeenCalledExactlyOnceWith(
+          "https://example.test/start",
+          expect.objectContaining({ waitUntil: "commit" }),
+        );
+        const published = yield* Stream.fromSubscription(events).pipe(
+          Stream.filter((event) => event.type === "opened"),
+          Stream.runHead,
+        );
+        expect(Option.getOrNull(published)).toMatchObject({
+          snapshot: { desktopRootId: snapshot.desktopRootId },
+        });
+        yield* browser.attachViewer(viewerInput(opened.tabId!, false));
+        expect(desktopConnections).toHaveLength(1);
+        page.locator.mockReturnValue({ evaluate: async () => true } as never);
+        yield* broker.invoke({
+          scope,
+          tabId: opened.tabId!,
+          operation: "type",
+          input: { locator: "#field", text: "root input" },
+        });
+        yield* broker.invoke({
+          scope,
+          tabId: opened.tabId!,
+          operation: "press",
+          input: { key: "Enter" },
+        });
+        expect(page.keyboard.insertText).toHaveBeenCalledExactlyOnceWith("root input");
+        expect(page.keyboard.press).toHaveBeenCalledExactlyOnceWith("Enter");
+        rootCloseFailure = "close-canceled";
+        yield* broker
+          .invoke<void>({ scope, tabId: opened.tabId!, operation: "close", input: {} })
+          .pipe(Effect.flip);
+        expect(
+          (yield* manager.list({ threadId: scope.thread.threadId })).sessions[0],
+        ).toMatchObject({
+          desktopRootId: snapshot.desktopRootId,
+          automationOwner: `${scope.environmentId}\u0000${scope.thread.providerSessionId}`,
+        });
+        rootCloseFailure = null;
+        yield* broker.invoke({ scope, tabId: opened.tabId!, operation: "close", input: {} });
+        expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toEqual([]);
+        expect(rootClosures.map((close) => close.rootId)).toEqual([
+          snapshot.desktopRootId,
+          snapshot.desktopRootId,
+        ]);
+        expect(page.close).not.toHaveBeenCalled();
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live.each(["absent", "present", "unavailable"] as const)(
+  "reconnect reconciles an ordinary offline root close and its tab capacity (%s)",
+  (presence) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        profileCatalogue = {
+          desktopHostId: "host-a",
+          profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+          defaultProfileId: "work",
+        };
+        desktopRendersNext = true;
+        const { broker, browser, tabId } = yield* ready;
+        const manager = yield* Manager.PreviewManager;
+        const viewer = yield* browser.attachViewer(viewerInput(tabId, false));
+        desktopDetaches.emit("detach", {
+          threadId: scope.thread.threadId,
+          tabId,
+          desktopHostId: "host-a",
+        });
+        let ending = yield* Queue.take(viewer.output);
+        while (ending._tag !== "reconnect") ending = yield* Queue.take(viewer.output);
+        // The detached root still uses one slot while its native window may be alive.
+        for (let index = 1; index < 8; index++) {
+          desktopRendersNext = true;
+          yield* broker.invoke<PreviewAutomationStatus>({
+            scope,
+            operation: "open",
+            input: { reuseExistingTab: false, show: false },
+          });
+        }
+        const before = yield* manager.list({});
+        expect(before.sessions).toHaveLength(8);
+        expect(rootCreations.every((root) => root.serverEpoch === before.serverEpoch)).toBe(true);
+        nativeRootPresence.set(`root-${tabId}`, presence !== "absent");
+        nativeRootProbeUnavailable = presence === "unavailable";
+        nativeRootProbeEntered = Promise.withResolvers<void>();
+        nativeRootProbeProcessed = Promise.withResolvers<void>();
+        nativeRootProbeGate = Promise.withResolvers<void>();
+        nativeCloseProcessed = Promise.withResolvers<void>();
+        yield* Effect.addFinalizer(() => Effect.sync(() => nativeRootProbeGate?.resolve()));
+        desktopPopupEvents.emit("host-connected", "other-host");
+        desktopPopupEvents.emit("host-connected", "host-a");
+        yield* Effect.promise(() => nativeRootProbeEntered!.promise);
+        expect(nativeRootProbes).toEqual([
+          {
+            threadId: scope.thread.threadId,
+            tabId,
+            desktopHostId: "host-a",
+            rootId: `root-${tabId}`,
+          },
+        ]);
+        expect(rootOwnerReconciliations).toEqual([
+          { desktopHostId: "other-host", serverEpoch: before.serverEpoch },
+          { desktopHostId: "host-a", serverEpoch: before.serverEpoch },
+        ]);
+        nativeRootProbeGate.resolve();
+        yield* Effect.promise(() =>
+          presence === "absent" ? nativeCloseProcessed!.promise : nativeRootProbeProcessed!.promise,
+        );
+        const after = (yield* manager.list({})).sessions;
+        expect(after.some((session) => session.tabId === tabId)).toBe(presence !== "absent");
+        expect(after.filter((session) => session.tabId !== tabId)).toEqual(
+          before.sessions.filter((session) => session.tabId !== tabId),
+        );
+        expect(rootClosures).toEqual([]);
+        desktopRendersNext = true;
+        const replacement = broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { reuseExistingTab: false, show: false },
+        });
+        if (presence === "absent") {
+          const opened = yield* replacement;
+          expect(opened.tabId).not.toBe(tabId);
+          expect((yield* manager.list({})).sessions).toHaveLength(8);
+        } else {
+          expect((yield* replacement.pipe(Effect.flip)).message).toContain("Too many");
+          expect((yield* manager.list({})).sessions).toHaveLength(8);
+        }
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live("a root loaded before native acceptance publishes its completed navigation", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      yield* ServerBrowser.ServerBrowser;
+      const manager = yield* Manager.PreviewManager;
+      const broker = yield* Broker.PreviewAutomationBroker;
+      yield* Effect.yieldNow;
+      desktopRendersNext = true;
+      rootAcceptanceEntered = Promise.withResolvers<void>();
+      rootAcceptanceGate = Promise.withResolvers<void>();
+      nativeNavigationReported = { status: "Success", completed: Promise.withResolvers<void>() };
+      desktopPageSetup = async (context) => {
+        context.page.title.mockResolvedValue("Completed before acceptance");
+      };
+      yield* Effect.addFinalizer(() => Effect.sync(() => rootAcceptanceGate!.resolve()));
+      const events = yield* manager.subscribeEvents;
+      const opening = yield* broker
+        .invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { reuseExistingTab: false, show: false, url: "https://example.test/completed" },
+        })
+        .pipe(Effect.forkChild);
+      yield* Effect.promise(() => rootAcceptanceEntered!.promise);
+      yield* Effect.promise(() => nativeNavigationReported!.completed.promise);
+      const page = desktopConnections[0]!.context.page;
+      expect(page.url()).toBe("https://example.test/completed");
+      expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toEqual([]);
+      expect(yield* PubSub.takeUpTo(events, 100)).toEqual([]);
+      rootAcceptanceGate.resolve();
+      const opened = yield* Fiber.join(opening);
+      expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toEqual([
+        expect.objectContaining({
+          tabId: opened.tabId,
+          navStatus: {
+            _tag: "Success",
+            url: "https://example.test/completed",
+            title: "Completed before acceptance",
+          },
+        }),
+      ]);
+      expect(page.goto).toHaveBeenCalledTimes(1);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("a root that failed before native acceptance publishes its failed navigation", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      yield* ServerBrowser.ServerBrowser;
+      const manager = yield* Manager.PreviewManager;
+      const broker = yield* Broker.PreviewAutomationBroker;
+      yield* Effect.yieldNow;
+      desktopRendersNext = true;
+      rootAcceptanceEntered = Promise.withResolvers<void>();
+      rootAcceptanceGate = Promise.withResolvers<void>();
+      nativeNavigationReported = { status: "LoadFailed", completed: Promise.withResolvers<void>() };
+      const url = "https://example.test/refused";
+      desktopPageSetup = async (context) => {
+        context.page.goto.mockImplementationOnce(async (next) => {
+          const request = {
+            isNavigationRequest: () => true,
+            frame: () => context.page,
+            url: () => next,
+            method: () => "GET",
+            failure: () => ({ errorText: "net::ERR_CONNECTION_REFUSED" }),
+          };
+          context.page.emit("request", request);
+          context.page.emit("requestfailed", request);
+          throw new Error(`page.goto: net::ERR_CONNECTION_REFUSED at ${next}`);
+        });
+      };
+      yield* Effect.addFinalizer(() => Effect.sync(() => rootAcceptanceGate!.resolve()));
+      const opening = yield* broker
+        .invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { reuseExistingTab: false, show: false, url },
+        })
+        .pipe(Effect.flip, Effect.forkChild);
+      yield* Effect.promise(() => rootAcceptanceEntered!.promise);
+      yield* Effect.promise(() => nativeNavigationReported!.completed.promise);
+      expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toEqual([]);
+      rootAcceptanceGate.resolve();
+      const failure = yield* Fiber.join(opening);
+      expect(failure).toMatchObject({ _tag: "PreviewAutomationExecutionError" });
+      expect(failure.message).toContain("ERR_CONNECTION_REFUSED");
+      expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toEqual([
+        expect.objectContaining({
+          navStatus: expect.objectContaining({
+            _tag: "LoadFailed",
+            url,
+            title: "",
+            code: -102,
+            description: "ERR_CONNECTION_REFUSED",
+          }),
+        }),
+      ]);
+      expect(desktopConnections[0]!.context.page.goto).toHaveBeenCalledTimes(1);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.effect("native root acceptance failure retains the unavailable error classification", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      yield* ServerBrowser.ServerBrowser;
+      const broker = yield* Broker.PreviewAutomationBroker;
+      const manager = yield* Manager.PreviewManager;
+      yield* Effect.yieldNow;
+      desktopRendersNext = true;
+      rootAcceptanceFailure = new DesktopBrowserTransportError({ reason: "guest-unavailable" });
+      const failure = yield* broker
+        .invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { reuseExistingTab: false, show: false },
+        })
+        .pipe(Effect.flip);
+      expect(failure).toMatchObject({ _tag: "PreviewAutomationRemoteUnavailableError" });
+      expect((yield* manager.list({})).sessions).toEqual([]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live.each(["acceptance", "publication"] as const)(
+  "failed native root %s releases capacity and reconnect ownership without an acknowledgment",
+  (stage) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        profileCatalogue = {
+          desktopHostId: "host-a",
+          profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+          defaultProfileId: "work",
+        };
+        desktopRendersNext = true;
+        const { broker, browser, tabId: retainedTabId } = yield* ready;
+        const manager = yield* Manager.PreviewManager;
+        const retained = (yield* manager.list({})).sessions[0]!;
+        const serverEpoch = (yield* manager.list({})).serverEpoch;
+        const viewer = yield* browser.attachViewer(viewerInput(retainedTabId, false));
+        desktopDetaches.emit("detach", {
+          threadId: scope.thread.threadId,
+          tabId: retainedTabId,
+          desktopHostId: "host-a",
+        });
+        let ending = yield* Queue.take(viewer.output);
+        while (ending._tag !== "reconnect") ending = yield* Queue.take(viewer.output);
+        const context = yield* Layer.build(
+          DesktopChannel.layer.pipe(
+            Layer.provide(
+              ServerConfig.layerTest(process.cwd(), { prefix: "t3-failed-root-channel-" }),
+            ),
+          ),
+        );
+        const channel = Context.get(context, DesktopChannel.DesktopBrowserChannel);
+        const connect = (owner: string) =>
+          Effect.gen(function* () {
+            const commands = yield* Queue.unbounded<DesktopBrowserCommand>();
+            const fiber = yield* channel.subscribeCommands(owner, "host-a").pipe(
+              Stream.runForEach((command) => Queue.offer(commands, command)),
+              Effect.forkScoped,
+            );
+            expect(yield* Queue.take(commands)).toEqual({ type: "announce" });
+            return { commands, fiber, owner };
+          });
+        nativeRootCreationChannel = channel;
+        let connection = yield* connect("socket-0");
+        // More than the eight-tab agent limit must fail for the original reason,
+        // even though this owner never acknowledges destruction of a failed root.
+        for (let index = 0; index < 9; index++) {
+          desktopRendersNext = true;
+          if (stage === "publication") {
+            rootPublicationEntered = Promise.withResolvers<void>();
+            rootPublicationGate = Promise.withResolvers<void>();
+            rootPublicationFailure = new DesktopBrowserTransportError({
+              reason: "host-unavailable",
+            });
+          }
+          const opening = yield* broker
+            .invoke<PreviewAutomationStatus>({
+              scope,
+              operation: "open",
+              input: { reuseExistingTab: false, show: false },
+            })
+            .pipe(Effect.flip, Effect.forkChild);
+          const create = yield* Queue.take(connection.commands).pipe(
+            Effect.raceFirst(
+              Fiber.join(opening).pipe(
+                Effect.flatMap((failure) => Effect.die(new Error(failure.message))),
+              ),
+            ),
+          );
+          if (create.type !== "createRoot") throw new Error("Expected native root creation");
+          const rootId = `root-${create.tabId}`;
+          const source = {
+            threadId: create.threadId,
+            tabId: create.tabId,
+            desktopHostId: "host-a",
+          };
+          yield* channel.receiveEvent(connection.owner, "host-a", {
+            type: "rootCreated",
+            ...source,
+            rootId,
+            requestId: create.requestId,
+            profileId: create.profileId,
+          });
+          const accept = yield* Queue.take(connection.commands);
+          if (accept.type !== "acceptRoot") throw new Error("Expected native root acceptance");
+          if (stage === "publication") {
+            yield* channel.receiveEvent(connection.owner, "host-a", {
+              type: "rootAccepted",
+              ...source,
+              rootId,
+              requestId: accept.requestId,
+              profileId: accept.profileId,
+              accepted: true,
+            });
+            yield* Effect.promise(() => rootPublicationEntered!.promise);
+          }
+          yield* Fiber.interrupt(connection.fiber);
+          rootPublicationGate?.resolve();
+          const failure = yield* Fiber.join(opening);
+          expect(failure).toMatchObject({ _tag: "PreviewAutomationRemoteUnavailableError" });
+          expect((yield* manager.list({})).sessions).toEqual([retained]);
+          connection = yield* connect(`socket-${index + 1}`);
+          // No cancel replay or hidden owned root remains on the returning host.
+          yield* channel.reconcileRoots("host-a", serverEpoch);
+          expect(yield* Queue.take(connection.commands)).toEqual({
+            type: "reconcileRoots",
+            serverEpoch,
+            retainedRootRequestIds: [],
+          });
+          expect(rootDiscards).toContainEqual({ ...source, rootId });
+          expect(rootClosures).toEqual([]);
+        }
+        expect(rootDiscards).toHaveLength(9);
+        nativeRootCreationChannel = null;
+        rootPublicationFailure = null;
+        rootPublicationGate = null;
+        desktopRendersNext = true;
+        const replacement = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { reuseExistingTab: false, show: false },
+        });
+        expect(replacement.tabId).not.toBe(retainedTabId);
+        expect((yield* manager.list({})).sessions).toHaveLength(2);
+        // The unrelated published offline root remains discoverable and closable.
+        desktopTabs.delete(retainedTabId);
+        rootCloseFailure = "host-unavailable";
+        yield* broker.invoke({ scope, tabId: retainedTabId, operation: "close", input: {} });
+        expect((yield* manager.list({})).sessions.map((session) => session.tabId)).toEqual([
+          replacement.tabId,
+        ]);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.effect("canceled root connection closes its attempted page and never publishes a late tab", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      yield* ServerBrowser.ServerBrowser;
+      const manager = yield* Manager.PreviewManager;
+      const broker = yield* Broker.PreviewAutomationBroker;
+      yield* Effect.yieldNow;
+      desktopRendersNext = true;
+      const setupEntered = Promise.withResolvers<void>();
+      const setupGate = Promise.withResolvers<void>();
+      desktopPageSetup = async () => {
+        setupEntered.resolve();
+        await setupGate.promise;
+      };
+      rootCloseFailure = "close-canceled";
+      releasedDesktopSeen = Promise.withResolvers<void>();
+      const events = yield* manager.subscribeEvents;
+      const opening = yield* broker
+        .invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { reuseExistingTab: false, show: false },
+          timeoutMs: 200,
+        })
+        .pipe(Effect.flip, Effect.forkChild);
+      yield* Effect.promise(() => setupEntered.promise);
+      yield* TestClock.adjust("201 millis");
+      expect(yield* Fiber.join(opening)).toMatchObject({ _tag: "PreviewAutomationTimeoutError" });
+      setupGate.resolve();
+      yield* Effect.promise(() => releasedDesktopSeen!.promise);
+      expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toEqual([]);
+      expect(yield* PubSub.takeUpTo(events, 100)).toEqual([]);
+      expect(rootClosures).toEqual([]);
+      expect(rootDiscards).toEqual([
+        expect.objectContaining({ rootId: `root-${rootCreations[0]!.tabId}` }),
+      ]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("shared native pages reject agent keyboard input while allowing a controlling viewer", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const browser = yield* ServerBrowser.ServerBrowser;
+      const manager = yield* Manager.PreviewManager;
+      const broker = yield* Broker.PreviewAutomationBroker;
+      yield* Effect.yieldNow;
+      desktopRendersNext = true;
+      const shared = yield* manager.open({
+        threadId: scope.thread.threadId,
+        runtime: "server",
+        desktopHostId: "local",
+        automationOwner: `${scope.environmentId}\u0000${scope.thread.providerSessionId}`,
+      });
+      const viewer = yield* browser.attachViewer(viewerInput(shared.tabId, true));
+      expect(shared.backingPage).toBe("desktop");
+      surfaceCalls.length = 0;
+      for (const [operation, input] of [
+        ["type", { locator: "#field", text: "shared input" }],
+        ["press", { key: "Enter" }],
+      ] as const) {
+        const failure = yield* broker
+          .invoke<void>({ scope, tabId: shared.tabId, operation, input })
+          .pipe(Effect.flip);
+        expect(failure).toMatchObject({ _tag: "PreviewAutomationExecutionError" });
+        expect(failure.message).toContain("preview_open({reuseExistingTab:false})");
+        expect(failure.message).toContain("returned tabId");
+      }
+      expect(surfaceCalls).toEqual([]);
+      expect(rootCreations).toEqual([]);
+      const page = desktopConnections[0]!.context.page;
+      expect(page.locator).not.toHaveBeenCalled();
+      expect(page.keyboard.insertText).not.toHaveBeenCalled();
+      expect(page.keyboard.press).not.toHaveBeenCalled();
+      expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toEqual([shared]);
+      yield* viewer.input({ type: "takeControl" });
+      yield* viewer.input({ type: "text", text: "viewer text" });
+      yield* viewer.input({ type: "key", action: "down", key: "Enter", code: "Enter" });
+      const commands = desktopConnections[0]!.context.sessions.flatMap(
+        (session) => session.send.mock.calls,
+      );
+      expect(commands).toEqual(
+        expect.arrayContaining([
+          ["Input.insertText", { text: "viewer text", __t3InputSource: "viewer" }],
+          [
+            "Input.dispatchKeyEvent",
+            expect.objectContaining({
+              type: "rawKeyDown",
+              key: "Enter",
+              code: "Enter",
+              __t3InputSource: "viewer",
+            }),
+          ],
+        ]),
+      );
+      yield* viewer.input({ type: "mouse", action: "down", button: "left", x: 10, y: 20 });
+      yield* viewer.input({ type: "releaseControl" });
+      expect(desktopConnections[0]!.context.sessions.at(-1)!.send).toHaveBeenCalledWith(
+        "Input.dispatchKeyEvent",
+        { type: "keyUp", key: "Enter", code: "Enter", __t3InputSource: "viewer" },
+      );
+      expect(desktopConnections[0]!.context.sessions.at(-1)!.send).toHaveBeenCalledWith(
+        "Input.dispatchMouseEvent",
+        {
+          type: "mouseReleased",
+          button: "left",
+          x: 10,
+          y: 20,
+          buttons: 0,
+          clickCount: 1,
+          __t3InputSource: "viewer",
+        },
+      );
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live("drives the desktop's own page for a tab the desktop renders", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -3064,6 +5434,596 @@ it.live(
     ).pipe(Effect.provide(layer)),
 );
 
+it.live.each([undefined, "incognito"])(
+  "a host-omitted existing tab retains reported defaults (profile=%s)",
+  (profileId) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const browser = yield* ServerBrowser.ServerBrowser;
+        const broker = yield* Broker.PreviewAutomationBroker;
+        const manager = yield* Manager.PreviewManager;
+        yield* Effect.yieldNow;
+        if (profileId !== undefined)
+          yield* browser.reportProfiles({ profiles: [], defaultProfileId: profileId });
+        const opened = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { open: false },
+        });
+        const tabId = PreviewTabId.make(opened.tabId!);
+        yield* browser.reportProfiles({
+          profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+          defaultProfileId: "work",
+        });
+        const reportedStatus = {
+          profileId: profileId ?? null,
+          defaultProfileId: "work",
+          profiles: [
+            { id: "default", name: "Default" },
+            { id: "incognito", name: "Incognito", incognito: true },
+            { id: "work", name: "Work" },
+          ],
+        };
+        expect(
+          yield* broker.invoke<PreviewAutomationStatus>({
+            scope,
+            tabId,
+            operation: "status",
+            input: {},
+          }),
+        ).toMatchObject(reportedStatus);
+        expect(
+          yield* broker.invoke<PreviewAutomationStatus>({
+            scope,
+            tabId,
+            operation: "open",
+            input: { open: false },
+          }),
+        ).toMatchObject({ tabId, ...reportedStatus });
+        const events = yield* manager.subscribeEvents;
+        contexts[0]!.page.emit("popup", makeContext().page);
+        const event = Option.getOrThrow(
+          yield* Stream.fromSubscription(events).pipe(
+            Stream.filter((event) => event.type === "opened" && event.tabId !== tabId),
+            Stream.runHead,
+          ),
+        );
+        expect(
+          yield* broker.invoke<PreviewAutomationStatus>({
+            scope,
+            tabId: event.tabId,
+            operation: "status",
+            input: {},
+          }),
+        ).toMatchObject(reportedStatus);
+        const fresh = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { open: false, reuseExistingTab: false },
+        });
+        expect(fresh).toMatchObject({ profileId: "work", defaultProfileId: "work" });
+        expect(contextRequests).toEqual([
+          { profileId: profileId ?? "default", isolated: true },
+          { profileId: "work", isolated: false },
+        ]);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live("explicit environment hosting opens loopback without consulting a connected desktop", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      localDesktopAvailable = true;
+      profileCatalogue = {
+        desktopHostId: "remote-desktop",
+        profiles: [{ id: "work", name: "Logged in Developer", kind: "persistent" }],
+        defaultProfileId: "work",
+      };
+      remoteUrlAvailable = false;
+      const broker = yield* Broker.PreviewAutomationBroker;
+      yield* ServerBrowser.ServerBrowser;
+      yield* Effect.yieldNow;
+      const opened = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: {
+          browserHost: "environment",
+          url: "http://127.0.0.1:5173/fixture",
+          reuseExistingTab: false,
+          open: false,
+        },
+      });
+      expect(opened).toMatchObject({
+        available: true,
+        browserHost: "environment",
+        profileId: "incognito",
+        profileName: "Incognito",
+        control: { owner: "agent", ownedByCaller: true },
+      });
+      expect(profileRequests).toEqual([]);
+      expect(rootCreations).toEqual([]);
+      expect(contexts[0]!.page.goto).toHaveBeenCalledWith(
+        "http://127.0.0.1:5173/fixture",
+        expect.anything(),
+      );
+      const manager = yield* Manager.PreviewManager;
+      expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toEqual([
+        expect.objectContaining({
+          backingPage: "server",
+          automationOwner: `${scope.environmentId}\u0000${scope.thread.providerSessionId}`,
+        }),
+      ]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("environment hosting refuses desktop sign-ins instead of substituting a cookie jar", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const broker = yield* Broker.PreviewAutomationBroker;
+      yield* ServerBrowser.ServerBrowser;
+      yield* Effect.yieldNow;
+      const failure = yield* broker
+        .invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "openWithProfile",
+          input: { browserHost: "environment", profileName: "Logged in Developer", open: false },
+        })
+        .pipe(Effect.flip);
+      expect(failure).toMatchObject({ _tag: "PreviewAutomationExecutionError" });
+      expect(contexts).toEqual([]);
+      expect(profileRequests).toEqual([]);
+      expect(rootCreations).toEqual([]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live.each([
+  { desktopAvailable: false, mode: "reuse" },
+  { desktopAvailable: false, mode: "new" },
+  { desktopAvailable: false, mode: "profile" },
+  { desktopAvailable: true, mode: "reuse" },
+  { desktopAvailable: true, mode: "new" },
+  { desktopAvailable: true, mode: "profile" },
+] as const)(
+  "an omitted host retains environment policy (desktop=$desktopAvailable, open=$mode)",
+  ({ desktopAvailable, mode }) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        localDesktopAvailable = desktopAvailable;
+        const browser = yield* ServerBrowser.ServerBrowser;
+        const broker = yield* Broker.PreviewAutomationBroker;
+        yield* browser.reportProfiles({
+          profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+          defaultProfileId: "work",
+        });
+        yield* Effect.yieldNow;
+        const first = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { browserHost: "environment", open: false },
+        });
+        const next = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: mode === "profile" ? "openWithProfile" : "open",
+          input: {
+            open: false,
+            ...(mode === "new" ? { reuseExistingTab: false } : {}),
+            ...(mode === "profile" ? { profileName: "Default" } : {}),
+          },
+        });
+        expect(next).toMatchObject({
+          browserHost: "environment",
+          profileId: mode === "profile" ? "default" : "incognito",
+          defaultProfileId: "incognito",
+        });
+        if (mode === "reuse") expect(next.tabId).toBe(first.tabId);
+        else expect(next.tabId).not.toBe(first.tabId);
+        expect(profileRequests).toEqual([]);
+        expect(rootCreations).toEqual([]);
+        expect(contextRequests).toEqual([
+          { profileId: "incognito", isolated: true },
+          ...(mode === "reuse"
+            ? []
+            : [
+                {
+                  profileId: mode === "profile" ? "default" : "incognito",
+                  isolated: mode !== "profile",
+                },
+              ]),
+        ]);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live("an explicit desktop choice overrides retained environment policy", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      localDesktopAvailable = true;
+      const broker = yield* Broker.PreviewAutomationBroker;
+      yield* ServerBrowser.ServerBrowser;
+      yield* Effect.yieldNow;
+      const first = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { browserHost: "environment", open: false },
+      });
+      desktopRendersNext = true;
+      const next = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { browserHost: "desktop", open: false },
+      });
+      expect(next).toMatchObject({ browserHost: "desktop", profileId: "default" });
+      expect(next.tabId).not.toBe(first.tabId);
+      expect(rootCreations).toHaveLength(1);
+      expect(contextRequests).toEqual([{ profileId: "incognito", isolated: true }]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("an explicit host mismatch cannot replace a requested desktop tab", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      desktopRendersNext = true;
+      const { broker, tabId } = yield* ready;
+      const failure = yield* broker
+        .invoke<PreviewAutomationStatus>({
+          scope,
+          tabId,
+          operation: "open",
+          input: { browserHost: "environment", open: false },
+        })
+        .pipe(Effect.flip);
+      expect(failure).toMatchObject({ _tag: "PreviewAutomationExecutionError" });
+      expect(rootCreations).toHaveLength(1);
+      expect(contextRequests).toEqual([]);
+      expect(
+        (yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          tabId,
+          operation: "status",
+          input: {},
+        })).browserHost,
+      ).toBe("desktop");
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("an environment choice creates a new tab instead of reusing the current desktop tab", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      desktopRendersNext = true;
+      const { broker, tabId } = yield* ready;
+      const opened = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { browserHost: "environment", open: false },
+      });
+      expect(opened).toMatchObject({ browserHost: "environment", profileId: "incognito" });
+      expect(opened.tabId).not.toBe(tabId);
+      expect(rootCreations).toHaveLength(1);
+      expect(contextRequests).toEqual([{ profileId: "incognito", isolated: true }]);
+      expect(opened.tabs).toHaveLength(2);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live.each([false, true])(
+  "checks a detached tab's retained host before attachment (explicit=%s)",
+  (explicit) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        desktopRendersNext = true;
+        const { broker, browser, tabId } = yield* ready;
+        const viewer = yield* browser.attachViewer(viewerInput(tabId, false));
+        desktopTabs.delete(tabId);
+        desktopDetaches.emit("detach", {
+          threadId: scope.thread.threadId,
+          tabId,
+          desktopHostId: "local",
+        });
+        let ending = yield* Queue.take(viewer.output);
+        while (ending._tag !== "reconnect") ending = yield* Queue.take(viewer.output);
+        const connectionsBefore = desktopConnections.length;
+        const open = broker.invoke<PreviewAutomationStatus>({
+          scope,
+          ...(explicit ? { tabId } : {}),
+          operation: "open",
+          input: { browserHost: "environment", open: false },
+        });
+        if (explicit) {
+          const failure = yield* open.pipe(Effect.flip);
+          expect(failure).toMatchObject({
+            _tag: "PreviewAutomationExecutionError",
+            reason: expect.stringContaining("different browser host"),
+          });
+          expect(contextRequests).toEqual([]);
+        } else {
+          const opened = yield* open;
+          expect(opened).toMatchObject({ browserHost: "environment", profileId: "incognito" });
+          expect(opened.tabId).not.toBe(tabId);
+          expect(opened.tabs).toHaveLength(2);
+          expect(contextRequests).toEqual([{ profileId: "incognito", isolated: true }]);
+        }
+        expect(desktopConnections).toHaveLength(connectionsBefore);
+        expect(rootCreations).toHaveLength(1);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live("environment status advertises its own profiles instead of the desktop's catalogue", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const browser = yield* ServerBrowser.ServerBrowser;
+      const broker = yield* Broker.PreviewAutomationBroker;
+      yield* browser.reportProfiles({
+        profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+        defaultProfileId: "work",
+      });
+      yield* Effect.yieldNow;
+      const opened = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { browserHost: "environment", open: false, reuseExistingTab: false },
+      });
+      const tabId = PreviewTabId.make(opened.tabId!);
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(status).toMatchObject({
+        profileId: "incognito",
+        defaultProfileId: "incognito",
+        profiles: [
+          { id: "default", name: "Default" },
+          { id: "incognito", name: "Incognito", incognito: true },
+        ],
+      });
+      const reused = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "open",
+        input: { open: false },
+      });
+      expect(reused).toMatchObject({
+        tabId,
+        profileId: "incognito",
+        defaultProfileId: "incognito",
+        profiles: status.profiles,
+      });
+      const rejected = yield* broker
+        .invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "openWithProfile",
+          input: { browserHost: "environment", profileId: "work", open: false },
+        })
+        .pipe(Effect.flip);
+      expect(rejected).toMatchObject({ _tag: "PreviewAutomationExecutionError" });
+      expect(contextRequests).toEqual([{ profileId: "incognito", isolated: true }]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("a retained environment session keeps its profile policy after failed attachment", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const browser = yield* ServerBrowser.ServerBrowser;
+      const broker = yield* Broker.PreviewAutomationBroker;
+      const manager = yield* Manager.PreviewManager;
+      yield* browser.reportProfiles({
+        profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+        defaultProfileId: "work",
+      });
+      yield* Effect.yieldNow;
+      contextFailure = new Error("Test context unavailable");
+      const failure = yield* broker
+        .invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { browserHost: "environment", open: false },
+        })
+        .pipe(Effect.flip);
+      expect(failure).toMatchObject({ _tag: "PreviewAutomationExecutionError" });
+      const { sessions } = yield* manager.list({ threadId: scope.thread.threadId });
+      expect(sessions).toHaveLength(1);
+      const tabId = sessions[0]!.tabId;
+      contextFailure = null;
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "open",
+        input: { open: false },
+      });
+      expect(status).toMatchObject({
+        tabId,
+        profileId: "incognito",
+        defaultProfileId: "incognito",
+        profiles: [
+          { id: "default", name: "Default" },
+          { id: "incognito", name: "Incognito", incognito: true },
+        ],
+      });
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live(
+  "environment profile selection preserves reused storage and rejects an exact mismatch",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const broker = yield* Broker.PreviewAutomationBroker;
+        yield* ServerBrowser.ServerBrowser;
+        yield* Effect.yieldNow;
+        const opened = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "openWithProfile",
+          input: { browserHost: "environment", profileName: "Incognito", open: false },
+        });
+        const tabId = PreviewTabId.make(opened.tabId!);
+        expect(opened).toMatchObject({ browserHost: "environment", profileId: "incognito" });
+        const reused = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          tabId,
+          operation: "open",
+          input: { browserHost: "environment", open: false },
+        });
+        expect(reused).toMatchObject({ tabId, profileId: "incognito" });
+        const failure = yield* broker
+          .invoke<PreviewAutomationStatus>({
+            scope,
+            tabId,
+            operation: "openWithProfile",
+            input: { browserHost: "environment", profileId: "default", open: false },
+          })
+          .pipe(Effect.flip);
+        expect(failure).toMatchObject({ _tag: "PreviewAutomationProfileError" });
+        expect(contextRequests).toEqual([{ profileId: "incognito", isolated: true }]);
+        expect(profileRequests).toEqual([]);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live.each([false, true])(
+  "an attached desktop tab can be reused without its catalogue (explicit=%s)",
+  (explicit) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        desktopRendersNext = true;
+        const { broker, tabId } = yield* ready;
+        profileCatalogueUnavailable = true;
+        const reused = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          ...(explicit ? { tabId } : {}),
+          operation: "open",
+          input: { browserHost: "desktop", open: false, url: "https://reuse.example.test/" },
+        });
+        expect(reused).toMatchObject({
+          tabId,
+          browserHost: "desktop",
+          url: "https://reuse.example.test/",
+        });
+        for (const input of [
+          { reuseExistingTab: false },
+          { profileId: "default" },
+          { profileName: "Default" },
+        ]) {
+          const failure = yield* broker
+            .invoke<PreviewAutomationStatus>({
+              scope,
+              ...(explicit ? { tabId } : {}),
+              operation: "open",
+              input: { browserHost: "desktop", open: false, ...input },
+            })
+            .pipe(Effect.flip);
+          expect(failure).toMatchObject({ _tag: "PreviewAutomationRemoteUnavailableError" });
+        }
+        expect(rootCreations).toHaveLength(1);
+        expect(contextRequests).toEqual([]);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live("an explicit desktop choice never falls back to an environment cookie jar", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const broker = yield* Broker.PreviewAutomationBroker;
+      const browser = yield* ServerBrowser.ServerBrowser;
+      yield* browser.reportProfiles({ profiles: [], defaultProfileId: "default" });
+      yield* Effect.yieldNow;
+      const failure = yield* broker
+        .invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { browserHost: "desktop", open: false },
+        })
+        .pipe(Effect.flip);
+      expect(failure).toMatchObject({ _tag: "PreviewAutomationRemoteUnavailableError" });
+      expect(contextRequests).toEqual([]);
+      expect(rootCreations).toEqual([]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("an environment choice cannot replace an explicitly missing tab", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const broker = yield* Broker.PreviewAutomationBroker;
+      yield* ServerBrowser.ServerBrowser;
+      yield* Effect.yieldNow;
+      const failure = yield* broker
+        .invoke<PreviewAutomationStatus>({
+          scope,
+          tabId: PreviewTabId.make("missing-environment-tab"),
+          operation: "open",
+          input: { browserHost: "environment", open: false },
+        })
+        .pipe(Effect.flip);
+      expect(failure).toMatchObject({ _tag: "PreviewAutomationTabNotFoundError" });
+      expect(contextRequests).toEqual([]);
+      expect(rootCreations).toEqual([]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("an environment popup stays on the server when local native IPC is available", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      localDesktopAvailable = true;
+      const broker = yield* Broker.PreviewAutomationBroker;
+      const browser = yield* ServerBrowser.ServerBrowser;
+      yield* browser.reportProfiles({
+        profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+        defaultProfileId: "work",
+      });
+      yield* Effect.yieldNow;
+      const opened = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { browserHost: "environment", open: false, reuseExistingTab: false },
+      });
+      const manager = yield* Manager.PreviewManager;
+      const events = yield* manager.subscribeEvents;
+      const popup = makeContext();
+      contexts[0]!.page.emit("popup", popup.page);
+      const event = Option.getOrThrow(
+        yield* Stream.fromSubscription(events).pipe(
+          Stream.filter((event) => event.type === "opened" && event.tabId !== opened.tabId),
+          Stream.runHead,
+        ),
+      );
+      if (event.type !== "opened") throw new Error("Expected popup opening");
+      expect(event.snapshot).toMatchObject({
+        backingPage: "server",
+        profileId: "incognito",
+        automationOwner: `${scope.environmentId}\u0000${scope.thread.providerSessionId}`,
+        reveal: false,
+      });
+      expect(event.snapshot.desktopHostId).toBeUndefined();
+      const status = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId: event.tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(status).toMatchObject({
+        browserHost: "environment",
+        profileId: "incognito",
+        defaultProfileId: "incognito",
+        profiles: [
+          { id: "default", name: "Default" },
+          { id: "incognito", name: "Incognito", incognito: true },
+        ],
+        control: { owner: "agent", ownedByCaller: true },
+      });
+      expect(rootCreations).toEqual([]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live("an agent tab keeps throwaway storage when no client reported profiles", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -3169,6 +6129,7 @@ it.live(
           input: {},
         });
         expect(current).toMatchObject({ profileId: "work", profileName: "Work" });
+        expect(profileRequests.at(-1)).toMatchObject({ desktopHostId: "local" });
         expect(contexts).toHaveLength(0);
         expect(desktopConnections).toHaveLength(1);
         const mismatch = yield* broker
@@ -3192,6 +6153,145 @@ it.live(
         expect(fresh).toMatchObject({ profileId: "personal", profileName: "Personal" });
         expect(fresh.tabId).not.toBe(tabId);
         expect(desktopConnections).toHaveLength(2);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live("keeps profile discovery and new tabs on the caller's retained desktop owner", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      profileCatalogue = {
+        desktopHostId: "host-b",
+        profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+        defaultProfileId: "work",
+      };
+      desktopRendersNext = true;
+      const { broker, tabId } = yield* ready;
+      profileCatalogues.set("host-b", profileCatalogue);
+      profileCatalogue = {
+        desktopHostId: "local",
+        profiles: [{ id: "personal", name: "Personal", kind: "persistent" }],
+        defaultProfileId: "personal",
+      };
+      const current = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        tabId,
+        operation: "status",
+        input: {},
+      });
+      expect(current).toMatchObject({ profileId: "work", profileName: "Work" });
+      const catalogue = yield* broker.invoke({ scope, tabId, operation: "profiles", input: {} });
+      expect(catalogue).toMatchObject({ defaultProfileId: "work" });
+      expect(profileRequests.at(-1)).toMatchObject({ desktopHostId: "host-b" });
+      desktopRendersNext = true;
+      const fresh = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "openWithProfile",
+        input: { profileName: "Work", reuseExistingTab: false, show: false },
+      });
+      const manager = yield* Manager.PreviewManager;
+      expect(
+        (yield* manager.list({ threadId: scope.thread.threadId })).sessions.find(
+          (session) => session.tabId === fresh.tabId,
+        ),
+      ).toMatchObject({ desktopHostId: "host-b", profileId: "work" });
+      const requestedCatalogues = profileRequests.length;
+      const stale = yield* broker
+        .invoke<PreviewAutomationStatus>({
+          scope,
+          tabId: PreviewTabId.make("missing-tab"),
+          operation: "openWithProfile",
+          input: { profileName: "Personal", reuseExistingTab: false, show: false },
+        })
+        .pipe(Effect.flip);
+      expect(stale).toMatchObject({ _tag: "PreviewAutomationTabNotFoundError" });
+      expect(profileRequests).toHaveLength(requestedCatalogues);
+      profileCatalogues.clear();
+      const unavailable = yield* broker
+        .invoke<PreviewAutomationStatus>({
+          scope,
+          tabId,
+          operation: "open",
+          input: { reuseExistingTab: false, show: false },
+        })
+        .pipe(Effect.flip);
+      expect(unavailable).toMatchObject({ _tag: "PreviewAutomationRemoteUnavailableError" });
+      expect(desktopConnections).toHaveLength(2);
+      expect(contexts).toHaveLength(0);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live.each([false, true])(
+  "explicitly selects a user's desktop tab without implicitly adopting it (attached=%s)",
+  (attached) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const browser = yield* ServerBrowser.ServerBrowser;
+        const broker = yield* Broker.PreviewAutomationBroker;
+        const manager = yield* Manager.PreviewManager;
+        yield* Effect.yieldNow;
+        profileCatalogue = {
+          desktopHostId: "local",
+          profiles: [{ id: "personal", name: "Personal", kind: "persistent" }],
+          defaultProfileId: "personal",
+        };
+        profileCatalogues.set("host-b", {
+          desktopHostId: "host-b",
+          profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+          defaultProfileId: "work",
+        });
+        desktopRendersNext = true;
+        const opened = yield* manager.open({
+          threadId: scope.thread.threadId,
+          runtime: "server",
+          desktopHostId: "host-b",
+          profileId: "work",
+        });
+        const tabId = PreviewTabId.make(opened.tabId);
+        if (attached) yield* browser.attachViewer(viewerInput(tabId, false));
+        yield* broker.invoke({ scope, tabId, operation: "status", input: {} });
+        const implicit = yield* broker.invoke({ scope, operation: "profiles", input: {} });
+        expect(implicit).toMatchObject({ defaultProfileId: "personal" });
+        const explicit = yield* broker.invoke({ scope, tabId, operation: "profiles", input: {} });
+        expect(explicit).toMatchObject({ defaultProfileId: "work" });
+        const reused = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          tabId,
+          operation: "openWithProfile",
+          input: { profileId: "work", show: false },
+        });
+        expect(reused).toMatchObject({
+          tabId,
+          profileId: "work",
+          profileName: "Work",
+          control: { owner: "unclaimed", ownedByCaller: false },
+        });
+        yield* broker.invoke({
+          scope,
+          tabId,
+          operation: "navigate",
+          input: { url: "https://example.test/agent" },
+        });
+        expect(desktopConnections[0]!.context.page.goto).toHaveBeenLastCalledWith(
+          "https://example.test/agent",
+          expect.anything(),
+        );
+        yield* browser.attachViewer(viewerInput(tabId, true));
+        const controlled = yield* broker
+          .invoke<PreviewAutomationStatus>({
+            scope,
+            tabId,
+            operation: "openWithProfile",
+            input: { profileId: "work", show: false },
+          })
+          .pipe(Effect.flip);
+        expect(controlled).toMatchObject({
+          _tag: "PreviewAutomationControlInterruptedError",
+          reason: "humanControl",
+        });
+        expect(desktopConnections).toHaveLength(1);
+        expect(contexts).toHaveLength(0);
       }),
     ).pipe(Effect.provide(layer)),
 );
@@ -3249,7 +6349,54 @@ it.live("never substitutes a headless page when the selected desktop does not at
   ).pipe(Effect.provide(layer)),
 );
 
-it.live("catalogue timeout and late desktop attachment keep the original native page choice", () =>
+it.live("an older desktop fails new native opens before creating or publishing a tab", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      yield* ServerBrowser.ServerBrowser;
+      const manager = yield* Manager.PreviewManager;
+      const broker = yield* Broker.PreviewAutomationBroker;
+      yield* Effect.yieldNow;
+      for (const desktopHostId of ["local", "remote-host"]) {
+        profileCatalogue = {
+          desktopHostId,
+          supportsNativeRoots: false,
+          profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+          defaultProfileId: "work",
+        };
+        expect(yield* broker.invoke({ scope, operation: "profiles", input: {} })).toMatchObject({
+          defaultProfileId: "work",
+        });
+        for (const operation of ["open", "openWithProfile"] as const) {
+          const failure = yield* broker
+            .invoke<void>({
+              scope,
+              operation,
+              input: {
+                ...(operation === "openWithProfile" ? { profileId: "work" } : {}),
+                url: "https://auth.example.test/start",
+                reuseExistingTab: false,
+                show: false,
+              },
+            })
+            .pipe(Effect.flip);
+          expect(failure).toMatchObject({
+            _tag: "PreviewAutomationRemoteUnavailableError",
+            cause: {
+              message: expect.stringContaining("Update the desktop app"),
+              detail: { reason: "root-unsupported" },
+            },
+          });
+          expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toEqual([]);
+          expect(rootCreations).toEqual([]);
+          expect(contexts).toHaveLength(0);
+          expect(desktopConnections).toHaveLength(0);
+        }
+      }
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("an unavailable profile catalogue never opens a fallback profile or publishes a tab", () =>
   Effect.scoped(
     Effect.gen(function* () {
       const browser = yield* ServerBrowser.ServerBrowser;
@@ -3258,22 +6405,26 @@ it.live("catalogue timeout and late desktop attachment keep the original native 
       yield* Effect.yieldNow;
       localDesktopAvailable = true;
       profileCatalogue = null;
+      profileCatalogueUnavailable = true;
       yield* broker
-        .invoke<void>({ scope, operation: "open", input: { reuseExistingTab: false, show: false } })
+        .invoke<void>({
+          scope,
+          operation: "open",
+          input: { reuseExistingTab: false, show: false },
+        })
         .pipe(Effect.flip);
       const { sessions } = yield* manager.list({ threadId: scope.thread.threadId });
-      expect(sessions).toHaveLength(1);
-      expect(sessions[0]).toMatchObject({ backingPage: "desktop", desktopHostId: "local" });
+      expect(sessions).toHaveLength(0);
+      expect(rootCreations).toEqual([]);
       expect(contexts).toHaveLength(0);
       expect(desktopConnections).toHaveLength(0);
-      desktopTabs.add(sessions[0]!.tabId);
-      yield* browser.attachViewer(viewerInput(sessions[0]!.tabId, false));
-      expect(desktopConnections).toHaveLength(1);
+      desktopTabs.add("unpublished-root");
+      expect(
+        yield* browser.attachViewer(viewerInput("unpublished-root", false)).pipe(Effect.flip),
+      ).toMatchObject({ _tag: "ServerBrowserTabNotFoundError" });
+      expect(desktopConnections).toHaveLength(0);
       expect(contexts).toHaveLength(0);
-      expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions[0]).toMatchObject({
-        backingPage: "desktop",
-        desktopHostId: "local",
-      });
+      expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toEqual([]);
     }),
   ).pipe(Effect.provide(layer)),
 );
@@ -3419,16 +6570,20 @@ it.live("resolves remote environment URLs for explicit profile opens and later n
       const initial = (yield* manager.list({ threadId: scope.thread.threadId })).sessions.find(
         (session) => session.tabId === opened.tabId,
       );
-      // The desktop loads the initial URL from the session snapshot itself.
+      // The server navigates the acknowledged root, after resolving the environment URL.
       expect(initial).toMatchObject({
         desktopHostId: "remote-desktop",
         profileId: "work",
         navStatus: {
-          _tag: "Loading",
+          _tag: "Success",
           url: "http://environment.example.test:5173/start?x=1#section",
+          title: "test page",
         },
       });
-      expect(page.goto).not.toHaveBeenCalled();
+      expect(page.goto).toHaveBeenCalledExactlyOnceWith(
+        "http://environment.example.test:5173/start?x=1#section",
+        expect.objectContaining({ waitUntil: "commit" }),
+      );
       yield* broker.invoke<PreviewAutomationStatus>({
         scope,
         tabId: opened.tabId!,

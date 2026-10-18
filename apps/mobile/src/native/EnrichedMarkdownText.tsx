@@ -141,13 +141,10 @@ function enrichedStyle(
 
 export function MobileEnrichedMarkdownText(props: SelectableMarkdownTextProps) {
   const { renderImage, resolveImageSource } = props;
-  const { markdown, authoredFileLinks } = useMemo(
-    () => {
-      const prepared = prepareEnrichedMarkdown(props.markdown);
-      return { ...prepared, markdown: markdownWithTableBreaks(prepared.markdown) };
-    },
-    [props.markdown],
-  );
+  const { markdown, authoredFileLinks } = useMemo(() => {
+    const prepared = prepareEnrichedMarkdown(props.markdown);
+    return { ...prepared, markdown: markdownWithTableBreaks(prepared.markdown) };
+  }, [props.markdown]);
   const { themeAppearance } = useAppearancePreferences();
   const [documentAssets, setDocumentAssets] = useState<DocumentAssetsEvent["assets"]>([]);
   const onDocumentAssets = useCallback(({ assets }: DocumentAssetsEvent) => {

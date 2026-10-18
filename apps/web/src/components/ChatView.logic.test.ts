@@ -1695,12 +1695,55 @@ describe("resolveComposerInteractionMode", () => {
 });
 
 describe("resolveBackgroundDraftWorkspaceOptions", () => {
+  it.each(["auto", "manual"] as const)(
+    "keeps the %s routing intent for the next background composer",
+    (environmentSelection) => {
+      expect(
+        resolveBackgroundDraftWorkspaceOptions({
+          envMode: "local",
+          branch: "main",
+          startFromOrigin: true,
+          canAutoBalance: true,
+          environmentSelection,
+        }),
+      ).toEqual({
+        envMode: "local",
+        branch: "main",
+        worktreePath: null,
+        startFromOrigin: false,
+        environmentSelection,
+      });
+    },
+  );
+
+  it.each(["auto", "manual"] as const)(
+    "preserves the worktree base when balancing is unavailable and intent is %s",
+    (environmentSelection) => {
+      expect(
+        resolveBackgroundDraftWorkspaceOptions({
+          envMode: "worktree",
+          branch: "feature-work",
+          startFromOrigin: true,
+          canAutoBalance: false,
+          environmentSelection,
+        }),
+      ).toEqual({
+        envMode: "worktree",
+        branch: "feature-work",
+        worktreePath: null,
+        startFromOrigin: true,
+        ...(environmentSelection === "manual" ? { environmentSelection } : {}),
+      });
+    },
+  );
+
   it("keeps New worktree selected without reusing the launched worktree", () => {
     expect(
       resolveBackgroundDraftWorkspaceOptions({
         envMode: "worktree",
         branch: "main",
         startFromOrigin: true,
+        canAutoBalance: false,
       }),
     ).toEqual({
       envMode: "worktree",
@@ -2284,5 +2327,35 @@ describe("explicit read marker visit decisions", () => {
       record: false,
       nextKey: opened.nextKey,
     });
+  });
+});
+
+describe("restorePlanFollowUpComposer source cursor", () => {
+  it("restores the caret after a literal fenced file link so the next edit appends", () => {
+    const source = "```\n[package.json](package.json) \n```";
+    let restoredPrompt = "";
+    let sourceCursor = 0;
+    restorePlanFollowUpComposer({
+      snapshot: {
+        prompt: source,
+        terminalContexts: [],
+        reviewComments: [],
+        previewAnnotations: [],
+        threadContexts: [],
+      },
+      writePrompt: (value) => {
+        restoredPrompt = value;
+      },
+      writeTerminalContexts: () => {},
+      writeReviewComments: () => {},
+      writePreviewAnnotations: () => {},
+      writeThreadContexts: () => {},
+      resetCursor: ({ cursor }) => {
+        sourceCursor = cursor;
+      },
+    });
+    const edited =
+      restoredPrompt.slice(0, sourceCursor) + "\nnext" + restoredPrompt.slice(sourceCursor);
+    expect(edited).toBe(`${source}\nnext`);
   });
 });

@@ -221,10 +221,8 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
         const failed = command === control.failCommand;
         if (!failed && command === "loginctl enable-linger --no-ask-password 501")
           control.linger = "yes";
-        if (!failed && command === "systemctl --user enable t3code.service")
-          control.enabled = true;
-        if (!failed && command === "systemctl --user restart t3code.service")
-          control.active = true;
+        if (!failed && command === "systemctl --user enable t3code.service") control.enabled = true;
+        if (!failed && command === "systemctl --user restart t3code.service") control.active = true;
         // A failed stop can still have stopped the service.
         if (command === "systemctl --user stop t3code.service") control.active = false;
         if (
