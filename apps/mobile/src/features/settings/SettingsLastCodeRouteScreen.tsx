@@ -79,28 +79,29 @@ export function SettingsLastCodeRouteScreen() {
     writeInFlight.current = true;
     setPendingTargets(targets);
     setError(null);
-    try {
-      const outcomes = await Promise.allSettled(
-        writes.map(async (entry) => {
-          const result = await updateSettings({
-            environmentId: entry.environmentId,
-            input: { patch: entry.patch },
-          });
-          if (AsyncResult.isFailure(result)) throw squashAtomCommandFailure(result);
-        }),
-      );
-      const failures = outcomes.flatMap((result, index) => {
-        if (result.status === "fulfilled") return [];
-        const label = targets[index]!.environment.label;
-        const message =
-          result.reason instanceof Error ? result.reason.message : "Could not save settings.";
-        return [`${label}: ${message}`];
+    await Promise.allSettled(
+      writes.map(async (entry) => {
+        const result = await updateSettings({
+          environmentId: entry.environmentId,
+          input: { patch: entry.patch },
+        });
+        if (AsyncResult.isFailure(result)) throw squashAtomCommandFailure(result);
+      }),
+    )
+      .then((outcomes) => {
+        const failures = outcomes.flatMap((result, index) => {
+          if (result.status === "fulfilled") return [];
+          const label = targets[index]!.environment.label;
+          const message =
+            result.reason instanceof Error ? result.reason.message : "Could not save settings.";
+          return [`${label}: ${message}`];
+        });
+        if (failures.length > 0) setError(failures.join("\n"));
+      })
+      .finally(() => {
+        writeInFlight.current = false;
+        setPendingTargets(null);
       });
-      if (failures.length > 0) setError(failures.join("\n"));
-    } finally {
-      writeInFlight.current = false;
-      setPendingTargets(null);
-    }
   }
 
   return (

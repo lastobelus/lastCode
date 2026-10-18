@@ -1,6 +1,7 @@
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { EnvironmentId, MessageId, ThreadId, type ThreadAnnotation } from "@t3tools/contracts";
 import { act, useState } from "react";
+import { userEvent } from "vite-plus/test/browser";
 import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vite-plus/test";
 
@@ -72,7 +73,9 @@ function HoverHarness({
           </PopoverTrigger>
         ) : null}
       </ThreadAnnotationNavigationTrigger>
-      <button type="button">Outside control</button>
+      <button type="button" style={{ position: "fixed", bottom: 0, left: 0 }}>
+        Outside control
+      </button>
       {annotationActive ? (
         <ThreadAnnotationHoverPopover
           annotation={annotation}
@@ -129,6 +132,9 @@ async function renderHoverCard() {
   await act(() =>
     root?.render(<HoverHarness onNavigate={onNavigate} onRowClick={onRowClick} onEdit={onEdit} />),
   );
+  // The browser pointer survives DOM cleanup between tests. Start away from the row.
+  await act(() => userEvent.hover(button("Outside control")));
+  await expect.poll(popup).toBeNull();
   const setAnnotationActive = (annotationActive: boolean) =>
     act(() =>
       root?.render(
@@ -162,21 +168,12 @@ function popup() {
 }
 
 async function hoverNavigation() {
-  await act(() => {
-    navigationTrigger().dispatchEvent(new MouseEvent("mouseenter", { clientX: 10, clientY: 10 }));
-  });
-  expect(popup()).not.toBeNull();
+  await act(() => userEvent.hover(navigationTrigger()));
+  await expect.poll(popup).not.toBeNull();
 }
 
 async function leaveNavigation() {
-  await act(() => {
-    navigationTrigger().dispatchEvent(
-      new MouseEvent("mouseleave", { clientX: -100, clientY: -100 }),
-    );
-    document.body.dispatchEvent(
-      new MouseEvent("mousemove", { bubbles: true, clientX: -100, clientY: -100 }),
-    );
-  });
+  await act(() => userEvent.hover(button("Outside control")));
 }
 
 describe("ThreadAnnotationHoverPopover", () => {

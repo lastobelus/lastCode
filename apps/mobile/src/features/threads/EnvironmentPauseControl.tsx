@@ -143,17 +143,19 @@ function EnvironmentPauseDetails(props: {
     pendingRef.current = true;
     setPending(true);
     setError(null);
-    try {
+    await (async () => {
       const command = action === "start" ? start : action === "retry" ? retry : resume;
       const result = await command({ environmentId: entry.environmentId, input: {} });
       if (AsyncResult.isFailure(result)) throw squashAtomCommandFailure(result);
       if (action === "resume" || action === "cancel") setResumed(true);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "The request failed. Try again.");
-    } finally {
-      pendingRef.current = false;
-      setPending(false);
-    }
+    })()
+      .catch((cause) => {
+        setError(cause instanceof Error ? cause.message : "The request failed. Try again.");
+      })
+      .finally(() => {
+        pendingRef.current = false;
+        setPending(false);
+      });
   };
   const working = session !== null && !availability.ready && availability.known;
   return (

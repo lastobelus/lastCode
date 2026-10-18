@@ -142,7 +142,7 @@ function EnvironmentPauseDialog({
   const execute = async (action: "start" | "retry" | "resume") => {
     setPending(true);
     setError(null);
-    try {
+    await (async () => {
       const outcome = await (action === "start" ? start : action === "retry" ? retry : resume)(
         target,
       );
@@ -157,9 +157,9 @@ function EnvironmentPauseDialog({
       } else if (action === "resume" && outcome.value.session === null) {
         onClose();
       }
-    } finally {
+    })().finally(() => {
       setPending(false);
-    }
+    });
   };
 
   return (

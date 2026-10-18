@@ -37,17 +37,19 @@ export function ProviderSubagentBar(props: {
     pendingRef.current = true;
     setPending(true);
     setActionError(null);
-    try {
+    await (async () => {
       await action();
-    } catch (error) {
-      setActionError({
-        key: promotionKey,
-        message: error instanceof Error ? error.message : "Could not change subagent promotion.",
+    })()
+      .catch((error: unknown) => {
+        setActionError({
+          key: promotionKey,
+          message: error instanceof Error ? error.message : "Could not change subagent promotion.",
+        });
+      })
+      .finally(() => {
+        pendingRef.current = false;
+        setPending(false);
       });
-    } finally {
-      pendingRef.current = false;
-      setPending(false);
-    }
   };
   const containerRef = useRef<HTMLDivElement>(null);
   const promotionButtonRef = useRef<HTMLButtonElement>(null);

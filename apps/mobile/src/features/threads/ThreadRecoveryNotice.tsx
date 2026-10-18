@@ -52,7 +52,7 @@ export function ThreadRecoveryNotice({
     setPendingKey(key);
     setError(null);
     const input = { threadId: thread.id, runId: recovery.runId, attemptId: recovery.attemptId };
-    try {
+    await (async () => {
       if (presentation.action === "launch-repair" || presentation.action === "view-repair") {
         const result = await repair({ environmentId, input });
         if (result._tag === "Failure") throw squashAtomCommandFailure(result);
@@ -62,14 +62,16 @@ export function ThreadRecoveryNotice({
         const result = await recover({ environmentId, input });
         if (result._tag === "Failure") throw squashAtomCommandFailure(result);
       }
-    } catch (cause) {
-      setError({
-        key,
-        message: cause instanceof Error ? cause.message : "Could not recover this run.",
+    })()
+      .catch((cause) => {
+        setError({
+          key,
+          message: cause instanceof Error ? cause.message : "Could not recover this run.",
+        });
+      })
+      .finally(() => {
+        setPendingKey((value) => (value === key ? null : value));
       });
-    } finally {
-      setPendingKey((value) => (value === key ? null : value));
-    }
   };
   return (
     <View className="mx-3 mb-2 gap-2 rounded-xl border border-warning-foreground/25 bg-background p-3">
