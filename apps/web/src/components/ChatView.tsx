@@ -1,5 +1,12 @@
 import { ThreadFind, ThreadFindCanvas, type ThreadFindControls } from "./chat/ThreadFindProvider";
 import { THREAD_FIND_BAR_RESERVED_HEIGHT } from "./chat/ThreadFindBar";
+import { RotateCcwClockIcon } from "./icons/RotateCcwClockIcon";
+import { CircleAlertIcon } from "lucide-react";
+import {
+  ComposerActionResumeTitle,
+  ComposerActionResumeDescription,
+  ComposerActionResumeActions,
+} from "./chat/ComposerActionResume";
 import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
 import {
   isThreadWokeUnseen,
@@ -356,6 +363,7 @@ import {
   primaryServerKeybindingsAtom,
   serverEnvironment,
 } from "../state/server";
+import { terminalEnvironment } from "../state/terminal";
 import { threadEnvironment } from "../state/threads";
 import { resolveProviderSkillsForCwd } from "@t3tools/client-runtime/providerSkills";
 import { vcsEnvironment } from "../state/vcs";
@@ -1089,6 +1097,14 @@ export default function ChatView(props: ChatViewProps) {
     reportFailure: false,
   });
   const forkThreadFromRun = useAtomCommand(threadEnvironment.forkFromRun, {
+    reportFailure: false,
+  });
+  // Action cancellation keeps output history; normal terminal closing deletes it.
+  const closeTerminalMutation = useAtomCommand(terminalEnvironment.close, { reportFailure: false });
+  const resumeActionFollowUp = useAtomCommand(threadEnvironment.resumeAction, {
+    reportFailure: false,
+  });
+  const discardActionFollowUp = useAtomCommand(threadEnvironment.discardAction, {
     reportFailure: false,
   });
   const openPreview = useAtomCommand(previewEnvironment.open, { reportFailure: false });
@@ -5192,6 +5208,147 @@ export default function ChatView(props: ChatViewProps) {
       ),
     };
   })() as ComposerBannerStackItem | null;
+  const [isResumingInterruptedAction, setIsResumingInterruptedAction] = useState(false);
+  const [isDiscardingInterruptedAction, setIsDiscardingInterruptedAction] = useState(false);
+  const [cancellingResumableActionRunId, setCancellingResumableActionRunId] = useState<
+    string | null
+  >(null);
+  const runningResumableAction =
+    activeThreadShell?.actionResume?.outcome === "running" ? activeThreadShell.actionResume : null;
+  const handleOpenResumableActionTerminal = () => {
+    if (activeThreadRef === null || runningResumableAction === null) return;
+    storeEnsureTerminal(activeThreadRef, runningResumableAction.terminalId, {
+      open: true,
+      active: true,
+    });
+    setTerminalFocusRequestId((value) => value + 1);
+  };
+  const handleOpenResumableActionTerminalStable = useStableCallback(
+    handleOpenResumableActionTerminal,
+  );
+  const handleCancelResumableAction = async () => {
+    if (activeThreadRef === null || runningResumableAction === null) return;
+    const runId = runningResumableAction.runId;
+    if (cancellingResumableActionRunId === runId) return;
+    setCancellingResumableActionRunId(runId);
+    await (async () => {
+      const result = await closeTerminalMutation({
+        environmentId: activeThreadRef.environmentId,
+        input: {
+          threadId: activeThreadRef.threadId,
+          terminalId: runningResumableAction.terminalId,
+        },
+      });
+      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        setThreadError(
+          activeThreadRef.threadId,
+          error instanceof Error ? error.message : "Failed to cancel the running Action.",
+        );
+      }
+    })().finally(() => {
+      setCancellingResumableActionRunId((current) => (current === runId ? null : current));
+    });
+  };
+  const handleCancelResumableActionStable = useStableCallback(handleCancelResumableAction);
+  const runningResumableActionBannerItem = (() => {
+    if (runningResumableAction === null) return null;
+    return {
+      id: `action-running:${runningResumableAction.runId}`,
+      priority: "activity",
+      variant: runningResumableAction.progress?.state === "working" ? "info" : "warning",
+      icon: <RotateCcwClockIcon aria-hidden className="size-4" />,
+      title: <ComposerActionResumeTitle action={runningResumableAction} />,
+      description: <ComposerActionResumeDescription action={runningResumableAction} />,
+      actions: (
+        <ComposerActionResumeActions
+          action={runningResumableAction}
+          cancelling={cancellingResumableActionRunId === runningResumableAction.runId}
+          onCancel={() => void handleCancelResumableActionStable()}
+          onOpenTerminal={handleOpenResumableActionTerminalStable}
+        />
+      ),
+    };
+  })() as ComposerBannerStackItem | null;
+  const interruptedAction =
+    activeThreadShell?.actionResume?.delivery === "available"
+      ? activeThreadShell.actionResume
+      : null;
+  useEffect(() => {
+    if (interruptedAction === null) {
+      setIsResumingInterruptedAction(false);
+      setIsDiscardingInterruptedAction(false);
+    }
+  }, [interruptedAction]);
+  const handleResumeInterruptedAction = async () => {
+    if (!activeThreadRef || interruptedAction === null) return;
+    setIsResumingInterruptedAction(true);
+    const result = await resumeActionFollowUp({
+      environmentId: activeThreadRef.environmentId,
+      input: { threadId: activeThreadRef.threadId },
+    });
+    if (result._tag === "Failure") {
+      setIsResumingInterruptedAction(false);
+      if (!isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        setThreadError(
+          activeThreadRef.threadId,
+          error instanceof Error ? error.message : "Failed to resume the interrupted Action.",
+        );
+      }
+    }
+  };
+  const handleResumeInterruptedActionStable = useStableCallback(handleResumeInterruptedAction);
+  const handleDiscardInterruptedAction = async () => {
+    if (!activeThreadRef || interruptedAction === null) return;
+    setIsDiscardingInterruptedAction(true);
+    const result = await discardActionFollowUp({
+      environmentId: activeThreadRef.environmentId,
+      input: { threadId: activeThreadRef.threadId },
+    });
+    if (result._tag === "Failure") {
+      setIsDiscardingInterruptedAction(false);
+      if (!isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        setThreadError(
+          activeThreadRef.threadId,
+          error instanceof Error ? error.message : "Failed to discard the interrupted Action.",
+        );
+      }
+    }
+  };
+  const handleDiscardInterruptedActionStable = useStableCallback(handleDiscardInterruptedAction);
+  const interruptedActionBannerItem = (() => {
+    if (interruptedAction === null) return null;
+    return {
+      id: `action-interrupted:${interruptedAction.runId}`,
+      variant: "warning",
+      icon: <CircleAlertIcon />,
+      title: `${interruptedAction.actionName} was interrupted`,
+      description:
+        "LastCode did not restart the command or wake the agent. Resume only the agent follow-up when you are ready.",
+      actions: (
+        <div className="flex items-center gap-1.5">
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={isResumingInterruptedAction || isDiscardingInterruptedAction}
+            onClick={() => void handleDiscardInterruptedActionStable()}
+          >
+            {isDiscardingInterruptedAction ? "Discarding..." : "Discard"}
+          </Button>
+          <Button
+            size="xs"
+            variant="outline"
+            disabled={isResumingInterruptedAction || isDiscardingInterruptedAction}
+            onClick={() => void handleResumeInterruptedActionStable()}
+          >
+            {isResumingInterruptedAction ? "Resuming..." : "Resume agent"}
+          </Button>
+        </div>
+      ),
+    };
+  })() as ComposerBannerStackItem | null;
   // The relative times read the clock; nowMinute re-renders them on the minute.
   const snoozedUntil = activeThreadShell?.snoozedUntil ?? null;
   const settledAt = activeThreadShell?.settledAt ?? null;
@@ -5334,6 +5491,10 @@ export default function ChatView(props: ChatViewProps) {
       goalBannerItem,
       backgroundWorkBannerItem,
     ].filter((item) => item !== null);
+    const interruptedActionItems =
+      interruptedActionBannerItem === null ? [] : [interruptedActionBannerItem];
+    const runningActionItems =
+      runningResumableActionBannerItem === null ? [] : [runningResumableActionBannerItem];
     const usageLimitsItems = usageLimitsBanner === null ? [] : [usageLimitsBanner];
     const projectCloneItems = projectCloneBannerItem === null ? [] : [projectCloneBannerItem];
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
@@ -5343,6 +5504,8 @@ export default function ChatView(props: ChatViewProps) {
         ...usageLimitsItems,
         ...projectCloneItems,
         ...systemComposerBannerItems,
+        ...interruptedActionItems,
+        ...runningActionItems,
         ...backgroundWorkItems,
       ];
     }
@@ -5352,6 +5515,8 @@ export default function ChatView(props: ChatViewProps) {
       ...usageLimitsItems,
       ...projectCloneItems,
       ...systemComposerBannerItems,
+      ...interruptedActionItems,
+      ...runningActionItems,
       ...backgroundWorkItems,
       {
         id: `branch-mismatch:${activeBranchMismatchKey}`,
