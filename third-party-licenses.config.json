@@ -151,6 +151,22 @@
   ],
   "packageOverrides": [
     {
+      "name": "@napi-rs/wasm-runtime",
+      "sourceUrl": "https://github.com/napi-rs/napi-rs/tree/main/wasm-runtime",
+      "generatedNotice": {
+        "licenseId": "MIT",
+        "copyrights": ["Copyright (c) 2020-present LongYinan", "Copyright (c) 2018 GitHub"]
+      }
+    },
+    {
+      "name": "@tybys/wasm-util",
+      "sourceUrl": "https://github.com/toyobayashi/wasm-util",
+      "generatedNotice": {
+        "licenseId": "MIT",
+        "copyrights": ["Copyright (c) 2022-present Toyobayashi"]
+      }
+    },
+    {
       "name": "@bufbuild/protobuf",
       "version": "1.10.0",
       "generatedNotices": [

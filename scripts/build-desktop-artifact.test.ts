@@ -9,11 +9,16 @@ import * as ConfigProvider from "effect/ConfigProvider";
 import * as FileSystem from "effect/FileSystem";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
+import {
+  createGeneratedBuildStage,
+  inspectGeneratedBuildOwnership,
+} from "@t3tools/shared/generatedBuildOwnership";
 
 import {
   BundleNotSelfContainedError,
@@ -67,6 +72,7 @@ import {
   stageLinuxIconSize,
   stageDesktopDmgBackground,
   stageResourceMonitor,
+  stageBrandedServerDist,
   stageLinuxCaptureHelper,
   stageWslRuntimeArchive,
   bundlesWslRuntime,
@@ -94,9 +100,136 @@ import {
   WslRuntimeArchiveMissingError,
   wslRuntimeArchiveStem,
 } from "./build-desktop-artifact.ts";
-import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
+import {
+  LASTCODE_BRAND_ASSET_PATHS,
+  resolveLastCodeWebIconOverrides,
+} from "./lib/lastcode-brand-assets.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
+
+it.effect(
+  "release branding preserves compiler ownership across repeated packaging and rebuilds",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const tempDir = yield* fs.realPath(
+          yield* fs.makeTempDirectoryScoped({ prefix: "release-branding-" }),
+        );
+        const repoRoot = path.join(tempDir, "repository");
+        const metadata = path.join(tempDir, "git-metadata");
+        yield* fs.makeDirectory(repoRoot);
+        yield* fs.makeDirectory(metadata);
+        yield* fs.writeFileString(path.join(repoRoot, ".git"), `gitdir: ${metadata}\n`);
+        const root = "apps/server/dist";
+        const serverDistDir = path.join(repoRoot, root);
+        const brandingLogs: string[] = [];
+        const captureBrandingLogs = Logger.layer([
+          Logger.make((options) => {
+            brandingLogs.push(Logger.formatJson.log(options));
+          }),
+        ]);
+        const missingOwnership = yield* Effect.exit(
+          stageBrandedServerDist({
+            repoRoot,
+            serverDistDir,
+            destinationDir: path.join(tempDir, "unrecognized-release"),
+            brand: "production",
+          }).pipe(Effect.provide(captureBrandingLogs)),
+        );
+        assert.equal(missingOwnership._tag, "Failure");
+        assert.equal(brandingLogs.length, 0);
+        const icons = resolveLastCodeWebIconOverrides("development", "client");
+        const emit = (directory: string) =>
+          Effect.gen(function* () {
+            yield* fs.makeDirectory(path.join(directory, "client/assets"), { recursive: true });
+            yield* fs.writeFileString(
+              path.join(directory, "client/index.html"),
+              '<link href="/favicon.ico"><script src="/assets/main.js"></script>',
+            );
+            yield* fs.writeFileString(path.join(directory, "client/assets/main.js"), "compiled JS");
+            for (const icon of icons)
+              yield* fs.writeFileString(
+                path.join(directory, icon.targetRelativePath),
+                "development",
+              );
+          });
+        const original = createGeneratedBuildStage(repoRoot, root)!;
+        yield* emit(original.directory);
+        yield* fs.writeFileString(
+          path.join(original.directory, "client/assets/old.js"),
+          "old chunk",
+        );
+        original.publish(100);
+        const current = createGeneratedBuildStage(repoRoot, root)!;
+        yield* emit(current.directory);
+        current.publish(200);
+        yield* fs.writeFileString(
+          path.join(serverDistDir, "client/qa-note.txt"),
+          "retained addition",
+        );
+        const ownership = inspectGeneratedBuildOwnership(repoRoot, root)!;
+        const assetRepoRoot = yield* path.fromFileUrl(new URL("..", import.meta.url));
+        for (const [index, brand] of (["production", "nightly", "nightly"] as const).entries()) {
+          const destinationDir = path.join(tempDir, `release-${index}`);
+          yield* stageBrandedServerDist({
+            repoRoot,
+            serverDistDir,
+            destinationDir,
+            brand,
+          }).pipe(Effect.provide(captureBrandingLogs));
+          assert.equal(brandingLogs.length, index + 1);
+          assert.include(brandingLogs[index]!, "web client branding");
+          for (const override of resolveLastCodeWebIconOverrides(brand, "client"))
+            assert.deepEqual(
+              yield* fs.readFile(path.join(destinationDir, override.targetRelativePath)),
+              yield* fs.readFile(path.join(assetRepoRoot, override.sourceRelativePath)),
+            );
+          assert.isFalse(yield* fs.exists(path.join(destinationDir, "client/qa-note.txt")));
+          assert.isFalse(yield* fs.exists(path.join(destinationDir, "client/assets/old.js")));
+          assert.deepEqual(inspectGeneratedBuildOwnership(repoRoot, root), ownership);
+        }
+        const rebuild = createGeneratedBuildStage(repoRoot, root)!;
+        yield* emit(rebuild.directory);
+        rebuild.publish(300);
+        assert.isTrue(
+          inspectGeneratedBuildOwnership(repoRoot, root)!.files.every(
+            (file) => file.reason === null,
+          ),
+        );
+        assert.equal(
+          yield* fs.readFileString(path.join(serverDistDir, "client/qa-note.txt")),
+          "retained addition",
+        );
+        yield* fs.writeFileString(
+          path.join(serverDistDir, "client/favicon.ico"),
+          "retained user edit",
+        );
+        const collision = createGeneratedBuildStage(repoRoot, root)!;
+        yield* emit(collision.directory);
+        assert.throws(() => collision.publish(400), "requires file review");
+        collision.discard();
+        assert.equal(
+          yield* fs.readFileString(path.join(serverDistDir, "client/favicon.ico")),
+          "retained user edit",
+        );
+        // An ordinary repository has no linked-worktree ownership ledger.
+        yield* fs.remove(path.join(repoRoot, ".git"));
+        yield* fs.makeDirectory(path.join(repoRoot, ".git"));
+        yield* stageBrandedServerDist({
+          repoRoot,
+          serverDistDir,
+          destinationDir: path.join(tempDir, "ordinary-repository-release"),
+          brand: "production",
+        });
+        assert.equal(
+          yield* fs.readFileString(path.join(serverDistDir, "client/favicon.ico")),
+          "retained user edit",
+        );
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+);
 
 // Keeps pnpm from auto-installing TypeScript, a types-only peer, into the app.
 const stagePackageExtensions = {
@@ -264,25 +397,26 @@ const makeWindowsPayloadFixture = Effect.fn("test.makeWindowsPayloadFixture")(fu
 it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
   it("resolves the dedicated nightly updater channel from nightly versions", () => {
     assert.equal(resolveDesktopUpdateChannel("0.0.17-nightly.20260413.42"), "nightly");
+    assert.equal(resolveDesktopUpdateChannel("0.0.17-nightly.20260413.42.1"), "nightly");
     assert.equal(resolveDesktopUpdateChannel("0.0.17"), "latest");
   });
 
-  it("switches desktop packaging product names to nightly for nightly builds", () => {
-    assert.equal(resolveDesktopProductName("0.1.0"), "T3 Code (Beta)");
-    assert.equal(resolveDesktopProductName("0.0.17-nightly.20260413.42"), "T3 Code (Nightly)");
+  it("uses LastCode desktop packaging product names", () => {
+    assert.equal(resolveDesktopProductName("0.0.17"), "LastCode");
+    assert.equal(resolveDesktopProductName("0.0.17-nightly.20260413.42"), "LastCode");
   });
 
   it("switches desktop packaging icons to the nightly artwork for nightly versions", () => {
     assert.deepStrictEqual(resolveDesktopBuildIconAssets("0.0.17"), {
-      macIconPng: BRAND_ASSET_PATHS.productionMacIconPng,
-      linuxIconPng: BRAND_ASSET_PATHS.productionLinuxIconPng,
-      windowsIconIco: BRAND_ASSET_PATHS.productionWindowsIconIco,
+      macIconPng: LASTCODE_BRAND_ASSET_PATHS.productionMacIconPng,
+      linuxIconPng: LASTCODE_BRAND_ASSET_PATHS.productionLinuxIconPng,
+      windowsIconIco: LASTCODE_BRAND_ASSET_PATHS.productionWindowsIconIco,
     });
 
     assert.deepStrictEqual(resolveDesktopBuildIconAssets("0.0.17-nightly.20260413.42"), {
-      macIconPng: BRAND_ASSET_PATHS.nightlyMacIconPng,
-      linuxIconPng: BRAND_ASSET_PATHS.nightlyLinuxIconPng,
-      windowsIconIco: BRAND_ASSET_PATHS.nightlyWindowsIconIco,
+      macIconPng: LASTCODE_BRAND_ASSET_PATHS.nightlyMacIconPng,
+      linuxIconPng: LASTCODE_BRAND_ASSET_PATHS.nightlyLinuxIconPng,
+      windowsIconIco: LASTCODE_BRAND_ASSET_PATHS.nightlyWindowsIconIco,
     });
   });
 
@@ -682,7 +816,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         "**/*.map",
       ]);
       assert.deepStrictEqual(mac.dmg, {
-        title: "T3 Code (Beta) 1.2.3 Installer",
+        title: "LastCode 1.2.3 Installer",
         background: "dmg/dmg-background-latest.png",
         window: { width: 640, height: 432 },
         contents: [
@@ -693,11 +827,14 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         iconTextSize: 12,
       });
       assert.deepStrictEqual((linux.linux as Record<string, unknown>).target, ["AppImage", "deb"]);
+      assert.equal(mac.appId, "codes.lastobelus.lastcode");
+      assert.equal(mac.productName, "LastCode");
+      assert.equal(mac.artifactName, "LastCode-${version}-${arch}.${ext}");
       assert.deepStrictEqual((linux.linux as Record<string, unknown>).protocols, [
-        { name: "T3 Code", schemes: ["t3code", "t3code-dev"] },
+        { name: "LastCode", schemes: ["lastcode", "lastcode-dev"] },
       ]);
       assert.deepStrictEqual((mac.mac as Record<string, unknown>).protocols, [
-        { name: "T3 Code", schemes: ["t3code", "t3code-dev"] },
+        { name: "LastCode", schemes: ["lastcode", "lastcode-dev"] },
         { name: "Web site URL", schemes: ["http", "https"], role: "Viewer" },
       ]);
       const macInfo = (mac.mac as { extendInfo: Record<string, unknown> }).extendInfo;
@@ -713,6 +850,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       assert.deepStrictEqual(linux.toolsets, { appimage: "1.0.3" });
       assert.notProperty(mac, "toolsets");
       assert.notProperty(win, "toolsets");
+      assert.equal((linux.linux as Record<string, unknown>).executableName, "lastcode");
       assert.deepStrictEqual(mac.files, [...DESKTOP_FILE_EXCLUSIONS, ...MAC_FILE_EXCLUSIONS]);
       assert.deepStrictEqual(linux.files, [...DESKTOP_FILE_EXCLUSIONS, ...LINUX_FILE_EXCLUSIONS]);
       assert.deepStrictEqual(win.files, DESKTOP_FILE_EXCLUSIONS);
@@ -1629,6 +1767,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
     return Effect.scoped(
       Effect.gen(function* () {
+        const path = yield* Path.Path;
         const fixture = yield* makeWindowsPayloadFixture({ copyUnpackedNatives: true });
         yield* validateWindowsPackagedPayload({
           stageDistDir: fixture.stageDistDir,
@@ -1638,7 +1777,11 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         });
 
         assert.isFalse(
-          commands.some((command) => command.options.env?.ELECTRON_RUN_AS_NODE === "1"),
+          commands.some(
+            (command) =>
+              command.command === path.join(fixture.packagedAppDir, fixture.appExecutableName) &&
+              command.options.env?.ELECTRON_RUN_AS_NODE === "1",
+          ),
         );
         assert.isTrue(
           commands.some(
@@ -1914,7 +2057,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     });
 
     assert.deepStrictEqual(configuration, {
-      appId: "com.t3tools.t3code",
+      appId: "codes.lastobelus.lastcode",
       teamId: "ABC1234567",
       rpDomains: ["example.clerk.accounts.dev"],
       provisioningProfilePath: "/tmp/t3code.provisionprofile",
@@ -1937,7 +2080,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       "clerk.example.com",
       "example.clerk.accounts.dev",
     ]);
-    assert.include(entitlements, "<string>ABC1234567.com.t3tools.t3code</string>");
+    assert.include(entitlements, "<string>ABC1234567.codes.lastobelus.lastcode</string>");
     assert.include(entitlements, "<string>webcredentials:clerk.example.com</string>");
     assert.include(entitlements, "<string>webcredentials:example.clerk.accounts.dev</string>");
     assert.include(entitlements, "<key>com.apple.security.cs.allow-jit</key>");
@@ -2101,12 +2244,12 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       });
 
       const mac = config.mac as Record<string, unknown>;
-      assert.equal(config.appId, "com.t3tools.t3code");
+      assert.equal(config.appId, "codes.lastobelus.lastcode");
       assert.equal(mac.entitlements, "/tmp/entitlements.mac.plist");
       assert.equal(mac.provisioningProfile, "/tmp/t3code.provisionprofile");
       assert.match(String(mac.sign), /[\\/]scripts[\\/]sign-macos\.ts$/);
       assert.deepStrictEqual(mac.protocols, [
-        { name: "T3 Code", schemes: ["t3code", "t3code-dev"] },
+        { name: "LastCode", schemes: ["lastcode", "lastcode-dev"] },
         { name: "Web site URL", schemes: ["http", "https"], role: "Viewer" },
       ]);
     }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
@@ -2128,6 +2271,25 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         (config.dmg as Record<string, unknown>).background,
         "dmg/dmg-background-nightly.png",
       );
+    }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
+  );
+
+  it.effect("seals local macOS builds with an ad-hoc identity", () =>
+    Effect.gen(function* () {
+      const config = yield* createBuildConfig(
+        "mac",
+        "dmg",
+        "1.2.3",
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+
+      const mac = config.mac as Record<string, unknown>;
+      assert.equal(mac.identity, "-");
+      assert.equal(mac.hardenedRuntime, false);
+      assert.notProperty(mac, "sign");
     }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
   );
 
