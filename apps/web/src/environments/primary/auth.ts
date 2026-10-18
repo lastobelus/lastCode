@@ -13,6 +13,7 @@ import type { EnvironmentHttpCommonError as EnvironmentHttpCommonErrorType } fro
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { HttpClientError } from "effect/http";
+import { stripPreviewBootstrapTokenFromUrl } from "@t3tools/shared/remote";
 
 import {
   getPairingTokenFromUrl,
@@ -144,18 +145,39 @@ let resolvedAuthenticatedGateState: ServerAuthGateState | null = null;
 let explicitPairingRequested = false;
 const AUTH_SESSION_ESTABLISH_TIMEOUT_MS = 2_000;
 const AUTH_SESSION_ESTABLISH_STEP_MS = 100;
+const PREVIEW_BOOTSTRAP_DESTINATION_STATE_KEY = "t3PreviewBootstrapDestination";
+
+function isConsumedPreviewDestination(url: URL): boolean {
+  const state: unknown = window.history.state;
+  return (
+    state !== null &&
+    typeof state === "object" &&
+    PREVIEW_BOOTSTRAP_DESTINATION_STATE_KEY in state &&
+    state[PREVIEW_BOOTSTRAP_DESTINATION_STATE_KEY] === url.href
+  );
+}
 
 export function peekPairingTokenFromUrl(): string | null {
-  return getPairingTokenFromUrl(new URL(window.location.href));
+  const url = new URL(window.location.href);
+  return isConsumedPreviewDestination(url) ? null : getPairingTokenFromUrl(url);
 }
 
 export function stripPairingTokenFromUrl() {
   const url = new URL(window.location.href);
+  if (isConsumedPreviewDestination(url)) return;
   const next = stripPairingTokenUrl(url);
   if (next.toString() === url.toString()) {
     return;
   }
-  window.history.replaceState({}, document.title, next.toString());
+  const previousState: unknown = window.history.state;
+  const state = previousState !== null && typeof previousState === "object" ? previousState : {};
+  // Router re-entry and reload see the restored application token, not another
+  // pairing credential. A newly supplied envelope has a different URL.
+  const nextState =
+    stripPreviewBootstrapTokenFromUrl(url).href !== url.href
+      ? { ...state, [PREVIEW_BOOTSTRAP_DESTINATION_STATE_KEY]: next.href }
+      : state;
+  window.history.replaceState(nextState, document.title, next.toString());
 }
 
 export function takePairingTokenFromUrl(): string | null {

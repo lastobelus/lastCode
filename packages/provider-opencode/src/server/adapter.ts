@@ -3625,6 +3625,14 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                   }),
               );
               const nativeSession = unwrapData("session.fork", response);
+              yield* sdkCall("session.update", { sessionID: nativeSession.id }, () =>
+                client.session.update({
+                  sessionID: nativeSession.id,
+                  permission: openCodePermissionRules(
+                    forkInput.runtimePolicy ?? input.runtimePolicy,
+                  ),
+                }),
+              );
               const forkedAt = yield* DateTime.now;
               const providerThread = makeProviderThread({
                 idAllocator,
