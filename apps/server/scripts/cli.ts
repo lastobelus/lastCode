@@ -2,6 +2,7 @@
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
+import * as Clock from "effect/Clock";
 import * as FileSystem from "effect/FileSystem";
 import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
@@ -12,6 +13,11 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import { DEVELOPMENT_ICON_OVERRIDES } from "../../../scripts/lib/brand-assets.ts";
 import { findEsmImportsOfExternalPackages } from "../../../scripts/lib/cli-executable-imports.ts";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
+import { recordDependencyUse } from "@t3tools/shared/dependencyActivity";
+import {
+  createGeneratedBuildStage,
+  copyOwnedGeneratedBuild,
+} from "@t3tools/shared/generatedBuildOwnership";
 import {
   ServerCliBuildAssetMissingError,
   ServerCliCommandExitError,
@@ -42,13 +48,16 @@ const runCommand = Effect.fn("runCommand")(function* (command: ChildProcess.Stan
 const applyDevelopmentIconOverrides = Effect.fn("applyDevelopmentIconOverrides")(function* (
   repoRoot: string,
   serverDir: string,
+  outputDirectory?: string,
 ) {
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
 
   for (const override of DEVELOPMENT_ICON_OVERRIDES) {
     const sourcePath = path.join(repoRoot, override.sourceRelativePath);
-    const targetPath = path.join(serverDir, override.targetRelativePath);
+    const targetPath = outputDirectory
+      ? path.join(outputDirectory, override.targetRelativePath.replace(/^dist\//, ""))
+      : path.join(serverDir, override.targetRelativePath);
 
     if (!(yield* fs.exists(sourcePath))) {
       return yield* new ServerCliDevelopmentIconSourceMissingError({ sourcePath });
@@ -120,7 +129,6 @@ const buildCmd = Command.make(
           yield* Effect.sync(() => stage?.publish(completedAt));
         }),
       );
-
     }),
 ).pipe(Command.withDescription("Build the server package (tsdown + bundle web client)."));
 
