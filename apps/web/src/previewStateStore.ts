@@ -1,17 +1,42 @@
 import { useAtomValue } from "@effect/atom-react";
-import { scopedThreadKey } from "@t3tools/client-runtime/environment";
+import {
+  parseScopedThreadKey,
+  scopeThreadRef,
+  scopedThreadKey,
+} from "@t3tools/client-runtime/environment";
 import {
   type DesktopPreviewColorScheme,
   type DesktopPreviewFavicon,
+  type EnvironmentId,
   type PreviewEvent,
   type PreviewListResult,
+  type PreviewOpenInput,
   type PreviewSessionSnapshot,
   type ScopedThreadRef,
+  ThreadId,
 } from "@t3tools/contracts";
 import { Atom } from "effect/reactivity";
 
 import { PREVIEW_RECENT_URL_LIMIT } from "./components/preview/previewConstants";
 import { appAtomRegistry } from "./rpc/atomRegistry";
+import { useRightPanelStore } from "./rightPanelStore";
+import { randomUUID } from "./lib/utils";
+
+const openFocusClientId = randomUUID();
+
+/** Foreground requests reserve their selection order before recovery or RPC work starts. */
+export function capturePreviewOpenFocus(
+  ref: ScopedThreadRef,
+  background = false,
+): NonNullable<PreviewOpenInput["focus"]> {
+  const panel = useRightPanelStore.getState();
+  return {
+    clientId: openFocusClientId,
+    userActionRevision: background
+      ? panel.getUserActionRevision(ref)
+      : panel.recordSelectionIntent(ref),
+  };
+}
 
 export interface DesktopPreviewOverlay {
   hasWebContents: boolean;
@@ -32,6 +57,8 @@ export interface ThreadPreviewState {
   sessions: Record<string, PreviewSessionSnapshot>;
   /** Tabs intentionally closed by this client. Stale list snapshots must not resurrect them. */
   suppressedTabIds: ReadonlySet<string>;
+  /** Creation focus already applied, or superseded by an explicit selection. */
+  handledOpenTabIds: ReadonlySet<string>;
   activeTabId: string | null;
   desktopOverlay: DesktopPreviewOverlay | null;
   desktopByTabId: Record<string, DesktopPreviewOverlay>;
@@ -45,6 +72,7 @@ const EMPTY_THREAD_PREVIEW_STATE: ThreadPreviewState = Object.freeze({
   snapshot: null,
   sessions: {},
   suppressedTabIds: new Set<string>(),
+  handledOpenTabIds: new Set<string>(),
   activeTabId: null,
   desktopOverlay: null,
   desktopByTabId: {},
@@ -87,6 +115,8 @@ const activePreviewSessionsAtom = Atom.make((get) => {
 }).pipe(Atom.withLabel("preview:active-sessions"));
 
 const changedPreviewThreadKeys = new Set<string>();
+const previewServerEpochs = new Map<EnvironmentId, string>();
+const retiredPreviewServerEpochs = new Map<EnvironmentId, Set<string>>();
 
 function syncActivePreviewThread(threadKey: string, state: ThreadPreviewState): void {
   const active = Object.keys(state.sessions).length > 0;
@@ -146,6 +176,7 @@ const removeSession = (current: ThreadPreviewState, tabId: string): ThreadPrevie
   return {
     ...current,
     sessions,
+    handledOpenTabIds: new Set([...current.handledOpenTabIds].filter((id) => id !== tabId)),
     desktopByTabId,
     activeTabId: snapshot?.tabId ?? null,
     snapshot,
@@ -166,10 +197,93 @@ export function readThreadPreviewState(ref: ScopedThreadRef): ThreadPreviewState
   return appAtomRegistry.get(previewStateAtom(scopedThreadKey(ref)));
 }
 
-export function applyPreviewServerEvent(ref: ScopedThreadRef, event: PreviewEvent): void {
+/** A restarted primary server no longer owns the desktop pages from its previous epoch. */
+export function resetPreviewServerEpoch(
+  environmentId: EnvironmentId,
+  serverEpoch: string,
+): ScopedThreadRef[] {
+  if (isRetiredPreviewServerEpoch(environmentId, serverEpoch)) return [];
+  const retired = retiredPreviewServerEpochs.get(environmentId) ?? new Set<string>();
+  const previousEpoch = previewServerEpochs.get(environmentId);
+  if (previousEpoch !== undefined && previousEpoch !== serverEpoch) retired.add(previousEpoch);
+  previewServerEpochs.set(environmentId, serverEpoch);
+  retiredPreviewServerEpochs.set(environmentId, retired);
+  const reset: ScopedThreadRef[] = [];
+  for (const threadKey of changedPreviewThreadKeys) {
+    const ref = parseScopedThreadKey(threadKey);
+    if (!ref || ref.environmentId !== environmentId) continue;
+    const current = readThreadPreviewState(ref);
+    if (current.serverEpoch === null || current.serverEpoch === serverEpoch) continue;
+    retired.add(current.serverEpoch);
+    updateThreadPreviewState(ref, () => ({
+      ...EMPTY_THREAD_PREVIEW_STATE,
+      serverEpoch,
+      recentlySeenUrls: current.recentlySeenUrls,
+    }));
+    reset.push(ref);
+  }
+  return reset;
+}
+
+/** Retired primary-server responses cannot recreate native pages after a restart. */
+export function isRetiredPreviewServerEpoch(
+  environmentId: EnvironmentId,
+  serverEpoch: string,
+): boolean {
+  return retiredPreviewServerEpochs.get(environmentId)?.has(serverEpoch) ?? false;
+}
+
+/** Automation tabs stay hidden until revealed; user background tabs remain visible. */
+export function hiddenPreviewTabIds(
+  sessions: Readonly<Record<string, PreviewSessionSnapshot>>,
+): Set<string> {
+  return new Set(
+    Object.values(sessions)
+      .filter((session) => session.runtime === "server" && session.reveal === false)
+      .map((session) => session.tabId),
+  );
+}
+
+function applyOpenedFocus(
+  current: ThreadPreviewState,
+  event: Extract<PreviewEvent, { type: "opened" }>,
+  superseded: boolean,
+): ThreadPreviewState {
+  const snapshot = current.sessions[event.tabId];
+  if (!snapshot || current.handledOpenTabIds.has(event.tabId)) return current;
+  const handledOpenTabIds = new Set(current.handledOpenTabIds).add(event.tabId);
+  if (superseded || event.background === true || event.snapshot.reveal === false) {
+    return { ...current, handledOpenTabIds };
+  }
+  return {
+    ...current,
+    handledOpenTabIds,
+    activeTabId: event.tabId,
+    snapshot,
+    desktopOverlay: current.desktopByTabId[event.tabId] ?? null,
+  };
+}
+
+export function applyPreviewServerEvent(
+  ref: ScopedThreadRef,
+  event: PreviewEvent,
+  options: { replay?: boolean } = {},
+): void {
+  const previous = readThreadPreviewState(ref);
+  const focusSuperseded =
+    event.type === "opened" &&
+    event.focus?.clientId === openFocusClientId &&
+    event.focus.userActionRevision !== useRightPanelStore.getState().getUserActionRevision(ref);
   updateThreadPreviewState(ref, (current) => {
     if (current.serverEpoch !== null && event.serverEpoch !== current.serverEpoch) return current;
-    if (event.revision < current.serverRevision) return current;
+    // A list may hydrate a new tab before its live creation event. Consume
+    // that focus once, while retaining newer metadata and revision ordering.
+    // A cached mount replay carries metadata only, leaving pending RPC focus intact.
+    if (event.revision < current.serverRevision) {
+      return event.type === "opened" && !options.replay
+        ? applyOpenedFocus(current, event, focusSuperseded)
+        : current;
+    }
     const next = (() => {
       switch (event.type) {
         case "opened":
@@ -182,9 +296,9 @@ export function applyPreviewServerEvent(ref: ScopedThreadRef, event: PreviewEven
               ? current.recentlySeenUrls
               : dedupeRecentUrls(current.recentlySeenUrls, snapshot.navStatus.url);
           const sessions = { ...current.sessions, [snapshot.tabId]: snapshot };
-          const activeTabId = event.type === "opened" ? snapshot.tabId : current.activeTabId;
+          const activeTabId = current.activeTabId;
           const activeSnapshot = sessions[activeTabId ?? snapshot.tabId] ?? snapshot;
-          return {
+          const updated = {
             ...current,
             sessions,
             activeTabId: activeTabId ?? snapshot.tabId,
@@ -192,6 +306,9 @@ export function applyPreviewServerEvent(ref: ScopedThreadRef, event: PreviewEven
             desktopOverlay: current.desktopByTabId[activeSnapshot.tabId] ?? null,
             recentlySeenUrls,
           };
+          return event.type === "opened" && !options.replay
+            ? applyOpenedFocus(updated, event, focusSuperseded)
+            : updated;
         }
         case "failed": {
           const existing = current.sessions[event.tabId];
@@ -232,6 +349,30 @@ export function applyPreviewServerEvent(ref: ScopedThreadRef, event: PreviewEven
           serverRevision: event.revision,
         };
   });
+  const state = readThreadPreviewState(ref);
+  if (
+    event.type === "opened" &&
+    !focusSuperseded &&
+    !previous.handledOpenTabIds.has(event.tabId) &&
+    state.handledOpenTabIds.has(event.tabId) &&
+    event.background !== true &&
+    event.snapshot.reveal !== false &&
+    state.activeTabId === event.tabId
+  ) {
+    // PreviewPanel renders the right-panel surface's resource. Apply creation
+    // focus here once; delayed React reconciliation must not replay it over a
+    // later file, terminal, or browser selection.
+    const panel = useRightPanelStore.getState();
+    // Another client's accepted foreground open is a newer selection intent
+    // here too. Local requests already recorded their intent before recovery.
+    if (event.focus?.clientId !== openFocusClientId) panel.recordSelectionIntent(ref);
+    panel.reconcileBrowserSurfaces(
+      ref,
+      Object.keys(state.sessions),
+      hiddenPreviewTabIds(state.sessions),
+      event.tabId,
+    );
+  }
 }
 
 export function applyPreviewServerSnapshot(
@@ -245,6 +386,7 @@ export function applyPreviewServerSnapshot(
         ...current,
         snapshot: null,
         sessions: {},
+        handledOpenTabIds: new Set<string>(),
         activeTabId: null,
         desktopOverlay: null,
         desktopByTabId: {},
@@ -258,6 +400,9 @@ export function applyPreviewServerSnapshot(
       ...current,
       snapshot,
       sessions: { ...current.sessions, [snapshot.tabId]: snapshot },
+      // An RPC reply applies only this tab's focus; other listed tabs can
+      // still have live creation events pending.
+      handledOpenTabIds: new Set(current.handledOpenTabIds).add(snapshot.tabId),
       activeTabId: snapshot.tabId,
       desktopOverlay: current.desktopByTabId[snapshot.tabId] ?? null,
       recentlySeenUrls,
@@ -268,15 +413,25 @@ export function applyPreviewServerSnapshot(
 /**
  * Commands such as resize can target background tabs. Their response is
  * authoritative for that tab, but it is not a request to focus the tab.
+ * An open reply whose focus was superseded also consumes its creation intent.
  */
 export function updatePreviewServerSnapshot(
   ref: ScopedThreadRef,
   snapshot: PreviewSessionSnapshot,
+  options: { consumeOpenFocus?: boolean } = {},
 ): void {
   updateThreadPreviewState(ref, (current) => {
     if (current.suppressedTabIds.has(snapshot.tabId)) return current;
+    const handledOpenTabIds =
+      options.consumeOpenFocus && !current.handledOpenTabIds.has(snapshot.tabId)
+        ? new Set(current.handledOpenTabIds).add(snapshot.tabId)
+        : current.handledOpenTabIds;
     const existing = current.sessions[snapshot.tabId];
-    if (existing && existing.updatedAt > snapshot.updatedAt) return current;
+    if (existing && existing.updatedAt > snapshot.updatedAt) {
+      return handledOpenTabIds === current.handledOpenTabIds
+        ? current
+        : { ...current, handledOpenTabIds };
+    }
     const sessions = { ...current.sessions, [snapshot.tabId]: snapshot };
     const activeTabId =
       current.activeTabId && sessions[current.activeTabId] ? current.activeTabId : snapshot.tabId;
@@ -284,6 +439,7 @@ export function updatePreviewServerSnapshot(
     return {
       ...current,
       sessions,
+      handledOpenTabIds,
       activeTabId,
       snapshot: activeSnapshot,
       desktopOverlay: current.desktopByTabId[activeTabId] ?? null,
@@ -292,10 +448,40 @@ export function updatePreviewServerSnapshot(
   });
 }
 
+/** Reconcile one environment; return false if an event overtook its first authoritative list. */
+export function reconcilePreviewEnvironmentSessions(
+  environmentId: EnvironmentId,
+  result: PreviewListResult,
+): boolean {
+  if (isRetiredPreviewServerEpoch(environmentId, result.serverEpoch)) return true;
+  const sessionsByThread = new Map<ThreadId, PreviewSessionSnapshot[]>();
+  for (const threadKey of changedPreviewThreadKeys) {
+    const ref = parseScopedThreadKey(threadKey);
+    if (ref?.environmentId === environmentId) sessionsByThread.set(ref.threadId, []);
+  }
+  for (const snapshot of result.sessions) {
+    const threadId = ThreadId.make(snapshot.threadId);
+    const sessions = sessionsByThread.get(threadId) ?? [];
+    sessions.push(snapshot);
+    sessionsByThread.set(threadId, sessions);
+  }
+  let listLoaded = true;
+  for (const [threadId, sessions] of sessionsByThread) {
+    const ref = scopeThreadRef(environmentId, threadId);
+    reconcilePreviewServerSessions(ref, {
+      ...result,
+      sessions,
+    });
+    if (!readThreadPreviewState(ref).listLoaded) listLoaded = false;
+  }
+  return listLoaded;
+}
+
 export function reconcilePreviewServerSessions(
   ref: ScopedThreadRef,
   result: PreviewListResult,
 ): void {
+  if (isRetiredPreviewServerEpoch(ref.environmentId, result.serverEpoch)) return;
   updateThreadPreviewState(ref, (current) => {
     const sameServer = current.serverEpoch === result.serverEpoch;
     if (sameServer && result.revision < current.serverRevision) {
@@ -329,10 +515,16 @@ export function reconcilePreviewServerSessions(
         snapshots.some((snapshot) => snapshot.tabId === tabId),
       ),
     );
+    const handledOpenTabIds = new Set(
+      [...(sameServer || current.serverEpoch === null ? current.handledOpenTabIds : [])].filter(
+        (tabId) => sessions[tabId] !== undefined,
+      ),
+    );
     return {
       ...current,
       sessions,
       suppressedTabIds,
+      handledOpenTabIds,
       activeTabId,
       snapshot,
       desktopByTabId,
@@ -431,9 +623,20 @@ export function cancelPreviewSessionClose(
 export function setActivePreviewTab(ref: ScopedThreadRef, tabId: string): void {
   updateThreadPreviewState(ref, (current) => {
     const snapshot = current.sessions[tabId];
-    if (!snapshot || current.activeTabId === tabId) return current;
+    if (!snapshot) return current;
+    const handledOpenTabIds = new Set([
+      ...current.handledOpenTabIds,
+      ...Object.keys(current.sessions),
+    ]);
+    if (
+      current.activeTabId === tabId &&
+      handledOpenTabIds.size === current.handledOpenTabIds.size
+    ) {
+      return current;
+    }
     return {
       ...current,
+      handledOpenTabIds,
       activeTabId: tabId,
       snapshot,
       desktopOverlay: current.desktopByTabId[tabId] ?? null,
@@ -497,6 +700,8 @@ export function resetPreviewStateForTests(): void {
     appAtomRegistry.set(previewStateAtom(threadKey), EMPTY_THREAD_PREVIEW_STATE);
   }
   changedPreviewThreadKeys.clear();
+  previewServerEpochs.clear();
+  retiredPreviewServerEpochs.clear();
   appAtomRegistry.set(activePreviewThreadKeysAtom, { keys: new Set<string>() });
 }
 
