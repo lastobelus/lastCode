@@ -6,3 +6,5 @@
 # GitHub's GraphQL schema and the operations graphqlgen writes from it.
 packages/source-control-github/schema/** linguist-generated
 **/*.graphql.ts linguist-generated
+# Unified patch context prefixes intentionally precede upstream tab indentation.
+patches/*.patch whitespace=-space-before-tab
