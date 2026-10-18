@@ -80,6 +80,33 @@ const makeServerConfig = Effect.fn(function* (baseDir: string) {
 });
 
 it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
+  it.effect.each([
+    { platform: "win32", os: "windows", cleanupSupported: false },
+    { platform: "darwin", os: "darwin", cleanupSupported: true },
+    { platform: "linux", os: "linux", cleanupSupported: true },
+  ] as const)(
+    "advertises local-file preservation independently of cleanup support on $platform",
+    ({ platform, os, cleanupSupported }) =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-server-environment-cleanup-test-",
+        });
+        const descriptor = yield* Effect.gen(function* () {
+          const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
+          return yield* serverEnvironment.getDescriptor;
+        }).pipe(
+          Effect.provide(layerServerEnvironment(baseDir)),
+          Effect.provideService(HostProcess.Platform, platform),
+        );
+
+        expect(descriptor.platform.os).toBe(os);
+        expect(descriptor.capabilities.worktreeLocalPreservation).toBe(true);
+        expect(descriptor.capabilities.worktreeBuildCleanup).toBe(cleanupSupported);
+        expect(descriptor.capabilities.worktreeDependencyCleanup).toBe(cleanupSupported);
+      }),
+  );
+
   it.effect("publishes proven install ownership only for manually updated servers", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
