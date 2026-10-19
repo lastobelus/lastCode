@@ -9,6 +9,7 @@ import { LastCodeEnvironmentIconSettings } from "./LastCodeEnvironmentIconSettin
 
 const state = vi.hoisted(() => ({
   settings: {} as ClientSettings,
+  listeners: new Set<() => void>(),
   enabled: false,
   mixed: false,
   canWrite: true,
@@ -34,15 +35,26 @@ vi.mock("./useScopedSettings", () => ({
     state.mixed = false;
   },
 }));
-vi.mock("../../hooks/useSettings", () => ({
-  usePrimarySettings: () => state.settings,
-  updateClientSettings: (
-    update: Partial<ClientSettings> | ((settings: ClientSettings) => Partial<ClientSettings>),
-  ) => {
-    const patch = typeof update === "function" ? update(state.settings) : update;
-    state.settings = { ...state.settings, ...patch };
-  },
-}));
+vi.mock("../../hooks/useSettings", async () => {
+  const { useSyncExternalStore } = await import("react");
+  const subscribe = (listener: () => void) => {
+    state.listeners.add(listener);
+    return () => {
+      state.listeners.delete(listener);
+    };
+  };
+  const getSnapshot = () => state.settings;
+  return {
+    usePrimarySettings: () => useSyncExternalStore(subscribe, getSnapshot),
+    updateClientSettings: (
+      update: Partial<ClientSettings> | ((settings: ClientSettings) => Partial<ClientSettings>),
+    ) => {
+      const patch = typeof update === "function" ? update(state.settings) : update;
+      state.settings = { ...state.settings, ...patch };
+      for (const listener of state.listeners) listener();
+    },
+  };
+});
 vi.mock("@effect/atom-react", () => ({
   useAtomValue: () => ({
     entries: new Map([
@@ -228,14 +240,13 @@ describe("LastCode environment settings", () => {
     };
     await render(<LastCodeEnvironmentIconSettings />);
     await act(() => button("Show thread provider badges").click());
-    await act(() => root.render(<LastCodeEnvironmentIconSettings />));
+    expect(state.settings.showThreadProviderBadge).toBe(false);
     expect([...host.querySelectorAll<HTMLInputElement>('input[type="range"]')]).toHaveLength(0);
     await act(() => button("Show local icon").click());
     expect(state.settings.showLocalEnvironmentIcon).toBe(true);
     expect(state.settings.threadProviderBadgeSize).toBe(45);
     expect(state.settings.threadProviderBadgeTransparency).toBe(20);
     await act(() => button("Show thread provider badges").click());
-    await act(() => root.render(<LastCodeEnvironmentIconSettings />));
     expect(
       [...host.querySelectorAll<HTMLInputElement>('input[type="range"]')].map((field) =>
         Number(field.value),
