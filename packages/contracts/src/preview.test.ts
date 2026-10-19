@@ -16,6 +16,7 @@ import {
   PreviewAutomationHost,
   PreviewAutomationError,
   PreviewAutomationOpenInput,
+  PreviewAutomationMcpOpenInput,
   PreviewAutomationResizeInput,
   PreviewAutomationResizeResult,
   PreviewAutomationStatus,
@@ -29,6 +30,7 @@ const decodeServer = Schema.decodeUnknownSync(DiscoveredLocalServer);
 const decodeConfiguredLocalServerUrls = Schema.decodeUnknownSync(ConfiguredLocalServerUrls);
 const decodeViewport = Schema.decodeUnknownSync(PreviewViewportSetting);
 const decodeResizeInput = Schema.decodeUnknownSync(PreviewAutomationResizeInput);
+const decodeMcpOpenInput = Schema.decodeUnknownSync(PreviewAutomationMcpOpenInput);
 const decodeOpenInput = Schema.decodeUnknownSync(PreviewAutomationOpenInput);
 const decodeResizeResult = Schema.decodeUnknownSync(PreviewAutomationResizeResult);
 const decodeAutomationHost = Schema.decodeUnknownSync(PreviewAutomationHost);
@@ -36,6 +38,39 @@ const decodeAutomationError = Schema.decodeUnknownSync(PreviewAutomationError);
 const decodeAutomationStatus = Schema.decodeUnknownSync(PreviewAutomationStatus);
 
 describe("PreviewAutomationOpenInput", () => {
+  it("accepts either an explicit profile ID or an exact name", () => {
+    expect(decodeOpenInput({ profileId: "work-id" })).toEqual({ profileId: "work-id" });
+    expect(decodeOpenInput({ profileName: "Work" })).toEqual({ profileName: "Work" });
+  });
+
+  it("rejects conflicting profile selectors and blank selectors", () => {
+    expect(() => decodeOpenInput({ profileId: "work-id", profileName: "Work" })).toThrow();
+    expect(() => decodeOpenInput({ profileName: " " })).toThrow();
+    expect(() => decodeOpenInput({ profileId: "" })).toThrow();
+  });
+
+  it("accepts an own-thread published document target", () => {
+    expect(
+      decodeMcpOpenInput({ target: { kind: "published-document", path: "report.html" } }),
+    ).toEqual({
+      target: { kind: "published-document", path: "report.html" },
+    });
+  });
+
+  it("rejects ambiguous or desktop-hosted published document targets", () => {
+    const target = { kind: "published-document", path: "report.html" };
+    expect(() => decodeMcpOpenInput({ profileId: "work", profileName: "Work" })).toThrow();
+    expect(() => decodeMcpOpenInput({ tabId: "tab", reuseExistingTab: false })).toThrow();
+    expect(() => decodeMcpOpenInput({ target, url: "https://example.com" })).toThrow();
+    expect(() => decodeMcpOpenInput({ target, browserHost: "desktop" })).toThrow();
+    expect(() =>
+      decodeMcpOpenInput({ target: { kind: "published-document", path: " " } }),
+    ).toThrow();
+    expect(() =>
+      decodeMcpOpenInput({ target: { kind: "attachment", path: "report.html" } }),
+    ).toThrow();
+  });
+
   it("accepts the inline preview visibility flag", () => {
     expect(decodeOpenInput({ open: false })).toEqual({ open: false });
   });
@@ -161,6 +196,16 @@ describe("preview automation tab targeting", () => {
 });
 
 describe("PreviewAutomationHost", () => {
+  it("advertises native profile operations directly", () => {
+    expect(
+      decodeAutomationHost({
+        clientId: "server-browser",
+        environmentId: "environment-1",
+        supportedOperations: ["profiles", "openWithProfile"],
+      }),
+    ).toMatchObject({ supportedOperations: ["profiles", "openWithProfile"] });
+  });
+
   it("accepts legacy hosts and current operation advertisements", () => {
     expect(decodeAutomationHost({ clientId: "legacy", environmentId: "environment-1" })).toEqual({
       clientId: "legacy",

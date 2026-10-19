@@ -172,7 +172,10 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     },
   ];
   const stubBackendInstances = backendOptions.map(
-    ({ desiredRunning: initiallyRunning, stop }, index): DesktopBackendPool.DesktopBackendInstance => {
+    (
+      { desiredRunning: initiallyRunning, stop },
+      index,
+    ): DesktopBackendPool.DesktopBackendInstance => {
       const suffix = index === 0 ? "" : `-${index + 1}`;
       let desiredRunning = initiallyRunning;
       return {
@@ -203,7 +206,9 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
       };
     },
   );
-  const layerBackend = DesktopBackendPool.layerTest(options.backendInstances ?? stubBackendInstances);
+  const layerBackend = DesktopBackendPool.layerTest(
+    options.backendInstances ?? stubBackendInstances,
+  );
 
   const layerEnvironment = DesktopEnvironment.layer({
     dirname: "/repo/apps/desktop/src",

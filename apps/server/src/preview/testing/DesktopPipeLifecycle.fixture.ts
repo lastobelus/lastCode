@@ -7,6 +7,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 
 import * as ServerSettings from "../../serverSettings.ts";
@@ -37,6 +38,9 @@ Effect.gen(function* () {
   );
   const browser = Context.get(context, DesktopBrowserChannel.DesktopBrowserChannel);
   const telemetry = Context.get(context, DesktopTelemetryReceiver.DesktopTelemetryReceiver);
+  const owner = Option.getOrThrow(yield* browser.connectedHosts.pipe(Stream.runHead));
+  if (owner !== "local") return yield* Effect.die("The inherited native host was not registered.");
+  yield* browser.reconcileRoots(owner, "fixture-server-epoch");
   const health = yield* telemetry.subscribeHealth;
   const healthy = yield* health.changes.pipe(
     Stream.filter((value) => value.status === "healthy"),
