@@ -12197,6 +12197,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   ) {
     const projection = yield* getProjectionWithPendingEvents(threadId, events);
     const emitEvent = emit(events, command);
+    const preparingRunIds = new Set(
+      projection.runs.filter((run) => run.status === "preparing").map((run) => run.id),
+    );
     const activeItems = yield* projectionStore
       .getThreadRecords(threadId, ["turnItems"], {
         turnItemStatuses: ["pending", "running", "waiting"],
@@ -12290,7 +12293,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         type: "turn-item.updated",
         threadId,
         occurredAt: now,
-        payload: { ...item, status: "cancelled", completedAt: now, updatedAt: now },
+        payload: {
+          ...item,
+          status: "cancelled",
+          title:
+            item.runId !== null &&
+            preparingRunIds.has(item.runId) &&
+            item.type === "command_execution" &&
+            item.input === WORKSPACE_PREPARATION_INPUT
+              ? "Workspace preparation cancelled"
+              : item.title,
+          completedAt: now,
+          updatedAt: now,
+        },
       });
     }
     yield* disposeAllDelegatedCompletionCohorts({

@@ -4679,7 +4679,7 @@ it.layer(layerTest)("RuntimeLayer.layer lifecycle", (it) => {
     }),
   );
 
-  it.effect("cancels preparing work on archive and keeps it cancelled through replay", () =>
+  it.effect("keeps preparing work cancelled after stop-and-archive and replay", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
@@ -4721,11 +4721,13 @@ it.layer(layerTest)("RuntimeLayer.layer lifecycle", (it) => {
 
       const archive = {
         type: "thread.archive" as const,
+        childDisposition: "stop_and_archive" as const,
         commandId: CommandId.make("archive-preparing-archive"),
         threadId,
       };
       const archivedResult = yield* orchestrator.dispatch(archive);
       assert.equal((yield* orchestrator.dispatch(archive)).sequence, archivedResult.sequence);
+      yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain();
 
       const assertCancelled = Effect.gen(function* () {
         const projection = yield* orchestrator.getThreadProjection(threadId);
