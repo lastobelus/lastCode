@@ -1,6 +1,8 @@
 import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { AsyncResult } from "effect/reactivity";
 import * as Dialog from "../../components/ui/Dialog";
+import { recoverySuppressesWorking } from "@t3tools/client-runtime/state/thread-recovery";
+import { ThreadRecoveryNotice } from "./ThreadRecoveryNotice";
 import { useAtomValue } from "@effect/atom-react";
 import { useChildThreadInputs, useThreadReportedModelSelection } from "../../state/entities";
 import { UsageLimitRecoveryCard } from "./UsageLimitRecoveryCard";
@@ -31,7 +33,6 @@ import type {
   RuntimeRequestId,
   ScopedThreadRef,
   ServerConfig as T3ServerConfig,
-  ThreadId,
   UsageLimitsReport,
 } from "@t3tools/contracts";
 import {
@@ -108,6 +109,8 @@ import {
   threadComposerErrorsAtom,
 } from "../../state/thread-composer-error";
 import { threadEnvironment } from "../../state/threads";
+import { canPromoteSubagent } from "@t3tools/client-runtime/state/subagent-promotion";
+import type { ThreadId } from "@t3tools/contracts";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useDelayedStatus } from "../../lib/useDelayedStatus";
 import type {
@@ -197,6 +200,7 @@ export interface ThreadDetailScreenProps {
   readonly composerDraftKey: string | null;
   readonly followUpBehavior: FollowUpBehavior;
   readonly canSteerActiveTurn: boolean;
+  readonly forceQueue: boolean;
   readonly isSavingQueuedEdit: boolean;
   readonly onCancelQueuedRunEdit: () => void;
   readonly onRemoveQueuedEditAttachment: (attachmentId: string) => void;
@@ -447,6 +451,7 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
   const pendingBackgroundWork = presentPendingBackgroundWork(
     props.selectedThread.pendingBackgroundTasks,
   );
+  const suppressStaleWorking = recoverySuppressesWorking(props.selectedThread.recovery);
   const floatingStatus = ((): FloatingWorkingStatus | null => {
     const connectionStatus = connectionFloatingStatus({
       connectionError: props.connectionError,
@@ -457,6 +462,7 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
     if (connectionStatus !== null) {
       return connectionStatus;
     }
+    if (suppressStaleWorking) return null;
     if (props.activePendingApproval !== null || props.activePendingUserInput !== null) {
       return null;
     }
@@ -784,6 +790,12 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
     setComposerFocused(false);
   }, [selectedThreadKey, showContent]);
 
+  const requestSubagentPromotion = useAtomCommand(threadEnvironment.requestSubagentPromotion, {
+    reportFailure: false,
+  });
+  const cancelSubagentPromotion = useAtomCommand(threadEnvironment.cancelSubagentPromotion, {
+    reportFailure: false,
+  });
   const visitThread = useAtomCommand(threadEnvironment.visit, { reportFailure: false });
   const lastDispatchedVisitRef = useRef<string | null>(null);
   const lastVisitDispatchRef = useRef({ threadKey: selectedThreadKey, at: 0 });
@@ -1046,8 +1058,8 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
               agentLabel={agentLabel}
               threadTitle={props.selectedThread.title}
               latestRun={props.activityRun}
-              activeWorkStartedAt={props.activeWorkStartedAt}
-              runlessWorkActive={props.runlessWorkActive ?? false}
+              activeWorkStartedAt={suppressStaleWorking ? null : props.activeWorkStartedAt}
+              runlessWorkActive={!suppressStaleWorking && (props.runlessWorkActive ?? false)}
               listRef={listRef}
               freeze={freeze}
               anchorMessageId={anchorMessageId}
@@ -1165,6 +1177,11 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
                       />
                     </Animated.View>
                   ) : null}
+                  <ThreadRecoveryNotice
+                    key={`${selectedThreadKey}:${props.selectedThread.recovery?.runId}:${props.selectedThread.recovery?.attemptId}`}
+                    thread={props.selectedThread}
+                    environmentId={props.environmentId}
+                  />
                   <UsageLimitRecoveryCard
                     key={props.selectedThread.latestRun?.runId}
                     thread={props.selectedThread}
@@ -1286,6 +1303,56 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
                       }}
                     >
                       <ProviderSubagentBar
+                        key={String(props.selectedThread.id)}
+                        promotion={props.selectedThread.subagentPromotion ?? null}
+                        promotionAvailable={canPromoteSubagent(
+                          providerSubagentProvider?.threadCapabilities,
+                        )}
+                        onPromote={
+                          canPromoteSubagent(providerSubagentProvider?.threadCapabilities) &&
+                          props.connectionStateLabel === "connected"
+                            ? async () => {
+                                const result = await requestSubagentPromotion({
+                                  environmentId: props.environmentId,
+                                  input: {
+                                    threadId: props.selectedThread.id,
+                                    creationSource: "mobile",
+                                  },
+                                });
+                                if (result._tag === "Failure")
+                                  throw squashAtomCommandFailure(result);
+                              }
+                            : null
+                        }
+                        onCancelPromotion={
+                          props.selectedThread.subagentPromotion?.status === "waiting" &&
+                          props.connectionStateLabel === "connected"
+                            ? async () => {
+                                const promotion = props.selectedThread.subagentPromotion;
+                                if (!promotion) return;
+                                const result = await cancelSubagentPromotion({
+                                  environmentId: props.environmentId,
+                                  input: {
+                                    threadId: props.selectedThread.id,
+                                    requestId: promotion.requestId,
+                                  },
+                                });
+                                if (result._tag === "Failure")
+                                  throw squashAtomCommandFailure(result);
+                              }
+                            : null
+                        }
+                        onOpenPromoted={
+                          props.selectedThread.subagentPromotion?.status === "promoted"
+                            ? () =>
+                                navigation.navigate("Thread", {
+                                  environmentId: String(props.environmentId),
+                                  threadId: String(
+                                    props.selectedThread.subagentPromotion!.targetThreadId,
+                                  ),
+                                })
+                            : null
+                        }
                         provider={providerSubagentProvider ?? null}
                         modelLabel={
                           providerSubagentCatalogModel?.name ??
@@ -1340,6 +1407,7 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
                         draftKey={props.composerDraftKey ?? undefined}
                         followUpBehavior={props.followUpBehavior}
                         canSteerActiveTurn={props.canSteerActiveTurn}
+                        forceQueue={props.forceQueue}
                         queuedEdit={
                           props.queuedRunEdit === null
                             ? null

@@ -132,7 +132,7 @@ export const make = Effect.fn("SshDeviceHost.make")(function* (
   const parentScope = yield* Scope.Scope;
   const ssh = yield* resolveSshCommand;
   const owner = yield* ownerFor(config.id);
-  const agentRuntimeId = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
+  const agentRuntimeId = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
   const provide = <A, E>(
     effect: Effect.Effect<
       A,

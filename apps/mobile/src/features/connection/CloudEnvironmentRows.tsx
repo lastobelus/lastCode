@@ -1,3 +1,4 @@
+import { EnvironmentPauseControl } from "../threads/EnvironmentPauseControl";
 import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
 import { ConnectionTraceId } from "./ConnectionTraceId";
 import { useAuth } from "@clerk/expo";
@@ -191,24 +192,29 @@ function ConnectedCloudEnvironmentRow(props: {
     setLastDescriptor(props.descriptor);
   }
   return (
-    <CloudEnvironmentRowShell
-      opensDetails={props.onOpen !== undefined}
-      onOpen={props.onOpen}
-      onRemove={props.onRemove}
-      connectionError={enabled || unsupported ? props.environment.connectionError : null}
-      connectionErrorTraceId={enabled ? props.environment.connectionErrorTraceId : null}
-      connectionState={enabled || unsupported ? props.environment.connectionState : "available"}
-      errorExpanded={props.errorExpanded}
-      label={props.environment.environmentLabel}
-      machine={resolveEnvironmentMachineKind(
-        serverConfig ?? (lastDescriptor === undefined ? null : { environment: lastDescriptor }),
-      )}
-      onValueChange={props.onSetEnabled}
-      onToggleError={props.onToggleError}
-      disabled={unsupported}
-      {...(enabled || unsupported ? {} : { statusText: "Off" })}
-      value={enabled}
-    />
+    <View>
+      <CloudEnvironmentRowShell
+        opensDetails={props.onOpen !== undefined}
+        onOpen={props.onOpen}
+        onRemove={props.onRemove}
+        connectionError={enabled || unsupported ? props.environment.connectionError : null}
+        connectionErrorTraceId={enabled ? props.environment.connectionErrorTraceId : null}
+        connectionState={enabled || unsupported ? props.environment.connectionState : "available"}
+        errorExpanded={props.errorExpanded}
+        label={props.environment.environmentLabel}
+        machine={resolveEnvironmentMachineKind(
+          serverConfig ?? (lastDescriptor === undefined ? null : { environment: lastDescriptor }),
+        )}
+        onValueChange={props.onSetEnabled}
+        onToggleError={props.onToggleError}
+        disabled={unsupported}
+        {...(enabled || unsupported ? {} : { statusText: "Off" })}
+        value={enabled}
+      />
+      {props.onOpen ? (
+        <EnvironmentPauseControl environmentId={props.environment.environmentId} />
+      ) : null}
+    </View>
   );
 }
 
@@ -352,7 +358,10 @@ function CloudEnvironmentRowShell(props: {
         ) : null}
         <StatusContainer
           {...(errorCanExpand
-            ? { accessibilityRole: "button" as const, onPress: props.onToggleError }
+            ? {
+                accessibilityRole: "button" as const,
+                onPress: props.onToggleError,
+              }
             : {})}
           className="min-w-0 flex-row items-start gap-1"
         >

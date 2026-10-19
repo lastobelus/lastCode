@@ -276,7 +276,7 @@ const isThreadDispatchUnknownError = Schema.is(ThreadDispatchUnknownError);
 
 export const retryAmbiguousTrackedDispatch = <R>(
   dispatch: Effect.Effect<void, ThreadCliError | ThreadDispatchUnknownError, R>,
-) => dispatch.pipe(Effect.catchTag("ThreadDispatchUnknownError", () => dispatch));
+) => dispatch.pipe(Effect.catchTags({ ThreadDispatchUnknownError: () => dispatch }));
 
 export type ThreadTargetResolution =
   | { readonly kind: "resolved"; readonly thread: OrchestrationV2ThreadShell }
@@ -892,7 +892,7 @@ const tryRunLiveThreadRead = Effect.fn("tryRunLiveThreadRead")(function* (
       );
     }).pipe(
       Effect.provide(
-        EnvironmentAuth.runtimeLayer.pipe(
+        EnvironmentAuth.layerRuntime.pipe(
           Layer.provide(ServerConfig.layer(config)),
           Layer.provide(Layer.succeed(References.MinimumLogLevel, minimumLogLevel)),
         ),
@@ -1004,18 +1004,22 @@ const runThreadSend = Effect.fn("runThreadSend")(function* (
           );
           const crypto = yield* Crypto.Crypto;
           const commandId = CommandId.make(
-            yield* crypto.randomUUIDv4.pipe(
-              Effect.mapError(
-                (cause) => new ThreadCliError({ operation: "send command id generation", cause }),
+            yield* crypto
+              .randomUUIDv4()
+              .pipe(
+                Effect.mapError(
+                  (cause) => new ThreadCliError({ operation: "send command id generation", cause }),
+                ),
               ),
-            ),
           );
           const messageId = MessageId.make(
-            yield* crypto.randomUUIDv4.pipe(
-              Effect.mapError(
-                (cause) => new ThreadCliError({ operation: "send message id generation", cause }),
+            yield* crypto
+              .randomUUIDv4()
+              .pipe(
+                Effect.mapError(
+                  (cause) => new ThreadCliError({ operation: "send message id generation", cause }),
+                ),
               ),
-            ),
           );
           const resolution = resolveThreadTarget(shell.threads, identifier);
           if (resolution.kind === "resolved") {
@@ -1108,7 +1112,7 @@ const runThreadSend = Effect.fn("runThreadSend")(function* (
     );
   }).pipe(
     Effect.provide(
-      EnvironmentAuth.runtimeLayer.pipe(
+      EnvironmentAuth.layerRuntime.pipe(
         Layer.provide(ServerConfig.layer(config)),
         Layer.provide(Layer.succeed(References.MinimumLogLevel, minimumLogLevel)),
       ),
@@ -1183,7 +1187,7 @@ const runThreadWait = Effect.fn("runThreadWait")(function* (
     );
   }).pipe(
     Effect.provide(
-      EnvironmentAuth.runtimeLayer.pipe(
+      EnvironmentAuth.layerRuntime.pipe(
         Layer.provide(ServerConfig.layer(config)),
         Layer.provide(Layer.succeed(References.MinimumLogLevel, config.logLevel)),
       ),

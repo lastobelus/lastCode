@@ -19,7 +19,7 @@ import * as Ref from "effect/Ref";
 import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as UpdateDrainRepositoryPersistence from "../persistence/UpdateDrainRepository.ts";
 import { TerminalManager } from "../terminal/Manager.ts";
 import { UpdateDrain, layer as updateDrainLayer } from "./UpdateDrain.ts";
@@ -68,7 +68,7 @@ const busyTerminal = (): TerminalSummary => ({
 
 const durableLayer = updateDrainLayer.pipe(
   Layer.provide(UpdateDrainRepositoryPersistence.layer),
-  Layer.provide(SqlitePersistenceMemory),
+  Layer.provide(SqlitePersistence.layerMemory),
 );
 
 const makeHarness = Effect.fn("UpdateDrainAdmissionTest.makeHarness")(function* () {
