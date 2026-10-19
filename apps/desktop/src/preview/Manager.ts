@@ -16,7 +16,6 @@ import type {
   DesktopPreviewFavicon,
   DesktopPreviewOpenLinkEvent,
   DesktopPreviewPointerEvent,
-  PreviewAnnotationPayload,
   PreviewAnnotationRect,
   PreviewAnnotationSubmissionResult,
   DesktopPreviewRecordingArtifact,
@@ -66,7 +65,9 @@ import * as DesktopRendererHistory from "../telemetry/DesktopRendererHistory.ts"
 import { MENU_ACTION_CHANNEL, PREVIEW_PICTURE_IN_PICTURE_FRAME_CHANNEL } from "../ipc/channels.ts";
 import * as DesktopBrowserHost from "./DesktopBrowserHost.ts";
 import * as PreviewPasskeys from "./Passkeys.ts";
+import { captureAnnotationImage } from "./AnnotationScreenshot.ts";
 import * as BrowserSession from "./BrowserSession.ts";
+import * as BrowserRootWindow from "./BrowserRootWindow.ts";
 import {
   ANNOTATION_CAPTURED_CHANNEL,
   ANNOTATION_SEND_ENABLED_CHANNEL,
@@ -110,7 +111,11 @@ export interface PreviewTabState {
   audible: boolean;
   controller: "human" | "agent" | "none";
   favicon?: DesktopPreviewFavicon;
-  serverTab?: { readonly threadId: string; readonly tabId: string };
+  serverTab?: {
+    readonly threadId: string;
+    readonly tabId: string;
+    readonly desktopHostId?: string | undefined;
+  };
   updatedAt: string;
 }
 
@@ -270,43 +275,8 @@ const normalizeCaptureRect = (value: unknown): PreviewAnnotationRect | null => {
   ) {
     return null;
   }
-  return {
-    x: Math.max(0, Math.floor(x)),
-    y: Math.max(0, Math.floor(y)),
-    width: Math.max(1, Math.ceil(width)),
-    height: Math.max(1, Math.ceil(height)),
-  };
-};
-
-/**
- * Crops a full-page capture to a picked annotation. `cropRect` is in CSS px;
- * the capture's pixels are CSS px × the guest's `devicePixelRatio`.
- */
-const cropAnnotationScreenshot = (
-  image: Electron.NativeImage,
-  cropRect: PreviewAnnotationRect | null,
-  devicePixelRatio: number,
-): PreviewAnnotationPayload["screenshot"] => {
-  const full = image.getSize();
-  if (!cropRect) {
-    return {
-      dataUrl: image.toDataURL(),
-      width: full.width,
-      height: full.height,
-      cropRect: { x: 0, y: 0, width: full.width, height: full.height },
-    };
-  }
-  const scale = Number.isFinite(devicePixelRatio) && devicePixelRatio > 0 ? devicePixelRatio : 1;
-  const x = Math.min(full.width - 1, Math.max(0, Math.floor(cropRect.x * scale)));
-  const y = Math.min(full.height - 1, Math.max(0, Math.floor(cropRect.y * scale)));
-  const cropped = image.crop({
-    x,
-    y,
-    width: Math.max(1, Math.min(full.width - x, Math.ceil(cropRect.width * scale))),
-    height: Math.max(1, Math.min(full.height - y, Math.ceil(cropRect.height * scale))),
-  });
-  const size = cropped.getSize();
-  return { dataUrl: cropped.toDataURL(), width: size.width, height: size.height, cropRect };
+  // Keep CSS-pixel precision until the crop is mapped into the captured image.
+  return { x, y, width, height };
 };
 
 /**
@@ -601,10 +571,11 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       try: evaluate,
       catch: (cause) => new PreviewOperationError({ ...errorContext, cause }),
     });
-  const capturePageWithRetry = Effect.fn("PreviewManager.capturePageWithRetry")(function* (
+  const captureWithRetry = Effect.fn("PreviewManager.captureWithRetry")(function* <A>(
     errorContext: PreviewOperationContext,
     tabId: string,
     wc: Electron.WebContents,
+    captureImage: () => Promise<A>,
   ) {
     const requireCurrentGuest = Effect.gen(function* () {
       const tabs = yield* SynchronizedRef.get(tabsRef);
@@ -615,7 +586,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     const capture = Effect.gen(function* () {
       yield* requireCurrentGuest;
       const image = yield* Effect.tryPromise({
-        try: (_signal) => wc.capturePage(),
+        try: (_signal) => captureImage(),
         catch: (cause) => new PreviewOperationError({ ...errorContext, cause }),
       }).pipe(
         Effect.timeout(CAPTURE_PAGE_ATTEMPT_TIMEOUT_MS),
@@ -1275,17 +1246,16 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         if (!current || current.webContentsId !== wc.id || webContents.fromId(wc.id) !== wc) {
           return [Option.none<PreviewTabState>(), tabs] as const;
         }
-        // Electron emits did-stop-loading after did-fail-load. At that point the
-        // failed guest is no longer "loading", but it has not successfully
-        // navigated anywhere.
+        // Electron can commit its error document after did-fail-load, then emit
+        // navigation, stop and title updates without a successful retry. Keep
+        // the failure until a new main-frame navigation actually starts.
         const navStatus =
-          preserveLoadFailure &&
-          current.navStatus.kind === "LoadFailed" &&
-          computedNavStatus.kind === "Success"
+          preserveLoadFailure && current.navStatus.kind === "LoadFailed"
             ? current.navStatus
             : computedNavStatus;
         const clearFavicon =
           confirmedNavigation &&
+          navStatus.kind !== "LoadFailed" &&
           current.favicon !== undefined &&
           safeHttpOrigin(current.favicon.pageUrl) !==
             safeHttpOrigin(navStatus.kind === "Idle" ? wc.getURL() : navStatus.url);
@@ -1310,8 +1280,8 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       if (Option.isSome(next)) yield* emitIfCurrent(tabId, next.value);
     });
     const sync = () => runFork(syncState(true));
-    const syncNavigation = () => runFork(syncState(false, true));
-    const syncInPageNavigation = () => runFork(syncState(false));
+    const syncNavigation = () => runFork(syncState(true, true));
+    const syncInPageNavigation = () => runFork(syncState(true));
     const restoreRecordingCursor = () =>
       runFork(
         Effect.gen(function* () {
@@ -1330,7 +1300,10 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     const navigationStarted = (
       event: Electron.Event<Electron.WebContentsDidStartNavigationEventParams>,
     ) => {
-      if (event.isMainFrame && !event.isSameDocument) cancelFaviconCapture();
+      if (event.isMainFrame && !event.isSameDocument) {
+        cancelFaviconCapture();
+        runFork(syncState(false));
+      }
     };
     const audioStateChanged = (
       event: Electron.Event<Electron.WebContentsAudioStateChangedEventParams>,
@@ -2229,30 +2202,33 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
           const cropRect = normalizeCaptureRect(args[1]);
           const submission =
             args[2] === "send" && annotationSendEnabled.get(tabId) === true ? "send" : "attach";
-          const devicePixelRatio = typeof args[3] === "number" ? args[3] : 1;
           runFork(
-            capturePageWithRetry(
+            // Capture the full surface with bounded retries, then map and clip
+            // the CSS crop against the actual image and viewport dimensions.
+            captureWithRetry(
               { operation: "captureAnnotationScreenshot", tabId, webContentsId: wc.id },
               tabId,
               wc,
+              () => captureAnnotationImage(wc, cropRect),
             ).pipe(
-              Effect.map((image) => cropAnnotationScreenshot(image, cropRect, devicePixelRatio)),
               Effect.tapError((error) =>
                 Effect.logWarning("preview annotation screenshot failed").pipe(
                   Effect.annotateLogs({ tabId, webContentsId: wc.id, error: error.message }),
                 ),
               ),
               Effect.withSpan("PreviewManager.captureAnnotationScreenshot"),
+              // Preserve the annotation when capture fails, and tell the
+              // renderer why its screenshot is missing.
               Effect.match({
                 onFailure: (): PreviewAnnotationSubmissionResult => ({
                   annotation: payload,
                   submission,
                   screenshotFailed: true,
                 }),
-                onSuccess: (screenshot): PreviewAnnotationSubmissionResult =>
-                  screenshot === null
-                    ? { annotation: payload, submission, screenshotFailed: true }
-                    : { annotation: { ...payload, screenshot }, submission },
+                onSuccess: (screenshot): PreviewAnnotationSubmissionResult => ({
+                  annotation: { ...payload, screenshot },
+                  submission,
+                }),
               }),
               Effect.flatMap((result) => {
                 // A capture that outlives its session must not touch the
@@ -2474,7 +2450,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     const [createdAt, millis, image] = yield* Effect.all([
       currentIso,
       currentMillis,
-      capturePageWithRetry(
+      captureWithRetry(
         {
           operation: "captureScreenshot.capturePage",
           tabId,
@@ -2482,6 +2458,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         },
         tabId,
         wc,
+        () => wc.capturePage(),
       ),
     ]);
     const uuid = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
@@ -3294,7 +3271,11 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
 
   let pointerSequence = 0;
   const emitAgentPointer = Effect.fn("PreviewManager.emitAgentPointer")(function* (pointer: {
-    readonly key: { readonly threadId: string; readonly tabId: string };
+    readonly key: {
+      readonly threadId: string;
+      readonly tabId: string;
+      readonly desktopHostId?: string | undefined;
+    };
     readonly phase: "move" | "click";
     readonly x: number;
     readonly y: number;
@@ -3302,7 +3283,8 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     const tab = [...(yield* SynchronizedRef.get(tabsRef)).values()].find(
       (candidate) =>
         candidate.serverTab?.threadId === pointer.key.threadId &&
-        candidate.serverTab.tabId === pointer.key.tabId,
+        candidate.serverTab.tabId === pointer.key.tabId &&
+        (candidate.serverTab.desktopHostId ?? "local") === (pointer.key.desktopHostId ?? "local"),
     );
     if (!tab) return;
     const event: DesktopPreviewPointerEvent = {
@@ -3715,6 +3697,16 @@ export const make = Effect.gen(function* PreviewManagerMake() {
       });
     });
   };
+  browserHost.setRootFactory((input) =>
+    BrowserRootWindow.create(browserSession, input, input.partition).pipe(
+      Effect.flatMap((window) =>
+        Effect.sync(() => placeServerDownloads(window.webContents.session)).pipe(
+          Effect.onError(() => Effect.sync(() => window.destroy())),
+          Effect.as(window),
+        ),
+      ),
+    ),
+  );
 
   const operations = yield* makeNativeOperations(
     environment.browserArtifactsDir,
