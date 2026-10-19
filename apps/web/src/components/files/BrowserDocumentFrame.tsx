@@ -82,13 +82,15 @@ export function BrowserDocumentFrame(props: {
       className="min-h-0 w-full flex-1 border-0"
     />
   ) : props.htmlRender ? (
-    <HtmlRenderDocument
-      key={props.src}
-      src={props.src}
-      title={props.title}
-      threadRef={props.threadRef}
-      className="min-h-0 flex-1"
-    />
+    <div className="flex min-h-0 flex-1 flex-col p-(--app-scrollbar-lane-width)">
+      <HtmlRenderDocument
+        key={props.src}
+        src={props.src}
+        title={props.title}
+        threadRef={props.threadRef}
+        className="min-h-0 flex-1"
+      />
+    </div>
   ) : (
     <iframe
       key={props.src}
