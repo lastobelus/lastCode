@@ -364,6 +364,7 @@ export const GrokAdapterV2Driver: ProviderAdapterDriver<GrokSettings, GrokAdapte
   create: Effect.fn("GrokAdapterV2Driver.create")(
     function* (input: ProviderAdapterDriverCreateInput<GrokSettings>) {
       const hostEnvironment = yield* HostProcess.Environment;
+      const host = yield* ProviderHost.ProviderHost;
       const hostPlatform = yield* HostProcess.Platform;
       const selfInvocation = yield* resolveSelfInvocation();
       const providerEventLoggers = yield* ProviderEventLoggers.ProviderEventLoggers;
@@ -372,7 +373,11 @@ export const GrokAdapterV2Driver: ProviderAdapterDriver<GrokSettings, GrokAdapte
       return yield* makeGrokAdapterV2({
         instanceId: input.instanceId,
         settings: { ...input.config, enabled: input.enabled },
-        environment: yield* mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
+        environment: yield* mergeProviderInstanceEnvironment(
+          input.environment,
+          hostEnvironment,
+          host.paths.settingsPath,
+        ),
         hostPlatform,
         selfInvocation,
         continuationRequests,
@@ -414,6 +419,7 @@ const layer: Layer.Layer<
   ProviderAdapter.ProviderAdapterV2,
   Effect.gen(function* () {
     const hostEnvironment = yield* HostProcess.Environment;
+    const host = yield* ProviderHost.ProviderHost;
     const hostPlatform = yield* HostProcess.Platform;
     const selfInvocation = yield* resolveSelfInvocation();
     const providerEventLoggers = yield* ProviderEventLoggers.ProviderEventLoggers;
@@ -422,7 +428,11 @@ const layer: Layer.Layer<
     return yield* makeGrokAdapterV2({
       instanceId: GROK_DEFAULT_INSTANCE_ID,
       settings: DEFAULT_GROK_SETTINGS,
-      environment: hostEnvironment,
+      environment: yield* mergeProviderInstanceEnvironment(
+        undefined,
+        hostEnvironment,
+        host.paths.settingsPath,
+      ),
       hostPlatform,
       selfInvocation,
       continuationRequests,
