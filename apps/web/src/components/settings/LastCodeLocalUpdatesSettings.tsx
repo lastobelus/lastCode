@@ -33,19 +33,21 @@ function useLocalNightlyPreference() {
     const bridge = window.desktopBridge;
     if (!bridge || typeof bridge.setShowAndInstallLocalNightlies !== "function") return;
     setIsSaving(true);
-    try {
+    await (async () => {
       setSettings(await bridge.setShowAndInstallLocalNightlies(enabled));
-    } catch (error) {
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Could not change local nightly updates",
-          description: error instanceof Error ? error.message : "Desktop settings write failed.",
-        }),
-      );
-    } finally {
-      setIsSaving(false);
-    }
+    })()
+      .catch((error: unknown) => {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not change local nightly updates",
+            description: error instanceof Error ? error.message : "Desktop settings write failed.",
+          }),
+        );
+      })
+      .finally(() => {
+        setIsSaving(false);
+      });
   }, []);
 
   return { settings, isSaving, setLocalNightlies };

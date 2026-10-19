@@ -1,4 +1,4 @@
-import { usePrimarySettings, useUpdateClientSettings } from "../../hooks/useSettings";
+import { usePrimarySettings, updateClientSettings } from "../../hooks/useSettings";
 import { searchableSetting } from "./settingsSearch";
 import { SettingResetButton, SettingsRow } from "./settingsLayout";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
@@ -29,7 +29,6 @@ const WORKTREE_INDICATOR_PREVIEW_THREAD = {
 
 function LastCodeSidebarScaleSetting() {
   const clientSettings = usePrimarySettings();
-  const updateClientSettings = useUpdateClientSettings();
   const legacySidebarScaleRatio =
     (clientSettings.legacySidebarScale - MIN_LEGACY_SIDEBAR_SCALE) /
     (MAX_LEGACY_SIDEBAR_SCALE - MIN_LEGACY_SIDEBAR_SCALE);
@@ -99,7 +98,6 @@ function LastCodeSidebarScaleSetting() {
 
 function LastCodeSidebarGroupingSetting() {
   const clientSettings = usePrimarySettings();
-  const updateClientSettings = useUpdateClientSettings();
   return (
     <>
       <SettingsRow
@@ -142,7 +140,6 @@ function LastCodeSidebarGroupingSetting() {
 
 function LastCodeSidebarPresentationSettings() {
   const clientSettings = usePrimarySettings();
-  const updateClientSettings = useUpdateClientSettings();
   return (
     <>
       <SettingsRow
@@ -221,7 +218,6 @@ function LastCodeSidebarPresentationSettings() {
 
 export function LastCodeSidebarSettings() {
   const clientSettings = usePrimarySettings();
-  const updateClientSettings = useUpdateClientSettings();
   return (
     <>
       <SettingsRow

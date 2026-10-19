@@ -1,4 +1,4 @@
-import { usePrimarySettings, useUpdateClientSettings } from "../../hooks/useSettings";
+import { usePrimarySettings, updateClientSettings } from "../../hooks/useSettings";
 import { searchableSetting } from "./settingsSearch";
 import { SettingResetButton, SettingsRow } from "./settingsLayout";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
@@ -6,7 +6,6 @@ import { ProviderAccentColorPicker } from "./ProviderAccentColorPicker";
 
 export function LastCodeMessageAppearanceSettings() {
   const clientSettings = usePrimarySettings();
-  const updateClientSettings = useUpdateClientSettings();
   return (
     <>
       <SettingsRow

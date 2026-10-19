@@ -10,7 +10,7 @@ import { useMemo } from "react";
 import { ServerIcon } from "lucide-react";
 import { environmentCatalog } from "../../connection/catalog";
 import { ConnectedEnvironmentIcon, updateEnvironmentIconColors } from "../../environmentIcons";
-import { usePrimarySettings, useUpdateClientSettings } from "../../hooks/useSettings";
+import { usePrimarySettings, updateClientSettings } from "../../hooks/useSettings";
 import { usePrimaryEnvironmentId } from "../../state/environments";
 import { SidebarEnvironmentIcon } from "../sidebar/SidebarEnvironmentIcon";
 import { Switch } from "../ui/switch";
@@ -59,7 +59,6 @@ function ProviderBadgePreview() {
 
 function ProviderBadgeSettings() {
   const clientSettings = usePrimarySettings();
-  const updateClientSettings = useUpdateClientSettings();
   return (
     <>
       <SettingsRow
@@ -120,7 +119,6 @@ function ProviderBadgeSettings() {
 
 function EnvironmentIconSetting({ environment }: { environment: LastCodeEnvironmentSettingEntry }) {
   const clientSettings = usePrimarySettings();
-  const updateClientSettings = useUpdateClientSettings();
   const color = clientSettings.environmentIconColors[environment.environmentId];
   const isLocal = environment.kind === "local";
   return (

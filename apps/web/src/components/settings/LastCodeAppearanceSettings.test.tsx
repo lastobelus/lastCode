@@ -12,7 +12,7 @@ import { Select } from "../ui/select";
 const state = vi.hoisted(() => ({ settings: {} as ClientSettings, writes: vi.fn() }));
 vi.mock("../../hooks/useSettings", () => ({
   usePrimarySettings: () => state.settings,
-  useUpdateClientSettings: () => (patch: Partial<ClientSettings>) => {
+  updateClientSettings: (patch: Partial<ClientSettings>) => {
     state.writes(patch);
     state.settings = { ...state.settings, ...patch };
   },

@@ -1,4 +1,4 @@
-import { usePrimarySettings, useUpdateClientSettings } from "../../hooks/useSettings";
+import { usePrimarySettings, updateClientSettings } from "../../hooks/useSettings";
 import { searchableSetting } from "./settingsSearch";
 import { SettingResetButton, SettingsRow } from "./settingsLayout";
 import {
@@ -14,7 +14,6 @@ import { LastCodeSettingsSlider as SettingsSlider } from "./LastCodeSettingsSlid
 
 export function LastCodeScrollbarSettings() {
   const clientSettings = usePrimarySettings();
-  const updateClientSettings = useUpdateClientSettings();
   return (
     <>
       <SettingsRow

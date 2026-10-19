@@ -1,11 +1,10 @@
-import { usePrimarySettings, useUpdateClientSettings } from "../../hooks/useSettings";
+import { usePrimarySettings, updateClientSettings } from "../../hooks/useSettings";
 import { searchableSetting } from "./settingsSearch";
 import { SettingsRow } from "./settingsLayout";
 import { MAX_HANDOFFS_MENU_LIMIT, MIN_HANDOFFS_MENU_LIMIT } from "@t3tools/contracts/settings";
 
 export function LastCodeHandoffSettings() {
   const clientSettings = usePrimarySettings();
-  const updateClientSettings = useUpdateClientSettings();
   return (
     <>
       <SettingsRow

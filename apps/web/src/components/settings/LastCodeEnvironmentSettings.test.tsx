@@ -36,12 +36,12 @@ vi.mock("./useScopedSettings", () => ({
 }));
 vi.mock("../../hooks/useSettings", () => ({
   usePrimarySettings: () => state.settings,
-  useUpdateClientSettings:
-    () =>
-    (update: Partial<ClientSettings> | ((settings: ClientSettings) => Partial<ClientSettings>)) => {
-      const patch = typeof update === "function" ? update(state.settings) : update;
-      state.settings = { ...state.settings, ...patch };
-    },
+  updateClientSettings: (
+    update: Partial<ClientSettings> | ((settings: ClientSettings) => Partial<ClientSettings>),
+  ) => {
+    const patch = typeof update === "function" ? update(state.settings) : update;
+    state.settings = { ...state.settings, ...patch };
+  },
 }));
 vi.mock("@effect/atom-react", () => ({
   useAtomValue: () => ({
