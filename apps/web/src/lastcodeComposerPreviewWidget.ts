@@ -18,15 +18,24 @@ type WidgetContent = {
 
 const widgetRoots = new WeakMap<Node, Root>();
 
-function bulletContent(): WidgetContent {
-  return {
-    identity: "bullet:",
-    mount(element) {
-      element.className = "composer-md-bullet";
-      element.textContent = "• ";
-      element.setAttribute("aria-hidden", "true");
-    },
-  };
+const bulletContent: WidgetContent = {
+  identity: "bullet:",
+  mount(element) {
+    element.className = "composer-md-bullet";
+    element.textContent = "• ";
+    element.setAttribute("aria-hidden", "true");
+  },
+};
+
+function stopWidgetEvent() {
+  return true;
+}
+
+function destroyWidget(element: Node) {
+  const root = widgetRoots.get(element);
+  if (!root) return;
+  widgetRoots.delete(element);
+  queueMicrotask(() => root.unmount());
 }
 
 function taskContent(
@@ -89,7 +98,7 @@ function widgetContent(
 ): WidgetContent {
   switch (widget.kind) {
     case "bullet":
-      return bulletContent();
+      return bulletContent;
     case "task":
       return taskContent(widget.checked, appearance, actions);
     case "fenceHeader":
@@ -117,13 +126,8 @@ export function createComposerPreviewWidgets(actions: WidgetActions) {
         key: `${content.identity}:${appearance.theme}:${appearance.editable}`,
         side: -1,
         ignoreSelection: true,
-        stopEvent: () => true,
-        destroy(element) {
-          const root = widgetRoots.get(element);
-          if (!root) return;
-          widgetRoots.delete(element);
-          queueMicrotask(() => root.unmount());
-        },
+        stopEvent: stopWidgetEvent,
+        destroy: destroyWidget,
       },
     );
   };
