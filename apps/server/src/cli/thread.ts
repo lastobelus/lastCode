@@ -702,6 +702,23 @@ function activitySummary(item: ThreadCliTurnItem): string {
   return item.title ?? item.type.replaceAll("_", " ");
 }
 
+function presentActivity(item: ThreadCliTurnItem): ThreadCliActivity {
+  const pending = item.status === "pending" || item.status === "waiting";
+  let kind = item.type as string;
+  if (item.type === "approval_request") kind = `approval.${pending ? "requested" : "resolved"}`;
+  if (item.type === "user_input_request") kind = `user-input.${pending ? "requested" : "resolved"}`;
+  return {
+    id: item.id,
+    kind,
+    tone:
+      item.status === "failed" ? "error" : pending && "requestId" in item ? "approval" : "tool",
+    summary: activitySummary(item),
+    runId: item.runId,
+    createdAt: DateTime.formatIso(item.startedAt ?? item.updatedAt),
+    ...("requestId" in item ? { payload: { requestId: item.requestId } } : {}),
+  };
+}
+
 function projectThreadCliPresentation(projection: ThreadCliProjection, turnLimit: number) {
   const selectedRuns = projection.runs
     .toSorted((left, right) => right.ordinal - left.ordinal)
@@ -725,24 +742,7 @@ function projectThreadCliPresentation(projection: ThreadCliProjection, turnLimit
         item.type !== "assistant_message" &&
         (item.runId === null || runIds.has(item.runId)),
     )
-    .map((item): ThreadCliActivity => {
-      const pending = item.status === "pending" || item.status === "waiting";
-      return {
-        id: item.id,
-        kind:
-          item.type === "approval_request"
-            ? `approval.${pending ? "requested" : "resolved"}`
-            : item.type === "user_input_request"
-              ? `user-input.${pending ? "requested" : "resolved"}`
-              : item.type,
-        tone:
-          item.status === "failed" ? "error" : pending && "requestId" in item ? "approval" : "tool",
-        summary: activitySummary(item),
-        runId: item.runId,
-        createdAt: DateTime.formatIso(item.startedAt ?? item.updatedAt),
-        ...("requestId" in item ? { payload: { requestId: item.requestId } } : {}),
-      };
-    });
+    .map(presentActivity);
   return { latestRun: selectedRuns[0] ?? null, ...boundThreadPresentation(messages, activities) };
 }
 
