@@ -3,6 +3,7 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeUtil from "node:util";
 import { ACTION_EVENT_TOKEN_ENV, ACTION_RUN_ID_ENV } from "@t3tools/shared/actionResumeProtocol";
 import { expect, it } from "vite-plus/test";
 import { getCurrentProcessStartIdentity } from "./lib/lastcode-ci-process-identity.ts";
@@ -68,7 +69,16 @@ it("runs the affected-workspace command through the installed task runner", () =
   const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-ci-runner-"));
   const callsPath = NodePath.join(directory, "calls.jsonl");
   const testArgsPath = NodePath.join(directory, "test-args.jsonl");
+  const ambientBin = NodePath.join(directory, "ambient-bin");
   try {
+    // Managed Node shims can resolve or install a runtime outside the real workspace.
+    // Keep the installed runner and both leaf scripts on the already-resolved runtime.
+    NodeFS.mkdirSync(ambientBin);
+    NodeFS.writeFileSync(
+      NodePath.join(ambientBin, "node"),
+      "#!/bin/sh\nprintf 'Unexpected ambient Node shim\\n' >&2\nexit 97\n",
+      { mode: 0o755 },
+    );
     NodeFS.writeFileSync(
       NodePath.join(directory, "package.json"),
       JSON.stringify({ name: "fixture-root", private: true }),
@@ -103,21 +113,11 @@ it("runs the affected-workspace command through the installed task runner", () =
       reason: "Fixture source edit",
     }).find(({ label }) => label === "Workspace typecheck");
     if (step?.kind !== "command") throw new Error("Missing workspace typecheck command.");
-    const result = NodeChildProcess.spawnSync(
-      NodePath.resolve(import.meta.dirname, "../node_modules/.bin/vp"),
-      step.args,
-      { cwd: directory, encoding: "utf8", timeout: 15_000 },
-    );
-    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    runInstalledTask(directory, ambientBin, step.args);
     expect(NodeFS.readFileSync(callsPath, "utf8")).toBe("selected\n");
     const tests = resolveLocalCiSteps("full").find(({ label }) => label === "Workspace tests");
     if (tests?.kind !== "command") throw new Error("Missing workspace tests command.");
-    const tested = NodeChildProcess.spawnSync(
-      NodePath.resolve(import.meta.dirname, "../node_modules/.bin/vp"),
-      tests.args,
-      { cwd: directory, encoding: "utf8", timeout: 15_000 },
-    );
-    expect(tested.status, `${tested.stdout}\n${tested.stderr}`).toBe(0);
+    runInstalledTask(directory, ambientBin, tests.args);
     const argumentsByPackage = NodeFS.readFileSync(testArgsPath, "utf8")
       .trim()
       .split("\n")
@@ -132,6 +132,42 @@ it("runs the affected-workspace command through the installed task runner", () =
     NodeFS.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+function runInstalledTask(directory: string, ambientBin: string, args: ReadonlyArray<string>) {
+  const nodeExecutable = NodeChildProcess.execFileSync(
+    fixtureNodeExecutable(),
+    ["-p", "process.execPath"],
+    { encoding: "utf8", timeout: 2_000 },
+  ).trim();
+  const startedAt = performance.now();
+  const result = NodeChildProcess.spawnSync(
+    nodeExecutable,
+    [NodePath.resolve(import.meta.dirname, "../node_modules/vite-plus/bin/vp"), ...args],
+    {
+      cwd: directory,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: [NodePath.dirname(nodeExecutable), ambientBin, process.env.PATH ?? ""].join(
+          NodePath.delimiter,
+        ),
+      },
+      timeout: 15_000,
+    },
+  );
+  expect(
+    result.status,
+    JSON.stringify({
+      args,
+      elapsedMs: performance.now() - startedAt,
+      status: result.status,
+      signal: result.signal,
+      error: NodeUtil.inspect(result.error),
+      stdout: result.stdout,
+      stderr: result.stderr,
+    }),
+  ).toBe(0);
+}
 
 function fixtureNodeExecutable(): string {
   // Vite+ can execute tests with its own newer Node. The actual CI CLI must
