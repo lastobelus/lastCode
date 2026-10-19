@@ -1,6 +1,7 @@
+// @vitest-environment happy-dom
 import type { DesktopBridge } from "@t3tools/contracts";
 import { type ReactNode, act } from "react";
-import { create, type ReactTestRenderer } from "react-test-renderer";
+import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { LastCodeImportSettings } from "./LastCodeImportSettings";
@@ -44,7 +45,8 @@ vi.mock("../ui/button", () => ({
   Button: (props: Record<string, unknown>) => <button {...props} />,
 }));
 
-let renderer: ReactTestRenderer;
+let root: Root;
+let host: HTMLDivElement;
 const preference = { supported: true, showAndInstallLocalNightlies: false, message: null };
 const preview = {
   sourceDirectory: "/example/t3",
@@ -60,10 +62,14 @@ beforeEach(() => {
   state.update = null;
   state.toast.mockClear();
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  vi.stubGlobal("window", { desktopBridge: undefined });
+  host = document.createElement("div");
+  document.body.append(host);
+  root = createRoot(host);
+  Object.defineProperty(window, "desktopBridge", { configurable: true, value: undefined });
 });
 afterEach(async () => {
-  await act(() => renderer?.unmount());
+  await act(() => root.unmount());
+  host.remove();
   vi.unstubAllGlobals();
 });
 function setDesktopBridge(
@@ -77,7 +83,7 @@ function setDesktopBridge(
     >
   >,
 ) {
-  vi.stubGlobal("window", { desktopBridge });
+  Object.defineProperty(window, "desktopBridge", { configurable: true, value: desktopBridge });
 }
 
 function deferred<T>() {
@@ -91,18 +97,18 @@ function deferred<T>() {
 }
 
 function button() {
-  return renderer.root.findByType("button");
+  return host.querySelector("button")!;
 }
 
 describe("LastCode desktop settings", () => {
   it("keeps web controls disabled without requiring a desktop bridge", async () => {
     state.desktop = false;
     await act(() => {
-      renderer = create(<LastCodeLocalUpdatesSettings />);
+      root.render(<LastCodeLocalUpdatesSettings />);
     });
-    expect(button().props.disabled).toBe(true);
-    await act(() => renderer.update(<LastCodeImportSettings />));
-    expect(button().props.disabled).toBe(true);
+    expect(button().disabled).toBe(true);
+    await act(() => root.render(<LastCodeImportSettings />));
+    expect(button().disabled).toBe(true);
     expect(state.toast).not.toHaveBeenCalled();
   });
 
@@ -114,15 +120,15 @@ describe("LastCode desktop settings", () => {
       setShowAndInstallLocalNightlies: save,
     });
     await act(() => {
-      renderer = create(<LastCodeLocalUpdatesSettings />);
+      root.render(<LastCodeLocalUpdatesSettings />);
     });
-    expect(button().props.disabled).toBe(false);
-    await act(() => button().props.onClick());
-    expect(button().props.disabled).toBe(true);
+    expect(button().disabled).toBe(false);
+    await act(() => button().click());
+    expect(button().disabled).toBe(true);
     expect(save).toHaveBeenCalledExactlyOnceWith(true);
     await act(() => write.reject(new Error("write failed")));
-    expect(button().props.disabled).toBe(false);
-    expect(button().props["aria-pressed"]).toBe(false);
+    expect(button().disabled).toBe(false);
+    expect(button().getAttribute("aria-pressed")).toBe("false");
     expect(state.toast).toHaveBeenCalledWith(
       expect.objectContaining({
         title: "Could not change local nightly updates",
@@ -140,13 +146,13 @@ describe("LastCode desktop settings", () => {
       }),
     });
     await act(() => {
-      renderer = create(<LastCodeLocalUpdatesSettings />);
+      root.render(<LastCodeLocalUpdatesSettings />);
     });
-    await act(() => button().props.onClick());
-    expect(button().props["aria-pressed"]).toBe(true);
+    await act(() => button().click());
+    expect(button().getAttribute("aria-pressed")).toBe("true");
     state.update = { source: "lastcode-local", status: "downloaded" };
-    await act(() => renderer.update(<LastCodeLocalUpdatesSettings />));
-    expect(button().props.disabled).toBe(true);
+    await act(() => root.render(<LastCodeLocalUpdatesSettings />));
+    expect(button().disabled).toBe(true);
   });
 
   it("leaves import disabled after success for restart, and reports the backup location", async () => {
@@ -156,13 +162,13 @@ describe("LastCode desktop settings", () => {
       importT3Settings: () => operation.promise,
     });
     await act(() => {
-      renderer = create(<LastCodeImportSettings />);
+      root.render(<LastCodeImportSettings />);
     });
-    expect(button().props.disabled).toBe(false);
-    await act(() => button().props.onClick());
-    expect(button().props.disabled).toBe(true);
+    expect(button().disabled).toBe(false);
+    await act(() => button().click());
+    expect(button().disabled).toBe(true);
     await act(() => operation.resolve({ imported: [], backupDirectory: "/example/backup" }));
-    expect(button().props.disabled).toBe(true);
+    expect(button().disabled).toBe(true);
     expect(state.toast).toHaveBeenCalledWith(
       expect.objectContaining({
         type: "success",
@@ -182,14 +188,14 @@ describe("LastCode desktop settings", () => {
       importT3Settings: run,
     });
     await act(() => {
-      renderer = create(<LastCodeImportSettings />);
+      root.render(<LastCodeImportSettings />);
     });
-    await act(() => button().props.onClick());
-    expect(button().props.disabled).toBe(false);
-    await act(() => button().props.onClick());
+    await act(() => button().click());
+    expect(button().disabled).toBe(false);
+    await act(() => button().click());
     expect(run).toHaveBeenCalledTimes(2);
     expect(inspect).toHaveBeenCalledTimes(1);
-    expect(button().props.disabled).toBe(true);
+    expect(button().disabled).toBe(true);
   });
 
   it("reports a preview read failure and keeps import unavailable", async () => {
@@ -199,9 +205,9 @@ describe("LastCode desktop settings", () => {
       },
     });
     await act(() => {
-      renderer = create(<LastCodeImportSettings />);
+      root.render(<LastCodeImportSettings />);
     });
-    expect(button().props.disabled).toBe(true);
+    expect(button().disabled).toBe(true);
     expect(state.toast).toHaveBeenCalledWith(
       expect.objectContaining({
         title: "Could not inspect T3 Code settings",

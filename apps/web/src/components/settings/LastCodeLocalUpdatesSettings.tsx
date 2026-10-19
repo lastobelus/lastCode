@@ -1,8 +1,8 @@
-import { type DesktopLastCodeSettingsState } from "@t3tools/contracts";
+import { type DesktopLastCodeSettingsState, type DesktopUpdateState } from "@t3tools/contracts";
 import { MoonStarIcon } from "lucide-react";
 import { useDesktopUpdateState } from "../../state/desktopUpdate";
 import { Switch } from "../ui/switch";
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { isElectron } from "../../env";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { searchableSetting } from "./settingsSearch";
@@ -29,7 +29,7 @@ function useLocalNightlyPreference() {
       });
   }, []);
 
-  const setLocalNightlies = useCallback(async (enabled: boolean) => {
+  const setLocalNightlies = async (enabled: boolean) => {
     const bridge = window.desktopBridge;
     if (!bridge || typeof bridge.setShowAndInstallLocalNightlies !== "function") return;
     setIsSaving(true);
@@ -48,9 +48,24 @@ function useLocalNightlyPreference() {
       .finally(() => {
         setIsSaving(false);
       });
-  }, []);
+  };
 
   return { settings, isSaving, setLocalNightlies };
+}
+
+function localNightlyStatus(
+  settings: DesktopLastCodeSettingsState | null,
+  updateState: DesktopUpdateState | null,
+) {
+  if (!isElectron) return "Open this page in the LastCode desktop app to configure local builds.";
+  if (settings?.message != null) return settings.message;
+  if (updateState?.source === "lastcode-local" && updateState.status === "downloading") {
+    return "A local update build is running. Progress and failures are recorded in ~/.lastcode/local-updates/build.log.";
+  }
+  if (settings?.showAndInstallLocalNightlies) {
+    return "Enabled. LastCode checks your local repository and shows new checkpoints and LastCode revisions in the sidebar.";
+  }
+  return "Off by default. No local repositories, builds, or installers are touched while disabled.";
 }
 
 export function LastCodeLocalUpdatesSettings() {
@@ -59,14 +74,7 @@ export function LastCodeLocalUpdatesSettings() {
   const localUpdateActive =
     updateState?.source === "lastcode-local" &&
     (updateState.status === "downloading" || updateState.status === "downloaded");
-  const status = !isElectron
-    ? "Open this page in the LastCode desktop app to configure local builds."
-    : (settings?.message ??
-      (updateState?.source === "lastcode-local" && updateState.status === "downloading"
-        ? "A local update build is running. Progress and failures are recorded in ~/.lastcode/local-updates/build.log."
-        : settings?.showAndInstallLocalNightlies
-          ? "Enabled. LastCode checks your local repository and shows new checkpoints and LastCode revisions in the sidebar."
-          : "Off by default. No local repositories, builds, or installers are touched while disabled."));
+  const status = localNightlyStatus(settings, updateState);
 
   return (
     <SettingsSection title="LastCode" icon={<MoonStarIcon className="size-5" />}>

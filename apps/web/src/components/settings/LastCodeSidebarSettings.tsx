@@ -68,13 +68,10 @@ function LastCodeSidebarScaleSetting() {
                 min={MIN_LEGACY_SIDEBAR_SCALE}
                 onChange={(event) => {
                   const legacySidebarScale = Number(event.currentTarget.value);
-                  if (
-                    Number.isInteger(legacySidebarScale) &&
-                    legacySidebarScale >= MIN_LEGACY_SIDEBAR_SCALE &&
-                    legacySidebarScale <= MAX_LEGACY_SIDEBAR_SCALE
-                  ) {
-                    updateClientSettings({ legacySidebarScale });
-                  }
+                  if (!Number.isInteger(legacySidebarScale)) return;
+                  if (legacySidebarScale < MIN_LEGACY_SIDEBAR_SCALE) return;
+                  if (legacySidebarScale > MAX_LEGACY_SIDEBAR_SCALE) return;
+                  updateClientSettings({ legacySidebarScale });
                 }}
                 step={1}
                 style={legacySidebarScaleSliderStyle}

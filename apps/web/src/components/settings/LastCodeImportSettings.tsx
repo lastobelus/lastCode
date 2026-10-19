@@ -1,7 +1,7 @@
 import { type LastCodeSettingsImportPreview } from "@t3tools/contracts";
 import { DownloadIcon } from "lucide-react";
 import { Button } from "../ui/button";
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { isElectron } from "../../env";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { searchableSetting } from "./settingsSearch";
@@ -28,7 +28,7 @@ function useT3SettingsImport() {
       });
   }, []);
 
-  const importSettings = useCallback(async () => {
+  const importSettings = async () => {
     const bridge = window.desktopBridge;
     if (!bridge || typeof bridge.importT3Settings !== "function") return;
     setIsImporting(true);
@@ -51,7 +51,7 @@ function useT3SettingsImport() {
         }),
       );
     }
-  }, []);
+  };
 
   return { importPreview, isImporting, importSettings };
 }

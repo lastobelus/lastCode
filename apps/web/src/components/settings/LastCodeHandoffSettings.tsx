@@ -18,13 +18,10 @@ export function LastCodeHandoffSettings() {
             min={MIN_HANDOFFS_MENU_LIMIT}
             onChange={(event) => {
               const value = Number(event.currentTarget.value);
-              if (
-                Number.isInteger(value) &&
-                value >= MIN_HANDOFFS_MENU_LIMIT &&
-                value <= MAX_HANDOFFS_MENU_LIMIT
-              ) {
-                void updateClientSettings({ handoffsMenuLimit: value });
-              }
+              if (!Number.isInteger(value)) return;
+              if (value < MIN_HANDOFFS_MENU_LIMIT) return;
+              if (value > MAX_HANDOFFS_MENU_LIMIT) return;
+              void updateClientSettings({ handoffsMenuLimit: value });
             }}
             type="number"
             value={clientSettings.handoffsMenuLimit}

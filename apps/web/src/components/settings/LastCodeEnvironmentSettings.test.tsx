@@ -1,11 +1,11 @@
+// @vitest-environment happy-dom
 import { EnvironmentId, DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts";
 import { DEFAULT_CLIENT_SETTINGS, type ClientSettings } from "@t3tools/contracts/settings";
 import { type ReactElement, type ReactNode, act } from "react";
-import { create, type ReactTestRenderer } from "react-test-renderer";
+import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { LastCodeEnvironmentPauseSettings } from "./LastCodeEnvironmentPauseSettings";
 import { LastCodeEnvironmentIconSettings } from "./LastCodeEnvironmentIconSettings";
-import { ProviderAccentColorPicker } from "./ProviderAccentColorPicker";
 
 const state = vi.hoisted(() => ({
   settings: {} as ClientSettings,
@@ -61,7 +61,23 @@ vi.mock("../../environmentIcons", async (importOriginal) => ({
   ConnectedEnvironmentIcon: () => null,
 }));
 vi.mock("../sidebar/SidebarEnvironmentIcon", () => ({ SidebarEnvironmentIcon: () => null }));
-vi.mock("./ProviderAccentColorPicker", () => ({ ProviderAccentColorPicker: () => null }));
+vi.mock("./ProviderAccentColorPicker", () => ({
+  ProviderAccentColorPicker: ({
+    displayName = "incoming messages",
+    value,
+    onCommit,
+  }: {
+    displayName?: string;
+    value: string | null;
+    onCommit: (value: string) => void;
+  }) => (
+    <input
+      aria-label={displayName}
+      defaultValue={value ?? ""}
+      onChange={(event) => onCommit(event.currentTarget.value)}
+    />
+  ),
+}));
 vi.mock("./settingsLayout", () => ({
   SettingsSection: ({ children }: { children: ReactNode }) => <>{children}</>,
   SettingsRow: ({
@@ -109,7 +125,8 @@ vi.mock("../ui/switch", () => ({
     />
   ),
 }));
-let renderer: ReactTestRenderer;
+let root: Root;
+let host: HTMLDivElement;
 beforeEach(() => {
   Object.assign(state, {
     settings: { ...DEFAULT_CLIENT_SETTINGS, environmentIconColors: {} },
@@ -121,17 +138,28 @@ beforeEach(() => {
   });
   state.write.mockClear();
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  host = document.createElement("div");
+  document.body.append(host);
+  root = createRoot(host);
 });
 afterEach(async () => {
-  await act(() => renderer?.unmount());
+  await act(() => root.unmount());
+  host.remove();
   vi.unstubAllGlobals();
 });
 function button(label: string) {
-  return renderer.root.findAllByType("button").find((node) => node.props["aria-label"] === label)!;
+  return host.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!;
+}
+async function color(label: string, value: string) {
+  await act(() => {
+    const field = host.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)!;
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(field, value);
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+  });
 }
 async function render(node: ReactElement) {
   await act(() => {
-    renderer = create(node);
+    root.render(node);
   });
 }
 
@@ -142,8 +170,8 @@ describe("LastCode environment settings", () => {
       state.scope = scope;
       state.mixed = true;
       await render(<LastCodeEnvironmentPauseSettings />);
-      expect(button("Environment pause button").props.disabled).toBe(true);
-      expect(button("Reset environment pause button").props.disabled).toBe(true);
+      expect(button("Environment pause button").disabled).toBe(true);
+      expect(button("Reset environment pause button").disabled).toBe(true);
     },
   );
 
@@ -152,7 +180,7 @@ describe("LastCode environment settings", () => {
     async (...capabilities) => {
       state.capabilities = capabilities.flat() as (boolean | undefined)[];
       await render(<LastCodeEnvironmentPauseSettings />);
-      expect(button("Environment pause button").props.disabled).toBe(true);
+      expect(button("Environment pause button").disabled).toBe(true);
     },
   );
 
@@ -160,11 +188,11 @@ describe("LastCode environment settings", () => {
     state.mixed = true;
     state.canWrite = false;
     await render(<LastCodeEnvironmentPauseSettings />);
-    expect(button("Environment pause button").props.disabled).toBe(true);
+    expect(button("Environment pause button").disabled).toBe(true);
     state.canWrite = true;
-    await act(() => renderer.update(<LastCodeEnvironmentPauseSettings />));
-    expect(button("Environment pause button").props["aria-pressed"]).toBe("mixed");
-    await act(() => button("Reset environment pause button").props.onClick());
+    await act(() => root.render(<LastCodeEnvironmentPauseSettings />));
+    expect(button("Environment pause button").getAttribute("aria-pressed")).toBe("mixed");
+    await act(() => button("Reset environment pause button").click());
     expect(state.enabled).toBe(DEFAULT_SERVER_SETTINGS.environmentPauseEnabled);
     expect(state.mixed).toBe(false);
     expect(state.write).toHaveBeenCalledExactlyOnceWith({
@@ -175,22 +203,17 @@ describe("LastCode environment settings", () => {
   it("turns a mixed pause setting on across the selected targets", async () => {
     state.mixed = true;
     await render(<LastCodeEnvironmentPauseSettings />);
-    await act(() => button("Environment pause button").props.onClick());
+    await act(() => button("Environment pause button").click());
     expect(state.enabled).toBe(true);
     expect(state.mixed).toBe(false);
   });
 
   it("merges consecutive icon edits against current settings and clears only the requested color", async () => {
     await render(<LastCodeEnvironmentIconSettings />);
-    const pickers = renderer.root.findAllByType(ProviderAccentColorPicker);
-    expect(pickers.map((picker) => picker.props.displayName)).toEqual([
-      "Workstation (local)",
-      "Remote",
-    ]);
-    await act(() => pickers[0]!.props.onCommit("#123456"));
-    await act(() => pickers[1]!.props.onCommit("#abcdef"));
+    await color("Workstation (local)", "#123456");
+    await color("Remote", "#abcdef");
     expect(state.settings.environmentIconColors).toEqual({ primary: "#123456", remote: "#abcdef" });
-    await act(() => pickers[0]!.props.onCommit(""));
+    await color("Workstation (local)", "");
     expect(state.settings.environmentIconColors).toEqual({ remote: "#abcdef" });
     expect(state.settings.environmentIconColors[EnvironmentId.make("primary")]).toBeUndefined();
   });
@@ -204,17 +227,19 @@ describe("LastCode environment settings", () => {
       showLocalEnvironmentIcon: false,
     };
     await render(<LastCodeEnvironmentIconSettings />);
-    await act(() => button("Show thread provider badges").props.onClick());
-    await act(() => renderer.update(<LastCodeEnvironmentIconSettings />));
-    expect(renderer.root.findAllByType("input")).toHaveLength(0);
-    await act(() => button("Show local icon").props.onClick());
+    await act(() => button("Show thread provider badges").click());
+    await act(() => root.render(<LastCodeEnvironmentIconSettings />));
+    expect([...host.querySelectorAll<HTMLInputElement>('input[type="range"]')]).toHaveLength(0);
+    await act(() => button("Show local icon").click());
     expect(state.settings.showLocalEnvironmentIcon).toBe(true);
     expect(state.settings.threadProviderBadgeSize).toBe(45);
     expect(state.settings.threadProviderBadgeTransparency).toBe(20);
-    await act(() => button("Show thread provider badges").props.onClick());
-    await act(() => renderer.update(<LastCodeEnvironmentIconSettings />));
-    expect(renderer.root.findAllByType("input").map((field) => field.props.value)).toEqual([
-      45, 20,
-    ]);
+    await act(() => button("Show thread provider badges").click());
+    await act(() => root.render(<LastCodeEnvironmentIconSettings />));
+    expect(
+      [...host.querySelectorAll<HTMLInputElement>('input[type="range"]')].map((field) =>
+        Number(field.value),
+      ),
+    ).toEqual([45, 20]);
   });
 });

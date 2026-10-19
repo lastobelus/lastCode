@@ -6,7 +6,6 @@ import {
   MAX_THREAD_PROVIDER_BADGE_TRANSPARENCY,
 } from "@t3tools/contracts/settings";
 import { useAtomValue } from "@effect/atom-react";
-import { useMemo } from "react";
 import { ServerIcon } from "lucide-react";
 import { environmentCatalog } from "../../connection/catalog";
 import { ConnectedEnvironmentIcon, updateEnvironmentIconColors } from "../../environmentIcons";
@@ -180,14 +179,10 @@ function EnvironmentIconSetting({ environment }: { environment: LastCodeEnvironm
 export function LastCodeEnvironmentIconSettings() {
   const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const environmentSettings = useMemo(
-    () =>
-      deriveLastCodeEnvironmentSettingEntries({
-        entries: catalog.entries,
-        primaryEnvironmentId,
-      }),
-    [catalog.entries, primaryEnvironmentId],
-  );
+  const environmentSettings = deriveLastCodeEnvironmentSettingEntries({
+    entries: catalog.entries,
+    primaryEnvironmentId,
+  });
 
   return (
     <SettingsSection

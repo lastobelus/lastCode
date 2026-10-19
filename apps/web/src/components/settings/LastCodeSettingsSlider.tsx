@@ -40,9 +40,10 @@ export function LastCodeSettingsSlider({
         min={min}
         onChange={(event) => {
           const nextValue = Number(event.currentTarget.value);
-          if (Number.isInteger(nextValue) && nextValue >= min && nextValue <= max) {
-            onChange(nextValue);
-          }
+          if (!Number.isInteger(nextValue)) return;
+          if (nextValue < min) return;
+          if (nextValue > max) return;
+          onChange(nextValue);
         }}
         step={1}
         style={sliderStyle}
