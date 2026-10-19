@@ -710,8 +710,7 @@ function presentActivity(item: ThreadCliTurnItem): ThreadCliActivity {
   return {
     id: item.id,
     kind,
-    tone:
-      item.status === "failed" ? "error" : pending && "requestId" in item ? "approval" : "tool",
+    tone: item.status === "failed" ? "error" : pending && "requestId" in item ? "approval" : "tool",
     summary: activitySummary(item),
     runId: item.runId,
     createdAt: DateTime.formatIso(item.startedAt ?? item.updatedAt),
