@@ -30,16 +30,22 @@ import {
   toggleComposerTaskCheckbox,
 } from "~/lastcodeComposerSourceEdits";
 
+const pickerLifetime = vi.hoisted(() => ({ mounted: vi.fn(), unmounted: vi.fn() }));
+
 // Exercise the mounted fence widget's editing callback without the picker popup/icon system.
 vi.mock("~/components/chat/ComposerCodeBlockLanguagePicker", async () => {
-  const { createElement } = await import("react");
+  const { createElement, useEffect } = await import("react");
   return {
     ComposerCodeBlockLanguagePicker: (props: {
       language: string;
       disabled: boolean;
       onChange: (language: string) => void;
-    }) =>
-      createElement(
+    }) => {
+      useEffect(() => {
+        pickerLifetime.mounted(props.language);
+        return () => pickerLifetime.unmounted(props.language);
+      }, []);
+      return createElement(
         "select",
         {
           "aria-label": "Fence language",
@@ -50,7 +56,8 @@ vi.mock("~/components/chat/ComposerCodeBlockLanguagePicker", async () => {
         },
         createElement("option", { value: "ts" }, "TypeScript"),
         createElement("option", { value: "python" }, "Python"),
-      ),
+      );
+    },
   };
 });
 
@@ -89,7 +96,9 @@ function createSourceEditor(source: string, element?: HTMLElement) {
 
 function createSourceState(source: string) {
   const editor = createSourceEditor(source);
-  return editor.state.reconfigure({ plugins: editor.extensionManager.plugins });
+  const state = editor.state.reconfigure({ plugins: editor.extensionManager.plugins });
+  editor.destroy();
+  return state;
 }
 
 describe("source-preserving composer presentation", () => {
@@ -647,10 +656,95 @@ describe("mounted composer widget edits", () => {
   let mounted: ReturnType<typeof mountSourceWidgets>;
   beforeEach(() => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    pickerLifetime.mounted.mockClear();
+    pickerLifetime.unmounted.mockClear();
   });
   afterEach(async () => {
     await act(async () => mounted?.destroy());
+    document.documentElement.classList.remove("dark");
     vi.unstubAllGlobals();
+  });
+
+  it("cancels the initial picker render when its editor is destroyed immediately", async () => {
+    const errors = vi.spyOn(console, "error");
+    try {
+      await act(async () => {
+        mounted = mountSourceWidgets("before\n```ts\ncode\n```\nafter");
+        mounted.destroy();
+      });
+      expect(mounted.host.querySelector("select")).toBeNull();
+      expect(pickerLifetime.mounted).not.toHaveBeenCalled();
+      expect(pickerLifetime.unmounted).not.toHaveBeenCalled();
+      expect(errors).not.toHaveBeenCalled();
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it("remounts for theme and editability changes without editing source or retaining old roots", async () => {
+    const source = "before\n```ts\ncode\n```\nafter";
+    await act(async () => {
+      mounted = mountSourceWidgets(source);
+    });
+    const first = mounted.host.querySelector("select")!;
+    await act(async () => {
+      document.documentElement.classList.add("dark");
+      mounted.view.dispatch(mounted.composer.state.tr);
+    });
+    const dark = mounted.host.querySelector("select")!;
+    expect(dark).not.toBe(first);
+    expect(first.isConnected).toBe(false);
+    expect(pickerLifetime.unmounted).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      mounted.view.dispatch(
+        mounted.composer.state.tr.setMeta(composerLivePreviewKey, { editable: false }),
+      );
+    });
+    const disabled = mounted.host.querySelector("select")!;
+    expect(disabled).not.toBe(dark);
+    expect(disabled.disabled).toBe(true);
+    expect(pickerLifetime.unmounted).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      mounted.view.dispatch(
+        mounted.composer.state.tr.setMeta(composerLivePreviewKey, { editable: true }),
+      );
+    });
+    expect(mounted.host.querySelector("select")!.disabled).toBe(false);
+    expect(pickerLifetime.mounted).toHaveBeenCalledTimes(4);
+    expect(pickerLifetime.unmounted).toHaveBeenCalledTimes(3);
+    expect(mounted.composer.value()).toBe(source);
+    expect(mounted.composer.transactions.some((transaction) => transaction.docChanged)).toBe(false);
+  });
+
+  it("disposes one fence independently while the other retained picker still edits its live target", async () => {
+    const firstFence = "```ts\nfirst\n```\n";
+    const source = `before\n${firstFence}\n\`\`\`python\nsecond\n\`\`\`\nafter`;
+    await act(async () => {
+      mounted = mountSourceWidgets(source);
+    });
+    const [first, second] = mounted.host.querySelectorAll("select");
+    expect(first).toBeDefined();
+    expect(second).toBeDefined();
+    expect(pickerLifetime.mounted.mock.calls).toEqual([["ts"], ["python"]]);
+    await act(async () => {
+      mounted.composer.select(
+        source.indexOf(firstFence),
+        source.indexOf(firstFence) + firstFence.length,
+      );
+      // Delete the selection using the same source editor dispatch path.
+      mounted.view.dispatch(mounted.composer.state.tr.deleteSelection());
+    });
+    expect(mounted.host.querySelectorAll("select")).toHaveLength(1);
+    expect(mounted.host.querySelector("select")).toBe(second);
+    expect(first!.isConnected).toBe(false);
+    expect(pickerLifetime.unmounted.mock.calls).toEqual([["ts"]]);
+    await act(async () => {
+      second!.value = "ts";
+      second!.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(mounted.composer.value()).toBe("before\n\n```ts\nsecond\n```\nafter");
+    await act(async () => mounted.destroy());
+    expect(pickerLifetime.unmounted.mock.calls).toEqual([["ts"], ["python"], ["ts"]]);
   });
 
   const cases = [

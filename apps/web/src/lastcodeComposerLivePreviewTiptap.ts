@@ -10,10 +10,7 @@ import {
   buildComposerLivePreview,
   MAX_COMPOSER_LIVE_PREVIEW_LENGTH,
 } from "~/lastcodeComposerLivePreview";
-import { createElement } from "react";
-import { createRoot, type Root } from "react-dom/client";
 import { Fragment, Slice } from "@tiptap/pm/model";
-import { ComposerCodeBlockLanguagePicker } from "~/components/chat/ComposerCodeBlockLanguagePicker";
 import { markAsOneOffEdit } from "~/composer-undo-grouping";
 import { composerFormattingDelimiterForShortcut } from "~/lastcodeComposerSourceShortcuts";
 import {
@@ -34,9 +31,9 @@ import {
   type RichDocMap,
 } from "~/composer-rich-text-doc";
 
-type ComposerSourceView = Pick<EditorView, "state" | "dispatch">;
+import { createComposerPreviewWidgets } from "~/lastcodeComposerPreviewWidget";
 
-const widgetRoots = new WeakMap<Node, Root>();
+type ComposerSourceView = Pick<EditorView, "state" | "dispatch">;
 
 function sourceSelection(state: EditorState, map: RichDocMap) {
   return {
@@ -297,6 +294,11 @@ function replaceFenceLanguageAtWidget(
   return true;
 }
 
+const previewWidgetDecoration = createComposerPreviewWidgets({
+  toggleTask: toggleTaskCheckboxAtWidget,
+  replaceFenceLanguage: replaceFenceLanguageAtWidget,
+});
+
 function decorationsForState(
   state: EditorState,
   value: Omit<ComposerLivePreviewState, "decorations">,
@@ -333,65 +335,7 @@ function decorationsForState(
     decorations.push(Decoration.node(from, line.to, { class: [...line.classes].join(" ") }));
   }
   for (const widget of presentation.widgets) {
-    decorations.push(
-      Decoration.widget(
-        flatToPm(value.map, widget.from),
-        (view, getPos) => {
-          const element = document.createElement("span");
-          element.contentEditable = "false";
-          if (widget.kind === "bullet") {
-            element.className = "composer-md-bullet";
-            element.textContent = "• ";
-            element.setAttribute("aria-hidden", "true");
-          } else if (widget.kind === "task") {
-            element.className = "composer-md-checkbox";
-            const input = document.createElement("input");
-            input.type = "checkbox";
-            input.checked = widget.checked;
-            input.disabled = !value.editable;
-            input.setAttribute("aria-label", "Toggle task");
-            element.addEventListener("mousedown", (event) => event.preventDefault());
-            input.addEventListener("change", () => {
-              // Native checkbox state flips before change; source alone owns its state.
-              input.checked = widget.checked;
-              toggleTaskCheckboxAtWidget(view, getPos);
-            });
-            element.append(input);
-          } else {
-            element.className = "composer-md-fence-header";
-            const root = createRoot(element);
-            widgetRoots.set(element, root);
-            queueMicrotask(() => {
-              if (widgetRoots.get(element) !== root) return;
-              root.render(
-                createElement(ComposerCodeBlockLanguagePicker, {
-                  language: widget.language,
-                  theme: value.theme,
-                  disabled: !value.editable,
-                  onChange: (language: string) => {
-                    if (replaceFenceLanguageAtWidget(view, getPos, language)) view.focus();
-                  },
-                }),
-              );
-            });
-          }
-          return element;
-        },
-        {
-          side: -1,
-          ignoreSelection: true,
-          stopEvent: () => true,
-          key: `${widget.kind}:${widget.kind === "fenceHeader" ? widget.language : widget.kind === "task" ? widget.checked : ""}:${value.theme}:${value.editable}`,
-          destroy(element) {
-            const root = widgetRoots.get(element);
-            if (root) {
-              queueMicrotask(() => root.unmount());
-              widgetRoots.delete(element);
-            }
-          },
-        },
-      ),
-    );
+    decorations.push(previewWidgetDecoration(flatToPm(value.map, widget.from), widget, value));
   }
   if (!state.selection.empty) {
     state.doc.nodesBetween(state.selection.from, state.selection.to, (node, pos) => {
