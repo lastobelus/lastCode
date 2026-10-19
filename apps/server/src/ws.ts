@@ -1,3 +1,4 @@
+import { ThreadReadAuthorization } from "./orchestration-v2/ThreadReadAuthorization.ts";
 import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
@@ -180,6 +181,8 @@ import * as StorageCleanup from "./storageCleanup.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import { withTerminalOutputWindow } from "./terminal/OutputProtocol.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
+import * as ThreadReadBroker from "./mcp/ThreadReadBroker.ts";
+import * as OrchestratorMcpService from "./mcp/OrchestratorMcpService.ts";
 import * as ServerBrowser from "./preview/ServerBrowser.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import { remoteSshDeviceHosts } from "./device/localSshDeviceHost.ts";
@@ -544,8 +547,16 @@ const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 
 // Middleware added later wraps middleware added earlier, so instrumentation wraps authorization.
 const ServerWsRpcGroup = WsRpcGroup.middleware(RpcInstrumentation);
-// Replaying each intervening event costs a shell refetch; past this gap a
-// single O(active-threads) snapshot is cheaper and bounded.
+const MainServerWsRpcGroup = ServerWsRpcGroup.omit(
+  WS_METHODS.threadReadLocal,
+  WS_METHODS.threadReadConnect,
+  WS_METHODS.threadReadRespond,
+);
+// When a resuming client's cursor is more than this many events behind the
+// current head, skip the per-event catch-up replay and send a fresh shell
+// snapshot instead. Replaying each intervening event costs a shell refetch;
+// past this gap a single O(active-threads) snapshot is cheaper and bounded.
+// Matches the event store's default page size (DEFAULT_READ_FROM_SEQUENCE_LIMIT).
 const SHELL_RESUME_MAX_GAP = 1_000;
 // Row count alone does not bound replay memory: a few events with large tool
 // payloads can decode to gigabytes. Before replaying, sum the serialized
@@ -1163,9 +1174,11 @@ const layerWsRpc = (
   clientOrigin: OrchestrationClientOrigin,
   clientAnalyticsProps: Readonly<Record<string, unknown>>,
   previewAutomationBroker: PreviewAutomationBroker.PreviewAutomationBroker["Service"],
+  threadReadBroker: ThreadReadBroker.ThreadReadBroker["Service"],
+  threadReads: OrchestratorMcpService.OrchestratorMcpService["Service"],
   serverBrowser: ServerBrowser.ServerBrowser["Service"],
 ) =>
-  ServerWsRpcGroup.toLayer(
+  MainServerWsRpcGroup.toLayer(
     Effect.gen(function* () {
       const currentSessionId = currentSession.sessionId;
       const sql = yield* SqlClient.SqlClient;
@@ -1197,6 +1210,19 @@ const layerWsRpc = (
       };
       const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
       const commandOutputHub = yield* CommandOutputHub.CommandOutputHub;
+      const authorizeThreadRead = (threadId: ThreadId, messageId: MessageId) =>
+        Effect.gen(function* () {
+          const records = yield* threadManagement.getThreadRecords(threadId, ["runs"]);
+          yield* threadReadBroker.authorize({
+            threadId,
+            messageId,
+            sessionId: currentSessionId,
+            alreadyStored: records.runs.some((run) => run.userMessageId === messageId),
+          });
+        }).pipe(
+          // Failure to inspect the source must deny remote routing, without preventing a turn.
+          Effect.catch(() => Effect.void),
+        );
       const providerSessionManager = yield* ProviderSessionManager.ProviderSessionManagerV2;
       const scheduledTasks = yield* ScheduledTasks.ScheduledTaskService;
       const secretRequests = yield* SecretRequests.SecretRequests;
@@ -1781,14 +1807,10 @@ const layerWsRpc = (
         return Stream.concat(rpcInitialItems([{ kind: "snapshot" as const, snapshot }]), live);
       });
 
-      const mutateProject = Effect.fn("ws.projects.mutate")(function* (mutation: ProjectMutation) {
-        const result = yield* projectMutationOperation(projectService, mutation);
-        if (mutation.type === "project.delete")
-          yield* projectCloneTracker.discard(mutation.projectId);
-        return result;
-      });
+      const mutateProject = (mutation: ProjectMutation) =>
+        projectMutationOperation(projectService, mutation, projectCloneTracker.discard);
 
-      const handlers = ServerWsRpcGroup.of({
+      const handlers = MainServerWsRpcGroup.of({
         [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command) =>
           Effect.annotateCurrentSpan({
             "orchestration_v2.command_id": command.commandId,
@@ -1819,7 +1841,12 @@ const layerWsRpc = (
                             "creationSource" in command ? command.creationSource : "web",
                         }),
                       )
-                  ).pipe(Effect.provide(intakeContext)),
+                  ).pipe(Effect.provide(intakeContext), (effect) =>
+                    (command.type === "message.dispatch"
+                      ? authorizeThreadRead(command.threadId, command.messageId)
+                      : Effect.void
+                    ).pipe(Effect.andThen(effect)),
+                  ),
                 )
                 .pipe(
                   Effect.tap(() => recordClientCommandAnalytics(command)),
@@ -1959,7 +1986,12 @@ const layerWsRpc = (
                         }),
                     createdBy: "user",
                     creationSource: input.creationSource ?? "web",
-                  }).pipe(Effect.provide(intakeContext)),
+                  }).pipe(
+                    Effect.provideService(ThreadReadAuthorization, {
+                      authorize: authorizeThreadRead,
+                    }),
+                    Effect.provide(intakeContext),
+                  ),
                 )
                 .pipe(
                   Effect.tap(() =>
@@ -3075,6 +3107,36 @@ const layerWsRpc = (
       });
       return handlers;
     }),
+  ).pipe(
+    Layer.merge(
+      Layer.mergeAll(
+        ServerWsRpcGroup.toLayerHandler(
+          WS_METHODS.threadReadLocal,
+          Effect.gen(function* () {
+            const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
+            const environmentId = yield* serverEnvironment.getEnvironmentId;
+            return (input) =>
+              threadReads.readThreadLocal(
+                {
+                  environmentId,
+                  capabilities: new Set(["orchestration"]),
+                  issuedAt: 0,
+                  requestNamespace: currentSession.sessionId,
+                  thread: undefined,
+                  client: undefined,
+                },
+                input,
+              );
+          }),
+        ),
+        ServerWsRpcGroup.toLayerHandler(WS_METHODS.threadReadConnect, () =>
+          Stream.unwrap(threadReadBroker.connect(currentSession.sessionId)),
+        ),
+        ServerWsRpcGroup.toLayerHandler(WS_METHODS.threadReadRespond, (input) =>
+          threadReadBroker.respond(currentSession.sessionId, input),
+        ),
+      ),
+    ),
   );
 
 // RpcServer's default sends a socket-level Defect frame instead, and the client
@@ -3087,6 +3149,8 @@ export const WS_RPC_SERVER_OPTIONS = {
 export const layer = Layer.unwrap(
   Effect.gen(function* () {
     const previewAutomationBroker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
+    const threadReadBroker = yield* ThreadReadBroker.ThreadReadBroker;
+    const threadReads = yield* OrchestratorMcpService.OrchestratorMcpService;
     const serverBrowser = yield* ServerBrowser.ServerBrowser;
     const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
     const pullRequests = yield* PullRequestService.PullRequestService;
@@ -3161,6 +3225,8 @@ export const layer = Layer.unwrap(
               clientOrigin,
               clientAnalyticsProps,
               previewAutomationBroker,
+              threadReadBroker,
+              threadReads,
               serverBrowser,
             ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),

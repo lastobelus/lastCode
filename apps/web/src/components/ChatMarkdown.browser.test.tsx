@@ -5,6 +5,7 @@ import { act, type ReactElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
+import { chatMarkdownClipboardPayload } from "../markdown-clipboard";
 import { getSyntaxHighlighterPromise } from "../lib/syntaxHighlighting";
 import { MarkdownFindContext } from "./chat/markdownFindContext";
 import { useThreadFindHighlights } from "./chat/threadFindHighlights";
@@ -36,6 +37,27 @@ vi.mock(import("../remoteOpen"), async (original) => ({
   ...(await original()),
   useRemoteOpenResolution: () => ({ state: { mode: "local-exec" }, isResolved: true }) as never,
 }));
+// File-label tests exercise authored media and copy text without depending on external requests.
+vi.mock(import("@t3tools/client-runtime/markdown-images"), async (original) => {
+  const actual = await original();
+  return {
+    ...actual,
+    classifyMarkdownImageSource: (
+      ...args: Parameters<typeof actual.classifyMarkdownImageSource>
+    ) => {
+      if (args[0] === "https://example.com/preview.png" || args[0] === "https://example.com/a.png") {
+        return {
+          _tag: "Direct" as const,
+          uri: "data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20width=%221%22%20height=%221%22/%3E",
+        };
+      }
+      if (args[0] === "https://example.com/preview.mp4") {
+        return { _tag: "Direct" as const, uri: "data:video/mp4;base64," };
+      }
+      return actual.classifyMarkdownImageSource(...args);
+    },
+  };
+});
 // A rendered diagram is an SVG; real Mermaid layout is not what these tests exercise.
 vi.mock(import("./chat/MermaidDiagram"), async (original) => ({
   ...(await original()),
@@ -397,6 +419,108 @@ describe("ChatMarkdown skill chips", () => {
 
     await rerender(<ChatMarkdown cwd="/tmp/project" text={text} skills={[]} />);
     expect(container.textContent).not.toContain("2Spec");
+  });
+});
+
+describe("ChatMarkdown file-link labels", () => {
+  function copySelection(container: HTMLElement) {
+    const range = document.createRange();
+    range.selectNodeContents(container);
+    const selection = window.getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    try {
+      return chatMarkdownClipboardPayload(selection)?.text;
+    } finally {
+      selection.removeAllRanges();
+    }
+  }
+
+  it.each([
+    [String.raw`read \] here`, "read ] here"],
+    [String.raw`read \[ here`, "read [ here"],
+    [String.raw`read \\\] here`, String.raw`read \] here`],
+    [String.raw`read \*this\*`, "read *this*"],
+    [String.raw`read \_this\_`, "read _this_"],
+  ])("round-trips copied file-link label %s", async (sourceLabel, label) => {
+    const source = `[${sourceLabel}](/repo/example.ts:12)`;
+    const { container, rerender } = await render(<ChatMarkdown cwd="/repo" text={source} />);
+    expect(container.textContent).toContain(label);
+    const copied = copySelection(container);
+    expect(copied).toBe(source);
+    await rerender(<ChatMarkdown cwd="/repo" text={copied!} />);
+    expect(copySelection(container)).toBe(source);
+  });
+
+  it.each(["diagram", "example.ts", ""])(
+    "preserves image-only file labels with alt %s",
+    async (alt) => {
+      const source = `[![${alt}](https://example.com/preview.png)](/repo/example.ts)`;
+      const container = await renderText(source, { cwd: "/repo" });
+      expect(container.querySelector("img")?.getAttribute("alt")).toBe(alt);
+      expect(container.querySelectorAll("button")).toHaveLength(1);
+      expect(container.querySelectorAll('[role="button"]')).toHaveLength(0);
+      expect(container.querySelector("button button, button a")).toBeNull();
+      expect(copySelection(container)).toBe(source);
+    },
+  );
+
+  it("keeps video labels non-interactive and copies their source", async () => {
+    const source = "[![clip](https://example.com/preview.mp4)](/repo/example.ts)";
+    const container = await renderText(source, { cwd: "/repo" });
+    expect(container.querySelector("video")?.controls).toBe(false);
+    expect(container.querySelectorAll("button")).toHaveLength(1);
+    expect(container.querySelectorAll("[data-markdown-copy-media]")).toHaveLength(1);
+    expect(copySelection(container)).toBe(source);
+  });
+
+  it("copies the filename for a whitespace-only link label", async () => {
+    const container = await renderText("[   ](/repo/example.ts:12)", { cwd: "/repo" });
+    expect(copySelection(container)).toBe("[example.ts](/repo/example.ts:12)");
+  });
+
+  it.each([false, true])("matches soft-break filenames with lineBreaks=%s", async (lineBreaks) => {
+    const container = await renderText("[my\nfile.ts](/repo/my%20file.ts)", {
+      cwd: "/repo",
+      lineBreaks,
+    });
+    const link = container.querySelector(".chat-markdown-file-link")!;
+    expect(link.textContent).toBe(lineBreaks ? "my\nfile.ts (my file.ts)" : "my file.ts");
+    expect(link.querySelectorAll("br")).toHaveLength(lineBreaks ? 1 : 0);
+  });
+
+  it.each(["\n", "  \n", "\\\n"])(
+    "preserves line breaks in file labels (%j)",
+    async (lineBreak) => {
+      const source = `[src/${lineBreak}example.ts](/repo/src/example.ts)`;
+      const container = await renderText(source, { cwd: "/repo", lineBreaks: true });
+      const link = container.querySelector(".chat-markdown-file-link")!;
+      expect(link.querySelectorAll("br")).toHaveLength(1);
+      expect(link.getAttribute("data-markdown-copy-text")).toMatch(/src\/\n+example\.ts/);
+      expect(copySelection(container)).toBe(source);
+    },
+  );
+
+  it.each([
+    "src/\n**example.ts**",
+    String.raw`src/\]` + "\nexample.ts",
+    "src/[nested]\nexample.ts",
+    "src/`bracket ]`\nexample.ts",
+    "src/![diagram](https://example.com/preview.png)\nexample.ts",
+  ])("preserves authored multiline file label %s", async (sourceLabel) => {
+    const source = `[${sourceLabel}](/repo/src/example.ts)`;
+    const container = await renderText(source, { cwd: "/repo", lineBreaks: true });
+    expect(copySelection(container)).toBe(source);
+  });
+
+  it("retains descriptive prose, emphasis, destinations, and copy text", async () => {
+    const source = "This function [**validates** the input](/repo/src/example.ts:12).";
+    const container = await renderText(source, { cwd: "/repo" });
+    const link = container.querySelector(".chat-markdown-file-link")!;
+    expect(link.querySelector("strong")?.textContent).toBe("validates");
+    expect(link.textContent).toContain("validates the input");
+    expect(link.textContent).toContain("example.ts · L12");
+    expect(copySelection(container)).toBe(source);
   });
 });
 
@@ -792,6 +916,17 @@ describe("ChatMarkdown thread find", () => {
     { text: '```ts title="src/needle.ts"\nconst a = 1;\n```', query: "needle", count: 0 },
     { text: "```weirdlang\nconst a = 1;\n```", query: "weirdlang", count: 0 },
     { text: "Use $test-t3-app now", query: "T3 App Testing", count: 1 },
+    { text: "[Guide](/tmp/file.ts)", query: "Guide (file.ts)", count: 1 },
+    {
+      text: "[![diagram](https://example.com/a.png)](/tmp/file.ts)",
+      query: "(file.ts)",
+      count: 1,
+    },
+    {
+      text: "[![diagram](https://example.com/a.png)](/tmp/file.ts)",
+      query: "diagram",
+      count: 0,
+    },
     { text: "`/tmp/file.ts:42`", query: "file.ts · L42", count: 1, user: true, lineBreaks: true },
     { text: "> [!NOTE]\n> Searchable alert", query: "Searchable alert", count: 1 },
     {

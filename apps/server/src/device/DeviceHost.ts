@@ -107,8 +107,12 @@ export class DeviceHost extends Context.Service<
       DeviceHostAgentReady,
       DeviceHostError | DeviceHostTimeoutError | AgentDeviceStartError | NodeRuntimeUnavailableError
     >;
-    readonly current: Effect.Effect<DeviceHostReady | null>;
-    readonly stopAgent: Effect.Effect<void>;
+    /** Current endpoints when already running, without starting anything. */
+    readonly current: Effect.Effect<
+      (DeviceHostReady & { readonly agentDevice?: AgentDeviceEndpoint }) | null
+    >;
+    /** Stops only agent-device. Manual viewing through the hub stays available. */
+    readonly stopAgent: Effect.Effect<void, DeviceHostError | NodeRuntimeUnavailableError>;
     /** Stops helpers. Devices themselves keep running; the user owns those. */
     readonly stop: Effect.Effect<void>;
   }
