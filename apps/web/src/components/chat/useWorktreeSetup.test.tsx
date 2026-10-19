@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
   EnvironmentId,
@@ -6,7 +7,7 @@ import {
   type WorktreeSetupSnapshot,
 } from "@t3tools/contracts";
 import { act, useLayoutEffect } from "react";
-import { create, type ReactTestRenderer } from "react-test-renderer";
+import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const state = vi.hoisted(() => ({ snapshot: null as WorktreeSetupSnapshot | null }));
@@ -26,7 +27,8 @@ vi.mock("../../terminalUiStateStore", () => ({
 import { useWorktreeSetup } from "./useWorktreeSetup";
 
 const route = scopeThreadRef(EnvironmentId.make("environment-one"), ThreadId.make("thread-one"));
-let renderer: ReactTestRenderer | undefined;
+let root: Root;
+let host: HTMLDivElement;
 let observed: ReturnType<typeof useWorktreeSetup>;
 
 // ChatView constructs this ref with scopeThreadRef on every render. Preserve
@@ -68,18 +70,20 @@ function snapshot(sequence: number): WorktreeSetupSnapshot {
 
 async function render(ref = route, draft = false) {
   await act(() => {
-    if (renderer) renderer.update(<Probe {...ref} draft={draft} />);
-    else renderer = create(<Probe {...ref} draft={draft} />);
+    root.render(<Probe {...ref} draft={draft} />);
   });
 }
 
 beforeEach(() => {
   state.snapshot = null;
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  host = document.createElement("div");
+  document.body.append(host);
+  root = createRoot(host);
 });
 afterEach(async () => {
-  await act(() => renderer?.unmount());
-  renderer = undefined;
+  await act(() => root.unmount());
+  host.remove();
   vi.unstubAllGlobals();
 });
 
@@ -87,7 +91,7 @@ describe("worktree setup route identity", () => {
   it("rerenders an empty route with equivalent recreated scoped references", async () => {
     await render(route, true);
     await render(route, true);
-    expect(renderer!.toJSON()).toBe("none");
+    expect(host.textContent).toBe("none");
     expect(observed.isPreparingWorktree).toBe(false);
     expect(observed.blocksSend).toBe(false);
   });
@@ -95,18 +99,18 @@ describe("worktree setup route identity", () => {
   it("keeps the newest snapshot across equivalent refs, older updates and the null bridge", async () => {
     state.snapshot = snapshot(2);
     await render();
-    expect(renderer!.toJSON()).toBe("2");
+    expect(host.textContent).toBe("2");
     expect(observed.blocksSend).toBe(true);
     state.snapshot = snapshot(4);
     await render();
-    expect(renderer!.toJSON()).toBe("4");
+    expect(host.textContent).toBe("4");
     state.snapshot = snapshot(1);
     await render();
-    expect(renderer!.toJSON()).toBe("4");
+    expect(host.textContent).toBe("4");
     state.snapshot = null;
     await render();
     await render();
-    expect(renderer!.toJSON()).toBe("4");
+    expect(host.textContent).toBe("4");
     expect(observed.isPreparingWorktree).toBe(true);
   });
 
@@ -118,11 +122,29 @@ describe("worktree setup route identity", () => {
     await render();
     state.snapshot = null;
     await render();
-    expect(renderer!.toJSON()).toBe("3");
+    expect(host.textContent).toBe("3");
     await render(next);
-    expect(renderer!.toJSON()).toBe("none");
+    expect(host.textContent).toBe("none");
     expect(observed.blocksSend).toBe(false);
     await render(route);
-    expect(renderer!.toJSON()).toBe("none");
+    expect(host.textContent).toBe("none");
+  });
+
+  it.each([
+    scopeThreadRef(EnvironmentId.make("environment-two"), route.threadId),
+    scopeThreadRef(route.environmentId, ThreadId.make("thread-two")),
+  ])("retains a cached destination snapshot across null and older updates at %j", async (next) => {
+    state.snapshot = snapshot(3);
+    await render();
+    state.snapshot = { ...snapshot(4), threadId: next.threadId };
+    await render(next);
+    expect(host.textContent).toBe("4");
+    state.snapshot = null;
+    await render(next);
+    expect(host.textContent).toBe("4");
+    state.snapshot = { ...snapshot(1), threadId: next.threadId };
+    await render(next);
+    expect(host.textContent).toBe("4");
+    expect(observed.blocksSend).toBe(true);
   });
 });

@@ -1,8 +1,9 @@
+// @vitest-environment happy-dom
 import { EnvironmentId, MessageId } from "@t3tools/contracts";
 import { transform } from "oxc-transform-react";
 import { act, createElement, type ComponentType } from "react";
 import * as compilerRuntime from "react/compiler-runtime";
-import { create, type ReactTestRenderer } from "react-test-renderer";
+import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { useAssetUrls } from "../assets/assetUrls";
@@ -71,11 +72,17 @@ async function makeProbe(compiled: boolean): Promise<ComponentType<ProbeProps>> 
   );
 }
 
-let renderer: ReactTestRenderer | undefined;
-beforeEach(() => vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true));
+let root: Root;
+let host: HTMLDivElement;
+beforeEach(() => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  host = document.createElement("div");
+  document.body.append(host);
+  root = createRoot(host);
+});
 afterEach(async () => {
-  await act(() => renderer?.unmount());
-  renderer = undefined;
+  await act(() => root.unmount());
+  host.remove();
   vi.unstubAllGlobals();
 });
 
@@ -98,11 +105,11 @@ describe.each([false, true])("incremental timeline (compiled=%s)", (compiled) =>
     };
     const input: TimelineEntriesInput = { visibleTurnItems: [], optimisticMessages: [] };
     await act(() => {
-      renderer = create(createElement(Probe, { threadKey: "draft-one", input, observe }));
+      root.render(createElement(Probe, { threadKey: "draft-one", input, observe }));
     });
-    expect(renderer!.toJSON()).toBe("0");
+    expect(host.textContent).toBe("0");
     await act(() =>
-      renderer!.update(
+      root.render(
         createElement(Probe, {
           threadKey: "draft-one",
           input: { ...input, optimisticMessages: [message] },
@@ -110,11 +117,11 @@ describe.each([false, true])("incremental timeline (compiled=%s)", (compiled) =>
         }),
       ),
     );
-    expect(renderer!.toJSON()).toBe("1");
+    expect(host.textContent).toBe("1");
     expect(entries[0]).toMatchObject({ kind: "message", message: { text: "Keep this draft" } });
     const previous = entries[0];
     await act(() =>
-      renderer!.update(
+      root.render(
         createElement(Probe, {
           threadKey: "draft-one",
           input: { ...input, optimisticMessages: [message] },
@@ -124,7 +131,7 @@ describe.each([false, true])("incremental timeline (compiled=%s)", (compiled) =>
     );
     expect(entries[0]).toBe(previous);
     await act(() =>
-      renderer!.update(
+      root.render(
         createElement(Probe, {
           threadKey: "draft-two",
           input,
@@ -132,7 +139,7 @@ describe.each([false, true])("incremental timeline (compiled=%s)", (compiled) =>
         }),
       ),
     );
-    expect(renderer!.toJSON()).toBe("0");
+    expect(host.textContent).toBe("0");
   });
   it("refreshes attachment URLs without losing unchanged committed rows", async () => {
     const Probe = await makeProbe(compiled);
@@ -165,14 +172,14 @@ describe.each([false, true])("incremental timeline (compiled=%s)", (compiled) =>
       attachmentUrlById: new Map([["image", "https://assets.example/first"]]),
     };
     await act(() => {
-      renderer = create(createElement(Probe, { threadKey: "server-one", input, observe }));
+      root.render(createElement(Probe, { threadKey: "server-one", input, observe }));
     });
     const original = entries[0];
     expect(original).toMatchObject({
       message: { attachments: [{ previewUrl: "https://assets.example/first" }] },
     });
     await act(() =>
-      renderer!.update(
+      root.render(
         createElement(Probe, {
           threadKey: "server-one",
           input: {
@@ -185,7 +192,7 @@ describe.each([false, true])("incremental timeline (compiled=%s)", (compiled) =>
     );
     expect(entries[0]).toBe(original);
     await act(() =>
-      renderer!.update(
+      root.render(
         createElement(Probe, {
           threadKey: "server-one",
           input: {
