@@ -3525,6 +3525,10 @@ describe("PreviewManager", () => {
           yield* manager.createTab("tab_recording_stalled_warmup");
           yield* manager.registerWebview("tab_recording_stalled_warmup", 42);
           yield* manager.setMainWindow({
+            on: vi.fn(),
+            off: vi.fn(),
+            isVisible: () => true,
+            isMinimized: () => false,
             isDestroyed: () => false,
             once: vi.fn(),
             webContents: { setBackgroundThrottling: windowThrottling },
