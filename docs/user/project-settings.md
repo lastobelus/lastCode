@@ -160,14 +160,16 @@ Inherit follows each machine's rules; Off keeps that project's worktrees until y
 manually. Custom applies separate worktree rules to the selected project or checkout. Browser
 captures and log retention remain machine-wide.
 
-Worktrees can be removed after a chosen number of inactive days, after a thread settles, after
-merging, or when they have no commits beyond the default branch. Set settled retention to 0 days
-to remove a worktree at the next cleanup after settlement. Only T3-managed worktrees are eligible.
-Active sessions and shared worktrees prevent removal. **Keep worktrees with local changes** defaults
-to **Uncommitted changes**, which protects tracked edits and untracked files but deletes ignored
-files such as `.env` and build output. **Any local files** also protects ignored files other than
-`node_modules`. **Edited tracked files** protects only tracked edits and allows untracked and
-ignored files to be deleted. Branches and thread history stay; starting another turn recreates the checkout.
+When **Delete inactive worktrees** is enabled, clean archived checkouts are eligible
+immediately. Unarchived checkouts use the delay configured in settings. Worktrees can also
+be removed after a thread settles, after merging, or when they have no commits beyond the
+default branch. Set settled retention to 0 days to remove an eligible checkout at the next
+cleanup after settlement. Only
+registered linked worktrees in configured cleanup locations are eligible. Active consumers
+prevent removal. Shared families qualify only when every owner is archived and every owner
+has cleanup enabled. Edits, untracked files and unknown ignored files—including notes, `.env`
+and local runtime state—always preserve a checkout. Branches and thread history stay;
+starting another turn recreates the checkout.
 Merge cleanup requires a merged pull request whose commits are included in the remote default
 branch. A squash or rebase merge on GitHub also counts when the pull request targeted the default
 branch and the worktree is still at the pull request's last commit.
@@ -180,6 +182,30 @@ Existing prompts for deleting a worktree manually remain available when this pol
 Choose **Delete now** to run the enabled rules immediately. The latest results show which
 worktrees were removed or kept and why, plus any failures.
 Results also list folders in the worktree folder that no thread uses, with their sizes; cleanup never removes them, so remove them manually if you want.
+
+Enable **Remove inactive dependencies and build outputs** to reclaim recognized npm or
+pnpm `node_modules` installations and unchanged build files recorded by the compiler runners.
+This existing dependency rule also governs verified app `dist` and resource-monitor debug
+outputs; source checkouts remain subject to the separate whole-worktree rule. Additions,
+notes and research files are kept. Archived threads are eligible immediately when this rule is enabled. For shared
+worktrees, every owner must be archived and have cleanup enabled; an unarchived or active
+owner, or an owner whose project policy is Off, keeps the install.
+
+Unarchived and ownerless installs use the delay configured in settings, measured from actual
+dependency or compiled-output use. This includes registered manual and QA worktrees in configured cleanup
+locations when their repository maps to one project. Dependency preparation and the
+dependency-backed development and CI runners renew that clock; status conversations and
+simply opening a terminal do not. Recognized installs with uncertain usage start a full
+configured interval when first observed. Folder timestamps alone never prove usage.
+
+Active agents, sessions, terminals, previews, processes, and runtime protection prevent
+cleanup. Only unchanged recorded emissions are removed from build folders; arbitrary
+additions and edited outputs remain. Existing build files without compiler provenance need
+exact-file review and are kept until reviewed. Other generated folders and vendored sources
+are kept. Reinstall dependencies or rebuild outputs before continuing work. This rule is off by default and follows the project's Inherit, Off,
+or Custom policy. Dependency cleanup is available on macOS and Linux and keeps worktrees
+when consumers cannot be checked reliably. On mobile, open **Settings → Maintenance** to
+configure cleanup for an environment or project.
 
 Browser captures and rotated logs have separate retention periods. Expired capture links stop
 working. Current logs, message attachments, and browser profiles are kept.
