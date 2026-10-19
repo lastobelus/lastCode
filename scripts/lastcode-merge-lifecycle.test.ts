@@ -111,6 +111,28 @@ done
             ],
           },
           jobs: { jobs: [{ name: "CI Gate", status: "completed", conclusion: "success" }] },
+          reviews: [
+            [
+              {
+                id: 1,
+                user: { login: "chatgpt-codex-connector[bot]" },
+                state: "APPROVED",
+                commit_id: head,
+                submitted_at: "2026-10-01T00:00:00Z",
+              },
+            ],
+          ],
+          reviewThreads: [
+            {
+              data: {
+                repository: {
+                  pullRequest: {
+                    reviewThreads: { nodes: [], pageInfo: { hasNextPage: false } },
+                  },
+                },
+              },
+            },
+          ],
         };
         const responsesPath = NodePath.join(root, "responses.json");
         NodeFS.writeFileSync(responsesPath, JSON.stringify(responses));
@@ -121,12 +143,16 @@ const fs = require('node:fs');
 const cp = require('node:child_process');
 const responses = JSON.parse(fs.readFileSync(process.env.TEST_RESPONSES, 'utf8'));
 const args = process.argv.slice(2);
+const endpoint = args.find(arg => arg.startsWith('repos/'));
 let result;
 if (args[0] === 'pr' && args[1] === 'merge') {
   cp.execFileSync('git', ['push', '--no-verify', 'origin', responses.pr.headRefOid + ':refs/heads/lastcode/main']);
   fs.writeFileSync(process.env.TEST_MERGE_MARKER, 'called');
   process.exit(0);
 } else if (args[0] === 'pr' && args[1] === 'view') result = {...responses.pr, state: fs.existsSync(process.env.TEST_MERGE_MARKER) ? 'MERGED' : 'OPEN'};
+else if (args[0] === 'api' && args[1] === 'graphql') result = responses.reviewThreads;
+else if (endpoint?.endsWith('/pulls/1/reviews?per_page=100')) result = responses.reviews;
+else if (endpoint?.endsWith('/comments?per_page=100')) result = [[]];
 else if (args[0] === 'api' && args[1].includes('/rules/branches/')) result = responses.rules;
 else if (args[0] === 'api' && args[1].includes('/runs?')) result = responses.runs;
 else if (args[0] === 'api' && args[1].includes('/jobs?')) result = responses.jobs;
