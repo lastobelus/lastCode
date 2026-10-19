@@ -417,7 +417,7 @@ describe("LastCode checkpoint supervisor", () => {
     reconcilePrimaryProjectActions(
       "/srv/example/lastCode",
       "/Users/example",
-      ["lc-wait-for-pr"],
+      ["lc-wait-for-checkpoint"],
       { HOME: "/Users/example" },
       execute,
     );
@@ -434,7 +434,7 @@ describe("LastCode checkpoint supervisor", () => {
         "--base-dir",
         "/Users/example/.lastcode",
         "--trusted-source-id",
-        "lc-wait-for-pr",
+        "lc-wait-for-checkpoint",
       ],
       { HOME: "/Users/example" },
     );
@@ -443,12 +443,12 @@ describe("LastCode checkpoint supervisor", () => {
   it("validates and normalizes the environment-local Project Action trust allowlist", () => {
     expect(
       projectActionTrustAllowlist({
-        trustedProjectActionIds: ["lc-wait-for-pr", "lc-wait-for-pr"],
+        trustedProjectActionIds: ["lc-wait-for-checkpoint", "lc-wait-for-checkpoint"],
       }),
-    ).toEqual(["lc-wait-for-pr"]);
-    expect(() => projectActionTrustAllowlist({ trustedProjectActionIds: ["wait-for-pr"] })).toThrow(
-      "trust entries are invalid",
-    );
+    ).toEqual(["lc-wait-for-checkpoint"]);
+    expect(() =>
+      projectActionTrustAllowlist({ trustedProjectActionIds: ["wait-for-checkpoint"] }),
+    ).toThrow("trust entries are invalid");
   });
 
   it("detects every changed submodule gitlink", () => {
@@ -1838,6 +1838,11 @@ describe("LastCode checkpoint supervisor", () => {
     expect(message).toContain("sync/nightly/nightly-1");
     expect(message).toContain("lastcode-checkpoints --verbose");
     expect(message).toContain("nightly-checkpoint.stderr.log");
+    // A new watch ignores comments posted before it starts, so the gate check must follow it.
+    expect(message).toContain("call watch_pull_request");
+    expect(message.indexOf("call watch_pull_request")).toBeLessThan(
+      message.indexOf("run pnpm lastcode:pr-gates"),
+    );
   });
 
   it("distinguishes different recorded checkpoint blockers behind the same wrapper error", () => {
