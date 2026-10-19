@@ -1,0 +1,1764 @@
+<!doctype html>
+<html lang="en" data-repo-doc-path="doc/design/2026-08-16__action-resume-eli5.html">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>The same thread, with a doorbell — Issue #13 ELI5</title>
+    <style>
+      :root {
+        --ink: #17212b;
+        --muted: #5b6672;
+        --paper: #f3f0e9;
+        --surface: #fffefa;
+        --surface-2: #f9f7f1;
+        --line: #d8d2c7;
+        --line-strong: #b8b0a4;
+        --existing: #0f766e;
+        --existing-soft: #e4f3ef;
+        --new: #b94d1d;
+        --new-soft: #faeade;
+        --question: #7a4b18;
+        --question-soft: #fff2cf;
+        --human: #335ca8;
+        --human-soft: #e9effa;
+        --machine: #6d365d;
+        --machine-soft: #f3e7ef;
+        --danger: #9a352f;
+        --danger-soft: #f8e7e4;
+        --shadow: 0 10px 30px rgba(39, 34, 28, 0.08);
+        --font: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        color: var(--ink);
+        background: var(--paper);
+        font-family: var(--font);
+        font-size: 17px;
+        line-height: 1.58;
+      }
+
+      a {
+        color: #255b84;
+        text-underline-offset: 0.18em;
+      }
+      a:hover {
+        color: #173e5b;
+      }
+      a[aria-disabled="true"] {
+        color: var(--muted);
+        text-decoration-style: dotted;
+        cursor: help;
+      }
+
+      code {
+        padding: 0.12em 0.35em;
+        border: 1px solid #e1d9ce;
+        border-radius: 0.35em;
+        background: #f5f1ea;
+        font-family: var(--mono);
+        font-size: 0.89em;
+      }
+
+      .page {
+        width: min(1120px, calc(100% - 32px));
+        margin: 0 auto;
+        padding: 56px 0 72px;
+      }
+
+      header {
+        padding: 42px 46px 40px;
+        border: 1px solid var(--line);
+        border-radius: 24px;
+        background: var(--surface);
+        box-shadow: var(--shadow);
+      }
+
+      .eyebrow {
+        margin: 0 0 12px;
+        color: var(--existing);
+        font-size: 0.78rem;
+        font-weight: 800;
+        letter-spacing: 0.11em;
+        text-transform: uppercase;
+      }
+
+      h1,
+      h2,
+      h3 {
+        line-height: 1.15;
+        letter-spacing: -0.025em;
+      }
+      h1 {
+        max-width: 850px;
+        margin: 0;
+        font-size: clamp(2.35rem, 6vw, 4.8rem);
+      }
+      h2 {
+        margin: 54px 0 14px;
+        font-size: clamp(1.8rem, 4vw, 2.65rem);
+      }
+      h3 {
+        margin: 0 0 8px;
+        font-size: 1.16rem;
+      }
+
+      .lede {
+        max-width: 840px;
+        margin: 22px 0 0;
+        color: #35414c;
+        font-size: clamp(1.08rem, 2vw, 1.3rem);
+      }
+
+      .answer-first {
+        display: inline-block;
+        margin-top: 24px;
+        padding: 10px 14px;
+        border-left: 4px solid var(--new);
+        background: var(--new-soft);
+        font-weight: 750;
+      }
+
+      .section-intro {
+        max-width: 800px;
+        margin: 0 0 24px;
+        color: var(--muted);
+      }
+
+      details.truth,
+      details.context {
+        margin-top: 18px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--surface);
+      }
+
+      details.truth {
+        margin-top: 22px;
+      }
+
+      summary {
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 15px 18px;
+        cursor: pointer;
+        font-weight: 750;
+      }
+
+      summary::marker {
+        color: var(--new);
+      }
+      .truth-state {
+        color: var(--new);
+        font-size: 0.9rem;
+      }
+      .details-body {
+        padding: 0 20px 18px;
+        color: var(--muted);
+      }
+      .details-body p:last-child {
+        margin-bottom: 0;
+      }
+
+      .legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 9px 18px;
+        margin: 22px 0 0;
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+
+      .legend span {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+      }
+      .swatch {
+        width: 13px;
+        height: 13px;
+        border-radius: 4px;
+        border: 1px solid currentColor;
+      }
+      .swatch.existing {
+        color: var(--existing);
+        background: var(--existing-soft);
+      }
+      .swatch.new {
+        color: var(--new);
+        background: var(--new-soft);
+      }
+      .swatch.question {
+        color: var(--question);
+        background: var(--question-soft);
+      }
+
+      .grid {
+        display: grid;
+        gap: 18px;
+      }
+      .grid.three {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+      .grid.two {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .card {
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: var(--surface);
+        box-shadow: 0 4px 16px rgba(39, 34, 28, 0.045);
+      }
+
+      .card.pad {
+        padding: 22px;
+      }
+      .card p {
+        margin: 8px 0 0;
+        color: var(--muted);
+      }
+      .card.existing {
+        border-top: 5px solid var(--existing);
+      }
+      .card.new {
+        border-top: 5px solid var(--new);
+      }
+      .card.question {
+        border-top: 5px solid var(--question);
+      }
+
+      .number {
+        display: inline-grid;
+        place-items: center;
+        width: 30px;
+        height: 30px;
+        margin-bottom: 10px;
+        border-radius: 50%;
+        background: var(--ink);
+        color: white;
+        font-size: 0.86rem;
+        font-weight: 800;
+      }
+
+      .vocab {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 12px;
+      }
+
+      .vocab article {
+        padding: 17px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--surface);
+      }
+
+      .vocab strong {
+        display: block;
+        margin-bottom: 4px;
+      }
+      .vocab span {
+        color: var(--muted);
+        font-size: 0.94rem;
+      }
+
+      .diagram-card {
+        margin: 22px 0;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        background: var(--surface);
+        box-shadow: 0 5px 18px rgba(39, 34, 28, 0.05);
+      }
+
+      .diagram-heading {
+        padding: 20px 24px 10px;
+      }
+
+      .diagram-heading p {
+        margin: 5px 0 0;
+        color: var(--muted);
+      }
+      .diagram-scroll {
+        overflow-x: auto;
+        padding: 10px 20px 24px;
+      }
+      .diagram {
+        display: block;
+        width: 100%;
+        min-width: 760px;
+        height: auto;
+      }
+      .diagram text {
+        font-family: var(--font);
+        fill: var(--ink);
+      }
+      .diagram .small {
+        font-size: 13px;
+        fill: var(--muted);
+      }
+      .diagram .label {
+        font-size: 15px;
+        font-weight: 750;
+      }
+      .diagram .title {
+        font-size: 18px;
+        font-weight: 800;
+      }
+      .diagram .existing-box {
+        fill: var(--existing-soft);
+        stroke: var(--existing);
+        stroke-width: 2;
+      }
+      .diagram .new-box {
+        fill: var(--new-soft);
+        stroke: var(--new);
+        stroke-width: 2;
+      }
+      .diagram .question-box {
+        fill: var(--question-soft);
+        stroke: var(--question);
+        stroke-width: 2;
+        stroke-dasharray: 7 5;
+      }
+      .diagram .human-box {
+        fill: var(--human-soft);
+        stroke: var(--human);
+        stroke-width: 2;
+      }
+      .diagram .machine-box {
+        fill: var(--machine-soft);
+        stroke: var(--machine);
+        stroke-width: 2;
+      }
+      .diagram .plain-box {
+        fill: #fbfaf6;
+        stroke: var(--line-strong);
+        stroke-width: 2;
+      }
+      .diagram .arrow {
+        fill: none;
+        stroke: #66717b;
+        stroke-width: 2.2;
+        marker-end: url(#arrow);
+      }
+      .diagram .arrow-new {
+        fill: none;
+        stroke: var(--new);
+        stroke-width: 2.7;
+        marker-end: url(#arrow-new);
+      }
+      .diagram .arrow-existing {
+        fill: none;
+        stroke: var(--existing);
+        stroke-width: 2.3;
+        marker-end: url(#arrow-existing);
+      }
+      .diagram .arrow-muted {
+        fill: none;
+        stroke: #9a968e;
+        stroke-width: 2;
+        stroke-dasharray: 6 5;
+        marker-end: url(#arrow-muted);
+      }
+
+      .callout {
+        margin: 24px 0;
+        padding: 19px 22px;
+        border: 1px solid #e5c5b4;
+        border-left: 5px solid var(--new);
+        border-radius: 14px;
+        background: var(--new-soft);
+      }
+
+      .callout strong {
+        display: block;
+        margin-bottom: 5px;
+      }
+
+      .comparison {
+        width: 100%;
+        border-collapse: separate;
+        border-spacing: 0;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        background: var(--surface);
+      }
+
+      .comparison th,
+      .comparison td {
+        padding: 15px 17px;
+        border-bottom: 1px solid var(--line);
+        vertical-align: top;
+        text-align: left;
+      }
+
+      .comparison tr:last-child td {
+        border-bottom: 0;
+      }
+      .comparison th {
+        background: var(--surface-2);
+        font-size: 0.9rem;
+      }
+      .comparison th:first-child {
+        width: 22%;
+      }
+      .comparison td:nth-child(2) {
+        background: rgba(228, 243, 239, 0.42);
+      }
+      .comparison td:nth-child(3) {
+        background: rgba(250, 234, 222, 0.42);
+      }
+
+      .tag {
+        display: inline-block;
+        padding: 3px 8px;
+        border-radius: 999px;
+        font-size: 0.73rem;
+        font-weight: 800;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+
+      .tag.existing {
+        color: var(--existing);
+        background: var(--existing-soft);
+      }
+      .tag.new {
+        color: var(--new);
+        background: var(--new-soft);
+      }
+      .tag.question {
+        color: var(--question);
+        background: var(--question-soft);
+      }
+
+      .piece-list {
+        display: grid;
+        gap: 12px;
+      }
+      .piece {
+        display: grid;
+        grid-template-columns: 128px 1fr;
+        gap: 16px;
+        padding: 17px 18px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--surface);
+      }
+      .piece p {
+        margin: 0;
+        color: var(--muted);
+      }
+
+      .checks {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+      }
+      .checks li {
+        position: relative;
+        padding-left: 28px;
+        margin: 11px 0;
+      }
+      .checks li::before {
+        content: "✓";
+        position: absolute;
+        left: 0;
+        color: var(--existing);
+        font-weight: 900;
+      }
+
+      .nopes li::before {
+        content: "×";
+        color: var(--danger);
+      }
+
+      .decision {
+        padding: 22px;
+        border: 1px solid #dec28b;
+        border-radius: 16px;
+        background: var(--question-soft);
+      }
+
+      .decision + .decision {
+        margin-top: 14px;
+      }
+      .decision p {
+        margin: 7px 0 0;
+        color: #68481e;
+      }
+
+      .sources {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        padding: 0;
+        list-style: none;
+      }
+
+      .sources li {
+        padding: 13px 15px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--surface);
+        font-family: var(--mono);
+        font-size: 0.82rem;
+        overflow-wrap: anywhere;
+      }
+
+      footer {
+        margin-top: 58px;
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+      footer p {
+        margin: 12px 0 0;
+      }
+
+      @media (max-width: 820px) {
+        .grid.three,
+        .grid.two,
+        .vocab,
+        .sources {
+          grid-template-columns: 1fr;
+        }
+        .piece {
+          grid-template-columns: 1fr;
+          gap: 6px;
+        }
+        header {
+          padding: 30px 24px;
+        }
+        .comparison {
+          display: block;
+          overflow-x: auto;
+        }
+        .comparison table {
+          min-width: 700px;
+        }
+      }
+
+      @media (max-width: 520px) {
+        body {
+          font-size: 16px;
+        }
+        .page {
+          width: min(100% - 20px, 1120px);
+          padding-top: 20px;
+        }
+        header {
+          border-radius: 17px;
+        }
+        .diagram-heading {
+          padding: 17px 17px 8px;
+        }
+        .diagram-scroll {
+          padding: 8px 12px 18px;
+        }
+        summary {
+          padding: 14px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <header>
+        <p class="eyebrow">LastCode issue #13 · ELI5 architecture</p>
+        <h1>The same thread, with a doorbell</h1>
+        <p class="lede">
+          T3 Code already knows which conversation an agent belongs to, can run saved Actions in
+          terminals, can observe terminal exits, and can start another agent turn. Today those
+          pieces did not talk to one another. The issue #13 branch adds a small, explicit bridge
+          between them.
+        </p>
+        <div class="answer-first">
+          It resumes the same existing thread. It never creates a new thread.
+        </div>
+        <div class="legend" aria-label="Diagram legend">
+          <span><i class="swatch existing"></i> Existing T3 Code piece</span>
+          <span><i class="swatch new"></i> LastCode addition in this branch</span>
+          <span><i class="swatch question"></i> Recovery or boundary case</span>
+        </div>
+      </header>
+
+      <details class="truth">
+        <summary>
+          <span>Where this is true</span
+          ><span class="truth-state">Implemented in worktree · not shipped</span>
+        </summary>
+        <div class="details-body">
+          <p>
+            This page compares ordinary T3 Code with the implemented first slice of
+            <a href="https://github.com/lastobelus/lastCode/issues/13">lastobelus/lastCode#13</a>,
+            as inspected on 2026-08-17. Green pieces predate the feature. Orange pieces now exist in
+            this worktree but have not been committed, reviewed, or shipped.
+          </p>
+          <p>
+            Scope: Codex only; web and desktop only; one locally opted-in Action at a time per
+            thread; one durable, idempotent follow-up in the originating thread. There are no
+            timeouts. Mobile UI, other providers, general scheduling, and arbitrary commands remain
+            outside this first slice.
+          </p>
+        </div>
+      </details>
+
+      <h2>The tiny story</h2>
+      <div class="grid three">
+        <article class="card pad existing">
+          <span class="number">1</span>
+          <h3>T3 Code already has the parts</h3>
+          <p>
+            A thread, an agent session, saved Actions, managed terminals, exit events, and a normal
+            way to start another turn.
+          </p>
+        </article>
+        <article class="card pad question">
+          <span class="number">2</span>
+          <h3>One connection is missing</h3>
+          <p>
+            A terminal finishing does not tell the originating agent thread, “your requested work is
+            ready.”
+          </p>
+        </article>
+        <article class="card pad new">
+          <span class="number">3</span>
+          <h3>We added a doorbell</h3>
+          <p>
+            An explicit agent-only Action invocation arms one wake. Completion plus an idle thread
+            rings it exactly once.
+          </p>
+        </article>
+      </div>
+
+      <h2>Vocabulary without the architecture accent</h2>
+      <p class="section-intro">
+        These words are ordinary product concepts with codebase-specific names.
+      </p>
+      <section class="vocab" aria-label="Plain-language vocabulary">
+        <article>
+          <strong>Project</strong><span>A workspace or repository that LastCode knows about.</span>
+        </article>
+        <article>
+          <strong>Thread</strong
+          ><span>One durable conversation and its work history. Think “chat plus workbench.”</span>
+        </article>
+        <article>
+          <strong>Turn</strong
+          ><span
+            >One round inside a thread: input goes in, the agent works, a response comes back.</span
+          >
+        </article>
+        <article>
+          <strong>Provider</strong
+          ><span>The agent engine doing the work, such as Codex or Claude.</span>
+        </article>
+        <article>
+          <strong>Provider session</strong
+          ><span>The live connection between one thread and its agent engine.</span>
+        </article>
+        <article>
+          <strong>Action</strong
+          ><span
+            >A saved project command such as “Quick CI.” The code still calls these project
+            scripts.</span
+          >
+        </article>
+        <article>
+          <strong>Terminal</strong
+          ><span>A shell managed by T3 Code and associated with a thread.</span>
+        </article>
+        <article>
+          <strong>Activity</strong
+          ><span>A truthful system log row in the thread, distinct from a human chat message.</span>
+        </article>
+        <article>
+          <strong>MCP tool</strong
+          ><span
+            >A button/API exposed to the agent. Calling it carries authenticated thread
+            identity.</span
+          >
+        </article>
+        <article>
+          <strong>Command</strong><span>A typed request to change LastCode state.</span>
+        </article>
+        <article>
+          <strong>Event</strong><span>A recorded fact that a typed command was accepted.</span>
+        </article>
+        <article>
+          <strong>Reactor</strong
+          ><span
+            >A background worker that performs side effects after an event, such as calling
+            Codex.</span
+          >
+        </article>
+      </section>
+
+      <section class="diagram-card">
+        <div class="diagram-heading">
+          <h3>Diagram 1 · The container model</h3>
+          <p>
+            A project has multiple threads. A thread has multiple turns and may own terminals. An
+            Action belongs to the project, but it runs in a thread’s terminal.
+          </p>
+        </div>
+        <div class="diagram-scroll">
+          <svg
+            class="diagram"
+            viewBox="0 0 980 430"
+            role="img"
+            aria-labelledby="containers-title containers-desc"
+          >
+            <title id="containers-title">
+              T3 Code project, thread, turn, provider session, Action, and terminal relationships
+            </title>
+            <desc id="containers-desc">
+              A project contains saved Actions and links to several threads. One selected thread
+              contains turns, a provider session, and terminal sessions.
+            </desc>
+            <defs>
+              <marker
+                id="arrow"
+                viewBox="0 0 10 10"
+                refX="8"
+                refY="5"
+                markerWidth="7"
+                markerHeight="7"
+                orient="auto-start-reverse"
+              >
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#66717b" />
+              </marker>
+              <marker
+                id="arrow-existing"
+                viewBox="0 0 10 10"
+                refX="8"
+                refY="5"
+                markerWidth="7"
+                markerHeight="7"
+                orient="auto-start-reverse"
+              >
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#0f766e" />
+              </marker>
+            </defs>
+            <rect class="plain-box" x="25" y="25" rx="20" width="930" height="375" />
+            <text class="title" x="52" y="63">Project: LastCode repository</text>
+            <rect class="existing-box" x="55" y="98" rx="15" width="245" height="105" />
+            <text class="label" x="78" y="132">Saved Actions</text>
+            <text class="small" x="78" y="158">Quick CI</text>
+            <text class="small" x="78" y="180">Dev server · Tests · Lint</text>
+            <rect class="plain-box" x="355" y="90" rx="18" width="555" height="275" />
+            <text class="title" x="380" y="128">Thread A: “Implement issue #13”</text>
+            <rect class="human-box" x="385" y="155" rx="12" width="145" height="76" />
+            <text class="label" x="409" y="184">Turn 1</text>
+            <text class="small" x="409" y="207">User → agent</text>
+            <rect class="human-box" x="555" y="155" rx="12" width="145" height="76" />
+            <text class="label" x="579" y="184">Turn 2</text>
+            <text class="small" x="579" y="207">User → agent</text>
+            <rect class="existing-box" x="385" y="260" rx="12" width="220" height="70" />
+            <text class="label" x="408" y="289">Codex provider session</text>
+            <text class="small" x="408" y="313">Live agent connection</text>
+            <rect class="existing-box" x="635" y="260" rx="12" width="240" height="70" />
+            <text class="label" x="658" y="289">Thread terminals</text>
+            <text class="small" x="658" y="313">Shell output + exit events</text>
+            <path class="arrow-existing" d="M300 151 C330 151 330 292 375 292" />
+            <text class="small" x="236" y="241">Action runs here</text>
+            <path class="arrow" d="M530 193 L545 193" />
+            <path class="arrow" d="M495 231 L495 250" />
+            <path class="arrow" d="M700 231 L730 250" />
+            <rect class="plain-box" x="55" y="250" rx="14" width="245" height="90" />
+            <text class="label" x="78" y="281">Thread B</text>
+            <text class="small" x="78" y="307">A different conversation</text>
+            <text class="small" x="78" y="328">Not involved in this wake</text>
+          </svg>
+        </div>
+      </section>
+
+      <div class="callout">
+        <strong>The key distinction</strong>
+        A new <em>turn</em> is just the next round inside the same conversation. A new
+        <em>thread</em> would be a separate conversation. Issue #13 adds the former, never the
+        latter.
+      </div>
+
+      <h2>Ordinary T3 Code mechanics today</h2>
+      <p class="section-intro">
+        There are two working paths that currently end separately: conversation turns and terminal
+        Actions.
+      </p>
+
+      <section class="diagram-card">
+        <div class="diagram-heading">
+          <h3>Diagram 2 · An ordinary conversation turn</h3>
+          <p>
+            This path already knows how to get input to Codex and bring the answer back into the
+            thread.
+          </p>
+        </div>
+        <div class="diagram-scroll">
+          <svg
+            class="diagram"
+            viewBox="0 0 1060 260"
+            role="img"
+            aria-labelledby="turn-title turn-desc"
+          >
+            <title id="turn-title">Current T3 Code conversation turn flow</title>
+            <desc id="turn-desc">
+              A user message becomes a typed turn start, is recorded, sent by the provider reactor
+              to Codex, and produces assistant output in the same thread.
+            </desc>
+            <defs>
+              <marker
+                id="arrow-existing"
+                viewBox="0 0 10 10"
+                refX="8"
+                refY="5"
+                markerWidth="7"
+                markerHeight="7"
+                orient="auto-start-reverse"
+              >
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#0f766e" />
+              </marker>
+            </defs>
+            <rect class="human-box" x="25" y="78" rx="14" width="150" height="92" />
+            <text class="label" x="54" y="111">Human input</text>
+            <text class="small" x="54" y="137">“Run the tests”</text>
+            <rect class="existing-box" x="220" y="60" rx="14" width="170" height="128" />
+            <text class="label" x="244" y="94">Typed command</text>
+            <text class="small" x="244" y="121">thread.turn.start</text>
+            <text class="small" x="244" y="148">Contains a user</text>
+            <text class="small" x="244" y="168">message</text>
+            <rect class="existing-box" x="435" y="60" rx="14" width="175" height="128" />
+            <text class="label" x="459" y="94">Recorded facts</text>
+            <text class="small" x="459" y="121">message-sent</text>
+            <text class="small" x="459" y="148">turn-start-</text>
+            <text class="small" x="459" y="168">requested</text>
+            <rect class="existing-box" x="655" y="78" rx="14" width="165" height="92" />
+            <text class="label" x="678" y="111">Provider reactor</text>
+            <text class="small" x="678" y="137">Calls Codex</text>
+            <rect class="existing-box" x="865" y="78" rx="14" width="165" height="92" />
+            <text class="label" x="891" y="111">Same thread</text>
+            <text class="small" x="891" y="137">Agent response</text>
+            <path class="arrow-existing" d="M175 124 L210 124" />
+            <path class="arrow-existing" d="M390 124 L425 124" />
+            <path class="arrow-existing" d="M610 124 L645 124" />
+            <path class="arrow-existing" d="M820 124 L855 124" />
+          </svg>
+        </div>
+      </section>
+
+      <section class="diagram-card">
+        <div class="diagram-heading">
+          <h3>Diagram 3 · An ordinary Action</h3>
+          <p>
+            This path already runs a configured command in a thread-scoped terminal—but stops at the
+            terminal.
+          </p>
+        </div>
+        <div class="diagram-scroll">
+          <svg
+            class="diagram"
+            viewBox="0 0 1060 300"
+            role="img"
+            aria-labelledby="action-title action-desc"
+          >
+            <title id="action-title">Current T3 Code Action flow</title>
+            <desc id="action-desc">
+              A person clicks a saved Action, T3 Code opens a terminal in the current thread and
+              writes the command, then output and an exit stay in the terminal without waking the
+              agent.
+            </desc>
+            <defs>
+              <marker
+                id="arrow-existing"
+                viewBox="0 0 10 10"
+                refX="8"
+                refY="5"
+                markerWidth="7"
+                markerHeight="7"
+                orient="auto-start-reverse"
+              >
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#0f766e" />
+              </marker>
+              <marker
+                id="arrow-muted"
+                viewBox="0 0 10 10"
+                refX="8"
+                refY="5"
+                markerWidth="7"
+                markerHeight="7"
+                orient="auto-start-reverse"
+              >
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#9a968e" />
+              </marker>
+            </defs>
+            <rect class="human-box" x="28" y="80" rx="14" width="150" height="92" />
+            <text class="label" x="55" y="114">Person clicks</text>
+            <text class="small" x="55" y="140">Quick CI Action</text>
+            <rect class="existing-box" x="224" y="63" rx="14" width="180" height="126" />
+            <text class="label" x="249" y="98">Chat UI</text>
+            <text class="small" x="249" y="126">Chooses a terminal</text>
+            <text class="small" x="249" y="151">for active thread</text>
+            <rect class="existing-box" x="450" y="63" rx="14" width="180" height="126" />
+            <text class="label" x="474" y="98">Terminal manager</text>
+            <text class="small" x="474" y="126">Opens PTY shell</text>
+            <text class="small" x="474" y="151">Writes command</text>
+            <rect class="existing-box" x="676" y="63" rx="14" width="170" height="126" />
+            <text class="label" x="700" y="98">Terminal events</text>
+            <text class="small" x="700" y="126">Output</text>
+            <text class="small" x="700" y="151">Exit / close / error</text>
+            <rect class="plain-box" x="892" y="63" rx="14" width="140" height="126" />
+            <text class="label" x="915" y="98">The end</text>
+            <text class="small" x="915" y="126">No agent wake</text>
+            <text class="small" x="915" y="151">No next turn</text>
+            <path class="arrow-existing" d="M178 126 L214 126" />
+            <path class="arrow-existing" d="M404 126 L440 126" />
+            <path class="arrow-existing" d="M630 126 L666 126" />
+            <path class="arrow-muted" d="M846 126 L882 126" />
+            <path class="arrow-muted" d="M760 194 C760 250 540 252 540 199" />
+            <text class="small" x="575" y="273">
+              The terminal knows it ended; the provider session is not notified.
+            </text>
+          </svg>
+        </div>
+      </section>
+
+      <h2>The comparison in one table</h2>
+      <div
+        class="comparison"
+        role="region"
+        aria-label="Ordinary Action compared with resumable Action"
+        tabindex="0"
+      >
+        <table>
+          <thead>
+            <tr>
+              <th>Question</th>
+              <th>Ordinary Action today</th>
+              <th>Resumable Action in this branch</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Who starts it?</td>
+              <td>A person clicks or uses a shortcut.</td>
+              <td>
+                The agent explicitly calls the tool—whether a user prompt or a skill told it to.
+              </td>
+            </tr>
+            <tr>
+              <td>Where does it run?</td>
+              <td>A terminal associated with the active thread.</td>
+              <td>A dedicated terminal associated with the originating thread.</td>
+            </tr>
+            <tr>
+              <td>Does configuration opt in?</td>
+              <td>No resume capability exists.</td>
+              <td>Yes. Local per-Action permission, default off.</td>
+            </tr>
+            <tr>
+              <td>What happens on exit?</td>
+              <td>The terminal shows exit state.</td>
+              <td>
+                LastCode records typed lifecycle metadata and keeps the transcript in that terminal.
+              </td>
+            </tr>
+            <tr>
+              <td>Does the agent wait?</td>
+              <td>It must poll, sleep, or rely on the user.</td>
+              <td>No polling turns. LastCode waits for terminal completion and thread idleness.</td>
+            </tr>
+            <tr>
+              <td>What conversation changes?</td>
+              <td>Nothing automatically.</td>
+              <td>One new turn begins inside the same thread.</td>
+            </tr>
+            <tr>
+              <td>Is there a fake user message?</td>
+              <td>Not applicable.</td>
+              <td>No. The follow-up is stored and rendered as a system-authored message.</td>
+            </tr>
+            <tr>
+              <td>Where is output?</td>
+              <td>Terminal history.</td>
+              <td>
+                The dedicated terminal transcript. Raw output is not copied into the automatic
+                prompt.
+              </td>
+            </tr>
+            <tr>
+              <td>How does the user see it?</td>
+              <td>The terminal drawer.</td>
+              <td>
+                A yellow Waiting indicator with elapsed time, Open Terminal, and Cancel Action.
+              </td>
+            </tr>
+            <tr>
+              <td>Can it time out?</td>
+              <td>The command runs until it exits or is stopped.</td>
+              <td>No timeout. The user can cancel it explicitly.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2>The implemented bridge</h2>
+      <p class="section-intro">
+        Orange is the new glue. Green is existing T3 Code machinery we reuse.
+      </p>
+
+      <section class="diagram-card">
+        <div class="diagram-heading">
+          <h3>Diagram 4 · End-to-end implemented flow</h3>
+          <p>
+            The current agent turn ends before the Action does. The result starts the next turn only
+            after the same thread is idle.
+          </p>
+        </div>
+        <div class="diagram-scroll">
+          <svg
+            class="diagram"
+            viewBox="0 0 1120 690"
+            role="img"
+            aria-labelledby="proposed-title proposed-desc"
+          >
+            <title id="proposed-title">
+              Implemented Action resume flow using existing and new components
+            </title>
+            <desc id="proposed-desc">
+              An agent in an existing thread calls a new authenticated Action tool. Validation and
+              coordination use existing Action configuration and terminal events, persist lifecycle
+              activities, then use the ordinary turn command with a system-authored message to start
+              one follow-up in the same thread.
+            </desc>
+            <defs>
+              <marker
+                id="arrow-existing"
+                viewBox="0 0 10 10"
+                refX="8"
+                refY="5"
+                markerWidth="7"
+                markerHeight="7"
+                orient="auto-start-reverse"
+              >
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#0f766e" />
+              </marker>
+              <marker
+                id="arrow-new"
+                viewBox="0 0 10 10"
+                refX="8"
+                refY="5"
+                markerWidth="7"
+                markerHeight="7"
+                orient="auto-start-reverse"
+              >
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#b94d1d" />
+              </marker>
+            </defs>
+            <rect class="plain-box" x="20" y="20" rx="20" width="1080" height="650" />
+            <text class="title" x="48" y="60">Existing Thread A — identity never changes</text>
+
+            <rect class="existing-box" x="55" y="92" rx="14" width="220" height="100" />
+            <text class="label" x="80" y="126">Existing Codex turn</text>
+            <text class="small" x="80" y="151">Agent is working</text>
+            <text class="small" x="80" y="172">in Thread A</text>
+
+            <rect class="new-box" x="325" y="92" rx="14" width="220" height="100" />
+            <text class="label" x="350" y="126">New MCP tool</text>
+            <text class="small" x="350" y="151">“Run Quick CI</text>
+            <text class="small" x="350" y="172">and resume me”</text>
+
+            <rect class="existing-box" x="595" y="92" rx="14" width="220" height="100" />
+            <text class="label" x="620" y="126">Existing identity</text>
+            <text class="small" x="620" y="151">Thread A + provider</text>
+            <text class="small" x="620" y="172">come with the tool call</text>
+
+            <rect class="new-box" x="865" y="92" rx="14" width="190" height="100" />
+            <text class="label" x="890" y="126">New validation</text>
+            <text class="small" x="890" y="151">Known Action?</text>
+            <text class="small" x="890" y="172">Local opt-in?</text>
+
+            <path class="arrow-new" d="M275 142 L315 142" />
+            <path class="arrow-existing" d="M545 142 L585 142" />
+            <path class="arrow-new" d="M815 142 L855 142" />
+
+            <rect class="new-box" x="70" y="255" rx="14" width="245" height="115" />
+            <text class="label" x="95" y="290">New run coordinator</text>
+            <text class="small" x="95" y="316">Creates run ID</text>
+            <text class="small" x="95" y="338">Records armed lifecycle</text>
+            <text class="small" x="95" y="358">Returns immediately</text>
+
+            <rect class="existing-box" x="375" y="255" rx="14" width="245" height="115" />
+            <text class="label" x="400" y="290">Existing terminal manager</text>
+            <text class="small" x="400" y="316">Dedicated terminal</text>
+            <text class="small" x="400" y="338">in Thread A</text>
+            <text class="small" x="400" y="358">Output + exit events</text>
+
+            <rect class="new-box" x="680" y="255" rx="14" width="245" height="115" />
+            <text class="label" x="705" y="290">Durable lifecycle row</text>
+            <text class="small" x="705" y="316">Status + exit metadata</text>
+            <text class="small" x="705" y="338">Idempotent run IDs</text>
+            <text class="small" x="705" y="358">Transcript stays terminal-only</text>
+
+            <path class="arrow-new" d="M960 192 C960 225 192 215 192 245" />
+            <path class="arrow-existing" d="M315 312 L365 312" />
+            <path class="arrow-new" d="M620 312 L670 312" />
+
+            <rect class="new-box" x="120" y="445" rx="14" width="270" height="120" />
+            <text class="label" x="145" y="480">New two-signal gate</text>
+            <text class="small" x="145" y="507">Action terminal state ✓</text>
+            <text class="small" x="145" y="531">Thread A idle ✓</text>
+            <text class="small" x="145" y="552">Then consume wake once</text>
+
+            <rect class="new-box" x="455" y="445" rx="14" width="270" height="120" />
+            <text class="label" x="480" y="480">System-authored turn start</text>
+            <text class="small" x="480" y="507">Reuse thread.turn.start</text>
+            <text class="small" x="480" y="531">Fixed status template</text>
+            <text class="small" x="480" y="552">No human message</text>
+
+            <rect class="existing-box" x="790" y="445" rx="14" width="250" height="120" />
+            <text class="label" x="815" y="480">Existing provider service</text>
+            <text class="small" x="815" y="507">Sends fixed follow-up input</text>
+            <text class="small" x="815" y="531">to the same Codex session</text>
+            <text class="small" x="815" y="552">Starts next turn</text>
+
+            <path class="arrow-new" d="M498 370 C498 410 255 405 255 435" />
+            <path class="arrow-new" d="M803 370 C803 410 255 405 255 435" />
+            <path class="arrow-new" d="M390 505 L445 505" />
+            <path class="arrow-existing" d="M725 505 L780 505" />
+
+            <rect class="machine-box" x="380" y="605" rx="14" width="360" height="48" />
+            <text class="label" x="431" y="635">Turn N + 1, still inside Thread A</text>
+            <path class="arrow-existing" d="M915 565 C915 620 760 629 750 629" />
+          </svg>
+        </div>
+      </section>
+
+      <h2>How much is reused?</h2>
+      <section class="diagram-card">
+        <div class="diagram-heading">
+          <h3>Diagram 5 · Mostly existing railway, one new junction</h3>
+          <p>
+            The feature does not replace Action execution or provider turns. It joins their existing
+            tracks.
+          </p>
+        </div>
+        <div class="diagram-scroll">
+          <svg
+            class="diagram"
+            viewBox="0 0 1060 330"
+            role="img"
+            aria-labelledby="reuse-title reuse-desc"
+          >
+            <title id="reuse-title">
+              Existing components connected by a small implemented bridge
+            </title>
+            <desc id="reuse-desc">
+              Existing Action configuration, MCP identity, terminal manager, thread state, provider
+              reactor, and Codex session surround a small new opt-in, run coordinator, durable
+              lifecycle row, and system-turn seam.
+            </desc>
+            <defs>
+              <marker
+                id="arrow-existing"
+                viewBox="0 0 10 10"
+                refX="8"
+                refY="5"
+                markerWidth="7"
+                markerHeight="7"
+                orient="auto-start-reverse"
+              >
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#0f766e" />
+              </marker>
+              <marker
+                id="arrow-new"
+                viewBox="0 0 10 10"
+                refX="8"
+                refY="5"
+                markerWidth="7"
+                markerHeight="7"
+                orient="auto-start-reverse"
+              >
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#b94d1d" />
+              </marker>
+            </defs>
+            <rect class="existing-box" x="25" y="55" rx="14" width="155" height="82" />
+            <text class="label" x="50" y="88">Saved Action</text>
+            <text class="small" x="50" y="113">name + command</text>
+            <rect class="existing-box" x="220" y="55" rx="14" width="155" height="82" />
+            <text class="label" x="245" y="88">MCP identity</text>
+            <text class="small" x="245" y="113">thread + provider</text>
+            <rect class="existing-box" x="415" y="55" rx="14" width="155" height="82" />
+            <text class="label" x="440" y="88">Terminal</text>
+            <text class="small" x="440" y="113">PTY + events</text>
+            <rect class="existing-box" x="610" y="55" rx="14" width="155" height="82" />
+            <text class="label" x="635" y="88">Thread state</text>
+            <text class="small" x="635" y="113">running / idle</text>
+            <rect class="existing-box" x="805" y="55" rx="14" width="225" height="82" />
+            <text class="label" x="830" y="88">Provider turn machinery</text>
+            <text class="small" x="830" y="113">reactor + Codex session</text>
+            <path class="arrow-existing" d="M180 96 L210 96" />
+            <path class="arrow-existing" d="M375 96 L405 96" />
+            <path class="arrow-existing" d="M570 96 L600 96" />
+            <path class="arrow-existing" d="M765 96 L795 96" />
+
+            <rect class="new-box" x="150" y="205" rx="14" width="190" height="82" />
+            <text class="label" x="175" y="238">Local opt-in</text>
+            <text class="small" x="175" y="263">default off</text>
+            <rect class="new-box" x="385" y="205" rx="14" width="190" height="82" />
+            <text class="label" x="410" y="238">Run coordinator</text>
+            <text class="small" x="410" y="263">one-shot gate</text>
+            <rect class="new-box" x="620" y="205" rx="14" width="190" height="82" />
+            <text class="label" x="645" y="238">Lifecycle activity</text>
+            <text class="small" x="645" y="263">durable + typed</text>
+            <rect class="new-box" x="855" y="205" rx="14" width="175" height="82" />
+            <text class="label" x="880" y="238">System turn seam</text>
+            <text class="small" x="880" y="263">same turn command</text>
+            <path class="arrow-new" d="M245 195 C245 158 102 170 102 147" />
+            <path class="arrow-new" d="M480 195 L480 147" />
+            <path class="arrow-new" d="M715 195 C715 160 687 165 687 147" />
+            <path class="arrow-new" d="M942 195 L942 147" />
+          </svg>
+        </div>
+      </section>
+
+      <div class="piece-list" aria-label="Existing and added pieces">
+        <article class="piece">
+          <span class="tag existing">Reuse</span>
+          <p>
+            <strong>Project Action model.</strong> T3 Code already persists named commands and
+            exposes them in the UI. We add one local boolean; we do not invent a task database.
+          </p>
+        </article>
+        <article class="piece">
+          <span class="tag existing">Reuse</span>
+          <p>
+            <strong>MCP invocation identity.</strong> Calls already carry environment, thread,
+            provider-session, and provider-instance identity. The agent does not get to nominate
+            some unrelated thread.
+          </p>
+        </article>
+        <article class="piece">
+          <span class="tag existing">Reuse</span>
+          <p>
+            <strong>Terminal manager.</strong> It already opens thread terminals and publishes
+            output, exit, close, error, and activity events.
+          </p>
+        </article>
+        <article class="piece">
+          <span class="tag existing">Reuse</span>
+          <p>
+            <strong>Thread and provider lifecycle.</strong> LastCode already knows whether the
+            thread’s current turn is running or idle and already knows how to ask Codex for another
+            turn.
+          </p>
+        </article>
+        <article class="piece">
+          <span class="tag new">Add</span>
+          <p>
+            <strong>One-shot coordinator.</strong> A durable activity row plus a small in-memory
+            projection correlate run ID, Action, thread, terminal result, delivery, and restart
+            recovery. It is not a general scheduler.
+          </p>
+        </article>
+        <article class="piece">
+          <span class="tag new">Add</span>
+          <p>
+            <strong>Terminal-only output boundary.</strong> The existing terminal transcript remains
+            the artifact. The automatic follow-up contains only LastCode-authored status and the
+            terminal ID—never raw command output.
+          </p>
+        </article>
+        <article class="piece">
+          <span class="tag new">Add</span>
+          <p>
+            <strong>System turn seam.</strong> The internal turn command now permits a
+            server-originated system message, while the client command remains user-only. The
+            ordinary provider reactor does the rest.
+          </p>
+        </article>
+        <article class="piece">
+          <span class="tag new">Add</span>
+          <p>
+            <strong>User controls.</strong> Waiting appears in the sidebar with elapsed time,
+            terminal access, and cancellation. Archive and terminal close cancel; quit reports how
+            many running Actions it will cancel.
+          </p>
+        </article>
+      </div>
+
+      <h2>The one-shot state machine</h2>
+      <section class="diagram-card">
+        <div class="diagram-heading">
+          <h3>Diagram 6 · No polling; two events meet at a gate</h3>
+          <p>Either event may arrive first. Nothing wakes until both facts are true.</p>
+        </div>
+        <div class="diagram-scroll">
+          <svg
+            class="diagram"
+            viewBox="0 0 1060 520"
+            role="img"
+            aria-labelledby="state-title state-desc"
+          >
+            <title id="state-title">One-shot Action wake state machine</title>
+            <desc id="state-desc">
+              Validation creates an armed durable run. Action completion and thread idle can happen
+              in either order. When both are true one deterministic wake is accepted and consumed.
+              Invalid input rejects, archive cancels, and an unexpected restart offers manual
+              recovery without rerunning the command.
+            </desc>
+            <defs>
+              <marker
+                id="arrow-new"
+                viewBox="0 0 10 10"
+                refX="8"
+                refY="5"
+                markerWidth="7"
+                markerHeight="7"
+                orient="auto-start-reverse"
+              >
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#b94d1d" />
+              </marker>
+              <marker
+                id="arrow-muted"
+                viewBox="0 0 10 10"
+                refX="8"
+                refY="5"
+                markerWidth="7"
+                markerHeight="7"
+                orient="auto-start-reverse"
+              >
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#9a968e" />
+              </marker>
+            </defs>
+            <rect class="new-box" x="50" y="205" rx="14" width="150" height="84" />
+            <text class="label" x="86" y="240">Validate</text>
+            <text class="small" x="76" y="265">Action + opt-in</text>
+            <rect class="new-box" x="260" y="205" rx="14" width="150" height="84" />
+            <text class="label" x="305" y="240">Armed</text>
+            <text class="small" x="284" y="265">Receipt returned</text>
+            <rect class="new-box" x="480" y="70" rx="14" width="190" height="92" />
+            <text class="label" x="514" y="105">Action finished</text>
+            <text class="small" x="506" y="132">Thread still busy</text>
+            <rect class="new-box" x="480" y="330" rx="14" width="190" height="92" />
+            <text class="label" x="522" y="365">Thread idle</text>
+            <text class="small" x="507" y="392">Action still running</text>
+            <rect class="new-box" x="745" y="205" rx="14" width="150" height="84" />
+            <text class="label" x="780" y="240">Both true</text>
+            <text class="small" x="773" y="265">Claim one wake</text>
+            <rect class="machine-box" x="935" y="205" rx="14" width="100" height="84" />
+            <text class="label" x="950" y="240">Woken</text>
+            <text class="small" x="951" y="265">Consumed</text>
+            <path class="arrow-new" d="M200 247 L250 247" />
+            <path class="arrow-new" d="M410 230 C430 190 445 130 470 117" />
+            <path class="arrow-new" d="M410 264 C430 303 445 360 470 375" />
+            <path class="arrow-new" d="M670 117 C720 117 700 215 735 235" />
+            <path class="arrow-new" d="M670 376 C720 376 700 280 735 258" />
+            <path class="arrow-new" d="M895 247 L925 247" />
+
+            <rect class="plain-box" x="50" y="360" rx="14" width="150" height="72" />
+            <text class="label" x="89" y="391">Rejected</text>
+            <text class="small" x="67" y="414">Fail closed</text>
+            <path class="arrow-muted" d="M125 299 L125 350" />
+            <text class="small" x="30" y="464">
+              Unknown Action · opt-in off · wrong provider · wrong thread → no process, no wake
+            </text>
+
+            <rect class="question-box" x="745" y="360" rx="14" width="290" height="72" />
+            <text class="label" x="770" y="391">Restart or archive</text>
+            <text class="small" x="770" y="414">Review follow-up, or cancel + dispose.</text>
+            <path class="arrow-muted" d="M820 299 L820 350" />
+          </svg>
+        </div>
+      </section>
+
+      <h2>The trust boundary</h2>
+      <section class="diagram-card">
+        <div class="diagram-heading">
+          <h3>Diagram 7 · Metadata may wake the agent; terminal text may not</h3>
+          <p>We deliberately split trusted control data from untrusted process output.</p>
+        </div>
+        <div class="diagram-scroll">
+          <svg
+            class="diagram"
+            viewBox="0 0 1060 390"
+            role="img"
+            aria-labelledby="trust-title trust-desc"
+          >
+            <title id="trust-title">
+              Trusted metadata and untrusted Action output follow separate paths
+            </title>
+            <desc id="trust-desc">
+              Raw terminal output stays in the existing terminal transcript. Validated Action name,
+              status, exit code, and terminal identifier become fixed LastCode-authored provider
+              input. No raw output reaches the automatic prompt.
+            </desc>
+            <defs>
+              <marker
+                id="arrow-existing"
+                viewBox="0 0 10 10"
+                refX="8"
+                refY="5"
+                markerWidth="7"
+                markerHeight="7"
+                orient="auto-start-reverse"
+              >
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#0f766e" />
+              </marker>
+              <marker
+                id="arrow-new"
+                viewBox="0 0 10 10"
+                refX="8"
+                refY="5"
+                markerWidth="7"
+                markerHeight="7"
+                orient="auto-start-reverse"
+              >
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#b94d1d" />
+              </marker>
+            </defs>
+            <rect class="existing-box" x="40" y="55" rx="14" width="200" height="96" />
+            <text class="label" x="66" y="90">Terminal output</text>
+            <text class="small" x="66" y="117">Arbitrary, possibly hostile</text>
+            <text class="small" x="66" y="137">control sequences</text>
+            <rect class="existing-box" x="320" y="55" rx="14" width="200" height="96" />
+            <text class="label" x="346" y="90">Terminal transcript</text>
+            <text class="small" x="346" y="117">Existing history</text>
+            <text class="small" x="346" y="137">Open only on demand</text>
+            <rect class="question-box" x="600" y="55" rx="14" width="200" height="96" />
+            <text class="label" x="626" y="90">Agent may inspect</text>
+            <text class="small" x="626" y="117">Only if output is needed</text>
+            <text class="small" x="626" y="137">Still untrusted</text>
+            <path class="arrow-existing" d="M240 103 L310 103" />
+            <path class="arrow-new" d="M520 103 L590 103" />
+
+            <rect class="existing-box" x="40" y="235" rx="14" width="200" height="96" />
+            <text class="label" x="66" y="270">Typed result</text>
+            <text class="small" x="66" y="297">Action · status</text>
+            <text class="small" x="66" y="317">exit code · terminal ID</text>
+            <rect class="new-box" x="320" y="235" rx="14" width="200" height="96" />
+            <text class="label" x="346" y="270">Fixed system message</text>
+            <text class="small" x="346" y="297">LastCode-authored text</text>
+            <text class="small" x="346" y="317">Transcript pointer only</text>
+            <rect class="machine-box" x="600" y="235" rx="14" width="200" height="96" />
+            <text class="label" x="626" y="270">Provider input</text>
+            <text class="small" x="626" y="297">Starts follow-up</text>
+            <text class="small" x="626" y="317">No terminal text</text>
+            <path class="arrow-existing" d="M240 283 L310 283" />
+            <path class="arrow-new" d="M520 283 L590 283" />
+            <path
+              d="M820 102 L980 102 L980 282 L810 282"
+              fill="none"
+              stroke="#9a352f"
+              stroke-width="3"
+              stroke-dasharray="9 7"
+            />
+            <text x="825" y="186" font-size="16" font-weight="800" fill="#9a352f">
+              NO DIRECT PATH
+            </text>
+            <text class="small" x="835" y="211">output never becomes</text>
+            <text class="small" x="848" y="231">automatic input</text>
+          </svg>
+        </div>
+      </section>
+
+      <h2>How the ordinary turn command is reused without lying</h2>
+      <div class="grid two">
+        <article class="card pad existing">
+          <span class="tag existing">Existing behavior</span>
+          <h3 style="margin-top: 12px"><code>thread.turn.start</code></h3>
+          <p>
+            Client-originated starts still record a <strong>user</strong> message, then ask the
+            provider reactor to find that message and send its text to the provider.
+          </p>
+        </article>
+        <article class="card pad new">
+          <span class="tag new">Narrow addition</span>
+          <h3 style="margin-top: 12px">A system role inside the same command</h3>
+          <p>
+            The internal command accepts a server-originated <strong>system</strong> message; the
+            client-facing schema remains user-only. The same projector and provider reactor then run
+            the turn. No human message is manufactured.
+          </p>
+        </article>
+      </div>
+      <p class="callout">
+        <strong>This is the part we were discussing.</strong>
+        “Machine turn” does not mean “new thread.” It means “the next agent round was initiated by
+        LastCode because an explicitly armed Action finished.”
+      </p>
+
+      <h2>What does not happen</h2>
+      <div class="grid two">
+        <article class="card pad">
+          <h3>Thread and agent boundaries</h3>
+          <ul class="checks nopes">
+            <li>No new thread is created.</li>
+            <li>No unrelated thread can be selected by the tool input.</li>
+            <li>No ordinary terminal exit wakes an agent.</li>
+            <li>No UI Action click quietly gains automation powers.</li>
+          </ul>
+        </article>
+        <article class="card pad">
+          <h3>Scope and trust boundaries</h3>
+          <ul class="checks nopes">
+            <li>No checked-in <code>t3.json</code> can grant permission.</li>
+            <li>No terminal output is injected into the automatic prompt.</li>
+            <li>No polling handle or wait tool is introduced.</li>
+            <li>No general task scheduler is built.</li>
+          </ul>
+        </article>
+      </div>
+
+      <h2>Failure and recovery, plainly</h2>
+      <div class="comparison" role="region" aria-label="Failure and recovery table" tabindex="0">
+        <table>
+          <thead>
+            <tr>
+              <th>Situation</th>
+              <th>Proposed behavior</th>
+              <th>Why</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Action is not opted in</td>
+              <td>Tool rejects before launch.</td>
+              <td>Fail closed.</td>
+            </tr>
+            <tr>
+              <td>Ordinary Action click</td>
+              <td>Runs normally; no wake.</td>
+              <td>Eligibility is not arming.</td>
+            </tr>
+            <tr>
+              <td>Action finishes before the turn ends</td>
+              <td>Store result; wait for idle event.</td>
+              <td>Prevents the tool call from steering its own turn.</td>
+            </tr>
+            <tr>
+              <td>Thread becomes idle before Action finishes</td>
+              <td>Wait for terminal result.</td>
+              <td>Both signals are required.</td>
+            </tr>
+            <tr>
+              <td>Duplicate terminal/session events</td>
+              <td>One accepted command consumes the wake.</td>
+              <td>Exactly one follow-up.</td>
+            </tr>
+            <tr>
+              <td>User closes the dedicated terminal</td>
+              <td>Record user cancellation and send one automated cancellation follow-up.</td>
+              <td>Closing the work surface is an explicit cancel.</td>
+            </tr>
+            <tr>
+              <td>User archives the thread</td>
+              <td>Cancel the Action, close its terminal, and dispose the wake.</td>
+              <td>An archived thread must not wake later.</td>
+            </tr>
+            <tr>
+              <td>User quits LastCode</td>
+              <td>
+                Warn with the running count; confirmed quit records shutdown cancellation and does
+                not nag after restart.
+              </td>
+              <td>Intentional shutdown is different from a lost process.</td>
+            </tr>
+            <tr>
+              <td>LastCode stops unexpectedly</td>
+              <td>
+                Mark the process lost, rerun nothing, wake nobody, and show one aggregate Review
+                notice. “Resume agent” sends only the interruption follow-up.
+              </td>
+              <td>Recovery is explicit and cannot duplicate the command.</td>
+            </tr>
+            <tr>
+              <td>Thread is permanently deleted</td>
+              <td>Clear the projected Action state with ordinary thread cleanup.</td>
+              <td>No orphaned UI state.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2>Settled first-slice choices</h2>
+      <article class="decision">
+        <span class="tag new">Implemented</span>
+        <h3 style="margin-top: 12px">The follow-up is visibly machine-originated</h3>
+        <p>
+          A narrow system-message seam reuses <code>thread.turn.start</code>. The timeline labels it
+          “Automated follow-up,” while ordinary client sends remain user-only.
+        </p>
+      </article>
+      <article class="decision">
+        <span class="tag new">Implemented</span>
+        <h3 style="margin-top: 12px">No timeouts; explicit cancellation and recovery</h3>
+        <p>
+          Actions may run indefinitely. Terminal close and archive cancel them. Quit warns.
+          Unexpected restart never replays the command and requires the user to choose “Resume
+          agent.”
+        </p>
+      </article>
+
+      <h2>Sources checked</h2>
+      <p class="section-intro">
+        These links resolve from the saved page when opened directly from this repository.
+      </p>
+      <ul class="sources">
+        <li>
+          <a href="#" data-repo-path="docs/internals/glossary.md" data-repo-line="17"
+            >docs/internals/glossary.md</a
+          >
+        </li>
+        <li>
+          <a href="#" data-repo-path="packages/contracts/src/orchestration.ts" data-repo-line="198"
+            >packages/contracts/src/orchestration.ts</a
+          >
+        </li>
+        <li>
+          <a href="#" data-repo-path="packages/contracts/src/t3ProjectFile.ts" data-repo-line="25"
+            >packages/contracts/src/t3ProjectFile.ts</a
+          >
+        </li>
+        <li>
+          <a href="#" data-repo-path="apps/web/src/components/ChatView.tsx" data-repo-line="3000"
+            >apps/web/src/components/ChatView.tsx</a
+          >
+        </li>
+        <li>
+          <a
+            href="#"
+            data-repo-path="apps/server/src/mcp/McpInvocationContext.ts"
+            data-repo-line="10"
+            >apps/server/src/mcp/McpInvocationContext.ts</a
+          >
+        </li>
+        <li>
+          <a
+            href="#"
+            data-repo-path="apps/server/src/actionResume/ActionResume.ts"
+            data-repo-line="1"
+            >apps/server/src/actionResume/ActionResume.ts</a
+          >
+        </li>
+        <li>
+          <a
+            href="#"
+            data-repo-path="apps/server/src/orchestration/ThreadActionResume.ts"
+            data-repo-line="1"
+            >apps/server/src/orchestration/ThreadActionResume.ts</a
+          >
+        </li>
+        <li>
+          <a href="#" data-repo-path="apps/server/src/terminal/Manager.ts" data-repo-line="126"
+            >apps/server/src/terminal/Manager.ts</a
+          >
+        </li>
+        <li>
+          <a href="#" data-repo-path="apps/server/src/orchestration/decider.ts" data-repo-line="926"
+            >apps/server/src/orchestration/decider.ts</a
+          >
+        </li>
+        <li>
+          <a
+            href="#"
+            data-repo-path="apps/server/src/orchestration/Layers/ProviderCommandReactor.ts"
+            data-repo-line="1060"
+            >ProviderCommandReactor.ts</a
+          >
+        </li>
+        <li>
+          <a
+            href="#"
+            data-repo-path="apps/server/src/orchestration/Layers/ThreadDeletionReactor.ts"
+            data-repo-line="1"
+            >ThreadDeletionReactor.ts</a
+          >
+        </li>
+        <li>
+          <a href="#" data-repo-path="apps/web/src/components/Sidebar.tsx" data-repo-line="780"
+            >apps/web/src/components/Sidebar.tsx</a
+          >
+        </li>
+        <li>
+          <a href="#" data-repo-path="apps/desktop/src/app/DesktopLifecycle.ts" data-repo-line="89"
+            >apps/desktop/src/app/DesktopLifecycle.ts</a
+          >
+        </li>
+        <li>
+          <a href="#" data-repo-path="apps/server/src/server.test.ts" data-repo-line="6762"
+            >apps/server/src/server.test.ts</a
+          >
+        </li>
+        <li><a href="https://github.com/lastobelus/lastCode/issues/13">GitHub issue #13</a></li>
+      </ul>
+
+      <footer>
+        <details class="context">
+          <summary><span>Prompt/context</span><span>Why this page exists</span></summary>
+          <div class="details-body">
+            <p>
+              The user asked for an ELI5 with ample diagrams after architecture terms made it sound
+              as though #13 might create new threads. This page therefore leads with the product
+              mental model, compares ordinary conversation and Action flows separately, and marks
+              every added piece. Constraints carried forward: agent invocation from either direct
+              prompting or skill guidance, no polling turns or timeouts, explicit local opt-in,
+              truthful system-authored follow-up, terminal-only raw output, visible Waiting and
+              cancel controls, restart-safe recovery, and no general orchestration framework.
+            </p>
+          </div>
+        </details>
+        <p>
+          Updated from the issue #13 implementation worktree on 2026-08-17. The code is implemented
+          locally but still subject to validation and review.
+        </p>
+      </footer>
+    </main>
+
+    <script>
+      function eli5RepoBase() {
+        var params = new URLSearchParams(window.location.search);
+        var explicit = params.get("baseUrl") || params.get("repoBase");
+        if (explicit) return explicit.replace(/\/$/, "");
+
+        var docPath = document.documentElement.dataset.repoDocPath;
+        if (window.location.protocol === "file:" && docPath) {
+          var fullPath = decodeURIComponent(window.location.pathname);
+          var suffix = "/" + docPath.replace(/^\//, "");
+          return fullPath.endsWith(suffix) ? fullPath.slice(0, -suffix.length) : "";
+        }
+        return "";
+      }
+
+      function eli5WireRepoLinks() {
+        var repoBase = eli5RepoBase();
+        var links = document.querySelectorAll("a[data-repo-path]");
+        for (var index = 0; index < links.length; index += 1) {
+          var link = links[index];
+          if (!repoBase) {
+            link.removeAttribute("href");
+            link.setAttribute("aria-disabled", "true");
+            link.title = "Open the saved file directly or add ?baseUrl=/path/to/worktree.";
+            continue;
+          }
+          var repoPath = link.dataset.repoPath.replace(/^\//, "");
+          link.href = encodeURI("file://" + repoBase + "/" + repoPath);
+        }
+      }
+
+      eli5WireRepoLinks();
+    </script>
+  </body>
+</html>
