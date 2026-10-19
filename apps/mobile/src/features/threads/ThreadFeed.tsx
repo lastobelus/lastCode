@@ -33,7 +33,10 @@ import {
 } from "@t3tools/contracts";
 import { renderAssistantCitationsAsText } from "@t3tools/shared/assistantCitations";
 import { encodeComposerContextFragment } from "@t3tools/shared/composerContextClipboard";
-import { parseThreadLinkHref } from "@t3tools/shared/threadLinks";
+import {
+  parseThreadLinkReference,
+  resolveThreadLinkReference,
+} from "@t3tools/shared/threadLinks";
 import { PROMPT_LINK_MAX_PROMPT_LENGTH } from "@t3tools/shared/promptLinks";
 import {
   parseComposerContextHref,
@@ -48,7 +51,6 @@ import {
   type CodexArtifactTemplate,
 } from "@t3tools/shared/codexArtifactTemplates";
 import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
-import { isMarkdownFileLinkLabel } from "@t3tools/shared/markdownLinks";
 import { formatAttachmentSize } from "@t3tools/client-runtime/state/attachments";
 import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import {
@@ -1786,11 +1788,20 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   const screenColor = theme["--color-screen"];
   const userBubbleColor = theme["--color-user-bubble"];
   const onMarkdownLinkPress = (href: string, imageEmbed = false) => {
-    const linkedThreadId = parseThreadLinkHref(href);
-    if (linkedThreadId) {
+    const linkedThread = parseThreadLinkReference(href);
+    if (linkedThread) {
+      const resolved = resolveThreadLinkReference(
+        linkedThread,
+        (threadId, environmentId) =>
+          appAtomRegistry.get(
+            environmentThreadShells.threadShellAtom(
+              scopeThreadRef(environmentId ?? props.environmentId, threadId),
+            ),
+          ) ?? undefined,
+      );
       navigation.navigate("Thread", {
-        environmentId: String(props.environmentId),
-        threadId: String(linkedThreadId),
+        environmentId: String(resolved.environmentId ?? props.environmentId),
+        threadId: String(resolved.threadId),
       });
       return;
     }
