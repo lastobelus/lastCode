@@ -1,6 +1,7 @@
 import * as NodeAssert from "node:assert/strict";
 
 import {
+  T3_CODE_BROWSER_TOOL_INSTRUCTIONS,
   T3_CODE_ORCHESTRATION_INSTRUCTIONS,
   T3_CODE_ORCHESTRATION_SECTIONS,
 } from "@t3tools/provider-core/server/orchestrationInstructions";
@@ -58,6 +59,43 @@ describe("buildCodexAdditionalContext", () => {
       sections.map((entry) => entry.value).join("\n\n"),
       T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim(),
     );
+  });
+
+  it.each([
+    { browser: false, device: false },
+    { browser: true, device: false },
+    { browser: false, device: true },
+    { browser: true, device: true },
+  ])("replaces unavailable tool guidance with tools %j", (availability) => {
+    const enabled = buildCodexAdditionalContext(
+      { model: "gpt-6.1-sol", reasoningEffort: "high" },
+      { browser: true, device: true },
+    );
+    const context = buildCodexAdditionalContext(
+      { model: "gpt-6.1-sol", reasoningEffort: "high" },
+      availability,
+    );
+    if (availability.browser) {
+      NodeAssert.equal(context.t3_code_tools_browser?.value, T3_CODE_BROWSER_TOOL_INSTRUCTIONS);
+    } else {
+      NodeAssert.match(context.t3_code_tools_browser?.value ?? "", /browser tools are unavailable/);
+      NodeAssert.match(context.t3_code_tools_browser?.value ?? "", /Disregard earlier/);
+      NodeAssert.notEqual(
+        context.t3_code_tools_browser?.value,
+        enabled.t3_code_tools_browser?.value,
+      );
+    }
+    if (availability.device) {
+      NodeAssert.match(
+        context.t3_code_tools_device?.value ?? "",
+        /`device_list`, then `device_open`/,
+      );
+      NodeAssert.match(context.t3_code_tools_device?.value ?? "", /`agent-device snapshot -i`/);
+    } else {
+      NodeAssert.match(context.t3_code_tools_device?.value ?? "", /device tools are unavailable/);
+      NodeAssert.match(context.t3_code_tools_device?.value ?? "", /Disregard earlier/);
+      NodeAssert.notEqual(context.t3_code_tools_device?.value, enabled.t3_code_tools_device?.value);
+    }
   });
 });
 
@@ -137,7 +175,7 @@ describe("T3 browser developer instructions", () => {
     }
   });
 
-  it("omits the browser block entirely when the preview tools are not attached", () => {
+  it("replaces browser guidance when the preview tools are not attached", () => {
     for (const mode of ["default", "plan"] as const) {
       const instructions = toolInstructions(runtime, false);
       NodeAssert.doesNotMatch(instructions, /preview_status/);
@@ -162,5 +200,5 @@ function toolInstructions(
   runtime: Parameters<typeof buildCodexAdditionalContext>[0],
   available: boolean,
 ) {
-  return buildCodexAdditionalContext(runtime, available).t3_code_tools?.value ?? "";
+  return buildCodexAdditionalContext(runtime, available).t3_code_tools_browser?.value ?? "";
 }
