@@ -663,6 +663,9 @@ export function deriveTimelineEntriesFromVisibleTurnItems(
               ...(item.scheduledTaskId !== undefined
                 ? { scheduledTaskId: item.scheduledTaskId }
                 : {}),
+              ...(item.incomingSummary !== undefined
+                ? { incomingSummary: item.incomingSummary }
+                : {}),
             }
           : {}),
         createdAt,

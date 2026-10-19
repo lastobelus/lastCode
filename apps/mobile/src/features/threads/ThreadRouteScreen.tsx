@@ -127,7 +127,9 @@ function ThreadRouteFallbackLayout(props: { readonly children: ReactNode }) {
     <>
       <AppBar
         title="Thread"
-        options={{ contentStyle: { backgroundColor: themeVariables["--color-header"] } }}
+        options={{
+          contentStyle: { backgroundColor: themeVariables["--color-header"] },
+        }}
         onBack={layout.usesSplitView ? undefined : returnToList}
         hideBottomBorder
       />
@@ -637,7 +639,8 @@ function ThreadRouteContent(
 
     const targetTerminalId = resolveProjectScriptTerminalId({
       existingTerminalIds: terminalMenuSessions.map((session) => session.terminalId),
-      ...(knownTerminalSessions === null ||
+      ...(script.terminalLinkProfileName !== undefined ||
+      knownTerminalSessions === null ||
       !readEnvironmentScope(selectedThread.environmentId, AuthTerminalReadScope)
         ? { uniqueSuffix: uuidv4() }
         : {}),
@@ -668,6 +671,9 @@ function ThreadRouteContent(
         worktreePath: preferredWorktreePath,
         env,
         initialInput: `${script.command}\r`,
+        ...(script.terminalLinkProfileName === undefined
+          ? {}
+          : { terminalLinkProfileName: script.terminalLinkProfileName }),
       },
     });
     terminalDebugLog("project-script:staged", {
@@ -935,6 +941,7 @@ function ThreadRouteContent(
           composerDraftKey={composer.composerDraftKey}
           followUpBehavior={composer.followUpBehavior}
           canSteerActiveTurn={composer.canSteerActiveTurn}
+          forceQueue={composer.forceQueue}
           isSavingQueuedEdit={composer.isSavingQueuedEdit}
           onCancelQueuedRunEdit={composer.cancelQueuedRunEdit}
           onRemoveQueuedEditAttachment={composer.onRemoveQueuedEditAttachment}

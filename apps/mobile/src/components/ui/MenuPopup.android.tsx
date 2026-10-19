@@ -4,12 +4,15 @@ import {
   Column,
   DropdownMenu,
   DropdownMenuItem,
+  HorizontalDivider,
   RNHostView,
   Text,
 } from "@expo/ui/jetpack-compose";
 import { defaultMinSize, padding, size, width } from "@expo/ui/jetpack-compose/modifiers";
 import { Pressable } from "react-native";
+import { Fragment } from "react";
 import { resolveScaledTextRole } from "../../lib/appearancePreferences";
+import { flattenInlineMenuGroups } from "../../lib/inline-menu-groups";
 
 import { useAndroidControlSizing } from "./useAndroidControlSizing";
 import { useAppearancePreferences } from "../../features/settings/appearance/AppearancePreferencesProvider";
@@ -85,62 +88,64 @@ export function MenuPopup(props: MenuPopupProps) {
           {props.title}
         </Text>
       ) : null}
-      {props.actions.map((action, index) => (
-        <DropdownMenuItem
-          key={action.id ?? `${index}-${action.title}`}
-          enabled={!action.attributes?.disabled}
-          modifiers={itemModifiers}
-          onClick={() => props.onPress(action)}
-        >
-          {action.image && isAppSymbolName(action.image) ? (
-            <DropdownMenuItem.LeadingIcon>
-              <MenuIcon
-                name={action.image}
-                onPress={() => props.onPress(action)}
-                destructive={action.attributes?.destructive}
-                disabled={action.attributes?.disabled}
-              />
-            </DropdownMenuItem.LeadingIcon>
-          ) : null}
-          <DropdownMenuItem.Text>
-            <Column>
-              <Text
-                style={{ typography: "bodyLarge", ...body }}
-                color={
-                  action.attributes?.disabled
-                    ? muted
-                    : action.attributes?.destructive
-                      ? colors["--color-danger-foreground"]
-                      : foreground
-                }
-              >
-                {action.title}
-              </Text>
-              {action.subtitle ? (
-                <Text color={muted} style={{ typography: "bodySmall", ...caption }}>
-                  {action.subtitle}
+      {flattenInlineMenuGroups(props.actions).map(({ action, separatorBefore }, index) => (
+        <Fragment key={action.id ?? `${index}-${action.title}`}>
+          {separatorBefore ? <HorizontalDivider color={colors["--color-border"]} /> : null}
+          <DropdownMenuItem
+            enabled={!action.attributes?.disabled}
+            modifiers={itemModifiers}
+            onClick={() => props.onPress(action)}
+          >
+            {action.image && isAppSymbolName(action.image) ? (
+              <DropdownMenuItem.LeadingIcon>
+                <MenuIcon
+                  name={action.image}
+                  onPress={() => props.onPress(action)}
+                  destructive={action.attributes?.destructive}
+                  disabled={action.attributes?.disabled}
+                />
+              </DropdownMenuItem.LeadingIcon>
+            ) : null}
+            <DropdownMenuItem.Text>
+              <Column>
+                <Text
+                  style={{ typography: "bodyLarge", ...body }}
+                  color={
+                    action.attributes?.disabled
+                      ? muted
+                      : action.attributes?.destructive
+                        ? colors["--color-danger-foreground"]
+                        : foreground
+                  }
+                >
+                  {action.title}
                 </Text>
-              ) : null}
-            </Column>
-          </DropdownMenuItem.Text>
-          {(action.subactions?.length ?? 0) > 0 ? (
-            <DropdownMenuItem.TrailingIcon>
-              <MenuIcon
-                name="chevron.right"
-                onPress={() => props.onPress(action)}
-                disabled={action.attributes?.disabled}
-              />
-            </DropdownMenuItem.TrailingIcon>
-          ) : action.state === "on" ? (
-            <DropdownMenuItem.TrailingIcon>
-              <MenuIcon
-                name="checkmark"
-                onPress={() => props.onPress(action)}
-                disabled={action.attributes?.disabled}
-              />
-            </DropdownMenuItem.TrailingIcon>
-          ) : null}
-        </DropdownMenuItem>
+                {action.subtitle ? (
+                  <Text color={muted} style={{ typography: "bodySmall", ...caption }}>
+                    {action.subtitle}
+                  </Text>
+                ) : null}
+              </Column>
+            </DropdownMenuItem.Text>
+            {(action.subactions?.length ?? 0) > 0 ? (
+              <DropdownMenuItem.TrailingIcon>
+                <MenuIcon
+                  name="chevron.right"
+                  onPress={() => props.onPress(action)}
+                  disabled={action.attributes?.disabled}
+                />
+              </DropdownMenuItem.TrailingIcon>
+            ) : action.state === "on" ? (
+              <DropdownMenuItem.TrailingIcon>
+                <MenuIcon
+                  name="checkmark"
+                  onPress={() => props.onPress(action)}
+                  disabled={action.attributes?.disabled}
+                />
+              </DropdownMenuItem.TrailingIcon>
+            ) : null}
+          </DropdownMenuItem>
+        </Fragment>
       ))}
     </>
   );

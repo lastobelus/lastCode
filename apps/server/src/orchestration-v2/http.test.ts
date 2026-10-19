@@ -30,6 +30,9 @@ import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as ServerConfig from "../config.ts";
+import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
+import * as ThreadWait from "../threadTools/ThreadWait.ts";
 
 import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
 import { ProjectEnrichmentService } from "../project/ProjectEnrichmentService.ts";
@@ -151,6 +154,9 @@ it.effect("exports full history with size, scope, and missing-thread checks", ()
       ),
       Layer.provide(Layer.succeedContext(services)),
       Layer.provide(Layer.mock(ProjectEnrichmentService)({})),
+      Layer.provide(Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({})),
+      Layer.provide(Layer.mock(ThreadWait.ThreadWait)({})),
+      Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-transcript-http-" })),
       Layer.provide(HttpPlatform.layer),
       Layer.provide(Etag.layerWeak),
       Layer.provide(NodeServices.layer),
