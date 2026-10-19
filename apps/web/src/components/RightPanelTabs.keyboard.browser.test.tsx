@@ -9,7 +9,17 @@ import {
 import { RightPanelTabs } from "./RightPanelTabs";
 
 vi.mock("~/hooks/useTheme", () => ({ useTheme: () => ({ resolvedTheme: "light" }) }));
-vi.mock("~/browser/browserDefaults", () => ({ useBrowserDefaults: () => ({ profiles: [] }) }));
+vi.mock(import("~/browser/browserDefaults"), async (original) => ({
+  ...(await original()),
+  useBrowserDefaults: () => ({
+    viewport: { _tag: "fill" },
+    zoomFactor: 1,
+    appearance: "system",
+    autoShowFloatingPreview: true,
+    profiles: [],
+    profileId: "default",
+  }),
+}));
 
 let root: Root;
 let container: HTMLDivElement;
