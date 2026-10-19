@@ -1,4 +1,5 @@
 import * as Dialog from "../../components/ui/Dialog";
+import { EnvironmentPauseControl } from "../threads/EnvironmentPauseControl";
 import { ConnectionTraceId } from "./ConnectionTraceId";
 import { SymbolView } from "../../components/ui/AppSymbol";
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
@@ -164,6 +165,8 @@ export function ConnectionEnvironmentRow(props: {
           />
         </Pressable>
       </View>
+
+      <EnvironmentPauseControl environmentId={props.environment.environmentId} />
 
       {props.expanded ? (
         <Animated.View

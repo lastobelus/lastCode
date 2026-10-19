@@ -14,6 +14,30 @@ testing, use [test-t3-mobile](../test-t3-mobile/SKILL.md).
 
 ## Start the app
 
+Choose the route before launching. Record the machine that owns the app and the
+machine that actually runs the Browser page; the agent's machine alone does not
+identify the browser host. A loopback URL is usable only by a browser on that
+same machine. An attached viewer does not tell you where the browser process
+runs. When the tool advertises `browserHost`, ordinary agent QA can select
+`"environment"` to run beside the app; named desktop sign-ins select
+`"desktop"`. When the native desktop Browser runs elsewhere, use `--share` in
+both the dry run and managed launch, then navigate to the runner's published
+HTTPS origin. Do not first try the unshared loopback recipe remotely.
+
+For a remote desktop Browser, pass the runner's published HTTPS URL directly
+to `preview_navigate({ tabId, url: "<published-https-url>" })`. An
+environment-port target constructs a loopback URL; changing its protocol does
+not select the published hostname or its managed authentication route. Before
+navigation, check the local and published HTTPS
+`/.well-known/t3/environment` descriptors once and require the same environment
+ID. A successful pairing-token POST does not establish that the earlier remote
+descriptor check is reachable.
+
+`--host` configures the backend, not the web listener. The runner clears
+`T3CODE_WEB_BIND_HOST` for ordinary dev, so setting that variable is not a
+replacement for `--share`. Let the runner own sharing; do not install a proxy or
+configure a sharing service manually.
+
 Reuse this task's healthy dev server. Otherwise run `vp run dev` from the
 repository root through `preview_host` when available, retaining its managed
 terminal and lease. Follow `docs/lastcode/preview-handoffs.md` for the hosting
@@ -21,17 +45,39 @@ contract. Use a foreground command; do not detach the process. Otherwise retain
 its terminal session. Use the worktree's ignored `.t3` state.
 
 Before managed launch, resolve the absolute path of this worktree's `.t3`
-directory. Substitute that literal path for `<isolated-home>` in these commands
-(the quoted argument works in POSIX shells, PowerShell, and cmd.exe):
+directory. Substitute that literal path for `<isolated-home>` in the selected
+recipe (the quoted argument works in POSIX shells, PowerShell, and cmd.exe).
+When the Browser runs on the same machine as the app, use the local recipe:
 
 ```text
 ./node_modules/.bin/vp run dev --dry-run --home-dir "<isolated-home>"
 ./node_modules/.bin/vp run dev --home-dir "<isolated-home>"
 ```
 
-Run the dry run first and read `webPort` from its `[dev-runner]` output. Use
-`http://localhost:<webPort>` as the requested preview URL, then give the second
-command to `preview_host` with the same working directory and environment.
+When the native Browser runs on another machine, use the shared recipe instead:
+
+```text
+./node_modules/.bin/vp run dev --dry-run --share --home-dir "<isolated-home>"
+./node_modules/.bin/vp run dev --share --home-dir "<isolated-home>"
+```
+
+Run the selected recipe's dry run first and read `webPort` from its
+`[dev-runner]` output. Use `http://localhost:<webPort>` as the requested hosting
+URL, then give that recipe's second command to `preview_host` with the same
+working directory and environment. For the shared recipe, Browser navigation
+uses the published HTTPS route rather than the hosting URL.
+
+After the shared managed launch, obtain that URL on the app host with the
+read-only command `tailscale serve status --json`. The hosting result retains
+the supplied loopback URL and does not expose the runner's terminal output.
+In `Web`, select the single mapping key ending in `:<webPort>` whose root
+`Handlers["/"].Proxy` is `http://127.0.0.1:<webPort>`. Its published URL is
+`https://<mapping-key>/`. Check its environment descriptor against the local
+one before Browser navigation, as described above. A missing, ambiguous or
+mismatched mapping is a sharing-readiness failure even when the local lease
+is active; do not guess the URL from the environment connection or configure
+a replacement mapping. Keep the status output and concrete URL private.
+
 Use the workspace-installed executable for this unattended launch; a global
 Vite+ proxy can wait before starting the command. On Windows use
 `node_modules\\.bin\\vp.cmd`. If the workspace executable is missing, repair setup
@@ -56,6 +102,12 @@ The automation tab can initially pair with that same configured credential.
 Keep it in the selected QA profile. Never replace a shared configured credential
 or restart the user's LastCode to prepare QA.
 
+If the first shared navigation displays the pairing page, automatic dev
+authentication has not passed. Ordinary pairing may allow the feature's own QA
+to continue, but record that intervention separately and report the retained
+lease URL scheme and published browser URL scheme to the browser-repair owner.
+Do not describe a manually paired session as an unattended preview success.
+
 Keep pairing URLs and credentials private: never commit them, include them in
 reports, or capture them in screenshots. Do not redirect startup output into
 files: a managed relaunch can create another secret-bearing file without an
@@ -70,8 +122,18 @@ inspecting or seeding SQLite. Stop the test server before direct fixture writes.
 
 Routine automated QA against isolated development state does not need a
 separate permission prompt. Keep it in the background so the user can continue
-using LastCode. Call `preview_status` and `preview_profiles`, then explicitly select `Default`
-or an existing dedicated QA profile with
+using LastCode. Call `preview_status`. When the tool
+advertises `browserHost`, start isolated QA beside the app with
+`preview_open({ open: false, browserHost: "environment", profileName: "Incognito", reuseExistingTab: false })`.
+Environment hosting supports only `Default` and `Incognito`; select `Default`
+when the check needs persistent environment storage. Any named desktop profile,
+including a dedicated QA profile or `Logged in Developer`, requires
+`browserHost: "desktop"` and the shared recipe when the app is remote. Discover
+that desktop's profiles with `preview_profiles` before its dedicated open;
+environment-hosted QA uses the built-in choices without that desktop lookup. Omitting
+the host keeps the current policy even when opening a new tab or selecting a
+different profile. When the tool does not advertise the selector, explicitly
+select `Default` or an existing dedicated QA profile with
 `preview_open({ open: false, profileName: "Default", reuseExistingTab: false })`.
 Verify its returned profile. GitHub work requiring login uses a separate tab in
 `Logged in Developer`; never change the default profile to obtain that session. Retain the returned `tabId` and pass it to subsequent tools; reuse that
@@ -87,11 +149,10 @@ managed browser authentication described above, not this initial pairing URL.
 
 If managed hosting fails readiness, inspect the startup diagnostics returned by
 `preview_host`, the launch command, actual listening port, and ownership before
-retrying. The failure includes a bounded output excerpt captured before terminal
-cleanup. Treat that output as private diagnostic evidence, not publishable PR
-content. If diagnostics are unavailable, report that missing evidence rather
-than claiming to have diagnosed the launch. Opening or
-focusing a browser does not repair a failed server launch. Report the concrete
+retrying. The failure reports readiness and terminal status, not transcript
+contents: commands can load credentials that cannot be safely redacted. Do not
+infer a specific startup error from status alone. Opening or focusing a browser
+does not repair a failed server launch. Report the concrete
 startup failure if it cannot be repaired; do not ask for browser permission as
 a workaround.
 

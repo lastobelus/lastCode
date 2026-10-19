@@ -151,7 +151,7 @@ const make = Effect.gen(function* () {
       const existing = slots.get(key);
       // Reissuing a config must not invalidate commands already using it.
       if (existing !== undefined) return existing;
-      const token = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
+      const token = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
       credentials.set(token, target);
       slots.set(key, token);
       return token;
