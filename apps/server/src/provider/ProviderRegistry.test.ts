@@ -1327,7 +1327,7 @@ it.layer(
                 streamChanges: Stream.empty,
                 applyUsageLimits: () => Effect.void,
               },
-              orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+              orchestrationAdapter: makeCatalogAdapter(),
               textGeneration: {} as ProviderInstance["textGeneration"],
             } satisfies ProviderInstance;
             const layerInstanceRegistry = Layer.succeed(
@@ -2213,7 +2213,7 @@ it.layer(
             applyUsageLimits: () => Effect.void,
           },
           snapshotForCwd: () => Ref.get(scanResult),
-          orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+          orchestrationAdapter: makeCatalogAdapter(),
           textGeneration: {} as ProviderInstance["textGeneration"],
         };
         const layerInstanceRegistry = Layer.succeed(
