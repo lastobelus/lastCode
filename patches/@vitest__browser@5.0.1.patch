@@ -1,0 +1,13 @@
+diff --git a/dist/client.js b/dist/client.js
+--- a/dist/client.js
++++ b/dist/client.js
+@@ -421,7 +421,8 @@
+ 				return {
+ 					name: v.name,
+ 					message: v.message,
+-					stack: v.stack
++					stack: v.stack,
++					cause: v.cause
+ 				};
+ 			}
+ 			return v;
