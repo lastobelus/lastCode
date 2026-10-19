@@ -731,7 +731,6 @@ export function useUpdatePrimarySettings() {
 export function updateClientSettings(patch: ClientSettingsPatch): Promise<void> {
   return persistClientSettingsPatch(patch);
 }
-
 export function __resetClientSettingsPersistenceForTests(): void {
   clientSettingsHydrationGeneration += 1;
   clientSettingsSnapshot = DEFAULT_CLIENT_SETTINGS;
