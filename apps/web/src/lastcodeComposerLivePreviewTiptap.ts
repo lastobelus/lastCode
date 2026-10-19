@@ -31,7 +31,7 @@ import {
   type RichDocMap,
 } from "~/composer-rich-text-doc";
 
-import { composerPreviewWidgetDecoration } from "~/lastcodeComposerPreviewWidget";
+import { createComposerPreviewWidgets } from "~/lastcodeComposerPreviewWidget";
 
 type ComposerSourceView = Pick<EditorView, "state" | "dispatch">;
 
@@ -294,6 +294,11 @@ function replaceFenceLanguageAtWidget(
   return true;
 }
 
+const previewWidgetDecoration = createComposerPreviewWidgets({
+  toggleTask: toggleTaskCheckboxAtWidget,
+  replaceFenceLanguage: replaceFenceLanguageAtWidget,
+});
+
 function decorationsForState(
   state: EditorState,
   value: Omit<ComposerLivePreviewState, "decorations">,
@@ -330,12 +335,7 @@ function decorationsForState(
     decorations.push(Decoration.node(from, line.to, { class: [...line.classes].join(" ") }));
   }
   for (const widget of presentation.widgets) {
-    decorations.push(
-      composerPreviewWidgetDecoration(flatToPm(value.map, widget.from), widget, value, {
-        toggleTask: toggleTaskCheckboxAtWidget,
-        replaceFenceLanguage: replaceFenceLanguageAtWidget,
-      }),
-    );
+    decorations.push(previewWidgetDecoration(flatToPm(value.map, widget.from), widget, value));
   }
   if (!state.selection.empty) {
     state.doc.nodesBetween(state.selection.from, state.selection.to, (node, pos) => {

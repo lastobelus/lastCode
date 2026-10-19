@@ -98,32 +98,33 @@ function widgetContent(
 }
 
 /** Own a widget's identity, DOM events and React lifetime independently of document assembly. */
-export function composerPreviewWidgetDecoration(
-  position: number,
-  widget: ComposerPreviewWidget,
-  appearance: WidgetAppearance,
-  actions: WidgetActions,
-): Decoration {
-  const content = widgetContent(widget, appearance, actions);
-  return Decoration.widget(
-    position,
-    (view, getPos) => {
-      const element = document.createElement("span");
-      element.contentEditable = "false";
-      content.mount(element, view, getPos);
-      return element;
-    },
-    {
-      key: `${content.identity}:${appearance.theme}:${appearance.editable}`,
-      side: -1,
-      ignoreSelection: true,
-      stopEvent: () => true,
-      destroy(element) {
-        const root = widgetRoots.get(element);
-        if (!root) return;
-        widgetRoots.delete(element);
-        queueMicrotask(() => root.unmount());
+export function createComposerPreviewWidgets(actions: WidgetActions) {
+  return (
+    position: number,
+    widget: ComposerPreviewWidget,
+    appearance: WidgetAppearance,
+  ): Decoration => {
+    const content = widgetContent(widget, appearance, actions);
+    return Decoration.widget(
+      position,
+      (view, getPos) => {
+        const element = document.createElement("span");
+        element.contentEditable = "false";
+        content.mount(element, view, getPos);
+        return element;
       },
-    },
-  );
+      {
+        key: `${content.identity}:${appearance.theme}:${appearance.editable}`,
+        side: -1,
+        ignoreSelection: true,
+        stopEvent: () => true,
+        destroy(element) {
+          const root = widgetRoots.get(element);
+          if (!root) return;
+          widgetRoots.delete(element);
+          queueMicrotask(() => root.unmount());
+        },
+      },
+    );
+  };
 }
