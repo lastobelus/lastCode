@@ -714,6 +714,36 @@ describe("archive family reads", () => {
   });
 });
 
+describe("thread action lifecycle", () => {
+  it("blocks duplicate submissions until the first action finishes and then permits another", async () => {
+    const actions = useThreadListActions();
+    const thread = makeThread();
+    const first = actions.settleThread(thread);
+
+    await expect(actions.settleThread(thread)).resolves.toBe(false);
+    await expect(first).resolves.toBe(true);
+    expect(state.requests).toHaveLength(1);
+
+    await expect(actions.settleThread(thread)).resolves.toBe(true);
+    expect(state.requests).toHaveLength(2);
+  });
+
+  it("propagates thrown action errors and releases the thread for retry", async () => {
+    const actions = useThreadListActions();
+    const thread = makeThread();
+    const error = new Error("Unexpected transport failure");
+    state.afterRequest = () => {
+      throw error;
+    };
+
+    await expect(actions.settleThread(thread)).rejects.toBe(error);
+    state.afterRequest = undefined;
+
+    await expect(actions.settleThread(thread)).resolves.toBe(true);
+    expect(state.requests).toHaveLength(2);
+  });
+});
+
 describe("thread list operation permissions", () => {
   it.each(mutationCases)(
     "%s rejects a retained callback after its environment loses permission",

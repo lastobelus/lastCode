@@ -153,7 +153,7 @@ function useThreadActionExecutor(
 
     inFlightThreadKeys.current.add(key);
     selectionHaptic();
-    try {
+    return await (async () => {
       let archiveInput: {
         threadId: EnvironmentThreadShell["id"];
         childDisposition: ThreadArchiveChildDisposition;
@@ -305,9 +305,9 @@ function useThreadActionExecutor(
       }
       onCompleted?.(action, thread);
       return true;
-    } finally {
+    })().finally(() => {
       inFlightThreadKeys.current.delete(key);
-    }
+    });
   };
 
   return executeAction;
