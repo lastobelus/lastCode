@@ -99,9 +99,15 @@ describe("legacy sidebar subagent families", () => {
       expect(result.orderedThreadKeys).toEqual(result.renderedRows.map((row) => row.key));
       expect(result.allRows[0]).toMatchObject({
         descendantCount: 2,
+        descendantsStatus: { label: "Awaiting Input" },
+      });
+      expect(result.allRows[1]).toMatchObject({
+        descendantCount: 1,
         descendantsStatus: { label: "Failed" },
       });
-      expect(lastcodeSidebarFamilySummary(result.allRows[0]!)).toContain("failed");
+      expect(lastcodeSidebarFamilySummary(result.allRows[0]!)).toBe(
+        "2 subagents (1 awaiting input, 1 failed)",
+      );
       const selected = project(shells, {
         groupingStyle,
         showFamilyStatusSubheaders: false,
