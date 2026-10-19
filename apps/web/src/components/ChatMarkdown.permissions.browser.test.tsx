@@ -57,6 +57,7 @@ vi.mock(import("../state/session"), async (original) => {
         },
         () => readEnvironmentScope(id, scope),
       ),
+    readPreparedConnection: () => null,
   };
 });
 // Atoms derived from the server config run in the real registry over this config.
@@ -88,14 +89,17 @@ vi.mock(import("../hooks/useLocalStorage"), async (original) => ({
   useLocalStorage: (() => ["vscode", vi.fn()]) as never,
   getLocalStorageItem: (() => "vscode") as never,
 }));
-vi.mock(import("../localApi"), async (original) => ({
-  ...(await original()),
-  readLocalApi: () =>
-    ({
-      contextMenu: { show: state.choose },
-      shell: { openExternal: state.openExternal },
-    }) as never,
-}));
+vi.mock(import("../localApi"), async (original) => {
+  const api = {
+    contextMenu: { show: state.choose },
+    shell: { openExternal: state.openExternal },
+  };
+  return {
+    ...(await original()),
+    readLocalApi: (() => api) as never,
+    ensureLocalApi: (() => api) as never,
+  };
+});
 vi.mock(import("~/lib/openPullRequestLink"), async (original) => ({
   ...(await original()),
   resolvePullRequestPreviewTarget: () => null,
@@ -147,6 +151,7 @@ beforeEach(() => {
   useRightPanelStore.setState({ openFile: state.openFile });
   vi.spyOn(navigator.clipboard, "writeText").mockImplementation(state.copy);
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  vi.stubGlobal("desktopBridge", {});
 });
 
 afterEach(async () => {

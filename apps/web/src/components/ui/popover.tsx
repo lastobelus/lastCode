@@ -41,6 +41,7 @@ function PopoverPopup({
   alignOffset = 0,
   collisionAvoidance,
   tooltipStyle = false,
+  elevated = false,
   keepMounted = false,
   anchor,
   touchBackdrop = false,
@@ -54,6 +55,7 @@ function PopoverPopup({
   alignOffset?: PopoverPrimitive.Positioner.Props["alignOffset"];
   collisionAvoidance?: PopoverPrimitive.Positioner.Props["collisionAvoidance"];
   tooltipStyle?: boolean;
+  elevated?: boolean;
   keepMounted?: PopoverPrimitive.Portal.Props["keepMounted"];
   anchor?: PopoverPrimitive.Positioner.Props["anchor"];
   width?: keyof typeof popoverPopupWidthClassName;
@@ -95,6 +97,7 @@ function PopoverPopup({
             variant !== "panel" && "dropdown-glass",
             tooltipStyle &&
               "w-fit text-balance rounded-md text-xs shadow-md/5 before:rounded-[calc(var(--radius-md)-1px)]",
+            elevated && "shadow-xl shadow-black/25",
             !tooltipStyle &&
               variant !== "panel" &&
               "shadow-[0_16px_40px_-18px_rgb(0_0_0/55%)] dark:shadow-[0_18px_44px_-18px_rgb(0_0_0/80%)]",
