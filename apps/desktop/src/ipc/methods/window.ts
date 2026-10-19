@@ -29,6 +29,7 @@ import * as DesktopEnvironment from "../../app/DesktopEnvironment.ts";
 import * as DesktopAppSettings from "../../settings/DesktopAppSettings.ts";
 import * as DesktopWslBackend from "../../wsl/DesktopWslBackend.ts";
 import * as DesktopWslEnvironment from "../../wsl/DesktopWslEnvironment.ts";
+import * as DesktopWindow from "../../window/DesktopWindow.ts";
 import * as ElectronApp from "../../electron/ElectronApp.ts";
 import * as ElectronDialog from "../../electron/ElectronDialog.ts";
 import * as ElectronMenu from "../../electron/ElectronMenu.ts";
@@ -143,6 +144,20 @@ export const getLocalEnvironmentBootstraps = DesktopIpc.makeSyncIpcMethod({
   }),
 });
 
+export const reportRunningActionCount = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.REPORT_RUNNING_ACTION_COUNT_CHANNEL,
+  payload: Schema.Number,
+  result: Schema.Void,
+  handler: Effect.fn("desktop.ipc.window.reportRunningActionCount")(function* (count) {
+    const desktopWindow = yield* DesktopWindow.DesktopWindow;
+    yield* desktopWindow.reportRunningActionCount(count);
+  }),
+});
+
+// Pull the distro selection out of a backend instance id like
+// "wsl:ubuntu". Returns null for "wsl:default", which is the sentinel
+// for "track the user's WSL default distro" and maps to the
+// wslEnv-derived default at picker time.
 function extractWslDistroFromEnvironmentId(envId: string): string | null {
   if (!envId.startsWith(DesktopWslBackend.WSL_INSTANCE_ID_PREFIX)) {
     return null;
