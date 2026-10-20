@@ -103,6 +103,7 @@ jobs:
     name: Preflight
     needs: [resolve_commit]
     if: |
+      github.repository == 'pingdotgg/t3code' &&
       needs.resolve_commit.result == 'success' &&
       (github.event_name != 'schedule' || needs.resolve_commit.outputs.has_changes == 'true')
     runs-on: blacksmith-8vcpu-ubuntu-2404
@@ -331,6 +332,7 @@ jobs:
     # runs alongside preflight instead of after it. The condition mirrors preflight's.
     needs: [resolve_commit]
     if: |
+      github.repository == 'pingdotgg/t3code' &&
       needs.resolve_commit.result == 'success' &&
       (github.event_name != 'schedule' || needs.resolve_commit.outputs.has_changes == 'true')
     runs-on: blacksmith-8vcpu-ubuntu-2404
