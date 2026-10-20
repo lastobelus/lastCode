@@ -1,11 +1,86 @@
 import type { ActionResumeState } from "@t3tools/contracts";
 import { actionRunningPresentation } from "@t3tools/shared/actionResume";
-import { TerminalIcon } from "lucide-react";
+import { CircleAlertIcon, TerminalIcon } from "lucide-react";
 import { memo, useEffect, useState } from "react";
 
 import { formatWorkingDurationLabel } from "../Sidebar.logic";
 import { Button } from "../ui/button";
 import { cn } from "~/lib/utils";
+import { RotateCcwClockIcon } from "../icons/RotateCcwClockIcon";
+import type { ComposerBannerStackItem } from "./ComposerBannerStack";
+
+export function runningActionBanner({
+  action,
+  cancelling,
+  canRead,
+  canOperate,
+  onCancel,
+  onOpenTerminal,
+}: {
+  readonly action: ActionResumeState | null;
+  readonly cancelling: boolean;
+  readonly canRead: boolean;
+  readonly canOperate: boolean;
+  readonly onCancel: () => void;
+  readonly onOpenTerminal: () => void;
+}): ComposerBannerStackItem | null {
+  if (action === null) return null;
+  return {
+    id: `action-running:${action.runId}`,
+    priority: "activity",
+    variant: action.progress?.state === "working" ? "info" : "warning",
+    icon: <RotateCcwClockIcon aria-hidden className="size-4" />,
+    title: <ComposerActionResumeTitle action={action} />,
+    description: <ComposerActionResumeDescription action={action} />,
+    actions: canOperate ? (
+      <ComposerActionResumeActions
+        action={action}
+        cancelling={cancelling}
+        onCancel={onCancel}
+        onOpenTerminal={onOpenTerminal}
+      />
+    ) : canRead ? (
+      <Button size="xs" variant="ghost" onClick={onOpenTerminal}>
+        Open terminal
+      </Button>
+    ) : undefined,
+  };
+}
+
+export function interruptedActionBanner({
+  action,
+  canOperate,
+  pending,
+  onResume,
+  onDiscard,
+}: {
+  readonly action: ActionResumeState | null;
+  readonly canOperate: boolean;
+  readonly pending: "resume" | "discard" | null;
+  readonly onResume: () => void;
+  readonly onDiscard: () => void;
+}): ComposerBannerStackItem | null {
+  if (action === null) return null;
+  const disabled = !canOperate || pending !== null;
+  return {
+    id: `action-interrupted:${action.runId}`,
+    variant: "warning",
+    icon: <CircleAlertIcon />,
+    title: `${action.actionName} was interrupted`,
+    description:
+      "LastCode did not restart the command or wake the agent. Resume only the agent follow-up when you are ready.",
+    actions: (
+      <div className="flex items-center gap-1.5">
+        <Button size="xs" variant="ghost" disabled={disabled} onClick={onDiscard}>
+          {pending === "discard" ? "Discarding..." : "Discard"}
+        </Button>
+        <Button size="xs" variant="outline" disabled={disabled} onClick={onResume}>
+          {pending === "resume" ? "Resuming..." : "Resume agent"}
+        </Button>
+      </div>
+    ),
+  };
+}
 
 function ActionElapsed({ startedAt }: { readonly startedAt: string }) {
   const startedMs = Date.parse(startedAt);
