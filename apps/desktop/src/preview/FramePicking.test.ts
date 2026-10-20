@@ -293,17 +293,23 @@ describe("frame picking coordinates", () => {
   });
 });
 
-function observerFixture() {
+function observerFixture(ignore: (element: Element) => boolean = () => false) {
+  const lifecycle: string[] = [];
   const callbacks = new Map<Document, MutationCallback>();
   class Observer {
     callback: MutationCallback;
+    owner!: Document;
     constructor(callback: MutationCallback) {
       this.callback = callback;
     }
     observe(owner: Document) {
+      this.owner = owner;
       callbacks.set(owner, this.callback);
     }
-    disconnect() {}
+    disconnect() {
+      lifecycle.push(this.owner === top ? "disconnect top" : "disconnect child");
+      callbacks.delete(this.owner);
+    }
   }
   vi.stubGlobal("MutationObserver", Observer);
   const frameList: HTMLIFrameElement[] = [];
@@ -320,13 +326,12 @@ function observerFixture() {
     localName: "div",
     querySelector: vi.fn(() => null),
   } as unknown as Element;
-  const lifecycle: string[] = [];
   const attach = vi.fn((owner: Document) => {
     lifecycle.push(owner === top ? "attach top" : "attach child");
     return () => lifecycle.push(owner === top ? "remove top" : "remove child");
   });
   const changed = vi.fn();
-  const watch = observeFrameDocuments(top, attach, changed, () => false);
+  const watch = observeFrameDocuments(top, attach, changed, ignore);
   const mutate = (record: Partial<MutationRecord>) =>
     callbacks.get(top)!(
       [
@@ -355,6 +360,30 @@ function observerFixture() {
 }
 
 describe("frame document observation", () => {
+  it("ignores annotation-owned frame mutations without suppressing page changes", async () => {
+    const annotation = { nodeType: 1 } as Element;
+    const fixture = observerFixture((element) => element === annotation);
+    expect(fixture.changed).not.toHaveBeenCalled();
+    fixture.mutate({
+      target: annotation,
+      type: "childList",
+      addedNodes: [fixture.frame] as unknown as NodeList,
+    });
+    await Promise.resolve();
+    expect(fixture.changed).not.toHaveBeenCalled();
+    expect(fixture.queryFrames).toHaveBeenCalledTimes(1);
+    fixture.mutate({
+      target: annotation,
+      type: "childList",
+      removedNodes: [fixture.frame] as unknown as NodeList,
+    });
+    fixture.mutate({ type: "attributes", attributeName: "hidden" });
+    await Promise.resolve();
+    expect(fixture.changed).toHaveBeenCalledTimes(1);
+    expect(fixture.queryFrames).toHaveBeenCalledTimes(1);
+    fixture.watch.dispose();
+  });
+
   it("does not rescan documents for animated attributes or unrelated text changes", async () => {
     const fixture = observerFixture();
     for (let index = 0; index < 60; index += 1) {
@@ -380,6 +409,7 @@ describe("frame document observation", () => {
     } as unknown as Node;
     fixture.mutate({ type: "childList", addedNodes: [subtree] as unknown as NodeList });
     fixture.mutate({ type: "childList", addedNodes: [fixture.frame] as unknown as NodeList });
+    fixture.mutate({ type: "attributes", attributeName: "class" });
     await Promise.resolve();
     expect(fixture.queryFrames).toHaveBeenCalledTimes(2);
     expect(fixture.watch.documents()).toEqual([fixture.top, fixture.child]);
@@ -389,7 +419,12 @@ describe("frame document observation", () => {
     await Promise.resolve();
     expect(fixture.queryFrames).toHaveBeenCalledTimes(3);
     expect(fixture.watch.documents()).toEqual([fixture.top]);
-    expect(fixture.lifecycle).toEqual(["attach top", "attach child", "remove child"]);
+    expect(fixture.lifecycle).toEqual([
+      "attach top",
+      "attach child",
+      "disconnect child",
+      "remove child",
+    ]);
     fixture.watch.dispose();
   });
 
@@ -408,13 +443,26 @@ describe("frame document observation", () => {
     expect(fixture.lifecycle).toEqual([
       "attach top",
       "attach child",
+      "disconnect child",
       "remove child",
       "attach child",
     ]);
     fixture.watch.dispose();
+    fixture.watch.dispose();
     fixture.frame.dispatchEvent(new Event("load"));
     await Promise.resolve();
     expect(fixture.queryFrames).toHaveBeenCalledTimes(3);
+    expect(fixture.lifecycle).toEqual([
+      "attach top",
+      "attach child",
+      "disconnect child",
+      "remove child",
+      "attach child",
+      "disconnect top",
+      "remove top",
+      "disconnect child",
+      "remove child",
+    ]);
   });
 
   it("discards queued work after the annotation session is disposed", async () => {

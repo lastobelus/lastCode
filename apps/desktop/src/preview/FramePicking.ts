@@ -426,18 +426,18 @@ function observeFrameDocument(
     isElement(node) && (node.localName === "iframe" || node.querySelector("iframe") !== null);
   const cleanup = attach(owner);
   const observer = new MutationObserver((records) => {
-    const pageChanges = records.filter(
-      (record) => !isElement(record.target) || !ignore(record.target),
-    );
-    if (pageChanges.length === 0) return;
-    // Style animation and text updates can move a selection, but cannot
-    // introduce frame documents. Search only added/removed subtrees here.
-    const discover = pageChanges.some(
-      (record) =>
+    let pageChanged = false;
+    let discover = false;
+    for (const record of records) {
+      if (isElement(record.target) && ignore(record.target)) continue;
+      pageChanged = true;
+      // Style animation and text updates can move a selection, but cannot
+      // introduce frame documents. Search only added/removed subtrees here.
+      discover ||=
         record.type === "childList" &&
-        [...record.addedNodes, ...record.removedNodes].some(containsFrame),
-    );
-    queueUpdate(discover);
+        [...record.addedNodes, ...record.removedNodes].some(containsFrame);
+    }
+    if (pageChanged) queueUpdate(discover);
   });
   observer.observe(owner, {
     childList: true,
