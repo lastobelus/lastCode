@@ -1451,8 +1451,16 @@ server.listen(Number(flag("--port")), "127.0.0.1", () => {
 
         // A crashed server whose parent never reaps it stays a zombie, which
         // kill -0 still reports. Its pid file and runtime record keep naming it.
+        // Acknowledge from the exec'd parent so the shell cannot reap the child
+        // between printing its PID and completing exec.
         const parent = yield* spawner.spawn(
-          ChildProcess.make("sh", ["-c", "sleep 600 & echo $!; exec sleep 600"]),
+          ChildProcess.make("sh", [
+            "-c",
+            'sleep 600 & export ZOMBIE_PID=$!; exec "$1" -e "$2"',
+            "zombie-parent",
+            process.execPath,
+            "console.log(process.env.ZOMBIE_PID); setInterval(() => {}, 600_000);",
+          ]),
         );
         const zombie = Number(
           Option.getOrThrow(

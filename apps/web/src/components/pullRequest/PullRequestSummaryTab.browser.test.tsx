@@ -161,8 +161,10 @@ function filterItem(label: string) {
 }
 
 async function toggleFilter(label: string) {
-  if (!document.querySelector('[role="menuitemcheckbox"]')) await userEvent.click(filterButton());
-  await userEvent.click(filterItem(label));
+  if (!document.querySelector('[role="menuitemcheckbox"]')) {
+    await act(async () => userEvent.click(filterButton()));
+  }
+  await act(async () => userEvent.click(filterItem(label)));
 }
 
 it("hides bot and resolved comments until the filter shows them, and remembers the choice", async () => {
@@ -212,7 +214,7 @@ it("hides bot and resolved comments until the filter shows them, and remembers t
   expect(commentTexts()).not.toContain("Bot report 0");
 
   await toggleFilter("Resolved or dismissed");
-  await userEvent.keyboard("{Escape}");
+  await act(async () => userEvent.keyboard("{Escape}"));
   expect(
     [...container.querySelectorAll("button")].some((button) => button.textContent === "Resolved"),
   ).toBe(true);
@@ -221,7 +223,7 @@ it("hides bot and resolved comments until the filter shows them, and remembers t
   root = createRoot(container);
   await render({ ...value, url: `${value.url}0`, number: 10 });
   expect(commentTexts()).toContain("Bot report 11");
-  await userEvent.click(filterButton());
+  await act(async () => userEvent.click(filterButton()));
   expect(filterItem("Bot comments").getAttribute("aria-checked")).toBe("true");
 });
 

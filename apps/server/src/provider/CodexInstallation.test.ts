@@ -217,20 +217,24 @@ const compileNative = Effect.fn("test.compileNative")(function* (
   expect(yield* compiler.exitCode).toBe(0);
 }, Effect.scoped);
 
-it.effect.each([
+for (const { withHost, marker } of [
   { withHost: false, marker: null },
   { withHost: true, marker: null },
   { withHost: false, marker: ".bunx" },
   { withHost: false, marker: ".shim" },
-])("requires the native host or a known package-manager launcher: %j", ({ withHost, marker }) =>
-  Effect.gen(function* () {
-    const h = yield* makeHarness({
-      local: { version: "0.156.1" },
-      platform: marker ? "win32" : "darwin",
-    });
-    yield* compileNative(
-      h.localBinaryPath,
-      `#include <stdio.h>
+]) {
+  // Windows package-manager launchers are unsupported in LastCode.
+  it.effect.skipIf(marker !== null)(
+    `requires the native host or a known package-manager launcher: ${JSON.stringify({ withHost, marker })}`,
+    () =>
+      Effect.gen(function* () {
+        const h = yield* makeHarness({
+          local: { version: "0.156.1" },
+          platform: marker ? "win32" : "darwin",
+        });
+        yield* compileNative(
+          h.localBinaryPath,
+          `#include <stdio.h>
 #include <string.h>
 int main(int argc, char **argv) {
   if (argc == 2 && strcmp(argv[1], "--version") == 0) {
@@ -240,34 +244,38 @@ int main(int argc, char **argv) {
   return !(argc == 3 && strcmp(argv[1], "app-server") == 0 && strcmp(argv[2], "--help") == 0);
 }
 `,
-    );
-    if (withHost) {
-      const packageDirectory = `${h.baseDir}/package`;
-      yield* h.fs.makeDirectory(packageDirectory);
-      yield* h.fs.rename(h.localBinaryPath, `${packageDirectory}/codex`);
-      yield* h.fs.copyFile(`${packageDirectory}/codex`, `${packageDirectory}/codex-code-mode-host`);
-      yield* h.fs.symlink(`${packageDirectory}/codex`, h.localBinaryPath);
-    }
-    if (marker) {
-      yield* h.fs.writeFileString(
-        h.localBinaryPath.replace(/\.exe$/u, marker),
-        "launcher metadata",
-      );
-    }
-    const reusesLocal = withHost || marker !== null;
-    const started = yield* h.installation.start;
-    if (reusesLocal) {
-      expect(started).toMatchObject({
-        source: "local",
-        phase: "succeeded",
-        executablePath: h.localBinaryPath,
-      });
-    }
-    expect((yield* terminalState(h.installation)).phase).toBe("succeeded");
-    expect((yield* h.installation.resolve()).source).toBe(reusesLocal ? "local" : "managed");
-    expect(h.downloads()).toBe(reusesLocal ? 0 : 1);
-  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-);
+        );
+        if (withHost) {
+          const packageDirectory = `${h.baseDir}/package`;
+          yield* h.fs.makeDirectory(packageDirectory);
+          yield* h.fs.rename(h.localBinaryPath, `${packageDirectory}/codex`);
+          yield* h.fs.copyFile(
+            `${packageDirectory}/codex`,
+            `${packageDirectory}/codex-code-mode-host`,
+          );
+          yield* h.fs.symlink(`${packageDirectory}/codex`, h.localBinaryPath);
+        }
+        if (marker) {
+          yield* h.fs.writeFileString(
+            h.localBinaryPath.replace(/\.exe$/u, marker),
+            "launcher metadata",
+          );
+        }
+        const reusesLocal = withHost || marker !== null;
+        const started = yield* h.installation.start;
+        if (reusesLocal) {
+          expect(started).toMatchObject({
+            source: "local",
+            phase: "succeeded",
+            executablePath: h.localBinaryPath,
+          });
+        }
+        expect((yield* terminalState(h.installation)).phase).toBe("succeeded");
+        expect((yield* h.installation.resolve()).source).toBe(reusesLocal ? "local" : "managed");
+        expect(h.downloads()).toBe(reusesLocal ? 0 : 1);
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+}
 
 it.effect("rechecks compatibility after the local executable is replaced", () =>
   Effect.gen(function* () {

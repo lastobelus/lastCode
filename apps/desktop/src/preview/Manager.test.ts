@@ -602,6 +602,10 @@ const makeTestPictureInPictureWindow = (loadURL: () => Promise<void> = async () 
     send,
   };
   const pictureInPictureWindow = {
+    on: vi.fn(),
+    off: vi.fn(),
+    isVisible: () => true,
+    isMinimized: () => false,
     isDestroyed: vi.fn(() => destroyed),
     once: vi.fn((event: string, listener: () => void) => {
       listeners.set(event, listener);
@@ -687,6 +691,10 @@ describe("PreviewManager", () => {
         Object.assign(preview.webContents, { hostWebContents });
         fromId.mockReturnValue(preview.webContents);
         yield* manager.setMainWindow({
+          on: vi.fn(),
+          off: vi.fn(),
+          isVisible: () => true,
+          isMinimized: () => false,
           isDestroyed: () => false,
           once: vi.fn(),
           webContents: hostWebContents,
@@ -3033,6 +3041,10 @@ describe("PreviewManager", () => {
         yield* manager.registerWebview("tab_capture_throttling_1", 41);
         yield* manager.registerWebview("tab_capture_throttling_2", 42);
         yield* manager.setMainWindow({
+          on: vi.fn(),
+          off: vi.fn(),
+          isVisible: () => true,
+          isMinimized: () => false,
           isDestroyed: () => false,
           once: vi.fn(),
           webContents: { setBackgroundThrottling },
@@ -3070,6 +3082,10 @@ describe("PreviewManager", () => {
         yield* manager.createTab("tab_capture_throttling_failure");
         yield* manager.registerWebview("tab_capture_throttling_failure", 42);
         yield* manager.setMainWindow({
+          on: vi.fn(),
+          off: vi.fn(),
+          isVisible: () => true,
+          isMinimized: () => false,
           isDestroyed: () => false,
           once: vi.fn(),
           webContents: { setBackgroundThrottling },
@@ -3120,6 +3136,10 @@ describe("PreviewManager", () => {
         yield* manager.createTab("tab_guest_throttling_failure");
         yield* manager.registerWebview("tab_guest_throttling_failure", 42);
         yield* manager.setMainWindow({
+          on: vi.fn(),
+          off: vi.fn(),
+          isVisible: () => true,
+          isMinimized: () => false,
           isDestroyed: () => false,
           once: vi.fn(),
           webContents: { setBackgroundThrottling: setWindowBackgroundThrottling },
@@ -3166,6 +3186,10 @@ describe("PreviewManager", () => {
 
         const failedReplacement = yield* Effect.exit(
           manager.setMainWindow({
+            on: vi.fn(),
+            off: vi.fn(),
+            isVisible: () => true,
+            isMinimized: () => false,
             isDestroyed: () => false,
             once: vi.fn(),
             webContents: { setBackgroundThrottling },
@@ -3265,6 +3289,10 @@ describe("PreviewManager", () => {
         yield* manager.createTab("tab_replaced_window_close");
         yield* manager.registerWebview("tab_replaced_window_close", 42);
         yield* manager.setMainWindow({
+          on: vi.fn(),
+          off: vi.fn(),
+          isVisible: () => true,
+          isMinimized: () => false,
           isDestroyed: () => false,
           once: vi.fn((event: string, listener: () => void) => {
             if (event === "closed") closeFirstWindow = listener;
@@ -3272,6 +3300,10 @@ describe("PreviewManager", () => {
           webContents: { setBackgroundThrottling: firstWindowThrottling },
         } as never);
         yield* manager.setMainWindow({
+          on: vi.fn(),
+          off: vi.fn(),
+          isVisible: () => true,
+          isMinimized: () => false,
           isDestroyed: () => false,
           once: vi.fn(),
           webContents: { setBackgroundThrottling: replacementWindowThrottling },
@@ -3311,6 +3343,10 @@ describe("PreviewManager", () => {
         yield* manager.registerWebview("tab_window_close_recording", 42);
         yield* manager.registerWebview("tab_window_close_race", 43);
         yield* manager.setMainWindow({
+          on: vi.fn(),
+          off: vi.fn(),
+          isVisible: () => true,
+          isMinimized: () => false,
           isDestroyed: () => false,
           once: vi.fn((event: string, listener: () => void) => {
             if (event === "closed") closeMainWindow = listener;
@@ -3337,6 +3373,10 @@ describe("PreviewManager", () => {
         expect(grants).toEqual([{}]);
 
         yield* manager.setMainWindow({
+          on: vi.fn(),
+          off: vi.fn(),
+          isVisible: () => true,
+          isMinimized: () => false,
           isDestroyed: () => false,
           once: vi.fn(),
           webContents: { setBackgroundThrottling: replacementWindowThrottling },
@@ -3372,6 +3412,10 @@ describe("PreviewManager", () => {
         yield* manager.createTab("tab_window_close_warmup");
         yield* manager.registerWebview("tab_window_close_warmup", 42);
         yield* manager.setMainWindow({
+          on: vi.fn(),
+          off: vi.fn(),
+          isVisible: () => true,
+          isMinimized: () => false,
           isDestroyed: () => false,
           once: vi.fn((event: string, listener: () => void) => {
             if (event === "closed") closeMainWindow = listener;
@@ -4084,6 +4128,10 @@ describe("PreviewManager", () => {
         const pictureInPictureListeners = new Map<string, () => void>();
         const pictureInPictureSend = vi.fn();
         const pictureInPictureWindow = {
+          on: vi.fn(),
+          off: vi.fn(),
+          isVisible: () => true,
+          isMinimized: () => false,
           isDestroyed: vi.fn(() => false),
           once: vi.fn((event: string, listener: () => void) => {
             pictureInPictureListeners.set(event, listener);
@@ -4111,6 +4159,10 @@ describe("PreviewManager", () => {
         const recordingFrames: DesktopPreviewRecordingFrame[] = [];
 
         yield* manager.setMainWindow({
+          on: vi.fn(),
+          off: vi.fn(),
+          isVisible: () => true,
+          isMinimized: () => false,
           isDestroyed: () => false,
           once: vi.fn(),
           webContents: mainWindowWebContents,

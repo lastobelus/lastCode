@@ -561,21 +561,31 @@ describe("pull request detail decoding", () => {
   const activityJson = (raw: Record<string, unknown>) =>
     JSON.stringify({
       data: {
+        viewer: { login: "viewer" },
         repository: {
           pullRequest: {
             author: null,
             comments: {
+              totalCount:
+                raw["commentCount"] ??
+                (raw["comments"] as ReadonlyArray<unknown> | undefined)?.length ??
+                0,
               pageInfo: { hasNextPage: false, endCursor: null },
               nodes: ((raw["comments"] ?? []) as ReadonlyArray<Record<string, unknown>>).map(
                 (comment) => ({
                   lastEditedAt: null,
                   url: "https://github.com/c",
                   author: null,
+                  reactionGroups: [],
                   ...comment,
                 }),
               ),
             },
             reviews: {
+              totalCount:
+                raw["reviewCount"] ??
+                (raw["reviews"] as ReadonlyArray<unknown> | undefined)?.length ??
+                0,
               pageInfo: { hasNextPage: false, endCursor: null },
               nodes: ((raw["reviews"] ?? []) as ReadonlyArray<Record<string, unknown>>).map(
                 (review) => ({
@@ -762,6 +772,59 @@ describe("pull request detail decoding", () => {
     const detail = expectSuccess(activity(JSON.parse(detailJson) as Record<string, unknown>));
     expect(detail.comments.map((comment) => comment.id)).toEqual(["r1", "c1", "r2"]);
     expect(detail.comments.at(-1)?.reviewState).toBe("APPROVED");
+  });
+
+  it("reads issue-comment reactions and edit times with activity, excluding the viewer's name", () => {
+    const editedAt = "2026-07-06T00:00:00Z";
+    const page = expectSuccess(
+      decodePullRequestActivityJson(
+        activityJson({
+          comments: [
+            {
+              id: "request",
+              body: "@codex review",
+              createdAt: "2026-07-04T00:00:00Z",
+              lastEditedAt: editedAt,
+              reactionGroups: [
+                {
+                  content: "THUMBS_UP",
+                  viewerHasReacted: true,
+                  reactors: {
+                    totalCount: 2,
+                    nodes: [user("VIEWER"), { __typename: "Bot", login: "codex[bot]" }],
+                  },
+                },
+              ],
+            },
+          ],
+        }),
+      ),
+    );
+    expect(page.remarks[0]).toMatchObject({
+      id: "request",
+      editedAt,
+      reactions: [
+        { content: "thumbs-up", count: 2, actors: ["codex[bot]"], viewerHasReacted: true },
+      ],
+    });
+  });
+
+  it("counts raw activity before dropping bodyless reviews and keeps the full connection totals", () => {
+    const page = expectSuccess(
+      decodePullRequestActivityJson(
+        activityJson({
+          comments: [{ id: "c1", body: "latest", createdAt: "2026-07-04T00:00:00Z" }],
+          commentCount: 1001,
+          reviews: [
+            { id: "r1", body: "", state: "COMMENTED", submittedAt: "2026-07-04T00:00:00Z" },
+          ],
+          reviewCount: 3,
+        }),
+      ),
+    );
+    expect(page.remarks.map(({ id }) => id)).toEqual(["c1"]);
+    expect(page.rawCount).toBe(2);
+    expect(page.totalCount).toBe(1004);
   });
 
   it("keeps every attributed commit author, including an unlinked signature", () => {
@@ -1598,28 +1661,24 @@ describe("review thread decoding", () => {
     expect(threads).toHaveLength(1);
   });
 
-  it("reads edit times for issue comments and reviews without using reaction updates", () => {
+  it("reads review edit times without using reaction updates", () => {
     const editedAt = "2026-10-02T12:06:00Z";
     const result = expectSuccess(
       decodeReviewThreadsJson(
         threadsJson([], {
-          comments: {
+          reviews: {
             nodes: [
-              { id: "edited", lastEditedAt: editedAt },
+              { id: "review", lastEditedAt: editedAt },
               { id: "reaction-only", lastEditedAt: null, updatedAt: editedAt },
             ],
           },
-          reviews: { nodes: [{ id: "review", lastEditedAt: editedAt }] },
         }),
       ),
     );
-    expect([...result.editedAtById]).toEqual([
-      ["edited", editedAt],
-      ["review", editedAt],
-    ]);
+    expect([...result.editedAtById]).toEqual([["review", editedAt]]);
   });
 
-  it("puts an issue comment's and a review's reactions in reactionsById, and the pull request's own in reactions", () => {
+  it("puts a review's reactions in reactionsById, and the pull request's own in reactions", () => {
     const result = expectSuccess(
       decodeReviewThreadsJson(
         threadsJson([], {
@@ -1630,19 +1689,6 @@ describe("review thread decoding", () => {
               reactors: { totalCount: 1, nodes: [{ login: "bilal" }] },
             },
           ],
-          comments: {
-            nodes: [
-              {
-                id: "c1",
-                reactionGroups: [
-                  {
-                    content: "THUMBS_UP",
-                    reactors: { totalCount: 1, nodes: [{ login: "julius" }] },
-                  },
-                ],
-              },
-            ],
-          },
           reviews: {
             nodes: [
               {
@@ -1661,7 +1707,6 @@ describe("review thread decoding", () => {
       { content: "heart", count: 1, actors: ["bilal"], viewerHasReacted: true },
     ]);
     expect([...result.reactionsById]).toEqual([
-      ["c1", [{ content: "thumbs-up", count: 1, actors: ["julius"], viewerHasReacted: false }]],
       ["r1", [{ content: "eyes", count: 1, actors: ["hubot"], viewerHasReacted: false }]],
     ]);
   });
@@ -1720,10 +1765,9 @@ describe("ReviewThreads", () => {
     expect(Number(match[1]) * Number(comments[1])).toBeLessThanOrEqual(1_000);
   });
 
-  it("asks for reactionGroups on the pull request itself, its comments, its reviews and each thread's comments", () => {
-    // The fragment is spread once per subject: the pull request, its comments, its reviews, and
-    // each thread's comments (through `ThreadComment`).
-    expect(ReviewThreads.document.match(/\.\.\.Reactions\b/g)).toHaveLength(4);
+  it("asks for reactionGroups on the pull request itself, its reviews and each thread's comments", () => {
+    // Issue-comment reactions ride with the paginated activity read.
+    expect(ReviewThreads.document.match(/\.\.\.Reactions\b/g)).toHaveLength(3);
     expect(ReviewThreads.document.match(/reactionGroups/g)).toHaveLength(1);
     // The reviews connection is new: only reactions were ever wanted off it.
     expect(ReviewThreads.document).toContain("reviews(first:");
@@ -2313,17 +2357,45 @@ describe("batched pull request summaries", () => {
 });
 
 describe("pull request watch fingerprints", () => {
+  it("asks for bounded recent comments and named reactors", () => {
+    const document = PullRequestWatchFingerprint.document.replace(/[\s,]+/g, "");
+    expect(document).toContain("comments(first:100orderBy:{field:UPDATED_ATdirection:DESC})");
+    expect(document).toContain("nodes{idlastEditedAtreactionGroups{contentreactors(first:10)");
+    for (const kind of ["User", "Bot", "Organization", "Mannequin"]) {
+      expect(document).toContain(`...on${kind}{login}`);
+    }
+  });
+
   it("moves status with checks and remarks with comments, each without the other", () => {
     const pullRequest = (input: {
       readonly running: number;
       readonly failed: number;
       readonly commentEditedAt: string | null;
       readonly reviews: number;
+      readonly reactions?: number;
+      readonly reactors?: ReadonlyArray<string>;
     }) => ({
       state: "OPEN",
       mergeable: "MERGEABLE",
       headRefOid: "abc123",
-      comments: { totalCount: 1, nodes: [{ lastEditedAt: input.commentEditedAt }] },
+      comments: {
+        totalCount: 1,
+        nodes: [
+          {
+            id: "comment-1",
+            lastEditedAt: input.commentEditedAt,
+            reactionGroups: [
+              {
+                content: "THUMBS_UP",
+                reactors: {
+                  totalCount: input.reactions ?? 0,
+                  nodes: (input.reactors ?? []).map((login) => ({ __typename: "User", login })),
+                },
+              },
+            ],
+          },
+        ],
+      },
       reviews: { totalCount: input.reviews, nodes: [] },
       reviewThreads: { totalCount: 0 },
       commits: {
@@ -2352,6 +2424,31 @@ describe("pull request watch fingerprints", () => {
     const checkFinished = fingerprint({ ...base, running: 1, failed: 1 });
     const summaryEdited = fingerprint({ ...base, commentEditedAt: "2026-10-05T23:47:43Z" });
     const replied = fingerprint({ ...base, reviews: 2 });
+    const reacted = fingerprint({ ...base, reactions: 1 });
+    expect(reacted.remarks).not.toBe(before.remarks);
+    expect(reacted.status).toBe(before.status);
+    expect(fingerprint({ ...base, reactions: 0 }).remarks).toBe(before.remarks);
+
+    const namedReaction = { ...base, reactions: 2, reactors: ["maintainer", "reviewer"] };
+    const named = fingerprint(namedReaction);
+    const actorReplaced = fingerprint({
+      ...namedReaction,
+      reactors: ["maintainer", "codex[bot]"],
+    });
+    expect(actorReplaced.remarks).not.toBe(named.remarks);
+    expect(actorReplaced.status).toBe(named.status);
+    expect(fingerprint({ ...namedReaction, reactors: ["reviewer", "maintainer"] }).remarks).toBe(
+      named.remarks,
+    );
+    // Counts still reveal reactions outside the bounded actor page.
+    const bounded = {
+      ...base,
+      reactions: 11,
+      reactors: Array.from({ length: 10 }, (_, index) => `reviewer-${index}`),
+    };
+    expect(fingerprint({ ...bounded, reactions: 12 }).remarks).not.toBe(
+      fingerprint(bounded).remarks,
+    );
 
     expect(checkFinished.status).not.toBe(before.status);
     expect(checkFinished.remarks).toBe(before.remarks);
