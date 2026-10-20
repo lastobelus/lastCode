@@ -10,13 +10,8 @@ import {
   parseThreadAnnotationSubmission,
   saveThreadAnnotationSubmission,
 } from "./thread-annotation/threadAnnotationSubmission";
-import { RotateCcwClockIcon } from "./icons/RotateCcwClockIcon";
 import { CircleAlertIcon, StickyNoteIcon } from "lucide-react";
-import {
-  ComposerActionResumeTitle,
-  ComposerActionResumeDescription,
-  ComposerActionResumeActions,
-} from "./chat/ComposerActionResume";
+import { useActionResumeBanners } from "./chat/useActionResumeBanners";
 import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
 import {
   isThreadWokeUnseen,
@@ -1157,14 +1152,6 @@ export default function ChatView(props: ChatViewProps) {
     },
   );
   const forkThreadFromRun = useAtomCommand(threadEnvironment.forkFromRun, {
-    reportFailure: false,
-  });
-  // Action cancellation keeps output history; normal terminal closing deletes it.
-  const closeTerminalMutation = useAtomCommand(terminalEnvironment.close, { reportFailure: false });
-  const resumeActionFollowUp = useOrchestrationCommand(threadEnvironment.resumeAction, {
-    reportFailure: false,
-  });
-  const discardActionFollowUp = useOrchestrationCommand(threadEnvironment.discardAction, {
     reportFailure: false,
   });
   const openPreview = useAtomCommand(previewEnvironment.open, { reportFailure: false });
@@ -5461,173 +5448,16 @@ export default function ChatView(props: ChatViewProps) {
       ),
     };
   })() as ComposerBannerStackItem | null;
-  const [cancellingResumableActionRunId, setCancellingResumableActionRunId] = useState<
-    string | null
-  >(null);
-  const runningResumableAction =
-    activeThreadShell?.actionResume?.outcome === "running" ? activeThreadShell.actionResume : null;
-  const handleOpenResumableActionTerminal = () => {
-    if (
-      activeThreadRef === null ||
-      runningResumableAction === null ||
-      !readEnvironmentScope(activeThreadRef.environmentId, AuthTerminalReadScope)
-    )
-      return;
-    storeEnsureTerminal(activeThreadRef, runningResumableAction.terminalId, {
-      open: true,
-      active: true,
-    });
-    setTerminalFocusRequestId((value) => value + 1);
-  };
-  const handleOpenResumableActionTerminalStable = useStableCallback(
-    handleOpenResumableActionTerminal,
-  );
-  const handleCancelResumableAction = async () => {
-    if (activeThreadRef === null || runningResumableAction === null || !hasTerminalWriteAccess())
-      return;
-    const runId = runningResumableAction.runId;
-    if (cancellingResumableActionRunId === runId) return;
-    setCancellingResumableActionRunId(runId);
-    await (async () => {
-      const result = await closeTerminalMutation({
-        environmentId: activeThreadRef.environmentId,
-        input: {
-          threadId: activeThreadRef.threadId,
-          terminalId: runningResumableAction.terminalId,
-        },
-      });
-      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-        const error = squashAtomCommandFailure(result);
-        setThreadError(
-          activeThreadRef.threadId,
-          error instanceof Error ? error.message : "Failed to cancel the running Action.",
-        );
-      }
-    })().finally(() => {
-      setCancellingResumableActionRunId((current) => (current === runId ? null : current));
-    });
-  };
-  const handleCancelResumableActionStable = useStableCallback(handleCancelResumableAction);
-  const runningResumableActionBannerItem = (() => {
-    if (runningResumableAction === null) return null;
-    return {
-      id: `action-running:${runningResumableAction.runId}`,
-      priority: "activity",
-      variant: runningResumableAction.progress?.state === "working" ? "info" : "warning",
-      icon: <RotateCcwClockIcon aria-hidden className="size-4" />,
-      title: <ComposerActionResumeTitle action={runningResumableAction} />,
-      description: <ComposerActionResumeDescription action={runningResumableAction} />,
-      actions: canOperateTerminal ? (
-        <ComposerActionResumeActions
-          action={runningResumableAction}
-          cancelling={cancellingResumableActionRunId === runningResumableAction.runId}
-          onCancel={() => void handleCancelResumableActionStable()}
-          onOpenTerminal={handleOpenResumableActionTerminalStable}
-        />
-      ) : canReadTerminal ? (
-        <Button size="xs" variant="ghost" onClick={handleOpenResumableActionTerminal}>
-          Open terminal
-        </Button>
-      ) : undefined,
-    };
-  })() as ComposerBannerStackItem | null;
-  const interruptedAction =
-    activeThreadShell?.actionResume?.delivery === "available"
-      ? activeThreadShell.actionResume
-      : null;
-  const interruptedActionKey = interruptedAction
-    ? `${routeThreadKey}:${interruptedAction.runId}`
-    : null;
-  const [pendingInterruptedAction, setPendingInterruptedAction] = useState<{
-    key: string;
-    operation: "resume" | "discard";
-  } | null>(null);
-  if (pendingInterruptedAction !== null && pendingInterruptedAction.key !== interruptedActionKey) {
-    setPendingInterruptedAction(null);
-  }
-  const isResumingInterruptedAction =
-    pendingInterruptedAction?.key === interruptedActionKey &&
-    pendingInterruptedAction?.operation === "resume";
-  const isDiscardingInterruptedAction =
-    pendingInterruptedAction?.key === interruptedActionKey &&
-    pendingInterruptedAction?.operation === "discard";
-  const handleResumeInterruptedAction = async () => {
-    if (!activeThreadRef || interruptedActionKey === null) return;
-    setPendingInterruptedAction({ key: interruptedActionKey, operation: "resume" });
-    const result = await resumeActionFollowUp({
-      environmentId: activeThreadRef.environmentId,
-      input: { threadId: activeThreadRef.threadId },
-    });
-    if (result._tag === "Failure") {
-      setPendingInterruptedAction((current) =>
-        current?.key === interruptedActionKey && current.operation === "resume" ? null : current,
-      );
-      if (!isAtomCommandInterrupted(result)) {
-        const error = squashAtomCommandFailure(result);
-        setThreadError(
-          activeThreadRef.threadId,
-          error instanceof Error ? error.message : "Failed to resume the interrupted Action.",
-        );
-      }
-    }
-  };
-  const handleResumeInterruptedActionStable = useStableCallback(handleResumeInterruptedAction);
-  const handleDiscardInterruptedAction = async () => {
-    if (!activeThreadRef || interruptedActionKey === null) return;
-    setPendingInterruptedAction({ key: interruptedActionKey, operation: "discard" });
-    const result = await discardActionFollowUp({
-      environmentId: activeThreadRef.environmentId,
-      input: { threadId: activeThreadRef.threadId },
-    });
-    if (result._tag === "Failure") {
-      setPendingInterruptedAction((current) =>
-        current?.key === interruptedActionKey && current.operation === "discard" ? null : current,
-      );
-      if (!isAtomCommandInterrupted(result)) {
-        const error = squashAtomCommandFailure(result);
-        setThreadError(
-          activeThreadRef.threadId,
-          error instanceof Error ? error.message : "Failed to discard the interrupted Action.",
-        );
-      }
-    }
-  };
-  const handleDiscardInterruptedActionStable = useStableCallback(handleDiscardInterruptedAction);
-  const interruptedActionBannerItem = (() => {
-    if (interruptedAction === null) return null;
-    return {
-      id: `action-interrupted:${interruptedAction.runId}`,
-      variant: "warning",
-      icon: <CircleAlertIcon />,
-      title: `${interruptedAction.actionName} was interrupted`,
-      description:
-        "LastCode did not restart the command or wake the agent. Resume only the agent follow-up when you are ready.",
-      actions: (
-        <div className="flex items-center gap-1.5">
-          <Button
-            size="xs"
-            variant="ghost"
-            disabled={
-              !canOperateThread || isResumingInterruptedAction || isDiscardingInterruptedAction
-            }
-            onClick={() => void handleDiscardInterruptedActionStable()}
-          >
-            {isDiscardingInterruptedAction ? "Discarding..." : "Discard"}
-          </Button>
-          <Button
-            size="xs"
-            variant="outline"
-            disabled={
-              !canOperateThread || isResumingInterruptedAction || isDiscardingInterruptedAction
-            }
-            onClick={() => void handleResumeInterruptedActionStable()}
-          >
-            {isResumingInterruptedAction ? "Resuming..." : "Resume agent"}
-          </Button>
-        </div>
-      ),
-    };
-  })() as ComposerBannerStackItem | null;
+  const {
+    runningBanner: runningResumableActionBannerItem,
+    interruptedBanner: interruptedActionBannerItem,
+  } = useActionResumeBanners({
+    routeThreadRef,
+    threadRef: activeThreadRef,
+    action: activeThreadShell?.actionResume ?? null,
+    onRequestTerminalFocus: () => setTerminalFocusRequestId((value) => value + 1),
+    onThreadError: setThreadError,
+  });
   // The relative times read the clock; nowMinute re-renders them on the minute.
   const snoozedUntil = activeThreadShell?.snoozedUntil ?? null;
   const settledAt = activeThreadShell?.settledAt ?? null;
