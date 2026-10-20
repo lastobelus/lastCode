@@ -13,7 +13,6 @@ import {
   ThreadAnnotationActions,
   useThreadAnnotationBodyPending,
 } from "../thread-annotation/ThreadAnnotation";
-import { parseActionResumeFollowUp } from "@t3tools/shared/actionResume";
 import { useChatCanvas } from "./ChatCanvasContext";
 import { WorkLogBlock, WorkLogButton, WorkLogDetails, WorkLogList, WorkLogRow } from "./WorkLog";
 import { PullRequestGlyph } from "../pullRequest/pullRequestIcons";

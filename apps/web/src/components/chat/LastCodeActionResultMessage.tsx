@@ -1,9 +1,11 @@
+import type { ReactNode } from "react";
 import type { ScopedThreadRef, ServerProviderSkill } from "@t3tools/contracts";
 import {
   actionResultDetails,
   actionResultPresentation,
   parseActionResumeFollowUp,
   type ActionResultDetail,
+  type ActionResumeFollowUp,
 } from "@t3tools/shared/actionResume";
 import {
   BotIcon,
@@ -50,8 +52,7 @@ export function LastCodeActionResultMessage({
   }
   const presentation = actionResultPresentation(followUp);
   const details = actionResultDetails(followUp.report);
-  const rawOutput = followUp.detailedOutputAvailable ? null : followUp.output;
-  const expandable = rawOutput !== null || details.length > 0;
+  const expandable = !followUp.detailedOutputAvailable || details.length > 0;
   const { tone, icon: OutcomeIcon } = outcomeStyles[presentation.outcome];
   const heading = (
     <>
@@ -63,27 +64,11 @@ export function LastCodeActionResultMessage({
   );
   return (
     <div className={cn("mx-1 overflow-hidden rounded-lg border", tone)}>
-      {expandable ? (
-        <button
-          type="button"
-          aria-expanded={expanded}
-          className="flex w-full min-w-0 items-center gap-1.5 px-3 pt-2.5 text-left text-xs font-medium"
-          onClick={onToggle}
-        >
-          {heading}
-          {expanded ? (
-            <ChevronDownIcon aria-hidden className="size-3.5 shrink-0" />
-          ) : (
-            <ChevronRightIcon aria-hidden className="size-3.5 shrink-0" />
-          )}
-        </button>
-      ) : (
-        <div className="flex min-w-0 items-center gap-1.5 px-3 pt-2.5 text-left text-xs font-medium">
-          {heading}
-        </div>
-      )}
+      <ActionResultHeading expandable={expandable} expanded={expanded} onToggle={onToggle}>
+        {heading}
+      </ActionResultHeading>
       <ActionResultBody
-        rawOutput={rawOutput}
+        followUp={followUp}
         summary={presentation.summary}
         details={details}
         expanded={expanded}
@@ -92,21 +77,57 @@ export function LastCodeActionResultMessage({
   );
 }
 
+function ActionResultHeading({
+  expandable,
+  expanded,
+  onToggle,
+  children,
+}: {
+  expandable: boolean;
+  expanded: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <>
+      {expandable ? (
+        <button
+          type="button"
+          aria-expanded={expanded}
+          className="flex w-full min-w-0 items-center gap-1.5 px-3 pt-2.5 text-left text-xs font-medium"
+          onClick={onToggle}
+        >
+          {children}
+          {expanded ? (
+            <ChevronDownIcon aria-hidden className="size-3.5 shrink-0" />
+          ) : (
+            <ChevronRightIcon aria-hidden className="size-3.5 shrink-0" />
+          )}
+        </button>
+      ) : (
+        <div className="flex min-w-0 items-center gap-1.5 px-3 pt-2.5 text-left text-xs font-medium">
+          {children}
+        </div>
+      )}
+    </>
+  );
+}
+
 function ActionResultBody({
-  rawOutput,
+  followUp,
   summary,
   details,
   expanded,
 }: {
-  rawOutput: string | null;
+  followUp: ActionResumeFollowUp;
   summary: string;
   details: ReadonlyArray<ActionResultDetail>;
   expanded: boolean;
 }) {
-  if (rawOutput !== null && expanded) {
+  if (!followUp.detailedOutputAvailable && expanded) {
     return (
       <pre className="mx-2.5 mb-2.5 mt-2 max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md border border-black/10 bg-code px-3 py-2.5 font-mono text-xs leading-5 text-code-foreground shadow-inner dark:border-white/10">
-        {rawOutput}
+        {followUp.output}
       </pre>
     );
   }
@@ -114,7 +135,7 @@ function ActionResultBody({
     <div className="px-3 pb-2.5 pt-1">
       <p className="truncate text-sm text-foreground/90">{summary}</p>
       {details.length > 0 && expanded ? <ActionDetails details={details} /> : null}
-      {rawOutput === null && details.length === 0 ? (
+      {followUp.detailedOutputAvailable && details.length === 0 ? (
         <p className="mt-0.5 text-xs text-muted-foreground">
           Detailed output retained in the Action terminal.
         </p>
