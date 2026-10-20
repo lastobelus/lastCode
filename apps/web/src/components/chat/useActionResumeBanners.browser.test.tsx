@@ -325,6 +325,24 @@ describe("interrupted Action delivery", () => {
     await settle(second, failure());
     expect(button("Discard").disabled).toBe(false);
   });
+  it("keeps the latest operation pending when both controls dispatch before render", async () => {
+    const resume = deferred();
+    const discard = deferred();
+    state.resume.mockReturnValueOnce(resume.promise);
+    state.discard.mockReturnValueOnce(discard.promise);
+    await render({ action: interrupted });
+    // Existing behavior has no synchronous lock; disabled controls take effect after render.
+    await act(async () => {
+      button("Resume agent").click();
+      button("Discard").click();
+    });
+    expect(state.resume).toHaveBeenCalledOnce();
+    expect(state.discard).toHaveBeenCalledOnce();
+    await settle(resume, failure());
+    expect(button("Discarding...").disabled).toBe(true);
+    await settle(discard, failure());
+    expect(button("Resume agent").disabled).toBe(false);
+  });
   it("resets on removal and stays inert without a thread", async () => {
     await render({ action: interrupted, thread: null });
     expect(button("Resume agent").disabled).toBe(true);

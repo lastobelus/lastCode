@@ -23,6 +23,8 @@ import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import { useTerminalUiStateStore } from "../../terminalUiStateStore";
 import { interruptedActionBanner, runningActionBanner } from "./ComposerActionResume";
 
+type ActionDeliveryOperation = "resume" | "discard";
+
 interface ActionResumeBannerInput {
   readonly routeThreadRef: ScopedThreadRef;
   readonly threadRef: ScopedThreadRef | null;
@@ -112,23 +114,23 @@ function useInterruptedActionDelivery({
   );
   const interrupted = action?.delivery === "available" ? action : null;
   const key = interrupted ? `${scopedThreadKey(routeThreadRef)}:${interrupted.runId}` : null;
-  const [pending, setPending] = useState<{ key: string; operation: "resume" | "discard" } | null>(
-    null,
-  );
+  const [pending, setPending] = useState<{
+    key: string;
+    operation: ActionDeliveryOperation;
+  } | null>(null);
   if (pending !== null && pending.key !== key) setPending(null);
 
-  const deliver = useStableCallback(async (operation: "resume" | "discard") => {
+  async function deliver(operation: ActionDeliveryOperation) {
     if (threadRef === null || key === null) return;
-    setPending({ key, operation });
+    const attempt = { key, operation };
+    setPending(attempt);
     const request = {
       environmentId: threadRef.environmentId,
       input: { threadId: threadRef.threadId },
     };
     const result = await (operation === "resume" ? resume(request) : discard(request));
     if (result._tag === "Failure") {
-      setPending((current) =>
-        current?.key === key && current.operation === operation ? null : current,
-      );
+      setPending((current) => (current === attempt ? null : current));
     }
     reportActionFailure(
       result,
@@ -136,13 +138,14 @@ function useInterruptedActionDelivery({
       onThreadError,
       `Failed to ${operation} the interrupted Action.`,
     );
-  });
+  }
+  const deliverStable = useStableCallback(deliver);
   return {
     action: interrupted,
     canOperate,
     pending: pending?.key === key ? pending.operation : null,
-    onResume: () => void deliver("resume"),
-    onDiscard: () => void deliver("discard"),
+    onResume: () => void deliverStable("resume"),
+    onDiscard: () => void deliverStable("discard"),
   };
 }
 
