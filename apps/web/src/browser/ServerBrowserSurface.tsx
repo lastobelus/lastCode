@@ -43,9 +43,9 @@ import { refreshPreviewStreamAccess, usePreviewStreamAccess } from "~/state/prev
 import { observeResize } from "~/lib/observeResize";
 
 export interface ServerBrowserHandle {
-  readonly navigate: (url: string) => void;
+  readonly navigate: (url: string) => boolean;
   readonly history: (delta: -1 | 1) => void;
-  readonly reload: (options?: { readonly ignoreCache?: boolean }) => void;
+  readonly reload: (options?: { readonly ignoreCache?: boolean }) => boolean;
   readonly viewport: (setting: PreviewViewportSetting) => void;
   readonly canvas: () => HTMLCanvasElement | null;
 }
@@ -220,7 +220,7 @@ export function ServerBrowserSurface(props: {
   // These read only refs, so each is cached once. The stream effect keys on
   // clearInput and would reconnect if it changed.
   const send = (input: PreviewStreamInput) => {
-    clientRef.current?.send(input);
+    return clientRef.current?.send(input) ?? false;
   };
 
   const clearInput = () => {

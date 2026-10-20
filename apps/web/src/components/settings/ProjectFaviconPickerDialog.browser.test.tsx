@@ -31,6 +31,7 @@ vi.mock(import("~/state/filesystem"), async (original) => ({
   ...(await original()),
   useFilesystemReadAccess: () => ({
     canReadFiles: state.canReadFiles,
+    canReadThreadFiles: state.canReadFiles,
     isPending: false,
     error: null,
   }),

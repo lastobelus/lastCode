@@ -34,7 +34,7 @@ vi.mock("electron", () => ({
     setDesktopName: setDesktopNameMock,
     getVersion: () => "0.0.37",
     isPackaged: true,
-    getAppPath: () => "/tmp/.mount_T3/resources/app.asar",
+    getAppPath: () => "/tmp/.mount_LastCode/resources/app.asar",
     commandLine: {
       appendSwitch: appendSwitchMock,
       getSwitchValue: getSwitchValueMock,
@@ -59,9 +59,9 @@ vi.mock("node:child_process", () => ({
 
 import * as DesktopPreReadyPlatform from "./DesktopPreReadyPlatform.ts";
 
-const iconSource = "/tmp/.mount_T3/resources/app.asar/apps/desktop/prod-resources/icon.png";
-const iconPath = "/xdg/icons/com.t3tools.T3Code.desktop.png";
-const desktopEntryPath = "/xdg/applications/com.t3tools.T3Code.desktop";
+const iconSource = "/tmp/.mount_LastCode/resources/app.asar/apps/desktop/prod-resources/icon.png";
+const iconPath = "/xdg/icons/lastcode.desktop.png";
+const desktopEntryPath = "/xdg/applications/lastcode.desktop";
 const iconBytes = Buffer.from([0x89, 0x50, 0x00, 0xff, 0x80, 0x0a]);
 
 describe("DesktopPreReadyPlatform", () => {
@@ -244,14 +244,11 @@ describe("DesktopPreReadyPlatform", () => {
           ),
         );
         const identity = yield* Effect.promise(() => portalIdentity);
-        assert.equal(identity.desktopName, "com.t3tools.T3Code.desktop");
+        assert.equal(identity.desktopName, "lastcode.desktop");
         assert.include(identity.desktopEntry ?? "", "Exec=/Applications/current.AppImage %U");
-        assert.include(identity.desktopEntry ?? "", "Name=T3 Code (Beta)");
-        assert.include(identity.desktopEntry ?? "", "MimeType=x-scheme-handler/t3code;");
-        assert.include(
-          identity.desktopEntry ?? "",
-          "Icon=/xdg/icons/com.t3tools.T3Code.desktop.png",
-        );
+        assert.include(identity.desktopEntry ?? "", "Name=LastCode (Beta)");
+        assert.include(identity.desktopEntry ?? "", "MimeType=x-scheme-handler/lastcode;");
+        assert.include(identity.desktopEntry ?? "", "Icon=/xdg/icons/lastcode.desktop.png");
         assert.isTrue(identity.iconInstalled);
         assert.deepEqual(
           readFileSyncMock.mock.calls.filter(([path]) => path === iconSource),
@@ -327,7 +324,7 @@ describe("DesktopPreReadyPlatform", () => {
       assert.equal(writeFileSyncMock.mock.calls.length, 1);
       const [path, contents] = writeFileSyncMock.mock.calls[0]!;
       assert.equal(path, desktopEntryPath);
-      assert.include(contents, "MimeType=x-scheme-handler/t3code;");
+      assert.include(contents, "MimeType=x-scheme-handler/lastcode;");
       assert.include(contents, `Icon=${iconPath}`);
       assert.equal(setDesktopNameMock.mock.calls.length, 1);
     }).pipe(

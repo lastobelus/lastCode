@@ -4,6 +4,7 @@ import {
 } from "@t3tools/client-runtime/preview-hosting";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import {
+  AuthFilesystemReadScope,
   EnvironmentId,
   ThreadId,
   type ChatFileAttachment,
@@ -21,6 +22,9 @@ import {
 } from "./handoffsStore";
 import { selectThreadRightPanelState, useRightPanelStore } from "~/rightPanelStore";
 import { applyPreviewServerSnapshot, resetPreviewStateForTests } from "~/previewStateStore";
+import { toastManager } from "~/components/ui/toast";
+
+const filesystem = vi.hoisted(() => ({ readScope: vi.fn() }));
 
 vi.mock("~/state/entities", () => ({
   readThreadShell: () => ({ projectId: "project", worktreePath: "/workspace" }),
@@ -30,6 +34,7 @@ vi.mock("~/state/entities", () => ({
 }));
 vi.mock("~/state/session", async (importOriginal) => ({
   ...(await importOriginal<typeof import("~/state/session")>()),
+  readEnvironmentScope: filesystem.readScope,
   readPreparedConnection: () => ({
     httpBaseUrl: "https://environment.example",
     target: {
@@ -102,6 +107,8 @@ const operations = () => ({
 });
 const panel = () => selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, ref);
 beforeEach(() => {
+  filesystem.readScope.mockReset().mockReturnValue(true);
+  vi.mocked(toastManager.add).mockClear();
   native.bridge = null;
   refresh.request.mockClear();
   hosting.prepare.mockReset();
@@ -166,6 +173,96 @@ describe("opening a saved handoff", () => {
     expect(panel().activeSurfaceId).toBe("browser:tab");
     expect(ops.openPreview).not.toHaveBeenCalled();
     expect(readThreadHandoffs(ref)).toHaveLength(1);
+  });
+  it.each(["/workspace/report.html", "/tmp/report.pdf"])(
+    "renews conversation access to %s on the destination environment",
+    async (path) => {
+      filesystem.readScope.mockReturnValue(false);
+      const destinationRef = {
+        environmentId: EnvironmentId.make("destination-env"),
+        threadId: ThreadId.make("destination-thread"),
+      };
+      const ops = operations();
+      const oldUrl = "https://environment.example/api/assets/expired";
+      const entry = recordHandoff(destinationRef, { kind: "file", path });
+      applyPreviewServerSnapshot(destinationRef, {
+        ...snapshot(oldUrl),
+        threadId: destinationRef.threadId,
+      });
+      rememberHandoffBrowser(destinationRef, "tab", entry.target, oldUrl);
+      ops.navigatePreview.mockImplementation(async ({ input }) =>
+        AsyncResult.success({ ...snapshot(input.url), threadId: destinationRef.threadId }),
+      );
+
+      await openHandoff(destinationRef, entry, ops);
+
+      expect(filesystem.readScope).toHaveBeenCalledExactlyOnceWith(
+        destinationRef.environmentId,
+        AuthFilesystemReadScope,
+      );
+      expect(ops.createAssetUrl).toHaveBeenCalledExactlyOnceWith({
+        environmentId: destinationRef.environmentId,
+        input: {
+          resource: {
+            _tag: "media-file",
+            threadId: destinationRef.threadId,
+            path,
+            linkedThreadFile: true,
+          },
+        },
+      });
+      expect(ops.navigatePreview).toHaveBeenCalledExactlyOnceWith({
+        environmentId: destinationRef.environmentId,
+        input: {
+          threadId: destinationRef.threadId,
+          tabId: "tab",
+          url: "https://environment.example/api/assets/fresh",
+        },
+      });
+      expect(handoffBrowserTarget(destinationRef, "tab")).toEqual({
+        target: entry.target,
+        url: "https://environment.example/api/assets/fresh",
+      });
+      expect(
+        selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, destinationRef)
+          .activeSurfaceId,
+      ).toBe("browser:tab");
+      expect(ops.openPreview).not.toHaveBeenCalled();
+      expect(toastManager.add).not.toHaveBeenCalled();
+    },
+  );
+  it("keeps an expired browser capability unused when fresh conversation access is denied", async () => {
+    filesystem.readScope.mockReturnValue(false);
+    const ops = operations();
+    ops.createAssetUrl.mockResolvedValueOnce(
+      AsyncResult.failure(Cause.fail(new Error("The file is no longer published"))),
+    );
+    const path = "/workspace/revoked.html";
+    const oldUrl = "https://environment.example/api/assets/expired";
+    const entry = recordHandoff(ref, { kind: "file", path });
+    applyPreviewServerSnapshot(ref, snapshot(oldUrl));
+    rememberHandoffBrowser(ref, "tab", entry.target, oldUrl);
+
+    await openHandoff(ref, entry, ops);
+
+    expect(ops.createAssetUrl).toHaveBeenCalledExactlyOnceWith({
+      environmentId: ref.environmentId,
+      input: {
+        resource: { _tag: "media-file", threadId: ref.threadId, path, linkedThreadFile: true },
+      },
+    });
+    expect(ops.navigatePreview).not.toHaveBeenCalled();
+    expect(ops.openPreview).not.toHaveBeenCalled();
+    expect(refresh.request).not.toHaveBeenCalled();
+    expect(panel().surfaces).toEqual([]);
+    expect(readThreadHandoffs(ref)).toEqual([entry]);
+    expect(handoffBrowserTarget(ref, "tab")).toEqual({ target: entry.target, url: oldUrl });
+    expect(toastManager.add).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "Unable to open handoff",
+        description: "The file is no longer published",
+      }),
+    );
   });
   it("renews a native browser through the desktop bridge", async () => {
     const ops = operations();
@@ -529,22 +626,26 @@ describe("opening a saved handoff", () => {
     });
     expect(ops.openPreview).not.toHaveBeenCalled();
   });
-  it("opens attachments by identity", async () => {
-    const ops = operations();
-    const attachment = {
-      id: "attachment",
-      name: "report.pdf",
-      mimeType: "application/pdf",
-      sizeBytes: 100,
-      type: "file",
-    } as ChatFileAttachment;
-    const entry = recordHandoff(ref, { kind: "attachment", attachment });
-    await openHandoff(ref, entry, ops);
-    expect(panel().surfaces[0]).toMatchObject({ kind: "file", attachment });
-    expect(ops.createAssetUrl.mock.calls[0]?.[0]).toMatchObject({
-      input: { resource: { _tag: "attachment", attachmentId: "attachment" } },
-    });
-  });
+  it.each([true, false])(
+    "opens attachments by identity with filesystem access %s",
+    async (canReadFiles) => {
+      filesystem.readScope.mockReturnValue(canReadFiles);
+      const ops = operations();
+      const attachment = {
+        id: "attachment",
+        name: "report.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: 100,
+        type: "file",
+      } as ChatFileAttachment;
+      const entry = recordHandoff(ref, { kind: "attachment", attachment });
+      await openHandoff(ref, entry, ops);
+      expect(panel().surfaces[0]).toMatchObject({ kind: "file", attachment });
+      expect(ops.createAssetUrl.mock.calls[0]?.[0]).toMatchObject({
+        input: { resource: { _tag: "attachment", attachmentId: "attachment" } },
+      });
+    },
+  );
   it("keeps missing files available for retry without moving recency", async () => {
     const ops = {
       ...operations(),

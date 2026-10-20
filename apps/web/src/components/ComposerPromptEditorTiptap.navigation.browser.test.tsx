@@ -8,7 +8,7 @@ import { serializeEditorDoc } from "~/composer-rich-text-doc";
 import { ComposerPromptEditor, type ComposerPromptEditorHandle } from "./ComposerPromptEditor";
 
 const draft =
-  "> **Assistant and reasoning text still save intermediate full snapshots**, using the existing 50 ms batching. Compaction still preserves their `turn-item.updated` events. [Code](/Users/yashsingh/p/projects/t3code/apps/server/src/orchestration-v2/ProjectionMaintenance.ts:235)";
+  "> **Assistant and reasoning text still save intermediate full snapshots**, using the existing 50 ms batching. Compaction still preserves their `turn-item.updated` events. [Code](/workspace/example/src/ProjectionMaintenance.ts:235)";
 
 let root: Root;
 let container: HTMLDivElement;
@@ -27,13 +27,13 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-async function mountEditor(value: string, richTextEnabled = true) {
+async function mountEditor(value: string, richTextEnabled = true, cursor = 0) {
   await act(async () =>
     root.render(
       <ComposerPromptEditor
         editorRef={createRef<ComposerPromptEditorHandle>()}
         value={value}
-        cursor={0}
+        cursor={cursor}
         richTextEnabled={richTextEnabled}
         contextRecords={new Map()}
         skills={[]}
@@ -56,36 +56,37 @@ function press(editor: Editor, key: string, options: KeyboardEventInit = {}) {
   return handled;
 }
 
-it("keeps Up before the opening bold marker in a quote, including while typing", async () => {
-  const editor = await mountEditor(draft);
-  const position = editor.state.selection.from;
-  await act(async () => {
-    editor.view.focus();
-    expect(press(editor, "ArrowUp")).toBe(true);
-    expect(editor.state.selection.from).toBe(position);
-    editor.view.updateState(editor.state);
-    const marker = editor.view.dom.querySelector(".composer-rich-marker");
-    const caret = window.getSelection()?.getRangeAt(0);
-    if (!marker || !caret) throw new Error("Caret or bold marker is missing");
-    const markerRange = document.createRange();
-    markerRange.selectNode(marker);
-    expect(caret.compareBoundaryPoints(Range.START_TO_START, markerRange)).toBeLessThanOrEqual(0);
-    expect(press(editor, "ArrowUp")).toBe(false);
-    editor.commands.insertContent("x");
-  });
-  expect(serializeEditorDoc(editor.state.doc).value).toBe(draft.replace("> **", "> x**"));
-});
+it.each([false, true])(
+  "leaves Up before source markers to the browser with preview %s",
+  async (preview) => {
+    const editor = await mountEditor(draft, preview, draft.indexOf("**"));
+    const position = editor.state.selection.from;
+    await act(async () => {
+      editor.view.focus();
+      expect(press(editor, "ArrowUp")).toBe(false);
+      expect(editor.state.selection.from).toBe(position);
+      editor.view.updateState(editor.state);
+      // Source markers have their own text positions; no styled-edge stop is needed.
+      expect(press(editor, "ArrowUp")).toBe(false);
+      editor.commands.insertContent("x");
+    });
+    expect(serializeEditorDoc(editor.state.doc).value).toBe(draft.replace("> **", "> x**"));
+  },
+);
 
-it("keeps Down after a closing marker, including while typing", async () => {
-  const editor = await mountEditor("> **bold**");
-  await act(async () => {
-    editor.view.dispatch(editor.state.tr.setSelection(TextSelection.atEnd(editor.state.doc)));
-    expect(press(editor, "ArrowDown")).toBe(true);
-    expect(press(editor, "ArrowDown")).toBe(false);
-    editor.commands.insertContent("x");
-  });
-  expect(serializeEditorDoc(editor.state.doc).value).toBe("> **bold**x");
-});
+it.each([false, true])(
+  "leaves Down after source markers to the browser with preview %s",
+  async (preview) => {
+    const editor = await mountEditor("> **bold**", preview);
+    await act(async () => {
+      editor.view.dispatch(editor.state.tr.setSelection(TextSelection.atEnd(editor.state.doc)));
+      expect(press(editor, "ArrowDown")).toBe(false);
+      expect(press(editor, "ArrowDown")).toBe(false);
+      editor.commands.insertContent("x");
+    });
+    expect(serializeEditorDoc(editor.state.doc).value).toBe("> **bold**x");
+  },
+);
 
 it("leaves vertical navigation between paragraphs to the browser", async () => {
   const editor = await mountEditor("**first**\n**second**");
@@ -101,7 +102,7 @@ it("leaves vertical navigation between paragraphs to the browser", async () => {
 it.each([{ shiftKey: true }, { altKey: true }, { ctrlKey: true }, { isComposing: true }])(
   "preserves modified Up behavior for %j",
   async (options) => {
-    const editor = await mountEditor(draft);
+    const editor = await mountEditor(draft, true, draft.indexOf("Assistant"));
     await act(async () => {
       expect(press(editor, "ArrowUp", options)).toBe(false);
       editor.commands.insertContent("x");
@@ -116,15 +117,13 @@ describe("macOS boundary navigation", () => {
     container.style.width = "600px";
   });
 
-  const markdown = String.raw`Fixed the top padding to 16px and updated the offline index and ZIP.
+  const markdown = String.raw`A pasted explanation with a [document](/workspace/example/HW08.pdf).
 
-**Yes: [HW08, problem 6, page 2](/Users/yashsingh/.t3/scratch/2026-10-16-gather-all-info-about-the-2fcd52f5/calculus-resources/files/HW08.pdf)** asks for the absolute maximum and minimum of
 \[
-f(x,y)=2x^2+y^2,\qquad x^2+y^2\le16.
+f(x,y)=2x^2+y^2
 \]
-That's exactly a disk with the circular boundary \(x^2+y^2=16\), and it is within section 14.7.
 
-The original Fall 2022, 2023, and 2024 sample exams also have circle-constrained extrema problems, all question 6. Those explicitly require Lagrange multipliers, so they were removed from your filtered copies. **HW08 #6 is the best match for your exam.**`;
+**The final sentence stays editable.**`;
 
   it.each(["ArrowRight", "ArrowDown"])(
     "keeps Command-%s after the closing marker in the pasted draft",
@@ -133,20 +132,11 @@ The original Fall 2022, 2023, and 2024 sample exams also have circle-constrained
       await act(async () => {
         editor.view.dispatch(editor.state.tr.setSelection(TextSelection.atEnd(editor.state.doc)));
         editor.view.focus();
-        expect(press(editor, "ArrowRight")).toBe(true);
         expect(press(editor, key, { metaKey: true })).toBe(true);
         expect(editor.state.selection.eq(TextSelection.atEnd(editor.state.doc))).toBe(true);
         // Force the DOM selection rewrite that used to pull the caret back.
         editor.view.updateState(editor.state);
-        const markers = editor.view.dom.querySelectorAll(".composer-rich-marker");
-        const closingMarker = markers[markers.length - 1];
-        const caret = window.getSelection()?.getRangeAt(0);
-        if (!closingMarker || !caret) throw new Error("Caret or closing marker is missing");
-        const markerRange = document.createRange();
-        markerRange.selectNode(closingMarker);
-        expect(caret.compareBoundaryPoints(Range.START_TO_END, markerRange)).toBeGreaterThanOrEqual(
-          0,
-        );
+        expect(editor.state.selection.eq(TextSelection.atEnd(editor.state.doc))).toBe(true);
         editor.commands.insertContent("x");
       });
       expect(serializeEditorDoc(editor.state.doc).value).toBe(markdown + "x");
@@ -190,7 +180,7 @@ The original Fall 2022, 2023, and 2024 sample exams also have circle-constrained
         expect(editor.state.selection.head).toBe(TextSelection.atEnd(editor.state.doc).to);
         editor.commands.insertContent("x");
       });
-      expect(serializeEditorDoc(editor.state.doc).value).toBe("**box**");
+      expect(serializeEditorDoc(editor.state.doc).value).toBe("**x");
     },
   );
 
