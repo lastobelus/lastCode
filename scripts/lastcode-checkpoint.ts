@@ -278,9 +278,11 @@ function run(
 }
 
 export function checkpointSmokeEnvironment(
+  worktree: string,
   environment: NodeJS.ProcessEnv = process.env,
 ): NodeJS.ProcessEnv {
   const resolved = { ...environment };
+  resolved.PATH = `${NodePath.resolve(worktree, "node_modules/.bin")}${NodePath.delimiter}${environment.PATH ?? ""}`;
   delete resolved.ELECTRON_RUN_AS_NODE;
   return resolved;
 }
@@ -1564,7 +1566,7 @@ function assertForkInvariants(worktree: string): void {
 
 function runSmokeGate(repoRoot: string, worktree: string): void {
   const vp = checkpointVpPaths(repoRoot, worktree);
-  const environment = checkpointSmokeEnvironment();
+  const environment = checkpointSmokeEnvironment(worktree);
   console.log("[lastcode:checkpoint] Installing checkpoint worktree dependencies...");
   run(worktree, vp.bootstrap, ["install", "--frozen-lockfile"], { environment });
   migrationDependenciesInstalled(worktree);
