@@ -19,11 +19,11 @@ interface HighlightedBlock {
 const composerCodeBlockHighlightKey = new PluginKey<DecorationSet>("composerCodeBlockHighlight");
 
 // Tokenizing larger fences can stall the main thread.
-export const MAX_HIGHLIGHTED_CODE_BLOCK_LENGTH = 20_000;
+const MAX_HIGHLIGHTED_CODE_BLOCK_LENGTH = 20_000;
 const DEFERRED_HIGHLIGHT_CODE_BLOCK_LENGTH = 2_000;
 const DEFERRED_HIGHLIGHT_DELAY_MS = 300;
 
-export function shouldHighlightCodeBlock(code: string): boolean {
+function shouldHighlightCodeBlock(code: string): boolean {
   return code.length <= MAX_HIGHLIGHTED_CODE_BLOCK_LENGTH;
 }
 
