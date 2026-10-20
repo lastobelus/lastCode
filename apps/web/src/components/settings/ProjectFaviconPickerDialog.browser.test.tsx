@@ -1,6 +1,6 @@
 import { RegistryContext } from "@effect/atom-react";
 import { EnvironmentId, type AssetCreateUrlResult, type ProjectEntry } from "@t3tools/contracts";
-import { AsyncResult, Atom } from "effect/reactivity";
+import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
@@ -50,8 +50,6 @@ vi.mock(import("../ui/toast"), async (original) => {
   return { ...actual, toastManager: { ...actual.toastManager, add: toast } };
 });
 
-import { appAtomRegistry } from "~/rpc/atomRegistry";
-
 import {
   canPickExternalProjectFavicon,
   ProjectFaviconPickerDialog,
@@ -59,8 +57,10 @@ import {
 
 let root: Root;
 let container: HTMLDivElement;
+let registry: AtomRegistry.AtomRegistry;
 
 beforeEach(() => {
+  registry = AtomRegistry.make();
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   Object.defineProperty(navigator, "platform", { configurable: true, get: () => "MacIntel" });
   toast.mockClear();
@@ -76,6 +76,7 @@ beforeEach(() => {
 });
 afterEach(async () => {
   await act(async () => root.unmount());
+  registry.dispose();
   container.remove();
   Reflect.deleteProperty(navigator, "platform");
   vi.unstubAllGlobals();
@@ -86,7 +87,7 @@ async function renderPicker(onPickExternal?: () => Promise<string | null>) {
   const onSelect = vi.fn();
   await act(async () =>
     root.render(
-      <RegistryContext.Provider value={appAtomRegistry}>
+      <RegistryContext.Provider value={registry}>
         <ProjectFaviconPickerDialog
           cwd="/Users/me/project"
           environmentId={EnvironmentId.make("local")}
@@ -147,7 +148,9 @@ const imageUrl = `data:image/svg+xml,${encodeURIComponent(
 
 function addFiles(paths: string[]) {
   state.entries = paths.map((path) => ({ path, kind: "file" }));
-  for (const path of paths) state.assets.set(path, Atom.make<AssetResult>(AsyncResult.initial()));
+  // The real URL cache survives subscription gaps; published fixture results must too.
+  for (const path of paths)
+    state.assets.set(path, Atom.make<AssetResult>(AsyncResult.initial()).pipe(Atom.keepAlive));
 }
 
 function fileRow(path: string) {
@@ -160,7 +163,7 @@ function fileRow(path: string) {
 
 async function publishUrl(path: string, url: string) {
   await act(async () => {
-    appAtomRegistry.set(
+    registry.set(
       state.assets.get(path)!,
       AsyncResult.success({ relativeUrl: url, expiresAt: Date.now() + 60_000 }),
     );
