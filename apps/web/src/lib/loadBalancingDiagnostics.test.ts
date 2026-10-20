@@ -29,35 +29,157 @@ const eligibility = {
   providerDriver: "codex",
 };
 
+const providerFailures = [
+  {
+    override: {
+      enabled: false,
+      installed: false,
+      status: "error",
+      auth: { status: "unauthenticated" },
+      availability: "unavailable",
+    },
+    reason: "provider-disabled",
+  },
+  {
+    override: {
+      installed: false,
+      status: "error",
+      auth: { status: "unauthenticated" },
+      availability: "unavailable",
+    },
+    reason: "provider-not-installed",
+  },
+  {
+    override: { status: "error", auth: { status: "unauthenticated" }, availability: "unavailable" },
+    reason: "provider-error",
+  },
+  {
+    override: { auth: { status: "unauthenticated" }, availability: "unavailable" },
+    reason: "provider-unauthenticated",
+  },
+  { override: { availability: "unavailable" }, reason: "provider-unavailable" },
+] as const;
+
 describe("loadBalancingExclusionReason", () => {
-  it("accepts a usable instance and explains disconnected or manual-only hosts", () => {
+  it("gives disconnection precedence over manual-only and provider failures", () => {
+    for (const connectionPhase of [undefined, "connecting", "disconnected", "error"]) {
+      expect(
+        loadBalancingExclusionReason({ ...eligibility, connectionPhase, weight: 0, providers: [] }),
+      ).toBe("disconnected");
+    }
+    for (const weight of [-50, 0]) {
+      expect(loadBalancingExclusionReason({ ...eligibility, weight, providers: [] })).toBe(
+        "manual-only",
+      );
+    }
     expect(loadBalancingExclusionReason(eligibility)).toBeNull();
-    expect(loadBalancingExclusionReason({ ...eligibility, connectionPhase: "disconnected" })).toBe(
-      "disconnected",
-    );
-    expect(loadBalancingExclusionReason({ ...eligibility, weight: 0 })).toBe("manual-only");
   });
 
-  it("requires the selected instance and driver rather than another usable instance", () => {
-    expect(loadBalancingExclusionReason({ ...eligibility, providerInstanceId: "other" })).toBe(
-      "provider-missing",
-    );
-    expect(loadBalancingExclusionReason({ ...eligibility, providerDriver: "claude" })).toBe(
-      "provider-missing",
-    );
-    expect(loadBalancingExclusionReason({ ...eligibility, providerInstanceId: null })).toBeNull();
+  it("requires both the selected instance and driver, with null matching any instance", () => {
+    const otherInstance = { ...provider, instanceId: ProviderInstanceId.make("other") };
+    const otherDriver = { ...provider, driver: ProviderDriverKind.make("claude") };
+    for (const providers of [
+      undefined,
+      [],
+      [otherInstance],
+      [otherDriver],
+      [otherInstance, otherDriver],
+    ]) {
+      expect(loadBalancingExclusionReason({ ...eligibility, providers })).toBe("provider-missing");
+    }
+    expect(
+      loadBalancingExclusionReason({
+        ...eligibility,
+        providers: [otherInstance],
+        providerInstanceId: null,
+      }),
+    ).toBeNull();
+    expect(
+      loadBalancingExclusionReason({
+        ...eligibility,
+        providers: [otherDriver],
+        providerInstanceId: null,
+      }),
+    ).toBe("provider-missing");
+    expect(
+      loadBalancingExclusionReason({
+        ...eligibility,
+        providers: [otherInstance],
+        providerInstanceId: "other",
+      }),
+    ).toBeNull();
   });
 
-  it.each([
-    [{ enabled: false }, "provider-disabled"],
-    [{ installed: false }, "provider-not-installed"],
-    [{ status: "error" }, "provider-error"],
-    [{ auth: { status: "unauthenticated" } }, "provider-unauthenticated"],
-    [{ availability: "unavailable" }, "provider-unavailable"],
-  ] as const)("explains unusable provider state %j", (override, reason) => {
+  it.each(providerFailures)("preserves rejection priority: $reason", ({ override, reason }) => {
     expect(
       loadBalancingExclusionReason({ ...eligibility, providers: [{ ...provider, ...override }] }),
     ).toBe(reason);
+  });
+
+  it.each(["codex", null])(
+    "uses the first matching failure unless any matching provider is usable (%s)",
+    (providerInstanceId) => {
+      for (const first of providerFailures) {
+        for (const second of providerFailures) {
+          const failures = [
+            { ...provider, ...first.override },
+            { ...provider, ...second.override },
+          ];
+          const input = { ...eligibility, providerInstanceId };
+          expect(loadBalancingExclusionReason({ ...input, providers: failures })).toBe(
+            first.reason,
+          );
+          expect(loadBalancingExclusionReason({ ...input, providers: failures.toReversed() })).toBe(
+            second.reason,
+          );
+          for (let index = 0; index <= failures.length; index++) {
+            expect(
+              loadBalancingExclusionReason({
+                ...input,
+                providers: failures.toSpliced(index, 0, provider),
+              }),
+            ).toBeNull();
+          }
+        }
+      }
+    },
+  );
+
+  it("ignores usable mismatches and reports the first matching failure", () => {
+    const providers = [
+      { ...provider, instanceId: ProviderInstanceId.make("other") },
+      { ...provider, driver: ProviderDriverKind.make("claude") },
+      { ...provider, installed: false },
+      { ...provider, enabled: false },
+    ];
+    expect(loadBalancingExclusionReason({ ...eligibility, providers })).toBe(
+      "provider-not-installed",
+    );
+    expect(
+      loadBalancingExclusionReason({ ...eligibility, providers, providerInstanceId: null }),
+    ).toBeNull();
+    expect(
+      loadBalancingExclusionReason({
+        ...eligibility,
+        providers: providers.slice(1),
+        providerInstanceId: null,
+      }),
+    ).toBe("provider-not-installed");
+  });
+
+  it("accepts unknown authentication and every non-error status", () => {
+    for (const status of ["ready", "warning", "disabled"] as const) {
+      for (const authStatus of ["authenticated", "unknown"] as const) {
+        for (const availability of [undefined, "available"] as const) {
+          expect(
+            loadBalancingExclusionReason({
+              ...eligibility,
+              providers: [{ ...provider, status, auth: { status: authStatus }, availability }],
+            }),
+          ).toBeNull();
+        }
+      }
+    }
   });
 });
 

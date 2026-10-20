@@ -14,29 +14,24 @@ export function loadBalancingExclusionReason(input: {
 }) {
   if (input.connectionPhase !== "connected") return "disconnected" as const;
   if (input.weight <= 0) return "manual-only" as const;
-  const matching = input.providers?.filter(
-    (provider) =>
-      (input.providerInstanceId === null || provider.instanceId === input.providerInstanceId) &&
-      provider.driver === input.providerDriver,
-  );
-  if (!matching?.length) return "provider-missing" as const;
-  if (
-    matching.some(
+  const reasons = (input.providers ?? [])
+    .filter(
       (provider) =>
-        provider.enabled &&
-        provider.installed &&
-        provider.status !== "error" &&
-        provider.auth.status !== "unauthenticated" &&
-        provider.availability !== "unavailable",
+        (input.providerInstanceId === null || provider.instanceId === input.providerInstanceId) &&
+        provider.driver === input.providerDriver,
     )
-  )
-    return null;
-  const provider = matching[0]!;
+    .map(providerExclusionReason);
+  if (reasons.includes(null)) return null;
+  return reasons[0] ?? "provider-missing";
+}
+
+function providerExclusionReason(provider: ServerProvider) {
   if (!provider.enabled) return "provider-disabled" as const;
   if (!provider.installed) return "provider-not-installed" as const;
   if (provider.status === "error") return "provider-error" as const;
   if (provider.auth.status === "unauthenticated") return "provider-unauthenticated" as const;
-  return "provider-unavailable" as const;
+  if (provider.availability === "unavailable") return "provider-unavailable" as const;
+  return null;
 }
 
 type Evaluation = ReturnType<typeof evaluateLoadBalancedEnvironments>["candidates"][number];
