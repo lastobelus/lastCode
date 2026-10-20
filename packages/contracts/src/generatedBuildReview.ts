@@ -2,7 +2,7 @@ import * as Schema from "effect/Schema";
 import { NonNegativeInt, PositiveInt, ProjectId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 export const BUILD_REVIEW_PAGE_SIZE = 200;
-export const BUILD_REVIEW_FILE_LIMIT = 1_000;
+const BUILD_REVIEW_FILE_LIMIT = 1_000;
 
 const ReviewPath = Schema.String.check(
   Schema.makeFilter(
