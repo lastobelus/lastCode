@@ -130,6 +130,13 @@ export function parseBuildResult(stdout: string): LocalBuildResult {
     throw new Error("The local build helper returned an invalid build result.");
   return result as LocalBuildResult;
 }
+export function localBuildFailureSummary(message: string): string {
+  // Notification errors can contain the whole alert and must not displace the build failure.
+  const primary = message
+    .split(/\r?\n/u)
+    .findLast((line) => line.startsWith("[lastcode:local-update] "));
+  return (primary ?? message).slice(0, 280);
+}
 export async function runLocalBuild(
   repoRoot: string,
   deps: LocalBuildDeps,
@@ -343,7 +350,7 @@ if (import.meta.main) {
     lastCodeAction.result({
       outcome: "attention",
       reason: process.exitCode === 130 || process.exitCode === 143 ? "cancelled" : "build-failed",
-      summary: message.slice(0, 280),
+      summary: localBuildFailureSummary(message),
       facts: {
         status: process.exitCode === 130 || process.exitCode === 143 ? "cancelled" : "failed",
       },
