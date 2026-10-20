@@ -1,6 +1,8 @@
 import { useAtomValue } from "@effect/atom-react";
 import * as Schema from "effect/Schema";
 import {
+  lazy,
+  Suspense,
   useEffect,
   useState,
   useSyncExternalStore,
@@ -24,17 +26,24 @@ import { selectActiveRightPanel, useRightPanelStore } from "../rightPanelStore";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { cn, isMacPlatform } from "../lib/utils";
 import { primaryServerKeybindingsAtom } from "../state/server";
-import { useEnvironmentIdentificationMode, useLegacySidebarEnabled } from "../hooks/useSettings";
 import {
   PanelAnimationSuppressionProvider,
   usePanelAnimationSettings,
   usePanelNavigationSuppression,
 } from "../panelAnimations";
+import {
+  useClientSettingsHydrated,
+  useEnvironmentIdentificationMode,
+  useSidebarMode,
+  toggleSidebarMode,
+} from "../hooks/useSettings";
 import LegacyThreadSidebar from "./LegacySidebar";
+import { SidebarPresentation } from "./sidebar/SidebarPresentation";
 import { useThreadVisitedMigration } from "../hooks/useThreadVisitedMigration";
 import ThreadSidebar from "./Sidebar";
 import { SettingsSidebarNav } from "./settings/SettingsSidebarNav";
 import { SidebarBrandWidthProbe, SidebarChromeHeader } from "./sidebar/SidebarChrome";
+import { SidebarModeToggle } from "./sidebar/SidebarModeToggle";
 import { MainAppLocationTracker } from "./sidebar/mainAppLocation";
 import { useSidebarStageBackdropVariant } from "./SidebarStageBackdrop";
 import { useProjects } from "../state/entities";
@@ -58,6 +67,16 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import { useThreadRouteRef } from "../hooks/useThreadRouteTarget";
 
 const MACOS_TRAFFIC_LIGHTS_LEFT_INSET = "var(--desktop-window-controls-inset, 90px)";
+const LastCodeSidebar = lazy(() => import("./LastCodeSidebar"));
+const THREAD_SIDEBARS = {
+  lastcode: (
+    <Suspense fallback={<SidebarChromeHeader isElectron={isElectron} />}>
+      <LastCodeSidebar />
+    </Suspense>
+  ),
+  legacy: <LegacyThreadSidebar />,
+  inbox: <ThreadSidebar />,
+};
 
 function subscribeToViewportWidth(onChange: () => void): () => void {
   window.addEventListener("resize", onChange);
@@ -122,6 +141,18 @@ function SidebarControl() {
   const usagePageOpen = useLocation({ select: (location) => location.pathname === "/usage" });
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const { toggleSidebar, isMobile, mobileSheetMounted } = useSidebar();
+  const clientSettingsHydrated = useClientSettingsHydrated();
+  const routeThreadRef = useThreadRouteRef();
+  const terminalOpen = useTerminalUiStateStore((state) =>
+    routeThreadRef
+      ? selectThreadTerminalUiState(state.terminalUiStateByThreadKey, routeThreadRef).terminalOpen
+      : false,
+  );
+  const previewOpen = useRightPanelStore((state) =>
+    routeThreadRef
+      ? selectActiveRightPanel(state.byThreadKey, routeThreadRef) === "preview"
+      : false,
+  );
   const isSidebarVisible = useSidebarVisibility();
   const environmentIdentificationMode = useEnvironmentIdentificationMode();
   const stageBackdropVariant = useSidebarStageBackdropVariant(
@@ -133,7 +164,7 @@ function SidebarControl() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented) return;
+      if (event.defaultPrevented || event.repeat) return;
       if (
         event.target instanceof HTMLElement &&
         event.target.closest("[data-keybinding-capture]")
@@ -149,26 +180,48 @@ function SidebarControl() {
         // available everywhere else, including the plain-text composer.
         return;
       }
-      if (
-        resolveShortcutCommand(event, keybindings, { context: { usagePageOpen } }) !==
-        "sidebar.toggle"
-      )
-        return;
-
-      event.preventDefault();
-      event.stopPropagation();
-      toggleSidebar();
+      const command = resolveShortcutCommand(event, keybindings, {
+        context: {
+          usagePageOpen,
+          terminalFocus: isTerminalFocused(),
+          terminalOpen,
+          previewFocus: isPreviewFocused(),
+          previewOpen,
+          modelPickerOpen: isModelPickerOpen(),
+        },
+      });
+      switch (command) {
+        case "sidebar.toggle":
+          event.preventDefault();
+          event.stopPropagation();
+          toggleSidebar();
+          return;
+        case "sidebar.mode.toggle":
+          if (!clientSettingsHydrated) return;
+          event.preventDefault();
+          event.stopPropagation();
+          toggleSidebarMode();
+          return;
+      }
     };
 
     window.addEventListener("keydown", onKeyDown, true);
     const unsubscribe = window.desktopBridge?.onMenuAction((action) => {
       if (action === "sidebar.toggle") toggleSidebar();
+      if (action === "sidebar.mode.toggle") toggleSidebarMode();
     });
     return () => {
       window.removeEventListener("keydown", onKeyDown, true);
       unsubscribe?.();
     };
-  }, [keybindings, toggleSidebar, usagePageOpen]);
+  }, [
+    clientSettingsHydrated,
+    keybindings,
+    previewOpen,
+    terminalOpen,
+    toggleSidebar,
+    usagePageOpen,
+  ]);
 
   return (
     <div
@@ -182,7 +235,9 @@ function SidebarControl() {
         <TooltipTrigger
           render={
             <SidebarTrigger
-              variant={isSidebarVisible && stageBackdropVariant ? "media-navigation" : "ghost"}
+              variant={
+                isSidebarVisible && stageBackdropVariant ? "media-navigation" : "ghost-toggle"
+              }
               className={cn(
                 "pointer-events-auto",
                 isSidebarVisible && stageBackdropVariant && "relative top-auto translate-y-0",
@@ -195,6 +250,7 @@ function SidebarControl() {
           Toggle main sidebar{shortcutLabel ? ` (${shortcutLabel})` : ""}
         </TooltipPopup>
       </Tooltip>
+      {isSidebarVisible && <SidebarModeToggle onBackdrop={stageBackdropVariant !== null} />}
     </div>
   );
 }
@@ -255,7 +311,8 @@ function ProjectProjectionRetention() {
 
 export function AppSidebarLayout({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
-  const legacySidebarEnabled = useLegacySidebarEnabled();
+  const sidebarMode = useSidebarMode();
+  const clientSettingsHydrated = useClientSettingsHydrated();
   const { active: panelAnimationsActive, durationMs: panelAnimationDurationMs } =
     usePanelAnimationSettings();
   useThreadVisitedMigration();
@@ -301,19 +358,10 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
       return;
     }
 
-    const unsubscribe = onMenuAction((action) => {
-      if (action === "open-settings") {
-        const isSettingsRoute = /^\/settings(\/|$)/.test(pathname);
-        if (!isSettingsRoute) {
-          void navigate({ to: "/settings" });
-        }
-      }
+    return onMenuAction((action) => {
+      if (action === "open-settings" && !isOnSettings) void navigate({ to: "/settings" });
     });
-
-    return () => {
-      unsubscribe?.();
-    };
-  }, [navigate, pathname]);
+  }, [navigate, isOnSettings]);
 
   return (
     <PanelAnimationSuppressionProvider value={panelAnimationsSuppressed}>
@@ -343,16 +391,21 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
           }}
           style={windowControlsInsetStyle}
         >
-          {isOnSettings ? (
+          {isOnSettings && (
             <>
               <SidebarChromeHeader isElectron={isElectron} />
               <SettingsSidebarNav pathname={pathname} />
             </>
-          ) : legacySidebarEnabled ? (
-            <LegacyThreadSidebar />
-          ) : (
-            <ThreadSidebar />
           )}
+          {Object.entries(THREAD_SIDEBARS).map(([mode, sidebar]) => (
+            <SidebarPresentation
+              key={mode}
+              visible={!isOnSettings && sidebarMode === mode}
+              retain={clientSettingsHydrated}
+            >
+              {sidebar}
+            </SidebarPresentation>
+          ))}
           <SidebarRail onDoubleClick={resetSidebarWidth} />
         </Sidebar>
         {children}
