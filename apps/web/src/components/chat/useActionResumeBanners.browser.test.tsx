@@ -364,9 +364,9 @@ describe("interrupted Action delivery", () => {
 
 describe("Action banner stack", () => {
   it.each([false, true])(
-    "preserves activity priority and warning copy with branch mismatch %s",
+    "preserves warning-first order and Action copy with branch mismatch %s",
     async (mismatch) => {
-      // Both banners can be represented by the projection; priority must keep running in front.
+      // Warning banners share urgent priority and retain their input order.
       await render({ action: { ...running, delivery: "available" }, mismatch });
       expect(banners.runningBanner).toMatchObject({
         id: "action-running:run-a",
@@ -378,16 +378,16 @@ describe("Action banner stack", () => {
         variant: "warning",
       });
       const front = container.querySelector('[data-composer-banner-drawer="true"]')!;
-      expect(front.textContent).toContain("Waiting for review");
-      expect(front.textContent).toContain("Checks in progress");
-      expect(front.textContent).toContain("Resumes when this thread is idle.");
-      const notices = container.querySelector('[aria-label="Other notices"]')!;
-      expect(notices.textContent).toContain("Check work was interrupted");
-      expect(notices.textContent).toContain(
+      expect(front.textContent).toContain("Check work was interrupted");
+      expect(front.textContent).toContain(
         "LastCode did not restart the command or wake the agent.",
       );
+      const notices = container.querySelector('[aria-label="Other notices"]')!;
+      expect(notices.textContent).toContain("Waiting for review");
+      expect(notices.textContent).toContain("Checks in progress");
+      expect(notices.textContent).toContain("Resumes when this thread is idle.");
       if (mismatch)
-        expect(notices.textContent!.indexOf("Check work was interrupted")).toBeLessThan(
+        expect(notices.textContent!.indexOf("Waiting for review")).toBeLessThan(
           notices.textContent!.indexOf("Branch changed"),
         );
       await render({
@@ -403,7 +403,9 @@ describe("Action banner stack", () => {
         mismatch,
       });
       expect(banners.runningBanner?.variant).toBe("info");
-      expect(front.textContent).toContain("Compiling");
+      expect(
+        container.querySelector('[data-composer-banner-drawer="true"]')?.textContent,
+      ).toContain("Compiling");
     },
   );
 });
