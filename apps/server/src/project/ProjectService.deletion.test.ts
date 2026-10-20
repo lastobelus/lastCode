@@ -331,7 +331,7 @@ it.effect("retries a partial project deletion without repeating child events or 
               effect_type: "preview.cleanup",
             },
             {
-              effect_id: `effect:${expectedCommandId}:scheduled-tasks.cleanup`,
+              effect_id: `effect:${expectedCommandId}:scheduled-tasks.cleanup:${threadId}`,
               thread_id: threadId,
               command_id: expectedCommandId,
               effect_type: "scheduled-tasks.cleanup",

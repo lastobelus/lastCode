@@ -1039,9 +1039,6 @@ importers:
       compression:
         specifier: ^1.8.2
         version: 1.8.2
-      happy-dom:
-        specifier: ^20.12.0
-        version: 20.12.2(bufferutil@4.1.0)(utf-8-validate@6.0.6)
       oxc-transform-react:
         specifier: ~0.152.0
         version: 0.152.0
