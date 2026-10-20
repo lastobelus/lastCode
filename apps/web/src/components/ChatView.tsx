@@ -6200,23 +6200,24 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     const submittedAnnotationPrompt = promptRef.current;
-    if (
-      await chatAnnotation.interceptSubmission({
-        target: composerDraftTarget,
-        prompt: submittedAnnotationPrompt,
-        directAnnotation: directAnnotation !== undefined,
-        onDraftConsumed: () => {
-          if (
-            currentRouteThreadKeyRef.current !== routeThreadKey ||
-            promptRef.current !== submittedAnnotationPrompt
-          )
-            return;
-          promptRef.current = "";
-          composerRef.current?.resetCursorState();
-        },
-      })
-    )
+    const annotationSubmission = chatAnnotation.interceptSubmission({
+      target: composerDraftTarget,
+      prompt: submittedAnnotationPrompt,
+      directAnnotation: directAnnotation !== undefined,
+      onDraftConsumed: () => {
+        if (
+          currentRouteThreadKeyRef.current !== routeThreadKey ||
+          promptRef.current !== submittedAnnotationPrompt
+        )
+          return;
+        promptRef.current = "";
+        composerRef.current?.resetCursorState();
+      },
+    });
+    if (annotationSubmission) {
+      await annotationSubmission;
       return;
+    }
     if (!sendCtx.providerAvailable) {
       notifyDirectAnnotationAttached();
       return;

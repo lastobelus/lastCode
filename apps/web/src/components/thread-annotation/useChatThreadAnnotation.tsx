@@ -116,10 +116,9 @@ function useAnnotationBanner(input: {
     version: null,
   });
   if (dismissal.route !== key) setDismissal({ route: key, version: null });
-  const version = annotation ? `${key}:${annotation.updatedAt}` : null;
-  if (annotation === null) return null;
-  if (annotation.resolvedAt !== null) return null;
-  if (dismissal.route === key && dismissal.version === version) return null;
+  if (annotation?.resolvedAt !== null) return null;
+  const version = `${key}:${annotation.updatedAt}`;
+  if (dismissal.version === version) return null;
   const toggleExpanded = () => setExpanded(key, !expanded);
   const banner: ComposerBannerStackItem = {
     id: `thread-annotation:${version}`,
@@ -196,12 +195,12 @@ export function useChatThreadAnnotation(input: {
     onResolve,
   });
 
-  const interceptSubmission = async (submission: {
+  const interceptSubmission = (submission: {
     target: ComposerThreadTarget;
     prompt: string;
     directAnnotation: boolean;
     onDraftConsumed: () => void;
-  }): Promise<boolean> => {
+  }): boolean | Promise<boolean> => {
     if (submission.directAnnotation) return false;
     const draft = useComposerDraftStore.getState().getComposerDraft(submission.target);
     const command = parseThreadAnnotationSubmission(submission.prompt, draft);
@@ -225,13 +224,12 @@ export function useChatThreadAnnotation(input: {
       openEditor();
       return true;
     }
-    await saveThreadAnnotationSubmission({
+    return saveThreadAnnotationSubmission({
       target: submission.target,
       draft,
       save: () => mutations.save(command.body),
       onDraftConsumed: submission.onDraftConsumed,
-    });
-    return true;
+    }).then(() => true);
   };
   return {
     canAnnotate,
