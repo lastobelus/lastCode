@@ -361,12 +361,20 @@ describe("row-owned query and control seams", () => {
     expect(mocks.openPr).toHaveBeenLastCalledWith(expect.anything(), pr.url, ref);
     expect(mocks.prPresentation).toHaveBeenCalledWith(pr, "github");
   });
-  it("keeps local branch mismatch in shared details and excludes worktree mismatch", async () => {
+  it("shares local and worktree branch mismatches with checkout-specific restore capability", async () => {
     mocks.query.mockReturnValue({ data: { refName: "different" } });
     await render();
-    expect(source.branchMismatch).toEqual({ threadBranch: "feature", currentBranch: "different" });
+    expect(source.branchMismatch).toEqual({
+      threadBranch: "feature",
+      currentBranch: "different",
+      canRestoreThreadBranch: true,
+    });
     await render({ value: { ...thread, worktreePath: "/own-worktree" } });
-    expect(source.branchMismatch).toBeNull();
+    expect(source.branchMismatch).toEqual({
+      threadBranch: "feature",
+      currentBranch: "different",
+      canRestoreThreadBranch: false,
+    });
   });
   it("suppresses resolved PR and port controls during cleanup while retaining terminal status", async () => {
     mocks.linked.mockReturnValue({
