@@ -711,8 +711,29 @@ const make = Effect.gen(function* () {
       maxOutputBytes: 64 * 1024,
     });
     if (ignored.stdoutTruncated) return "ignored files exceed the inspection limit";
-    const file = ignored.stdout.split("\0").find((entry) => entry !== "");
-    return file === undefined ? null : `has ignored files (${file})`;
+    for (const file of ignored.stdout.split("\0")) {
+      if (file === "") continue;
+      // Finder metadata is disposable, but a directory or link with this name
+      // is not evidence that its contents belong to Finder. Tracked edits have
+      // already been rejected by status above.
+      if (path.basename(file) === ".DS_Store") {
+        const target = path.join(cwd, file);
+        const regularFile = yield* fs.readLink(target).pipe(
+          Effect.as(false),
+          Effect.catchIf(
+            (error) =>
+              error.cause instanceof Error &&
+              "code" in error.cause &&
+              error.cause.code === "EINVAL",
+            () => fs.stat(target).pipe(Effect.map((stat) => stat.type === "File")),
+          ),
+          Effect.orElseSucceed(() => false),
+        );
+        if (regularFile) continue;
+      }
+      return `has ignored files (${file})`;
+    }
+    return null;
   });
 
   const submoduleRemoval = Effect.fn("StorageCleanup.submoduleRemoval")(
