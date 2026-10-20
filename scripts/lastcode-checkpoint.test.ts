@@ -748,9 +748,37 @@ it("runs smoke checks with the isolated worktree's Vite+ binary", () => {
 
 it("removes the Electron host mode from checkpoint smoke subprocesses", () => {
   assert.deepStrictEqual(
-    checkpointSmokeEnvironment({ ELECTRON_RUN_AS_NODE: "1", KEEP_ME: "yes" }),
-    { KEEP_ME: "yes" },
+    checkpointSmokeEnvironment("/tmp/sync", {
+      ELECTRON_RUN_AS_NODE: "1",
+      KEEP_ME: "yes",
+      PATH: "/usr/bin:/bin",
+    }),
+    { KEEP_ME: "yes", PATH: "/tmp/sync/node_modules/.bin:/usr/bin:/bin" },
   );
+});
+
+it("resolves nested smoke commands from the checkpoint worktree in another checkout", () => {
+  const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-smoke-path-"));
+  const worktree = NodePath.join(root, "checkpoint");
+  const fixture = NodePath.join(root, "build-fixture");
+  const bin = NodePath.join(worktree, "node_modules", ".bin");
+  try {
+    NodeFS.mkdirSync(bin, { recursive: true });
+    NodeFS.mkdirSync(fixture);
+    NodeFS.writeFileSync(NodePath.join(bin, "vp"), '#!/bin/sh\nprintf "checkpoint-tool"\n', {
+      mode: 0o755,
+    });
+    const result = NodeChildProcess.spawnSync("vp", [], {
+      cwd: fixture,
+      env: checkpointSmokeEnvironment(worktree, { PATH: "/usr/bin:/bin" }),
+      encoding: "utf8",
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, "checkpoint-tool");
+  } finally {
+    NodeFS.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 it("typechecks every workspace before publishing", () => {
