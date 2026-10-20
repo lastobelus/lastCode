@@ -40,6 +40,7 @@ function getDescription(): ReactNode {
 function downloadedState(overrides: Partial<DesktopUpdateState> = {}): DesktopUpdateState {
   return {
     enabled: true,
+    source: "hosted",
     status: "downloaded",
     channel: "latest",
     currentVersion: "0.0.29",
@@ -51,6 +52,8 @@ function downloadedState(overrides: Partial<DesktopUpdateState> = {}): DesktopUp
     releaseNotes: [],
     omittedReleaseCount: 0,
     downloadPercent: 100,
+    localBuildProgress: null,
+    localBuildFailure: null,
     checkedAt: null,
     message: null,
     errorContext: null,
@@ -62,6 +65,7 @@ function downloadedState(overrides: Partial<DesktopUpdateState> = {}): DesktopUp
 describe("showDesktopUpdateDownloadedToast", () => {
   beforeEach(() => {
     testState.addToast.mockReset();
+    vi.stubEnv("T3CODE_DESKTOP_UPDATE_REPOSITORY", "pingdotgg/t3code");
   });
 
   afterEach(() => {
@@ -120,6 +124,18 @@ describe("showDesktopUpdateDownloadedToast", () => {
     );
 
     expect(findReleaseNotesLink(getDescription())).toBeNull();
+  });
+
+  it("reports a local build without linking to an upstream GitHub release", () => {
+    showDesktopUpdateDownloadedToast(
+      { openExternal: vi.fn() },
+      downloadedState({ source: "lastcode-local" }),
+    );
+
+    expect(findReleaseNotesLink(getDescription())).toBeNull();
+    expect(testState.addToast).toHaveBeenCalledWith(
+      expect.objectContaining({ title: "Local nightly built" }),
+    );
   });
 
   it.each([

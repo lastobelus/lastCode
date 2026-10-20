@@ -58,6 +58,9 @@ const baseWslState: DesktopWslState = {
 describe("resolveLocalVersionStatusLabel", () => {
   const baseState: DesktopUpdateState = {
     enabled: true,
+    source: "hosted",
+    localBuildProgress: null,
+    localBuildFailure: null,
     status: "idle",
     channel: "latest",
     currentVersion: "1.0.0",
