@@ -920,6 +920,8 @@ describe("getChangeRequest commits", () => {
         Effect.succeed({
           author: baseDetail.author,
           comments: baseDetail.comments,
+          commentCount: baseDetail.comments.length,
+          truncated: false,
           commits: [
             {
               oid: "view-oldest",
@@ -1004,7 +1006,13 @@ describe("getChangeRequestActivity dismissed reviews", () => {
     Layer.mock(GitHubPullRequestApi.GitHubPullRequestApi)({
       revalidateChecks: (_input, read) => read,
       getPullRequestActivity: () =>
-        Effect.succeed({ author: null, comments: [dismissedReview(body)], commits: [] }),
+        Effect.succeed({
+          author: null,
+          comments: [dismissedReview(body)],
+          commentCount: 1,
+          truncated: false,
+          commits: [],
+        }),
       listReviewThreadComments: () => Effect.succeed(threadComments),
     });
   const readActivity = Effect.gen(function* () {
