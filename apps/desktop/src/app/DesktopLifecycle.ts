@@ -11,6 +11,7 @@ import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 import { makeComponentLogger } from "./DesktopObservability.ts";
 import * as DesktopShutdown from "./DesktopShutdown.ts";
 import * as ElectronApp from "../electron/ElectronApp.ts";
+import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import * as ElectronTheme from "../electron/ElectronTheme.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopState from "./DesktopState.ts";
@@ -34,6 +35,7 @@ export type DesktopLifecycleRuntimeServices =
   | DesktopState.DesktopState
   | DesktopWindow.DesktopWindow
   | ElectronApp.ElectronApp
+  | ElectronDialog.ElectronDialog
   | ElectronTheme.ElectronTheme;
 
 type DesktopLifecycleRegistrationServices =
@@ -41,7 +43,7 @@ type DesktopLifecycleRegistrationServices =
   | ElectronWindow.ElectronWindow;
 
 /**
- * @effect-expect-leaking DesktopEnvironment | DesktopShutdown | DesktopState | DesktopWindow | ElectronApp | ElectronTheme | ElectronWindow
+ * @effect-expect-leaking DesktopEnvironment | DesktopShutdown | DesktopState | DesktopWindow | ElectronApp | ElectronDialog | ElectronTheme | ElectronWindow
  */
 export class DesktopLifecycle extends Context.Service<
   DesktopLifecycle,
@@ -101,6 +103,8 @@ function handleBeforeQuit(
   ) => Promise<A>,
   allowQuit: () => boolean,
   markQuitAllowed: () => void,
+  isQuitRequestPending: () => boolean,
+  setQuitRequestPending: (pending: boolean) => void,
 ): void {
   if (allowQuit()) {
     void runEffect(
@@ -114,8 +118,28 @@ function handleBeforeQuit(
   }
 
   event.preventDefault();
+  if (isQuitRequestPending()) return;
+  setQuitRequestPending(true);
   void runEffect(
     Effect.gen(function* () {
+      const desktopWindow = yield* DesktopWindow.DesktopWindow;
+      const warningAcknowledged =
+        yield* desktopWindow.consumeRunningActionQuitWarningAcknowledgment;
+      const runningActionCount = yield* desktopWindow.runningActionCount;
+      if (runningActionCount > 0 && !warningAcknowledged) {
+        const dialog = yield* ElectronDialog.ElectronDialog;
+        const result = yield* dialog.showMessageBox({
+          type: "warning",
+          title: "Running Actions",
+          message: `Quit and cancel ${runningActionCount} running ${runningActionCount === 1 ? "Action" : "Actions"}?`,
+          detail: "The commands will not be restarted automatically.",
+          buttons: ["Quit and cancel", "Keep running"],
+          defaultId: 1,
+          cancelId: 1,
+          noLink: true,
+        });
+        if (result.response !== 0) return false;
+      }
       const state = yield* DesktopState.DesktopState;
       const electronWindow = yield* ElectronWindow.ElectronWindow;
       yield* Ref.set(state.quitting, true);
@@ -127,16 +151,21 @@ function handleBeforeQuit(
           ),
         ),
       );
+      return true;
     }).pipe(Effect.withSpan("desktop.lifecycle.beforeQuit")),
-  ).finally(() => {
-    markQuitAllowed();
-    void runEffect(
-      Effect.gen(function* () {
-        const electronApp = yield* ElectronApp.ElectronApp;
-        yield* electronApp.quit;
-      }).pipe(Effect.withSpan("desktop.lifecycle.quitAfterShutdown")),
-    );
-  });
+  )
+    .then((shouldQuit) => {
+      if (!shouldQuit) return;
+      markQuitAllowed();
+      void runEffect(
+        Effect.gen(function* () {
+          const electronApp = yield* ElectronApp.ElectronApp;
+          yield* electronApp.quit;
+        }).pipe(Effect.withSpan("desktop.lifecycle.quitAfterShutdown")),
+      );
+    })
+    .catch(() => undefined)
+    .finally(() => setQuitRequestPending(false));
 }
 
 function quitFromSignal(
@@ -144,6 +173,7 @@ function quitFromSignal(
   runEffect: <A, E>(
     effect: Effect.Effect<A, E, DesktopLifecycleRegistrationServices>,
   ) => Promise<A>,
+  markQuitAllowed: () => void,
 ): void {
   void runEffect(
     Effect.gen(function* () {
@@ -154,6 +184,7 @@ function quitFromSignal(
       if (wasQuitting) return;
       yield* logLifecycleInfo("process signal received", { signal });
       yield* requestDesktopShutdownAndWait();
+      markQuitAllowed();
       yield* electronApp.quit;
     }).pipe(Effect.withSpan("desktop.lifecycle.processSignal")),
   );
@@ -199,6 +230,7 @@ export const make = Effect.gen(function* () {
       const context = yield* Effect.context<DesktopLifecycleRegistrationServices>();
       const runEffect = Effect.runPromiseWith(context);
       let quitAllowed = false;
+      let quitRequestPending = false;
       let updaterQuitAllowed = false;
       yield* electronTheme.onUpdated(() => {
         void runEffect(
@@ -232,6 +264,10 @@ export const make = Effect.gen(function* () {
           () => {
             quitAllowed = true;
           },
+          () => quitRequestPending,
+          (pending) => {
+            quitRequestPending = pending;
+          },
         );
       });
       yield* electronApp.on("activate", () => {
@@ -259,10 +295,14 @@ export const make = Effect.gen(function* () {
         // The layer outlives program finalizers, so repeated signals stay owned
         // while backends stop. Electron listeners still follow the program scope.
         yield* addScopedListener(process, "SIGINT", () => {
-          quitFromSignal("SIGINT", runEffect);
+          quitFromSignal("SIGINT", runEffect, () => {
+            quitAllowed = true;
+          });
         }).pipe(Scope.provide(signalScope));
         yield* addScopedListener(process, "SIGTERM", () => {
-          quitFromSignal("SIGTERM", runEffect);
+          quitFromSignal("SIGTERM", runEffect, () => {
+            quitAllowed = true;
+          });
         }).pipe(Scope.provide(signalScope));
       }
     }).pipe(Effect.withSpan("desktop.lifecycle.register")),
