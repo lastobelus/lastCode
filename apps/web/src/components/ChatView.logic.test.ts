@@ -3,6 +3,7 @@ import {
   isThreadWokeUnseen,
   mergeDirectPreviewAnnotation,
   resolveVisibleWorktreeSetup,
+  resolveThreadVisitDecision,
 } from "./ChatView.logic";
 import {
   recallCheckoutIsRepo,
@@ -2603,5 +2604,29 @@ describe("isThreadWokeUnseen", () => {
   it("hides settled threads and unparseable wake times", () => {
     expect(isThreadWokeUnseen({ ...base, settled: true })).toBe(false);
     expect(isThreadWokeUnseen({ ...base, wokeAt: "not a date" })).toBe(false);
+  });
+});
+
+describe("explicit read marker visit decisions", () => {
+  it("keeps a deliberate unread rewind sticky on open threads and acknowledges reopening/new activity", () => {
+    const opened = resolveThreadVisitDecision(100, 100, "a:100", null);
+    expect(opened).toEqual({ record: false, nextKey: "a:100" });
+    expect(resolveThreadVisitDecision(100, 99, "a:100", opened.nextKey).record).toBe(false);
+    const left = resolveThreadVisitDecision(NaN, NaN, null, opened.nextKey);
+    expect(left.nextKey).toBeNull();
+    const reopened = resolveThreadVisitDecision(100, 99, "a:100", left.nextKey);
+    expect(reopened.record).toBe(true);
+    expect(resolveThreadVisitDecision(200, 99, "a:200", "a:100", true)).toEqual({
+      record: false,
+      nextKey: "a:200",
+    });
+    expect(resolveThreadVisitDecision(100, 99, "a:100", reopened.nextKey).record).toBe(false);
+    const other = resolveThreadVisitDecision(100, 99, "b:100", reopened.nextKey);
+    expect(resolveThreadVisitDecision(100, 99, "a:100", other.nextKey).record).toBe(true);
+    expect(resolveThreadVisitDecision(200, 100, "a:200", reopened.nextKey).record).toBe(true);
+    expect(resolveThreadVisitDecision(NaN, 100, "a:invalid", opened.nextKey)).toEqual({
+      record: false,
+      nextKey: opened.nextKey,
+    });
   });
 });

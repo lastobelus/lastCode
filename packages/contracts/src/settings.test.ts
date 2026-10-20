@@ -710,9 +710,98 @@ describe("ClientSettings environment identification", () => {
   });
 });
 
+describe("ClientSettings environment icons", () => {
+  it("defaults to semantic colors with the local icon hidden", () => {
+    const settings = decodeClientSettings({});
+    expect(settings.environmentIconColors).toEqual({});
+    expect(settings.showLocalEnvironmentIcon).toBe(false);
+  });
+
+  it("accepts per-environment hex colors and the local icon opt-in", () => {
+    const input = {
+      environmentIconColors: { primary: "#2563eb", remote: "#7C3AED" },
+      showLocalEnvironmentIcon: true,
+    };
+    expect(decodeClientSettings(input)).toMatchObject(input);
+    expect(decodeClientSettingsPatch(input)).toEqual(input);
+  });
+
+  it.each(["blue", "#123", "#12345678", "#gg0000"])(
+    "rejects an invalid environment icon color: %s",
+    (color) => {
+      expect(() => decodeClientSettings({ environmentIconColors: { primary: color } })).toThrow();
+      expect(() =>
+        decodeClientSettingsPatch({ environmentIconColors: { primary: color } }),
+      ).toThrow();
+    },
+  );
+});
+
+describe("ClientSettings thread provider badges", () => {
+  it("enables opaque provider badges at 80% for existing client settings", () => {
+    const settings = decodeClientSettings({ showLocalEnvironmentIcon: false });
+    expect(settings.showThreadProviderBadge).toBe(true);
+    expect(settings.threadProviderBadgeSize).toBe(80);
+    expect(settings.threadProviderBadgeTransparency).toBe(0);
+  });
+
+  it("keeps omitted badge preferences out of partial updates", () => {
+    const patch = decodeClientSettingsPatch({ showLocalEnvironmentIcon: true });
+    expect(patch).not.toHaveProperty("showThreadProviderBadge");
+    expect(patch).not.toHaveProperty("threadProviderBadgeSize");
+    expect(patch).not.toHaveProperty("threadProviderBadgeTransparency");
+  });
+
+  it("persists badge appearance while badges are disabled", () => {
+    const input = {
+      showThreadProviderBadge: false,
+      threadProviderBadgeSize: 65,
+      threadProviderBadgeTransparency: 30,
+    };
+    expect(decodeClientSettings(input)).toMatchObject(input);
+    expect(decodeClientSettingsPatch(input)).toEqual(input);
+  });
+
+  it.each([
+    ["threadProviderBadgeSize", 10, 100],
+    ["threadProviderBadgeTransparency", 0, 100],
+  ] as const)("validates percentage bounds for %s", (key, minimum, maximum) => {
+    for (const value of [minimum, maximum]) {
+      expect(decodeClientSettings({ [key]: value })[key]).toBe(value);
+      expect(decodeClientSettingsPatch({ [key]: value })).toEqual({ [key]: value });
+    }
+    for (const value of [minimum - 1, maximum + 1, minimum + 0.5, "50", null]) {
+      expect(() => decodeClientSettings({ [key]: value })).toThrow();
+      expect(() => decodeClientSettingsPatch({ [key]: value })).toThrow();
+    }
+  });
+
+  it.each(["yes", 1, null])("rejects a non-boolean badge toggle: %s", (value) => {
+    expect(() => decodeClientSettings({ showThreadProviderBadge: value })).toThrow();
+    expect(() => decodeClientSettingsPatch({ showThreadProviderBadge: value })).toThrow();
+  });
+});
+
 describe("ClientSettings sidebar", () => {
   it("defaults to the current sidebar", () => {
-    expect(decodeClientSettings({}).legacySidebarEnabled).toBe(false);
+    const settings = decodeClientSettings({});
+    expect(settings.compactLegacySidebarStatuses).toBe(false);
+    expect(settings.showThreadWorktreeIndicators).toBe(true);
+    expect(settings.legacySidebarScale).toBe(100);
+    expect(settings.legacySidebarThreadGroupingStyle).toBe("minimal");
+    expect(settings.legacySidebarEnabled).toBe(false);
+    expect(settings.lastcodeSidebarEnabled).toBe(false);
+  });
+
+  it("preserves an explicit thread grouping choice", () => {
+    expect(
+      decodeClientSettings({ legacySidebarThreadGroupingStyle: "typed-groups" })
+        .legacySidebarThreadGroupingStyle,
+    ).toBe("typed-groups");
+    expect(
+      decodeClientSettings({ legacySidebarThreadGroupingStyle: "minimal" })
+        .legacySidebarThreadGroupingStyle,
+    ).toBe("minimal");
   });
 
   it("drops the retired sidebar v2 beta keys, resetting everyone to the default", () => {
@@ -733,6 +822,41 @@ describe("ClientSettings sidebar", () => {
     expect(decodeClientSettingsPatch(stored)).toEqual({});
   });
 
+  it.each([false, true])(
+    "decodes the independent LastCode choice with legacy=%s",
+    (legacySidebarEnabled) => {
+      const input = { lastcodeSidebarEnabled: true, legacySidebarEnabled, legacySidebarScale: 75 };
+      expect(decodeClientSettings(input)).toMatchObject(input);
+      expect(decodeClientSettingsPatch(input)).toEqual(input);
+      expect(decodeClientSettings({ legacySidebarEnabled }).lastcodeSidebarEnabled).toBe(false);
+    },
+  );
+
+  it.each(["yes", 1, null])(
+    "rejects an invalid LastCode sidebar choice: %s",
+    (lastcodeSidebarEnabled) => {
+      expect(() => decodeClientSettings({ lastcodeSidebarEnabled })).toThrow();
+      expect(() => decodeClientSettingsPatch({ lastcodeSidebarEnabled })).toThrow();
+    },
+  );
+
+  it("defaults family status subheaders on and preserves an explicit opt-out", () => {
+    expect(decodeClientSettings({}).lastcodeSidebarFamilyStatusSubheaders).toBe(true);
+    expect(
+      decodeClientSettings({ legacySidebarEnabled: true }).lastcodeSidebarFamilyStatusSubheaders,
+    ).toBe(true);
+    expect(
+      decodeClientSettings({ lastcodeSidebarFamilyStatusSubheaders: false })
+        .lastcodeSidebarFamilyStatusSubheaders,
+    ).toBe(false);
+    expect(decodeClientSettingsPatch({ lastcodeSidebarFamilyStatusSubheaders: false })).toEqual({
+      lastcodeSidebarFamilyStatusSubheaders: false,
+    });
+    expect(() =>
+      decodeClientSettingsPatch({ lastcodeSidebarFamilyStatusSubheaders: "false" }),
+    ).toThrow();
+  });
+
   it("preserves an explicit legacy sidebar opt-in", () => {
     expect(decodeClientSettings({ legacySidebarEnabled: true }).legacySidebarEnabled).toBe(true);
     expect(decodeClientSettingsPatch({ legacySidebarEnabled: true }).legacySidebarEnabled).toBe(
@@ -744,6 +868,36 @@ describe("ClientSettings sidebar", () => {
     expect(decodeClientSettings({}).confirmThreadUnpin).toBe(false);
     expect(decodeClientSettingsPatch({ confirmThreadUnpin: true }).confirmThreadUnpin).toBe(true);
     expect(() => decodeClientSettingsPatch({ confirmThreadUnpin: "yes" })).toThrow();
+  });
+
+  it("preserves compact legacy sidebar status indicators", () => {
+    expect(
+      decodeClientSettings({ compactLegacySidebarStatuses: true }).compactLegacySidebarStatuses,
+    ).toBe(true);
+    expect(
+      decodeClientSettingsPatch({ compactLegacySidebarStatuses: true })
+        .compactLegacySidebarStatuses,
+    ).toBe(true);
+  });
+
+  it("preserves an explicit worktree indicator preference", () => {
+    expect(
+      decodeClientSettings({ showThreadWorktreeIndicators: false }).showThreadWorktreeIndicators,
+    ).toBe(false);
+    expect(
+      decodeClientSettingsPatch({ showThreadWorktreeIndicators: false })
+        .showThreadWorktreeIndicators,
+    ).toBe(false);
+  });
+
+  it.each([50, 75, 100])("accepts a legacy sidebar scale within 50..100: %s", (value) => {
+    expect(decodeClientSettings({ legacySidebarScale: value }).legacySidebarScale).toBe(value);
+    expect(decodeClientSettingsPatch({ legacySidebarScale: value }).legacySidebarScale).toBe(value);
+  });
+
+  it.each([49, 101, 74.5])("rejects an invalid legacy sidebar scale: %s", (value) => {
+    expect(() => decodeClientSettings({ legacySidebarScale: value })).toThrow();
+    expect(() => decodeClientSettingsPatch({ legacySidebarScale: value })).toThrow();
   });
 });
 
@@ -845,6 +999,13 @@ describe("ClientSettings pull request merge methods", () => {
   });
 });
 
+describe("ClientSettings project icons", () => {
+  it("defaults to unrounded icons and preserves an explicit opt-in", () => {
+    expect(decodeClientSettings({}).roundedProjectIcons).toBe(false);
+    expect(decodeClientSettings({ roundedProjectIcons: true }).roundedProjectIcons).toBe(true);
+    expect(decodeClientSettingsPatch({ roundedProjectIcons: true }).roundedProjectIcons).toBe(true);
+  });
+});
 describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
   it("defaults to an empty record so legacy configs without the key still decode", () => {
     expect(DEFAULT_SERVER_SETTINGS.providerInstances).toEqual({});
