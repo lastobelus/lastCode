@@ -1411,7 +1411,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   const sql = yield* SqlClient.SqlClient;
   const config = yield* ServerConfig.ServerConfig;
   for (const query of [
-    "CREATE TABLE orchestration_events (sequence INTEGER PRIMARY KEY, aggregate_kind TEXT, stream_id TEXT, event_type TEXT, occurred_at TEXT, application_event_version INTEGER NOT NULL DEFAULT 1)",
+    "CREATE TABLE orchestration_events (sequence INTEGER PRIMARY KEY, aggregate_kind TEXT, stream_id TEXT, event_type TEXT, occurred_at TEXT, application_event_version INTEGER NOT NULL DEFAULT 1, payload_json TEXT NOT NULL)",
     "CREATE INDEX idx_orchestration_events_agent_stream_sequence ON orchestration_events(stream_id, sequence) WHERE application_event_version = 2 AND aggregate_kind = 'thread'",
     "CREATE TABLE projection_projects (project_id TEXT, workspace_root TEXT)",
     "CREATE TABLE orchestration_v2_projection_threads (thread_id TEXT, project_id TEXT, payload_json TEXT, deleted_at TEXT)",
@@ -1616,7 +1616,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
         if (mode === "final-mount-queued-run")
           yield* sql`INSERT INTO orchestration_v2_projection_runs VALUES (${threadId}, 'queued')`;
         if (mode === "final-mount-candidate-event")
-          yield* sql`INSERT INTO orchestration_events (aggregate_kind, stream_id, event_type, occurred_at, application_event_version) VALUES ('thread', ${threadId}, 'turn-item.updated', ${DateTime.formatIso(at(0))}, 2)`;
+          yield* sql`INSERT INTO orchestration_events (aggregate_kind, stream_id, event_type, occurred_at, application_event_version, payload_json) VALUES ('thread', ${threadId}, 'turn-item.updated', ${DateTime.formatIso(at(0))}, 2, '{}')`;
         if (mode === "final-mount-provider-ownership") acquireManagerOwnership();
         if (mode === "final-mount-dependency-use") yield* f.cleanup.observe(f.input, NOW, true);
       }
@@ -1648,15 +1648,15 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     if (mode === "deleted-pending" || mode === "deleted-visible-pending" || wholeSharedDeleted)
       yield* sql`INSERT INTO orchestration_v2_effect_outbox VALUES (${deletedThreadId}, 'running')`;
     if (mode === "deleted-canonical-event" || mode === "deleted-out-of-order-event") {
-      yield* sql`INSERT INTO orchestration_events (aggregate_kind, stream_id, event_type, occurred_at, application_event_version) VALUES ('thread', ${threadId}, 'turn-item.updated', ${DateTime.formatIso(at(1))}, 2)`;
+      yield* sql`INSERT INTO orchestration_events (aggregate_kind, stream_id, event_type, occurred_at, application_event_version, payload_json) VALUES ('thread', ${threadId}, 'turn-item.updated', ${DateTime.formatIso(at(1))}, 2, '{}')`;
       if (mode === "deleted-out-of-order-event")
-        yield* sql`INSERT INTO orchestration_events (aggregate_kind, stream_id, event_type, occurred_at, application_event_version) VALUES ('thread', ${threadId}, 'turn-item.updated', ${DateTime.formatIso(at(20))}, 2)`;
+        yield* sql`INSERT INTO orchestration_events (aggregate_kind, stream_id, event_type, occurred_at, application_event_version, payload_json) VALUES ('thread', ${threadId}, 'turn-item.updated', ${DateTime.formatIso(at(20))}, 2, '{}')`;
     }
     if (mode === "deleted-unrelated-events") {
-      yield* sql`INSERT INTO orchestration_events (aggregate_kind, stream_id, event_type, occurred_at, application_event_version) VALUES ('thread', ${threadId}, 'turn-item.updated', ${DateTime.formatIso(at(20))}, 2)`;
-      yield* sql`INSERT INTO orchestration_events (aggregate_kind, stream_id, event_type, occurred_at, application_event_version) VALUES ('thread', 'unrelated-thread', 'turn-item.updated', ${DateTime.formatIso(at(1))}, 2)`;
-      yield* sql`INSERT INTO orchestration_events (aggregate_kind, stream_id, event_type, occurred_at, application_event_version) VALUES ('project', ${threadId}, 'project.updated', ${DateTime.formatIso(at(1))}, 2)`;
-      yield* sql`INSERT INTO orchestration_events (aggregate_kind, stream_id, event_type, occurred_at, application_event_version) VALUES ('thread', ${threadId}, 'turn-item.updated', ${DateTime.formatIso(at(1))}, 1)`;
+      yield* sql`INSERT INTO orchestration_events (aggregate_kind, stream_id, event_type, occurred_at, application_event_version, payload_json) VALUES ('thread', ${threadId}, 'turn-item.updated', ${DateTime.formatIso(at(20))}, 2, '{}')`;
+      yield* sql`INSERT INTO orchestration_events (aggregate_kind, stream_id, event_type, occurred_at, application_event_version, payload_json) VALUES ('thread', 'unrelated-thread', 'turn-item.updated', ${DateTime.formatIso(at(1))}, 2, '{}')`;
+      yield* sql`INSERT INTO orchestration_events (aggregate_kind, stream_id, event_type, occurred_at, application_event_version, payload_json) VALUES ('project', ${threadId}, 'project.updated', ${DateTime.formatIso(at(1))}, 2, '{}')`;
+      yield* sql`INSERT INTO orchestration_events (aggregate_kind, stream_id, event_type, occurred_at, application_event_version, payload_json) VALUES ('thread', ${threadId}, 'turn-item.updated', ${DateTime.formatIso(at(1))}, 1, '{}')`;
     }
   }
   if (mode.startsWith("session") || sharedSession) {
@@ -1910,7 +1910,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
           ),
         )
       : Stream.empty;
-  const projects =
+  let projects =
     mode === "ownerless-shared-project" ||
     mode === "ownerless-shared-project-failed-inventory" ||
     mode === "ownerless-non-git-project"
@@ -1933,7 +1933,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
             },
           ]
         : [project];
-  const projectRows = projects.map(({ id, ...entry }) => ({
+  let projectRows = projects.map(({ id, ...entry }) => ({
     ...entry,
     projectId: id,
     defaultThreadEnvMode: null,
@@ -1985,8 +1985,18 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
       getShellSnapshot: (options) =>
         Effect.gen(function* () {
           reads++;
-          if (reads === 1 && mode === "initial-revision-changed")
-            yield* sql`INSERT INTO orchestration_events (sequence, aggregate_kind, stream_id, event_type, application_event_version) VALUES (1, 'thread', ${threadId}, 'thread.metadata-updated', 2)`;
+          const snapshotThread = thread;
+          if (reads === 1 && mode === "initial-revision-changed") {
+            thread = { ...thread, projectId: ProjectId.make("changed-project") };
+            const payload = encodeFullThread(
+              decodeFullThread({
+                ...thread,
+                createdAt: DateTime.formatIso(thread.createdAt),
+                updatedAt: DateTime.formatIso(thread.updatedAt),
+              }),
+            );
+            yield* sql`INSERT INTO orchestration_events (sequence, aggregate_kind, stream_id, event_type, application_event_version, payload_json) VALUES (1, 'thread', ${threadId}, 'thread.metadata-updated', 2, ${payload})`;
+          }
           const threads =
             ownerless ||
             options?.location === "archive" ||
@@ -1999,7 +2009,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
                   ? [thread, visibleDeletedThread]
                   : mode === "shared"
                     ? [thread, { ...thread, id: ThreadId.make("other") }]
-                    : [thread];
+                    : [snapshotThread];
           return {
             schemaVersion: 1 as const,
             snapshotSequence: 0,
@@ -2028,7 +2038,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
         Effect.gen(function* () {
           targetedReads.push(requestedId);
           if (targetedReads.length === 1 && mode === "deleted-event-after-capture") {
-            yield* sql`INSERT INTO orchestration_events (aggregate_kind, stream_id, event_type, occurred_at, application_event_version) VALUES ('thread', ${threadId}, 'turn-item.updated', ${DateTime.formatIso(at(1))}, 2)`;
+            yield* sql`INSERT INTO orchestration_events (aggregate_kind, stream_id, event_type, occurred_at, application_event_version, payload_json) VALUES ('thread', ${threadId}, 'turn-item.updated', ${DateTime.formatIso(at(1))}, 2, '{}')`;
             deletedEventInserted = true;
           }
           if (
@@ -2053,19 +2063,21 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
           if (targetedReads.length > 1 && mode === "ownership-changed")
             thread = { ...thread, projectId: ProjectId.make("changed-project") };
           if (targetedReads.length === 1 && mode === "revision-changed") {
-            yield* sql`INSERT INTO projection_projects VALUES (${projectId}, ${f.repository})`;
-            yield* sql`INSERT INTO orchestration_v2_projection_threads VALUES ('unrelated-new-deleted', ${projectId}, '{"not":"a-thread"}', 'deleted')`;
-            yield* sql`INSERT INTO orchestration_events (sequence, aggregate_kind, stream_id, event_type, application_event_version) VALUES (1, 'project', ${projectId}, 'project.updated', 2)`;
+            const addedProject = { ...project, id: ProjectId.make("new-project") };
+            projects = [...projects, addedProject];
+            projectRows = [...projectRows, { ...projectRows[0]!, projectId: addedProject.id }];
+            yield* sql`INSERT INTO projection_projects VALUES (${addedProject.id}, ${f.repository})`;
+            yield* sql`INSERT INTO orchestration_events (sequence, aggregate_kind, stream_id, event_type, application_event_version, payload_json) VALUES (1, 'project', ${addedProject.id}, 'project.updated', 2, ${JSON.stringify(addedProject)})`;
           }
           if (targetedReads.length === 1 && mode === "unrelated-streaming")
-            yield* sql`INSERT INTO orchestration_events (sequence, aggregate_kind, stream_id, event_type, application_event_version) VALUES (1, 'thread', 'unrelated-stream-thread', 'turn-item.updated', 2)`;
+            yield* sql`INSERT INTO orchestration_events (sequence, aggregate_kind, stream_id, event_type, application_event_version, payload_json) VALUES (1, 'thread', 'unrelated-stream-thread', 'turn-item.updated', 2, '{}')`;
           if (targetedReads.length === 1 && mode === "provider-binding-changed") {
             const payload = providerPayload("changed-session", "error", f.repository);
             yield* sql.withTransaction(
               Effect.gen(function* () {
                 yield* sql`INSERT INTO orchestration_v2_projection_provider_sessions VALUES ('changed-session', 'error', ${payload})`;
                 yield* sql`INSERT INTO orchestration_v2_projection_provider_session_bindings VALUES ('changed-session', ${threadId})`;
-                yield* sql`INSERT INTO orchestration_events (sequence, aggregate_kind, stream_id, event_type, application_event_version) VALUES (1, 'thread', ${threadId}, 'provider-session.attached', 2)`;
+                yield* sql`INSERT INTO orchestration_events (sequence, aggregate_kind, stream_id, event_type, application_event_version, payload_json) VALUES (1, 'thread', ${threadId}, 'provider-session.attached', 2, '{}')`;
               }),
             );
             providerEventInserted = true;
@@ -2075,7 +2087,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
             yield* sql.withTransaction(
               Effect.gen(function* () {
                 yield* sql`UPDATE orchestration_v2_projection_provider_sessions SET payload_json = ${payload} WHERE provider_session_id = 'changed-session'`;
-                yield* sql`INSERT INTO orchestration_events (sequence, aggregate_kind, stream_id, event_type, application_event_version) VALUES (1, 'thread', ${threadId}, 'provider-session.updated', 2)`;
+                yield* sql`INSERT INTO orchestration_events (sequence, aggregate_kind, stream_id, event_type, application_event_version, payload_json) VALUES (1, 'thread', ${threadId}, 'provider-session.updated', 2, '{}')`;
               }),
             );
             providerEventInserted = true;
@@ -2127,7 +2139,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
             yield* sql.withTransaction(
               Effect.gen(function* () {
                 yield* sql`UPDATE orchestration_v2_projection_provider_sessions SET status = 'ready', payload_json = ${payload} WHERE provider_session_id = ${sessionId}`;
-                yield* sql`INSERT INTO orchestration_events (sequence, aggregate_kind, stream_id, event_type, application_event_version) VALUES (1, 'thread', ${threadId}, 'provider-session.updated', 2)`;
+                yield* sql`INSERT INTO orchestration_events (sequence, aggregate_kind, stream_id, event_type, application_event_version, payload_json) VALUES (1, 'thread', ${threadId}, 'provider-session.updated', 2, '{}')`;
               }),
             );
             providerEventInserted = true;
@@ -2332,7 +2344,17 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
   }
   if (mode === "revision-changed") {
     assert.equal(reads, 3);
-    assert.equal(dependencyInspections(), 0);
+    const report = yield* worker.latestReport;
+    assert.isTrue(
+      report!.entries.some(
+        (entry) => entry.worktreeResource === "dependencies" && entry.outcome === "kept",
+      ),
+    );
+    assert.equal(report!.counts.failed, 0);
+    assert.deepStrictEqual(
+      yield* sql`SELECT project_id FROM projection_projects WHERE project_id = 'new-project'`,
+      [{ project_id: "new-project" }],
+    );
   }
   if (mode === "deleted-event-after-capture") assert.isTrue(deletedEventInserted);
   if (mode.startsWith("final-mount-")) {
@@ -2342,7 +2364,17 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
       mountReads,
       mode === "final-mount-unchanged" ? 5 : mode === "final-mount-late-dependency-use" ? 4 : 2,
     );
-    assert.equal(targetedReads.length, 4);
+    // Prepared eligibility now rechecks the owner after each native proof.
+    assert.equal(
+      targetedReads.length,
+      mode === "final-mount-unchanged"
+        ? 6
+        : mode === "final-mount-queued-run" ||
+            mode === "final-mount-candidate-event" ||
+            mode === "final-mount-late-dependency-use"
+          ? 5
+          : 4,
+    );
     assert.equal(processReads, 3);
     assert.equal(reads, 3);
     if (mode === "final-mount-policy-off")

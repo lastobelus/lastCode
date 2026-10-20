@@ -1,3 +1,4 @@
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { observeDependencyActivity } from "@t3tools/shared/dependencyActivity";
 import {
   createGeneratedBuildStage,
@@ -333,6 +334,7 @@ const cleanupFixture = (
     worktreeAfterDays: 8,
     worktreeOnDelete: true,
   },
+  eventSql?: SqlClient.SqlClient,
 ) =>
   Effect.gen(function* () {
     const fixtureNow = yield* Clock.currentTimeMillis;
@@ -605,6 +607,12 @@ const cleanupFixture = (
           (strings: TemplateStringsArray, ...values: unknown[]) => {
             const query = strings.join("");
             if (
+              eventSql !== undefined &&
+              query.includes("FROM orchestration_events") &&
+              !query.includes("FROM orchestration_v2_projection_threads")
+            )
+              return eventSql(strings, ...values);
+            if (
               failDependencyRead &&
               query.includes("FROM orchestration_v2_projection_threads t")
             ) {
@@ -631,7 +639,8 @@ const cleanupFixture = (
             }
             if (
               failEligibilityRevalidation &&
-              query.includes("OR (aggregate_kind = 'thread' AND stream_id")
+              query.includes("stream_id IN") &&
+              query.includes("event_type NOT IN (")
             ) {
               failEligibilityRevalidation = false;
               return Effect.fail(
@@ -685,7 +694,7 @@ const cleanupFixture = (
                 : [];
             });
           },
-          { in: (values: ReadonlyArray<unknown>) => values },
+          { in: eventSql?.in ?? ((values: ReadonlyArray<unknown>) => values) },
         ) as unknown as SqlClient.SqlClient,
       ),
       Effect.provideService(ProviderSessionManager.ProviderSessionManagerV2, {
@@ -990,13 +999,16 @@ const cleanupFixture = (
     };
   });
 /** The fixture, with the size walk of its worktree held until `resume` succeeds. */
-const pausedMeasurementFixture = (storageCleanup?: StorageCleanupSettings) =>
+const pausedMeasurementFixture = (
+  storageCleanup?: StorageCleanupSettings,
+  eventSql?: SqlClient.SqlClient,
+) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const measuring = yield* Deferred.make<void>();
     const resume = yield* Deferred.make<void>();
     let measuredPath: string | undefined;
-    const fixture = yield* cleanupFixture(storageCleanup).pipe(
+    const fixture = yield* cleanupFixture(storageCleanup, eventSql).pipe(
       Effect.provideService(FileSystem.FileSystem, {
         ...fs,
         readDirectory: (directory, options) =>
@@ -1252,6 +1264,288 @@ it.live("preserves late tracked edits when submodules were never initialized", (
     }),
   ),
 );
+
+const cleanupEventSql = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql`CREATE TABLE orchestration_events (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    aggregate_kind TEXT NOT NULL,
+    stream_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    payload_json TEXT NOT NULL
+  )`;
+  const append = (type: string, payload: unknown, streamId = "thread-1", kind = "thread") =>
+    sql`INSERT INTO orchestration_events (aggregate_kind, stream_id, event_type, payload_json)
+      VALUES (${kind}, ${streamId}, ${type}, ${JSON.stringify(payload)})`.pipe(Effect.asVoid);
+  return { sql, append };
+});
+
+describe("cleanup ownership event revalidation", () => {
+  it.live.each([
+    "owner visit",
+    "owner metadata",
+    "unrelated visit",
+    "unrelated PR link",
+    "unrelated metadata",
+    "unrelated creation",
+    "new owner",
+    "aliased owner",
+    "moved owner",
+    "owner active",
+    "owner unarchived",
+    "project metadata",
+    "project root",
+    "project addition",
+  ] as const)("revalidates dependency ownership after %s", (change) =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const { sql, append } = yield* cleanupEventSql;
+        const fixture = yield* cleanupFixture(undefined, sql);
+        yield* fixture.enableDependencies;
+        const owner = shell({
+          branch: "feature",
+          worktreePath: fixture.worktree,
+          archivedAt: at(-30 * DAY_MS),
+        });
+        const other = shell({
+          id: ThreadId.make("other-thread"),
+          branch: "other-feature",
+          worktreePath: `${fixture.repo}/other-checkout`,
+        });
+        fixture.setThreads(change === "moved owner" ? [owner, other] : [owner]);
+        let aliasedPath = fixture.worktree;
+        if (change === "aliased owner") {
+          const alias = `${fixture.config.baseDir}/worktree-alias`;
+          yield* fixture.fs.symlink(fixture.config.worktreesDir, alias);
+          aliasedPath = `${alias}/feature`;
+        }
+        fixture.onDependencyInspection(
+          Effect.gen(function* () {
+            if (change.startsWith("project")) {
+              const roots = projectShells(
+                change === "project addition"
+                  ? [fixture.repo, fixture.repo]
+                  : [change === "project root" ? fixture.worktree : fixture.repo],
+              );
+              fixture.setProjectRoots(roots);
+              yield* append("project.updated", roots[0], "project-1", "project");
+              return;
+            }
+            if (change === "unrelated PR link") {
+              yield* append(
+                "thread.pull-request-link-updated",
+                { host: "github.com", repository: "example/project", number: 1 },
+                other.id,
+              );
+              return;
+            }
+            const next =
+              change === "owner active"
+                ? { ...owner, status: "running" as const }
+                : change === "owner unarchived"
+                  ? { ...owner, archivedAt: null }
+                  : change === "new owner" || change === "aliased owner" || change === "moved owner"
+                    ? { ...other, worktreePath: aliasedPath }
+                    : change === "owner visit" || change === "owner metadata"
+                      ? owner
+                      : other;
+            if (change === "owner active" || change === "owner unarchived")
+              fixture.setThreads([next]);
+            else if (
+              ["new owner", "aliased owner", "moved owner", "unrelated creation"].includes(change)
+            )
+              fixture.setThreads([owner, next]);
+            const eventType = change.includes("visit")
+              ? "thread.visited"
+              : change === "new owner" ||
+                  change === "aliased owner" ||
+                  change === "unrelated creation"
+                ? "thread.created"
+                : "thread.metadata-updated";
+            yield* append(eventType, next, next.id);
+          }).pipe(Effect.orDie),
+        );
+        const report = yield* fixture.service.runNow;
+        const kept = [
+          "new owner",
+          "aliased owner",
+          "moved owner",
+          "owner active",
+          "owner unarchived",
+          "project root",
+          "project addition",
+        ].includes(change);
+        expect(
+          report.entries.filter((entry) => entry.worktreeResource === "dependencies"),
+        ).toMatchObject([{ outcome: kept ? "kept" : "removed" }]);
+        expect(yield* fixture.fs.exists(`${fixture.worktree}/node_modules`)).toBe(kept);
+        expect(report.counts.failed).toBe(0);
+      }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+    ),
+  );
+
+  it.live("keeps ownerless dependencies when new thread history names their branch", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const { sql, append } = yield* cleanupEventSql;
+        const fixture = yield* cleanupFixture(undefined, sql);
+        yield* fixture.enableDependencies;
+        fixture.setThreads([]);
+        fixture.onDependencyInspection(
+          Effect.gen(function* () {
+            const owner = shell({ branch: "feature", worktreePath: `${fixture.repo}/elsewhere` });
+            fixture.setThreads([owner]);
+            yield* append("thread.created", owner);
+          }).pipe(Effect.orDie),
+        );
+        const report = yield* fixture.service.runNow;
+        expect(
+          report.entries.filter((entry) => entry.worktreeResource === "dependencies"),
+        ).toMatchObject([{ outcome: "kept" }]);
+        expect(yield* fixture.fs.exists(`${fixture.worktree}/node_modules`)).toBe(true);
+        expect(report.counts.failed).toBe(0);
+      }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+    ),
+  );
+
+  it.live.each(["owner visit", "owner unarchived"] as const)(
+    "revalidates dependency ownership after late %s in native removal",
+    (change) =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          const { sql, append } = yield* cleanupEventSql;
+          let captures = 0;
+          let injected = false;
+          let inject: Effect.Effect<void> = Effect.void;
+          const fixture = yield* cleanupFixture(undefined, sql).pipe(
+            Effect.provideService(
+              WorktreeConsumers.ProcessPaths,
+              Effect.gen(function* () {
+                captures++;
+                // The third native capture follows canRemove's sequence capture
+                // and precedes a final isStillEligible callback.
+                if (captures === 3) {
+                  yield* inject;
+                  injected = true;
+                }
+                return [];
+              }),
+            ),
+          );
+          yield* fixture.enableDependencies;
+          const owner = shell({
+            branch: "feature",
+            worktreePath: fixture.worktree,
+            archivedAt: at(-30 * DAY_MS),
+          });
+          fixture.setThreads([owner]);
+          inject = Effect.gen(function* () {
+            const latest = change === "owner unarchived" ? { ...owner, archivedAt: null } : owner;
+            fixture.setThreads([latest]);
+            yield* append(
+              change === "owner visit" ? "thread.visited" : "thread.metadata-updated",
+              latest,
+              owner.id,
+            );
+          }).pipe(Effect.orDie);
+          const report = yield* fixture.service.runNow;
+          expect(injected).toBe(true);
+          expect(
+            report.entries.filter((entry) => entry.worktreeResource === "dependencies"),
+          ).toMatchObject([{ outcome: change === "owner visit" ? "removed" : "kept" }]);
+          expect(yield* fixture.fs.exists(`${fixture.worktree}/node_modules`)).toBe(
+            change === "owner unarchived",
+          );
+          expect(report.counts.failed).toBe(0);
+        }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+      ),
+  );
+
+  it.live.each(["unrelated visit", "new owner"] as const)(
+    "revalidates whole-checkout ownership after %s during measurement",
+    (change) =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          const { sql, append } = yield* cleanupEventSql;
+          const fixture = yield* pausedMeasurementFixture(undefined, sql);
+          const owner = shell({ branch: "feature", worktreePath: fixture.worktree });
+          const other = shell({
+            id: ThreadId.make("other-thread"),
+            branch: "other-feature",
+            worktreePath: change === "new owner" ? fixture.worktree : `${fixture.repo}/elsewhere`,
+          });
+          const run = yield* Effect.forkChild(fixture.service.runNow);
+          yield* Deferred.await(fixture.measuring);
+          if (change === "new owner") fixture.setThreads([owner, other]);
+          yield* append(
+            change === "new owner" ? "thread.created" : "thread.visited",
+            other,
+            other.id,
+          );
+          yield* Deferred.succeed(fixture.resume, undefined);
+          const report = yield* Fiber.join(run);
+          expect(checkoutEntries(report)[0]?.outcome).toBe(
+            change === "new owner" ? "kept" : "removed",
+          );
+          expect(yield* fixture.fs.exists(fixture.worktree)).toBe(change === "new owner");
+          expect(report.counts.failed).toBe(0);
+        }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+      ),
+  );
+
+  it.live.each(["unrelated visit", "new owner"] as const)(
+    "revalidates generated-build ownership after %s",
+    (change) =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          const { sql, append } = yield* cleanupEventSql;
+          let outputDirectory = "";
+          let inject: Effect.Effect<void> | null = null;
+          let observations = 0;
+          const fixture = yield* cleanupFixture(undefined, sql).pipe(
+            Effect.provideService(
+              WorktreeConsumers.ProcessPaths,
+              Effect.gen(function* () {
+                observations++;
+                if (observations === 2 && inject !== null) {
+                  const event = inject;
+                  inject = null;
+                  yield* event;
+                }
+                return [];
+              }),
+            ),
+          );
+          fixture.setDependencyRetention(3);
+          yield* seedCompilerOutput(fixture, "apps/web/dist", fixture.now - 4 * DAY_MS);
+          outputDirectory = `${fixture.worktree}/apps/web/dist`;
+          const owner = shell({ branch: "feature", worktreePath: fixture.worktree });
+          const other = shell({
+            id: ThreadId.make("other-thread"),
+            branch: "other-feature",
+            worktreePath: change === "new owner" ? fixture.worktree : `${fixture.repo}/elsewhere`,
+          });
+          inject = Effect.gen(function* () {
+            if (change === "new owner") fixture.setThreads([owner, other]);
+            yield* append(
+              change === "new owner" ? "thread.created" : "thread.visited",
+              other,
+              other.id,
+            );
+          }).pipe(Effect.orDie);
+          const report = yield* fixture.service.runNow;
+          expect(inject).toBeNull();
+          expect(
+            report.entries.filter((entry) => entry.worktreeResource === "generated-builds"),
+          ).toMatchObject([{ outcome: change === "new owner" ? "kept" : "removed" }]);
+          expect(yield* fixture.fs.exists(`${outputDirectory}/assets/emitted.bin`)).toBe(
+            change === "new owner",
+          );
+          expect(report.counts.failed).toBe(0);
+        }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+      ),
+  );
+});
 
 describe("subagent worktree ownership", () => {
   it.effect.each([
