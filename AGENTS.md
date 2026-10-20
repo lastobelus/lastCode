@@ -119,7 +119,7 @@ An empty database is a bad test. Seed your worktree's `.t3` with a copy of real 
 ## Verifying
 
 - Smallest proof that the change works. `vp test run <files>` for the tests you touched, targeted lint and typecheck for the scope you changed.
-- Run compiled web React checks with `pnpm --dir apps/web exec vp test run --project unit src/...`; the root Vite config omits the web React compiler, so root-config tests do not validate compiled React behavior.
+- Run compiled web React checks with `pnpm --dir apps/web exec vp test run --project unit src/...`; the root Vite config omits the web React compiler. Mounted tests can still pass through compiler fallback. For a new or refactored hook/component, also run `pnpm --dir apps/web exec vp test run --project unit src/reactCompilerCoverage.test.ts -t 'compiles apps/web/src/path/to/file.tsx'` to verify compilation without bailouts.
 - Test meaningful logic or observable behavior. Do not render components to static markup to assert props or attributes, or add tests that merely assert callback wiring or mirror the implementation.
 - **Do not run repo-wide checks.** No `vp check`, no `vp run -r test`, no `vp run -r typecheck` unless I ask. CI owns the full suite.
 - Backend behavior changes ship with focused tests for that behavior.
