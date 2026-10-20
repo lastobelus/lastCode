@@ -20,6 +20,7 @@ type AnchorElement = ReactElement<{
 
 const baseState: DesktopUpdateState = {
   enabled: true,
+  source: "hosted",
   status: "available",
   channel: "nightly",
   currentVersion: "0.0.35",
@@ -35,6 +36,8 @@ const baseState: DesktopUpdateState = {
   message: null,
   errorContext: null,
   canRetry: false,
+  localBuildProgress: null,
+  localBuildFailure: null,
 };
 
 function collectAnchors(node: ReactNode, anchors: AnchorElement[] = []): AnchorElement[] {
@@ -72,6 +75,7 @@ function renderNotes(state: DesktopUpdateState, openExternal = vi.fn().mockResol
 describe("SidebarUpdateReleaseNotes", () => {
   beforeEach(() => {
     testState.addToast.mockReset();
+    vi.stubEnv("T3CODE_DESKTOP_UPDATE_REPOSITORY", "pingdotgg/t3code");
   });
 
   afterEach(() => {
