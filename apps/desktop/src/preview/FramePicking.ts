@@ -415,6 +415,44 @@ export function pickInDocument(
   return null;
 }
 
+function containsFrame(node: Node) {
+  return isElement(node) && (node.localName === "iframe" || node.querySelector("iframe") !== null);
+}
+
+/** Owns one document's annotation listeners and mutation subscription until cleanup. */
+function observeFrameDocument(
+  owner: Document,
+  attach: (owner: Document) => () => void,
+  queueUpdate: (discover: boolean) => void,
+  ignore: (element: Element) => boolean,
+) {
+  const cleanup = attach(owner);
+  const observer = new MutationObserver((records) => {
+    let pageChanged = false;
+    let discover = false;
+    for (const record of records) {
+      if (isElement(record.target) && ignore(record.target)) continue;
+      pageChanged = true;
+      // Style animation and text updates can move a selection, but cannot
+      // introduce frame documents. Search only added/removed subtrees here.
+      discover ||=
+        record.type === "childList" &&
+        [...record.addedNodes, ...record.removedNodes].some(containsFrame);
+    }
+    if (pageChanged) queueUpdate(discover);
+  });
+  observer.observe(owner, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ["style", "class", "hidden", "width", "height"],
+  });
+  return () => {
+    observer.disconnect();
+    cleanup();
+  };
+}
+
 /** Tracks frame loads and DOM replacement without enabling preloads or Node in subframes. */
 export function observeFrameDocuments(
   topDocument: Document,
@@ -440,8 +478,6 @@ export function observeFrameDocuments(
       else changed();
     });
   };
-  const containsFrame = (node: Node) =>
-    isElement(node) && (node.localName === "iframe" || node.querySelector("iframe") !== null);
   const refresh = (notify = true) => {
     if (disposed) return;
     const foundDocuments = new Set<Document>();
@@ -471,31 +507,7 @@ export function observeFrameDocuments(
     // old document's listeners before adding the same callbacks to its successor.
     for (const owner of foundDocuments) {
       if (!documents.has(owner)) {
-        const cleanup = attach(owner);
-        const observer = new MutationObserver((records) => {
-          const pageChanges = records.filter(
-            (record) => !isElement(record.target) || !ignore(record.target),
-          );
-          if (pageChanges.length === 0) return;
-          // Style animation and text updates can move a selection, but cannot
-          // introduce frame documents. Search only added/removed subtrees here.
-          const discover = pageChanges.some(
-            (record) =>
-              record.type === "childList" &&
-              [...record.addedNodes, ...record.removedNodes].some(containsFrame),
-          );
-          queueUpdate(discover);
-        });
-        observer.observe(owner, {
-          childList: true,
-          subtree: true,
-          attributes: true,
-          attributeFilter: ["style", "class", "hidden", "width", "height"],
-        });
-        documents.set(owner, () => {
-          observer.disconnect();
-          cleanup();
-        });
+        documents.set(owner, observeFrameDocument(owner, attach, queueUpdate, ignore));
       }
     }
     for (const frame of foundFrames) {
