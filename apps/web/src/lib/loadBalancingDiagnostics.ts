@@ -22,7 +22,7 @@ export function loadBalancingExclusionReason(input: {
     )
     .map(providerExclusionReason);
   if (reasons.includes(null)) return null;
-  return reasons[0] ?? "provider-missing";
+  return reasons[0] ?? ("provider-missing" as const);
 }
 
 function providerExclusionReason(provider: ServerProvider) {

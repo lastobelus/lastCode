@@ -121,7 +121,7 @@ describe("loadBalancingExclusionReason", () => {
     (providerInstanceId) => {
       for (const first of providerFailures) {
         for (const second of providerFailures) {
-          const failures = [
+          const failures: ServerProvider[] = [
             { ...provider, ...first.override },
             { ...provider, ...second.override },
           ];
