@@ -83,6 +83,7 @@ afterEach(async () => {
     await vi.runOnlyPendingTimersAsync();
   });
   container.remove();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
@@ -136,43 +137,50 @@ describe("command palette focus restoration", () => {
     expect(document.activeElement).toBe(field);
   });
 
-  it("focuses the replacement command input after leaving the file picker", async () => {
-    await act(() =>
-      root.render(
-        <CommandPalette>
-          <input aria-label="Settings field" />
-        </CommandPalette>,
-      ),
-    );
-    const field = container.querySelector("input")!;
-    await act(() => field.focus());
-    await act(() =>
-      field.dispatchEvent(
-        new KeyboardEvent("keydown", {
-          key: "p",
-          ctrlKey: true,
-          bubbles: true,
-          cancelable: true,
-        }),
-      ),
-    );
-    await flushFocus();
-    expect(document.querySelector('[data-palette-mode="files"]')).not.toBeNull();
-    await act(() =>
-      document.activeElement?.dispatchEvent(
-        new KeyboardEvent("keydown", {
-          key: "Escape",
-          bubbles: true,
-          cancelable: true,
-        }),
-      ),
-    );
-    await flushFocus();
-    expect(document.activeElement?.closest('[data-palette-mode="command"]')).not.toBeNull();
-    expect(document.activeElement?.tagName).toBe("INPUT");
-    await dismissPalette();
-    expect(document.activeElement).toBe(field);
-  });
+  it.each([
+    { platform: "MacIntel", modifiers: { metaKey: true } },
+    { platform: "Linux x86_64", modifiers: { ctrlKey: true } },
+  ])(
+    "focuses the replacement command input after leaving the file picker on $platform",
+    async ({ platform, modifiers }) => {
+      vi.spyOn(navigator, "platform", "get").mockReturnValue(platform);
+      await act(() =>
+        root.render(
+          <CommandPalette>
+            <input aria-label="Settings field" />
+          </CommandPalette>,
+        ),
+      );
+      const field = container.querySelector("input")!;
+      await act(() => field.focus());
+      await act(() =>
+        field.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "p",
+            ...modifiers,
+            bubbles: true,
+            cancelable: true,
+          }),
+        ),
+      );
+      await flushFocus();
+      expect(document.querySelector('[data-palette-mode="files"]')).not.toBeNull();
+      await act(() =>
+        document.activeElement?.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "Escape",
+            bubbles: true,
+            cancelable: true,
+          }),
+        ),
+      );
+      await flushFocus();
+      expect(document.activeElement?.closest('[data-palette-mode="command"]')).not.toBeNull();
+      expect(document.activeElement?.tagName).toBe("INPUT");
+      await dismissPalette();
+      expect(document.activeElement).toBe(field);
+    },
+  );
 
   it("focuses the mounted composer at the end instead of the previous field", async () => {
     await act(() =>

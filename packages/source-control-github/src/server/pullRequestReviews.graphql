@@ -102,18 +102,6 @@ query ReviewThreads(
         avatarUrl
       }
       ...Reactions
-      comments(first: 100) {
-        nodes {
-          id
-          lastEditedAt
-          author {
-            __typename
-            login
-            avatarUrl
-          }
-          ...Reactions
-        }
-      }
       # For their reactions and edit times: the words and the verdict arrive with the activity read.
       reviews(first: 100) {
         nodes {
