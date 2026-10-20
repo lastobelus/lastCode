@@ -8,6 +8,7 @@ import * as NodePath from "node:path";
 import * as NodeNet from "node:net";
 import {
   parseBuildResult,
+  localBuildFailureSummary,
   consumeSelection,
   executeBuild,
   requestPath,
@@ -203,6 +204,27 @@ describe("local build package action", () => {
         verifyResult: () => {},
       }),
     ).rejects.toThrow("expected");
+  });
+  it("summarizes the build failure while retaining notification failure diagnostics", async () => {
+    const primary = "[lastcode:local-update] Local LastCode build failed. See build.log.";
+    const stderr = [
+      "[lastcode:local-update] Could not post the build failure to the maintenance thread:",
+      "send failed: Automated LastCode local update build alert.",
+      "Diagnostic: a browser focus assertion failed.",
+      primary,
+      "",
+    ].join("\r\n");
+    await expect(
+      runLocalBuild("/repo", {
+        git: () => commit,
+        readRequest: () => request(),
+        writeRequest: () => {},
+        execute: () => ({ code: 1, stdout: "", stderr }),
+      }),
+    ).rejects.toThrow(stderr.trim());
+    expect(localBuildFailureSummary(stderr)).toBe(primary);
+    expect(localBuildFailureSummary("Selected tag moved.")).toBe("Selected tag moved.");
+    expect(localBuildFailureSummary("x".repeat(500))).toHaveLength(280);
   });
   it("bounds captured stdout and stderr from the owned child", async () => {
     const result = await executeBuild(

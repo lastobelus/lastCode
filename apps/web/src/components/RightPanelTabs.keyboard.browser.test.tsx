@@ -206,8 +206,6 @@ describe("right panel new-tab shortcut", () => {
   );
 
   it("uses a custom binding from a text field and closes on Escape", async () => {
-    // Native menu focus must settle outside act so React can finish pending updates.
-    vi.useRealTimers();
     const input = document.createElement("input");
     await renderPanel({
       keybindings: compileResolvedKeybindingsConfig([{ key: "mod+y", command: "rightPanel.new" }]),
