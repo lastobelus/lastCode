@@ -10,7 +10,7 @@ import {
   parseThreadAnnotationSubmission,
   saveThreadAnnotationSubmission,
 } from "./thread-annotation/threadAnnotationSubmission";
-import { CircleAlertIcon, StickyNoteIcon } from "lucide-react";
+import { StickyNoteIcon } from "lucide-react";
 import { useActionResumeBanners } from "./chat/useActionResumeBanners";
 import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
 import {
@@ -380,7 +380,6 @@ import {
   primaryServerKeybindingsAtom,
   serverEnvironment,
 } from "../state/server";
-import { terminalEnvironment } from "../state/terminal";
 import { threadEnvironment } from "../state/threads";
 import { resolveProviderSkillsForCwd } from "@t3tools/client-runtime/providerSkills";
 import { vcsEnvironment } from "../state/vcs";

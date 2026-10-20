@@ -11,6 +11,7 @@ import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
+  type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
 
 import { useStableCallback } from "../../hooks/useStableCallback";
@@ -28,6 +29,19 @@ interface ActionResumeBannerInput {
   readonly action: ActionResumeState | null;
   readonly onRequestTerminalFocus: () => void;
   readonly onThreadError: (threadId: ThreadId | null, error: string | null) => void;
+}
+
+// The callback belongs to the route that started the command, including after await.
+function reportActionFailure(
+  result: AtomCommandResult<unknown, unknown>,
+  threadId: ThreadId,
+  onThreadError: ActionResumeBannerInput["onThreadError"],
+  fallback: string,
+) {
+  if (result._tag !== "Failure") return;
+  if (isAtomCommandInterrupted(result)) return;
+  const error = squashAtomCommandFailure(result);
+  onThreadError(threadId, error instanceof Error ? error.message : fallback);
 }
 
 function useRunningActionControl({
@@ -62,13 +76,12 @@ function useRunningActionControl({
         environmentId: threadRef.environmentId,
         input: { threadId: threadRef.threadId, terminalId: running.terminalId },
       });
-      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-        const error = squashAtomCommandFailure(result);
-        onThreadError(
-          threadRef.threadId,
-          error instanceof Error ? error.message : "Failed to cancel the running Action.",
-        );
-      }
+      reportActionFailure(
+        result,
+        threadRef.threadId,
+        onThreadError,
+        "Failed to cancel the running Action.",
+      );
     } finally {
       setCancellingRunId((current) => (current === runId ? null : current));
     }
@@ -104,52 +117,32 @@ function useInterruptedActionDelivery({
   );
   if (pending !== null && pending.key !== key) setPending(null);
 
-  const resumeAgent = useStableCallback(async () => {
+  const deliver = useStableCallback(async (operation: "resume" | "discard") => {
     if (threadRef === null || key === null) return;
-    setPending({ key, operation: "resume" });
-    const result = await resume({
+    setPending({ key, operation });
+    const request = {
       environmentId: threadRef.environmentId,
       input: { threadId: threadRef.threadId },
-    });
+    };
+    const result = await (operation === "resume" ? resume(request) : discard(request));
     if (result._tag === "Failure") {
       setPending((current) =>
-        current?.key === key && current.operation === "resume" ? null : current,
+        current?.key === key && current.operation === operation ? null : current,
       );
-      if (!isAtomCommandInterrupted(result)) {
-        const error = squashAtomCommandFailure(result);
-        onThreadError(
-          threadRef.threadId,
-          error instanceof Error ? error.message : "Failed to resume the interrupted Action.",
-        );
-      }
     }
-  });
-  const discardResult = useStableCallback(async () => {
-    if (threadRef === null || key === null) return;
-    setPending({ key, operation: "discard" });
-    const result = await discard({
-      environmentId: threadRef.environmentId,
-      input: { threadId: threadRef.threadId },
-    });
-    if (result._tag === "Failure") {
-      setPending((current) =>
-        current?.key === key && current.operation === "discard" ? null : current,
-      );
-      if (!isAtomCommandInterrupted(result)) {
-        const error = squashAtomCommandFailure(result);
-        onThreadError(
-          threadRef.threadId,
-          error instanceof Error ? error.message : "Failed to discard the interrupted Action.",
-        );
-      }
-    }
+    reportActionFailure(
+      result,
+      threadRef.threadId,
+      onThreadError,
+      `Failed to ${operation} the interrupted Action.`,
+    );
   });
   return {
     action: interrupted,
     canOperate,
     pending: pending?.key === key ? pending.operation : null,
-    onResume: () => void resumeAgent(),
-    onDiscard: () => void discardResult(),
+    onResume: () => void deliver("resume"),
+    onDiscard: () => void deliver("discard"),
   };
 }
 
