@@ -449,15 +449,10 @@ const cleanupFixture = (
       Effect.provideService(ServerConfig.ServerConfig, config),
       Effect.provideService(FileSystem.FileSystem, {
         ...fs,
-        exists: (target: string) =>
+        realPath: (target: string) =>
           failManagedRootCanonicalization && target === config.worktreesDir
-            ? Effect.sync(() => {
-                failManagedRootCanonicalization = false;
-              }).pipe(
-                Effect.flatMap(() => fs.remove(target, { recursive: true })),
-                Effect.as(true),
-              )
-            : fs.exists(target),
+            ? fs.realPath(`${target}/unavailable-canonicalization-fixture`)
+            : fs.realPath(target),
       }),
       Effect.provideService(GitVcsDriver.GitVcsDriver, {
         ...git,
@@ -627,7 +622,11 @@ const cleanupFixture = (
                 }),
               );
             }
-            if (failWorktreeRead && query.includes("WHERE t.deleted_at IS NOT NULL")) {
+            if (
+              failWorktreeRead &&
+              query.includes("WHERE t.deleted_at IS NOT NULL") &&
+              !query.includes('AS "latestEventAt"')
+            ) {
               failWorktreeRead = false;
               return Effect.fail(
                 new SqlError.SqlError({
@@ -3231,7 +3230,7 @@ describe("verified build sweep shares the dependency rule", () => {
             (yield* fixture.service.runNow).entries.filter(
               (entry) => entry.worktreeResource === "generated-builds",
             ),
-          ).toEqual([]);
+          ).toMatchObject([{ outcome: "kept", reason: expect.stringContaining("off") }]);
           expect(
             yield* fixture.fs.exists(`${fixture.worktree}/apps/web/dist/assets/emitted.bin`),
           ).toBe(true);
@@ -3536,7 +3535,7 @@ describe("storage cleanup reports and local file policies", () => {
       Effect.gen(function* () {
         const { service, snapshotReads } = yield* cleanupFixture();
         expect(checkoutEntries(yield* service.runNow)[0]).toMatchObject({ outcome: "removed" });
-        expect(snapshotReads()).toBe(2);
+        expect(snapshotReads()).toBe(3);
       }),
     ),
   );
@@ -3562,8 +3561,8 @@ describe("storage cleanup reports and local file policies", () => {
           yield* Deferred.await(handled);
           yield* Deferred.succeed(fixture.resume, undefined);
           yield* fixture.service.drain;
-          // Candidate scan and post-inventory ownership audit each read once per sweep.
-          expect(fixture.snapshotReads()).toBe(sweeps * 2);
+          // Build metadata, checkout candidates and the ownership audit each read once per sweep.
+          expect(fixture.snapshotReads()).toBe(sweeps * 3);
         }),
       ),
   );
@@ -5048,6 +5047,7 @@ describe("storage cleanup reports and local file policies", () => {
           }),
         );
         expect(report.counts.failed).toBe(1);
+        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(true);
         const auditText = yield* fixture.fs.readFileString(
           `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
         );
@@ -5186,6 +5186,7 @@ describe("storage cleanup reports and local file policies", () => {
           }),
         );
         expect(report.counts.failed).toBe(1);
+        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(true);
         expect(report.entries.some((entry) => entry.kind === "browser-artifacts")).toBe(true);
         expect(report.entries.some((entry) => entry.kind === "logs")).toBe(true);
         const auditText = yield* fixture.fs.readFileString(
@@ -5423,7 +5424,7 @@ it.live.each(["thread.settled", "stopped", "ready"] as const)(
         yield* Deferred.await(handled);
         yield* Deferred.succeed(fixture.resume, undefined);
         yield* fixture.service.drain;
-        expect(fixture.snapshotReads()).toBe(2);
+        expect(fixture.snapshotReads()).toBe(3);
       }),
     ),
 );

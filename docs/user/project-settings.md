@@ -208,13 +208,18 @@ simply opening a terminal do not. Recognized installs with uncertain usage start
 configured interval when first observed. Folder timestamps alone never prove usage.
 
 Active agents, sessions, terminals, previews, processes, and runtime protection prevent
-cleanup. Only unchanged recorded emissions are removed from build folders; arbitrary
-additions and edited outputs remain. Existing build files without compiler provenance need
-exact-file review and are kept until reviewed. Other generated folders and vendored sources
+cleanup. Only unchanged compiler-recorded or explicitly approved files are removed from build
+folders; arbitrary additions and edited outputs remain. Other generated folders and vendored sources
 are kept. Reinstall dependencies or rebuild outputs before continuing work. This rule is off by default and follows the project's Inherit, Off,
 or Custom policy. Dependency cleanup is available on macOS and Linux and keeps worktrees
 when consumers cannot be checked reliably. On mobile, open **Settings → Maintenance** to
 configure cleanup for an environment or project.
+
+For older builds, choose **Settings → Storage → Review older builds** on web or desktop.
+Choose an environment and build root, then explicitly select the files to approve. Saving
+does not delete files or enable cleanup; the existing policy and delay still apply. New,
+changed, recreated and unselected files stay. Clearing approval keeps the build root protected.
+Each review supports up to 1,000 files and 512 MiB per root.
 
 Browser captures and rotated logs have separate retention periods. Expired capture links stop
 working. Current logs, message attachments, and browser profiles are kept.
