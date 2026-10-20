@@ -9,7 +9,17 @@ import {
 import { RightPanelTabs } from "./RightPanelTabs";
 
 vi.mock("~/hooks/useTheme", () => ({ useTheme: () => ({ resolvedTheme: "light" }) }));
-vi.mock("~/browser/browserDefaults", () => ({ useBrowserDefaults: () => ({ profiles: [] }) }));
+vi.mock(import("~/browser/browserDefaults"), async (original) => ({
+  ...(await original()),
+  useBrowserDefaults: () => ({
+    viewport: { _tag: "fill" },
+    zoomFactor: 1,
+    appearance: "system",
+    autoShowFloatingPreview: true,
+    profiles: [],
+    profileId: "default",
+  }),
+}));
 
 let root: Root;
 let container: HTMLDivElement;
@@ -95,16 +105,28 @@ async function renderPanel(overrides: Partial<ComponentProps<typeof RightPanelTa
       </RightPanelTabs>,
     ),
   );
-  await act(() => vi.advanceTimersByTimeAsync(0));
-  await act(() => vi.advanceTimersToNextFrame());
+  if (vi.isFakeTimers()) {
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    await act(() => vi.advanceTimersToNextFrame());
+  }
 }
 
 async function press(key: string, options: KeyboardEventInit = {}) {
   const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...options });
   await act(() => (document.activeElement ?? document.body).dispatchEvent(event));
-  await act(() => vi.advanceTimersByTimeAsync(0));
-  await act(() => vi.advanceTimersToNextFrame());
+  if (vi.isFakeTimers()) {
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    await act(() => vi.advanceTimersToNextFrame());
+  }
   return event;
+}
+
+function focusWithin(element: Element | null): Promise<void> {
+  if (!element) throw new Error("Expected the menu or its trigger to be mounted");
+  if (element.contains(document.activeElement)) return Promise.resolve();
+  return new Promise((resolve) => {
+    element.addEventListener("focusin", () => resolve(), { once: true });
+  });
 }
 
 describe("right panel new-tab shortcut", () => {
@@ -192,23 +214,24 @@ describe("right panel new-tab shortcut", () => {
   );
 
   it("uses a custom binding from a text field and closes on Escape", async () => {
+    // Menu focus crosses native frame and microtask boundaries; await its focus events.
+    vi.useRealTimers();
     const input = document.createElement("input");
     await renderPanel({
       keybindings: compileResolvedKeybindingsConfig([{ key: "mod+y", command: "rightPanel.new" }]),
     });
     document.body.append(input);
     input.focus();
+    expect(document.activeElement).toBe(input);
     expect((await press("t", { metaKey: true })).defaultPrevented).toBe(false);
     await press("y", { metaKey: true });
     expect(document.querySelector('[role="menu"]')).not.toBeNull();
-    await press("Escape");
-    expect(document.querySelector('[role="menu"]:not([data-closed])')).toBeNull();
-    // The menu hands focus back to its trigger once its close finishes, a few frames later.
-    // Timers are fake here, so advance them instead of polling in real time.
+    await act(() => focusWithin(document.querySelector('[role="menu"]')));
     const trigger = container.querySelector('[aria-label="Add panel surface"]');
-    for (let frame = 0; frame < 10 && document.activeElement !== trigger; frame++) {
-      await act(() => vi.advanceTimersToNextFrame());
-    }
+    const triggerFocused = focusWithin(trigger);
+    await press("Escape");
+    await act(() => triggerFocused);
+    expect(document.querySelector('[role="menu"]:not([data-closed])')).toBeNull();
     expect(document.activeElement).toBe(trigger);
     input.remove();
   });

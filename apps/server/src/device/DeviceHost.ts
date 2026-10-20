@@ -102,6 +102,8 @@ export interface DeviceOperations {
     },
     DeviceOperationError
   >;
+  /** Live runtimes without enumerating available, unbooted devices. */
+  readonly listCurrent?: DeviceOperations["list"];
   /**
    * Boots the device and prepares its stream. Android AVDs change id when they
    * boot (AVD name to emulator serial), so the returned id is authoritative.
@@ -180,8 +182,12 @@ export class DeviceHost extends Context.Service<
       DeviceHostAgentReady,
       DeviceHostError | DeviceHostTimeoutError | AgentDeviceStartError | NodeRuntimeUnavailableError
     >;
-    readonly current: Effect.Effect<DeviceHostReady | null>;
-    readonly stopAgent: Effect.Effect<void>;
+    /** Current endpoints when already running, without starting anything. */
+    readonly current: Effect.Effect<
+      (DeviceHostReady & { readonly agentDevice?: AgentDeviceEndpoint | null }) | null
+    >;
+    /** Stops only agent-device. Manual viewing through the hub stays available. */
+    readonly stopAgent: Effect.Effect<void, DeviceHostError | NodeRuntimeUnavailableError>;
     /** Stops helpers. Devices themselves keep running; the user owns those. */
     readonly stop: Effect.Effect<void>;
   }
