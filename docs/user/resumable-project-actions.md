@@ -11,12 +11,12 @@ continue with the [implementation guide](../internals/resumable-project-actions-
 
 ## Recognize a waiting thread
 
-While an Action is running, the legacy thread sidebar shows a yellow dot and the v2 sidebar shows
+While an Action is running, the LastCode sidebar shows a yellow dot and the v2 sidebar shows
 a yellow history-clock icon. Hover the indicator on web or desktop to see the Action name.
 
 If the agent is also working, the regular **Working** indicator and label remain primary, with the
 yellow Action indicator beside them. When the agent becomes idle, the thread status changes to
-**Waiting** until the Action finishes. Both the legacy and v2 sidebars show these states. Mobile
+**Waiting** until the Action finishes. Both the LastCode and v2 sidebars show these states. Mobile
 thread lists show the same additional waiting indicator when the agent and Action run together.
 
 ## Inspect or stop the Action

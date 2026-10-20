@@ -335,6 +335,24 @@ export function readEnvironmentSupportsVisitedTracking(environmentId: Environmen
   );
 }
 
+/** Whether the environment supports persistent thread annotations. Missing is
+    unsupported so clients do not send annotation commands to older servers. */
+export function readEnvironmentSupportsThreadAnnotations(environmentId: EnvironmentId): boolean {
+  return (
+    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
+      .threadAnnotations === true
+  );
+}
+
+/** Whether the server durably owns worktree cleanup after thread deletion.
+    Missing is unsupported so an older server cannot discard the user's cleanup choice. */
+export function readEnvironmentSupportsWorktreeCleanup(environmentId: EnvironmentId): boolean {
+  return (
+    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
+      .threadWorktreeCleanup === true
+  );
+}
+
 export function readEnvironmentThreadRefs(
   environmentId: EnvironmentId,
 ): ReadonlyArray<ScopedThreadRef> {
@@ -410,4 +428,11 @@ export function useThreadRelationshipShells(
   ref: ScopedThreadRef,
 ): ReadonlyArray<OrchestrationV2ThreadShell> {
   return useAtomValue(relationshipShellsAtomFamily(threadKey(ref)));
+}
+
+export function readEnvironmentSupportsPersistence(environmentId: EnvironmentId): boolean {
+  return (
+    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
+      .threadPersistence === true
+  );
 }
