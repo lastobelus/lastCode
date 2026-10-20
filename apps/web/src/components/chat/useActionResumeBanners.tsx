@@ -72,7 +72,8 @@ function useRunningActionControl({
     const runId = running.runId;
     if (cancellingRunId === runId) return;
     setCancellingRunId(runId);
-    try {
+    // React Compiler supports promise cleanup, but not try/finally without catch.
+    await (async () => {
       // Action cancellation keeps output history; normal terminal closing deletes it.
       const result = await closeTerminal({
         environmentId: threadRef.environmentId,
@@ -84,9 +85,9 @@ function useRunningActionControl({
         onThreadError,
         "Failed to cancel the running Action.",
       );
-    } finally {
+    })().finally(() => {
       setCancellingRunId((current) => (current === runId ? null : current));
-    }
+    });
   });
   return {
     action: running,
