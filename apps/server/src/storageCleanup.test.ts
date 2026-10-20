@@ -3313,6 +3313,86 @@ describe("storage cleanup reports and local file policies", () => {
       }),
     ),
   );
+  it.live("reclaims an archived checkout containing only ignored Finder metadata", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture();
+        fixture.setThreads([
+          shell({ branch: "feature", worktreePath: fixture.worktree, archivedAt: fixture.at(-1) }),
+        ]);
+        yield* fixture.fs.makeDirectory(`${fixture.worktree}/assets`);
+        yield* fixture.fs.writeFileString(`${fixture.worktree}/assets/tracked.txt`, "source\n");
+        yield* fixture.command(fixture.worktree, ["add", "assets/tracked.txt"]);
+        yield* fixture.command(fixture.worktree, ["commit", "-m", "record nested source"]);
+        yield* fixture.fs.writeFileString(`${fixture.repo}/.git/info/exclude`, ".DS_Store\n");
+        for (const relative of [".DS_Store", "assets/.DS_Store"])
+          yield* fixture.fs.writeFileString(`${fixture.worktree}/${relative}`, "Finder metadata");
+        const before = (yield* fixture.command(fixture.repo, ["rev-parse", "refs/heads/feature"]))
+          .stdout;
+
+        expect(checkoutEntries(yield* fixture.service.runNow)[0]).toMatchObject({
+          outcome: "removed",
+          reason: "All thread owners are archived",
+        });
+        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(false);
+        expect(
+          (yield* fixture.command(fixture.repo, ["rev-parse", "refs/heads/feature"])).stdout,
+        ).toBe(before);
+      }),
+    ),
+  );
+  it.live.each([".env", ".DS_Store.backup"])(
+    "preserves ignored %s alongside Finder metadata",
+    (relative) =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          const fixture = yield* cleanupFixture();
+          yield* fixture.fs.writeFileString(`${fixture.repo}/.git/info/exclude`, ".DS_Store*\n");
+          yield* fixture.fs.writeFileString(`${fixture.worktree}/.DS_Store`, "Finder metadata");
+          yield* fixture.fs.writeFileString(`${fixture.worktree}/${relative}`, "retained bytes");
+          expect(checkoutEntries(yield* fixture.service.runNow)[0]).toMatchObject({
+            outcome: "kept",
+          });
+          expect(yield* fixture.fs.readFileString(`${fixture.worktree}/${relative}`)).toBe(
+            "retained bytes",
+          );
+        }),
+      ),
+  );
+  it.live.each(["directory", "symlink", "tracked-edit"] as const)(
+    "preserves a %s named .DS_Store",
+    (kind) =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          const fixture = yield* cleanupFixture();
+          yield* fixture.fs.writeFileString(`${fixture.repo}/.git/info/exclude`, ".DS_Store\n");
+          const target = `${fixture.worktree}/.DS_Store`;
+          const outside = `${fixture.repo}/retained.txt`;
+          yield* fixture.fs.writeFileString(outside, "outside bytes");
+          if (kind === "directory") {
+            yield* fixture.fs.makeDirectory(target);
+            yield* fixture.fs.writeFileString(`${target}/notes.txt`, "retained bytes");
+          } else if (kind === "symlink") {
+            yield* fixture.fs.symlink(outside, target);
+          } else {
+            yield* fixture.fs.writeFileString(target, "tracked metadata");
+            yield* fixture.command(fixture.worktree, ["add", "-f", ".DS_Store"]);
+            yield* fixture.command(fixture.worktree, ["commit", "-m", "track named file"]);
+            yield* fixture.fs.writeFileString(target, "retained edit");
+          }
+          expect(checkoutEntries(yield* fixture.service.runNow)[0]).toMatchObject({
+            outcome: "kept",
+          });
+          expect(yield* fixture.fs.exists(target)).toBe(true);
+          expect(yield* fixture.fs.readFileString(outside)).toBe("outside bytes");
+          if (kind === "directory")
+            expect(yield* fixture.fs.readFileString(`${target}/notes.txt`)).toBe("retained bytes");
+          if (kind === "symlink") expect(yield* fixture.fs.readLink(target)).toBe(outside);
+          if (kind === "tracked-edit")
+            expect(yield* fixture.fs.readFileString(target)).toBe("retained edit");
+        }),
+      ),
+  );
   it.live.each([3, 90])(
     "keeps a recent unarchived checkout for its configured %s day delay",
     (days) =>
