@@ -4,7 +4,7 @@ import * as Schema from "effect/Schema"
 import * as Shared from "../../schema/github.graphql.ts"
 
 /** A user is an individual's account on GitHub that owns repositories and can make new content. */
-export const User = Schema.Struct({
+export const AuthorUser = Schema.Struct({
   __typename: Schema.Literal("User"),
   /** The username used to login. */
   login: Schema.String,
@@ -13,7 +13,7 @@ export const User = Schema.Struct({
   /** The user's public profile name. */
   name: Schema.NullOr(Schema.String)
 })
-export interface User extends Schema.Struct.Type<typeof User.fields> {}
+export interface AuthorUser extends Schema.Struct.Type<typeof AuthorUser.fields> {}
 
 /** Represents an object which can take actions on GitHub. Typically a User or Bot. */
 export const ActorOther = Schema.Struct({
@@ -129,7 +129,7 @@ export const PullRequestSummaryRepositoryPullRequestPullRequest = Schema.Struct(
   baseRefName: Schema.String,
   /** The actor who authored the comment. */
   author: Schema.NullOr(Schema.Union([
-    User,
+    AuthorUser,
     ActorOther
   ])),
   /** A list of latest reviews per user associated with the pull request that are not also pending review. */
@@ -268,10 +268,76 @@ export declare namespace PullRequestStackMembership {
   export type Result = typeof PullRequestStackMembership.result.Type
 }
 
+/** A user is an individual's account on GitHub that owns repositories and can make new content. */
+export const NodesUser = Schema.Struct({
+  __typename: Schema.Literal("User"),
+  /** The username used to login. */
+  login: Schema.String
+})
+export interface NodesUser extends Schema.Struct.Type<typeof NodesUser.fields> {}
+
+/** A special type of user which takes actions on behalf of GitHub Apps. */
+export const Bot = Schema.Struct({
+  __typename: Schema.Literal("Bot"),
+  /** The username of the actor. */
+  login: Schema.String
+})
+export interface Bot extends Schema.Struct.Type<typeof Bot.fields> {}
+
+/** An account on GitHub, with one or more owners, that has repositories, members and teams. */
+export const Organization = Schema.Struct({
+  __typename: Schema.Literal("Organization"),
+  /** The organization's login name. */
+  login: Schema.String
+})
+export interface Organization extends Schema.Struct.Type<typeof Organization.fields> {}
+
+/** A placeholder user for attribution of imported data on GitHub. */
+export const Mannequin = Schema.Struct({
+  __typename: Schema.Literal("Mannequin"),
+  /** The username of the actor. */
+  login: Schema.String
+})
+export interface Mannequin extends Schema.Struct.Type<typeof Mannequin.fields> {}
+
+/** Types that can be assigned to reactions. */
+export const ReactorOther = Schema.Struct({
+  __typename: GraphQL.otherTypename<Shared.Typename.Reactor>()(["User", "Bot", "Organization", "Mannequin"])
+})
+export interface ReactorOther extends Schema.Struct.Type<typeof ReactorOther.fields> {}
+
+/** The connection type for Reactor. */
+export const ReactorConnection = Schema.Struct({
+  /** Identifies the total count of items in the connection. */
+  totalCount: Shared.Int,
+  /** A list of nodes. */
+  nodes: Schema.NullOr(Schema.Array(Schema.NullOr(Schema.Union([
+    NodesUser,
+    Bot,
+    Organization,
+    Mannequin,
+    ReactorOther
+  ]))))
+})
+export interface ReactorConnection extends Schema.Struct.Type<typeof ReactorConnection.fields> {}
+
+/** A group of emoji reactions to a particular piece of content. */
+export const ReactionGroup = Schema.Struct({
+  /** Identifies the emoji reaction. */
+  content: GraphQL.enumLiterals(Shared.ReactionContent.literals),
+  /** Reactors to the reaction subject with the emotion represented by this reaction group. */
+  reactors: ReactorConnection
+})
+export interface ReactionGroup extends Schema.Struct.Type<typeof ReactionGroup.fields> {}
+
 /** Represents a comment on an Issue. */
 export const IssueComment = Schema.Struct({
+  /** The Node ID of the IssueComment object */
+  id: Shared.ID,
   /** The moment the editor made the last edit */
-  lastEditedAt: Schema.NullOr(Shared.DateTime)
+  lastEditedAt: Schema.NullOr(Shared.DateTime),
+  /** A list of reactions grouped by content left on the subject. */
+  reactionGroups: Schema.NullOr(Schema.Array(ReactionGroup))
 })
 export interface IssueComment extends Schema.Struct.Type<typeof IssueComment.fields> {}
 
@@ -397,7 +463,7 @@ export const PullRequestWatchFingerprint = GraphQL.query("PullRequestWatchFinger
       { name: "number", body: "Int!" }
     ],
     selections: [
-      { name: "repository", body: ["(owner:$", "owner", " name:$", "name", "){pullRequest(number:$", "number", "){state mergeable headRefOid comments(first:100 orderBy:{field:UPDATED_AT direction:DESC}){totalCount nodes{lastEditedAt}}reviews(last:100){totalCount nodes{lastEditedAt}}reviewThreads{totalCount}commits(last:1){nodes{commit{statusCheckRollup{contexts{checkRunCountsByState{state count}statusContextCountsByState{state count}}}}}}}}"] }
+      { name: "repository", body: ["(owner:$", "owner", " name:$", "name", "){pullRequest(number:$", "number", "){state mergeable headRefOid comments(first:100 orderBy:{field:UPDATED_AT direction:DESC}){totalCount nodes{id lastEditedAt reactionGroups{content reactors(first:10){totalCount nodes{__typename...on User{login}...on Bot{login}...on Organization{login}...on Mannequin{login}}}}}}reviews(last:100){totalCount nodes{lastEditedAt}}reviewThreads{totalCount}commits(last:1){nodes{commit{statusCheckRollup{contexts{checkRunCountsByState{state count}statusContextCountsByState{state count}}}}}}}}"] }
     ],
     fragments: []
   },

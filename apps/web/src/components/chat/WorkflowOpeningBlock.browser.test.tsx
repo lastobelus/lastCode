@@ -114,7 +114,10 @@ it("shows a short script as highlighted code with nothing to open", async () => 
     await getSyntaxHighlighterPromise("javascript");
   });
   expect(host.querySelector('[data-language="javascript"]')?.textContent).toContain("SCRIPTONLY");
-  await vi.waitFor(() => expect(host.querySelector(".chat-markdown-shiki")).not.toBeNull());
+  await act(async () => {
+    await getSyntaxHighlighterPromise("javascript");
+  });
+  expect(host.querySelector(".chat-markdown-shiki")).not.toBeNull();
   expect(foldToggle()).toBeUndefined();
 });
 
