@@ -30,20 +30,20 @@ interface RecordedRegistration {
   }>;
 }
 
-const iconSource = "/tmp/.mount_T3/resources/app.asar/apps/desktop/prod-resources/icon.png";
-const iconPath = "/home/alice/.local/share/icons/com.t3tools.T3Code.desktop.png";
+const iconSource = "/tmp/.mount_LastCode/resources/app.asar/apps/desktop/prod-resources/icon.png";
+const iconPath = "/home/alice/.local/share/icons/lastcode.desktop.png";
 const iconBytes = new Uint8Array([0x89, 0x50, 0x00, 0xff, 0x80, 0x0a]);
 const currentDesktopEntry = DesktopLinuxUrlHandler.renderUrlHandlerDesktopEntry({
-  displayName: "T3 Code (Alpha)",
-  execTarget: "/home/alice/Applications/T3-Code.AppImage",
-  scheme: "t3code",
+  displayName: "LastCode (Alpha)",
+  execTarget: "/home/alice/Applications/LastCode.AppImage",
+  scheme: "lastcode",
   iconPath,
 });
 const registrationCommands = [
   { command: "update-desktop-database", args: ["/home/alice/.local/share/applications"] },
   {
     command: "xdg-mime",
-    args: ["default", "com.t3tools.T3Code.desktop", "x-scheme-handler/t3code"],
+    args: ["default", "lastcode.desktop", "x-scheme-handler/lastcode"],
   },
 ];
 
@@ -52,11 +52,11 @@ const makeEnvironment = (path: Path.Path, overrides: Record<string, unknown> = {
     platform: "linux",
     isPackaged: true,
     isDevelopment: false,
-    displayName: "T3 Code (Alpha)",
-    linuxDesktopEntryName: "com.t3tools.T3Code.desktop",
-    linuxWmClass: "t3code",
+    displayName: "LastCode (Alpha)",
+    linuxDesktopEntryName: "lastcode.desktop",
+    linuxWmClass: "lastcode",
     linuxApplicationsDir: "/home/alice/.local/share/applications",
-    appImagePath: Option.some("/home/alice/Applications/T3-Code.AppImage"),
+    appImagePath: Option.some("/home/alice/Applications/LastCode.AppImage"),
     path,
     ...overrides,
   } as unknown as DesktopEnvironment.DesktopEnvironment["Service"]);
@@ -210,22 +210,22 @@ const emptyRecording = (): RecordedRegistration => ({
 describe("DesktopLinuxUrlHandler", () => {
   it("renders a scheme-handler desktop entry with freedesktop Exec quoting", () => {
     const entry = DesktopLinuxUrlHandler.renderUrlHandlerDesktopEntry({
-      displayName: "T3 Code (Nightly)",
-      execTarget: '/home/al ice/Apps/T3 "100%" $HOME\\x.AppImage',
-      scheme: "t3code",
-      iconPath: "/home/al ice/icons/T3\\x.png",
+      displayName: "LastCode (Nightly)",
+      execTarget: '/home/al ice/Apps/LastCode "100%" $HOME\\x.AppImage',
+      scheme: "lastcode",
+      iconPath: "/home/al ice/icons/LastCode\\x.png",
     });
 
     assert.include(entry, "[Desktop Entry]");
-    assert.include(entry, "Name=T3 Code (Nightly)");
+    assert.include(entry, "Name=LastCode (Nightly)");
     assert.include(
       entry,
-      'Exec="/home/al ice/Apps/T3 \\\\"100%%\\\\" \\\\$HOME\\\\\\\\x.AppImage" %U',
+      'Exec="/home/al ice/Apps/LastCode \\\\"100%%\\\\" \\\\$HOME\\\\\\\\x.AppImage" %U',
     );
     assert.include(entry, "NoDisplay=true");
     assert.notInclude(entry, "StartupWMClass=");
-    assert.include(entry, "MimeType=x-scheme-handler/t3code;");
-    assert.include(entry, "Icon=/home/al ice/icons/T3\\\\x.png");
+    assert.include(entry, "MimeType=x-scheme-handler/lastcode;");
+    assert.include(entry, "Icon=/home/al ice/icons/LastCode\\\\x.png");
   });
 
   it.each([
@@ -239,9 +239,9 @@ describe("DesktopLinuxUrlHandler", () => {
     },
   ])("renders the handler Exec line for $execTarget", ({ execTarget, execLine }) => {
     const entry = DesktopLinuxUrlHandler.renderUrlHandlerDesktopEntry({
-      displayName: "T3 Code",
+      displayName: "LastCode",
       execTarget,
-      scheme: "t3code",
+      scheme: "lastcode",
     });
 
     assert.include(entry.split("\n"), execLine);
@@ -250,27 +250,27 @@ describe("DesktopLinuxUrlHandler", () => {
   it("carries structured context on registration errors", () => {
     const writeError = new DesktopLinuxUrlHandler.DesktopLinuxUrlHandlerRegistrationError({
       step: "write-desktop-entry",
-      scheme: "t3code",
-      desktopEntryPath: "/home/alice/.local/share/applications/com.t3tools.T3Code.desktop",
+      scheme: "lastcode",
+      desktopEntryPath: "/home/alice/.local/share/applications/lastcode.desktop",
       cause: new Error("boom"),
     });
     assert.equal(
       writeError.message,
-      "Failed to register the t3code:// URL handler (step: write-desktop-entry).",
+      "Failed to register the lastcode:// URL handler (step: write-desktop-entry).",
     );
     assert.equal(
       writeError.desktopEntryPath,
-      "/home/alice/.local/share/applications/com.t3tools.T3Code.desktop",
+      "/home/alice/.local/share/applications/lastcode.desktop",
     );
 
     const exitError = new DesktopLinuxUrlHandler.DesktopLinuxUrlHandlerRegistrationError({
       step: "set-default-handler",
-      scheme: "t3code",
+      scheme: "lastcode",
       exitCode: 4,
     });
     assert.equal(
       exitError.message,
-      "Failed to register the t3code:// URL handler (step: set-default-handler, xdg-mime exit code 4).",
+      "Failed to register the lastcode:// URL handler (step: set-default-handler, xdg-mime exit code 4).",
     );
   });
 
@@ -286,13 +286,13 @@ describe("DesktopLinuxUrlHandler", () => {
         assert.equal(recorded.files.length, 1);
         assert.equal(
           recorded.files[0]?.path,
-          "/home/alice/.local/share/applications/com.t3tools.T3Code.desktop",
+          "/home/alice/.local/share/applications/lastcode.desktop",
         );
         assert.include(
           recorded.files[0]?.content,
-          "Exec=/home/alice/Applications/T3-Code.AppImage %U",
+          "Exec=/home/alice/Applications/LastCode.AppImage %U",
         );
-        assert.include(recorded.files[0]?.content, "MimeType=x-scheme-handler/t3code;");
+        assert.include(recorded.files[0]?.content, "MimeType=x-scheme-handler/lastcode;");
         assert.deepEqual(recorded.commands, [
           {
             command: "update-desktop-database",
@@ -300,7 +300,7 @@ describe("DesktopLinuxUrlHandler", () => {
           },
           {
             command: "xdg-mime",
-            args: ["default", "com.t3tools.T3Code.desktop", "x-scheme-handler/t3code"],
+            args: ["default", "lastcode.desktop", "x-scheme-handler/lastcode"],
           },
         ]);
       });
@@ -316,10 +316,10 @@ describe("DesktopLinuxUrlHandler", () => {
       assert.include(
         recorded.files[0]?.content,
         DesktopLinuxUrlHandler.renderUrlHandlerDesktopEntry({
-          displayName: "T3 Code (Alpha)",
+          displayName: "LastCode (Alpha)",
           execTarget: process.execPath,
-          scheme: "t3code",
-          iconPath: "/home/alice/.local/share/icons/com.t3tools.T3Code.desktop.png",
+          scheme: "lastcode",
+          iconPath: "/home/alice/.local/share/icons/lastcode.desktop.png",
         }),
       );
     });
@@ -331,10 +331,10 @@ describe("DesktopLinuxUrlHandler", () => {
     return Effect.gen(function* () {
       yield* runRegister(recorded, {
         existingEntry: DesktopLinuxUrlHandler.renderUrlHandlerDesktopEntry({
-          displayName: "T3 Code (Alpha)",
-          execTarget: "/home/alice/Applications/T3-Code.AppImage",
-          scheme: "t3code",
-          iconPath: "/home/alice/.local/share/icons/com.t3tools.T3Code.desktop.png",
+          displayName: "LastCode (Alpha)",
+          execTarget: "/home/alice/Applications/LastCode.AppImage",
+          scheme: "lastcode",
+          iconPath: "/home/alice/.local/share/icons/lastcode.desktop.png",
         }),
       });
 
@@ -347,7 +347,7 @@ describe("DesktopLinuxUrlHandler", () => {
         },
         {
           command: "xdg-mime",
-          args: ["default", "com.t3tools.T3Code.desktop", "x-scheme-handler/t3code"],
+          args: ["default", "lastcode.desktop", "x-scheme-handler/lastcode"],
         },
       ]);
     });
@@ -418,14 +418,14 @@ describe("DesktopLinuxUrlHandler", () => {
       yield* runRegister(unpackaged, {
         environment: {
           isPackaged: false,
-          linuxDesktopEntryName: "com.t3tools.T3Code.Development.desktop",
+          linuxDesktopEntryName: "lastcode-dev.desktop",
         },
       });
 
       assert.deepEqual(nonLinux.files, []);
       assert.equal(
         unpackaged.files[0]?.path,
-        "/home/alice/.local/share/applications/com.t3tools.T3Code.Development.desktop",
+        "/home/alice/.local/share/applications/lastcode-dev.desktop",
       );
       assert.deepEqual(unpackaged.commands, []);
     });
@@ -445,7 +445,7 @@ describe("DesktopLinuxUrlHandler", () => {
           module: "FileSystem",
           method: "writeFileString",
           description: "read-only filesystem",
-          pathOrDescriptor: "/home/alice/.local/share/applications/com.t3tools.T3Code.desktop",
+          pathOrDescriptor: "/home/alice/.local/share/applications/lastcode.desktop",
         }),
       });
 
@@ -481,6 +481,7 @@ describe("DesktopLinuxUrlHandler", () => {
 
 interface ThemeIconRun {
   readonly root: string;
+  readonly desktopEntryName?: string;
   readonly commands: Array<{ readonly command: string; readonly args: ReadonlyArray<string> }>;
   readonly iconCacheOptions?: Array<Record<string, unknown>>;
   readonly sourceMissing?: boolean;
@@ -507,6 +508,9 @@ const registerWithRealFileSystem = (run: ThemeIconRun) =>
                 Effect.map((path) =>
                   makeEnvironment(path, {
                     linuxApplicationsDir: path.join(run.root, "applications"),
+                    ...(run.desktopEntryName === undefined
+                      ? {}
+                      : { linuxDesktopEntryName: run.desktopEntryName }),
                   }),
                 ),
               ),
@@ -607,7 +611,7 @@ const iconCacheRuns = (run: ThemeIconRun) =>
   run.commands.filter(({ command }) => command === "gtk-update-icon-cache").length;
 
 it.layer(NodeServices.layer)("DesktopLinuxUrlHandler theme icons", (it) => {
-  it.effect("installs both app id spellings without creating an icon cache", () =>
+  it.effect("installs the branded app id icon without creating an icon cache", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -617,21 +621,72 @@ it.layer(NodeServices.layer)("DesktopLinuxUrlHandler theme icons", (it) => {
 
       yield* registerWithRealFileSystem(run);
       assert.deepEqual([...(yield* fileSystem.readDirectory(fixture.appsDir))].sort(), [
-        "com.t3tools.T3Code.png",
-        "com.t3tools.t3code.png",
+        "lastcode.png",
       ]);
-      for (const name of ["com.t3tools.t3code", "com.t3tools.T3Code"]) {
-        const target = path.join(fixture.appsDir, `${name}.png`);
-        assert.deepEqual([...(yield* fileSystem.readFile(target))], [...icon]);
-        yield* fileSystem.utimes(target, fixture.pastSeconds, fixture.pastSeconds);
-      }
+      const target = path.join(fixture.appsDir, "lastcode.png");
+      assert.deepEqual([...(yield* fileSystem.readFile(target))], [...icon]);
+      yield* fileSystem.utimes(target, fixture.pastSeconds, fixture.pastSeconds);
 
       yield* registerWithRealFileSystem(run);
-      for (const name of ["com.t3tools.t3code", "com.t3tools.T3Code"]) {
-        const info = yield* fileSystem.stat(path.join(fixture.appsDir, `${name}.png`));
-        assert.equal(Option.getOrThrow(info.mtime).getTime(), fixture.pastSeconds * 1000);
-      }
+      const info = yield* fileSystem.stat(target);
+      assert.equal(Option.getOrThrow(info.mtime).getTime(), fixture.pastSeconds * 1000);
       assert.isFalse(yield* fileSystem.exists(fixture.cachePath));
+      assert.equal(iconCacheRuns(run), 0);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("installs both spellings of a mixed-case app id", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const icon = new Uint8Array([1, 2, 3]);
+      const fixture = yield* themeIconFixture(icon);
+      // Model case-sensitive Linux icon lookup even on a case-insensitive host.
+      const icons = new Map<string, Uint8Array>();
+      const writes: string[] = [];
+      const run: ThemeIconRun = {
+        root: fixture.root,
+        commands: [],
+        desktopEntryName: "com.example.LastCode.desktop",
+      };
+      const register = registerWithRealFileSystem(run).pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fileSystem,
+          readFile: (target) => {
+            if (!target.startsWith(fixture.appsDir + path.sep)) return fileSystem.readFile(target);
+            const current = icons.get(target);
+            return current === undefined
+              ? Effect.fail(
+                  PlatformError.systemError({
+                    _tag: "NotFound",
+                    module: "FileSystem",
+                    method: "readFile",
+                    pathOrDescriptor: target,
+                  }),
+                )
+              : Effect.succeed(current);
+          },
+          writeFile: (target, bytes, options) => {
+            if (!target.startsWith(fixture.appsDir + path.sep)) {
+              return fileSystem.writeFile(target, bytes, options);
+            }
+            return Effect.sync(() => {
+              icons.set(target, bytes);
+              writes.push(target);
+            });
+          },
+        }),
+      );
+
+      yield* register;
+      const targets = ["com.example.lastcode.png", "com.example.LastCode.png"].map((name) =>
+        path.join(fixture.appsDir, name),
+      );
+      assert.deepEqual(writes, targets);
+      for (const target of targets) assert.deepEqual([...(icons.get(target) ?? [])], [...icon]);
+
+      yield* register;
+      assert.deepEqual(writes, targets);
       assert.equal(iconCacheRuns(run), 0);
     }).pipe(Effect.scoped),
   );
@@ -642,13 +697,9 @@ it.layer(NodeServices.layer)("DesktopLinuxUrlHandler theme icons", (it) => {
       const path = yield* Path.Path;
       const fixture = yield* themeIconFixture(new Uint8Array([1, 2, 3]));
       yield* fixture.seedCache;
-      const lower = path.join(fixture.appsDir, "com.t3tools.t3code.png");
-      const upper = path.join(fixture.appsDir, "com.t3tools.T3Code.png");
-      yield* fileSystem.writeFile(lower, new Uint8Array([3, 2, 1]));
-      yield* fileSystem.writeFile(upper, new Uint8Array([1, 2, 3]));
-      for (const target of [lower, upper]) {
-        yield* fileSystem.utimes(target, fixture.pastSeconds, fixture.pastSeconds);
-      }
+      const target = path.join(fixture.appsDir, "lastcode.png");
+      yield* fileSystem.writeFile(target, new Uint8Array([3, 2, 1]));
+      yield* fileSystem.utimes(target, fixture.pastSeconds, fixture.pastSeconds);
       const run: ThemeIconRun = {
         root: fixture.root,
         commands: [],
@@ -658,9 +709,9 @@ it.layer(NodeServices.layer)("DesktopLinuxUrlHandler theme icons", (it) => {
       yield* registerWithRealFileSystem(run);
       yield* registerWithRealFileSystem(run);
 
-      assert.deepEqual([...(yield* fileSystem.readFile(lower))], [1, 2, 3]);
-      const upperInfo = yield* fileSystem.stat(upper);
-      assert.equal(Option.getOrThrow(upperInfo.mtime).getTime(), fixture.pastSeconds * 1000);
+      assert.deepEqual([...(yield* fileSystem.readFile(target))], [1, 2, 3]);
+      const info = yield* fileSystem.stat(target);
+      assert.isAbove(Option.getOrThrow(info.mtime).getTime(), fixture.pastSeconds * 1000);
       assert.deepEqual(
         run.commands.filter(({ command }) => command === "gtk-update-icon-cache"),
         [{ command: "gtk-update-icon-cache", args: ["-f", "-t", fixture.hicolorDir] }],
@@ -685,7 +736,7 @@ it.layer(NodeServices.layer)("DesktopLinuxUrlHandler theme icons", (it) => {
 
       yield* registerWithRealFileSystem(run);
 
-      assert.isTrue(yield* fileSystem.exists(path.join(fixture.appsDir, "com.t3tools.T3Code.png")));
+      assert.isTrue(yield* fileSystem.exists(path.join(fixture.appsDir, "lastcode.png")));
       assert.equal(iconCacheRuns(run), 1);
     }).pipe(Effect.scoped),
   );

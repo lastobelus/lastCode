@@ -67,7 +67,7 @@ function Composer({
       disabled={false}
       placeholder=""
       onChange={(...args) => {
-        setPrompt({ value: args[0], cursor: args[1] });
+        setPrompt({ value: args[0], cursor: args[2] });
         onChange?.(...args);
       }}
       onPaste={() => {}}
@@ -148,10 +148,17 @@ it.each([
   });
   expect(serializeEditorDoc(editor.state.doc).value).toBe(`${value}_`);
   expect(textWithMark(editor, "italic")).toEqual([]);
-  expect(textWithMark(editor, "code")).toEqual(code);
+  expect(textWithMark(editor, "code")).toEqual([]);
+  if (code.length > 0) {
+    expect(
+      Array.from(container.querySelectorAll(".composer-md-code"), (node) => node.textContent).join(
+        "",
+      ),
+    ).toBe("`_build`");
+  }
 });
 
-it("still italicizes text when typing a closing asterisk", async () => {
+it("previews italics while preserving typed source delimiters", async () => {
   const editor = await mountEditor("clean *build");
   await act(async () => {
     editor.commands.focus("end");
@@ -159,7 +166,9 @@ it("still italicizes text when typing a closing asterisk", async () => {
     typeText(editor, from, to, "*");
   });
   expect(serializeEditorDoc(editor.state.doc).value).toBe("clean *build*");
-  expect(textWithMark(editor, "italic")).toEqual(["build"]);
+  expect(textWithMark(editor, "italic")).toEqual([]);
+  expect(editor.state.doc.textContent).toBe("clean *build*");
+  expect(container.querySelector(".composer-md-em")?.textContent).toBe("build");
 });
 
 it.each([false, true])(
@@ -262,12 +271,12 @@ it("keeps skill queries active before whitespace and line breaks, suppressing on
   });
   expect.soft(trigger()).toMatchObject({ kind: "skill", query: "bab" });
   await act(async () => {
-    editor.commands.setHardBreak();
+    editor.commands.splitBlock();
   });
   await act(async () => {
-    editor.commands.setTextSelection(editor.state.selection.from - 1);
+    editor.commands.setTextSelection(editor.state.selection.from - 2);
   });
-  expect(editor.state.selection.$from.nodeAfter?.type.name).toBe("hardBreak");
+  expect(editor.state.selection.$from.parent.textContent).toBe("first $bab");
   expect.soft(trigger()).toMatchObject({ kind: "skill", query: "bab" });
 
   const chip = serializeEditorDoc(editor.state.doc).runs.find((run) => run.kind === "token")!;
@@ -305,18 +314,18 @@ it("reconciles provider skills and metadata without losing formatting, caret, or
   const disabled = { ...babysit, enabled: false };
   const agentOnly = { ...babysit, userInvocable: false };
   const editor = await mountEditor(value, true, [disabled]);
-  expect.soft(editor.state.doc.textContent).toBe("run use $babysit now then $HOME");
+  expect.soft(editor.state.doc.textContent).toBe(value);
   await mountEditor(value, true, [agentOnly]);
-  expect.soft(editor.state.doc.textContent).toBe("run use $babysit now then $HOME");
+  expect.soft(editor.state.doc.textContent).toBe(value);
   await act(async () => {
-    editor.commands.setTextSelection("run use $baby".length + 1);
+    editor.commands.setTextSelection("run **use $baby".length + 1);
   });
   await mountEditor(value, true, [disabled, babysit]);
-  expect(editor.state.doc.textContent).toBe("run use  now then $HOME");
+  expect(editor.state.doc.textContent).toBe(value.replace("$babysit", ""));
   const chip = serializeEditorDoc(editor.state.doc).runs.find((run) => run.kind === "token")!;
   expect(editor.state.selection.from).toBe(chip.pmPos + 1);
   await mountEditor(value, true, [disabled]);
-  expect.soft(editor.state.doc.textContent).toBe("run use $babysit now then $HOME");
+  expect.soft(editor.state.doc.textContent).toBe(value);
   expect(serializeEditorDoc(editor.state.doc).value).toBe(value);
   await act(async () => {
     editor.commands.insertContent("X");
@@ -326,7 +335,7 @@ it("reconciles provider skills and metadata without losing formatting, caret, or
     editor.commands.undo();
   });
   expect(serializeEditorDoc(editor.state.doc).value).toBe(value);
-  expect(editor.state.doc.textContent).toBe("run use $babysit now then $HOME");
+  expect(editor.state.doc.textContent).toBe(value);
 
   await mountEditor(value, true, [babysit]);
   await act(async () => {
@@ -336,7 +345,7 @@ it("reconciles provider skills and metadata without losing formatting, caret, or
   await act(async () => {
     editor.commands.undo();
   });
-  expect(editor.state.doc.textContent).toBe("run use $babysit now then $HOME");
+  expect(editor.state.doc.textContent).toBe(value);
   expect(serializeEditorDoc(editor.state.doc).value).toBe(value);
 
   await mountEditor(value, true, [{ ...babysit, description: "Previous provider description" }]);

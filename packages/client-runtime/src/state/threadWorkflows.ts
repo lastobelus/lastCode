@@ -5,6 +5,7 @@ import type {
   OrchestrationV2ThreadProjection,
 } from "@t3tools/contracts";
 import { copySorted } from "@t3tools/shared/Array";
+import { recoveryQueuesFollowUps } from "./threadRecovery.ts";
 
 type Projection = OrchestrationV2ThreadProjection;
 type Run = Projection["runs"][number];
@@ -126,6 +127,9 @@ export function deriveThreadQueueWorkflowState(projection: Projection): ThreadQu
   const activeRun = resolveActiveThreadRun(projection);
   const session = resolveThreadProviderSession(projection);
   const capabilities = session?.capabilities.turns;
+  const recoveryForcesQueue =
+    recoveryQueuesFollowUps(projection.thread.recovery, activeRun?.id) &&
+    projection.thread.recovery?.attemptId === activeRun?.activeAttemptId;
   const hasSteerableProviderTurn =
     activeRun?.status === "running" &&
     activeRun.activeAttemptId !== null &&
@@ -154,6 +158,7 @@ export function deriveThreadQueueWorkflowState(projection: Projection): ThreadQu
     isHeld: projection.runs.some((run) => run.status === "queued" && run.queueHeld === true),
     canReorder: capabilities?.supportsQueuedMessages === true,
     canPromoteToSteer:
+      !recoveryForcesQueue &&
       hasSteerableProviderTurn &&
       (capabilities?.supportsActiveSteering === true ||
         capabilities?.supportsSteeringByInterruptRestart === true),

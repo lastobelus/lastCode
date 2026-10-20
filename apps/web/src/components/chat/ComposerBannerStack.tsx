@@ -14,6 +14,7 @@ export interface ComposerBannerStackItem {
   readonly id: string;
   readonly variant: ComposerBannerVariant;
   readonly priority?: "urgent" | "activity" | "notice";
+  readonly role?: "alert" | "status";
   readonly icon: ReactNode;
   readonly title: ReactNode;
   readonly description?: ReactNode;
@@ -351,7 +352,7 @@ function ComposerBannerStackAlert({
   const descriptionBelow = item.descriptionPlacement === "below";
   return (
     <ComposerBanner.Root
-      role="alert"
+      role={item.role ?? "alert"}
       placement={attached ? "attached" : "floating"}
       variant={item.variant}
       density="comfortable"

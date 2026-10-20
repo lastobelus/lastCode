@@ -14,20 +14,30 @@ to keep a large paste editable in the composer instead.
 
 ## Formatting
 
-The composer writes Markdown and shows it styled as you type. Markers such as
-`**` stay in the text and show beside the styled words when your cursor is on
-them. Lines starting with `- `, `1. `, `- [ ] `, `> `, `# ` or `---` become lists,
-task lists, quotes, headings and rules; ` ``` ` followed by Enter opens a code
-block. What you typed is what the agent receives, markers and numbering
-included, and `#1234` without a space still looks up a pull request.
+The composer keeps the Markdown you type, including every delimiter. With
+**Settings → General → Rich text composer** enabled, formatting appears while markers
+hide away from the cursor. Move the cursor into a formatted span to edit its
+markers directly. Backticks keep names such as `_build` and `node_modules`
+literal. What you typed is what the agent receives.
 
-Enter sends. In a list or quote, **Shift+Enter** continues it, and Shift+Enter
-on an empty line leaves it; **Tab** nests a list item. In a code block, Enter
-starts a new line at the current indentation, **Tab** and **Shift+Tab** indent
-the selected lines, and a closing ` ``` ` followed by Enter, or two blank lines
-at the end, leave the block. **Backspace** at the start of a code block turns it
-back into plain lines. Choose the language in a code block's corner to change
-it. Very large code blocks are shown without syntax highlighting.
+Lines starting with `- `, `1. `, `- [ ] `, `> `, `# ` or `---` show as lists,
+tasks, quotes, headings and rules. Click a task checkbox to change `[ ]` to
+`[x]`. Formatting shortcuts wrap or unwrap the selection: **Cmd+B / Ctrl+B**
+for bold, **Cmd+I / Ctrl+I** for italics, **Cmd+E / Ctrl+E** for inline code,
+and **Cmd+Shift+S / Ctrl+Shift+S** for strikethrough.
+Use Cmd on Mac and Ctrl elsewhere. Strikethrough takes priority over the
+settle-thread shortcut while the Rich text composer is focused.
+
+Enter sends. **Shift+Enter** continues a list or quote; on an empty item it
+leaves it. **Tab** nests a list item. Typing a code fence such as ` ```ts `
+and pressing Enter adds a matching closing fence. Inside the fence, Enter
+adds a line with the current indentation; **Tab** and **Shift+Tab** indent
+or outdent code. To write after the block, move beyond its closing fence.
+Choose its language while the cursor is outside the block. Formatting shortcuts,
+checkbox changes and code-block actions can each be undone in one step.
+
+Drafts above 12,000 characters show plain Markdown for responsiveness. `#1234`
+without a space still looks up a pull request.
 
 ## Attach files
 
@@ -76,6 +86,19 @@ Mobile has the same choice under **Settings → Follow-ups**. While a turn is
 running the send button shows which action it will take. Long-press it to use the
 other action for a single message, or hold `Cmd` while sending from a hardware
 keyboard. The button only offers Steer when the running agent supports it.
+
+## Recover a thread
+
+LastCode checks Codex and Claude threads when their updates stop being recorded.
+Long thinking or tool calls alone do not trigger recovery. When the provider confirms
+that the affected turn ended, LastCode reconciles its status automatically without
+repeating the work. The recovery notice tells you when some output may be missing.
+
+Use **Check now** or **Recover** in the thread's notice to check again. If automatic
+recovery cannot finish, **Open repair thread** starts a separate investigation using
+the project's default provider and model. Your original conversation stays in place;
+**View repair thread** returns to the same investigation. Configure a project model
+default first if LastCode asks for one.
 
 ## Queue messages offline on mobile
 
@@ -321,6 +344,10 @@ share** and **Open in file viewer**. Pictures, videos and PDFs keep their native
 other document formats such as Word or Pages open in the device's own viewer when it has one.
 If nothing on the device can show a format, save or share it to open it elsewhere.
 
+In LastCode, enter `/annotate` to open the current thread's annotation editor. Enter `/annotate`
+followed by Markdown to save the annotation directly without sending a message to the agent.
+Annotations become available after the first message turns a draft into a saved thread.
+
 ## Images and videos in messages
 
 Select an image or video attachment or link to preview it. Playback support depends
@@ -333,6 +360,18 @@ return to the thumbnail to open this menu after watching a full-screen video.
 File links refer to the environment's machine, including when you connect remotely.
 Previews use the original file, even outside the workspace. Moving or deleting it
 can break the preview, so save a copy if you need to keep it.
+
+## Preview links
+
+Managed QA previews stay available for 24 hours after handoff. Opening one
+restarts its temporary server if needed; the server stops automatically when
+that window ends. Viewing does not extend the window. Open the link from its
+thread so LastCode can restore it before opening either browser. Remote viewing
+still requires the server to be reachable from your device.
+
+If a link opened in the integrated browser cannot connect, choose **Ask agent to
+restore preview**. The failed link and error go to the thread that owns the
+preview. After the agent restores it, reload the page.
 
 ## Files outside the workspace
 

@@ -16,7 +16,6 @@ import {
   readThreadPreviewState,
   reconcilePreviewServerSessions,
 } from "~/previewStateStore";
-import { isElectron } from "~/env";
 import { previewEnvironment } from "~/state/preview";
 import { primaryEnvironmentIdAtom } from "~/state/primaryEnvironment";
 
@@ -55,11 +54,7 @@ const previewSessionSyncAtom = Atom.family((threadKey: string) => {
       const currentEpoch = readThreadPreviewState(threadRef).serverEpoch;
       // The desktop host owns epoch changes, including when a retired query finishes late.
       // Other environments adopt their new epoch from the completed thread list.
-      if (
-        currentEpoch !== null &&
-        result.value.serverEpoch !== currentEpoch &&
-        hostAppliesEvents
-      )
+      if (currentEpoch !== null && result.value.serverEpoch !== currentEpoch && hostAppliesEvents)
         return;
       reconcilePreviewServerSessions(threadRef, result.value);
       if (!readThreadPreviewState(threadRef).listLoaded) {

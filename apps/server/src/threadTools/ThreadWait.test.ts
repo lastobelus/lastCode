@@ -26,12 +26,12 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as EventStore from "../orchestration-v2/EventStore.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ThreadWait from "./ThreadWait.ts";
 
 const environmentId = EnvironmentId.make("environment:thread-wait");
 const stores = Layer.mergeAll(EventStore.layer, ProjectionStore.layer).pipe(
-  Layer.provideMerge(SqlitePersistenceMemory),
+  Layer.provideMerge(SqlitePersistence.layerMemory),
 );
 const dependencies = Layer.mergeAll(
   EventSink.layer.pipe(Layer.provideMerge(stores)),

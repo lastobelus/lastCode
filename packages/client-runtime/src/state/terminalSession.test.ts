@@ -36,6 +36,28 @@ const BASE_SNAPSHOT: TerminalSessionSnapshot = {
 };
 
 describe("terminal session reducers", () => {
+  it("keeps attached profile intent through output and clears it with a new ordinary snapshot", () => {
+    const named = applyTerminalAttachStreamEvent(EMPTY_TERMINAL_BUFFER_STATE, {
+      type: "snapshot",
+      snapshot: { ...BASE_SNAPSHOT, terminalLinkProfileName: "Work account" },
+    });
+    const output = applyTerminalAttachStreamEvent(named, {
+      type: "output",
+      threadId: TARGET.threadId,
+      terminalId: TARGET.terminalId,
+      data: "more",
+    });
+    expect(combineTerminalSessionState(null, output).terminalLinkProfileName).toBe("Work account");
+    const ordinary = applyTerminalAttachStreamEvent(output, {
+      type: "restarted",
+      threadId: TARGET.threadId,
+      terminalId: TARGET.terminalId,
+      snapshot: { ...BASE_SNAPSHOT, history: "" },
+    });
+    expect(combineTerminalSessionState(null, ordinary).terminalLinkProfileName).toBeUndefined();
+    expect(terminalOutputText(ordinary.output)).toBe("");
+  });
+
   it("prefers live attach status over stale metadata after the attach stream starts", () => {
     const summary = applyTerminalMetadataStreamEvent([], {
       type: "snapshot",
