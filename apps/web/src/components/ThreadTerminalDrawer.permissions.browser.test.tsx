@@ -63,6 +63,16 @@ vi.mock(import("~/terminal/ghostty/surface"), async (original) => ({
   ...(await original()),
   GhosttyTerminalSurface: { create: state.createSurface } as never,
 }));
+vi.mock(import("~/terminal/ghostty/keyCodes"), async (original) => ({
+  ...(await original()),
+  // Synthetic key/code pairs must agree with the layout, regardless of the host keyboard.
+  loadGhosttyKeyboardLayoutMap: async () =>
+    new Map([
+      ["KeyB", "b"],
+      ["KeyC", "c"],
+      ["KeyD", "d"],
+    ]),
+}));
 vi.mock(import("../state/session"), async (original) => {
   const { useSyncExternalStore } = await import("react");
   const readEnvironmentScope = (id: EnvironmentId | null, scope: AuthEnvironmentScope) =>
