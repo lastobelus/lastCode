@@ -3,6 +3,7 @@ import {
   AuthTerminalOperateScope,
   AuthTerminalReadScope,
   EnvironmentId,
+  ProjectId,
   ThreadId,
   type ActionResumeState,
   type ScopedThreadRef,
@@ -54,10 +55,10 @@ const b: ScopedThreadRef = {
   environmentId: EnvironmentId.make("environment-b"),
   threadId: ThreadId.make("thread-b"),
 };
-const running = {
+const running: ActionResumeState = {
   runId: "run-a",
   threadId: a.threadId,
-  projectId: "project-a",
+  projectId: ProjectId.make("project-a"),
   actionId: "action-a",
   actionName: "Check work",
   command: "check-work",
@@ -68,15 +69,23 @@ const running = {
   finishedAt: null,
   exitCode: null,
   exitSignal: null,
-  progress: { state: "waiting", summary: "Waiting for review", detail: "Checks in progress" },
-} as ActionResumeState;
+  progress: {
+    version: 1,
+    state: "waiting",
+    summary: "Waiting for review",
+    detail: "Checks in progress",
+    updatedAt: "2026-08-25T12:00:00.000Z",
+  },
+};
 const interrupted: ActionResumeState = {
   ...running,
-  outcome: "interrupted",
+  outcome: "process_lost",
   delivery: "available",
+  finishedAt: "2026-08-25T12:01:00.000Z",
 };
 const success = () => AsyncResult.success(undefined);
-const failure = (message = "Failed") => AsyncResult.failure(Cause.fail(new Error(message)));
+const failure = (message = "Failed"): AtomCommandResult<void, Error> =>
+  AsyncResult.failure(Cause.fail(new Error(message)));
 function deferred() {
   let resolve!: (value: AtomCommandResult<void, Error>) => void;
   const promise = new Promise<AtomCommandResult<void, Error>>((done) => {
@@ -382,7 +391,15 @@ describe("Action banner stack", () => {
           notices.textContent!.indexOf("Branch changed"),
         );
       await render({
-        action: { ...running, progress: { state: "working", summary: "Compiling" } },
+        action: {
+          ...running,
+          progress: {
+            version: 1,
+            state: "working",
+            summary: "Compiling",
+            updatedAt: "2026-08-25T12:00:00.000Z",
+          },
+        },
         mismatch,
       });
       expect(banners.runningBanner?.variant).toBe("info");
