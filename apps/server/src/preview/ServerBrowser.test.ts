@@ -4211,6 +4211,292 @@ it.effect("an idle native popup stays open until deliberately closed", () =>
   ).pipe(Effect.provide(layer)),
 );
 
+it.live("an agent's tabs stop at the limit until unwatched idle pages are released", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker, tabId } = yield* ready;
+      const open = broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { reuseExistingTab: false, show: false },
+      });
+      for (let count = 1; count < 8; count += 1) yield* open;
+      expect(yield* Effect.flip(open)).toMatchObject({
+        _tag: "PreviewAutomationControlInterruptedError",
+        reason: "tabLimit",
+      });
+      yield* broker.invoke({
+        scope: asSession("agent-b"),
+        operation: "open",
+        input: { reuseExistingTab: false, show: false },
+      });
+      const later = (yield* Clock.currentTimeMillis) + 31 * 60 * 1000;
+      const clock = vi.spyOn(Date, "now").mockReturnValue(later);
+      yield* Effect.addFinalizer(() => Effect.sync(() => clock.mockRestore()));
+      const browser = yield* ServerBrowser.ServerBrowser;
+      yield* browser.attachViewer(viewerInput(tabId, false));
+      const reopened = yield* open;
+      const manager = yield* Manager.PreviewManager;
+      const { sessions } = yield* manager.list({ threadId: scope.thread.threadId });
+      expect(sessions).toHaveLength(10);
+      expect(sessions.map((session) => session.tabId)).toEqual(
+        expect.arrayContaining([tabId, reopened.tabId]),
+      );
+      expect(contexts.filter((context) => !context.page.isClosed())).toHaveLength(2);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("an idle agent tab the desktop renders stays open for the person browsing it", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const broker = yield* Broker.PreviewAutomationBroker;
+      yield* Effect.yieldNow;
+      const open = broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { reuseExistingTab: false, show: false },
+      });
+      desktopRendersNext = true;
+      const desktopTab = yield* open;
+      const openHeadless = broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "open",
+        input: { browserHost: "environment", reuseExistingTab: false, show: false },
+      });
+      const headlessTab = yield* openHeadless;
+      const later = (yield* Clock.currentTimeMillis) + 31 * 60 * 1000;
+      const clock = vi.spyOn(Date, "now").mockReturnValue(later);
+      yield* Effect.addFinalizer(() => Effect.sync(() => clock.mockRestore()));
+      // Opening releases unwatched headless pages without forgetting their tabs.
+      const reopened = yield* openHeadless;
+      const manager = yield* Manager.PreviewManager;
+      const { sessions } = yield* manager.list({ threadId: scope.thread.threadId });
+      const openTabIds = sessions.map((session) => session.tabId);
+      expect(openTabIds).toContain(desktopTab.tabId);
+      expect(openTabIds).toContain(reopened.tabId);
+      expect(openTabIds).toContain(headlessTab.tabId);
+      expect(contexts[0]!.page.isClosed()).toBe(true);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("resuming an idle page respects server capacity without inheriting its agent's limit", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { browser, broker, tabId } = yield* ready;
+      const later = (yield* Clock.currentTimeMillis) + 31 * 60_000;
+      const clock = vi.spyOn(Date, "now").mockReturnValue(later);
+      yield* Effect.addFinalizer(() => Effect.sync(() => clock.mockRestore()));
+      let last: PreviewAutomationStatus | undefined;
+      for (let count = 0; count < 32; count += 1) {
+        last = yield* broker.invoke<PreviewAutomationStatus>({
+          scope: count < 8 ? scope : asSession(`capacity-agent-${Math.floor(count / 8)}`),
+          operation: "open",
+          input: { browserHost: "environment", open: false, reuseExistingTab: false },
+        });
+      }
+      expect(contexts[0]!.page.isClosed()).toBe(true);
+      expect(contexts.filter((context) => !context.page.isClosed())).toHaveLength(32);
+      const result = yield* browser.attachViewer(viewerInput(tabId, false)).pipe(Effect.result);
+      expect(result).toMatchObject({
+        _tag: "Failure",
+        failure: { _tag: "ServerBrowserLaunchError" },
+      });
+      expect(contexts).toHaveLength(33);
+      yield* broker.invoke({
+        scope: asSession("capacity-agent-3"),
+        tabId: PreviewTabId.make(last!.tabId!),
+        operation: "close",
+        input: {},
+      });
+      yield* browser.attachViewer(viewerInput(tabId, false));
+      expect(contexts).toHaveLength(34);
+      expect(contexts.filter((context) => !context.page.isClosed())).toHaveLength(32);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live.each([1, 32])(
+  "an owner closes a dormant environment tab without reopening it with %s live pages",
+  (livePages) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const prepared: Array<{ threadId: string; url: string }> = [];
+        hostingPreparation = (input) =>
+          Effect.sync(() => {
+            prepared.push(input);
+            return { managed: true, bootstrapToken: "fixture-close-credential" };
+          });
+        const broker = yield* Broker.PreviewAutomationBroker;
+        const manager = yield* Manager.PreviewManager;
+        yield* ServerBrowser.ServerBrowser;
+        yield* Effect.yieldNow;
+        const opened = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: {
+            browserHost: "environment",
+            url: "http://127.0.0.1:5173/fixture",
+            open: false,
+          },
+        });
+        const tabId = PreviewTabId.make(opened.tabId!);
+        const later = (yield* Clock.currentTimeMillis) + 31 * 60_000;
+        const clock = vi.spyOn(Date, "now").mockReturnValue(later);
+        yield* Effect.addFinalizer(() => Effect.sync(() => clock.mockRestore()));
+        for (let count = 0; count < livePages; count += 1) {
+          yield* broker.invoke({
+            scope: asSession(`capacity-agent-${Math.floor(count / 8)}`),
+            operation: "open",
+            input: { browserHost: "environment", open: false, reuseExistingTab: false },
+          });
+        }
+        expect(contexts[0]!.page.isClosed()).toBe(true);
+        const contextsBefore = contexts.length;
+        const credentialsBefore = contexts.map((context) => context.request.post.mock.calls.length);
+        prepared.length = 0;
+        const unauthorized = yield* broker
+          .invoke({
+            scope: asSession("another-agent"),
+            tabId,
+            operation: "close",
+            input: {},
+          })
+          .pipe(Effect.flip);
+        expect(unauthorized).toMatchObject({
+          _tag: "PreviewAutomationControlInterruptedError",
+          reason: "agentMismatch",
+        });
+        expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toContainEqual(
+          expect.objectContaining({ tabId }),
+        );
+        yield* broker.invoke({ scope, tabId, operation: "close", input: {} });
+        expect(
+          (yield* manager.list({ threadId: scope.thread.threadId })).sessions,
+        ).not.toContainEqual(expect.objectContaining({ tabId }));
+        expect(contexts).toHaveLength(contextsBefore);
+        expect(prepared).toEqual([]);
+        expect(contexts.map((context) => context.request.post.mock.calls.length)).toEqual(
+          credentialsBefore,
+        );
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live.each([
+  ["Success", "incognito"],
+  ["LoadFailed", "incognito"],
+  ["Success", "default"],
+  ["LoadFailed", "default"],
+] as const)(
+  "an idle environment tab resumes its saved %s page in profile %s",
+  ([status, profileId]) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        profileCatalogue = {
+          desktopHostId: "fixture-desktop",
+          profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+          defaultProfileId: "work",
+        };
+        const prepared: Array<{ threadId: string; url: string }> = [];
+        hostingPreparation = (input) =>
+          Effect.sync(() => {
+            prepared.push(input);
+            return { managed: true, bootstrapToken: "fixture-fresh-credential" };
+          });
+        const browser = yield* ServerBrowser.ServerBrowser;
+        const broker = yield* Broker.PreviewAutomationBroker;
+        const manager = yield* Manager.PreviewManager;
+        yield* Effect.yieldNow;
+        const url = "http://127.0.0.1:5173/fixture?q=1#anchor";
+        const opened = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { browserHost: "environment", profileId, url, open: false },
+        });
+        const tabId = PreviewTabId.make(opened.tabId!);
+        yield* manager.reportStatus({
+          threadId: scope.thread.threadId,
+          tabId,
+          serverControlled: true,
+          navStatus:
+            status === "Success"
+              ? { _tag: "Success", url, title: "Retained fixture" }
+              : {
+                  _tag: "LoadFailed",
+                  url,
+                  title: "",
+                  code: -102,
+                  description: "ERR_CONNECTION_REFUSED",
+                },
+          canGoBack: false,
+          canGoForward: false,
+        });
+        const saved = (yield* manager.list({ threadId: scope.thread.threadId })).sessions[0]!;
+        const later = (yield* Clock.currentTimeMillis) + 31 * 60_000;
+        const clock = vi.spyOn(Date, "now").mockReturnValue(later);
+        yield* Effect.addFinalizer(() => Effect.sync(() => clock.mockRestore()));
+        yield* broker.invoke({
+          scope: asSession("sweep-agent"),
+          operation: "open",
+          input: { browserHost: "environment", reuseExistingTab: false, open: false },
+        });
+        expect(contexts[0]!.page.isClosed()).toBe(true);
+        expect(contexts[0]!.close).toHaveBeenCalledTimes(profileId === "incognito" ? 1 : 0);
+        expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toContainEqual(
+          saved,
+        );
+        const dormant = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "status",
+          input: {},
+        });
+        expect(dormant).toMatchObject({
+          available: false,
+          browserHost: "environment",
+          tabId,
+          url,
+          profileId,
+          defaultProfileId: "incognito",
+          tabs: expect.arrayContaining([
+            expect.objectContaining({ tabId, url, profileId, ownedByCaller: true, visible: false }),
+          ]),
+        });
+        expect(contexts).toHaveLength(2);
+        prepared.length = 0;
+        yield* browser.attachViewer(viewerInput(tabId, false));
+        const resumed = contexts[2]!;
+        yield* broker.invoke({ scope, operation: "snapshot", input: {} });
+        expect(prepared).toEqual([{ threadId: scope.thread.threadId, url }]);
+        expect(resumed.request.post).toHaveBeenCalledExactlyOnceWith(
+          "http://127.0.0.1:5173/api/auth/browser-session",
+          expect.objectContaining({ data: { credential: "fixture-fresh-credential" } }),
+        );
+        expect(resumed.page.goto).toHaveBeenCalledExactlyOnceWith(url, expect.anything());
+        expect(contextRequests[2]).toEqual({ profileId, isolated: profileId === "incognito" });
+        const reopened = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { open: false },
+        });
+        expect(reopened).toMatchObject({ tabId, url, browserHost: "environment", profileId });
+        expect(contexts).toHaveLength(3);
+        expect(profileRequests).toEqual([]);
+        expect(rootCreations).toEqual([]);
+        expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toContainEqual(
+          expect.objectContaining({
+            tabId,
+            runtime: "server",
+            backingPage: "server",
+            automationOwner: saved.automationOwner,
+            profileId,
+          }),
+        );
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
 it.effect.each([
   "layout-timeout",
   "surface-unsupported",

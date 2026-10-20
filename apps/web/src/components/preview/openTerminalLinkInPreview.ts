@@ -11,11 +11,8 @@ import {
 } from "~/browser/browserDefaults";
 import { isWebUrl, resolveBrowserLinkTargetPreference } from "~/browser/browserLinkTarget";
 import type { OpenPreviewMutation } from "~/browser/openFileInPreview";
-import {
-  desktopBrowserHostFor,
-  isPreviewAvailableFor,
-  previewRuntimeFor,
-} from "~/browser/previewRuntime";
+import { isPreviewAvailableFor } from "~/browser/previewRuntime";
+import { preparedPreviewOpenTarget } from "~/browser/preparedPreviewOpenTarget";
 import { openPreparedExternalUrl } from "~/browser/openPreparedExternalUrl";
 import { recordVisitForThread } from "~/browserHistoryStore";
 import { applyPreviewServerSnapshot } from "~/previewStateStore";
@@ -111,21 +108,14 @@ export async function openTerminalLinkInPreview<E>(
   };
 
   const defaults = explicitDefaults ?? (await resolveBrowserDefaults());
-  const runtime = previewRuntimeFor(input.threadRef.environmentId);
-  const desktopHostId =
-    runtime === "server" ? desktopBrowserHostFor(input.threadRef.environmentId) : undefined;
+  const profileId = explicitProfileId ?? browserDefaultOpenProfileId(defaults);
   const result = await input.openPreview({
     environmentId: input.threadRef.environmentId,
     input: {
       threadId: input.threadRef.threadId,
-      url: hostedPreviewNavigationUrl(
-        prepared,
-        runtime === "server" && desktopHostId === undefined ? input.url : prepared.url,
-      ),
+      ...preparedPreviewOpenTarget(input.threadRef.environmentId, prepared, input.url, profileId),
       viewport: browserDefaultOpenViewport(defaults),
-      profileId: explicitProfileId ?? browserDefaultOpenProfileId(defaults),
-      ...(runtime === undefined ? {} : { runtime }),
-      ...(desktopHostId === undefined ? {} : { desktopHostId }),
+      profileId,
     },
   });
   if (result._tag === "Failure") {

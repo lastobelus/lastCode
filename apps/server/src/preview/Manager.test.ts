@@ -501,6 +501,51 @@ it.layer(PreviewManagerTestLayer)("PreviewManager", (it) => {
     }),
   );
 
+  it.effect(
+    "client environment selection publishes server backing despite native IPC and host defaults",
+    () =>
+      Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        const manager = yield* PreviewManager.make.pipe(
+          Effect.provideService(ServerConfig.ServerConfig, {
+            ...config,
+            desktopBrowserFd: 4,
+            desktopBrowserControlFd: 5,
+          }),
+        );
+        for (const profileId of ["default", "incognito"]) {
+          const opened = yield* manager.open({
+            threadId: freshThreadId(),
+            browserHost: "environment",
+            runtime: "desktop",
+            desktopHostId: "selected-desktop",
+            profileId,
+            url: "http://127.0.0.1:5173/app?run=1#section",
+          });
+          expect(opened).toMatchObject({
+            runtime: "server",
+            backingPage: "server",
+            profileId,
+            navStatus: { url: "http://127.0.0.1:5173/app?run=1#section" },
+          });
+          expect(opened.desktopHostId).toBeUndefined();
+        }
+        const threadId = freshThreadId();
+        const failure = yield* manager
+          .open({
+            threadId,
+            browserHost: "environment",
+            profileId: "work-account",
+          })
+          .pipe(Effect.flip);
+        expect(failure).toMatchObject({
+          _tag: "PreviewProfileHostError",
+          profileId: "work-account",
+        });
+        expect((yield* manager.list({ threadId })).sessions).toEqual([]);
+      }),
+  );
+
   it.effect("lists all environment tabs when the thread filter is omitted", () =>
     Effect.gen(function* () {
       const manager = yield* PreviewManager.PreviewManager;

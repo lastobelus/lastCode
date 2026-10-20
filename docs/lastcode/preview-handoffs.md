@@ -100,7 +100,9 @@ The successful tool result establishes a retained handoff and its current
 24-hour process window. LastCode owns the terminal and persists the recipe across
 turn completion and server restarts. Opening the link in its owning thread, or
 returning to its retained Browser panel, restores a stopped server without an
-agent message. A healthy page keeps its current form state when revisited.
+agent message. A page that is still running keeps its current form state when
+revisited. Idle environment browser pages can sleep while their tabs remain;
+returning recreates the page at its saved address and renews access.
 
 At the process deadline, LastCode closes only that preview's terminal and marks
 the handoff sleeping. A later opening starts a fresh process window after
@@ -129,13 +131,14 @@ An existing server cannot be adopted merely by remembering its URL: relaunch it
 through `preview_host` to establish native ownership. One managed listener owns
 a local origin; use a distinct port for another preview. Native browser recovery
 uses the owning environment and thread, never an unrelated thread or public
-website. Existing browser connection limits still apply when the environment's
-preview URL is unreachable from the client. Desktop, web, and mobile prepare
-owned links before opening them. Private-network environment addresses replace
-loopback destinations for remote clients. A saved previous private address is
-rewritten only when it is known to belong to that environment; unknown LAN
-addresses are left unchanged. This does not create a tunnel or make a
-loopback-only listener reachable from another machine.
+website. In the integrated Browser, managed app links use an environment-hosted
+page and the saved listener's local address, so a loopback-only app does not
+depend on desktop access to its port. An explicitly selected desktop profile
+keeps its desktop identity and requires a reachable browser destination. External
+browsers and mobile clients also need a reachable listener; restoring a process
+does not create a tunnel or expose a loopback port. A saved previous private
+address is rewritten only when it is known to belong to that environment;
+unknown LAN addresses are left unchanged.
 
 Persistent HTML files can instead use LastCode's existing file-preview hosting
 without a temporary server. Keep the source and neighboring assets available.

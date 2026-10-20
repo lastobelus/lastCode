@@ -1,4 +1,5 @@
-import type { PreviewSessionSnapshot, ScopedThreadRef } from "@t3tools/contracts";
+import type { PreviewOpenInput, PreviewSessionSnapshot, ScopedThreadRef } from "@t3tools/contracts";
+import type { PreparedHostedPreview } from "@t3tools/client-runtime/preview-hosting";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
@@ -11,13 +12,18 @@ import {
 } from "./openTerminalLinkInPreview";
 
 const hostingMocks = vi.hoisted(() => ({
-  prepare: vi.fn(async (_ref: ScopedThreadRef, url: string) => ({
+  prepare: vi.fn(async (_ref: ScopedThreadRef, url: string): Promise<PreparedHostedPreview> => ({
     url,
     managed: false,
     restored: false,
   })),
 }));
 vi.mock("./previewHostingRecovery", () => ({ prepareHostedPreview: hostingMocks.prepare }));
+vi.mock("~/state/entities", () => ({
+  readEnvironmentSupportsServerBrowser: () => true,
+  readEnvironmentHasLocalDesktopBrowser: () => true,
+  useEnvironmentSupportsServerBrowser: () => true,
+}));
 
 vi.mock("~/previewStateStore", () => ({
   applyPreviewServerSnapshot: vi.fn(),
@@ -86,6 +92,61 @@ afterEach(() => {
 });
 
 describe("openTerminalLinkInPreview", () => {
+  it("opens an ordinary managed app in its environment rather than this desktop", async () => {
+    vi.spyOn(previewRuntime, "previewRuntimeFor").mockReturnValue(undefined);
+    const url = "http://workstation.example:5173/app?case=terminal#section";
+    const localUrl = "http://127.0.0.1:5173/app?case=terminal#section";
+    hostingMocks.prepare.mockResolvedValue({ url, localUrl, managed: true, restored: true });
+    const openPreview = vi.fn(async (_input: { input: PreviewOpenInput }) =>
+      AsyncResult.success(snapshot),
+    );
+    const fallbackToBrowser = vi.fn();
+    await openTerminalLinkInPreview({
+      url,
+      threadRef,
+      openPreview,
+      fallbackToBrowser,
+      forceBrowser: false,
+    });
+    expect(openPreview.mock.calls[0]?.[0].input).toMatchObject({
+      url: localUrl,
+      runtime: "server",
+      browserHost: "environment",
+      profileId: "default",
+    });
+    expect(openPreview.mock.calls[0]?.[0].input).not.toHaveProperty("desktopHostId");
+    expect(fallbackToBrowser).not.toHaveBeenCalled();
+  });
+
+  it("keeps a managed Action's named profile on its selected desktop", async () => {
+    vi.spyOn(previewRuntime, "previewRuntimeFor").mockReturnValue("server");
+    vi.spyOn(previewRuntime, "desktopBrowserHostFor").mockReturnValue("selected-desktop");
+    const url = "http://workstation.example:5173/sign-in";
+    hostingMocks.prepare.mockResolvedValue({
+      url,
+      localUrl: "http://127.0.0.1:5173/sign-in",
+      managed: true,
+      restored: true,
+    });
+    const openPreview = vi.fn(async (_input: { input: PreviewOpenInput }) =>
+      AsyncResult.success(snapshot),
+    );
+    await openTerminalLinkInPreview({
+      url,
+      threadRef,
+      terminalLinkProfileName: "Work account",
+      openPreview,
+      fallbackToBrowser: vi.fn(),
+      forceBrowser: false,
+    });
+    expect(openPreview.mock.calls[0]?.[0].input).toMatchObject({
+      url,
+      profileId: "work",
+      desktopHostId: "selected-desktop",
+    });
+    expect(openPreview.mock.calls[0]?.[0].input).not.toHaveProperty("browserHost");
+  });
+
   it.each([
     { forceBrowser: false, catalogue: "present" },
     { forceBrowser: true, catalogue: "present" },

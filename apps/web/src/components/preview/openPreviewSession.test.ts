@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 import * as browserDefaults from "~/browser/browserDefaults";
 import * as previewRuntime from "~/browser/previewRuntime";
 import * as hostingRecovery from "./previewHostingRecovery";
+import * as entities from "~/state/entities";
 import {
   BrowserSettingsReadError,
   openFileInPreview,
@@ -86,6 +87,42 @@ afterEach(() => {
 });
 
 describe("openPreviewSession", () => {
+  it.each([undefined, "server", "desktop"] as const)(
+    "routes a managed app through shared placement while preserving an explicit %s move",
+    async (runtime) => {
+      vi.spyOn(previewRuntime, "previewRuntimeFor").mockReturnValue(undefined);
+      vi.spyOn(entities, "readEnvironmentSupportsServerBrowser").mockReturnValue(true);
+      const url = "http://workstation.example:5173/app/a%2Fb?q=1#section";
+      const localUrl = "http://127.0.0.1:5173/app/a%2Fb?q=1#section";
+      vi.spyOn(hostingRecovery, "prepareHostedPreview").mockResolvedValue({
+        url,
+        localUrl,
+        managed: true,
+        restored: true,
+      });
+      const openPreview = vi.fn(async (_input: { input: PreviewOpenInput }) =>
+        AsyncResult.success(snapshot),
+      );
+      await openPreviewSession({
+        threadRef,
+        openPreview,
+        url,
+        ...(runtime === undefined ? {} : { runtime }),
+      });
+      if (runtime === "desktop") {
+        expect(openPreview.mock.calls[0]?.[0].input).toMatchObject({ url });
+        expect(openPreview.mock.calls[0]?.[0].input).not.toHaveProperty("browserHost");
+        expect(openPreview.mock.calls[0]?.[0].input).not.toHaveProperty("runtime");
+      } else {
+        expect(openPreview.mock.calls[0]?.[0].input).toMatchObject({
+          url: localUrl,
+          runtime: "server",
+          browserHost: "environment",
+        });
+        expect(openPreview.mock.calls[0]?.[0].input).not.toHaveProperty("desktopHostId");
+      }
+    },
+  );
   it("moves to the environment's browser without selecting this desktop's native host", async () => {
     vi.spyOn(previewRuntime, "previewRuntimeFor").mockReturnValue(undefined);
     const desktopHost = vi
@@ -112,6 +149,7 @@ describe("openPreviewSession", () => {
         threadId: threadRef.threadId,
         url: "http://localhost:5173/check",
         runtime: "server",
+        browserHost: "environment",
         profileId: DEFAULT_BROWSER_PROFILE_ID,
         viewport: FILL_PREVIEW_VIEWPORT,
       },

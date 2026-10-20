@@ -12,6 +12,7 @@ import {
   type PreviewAutomationStatus,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Clock from "effect/Clock";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
@@ -89,7 +90,7 @@ const dependencies = Layer.mergeAll(
 ).pipe(Layer.provideMerge(platform));
 const layer = ServerBrowser.layer.pipe(Layer.provideMerge(dependencies));
 
-it.live("an explicit environment page renders loopback and accepts streamed viewer input", () =>
+it.live("an environment page renders loopback, accepts input, and resumes after idle release", () =>
   Effect.scoped(
     Effect.gen(function* () {
       const server = yield* Effect.acquireRelease(
@@ -133,7 +134,53 @@ it.live("an explicit environment page renders loopback and accepts streamed view
       });
       expect(snapshot.visibleText).toContain("environment-browser-ready");
       expect(snapshot.screenshot?.data).toBeTruthy();
-      const viewer = yield* browser.attachViewer({
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const viewer = yield* browser.attachViewer({
+            threadId: scope.thread.threadId,
+            tabId,
+            canOperate: true,
+            maxWidth: 800,
+            maxHeight: 600,
+            quality: 70,
+          });
+          const frame = yield* Queue.take(viewer.output).pipe(
+            Effect.repeat({ until: (output) => output._tag === "frame" }),
+          );
+          if (frame._tag !== "frame") throw new Error("Missing frame");
+          expect(frame.data.byteLength).toBeGreaterThan(100);
+          yield* frame.ack;
+          yield* broker.invoke({ scope, tabId, operation: "click", input: { selector: "#note" } });
+          yield* viewer.input({ type: "takeControl" });
+          yield* viewer.input({ type: "text", text: "viewer input" });
+          yield* viewer.input({ type: "releaseControl" });
+          const value = yield* broker.invoke({
+            scope,
+            tabId,
+            operation: "evaluate",
+            input: { expression: 'document.querySelector("#note").value' },
+          });
+          expect(value).toBe("viewer input");
+        }),
+      );
+      const manager = yield* Manager.PreviewManager;
+      const saved = (yield* manager.list({ threadId: scope.thread.threadId })).sessions[0]!;
+      expect(saved.navStatus).toMatchObject({ _tag: "Success", url });
+      const later = (yield* Clock.currentTimeMillis) + 31 * 60_000;
+      const clock = vi.spyOn(Date, "now").mockReturnValue(later);
+      yield* Effect.addFinalizer(() => Effect.sync(() => clock.mockRestore()));
+      yield* broker.invoke({
+        scope: { ...scope, thread: { ...scope.thread, providerSessionId: "sweep-agent" } },
+        operation: "open",
+        input: { browserHost: "environment", open: false, reuseExistingTab: false },
+      });
+      expect((yield* manager.list({ threadId: scope.thread.threadId })).sessions).toContainEqual(
+        saved,
+      );
+      expect(
+        yield* broker.invoke<PreviewAutomationStatus>({ scope, operation: "status", input: {} }),
+      ).toMatchObject({ available: false, tabId, url, browserHost: "environment" });
+      const resumedViewer = yield* browser.attachViewer({
         threadId: scope.thread.threadId,
         tabId,
         canOperate: true,
@@ -141,23 +188,20 @@ it.live("an explicit environment page renders loopback and accepts streamed view
         maxHeight: 600,
         quality: 70,
       });
-      const frame = yield* Queue.take(viewer.output).pipe(
+      const resumedFrame = yield* Queue.take(resumedViewer.output).pipe(
         Effect.repeat({ until: (output) => output._tag === "frame" }),
       );
-      if (frame._tag !== "frame") throw new Error("Missing frame");
-      expect(frame.data.byteLength).toBeGreaterThan(100);
-      yield* frame.ack;
-      yield* broker.invoke({ scope, tabId, operation: "click", input: { selector: "#note" } });
-      yield* viewer.input({ type: "takeControl" });
-      yield* viewer.input({ type: "text", text: "viewer input" });
-      yield* viewer.input({ type: "releaseControl" });
-      const value = yield* broker.invoke({
+      if (resumedFrame._tag !== "frame") throw new Error("Missing resumed frame");
+      expect(resumedFrame.data.byteLength).toBeGreaterThan(100);
+      yield* resumedFrame.ack;
+      const resumedSnapshot = yield* broker.invoke<PreviewAutomationSnapshot>({
         scope,
-        tabId,
-        operation: "evaluate",
-        input: { expression: 'document.querySelector("#note").value' },
+        operation: "snapshot",
+        input: { includeImage: true },
       });
-      expect(value).toBe("viewer input");
+      expect(resumedSnapshot.url).toBe(url);
+      expect(resumedSnapshot.visibleText).toContain("environment-browser-ready");
+      expect(resumedSnapshot.screenshot?.data).toBeTruthy();
     }),
   ).pipe(Effect.provide(layer)),
 );

@@ -1,5 +1,4 @@
 import { stripPreviewBootstrapTokenFromUrl } from "@t3tools/shared/remote";
-import { hostedPreviewNavigationUrl } from "@t3tools/client-runtime/preview-hosting";
 import type {
   EnvironmentId,
   PreviewOpenInput,
@@ -19,6 +18,7 @@ import {
 } from "~/browser/browserDefaults";
 import { BrowserSettingsReadError } from "~/browser/openFileInPreview";
 import { desktopBrowserHostFor, previewRuntimeFor } from "~/browser/previewRuntime";
+import { preparedPreviewOpenTarget } from "~/browser/preparedPreviewOpenTarget";
 import { applyPreviewServerSnapshot, rememberPreviewUrl } from "~/previewStateStore";
 import { prepareHostedPreview } from "./previewHostingRecovery";
 
@@ -44,31 +44,35 @@ export async function openPreviewSession<E>(
   if (defaults instanceof BrowserSettingsReadError) {
     return AsyncResult.failure(Cause.fail(defaults));
   }
+  const profileId = input.profileId ?? browserDefaultOpenProfileId(defaults);
+  const preparedUrl =
+    input.url === undefined ? undefined : await prepareHostedPreview(input.threadRef, input.url);
   const runtime = input.runtime ?? previewRuntimeFor(input.threadRef.environmentId);
-  // A user moving to the environment's browser selects its page, rather than
-  // this client's native browser. Default opens keep their selected desktop host.
   const desktopHostId =
     runtime === "server" && input.runtime === undefined
       ? desktopBrowserHostFor(input.threadRef.environmentId)
       : undefined;
-  const preparedUrl =
-    input.url === undefined ? undefined : await prepareHostedPreview(input.threadRef, input.url);
-  const url =
+  const target =
     preparedUrl === undefined
-      ? undefined
-      : hostedPreviewNavigationUrl(
+      ? {
+          ...(runtime === undefined || runtime === "desktop" ? {} : { runtime }),
+          ...(desktopHostId === undefined ? {} : { desktopHostId }),
+          ...(input.runtime === "server" ? { browserHost: "environment" as const } : {}),
+        }
+      : preparedPreviewOpenTarget(
+          input.threadRef.environmentId,
           preparedUrl,
-          runtime === "server" && desktopHostId === undefined ? input.url : preparedUrl.url,
+          input.url ?? preparedUrl.url,
+          profileId,
+          input.runtime,
         );
   const result = await input.openPreview({
     environmentId: input.threadRef.environmentId,
     input: {
       threadId: input.threadRef.threadId,
-      ...(url === undefined ? {} : { url }),
+      ...target,
       viewport: input.viewport ?? browserDefaultOpenViewport(defaults),
-      profileId: input.profileId ?? browserDefaultOpenProfileId(defaults),
-      ...(runtime === undefined || runtime === "desktop" ? {} : { runtime }),
-      ...(desktopHostId === undefined ? {} : { desktopHostId }),
+      profileId,
     },
   });
   if (result._tag === "Failure") {

@@ -5,6 +5,8 @@ import {
   type PreviewError,
   PreviewInvalidUrlError,
   PreviewNativeCloseError,
+  PreviewProfileHostError,
+  isBuiltInBrowserProfileId,
   type PreviewListInput,
   type PreviewListResult,
   type PreviewNavigateInput,
@@ -253,10 +255,18 @@ export const make = Effect.gen(function* PreviewManagerMake() {
 
   const open: PreviewManager["Service"]["open"] = Effect.fn("PreviewManager.open")(
     function* (input) {
-      const runtime = input.runtime;
+      const environmentHosted = input.environmentHosted || input.browserHost === "environment";
+      if (
+        environmentHosted &&
+        input.profileId !== undefined &&
+        !isBuiltInBrowserProfileId(input.profileId)
+      ) {
+        return yield* new PreviewProfileHostError({ profileId: input.profileId });
+      }
+      const runtime = environmentHosted ? "server" : input.runtime;
       // Choose before publishing: renderers and automation must create the same page.
       // An unavailable selected desktop fails attachment; it never becomes a headless tab.
-      const desktopHostId = input.environmentHosted
+      const desktopHostId = environmentHosted
         ? undefined
         : (input.desktopHostId ??
           (runtime === "server" &&

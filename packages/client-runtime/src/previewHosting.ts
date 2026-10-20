@@ -73,6 +73,8 @@ export interface PrepareHostedPreviewInput {
 
 export interface PreparedHostedPreview {
   readonly url: string;
+  /** Verified lease destination as reached by a browser in the owning environment. */
+  readonly localUrl?: string;
   readonly managed: boolean;
   readonly restored: boolean;
   /** One-use navigation only; never save in handoffs, history, or copied links. */
@@ -172,8 +174,12 @@ export function prepareHostedPreview(
       ? selectExactPrivateHostedPreview(target, threadLeases)
       : selectHostedPreview(target, threadLeases);
     if (!owned) return original;
+    const localDestination = new URL(target);
+    localDestination.hostname = new URL(owned.url).hostname;
+    const localUrl = localDestination.href;
     const destination = resolveOwnedPreviewUrl(target, environment, targetIsPreviousPrivateAddress);
-    if (destination.length > PREVIEW_URL_MAX_LENGTH) throw new HostedPreviewUrlTooLongError();
+    if (destination.length > PREVIEW_URL_MAX_LENGTH || localUrl.length > PREVIEW_URL_MAX_LENGTH)
+      throw new HostedPreviewUrlTooLongError();
     let recovered: PreviewHostingRecoverResult;
     try {
       // Each navigation needs its own one-use credential, including two opens
@@ -198,6 +204,7 @@ export function prepareHostedPreview(
       throw new HostedPreviewUrlTooLongError();
     return {
       url: destination,
+      localUrl,
       managed: true,
       restored: true,
       ...(navigationUrl === undefined ? {} : { navigationUrl }),

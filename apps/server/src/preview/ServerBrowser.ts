@@ -1134,21 +1134,30 @@ const make = Effect.gen(function* () {
     reportLiveTabs();
     // Native/adopted pages may have finished before their listeners were installed.
     if (adopted || desktop) void reportLoaded(tab, true);
-    // Existing desktop and popup PDFs can start loading before interception attaches.
-    if (
+    if (!adopted && !desktop && snapshot.navStatus._tag !== "Idle") {
+      const url = snapshot.navStatus.url;
+      tab.navigationFailed = false;
+      tab.initialNavigation = prepareExistingBrowserNavigation(tab, url)
+        .then((destination) =>
+          page.goto(destination, { waitUntil: "commit", timeout: NAVIGATION_TIMEOUT_MS }),
+        )
+        .then(constVoid);
+    } else if (
       snapshot.navStatus._tag === "Loading" &&
       ((!adopted && (!desktop || snapshot.backingPage === "desktop-root")) ||
         isPdfAssetUrl(snapshot.navStatus.url))
     ) {
+      // Existing desktop and popup PDFs can start loading before interception attaches.
       const options = { waitUntil: "commit", timeout: NAVIGATION_TIMEOUT_MS } as const;
       tab.initialNavigation = (
         (desktop || adopted) && page.url() === snapshot.navStatus.url
           ? page.reload(options)
           : page.goto(snapshot.navStatus.url, options)
-      ).then(constVoid, (cause: unknown) => {
+).then(constVoid, (cause: unknown) => {
         throw ServerBrowserPage.toOperationError(cause, NAVIGATION_TIMEOUT_MS);
       });
-
+    }
+    if (tab.initialNavigation) {
       if (tab.control.agentId !== null) tab.control.track(tab.initialNavigation);
       else void tab.initialNavigation.catch(constVoid);
     }
@@ -1818,12 +1827,19 @@ const make = Effect.gen(function* () {
     );
     if (!snapshot) return yield* new ServerBrowserTabNotFoundError({ threadId, tabId });
     return yield* Effect.tryPromise({
-      try: () => ensureTab(snapshot),
+      try: () => {
+        if (snapshot.backingPage === "server" && !pendingTabs.has(tabKey(threadId, tabId))) {
+          closeIdleAgentTabs();
+          // Returning viewers share the server budget, without inheriting an old agent's limit.
+          assertTabCapacity();
+        }
+        return ensureTab(snapshot);
+      },
       catch: (cause) => (isTabNotFound(cause) ? cause : new ServerBrowserLaunchError({ cause })),
     });
   });
 
-  const atTabLimit = (agentSessionId: string) => {
+  const atTabLimit = (agentSessionId?: string) => {
     const openingRoots = [...nativeRoots.values()].filter(
       (root) => !root.closed && !tabs.has(tabKey(root.key.threadId, root.key.tabId)),
     );
@@ -1833,13 +1849,14 @@ const make = Effect.gen(function* () {
         openingRoots.filter((root) => !pendingTabs.has(tabKey(root.key.threadId, root.key.tabId)))
           .length >=
         SERVER_TAB_LIMIT ||
-      [...tabs.values()].filter((tab) => tab.control.agentId === agentSessionId).length +
-        openingRoots.filter((root) => root.automationOwner === agentSessionId).length >=
-        AGENT_TAB_LIMIT
+      (agentSessionId !== undefined &&
+        [...tabs.values()].filter((tab) => tab.control.agentId === agentSessionId).length +
+          openingRoots.filter((root) => root.automationOwner === agentSessionId).length >=
+          AGENT_TAB_LIMIT)
     );
   };
 
-  const assertTabCapacity = (agentSessionId: string) => {
+  const assertTabCapacity = (agentSessionId?: string) => {
     if (atTabLimit(agentSessionId))
       throw new BrowserControlInterrupted(
         `Too many server browser tabs are open (${AGENT_TAB_LIMIT} per agent session, ${SERVER_TAB_LIMIT} per server). Close one with t3_preview_close or reuse one from preview_status tabs.`,
@@ -1858,7 +1875,7 @@ const make = Effect.gen(function* () {
         tab.viewers.size === 0 &&
         tab.usedAt < cutoff
       )
-        dropTab(tab, true);
+        dropTab(tab, false);
     }
   };
 
@@ -1947,6 +1964,7 @@ const make = Effect.gen(function* () {
     tab: ServerTab | undefined,
     agentSessionId?: string,
     requestedThreadId?: string,
+    requestedTabId?: string,
   ): Promise<PreviewAutomationStatus> => {
     const threadId = tab?.threadId ?? requestedThreadId;
     const listedTabs = [...tabs.values()]
@@ -1960,8 +1978,7 @@ const make = Effect.gen(function* () {
         visible: candidate.viewers.size > 0,
         ...(candidate.profileId === undefined ? {} : { profileId: candidate.profileId }),
       }));
-    // Detached roots still occupy capacity and support an explicit offline close.
-    // Keep them discoverable even when the thread has no connected page at all.
+    // Idle pages and detached native roots keep their session without a connected page.
     const detachedRoots = [...nativeRoots.values()].filter(
       (root) =>
         root.published &&
@@ -1969,38 +1986,62 @@ const make = Effect.gen(function* () {
         root.key.threadId === threadId &&
         !tabs.has(tabKey(root.key.threadId, root.key.tabId)),
     );
-    if (threadId !== undefined && detachedRoots.length > 0) {
+    let retained: ReadonlyArray<PreviewSessionSnapshot> = [];
+    if (threadId !== undefined) {
       const { sessions } = await Effect.runPromise(
         manager.list({ threadId: ThreadId.make(threadId) }),
       );
-      for (const root of detachedRoots) {
-        const snapshot = sessions.find(
-          (session) => session.tabId === root.key.tabId && session.desktopRootId === root.rootId,
-        );
-        if (!snapshot) continue;
+      retained = sessions.filter(
+        (snapshot) =>
+          snapshot.runtime === "server" &&
+          !tabs.has(tabKey(snapshot.threadId, snapshot.tabId)) &&
+          (snapshot.backingPage === "server" ||
+            detachedRoots.some(
+              (root) => snapshot.tabId === root.key.tabId && snapshot.desktopRootId === root.rootId,
+            )),
+      );
+      for (const snapshot of retained) {
         listedTabs.push({
           tabId: snapshot.tabId,
           url: snapshot.navStatus._tag === "Idle" ? null : snapshot.navStatus.url,
-          owner: "agent",
-          ownedByCaller: root.automationOwner === agentSessionId,
+          owner: snapshot.automationOwner === undefined ? "unclaimed" : "agent",
+          ownedByCaller: snapshot.automationOwner === agentSessionId,
           visible: false,
           ...(snapshot.profileId === undefined ? {} : { profileId: snapshot.profileId }),
         });
       }
     }
     if (!tab) {
+      const selected = retained.findLast(
+        (snapshot) =>
+          snapshot.backingPage === "server" &&
+          (requestedTabId === undefined
+            ? snapshot.automationOwner === agentSessionId
+            : snapshot.tabId === requestedTabId),
+      );
+      const navStatus = selected?.navStatus;
       return {
         available: false,
         visible: false,
         nativePresented: false,
         streamViewers: 0,
         revealRequested: false,
-        tabId: null,
-        url: null,
-        title: null,
+        tabId: selected?.tabId ?? null,
+        url: navStatus && navStatus._tag !== "Idle" ? navStatus.url : null,
+        title: navStatus && navStatus._tag !== "Idle" ? navStatus.title : null,
         loading: false,
         tabs: listedTabs,
-        ...profileStatus(),
+        ...(selected === undefined
+          ? {}
+          : {
+              browserHost: "environment" as const,
+              profileId: selected.profileId ?? null,
+              viewportSetting: selected.viewport ?? FILL_PREVIEW_VIEWPORT,
+            }),
+        ...profileStatus(
+          selected !== undefined &&
+            environmentProfileSessions.has(tabKey(selected.threadId, selected.tabId)),
+        ),
       };
     }
     const url = tab.page.url();
@@ -2686,6 +2727,7 @@ const make = Effect.gen(function* () {
             : tabs.get(tabKey(request.threadId, request.tabId)),
           request.agentSessionId,
           request.threadId,
+          request.tabId,
         );
       case "profiles": {
         const { desktopHostId } = await profileHost(request);
@@ -3067,6 +3109,29 @@ const make = Effect.gen(function* () {
           manager.close({ threadId: request.threadId, tabId: request.tabId }),
         );
         return {};
+      }
+      if (!tabs.has(key)) {
+        const { sessions } = await Effect.runPromise(manager.list({ threadId: request.threadId }));
+        const retained = sessions.find(
+          (snapshot) =>
+            snapshot.tabId === request.tabId &&
+            snapshot.runtime === "server" &&
+            snapshot.backingPage === "server",
+        );
+        if (retained && !tabs.has(key)) {
+          if (
+            request.agentSessionId === undefined ||
+            retained.automationOwner !== request.agentSessionId
+          )
+            throw new BrowserControlInterrupted(
+              "Only the agent session that opened this tab can close it.",
+              "agentMismatch",
+            );
+          await Effect.runPromise(
+            manager.close({ threadId: request.threadId, tabId: request.tabId }),
+          );
+          return {};
+        }
       }
     }
     const tab = await requireTab(request);

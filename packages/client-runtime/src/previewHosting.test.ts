@@ -97,7 +97,7 @@ describe("prepareHostedPreview", () => {
       recover,
     });
     expect(recover).toHaveBeenCalledWith(lease, { bootstrap: false });
-    expect(result).toEqual({ url: lease.url, managed: true, restored: true });
+    expect(result).toEqual({ url: lease.url, localUrl: lease.url, managed: true, restored: true });
   });
 
   it("restores an owning local lease and preserves the requested URL components", async () => {
@@ -112,6 +112,7 @@ describe("prepareHostedPreview", () => {
 
     expect(result).toEqual({
       url: "http://localhost:5173/preview/index.html?theme=dark#top",
+      localUrl: "http://localhost:5173/preview/index.html?theme=dark#top",
       managed: true,
       restored: true,
     });
@@ -129,6 +130,7 @@ describe("prepareHostedPreview", () => {
 
     expect(result).toEqual({
       url: "http://192.168.1.30:5173/preview?q=1#section",
+      localUrl: "http://localhost:5173/preview?q=1#section",
       managed: true,
       restored: true,
     });
@@ -150,10 +152,31 @@ describe("prepareHostedPreview", () => {
 
     expect(result).toEqual({
       url: "http://100.100.12.4:5173/preview/index.html?theme=dark#top",
+      localUrl: savedLease.url,
       managed: true,
       restored: true,
     });
     expect(recover).toHaveBeenCalledWith(savedLease, { bootstrap: true });
+  });
+
+  it("retains the verified loopback destination for environment browsing through a remote endpoint", async () => {
+    const localLease = { ...lease, url: "http://127.0.0.1:5173/" };
+    const result = await prepareHostedPreview({
+      threadRef,
+      url: "http://workstation.example:5173/app/a%2Fb?run=1&token=application#section",
+      environmentUrl: "https://workstation.example/",
+      list: async () => [localLease],
+      recover: async () => ({ ...localLease, bootstrapToken: "navigation-credential" }),
+    });
+
+    const localUrl = "http://127.0.0.1:5173/app/a%2Fb?run=1&token=application#section";
+    expect(result.localUrl).toBe(localUrl);
+    const navigation = new URL(hostedPreviewNavigationUrl(result, result.localUrl));
+    expect(stripPreviewBootstrapTokenFromUrl(navigation).href).toBe(localUrl);
+    expect(getPairingTokenFromUrl(navigation)).toBe("navigation-credential");
+    expect(result.url).toBe(
+      "http://workstation.example:5173/app/a%2Fb?run=1&token=application#section",
+    );
   });
 
   it("does not adopt an unrelated private address even with an exact owning lease", async () => {
@@ -199,6 +222,7 @@ describe("prepareHostedPreview", () => {
 
     expect(result).toEqual({
       url: "http://localhost:5173/preview?q=1#section",
+      localUrl: "http://localhost:5173/preview?q=1#section",
       managed: true,
       restored: true,
     });
@@ -273,6 +297,7 @@ describe("prepareHostedPreview", () => {
     await started;
     finishList([lease]);
     expect(await first).toMatchObject({ managed: true, restored: true });
+    expect(await second).toEqual(await first);
     expect(list).toHaveBeenCalledTimes(1);
     expect(input.recover).toHaveBeenCalledTimes(1);
   });
@@ -311,6 +336,7 @@ describe("prepareHostedPreview", () => {
     expect(await Promise.all(preparations)).toEqual(
       urls.map((path) => ({
         url: `http://192.168.1.30:5173${path}`,
+        localUrl: `http://localhost:5173${path}`,
         managed: true,
         restored: true,
       })),

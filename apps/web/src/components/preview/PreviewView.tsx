@@ -49,6 +49,7 @@ import { capturePreviewAnnotationScreenshot } from "~/lib/previewAnnotation";
 import { getClientSettings } from "~/hooks/useSettings";
 import {
   rememberPreviewUrl,
+  readThreadPreviewState,
   updatePreviewServerSnapshot,
   useThreadPreviewState,
 } from "~/previewStateStore";
@@ -90,6 +91,7 @@ import { BROWSER_DEVICE_TOOLBAR_HEIGHT } from "~/browser/browserViewportLayout";
 import { useBrowserLayoutZoomFactor } from "~/browser/useBrowserLayoutZoomFactor";
 import { previewRuntimeTabId } from "~/browser/previewRuntimeTabId";
 import { BrowserSettingsReadError } from "~/browser/openFileInPreview";
+import { preparedPreviewOpenTarget } from "~/browser/preparedPreviewOpenTarget";
 import { PreviewFileNotShown, PreviewUnreachable } from "./PreviewUnreachable";
 import {
   clearPreviewRecoveryRequest,
@@ -306,7 +308,7 @@ export function PreviewView({
   }, [environmentHostname, latestHistoryUrl, navTitle, navUrl, threadEnvironmentId, threadId]);
 
   // Recovery must not override a newer address, tab, or environment.
-  const navigationIdentity = JSON.stringify([runtimeTabId, url, environmentHttpBaseUrl]);
+  const navigationIdentity = JSON.stringify([runtimeTabId, url, environmentHttpBaseUrl, visible]);
   const navigationSequence = useRef({ identity: navigationIdentity, value: 0 });
   useEffect(() => {
     if (navigationSequence.current.identity !== navigationIdentity) {
@@ -416,8 +418,55 @@ export function PreviewView({
   const hostingEnvironmentId = threadRef.environmentId;
   const hostingThreadId = threadRef.threadId;
   const refreshPreparedPreview = async (
-    prepared: Pick<PreparedHostedPreview, "url" | "navigationUrl">,
+    prepared: PreparedHostedPreview,
+    panelRevision: number,
   ): Promise<boolean> => {
+    const target = preparedPreviewOpenTarget(
+      threadRef.environmentId,
+      prepared,
+      url,
+      activeProfileId,
+    );
+    if (
+      isUnreachable &&
+      visible &&
+      tabId &&
+      snapshot &&
+      snapshot.backingPage !== "server" &&
+      target.browserHost === "environment"
+    ) {
+      const sequence = navigationSequence.current.value;
+      const panels = useRightPanelStore.getState();
+      if (panels.getUserActionRevision(threadRef) !== panelRevision) return false;
+      const result = await open({
+        environmentId: threadRef.environmentId,
+        input: {
+          threadId: threadRef.threadId,
+          ...target,
+          viewport,
+          profileId: activeProfileId,
+          background: true,
+        },
+      });
+      if (result._tag === "Failure") {
+        if (isAtomCommandInterrupted(result)) return false;
+        throw squashAtomCommandFailure(result);
+      }
+      updatePreviewServerSnapshot(threadRef, result.value, { consumeOpenFocus: true });
+      const current = readThreadPreviewState(threadRef).sessions[tabId];
+      if (
+        !isMountedRef.current ||
+        sequence !== navigationSequence.current.value ||
+        useRightPanelStore.getState().getUserActionRevision(threadRef) !== panelRevision ||
+        current?.navStatus._tag !== "LoadFailed" ||
+        current.navStatus.url !== url
+      ) {
+        return true;
+      }
+      panels.openBrowser(threadRef, result.value.tabId);
+      await closePreviewSession({ closePreview, snapshot, tabId, threadRef });
+      return true;
+    }
     const destination = hostedPreviewNavigationUrl(prepared);
     if (isServerTab) {
       if (serverControlledTabId !== runtimeTabId) return false;
@@ -436,13 +485,20 @@ export function PreviewView({
   const refreshRecoveredPreview = useEffectEvent(refreshPreparedPreview);
   const handleRefresh = () => {
     const sequence = ++navigationSequence.current.value;
+    const panelRevision = useRightPanelStore.getState().getUserActionRevision({
+      environmentId: hostingEnvironmentId,
+      threadId: hostingThreadId,
+    });
     void prepareHostedPreview(
       { environmentId: hostingEnvironmentId, threadId: hostingThreadId },
       url,
     )
       .then(async (prepared) => {
         if (sequence === navigationSequence.current.value)
-          await refreshPreparedPreview(isServerTab ? { ...prepared, url } : prepared);
+          await refreshPreparedPreview(
+            isServerTab ? { ...prepared, url } : prepared,
+            panelRevision,
+          );
       })
       .catch((cause: unknown) => {
         if (sequence === navigationSequence.current.value) reportHostedPreviewFailure(cause);
@@ -510,6 +566,10 @@ export function PreviewView({
     if (attempt.completed) return;
     let cancelled = false;
     const sequence = navigationSequence.current.value;
+    const panelRevision = useRightPanelStore.getState().getUserActionRevision({
+      environmentId: hostingEnvironmentId,
+      threadId: hostingThreadId,
+    });
     void attempt.recovery
       .then(async (prepared) => {
         if (cancelled || sequence !== navigationSequence.current.value) return;
@@ -531,6 +591,7 @@ export function PreviewView({
         if (attempt.dispatch === null) {
           attempt.dispatch = refreshRecoveredPreview(
             isServerTab ? { ...authenticated, url: destination } : authenticated,
+            panelRevision,
           ).then((accepted) => {
             attempt.completed = accepted;
             if (accepted && requestedHostedRefresh && tabId) {
@@ -654,6 +715,10 @@ export function PreviewView({
     attempt.watching = true;
     let cancelled = false;
     const sequence = navigationSequence.current.value;
+    const panelRevision = useRightPanelStore.getState().getUserActionRevision({
+      environmentId: hostingEnvironmentId,
+      threadId: hostingThreadId,
+    });
     void attempt.recovery
       .then(async (prepared) => {
         if (cancelled || sequence !== navigationSequence.current.value) return;
@@ -661,6 +726,7 @@ export function PreviewView({
           if (attempt.dispatch === null) {
             attempt.dispatch = refreshRecoveredPreview(
               isServerTab ? { ...prepared, url } : prepared,
+              panelRevision,
             ).then((accepted) => {
               attempt.completed = accepted;
               if (!accepted) hostingAttemptedByTab.current.delete(runtimeTabId);
