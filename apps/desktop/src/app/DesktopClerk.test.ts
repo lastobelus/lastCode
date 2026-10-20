@@ -150,7 +150,7 @@ describe("DesktopClerk", () => {
         assert.deepEqual(
           setAsDefaultProtocolClient.mock.calls,
           registers
-            ? [["t3code", process.execPath, [String.raw`C:\T3 Code\dist-electron\main.cjs`]]]
+            ? [["lastcode", process.execPath, [String.raw`C:\T3 Code\dist-electron\main.cjs`]]]
             : [],
         );
         assert.deepEqual(events, registers ? ["bridge", "register"] : ["bridge"]);
