@@ -10,14 +10,24 @@ import {
   inspectGeneratedBuildOwnershipAsync,
   recordGeneratedBuildUse,
   removeGeneratedBuildFilesAsync,
+  generatedBuildReviewProtection,
+  validateLegacyBuildReviewContext,
+  observeLegacyBuild,
+  legacyBuildActivity,
+  recordLegacyBuildUse,
+  previewLegacyBuild,
+  saveLegacyBuildSelection,
+  inspectReviewedBuildFilesAsync,
+  removeReviewedBuildFilesAsync,
 } from "@t3tools/shared/generatedBuildOwnership";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as WorktreeConsumers from "./WorktreeConsumers.ts";
 
-interface BuildInput {
+export interface BuildInput {
   readonly managedWorktreesRoot: string;
   readonly repositoryRoot: string;
   readonly worktreePath: string;
+  readonly processPaths?: Effect.Effect<ReadonlyArray<string> | null>;
 }
 interface BuildRemoval {
   readonly bytes: number;
@@ -37,6 +47,33 @@ class GeneratedBuildsError extends Schema.TaggedError<GeneratedBuildsError>()(
 export class GeneratedBuilds extends Context.Service<
   GeneratedBuilds,
   {
+    readonly validateReviewContext: (
+      input: BuildInput,
+      contextKey: string,
+    ) => Effect.Effect<void, GeneratedBuildsError>;
+    readonly roots: (input: BuildInput) => Effect.Effect<readonly string[], GeneratedBuildsError>;
+    readonly canReview: (
+      input: BuildInput,
+      root: string,
+      now: number,
+      canReview: Effect.Effect<boolean>,
+    ) => Effect.Effect<boolean>;
+    readonly preview: (
+      input: BuildInput,
+      root: string,
+      now: number,
+      contextKey: string,
+      canReview: Effect.Effect<boolean>,
+    ) => Effect.Effect<Awaited<ReturnType<typeof previewLegacyBuild>>, GeneratedBuildsError>;
+    readonly select: (
+      input: BuildInput,
+      root: string,
+      now: number,
+      contextKey: string,
+      token: string,
+      paths: readonly string[],
+      canReview: Effect.Effect<boolean>,
+    ) => Effect.Effect<Awaited<ReturnType<typeof saveLegacyBuildSelection>>, GeneratedBuildsError>;
     readonly hasOutputs: (worktreePath: string) => Effect.Effect<boolean, GeneratedBuildsError>;
     readonly observe: (
       input: BuildInput,
@@ -53,6 +90,7 @@ export class GeneratedBuilds extends Context.Service<
       archived: boolean,
       canRemove: Effect.Effect<boolean, EligibilityError>,
       isStillEligible: Effect.Effect<boolean, EligibilityError>,
+      contextKey?: string,
     ) => Effect.Effect<BuildRemoval>;
   }
 >()("t3/workspace/GeneratedBuilds") {}
@@ -267,6 +305,11 @@ const make = Effect.gen(function* () {
       try: () => generatedBuildActivity(cwd, root),
       catch: (cause) => new GeneratedBuildsError({ path: cwd, cause }),
     });
+  const legacyActivity = (cwd: string, root: string) =>
+    Effect.try({
+      try: () => legacyBuildActivity(cwd, root),
+      catch: (cause) => new GeneratedBuildsError({ path: cwd, cause }),
+    });
   const hasOutputs = (cwd: string) =>
     io(cwd, () => discover(cwd)).pipe(Effect.map((roots) => roots.length > 0));
   const observe = Effect.fn("GeneratedBuilds.observe")(function* (
@@ -283,13 +326,20 @@ const make = Effect.gen(function* () {
     let renewed = false;
     for (const root of roots) {
       if (!(yield* validate(input, root))) continue;
-      let clock = yield* activity(input.worktreePath, root);
+      let clock = yield* activity(input.worktreePath, root).pipe(Effect.orElseSucceed(() => null));
+      const legacy = clock === null;
+      if (legacy)
+        clock = yield* Effect.try({
+          try: () => observeLegacyBuild(input.worktreePath, root, now, persist),
+          catch: (cause) => new GeneratedBuildsError({ path: input.worktreePath, cause }),
+        }).pipe(Effect.orElseSucceed(() => null));
       if (!clock) continue;
       const output = NodePath.join(input.worktreePath, root);
       // Read-only revalidation reads the durable token/clock. Writing observation
       // shares the sweep snapshot, while removal guards still capture fresh evidence.
       if (persist && paths === undefined) {
-        const capture = observationProcessPaths ?? (yield* WorktreeConsumers.ProcessPaths);
+        const capture =
+          observationProcessPaths ?? input.processPaths ?? (yield* WorktreeConsumers.ProcessPaths);
         paths = yield* capture;
       }
       if (persist && paths === null) return null;
@@ -298,15 +348,99 @@ const make = Effect.gen(function* () {
         (yield* actualOutputUse(input.worktreePath, root, paths ?? null, observationTargets));
       if (used && persist) {
         const updated = yield* Effect.try({
-          try: () => recordGeneratedBuildUse(input.worktreePath, root, now),
+          try: () => {
+            const compiled = recordGeneratedBuildUse(input.worktreePath, root, now);
+            const reviewed = recordLegacyBuildUse(input.worktreePath, root, now);
+            return compiled || reviewed;
+          },
           catch: (cause) => new GeneratedBuildsError({ path: output, cause }),
         });
-        clock = yield* activity(input.worktreePath, root);
+        clock = yield* legacy
+          ? legacyActivity(input.worktreePath, root)
+          : activity(input.worktreePath, root);
         renewed ||= updated;
       }
       if (clock) oldest = Math.min(oldest ?? clock.lastUsedAt, clock.lastUsedAt);
     }
     return oldest === null ? null : { lastUsedAt: oldest, renewed };
+  });
+  const guard = Effect.fn("GeneratedBuilds.guard")(function* <EligibilityError>(
+    input: BuildInput,
+    now: number,
+    canRemove: Effect.Effect<boolean, EligibilityError>,
+    isStillEligible: Effect.Effect<boolean, EligibilityError>,
+    reasons: Set<string>,
+    result: { failed: boolean },
+    root: string,
+    paths: readonly string[],
+  ) {
+    let failureReason = "Build cleanup workspace ownership check failed; files were retained.";
+    return yield* Effect.gen(function* () {
+      if (!(yield* canRemove)) {
+        reasons.add("Current workspace ownership or policy protects build files.");
+        return false;
+      }
+      // Keep the policy check after OS inspection, and repeat the native
+      // proof afterward for consumers starting during awaited Git/app guards.
+      // Both captures omit the sweep's observation cache.
+      const consumersClear = Effect.gen(function* () {
+        failureReason = "Build cleanup process inventory check failed; files were retained.";
+        const processes = yield* input.processPaths ?? (yield* WorktreeConsumers.ProcessPaths);
+        if (processes === null) {
+          reasons.add("Process file-consumer inventory is unavailable; build files were retained.");
+          return false;
+        }
+        failureReason = "Build cleanup output-consumer identity check failed; files were retained.";
+        if (yield* actualOutputUse(input.worktreePath, root, processes)) {
+          failureReason = "Build cleanup usage renewal check failed; files were retained.";
+          yield* Effect.try({
+            try: () => {
+              recordGeneratedBuildUse(input.worktreePath, root, now);
+              recordLegacyBuildUse(input.worktreePath, root, now);
+            },
+            catch: (cause) => new GeneratedBuildsError({ path: input.worktreePath, cause }),
+          });
+        }
+        failureReason = "Build cleanup worktree consumer check failed; files were retained.";
+        const consumerReason = yield* WorktreeConsumers.worktreeConsumerReason(
+          input.worktreePath,
+          processes,
+        );
+        if (consumerReason !== null) {
+          reasons.add(`Build files were retained: ${consumerReason}`);
+          return false;
+        }
+        return true;
+      });
+      if (!(yield* consumersClear)) return false;
+      failureReason =
+        "Build cleanup Git and generated-path validation check failed; files were retained.";
+      if (!(yield* validate(input, root))) {
+        reasons.add("Git or generated-path eligibility changed before build removal.");
+        return false;
+      }
+      failureReason = "Build cleanup Git-ignore verification check failed; files were retained.";
+      const ignored = yield* ignoredFiles(input.worktreePath, root, paths);
+      if (paths.some((path) => !ignored.has(path))) {
+        reasons.add("Git-ignore eligibility changed before build removal.");
+        return false;
+      }
+      failureReason = "Build cleanup final eligibility check failed; files were retained.";
+      if (!(yield* isStillEligible)) {
+        reasons.add("Build cleanup policy or ownership changed before removal.");
+        return false;
+      }
+      if (!(yield* consumersClear)) return false;
+      return true;
+    }).pipe(
+      Effect.catch(() =>
+        Effect.sync(() => {
+          result.failed = true;
+          reasons.add(failureReason);
+          return false;
+        }),
+      ),
+    );
   });
   const remove = Effect.fn("GeneratedBuilds.remove")(function* <EligibilityError>(
     input: BuildInput,
@@ -315,83 +449,12 @@ const make = Effect.gen(function* () {
     archived: boolean,
     canRemove: Effect.Effect<boolean, EligibilityError>,
     isStillEligible: Effect.Effect<boolean, EligibilityError>,
+    contextKey?: string,
   ) {
     const result = { bytes: 0, files: 0, kept: 0, reason: "", failed: false };
     const reasons = new Set<string>();
     const context = yield* Effect.context<never>();
     const runPromise = Effect.runPromiseWith(context);
-    const guard = Effect.fn("GeneratedBuilds.guard")(function* (
-      root: string,
-      paths: readonly string[],
-    ) {
-      let failureReason = "Build cleanup workspace ownership check failed; files were retained.";
-      return yield* Effect.gen(function* () {
-        if (!(yield* canRemove)) {
-          reasons.add("Current workspace ownership or policy protects build files.");
-          return false;
-        }
-        // Keep the policy check after OS inspection, and repeat the native
-        // proof afterward for consumers starting during awaited Git/app guards.
-        // Both captures omit the sweep's observation cache.
-        const consumersClear = Effect.gen(function* () {
-          failureReason = "Build cleanup process inventory check failed; files were retained.";
-          const processes = yield* yield* WorktreeConsumers.ProcessPaths;
-          if (processes === null) {
-            reasons.add(
-              "Process file-consumer inventory is unavailable; build files were retained.",
-            );
-            return false;
-          }
-          failureReason =
-            "Build cleanup output-consumer identity check failed; files were retained.";
-          if (yield* actualOutputUse(input.worktreePath, root, processes)) {
-            failureReason = "Build cleanup usage renewal check failed; files were retained.";
-            yield* Effect.try({
-              try: () => recordGeneratedBuildUse(input.worktreePath, root, now),
-              catch: (cause) => new GeneratedBuildsError({ path: input.worktreePath, cause }),
-            });
-          }
-          failureReason = "Build cleanup worktree consumer check failed; files were retained.";
-          const consumerReason = yield* WorktreeConsumers.worktreeConsumerReason(
-            input.worktreePath,
-            processes,
-          );
-          if (consumerReason !== null) {
-            reasons.add(`Build files were retained: ${consumerReason}`);
-            return false;
-          }
-          return true;
-        });
-        if (!(yield* consumersClear)) return false;
-        failureReason =
-          "Build cleanup Git and generated-path validation check failed; files were retained.";
-        if (!(yield* validate(input, root))) {
-          reasons.add("Git or generated-path eligibility changed before build removal.");
-          return false;
-        }
-        failureReason = "Build cleanup Git-ignore verification check failed; files were retained.";
-        const ignored = yield* ignoredFiles(input.worktreePath, root, paths);
-        if (paths.some((path) => !ignored.has(path))) {
-          reasons.add("Git-ignore eligibility changed before build removal.");
-          return false;
-        }
-        failureReason = "Build cleanup final eligibility check failed; files were retained.";
-        if (!(yield* isStillEligible)) {
-          reasons.add("Build cleanup policy or ownership changed before removal.");
-          return false;
-        }
-        if (!(yield* consumersClear)) return false;
-        return true;
-      }).pipe(
-        Effect.catch(() =>
-          Effect.sync(() => {
-            result.failed = true;
-            reasons.add(failureReason);
-            return false;
-          }),
-        ),
-      );
-    });
     const operation = Effect.gen(function* () {
       if (!Number.isFinite(days) || days <= 0 || !Number.isSafeInteger(now) || now < 0) {
         reasons.add("Build cleanup policy is disabled or invalid.");
@@ -399,89 +462,143 @@ const make = Effect.gen(function* () {
       }
       const roots = yield* io(input.worktreePath, () => discover(input.worktreePath));
       for (const root of roots) {
-        if (!(yield* validate(input, root))) {
-          result.kept++;
-          reasons.add("Build root is not a recognized untracked ignored output.");
-          continue;
-        }
-        const clock = yield* activity(input.worktreePath, root);
-        if (!clock) {
-          result.kept++;
-          reasons.add("Legacy build output needs exact-file review.");
-          continue;
-        }
-        if (!archived && clock.lastUsedAt >= now - days * 86_400_000) {
-          result.kept++;
-          reasons.add("Build output is within the delay configured in settings.");
-          continue;
-        }
-        const inspected = yield* io(input.worktreePath, () =>
-          inspectGeneratedBuildOwnershipAsync(input.worktreePath, root),
-        );
-        if (!inspected || inspected.token !== clock.token) {
-          result.kept++;
-          reasons.add("Build provenance changed during inspection.");
-          continue;
-        }
-        const valid = inspected.files
-          .filter((file) => file.reason === null)
-          .map((file) => file.path);
-        result.kept += inspected.files.length - valid.length;
-        if (valid.length !== inspected.files.length)
-          reasons.add("Modified, missing or unsafe emitted files were retained.");
-        const ignored = yield* ignoredFiles(input.worktreePath, root, valid);
-        const selected = valid.filter((path) => ignored.has(path));
-        result.kept += valid.length - selected.length;
-        if (selected.length !== valid.length)
-          reasons.add("Nonignored emitted files were retained.");
-        if (selected.length === 0) continue;
-        const removed = yield* Effect.tryPromise({
-          try: (signal) =>
-            removeGeneratedBuildFilesAsync(
-              input.worktreePath,
-              root,
-              inspected.token,
-              selected,
-              (paths) =>
-                runPromise(
-                  guard(root, paths).pipe(
-                    Effect.catch(() =>
-                      Effect.sync(() => {
-                        result.failed = true;
-                        reasons.add("Build cleanup eligibility check failed; files were retained.");
-                        return false;
-                      }),
-                    ),
-                  ),
-                  {
-                    signal,
-                  },
-                )
-                  .then((eligible) => eligible && !signal.aborted)
-                  .catch(() => {
-                    result.failed = true;
-                    reasons.add("Build cleanup protection failed; files were retained.");
-                    return false;
-                  }),
-              signal,
-            ),
-          catch: (cause) => new GeneratedBuildsError({ path: input.worktreePath, cause }),
-        });
-        result.bytes += removed.bytes;
-        result.files += removed.files;
-        result.kept += removed.kept.length;
-        for (const file of removed.kept) reasons.add(file.reason);
-        const residual = yield* io(input.worktreePath, async () => {
-          const output = NodePath.join(input.worktreePath, root);
-          const stat = await lstat(output);
-          return (
-            stat !== null && (!stat.isDirectory() || (await NodeFSP.readdir(output)).length > 0)
+        yield* Effect.gen(function* () {
+          if (!(yield* validate(input, root))) {
+            result.kept++;
+            reasons.add("Build root is not a recognized untracked ignored output.");
+            return;
+          }
+          const compilerClock = yield* activity(input.worktreePath, root);
+          const reviewed = generatedBuildReviewProtection(input.worktreePath, root);
+          const clock =
+            reviewed || compilerClock === null
+              ? yield* legacyActivity(input.worktreePath, root)
+              : compilerClock;
+          if (reviewed && contextKey === undefined) {
+            result.kept++;
+            reasons.add("Reviewed build files require current workspace review authority.");
+            return;
+          }
+          if (!clock || (!reviewed && compilerClock === null)) {
+            result.kept++;
+            reasons.add("Legacy build output needs exact-file review.");
+            return;
+          }
+          if (!archived && clock.lastUsedAt >= now - days * 86_400_000) {
+            result.kept++;
+            reasons.add("Build output is within the delay configured in settings.");
+            return;
+          }
+          const inspected = yield* io(input.worktreePath, () =>
+            reviewed && contextKey !== undefined
+              ? inspectReviewedBuildFilesAsync(input.worktreePath, root, contextKey)
+              : inspectGeneratedBuildOwnershipAsync(input.worktreePath, root),
           );
-        });
-        if (residual) {
-          result.kept++;
-          reasons.add("Unowned or retained additions remain in the build root.");
-        }
+          if (
+            !inspected ||
+            (reviewed ? inspected.lastUsedAt !== clock.lastUsedAt : inspected.token !== clock.token)
+          ) {
+            result.kept++;
+            reasons.add("Build provenance changed during inspection.");
+            return;
+          }
+          const valid = inspected.files
+            .filter((file) => file.reason === null)
+            .map((file) => file.path);
+          result.kept += inspected.files.length - valid.length;
+          if (valid.length !== inspected.files.length)
+            reasons.add("Modified, missing or unsafe emitted files were retained.");
+          const ignored = yield* ignoredFiles(input.worktreePath, root, valid);
+          const selected = valid.filter((path) => ignored.has(path));
+          result.kept += valid.length - selected.length;
+          if (selected.length !== valid.length)
+            reasons.add("Nonignored emitted files were retained.");
+          if (selected.length === 0) return;
+          const removed = yield* Effect.tryPromise({
+            try: (signal) =>
+              (reviewed && contextKey !== undefined
+                ? (
+                    cwd: string,
+                    root: string,
+                    token: string,
+                    paths: readonly string[],
+                    revalidate: (paths: readonly string[]) => Promise<boolean>,
+                    signal?: AbortSignal,
+                  ) =>
+                    removeReviewedBuildFilesAsync(
+                      cwd,
+                      root,
+                      contextKey,
+                      token,
+                      paths,
+                      revalidate,
+                      signal,
+                    )
+                : removeGeneratedBuildFilesAsync)(
+                input.worktreePath,
+                root,
+                inspected.token,
+                selected,
+                (paths) =>
+                  runPromise(
+                    guard(
+                      input,
+                      now,
+                      canRemove,
+                      isStillEligible,
+                      reasons,
+                      result,
+                      root,
+                      paths,
+                    ).pipe(
+                      Effect.catch(() =>
+                        Effect.sync(() => {
+                          result.failed = true;
+                          reasons.add(
+                            "Build cleanup eligibility check failed; files were retained.",
+                          );
+                          return false;
+                        }),
+                      ),
+                    ),
+                    {
+                      signal,
+                    },
+                  )
+                    .then((eligible) => eligible && !signal.aborted)
+                    .catch(() => {
+                      result.failed = true;
+                      reasons.add("Build cleanup protection failed; files were retained.");
+                      return false;
+                    }),
+                signal,
+              ),
+            catch: (cause) => new GeneratedBuildsError({ path: input.worktreePath, cause }),
+          });
+          result.bytes += removed.bytes;
+          result.files += removed.files;
+          result.kept += removed.kept.length;
+          for (const file of removed.kept) reasons.add(file.reason);
+          const residual = yield* io(input.worktreePath, async () => {
+            const output = NodePath.join(input.worktreePath, root);
+            const stat = await lstat(output);
+            return (
+              stat !== null && (!stat.isDirectory() || (await NodeFSP.readdir(output)).length > 0)
+            );
+          });
+          if (residual) {
+            result.kept++;
+            reasons.add("Unowned or retained additions remain in the build root.");
+          }
+        }).pipe(
+          Effect.catch(() =>
+            Effect.sync(() => {
+              result.failed = true;
+              result.kept++;
+              reasons.add("A build root could not be safely verified; its files were retained.");
+            }),
+          ),
+        );
       }
     }).pipe(
       Effect.catch(() =>
@@ -495,13 +612,104 @@ const make = Effect.gen(function* () {
     yield* operation;
     const removedReason =
       result.files > 0
-        ? "Removed unchanged compiler-emitted files; recovered size is an estimate."
+        ? "Removed unchanged verified build files; recovered size is an estimate."
         : "";
     result.reason =
       [removedReason, ...reasons].filter(Boolean).join(" ") ||
       "No verified emitted files were eligible.";
     return result;
   });
-  return { hasOutputs, observe, remove };
+  const roots = Effect.fn("GeneratedBuilds.roots")(function* (input: BuildInput) {
+    const found = yield* io(input.worktreePath, () => discover(input.worktreePath));
+    const recognized: string[] = [];
+    for (const root of found) if (yield* validate(input, root)) recognized.push(root);
+    return recognized;
+  });
+  const reviewGuard = (
+    input: BuildInput,
+    root: string,
+    now: number,
+    canReview: Effect.Effect<boolean>,
+    paths: readonly string[],
+  ) => guard(input, now, canReview, canReview, new Set(), { failed: false }, root, paths);
+  const preview = Effect.fn("GeneratedBuilds.preview")(function* (
+    input: BuildInput,
+    root: string,
+    now: number,
+    contextKey: string,
+    canReview: Effect.Effect<boolean>,
+  ) {
+    if (!(yield* reviewGuard(input, root, now, canReview, [])))
+      return yield* new GeneratedBuildsError({
+        path: input.worktreePath,
+        cause: "Build review is protected by current workspace activity or policy.",
+      });
+    const result = yield* io(input.worktreePath, () =>
+      previewLegacyBuild(input.worktreePath, root, now, contextKey),
+    );
+    if (
+      !(yield* reviewGuard(
+        input,
+        root,
+        now,
+        canReview,
+        result.files.map((file) => file.path),
+      ))
+    )
+      return yield* new GeneratedBuildsError({
+        path: input.worktreePath,
+        cause: "Build review eligibility changed.",
+      });
+    return result;
+  });
+  const select = Effect.fn("GeneratedBuilds.select")(function* (
+    input: BuildInput,
+    root: string,
+    now: number,
+    contextKey: string,
+    token: string,
+    paths: readonly string[],
+    canReview: Effect.Effect<boolean>,
+  ) {
+    if (!(yield* reviewGuard(input, root, now, canReview, paths)))
+      return yield* new GeneratedBuildsError({
+        path: input.worktreePath,
+        cause: "Build review eligibility changed.",
+      });
+    const context = yield* Effect.context<never>();
+    return yield* io(input.worktreePath, () =>
+      saveLegacyBuildSelection(
+        input.worktreePath,
+        root,
+        now,
+        contextKey,
+        token,
+        paths,
+        (selected) =>
+          Effect.runPromiseWith(context)(reviewGuard(input, root, now, canReview, selected)),
+      ),
+    );
+  });
+  const canReview = (
+    input: BuildInput,
+    root: string,
+    now: number,
+    eligible: Effect.Effect<boolean>,
+  ) => reviewGuard(input, root, now, eligible, []);
+  const validateReviewContext = Effect.fn("GeneratedBuilds.validateReviewContext")(function* (
+    input: BuildInput,
+    contextKey: string,
+  ) {
+    const found = yield* io(input.worktreePath, () => discover(input.worktreePath));
+    for (const root of found)
+      yield* Effect.try({
+        try: () => {
+          if (generatedBuildReviewProtection(input.worktreePath, root))
+            validateLegacyBuildReviewContext(input.worktreePath, root, contextKey);
+        },
+        catch: (cause) => new GeneratedBuildsError({ path: input.worktreePath, cause }),
+      });
+  });
+  return { hasOutputs, observe, remove, roots, preview, select, canReview, validateReviewContext };
 });
 export const layer = Layer.effect(GeneratedBuilds, make);

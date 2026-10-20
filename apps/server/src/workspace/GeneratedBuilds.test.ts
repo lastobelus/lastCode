@@ -154,7 +154,7 @@ it.effect(
       yield* fs.makeDirectory(web);
       yield* fs.writeFileString(NodePath.join(web, "legacy.js"), "legacy unknown output");
       assert.equal(yield* builds.hasOutputs(input.worktreePath), true);
-      assert.equal(yield* builds.observe(input, DAY), null);
+      assert.deepEqual(yield* builds.observe(input, DAY), { lastUsedAt: DAY, renewed: false });
       assert.match((yield* remove(DAY, 3, true)).reason, /exact-file review/);
       yield* emit("apps/web/dist", 1, ["main.js", "changed.js"]);
       yield* fs.writeFileString(NodePath.join(web, "changed.js"), "retained edit");
@@ -261,7 +261,7 @@ it.effect(
       assert.equal(result.kept, 2); // One file plus the retained nonempty root.
       assert.match(
         result.reason,
-        /Removed unchanged compiler-emitted files; recovered size is an estimate/,
+        /Removed unchanged verified build files; recovered size is an estimate/,
       );
       assert.equal(
         yield* fs.exists(NodePath.join(input.worktreePath, "apps/web/dist/64.js")),
@@ -534,7 +534,7 @@ it.effect(
 );
 
 it.effect(
-  "build observations capture once for verified roots and skip read-only or unrecognized outputs",
+  "build observations share one inventory for recognized roots and skip read-only or invalid paths",
   () =>
     Effect.gen(function* () {
       const { builds, input, emit, fs } = yield* fixture();
@@ -553,19 +553,19 @@ it.effect(
         NodePath.join(input.worktreePath, "apps/web/dist/legacy.js"),
         "legacy",
       );
-      assert.isNull(yield* observe());
-      assert.equal(reads, 0);
+      assert.deepEqual(yield* observe(), { lastUsedAt: DAY, renewed: false });
+      assert.equal(reads, 1);
       yield* emit("apps/web/dist", 1);
       yield* emit("apps/server/dist", 2);
       assert.deepEqual(yield* observe(false), { lastUsedAt: 1, renewed: false });
-      assert.equal(reads, 0);
-      assert.deepEqual(yield* observe(), { lastUsedAt: 1, renewed: false });
       assert.equal(reads, 1);
+      assert.deepEqual(yield* observe(), { lastUsedAt: 1, renewed: false });
+      assert.equal(reads, 2);
       assert.isNull(yield* builds.observe(input, DAY, false, true, Effect.succeed(null)));
       assert.equal(generatedBuildActivity(input.worktreePath, "apps/web/dist")?.lastUsedAt, 1);
       yield* fs.writeFileString(NodePath.join(input.worktreePath, ".gitignore"), "");
       assert.isNull(yield* observe());
-      assert.equal(reads, 1);
+      assert.equal(reads, 2);
     }).pipe(Effect.provide(testLayer)),
 );
 
@@ -626,5 +626,128 @@ it.effect("a busy output mutation does not claim or persist a usage renewal", ()
       lastUsedAt: DAY,
       renewed: true,
     });
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect(
+  "reviewed legacy selection respects first observation, exact files and persistent protection",
+  () =>
+    Effect.gen(function* () {
+      const { builds, input, fs } = yield* fixture();
+      const root = "apps/web/dist";
+      const output = NodePath.join(input.worktreePath, root);
+      yield* fs.makeDirectory(output);
+      yield* fs.writeFileString(NodePath.join(output, "old.js"), "old build");
+      yield* fs.writeFileString(NodePath.join(output, "notes.txt"), "keep notes");
+      yield* builds.observe(input, DAY);
+      const preview = yield* builds.preview(
+        input,
+        root,
+        DAY,
+        "current-owner",
+        Effect.succeed(true),
+      );
+      assert.deepEqual(preview.selectedPaths, []);
+      yield* builds.select(
+        input,
+        root,
+        DAY,
+        "current-owner",
+        preview.token,
+        ["old.js"],
+        Effect.succeed(true),
+      );
+      const remove = (now: number, context = "current-owner") =>
+        builds.remove(input, now, 3, false, Effect.succeed(true), Effect.succeed(true), context);
+      assert.equal((yield* remove(2 * DAY)).files, 0);
+      assert.equal((yield* remove(5 * DAY)).files, 1);
+      assert.equal(yield* fs.readFileString(NodePath.join(output, "notes.txt")), "keep notes");
+      yield* fs.writeFileString(NodePath.join(output, "old.js"), "recreated bytes");
+      assert.equal((yield* remove(6 * DAY)).files, 0);
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("actual legacy output use revokes review selection and starts a full new delay", () =>
+  Effect.gen(function* () {
+    const { builds, input, fs } = yield* fixture();
+    const root = "apps/web/dist";
+    const output = NodePath.join(input.worktreePath, root, "old.js");
+    yield* fs.makeDirectory(NodePath.dirname(output));
+    yield* fs.writeFileString(output, "old build");
+    const preview = yield* builds.preview(input, root, DAY, "owner", Effect.succeed(true));
+    yield* builds.select(
+      input,
+      root,
+      DAY,
+      "owner",
+      preview.token,
+      ["old.js"],
+      Effect.succeed(true),
+    );
+    yield* builds
+      .observe(input, 5 * DAY)
+      .pipe(Effect.provideService(WorktreeConsumers.ProcessPaths, Effect.succeed([output])));
+    const result = yield* builds.remove(
+      input,
+      10 * DAY,
+      3,
+      false,
+      Effect.succeed(true),
+      Effect.succeed(true),
+      "owner",
+    );
+    assert.equal(result.files, 0);
+    assert.equal(yield* fs.exists(output), true);
+    const refreshed = yield* builds.preview(input, root, 10 * DAY, "owner", Effect.succeed(true));
+    assert.equal(refreshed.lastUsedAt, 5 * DAY);
+    assert.deepEqual(refreshed.selectedPaths, []);
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("review rejects a late application guard or live file consumer", () =>
+  Effect.gen(function* () {
+    const { builds, input, fs } = yield* fixture();
+    const root = "apps/web/dist";
+    const output = NodePath.join(input.worktreePath, root, "old.js");
+    yield* fs.makeDirectory(NodePath.dirname(output));
+    yield* fs.writeFileString(output, "old build");
+    const preview = yield* builds.preview(input, root, DAY, "owner", Effect.succeed(true));
+    const refused = yield* builds
+      .select(input, root, DAY, "owner", preview.token, ["old.js"], Effect.succeed(false))
+      .pipe(Effect.result);
+    assert.equal(refused._tag, "Failure");
+    const consumed = yield* builds
+      .preview(input, root, DAY, "owner", Effect.succeed(true))
+      .pipe(
+        Effect.provideService(WorktreeConsumers.ProcessPaths, Effect.succeed([output])),
+        Effect.result,
+      );
+    assert.equal(consumed._tag, "Failure");
+    assert.equal(yield* fs.exists(output), true);
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("empty review consent protects the same root after later compiler publication", () =>
+  Effect.gen(function* () {
+    const { builds, input, fs, emit } = yield* fixture();
+    const root = "apps/web/dist";
+    const output = NodePath.join(input.worktreePath, root);
+    yield* fs.makeDirectory(output);
+    yield* fs.writeFileString(NodePath.join(output, "notes.txt"), "retained note");
+    const preview = yield* builds.preview(input, root, DAY, "owner", Effect.succeed(true));
+    yield* builds.select(input, root, DAY, "owner", preview.token, [], Effect.succeed(true));
+    yield* emit(root, DAY);
+    const result = yield* builds.remove(
+      input,
+      10 * DAY,
+      3,
+      true,
+      Effect.succeed(true),
+      Effect.succeed(true),
+      "owner",
+    );
+    assert.equal(result.files, 0);
+    assert.equal(yield* fs.exists(NodePath.join(output, "main.js")), true);
+    assert.equal(yield* fs.readFileString(NodePath.join(output, "notes.txt")), "retained note");
   }).pipe(Effect.provide(testLayer)),
 );

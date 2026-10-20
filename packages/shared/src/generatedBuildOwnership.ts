@@ -673,7 +673,208 @@ export async function inspectGeneratedBuildOwnershipAsync(worktreePath: string, 
   return { token: previous.token, lastUsedAt: previous.record.lastUsedAt, files };
 }
 
-/** Hash bounded batches, then refresh policy/consumers once per batch before synchronous final identity checks. */
+type RemovalResult = {
+  bytes: number;
+  files: number;
+  kept: Array<{ path: string; reason: string }>;
+};
+type RemovalAuthority = {
+  files: OwnedFile[];
+  changedReason: string;
+  validate: () => string | null;
+  consume: (files: readonly OwnedFile[]) => void;
+};
+
+function compilerRemovalAuthority(ctx: Context, expectedToken: string): RemovalAuthority {
+  const previous = readRecord(ctx);
+  if (!previous || previous.token !== expectedToken)
+    throw new Error("Build ownership changed before removal");
+  return {
+    files: previous.record.files,
+    changedReason: "Generated file changed since emission",
+    validate: () => {
+      if (generatedBuildReviewProtection(ctx.cwd, ctx.root))
+        return "Reviewed build content remains protected";
+      return signature(NodeFS.lstatSync(ctx.recordPath)) === previous.recordIdentity
+        ? null
+        : "Build ownership changed before removal";
+    },
+    consume: () => {},
+  };
+}
+
+function requestedRemovalFiles(authority: RemovalAuthority, paths: readonly string[]) {
+  const owned = new Map(authority.files.map((file) => [file.path, file]));
+  return [...new Set(paths)].map((path) => {
+    const file = owned.get(path);
+    if (!file) throw new Error("Requested file has no deletion authority");
+    return file;
+  });
+}
+
+function removalProgress(requested: OwnedFile[]) {
+  const result: RemovalResult = { bytes: 0, files: 0, kept: [] };
+  const removed = new Set<string>();
+  const stop = (offset: number, reason: string) => {
+    const alreadyKept = new Set(result.kept.map(({ path }) => path));
+    result.kept.push(
+      ...requested
+        .slice(offset)
+        .filter(({ path }) => !alreadyKept.has(path) && !removed.has(path))
+        .map(({ path }) => ({ path, reason })),
+    );
+    return result;
+  };
+  return { result, removed, stop };
+}
+
+/** Both authority adapters enter the same mutex, final identity check and exact unlink seam. */
+function removeVerifiedBatch(
+  ctx: Context,
+  batch: OwnedFile[],
+  verified: Set<string>,
+  authority: RemovalAuthority,
+  progress: ReturnType<typeof removalProgress>,
+  signal?: AbortSignal,
+  strictErrors = false,
+) {
+  let release;
+  try {
+    release = tryAcquireBuildMutationLock(ctx);
+  } catch (error) {
+    if (strictErrors) throw error;
+    return "Build output lock could not be acquired safely";
+  }
+  if (!release) return "Build output is busy; retry cleanup";
+  try {
+    if (hasPendingPublication(ctx)) return "Build publication is pending recovery";
+    const refusal = authority.validate();
+    if (refusal) return refusal;
+    const ready: OwnedFile[] = [];
+    for (const file of batch) {
+      if (!verified.has(file.path)) continue;
+      try {
+        const stat = NodeFS.lstatSync(safePath(ctx.cwd, `${ctx.root}/${file.path}`));
+        if (!stat.isFile() || stat.nlink !== 1 || signature(stat) !== file.identity)
+          progress.result.kept.push({
+            path: file.path,
+            reason: "Generated file changed before removal",
+          });
+        else ready.push(file);
+      } catch (error) {
+        progress.result.kept.push({
+          path: file.path,
+          reason: missing(error)
+            ? "Generated file is absent"
+            : "Generated file cannot be safely verified",
+        });
+      }
+    }
+    if (ready.length === 0) return null;
+    // One atomic bounded receipt write per batch consumes consent before unlink,
+    // so a crash or failed unlink cannot make a removed identity reusable.
+    try {
+      authority.consume(ready);
+    } catch {
+      return "Build deletion consent could not be consumed safely";
+    }
+    for (const file of ready) {
+      if (signal?.aborted) return "Build cleanup was cancelled";
+      try {
+        const refusal = authority.validate();
+        if (refusal) return refusal;
+        const target = safePath(ctx.cwd, `${ctx.root}/${file.path}`);
+        const stat = NodeFS.lstatSync(target);
+        // Hashing and awaited process/policy checks finish before the lock. Ctime
+        // prevents accepting rewritten bytes with restored mtime and size.
+        if (!stat.isFile() || stat.nlink !== 1 || signature(stat) !== file.identity) {
+          progress.result.kept.push({
+            path: file.path,
+            reason: "Generated file changed before removal",
+          });
+          continue;
+        }
+        NodeFS.unlinkSync(target);
+        progress.result.bytes += file.bytes;
+        progress.result.files++;
+        progress.removed.add(file.path);
+        let parent = NodePath.dirname(target);
+        const output = NodePath.join(ctx.cwd, ctx.root);
+        while (parent.startsWith(`${output}${NodePath.sep}`) || parent === output) {
+          try {
+            NodeFS.rmdirSync(parent);
+          } catch {
+            break;
+          }
+          parent = NodePath.dirname(parent);
+        }
+      } catch (error) {
+        if (strictErrors && !missing(error)) throw error;
+        progress.result.kept.push({
+          path: file.path,
+          reason: missing(error)
+            ? "Generated file is absent"
+            : "Generated file could not be removed safely",
+        });
+      }
+    }
+    return null;
+  } catch (error) {
+    if (strictErrors) throw error;
+    return "Build deletion authority could not be checked safely";
+  } finally {
+    release();
+  }
+}
+
+async function removeAuthorizedFilesAsync(
+  ctx: Context,
+  authority: RemovalAuthority,
+  paths: readonly string[],
+  revalidate: (paths: readonly string[]) => Promise<boolean>,
+  signal?: AbortSignal,
+) {
+  const requested = requestedRemovalFiles(authority, paths);
+  const progress = removalProgress(requested);
+  for (let offset = 0; offset < requested.length; offset += 64) {
+    if (signal?.aborted) return progress.stop(offset, "Build cleanup was cancelled");
+    const batch = requested.slice(offset, offset + 64);
+    const verified = new Set<string>();
+    for (const file of batch) {
+      if (signal?.aborted) return progress.stop(offset, "Build cleanup was cancelled");
+      try {
+        const current = await asynchronousFileEvidence(
+          safePath(ctx.cwd, `${ctx.root}/${file.path}`),
+          signal,
+        );
+        if (current.identity === file.identity && current.hash === file.hash)
+          verified.add(file.path);
+        else progress.result.kept.push({ path: file.path, reason: authority.changedReason });
+      } catch (error) {
+        progress.result.kept.push({
+          path: file.path,
+          reason: missing(error)
+            ? "Generated file is absent"
+            : "Generated file cannot be safely verified",
+        });
+      }
+    }
+    if (verified.size === 0) continue;
+    if (signal?.aborted) return progress.stop(offset, "Build cleanup was cancelled");
+    try {
+      if (!(await revalidate([...verified])))
+        return progress.stop(offset, "Build cleanup guards changed before removal");
+    } catch {
+      return progress.stop(offset, "Build cleanup guards could not be checked");
+    }
+    if (signal?.aborted) return progress.stop(offset, "Build cleanup was cancelled");
+    const refusal = removeVerifiedBatch(ctx, batch, verified, authority, progress, signal);
+    if (refusal) return progress.stop(offset, refusal);
+  }
+  return progress.result;
+}
+
+/** Hash bounded batches, then refresh policy/consumers before synchronous final identity checks. */
 export async function removeGeneratedBuildFilesAsync(
   worktreePath: string,
   root: string,
@@ -684,102 +885,13 @@ export async function removeGeneratedBuildFilesAsync(
 ) {
   const ctx = context(worktreePath, root);
   if (!ctx) throw new Error("Build ownership requires a linked worktree");
-  const previous = readRecord(ctx);
-  if (!previous || previous.token !== expectedToken)
-    throw new Error("Build ownership changed before removal");
-  const owned = new Map(previous.record.files.map((file) => [file.path, file]));
-  const requested = [...new Set(paths)].map((path) => {
-    const file = owned.get(path);
-    if (!file) throw new Error("Requested file has no emission provenance");
-    return file;
-  });
-  let bytes = 0;
-  let files = 0;
-  const kept: Array<{ path: string; reason: string }> = [];
-  const stop = (offset: number, reason: string) => {
-    const alreadyKept = new Set(kept.map(({ path }) => path));
-    kept.push(
-      ...requested
-        .slice(offset)
-        .filter(({ path }) => !alreadyKept.has(path))
-        .map(({ path }) => ({ path, reason })),
-    );
-    return { bytes, files, kept };
-  };
-  for (let offset = 0; offset < requested.length; offset += 64) {
-    if (signal?.aborted) return stop(offset, "Build cleanup was cancelled");
-    const batch = requested.slice(offset, offset + 64);
-    const verified = new Set<string>();
-    for (const file of batch) {
-      if (signal?.aborted) return stop(offset, "Build cleanup was cancelled");
-      try {
-        const current = await asynchronousFileEvidence(
-          safePath(ctx.cwd, `${root}/${file.path}`),
-          signal,
-        );
-        if (current.identity === file.identity && current.hash === file.hash)
-          verified.add(file.path);
-        else kept.push({ path: file.path, reason: "Generated file changed since emission" });
-      } catch (error) {
-        kept.push({
-          path: file.path,
-          reason: missing(error)
-            ? "Generated file is absent"
-            : "Generated file cannot be safely verified",
-        });
-      }
-    }
-    if (verified.size === 0) continue;
-    if (signal?.aborted) return stop(offset, "Build cleanup was cancelled");
-    if (!(await revalidate([...verified])))
-      return stop(offset, "Build cleanup guards changed before removal");
-    if (signal?.aborted) return stop(offset, "Build cleanup was cancelled");
-    // Hashes and live policy/process checks stay outside this short native seam.
-    const release = tryAcquireBuildMutationLock(ctx);
-    if (!release) return stop(offset, "Build output is busy; retry cleanup");
-    try {
-      if (hasPendingPublication(ctx)) return stop(offset, "Build publication is pending recovery");
-      for (const [index, file] of batch.entries()) {
-        if (!verified.has(file.path)) continue;
-        if (signal?.aborted) return stop(offset + index, "Build cleanup was cancelled");
-        try {
-          if (signature(NodeFS.lstatSync(ctx.recordPath)) !== previous.recordIdentity)
-            return stop(offset + index, "Build ownership changed before removal");
-          const target = safePath(ctx.cwd, `${root}/${file.path}`);
-          const stat = NodeFS.lstatSync(target);
-          // Async hashing is accepted only while inode, immutable ctime, size and
-          // timestamps still match. No content hashing or await in this final seam.
-          if (!stat.isFile() || stat.nlink !== 1 || signature(stat) !== file.identity) {
-            kept.push({ path: file.path, reason: "Generated file changed before removal" });
-            continue;
-          }
-          NodeFS.unlinkSync(target);
-          bytes += file.bytes;
-          files++;
-          let parent = NodePath.dirname(target);
-          const output = NodePath.join(ctx.cwd, root);
-          while (parent.startsWith(`${output}${NodePath.sep}`) || parent === output) {
-            try {
-              NodeFS.rmdirSync(parent);
-            } catch {
-              break;
-            }
-            parent = NodePath.dirname(parent);
-          }
-        } catch (error) {
-          kept.push({
-            path: file.path,
-            reason: missing(error)
-              ? "Generated file is absent"
-              : "Generated file could not be removed safely",
-          });
-        }
-      }
-    } finally {
-      release();
-    }
-  }
-  return { bytes, files, kept };
+  return removeAuthorizedFilesAsync(
+    ctx,
+    compilerRemovalAuthority(ctx, expectedToken),
+    paths,
+    revalidate,
+    signal,
+  );
 }
 
 /** Only positive evidence of an actual compiled-output consumer may renew this clock. */
@@ -803,7 +915,7 @@ export function recordGeneratedBuildUse(worktreePath: string, root: string, now:
   }
 }
 
-/** Exact selective deletion only. Keep provenance and approvals, including after partial removal or regeneration. */
+/** Exact selective deletion only; retained review markers also protect compiler-owned output. */
 export function removeGeneratedBuildFiles(
   worktreePath: string,
   root: string,
@@ -812,71 +924,31 @@ export function removeGeneratedBuildFiles(
 ) {
   const ctx = context(worktreePath, root);
   if (!ctx) throw new Error("Build ownership requires a linked worktree");
-  const previous = readRecord(ctx);
-  if (!previous || previous.token !== expectedToken)
-    throw new Error("Build ownership changed before removal");
-  const owned = new Map(previous.record.files.map((file) => [file.path, file]));
-  let bytes = 0;
-  let files = 0;
-  const kept: Array<{ path: string; reason: string }> = [];
-  const requested = [...new Set(paths)];
-  const stop = (offset: number, reason: string) => ({
-    bytes,
-    files,
-    kept: [...kept, ...requested.slice(offset).map((path) => ({ path, reason }))],
-  });
-  for (const [index, relative] of requested.entries()) {
-    const file = owned.get(relative);
-    if (!file) throw new Error("Requested file has no emission provenance");
-    const target = safePath(ctx.cwd, `${root}/${relative}`);
+  const authority = compilerRemovalAuthority(ctx, expectedToken);
+  const requested = requestedRemovalFiles(authority, paths);
+  const progress = removalProgress(requested);
+  for (const [index, file] of requested.entries()) {
     try {
-      if (!evidenceMatches(file, target)) {
-        kept.push({ path: relative, reason: "Generated file changed since emission" });
+      if (!evidenceMatches(file, safePath(ctx.cwd, `${root}/${file.path}`))) {
+        progress.result.kept.push({ path: file.path, reason: authority.changedReason });
         continue;
       }
-      const release = tryAcquireBuildMutationLock(ctx);
-      if (!release) return stop(index, "Build output is busy; retry cleanup");
-      try {
-        if (hasPendingPublication(ctx)) return stop(index, "Build publication is pending recovery");
-        if (signature(NodeFS.lstatSync(ctx.recordPath)) !== previous.recordIdentity)
-          return stop(index, "Build ownership changed before removal");
-        const stat = NodeFS.lstatSync(target);
-        if (!stat.isFile() || stat.nlink !== 1 || signature(stat) !== file.identity) {
-          kept.push({ path: relative, reason: "Generated file changed before removal" });
-          continue;
-        }
-        // No async gap after the caller's guards and this final identity/content check.
-        NodeFS.unlinkSync(target);
-        bytes += file.bytes;
-        files++;
-        let parent = NodePath.dirname(target);
-        const output = NodePath.join(ctx.cwd, root);
-        while (parent.startsWith(`${output}${NodePath.sep}`) || parent === output) {
-          try {
-            NodeFS.rmdirSync(parent);
-          } catch (error) {
-            if (
-              ["ENOTEMPTY", "EEXIST", "ENOENT"].includes(
-                (error as NodeJS.ErrnoException).code ?? "",
-              )
-            )
-              break;
-            break; // Empty-directory pruning is optional after a successful unlink.
-          }
-          parent = NodePath.dirname(parent);
-        }
-      } finally {
-        release();
-      }
+      const refusal = removeVerifiedBatch(
+        ctx,
+        [file],
+        new Set([file.path]),
+        authority,
+        progress,
+        undefined,
+        true,
+      );
+      if (refusal) return progress.stop(index, refusal);
     } catch (error) {
-      if (missing(error)) {
-        kept.push({ path: relative, reason: "Generated file is absent" });
-        continue;
-      }
-      throw error;
+      if (!missing(error)) throw error;
+      progress.result.kept.push({ path: file.path, reason: "Generated file is absent" });
     }
   }
-  return { bytes, files, kept };
+  return progress.result;
 }
 
 /** The runner creates an empty private stage before invoking a compiler. Only that stage can mint provenance. */
@@ -1083,4 +1155,613 @@ export function copyOwnedGeneratedBuild(worktreePath: string, root: string, dest
       throw new Error("Web output changed during server build");
   }
   return true;
+}
+
+type ReviewRecord = {
+  version: 1;
+  worktreeIdentity: string;
+  root: string;
+  rootAllocation: string;
+  lastUsedAt: number;
+  useToken: string;
+  protected: boolean;
+  contextKey: string | null;
+  files: OwnedFile[];
+};
+type ReviewSnapshot = { record: ReviewRecord; token: string };
+type ReviewFile = {
+  path: string;
+  identity: string;
+  hash: string | null;
+  size: number;
+  bytes: number;
+  selectable: boolean;
+  reason: string | null;
+};
+const MAX_REVIEW_FILES = 1_000;
+const MAX_REVIEW_CONTENT_BYTES = 512 * 1024 * 1024;
+const reviewPath = (ctx: Context) =>
+  NodePath.join(
+    ctx.gitDir,
+    `t3-build-review-${NodeCrypto.createHash("sha256").update(ctx.root).digest("hex")}.json`,
+  );
+const digest = (value: string) => NodeCrypto.createHash("sha256").update(value).digest("hex");
+const validTime = (now: number) => Number.isSafeInteger(now) && now >= 0;
+
+function rootAllocation(ctx: Context) {
+  const stat = NodeFS.lstatSync(safePath(ctx.cwd, ctx.root));
+  if (!stat.isDirectory()) throw new Error("Build review requires an existing directory");
+  return allocation(stat);
+}
+
+function readReview(ctx: Context): ReviewSnapshot | null {
+  const path = reviewPath(ctx);
+  let fd;
+  try {
+    fd = NodeFS.openSync(path, NodeFS.constants.O_RDONLY | (NodeFS.constants.O_NOFOLLOW ?? 0));
+  } catch (error) {
+    if (missing(error)) return null;
+    throw error;
+  }
+  try {
+    const stat = NodeFS.fstatSync(fd);
+    if (!stat.isFile() || stat.nlink !== 1 || stat.size > MAX_RECORD_BYTES)
+      throw new Error("Unsafe build review record");
+    const raw = NodeFS.readFileSync(fd, "utf8");
+    const value = JSON.parse(raw) as Partial<ReviewRecord> | null;
+    if (
+      typeof value !== "object" ||
+      value === null ||
+      value.version !== 1 ||
+      value.worktreeIdentity !== ctx.worktreeIdentity ||
+      value.root !== ctx.root ||
+      typeof value.rootAllocation !== "string" ||
+      typeof value.lastUsedAt !== "number" ||
+      !validTime(value.lastUsedAt) ||
+      typeof value.useToken !== "string" ||
+      !/^[a-f0-9-]{36}$/.test(value.useToken) ||
+      typeof value.protected !== "boolean" ||
+      (value.contextKey !== null && typeof value.contextKey !== "string") ||
+      !Array.isArray(value.files) ||
+      value.files.length > MAX_REVIEW_FILES ||
+      (!value.protected && (value.files.length !== 0 || value.contextKey !== null))
+    )
+      throw new Error("Invalid build review record");
+    const paths = new Set<string>();
+    for (const file of value.files) {
+      if (
+        typeof file !== "object" ||
+        file === null ||
+        typeof file.path !== "string" ||
+        !safeRelative(file.path) ||
+        paths.has(file.path) ||
+        typeof file.identity !== "string" ||
+        typeof file.hash !== "string" ||
+        !/^[a-f0-9]{64}$/.test(file.hash) ||
+        typeof file.bytes !== "number" ||
+        !Number.isSafeInteger(file.bytes) ||
+        file.bytes < 0
+      )
+        throw new Error("Invalid reviewed build file");
+      paths.add(file.path);
+    }
+    if (
+      signature(NodeFS.lstatSync(path)) !== signature(stat) ||
+      signature(NodeFS.fstatSync(fd)) !== signature(stat)
+    )
+      throw new Error("Build review changed during observation");
+    return {
+      record: value as ReviewRecord,
+      token: digest(raw + signature(stat)),
+    };
+  } finally {
+    NodeFS.closeSync(fd);
+  }
+}
+
+function writeReview(ctx: Context, record: ReviewRecord) {
+  const raw = JSON.stringify(record);
+  if (Buffer.byteLength(raw) > MAX_RECORD_BYTES)
+    throw new Error("Build review exceeds its observation limit");
+  const path = reviewPath(ctx);
+  const temporary = `${path}.${NodeCrypto.randomUUID()}.tmp`;
+  try {
+    NodeFS.writeFileSync(temporary, raw, { flag: "wx", mode: 0o600 });
+    flushPreparedFile(temporary);
+    NodeFS.renameSync(temporary, path);
+    return readReview(ctx)!;
+  } finally {
+    NodeFS.rmSync(temporary, { force: true });
+  }
+}
+
+function assertLegacyBuild(ctx: Context) {
+  const current = context(ctx.cwd, ctx.root);
+  if (
+    !current ||
+    current.worktreeIdentity !== ctx.worktreeIdentity ||
+    current.gitDir !== ctx.gitDir
+  )
+    throw new Error("Build worktree changed; refresh review");
+  if (readRecord(ctx)) throw new Error("Build now has compiler provenance; refresh review");
+}
+const reviewActivity = (snapshot: ReviewSnapshot) => ({
+  token: snapshot.token,
+  lastUsedAt: snapshot.record.lastUsedAt,
+  hasSelection: snapshot.record.files.length > 0,
+});
+
+/** First observation measures a full future delay; filesystem timestamps never establish age. */
+export function observeLegacyBuild(
+  worktreePath: string,
+  root: string,
+  now: number,
+  persist = true,
+) {
+  if (!validTime(now)) throw new Error("Invalid build observation time");
+  const ctx = context(worktreePath, root);
+  if (!ctx) return null;
+  const release = persist ? acquireBuildMutationLock(ctx) : () => {};
+  try {
+    if (readRecord(ctx)) return null;
+    const currentAllocation = rootAllocation(ctx);
+    const previous = readReview(ctx);
+    if (previous?.record.rootAllocation === currentAllocation) return reviewActivity(previous);
+    const next: ReviewRecord = {
+      version: 1,
+      worktreeIdentity: ctx.worktreeIdentity,
+      root,
+      rootAllocation: currentAllocation,
+      lastUsedAt: Math.max(now, previous?.record.lastUsedAt ?? 0),
+      useToken: NodeCrypto.randomUUID(),
+      protected: previous?.record.protected ?? false,
+      contextKey: null,
+      files: [],
+    };
+    return persist
+      ? reviewActivity(writeReview(ctx, next))
+      : {
+          token: digest(JSON.stringify(next)),
+          lastUsedAt: next.lastUsedAt,
+          hasSelection: false,
+        };
+  } finally {
+    release();
+  }
+}
+
+/** Metadata-only legacy clock observation. It neither hashes files nor refreshes consent or age. */
+export function legacyBuildActivity(worktreePath: string, root: string) {
+  const ctx = context(worktreePath, root);
+  if (!ctx || readRecord(ctx)) return null;
+  const previous = readReview(ctx);
+  if (!previous || rootAllocation(ctx) !== previous.record.rootAllocation) return null;
+  return reviewActivity(previous);
+}
+
+/** Positive evidence of an actual output consumer renews age and revokes every selected identity. */
+export function recordLegacyBuildUse(worktreePath: string, root: string, now: number) {
+  if (!validTime(now)) throw new Error("Invalid build use time");
+  const ctx = context(worktreePath, root);
+  if (!ctx) return false;
+  const release = tryAcquireBuildMutationLock(ctx);
+  if (!release) return false;
+  try {
+    if (readRecord(ctx)) return false;
+    const previous = readReview(ctx);
+    writeReview(ctx, {
+      version: 1,
+      worktreeIdentity: ctx.worktreeIdentity,
+      root,
+      rootAllocation: rootAllocation(ctx),
+      lastUsedAt: Math.max(now, previous?.record.lastUsedAt ?? 0),
+      useToken: NodeCrypto.randomUUID(),
+      protected: previous?.record.protected ?? false,
+      contextKey: null,
+      files: [],
+    });
+    return true;
+  } finally {
+    release();
+  }
+}
+
+/** Retained review protection is independent of owners, compiler records, and surviving output files. */
+export function generatedBuildReviewProtection(worktreePath: string, relativeCandidate = "") {
+  if (relativeCandidate !== "" && !safeRelative(relativeCandidate)) return true;
+  try {
+    const ctx = context(worktreePath, "apps/web/dist");
+    if (!ctx) return false;
+    for (const name of NodeFS.readdirSync(ctx.gitDir)) {
+      if (!name.startsWith("t3-build-review-") || !name.endsWith(".json")) continue;
+      const match = /^t3-build-review-([a-f0-9]{64})\.json$/.exec(name);
+      if (!match) return true;
+      const path = NodePath.join(ctx.gitDir, name);
+      const stat = NodeFS.lstatSync(path);
+      if (!stat.isFile() || stat.nlink !== 1 || stat.size > MAX_RECORD_BYTES) return true;
+      // Find the recognized root without trusting the unvalidated record to redirect reads.
+      const value = JSON.parse(NodeFS.readFileSync(path, "utf8")) as { root?: unknown };
+      if (
+        typeof value?.root !== "string" ||
+        !allowedRoot(value.root) ||
+        digest(value.root) !== match[1]
+      )
+        return true;
+      const previous = readReview({ ...ctx, root: value.root });
+      if (!previous) return true;
+      if (!previous.record.protected) continue;
+      const root = previous.record.root;
+      if (
+        relativeCandidate === "" ||
+        relativeCandidate === root ||
+        root.startsWith(`${relativeCandidate}/`) ||
+        relativeCandidate.startsWith(`${root}/`)
+      )
+        return true;
+    }
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+type Inventory = {
+  files: ReviewFile[];
+  directories: Array<{ path: string; identity: string }>;
+  rootAllocation: string;
+};
+async function reviewInventory(ctx: Context): Promise<Inventory> {
+  const initialAllocation = rootAllocation(ctx);
+  const files: ReviewFile[] = [];
+  const directories: Inventory["directories"] = [];
+  let size = 0;
+  let entries = 0;
+  const visit = async (relative: string, depth: number) => {
+    if (depth > 64 || ++entries > 5_000) throw new Error("Build review inventory is too large");
+    const directory = safePath(ctx.cwd, relative ? `${ctx.root}/${relative}` : ctx.root);
+    const before = await NodeFS.promises.lstat(directory);
+    if (!before.isDirectory()) throw new Error("Build review directory changed");
+    directories.push({ path: relative, identity: signature(before) });
+    const children = (await NodeFS.promises.readdir(directory)).sort();
+    for (const name of children) {
+      if (++entries > 5_000) throw new Error("Build review inventory is too large");
+      const path = relative ? `${relative}/${name}` : name;
+      const target = NodePath.join(directory, name);
+      const stat = await NodeFS.promises.lstat(target);
+      if (safeRelative(path) && stat.isDirectory()) {
+        await visit(path, depth + 1);
+        continue;
+      }
+      if (files.length >= MAX_REVIEW_FILES) throw new Error("Build review exceeds 1000 files");
+      const regular = stat.isFile();
+      const bytes = Number.isFinite(stat.blocks) ? stat.blocks * 512 : stat.size;
+      if (regular) {
+        size += stat.size;
+        if (size > MAX_REVIEW_CONTENT_BYTES) throw new Error("Build review exceeds 512 MiB");
+      }
+      const reason = !safeRelative(path)
+        ? "Unsafe file path"
+        : stat.isSymbolicLink()
+          ? "Symbolic links cannot be selected"
+          : !regular
+            ? "Only regular files can be selected"
+            : stat.nlink !== 1
+              ? "Hardlinked files cannot be selected"
+              : null;
+      let hash: string | null = null;
+      if (reason === null) {
+        const evidence = await asynchronousFileEvidence(safePath(ctx.cwd, `${ctx.root}/${path}`));
+        if (evidence.identity !== signature(stat)) throw new Error("Build review file changed");
+        hash = evidence.hash;
+      }
+      files.push({
+        path,
+        identity: signature(stat),
+        hash,
+        size: regular ? stat.size : 0,
+        bytes,
+        selectable: reason === null,
+        reason,
+      });
+    }
+    if (signature(await NodeFS.promises.lstat(directory)) !== signature(before))
+      throw new Error("Build review directory changed during observation");
+  };
+  await visit("", 0);
+  if (rootAllocation(ctx) !== initialAllocation)
+    throw new Error("Build root changed during review");
+  return { files, directories, rootAllocation: initialAllocation };
+}
+
+function assertInventoryCurrent(ctx: Context, inventory: Inventory) {
+  if (rootAllocation(ctx) !== inventory.rootAllocation)
+    throw new Error("Build root changed during review");
+  for (const directory of inventory.directories) {
+    const path = safePath(ctx.cwd, directory.path ? `${ctx.root}/${directory.path}` : ctx.root);
+    const stat = NodeFS.lstatSync(path);
+    if (!stat.isDirectory() || signature(stat) !== directory.identity)
+      throw new Error("Build review inventory changed; refresh review");
+  }
+  for (const file of inventory.files) {
+    // Directory traversal was already checked. Lstat the final entry without
+    // following links, including unsafe names that remain display-only.
+    const parent = NodePath.posix.dirname(file.path);
+    const directory = safePath(ctx.cwd, parent === "." ? ctx.root : `${ctx.root}/${parent}`);
+    const stat = NodeFS.lstatSync(NodePath.join(directory, NodePath.posix.basename(file.path)));
+    if (
+      signature(stat) !== file.identity ||
+      (file.selectable && (!stat.isFile() || stat.nlink !== 1))
+    )
+      throw new Error("Build review file changed; refresh review");
+  }
+}
+function previewFingerprint(
+  ctx: Context,
+  contextKey: string,
+  state: ReviewSnapshot,
+  inventory: Inventory,
+) {
+  return digest(
+    JSON.stringify({
+      worktree: ctx.worktreeIdentity,
+      contextKey,
+      useToken: state.record.useToken,
+      lastUsedAt: state.record.lastUsedAt,
+      inventory,
+      recordToken: state.token,
+    }),
+  );
+}
+
+/** A bounded complete preview; hashes stream outside the root publication mutex. */
+async function prepareLegacyPreview(
+  worktreePath: string,
+  root: string,
+  now: number,
+  contextKey: string,
+) {
+  if (contextKey.length === 0) throw new Error("Build review context is required");
+  const ctx = context(worktreePath, root);
+  if (!ctx) throw new Error("Build review requires a linked worktree");
+  if (!observeLegacyBuild(worktreePath, root, now))
+    throw new Error("Build now has compiler provenance; refresh review");
+  const stateRelease = acquireBuildMutationLock(ctx);
+  let state: ReviewSnapshot;
+  try {
+    validReviewedState(ctx, contextKey, true);
+    state = readReview(ctx)!;
+  } finally {
+    stateRelease();
+  }
+  const inventory = await reviewInventory(ctx);
+  const release = acquireBuildMutationLock(ctx);
+  try {
+    assertLegacyBuild(ctx);
+    if (readReview(ctx)?.token !== state.token)
+      throw new Error("Build activity changed; refresh review");
+    assertInventoryCurrent(ctx, inventory);
+    const preview = {
+      token: previewFingerprint(ctx, contextKey, state, inventory),
+      lastUsedAt: state.record.lastUsedAt,
+      files: inventory.files,
+      selectedPaths:
+        state.record.contextKey === contextKey &&
+        state.record.rootAllocation === inventory.rootAllocation
+          ? state.record.files
+              .filter((file) =>
+                inventory.files.some(
+                  (current) =>
+                    current.selectable &&
+                    current.path === file.path &&
+                    current.identity === file.identity &&
+                    current.hash === file.hash,
+                ),
+              )
+              .map((file) => file.path)
+          : [],
+      bytes: inventory.files.reduce((sum, file) => sum + file.bytes, 0),
+      size: inventory.files.reduce((sum, file) => sum + file.size, 0),
+    };
+    return { preview, state, inventory };
+  } finally {
+    release();
+  }
+}
+
+/** A complete identity-bound preview. Selection never grants authority until explicitly saved. */
+export async function previewLegacyBuild(
+  worktreePath: string,
+  root: string,
+  now: number,
+  contextKey: string,
+) {
+  return (await prepareLegacyPreview(worktreePath, root, now, contextKey)).preview;
+}
+
+/** Approval is separate from compiler provenance and actual-use time, including an empty tombstone. */
+export async function saveLegacyBuildSelection(
+  worktreePath: string,
+  root: string,
+  now: number,
+  contextKey: string,
+  previewToken: string,
+  selectedPaths: readonly string[],
+  revalidate?: (paths: readonly string[]) => Promise<boolean>,
+  signal?: AbortSignal,
+) {
+  const ctx = context(worktreePath, root);
+  if (!ctx) throw new Error("Build review requires a linked worktree");
+  const { preview, state, inventory } = await prepareLegacyPreview(
+    worktreePath,
+    root,
+    now,
+    contextKey,
+  );
+  if (preview.token !== previewToken) throw new Error("Build preview changed; refresh review");
+  const requested = [...new Set(selectedPaths)];
+  const files = requested.map((path) => {
+    const file = preview.files.find((candidate) => candidate.path === path);
+    if (!file?.selectable || file.hash === null)
+      throw new Error("File cannot be selected for build cleanup");
+    return { path, identity: file.identity, hash: file.hash, bytes: file.bytes };
+  });
+  if (signal?.aborted) throw new Error("Build review was cancelled");
+  if (revalidate && !(await revalidate(requested)))
+    throw new Error("Build review guards changed; refresh review");
+  if (signal?.aborted) throw new Error("Build review was cancelled");
+  const release = acquireBuildMutationLock(ctx);
+  try {
+    assertLegacyBuild(ctx);
+    if (readReview(ctx)?.token !== state.token || state.record.lastUsedAt !== preview.lastUsedAt)
+      throw new Error("Build activity changed; refresh review");
+    assertInventoryCurrent(ctx, inventory);
+    if (rootAllocation(ctx) !== state.record.rootAllocation)
+      throw new Error("Build root changed; refresh review");
+    for (const file of files) {
+      const stat = NodeFS.lstatSync(safePath(ctx.cwd, `${root}/${file.path}`));
+      if (!stat.isFile() || stat.nlink !== 1 || signature(stat) !== file.identity)
+        throw new Error("Selected file changed; refresh review");
+    }
+    return reviewActivity(
+      writeReview(ctx, { ...state.record, protected: true, contextKey, files }),
+    );
+  } finally {
+    release();
+  }
+}
+
+function validReviewedState(ctx: Context, contextKey: string, revokeInvalid = false) {
+  const previous = readReview(ctx);
+  if (!previous?.record.protected) return null;
+  let valid = false;
+  try {
+    assertLegacyBuild(ctx);
+    valid =
+      previous.record.contextKey === contextKey &&
+      previous.record.rootAllocation === rootAllocation(ctx);
+  } catch {
+    valid = false;
+  }
+  if (valid) return previous;
+  // Callers requesting revocation already own the root mutex. A context or
+  // allocation returning to an old value must never resurrect old approval.
+  if (revokeInvalid && previous.record.files.length > 0)
+    writeReview(ctx, { ...previous.record, contextKey: null, files: [] });
+  return null;
+}
+
+function openReviewedState(ctx: Context, contextKey: string) {
+  const current = validReviewedState(ctx, contextKey);
+  if (current) return current;
+  const release = tryAcquireBuildMutationLock(ctx);
+  if (!release) return null;
+  try {
+    return validReviewedState(ctx, contextKey, true);
+  } finally {
+    release();
+  }
+}
+
+/** Observe policy/mapping changes before inactivity or Off can skip content inspection. */
+export function validateLegacyBuildReviewContext(
+  worktreePath: string,
+  root: string,
+  contextKey: string,
+) {
+  const ctx = context(worktreePath, root);
+  if (!ctx) return false;
+  const release = acquireBuildMutationLock(ctx);
+  try {
+    const current = validReviewedState(ctx, contextKey, true);
+    return current !== null && current.record.files.length > 0;
+  } finally {
+    release();
+  }
+}
+
+/** Inspect only exact currently approved identities; stale or consumed consent grants no authority. */
+export async function inspectReviewedBuildFilesAsync(
+  worktreePath: string,
+  root: string,
+  contextKey: string,
+) {
+  const ctx = context(worktreePath, root);
+  if (!ctx) return null;
+  let previous;
+  try {
+    previous = openReviewedState(ctx, contextKey);
+  } catch {
+    return null;
+  }
+  if (!previous || previous.record.files.length === 0) return null;
+  const files: Array<OwnedFile & { reason: string | null }> = [];
+  for (const file of previous.record.files) {
+    let reason: string | null = null;
+    try {
+      const evidence = await asynchronousFileEvidence(safePath(ctx.cwd, `${root}/${file.path}`));
+      if (evidence.identity !== file.identity || evidence.hash !== file.hash)
+        reason = "Generated file changed since review";
+    } catch (error) {
+      reason = missing(error)
+        ? "Generated file is absent"
+        : "Generated file cannot be safely verified";
+    }
+    files.push({ ...file, reason });
+  }
+  const release = tryAcquireBuildMutationLock(ctx);
+  if (!release) return null;
+  try {
+    if (validReviewedState(ctx, contextKey, true)?.token !== previous.token) return null;
+    const stale = new Set(files.filter((file) => file.reason !== null).map((file) => file.path));
+    if (stale.size > 0) {
+      previous = writeReview(ctx, {
+        ...previous.record,
+        files: previous.record.files.filter((file) => !stale.has(file.path)),
+      });
+      if (previous.record.files.length === 0) return null;
+    }
+    return { token: previous.token, lastUsedAt: previous.record.lastUsedAt, files };
+  } catch {
+    return null;
+  } finally {
+    release();
+  }
+}
+
+/** The reviewed adapter consumes exact selected identities through the compiler's native removal seam. */
+export async function removeReviewedBuildFilesAsync(
+  worktreePath: string,
+  root: string,
+  contextKey: string,
+  expectedToken: string,
+  paths: readonly string[],
+  revalidate: (paths: readonly string[]) => Promise<boolean>,
+  signal?: AbortSignal,
+) {
+  const ctx = context(worktreePath, root);
+  if (!ctx) throw new Error("Build review requires a linked worktree");
+  let current = openReviewedState(ctx, contextKey);
+  if (!current || current.token !== expectedToken)
+    throw new Error("Build review changed before removal");
+  const authority: RemovalAuthority = {
+    files: current.record.files,
+    changedReason: "Generated file changed since review",
+    validate: () => {
+      try {
+        return validReviewedState(ctx, contextKey, true)?.token === current?.token
+          ? null
+          : "Build review changed before removal";
+      } catch {
+        return "Build review changed before removal";
+      }
+    },
+    consume: (files) => {
+      const consumed = new Set(files.map((file) => file.path));
+      current = writeReview(ctx, {
+        ...current!.record,
+        files: current!.record.files.filter((file) => !consumed.has(file.path)),
+      });
+    },
+  };
+  return removeAuthorizedFilesAsync(ctx, authority, paths, revalidate, signal);
 }

@@ -14,6 +14,17 @@ const descriptor = {
 } as const;
 
 describe("ExecutionEnvironmentDescriptor", () => {
+  it.each([undefined, false, true])("requires explicit build review support (%s)", (support) => {
+    const decoded = decodeDescriptor({
+      ...descriptor,
+      capabilities: {
+        worktreeBuildCleanup: true,
+        ...(support === undefined ? {} : { worktreeBuildReview: support }),
+      },
+    });
+    expect(decoded.capabilities.worktreeBuildReview).toBe(support);
+  });
+
   it("keeps settled cleanup optional alongside current worktree capabilities", () => {
     expect(decodeDescriptor(descriptor).capabilities.settledWorktreeCleanup).toBeUndefined();
     const capabilities = {

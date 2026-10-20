@@ -143,6 +143,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     ],
   },
   {
+    id: "storage-review-older-builds",
+    title: "Review older builds",
+    to: "/settings/storage",
+    scope: "project-defaults",
+    searchTerms: ["legacy build files exact selection approval protected cleanup"],
+  },
+  {
     id: "storage-delete-now",
     title: "Delete now",
     to: "/settings/storage",

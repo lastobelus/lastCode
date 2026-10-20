@@ -35,6 +35,7 @@ import {
   SettingsSection,
   useRelativeTimeTick,
 } from "./settingsLayout";
+import { LegacyBuildReviewRow } from "./LegacyBuildReviewDialog";
 import { DatabaseStorageNotice } from "./DatabaseStorageNotice";
 import { SettingsScopeNotice } from "./SettingsScopeNotice";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
@@ -772,6 +773,7 @@ export function StorageSettingsPanel() {
             )}
           </>
         )}
+        <LegacyBuildReviewRow />
       </SettingsSection>
 
       {!isProjectScope && (

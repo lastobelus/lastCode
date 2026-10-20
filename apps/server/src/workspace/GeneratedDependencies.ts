@@ -1,3 +1,4 @@
+import { generatedBuildReviewProtection } from "@t3tools/shared/generatedBuildOwnership";
 import {
   observeDependencyActivity,
   recordDependencyUse,
@@ -683,7 +684,11 @@ const make = Effect.gen(function* () {
             try: async () => {
               // All asynchronous eligibility and mount work is complete. Read the
               // tiny usage evidence synchronously just before submitting removal.
-              if (dependencyActivitySnapshot(current.worktreePath) !== usageSnapshot) return null;
+              if (
+                dependencyActivitySnapshot(current.worktreePath) !== usageSnapshot ||
+                generatedBuildReviewProtection(current.worktreePath, "node_modules")
+              )
+                return null;
               // fs.rm unlinks internal symlinks; it does not traverse their targets.
               await NodeFSP.rm(current.dependencyPath, { recursive: true });
               return { ...current, estimatedReclaimedBytes: inspection.estimatedReclaimedBytes };
