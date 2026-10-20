@@ -117,12 +117,9 @@ function useAnnotationBanner(input: {
   });
   if (dismissal.route !== key) setDismissal({ route: key, version: null });
   const version = annotation ? `${key}:${annotation.updatedAt}` : null;
-  if (
-    annotation === null ||
-    annotation.resolvedAt !== null ||
-    (dismissal.route === key && dismissal.version === version)
-  )
-    return null;
+  if (annotation === null) return null;
+  if (annotation.resolvedAt !== null) return null;
+  if (dismissal.route === key && dismissal.version === version) return null;
   const toggleExpanded = () => setExpanded(key, !expanded);
   const banner: ComposerBannerStackItem = {
     id: `thread-annotation:${version}`,
@@ -167,7 +164,7 @@ export function useChatThreadAnnotation(input: {
   threadRef: ScopedThreadRef | null;
   annotation: ThreadAnnotation | null;
   supported: boolean;
-  hasUserMessage: boolean;
+  hasUserMessage: () => boolean;
   cwd: string | null;
 }) {
   const { routeThreadRef, threadRef, annotation, supported, hasUserMessage, cwd } = input;
@@ -177,7 +174,7 @@ export function useChatThreadAnnotation(input: {
     AuthOrchestrationOperateScope,
   );
   const canAnnotate =
-    canOperate && threadRef !== null && supported && (annotation !== null || hasUserMessage);
+    canOperate && threadRef !== null && supported && (annotation !== null || hasUserMessage());
   const mutations = useAnnotationMutations(threadRef, canAnnotate, routeKey);
   const [editor, setEditor] = useState<{ route: string } | null>(null);
   if (editor !== null && editor.route !== routeKey) setEditor(null);

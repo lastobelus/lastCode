@@ -4917,11 +4917,7 @@ export default function ChatView(props: ChatViewProps) {
     threadRef: isServerThread ? activeThreadRef : null,
     annotation: activeThreadShell?.annotation ?? null,
     supported: serverConfig?.environment.capabilities.threadAnnotations === true,
-    hasUserMessage:
-      canOperateThread &&
-      isServerThread &&
-      serverConfig?.environment.capabilities.threadAnnotations === true &&
-      activeThreadShell?.annotation == null &&
+    hasUserMessage: () =>
       serverProjection?.messages.some((message) => message.role === "user") === true,
     cwd: gitCwd,
   });
