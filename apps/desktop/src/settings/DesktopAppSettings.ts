@@ -35,6 +35,7 @@ export interface DesktopSettings {
   readonly tailscaleServePort: number;
   readonly updateChannel: DesktopUpdateChannel;
   readonly updateChannelConfiguredByUser: boolean;
+  readonly showAndInstallLocalNightlies: boolean;
   readonly wslBackendEnabled: boolean;
   readonly wslDistro: string | null;
   // Changing this requires a desktop restart because the pool's primary spec is
@@ -74,6 +75,7 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   tailscaleServePort: DEFAULT_TAILSCALE_SERVE_PORT,
   updateChannel: "latest",
   updateChannelConfiguredByUser: false,
+  showAndInstallLocalNightlies: false,
   wslBackendEnabled: false,
   wslDistro: null,
   wslOnly: false,
@@ -96,6 +98,7 @@ const DesktopSettingsDocument = Schema.Struct({
   tailscaleServePort: Schema.optionalKey(Schema.Number),
   updateChannel: Schema.optionalKey(DesktopUpdateChannelSchema),
   updateChannelConfiguredByUser: Schema.optionalKey(Schema.Boolean),
+  showAndInstallLocalNightlies: Schema.optionalKey(Schema.Boolean),
   wslBackendEnabled: Schema.optionalKey(Schema.Boolean),
   wslMode: Schema.optionalKey(Schema.Literals(["local", "wsl"])),
   wslDistro: Schema.optionalKey(Schema.NullOr(Schema.String)),
@@ -160,6 +163,9 @@ export class DesktopAppSettings extends Context.Service<
     }) => Effect.Effect<DesktopSettingsChange, DesktopSettingsWriteError>;
     readonly setUpdateChannel: (
       channel: DesktopUpdateChannel,
+    ) => Effect.Effect<DesktopSettingsChange, DesktopSettingsWriteError>;
+    readonly setShowAndInstallLocalNightlies: (
+      enabled: boolean,
     ) => Effect.Effect<DesktopSettingsChange, DesktopSettingsWriteError>;
     readonly setWslBackendEnabled: (
       enabled: boolean,
@@ -228,6 +234,7 @@ function normalizeDesktopSettingsDocument(
       ? Option.getOrElse(parsedUpdateChannel, () => defaultSettings.updateChannel)
       : defaultSettings.updateChannel,
     updateChannelConfiguredByUser,
+    showAndInstallLocalNightlies: parsed.showAndInstallLocalNightlies === true,
     wslBackendEnabled,
     wslDistro: normalizeWslDistro(parsed.wslDistro),
     wslOnly: parsed.wslOnly === true,
@@ -267,6 +274,9 @@ function toDesktopSettingsDocument(
   }
   if (settings.updateChannelConfiguredByUser !== defaults.updateChannelConfiguredByUser) {
     document.updateChannelConfiguredByUser = settings.updateChannelConfiguredByUser;
+  }
+  if (settings.showAndInstallLocalNightlies !== defaults.showAndInstallLocalNightlies) {
+    document.showAndInstallLocalNightlies = settings.showAndInstallLocalNightlies;
   }
   if (settings.wslBackendEnabled !== defaults.wslBackendEnabled) {
     document.wslBackendEnabled = settings.wslBackendEnabled;
@@ -337,6 +347,15 @@ function setUpdateChannel(
         updateChannel: requestedChannel,
         updateChannelConfiguredByUser: true,
       };
+}
+
+function setShowAndInstallLocalNightlies(
+  settings: DesktopSettings,
+  enabled: boolean,
+): DesktopSettings {
+  return settings.showAndInstallLocalNightlies === enabled
+    ? settings
+    : { ...settings, showAndInstallLocalNightlies: enabled };
 }
 
 function setWslBackendEnabled(settings: DesktopSettings, enabled: boolean): DesktopSettings {
@@ -547,6 +566,12 @@ export const make = Effect.gen(function* () {
       persist((settings) => setUpdateChannel(settings, channel)).pipe(
         Effect.withSpan("desktop.settings.setUpdateChannel", { attributes: { channel } }),
       ),
+    setShowAndInstallLocalNightlies: (enabled) =>
+      persist((settings) => setShowAndInstallLocalNightlies(settings, enabled)).pipe(
+        Effect.withSpan("desktop.settings.setShowAndInstallLocalNightlies", {
+          attributes: { enabled },
+        }),
+      ),
     setWslBackendEnabled: (enabled) =>
       persist((settings) => setWslBackendEnabled(settings, enabled)).pipe(
         Effect.withSpan("desktop.settings.setWslBackendEnabled", { attributes: { enabled } }),
@@ -602,6 +627,8 @@ export const layerTest = (initialSettings: DesktopSettings = DEFAULT_DESKTOP_SET
           update((settings) => setServerExposureMode(settings, mode)),
         setTailscaleServe: (input) => update((settings) => setTailscaleServe(settings, input)),
         setUpdateChannel: (channel) => update((settings) => setUpdateChannel(settings, channel)),
+        setShowAndInstallLocalNightlies: (enabled) =>
+          update((settings) => setShowAndInstallLocalNightlies(settings, enabled)),
         setWslBackendEnabled: (enabled) =>
           update((settings) => setWslBackendEnabled(settings, enabled)),
         setWslDistro: (distro) => update((settings) => setWslDistro(settings, distro)),

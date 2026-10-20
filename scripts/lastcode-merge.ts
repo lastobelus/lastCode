@@ -17,6 +17,7 @@ import {
   runGit,
 } from "./lastcode-local-ci.ts";
 import { type GithubCiEvidence, readGithubCi } from "./lastcode-github-ci.ts";
+import { readReviewData, validateReviewForMerge } from "./lastcode-pr-gates.ts";
 import { acquireMainWriteLock } from "./lastcode-main-write-lock.ts";
 import {
   carrySquashBody,
@@ -101,7 +102,7 @@ export function validateGithubCiForMerge(evidence: GithubCiEvidence): {
     throw new Error(`GitHub CI is not merge-ready: ${evidence.detail}`);
   }
   throw new Error(
-    `GitHub CI is not merge-ready (${evidence.state}/${evidence.reason}); run Wait for PR again.`,
+    `GitHub CI is not merge-ready (${evidence.state}/${evidence.reason}); check again with pnpm lastcode:pr-gates once CI settles.`,
   );
 }
 
@@ -226,6 +227,11 @@ function main(argv: ReadonlyArray<string>): void {
     <T>(args: ReadonlyArray<string>): T => runGhJson<T>(repoRoot, args),
   );
   const validatedGithubCi = validateGithubCiForMerge(githubCi);
+  validateReviewForMerge(
+    readReviewData(LASTCODE_GITHUB_REPOSITORY, pullRequest, <T>(args: ReadonlyArray<string>): T =>
+      runGhJson<T>(repoRoot, args),
+    ),
+  );
 
   runCommand(repoRoot, "git", ["fetch", LASTCODE_ORIGIN_REMOTE, LASTCODE_BASE_BRANCH]);
   assertMergeBaseUnchanged(repoRoot, baseCommit, "while validating GitHub CI");
@@ -260,6 +266,13 @@ function main(argv: ReadonlyArray<string>): void {
     validatePullRequestForMerge(lockedPullRequest, commit, baseCommit);
     validateGithubCiForMerge(
       readGithubCi(
+        LASTCODE_GITHUB_REPOSITORY,
+        lockedPullRequest,
+        <T>(args: ReadonlyArray<string>): T => runGhJson<T>(repoRoot, args),
+      ),
+    );
+    validateReviewForMerge(
+      readReviewData(
         LASTCODE_GITHUB_REPOSITORY,
         lockedPullRequest,
         <T>(args: ReadonlyArray<string>): T => runGhJson<T>(repoRoot, args),
