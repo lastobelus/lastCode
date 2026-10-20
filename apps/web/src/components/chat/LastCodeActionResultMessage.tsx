@@ -4,7 +4,6 @@ import {
   actionResultPresentation,
   parseActionResumeFollowUp,
   type ActionResultDetail,
-  type ActionResumeFollowUp,
 } from "@t3tools/shared/actionResume";
 import {
   BotIcon,
@@ -51,7 +50,8 @@ export function LastCodeActionResultMessage({
   }
   const presentation = actionResultPresentation(followUp);
   const details = actionResultDetails(followUp.report);
-  const expandable = !followUp.detailedOutputAvailable || details.length > 0;
+  const rawOutput = followUp.detailedOutputAvailable ? null : followUp.output;
+  const expandable = rawOutput !== null || details.length > 0;
   const { tone, icon: OutcomeIcon } = outcomeStyles[presentation.outcome];
   const heading = (
     <>
@@ -83,7 +83,7 @@ export function LastCodeActionResultMessage({
         </div>
       )}
       <ActionResultBody
-        followUp={followUp}
+        rawOutput={rawOutput}
         summary={presentation.summary}
         details={details}
         expanded={expanded}
@@ -93,20 +93,20 @@ export function LastCodeActionResultMessage({
 }
 
 function ActionResultBody({
-  followUp,
+  rawOutput,
   summary,
   details,
   expanded,
 }: {
-  followUp: ActionResumeFollowUp;
+  rawOutput: string | null;
   summary: string;
   details: ReadonlyArray<ActionResultDetail>;
   expanded: boolean;
 }) {
-  if (!followUp.detailedOutputAvailable && expanded) {
+  if (rawOutput !== null && expanded) {
     return (
       <pre className="mx-2.5 mb-2.5 mt-2 max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md border border-black/10 bg-code px-3 py-2.5 font-mono text-xs leading-5 text-code-foreground shadow-inner dark:border-white/10">
-        {followUp.output}
+        {rawOutput}
       </pre>
     );
   }
@@ -114,7 +114,7 @@ function ActionResultBody({
     <div className="px-3 pb-2.5 pt-1">
       <p className="truncate text-sm text-foreground/90">{summary}</p>
       {details.length > 0 && expanded ? <ActionDetails details={details} /> : null}
-      {followUp.detailedOutputAvailable && details.length === 0 ? (
+      {rawOutput === null && details.length === 0 ? (
         <p className="mt-0.5 text-xs text-muted-foreground">
           Detailed output retained in the Action terminal.
         </p>

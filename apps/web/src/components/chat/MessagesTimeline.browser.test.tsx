@@ -1,3 +1,4 @@
+import { formatActionResumeFollowUp } from "@t3tools/shared/actionResume";
 import { RegistryProvider } from "@effect/atom-react";
 import {
   ApprovalRequestId,
@@ -1234,6 +1235,67 @@ describe("MessagesTimeline scroll position", () => {
       atEnd: false,
       scrollOffset: offset,
     });
+  });
+
+  it("keeps Action disclosure on the same row and reading position without treating an ordinary prompt as an Action", async () => {
+    const props = baseProps();
+    const result = formatActionResumeFollowUp({
+      actionName: "Inspect project",
+      actionId: "inspect-project",
+      runId: "action-run",
+      validatedStatus: "succeeded",
+      lifecycleOutcome: "succeeded",
+      exitCode: 0,
+      report: {
+        version: 1,
+        outcome: "success",
+        summary: "Inspection complete",
+        facts: { Detail: "A long result. ".repeat(60) },
+      },
+      output: undefined,
+    });
+    const entries = [
+      ...tallEntries,
+      message(result, { createdBy: "system" }, "action-result"),
+      message(result, { createdBy: "user" }, "ordinary-prompt"),
+      tall(14),
+      tall(15),
+    ];
+    function Chat() {
+      const [liveFollowEnabled, setLiveFollowEnabled] = useState(true);
+      return (
+        <div className="contents" onWheelCapture={() => setLiveFollowEnabled(false)}>
+          <MessagesTimeline
+            {...props}
+            timelineEntries={entries}
+            liveFollowEnabled={liveFollowEnabled}
+          />
+        </div>
+      );
+    }
+    await renderElement(<Chat />);
+    const viewport = await waitForList(props);
+    await userEvent.wheel(viewport, { delta: { y: -600 } });
+    const selector = '[data-message-id="action-result"]';
+    await vi.waitFor(() => expect(container.querySelector(selector)).not.toBeNull());
+    const row = container.querySelector<HTMLElement>(selector)!;
+    await act(async () => row.scrollIntoView({ block: "center" }));
+    const before = row.getBoundingClientRect().top;
+    const rowId = row.dataset.timelineRowId;
+    const toggle = row.querySelector<HTMLButtonElement>("button[aria-expanded]")!;
+    await click(toggle);
+    await vi.waitFor(() => expect(row.querySelector("dl")).not.toBeNull());
+    expect(container.querySelector(selector)).toBe(row);
+    expect(row.dataset.timelineRowId).toBe(rowId);
+    expect(Math.abs(row.getBoundingClientRect().top - before)).toBeLessThan(3);
+    expect(viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight).toBeGreaterThan(100);
+    const prompt = container.querySelector('[data-message-id="ordinary-prompt"]')!;
+    expect(prompt.textContent).toContain("Automated Project Action follow-up.");
+    expect(prompt.querySelector("dl")).toBeNull();
+    expect(prompt.textContent).not.toContain("Succeeded: Inspect project");
+    await click(toggle);
+    await vi.waitFor(() => expect(row.querySelector("dl")).toBeNull());
+    expect(Math.abs(row.getBoundingClientRect().top - before)).toBeLessThan(3);
   });
 
   it("restores the composer after closing tool output only at the end", async () => {
