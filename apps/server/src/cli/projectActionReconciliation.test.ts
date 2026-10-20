@@ -448,3 +448,38 @@ it.effect("revokes a managed trust grant from divergent fields even while allowl
     assert.deepEqual(reconciled.report.updated, ["lc-wait-for-checkpoint"]);
   }),
 );
+
+it.effect(
+  "reconciles explicit terminal-link profile intent without granting resume permission",
+  () =>
+    Effect.gen(function* () {
+      const declaration = {
+        id: "sign-in",
+        name: "Sign in",
+        command: "auth-tool login",
+        terminalLinkProfileName: "Work account",
+      };
+      const initial = yield* reconcileProjectActions({
+        projectWorkspaceRoot: "/workspace/example",
+        currentScripts: [],
+        declarations: [declaration],
+      });
+      assert.equal(initial.scripts[0]?.terminalLinkProfileName, "Work account");
+      assert.notProperty(initial.scripts[0], "allowAgentResume");
+      const changed = yield* reconcileProjectActions({
+        projectWorkspaceRoot: "/workspace/example",
+        currentScripts: initial.scripts,
+        declarations: [{ ...declaration, terminalLinkProfileName: "Other account" }],
+        previousState: initial.state,
+      });
+      assert.equal(changed.scripts[0]?.terminalLinkProfileName, "Other account");
+      const { terminalLinkProfileName: _name, ...ordinary } = declaration;
+      const removed = yield* reconcileProjectActions({
+        projectWorkspaceRoot: "/workspace/example",
+        currentScripts: changed.scripts,
+        declarations: [ordinary],
+        previousState: changed.state,
+      });
+      assert.notProperty(removed.scripts[0], "terminalLinkProfileName");
+    }),
+);

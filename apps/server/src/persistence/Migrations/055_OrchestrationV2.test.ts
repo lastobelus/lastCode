@@ -5,6 +5,8 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { migrationEntries, runMigrations } from "../Migrations.ts";
+import { runDatabaseMigrations } from "../DatabaseMigrations.ts";
+import { lastcodeMigrationManifest } from "../LastCodeMigrations.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -25,7 +27,7 @@ layer("055_OrchestrationV2", (it) => {
       const sql = yield* SqlClient.SqlClient;
       yield* runMigrations({ toMigrationInclusive: 53 });
 
-      const executed = yield* runMigrations();
+      const executed = yield* runDatabaseMigrations();
       assert.deepStrictEqual(executed, [
         [54, "ProjectionThreadsAutoSettleDisabledAt"],
         [55, "OrchestrationV2"],
@@ -40,8 +42,13 @@ layer("055_OrchestrationV2", (it) => {
         [64, "CanonicalizeThreadPullRequestLinks"],
         [65, "CodexUsageNativeTurnIndex"],
         [66, "RepairClientSettlementTimestamps"],
+        ...lastcodeMigrationManifest,
       ]);
-      assert.deepStrictEqual(yield* runMigrations(), []);
+      assert.deepStrictEqual(yield* runDatabaseMigrations(), []);
+      assert.deepStrictEqual(
+        yield* sql`SELECT migration_id, name FROM lastcode_sql_migrations WHERE migration_id = 12`,
+        [{ migration_id: 12, name: "ThreadCreatorEvidenceIndex" }],
+      );
 
       const migrations = yield* sql<{
         readonly migration_id: number;
@@ -130,6 +137,7 @@ layer("055_OrchestrationV2", (it) => {
         WHERE type = 'index'
           AND name IN (
             'idx_orchestration_events_application_high_water',
+            'orchestration_events_v2_thread_created_target_idx',
             'orchestration_events_v2_created_threads_idx',
             'orchestration_v2_projection_turn_items_shell_pending_idx'
           )
@@ -140,6 +148,7 @@ layer("055_OrchestrationV2", (it) => {
         [
           "idx_orchestration_events_application_high_water",
           "orchestration_events_v2_created_threads_idx",
+          "orchestration_events_v2_thread_created_target_idx",
           "orchestration_v2_projection_turn_items_shell_pending_idx",
         ],
       );

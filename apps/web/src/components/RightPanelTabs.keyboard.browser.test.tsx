@@ -121,14 +121,6 @@ async function press(key: string, options: KeyboardEventInit = {}) {
   return event;
 }
 
-function focusWithin(element: Element | null): Promise<void> {
-  if (!element) throw new Error("Expected the menu or its trigger to be mounted");
-  if (element.contains(document.activeElement)) return Promise.resolve();
-  return new Promise((resolve) => {
-    element.addEventListener("focusin", () => resolve(), { once: true });
-  });
-}
-
 describe("right panel new-tab shortcut", () => {
   it.each(["MacIntel", "Win32", "Linux x86_64"])(
     "opens the menu on %s and chooses a tab",
@@ -214,26 +206,24 @@ describe("right panel new-tab shortcut", () => {
   );
 
   it("uses a custom binding from a text field and closes on Escape", async () => {
-    // Menu focus crosses native frame and microtask boundaries; await its focus events.
+    // Native menu focus must settle outside act so React can finish pending updates.
     vi.useRealTimers();
     const input = document.createElement("input");
     await renderPanel({
       keybindings: compileResolvedKeybindingsConfig([{ key: "mod+y", command: "rightPanel.new" }]),
     });
-    document.body.append(input);
+    container.append(input);
     input.focus();
     expect(document.activeElement).toBe(input);
     expect((await press("t", { metaKey: true })).defaultPrevented).toBe(false);
     await press("y", { metaKey: true });
     expect(document.querySelector('[role="menu"]')).not.toBeNull();
-    await act(() => focusWithin(document.querySelector('[role="menu"]')));
+    await expect.poll(() => document.activeElement?.closest('[role="menu"]')).not.toBeNull();
     const trigger = container.querySelector('[aria-label="Add panel surface"]');
-    const triggerFocused = focusWithin(trigger);
+    expect(trigger).not.toBeNull();
     await press("Escape");
-    await act(() => triggerFocused);
-    expect(document.querySelector('[role="menu"]:not([data-closed])')).toBeNull();
-    expect(document.activeElement).toBe(trigger);
-    input.remove();
+    await expect.poll(() => document.querySelector('[role="menu"]:not([data-closed])')).toBeNull();
+    await expect.poll(() => document.activeElement).toBe(trigger);
   });
 
   it("does not open over another popup or during text composition", async () => {

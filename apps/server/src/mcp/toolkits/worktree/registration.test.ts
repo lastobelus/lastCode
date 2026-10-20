@@ -1,3 +1,4 @@
+import * as PublishedDocumentPreview from "../../../preview/PublishedDocumentPreview.ts";
 import * as Orchestrator from "../../../orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "../../../orchestration-v2/ProjectionStore.ts";
 import * as ProjectStore from "../../../orchestration-v2/ProjectStore.ts";
@@ -14,6 +15,11 @@ import * as Schema from "effect/Schema";
 import { HttpBody, HttpClient, HttpRouter } from "effect/http";
 
 import * as ServerEnvironment from "../../../environment/ServerEnvironment.ts";
+import * as EnvironmentPause from "../../../environment/EnvironmentPause.ts";
+import * as PreviewHosting from "../../../preview/Hosting.ts";
+import * as ThreadLifecycle from "../../../orchestration-v2/ThreadLifecycleService.ts";
+import * as ThreadRecovery from "../../../orchestration-v2/ThreadRecoveryService.ts";
+import * as ThreadRecoveryRepair from "../../../orchestration-v2/ThreadRecoveryRepairService.ts";
 import * as GitWorkflowService from "../../../git/GitWorkflowService.ts";
 import * as ProviderAdapterRegistry from "../../../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
@@ -64,6 +70,12 @@ const layerStubServices = Layer.mergeAll(
   Layer.mock(ThreadSearch.ThreadSearch)({}),
   McpProviderSessions.layer,
   Layer.mock(UpdateDrainAdmission.UpdateDrainAdmission)({}),
+  Layer.mock(EnvironmentPause.EnvironmentPause)({}),
+  Layer.mock(PreviewHosting.PreviewHosting)({}),
+  Layer.mock(PublishedDocumentPreview.PublishedDocumentPreview)({}),
+  Layer.mock(ThreadLifecycle.ThreadLifecycleService)({}),
+  Layer.mock(ThreadRecovery.ThreadRecoveryService)({}),
+  Layer.mock(ThreadRecoveryRepair.ThreadRecoveryRepairService)({}),
 );
 
 const ToolsListPayload = Schema.fromJsonString(

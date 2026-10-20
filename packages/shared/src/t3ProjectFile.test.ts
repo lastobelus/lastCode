@@ -54,6 +54,7 @@ describe("buildT3ProjectFileJsonSchema", () => {
       "previewUrl",
       "runOnSettle",
       "runOnWorktreeCreate",
+      "terminalLinkProfileName",
     ]);
   });
 
@@ -75,6 +76,14 @@ describe("T3ProjectFileFromJson", () => {
 
     expect(decoded.iconPath).toBe("assets/logo.svg");
     expect(decoded.scripts?.[0]).toEqual({ name: "Dev", command: "pnpm dev" });
+  });
+
+  it("decodes explicit terminal-link intent without an embedded URL", () => {
+    expect(
+      decodeJson(
+        '{ "scripts": [{ "name": "Sign in", "command": "auth-tool login", "terminalLinkProfileName": "Work account" }] }',
+      ).scripts?.[0]?.terminalLinkProfileName,
+    ).toBe("Work account");
   });
 
   it("fails on malformed JSON", () => {

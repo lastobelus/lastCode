@@ -8,6 +8,7 @@ import {
 } from "@t3tools/client-runtime/media-actions";
 import {
   AuthFilesystemReadScope,
+  AuthOrchestrationReadScope,
   type EnvironmentId,
   sessionGrantsScope,
   type SessionGrantInput,
@@ -26,7 +27,11 @@ import { copyTextWithHaptic } from "../lib/copyTextWithHaptic";
 import { loadLocalAttachmentPreview } from "../lib/localAttachmentPreview";
 
 function allowsHostMedia(session: SessionGrantInput | null) {
-  return session === null || sessionGrantsScope(session, AuthFilesystemReadScope);
+  return (
+    session === null ||
+    sessionGrantsScope(session, AuthFilesystemReadScope) ||
+    sessionGrantsScope(session, AuthOrchestrationReadScope)
+  );
 }
 
 function canReadHostMedia(environmentId: EnvironmentId | null): boolean {
