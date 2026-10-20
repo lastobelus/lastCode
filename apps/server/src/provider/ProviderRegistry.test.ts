@@ -2091,7 +2091,7 @@ it.layer(
               cached = false;
               events.push(`invalidate:${id}`);
             }),
-            orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+            orchestrationAdapter: makeCatalogAdapter(),
             textGeneration: {} as ProviderInstance["textGeneration"],
           };
         };
