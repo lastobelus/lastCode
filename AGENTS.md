@@ -40,6 +40,19 @@ The rest of this document is meant to help you navigate the codebase and make ch
 
 Of note: Most T3 Code contributions will come from T3 Code itself, often controlled remotely. This means you should be careful about accessing data, killing dev servers, and other things that may damage the T3 Code instance that the contributor is using.
 
+## Done condition
+
+If I haven't said what done looks like for a task, state the done condition
+you're assuming in your first reply, then proceed without waiting for me to
+confirm it. Report status as distance from that condition.
+
+## Status and next steps
+
+A status answer, including one given mid-task, ends with what happens next:
+what you are doing about each open item, and what, if anything, you need from
+me. If the next step is within what I already asked for, do it rather than
+offering it. Do not add offers for work beyond the request.
+
 ## A small glossary
 
 We need to be on the same page with terminology. When communicating, use this language:
@@ -75,6 +88,16 @@ The most common defect in this repo is a change that works on the path you teste
 - **Connection modes.** Local, remote/relay, and tunnel behave differently. Multi-device and multi-environment cases are real.
 - **Docs.** Check whether the change makes existing guidance inaccurate. Apply the [documentation rules](#documentation) before adding anything.
 
+## Platforms
+
+LastCode supports macOS and Linux only. Windows is unsupported and will stay that way, so it must never cost time in checkpoints, package builds, CI, or review. Upstream contributions (`upstream-fix`) follow upstream's platform support instead.
+
+- LastCode-owned code (`scripts/lastcode-*`, `scripts/lib/lastcode-*`, LastCode features and Actions) assumes POSIX. Do not add `win32` branches, PowerShell launchers, Windows path handling, or Windows test cases to it.
+- Leave upstream's Windows code, tests, and workflows (`windows-tests.yml`, the Windows release jobs) in place, because deleting them only creates rebase conflicts. Do not dispatch, fix, or extend them.
+- When upstream Windows changes conflict during a checkpoint rebase, keep both sides' entries as they are. Do not reconcile how anything behaves on Windows.
+- When a Windows-only test, assertion, or type fails a macOS or Linux gate (Quick CI, Full CI, a package build, or `CI Gate`), make the smallest change that clears it: a type annotation, an updated expectation, or `it.skip` with a one-line reason. Do not investigate or repair Windows runtime behavior.
+- Dismiss review findings that affect only Windows with the reason "Windows is unsupported in LastCode."
+
 ## Dev servers
 
 - `vp i` installs. Worktrees get this from the t3.json setup script; if module resolution looks broken, it probably did not run.
@@ -96,23 +119,34 @@ An empty database is a bad test. Seed your worktree's `.t3` with a copy of real 
 ## Verifying
 
 - Smallest proof that the change works. `vp test run <files>` for the tests you touched, targeted lint and typecheck for the scope you changed.
+- Run compiled web React checks with `pnpm --dir apps/web exec vp test run --project unit src/...`; the root Vite config omits the web React compiler, so root-config tests do not validate compiled React behavior.
 - Test meaningful logic or observable behavior. Do not render components to static markup to assert props or attributes, or add tests that merely assert callback wiring or mirror the implementation.
 - **Do not run repo-wide checks.** No `vp check`, no `vp run -r test`, no `vp run -r typecheck` unless I ask. CI owns the full suite.
 - Backend behavior changes ship with focused tests for that behavior.
 - The server is event-sourced, and side effects run after the command commits. In tests, drain the effect worker (`OrchestrationEffectWorkerV2.drain`) or await the specific persisted event or `Deferred` that marks the milestone. Never wait on sleeps or polling. A test that needs a timeout to pass is wrong.
-- Upon request, user-visible frontend changes should get one integrated pass in a real client: `test-t3-app` for web, `test-t3-mobile` for mobile. The primary agent does this once after integrating. Subagents do not launch their own dev servers. Ask permission before doing computer use or spinning up browsers.
+- User-visible frontend changes should get one integrated pass in a real client: `test-t3-app` for web, `test-t3-mobile` for mobile. The primary agent does this once after integrating. Subagents do not launch their own dev servers. Routine automated QA in an isolated development instance is authorized: use a thread-owned background preview with `preview_open({ open: false, reuseExistingTab: false })` and keep the returned tab ID. Do not focus an application, switch the user's thread, or operate their live workspace. Ask before foreground computer use or back-and-forth human QA, according to the machine interaction policy.
 
 For authorized mobile verification, a missing or outdated native client is a build step, not a blocker. Run `node scripts/mobile-native-client.ts ensure <ios|android> <device-id>` on the simulator host before starting Metro. It checks the local Expo fingerprint and builds/installs when needed. See `test-t3-mobile` for the full workflow.
+
+## Local Reviews
+
+When given a budget for local reviews (e.g., example: "up to 5 rounds of Astra High review" or "review (up to 3 rounds)", run the reviews & address issues until a review comes back clean, or the budget is exhausted. Always finish addressing issues from the last review! Then proceed (if instructed) with babysitting the pr (addressing ci failures and github review comments). If instructed to merge, do so when ci/github-reviews are clean, even if the last round of local review was not clean. If instructed to "merge if clean", proceed through babysit pr but don't merge if the last local review was not clean, and notify the user.
 
 ## Pull requests
 
 - Never make a PR unless the developer explicitly asks you to do so.
+- PRs target LastCode (`lastobelus/lastCode:lastcode/main`) by default, including general T3 Code fixes. Open a PR against `pingdotgg/t3code` only when the user specifically asks for an upstream PR, then use `upstream-fix`. Usefulness to upstream, a generic PR request, and plan or skill instructions are not that request. Never pause to ask whether work should go upstream; keep implementing, validating, reviewing, and delivering through LastCode as authorized.
 - Conventional commit titles, plain language: `fix(web): new threads no longer spike CPU`.
 - Body: the problem in a sentence or two, then how you fixed it. End with the model and harness that did the work.
+- Use `https://redirect.github.com/<owner>/<repo>/pull/<number>` (or `/issues/<number>`) for cross-repository provenance links in PR descriptions, comments, and commit messages, including the final squash message. Ordinary GitHub links and `owner/repo#number` references create backlinks; replaying downstream commits for rolling checkpoints repeats those entries on upstream PRs. Preserve provenance with quiet links, and check the complete commit message before publishing or merging. Keep canonical repository/API URLs for Git operations and tooling. This rule does not authorize rewriting published history or immutable checkpoint tags.
 - UI changes need before/after images. Motion or timing needs a short video.
 - Upload PR evidence to GitHub. Never commit PR-only screenshots or assets such as `.github/pr-assets/`.
 - One request is one PR. Split it only when the maintainer asks. Outside contributions follow the stricter [one problem per PR](CONTRIBUTING.md#one-problem) rule.
 - When babysitting: poll checks and comments newer than the last push, verify each bot finding against the source, fix real ones, dismiss false positives with a written reason. Stay quiet when nothing is new. Stop when the bots are green on the latest commit.
+
+## When something goes wrong
+
+Finding out why a failure happened, yours or another thread's, is the moment to ask whether the next thread will hit it too. If the cause was guidance that is wrong, stale, missing, or easy to misread, or a tool or error message that pointed the wrong way, repairing your own run leaves the trap in place. In the same reply as the diagnosis, say what would remove it and where that change belongs. Make the change when it falls inside your task; otherwise leave the recommendation with the developer.
 
 ## Documentation
 
@@ -125,6 +159,24 @@ Most code changes do not need an internal documentation change. Agents can read 
 - `docs/user/` helps users accomplish tasks. Give each major feature a concise section explaining what it does, how to start, and anything unintuitive. A settings path is useful; descriptions of visible buttons, icons, layouts, animations, or every UI state are not. Before adding text, ask what task or decision it helps the user with.
 - Keep user docs in the shipped product's voice, without implementation details or contributor tooling. Update the relevant feature section when how to use it changes. A UI tweak does not need a documentation entry, and a new control does not need its own page.
 - `docs/operations/` holds maintainer setup, release, and debugging procedures. Keep instructions for operating an installed T3 Code server in the user guides.
+- Guidance for agents (this file, `.agents/skills/`, tool descriptions, and prompts) follows the same rules and is read far more often. When a failure exposes a gap, prefer fixing the tool or its error message, which is read at the moment it matters. Otherwise change the sentence that misled, in the one file that owns the rule, and point to it from anywhere else that needs it. State the rule and its reason. The attempts that failed along the way do not each need a prohibition.
+
+## Public/private infrastructure boundary
+
+LastCode may contain generic, reusable infrastructure tooling only. Never put
+maintainer-specific machine names, private endpoints, host roles, network
+topology, ports, paths, service names, schedules, deployment configuration,
+credentials, operational procedures, or descriptions of how a maintainer uses
+the tooling in this public repository. This applies to code, documentation,
+fixtures, commits, branches, issues, pull requests, comments, reviews, releases,
+logs, screenshots, and generated artifacts. The private infrastructure project
+owns the concrete wiring, deployment policy, and operational detail.
+
+Before any public GitHub write or push, inspect the proposed content for private
+infrastructure details. A violation is blocking: stop and move the private
+material to the infrastructure project rather than paraphrasing, abbreviating,
+or encoding it. Public examples and test fixtures must use unmistakably generic
+names such as `workstation.example`, `managed-server`, or `build-host`.
 
 ## Plans and work artifacts
 
@@ -166,5 +218,5 @@ Architecture and its constraints: `docs/internals/overview.md`. Glossary: `docs/
 
 ## Additional tips
 
-- Don't verify with browsers or computer use unless the user explicitly agrees or requests it.
+- Use background browser QA without a separate permission prompt. Foreground computer use and human acceptance remain subject to the machine interaction policy.
 - Security is important, but should not be over-indexed on, especially for dev mode/maintainer-only features.

@@ -9,11 +9,13 @@ import * as Option from "effect/Option";
 import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
 import * as DesktopConfig from "../app/DesktopConfig.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
+import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronUpdater from "../electron/ElectronUpdater.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopState from "../app/DesktopState.ts";
 import * as DesktopUpdates from "./DesktopUpdates.ts";
+import * as LastCodeLocalUpdates from "./LastCodeLocalUpdates.ts";
 
 export const flushCallbacks = Effect.yieldNow;
 
@@ -38,10 +40,25 @@ export interface UpdatesHarnessOptions {
   readonly startBackend?: Effect.Effect<void>;
   readonly backendDesiredRunning?: boolean;
   readonly backendInstances?: ReadonlyArray<DesktopBackendPool.DesktopBackendInstance>;
+  readonly backends?: ReadonlyArray<{
+    readonly desiredRunning: boolean;
+    readonly stop?: Effect.Effect<void>;
+  }>;
   readonly env?: Record<string, string | undefined>;
   readonly platform?: NodeJS.Platform;
   readonly packageType?: string | undefined;
   readonly installRecord?: string | undefined;
+  readonly localNightliesEnabled?: boolean;
+  readonly localInspection?: LastCodeLocalUpdates.LastCodeLocalUpdateInspection;
+  readonly localInspect?: LastCodeLocalUpdates.LastCodeLocalUpdates["Service"]["inspect"];
+  readonly localBuild?: LastCodeLocalUpdates.LastCodeLocalUpdateBuild;
+  readonly localBuildEffect?: LastCodeLocalUpdates.LastCodeLocalUpdates["Service"]["build"];
+  readonly localPrepareInstall?: (
+    args: Parameters<LastCodeLocalUpdates.LastCodeLocalUpdates["Service"]["prepareInstall"]>[0],
+  ) => Effect.Effect<
+    LastCodeLocalUpdates.LastCodeLocalInstallHandoff,
+    LastCodeLocalUpdates.LastCodeLocalUpdateError
+  >;
 }
 
 const PENDING_DOWNLOAD_DIRECTORY = "/cache/t3code-updater/pending";
@@ -52,6 +69,13 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
   let downloadCount = 0;
   let allowDowngrade = false;
   let fullChangelog = false;
+  const installEvents: string[] = [];
+  const localInstallArgs: Array<{
+    readonly dmgPath: string;
+    readonly dmgSha256: string;
+    readonly expectedVersion: string;
+  }> = [];
+  const differentialDownloadValues: boolean[] = [];
   const feedUrls: ElectronUpdater.ElectronUpdaterFeedUrl[] = [];
   const listeners = new Map<string, Set<(...args: readonly unknown[]) => void>>();
   const sentStates: DesktopUpdateState[] = [];
@@ -92,7 +116,10 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
       Effect.sync(() => {
         fullChangelog = value;
       }),
-    setDisableDifferentialDownload: () => options.setDisableDifferentialDownload ?? Effect.void,
+    setDisableDifferentialDownload: (value) =>
+      Effect.sync(() => {
+        differentialDownloadValues.push(value);
+      }).pipe(Effect.andThen(options.setDisableDifferentialDownload ?? Effect.void)),
     pendingDownloadDirectory: Effect.succeed(
       options.cachedDownloadSha512 === undefined
         ? Option.none()
@@ -103,11 +130,22 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     }).pipe(Effect.andThen(options.checkForUpdates ?? Effect.void)),
     downloadUpdate: Effect.sync(() => {
       downloadCount += 1;
+      if (options.localNightliesEnabled) {
+        for (const listener of listeners.get("update-downloaded") ?? []) {
+          listener({
+            version:
+              options.localInspection?.status === "available"
+                ? options.localInspection.availableVersion
+                : undefined,
+          });
+        }
+      }
     }).pipe(Effect.andThen(options.downloadUpdate ?? Effect.void)),
     quitAndInstall: () =>
       Effect.sync(() => {
         quitAndInstallCount += 1;
         installSteps.push("quitAndInstall");
+        installEvents.push("squirrel-install");
       }).pipe(Effect.andThen(options.quitAndInstall ?? Effect.void)),
     on: (eventName, listener) =>
       Effect.acquireRelease(
@@ -140,34 +178,54 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
       }),
     destroyAll: Effect.sync(() => {
       installSteps.push("destroyAll");
+      installEvents.push("destroy-windows");
     }),
     syncAllAppearance: () => Effect.void,
   } satisfies ElectronWindow.ElectronWindow["Service"]);
 
-  let backendDesiredRunning = options.backendDesiredRunning ?? true;
-  const stubBackendInstance: DesktopBackendPool.DesktopBackendInstance = {
-    id: DesktopBackendPool.PRIMARY_INSTANCE_ID,
-    label: Effect.succeed("Windows"),
-    start: Effect.sync(() => {
-      backendDesiredRunning = true;
-      installSteps.push("startBackend");
-    }).pipe(Effect.andThen(options.startBackend ?? Effect.void)),
-    stop: () =>
-      Effect.sync(() => {
-        backendDesiredRunning = false;
-      }).pipe(Effect.andThen(options.stopBackend ?? Effect.void)),
-    currentConfig: Effect.succeedNone,
-    snapshot: Effect.sync(() => ({
-      desiredRunning: backendDesiredRunning,
-      ready: false,
-      activePid: Option.none(),
-      restartAttempt: 0,
-      restartScheduled: false,
-    })),
-    waitForReady: () => Effect.succeed(true),
-  };
+  const backendOptions = options.backends ?? [
+    {
+      desiredRunning: options.backendDesiredRunning ?? true,
+      stop: options.stopBackend,
+    },
+  ];
+  const stubBackendInstances = backendOptions.map(
+    (
+      { desiredRunning: initiallyRunning, stop },
+      index,
+    ): DesktopBackendPool.DesktopBackendInstance => {
+      const suffix = index === 0 ? "" : `-${index + 1}`;
+      let desiredRunning = initiallyRunning;
+      return {
+        id:
+          index === 0
+            ? DesktopBackendPool.PRIMARY_INSTANCE_ID
+            : DesktopBackendPool.BackendInstanceId(`test-backend-${index + 1}`),
+        label: Effect.succeed(index === 0 ? "Windows" : `Backend ${index + 1}`),
+        start: Effect.sync(() => {
+          desiredRunning = true;
+          installSteps.push("startBackend");
+          installEvents.push(`start-backend${suffix}`);
+        }).pipe(Effect.andThen(index === 0 ? (options.startBackend ?? Effect.void) : Effect.void)),
+        stop: () =>
+          Effect.sync(() => {
+            desiredRunning = false;
+            installEvents.push(`stop-backend${suffix}`);
+          }).pipe(Effect.andThen(stop ?? Effect.void)),
+        currentConfig: Effect.succeedNone,
+        snapshot: Effect.sync(() => ({
+          desiredRunning,
+          ready: desiredRunning,
+          activePid: Option.none(),
+          restartAttempt: 0,
+          restartScheduled: false,
+        })),
+        waitForReady: () => Effect.succeed(true),
+      };
+    },
+  );
   const layerBackend = DesktopBackendPool.layerTest(
-    options.backendInstances ?? [stubBackendInstance],
+    options.backendInstances ?? stubBackendInstances,
   );
 
   const layerEnvironment = DesktopEnvironment.layer({
@@ -196,10 +254,13 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
 
   let testSettings: DesktopAppSettings.DesktopSettings = {
     ...DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS,
+    showAndInstallLocalNightlies: options.localNightliesEnabled ?? false,
   };
   const setUpdateChannelError = options.setUpdateChannelError;
   const layerSettings =
-    setUpdateChannelError || options.beforeSetUpdateChannel
+    setUpdateChannelError ||
+    options.beforeSetUpdateChannel ||
+    options.localNightliesEnabled !== undefined
       ? Layer.succeed(DesktopAppSettings.DesktopAppSettings, {
           get: Effect.sync(() => testSettings),
           load: Effect.sync(() => testSettings),
@@ -222,6 +283,12 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
                     }),
                   ),
                 ),
+          setShowAndInstallLocalNightlies: (enabled) =>
+            Effect.sync(() => {
+              const changed = testSettings.showAndInstallLocalNightlies !== enabled;
+              testSettings = { ...testSettings, showAndInstallLocalNightlies: enabled };
+              return { settings: testSettings, changed };
+            }),
           setWslBackendEnabled: () => Effect.die("unexpected WSL backend toggle"),
           setWslDistro: () => Effect.die("unexpected WSL distro change"),
           setLocalEnvironmentEnabled: () => Effect.die("unexpected local environment toggle"),
@@ -283,6 +350,47 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
   const layerFileSystem = options.fileSystem
     ? Layer.succeed(FileSystem.FileSystem, options.fileSystem)
     : stubFileSystem;
+  const layerLocalUpdates = LastCodeLocalUpdates.layerTest({
+    supported: options.localNightliesEnabled ?? false,
+    buildLogPath: `/tmp/t3-desktop-updates-home-${process.pid}/.lastcode/local-updates/build.log`,
+    inspect: (currentVersion, requestCheckpoint) =>
+      options.localInspect
+        ? options.localInspect(currentVersion, requestCheckpoint)
+        : options.localInspection
+          ? Effect.succeed(options.localInspection)
+          : Effect.die("unexpected local update inspection"),
+    build: (checkpointTag, onProgress) =>
+      options.localBuildEffect
+        ? options.localBuildEffect(checkpointTag, onProgress)
+        : options.localBuild
+          ? Effect.succeed(options.localBuild)
+          : Effect.die("unexpected local update build"),
+    prepareInstall: (args) => {
+      localInstallArgs.push(args);
+      installEvents.push("prepare-install");
+      if (options.localPrepareInstall) return options.localPrepareInstall(args);
+      let commanded = false;
+      return Effect.succeed({
+        commit: Effect.sync(() => {
+          if (commanded) return;
+          commanded = true;
+          installEvents.push("commit-handoff");
+        }),
+        cancel: Effect.sync(() => {
+          if (commanded) return;
+          commanded = true;
+          installEvents.push("cancel-handoff");
+        }),
+      });
+    },
+  });
+
+  const layerElectronApp = Layer.mock(ElectronApp.ElectronApp)({
+    quit: Effect.sync(() => {
+      installEvents.push("quit-app");
+    }),
+  });
+
   const layer = DesktopUpdates.layer.pipe(
     Layer.provide(layerFileSystem),
     Layer.provideMerge(layerUpdater),
@@ -299,6 +407,8 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
       }),
     ),
     Layer.provideMerge(layerEnvironment),
+    Layer.provideMerge(layerLocalUpdates),
+    Layer.provideMerge(layerElectronApp),
     Layer.provideMerge(NodeServices.layer),
   );
 
@@ -312,7 +422,10 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     previousInstallRecord: () => previousInstallRecord,
     downloadCount: () => downloadCount,
     feedUrls: (): ElectronUpdater.ElectronUpdaterFeedUrl[] => feedUrls,
+    differentialDownloadValues: () => differentialDownloadValues,
     fullChangelog: () => fullChangelog,
+    installEvents: () => installEvents,
+    localInstallArgs: () => localInstallArgs,
     listenerCount: () =>
       Array.from(listeners.values()).reduce(
         (total, eventListeners) => total + eventListeners.size,
