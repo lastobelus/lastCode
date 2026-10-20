@@ -1,5 +1,6 @@
 import { formatFilePathForClipboard } from "@t3tools/client-runtime/media-actions";
 import { resolvePathLinkTarget } from "@t3tools/shared/fileLinks";
+import { resolveThreadVisitDecision } from "./ChatView.logic";
 import { ThreadFind, ThreadFindCanvas, type ThreadFindControls } from "./chat/ThreadFindProvider";
 import { THREAD_FIND_BAR_RESERVED_HEIGHT } from "./chat/ThreadFindBar";
 import { useActionResumeBanners } from "./chat/useActionResumeBanners";
@@ -4633,7 +4634,10 @@ export default function ChatView(props: ChatViewProps) {
   useEffect(() => {
     if (!activeThread?.id || terminalUiState.terminalOpen) return;
     const frame = window.requestAnimationFrame(() => {
-      focusComposerStable();
+      // A double-click can mount the row editor before this navigation frame runs.
+      if (!document.activeElement?.matches('[data-sidebar="menu-sub-button"] input')) {
+        focusComposerStable();
+      }
     });
     return () => {
       window.cancelAnimationFrame(frame);
@@ -8921,26 +8925,44 @@ function ThreadVisitWatermark(props: { readonly threadRef: ScopedThreadRef }) {
   );
   const visitThreadMutation = useAtomCommand(threadEnvironment.visit, { reportFailure: false });
   const lastDispatchedVisitRef = useRef<string | null>(null);
+  const lastObservedVisitRef = useRef<{ threadKey: string; visitedAt: number } | null>(null);
   const lastVisitDispatchAtRef = useRef(0);
 
   useEffect(() => {
-    if (!serverThread?.id) return;
+    if (!serverThread?.id) {
+      lastObservedVisitRef.current = null;
+      lastDispatchedVisitRef.current = resolveThreadVisitDecision(
+        NaN,
+        NaN,
+        null,
+        lastDispatchedVisitRef.current,
+      ).nextKey;
+      return;
+    }
     const threadUpdatedAt = Date.parse(serverThread.updatedAt);
-    if (Number.isNaN(threadUpdatedAt)) return;
     const effectiveLastVisitedAt = resolveThreadLastVisitedAt(
       serverThread.lastVisitedAt,
       activeThreadLocalLastVisitedAt,
     );
     const lastVisitedAt = effectiveLastVisitedAt ? Date.parse(effectiveLastVisitedAt) : NaN;
-    if (!Number.isNaN(lastVisitedAt) && lastVisitedAt >= threadUpdatedAt) return;
+    const dispatchKey = `${threadKey}:${serverThread.updatedAt}`;
+    const previousVisit = lastObservedVisitRef.current;
+    const rewound =
+      previousVisit?.threadKey === threadKey && lastVisitedAt < previousVisit.visitedAt;
+    lastObservedVisitRef.current = { threadKey, visitedAt: lastVisitedAt };
+    const visitDecision = resolveThreadVisitDecision(
+      threadUpdatedAt,
+      lastVisitedAt,
+      dispatchKey,
+      lastDispatchedVisitRef.current,
+      rewound,
+    );
+    if (!visitDecision.record) {
+      lastDispatchedVisitRef.current = visitDecision.nextKey;
+      return;
+    }
 
     if (serverThread.lastVisitedAt !== undefined) {
-      // Dedupe per watermark — the effect re-runs before the command's echo
-      // lands. The dedupe also keeps a mark-unread on the open thread sticky:
-      // the rewind leaves updatedAt untouched, so the already-dispatched key
-      // skips a fresh visit until new activity lands or the thread is reopened.
-      const dispatchKey = `${threadKey}:${serverThread.updatedAt}`;
-      if (lastDispatchedVisitRef.current === dispatchKey) return;
       const dispatch = () => {
         lastDispatchedVisitRef.current = dispatchKey;
         lastVisitDispatchAtRef.current = Date.now();
@@ -8964,6 +8986,7 @@ function ThreadVisitWatermark(props: { readonly threadRef: ScopedThreadRef }) {
       return () => clearTimeout(timer);
     }
 
+    lastDispatchedVisitRef.current = visitDecision.nextKey;
     markThreadVisited(
       scopedThreadKey(scopeThreadRef(serverThread.environmentId, serverThread.id)),
       serverThread.updatedAt,

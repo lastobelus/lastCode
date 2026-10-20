@@ -1,5 +1,8 @@
 import type { ResolvedKeybindingsConfig, ScopedThreadRef } from "@t3tools/contracts";
-import { DEFAULT_RESOLVED_KEYBINDINGS } from "@t3tools/shared/keybindings";
+import {
+  DEFAULT_RESOLVED_KEYBINDINGS,
+  compileResolvedKeybindingsConfig,
+} from "@t3tools/shared/keybindings";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import { act } from "react";
@@ -324,9 +327,17 @@ describe("root reopen shortcut", () => {
   });
 
   it("always forwards the layout toggles out of a focused desktop browser", async () => {
+    state.keybindings = [
+      ...DEFAULT_RESOLVED_KEYBINDINGS,
+      ...compileResolvedKeybindingsConfig([{ key: "mod+shift+b", command: "sidebar.mode.toggle" }]),
+    ];
     await render();
     expect(state.setShortcuts).toHaveBeenLastCalledWith([
       expect.objectContaining({ command: "sidebar.toggle" }),
+      expect.objectContaining({
+        command: "sidebar.mode.toggle",
+        shortcut: expect.objectContaining({ key: "b", modKey: true, shiftKey: true }),
+      }),
       expect.objectContaining({ command: "rightPanel.toggle" }),
     ]);
   });

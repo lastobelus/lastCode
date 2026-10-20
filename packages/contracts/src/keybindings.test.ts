@@ -22,6 +22,16 @@ const decode = <S extends Schema.Top>(
 const decodeResolvedRule = Schema.decodeUnknownEffect(ResolvedKeybindingRule as never);
 const encodeResolvedKeybindings = Schema.encodeEffect(ResolvedKeybindingsConfig);
 
+it.effect("parses the LastCode sidebar mode keybinding", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decode(KeybindingRule, {
+      key: "mod+shift+b",
+      command: "sidebar.mode.toggle",
+    });
+    assert.strictEqual(parsed.command, "sidebar.mode.toggle");
+  }),
+);
+
 it.effect("rejects invalid command values", () =>
   Effect.gen(function* () {
     for (const command of ["script..run", "script. setup .run"]) {
