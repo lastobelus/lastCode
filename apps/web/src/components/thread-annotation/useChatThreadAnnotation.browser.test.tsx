@@ -170,7 +170,7 @@ describe("chat annotation ownership", () => {
       environmentId: a.environmentId,
       input: { threadId: a.threadId, body: "New note" },
     });
-    expect(editor()).toBeNull();
+    await expect.poll(editor).toBeNull();
   });
   it("resolves from the banner and reopens from the timeline", async () => {
     await render();
