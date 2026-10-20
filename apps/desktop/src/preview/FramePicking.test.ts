@@ -332,16 +332,17 @@ function observerFixture(ignore: (element: Element) => boolean = () => false) {
   });
   const changed = vi.fn();
   const watch = observeFrameDocuments(top, attach, changed, ignore);
-  const mutate = (record: Partial<MutationRecord>) =>
+  const mutate = (records: Partial<MutationRecord> | Partial<MutationRecord>[]) =>
     callbacks.get(top)!(
-      [
-        {
-          target: unrelated,
-          addedNodes: [],
-          removedNodes: [],
-          ...record,
-        } as unknown as MutationRecord,
-      ],
+      (Array.isArray(records) ? records : [records]).map(
+        (record) =>
+          ({
+            target: unrelated,
+            addedNodes: [],
+            removedNodes: [],
+            ...record,
+          }) as unknown as MutationRecord,
+      ),
       {} as MutationObserver,
     );
   return {
@@ -372,12 +373,14 @@ describe("frame document observation", () => {
     await Promise.resolve();
     expect(fixture.changed).not.toHaveBeenCalled();
     expect(fixture.queryFrames).toHaveBeenCalledTimes(1);
-    fixture.mutate({
-      target: annotation,
-      type: "childList",
-      removedNodes: [fixture.frame] as unknown as NodeList,
-    });
-    fixture.mutate({ type: "attributes", attributeName: "hidden" });
+    fixture.mutate([
+      {
+        target: annotation,
+        type: "childList",
+        removedNodes: [fixture.frame] as unknown as NodeList,
+      },
+      { type: "attributes", attributeName: "hidden" },
+    ]);
     await Promise.resolve();
     expect(fixture.changed).toHaveBeenCalledTimes(1);
     expect(fixture.queryFrames).toHaveBeenCalledTimes(1);

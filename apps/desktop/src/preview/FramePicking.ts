@@ -415,6 +415,10 @@ export function pickInDocument(
   return null;
 }
 
+function containsFrame(node: Node) {
+  return isElement(node) && (node.localName === "iframe" || node.querySelector("iframe") !== null);
+}
+
 /** Owns one document's annotation listeners and mutation subscription until cleanup. */
 function observeFrameDocument(
   owner: Document,
@@ -422,8 +426,6 @@ function observeFrameDocument(
   queueUpdate: (discover: boolean) => void,
   ignore: (element: Element) => boolean,
 ) {
-  const containsFrame = (node: Node) =>
-    isElement(node) && (node.localName === "iframe" || node.querySelector("iframe") !== null);
   const cleanup = attach(owner);
   const observer = new MutationObserver((records) => {
     let pageChanged = false;
