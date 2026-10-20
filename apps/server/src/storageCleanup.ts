@@ -80,6 +80,16 @@ type CleanupWorkingEntry = {
   -readonly [Key in keyof StorageCleanupReportEntry]: StorageCleanupReportEntry[Key];
 };
 
+type OwnershipScope = {
+  readonly cwd: string;
+  readonly projectId: ProjectId;
+  readonly branch: string | null;
+  readonly threads: ReadonlyArray<
+    Pick<OrchestrationV2ThreadShell, "id" | "projectId" | "branch" | "worktreePath">
+  >;
+  readonly projects: ReadonlyArray<{ readonly id: ProjectId; readonly workspaceRoot: string }>;
+};
+
 function cleanupFailureReason(error: { readonly message: string }) {
   return isGitCommandError(error)
     ? `${error.command}: ${error.detail.split(/\r?\n/)[0]}${error.reason ? ` (${error.reason})` : ""}`
@@ -905,9 +915,101 @@ const make = Effect.gen(function* () {
 
   const ownershipChangedSince = Effect.fn("StorageCleanup.ownershipChangedSince")(function* (
     sequence: number,
+    scope?: OwnershipScope,
   ) {
-    // Thread-core payloads and project events can change workspace ownership.
-    // Read only events after the batch; unrelated streaming output is safe to ignore.
+    if (scope !== undefined) {
+      // Core events also carry visits, attention and PR updates. Compare their
+      // ownership fields rather than treating ordinary conversation activity as
+      // a workspace change. Keep all observed transitions, including a new owner
+      // that moves away again before the final check.
+      const rows = yield* sql<{
+        kind: string;
+        id: string;
+        worktreePath: string | null;
+        projectId: string | null;
+        branch: string | null;
+        pathType: string | null;
+        branchType: string | null;
+      }>`
+        SELECT DISTINCT aggregate_kind AS kind, stream_id AS id,
+          CASE WHEN aggregate_kind = 'thread' THEN json_extract(payload_json, '$.worktreePath') END AS "worktreePath",
+          CASE WHEN aggregate_kind = 'thread' THEN json_extract(payload_json, '$.projectId') END AS "projectId",
+          CASE WHEN aggregate_kind = 'thread' THEN json_extract(payload_json, '$.branch') END AS branch,
+          CASE WHEN aggregate_kind = 'thread' THEN json_type(payload_json, '$.worktreePath') END AS "pathType",
+          CASE WHEN aggregate_kind = 'thread' THEN json_type(payload_json, '$.branch') END AS "branchType"
+        FROM orchestration_events
+        WHERE sequence > ${sequence}
+          AND (aggregate_kind = 'project' OR event_type LIKE 'thread.%')
+          AND event_type != 'thread.pull-request-link-updated'
+        LIMIT 1001
+      `;
+      if (rows.length > 1000) return true;
+      if (rows.some((row) => row.kind === "project")) {
+        const current = yield* projectStore.listShells();
+        // Structural project changes can introduce a competing repository
+        // mapping even when the new root is elsewhere. Cosmetic edits cannot.
+        if (
+          current.length !== scope.projects.length ||
+          current.some((project) => {
+            const initial = scope.projects.find((entry) => entry.id === project.id);
+            return (
+              initial === undefined ||
+              path.resolve(initial.workspaceRoot) !== path.resolve(project.workspaceRoot)
+            );
+          })
+        )
+          return true;
+      }
+      const initial = new Map(scope.threads.map((thread) => [String(thread.id), thread]));
+      for (const row of rows) {
+        if (row.kind !== "thread") continue;
+        if (
+          (row.pathType !== "text" && row.pathType !== "null") ||
+          (row.branchType !== "text" && row.branchType !== "null") ||
+          typeof row.projectId !== "string"
+        )
+          return true;
+        const before = initial.get(row.id);
+        if (
+          before !== undefined &&
+          before.worktreePath === row.worktreePath &&
+          before.projectId === row.projectId &&
+          before.branch === row.branch
+        )
+          continue;
+        // Ownerless cleanup also requires that no thread history claims this
+        // project/branch, even if that thread records a different checkout.
+        if (
+          scope.branch !== null &&
+          row.projectId === scope.projectId &&
+          row.branch === scope.branch
+        )
+          return true;
+        for (const recordedPath of [before?.worktreePath, row.worktreePath]) {
+          if (recordedPath == null) continue;
+          const resolved = path.resolve(recordedPath);
+          const canonical = yield* fs.realPath(resolved).pipe(
+            Effect.catchIf(
+              (error) =>
+                error.cause instanceof Error &&
+                "code" in error.cause &&
+                error.cause.code === "ENOENT",
+              () => Effect.succeed(resolved),
+            ),
+            Effect.orElseSucceed(() => null),
+          );
+          if (
+            canonical === null ||
+            canonical === scope.cwd ||
+            inside(scope.cwd, canonical) ||
+            inside(canonical, scope.cwd)
+          )
+            return true;
+        }
+      }
+      return false;
+    }
+    // The informational orphan audit has no candidate-specific snapshot.
     const rows = yield* sql`
       SELECT 1 FROM orchestration_events
       WHERE sequence > ${sequence}
@@ -1303,6 +1405,15 @@ const make = Effect.gen(function* () {
       decodeCleanupThread(row.payload_json),
     );
     const legacyOwners = yield* worktreeCleanup.historicalWorktreeOwners;
+    const ownershipThreads = [...historicalOwners, ...snapshot.threads, ...deletedOwners];
+    const workspaceOwnershipChanged = (cwd: string, projectId: ProjectId, branch: string | null) =>
+      ownershipChangedSince(sequence, {
+        cwd,
+        projectId,
+        branch,
+        threads: ownershipThreads,
+        projects: snapshot.projects,
+      });
     const knownPaths = new Set([...groups.keys(), ...deletedGroups.keys()]);
     for (const owner of [
       ...historicalOwners.map((thread) => thread.worktreePath),
@@ -1463,7 +1574,7 @@ const make = Effect.gen(function* () {
             resolveWorktreeCleanup(current, project.id).worktreeDependenciesAfterDays !== days
           )
             return keep("Dependency cleanup policy or locations changed");
-          if (yield* ownershipChangedSince(sequence))
+          if (yield* workspaceOwnershipChanged(cwd, project.id, branch))
             return keep("Workspace ownership changed during cleanup");
           if (!(yield* pathIdentityUnchanged(recordedPath, cwd)))
             return keep("Worktree path is a symlink or its location changed");
@@ -1491,7 +1602,7 @@ const make = Effect.gen(function* () {
             latest !== null &&
             !latest.renewed &&
             (generatedBuilds || latest.lastUsedAt === observation.lastUsedAt) &&
-            !(yield* ownershipChangedSince(sequence)) &&
+            !(yield* workspaceOwnershipChanged(cwd, project.id, branch)) &&
             resolveWorktreeCleanup(yield* settingsService.getSettings, project.id)
               .worktreeDependenciesAfterDays === days
           );
@@ -1549,7 +1660,6 @@ const make = Effect.gen(function* () {
         cleanOwnerless,
       );
     }
-    const ownershipChanged = yield* ownershipChangedSince(sequence);
     const candidates = [
       ...Map.groupBy([...liveOwners, ...deletedOwners], (owner) => owner.cleanupPath).values(),
     ].map((owners) => ({
@@ -1614,7 +1724,8 @@ const make = Effect.gen(function* () {
         const managedWorktreesRoot = roots.find((root) => inside(root, worktreePath));
         if (managedWorktreesRoot === undefined)
           return keep("Worktree is outside the configured cleanup locations");
-        if (ownershipChanged) return keep("Workspace ownership changed during cleanup");
+        if (yield* workspaceOwnershipChanged(worktreePath, thread.projectId, thread.branch))
+          return keep("Workspace ownership changed during cleanup");
         if (processCwds === null) return keep("Could not check running processes safely");
         if (!deleted && !storageCleanupThreadIdle(thread, now))
           return keep("Thread still has active or pending work");
@@ -1820,9 +1931,9 @@ const make = Effect.gen(function* () {
                     return keep("Worktree path is a symlink or its location changed");
                   if (yield* terminalUsesDependencies(worktreePath, recordedWorktreePath))
                     return keep("A terminal is still using this worktree");
-                  // Reuse normalized ownership and project roots only while no
-                  // ownership event has changed them; otherwise defer to a new sweep.
-                  if (yield* ownershipChangedSince(sequence))
+                  if (
+                    yield* workspaceOwnershipChanged(worktreePath, thread.projectId, thread.branch)
+                  )
                     return keep("Workspace ownership changed during cleanup");
                   if (yield* containsProjectRoot(worktreePath, [project, ...snapshot.projects]))
                     return keep("A project uses this worktree as its main workspace");
@@ -1870,7 +1981,11 @@ const make = Effect.gen(function* () {
                     return keep("Thread still has active or pending work");
                   return (
                     !(yield* terminalUsesDependencies(worktreePath, recordedWorktreePath)) &&
-                    !(yield* ownershipChangedSince(sequence)) &&
+                    !(yield* workspaceOwnershipChanged(
+                      worktreePath,
+                      thread.projectId,
+                      thread.branch,
+                    )) &&
                     allOwnerPoliciesUnchanged(yield* settingsService.getSettings)
                   );
                 },
@@ -1896,21 +2011,7 @@ const make = Effect.gen(function* () {
                 return yield* revalidate();
               });
               const isStillEligible = Effect.gen(function* () {
-                if (!archived) {
-                  const dependencyActivity = yield* observe(
-                    { managedWorktreesRoot, worktreePath, repositoryRoot: project.workspaceRoot },
-                    now,
-                    false,
-                    false,
-                  );
-                  if (
-                    dependencyActivity === null ||
-                    dependencyActivity.renewed ||
-                    dependencyActivity.lastUsedAt >= now - days * DAY_MS
-                  )
-                    return keep("Dependency installation or use changed during cleanup");
-                }
-                if (!(yield* familyStillIdle())) return false;
+                if (!(yield* candidateStillIdle())) return false;
                 if (
                   eligibilitySequence === null ||
                   (yield* terminalUsesDependencies(worktreePath, recordedWorktreePath)) ||
@@ -1925,14 +2026,23 @@ const make = Effect.gen(function* () {
                     .worktreeDependenciesAfterDays !== days
                 )
                   return false;
-                // Siblings and mount inventory may take time. Invalidate prepared
-                // eligibility with indexed new events and current state, without
-                // repeating Git, project-root resolution or provider-history scans.
+                if (yield* workspaceOwnershipChanged(worktreePath, thread.projectId, thread.branch))
+                  return keep("Workspace ownership changed during cleanup");
+                // Siblings and mount inventory may take time. Late runtime or
+                // core mutations for any known owner invalidate prepared state;
+                // visits, PR refreshes and other bookkeeping cannot change it.
                 const changed = yield* sql`
                   SELECT 1 FROM orchestration_events
                   WHERE sequence > ${eligibilitySequence}
-                    AND (aggregate_kind = 'project' OR event_type LIKE 'thread.%'
-                      OR (aggregate_kind = 'thread' AND stream_id = ${thread.id}))
+                    AND aggregate_kind = 'thread'
+                    AND stream_id IN ${sql.in(owners.map((owner) => owner.id))}
+                    AND event_type NOT IN (
+                      'thread.visited', 'thread.marked-unread',
+                      'thread.pull-request-link-updated', 'thread.pull-request-synced',
+                      'thread.attention-set', 'thread.attention-cleared',
+                      'thread.pinned', 'thread.unpinned',
+                      'thread.pin-reordered', 'thread.active-reordered'
+                    )
                   LIMIT 1
                 `;
                 if (changed.length > 0 || (yield* hasPendingWorkspaceWork(thread.id))) return false;
@@ -2424,7 +2534,15 @@ const make = Effect.gen(function* () {
           const latestProjects = yield* projectStore.listShells();
           if (!policiesUnchanged(yield* settingsService.getSettings))
             return "settings changed since check";
-          if (yield* ownershipChangedSince(sequence))
+          if (
+            yield* ownershipChangedSince(sequence, {
+              cwd: worktreePath,
+              projectId: thread.projectId,
+              branch: thread.branch,
+              threads: [...snapshot.threads, ...deletedThreads],
+              projects: snapshot.projects,
+            })
+          )
             return "thread or project ownership changed since check";
           if (yield* containsProjectRoot(worktreePath, [project, ...latestProjects]))
             return "contains a project checkout";
