@@ -100,6 +100,7 @@ beforeEach(() => {
     ...DEFAULT_SERVER_SETTINGS,
     storageCleanup: {
       worktreeKeepWhen: "uncommitted-changes",
+      worktreeDependenciesAfterDays: null,
       worktreeAfterDays: null,
       worktreeSettledAfterDays: null,
       worktreeOnMerge: false,
@@ -256,5 +257,5 @@ it("shows orphan sizes and identifies failed worktrees with one connected machin
     "No thread uses this folder, and it isn't a git worktree",
   );
   expect(container.textContent).toContain("6.29 MB");
-  expect(container.textContent).toContain("0 B recovered.");
+  expect(container.textContent).toContain("Estimated space recovered: 0 B.");
 });

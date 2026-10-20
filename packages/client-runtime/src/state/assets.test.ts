@@ -74,6 +74,12 @@ describe("createAssetEnvironmentAtoms", () => {
       localFails: true,
       localDefect: true,
     },
+    {
+      name: "linked file stays in its owning environment",
+      path: "/tmp/clip.mp4",
+      error: "context",
+      linkedThreadFile: true,
+    },
     { name: "remote success", path: "/tmp/clip.mp4", success: true },
     { name: "relative path", path: "clip.mp4" },
     { name: "no primary", path: "/tmp/clip.mp4", primary: "none" },
@@ -89,6 +95,7 @@ describe("createAssetEnvironmentAtoms", () => {
         _tag: "media-file" as const,
         threadId: ThreadId.make("foreign-thread"),
         path: scenario.path,
+        ...("linkedThreadFile" in scenario ? { linkedThreadFile: scenario.linkedThreadFile } : {}),
       };
       const error =
         scenario.error === "auth"

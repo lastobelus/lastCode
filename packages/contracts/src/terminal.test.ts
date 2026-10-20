@@ -342,3 +342,22 @@ describe("TerminalEvent", () => {
     ).toBe(true);
   });
 });
+
+describe("terminal link profile launch intent", () => {
+  const input = { threadId: "thread-1", terminalId: "term-action-a", cwd: "/workspace/example" };
+  it("distinguishes explicit ordinary launch intent from reopening retained intent", () => {
+    expect(
+      decodeSync(TerminalOpenInput, { ...input, terminalLinkProfileName: null })
+        .terminalLinkProfileName,
+    ).toBeNull();
+    expect(decodeSync(TerminalOpenInput, input)).not.toHaveProperty("terminalLinkProfileName");
+    expect(
+      decodeSync(TerminalAttachInput, { ...input, terminalLinkProfileName: null })
+        .terminalLinkProfileName,
+    ).toBeNull();
+    expect(
+      decodeSync(TerminalOpenInput, { ...input, terminalLinkProfileName: "Work account" })
+        .terminalLinkProfileName,
+    ).toBe("Work account");
+  });
+});

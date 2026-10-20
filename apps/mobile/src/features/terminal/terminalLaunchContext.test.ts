@@ -246,3 +246,23 @@ describe("initial terminal launch location", () => {
     }
   });
 });
+
+it("keeps profile intent on the staged Action terminal without transferring it to another shell", () => {
+  const target = {
+    environmentId: EnvironmentId.make("env-1"),
+    threadId: ThreadId.make("thread-1"),
+    terminalId: "term-action",
+  };
+  stagePendingTerminalLaunch({
+    target,
+    launch: {
+      cwd: "/workspace/example",
+      worktreePath: null,
+      terminalLinkProfileName: "Work account",
+      initialInput: "auth-tool login\r",
+    },
+  });
+  expect(takePendingTerminalLaunch({ ...target, terminalId: "term-1" })).toBeNull();
+  expect(takePendingTerminalLaunch(target)?.terminalLinkProfileName).toBe("Work account");
+  expect(takePendingTerminalLaunch(target)).toBeNull();
+});

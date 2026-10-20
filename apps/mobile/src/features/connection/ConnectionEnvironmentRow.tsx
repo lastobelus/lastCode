@@ -1,4 +1,5 @@
 import * as Dialog from "../../components/ui/Dialog";
+import { EnvironmentPauseControl } from "../threads/EnvironmentPauseControl";
 import { ConnectionTraceId } from "./ConnectionTraceId";
 import { SymbolView } from "../../components/ui/AppSymbol";
 import { hasSavedBearerRoute } from "@t3tools/client-runtime/connection";
@@ -184,6 +185,8 @@ export function ConnectionEnvironmentRow(props: {
           />
         </Pressable>
       </View>
+
+      <EnvironmentPauseControl environmentId={props.environment.environmentId} />
 
       {props.expanded ? (
         <Animated.View
