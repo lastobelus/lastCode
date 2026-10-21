@@ -1313,12 +1313,12 @@ async function executeLocalCi(
           ...(step.failureHelp ? { failureHelp: step.failureHelp } : {}),
           ...(diagnosticDirectory
             ? {
+                output: process.stdout,
                 onOutput: (output: string) => {
                   NodeFS.appendFileSync(
                     NodePath.join(diagnosticDirectory, `${index + 1}.log`),
                     output,
                   );
-                  process.stdout.write(output);
                 },
               }
             : {}),

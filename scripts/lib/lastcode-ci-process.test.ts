@@ -4,6 +4,7 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeProcess from "node:process";
+import * as NodeStream from "node:stream";
 import { describe, expect, it } from "vite-plus/test";
 import { runCiProcess } from "./lastcode-ci-process.ts";
 
@@ -69,6 +70,151 @@ async function assertControllerDeathWithSubreaper(cwd: string) {
 }
 
 describe("CI process ownership", () => {
+  it("tees both channels completely through a bounded slow sink and waits for its drain", async () => {
+    const bytesPerChannel = 1024 * 1024;
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-ci-output-"));
+    const sinkFile = NodePath.join(directory, "output.log");
+    const received: Buffer[] = [];
+    let retained = "";
+    let total = 0;
+    let maximumBuffered = 0;
+    let releaseFirst!: () => void;
+    let releaseLast!: () => void;
+    let firstWritten!: () => void;
+    let lastWritten!: () => void;
+    const firstWrite = new Promise<void>((resolve) => {
+      firstWritten = resolve;
+    });
+    const lastWrite = new Promise<void>((resolve) => {
+      lastWritten = resolve;
+    });
+    const output = new NodeStream.Writable({
+      highWaterMark: 1024,
+      write(chunk: Buffer, _encoding, callback) {
+        if (chunk.length === 0) {
+          callback();
+          return;
+        }
+        maximumBuffered = Math.max(maximumBuffered, output.writableLength);
+        received.push(Buffer.from(chunk));
+        total += chunk.length;
+        const flush = () => NodeFS.appendFile(sinkFile, chunk, callback);
+        if (received.length === 1) {
+          releaseFirst = () => {
+            releaseFirst = () => {};
+            flush();
+          };
+          firstWritten();
+        } else if (total === bytesPerChannel * 2) {
+          releaseLast = () => {
+            releaseLast = () => {};
+            flush();
+          };
+          lastWritten();
+        } else {
+          flush();
+        }
+      },
+    });
+    const controller = new AbortController();
+    let completed = false;
+    const command = runCiProcess({
+      cwd: process.cwd(),
+      command: process.execPath,
+      args: [
+        "-e",
+        [
+          "const {once} = require('node:events');",
+          `async function send(stream, byte) { for(let n=0;n<${bytesPerChannel / 16384};n++) if(!stream.write(Buffer.alloc(16384,byte))) await once(stream,'drain'); }`,
+          "Promise.all([send(process.stdout,65),send(process.stderr,66)]).catch(error => { console.error(error); process.exitCode=1; });",
+        ].join("\n"),
+      ],
+      signal: controller.signal,
+      terminationGraceMs: 50,
+      output,
+      onOutput: (chunk) => {
+        retained += chunk;
+      },
+    });
+    void command.then(
+      () => {
+        completed = true;
+      },
+      () => {},
+    );
+    try {
+      await firstWrite;
+      expect(completed).toBe(false);
+      expect(output.writableNeedDrain).toBe(true);
+      releaseFirst();
+      await lastWrite;
+      expect(completed).toBe(false);
+      expect(output.writableNeedDrain).toBe(true);
+      releaseLast();
+      await command;
+      const text = Buffer.concat(received).toString();
+      expect(text).toBe(retained);
+      expect(NodeFS.readFileSync(sinkFile, "utf8")).toBe(text);
+      expect(text.length).toBe(bytesPerChannel * 2);
+      expect(text.replaceAll("A", "").length).toBe(bytesPerChannel);
+      expect(text.replaceAll("B", "").length).toBe(bytesPerChannel);
+      expect(maximumBuffered).toBeLessThanOrEqual(256 * 1024);
+      expect(output.writableEnded).toBe(false);
+      expect(output.destroyed).toBe(false);
+    } finally {
+      controller.abort();
+      releaseFirst?.();
+      releaseLast?.();
+      await command.catch(() => {});
+      output.destroy();
+      NodeFS.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["cancel", "write error"])("cleans up blocked output after %s", async (failure) => {
+    const controller = new AbortController();
+    let writing!: () => void;
+    let release!: (error?: Error) => void;
+    const blocked = new Promise<void>((resolve) => {
+      writing = resolve;
+    });
+    const output = new NodeStream.Writable({
+      highWaterMark: 1,
+      write(_chunk, _encoding, callback) {
+        release = (error) => {
+          release = () => {};
+          callback(error);
+        };
+        writing();
+      },
+    });
+    const command = runCiProcess({
+      cwd: process.cwd(),
+      command: process.execPath,
+      args: ["-e", "process.stdout.write('blocked'); setInterval(() => {},1000);"],
+      signal: controller.signal,
+      terminationGraceMs: 50,
+      output,
+    });
+    const rejected = expect(command).rejects.toThrow(
+      failure === "cancel" ? "cancelled while blocked" : "destination write failed",
+    );
+    try {
+      await blocked;
+      expect(output.writableNeedDrain).toBe(true);
+      if (failure === "cancel") controller.abort(new Error("cancelled while blocked"));
+      else release(new Error("destination write failed"));
+      await rejected;
+      if (failure === "cancel") expect(output.destroyed).toBe(false);
+      expect(output.writableEnded).toBe(false);
+    } finally {
+      controller.abort();
+      release?.();
+      await command.catch(() => {});
+      output.destroy();
+    }
+  });
+
   it("finishes descendant cleanup after its controller dies", async () => {
     const cwd = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-ci-controller-"));
     let workerPid: number | undefined;
