@@ -1,5 +1,14 @@
 import { EnvironmentPauseStatus, EnvironmentPauseError } from "./environmentPause.ts";
 import {
+  BuildReviewError,
+  BuildReviewTarget,
+  BuildReviewTargetsInput,
+  BuildReviewPreview,
+  BuildReviewPreviewInput,
+  BuildReviewSelectInput,
+  BuildReviewSelectionResult,
+} from "./generatedBuildReview.ts";
+import {
   OrchestrationV2SearchThreadError,
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
@@ -535,6 +544,9 @@ export const WS_METHODS = {
   serverRemoveKeybinding: "server.removeKeybinding",
   serverRunStorageCleanup: "server.runStorageCleanup",
   serverGetStorageCleanupReport: "server.getStorageCleanupReport",
+  serverGetBuildReviewTargets: "server.getBuildReviewTargets",
+  serverPreviewBuildReview: "server.previewBuildReview",
+  serverSelectBuildReview: "server.selectBuildReview",
   serverGetDatabaseStorage: "server.getDatabaseStorage",
   serverEnvironmentPauseStatus: "server.environmentPauseStatus",
   serverPauseEnvironment: "server.pauseEnvironment",
@@ -809,6 +821,22 @@ const WsServerGetStorageCleanupReportRpc = Rpc.make(WS_METHODS.serverGetStorageC
   success: Schema.NullOr(StorageCleanupReport),
   stream: true,
   error: EnvironmentAuthorizationError,
+});
+
+const WsServerGetBuildReviewTargetsRpc = Rpc.make(WS_METHODS.serverGetBuildReviewTargets, {
+  payload: BuildReviewTargetsInput,
+  success: Schema.Array(BuildReviewTarget),
+  error: Schema.Union([BuildReviewError, EnvironmentAuthorizationError]),
+});
+const WsServerPreviewBuildReviewRpc = Rpc.make(WS_METHODS.serverPreviewBuildReview, {
+  payload: BuildReviewPreviewInput,
+  success: BuildReviewPreview,
+  error: Schema.Union([BuildReviewError, EnvironmentAuthorizationError]),
+});
+const WsServerSelectBuildReviewRpc = Rpc.make(WS_METHODS.serverSelectBuildReview, {
+  payload: BuildReviewSelectInput,
+  success: BuildReviewSelectionResult,
+  error: Schema.Union([BuildReviewError, EnvironmentAuthorizationError]),
 });
 
 const WsServerGetDatabaseStorageRpc = Rpc.make(WS_METHODS.serverGetDatabaseStorage, {
@@ -2128,6 +2156,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerRemoveKeybindingRpc,
   WsServerRunStorageCleanupRpc,
   WsServerGetStorageCleanupReportRpc,
+  WsServerGetBuildReviewTargetsRpc,
+  WsServerPreviewBuildReviewRpc,
+  WsServerSelectBuildReviewRpc,
   WsServerGetDatabaseStorageRpc,
   WsEnvironmentPauseStatusRpc,
   WsPauseEnvironmentRpc,

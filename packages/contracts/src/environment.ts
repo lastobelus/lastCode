@@ -112,6 +112,8 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   worktreeDependencyCleanup: Schema.optionalKey(Schema.Boolean),
   /** Verified compiler outputs share the resolved dependency-cleanup rule. */
   worktreeBuildCleanup: Schema.optionalKey(Schema.Boolean),
+  /** Exact-file review of older build outputs, independently of compiler provenance. */
+  worktreeBuildReview: Schema.optionalKey(Schema.Boolean),
   /** Whole-worktree cleanup preserves unknown, untracked, and ignored local files
       regardless of `worktreeKeepWhen`. Missing on servers with the legacy policy. */
   worktreeLocalPreservation: Schema.optionalKey(Schema.Boolean),

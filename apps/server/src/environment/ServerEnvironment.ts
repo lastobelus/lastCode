@@ -238,6 +238,7 @@ export const make = Effect.gen(function* () {
       threadAutoSettlementScope: true,
       worktreeDependencyCleanup: hostPlatform === "darwin" || hostPlatform === "linux",
       worktreeBuildCleanup: hostPlatform === "darwin" || hostPlatform === "linux",
+      worktreeBuildReview: hostPlatform === "darwin" || hostPlatform === "linux",
       worktreeLocalPreservation: true,
       threadRestartContinuation: true,
       projectSettingsOverrides: true,

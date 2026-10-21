@@ -3,6 +3,7 @@ import { observeDependencyActivity } from "@t3tools/shared/dependencyActivity";
 import {
   createGeneratedBuildStage,
   generatedBuildActivity,
+  observeLegacyBuild,
   recordGeneratedBuildUse,
 } from "@t3tools/shared/generatedBuildOwnership";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -448,15 +449,10 @@ const cleanupFixture = (
       Effect.provideService(ServerConfig.ServerConfig, config),
       Effect.provideService(FileSystem.FileSystem, {
         ...fs,
-        exists: (target: string) =>
+        realPath: (target: string) =>
           failManagedRootCanonicalization && target === config.worktreesDir
-            ? Effect.sync(() => {
-                failManagedRootCanonicalization = false;
-              }).pipe(
-                Effect.flatMap(() => fs.remove(target, { recursive: true })),
-                Effect.as(true),
-              )
-            : fs.exists(target),
+            ? fs.realPath(`${target}/unavailable-canonicalization-fixture`)
+            : fs.realPath(target),
       }),
       Effect.provideService(GitVcsDriver.GitVcsDriver, {
         ...git,
@@ -626,7 +622,11 @@ const cleanupFixture = (
                 }),
               );
             }
-            if (failWorktreeRead && query.includes("WHERE t.deleted_at IS NOT NULL")) {
+            if (
+              failWorktreeRead &&
+              query.includes("WHERE t.deleted_at IS NOT NULL") &&
+              !query.includes('AS "latestEventAt"')
+            ) {
               failWorktreeRead = false;
               return Effect.fail(
                 new SqlError.SqlError({
@@ -3230,7 +3230,7 @@ describe("verified build sweep shares the dependency rule", () => {
             (yield* fixture.service.runNow).entries.filter(
               (entry) => entry.worktreeResource === "generated-builds",
             ),
-          ).toEqual([]);
+          ).toMatchObject([{ outcome: "kept", reason: expect.stringContaining("off") }]);
           expect(
             yield* fixture.fs.exists(`${fixture.worktree}/apps/web/dist/assets/emitted.bin`),
           ).toBe(true);
@@ -3535,7 +3535,7 @@ describe("storage cleanup reports and local file policies", () => {
       Effect.gen(function* () {
         const { service, snapshotReads } = yield* cleanupFixture();
         expect(checkoutEntries(yield* service.runNow)[0]).toMatchObject({ outcome: "removed" });
-        expect(snapshotReads()).toBe(2);
+        expect(snapshotReads()).toBe(3);
       }),
     ),
   );
@@ -3561,8 +3561,8 @@ describe("storage cleanup reports and local file policies", () => {
           yield* Deferred.await(handled);
           yield* Deferred.succeed(fixture.resume, undefined);
           yield* fixture.service.drain;
-          // Candidate scan and post-inventory ownership audit each read once per sweep.
-          expect(fixture.snapshotReads()).toBe(sweeps * 2);
+          // Build metadata, checkout candidates and the ownership audit each read once per sweep.
+          expect(fixture.snapshotReads()).toBe(sweeps * 3);
         }),
       ),
   );
@@ -5047,6 +5047,7 @@ describe("storage cleanup reports and local file policies", () => {
           }),
         );
         expect(report.counts.failed).toBe(1);
+        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(true);
         const auditText = yield* fixture.fs.readFileString(
           `${fixture.config.logsDir}/storage-cleanup.audit.ndjson`,
         );
@@ -5185,6 +5186,7 @@ describe("storage cleanup reports and local file policies", () => {
           }),
         );
         expect(report.counts.failed).toBe(1);
+        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(true);
         expect(report.entries.some((entry) => entry.kind === "browser-artifacts")).toBe(true);
         expect(report.entries.some((entry) => entry.kind === "logs")).toBe(true);
         const auditText = yield* fixture.fs.readFileString(
@@ -5422,7 +5424,360 @@ it.live.each(["thread.settled", "stopped", "ready"] as const)(
         yield* Deferred.await(handled);
         yield* Deferred.succeed(fixture.resume, undefined);
         yield* fixture.service.drain;
-        expect(fixture.snapshotReads()).toBe(2);
+        expect(fixture.snapshotReads()).toBe(3);
+      }),
+    ),
+);
+
+const seedLegacyReviewOutput = Effect.fn("test.seedLegacyReviewOutput")(function* (
+  fixture: Effect.Success<ReturnType<typeof cleanupFixture>>,
+  app = "web",
+) {
+  const source = `${fixture.worktree}/apps/${app}`;
+  yield* fixture.fs.makeDirectory(source, { recursive: true });
+  yield* fixture.fs.writeFileString(`${source}/package.json`, '{"name":"generic-app"}');
+  yield* fixture.fs.writeFileString(`${source}/vite.config.ts`, "export default {};\n");
+  yield* fixture.command(fixture.worktree, ["add", `apps/${app}`]);
+  yield* fixture.command(fixture.worktree, ["commit", "-m", "generic build sources"]);
+  yield* fixture.fs.makeDirectory(`${source}/dist`);
+  yield* fixture.fs.writeFileString(`${source}/dist/old.js`, "old generated bytes");
+  yield* fixture.fs.writeFileString(`${source}/dist/notes.txt`, "retain this note");
+});
+
+describe("legacy build review service", () => {
+  it.live(
+    "lists ownerless builds and starts the configured delay without backdating old files",
+    () =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          const fixture = yield* cleanupFixture();
+          fixture.setDependencyRetention(3);
+          fixture.setThreads([]);
+          yield* seedLegacyReviewOutput(fixture);
+          const targets = yield* fixture.service.buildReviewTargets({});
+          expect(targets).toHaveLength(1);
+          expect(targets[0]).toMatchObject({
+            root: "apps/web/dist",
+            archived: false,
+            delayDays: 3,
+            protectedReason: null,
+          });
+          expect(targets[0]!.eligibleAt).toBeGreaterThanOrEqual(fixture.now + 3 * DAY_MS);
+          const preview = yield* fixture.service.previewBuildReview({ targetId: targets[0]!.id });
+          expect(preview.selectedPaths).toEqual([]);
+          const saved = yield* fixture.service.selectBuildReview({
+            targetId: targets[0]!.id,
+            previewToken: preview.token,
+            paths: ["old.js"],
+          });
+          expect(saved.selectedCount).toBe(1);
+          const report = yield* fixture.service.runNow;
+          expect(
+            report.entries.filter((entry) => entry.worktreeResource === "generated-builds"),
+          ).toMatchObject([{ outcome: "kept" }]);
+          expect(yield* fixture.fs.exists(`${fixture.worktree}/apps/web/dist/old.js`)).toBe(true);
+        }),
+      ),
+  );
+
+  it.live(
+    "reclaims only approved aged ownerless files and retains protection after consumption",
+    () =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          const fixture = yield* cleanupFixture();
+          fixture.setDependencyRetention(3);
+          fixture.setThreads([]);
+          yield* seedLegacyReviewOutput(fixture);
+          yield* Effect.sync(() =>
+            observeLegacyBuild(fixture.worktree, "apps/web/dist", fixture.now - 4 * DAY_MS),
+          );
+          const [target] = yield* fixture.service.buildReviewTargets({});
+          const preview = yield* fixture.service.previewBuildReview({ targetId: target!.id });
+          yield* fixture.service.selectBuildReview({
+            targetId: target!.id,
+            previewToken: preview.token,
+            paths: ["old.js"],
+          });
+          const report = yield* fixture.service.runNow;
+          expect(
+            report.entries.filter((entry) => entry.worktreeResource === "generated-builds"),
+          ).toMatchObject([{ outcome: "removed", files: 1 }]);
+          expect(
+            yield* fixture.fs.readFileString(`${fixture.worktree}/apps/web/dist/notes.txt`),
+          ).toBe("retain this note");
+          yield* fixture.fs.writeFileString(
+            `${fixture.worktree}/apps/web/dist/old.js`,
+            "recreated bytes",
+          );
+          expect(
+            (yield* fixture.service.runNow).entries.filter(
+              (entry) => entry.worktreeResource === "generated-builds",
+            ),
+          ).toMatchObject([{ outcome: "kept" }]);
+          expect(yield* fixture.fs.exists(`${fixture.worktree}/apps/web/dist/old.js`)).toBe(true);
+        }),
+      ),
+  );
+
+  it.live.each(["off", "ambiguous", "provider", "consumer"] as const)(
+    "retains %s ownerless protection during review",
+    (mode) =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          let paths: readonly string[] = [];
+          const fixture = yield* cleanupFixture().pipe(
+            Effect.provideService(
+              WorktreeConsumers.ProcessPaths,
+              Effect.sync(() => paths),
+            ),
+          );
+          fixture.setDependencyRetention(3);
+          fixture.setThreads([]);
+          yield* seedLegacyReviewOutput(fixture);
+          if (mode === "off") fixture.setDependencyRetention(null);
+          if (mode === "ambiguous")
+            fixture.setProjectRoots(projectShells([fixture.repo, fixture.repo]));
+          if (mode === "provider") fixture.setOpenSessionCwd(fixture.worktree);
+          if (mode === "consumer") paths = [`${fixture.worktree}/apps/web/dist/old.js`];
+          const [target] = yield* fixture.service.buildReviewTargets({});
+          expect(target?.protectedReason).toBeTruthy();
+          const preview = yield* fixture.service
+            .previewBuildReview({ targetId: target!.id })
+            .pipe(Effect.result);
+          expect(preview._tag).toBe("Failure");
+          expect(yield* fixture.fs.exists(`${fixture.worktree}/apps/web/dist/old.js`)).toBe(true);
+        }),
+      ),
+  );
+
+  it.live("archived owners remove reviewed files immediately and protect the whole checkout", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture();
+        fixture.setDependencyRetention(90);
+        const owner = shell({
+          branch: "feature",
+          worktreePath: fixture.worktree,
+          archivedAt: fixture.at(-1),
+        });
+        fixture.setThreads([owner]);
+        yield* seedLegacyReviewOutput(fixture);
+        const [target] = yield* fixture.service.buildReviewTargets({});
+        expect(target?.archived).toBe(true);
+        const preview = yield* fixture.service.previewBuildReview({ targetId: target!.id });
+        yield* fixture.service.selectBuildReview({
+          targetId: target!.id,
+          previewToken: preview.token,
+          paths: ["old.js"],
+        });
+        fixture.setThreads([
+          {
+            ...owner,
+            updatedAt: fixture.at(1),
+            lastVisitedAt: fixture.at(1),
+            latestUserMessageAt: fixture.at(1),
+            latestRunCompletedAt: fixture.at(2),
+            latestRunId: RunId.make("finished-status-request"),
+          },
+        ]);
+        expect(
+          (yield* fixture.service.runNow).entries.filter(
+            (entry) => entry.worktreeResource === "generated-builds",
+          ),
+        ).toMatchObject([{ outcome: "removed", files: 1 }]);
+        expect(
+          yield* fixture.fs.readFileString(`${fixture.worktree}/apps/web/dist/notes.txt`),
+        ).toBe("retain this note");
+        yield* fixture.fs.remove(`${fixture.worktree}/apps/web/dist`, { recursive: true });
+        fixture.setRetention(1);
+        fixture.setPolicy("tracked-changes");
+        yield* fixture.service.runNow;
+        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(true);
+      }),
+    ),
+  );
+
+  it.live("changed ownership or policy invalidates the preview without granting authority", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture();
+        fixture.setDependencyRetention(3);
+        fixture.setThreads([]);
+        yield* seedLegacyReviewOutput(fixture);
+        const [target] = yield* fixture.service.buildReviewTargets({});
+        const preview = yield* fixture.service.previewBuildReview({ targetId: target!.id });
+        fixture.setThreads([shell({ branch: "feature", worktreePath: fixture.worktree })]);
+        const result = yield* fixture.service
+          .selectBuildReview({
+            targetId: target!.id,
+            previewToken: preview.token,
+            paths: ["old.js"],
+          })
+          .pipe(Effect.result);
+        expect(result._tag).toBe("Failure");
+        expect(yield* fixture.fs.exists(`${fixture.worktree}/apps/web/dist/old.js`)).toBe(true);
+      }),
+    ),
+  );
+});
+
+it.live.each(["longer delay", "Off review", "competing mapping"] as const)(
+  "observed %s permanently revokes legacy selection before policy early exits",
+  (change) =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture();
+        fixture.setDependencyRetention(3);
+        fixture.setThreads([]);
+        yield* seedLegacyReviewOutput(fixture);
+        yield* Effect.sync(() =>
+          observeLegacyBuild(fixture.worktree, "apps/web/dist", fixture.now - 4 * DAY_MS),
+        );
+        const [target] = yield* fixture.service.buildReviewTargets({});
+        const preview = yield* fixture.service.previewBuildReview({ targetId: target!.id });
+        yield* fixture.service.selectBuildReview({
+          targetId: target!.id,
+          previewToken: preview.token,
+          paths: ["old.js"],
+        });
+        if (change === "longer delay") {
+          fixture.setDependencyRetention(30);
+          yield* fixture.service.runNow;
+        } else if (change === "competing mapping") {
+          fixture.setProjectRoots(projectShells([fixture.repo, fixture.repo]));
+          yield* fixture.service.runNow;
+          fixture.setProjectRoots(projectShells([fixture.repo]));
+        } else {
+          fixture.setDependencyRetention(null);
+          const [protectedTarget] = yield* fixture.service.buildReviewTargets({});
+          expect(protectedTarget?.protectedReason).toContain("off");
+        }
+        fixture.setDependencyRetention(3);
+        const report = yield* fixture.service.runNow;
+        expect(
+          report.entries.filter((entry) => entry.worktreeResource === "generated-builds"),
+        ).toMatchObject([{ outcome: "kept" }]);
+        expect(yield* fixture.fs.readFileString(`${fixture.worktree}/apps/web/dist/old.js`)).toBe(
+          "old generated bytes",
+        );
+        expect(
+          yield* fixture.fs.readFileString(`${fixture.worktree}/apps/web/dist/notes.txt`),
+        ).toBe("retain this note");
+        const refreshed = yield* fixture.service.previewBuildReview({ targetId: target!.id });
+        expect(refreshed.selectedPaths).toEqual([]);
+      }),
+    ),
+);
+
+it.live(
+  "targeted build preview skips sibling preflight and retains the selected final consumer guard",
+  () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        let captures = 0;
+        let finalConsumerCapture = -1;
+        let selectedOutput = "";
+        const fixture = yield* cleanupFixture().pipe(
+          Effect.provideService(
+            WorktreeConsumers.ProcessPaths,
+            Effect.sync(() => {
+              captures++;
+              return captures === finalConsumerCapture ? [selectedOutput] : [];
+            }),
+          ),
+        );
+        fixture.setDependencyRetention(3);
+        fixture.setThreads([]);
+        yield* seedLegacyReviewOutput(fixture);
+        selectedOutput = `${fixture.worktree}/apps/web/dist/old.js`;
+        const [target] = yield* fixture.service.buildReviewTargets({});
+        captures = 0;
+        yield* fixture.service.previewBuildReview({ targetId: target!.id });
+        const capturesWithoutSibling = captures;
+        expect(capturesWithoutSibling).toBeGreaterThan(1);
+        yield* seedLegacyReviewOutput(fixture, "server");
+        captures = 0;
+        yield* fixture.service.previewBuildReview({ targetId: target!.id });
+        expect(captures).toBe(capturesWithoutSibling);
+        captures = 0;
+        finalConsumerCapture = capturesWithoutSibling;
+        const refused = yield* fixture.service
+          .previewBuildReview({ targetId: target!.id })
+          .pipe(Effect.result);
+        expect(refused._tag).toBe("Failure");
+        expect(yield* fixture.fs.readFileString(selectedOutput)).toBe("old generated bytes");
+        expect(
+          yield* fixture.fs.readFileString(`${fixture.worktree}/apps/server/dist/old.js`),
+        ).toBe("old generated bytes");
+      }),
+    ),
+);
+
+it.live(
+  "all-Off cleanup revokes the only project's prior build consent without process capture",
+  () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        let fileCaptures = 0;
+        let cwdCaptures = 0;
+        let providerCaptures = 0;
+        const fixture = yield* cleanupFixture().pipe(
+          Effect.provideService(
+            WorktreeConsumers.ProcessPaths,
+            Effect.sync(() => {
+              fileCaptures++;
+              return [];
+            }),
+          ),
+          Effect.provideService(
+            GeneratedDependencies.ProcessWorkingDirectories,
+            Effect.sync(() => {
+              cwdCaptures++;
+              return [];
+            }),
+          ),
+        );
+        const projectId = ProjectId.make("project-1");
+        fixture.setDependencyRetention(null);
+        fixture.setProjectDependencyRetention(projectId, 3);
+        fixture.setThreads([]);
+        yield* seedLegacyReviewOutput(fixture);
+        yield* Effect.sync(() =>
+          observeLegacyBuild(fixture.worktree, "apps/web/dist", fixture.now - 4 * DAY_MS),
+        );
+        const [target] = yield* fixture.service.buildReviewTargets({});
+        const preview = yield* fixture.service.previewBuildReview({ targetId: target!.id });
+        yield* fixture.service.selectBuildReview({
+          targetId: target!.id,
+          previewToken: preview.token,
+          paths: ["old.js"],
+        });
+        fixture.setProjectWholeCleanupOff(projectId);
+        fixture.setOpenSessionCwd(fixture.repo);
+        fixture.onSessionLiveRead(() => {
+          providerCaptures++;
+        });
+        fileCaptures = 0;
+        cwdCaptures = 0;
+        yield* fixture.service.runNow;
+        expect(fileCaptures).toBe(0);
+        expect(cwdCaptures).toBe(0);
+        expect(providerCaptures).toBe(0);
+        fixture.setProjectDependencyRetention(projectId, 3);
+        const report = yield* fixture.service.runNow;
+        expect(
+          report.entries.filter((entry) => entry.worktreeResource === "generated-builds"),
+        ).toMatchObject([{ outcome: "kept" }]);
+        expect(yield* fixture.fs.readFileString(`${fixture.worktree}/apps/web/dist/old.js`)).toBe(
+          "old generated bytes",
+        );
+        expect(
+          yield* fixture.fs.readFileString(`${fixture.worktree}/apps/web/dist/notes.txt`),
+        ).toBe("retain this note");
+        expect(
+          (yield* fixture.service.previewBuildReview({ targetId: target!.id })).selectedPaths,
+        ).toEqual([]);
       }),
     ),
 );

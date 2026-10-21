@@ -1,4 +1,8 @@
 import {
+  previewLegacyBuild,
+  saveLegacyBuildSelection,
+} from "@t3tools/shared/generatedBuildOwnership";
+import {
   recordDependencyUse,
   dependencyActivitySnapshot,
 } from "@t3tools/shared/dependencyActivity";
@@ -2709,4 +2713,48 @@ it.effect(
       ),
     );
   },
+);
+
+it.effect("an unrelated empty build review keeps dependency cleanup independently eligible", () =>
+  Effect.gen(function* () {
+    const { cleanup, input, fs, dependencyPath } = yield* fixture();
+    const root = "apps/web/dist";
+    yield* fs.makeDirectory(`${input.worktreePath}/${root}`, { recursive: true });
+    yield* fs.writeFileString(`${input.worktreePath}/${root}/notes.txt`, "retained build note");
+    const preview = yield* Effect.promise(() =>
+      previewLegacyBuild(input.worktreePath, root, NOW, "owner"),
+    );
+    yield* Effect.promise(() =>
+      saveLegacyBuildSelection(input.worktreePath, root, NOW, "owner", preview.token, []),
+    );
+    const inspection = yield* cleanup.inspect(input);
+    assert.isNotNull(inspection);
+    assert.isNotNull(yield* cleanup.remove(inspection!, Effect.succeed(true)));
+    assert.isFalse(yield* fs.exists(dependencyPath));
+    assert.equal(
+      yield* fs.readFileString(`${input.worktreePath}/${root}/notes.txt`),
+      "retained build note",
+    );
+  }).pipe(Effect.scoped, Effect.provide(testLayer())),
+);
+
+it.effect(
+  "an unreadable review appearing after final eligibility protects dependency removal",
+  () =>
+    Effect.gen(function* () {
+      const { cleanup, input, fs, dependencyPath, runGit } = yield* fixture();
+      const inspection = yield* cleanup.inspect(input);
+      assert.isNotNull(inspection);
+      const location = yield* runGit(input.worktreePath, ["rev-parse", "--absolute-git-dir"]);
+      const marker = `${location.stdout.trim()}/t3-build-review-${"0".repeat(64)}.json`;
+      const removed = yield* cleanup.removeBatch([
+        {
+          inspection: inspection!,
+          canRemove: Effect.succeed(true),
+          isStillEligible: fs.writeFileString(marker, "unreadable review").pipe(Effect.as(true)),
+        },
+      ]);
+      assert.deepEqual(removed, []);
+      assert.isTrue(yield* fs.exists(dependencyPath));
+    }).pipe(Effect.scoped, Effect.provide(testLayer())),
 );

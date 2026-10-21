@@ -1,4 +1,13 @@
+// @effect-diagnostics nodeBuiltinImport:off -- Opaque server-resolved build review identifiers.
+import * as NodeCrypto from "node:crypto";
 import {
+  legacyBuildActivity,
+  generatedBuildActivity,
+  generatedBuildReviewProtection,
+} from "@t3tools/shared/generatedBuildOwnership";
+import {
+  BuildReviewError,
+  BUILD_REVIEW_PAGE_SIZE,
   GitCommandError,
   OrchestrationV2AppThreadJson,
   OrchestrationV2ProviderSessionJson,
@@ -6,6 +15,12 @@ import {
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import type {
+  BuildReviewTarget,
+  BuildReviewTargetsInput,
+  BuildReviewPreviewInput,
+  BuildReviewPreview,
+  BuildReviewSelectInput,
+  BuildReviewSelectionResult,
   OrchestrationV2ThreadShell,
   ProviderSessionId,
   ProjectId,
@@ -64,6 +79,8 @@ const decodeCleanupSession = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationV2ProviderSessionJson),
 );
 const encodeAuditRecord = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
+const encodeReviewContext = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+const isBuildReviewError = Schema.is(BuildReviewError);
 
 const DAY_MS = 86_400_000;
 // After a settle, the project's settle script needs time to open its
@@ -225,9 +242,24 @@ export function storageCleanupDeletedActivityAt(
   );
 }
 
+type BuildReviewRequest = {
+  readonly input: BuildReviewTargetsInput | BuildReviewPreviewInput | BuildReviewSelectInput;
+  readonly candidates: Array<{ target: BuildReviewTarget; entry: CleanupWorkingEntry }>;
+  result?: BuildReviewPreview | BuildReviewSelectionResult;
+};
+
 export class StorageCleanup extends Context.Service<
   StorageCleanup,
   {
+    readonly buildReviewTargets: (
+      input: BuildReviewTargetsInput,
+    ) => Effect.Effect<readonly BuildReviewTarget[], BuildReviewError>;
+    readonly previewBuildReview: (
+      input: BuildReviewPreviewInput,
+    ) => Effect.Effect<BuildReviewPreview, BuildReviewError>;
+    readonly selectBuildReview: (
+      input: BuildReviewSelectInput,
+    ) => Effect.Effect<BuildReviewSelectionResult, BuildReviewError>;
     readonly runNow: Effect.Effect<StorageCleanupReport, ServerSettingsError>;
     readonly latestReport: Effect.Effect<StorageCleanupReport | null>;
     readonly reports: Stream.Stream<StorageCleanupReport | null>;
@@ -278,6 +310,11 @@ const make = Effect.gen(function* () {
     Effect.provide(GeneratedDependencies.layer),
   );
   const builds = yield* GeneratedBuilds.GeneratedBuilds.pipe(Effect.provide(GeneratedBuilds.layer));
+  const processPaths = yield* WorktreeConsumers.ProcessPaths;
+  const buildInput = (input: GeneratedBuilds.BuildInput): GeneratedBuilds.BuildInput => ({
+    ...input,
+    processPaths,
+  });
   const liveTerminals = new Map<string, Map<string, TerminalSummary>>();
   const orphanSizes = new Map<string, number | null>();
   const noteTerminal = (terminal: TerminalSummary) => {
@@ -689,6 +726,7 @@ const make = Effect.gen(function* () {
   const localChangesReason = Effect.fn("StorageCleanup.localChangesReason")(function* (
     cwd: string,
   ) {
+    if (generatedBuildReviewProtection(cwd)) return "reviewed build content protects this worktree";
     const status = yield* git.execute({
       operation: "StorageCleanup.localChanges",
       cwd,
@@ -1082,6 +1120,7 @@ const make = Effect.gen(function* () {
     resource: "dependencies" | "generated-builds",
     observationProcessPaths: Effect.Effect<ReadonlyArray<string> | null>,
     observationTargets: WorktreeConsumers.TargetObservation,
+    review?: BuildReviewRequest,
   ) {
     const generatedBuilds = resource === "generated-builds";
     const outputPath = (cwd: string) => (generatedBuilds ? cwd : path.join(cwd, "node_modules"));
@@ -1103,7 +1142,7 @@ const make = Effect.gen(function* () {
     ) {
       if (generatedBuilds)
         return yield* builds.observe(
-          input,
+          buildInput(input),
           time,
           used,
           persist,
@@ -1125,8 +1164,8 @@ const make = Effect.gen(function* () {
         : generatedBuilds
           ? "No verified compiler emissions; legacy build outputs need exact-file review"
           : "No dependency install could be safely recognized";
-    if (!anyWorktreePolicy(serverSettings, dependencyCleanupEnabled)) {
-      if (generatedBuilds) return;
+    const metadataOnly = !review && !anyWorktreePolicy(serverSettings, dependencyCleanupEnabled);
+    if (metadataOnly && !generatedBuilds) {
       entries.push({
         kind: "worktree",
         worktreeResource: resource,
@@ -1149,12 +1188,16 @@ const make = Effect.gen(function* () {
         settings.previousWorktreesDirectories,
         serverSettings.previousWorktreesDirectories,
       );
-    const processCwds = yield* dependencies.processWorkingDirectories.pipe(
-      Effect.flatMap((cwds) =>
-        cwds === null ? Effect.succeed(null) : Effect.forEach(cwds, canonicalWorkspacePath),
-      ),
-    );
-    const hasLiveProviderSession = yield* makeProviderSessionGuard();
+    const processCwds = metadataOnly
+      ? null
+      : yield* dependencies.processWorkingDirectories.pipe(
+          Effect.flatMap((cwds) =>
+            cwds === null ? Effect.succeed(null) : Effect.forEach(cwds, canonicalWorkspacePath),
+          ),
+        );
+    const hasLiveProviderSession = metadataOnly
+      ? () => Effect.succeed(true)
+      : yield* makeProviderSessionGuard();
     const sequence = yield* readApplicationSequence();
     const snapshot = yield* readThreads();
     const canonicalPaths = new Map<string, string>();
@@ -1414,6 +1457,195 @@ const make = Effect.gen(function* () {
         threads: ownershipThreads,
         projects: snapshot.projects,
       });
+    const reviewContext = (
+      projectId: ProjectId,
+      cwd: string,
+      recordedPath: string,
+      branch: string | null,
+      owners: readonly unknown[],
+    ) => {
+      const commonDirectory = projectRepositories.find(
+        (entry) => entry.project.id === projectId,
+      )?.commonDirectory;
+      return encodeReviewContext({
+        projectId,
+        cwd,
+        recordedPath,
+        branch,
+        owners,
+        repository: commonDirectory,
+        repositoryProjectIds: projectRepositories
+          .filter((entry) => entry.commonDirectory === commonDirectory)
+          .map((entry) => entry.project.id)
+          .sort(),
+        repositoryMappingUncertain: projectRepositories.some((entry) => entry.uncertain),
+        projectRoot: snapshot.projects.find((entry) => entry.id === projectId)?.workspaceRoot,
+        roots,
+        policy: resolveWorktreeCleanup(serverSettings, projectId).worktreeDependenciesAfterDays,
+      });
+    };
+    const observeReviewContext = (
+      input: GeneratedBuilds.BuildInput,
+      recordedPath: string,
+      contextKey: string,
+    ) => {
+      if (!generatedBuilds) return Effect.succeed(true);
+      return [...new Set([input.worktreePath, recordedPath])].sort().reduceRight(
+        (effect, cwd) => withWorkspaceLease(cwd, effect),
+        builds.validateReviewContext(input, contextKey).pipe(
+          Effect.as(true),
+          Effect.orElseSucceed(() => false),
+        ),
+      );
+    };
+    const registerReview = Effect.fn("StorageCleanup.registerBuildReview")(function* (
+      input: GeneratedBuilds.BuildInput,
+      projectId: ProjectId,
+      branch: string | null,
+      archived: boolean,
+      entry: CleanupWorkingEntry,
+    ) {
+      if (
+        !review ||
+        ("projectId" in review.input &&
+          review.input.projectId !== undefined &&
+          review.input.projectId !== projectId)
+      )
+        return;
+      const project = snapshot.projects.find((candidate) => candidate.id === projectId);
+      if (!project) return;
+      const found = yield* builds.roots(input).pipe(Effect.orElseSucceed(() => []));
+      const days = resolveWorktreeCleanup(serverSettings, projectId).worktreeDependenciesAfterDays;
+      for (const root of found) {
+        const compiler = yield* Effect.try({
+          try: () => generatedBuildActivity(input.worktreePath, root),
+          catch: () => true,
+        }).pipe(Effect.orElseSucceed(() => true));
+        if (compiler !== null) continue;
+        const clock = yield* Effect.try({
+          try: () => legacyBuildActivity(input.worktreePath, root),
+          catch: () => null,
+        }).pipe(Effect.orElseSucceed(() => null));
+        const id = NodeCrypto.createHash("sha256")
+          .update([projectId, input.worktreePath, root].join("\0"))
+          .digest("hex");
+        review.candidates.push({
+          entry,
+          target: {
+            id,
+            label: `${branch ?? path.basename(input.worktreePath)} · ${root}`,
+            projectId,
+            projectName: project.title || path.basename(project.workspaceRoot),
+            worktreePath: input.worktreePath,
+            root,
+            branch,
+            archived,
+            delayDays: days,
+            eligibleAt:
+              days === null
+                ? null
+                : archived
+                  ? 0
+                  : clock === null
+                    ? null
+                    : clock.lastUsedAt + days * DAY_MS,
+            protectedReason: entry.reason,
+          },
+        });
+      }
+    });
+    const performReview = Effect.fn("StorageCleanup.performBuildReview")(function* (
+      input: GeneratedBuilds.BuildInput,
+      contextKey: string,
+      canReview: Effect.Effect<boolean>,
+    ) {
+      if (!review) return;
+      for (const candidate of review.candidates.filter(
+        (item) => item.target.worktreePath === input.worktreePath,
+      )) {
+        const targeted = "targetId" in review.input;
+        if (targeted && review.input.targetId !== candidate.target.id) continue;
+        if (!targeted && !(yield* canReview)) return;
+        if (
+          !targeted &&
+          !(yield* builds.canReview(buildInput(input), candidate.target.root, now, canReview))
+        ) {
+          candidate.entry.reason =
+            "Build review is protected by current files, consumers, or workspace activity.";
+          continue;
+        }
+        const activity = yield* Effect.try({
+          try: () => legacyBuildActivity(input.worktreePath, candidate.target.root),
+          catch: () => null,
+        }).pipe(Effect.orElseSucceed(() => null));
+        candidate.target = {
+          ...candidate.target,
+          protectedReason: null,
+          eligibleAt:
+            candidate.target.delayDays === null || activity === null
+              ? null
+              : candidate.target.archived
+                ? 0
+                : activity.lastUsedAt + candidate.target.delayDays * DAY_MS,
+        };
+        if (!("targetId" in review.input) || review.input.targetId !== candidate.target.id)
+          continue;
+        const root = candidate.target.root;
+        if ("previewToken" in review.input) {
+          const saved = yield* builds.select(
+            buildInput(input),
+            root,
+            now,
+            contextKey,
+            review.input.previewToken,
+            review.input.paths,
+            canReview,
+          );
+          review.result = {
+            selectedCount: new Set(review.input.paths).size,
+            eligibleAt: candidate.target.archived
+              ? 0
+              : saved.lastUsedAt + candidate.target.delayDays! * DAY_MS,
+            message:
+              review.input.paths.length === 0
+                ? "Selection cleared; this build remains protected."
+                : "Selected unchanged files will be removed after the configured inactivity period.",
+          };
+        } else {
+          const preview = yield* builds.preview(
+            buildInput(input),
+            root,
+            now,
+            contextKey,
+            canReview,
+          );
+          const offset = review.input.offset ?? 0;
+          review.result = {
+            target: {
+              ...candidate.target,
+              eligibleAt: candidate.target.archived
+                ? 0
+                : preview.lastUsedAt + candidate.target.delayDays! * DAY_MS,
+            },
+            token: preview.token,
+            files: preview.files
+              .slice(offset, offset + BUILD_REVIEW_PAGE_SIZE)
+              .map(({ path, size, bytes, selectable, reason }) => ({
+                path,
+                size,
+                bytes,
+                selectable,
+                reason,
+              })),
+            offset,
+            totalFiles: preview.files.length,
+            totalBytes: preview.bytes,
+            totalSize: preview.size,
+            selectedPaths: preview.selectedPaths,
+          };
+        }
+      }
+    });
     const knownPaths = new Set([...groups.keys(), ...deletedGroups.keys()]);
     for (const owner of [
       ...historicalOwners.map((thread) => thread.worktreePath),
@@ -1423,7 +1655,7 @@ const make = Effect.gen(function* () {
     }
     // The managed layout is root/repository/worktree. Unknown repositories never
     // receive an inactivity record or automatic deletion authority.
-    for (const root of roots) {
+    for (const root of metadataOnly ? [] : roots) {
       const pending = [{ directory: root, depth: 0 }];
       let visited = 0;
       while (pending.length > 0 && visited < 1000) {
@@ -1492,6 +1724,35 @@ const make = Effect.gen(function* () {
       entries.push(entry);
       const candidate = mappings[0]!;
       const { project, branch, recordedPath } = candidate;
+      const reviewRoot = roots.find((root) => inside(root, cwd));
+      if (reviewRoot !== undefined)
+        yield* registerReview(
+          {
+            managedWorktreesRoot: reviewRoot,
+            worktreePath: cwd,
+            repositoryRoot: project.workspaceRoot,
+          },
+          project.id,
+          branch,
+          false,
+          entry,
+        );
+      const contextKey = reviewContext(project.id, cwd, recordedPath, branch, []);
+      if (
+        reviewRoot !== undefined &&
+        !(yield* observeReviewContext(
+          {
+            managedWorktreesRoot: reviewRoot,
+            worktreePath: cwd,
+            repositoryRoot: project.workspaceRoot,
+          },
+          recordedPath,
+          contextKey,
+        ))
+      ) {
+        entry.reason = "Build review context could not be verified; files were retained.";
+        continue;
+      }
       const days = resolveWorktreeCleanup(serverSettings, project.id).worktreeDependenciesAfterDays;
       if (days === null) {
         entry.reason = "Project dependency cleanup is off";
@@ -1560,7 +1821,7 @@ const make = Effect.gen(function* () {
         );
         if (observation === null) return keep(unrecognizedReason());
         if (protectedReason !== null) return keep(protectedReason);
-        if (observation.lastUsedAt >= now - days * DAY_MS) {
+        if (!review && observation.lastUsedAt >= now - days * DAY_MS) {
           return keep(
             observation.renewed
               ? "Started a full inactivity period for this recognized install"
@@ -1609,8 +1870,24 @@ const make = Effect.gen(function* () {
         });
         if (!(yield* revalidate())) return false;
         const canRemove = revalidate();
+        if (review) {
+          yield* performReview(
+            input,
+            contextKey,
+            canRemove.pipe(Effect.orElseSucceed(() => false)),
+          );
+          return false;
+        }
         if (generatedBuilds) {
-          const removed = yield* builds.remove(input, now, days, false, canRemove, canRemove);
+          const removed = yield* builds.remove(
+            buildInput(input),
+            now,
+            days,
+            false,
+            canRemove,
+            canRemove,
+            contextKey,
+          );
           entry.reason = removed.reason;
           if (removed.failed) entry.outcome = "failed";
           if (removed.files > 0)
@@ -1621,6 +1898,8 @@ const make = Effect.gen(function* () {
             });
           return removed.files > 0;
         }
+        if (generatedBuildReviewProtection(cwd, "node_modules"))
+          return keep("Reviewed build content protects these dependencies.");
         const inspection = yield* dependencies.inspect(input);
         if (inspection === null)
           return keep("No dependency install could be safely recognized and measured");
@@ -1677,20 +1956,70 @@ const make = Effect.gen(function* () {
           serverSettings,
           thread.projectId,
         ).worktreeDependenciesAfterDays;
+        const contextKey = reviewContext(
+          thread.projectId,
+          thread.cleanupPath,
+          thread.recordedWorktreePath,
+          thread.branch,
+          owners
+            .map((owner) => [
+              owner.id,
+              owner.projectId,
+              owner.branch,
+              owner.worktreePath,
+              owner.archivedAt,
+              resolveWorktreeCleanup(serverSettings, owner.projectId).worktreeDependenciesAfterDays,
+            ])
+            .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+        );
+        if (
+          (review || generatedBuilds) &&
+          thread.worktreePath !== null &&
+          (yield* outputExists(thread.cleanupPath))
+        ) {
+          const managedWorktreesRoot = roots.find((root) => inside(root, thread.cleanupPath));
+          const repositoryRoot =
+            "workspaceRoot" in thread
+              ? thread.workspaceRoot
+              : snapshot.projects.find((project) => project.id === thread.projectId)?.workspaceRoot;
+          if (managedWorktreesRoot && repositoryRoot) {
+            const entry = noteCandidate(thread, thread.cleanupPath, repositoryRoot);
+            yield* registerReview(
+              { managedWorktreesRoot, repositoryRoot, worktreePath: thread.cleanupPath },
+              thread.projectId,
+              thread.branch,
+              owners.every((owner) => owner.archivedAt !== null),
+              entry,
+            );
+            if (
+              !(yield* observeReviewContext(
+                { managedWorktreesRoot, repositoryRoot, worktreePath: thread.cleanupPath },
+                thread.recordedWorktreePath,
+                contextKey,
+              ))
+            ) {
+              entry.reason = "Build review context could not be verified; files were retained.";
+              return [];
+            }
+            if (days === null) entry.reason = "Project dependency cleanup is off";
+          }
+        }
         if (days === null || thread.worktreePath === null || thread.branch === null) return [];
         const deleted = "dependencyActivityAt" in thread;
         const activityAt = deleted ? thread.dependencyActivityAt : storageCleanupActivityAt(thread);
         const worktreePath = thread.cleanupPath;
         const recordedWorktreePath = thread.recordedWorktreePath;
         if (!(yield* outputExists(worktreePath))) return [];
-        const entry = noteCandidate(
-          thread,
-          worktreePath,
-          "workspaceRoot" in thread
-            ? thread.workspaceRoot
-            : (snapshot.projects.find((project) => project.id === thread.projectId)
-                ?.workspaceRoot ?? null),
-        );
+        const entry =
+          reports.get(worktreePath) ??
+          noteCandidate(
+            thread,
+            worktreePath,
+            "workspaceRoot" in thread
+              ? thread.workspaceRoot
+              : (snapshot.projects.find((project) => project.id === thread.projectId)
+                  ?.workspaceRoot ?? null),
+          );
         const keep = (reason: string) => {
           Object.assign(entry, { reason });
           return [];
@@ -1757,7 +2086,7 @@ const make = Effect.gen(function* () {
           if (dependencyActivity === null) return keep(unrecognizedReason());
           if (dependencyActivity.protectedReason !== null)
             return keep(dependencyActivity.protectedReason);
-          if (dependencyActivity.lastUsedAt >= now - days * DAY_MS)
+          if (!review && dependencyActivity.lastUsedAt >= now - days * DAY_MS)
             return keep(
               dependencyActivity.renewed
                 ? "Started a full inactivity period for this recognized install"
@@ -1778,6 +2107,7 @@ const make = Effect.gen(function* () {
             recordedWorktreePath,
             managedWorktreesRoot,
             project,
+            contextKey,
           },
         ];
       }),
@@ -1799,6 +2129,7 @@ const make = Effect.gen(function* () {
             recordedWorktreePath,
             managedWorktreesRoot,
             project,
+            contextKey,
           }) =>
             Effect.gen(function* () {
               const entry = reports.get(worktreePath)!;
@@ -1914,7 +2245,7 @@ const make = Effect.gen(function* () {
                     if (
                       dependencyActivity === null ||
                       dependencyActivity.renewed ||
-                      dependencyActivity.lastUsedAt >= now - days * DAY_MS
+                      (!review && dependencyActivity.lastUsedAt >= now - days * DAY_MS)
                     )
                       return keep("Dependency installation or use changed during cleanup");
                   }
@@ -2062,14 +2393,27 @@ const make = Effect.gen(function* () {
                   allOwnerPoliciesUnchanged(yield* settingsService.getSettings)
                 );
               });
+              if (review) {
+                yield* performReview(
+                  { managedWorktreesRoot, worktreePath, repositoryRoot: project.workspaceRoot },
+                  contextKey,
+                  canRemove.pipe(Effect.catch(() => Effect.succeed(false))),
+                );
+                return null;
+              }
               if (generatedBuilds) {
                 const removed = yield* builds.remove(
-                  { managedWorktreesRoot, worktreePath, repositoryRoot: project.workspaceRoot },
+                  buildInput({
+                    managedWorktreesRoot,
+                    worktreePath,
+                    repositoryRoot: project.workspaceRoot,
+                  }),
                   now,
                   days,
                   archived,
                   canRemove,
                   isStillEligible,
+                  contextKey,
                 );
                 entry.reason = removed.reason;
                 if (removed.failed) entry.outcome = "failed";
@@ -2079,6 +2423,10 @@ const make = Effect.gen(function* () {
                     bytes: removed.bytes,
                     files: removed.files,
                   });
+                return null;
+              }
+              if (generatedBuildReviewProtection(worktreePath, "node_modules")) {
+                keep("Reviewed build content protects these dependencies.");
                 return null;
               }
               const inspection = yield* dependencies.inspect({
@@ -2531,6 +2879,8 @@ const make = Effect.gen(function* () {
         // the removal. Read only this path's threads: a full snapshot per
         // worktree takes seconds on large databases.
         const blockedSinceCheck = Effect.fnUntraced(function* () {
+          if (generatedBuildReviewProtection(worktreePath))
+            return "reviewed build content protects this worktree";
           const latestProjects = yield* projectStore.listShells();
           if (!policiesUnchanged(yield* settingsService.getSettings))
             return "settings changed since check";
@@ -2939,7 +3289,7 @@ const make = Effect.gen(function* () {
     const entries: CleanupWorkingEntry[] = [];
     // One lazy observation for both resource passes; retain the original array's
     // native identity metadata. Final removal scans remain independent and fresh.
-    const observationProcessPaths = yield* Effect.cached(yield* WorktreeConsumers.ProcessPaths);
+    const observationProcessPaths = yield* Effect.cached(processPaths);
     const observationTargets = WorktreeConsumers.createTargetObservation();
     yield* audit({
       event: "sweep-start",
@@ -3180,6 +3530,67 @@ const make = Effect.gen(function* () {
     return yield* Deferred.await(completion);
   });
 
+  const reviewBuilds = Effect.fn("StorageCleanup.reviewBuilds")(function* (
+    input: BuildReviewRequest["input"],
+  ) {
+    const now = yield* Clock.currentTimeMillis;
+    const review: BuildReviewRequest = { input, candidates: [] };
+    const entries: CleanupWorkingEntry[] = [];
+    yield* cleanDisposableOutputs(
+      yield* settingsService.getSettings,
+      now,
+      entries,
+      "generated-builds",
+      processPaths,
+      WorktreeConsumers.createTargetObservation(),
+      review,
+    );
+    const targets = review.candidates.map(({ target, entry }) => ({
+      ...target,
+      protectedReason: target.protectedReason === null ? null : entry.reason,
+    }));
+    if (!("targetId" in input)) return { targets, result: review.result };
+    if (!review.result) {
+      const target = targets.find((candidate) => candidate.id === input.targetId);
+      return yield* new BuildReviewError({
+        message:
+          target?.protectedReason ??
+          "This build target changed or is no longer available. Refresh the target list.",
+      });
+    }
+    return { targets, result: review.result };
+  });
+  const mapReviewError = (cause: unknown) =>
+    isBuildReviewError(cause)
+      ? cause
+      : new BuildReviewError({
+          message:
+            "Build review could not verify current files, activity, or workspace ownership. Refresh and try again.",
+        });
+  const buildReviewTargets = (input: BuildReviewTargetsInput) =>
+    reviewBuilds(input).pipe(
+      Effect.map(({ targets }) => targets),
+      Effect.mapError(mapReviewError),
+    );
+  const previewBuildReview = (input: BuildReviewPreviewInput) =>
+    reviewBuilds(input).pipe(
+      Effect.flatMap(({ result }) =>
+        result && "files" in result
+          ? Effect.succeed(result)
+          : Effect.fail(new BuildReviewError({ message: "Build preview is unavailable." })),
+      ),
+      Effect.mapError(mapReviewError),
+    );
+  const selectBuildReview = (input: BuildReviewSelectInput) =>
+    reviewBuilds(input).pipe(
+      Effect.flatMap(({ result }) =>
+        result && "selectedCount" in result
+          ? Effect.succeed(result)
+          : Effect.fail(new BuildReviewError({ message: "Build selection could not be saved." })),
+      ),
+      Effect.mapError(mapReviewError),
+    );
+
   const start = Effect.fn("StorageCleanup.start")(function* () {
     const unsubscribe = yield* terminals.subscribeMetadata((event) =>
       Effect.sync(() => {
@@ -3238,6 +3649,9 @@ const make = Effect.gen(function* () {
   });
   yield* start();
   return StorageCleanup.of({
+    buildReviewTargets,
+    previewBuildReview,
+    selectBuildReview,
     runNow,
     latestReport: SubscriptionRef.get(reportRef),
     reports: SubscriptionRef.changes(reportRef),
