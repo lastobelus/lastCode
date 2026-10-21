@@ -71,18 +71,22 @@ it("offers every upstream presentation, keeps operational labels on circles, and
     </TooltipProvider>,
   );
   const host = screen.container;
-  expect(host.querySelectorAll('[role="combobox"]')).toHaveLength(
-    configurableThreadStatuses.length,
-  );
-  expect(host.textContent).not.toMatch(/Deleting|Question|Cleanup failed|Needs repair|Archiving/);
+  await vi.waitFor(() => {
+    expect(host.querySelectorAll('[role="combobox"]')).toHaveLength(
+      configurableThreadStatuses.length,
+    );
+    expect(host.textContent).not.toMatch(/Deleting|Question|Cleanup failed|Needs repair|Archiving/);
+  });
   const trigger = host.querySelector<HTMLButtonElement>('[aria-label="Working status icon"]')!;
   await act(() => trigger.focus());
   await userEvent.keyboard("{Enter}");
-  expect(document.querySelectorAll('[role="option"]')).toHaveLength(15);
+  await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(15));
   await userEvent.keyboard("{Home}{Enter}");
-  expect(state.settings.lastcodeStatusIcons).toEqual({
-    Working: { shape: "triangle", style: "open" },
-  });
+  await vi.waitFor(() =>
+    expect(state.settings.lastcodeStatusIcons).toEqual({
+      Working: { shape: "triangle", style: "open" },
+    }),
+  );
   expect(lastCodeStatusIcon("Deleting", { Deleting: { shape: "square", style: "solid" } })).toEqual(
     { shape: "circle", style: "solid" },
   );
@@ -94,8 +98,10 @@ it("offers every upstream presentation, keeps operational labels on circles, and
     shape: "circle",
     style: "solid",
   });
-  const preview = trigger.parentElement!.querySelector('[data-status-shape="triangle"]');
-  expect(preview).not.toBeNull();
-  await act(() => host.querySelector<HTMLButtonElement>("button")!.click());
-  expect(state.settings.lastcodeStatusIcons).toEqual({});
+  await vi.waitFor(() => {
+    const preview = trigger.parentElement!.querySelector('[data-status-shape="triangle"]');
+    expect(preview).not.toBeNull();
+  });
+  await userEvent.click(host.querySelector<HTMLButtonElement>("button")!);
+  await vi.waitFor(() => expect(state.settings.lastcodeStatusIcons).toEqual({}));
 });
