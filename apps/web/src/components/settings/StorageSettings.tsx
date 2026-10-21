@@ -35,6 +35,7 @@ import {
   SettingsSection,
   useRelativeTimeTick,
 } from "./settingsLayout";
+import { LegacyBuildReviewRow } from "./LegacyBuildReviewDialog";
 import { DatabaseStorageNotice } from "./DatabaseStorageNotice";
 import { SettingsScopeNotice } from "./SettingsScopeNotice";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
@@ -197,17 +198,24 @@ function CleanupResults({
   return (
     <>
       {report.entries.map((entry, index) => {
+        const disposable =
+          entry.worktreeResource === "dependencies" ||
+          entry.worktreeResource === "generated-builds";
         const name =
-          entry.kind === "worktree"
-            ? ((entry.threadId === null
-                ? entry.path
-                : entry.path?.split(/[\\/]/).findLast(Boolean)) ?? "Worktrees")
-            : entry.kind === "logs"
-              ? "Rotated logs"
-              : "Browser artifacts";
+          entry.worktreeResource === "dependencies"
+            ? `Dependencies: ${entry.path?.split(/[\\/]/).filter(Boolean).at(-2) ?? "worktree"}`
+            : entry.worktreeResource === "generated-builds"
+              ? `Build outputs: ${entry.path?.split(/[\\/]/).findLast(Boolean) ?? "worktree"}`
+              : entry.kind === "worktree"
+                ? ((entry.threadId === null
+                    ? entry.path
+                    : entry.path?.split(/[\\/]/).findLast(Boolean)) ?? "Worktrees")
+                : entry.kind === "logs"
+                  ? "Rotated logs"
+                  : "Browser artifacts";
         return (
           <SettingsRow
-            key={`${entry.path ?? entry.kind}:${entry.threadId ?? index}`}
+            key={`${entry.kind}:${entry.worktreeResource ?? "checkout"}:${entry.path ?? ""}:${entry.threadId ?? index}`}
             title={<span className="wrap-anywhere select-text">{name}</span>}
             description={
               <span className="block space-y-2 wrap-anywhere select-text">
@@ -243,10 +251,14 @@ function CleanupResults({
                 (entry.outcome === "kept" && entry.bytes !== null)) && (
                 <span className="text-xs text-muted-foreground">
                   {[
-                    entry.kind !== "worktree" && entry.files !== null
+                    (disposable || entry.kind !== "worktree") && entry.files !== null
                       ? `${entry.files.toLocaleString()} ${entry.files === 1 ? "file" : "files"}`
                       : null,
-                    entry.bytes !== null ? formatBytes(entry.bytes) : null,
+                    entry.bytes !== null
+                      ? `${formatBytes(entry.bytes)}${disposable ? " estimated" : ""}`
+                      : disposable
+                        ? "Size unknown"
+                        : null,
                   ]
                     .filter(Boolean)
                     .join(" · ")}
@@ -449,6 +461,49 @@ export function StorageSettingsPanel() {
       : undefined;
   const update = (patch: Partial<StorageCleanupSettings>) =>
     updateSettings({ storageCleanup: patch });
+  const dependenciesSupported = connectedEnvironments.every(
+    (environment) =>
+      environment.serverConfig?.environment.capabilities.worktreeDependencyCleanup === true,
+  );
+  const buildsSupported = connectedEnvironments.every(
+    (environment) =>
+      environment.serverConfig?.environment.capabilities.worktreeBuildCleanup === true,
+  );
+  const anyBuildsSupported = connectedEnvironments.some(
+    (environment) =>
+      environment.serverConfig?.environment.capabilities.worktreeBuildCleanup === true,
+  );
+  const preservationSupported = connectedEnvironments.every(
+    (environment) =>
+      environment.serverConfig?.environment.capabilities.worktreeLocalPreservation === true,
+  );
+  const anyPreservationSupported = connectedEnvironments.some(
+    (environment) =>
+      environment.serverConfig?.environment.capabilities.worktreeLocalPreservation === true,
+  );
+  const disposableOutputsLabel = anyBuildsSupported
+    ? "Remove inactive dependencies and build outputs"
+    : "Remove inactive worktree dependencies";
+  const disposableOutputsResources = buildsSupported
+    ? "Remove recognized dependencies and unchanged verified build outputs on supported selected environments."
+    : anyBuildsSupported
+      ? "Remove recognized dependencies where supported. Build outputs are reclaimed only on selected environments with build cleanup support."
+      : "Remove recognized npm or pnpm dependencies where supported. Build outputs are kept.";
+  const disposableOutputsTiming = preservationSupported
+    ? "When this rule is enabled, every shared owner must be archived for immediate cleanup. Unarchived and ownerless worktrees use the configured delay since actual use."
+    : anyPreservationSupported
+      ? "Updated environments clean archived owners immediately when every owner is archived and cleanup is enabled; unarchived and ownerless worktrees use the configured delay since actual use. Older selected environments use their existing thread-inactivity rule."
+      : "Selected environments use their existing thread-inactivity rule.";
+  const disposableOutputsDescription = `${disposableOutputsResources} ${disposableOutputsTiming} This rule keeps source and other files. Active consumers prevent cleanup. Reinstall or rebuild before resuming work.`;
+  const preservedFilesDescription = `Edits, untracked files and unknown ignored files keep the checkout.${anyBuildsSupported ? " Verified generated files are reclaimed separately on environments that support their cleanup." : ""}`;
+  const legacyKeepWhenDescription =
+    settings.worktreeKeepWhen === "any-local-files"
+      ? "Includes ignored files, except node_modules."
+      : settings.worktreeKeepWhen === "tracked-changes"
+        ? "Deletes untracked and ignored files, including .env."
+        : "Keeps edits and untracked files. Deletes ignored files, including .env.";
+  const mixedPreservationSupport = !preservationSupported && anyPreservationSupported;
+
   const updateWorktree = (patch: Partial<WorktreeCleanupRules>) =>
     isProjectScope
       ? updateSettings({ worktreeCleanup: { mode: "custom", rules: patch } })
@@ -547,6 +602,26 @@ export function StorageSettingsPanel() {
         {(!isProjectScope || (!mixedModes && mode === "custom")) && (
           <>
             <SettingsRow
+              title={disposableOutputsLabel}
+              status={ruleStatus("worktreeDependenciesAfterDays")}
+              description={
+                dependenciesSupported
+                  ? disposableOutputsDescription
+                  : `Choose updated macOS or Linux machines to change this rule. ${disposableOutputsDescription}`
+              }
+              serverScoped={!isProjectScope}
+              control={
+                <RetentionControl
+                  label={disposableOutputsLabel}
+                  disabled={!dependenciesSupported}
+                  value={settings.worktreeDependenciesAfterDays}
+                  onChange={(worktreeDependenciesAfterDays) =>
+                    updateWorktree({ worktreeDependenciesAfterDays })
+                  }
+                />
+              }
+            />
+            <SettingsRow
               title="Delete worktrees with deleted threads"
               status={ruleStatus("worktreeOnDelete")}
               description="Remove unused worktrees when active or archived threads are deleted. Worktrees with local changes are kept."
@@ -562,7 +637,13 @@ export function StorageSettingsPanel() {
             <SettingsRow
               title="Delete inactive worktrees"
               status={ruleStatus("worktreeAfterDays")}
-              description="Remove worktrees after their threads have been inactive for this many days. Branches and thread history are kept."
+              description={
+                preservationSupported
+                  ? "Clean archived worktrees are eligible immediately when enabled. Unarchived worktrees use the configured delay. Branches and thread history are kept."
+                  : anyPreservationSupported
+                    ? "Updated environments allow clean archived worktrees immediately when enabled and use the configured delay for unarchived worktrees. Older environments use their existing inactivity rule. Branches and thread history are kept."
+                    : "Remove worktrees using the selected environment’s inactivity rule. Branches and thread history are kept."
+              }
               serverScoped={!isProjectScope}
               control={
                 <RetentionControl
@@ -634,45 +715,53 @@ export function StorageSettingsPanel() {
             ) && (
               <SettingsRow
                 {...searchableSetting("storage-worktree-keep-when")}
-                status={ruleStatus("worktreeKeepWhen")}
+                title={
+                  preservationSupported
+                    ? "Local work is preserved"
+                    : "Keep worktrees with local changes"
+                }
+                status={preservationSupported ? undefined : ruleStatus("worktreeKeepWhen")}
                 description={
-                  settings.worktreeKeepWhen === "any-local-files"
-                    ? "Includes ignored files, except node_modules."
-                    : settings.worktreeKeepWhen === "tracked-changes"
-                      ? "Deletes untracked and ignored files, including .env."
-                      : "Keeps edits and untracked files. Deletes ignored files, including .env."
+                  preservationSupported
+                    ? preservedFilesDescription
+                    : mixedPreservationSupport
+                      ? `${ruleStatus("worktreeKeepWhen") ? "Older selected environments use their own local-file preferences." : `Older selected environments: ${legacyKeepWhenDescription}`} Updated environments preserve unknown local files regardless of this preference.${anyBuildsSupported ? " Verified generated files are reclaimed separately on environments that support their cleanup." : ""}`
+                      : legacyKeepWhenDescription
                 }
                 serverScoped={!isProjectScope}
                 control={
-                  <Select
-                    value={ruleStatus("worktreeKeepWhen") ? null : settings.worktreeKeepWhen}
-                    onValueChange={(next) => {
-                      if (
-                        next === "any-local-files" ||
-                        next === "uncommitted-changes" ||
-                        next === "tracked-changes"
-                      )
-                        updateWorktree({ worktreeKeepWhen: next });
-                    }}
-                  >
-                    <SelectTrigger size="sm" aria-label="Keep worktrees with local changes">
-                      <SelectValue>
-                        {ruleStatus("worktreeKeepWhen")
-                          ? "Mixed"
-                          : KEEP_WHEN_LABELS[settings.worktreeKeepWhen]}
-                      </SelectValue>
-                    </SelectTrigger>
-                    <SelectPopup align="end" alignItemWithTrigger={false}>
-                      <SelectItem value="any-local-files">Any local files</SelectItem>
-                      <SelectItem value="uncommitted-changes">Uncommitted changes</SelectItem>
-                      <SelectItem value="tracked-changes">Edited tracked files</SelectItem>
-                    </SelectPopup>
-                  </Select>
+                  preservationSupported ? null : (
+                    <Select
+                      value={ruleStatus("worktreeKeepWhen") ? null : settings.worktreeKeepWhen}
+                      onValueChange={(next) => {
+                        if (
+                          next === "any-local-files" ||
+                          next === "uncommitted-changes" ||
+                          next === "tracked-changes"
+                        )
+                          updateWorktree({ worktreeKeepWhen: next });
+                      }}
+                    >
+                      <SelectTrigger size="sm" aria-label="Keep worktrees with local changes">
+                        <SelectValue>
+                          {ruleStatus("worktreeKeepWhen")
+                            ? "Mixed"
+                            : KEEP_WHEN_LABELS[settings.worktreeKeepWhen]}
+                        </SelectValue>
+                      </SelectTrigger>
+                      <SelectPopup align="end" alignItemWithTrigger={false}>
+                        <SelectItem value="any-local-files">Any local files</SelectItem>
+                        <SelectItem value="uncommitted-changes">Uncommitted changes</SelectItem>
+                        <SelectItem value="tracked-changes">Edited tracked files</SelectItem>
+                      </SelectPopup>
+                    </Select>
+                  )
                 }
               />
             )}
           </>
         )}
+        <LegacyBuildReviewRow />
       </SettingsSection>
 
       {!isProjectScope && (
