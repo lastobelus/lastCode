@@ -1,8 +1,7 @@
-import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
 import { DEFAULT_CLIENT_SETTINGS, type ClientSettings } from "@t3tools/contracts/settings";
-import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
+import { expect, it, vi } from "vite-plus/test";
 import { userEvent } from "vite-plus/test/browser";
+import { act, render } from "../../../test/render";
 import type { ClientSettingsUpdate } from "../../hooks/useSettings";
 import "../../index.css";
 import { configurableThreadStatuses } from "../Sidebar.logic";
@@ -53,38 +52,34 @@ vi.mock("./settingsLayout", () => ({
   ),
 }));
 
-let host: HTMLDivElement;
-let root: Root;
-beforeEach(async () => {
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+function setup(): Disposable {
   state.settings = { ...DEFAULT_CLIENT_SETTINGS };
-  host = document.createElement("div");
-  document.body.append(host);
-  root = createRoot(host);
-  await act(() =>
-    root.render(
-      <TooltipProvider>
-        <LastCodeStatusIconSettings />
-      </TooltipProvider>,
-    ),
-  );
-});
-afterEach(async () => {
-  await act(() => root.unmount());
-  host.remove();
-  vi.unstubAllGlobals();
-});
+  state.listeners.clear();
+  return {
+    [Symbol.dispose]() {
+      state.settings = { ...DEFAULT_CLIENT_SETTINGS };
+      state.listeners.clear();
+    },
+  };
+}
 
 it("offers every upstream presentation, keeps operational labels on circles, and selects with the keyboard", async () => {
+  using _state = setup();
+  await using screen = await render(
+    <TooltipProvider>
+      <LastCodeStatusIconSettings />
+    </TooltipProvider>,
+  );
+  const host = screen.container;
   expect(host.querySelectorAll('[role="combobox"]')).toHaveLength(
     configurableThreadStatuses.length,
   );
   expect(host.textContent).not.toMatch(/Deleting|Question|Cleanup failed|Needs repair|Archiving/);
   const trigger = host.querySelector<HTMLButtonElement>('[aria-label="Working status icon"]')!;
   await act(() => trigger.focus());
-  await act(() => userEvent.keyboard("{Enter}"));
+  await userEvent.keyboard("{Enter}");
   expect(document.querySelectorAll('[role="option"]')).toHaveLength(15);
-  await act(() => userEvent.keyboard("{Home}{Enter}"));
+  await userEvent.keyboard("{Home}{Enter}");
   expect(state.settings.lastcodeStatusIcons).toEqual({
     Working: { shape: "triangle", style: "open" },
   });

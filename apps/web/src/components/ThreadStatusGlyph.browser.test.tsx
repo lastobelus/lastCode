@@ -1,6 +1,5 @@
-import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
+import { render, type Screen } from "../../test/render";
+import { expect, it } from "vite-plus/test";
 import { page } from "vite-plus/test/browser";
 import type { LastCodeStatusIcon } from "@t3tools/contracts/settings";
 import "../index.css";
@@ -11,23 +10,9 @@ const workingStatus = configurableThreadStatuses.find((status) => status.label =
 import { ThreadStatusLabel } from "./ThreadStatusIndicators";
 import { TooltipProvider } from "./ui/tooltip";
 
-let host: HTMLDivElement;
-let root: Root;
-beforeEach(() => {
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  host = document.createElement("div");
-  document.body.append(host);
-  root = createRoot(host);
-});
-afterEach(async () => {
-  await act(() => root.unmount());
-  host.remove();
-  vi.unstubAllGlobals();
-});
-
-async function raster(icon: LastCodeStatusIcon) {
-  await act(() => root.render(<ThreadStatusGlyph icon={icon} dotClass={workingStatus.dotClass} />));
-  const marker = host.querySelector<HTMLElement>("[data-status-shape] > span")!;
+async function raster(screen: Screen, icon: LastCodeStatusIcon) {
+  await screen.rerender(<ThreadStatusGlyph icon={icon} dotClass={workingStatus.dotClass} />);
+  const marker = screen.container.querySelector<HTMLElement>("[data-status-shape] > span")!;
   const image = new Image();
   image.src = getComputedStyle(marker).maskImage.slice(5, -2);
   await image.decode();
@@ -47,10 +32,11 @@ it.each([
 ] as const)(
   "keeps %s's approved outer geometry and interior opacity",
   async (shape, width, height) => {
+    await using screen = await render(null, { router: false });
     for (const style of shape === "circle"
       ? (["open", "outline-fill"] as const)
       : (["open", "solid", "outline-fill"] as const)) {
-      const { data } = await raster({ shape, style });
+      const { data } = await raster(screen, { shape, style });
       const xs: number[] = [];
       const ys: number[] = [];
       for (let y = 0; y < 180; y++) {
@@ -71,17 +57,17 @@ it.each([
 );
 
 it("preserves the dot color and compact 14px slot for every shape", async () => {
+  await using screen = await render(null, { router: false });
+  const host = screen.container;
   const status = {
     ...workingStatus,
     pulse: false,
   };
   for (const shape of ["triangle", "triangle-right", "square", "diamond", "circle"] as const) {
-    await act(() =>
-      root.render(
-        <TooltipProvider>
-          <ThreadStatusLabel status={status} compact icon={{ shape, style: "solid" }} />
-        </TooltipProvider>,
-      ),
+    await screen.rerender(
+      <TooltipProvider>
+        <ThreadStatusLabel status={status} compact icon={{ shape, style: "solid" }} />
+      </TooltipProvider>,
     );
     const slot = host.querySelector<HTMLElement>('[role="img"]')!;
     const reference = host.querySelector<HTMLElement>("[data-status-shape]")!;
@@ -97,19 +83,18 @@ it("preserves the dot color and compact 14px slot for every shape", async () => 
 
 it("truncates only the noncompact label while its marker can paint outside the reference box", async () => {
   await page.viewport(1280, 900);
-  await act(() =>
-    root.render(
-      <TooltipProvider>
-        <div style={{ width: 34, display: "flex" }}>
-          <ThreadStatusLabel
-            status={{ ...workingStatus, label: "Pending Approval", pulse: false }}
-            icon={{ shape: "diamond", style: "solid" }}
-          />
-        </div>
-      </TooltipProvider>,
-    ),
+  await using screen = await render(
+    <TooltipProvider>
+      <div style={{ width: 34, display: "flex" }}>
+        <ThreadStatusLabel
+          status={{ ...workingStatus, label: "Pending Approval", pulse: false }}
+          icon={{ shape: "diamond", style: "solid" }}
+        />
+      </div>
+    </TooltipProvider>,
+    { router: false },
   );
-  const label = host.querySelector<HTMLElement>('[role="img"]')!;
+  const label = screen.container.querySelector<HTMLElement>('[role="img"]')!;
   const text = [...label.children].find((child) => child.textContent === "Pending Approval")!;
   const marker = label.querySelector<HTMLElement>("[data-status-shape]")!;
   expect(getComputedStyle(label).overflow).toBe("visible");
