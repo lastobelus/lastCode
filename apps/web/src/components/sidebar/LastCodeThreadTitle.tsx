@@ -180,7 +180,7 @@ export function LastCodeThreadTitle({
     <>
       <WaitingAction thread={thread} threadStatus={threadStatus} />
       {threadStatus && (
-        <span className="inline-flex min-w-0 max-w-[35%] overflow-hidden">
+        <span className="inline-flex min-w-0 max-w-[35%]">
           <LastCodeThreadStatusLabel status={threadStatus} compact={compactStatusIndicators} />
         </span>
       )}

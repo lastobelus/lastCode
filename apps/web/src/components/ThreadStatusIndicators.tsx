@@ -860,7 +860,7 @@ export function ThreadStatusLabel({
             aria-label={
               status.description ? `${status.label}. ${status.description}` : status.label
             }
-            className={`inline-flex items-center gap-1 text-3xs ${status.colorClass}`}
+            className={`inline-flex items-center gap-1 text-3xs ${icon ? "min-w-0 max-w-full" : ""} ${status.colorClass}`}
           />
         }
       >
@@ -874,7 +874,9 @@ export function ThreadStatusLabel({
             }`}
           />
         )}
-        <span className="hidden md:inline">{status.label}</span>
+        <span className={icon ? "hidden min-w-0 truncate md:inline" : "hidden md:inline"}>
+          {status.label}
+        </span>
       </TooltipTrigger>
       <TooltipPopup side="top">{status.description ?? status.label}</TooltipPopup>
     </Tooltip>

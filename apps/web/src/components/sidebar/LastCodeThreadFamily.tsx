@@ -242,7 +242,7 @@ export function LastCodeThreadFamilySummary({
           <span className="inline-flex shrink-0 @sm/lastcode-sidebar:hidden">
             <LastCodeThreadStatusLabel status={family.descendantsStatus} compact />
           </span>
-          <span className="hidden min-w-0 overflow-hidden @sm/lastcode-sidebar:inline-flex">
+          <span className="hidden min-w-0 @sm/lastcode-sidebar:inline-flex">
             <LastCodeThreadStatusLabel
               status={family.descendantsStatus}
               compact={!showSubheaders || compactStatusIndicators}

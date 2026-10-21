@@ -1,6 +1,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
+import { page } from "vite-plus/test/browser";
 import type { LastCodeStatusIcon } from "@t3tools/contracts/settings";
 import "../index.css";
 import { ThreadStatusGlyph } from "./ThreadStatusGlyph";
@@ -92,4 +93,29 @@ it("preserves the dot color and compact 14px slot for every shape", async () => 
     expect(getComputedStyle(marker).backgroundColor).not.toBe(getComputedStyle(slot).color);
     expect(slot.getAttribute("aria-label")).toBe("Working");
   }
+});
+
+it("truncates only the noncompact label while its marker can paint outside the reference box", async () => {
+  await page.viewport(1280, 900);
+  await act(() =>
+    root.render(
+      <TooltipProvider>
+        <div style={{ width: 34, display: "flex" }}>
+          <ThreadStatusLabel
+            status={{ ...workingStatus, label: "Pending Approval", pulse: false }}
+            icon={{ shape: "diamond", style: "solid" }}
+          />
+        </div>
+      </TooltipProvider>,
+    ),
+  );
+  const label = host.querySelector<HTMLElement>('[role="img"]')!;
+  const text = [...label.children].find((child) => child.textContent === "Pending Approval")!;
+  const marker = label.querySelector<HTMLElement>("[data-status-shape]")!;
+  expect(getComputedStyle(label).overflow).toBe("visible");
+  expect(getComputedStyle(marker).overflow).toBe("visible");
+  expect(text.scrollWidth).toBeGreaterThan(text.clientWidth);
+  expect(getComputedStyle(text).textOverflow).toBe("ellipsis");
+  expect(marker.getBoundingClientRect().width).toBe(6);
+  expect(label.getBoundingClientRect().width).toBeLessThanOrEqual(34);
 });
