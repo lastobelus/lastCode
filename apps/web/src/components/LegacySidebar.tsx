@@ -19,10 +19,11 @@ import {
   prStatusIndicator,
   PrStatusTooltipContent,
   ThreadTerminalStatusButton,
-  ThreadStatusLabel,
   ThreadWorktreeIndicator,
   useLinkedThreadPullRequest,
 } from "./ThreadStatusIndicators";
+import { LastCodeThreadStatusLabel } from "./sidebar/LastCodeThreadStatusLabel";
+import { LastCodeStatusGlyph } from "./sidebar/LastCodeStatusGlyph";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
 import { ProjectFavicon } from "./ProjectFavicon";
 import { useAtomValue } from "@effect/atom-react";
@@ -766,7 +767,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
             </a>
           ) : null}
           {threadStatus && (
-            <ThreadStatusLabel status={threadStatus} compact={compactStatusIndicators} />
+            <LastCodeThreadStatusLabel status={threadStatus} compact={compactStatusIndicators} />
           )}
           {canOperateThread && renamingThreadKey === threadKey ? (
             <input
@@ -1094,7 +1095,9 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
             }}
           >
             <span className="flex min-w-0 flex-1 items-center gap-2">
-              {hiddenThreadStatus && <ThreadStatusLabel status={hiddenThreadStatus} compact />}
+              {hiddenThreadStatus && (
+                <LastCodeThreadStatusLabel status={hiddenThreadStatus} compact />
+              )}
               <span>Show more</span>
             </span>
           </SidebarMenuSubButton>
@@ -2457,11 +2460,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                 }
               >
                 <span className="absolute inset-0 flex items-center justify-center transition-opacity duration-150 group-hover/project-header:opacity-0">
-                  <span
-                    className={`size-[9px] rounded-full ${projectStatus.dotClass} ${
-                      projectStatus.pulse ? "motion-safe:animate-status-pulse" : ""
-                    }`}
-                  />
+                  <LastCodeStatusGlyph status={projectStatus} size={9} />
                 </span>
                 <ChevronRightIcon className="absolute inset-0 m-auto size-3.5 text-icon-muted opacity-0 transition-opacity duration-150 group-hover/project-header:opacity-100" />
               </TooltipTrigger>

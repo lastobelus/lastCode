@@ -95,3 +95,41 @@ it("updates an ordinary legacy row when compact status indicators change", async
   });
   await vi.waitFor(() => expect(marker()?.textContent).toBe("Awaiting Input"));
 });
+
+it("keeps a native input request's chosen shape and fill in compact and labeled legacy rows", async () => {
+  using _settings = setup();
+  await updateClientSettings({
+    compactLegacySidebarStatuses: true,
+    lastcodeStatusIcons: { "Awaiting Input": { shape: "triangle-right", style: "outline-fill" } },
+  });
+  await using screen = await render(row());
+  const marker = () => screen.container.querySelector<HTMLElement>('[aria-label="Awaiting Input"]');
+  const glyph = () => marker()?.querySelector<HTMLElement>("[data-status-shape]");
+  await vi.waitFor(() => {
+    expect(marker()?.textContent).toBe("");
+    expect(marker()?.getBoundingClientRect().width).toBe(14);
+    expect(glyph()?.dataset.statusShape).toBe("triangle-right");
+    expect(glyph()?.dataset.statusStyle).toBe("outline-fill");
+    const paint = glyph()?.firstElementChild;
+    if (!(paint instanceof HTMLElement)) throw new Error("The status must paint its glyph.");
+    const svg = decodeURIComponent(getComputedStyle(paint).maskImage);
+    expect(svg).toContain("rotate(90 3 3)");
+    expect(svg).toContain('fill-opacity="0.5" stroke="black" stroke-width="1"');
+    expect(paint.classList.contains("bg-indigo-500")).toBe(true);
+  });
+  await act(async () => {
+    await updateClientSettings({ compactLegacySidebarStatuses: false });
+  });
+  await vi.waitFor(() => {
+    expect(marker()?.textContent).toBe("Awaiting Input");
+    expect(glyph()?.dataset.statusShape).toBe("triangle-right");
+    expect(glyph()?.dataset.statusStyle).toBe("outline-fill");
+  });
+  await act(async () => {
+    await updateClientSettings({ lastcodeStatusIcons: {} });
+  });
+  await vi.waitFor(() => {
+    expect(glyph()?.dataset.statusShape).toBe("circle");
+    expect(glyph()?.dataset.statusStyle).toBe("solid");
+  });
+});
