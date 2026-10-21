@@ -1943,7 +1943,7 @@ done
     } finally {
       NodeFS.rmSync(fixture.root, { recursive: true, force: true });
     }
-  }, 120_000);
+  });
 
   it("blocks the first carry revision when it would drop checkpoint-only resolutions", () => {
     const fixture = initFixture();

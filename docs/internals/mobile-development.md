@@ -23,7 +23,7 @@ are unchanged. Skipping compilation would lose new classes; invalidating every
 consumer for unchanged output makes an ordinary component edit refresh the whole
 app. The fingerprint is recorded only after initialization succeeds.
 
-The [expo-notifications patch](../../patches/expo-notifications@57.0.15.patch) protects
+The [expo-notifications patch](../../patches/expo-notifications@58.1.5.patch) protects
 `NotificationCenterManager`'s delegates and pending responses with a lock. React runtimes can
 register and remove delegates concurrently during reloads or scene startup. Delivery snapshots
 delegates under the lock and invokes them after releasing it. Pending-response replay removes

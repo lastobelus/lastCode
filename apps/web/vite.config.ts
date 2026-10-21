@@ -1,4 +1,6 @@
 import * as NodeZlib from "node:zlib";
+import * as NodeURL from "node:url";
+import { createGeneratedBuildStage } from "@t3tools/shared/generatedBuildOwnership";
 
 import react from "@vitejs/plugin-react";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
@@ -20,6 +22,7 @@ import { loadRepoEnv } from "../../scripts/lib/public-config";
 import { thirdPartyLicensesPlugin } from "../../scripts/lib/third-party-licenses";
 import { tailwindPlugins } from "./vite/tailwind";
 import { warmBundledDevPlugin } from "./vite/warmBundledDev";
+import { createBuildOwnershipPlugin, resolveHostedWebAssetBrand } from "./vite/buildOwnership.ts";
 
 const repoEnv = loadRepoEnv();
 Object.assign(process.env, repoEnv);
@@ -99,7 +102,9 @@ const browserTestProject = {
   extends: true,
   // Pre-bundled so a late first import does not trigger a mid-run reload. The
   // dependency scan misses autocomplete because tests reach it only through lazy imports.
-  optimizeDeps: { include: ["vite-plus/test/browser", "@base-ui/react/autocomplete"] },
+  optimizeDeps: {
+    include: ["vite-plus/test/browser", "@base-ui/react/autocomplete", "@effect/vitest"],
+  },
   test: {
     name: "browser",
     include: ["src/**/*.browser.test.{ts,tsx}"],
@@ -182,11 +187,16 @@ const configuredAllowedHosts = (process.env.T3CODE_DEV_ALLOWED_HOSTS ?? "")
   .filter((entry) => entry.length > 0);
 const allowedHosts = [".ts.net", ...configuredAllowedHosts];
 
-export default defineConfig(() => {
+export default defineConfig(({ command }) => {
+  const repoRoot = NodeURL.fileURLToPath(new URL("../..", import.meta.url));
+  const brand = command === "build" ? resolveHostedWebAssetBrand(configuredHostedAppChannel) : null;
+  const stage = command === "build" ? createGeneratedBuildStage(repoRoot, "apps/web/dist") : null;
+  const provenancePlugin = createBuildOwnershipPlugin(repoRoot, stage, Date.now, brand);
   return {
     assetsInclude: ["**/*.wasm"],
     plugins: [
       devCompressionPlugin(),
+      provenancePlugin,
       thirdPartyLicensesPlugin({
         bundleName: "web",
         configFile: new URL("../../third-party-licenses.config.json", import.meta.url),
@@ -295,7 +305,7 @@ export default defineConfig(() => {
       devSourcemap: buildSourcemap !== false,
     },
     build: {
-      outDir: "dist",
+      outDir: stage?.directory ?? "dist",
       emptyOutDir: true,
       manifest: true,
       sourcemap: buildSourcemap,

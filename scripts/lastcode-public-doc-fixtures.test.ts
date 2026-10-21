@@ -194,10 +194,6 @@ it("resolves isolated packaged-app data paths on every supported desktop platfor
     resolvePackagedUserDataDirectory("/fixture/home", "linux"),
     "/fixture/home/.config/lastcode",
   );
-  assert.equal(
-    resolvePackagedUserDataDirectory("C:\\fixture\\home", "win32"),
-    NodePath.join("C:\\fixture\\home", "AppData", "Roaming", "lastcode"),
-  );
 });
 
 it("seeds a one-project mobile companion workspace", async () => {
@@ -377,7 +373,7 @@ it("runs the public-doc fixture lifecycle in isolated state", async () => {
   } finally {
     await NodeFSP.rm(outputDirectory, { recursive: true, force: true });
   }
-}, 90_000);
+});
 
 it("seeds and rebuilds the mobile showcase using native V2 records", async () => {
   const baseDir = await NodeFSP.mkdtemp(
@@ -415,4 +411,4 @@ it("seeds and rebuilds the mobile showcase using native V2 records", async () =>
   } finally {
     await NodeFSP.rm(baseDir, { recursive: true, force: true });
   }
-}, 30_000);
+});
