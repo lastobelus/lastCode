@@ -178,6 +178,9 @@ vi.mock("../lib/composerDraftUploads", () => ({
 vi.mock("../localApi", () => ({
   readLocalApi: () => ({ dialogs: { confirm: state.confirm } }),
 }));
+vi.mock("../components/ThreadArchiveDialog", () => ({
+  requestThreadArchiveDialog: vi.fn(async () => null),
+}));
 vi.mock("../threadRoutes", () => ({
   resolveThreadRouteRef: () => null,
   buildThreadRouteParams: (ref: ScopedThreadRef) => ref,
