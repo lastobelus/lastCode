@@ -1179,8 +1179,10 @@ async function executeLocalCi(
     ) => {
       if (!diagnosticDirectory || !reportPath) return;
       NodeFS.mkdirSync(diagnosticDirectory, { recursive: true });
+      const pendingReportPath = `${reportPath}.pending`;
+      // Keep the readable owner report intact if a later write is interrupted.
       NodeFS.writeFileSync(
-        reportPath,
+        pendingReportPath,
         `${JSON.stringify(
           {
             schemaVersion: 1,
@@ -1214,6 +1216,7 @@ async function executeLocalCi(
           2,
         )}\n`,
       );
+      NodeFS.renameSync(pendingReportPath, reportPath);
     };
     writeDiagnostics("running");
     if (diagnosticDirectory) {

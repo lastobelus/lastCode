@@ -123,7 +123,7 @@ it.each([
           "import os from 'node:os'; import fs from 'node:fs'; import {syncBuiltinESMExports} from 'node:module';",
           ...(failFinalReport
             ? [
-                "const writeFileSync = fs.writeFileSync; fs.writeFileSync = function(path, data, ...args) { if (String(path).endsWith('/report.json') && JSON.parse(String(data)).status === 'passed') throw new Error('fixture final diagnostics write failed'); return writeFileSync.call(this, path, data, ...args); };",
+                "const writeFileSync = fs.writeFileSync; fs.writeFileSync = function(path, data, ...args) { if ((String(path).endsWith('/report.json') || String(path).endsWith('/report.json.pending')) && JSON.parse(String(data)).status === 'passed') { writeFileSync.call(this, path, String(data).slice(0, 20), ...args); throw new Error('fixture final diagnostics write failed'); } return writeFileSync.call(this, path, data, ...args); };",
               ]
             : []),
           `os.homedir = () => ${JSON.stringify(NodePath.join(directory, "home"))}; syncBuiltinESMExports();`,
