@@ -1,46 +1,67 @@
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
-import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { useAtomValue } from "@effect/atom-react";
+import type { EnvironmentId } from "@t3tools/contracts";
 import {
   formatThreadLink,
-  percentDecodedThreadLinkId,
+  resolveThreadLinkReference,
   resolveThreadLinkRef,
+  type ThreadLinkReference,
 } from "@t3tools/shared/threadLinks";
 import { Link } from "@tanstack/react-router";
 import { MessageSquareTextIcon } from "lucide-react";
+import { Atom } from "effect/reactivity";
 
-import { useProject, useThreadRefs, useThreadShell } from "../../state/entities";
+import { useProject } from "../../state/entities";
+import { environmentThreadShells } from "../../state/threads";
 import { ProjectFavicon } from "../ProjectFavicon";
 
 export function MarkdownThreadLink(props: {
   readonly environmentId: EnvironmentId;
-  readonly threadId: ThreadId;
+  readonly reference: ThreadLinkReference;
+  readonly messageEnvironmentId?: EnvironmentId | undefined;
   readonly label: string;
 }) {
-  const decodedId = percentDecodedThreadLinkId(props.threadId);
-  const written = useThreadShell(scopeThreadRef(props.environmentId, props.threadId));
-  const decoded = useThreadShell(
-    written === null && decodedId !== null ? scopeThreadRef(props.environmentId, decodedId) : null,
-  );
-  const local = written ?? decoded;
-  const refs = useThreadRefs(local === null);
-  const remote = useThreadShell(
-    local === null
-      ? resolveThreadLinkRef(scopeThreadRef(props.environmentId, props.threadId), refs)
-      : null,
-  );
-  const thread = local ?? remote;
-  const environmentId = thread?.environmentId ?? props.environmentId;
-  const threadId = thread?.id ?? props.threadId;
+  const {
+    threadId: linkedThreadId,
+    environmentId: linkedEnvironmentId,
+    version,
+    legacyThreadId,
+  } = props.reference;
+  const messageEnvironmentId = props.messageEnvironmentId;
+  const resolvedAtom = Atom.make((get) => {
+    const resolved = resolveThreadLinkReference(
+      { threadId: linkedThreadId, environmentId: linkedEnvironmentId, version, legacyThreadId },
+      (threadId, environmentId) => {
+        const owner = environmentId ?? messageEnvironmentId;
+        return owner === undefined
+          ? undefined
+          : (get(environmentThreadShells.threadShellAtom(scopeThreadRef(owner, threadId))) ??
+              undefined);
+      },
+    );
+    if (resolved.value !== undefined || linkedEnvironmentId !== undefined) return resolved;
+    const target = resolveThreadLinkRef(
+      scopeThreadRef(messageEnvironmentId ?? props.environmentId, linkedThreadId),
+      get(environmentThreadShells.threadRefsAtom),
+    );
+    return target === null
+      ? resolved
+      : { ...target, value: get(environmentThreadShells.threadShellAtom(target)) ?? undefined };
+  });
+  const resolved = useAtomValue(resolvedAtom);
+  const thread = resolved.value;
+  const threadId = resolved.threadId;
+  const environmentId = resolved.environmentId ?? props.messageEnvironmentId ?? props.environmentId;
   const project = useProject(
-    thread === null ? null : scopeProjectRef(environmentId, thread.projectId),
+    thread === undefined ? null : scopeProjectRef(environmentId, thread.projectId),
   );
   const title = thread?.title.trim() || props.label;
   return (
     <Link
       to="/$environmentId/$threadId"
       params={{ environmentId, threadId }}
-      title={thread === null ? "Thread no longer available" : project?.title}
-      data-markdown-copy={formatThreadLink(threadId, title)}
+      title={thread === undefined ? "Thread no longer available" : project?.title}
+      data-markdown-copy={formatThreadLink(threadId, title, environmentId)}
     >
       <span
         className="ms-[0.25em] me-[0.2em] inline-flex size-[14px] [vertical-align:-0.125em]"

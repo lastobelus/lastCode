@@ -1,6 +1,7 @@
 import * as NodeAssert from "node:assert/strict";
 
 import {
+  T3_CODE_BROWSER_TOOL_INSTRUCTIONS,
   T3_CODE_ORCHESTRATION_INSTRUCTIONS,
   T3_CODE_ORCHESTRATION_SECTIONS,
 } from "@t3tools/provider-core/server/orchestrationInstructions";
@@ -57,6 +58,43 @@ describe("buildCodexAdditionalContext", () => {
       sections.map((entry) => entry.value).join("\n\n"),
       T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim(),
     );
+  });
+
+  it.each([
+    { browser: false, device: false },
+    { browser: true, device: false },
+    { browser: false, device: true },
+    { browser: true, device: true },
+  ])("replaces unavailable tool guidance with tools %j", (availability) => {
+    const enabled = buildCodexAdditionalContext(
+      { model: "gpt-6.1-sol", reasoningEffort: "high" },
+      { browser: true, device: true },
+    );
+    const context = buildCodexAdditionalContext(
+      { model: "gpt-6.1-sol", reasoningEffort: "high" },
+      availability,
+    );
+    if (availability.browser) {
+      NodeAssert.equal(context.t3_code_tools_browser?.value, T3_CODE_BROWSER_TOOL_INSTRUCTIONS);
+    } else {
+      NodeAssert.match(context.t3_code_tools_browser?.value ?? "", /browser tools are unavailable/);
+      NodeAssert.match(context.t3_code_tools_browser?.value ?? "", /Disregard earlier/);
+      NodeAssert.notEqual(
+        context.t3_code_tools_browser?.value,
+        enabled.t3_code_tools_browser?.value,
+      );
+    }
+    if (availability.device) {
+      NodeAssert.match(
+        context.t3_code_tools_device?.value ?? "",
+        /`device_list`, then `device_open`/,
+      );
+      NodeAssert.match(context.t3_code_tools_device?.value ?? "", /`agent-device snapshot -i`/);
+    } else {
+      NodeAssert.match(context.t3_code_tools_device?.value ?? "", /device tools are unavailable/);
+      NodeAssert.match(context.t3_code_tools_device?.value ?? "", /Disregard earlier/);
+      NodeAssert.notEqual(context.t3_code_tools_device?.value, enabled.t3_code_tools_device?.value);
+    }
   });
 });
 

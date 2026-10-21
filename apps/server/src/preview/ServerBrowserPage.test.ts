@@ -5,9 +5,38 @@ import {
   type CDPSession,
   type Page,
 } from "playwright-core";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vite-plus/test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vite-plus/test";
 
 import * as ServerBrowserPage from "./ServerBrowserPage.ts";
+
+describe("native viewport", () => {
+  it("uses the CDP guest dimensions and scroll offset for a scaled capture", async () => {
+    const page = { viewportSize: () => null } as unknown as Page;
+    const send = vi.fn(async (method: string) =>
+      method === "Page.getLayoutMetrics"
+        ? { cssVisualViewport: { clientWidth: 390, clientHeight: 844, pageX: 20, pageY: 30 } }
+        : { data: "image" },
+    );
+    const cdp = { send } as unknown as CDPSession;
+    expect(await ServerBrowserPage.viewportSize(page, cdp)).toEqual({ width: 390, height: 844 });
+    expect(await ServerBrowserPage.captureViewport(page, cdp, { format: "png", scale: 0.5 })).toBe(
+      "image",
+    );
+    expect(send).toHaveBeenLastCalledWith("Page.captureScreenshot", {
+      format: "png",
+      clip: { x: 20, y: 30, width: 390, height: 844, scale: 0.5 },
+    });
+  });
+});
 
 describe("server browser element refs", () => {
   let browser: Browser;
@@ -244,6 +273,13 @@ describe("server browser element refs", () => {
     );
     await ServerBrowserPage.click(page, { selector: 'button[data-example=" >> aria-ref=e1"]' });
     expect(await page.locator("button").textContent()).toBe("saved");
+  });
+
+  it("stops an evaluation at its deadline so the page answers the next one", async () => {
+    await expect(
+      ServerBrowserPage.evaluate(cdp, { expression: "for (;;) {}" }, { timeoutMs: 200 }),
+    ).rejects.toMatchObject({ tag: "PreviewAutomationTimeoutError" });
+    expect(await ServerBrowserPage.evaluate(cdp, { expression: "1 + 1" }, { timeoutMs: 2_000 })).toBe(2);
   });
 });
 
