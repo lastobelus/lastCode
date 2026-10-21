@@ -522,6 +522,46 @@ describe("video asset byte ranges", () => {
       }).pipe(Effect.provide(layerFileResponse)),
   );
 
+  it.effect("streams guarded file ranges, including suffixes and conditional requests", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-guarded-range-" });
+      const filePath = path.join(directory, "clip.mp4");
+      yield* fs.writeFileString(filePath, "0123456789");
+      const canonicalPath = yield* fs.realPath(filePath);
+      for (const [range, ifRange, expected, status, contentRange] of [
+        [undefined, undefined, "0123456789", 200, null],
+        ["bytes=0-1", undefined, "01", 206, "bytes 0-1/10"],
+        ["bytes=4-", undefined, "456789", 206, "bytes 4-9/10"],
+        ["bytes=-3", undefined, "789", 206, "bytes 7-9/10"],
+        ["bytes=-999999999999999999999999", undefined, "0123456789", 206, "bytes 0-9/10"],
+        ["bytes=10-", undefined, "", 416, "bytes */10"],
+        ["bytes=0-1", '"old-etag"', "0123456789", 200, null],
+        ["bytes=0-1", "", "0123456789", 200, null],
+      ] as const) {
+        const file = yield* openMediaFile(canonicalPath);
+        if (!file) throw new Error("Expected an opened media file");
+        const response = HttpServerResponse.toWeb(
+          yield* assetFileResponse(
+            { path: canonicalPath, file, mimeType: "video/mp4" },
+            range,
+            ifRange,
+          ),
+        );
+        expect(response.status).toBe(status);
+        expect(response.headers.get("accept-ranges")).toBe("bytes");
+        expect(response.headers.get("content-range")).toBe(contentRange);
+        expect(response.headers.get("cache-control")).toBe("private, no-store, no-transform");
+        expect(response.headers.get("etag")).toBeNull();
+        expect(response.headers.get("last-modified")).toBeNull();
+        if (status !== 416)
+          expect(response.headers.get("content-length")).toBe(String(expected.length));
+        expect(yield* Effect.promise(() => response.text())).toBe(expected);
+      }
+    }).pipe(Effect.provide(layerFileResponse)),
+  );
+
   it.effect("keeps attachment media out of the cache once its signed URL expires", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -533,7 +573,7 @@ describe("video asset byte ranges", () => {
       const response = HttpServerResponse.toWeb(
         yield* assetFileResponse({ path: canonicalPath, mimeType: "audio/wav" }),
       );
-      expect(response.headers.get("cache-control")).toBe("private, no-store");
+      expect(response.headers.get("cache-control")).toBe("private, no-store, no-transform");
       expect(response.headers.get("accept-ranges")).toBe("bytes");
     }).pipe(Effect.provide(layerFileResponse)),
   );
@@ -702,6 +742,25 @@ describe("assetResponseHeaders", () => {
     expect(assetResponseHeaders("/attachments/user-image.SVG")).toHaveProperty(
       "Content-Security-Policy",
     );
+  });
+
+  it("does not apply document policy to raster images", () => {
+    expect(assetResponseHeaders("/attachments/user-image.png")).toEqual({
+      "Cache-Control": "private, max-age=3600, no-transform",
+      "X-Content-Type-Options": "nosniff",
+    });
+  });
+
+  it("serves inline videos with their declared mime type", () => {
+    expect(
+      assetResponseHeaders("/attachments/demo.bin", {
+        mimeType: 'video/mp4; codecs="avc1.42E01E"',
+      }),
+    ).toEqual({
+      "Cache-Control": "private, max-age=3600, no-transform",
+      "Content-Type": "video/mp4",
+      "X-Content-Type-Options": "nosniff",
+    });
   });
   it("serves inline attachment documents with their declared mime type", () => {
     expect(
