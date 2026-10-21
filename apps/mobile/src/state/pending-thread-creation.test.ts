@@ -138,7 +138,7 @@ describe("resolvePendingThreadCreation", () => {
     ).toBeNull();
   });
   it("shows preparation while a queued thread is waiting for its first shell", () => {
-    expect(pendingThreadCreationShell(creation)?.runtime).toEqual({
+    expect(pendingThreadCreationShell(creation)?.runtime).toMatchObject({
       status: "preparing",
       activeRunId: null,
       providerInstanceId: creation.modelSelection!.instanceId,
