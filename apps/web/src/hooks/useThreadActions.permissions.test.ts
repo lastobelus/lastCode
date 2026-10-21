@@ -43,6 +43,11 @@ vi.mock("react", () => ({
   useMemo: (factory: () => unknown) => factory(),
   useRef: (current: unknown) => ({ current }),
 }));
+vi.mock("../components/ThreadArchiveDialog", () => ({
+  requestThreadArchiveDialog: () => {
+    throw new Error("These permission fixtures do not require archive confirmation.");
+  },
+}));
 vi.mock("@tanstack/react-router", () => ({
   useRouter: () => ({ state: { matches: [] }, navigate: async () => {} }),
 }));
