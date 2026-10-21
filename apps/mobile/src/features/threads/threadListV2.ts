@@ -74,7 +74,6 @@ export type ThreadListV2Status =
   | "archive-failed"
   | "approval"
   | "input"
-  | "question"
   | "not-responding"
   | "needs-repair"
   | "working"
@@ -214,7 +213,6 @@ export function resolveThreadListV2SwipeActions(input: {
 export function resolveThreadListV2SnoozeGateExpiryMs(
   thread: Pick<
     EnvironmentThreadShell,
-    | "attention"
     | "hasPendingApprovals"
     | "hasPendingUserInput"
     | "pendingSubagentRequest"
@@ -227,8 +225,7 @@ export function resolveThreadListV2SnoozeGateExpiryMs(
   if (
     thread.hasPendingApprovals ||
     thread.hasPendingUserInput ||
-    thread.pendingSubagentRequest != null ||
-    thread.attention?.kind === "question"
+    thread.pendingSubagentRequest != null
   )
     return null;
   if (!hasQueuedTurnStart(thread, options)) return null;
@@ -271,7 +268,6 @@ export function resolveThreadListV2Status(
   thread: Pick<
     EnvironmentThreadShell,
     | "actionResume"
-    | "attention"
     | "hasPendingApprovals"
     | "hasPendingUserInput"
     | "pendingSubagentRequest"
@@ -291,7 +287,6 @@ export function resolveThreadListV2Status(
   if (thread.hasPendingUserInput || thread.pendingSubagentRequest === "user_input") {
     return "input";
   }
-  if (thread.attention?.kind === "question") return "question";
   if (thread.runtime?.status === "running" && thread.blockedOnThreadWait === true) {
     return "waiting";
   }

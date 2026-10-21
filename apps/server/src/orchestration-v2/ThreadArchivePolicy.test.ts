@@ -49,7 +49,6 @@ it("does not use unrelated metadata timestamps or retained failures as unread re
     updatedAt: afterReply,
     lastVisitedAt: beforeReply,
     recovery: { status: "needed" },
-    attention: { kind: "question" },
   };
   assert.isFalse(archiveNeedsConfirmation(failure, controls, null));
 });

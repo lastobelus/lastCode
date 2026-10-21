@@ -534,8 +534,6 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "thread.annotation.upsert":
     case "thread.annotation.resolve":
     case "thread.annotation.reopen":
-    case "thread.attention.set":
-    case "thread.attention.clear":
     case "thread.dashboard-item.upsert":
     case "thread.dashboard-item.remove":
     case "thread.create":
@@ -2777,8 +2775,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           | "thread.annotation.upsert"
           | "thread.annotation.resolve"
           | "thread.annotation.reopen"
-          | "thread.attention.set"
-          | "thread.attention.clear"
           | "thread.dashboard-item.upsert"
           | "thread.dashboard-item.remove";
       }
@@ -2803,8 +2799,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         | "thread.annotation-upserted"
         | "thread.annotation-resolved"
         | "thread.annotation-reopened"
-        | "thread.attention-set"
-        | "thread.attention-cleared"
         | "thread.metadata-updated",
       payload: OrchestrationV2AppThread,
     ) =>
@@ -2883,34 +2877,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             }
           : {}),
       });
-      return;
-    }
-    if (command.type === "thread.attention.set" || command.type === "thread.attention.clear") {
-      const attention =
-        command.type === "thread.attention.set"
-          ? thread.attention?.kind === command.attention.kind
-            ? thread.attention
-            : command.attention
-          : null;
-      yield* emitThread(
-        command.type === "thread.attention.set"
-          ? "thread.attention-set"
-          : "thread.attention-cleared",
-        {
-          ...thread,
-          attention,
-          updatedAt: now,
-          ...(attention === null
-            ? {}
-            : {
-                settledOverride: null,
-                settledAt: null,
-                unsettledAt: null,
-                snoozedUntil: null,
-                snoozedAt: null,
-              }),
-        },
-      );
       return;
     }
     const records = yield* projectionStore
@@ -3493,10 +3459,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: `Thread ${command.threadId} snooze wake time ${command.snoozedUntil} is not in the future.`,
         });
       }
-      if (
-        thread.attention != null ||
-        projection.runtimeRequests.some((request) => request.status === "pending")
-      ) {
+      if (projection.runtimeRequests.some((request) => request.status === "pending")) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
@@ -3566,7 +3529,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             thread.settledOverride === "settled" && thread.settledAt !== null && !wasPinned;
           return {
             ...thread,
-            attention: null,
             settledOverride: "settled",
             settledAt: alreadySettled ? thread.settledAt : (command.settledAt ?? now),
             pullRequests: thread.pullRequests?.map((link) => withPullRequestWatch(link, undefined)),
@@ -4503,7 +4465,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           lastVisitedAt: null,
           persistent: false,
           annotation: null,
-          attention: null,
           dashboardItems: [],
           actionResume: null,
           worktreeCleanup: null,
@@ -5763,26 +5724,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
   ) {
     let projection = yield* getProjectionWithPendingEvents(command.threadId, events);
-    // Automatic usage recovery carries user provenance but does not answer
-    // an outstanding question.
-    if (
-      command.createdBy === "user" &&
-      command.usageLimitContinuationOfRunId === undefined &&
-      projection.thread.attention != null
-    ) {
-      const now = yield* DateTime.now;
-      yield* emit(
-        events,
-        command,
-      )({
-        type: "thread.attention-cleared",
-        threadId: command.threadId,
-        providerInstanceId: projection.thread.providerInstanceId,
-        occurredAt: now,
-        payload: { ...projection.thread, attention: null, updatedAt: now },
-      });
-      projection = yield* getProjectionWithPendingEvents(command.threadId, events);
-    }
     if (command.manualContinuationOfRunId !== undefined) {
       const source = projection.runs.find((run) => run.id === command.manualContinuationOfRunId);
       const limited = latestRootProviderFailure(source ?? null, projection.turnItems);
@@ -13340,8 +13281,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "thread.annotation.upsert":
       case "thread.annotation.resolve":
       case "thread.annotation.reopen":
-      case "thread.attention.set":
-      case "thread.attention.clear":
       case "thread.dashboard-item.upsert":
       case "thread.dashboard-item.remove":
         yield* dispatchThreadMetadata(command, events);
@@ -13365,7 +13304,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             ),
           );
         if (
-          thread.attention != null ||
           hasOpenActionableDashboardItems(thread.dashboardItems) ||
           thread.settledOverride !== null ||
           DateTime.toEpochMillis(thread.updatedAt) > DateTime.toEpochMillis(command.snapshotAt)

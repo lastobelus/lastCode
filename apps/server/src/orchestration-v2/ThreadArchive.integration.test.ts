@@ -785,7 +785,7 @@ const idleArchiveFamily = Effect.gen(function* () {
     assert.include(["idle", "completed"], shell.status);
     assert.isNull(shell.pendingRuntimeRequest);
     assert.isFalse(shell.hasActionableProposedPlan);
-    assert.isNull(shell.attention ?? null);
+    assert.isFalse("attention" in shell);
     assert.isEmpty(shell.pendingBackgroundTasks ?? []);
   }
   return { ...ids, native, snapshot };

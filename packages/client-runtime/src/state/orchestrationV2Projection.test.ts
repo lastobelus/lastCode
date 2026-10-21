@@ -188,7 +188,6 @@ describe("applyOrchestrationV2ProjectionEvent", () => {
         updatedAt: "2026-06-20T00:00:00.000Z",
         resolvedAt: null,
       },
-      attention: { kind: "question" as const, raisedAt: "2026-06-20T00:00:00.000Z" },
     };
     const next = applyOrchestrationV2ProjectionEvent(emptyProjection, {
       id: EventId.make(`metadata-${type}`),

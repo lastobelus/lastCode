@@ -630,7 +630,6 @@ export interface ThreadStatusPill {
     | "Plan Ready"
     | "Deleting"
     | "Deleting (Queued)"
-    | "Question"
     | "Cleanup failed"
     | "Not responding"
     | "Needs repair"
@@ -640,13 +639,11 @@ export interface ThreadStatusPill {
   colorClass: string;
   dotClass: string;
   pulse: boolean;
-  marker?: string;
 }
 
 const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
   "Pending Approval": 7,
   "Awaiting Input": 6,
-  Question: 5,
   Failed: 3.5,
   Working: 3,
   Connecting: 3,
@@ -664,7 +661,6 @@ const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
 
 type ThreadStatusInput = Pick<
   SidebarThreadSummary,
-  | "attention"
   | "hasActionableProposedPlan"
   | "hasPendingApprovals"
   | "hasPendingUserInput"
@@ -928,7 +924,6 @@ export type SidebarThreadStatus =
   | "archive-failed"
   | "approval"
   | "input"
-  | "question"
   | "working"
   | "waiting"
   | "failed"
@@ -963,7 +958,6 @@ type SidebarThreadStatusInput = Pick<
   | "runtime"
   | "blockedOnThreadWait"
   | "actionResume"
-  | "attention"
   | "worktreeCleanup"
   | "recovery"
   | "archivePending"
@@ -983,7 +977,6 @@ export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): Si
   if (thread.hasPendingUserInput || thread.pendingSubagentRequest === "user_input") {
     return "input";
   }
-  if (thread.attention?.kind === "question") return "question";
   if (thread.runtime?.status === "running" && thread.blockedOnThreadWait === true) {
     return "waiting";
   }
@@ -1017,7 +1010,6 @@ export type SidebarV2TopStatusKind =
   | "waiting"
   | "woke"
   | "working"
-  | "question"
   | "cleanup-deleting"
   | "cleanup-queued"
   | "cleanup-failed"
@@ -1034,7 +1026,6 @@ export function resolveSidebarV2TopStatus(input: {
     input.status === "archive-failed" ||
     input.status === "not-responding" ||
     input.status === "needs-repair" ||
-    input.status === "question" ||
     input.status === "cleanup-deleting" ||
     input.status === "cleanup-queued" ||
     input.status === "cleanup-failed"
@@ -1239,16 +1230,6 @@ export function resolveThreadStatusPill(input: {
       colorClass: "text-indigo-600 dark:text-indigo-300/90",
       dotClass: "bg-indigo-500 dark:bg-indigo-300/90",
       pulse: false,
-    };
-  }
-
-  if (thread.attention?.kind === "question") {
-    return {
-      label: "Question",
-      colorClass: "text-violet-600 dark:text-violet-300/90",
-      dotClass: "bg-violet-500 dark:bg-violet-300/90",
-      pulse: false,
-      marker: "?",
     };
   }
 

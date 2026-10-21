@@ -694,7 +694,6 @@ it.layer(layerTest)("LegacyV1ThreadImporter", (it) => {
           updatedAt: "2026-01-02T00:00:00.000Z",
           resolvedAt: "2026-01-02T00:00:00.000Z",
         };
-        const attention = { kind: "question", raisedAt: "2026-01-02T00:00:00.000Z" };
         yield* sql`INSERT INTO projection_projects (project_id, title, workspace_root, scripts_json, created_at, updated_at) VALUES ('legacy:metadata-project','Legacy metadata','/example/project','[]','2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z')`;
         yield* sql`INSERT INTO projection_threads (thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode, created_at, updated_at, annotation_json, persistent, attention_json)
         VALUES (${threadId},'legacy:metadata-project','Legacy metadata','{"instanceId":"codex","model":"gpt-6"}','full-access','default','2026-01-01T00:00:00.000Z','2026-01-02T00:00:00.000Z',${'{"body":"Resolved note","anchorMessageId":"legacy:source-message","createdAt":"2026-01-01T00:00:00.000Z","updatedAt":"2026-01-02T00:00:00.000Z","resolvedAt":"2026-01-02T00:00:00.000Z"}'},1,${'{"kind":"question","raisedAt":"2026-01-02T00:00:00.000Z"}'})`;
@@ -704,7 +703,7 @@ it.layer(layerTest)("LegacyV1ThreadImporter", (it) => {
         yield* importer.ensureTranscript(threadId);
         const imported = yield* projections.getThreadProjection(threadId);
         assert.deepStrictEqual(imported.thread.annotation, annotation);
-        assert.deepStrictEqual(imported.thread.attention, attention);
+        assert.isFalse("attention" in imported.thread);
         assert.isTrue(imported.thread.persistent);
         assert.equal(imported.messages[0]?.senderThreadId, "legacy:sender");
         yield* sql`UPDATE orchestration_v2_projection_threads SET payload_json=json_remove(payload_json,'$.annotation','$.persistent','$.attention','$.worktreeCleanup') WHERE thread_id=${threadId}`;
@@ -717,7 +716,7 @@ it.layer(layerTest)("LegacyV1ThreadImporter", (it) => {
         const repaired = yield* projections.getThreadProjection(threadId);
         assert.deepStrictEqual(repaired.thread.updatedAt, imported.thread.updatedAt);
         assert.deepStrictEqual(repaired.thread.annotation, annotation);
-        assert.deepStrictEqual(repaired.thread.attention, attention);
+        assert.isFalse("attention" in repaired.thread);
         assert.isTrue(repaired.thread.persistent);
         assert.equal(repaired.messages[0]?.senderThreadId, "legacy:sender");
         const item = repaired.turnItems[0];
@@ -733,7 +732,6 @@ it.layer(layerTest)("LegacyV1ThreadImporter", (it) => {
               payload: {
                 ...repaired.thread,
                 annotation: null,
-                attention: null,
                 persistent: false,
                 worktreeCleanup: null,
               },
@@ -744,7 +742,7 @@ it.layer(layerTest)("LegacyV1ThreadImporter", (it) => {
         yield* importer.reconcileShells;
         const cleared = yield* projections.getThread(threadId);
         assert.isNull(cleared.annotation);
-        assert.isNull(cleared.attention);
+        assert.isFalse("attention" in cleared);
         assert.isFalse(cleared.persistent);
         assert.deepStrictEqual(yield* importer.reconcileShells, {
           importedThreadCount: 0,

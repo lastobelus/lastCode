@@ -78,8 +78,6 @@ import * as HtmlHandlers from "./toolkits/html/handlers.ts";
 import { HtmlPreviewTool, HtmlPreviewToolkit, HtmlRenderToolkit } from "./toolkits/html/tools.ts";
 import * as ActionResumeHandlers from "./toolkits/actionResume/handlers.ts";
 import { ActionResumeToolkit } from "./toolkits/actionResume/tools.ts";
-import * as ThreadAttentionHandlers from "./toolkits/threadAttention/handlers.ts";
-import { ThreadAttentionToolkit } from "./toolkits/threadAttention/tools.ts";
 import * as ThreadDashboardHandlers from "./toolkits/threadDashboard/handlers.ts";
 import { ThreadDashboardToolkit } from "./toolkits/threadDashboard/tools.ts";
 
@@ -1131,11 +1129,6 @@ export const layerActionResumeToolkit = toolkitRegistration(
   ActionResumeHandlers.layer,
 );
 
-const layerThreadAttentionToolkit = toolkitRegistration(
-  ThreadAttentionToolkit,
-  ThreadAttentionHandlers.layer,
-);
-
 const layerThreadDashboardToolkit = toolkitRegistration(
   ThreadDashboardToolkit,
   ThreadDashboardHandlers.layer,
@@ -1165,13 +1158,12 @@ const layerFullToolkit = Layer.mergeAll(
   layerDeviceToolkit,
   layerHtmlToolkit,
   layerActionResumeToolkit,
-  layerThreadAttentionToolkit,
   layerThreadDashboardToolkit,
 ).pipe(Layer.provideMerge(makeMcpTransport("/mcp")));
 
 // Sessions created while agent browser access is disabled still receive the
-// attention and dashboard tools, but preview tools stay absent from discovery entirely.
-const layerThreadAttentionOnlyToolkit = Layer.mergeAll(
+// dashboard tools, but preview tools stay absent from discovery entirely.
+const layerThreadOnlyToolkit = Layer.mergeAll(
   layerOrchestratorToolkit,
   layerHtmlToolkit,
   layerThreadToolkit,
@@ -1179,7 +1171,6 @@ const layerThreadAttentionOnlyToolkit = Layer.mergeAll(
   layerProjectRegistration,
   layerEnvironmentToolkit,
   layerWorktreeToolkitRegistration,
-  layerThreadAttentionToolkit,
   layerThreadDashboardToolkit,
   layerPullRequestsToolkit,
 ).pipe(Layer.provideMerge(makeMcpTransport("/mcp/thread")));
@@ -1188,5 +1179,5 @@ const layerThreadAttentionOnlyToolkit = Layer.mergeAll(
 // McpServer layer would expose the full catalog on the restricted endpoint too.
 export const layer = Layer.mergeAll(
   Layer.fresh(layerFullToolkit),
-  Layer.fresh(layerThreadAttentionOnlyToolkit),
+  Layer.fresh(layerThreadOnlyToolkit),
 );

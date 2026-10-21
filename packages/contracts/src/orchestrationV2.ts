@@ -1,7 +1,6 @@
 import { ActionResumeState } from "./actionResume.ts";
 import {
   ThreadAnnotation,
-  ThreadAttention,
   ThreadDashboardItemInput,
   ThreadDashboardItems,
   ThreadWorktreeCleanup,
@@ -468,7 +467,6 @@ export const OrchestrationV2AppThread = Schema.Struct({
   historyOrigin: Schema.optional(OrchestrationV2ThreadHistoryOrigin),
   persistent: Schema.optional(Schema.Boolean),
   annotation: Schema.optional(Schema.NullOr(ThreadAnnotation)),
-  attention: Schema.optional(Schema.NullOr(ThreadAttention)),
   dashboardItems: Schema.optional(ThreadDashboardItems),
   actionResume: Schema.optional(Schema.NullOr(ActionResumeState)),
   worktreeCleanup: Schema.optional(Schema.NullOr(ThreadWorktreeCleanup)),
@@ -1725,6 +1723,7 @@ export const OrchestrationV2DomainEvent = Schema.Union([
       "thread.annotation-upserted",
       "thread.annotation-resolved",
       "thread.annotation-reopened",
+      // Retired metadata events remain decodable in persisted history.
       "thread.attention-set",
       "thread.attention-cleared",
       "thread.pull-request-synced",
@@ -1934,7 +1933,6 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   historyOrigin: Schema.optional(OrchestrationV2ThreadHistoryOrigin),
   persistent: Schema.optional(Schema.Boolean),
   annotation: Schema.optional(Schema.NullOr(ThreadAnnotation)),
-  attention: Schema.optional(Schema.NullOr(ThreadAttention)),
   dashboardItems: Schema.optional(ThreadDashboardItems),
   actionResume: Schema.optional(Schema.NullOr(ActionResumeState)),
   subagentPromotion: Schema.optional(Schema.NullOr(OrchestrationV2SubagentPromotion)),
@@ -2581,6 +2579,7 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
       "thread.annotation-upserted",
       "thread.annotation-resolved",
       "thread.annotation-reopened",
+      // Retired metadata events remain decodable in persisted history.
       "thread.attention-set",
       "thread.attention-cleared",
       "thread.runtime-mode-updated",
@@ -2769,17 +2768,6 @@ export const OrchestrationV2Command = Schema.Union([
     commandId: CommandId,
     threadId: ThreadId,
     itemId: ThreadDashboardItemInput.fields.id,
-  }),
-  Schema.Struct({
-    type: Schema.Literal("thread.attention.set"),
-    commandId: CommandId,
-    threadId: ThreadId,
-    attention: ThreadAttention,
-  }),
-  Schema.Struct({
-    type: Schema.Literal("thread.attention.clear"),
-    commandId: CommandId,
-    threadId: ThreadId,
   }),
   Schema.Struct({
     type: Schema.Literal("thread.archive"),

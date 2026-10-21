@@ -499,22 +499,6 @@ describe("resolveSidebarThreadStatus", () => {
     ).toBe("waiting");
   });
 
-  it("keeps a thread question ahead of provider activity and Action progress", () => {
-    const question = { kind: "question" as const, raisedAt: "2026-03-09T10:00:00.000Z" };
-    expect(resolveSidebarThreadStatus({ ...idle, runtime, attention: question })).toBe("question");
-    expect(
-      resolveSidebarThreadStatus({
-        ...idle,
-        runtime,
-        attention: question,
-        hasPendingApprovals: true,
-      }),
-    ).toBe("approval");
-    expect(resolveSidebarV2TopStatus({ status: "question", isUnread: true, isWoke: true })).toBe(
-      "question",
-    );
-  });
-
   it("uses Action progress while idle and keeps an active provider ahead of it", () => {
     const action = {
       runId: "action-1",
@@ -691,25 +675,6 @@ describe("resolveThreadStatusPill", () => {
     },
   );
 
-  it("shows a question after native input and before active work", () => {
-    expect(
-      resolveThreadStatusPill({
-        thread: {
-          ...baseThread,
-          attention: { kind: "question", raisedAt: "2026-03-09T10:00:00.000Z" },
-        },
-      }),
-    ).toMatchObject({ label: "Question", marker: "?", pulse: false });
-    expect(
-      resolveThreadStatusPill({
-        thread: {
-          ...baseThread,
-          hasPendingApprovals: true,
-          attention: { kind: "question", raisedAt: "2026-03-09T10:00:00.000Z" },
-        },
-      }),
-    ).toMatchObject({ label: "Pending Approval" });
-  });
 
   it("shows an active thread wait without a pulse and resumes Working when it ends", () => {
     const blocked = { ...baseThread, blockedOnThreadWait: true };

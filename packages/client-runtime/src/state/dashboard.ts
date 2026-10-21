@@ -117,14 +117,6 @@ export function buildProjectDashboard(
     if (thread.hasPendingUserInput) {
       addSignal("input", "Input requested", "Open the thread to answer its pending input request.");
     }
-    if (thread.attention != null) {
-      addSignal(
-        "question",
-        "Question waiting",
-        "The agent has marked this thread as waiting for your answer.",
-        { raisedAt: thread.attention.raisedAt },
-      );
-    }
     if (thread.hasActionableProposedPlan && !active && status !== "waiting") {
       addSignal(
         "review",

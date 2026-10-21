@@ -193,7 +193,6 @@ it.effect.each([
   "failed",
   "running-action",
   "finished-action",
-  "owner-attention",
   "unknown-running",
   "queued-work",
   "owner-work",
@@ -240,9 +239,7 @@ it.effect.each([
         : {}),
     };
     for (const thread of [
-      state === "owner-attention"
-        ? { ...root, attention: { kind: "question" as const, raisedAt: DateTime.formatIso(now) } }
-        : root,
+      root,
       child,
     ])
       yield* store.apply({
@@ -334,7 +331,6 @@ it.effect.each(["archived", "deleted"] as const)(
             parentThreadId: intermediateId,
             relationshipToParent: "subagent" as const,
           },
-          attention: { kind: "question" as const, raisedAt: DateTime.formatIso(now) },
         },
         {
           ...root,
@@ -367,7 +363,7 @@ it.effect.each(["archived", "deleted"] as const)(
       assert.isFalse(family.requiresConfirmation);
       assert.isFalse(family.canPromote);
       assert.isTrue(family.canStopAndArchive);
-      assert.equal(family.threads.find(({ id }) => id === childId)?.attention?.kind, "question");
+      assert.isFalse("attention" in family.threads.find(({ id }) => id === childId)!);
       assert.isNotNull(family.threads.find(({ id }) => id === rootId)?.archivedAt);
       assert.isTrue(
         Exit.isFailure(

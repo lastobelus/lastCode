@@ -14,7 +14,6 @@ export type ThreadStatusKind =
   | "archive-failed"
   | "pending-approval"
   | "awaiting-input"
-  | "question"
   | "not-responding"
   | "needs-repair"
   | "working"
@@ -128,16 +127,6 @@ export function resolveThreadStatus(
       label: "Awaiting Input",
       pillClassName: "bg-adaptive-indigo-500-a12-a16",
       textClassName: "text-adaptive-indigo-600-300",
-      pulse: false,
-    };
-  }
-
-  if (thread.attention?.kind === "question") {
-    return {
-      kind: "question",
-      label: "Question",
-      pillClassName: "bg-adaptive-violet-500-a12-a16",
-      textClassName: "text-adaptive-violet-700-300",
       pulse: false,
     };
   }

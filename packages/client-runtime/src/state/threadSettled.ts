@@ -71,7 +71,6 @@ export interface ThreadSnoozeShell extends QueuedThreadShell {
   readonly source?: Pick<EnvironmentThreadShell["source"], "pendingRuntimeRequest">;
   readonly snoozedUntil?: string | null;
   readonly snoozedAt?: string | null;
-  readonly attention?: import("@t3tools/contracts").ThreadAttention | null;
   readonly hasPendingApprovals: boolean;
   readonly hasPendingUserInput: boolean;
   readonly pendingSubagentRequest?: PendingSubagentRequest | null;
@@ -83,7 +82,6 @@ export interface ThreadSnoozeShell extends QueuedThreadShell {
  * until its timer.
  */
 export function threadRaisedHandWhileSnoozed(shell: ThreadSnoozeShell): boolean {
-  if (shell.attention?.kind === "question") return true;
   if (shell.hasPendingApprovals || shell.hasPendingUserInput) return true;
   if (shell.source?.pendingRuntimeRequest != null) return true;
   if (shell.pendingSubagentRequest != null) return true;
@@ -117,7 +115,6 @@ function failureEdgeAt(shell: ThreadSnoozeShell): string | null | undefined {
 export function canSnooze(
   shell: Pick<
     ThreadSnoozeShell,
-    | "attention"
     | "hasPendingApprovals"
     | "hasPendingUserInput"
     | "pendingSubagentRequest"
@@ -131,7 +128,7 @@ export function canSnooze(
   if (shell.hasPendingApprovals || shell.hasPendingUserInput) return false;
   // The server rejects snoozing even for nonblocking questions.
   if (shell.source?.pendingRuntimeRequest != null) return false;
-  if (shell.pendingSubagentRequest != null || shell.attention?.kind === "question") return false;
+  if (shell.pendingSubagentRequest != null) return false;
   if (hasQueuedTurnStart(shell, options)) return false;
   return true;
 }
@@ -159,7 +156,6 @@ export function threadWokeAt(
   // indicator the user already cleared by visiting (snoozedUntil is newer
   // than that visit's lastVisitedAt).
   if (threadRaisedHandWhileSnoozed(shell)) {
-    if (shell.attention?.kind === "question") return shell.attention.raisedAt;
     // An old failure must not replace the activity time of an approval or input wake.
     const failedAt = failureEdgeAt(shell);
     if (
