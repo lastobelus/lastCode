@@ -308,6 +308,19 @@ The resulting stamp binds the exact LastCode commit, installable tag, upstream
 tag, and upstream commit. A PR stamp cannot authorize a checkpoint build, and a
 checkpoint stamp cannot authorize a PR merge.
 
+Full CI collects independent failures in one pass, including separate test and
+typecheck results for each workspace. Fix the complete candidate's failure list
+as one checkpoint repair batch before opening successive repair PRs. Checks
+that need a failed prerequisite are reported as blocked; cancellation and
+process-ownership failures stop the run. Any failed or blocked check prevents a
+passing CI stamp and packaging. Quick CI retains its fast failure behavior.
+
+The Action result links a retained JSON report and per-check output under the
+repository's common Git directory, in `lastcode-ci-diagnostics/`. The report
+records the candidate commit, validation-tool commit, runtime, commands and
+each check's result. Use that inventory to distinguish source failures from
+host-specific failures. An interrupted report is incomplete evidence.
+
 ## Apple Silicon DMG builder
 
 ### Resumable local builds

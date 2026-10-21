@@ -14,6 +14,9 @@ export interface CiProcessOptions {
   readonly terminationGraceMs?: number;
 }
 
+/** An ordinary check failure; cancellation and process-ownership failures stay fatal. */
+export class CiCommandFailure extends Error {}
+
 /** Waits for an owned command and its cancellation cleanup before releasing CI capacity. */
 export function runCiProcess(options: CiProcessOptions): Promise<void> {
   options.signal.throwIfAborted();
@@ -30,8 +33,6 @@ export function runCiProcess(options: CiProcessOptions): Promise<void> {
           : ["inherit", "inherit", "inherit", "ipc"],
       },
     );
-    child.stdout?.on("data", (data: Buffer) => options.onOutput?.(data.toString()));
-    child.stderr?.on("data", (data: Buffer) => options.onOutput?.(data.toString()));
     let closed = false;
     let cancelled = false;
     let cancellationFinished = false;
@@ -45,9 +46,10 @@ export function runCiProcess(options: CiProcessOptions): Promise<void> {
       if (spawnError) return reject(spawnError);
       if (cleanupError) return reject(cleanupError);
       if (cancelled) return reject(options.signal.reason ?? new Error("Local CI cancelled."));
+      if (exitCode === null) return reject(new Error("CI command terminated without an exit code."));
       if (exitCode !== 0) {
         return reject(
-          new Error(
+          new CiCommandFailure(
             [
               `${options.command} ${options.args.join(" ")} failed with exit code ${exitCode ?? "unknown"}.`,
               options.failureHelp,
@@ -93,6 +95,17 @@ export function runCiProcess(options: CiProcessOptions): Promise<void> {
         finish();
       }, options.terminationGraceMs ?? 2_000);
     };
+
+    const forwardOutput = (data: Buffer) => {
+      try {
+        options.onOutput?.(data.toString());
+      } catch (error) {
+        spawnError = error instanceof Error ? error : new Error("Could not retain CI output.");
+        abort();
+      }
+    };
+    child.stdout?.on("data", forwardOutput);
+    child.stderr?.on("data", forwardOutput);
 
     child.once("error", (error) => {
       spawnError = error;
