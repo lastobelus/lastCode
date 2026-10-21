@@ -1,4 +1,4 @@
-import { LastCodeStatusGlyph } from "./LastCodeStatusGlyph";
+import type { ReactNode } from "react";
 import { ArrowRightLeftIcon, CircleAlertIcon, GitBranchIcon, TerminalIcon } from "lucide-react";
 import type { ProjectIconOverride } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
@@ -30,6 +30,7 @@ type SidebarHoverProviderEntry = Pick<
 export interface SidebarThreadHoverContentProps {
   thread: SidebarThreadSummary;
   threadStatus?: ThreadStatusPill | null | undefined;
+  renderStatusGlyph?: (status: ThreadStatusPill) => ReactNode;
   projectTitle: string | null;
   projectDisplayName?: string | null;
   projectCwd: string | null;
@@ -192,7 +193,11 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
         {threadStatus ? (
           <div className={cn("flex min-w-0 items-center gap-2", threadStatus.colorClass)}>
             <span className="flex size-3.5 shrink-0 items-center justify-center" aria-hidden>
-              <LastCodeStatusGlyph status={{ ...threadStatus, pulse: false }} />
+              {props.renderStatusGlyph ? (
+                props.renderStatusGlyph({ ...threadStatus, pulse: false })
+              ) : (
+                <span className={cn("size-1.5 rounded-full", threadStatus.dotClass)} />
+              )}
             </span>
             <div className="min-w-0 truncate">{threadStatus.label}</div>
           </div>
