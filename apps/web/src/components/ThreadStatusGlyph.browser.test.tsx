@@ -4,6 +4,9 @@ import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import type { LastCodeStatusIcon } from "@t3tools/contracts/settings";
 import "../index.css";
 import { ThreadStatusGlyph } from "./ThreadStatusGlyph";
+import { configurableThreadStatuses } from "./Sidebar.logic";
+
+const workingStatus = configurableThreadStatuses.find((status) => status.label === "Working")!;
 import { ThreadStatusLabel } from "./ThreadStatusIndicators";
 import { TooltipProvider } from "./ui/tooltip";
 
@@ -22,7 +25,7 @@ afterEach(async () => {
 });
 
 async function raster(icon: LastCodeStatusIcon) {
-  await act(() => root.render(<ThreadStatusGlyph icon={icon} dotClass="bg-sky-500" />));
+  await act(() => root.render(<ThreadStatusGlyph icon={icon} dotClass={workingStatus.dotClass} />));
   const marker = host.querySelector<HTMLElement>("[data-status-shape] > span")!;
   const image = new Image();
   image.src = getComputedStyle(marker).maskImage.slice(5, -2);
@@ -41,9 +44,11 @@ it.each([
   ["square", 6, 6],
   ["circle", 6, 6],
 ] as const)(
-  "keeps %s's approved outer geometry for outlined styles",
+  "keeps %s's approved outer geometry and interior opacity",
   async (shape, width, height) => {
-    for (const style of ["open", "outline-fill"] as const) {
+    for (const style of shape === "circle"
+      ? (["open", "outline-fill"] as const)
+      : (["open", "solid", "outline-fill"] as const)) {
       const { data } = await raster({ shape, style });
       const xs: number[] = [];
       const ys: number[] = [];
@@ -58,7 +63,7 @@ it.each([
       expect(Math.max(...xs) - Math.min(...xs) + 1).toBeCloseTo(width * 20, -1);
       expect(Math.max(...ys) - Math.min(...ys) + 1).toBeCloseTo(height * 20, -1);
       const centerAlpha = data[(90 * 180 + 90) * 4 + 3];
-      expect(centerAlpha).toBe(style === "open" ? 0 : 128);
+      expect(centerAlpha).toBe(style === "open" ? 0 : style === "solid" ? 255 : 128);
       expect(Math.max(...data.filter((_, index) => index % 4 === 3))).toBe(255);
     }
   },
@@ -66,9 +71,7 @@ it.each([
 
 it("preserves the dot color and compact 14px slot for every shape", async () => {
   const status = {
-    label: "Working",
-    colorClass: "text-sky-600",
-    dotClass: "bg-sky-500",
+    ...workingStatus,
     pulse: false,
   };
   for (const shape of ["triangle", "triangle-right", "square", "diamond", "circle"] as const) {
