@@ -1,4 +1,5 @@
 import type { SidebarThreadSummary } from "../../types";
+import type { ThreadStatusPill } from "../Sidebar.logic";
 import type { ComponentProps } from "react";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { readThreadShell } from "../../state/entities";
@@ -12,6 +13,7 @@ import type { LastCodeThreadProcessSnapshot } from "./useLastCodeThreadProcesses
 import type { LastCodeThreadFamilyPresentation } from "./useLastCodeThreadFamily";
 export function LastCodeThreadHoverDetails({
   thread,
+  threadStatus,
   sourceControl,
   processes,
   identity,
@@ -21,6 +23,7 @@ export function LastCodeThreadHoverDetails({
   hasActiveAnnotation,
 }: {
   thread: SidebarThreadSummary;
+  threadStatus?: ThreadStatusPill | null | undefined;
   sourceControl: LastCodeThreadSourceControlSnapshot;
   processes: LastCodeThreadProcessSnapshot;
   identity: LastCodeThreadIdentity;
@@ -51,6 +54,7 @@ export function LastCodeThreadHoverDetails({
         terminalProcessCount={processes.runningTerminalIds.length}
         terminalStatus={processes.terminalStatus}
         thread={thread}
+        threadStatus={threadStatus}
         cleanupBlockerTitle={cleanupBlockerTitle}
         showCleanup={!hasActiveAnnotation}
       />
@@ -63,6 +67,7 @@ export function createLastCodeThreadHoverContents(
   input: Pick<
     ComponentProps<typeof LastCodeThreadHoverDetails>,
     | "thread"
+    | "threadStatus"
     | "sourceControl"
     | "processes"
     | "identity"

@@ -78,6 +78,7 @@ function LastCodeThreadRow(props: LastCodeThreadRowProps) {
   const { content: threadHoverDetails, trailingContent: cleanupHoverDetails } =
     createLastCodeThreadHoverContents({
       thread,
+      threadStatus,
       sourceControl,
       processes,
       identity,

@@ -237,6 +237,7 @@ import {
   resolveSidebarRowAccessibility,
   type SidebarDropVerb,
   resolveSidebarThreadStatus,
+  resolveThreadStatusPill,
   resolveThreadLastVisitedAt,
   searchSidebarThreads,
   shouldCreateNewThreadInCurrentProject,
@@ -1734,6 +1735,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const detailsTooltip = (
     <SidebarThreadTooltip
       thread={thread}
+      threadStatus={resolveThreadStatusPill({ thread: { ...thread, lastVisitedAt } })}
       projectTitle={props.project?.title ?? null}
       projectCwd={props.project?.workspaceRoot ?? null}
       projectFaviconPath={props.project?.faviconPath ?? null}

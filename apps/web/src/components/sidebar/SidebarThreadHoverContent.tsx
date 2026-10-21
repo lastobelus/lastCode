@@ -6,6 +6,7 @@ import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 
 import type { ProviderInstanceEntry } from "../../providerInstances";
 import type { SidebarThreadSummary } from "../../types";
+import { resolveThreadStatusPill, type ThreadStatusPill } from "../Sidebar.logic";
 import { cn } from "~/lib/utils";
 import { ProjectFavicon } from "../ProjectFavicon";
 import type { TerminalStatusIndicator } from "../ThreadStatusIndicators";
@@ -26,6 +27,7 @@ type SidebarHoverProviderEntry = Pick<
 
 export interface SidebarThreadHoverContentProps {
   thread: SidebarThreadSummary;
+  threadStatus?: ThreadStatusPill | null | undefined;
   projectTitle: string | null;
   projectDisplayName?: string | null;
   projectCwd: string | null;
@@ -72,6 +74,10 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
     .map(
       (instanceId) => props.providerEntryByInstanceId?.get(instanceId)?.displayName ?? instanceId,
     );
+  const threadStatus =
+    props.threadStatus === undefined
+      ? resolveThreadStatusPill({ thread: props.thread })
+      : props.threadStatus;
   const actionPresentation =
     props.thread.actionResume?.outcome === "running"
       ? actionRunningPresentation(props.thread.actionResume)
@@ -181,6 +187,14 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
                 </div>
               ))}
             </div>
+          </div>
+        ) : null}
+        {threadStatus ? (
+          <div className={cn("flex min-w-0 items-center gap-2", threadStatus.colorClass)}>
+            <span className="flex size-3 shrink-0 items-center justify-center" aria-hidden>
+              <span className={cn("size-1.5 rounded-full", threadStatus.dotClass)} />
+            </span>
+            <div className="min-w-0 truncate">{threadStatus.label}</div>
           </div>
         ) : null}
         {actionPresentation ? (
