@@ -15,6 +15,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as ServerConfig from "../config.ts";
 import * as SqlitePersistence from "./Sqlite.ts";
 import { runMigrations } from "./Migrations.ts";
+import { lastcodeMigrationManifest, runLastCodeMigrations } from "./LastCodeMigrations.ts";
 import { initializeV2Database } from "./initializeV2Database.ts";
 import * as EventStore from "../orchestration-v2/EventStore.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
@@ -36,10 +37,12 @@ it.effect(
       VALUES ('project', 'Project', '/tmp/project', '[]', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`;
       yield* sql`INSERT INTO projection_threads (thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode, created_at, updated_at)
       VALUES (${threadId}, 'project', 'V1 thread', '{"instanceId":"codex","model":"gpt-5.4"}', 'full-access', 'default', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`;
+      yield* sql`UPDATE projection_threads SET annotation_json = ${'{"body":"Keep resolved note","anchorMessageId":"message-0","createdAt":"2026-01-01T00:00:00.000Z","updatedAt":"2026-01-02T00:00:00.000Z","resolvedAt":"2026-01-02T00:00:00.000Z"}'}, persistent = 1, attention_json = '{"kind":"question","raisedAt":"2026-01-02T00:00:00.000Z"}' WHERE thread_id = ${threadId}`;
       for (let index = 0; index < 6; index++) {
         yield* sql`INSERT INTO projection_thread_messages (message_id, thread_id, role, text, is_streaming, created_at, updated_at)
         VALUES (${`message-${index}`}, ${threadId}, ${index % 2 ? "assistant" : "user"}, ${`Text ${index}`}, 0, ${`2026-01-0${index + 1}T00:00:00.000Z`}, ${`2026-01-0${index + 1}T00:00:00.000Z`})`;
       }
+      yield* sql`UPDATE projection_thread_messages SET source_thread_id = 'sender-thread' WHERE message_id = 'message-0'`;
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: sourcePath })));
 
     return Effect.gen(function* () {
@@ -63,6 +66,17 @@ it.effect(
         const projections = yield* ProjectionStore.ProjectionStoreV2;
         const shell = yield* projections.getThreadProjection(threadId);
         assert.equal(shell.thread.id, threadId);
+        assert.isTrue(shell.thread.persistent);
+        assert.equal(shell.thread.annotation?.body, "Keep resolved note");
+        assert.equal(shell.thread.annotation?.anchorMessageId, "message-0");
+        assert.equal(shell.thread.annotation?.resolvedAt, "2026-01-02T00:00:00.000Z");
+        assert.equal(shell.thread.attention?.kind, "question");
+        assert.deepStrictEqual(
+          (yield* sql`SELECT migration_id, name FROM lastcode_sql_migrations ORDER BY migration_id`).map(
+            (row) => [row.migration_id, row.name] as const,
+          ),
+          lastcodeMigrationManifest,
+        );
         assert.deepEqual(
           shell.messages.map((message) => message.text),
           ["Text 4", "Text 5"],
@@ -76,6 +90,12 @@ it.effect(
           transcript.messages.map((message) => message.text),
           ["Text 0", "Text 1", "Text 2", "Text 3", "Text 4", "Text 5"],
         );
+        assert.equal(transcript.messages[0]?.senderThreadId, "sender-thread");
+        const importedItem = transcript.turnItems.find(
+          (item) => item.type === "user_message" && item.messageId === "message-0",
+        );
+        assert.ok(importedItem?.type === "user_message");
+        assert.equal(importedItem.senderThreadId, "sender-thread");
         const imported =
           yield* sql`SELECT imported_message_count, transcript_imported_at FROM orchestration_v2_legacy_imports`;
         assert.equal(imported[0]?.imported_message_count, 6);

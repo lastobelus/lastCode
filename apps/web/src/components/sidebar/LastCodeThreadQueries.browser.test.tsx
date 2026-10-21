@@ -1,16 +1,7 @@
+import { act, render } from "../../../test/render";
 import { LastCodeSidebarPresentationProvider } from "./LastCodeSidebarPresentation";
-import { act, useEffect } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import {
-  beforeAll,
-  afterAll,
-  beforeEach,
-  afterEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vite-plus/test";
+import { useEffect } from "react";
+import { describe, expect, it, vi } from "vite-plus/test";
 import {
   AuthPreviewOperateScope,
   EnvironmentId,
@@ -128,7 +119,14 @@ const port: DiscoveredLocalServer = {
   pid: 12345,
   terminal: null,
 };
-let source: LastCodeThreadSourceControlSnapshot, processes: LastCodeThreadProcessSnapshot;
+const observe =
+  vi.fn<
+    (source: LastCodeThreadSourceControlSnapshot, processes: LastCodeThreadProcessSnapshot) => void
+  >();
+const snapshot = () => {
+  const [source, processes] = observe.mock.calls.at(-1)!;
+  return { source, processes };
+};
 function Harness({
   value = thread,
   live = true,
@@ -146,8 +144,7 @@ function Harness({
   const target = scopeThreadRef(value.environmentId, value.id);
   const queryProcesses = useLastCodeThreadProcesses(target);
   useEffect(() => {
-    source = querySource;
-    processes = queryProcesses;
+    observe(querySource, queryProcesses);
   }, [querySource, queryProcesses]);
   return (
     <LastCodeSidebarPresentationProvider
@@ -178,20 +175,7 @@ function Harness({
     </LastCodeSidebarPresentationProvider>
   );
 }
-let root: Root | null = null,
-  container: HTMLDivElement | null = null;
-const original = Object.getOwnPropertyDescriptor(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-beforeAll(() =>
-  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
-    configurable: true,
-    value: true,
-  }),
-);
-afterAll(() => {
-  if (original) Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", original);
-  else Reflect.deleteProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-});
-beforeEach(() => {
+function setup() {
   vi.clearAllMocks();
   mocks.previewPermission = true;
   mocks.readScope.mockImplementation(() => mocks.previewPermission);
@@ -214,46 +198,37 @@ beforeEach(() => {
     event.stopPropagation();
     return true;
   });
-});
-afterEach(async () => {
-  await act(() => root?.unmount());
-  container?.remove();
-  root = null;
-  container = null;
-  document.body.replaceChildren();
-});
-async function render(props: React.ComponentProps<typeof Harness> = {}) {
-  if (!root) {
-    container = document.createElement("div");
-    document.body.append(container);
-    root = createRoot(container);
-  }
-  await act(() => root!.render(<Harness {...props} />));
 }
+
 async function click(element: HTMLElement) {
   await act(() => element.click());
 }
 describe("row-owned query and control seams", () => {
   it("refreshes shared PR opening choices on the same mounted control", async () => {
+    setup();
+    await using screen = await render(null);
+    const container = screen.container;
     const value = { ...thread, pullRequests: [link] };
     mocks.openPr.mockReturnValue(true);
-    await render({ value, panel: true });
+    await screen.rerender(<Harness {...{ value, panel: true }} />);
     const anchor = container!.querySelector("a")!;
     await click(anchor);
     expect(mocks.openPr).toHaveBeenLastCalledWith(expect.anything(), anchor.href, ref);
     expect(mocks.navigation).toHaveBeenCalledOnce();
-    await render({ value, panel: false });
+    await screen.rerender(<Harness {...{ value, panel: false }} />);
     expect(container!.querySelector("a")).toBe(anchor);
     await click(anchor);
     expect(mocks.openPr).toHaveBeenLastCalledWith(expect.anything(), anchor.href, undefined);
     expect(mocks.navigation).toHaveBeenCalledOnce();
-    await render({ value, panel: true, active: true });
+    await screen.rerender(<Harness {...{ value, panel: true, active: true }} />);
     await click(anchor);
     expect(mocks.openPr).toHaveBeenLastCalledWith(expect.anything(), anchor.href, ref);
     expect(mocks.navigation).toHaveBeenCalledOnce();
   });
   it("queries the exact physical project once and favors worktree over own cwd over representative fallback", async () => {
-    await render({ value: { ...thread, worktreePath: "/own-worktree" } });
+    setup();
+    await using screen = await render(null);
+    await screen.rerender(<Harness {...{ value: { ...thread, worktreePath: "/own-worktree" } }} />);
     expect(mocks.project).toHaveBeenCalledOnce();
     expect(mocks.project).toHaveBeenCalledWith(
       scopeProjectRef(thread.environmentId, thread.projectId),
@@ -263,21 +238,23 @@ describe("row-owned query and control seams", () => {
       environmentId: thread.environmentId,
       input: { cwd: "/own-worktree", includeRemote: false },
     });
-    expect(source.gitCwd).toBe("/own-worktree");
-    expect(source.threadProjectCwd).toBe("/own-project");
-    await render();
-    expect(source.gitCwd).toBe("/own-project");
+    expect(snapshot().source.gitCwd).toBe("/own-worktree");
+    expect(snapshot().source.threadProjectCwd).toBe("/own-project");
+    await screen.rerender(<Harness {...{}} />);
+    expect(snapshot().source.gitCwd).toBe("/own-project");
     mocks.project.mockReturnValue(null);
-    await render();
-    expect(source.gitCwd).toBe("/representative-project");
+    await screen.rerender(<Harness {...{}} />);
+    expect(snapshot().source.gitCwd).toBe("/representative-project");
   });
   it("keeps a colliding thread ID in its own environment and project", async () => {
+    setup();
+    await using screen = await render(null);
     const value = {
       ...thread,
       environmentId: EnvironmentId.make("second-environment"),
       projectId: ProjectId.make("second-project"),
     };
-    await render({ value });
+    await screen.rerender(<Harness {...{ value }} />);
     expect(mocks.project).toHaveBeenCalledWith(
       scopeProjectRef(value.environmentId, value.projectId),
     );
@@ -288,7 +265,9 @@ describe("row-owned query and control seams", () => {
     expect(mocks.linked.mock.calls[0]?.[0]).toBe(value.environmentId);
   });
   it("retains lease-gated git and linked PR reads without fetching again in sibling controls", async () => {
-    await render({ live: false });
+    setup();
+    await using screen = await render(null);
+    await screen.rerender(<Harness {...{ live: false }} />);
     expect(mocks.status).not.toHaveBeenCalled();
     expect(mocks.query).toHaveBeenCalledWith(null);
     expect(mocks.linked).toHaveBeenCalledOnce();
@@ -303,45 +282,57 @@ describe("row-owned query and control seams", () => {
     expect(mocks.previews).toHaveBeenCalledWith(ref);
   });
   it("does not request git status for linked PRs, branchless threads or missing cwd", async () => {
-    await render({
-      value: {
-        ...thread,
-        linkedPullRequest: {
-          projectId: thread.projectId,
-          repository: link.repository,
-          number: link.number,
-          url: link.url,
-        },
-      },
-    });
+    setup();
+    await using screen = await render(null);
+    await screen.rerender(
+      <Harness
+        {...{
+          value: {
+            ...thread,
+            linkedPullRequest: {
+              projectId: thread.projectId,
+              repository: link.repository,
+              number: link.number,
+              url: link.url,
+            },
+          },
+        }}
+      />,
+    );
     expect(mocks.status).not.toHaveBeenCalled();
-    await render({ value: { ...thread, branch: null } });
+    await screen.rerender(<Harness {...{ value: { ...thread, branch: null } }} />);
     expect(mocks.status).not.toHaveBeenCalled();
     mocks.project.mockReturnValue(null);
-    await render({ fallback: null });
+    await screen.rerender(<Harness {...{ fallback: null }} />);
     expect(mocks.status).not.toHaveBeenCalled();
   });
   it("shares terminal/preview capability while keeping terminals distinct from preview-only work", async () => {
+    setup();
+    await using screen = await render(null);
+    const container = screen.container;
     mocks.previews.mockReturnValue([{}]);
-    await render();
-    expect(processes.hasStoppableProcesses).toBe(true);
-    expect(processes.terminalStatus).toBeNull();
+    await screen.rerender(<Harness {...{}} />);
+    expect(snapshot().processes.hasStoppableProcesses).toBe(true);
+    expect(snapshot().processes.terminalStatus).toBeNull();
     mocks.supportsProcesses.mockReturnValue(false);
-    await render();
-    expect(processes.hasStoppableProcesses).toBe(false);
+    await screen.rerender(<Harness {...{}} />);
+    expect(snapshot().processes.hasStoppableProcesses).toBe(false);
     mocks.terminals.mockReturnValue(["running-terminal"]);
     mocks.terminalPresentation.mockReturnValue({
       label: "Terminal process running",
       colorClass: "text-muted-foreground",
       pulse: true,
     });
-    await render();
-    expect(processes.terminalStatus?.label).toBe("Terminal process running");
+    await screen.rerender(<Harness {...{}} />);
+    expect(snapshot().processes.terminalStatus?.label).toBe("Terminal process running");
     expect(container!.querySelector('[role="img"]')?.getAttribute("aria-label")).toBe(
       "Terminal process running",
     );
   });
   it("shares resolved PR status and uses that URL before any pending link", async () => {
+    setup();
+    await using screen = await render(null);
+    const container = screen.container;
     const pr = {
       number: 18,
       url: "https://github.com/example/project/pull/18",
@@ -355,28 +346,33 @@ describe("row-owned query and control seams", () => {
       colorClass: "text-muted-foreground",
       tooltip: "Resolved PR",
     });
-    await render({ value: { ...thread, pullRequests: [link] } });
+    await screen.rerender(<Harness {...{ value: { ...thread, pullRequests: [link] } }} />);
     expect(container!.querySelectorAll("a")).toHaveLength(1);
     await click(container!.querySelector("a")!);
     expect(mocks.openPr).toHaveBeenLastCalledWith(expect.anything(), pr.url, ref);
     expect(mocks.prPresentation).toHaveBeenCalledWith(pr, "github");
   });
   it("shares local and worktree branch mismatches with checkout-specific restore capability", async () => {
+    setup();
+    await using screen = await render(null);
     mocks.query.mockReturnValue({ data: { refName: "different" } });
-    await render();
-    expect(source.branchMismatch).toEqual({
+    await screen.rerender(<Harness {...{}} />);
+    expect(snapshot().source.branchMismatch).toEqual({
       threadBranch: "feature",
       currentBranch: "different",
       canRestoreThreadBranch: true,
     });
-    await render({ value: { ...thread, worktreePath: "/own-worktree" } });
-    expect(source.branchMismatch).toEqual({
+    await screen.rerender(<Harness {...{ value: { ...thread, worktreePath: "/own-worktree" } }} />);
+    expect(snapshot().source.branchMismatch).toEqual({
       threadBranch: "feature",
       currentBranch: "different",
       canRestoreThreadBranch: false,
     });
   });
   it("suppresses resolved PR and port controls during cleanup while retaining terminal status", async () => {
+    setup();
+    await using screen = await render(null);
+    const container = screen.container;
     mocks.linked.mockReturnValue({
       pr: { number: 18, url: link.url, title: "Resolved", state: "open", isDraft: false },
     });
@@ -391,49 +387,62 @@ describe("row-owned query and control seams", () => {
       colorClass: "text-muted-foreground",
       pulse: false,
     });
-    await render({
-      value: {
-        ...thread,
-        worktreeCleanup: {
-          status: "deleting",
-          repositoryRoot: "/repository",
-          worktreePath: "/worktree",
-          startedAt: "2026-01-01T00:00:00Z",
-        },
-      },
-    });
+    await screen.rerender(
+      <Harness
+        {...{
+          value: {
+            ...thread,
+            worktreeCleanup: {
+              status: "deleting",
+              repositoryRoot: "/repository",
+              worktreePath: "/worktree",
+              startedAt: "2026-01-01T00:00:00Z",
+            },
+          },
+        }}
+      />,
+    );
     expect(container!.querySelector("a")).toBeNull();
     expect(container!.querySelector("button")).toBeNull();
     expect(container!.querySelector('[role="img"]')).not.toBeNull();
   });
   it("opens a pending PR for the exact environment and navigates only when right-panel opening needs it", async () => {
+    setup();
+    await using screen = await render(null);
+    const container = screen.container;
     const value = { ...thread, pullRequests: [link] };
-    await render({ value });
+    await screen.rerender(<Harness {...{ value }} />);
     await click(container!.querySelector("a")!);
     expect(mocks.openPr).toHaveBeenLastCalledWith(expect.anything(), link.url, ref);
     expect(mocks.navigation).toHaveBeenCalledWith(ref);
     expect(mocks.bubble).not.toHaveBeenCalled();
     mocks.navigation.mockClear();
-    await render({ value, active: true });
+    await screen.rerender(<Harness {...{ value, active: true }} />);
     await click(container!.querySelector("a")!);
     expect(mocks.navigation).not.toHaveBeenCalled();
-    await render({ value, panel: false });
+    await screen.rerender(<Harness {...{ value, panel: false }} />);
     await click(container!.querySelector("a")!);
     expect(mocks.openPr).toHaveBeenLastCalledWith(expect.anything(), link.url, undefined);
     expect(mocks.navigation).not.toHaveBeenCalled();
     mocks.openPr.mockReturnValue(false);
-    await render({ value });
+    await screen.rerender(<Harness {...{ value }} />);
     await click(container!.querySelector("a")!);
     expect(mocks.navigation).not.toHaveBeenCalled();
   });
   it("leaves pending PR display disabled when the environment lacks multiple-PR capability", async () => {
+    setup();
+    await using screen = await render(null);
+    const container = screen.container;
     mocks.multi.mockReturnValue(false);
-    await render({ value: { ...thread, pullRequests: [link] } });
+    await screen.rerender(<Harness {...{ value: { ...thread, pullRequests: [link] } }} />);
     expect(container!.querySelector("a")).toBeNull();
   });
   it("opens the first discovered port with the current scoped destination and preview command", async () => {
+    setup();
+    await using screen = await render(null);
+    const container = screen.container;
     mocks.ports.mockReturnValue([port, { ...port, port: 5174 }]);
-    await render();
+    await screen.rerender(<Harness {...{}} />);
     await click(container!.querySelector("button")!);
     expect(mocks.navigation).toHaveBeenCalledWith(ref);
     expect(mocks.openPort).toHaveBeenCalledWith({
@@ -447,8 +456,11 @@ describe("row-owned query and control seams", () => {
     );
   });
   it("rechecks preview permission at click time independently of task permission", async () => {
+    setup();
+    await using screen = await render(null);
+    const container = screen.container;
     mocks.ports.mockReturnValue([port]);
-    await render();
+    await screen.rerender(<Harness {...{}} />);
     mocks.previewPermission = false;
     await click(container!.querySelector("button")!);
     expect(mocks.openPort).not.toHaveBeenCalled();
@@ -458,9 +470,12 @@ describe("row-owned query and control seams", () => {
     expect(container!.querySelector("button")).toBeNull();
   });
   it("reports preview failure but suppresses interruption without changing navigation order", async () => {
+    setup();
+    await using screen = await render(null);
+    const container = screen.container;
     mocks.ports.mockReturnValue([port]);
     mocks.openPort.mockResolvedValueOnce(AsyncResult.failure(Cause.fail(new Error("Unavailable"))));
-    await render();
+    await screen.rerender(<Harness {...{}} />);
     await click(container!.querySelector("button")!);
     expect(mocks.toast).toHaveBeenCalledWith(
       expect.objectContaining({ title: "Unable to open preview", description: "Unavailable" }),

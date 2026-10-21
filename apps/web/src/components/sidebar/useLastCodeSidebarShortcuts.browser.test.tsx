@@ -1,11 +1,9 @@
-import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { act, render as renderUi, fakeTimers } from "../../../test/render";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId, ThreadId, type ResolvedKeybindingsConfig } from "@t3tools/contracts";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { makeThreadFixture } from "../../test-fixtures";
 import { useThreadSelectionStore } from "../../threadSelectionStore";
-import { THREAD_JUMP_HINT_SHOW_DELAY_MS } from "../Sidebar.logic";
 import { useLastCodeSidebarShortcuts } from "./useLastCodeSidebarShortcuts";
 const mocks = vi.hoisted(() => ({
   navigate: vi.fn(async () => {}),
@@ -14,7 +12,10 @@ const mocks = vi.hoisted(() => ({
   bindings: [] as ResolvedKeybindingsConfig,
 }));
 const router = { navigate: mocks.navigate };
-vi.mock("@tanstack/react-router", () => ({ useRouter: () => router }));
+vi.mock("@tanstack/react-router", async (original) => ({
+  ...(await original<typeof import("@tanstack/react-router")>()),
+  useRouter: () => router,
+}));
 vi.mock("@effect/atom-react", async (original) => ({
   ...(await original<typeof import("@effect/atom-react")>()),
   useAtomValue: () => mocks.bindings,
@@ -71,10 +72,8 @@ function Harness({
     </>
   );
 }
-let root: Root, container: HTMLDivElement;
-const original = Object.getOwnPropertyDescriptor(globalThis, "IS_REACT_ACT_ENVIRONMENT"),
-  platform = Object.getOwnPropertyDescriptor(navigator, "platform");
-beforeEach(() => {
+async function setup() {
+  await using stack = new AsyncDisposableStack();
   vi.clearAllMocks();
   mocks.mobile = false;
   mocks.bindings = [
@@ -82,26 +81,23 @@ beforeEach(() => {
     binding("thread.previous", "["),
     binding("thread.jump.2", "2"),
   ];
-  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
-    configurable: true,
-    value: true,
-  });
+  const platform = Object.getOwnPropertyDescriptor(navigator, "platform");
   Object.defineProperty(navigator, "platform", { configurable: true, value: "Linux" });
+  stack.defer(() => {
+    if (platform) Object.defineProperty(navigator, "platform", platform);
+    else Reflect.deleteProperty(navigator, "platform");
+  });
   useThreadSelectionStore.getState().clearSelection();
-  container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
-});
-afterEach(async () => {
-  await act(() => root.unmount());
-  container.remove();
-  useThreadSelectionStore.getState().clearSelection();
-  vi.useRealTimers();
-  if (original) Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", original);
-  else Reflect.deleteProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-  if (platform) Object.defineProperty(navigator, "platform", platform);
-  else Reflect.deleteProperty(navigator, "platform");
-});
+  stack.defer(() => useThreadSelectionStore.getState().clearSelection());
+  // The router is mocked because the hook's native-navigation calls are the assertion target.
+  const screen = stack.use(await renderUi(null, { router: false }));
+  const owner = stack.move();
+  return {
+    container: screen.container,
+    rerender: screen.rerender,
+    [Symbol.asyncDispose]: () => owner.disposeAsync(),
+  };
+}
 async function press(key: string, init: KeyboardEventInit = {}) {
   const event = new KeyboardEvent("keydown", {
     key,
@@ -115,8 +111,11 @@ async function press(key: string, init: KeyboardEventInit = {}) {
 }
 describe("root native shortcut arbitration", () => {
   it("navigates exact colliding-environment targets, clears selection, anchors and closes mobile", async () => {
+    await using fixture = await setup();
+    const { rerender } = fixture;
+
     mocks.mobile = true;
-    await act(() => root.render(<Harness />));
+    await rerender(<Harness />);
     useThreadSelectionStore.getState().toggleThread(key(first));
     const next = await press("]");
     expect(next.defaultPrevented).toBe(true);
@@ -133,7 +132,10 @@ describe("root native shortcut arbitration", () => {
   it.each(["repeat", "prevented", "palette", "model"] as const)(
     "does not consume a %s key event",
     async (guard) => {
-      await act(() => root.render(<Harness />));
+      await using fixture = await setup();
+      const { container, rerender } = fixture;
+
+      await rerender(<Harness />);
       const marker = document.createElement("div");
       if (guard === "palette") marker.setAttribute("data-command-palette", "");
       if (guard === "model") marker.setAttribute("data-model-picker-content", "");
@@ -152,7 +154,10 @@ describe("root native shortcut arbitration", () => {
     },
   );
   it("reads terminal focus at event time and ignores absent targets or traversal edges", async () => {
-    await act(() => root.render(<Harness />));
+    await using fixture = await setup();
+    const { container, rerender } = fixture;
+
+    await rerender(<Harness />);
     const terminal = document.createElement("div"),
       input = document.createElement("input");
     terminal.dataset.terminalOwner = "drawer";
@@ -162,21 +167,24 @@ describe("root native shortcut arbitration", () => {
     expect((await press("]")).defaultPrevented).toBe(false);
     expect(mocks.navigate).not.toHaveBeenCalled();
     await act(() => input.blur());
-    await act(() => root.render(<Harness current={key(second)} />));
+    await rerender(<Harness current={key(second)} />);
     expect((await press("]")).defaultPrevented).toBe(false);
-    await act(() => root.render(<Harness map={new Map([[key(first), first]])} />));
+    await rerender(<Harness map={new Map([[key(first), first]])} />);
     expect((await press("2")).defaultPrevented).toBe(false);
     expect(mocks.navigate).not.toHaveBeenCalled();
   });
   it("uses refreshed projection order and bindings, with only one navigation per native event", async () => {
-    await act(() => root.render(<Harness current={null} />));
+    await using fixture = await setup();
+    const { rerender } = fixture;
+
+    await rerender(<Harness current={null} />);
     await press("]");
     expect(mocks.navigate).toHaveBeenLastCalledWith({
       to: "/$environmentId/$threadId",
       params: { environmentId: first.environmentId, threadId: first.id },
     });
     mocks.bindings = [binding("thread.next", "n")];
-    await act(() => root.render(<Harness current={null} order={keys.toReversed()} />));
+    await rerender(<Harness current={null} order={keys.toReversed()} />);
     expect((await press("]")).defaultPrevented).toBe(false);
     await press("n");
     expect(mocks.navigate).toHaveBeenLastCalledWith({
@@ -186,7 +194,10 @@ describe("root native shortcut arbitration", () => {
     expect(mocks.navigate).toHaveBeenCalledTimes(2);
   });
   it("preserves safe-area selection and dismisses it outside", async () => {
-    await act(() => root.render(<Harness />));
+    await using fixture = await setup();
+    const { container, rerender } = fixture;
+
+    await rerender(<Harness />);
     useThreadSelectionStore.getState().toggleThread(key(first));
     await act(() =>
       container
@@ -202,18 +213,24 @@ describe("root native shortcut arbitration", () => {
     expect(useThreadSelectionStore.getState().selectedThreadKeys.size).toBe(0);
   });
   it("refreshes terminal-open context without retaining an old target binding", async () => {
+    await using fixture = await setup();
+    const { rerender } = fixture;
+
     mocks.bindings = [
       { ...binding("thread.next", "]"), whenAst: { type: "identifier", name: "terminalOpen" } },
     ];
-    await act(() => root.render(<Harness />));
+    await rerender(<Harness />);
     expect((await press("]")).defaultPrevented).toBe(false);
-    await act(() => root.render(<Harness terminalOpen />));
+    await rerender(<Harness terminalOpen />);
     expect((await press("]")).defaultPrevented).toBe(true);
     expect(mocks.navigate).toHaveBeenCalledTimes(1);
   });
   it("removes keyboard and selection listeners on unmount", async () => {
-    await act(() => root.render(<Harness />));
-    await act(() => root.render(null));
+    await using fixture = await setup();
+    const { container, rerender } = fixture;
+
+    await rerender(<Harness />);
+    await rerender(null);
     useThreadSelectionStore.getState().toggleThread(key(first));
     await press("]");
     await act(() => container.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })));
@@ -221,11 +238,14 @@ describe("root native shortcut arbitration", () => {
     expect(useThreadSelectionStore.getState().selectedThreadKeys.size).toBe(1);
   });
   it("keeps delayed configured jump labels and hides them on terminal focus", async () => {
-    vi.useFakeTimers();
-    await act(() => root.render(<Harness />));
+    await using fixture = await setup();
+    const { container, rerender } = fixture;
+
+    using _timers = fakeTimers();
+    await rerender(<Harness />);
     await press("Control");
     expect(container.querySelector("output")!.textContent).toBe("");
-    await act(() => vi.advanceTimersByTime(THREAD_JUMP_HINT_SHOW_DELAY_MS));
+    await act(() => vi.advanceTimersToNextTimer());
     expect(container.querySelector("output")!.textContent).toBe("Ctrl+2");
     const terminal = document.createElement("div"),
       input = document.createElement("input");

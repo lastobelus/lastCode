@@ -1,15 +1,5 @@
-import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import {
-  afterAll,
-  afterEach,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vite-plus/test";
+import { act, render, type Screen } from "../../../test/render";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { makeThreadFixture } from "../../test-fixtures";
@@ -80,34 +70,9 @@ function projection(
     statusForThread: () => null,
   });
 }
-let root: Root | null = null;
-let container: HTMLDivElement;
-const original = Object.getOwnPropertyDescriptor(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-beforeAll(() =>
-  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
-    configurable: true,
-    value: true,
-  }),
-);
-afterAll(() => {
-  if (original) Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", original);
-  else Reflect.deleteProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-});
-beforeEach(() => {
-  vi.clearAllMocks();
-  mocks.creator = null;
-  localStorage.clear();
-  useLastCodeSidebarFamiliesStore.setState({ collapsedByKey: {} });
-  container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
-});
-afterEach(async () => {
-  await act(() => root?.unmount());
-  container.remove();
-  root = null;
-});
+
 async function disclosure(
+  screen: Screen,
   active: boolean,
   collapsed = false,
   style: "typed-groups" | "minimal" = "typed-groups",
@@ -116,7 +81,7 @@ async function disclosure(
     (row) => row.thread.id === parent.id,
   )!;
   await act(() =>
-    root?.render(
+    screen.rerender(
       <div onClick={mocks.row} onKeyDown={mocks.row} onDoubleClick={mocks.row}>
         <LastCodeThreadFamilyDisclosure
           family={family}
@@ -126,11 +91,14 @@ async function disclosure(
       </div>,
     ),
   );
-  return container.querySelector("button")!;
+  return screen.container.querySelector("button")!;
 }
 describe("family disclosure ownership", () => {
   it("persists an exact scoped family key and returns to the parent when collapsing its selected child", async () => {
-    const button = await disclosure(true);
+    setup();
+    await using screen = await render(null);
+
+    const button = await disclosure(screen, true);
     await act(() => button.click());
     expect(mocks.navigate).toHaveBeenCalledWith(scopeThreadRef(parent.environmentId, parent.id));
     expect(mocks.row).not.toHaveBeenCalled();
@@ -144,7 +112,10 @@ describe("family disclosure ownership", () => {
     ).toBeUndefined();
   });
   it("expands without navigation and isolates nested keyboard/double-click activation", async () => {
-    const button = await disclosure(false, true);
+    setup();
+    await using screen = await render(null);
+
+    const button = await disclosure(screen, false, true);
     await act(() => {
       button.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
       button.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
@@ -157,7 +128,10 @@ describe("family disclosure ownership", () => {
     ).toBe(false);
   });
   it("keeps an interactive created conversation selected when its family collapses", async () => {
-    const button = await disclosure(true, false, "minimal");
+    setup();
+    await using screen = await render(null);
+
+    const button = await disclosure(screen, true, false, "minimal");
     await act(() => button.click());
     expect(mocks.navigate).not.toHaveBeenCalled();
     expect(
@@ -165,11 +139,15 @@ describe("family disclosure ownership", () => {
     ).toBe(true);
   });
   it("persists the distinct subagent-group key and follows its projected parent navigation", async () => {
+    setup();
+    await using screen = await render(null);
+    const { container } = screen;
+
     const item = projection(true).renderedItems.find((item) => item.type === "subagents");
     expect(item?.type).toBe("subagents");
     if (item?.type !== "subagents") throw new Error("Missing projected group");
     await act(() =>
-      root?.render(
+      screen.rerender(
         <ul>
           <LastCodeSubagentGroup item={item} navigateToThread={mocks.navigate} />
         </ul>,
@@ -204,19 +182,27 @@ function CreatorPresentation({ foreign = false }: { foreign?: boolean }) {
 }
 describe("creator presentation targeting", () => {
   it("reads the creator once in the owning environment and updates its description on refresh", async () => {
+    setup();
+    await using screen = await render(null);
+    const { container } = screen;
+
     mocks.creator = parent;
-    await act(() => root?.render(<CreatorPresentation />));
+    await act(() => screen.rerender(<CreatorPresentation />));
     expect(mocks.readCreator).toHaveBeenCalledExactlyOnceWith(
       scopeThreadRef(parent.environmentId, parent.id),
     );
     expect(container.textContent).toContain("Parent");
     mocks.creator = { ...parent, title: "Renamed creator" };
-    await act(() => root?.render(<CreatorPresentation />));
+    await act(() => screen.rerender(<CreatorPresentation />));
     expect(container.textContent).toContain("Renamed creator");
   });
   it("rejects a same-ID creator from another environment", async () => {
+    setup();
+    await using screen = await render(null);
+    const { container } = screen;
+
     mocks.creator = parent;
-    await act(() => root?.render(<CreatorPresentation foreign />));
+    await act(() => screen.rerender(<CreatorPresentation foreign />));
     expect(mocks.readCreator).toHaveBeenCalledExactlyOnceWith(
       scopeThreadRef(EnvironmentId.make("second"), parent.id),
     );
@@ -224,3 +210,10 @@ describe("creator presentation targeting", () => {
     expect(container.textContent).toContain("unavailable");
   });
 });
+
+function setup() {
+  vi.clearAllMocks();
+  mocks.creator = null;
+  localStorage.clear();
+  useLastCodeSidebarFamiliesStore.setState({ collapsedByKey: {} });
+}

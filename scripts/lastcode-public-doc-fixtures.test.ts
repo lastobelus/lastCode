@@ -34,12 +34,12 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { ThreadId } from "@t3tools/contracts";
-import { makeSqlitePersistenceLive } from "../apps/server/src/persistence/Layers/Sqlite.ts";
+import * as SqlitePersistence from "../apps/server/src/persistence/Sqlite.ts";
 import * as ProjectionStore from "../apps/server/src/orchestration-v2/ProjectionStore.ts";
 import * as EventStore from "../apps/server/src/orchestration-v2/EventStore.ts";
 import * as Positions from "../apps/server/src/orchestration-v2/TurnItemPositionStore.ts";
 import * as Maintenance from "../apps/server/src/orchestration-v2/ProjectionMaintenance.ts";
-const persistence = makeSqlitePersistenceLive(process.argv[1]);
+const persistence = SqlitePersistence.layerFromPath(process.argv[1]);
 const native = Layer.mergeAll(ProjectionStore.layer, EventStore.layer, Positions.layer).pipe(Layer.provideMerge(persistence));
 const layer = Maintenance.layer.pipe(Layer.provideMerge(native), Layer.provide(NodeServices.layer));
 const result = await Effect.runPromise(Effect.gen(function* () {

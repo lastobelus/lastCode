@@ -35,6 +35,8 @@ import {
   getThreadListV2OrderedSection,
   resolveThreadListV2CleanupActions,
   resolveThreadListV2SnoozeMenuSelection,
+  resolveThreadListV2SnoozeGateExpiryMs,
+  resolveThreadListV2WokeAt,
   resolveThreadListV2Status,
   resolveThreadListV2SwipeActions,
   withThreadListV2ArchiveAction,

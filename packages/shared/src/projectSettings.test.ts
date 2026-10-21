@@ -341,6 +341,7 @@ describe("resolveWorktreeCleanup", () => {
   it("inherits machine rules, disables one project and keeps custom rules isolated", () => {
     const machine = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
       storageCleanup: {
+        worktreeDependenciesAfterDays: 14,
         worktreeAfterDays: 8,
         worktreeSettledAfterDays: 2,
         worktreeKeepWhen: "any-local-files",
@@ -353,6 +354,7 @@ describe("resolveWorktreeCleanup", () => {
       worktreeSettledAfterDays: 2,
       worktreeKeepWhen: "any-local-files",
     });
+    expect(inherited.worktreeDependenciesAfterDays).toBe(14);
     const off = applyServerSettingsPatch(machine, {
       projectSettingsOverrides: {
         [projectId]: { worktreeCleanup: { mode: "off" } },
@@ -363,6 +365,7 @@ describe("resolveWorktreeCleanup", () => {
       worktreeSettledAfterDays: null,
       worktreeOnDelete: false,
       worktreeOnMerge: false,
+      worktreeDependenciesAfterDays: null,
       worktreeUnchanged: false,
       worktreeKeepWhen: "any-local-files",
     });
@@ -403,6 +406,7 @@ describe("resolveWorktreeCleanup", () => {
       worktreeSettledAfterDays: 0,
       worktreeOnDelete: true,
       worktreeOnMerge: true,
+      worktreeDependenciesAfterDays: null,
       worktreeUnchanged: false,
       worktreeKeepWhen: "uncommitted-changes",
     });

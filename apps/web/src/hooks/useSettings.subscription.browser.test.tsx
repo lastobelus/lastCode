@@ -1,15 +1,5 @@
-import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import {
-  afterAll,
-  afterEach,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vite-plus/test";
+import { act, render } from "../../test/render";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { DEFAULT_CLIENT_SETTINGS } from "@t3tools/contracts/settings";
 const persistence = vi.hoisted(() => ({
   getClientSettings: vi.fn(async () => null),
@@ -22,8 +12,6 @@ import {
   useClientSetting,
   updateClientSettings,
 } from "./useSettings";
-let root: Root;
-let container: HTMLDivElement;
 const compactRender = vi.fn();
 const groupingRender = vi.fn();
 const counts = () => ({
@@ -40,43 +28,25 @@ function Grouping() {
   const value = useClientSetting("legacySidebarThreadGroupingStyle");
   return <output data-testid="grouping">{value}</output>;
 }
-const original = Object.getOwnPropertyDescriptor(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-beforeAll(() =>
-  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
-    configurable: true,
-    value: true,
-  }),
-);
-afterAll(() => {
-  if (original) Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", original);
-  else Reflect.deleteProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-});
-beforeEach(() => {
+function setup() {
   __resetClientSettingsPersistenceForTests();
   __setClientSettingsForTests(DEFAULT_CLIENT_SETTINGS);
   vi.clearAllMocks();
-  container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
-});
-afterEach(async () => {
-  await act(() => root.unmount());
-  container.remove();
-  __resetClientSettingsPersistenceForTests();
-});
+  return { [Symbol.dispose]: __resetClientSettingsPersistenceForTests };
+}
 async function mount() {
-  await act(() =>
-    root.render(
-      <>
-        <Compact />
-        <Grouping />
-      </>,
-    ),
+  return render(
+    <>
+      <Compact />
+      <Grouping />
+    </>,
+    { router: false },
   );
 }
 describe("key-specific client settings subscriptions", () => {
   it("does not render for unrelated settings or write while subscribing", async () => {
-    await mount();
+    using _fixture = setup();
+    await using _screen = await mount();
     expect(persistence.setClientSettings).not.toHaveBeenCalled();
     const before = counts();
     await act(async () => {
@@ -85,7 +55,9 @@ describe("key-specific client settings subscriptions", () => {
     expect(counts()).toEqual(before);
   });
   it("updates only the compact consumer when compact status changes", async () => {
-    await mount();
+    using _fixture = setup();
+    await using screen = await mount();
+    const { container } = screen;
     const before = counts();
     await act(async () => {
       await updateClientSettings({
@@ -98,7 +70,9 @@ describe("key-specific client settings subscriptions", () => {
     );
   });
   it("updates grouping independently and ignores a repeated identical value", async () => {
-    await mount();
+    using _fixture = setup();
+    await using screen = await mount();
+    const { container } = screen;
     const before = counts();
     const value =
       DEFAULT_CLIENT_SETTINGS.legacySidebarThreadGroupingStyle === "minimal"

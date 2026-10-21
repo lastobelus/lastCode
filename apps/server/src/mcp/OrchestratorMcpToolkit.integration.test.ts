@@ -2,6 +2,10 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import {
   CommandId,
+  EventId,
+  RunId,
+  RunAttemptId,
+  OrchestratorMcpThreadReadResult,
   EnvironmentId,
   isProviderNativeSubagentThread,
   MessageId,
@@ -17,6 +21,9 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
+import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
+import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -44,13 +51,18 @@ import * as ProjectService from "../project/ProjectService.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as ThreadSearch from "../orchestration-v2/ThreadSearch.ts";
 import * as ThreadRecovery from "../orchestration-v2/ThreadRecoveryService.ts";
 import * as ThreadRecoveryRepair from "../orchestration-v2/ThreadRecoveryRepairService.ts";
 import * as ThreadReadBroker from "./ThreadReadBroker.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 
-const layerOrchestratorToolkit = McpHttpServer.layerOrchestratorToolkit.pipe(
+const layerOrchestratorToolkit = Layer.mergeAll(
+  McpHttpServer.layerOrchestratorToolkit,
+  McpHttpServer.layerThreadToolkit,
+).pipe(
+  Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
 );
@@ -73,10 +85,12 @@ const cancellationPrompt = "Remain active until the parent cancels this delegate
 const queuedFollowupPrompt = "Complete the queued follow-up and return the final result.";
 const queuedFollowupResult = "Queued delegated follow-up completed.";
 
+const encodeCallToolResult = Schema.encodeEffect(McpSchema.CallToolResult);
 const decodeDelegateTaskResult = Schema.decodeUnknownEffect(OrchestratorMcpDelegateTaskResult);
 const decodeThreadInterruptResult = Schema.decodeUnknownEffect(
   OrchestratorMcpThreadInterruptResult,
 );
+const decodeThreadReadResult = Schema.decodeUnknownEffect(OrchestratorMcpThreadReadResult);
 const decodeThreadSendResult = Schema.decodeUnknownEffect(OrchestratorMcpThreadSendResult);
 
 const codexSelection = {
@@ -637,17 +651,8 @@ describe("orchestrator MCP toolkit", () => {
 
 it.effect("encodes a recovered thread detail as a JSON-safe MCP tool result", () =>
   Effect.gen(function* () {
-    const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
-    const registry = ProviderAdapterRegistry.layerFromAdapters([
-      makeDeterministicAdapter({
-        instanceId: codexInstanceId,
-        driver: ProviderDriverKind.make("codex"),
-        capabilities: CodexProviderCapabilitiesV2,
-        capturedTurns,
-        shouldComplete: () => false,
-        response: () => "unused",
-      }),
-    ]);
+    // This serialization fixture creates metadata only and never starts a provider turn.
+    const registry = ProviderAdapterRegistry.layerFromAdapters([]);
     const orchestratorLayer = ProviderReplayHarness.layerWithRegistry(
       { name: "mcp-recovery-json" },
       registry,
@@ -673,6 +678,8 @@ it.effect("encodes a recovered thread detail as a JSON-safe MCP tool result", ()
       ),
       Layer.provide(ServerSettings.layerTest()),
       Layer.provide(layerUnusedScheduledTaskStub),
+      Layer.provide(Layer.mock(ThreadRecovery.ThreadRecoveryService)({})),
+      Layer.provide(Layer.mock(ThreadRecoveryRepair.ThreadRecoveryRepairService)({})),
       Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
       Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
       Layer.provide(NodeServices.layer),
@@ -714,7 +721,7 @@ it.effect("encodes a recovered thread detail as a JSON-safe MCP tool result", ()
           );
         expect(result.isError).toBe(false);
         // The MCP transport validates structuredContent as JSON, after the toolkit returns.
-        const encoded = yield* Schema.encodeEffect(McpSchema.CallToolResult)(result);
+        const encoded = yield* encodeCallToolResult(result);
         return yield* decodeThreadReadResult(encoded.structuredContent);
       });
       const withoutRecovery = yield* read;

@@ -1,15 +1,5 @@
-import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import {
-  afterAll,
-  afterEach,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vite-plus/test";
+import { render } from "../../../test/render";
+import { describe, expect, it, vi } from "vite-plus/test";
 import {
   EnvironmentId,
   ProviderDriverKind,
@@ -89,37 +79,28 @@ function Harness({ badge = false, nested = false }: { badge?: boolean; nested?: 
   );
   return <output>{JSON.stringify(value)}</output>;
 }
-let root: Root, container: HTMLDivElement;
-const original = Object.getOwnPropertyDescriptor(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-beforeAll(() =>
-  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
-    configurable: true,
-    value: true,
-  }),
-);
-afterAll(() => {
-  if (original) Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", original);
-  else Reflect.deleteProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-});
-beforeEach(() => {
+function setup() {
   vi.clearAllMocks();
   mocks.primary = null;
   mocks.local = false;
-  container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
-});
-afterEach(async () => {
-  await act(() => root.unmount());
-  container.remove();
-});
-async function render(badge = false, nested = false) {
-  await act(() => root.render(<Harness badge={badge} nested={nested} />));
-  return JSON.parse(container.textContent!) as ReturnType<typeof useLastCodeThreadIdentity>;
+}
+async function renderIdentity(badge = false, nested = false) {
+  const screen = await render(<Harness badge={badge} nested={nested} />, { router: false });
+  const value = () =>
+    JSON.parse(screen.container.textContent!) as ReturnType<typeof useLastCodeThreadIdentity>;
+  return Object.assign(screen, {
+    value,
+    async show(badge: boolean, nested: boolean) {
+      await screen.rerender(<Harness badge={badge} nested={nested} />);
+      return value();
+    },
+  });
 }
 describe("row provider and environment identity", () => {
   it("uses the owning member's provider catalog despite a same-ID foreign provider", async () => {
-    const value = await render();
+    setup();
+    await using screen = await renderIdentity();
+    const value = screen.value();
     expect(mocks.environmentRead).toHaveBeenCalledExactlyOnceWith(thread.environmentId);
     expect(value.providerEntry?.displayName).toBe("Own");
     expect(value.modelLabel).toContain("Own");
@@ -127,22 +108,28 @@ describe("row provider and environment identity", () => {
     expect(value.showsThreadEnvironmentIcon).toBe(true);
   });
   it("suppresses nested environment identity unless provider badges are enabled", async () => {
-    const plain = await render(false, true);
+    setup();
+    await using screen = await renderIdentity(false, true);
+    const plain = screen.value();
     expect(plain.showsThreadEnvironmentIcon).toBe(false);
     expect(plain.threadEnvironmentLabel).toBeNull();
-    const badged = await render(true, true);
+    const badged = await screen.show(true, true);
     expect(badged.showsThreadEnvironmentIcon).toBe(true);
     expect(badged.threadEnvironmentLabel).toBe("Member environment");
   });
   it("keeps desktop-local secondary threads local without the remote glyph", async () => {
+    setup();
     mocks.local = true;
-    const value = await render();
+    await using screen = await renderIdentity();
+    const value = screen.value();
     expect(value.showsThreadEnvironmentIcon).toBe(false);
     expect(value.threadEnvironmentLabel).toBe("Member environment");
   });
   it("keeps a primary local thread icon hidden without the local-icon setting", async () => {
+    setup();
     mocks.primary = thread.environmentId;
-    const value = await render();
+    await using screen = await renderIdentity();
+    const value = screen.value();
     expect(value.showsThreadEnvironmentIcon).toBe(false);
     expect(value.threadEnvironmentLabel).toBeNull();
   });

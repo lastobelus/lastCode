@@ -1,6 +1,5 @@
-import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { beforeEach, afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { act, render as renderUi } from "../../test/render";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { EnvironmentId, RunId, ThreadId } from "@t3tools/contracts";
 import { AsyncResult } from "effect/reactivity";
@@ -54,7 +53,6 @@ vi.mock("../state/use-atom-command", () => ({
 }));
 import { useMarkThreadRead, useMarkThreadUnread } from "./useThreadActions";
 import { markThreadsReadState, withThreadReadPermissions } from "./threadReadActions";
-let root: Root, container: HTMLDivElement;
 const initial = makeThreadFixture({
   updatedAt: "2026-01-01T00:01:00Z",
   lastVisitedAt: "2026-01-01T00:02:00Z",
@@ -86,12 +84,13 @@ function Harness() {
     </>
   );
 }
-const action = async (label: string) =>
-  act(async () => {
-    [...container.querySelectorAll("button")].find((x) => x.textContent === label)!.click();
+async function setup() {
+  await using stack = new AsyncDisposableStack();
+  const previous = useUiStateStore.getState().threadLastVisitedAtById;
+  stack.defer(() => {
+    useUiStateStore.setState({ threadLastVisitedAtById: previous });
+    vi.restoreAllMocks();
   });
-beforeEach(async () => {
-  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   mocks.tracking = true;
   mocks.canOperate = true;
   mocks.deniedEnvironments.clear();
@@ -101,19 +100,20 @@ beforeEach(async () => {
   mocks.toast.mockClear();
   mocks.unsupportedIds.clear();
   useUiStateStore.setState({ threadLastVisitedAtById: { [key]: initial.lastVisitedAt! } });
-  container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
-  await act(() => root.render(<Harness />));
-});
-afterEach(async () => {
-  vi.restoreAllMocks();
-  await act(() => root.unmount());
-  container.remove();
-  useUiStateStore.setState({ threadLastVisitedAtById: {} });
-});
+  const screen = stack.use(await renderUi(<Harness />));
+  const { container } = screen;
+  const action = async (label: string) =>
+    act(async () => {
+      [...container.querySelectorAll("button")].find((x) => x.textContent === label)!.click();
+    });
+  const owner = stack.move();
+  return { action, [Symbol.asyncDispose]: () => owner.disposeAsync() };
+}
 describe("explicit read-state actions", () => {
   it("disables synced read actions and rejects a stale authorized menu after permission loss", async () => {
+    await using fixture = await setup();
+    const { action } = fixture;
+
     const items = [
       { id: "mark-read", label: "Mark read" },
       { id: "mark-unread", label: "Mark unread" },
@@ -133,6 +133,9 @@ describe("explicit read-state actions", () => {
     expect(mocks.toast).toHaveBeenCalledTimes(2);
   });
   it("keeps local read markers available on read-only connections to older servers", async () => {
+    await using fixture = await setup();
+    const { action } = fixture;
+
     mocks.canOperate = false;
     mocks.tracking = false;
     const items = withThreadReadPermissions([{ id: "mark-read", label: "Mark read" }], [ref]);
@@ -145,7 +148,9 @@ describe("explicit read-state actions", () => {
       "2026-01-01T00:01:00.000Z",
     );
   });
-  it("disables a mixed bulk menu if any synced destination loses authority", () => {
+  it("disables a mixed bulk menu if any synced destination loses authority", async () => {
+    await using _fixture = await setup();
+
     const denied = scopeThreadRef(EnvironmentId.make("read-only"), initial.id);
     mocks.deniedEnvironments.add(denied.environmentId);
     const items = withThreadReadPermissions(
@@ -155,6 +160,9 @@ describe("explicit read-state actions", () => {
     expect(items[0]?.disabled).toBe(true);
   });
   it("marks supported bulk targets while counting only unsupported ones", async () => {
+    await using fixture = await setup();
+    const { action } = fixture;
+
     mocks.unsupportedIds.add(bulkRefs[1]!.threadId);
     await action("Bulk unread");
     expect(mocks.calls.map((x) => x.input.threadId)).toEqual([ref.threadId, bulkRefs[2]!.threadId]);
@@ -166,6 +174,9 @@ describe("explicit read-state actions", () => {
   it.each(["Bulk unread", "Bulk read"])(
     "reports rejected %s once for distinct targets",
     async (label) => {
+      await using fixture = await setup();
+      const { action } = fixture;
+
       mocks.failed = true;
       mocks.thread = { ...initial, lastVisitedAt: null };
       useUiStateStore.setState({ threadLastVisitedAtById: {} });
@@ -183,6 +194,9 @@ describe("explicit read-state actions", () => {
   it.each([true, false])(
     "skips already-acknowledged read markers with tracking=%s",
     async (tracking) => {
+      await using fixture = await setup();
+      const { action } = fixture;
+
       mocks.tracking = tracking;
       await action("Mark unread");
       await action("Mark read");
@@ -194,6 +208,9 @@ describe("explicit read-state actions", () => {
     },
   );
   it("reports unsupported bulk targets once", async () => {
+    await using fixture = await setup();
+    const { action } = fixture;
+
     mocks.thread = { ...initial, latestRun: null };
     await action("Bulk unread");
     expect(mocks.toast).toHaveBeenCalledTimes(1);
@@ -205,6 +222,9 @@ describe("explicit read-state actions", () => {
   it.each([true, false])(
     "does not acknowledge future replies using a fast client clock, tracking=%s",
     async (tracking) => {
+      await using fixture = await setup();
+      const { action } = fixture;
+
       mocks.tracking = tracking;
       vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-01-01T00:10:00Z"));
       mocks.thread = { ...initial, lastVisitedAt: "2026-01-01T00:00:00Z" };
@@ -228,6 +248,9 @@ describe("explicit read-state actions", () => {
   it.each([true, false])(
     "supports read→unread→read with visited tracking=%s without a new reply",
     async (tracking) => {
+      await using fixture = await setup();
+      const { action } = fixture;
+
       mocks.tracking = tracking;
       await action("Mark unread");
       const unread = tracking
@@ -246,6 +269,9 @@ describe("explicit read-state actions", () => {
   it.each([true, false])(
     "reports no completed reply instead of silently failing with tracking=%s",
     async (tracking) => {
+      await using fixture = await setup();
+      const { action } = fixture;
+
       mocks.tracking = tracking;
       mocks.thread = { ...initial, latestRun: null };
       await action("Mark unread");
@@ -259,6 +285,9 @@ describe("explicit read-state actions", () => {
   it.each(["Mark unread", "Mark read"])(
     "reports rejected %s and leaves the existing marker intact",
     async (label) => {
+      await using fixture = await setup();
+      const { action } = fixture;
+
       mocks.failed = true;
       if (label === "Mark read") {
         mocks.thread = { ...initial, lastVisitedAt: null };
@@ -274,6 +303,9 @@ describe("explicit read-state actions", () => {
     },
   );
   it("reads the newest completion at activation, and Mark read works with no completion", async () => {
+    await using fixture = await setup();
+    const { action } = fixture;
+
     mocks.thread = {
       ...initial,
       latestRun: { ...initial.latestRun!, completedAt: "2026-01-01T00:05:00Z" },
