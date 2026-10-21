@@ -243,8 +243,8 @@ it.live("reports V2 thread HTTP and WebSocket transfer budgets", () =>
           for (let index = 0; index < TRANSFER_HISTORY_TURN_COUNT; index++)
             yield* sink.write({ events: turnEvents(provider, index, false) });
           const context = yield* Effect.context<
-          Layer.Success<typeof layerServices> | FileSystem.FileSystem
-        >();
+            Layer.Success<typeof layerServices> | FileSystem.FileSystem
+          >();
           const server = yield* Layer.build(
             HttpRouter.serve(layerRoutes, { disableListenLog: true }).pipe(
               Layer.provide(Layer.succeedContext(context)),

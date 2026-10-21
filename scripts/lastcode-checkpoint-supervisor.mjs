@@ -973,11 +973,16 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
         );
       }
     }
+    // Passing tests can print expected failures to stderr; the checkpoint record names the blocker.
+    const diagnostic =
+      typeof checkpointRun?.error === "string" && checkpointRun.error.trim()
+        ? boundedCommandDiagnostic(checkpointRun.error)
+        : error instanceof CommandFailure
+          ? error.diagnostic
+          : undefined;
     const failure = {
       checkpointRun,
-      ...(error instanceof CommandFailure && error.diagnostic
-        ? { diagnostic: error.diagnostic }
-        : {}),
+      ...(diagnostic ? { diagnostic } : {}),
       error: error instanceof Error ? error.message : String(error),
       phase: error instanceof CommandFailure ? error.phase : phase,
     };

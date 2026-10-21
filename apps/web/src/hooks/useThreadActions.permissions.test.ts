@@ -26,8 +26,8 @@ const state = vi.hoisted(() => ({
     projectId: ProjectId;
     title: string;
     worktreePath: string | null;
-    session: { status: "ready" | "stopped" } | null;
-    latestTurn: null;
+    runtime: { status: "idle" } | null;
+    latestRun: null;
   }[],
   requests: [] as { action: string; environmentId: string; input: { threadId?: string } }[],
   localEffects: [] as string[],
@@ -99,6 +99,7 @@ vi.mock("../state/entities", () => ({
   readEnvironmentSupportsPinReorder: () => true,
   readEnvironmentSupportsSettlement: () => true,
   readEnvironmentSupportsSnooze: () => true,
+  readEnvironmentSupportsWorktreeCleanup: () => false,
   readThreadShell: (ref: ScopedThreadRef) =>
     state.threads.find(
       (thread) => thread.environmentId === ref.environmentId && thread.id === ref.threadId,
@@ -134,6 +135,7 @@ vi.mock("../uiStateStore", () => ({
     }),
 }));
 vi.mock("../lib/archivedThreadsState", () => ({
+  loadArchivedThreadsForEnvironment: async () => [],
   refreshArchivedThreadsForEnvironment: () => state.localEffects.push("refresh-archive"),
 }));
 vi.mock("../lib/composerDraftUploads", () => ({
@@ -219,8 +221,8 @@ beforeEach(() => {
       projectId: ProjectId.make("project"),
       title: "Thread",
       worktreePath: null,
-      session: null,
-      latestTurn: null,
+      runtime: null,
+      latestRun: null,
     },
   ];
   state.requests = [];
@@ -299,7 +301,7 @@ describe("thread action permissions", () => {
 
   it("stops before delete and local cleanup when permission is revoked during session stop", async () => {
     state.scopes.get(secondary)!.add(AuthOrchestrationOperateScope);
-    state.threads[0]!.session = { status: "ready" };
+    state.threads[0]!.runtime = { status: "idle" };
     state.afterRequest = () => state.scopes.get(secondary)!.clear();
     expect((await useThreadActions().deleteThread(target))._tag).toBe("Failure");
     expect(state.requests.map((request) => request.action)).toEqual(["stopSession"]);
@@ -312,6 +314,7 @@ describe("thread action permissions", () => {
   ])("deletes a worktree thread and keeps its worktree $reason", async ({ sessionLookupFails }) => {
     state.scopes.get(secondary)!.add(AuthOrchestrationOperateScope);
     state.threads[0]!.worktreePath = "/worktrees/thread";
+    state.threads[0]!.runtime = { status: "idle" };
     state.sessionLookupFails = sessionLookupFails;
     expect((await useThreadActions().deleteThread(target))._tag).toBe("Success");
     expect(state.confirm).not.toHaveBeenCalled();
@@ -325,7 +328,10 @@ describe("thread action permissions", () => {
       .add(AuthOrchestrationOperateScope)
       .add(AuthSourceControlWriteScope);
     state.threads[0]!.worktreePath = "/worktrees/thread";
-    state.afterRequest = () => state.scopes.get(secondary)!.delete(AuthSourceControlWriteScope);
+    state.threads[0]!.runtime = { status: "idle" };
+    state.afterRequest = (action) => {
+      if (action === "delete") state.scopes.get(secondary)!.delete(AuthSourceControlWriteScope);
+    };
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       const result = await useThreadActions().deleteThread(target);
