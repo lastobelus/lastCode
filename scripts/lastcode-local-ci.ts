@@ -1400,6 +1400,8 @@ async function executeLocalCi(
     lease.recordChild(undefined);
 
     if (options.mode === "full" && (baseCommit || checkpointContext)) {
+      // Required evidence must finish before a stamp can authorize packaging.
+      writeDiagnostics("passed");
       const stampPath = await writeVerifiedFullCiStamp(
         repoRoot,
         repositoryIntegrity,
@@ -1414,7 +1416,6 @@ async function executeLocalCi(
         },
         signal,
       );
-      writeDiagnostics("passed");
       lease.release();
       console.log(`\n[lastcode:ci] Full local CI passed for ${commitBefore}.`);
       console.log(`[lastcode:ci] Stamp: ${stampPath}`);
