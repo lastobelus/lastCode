@@ -51,14 +51,13 @@ it("updates search hover completion from local visits when the server omits visi
         terminalStatus={null}
         terminalProcessCount={0}
       />,
-      { router: false },
     );
     const { container } = screen;
-    expect(container.textContent).toContain("Completed");
+    await vi.waitFor(() => expect(container.textContent).toContain("Completed"));
     await act(() => useUiStateStore.setState({ threadLastVisitedAtById: { [key]: later } }));
-    expect(container.textContent).not.toContain("Completed");
+    await vi.waitFor(() => expect(container.textContent).not.toContain("Completed"));
     await act(() => useUiStateStore.setState({ threadLastVisitedAtById: { [key]: earlier } }));
-    expect(container.textContent).toContain("Completed");
+    await vi.waitFor(() => expect(container.textContent).toContain("Completed"));
   } finally {
     useUiStateStore.setState({ threadLastVisitedAtById: previous });
   }
@@ -110,18 +109,19 @@ it.each([
         terminalStatus={null}
         terminalProcessCount={0}
       />,
-      { router: false },
     );
     const { container } = screen;
-    const label = [...container.querySelectorAll("div")].find(
-      (element) => element.textContent === status.label && element.children.length === 0,
-    );
-    if (!label) throw new Error(`Missing ${status.label} status in thread hover`);
-    const dot = label.parentElement?.querySelector<HTMLElement>(".rounded-full");
-    if (!dot) throw new Error("Missing status dot in thread hover");
-    expect(dot.getBoundingClientRect().width).toBeGreaterThan(0);
-    expect(getComputedStyle(dot).backgroundColor).toBe(getComputedStyle(label).color);
-    expect(container.textContent).toContain("Checks are still running");
+    await vi.waitFor(() => {
+      const label = [...container.querySelectorAll("div")].find(
+        (element) => element.textContent === status.label && element.children.length === 0,
+      );
+      if (!label) throw new Error(`Missing ${status.label} status in thread hover`);
+      const dot = label.parentElement?.querySelector<HTMLElement>(".rounded-full");
+      if (!dot) throw new Error("Missing status dot in thread hover");
+      expect(dot.getBoundingClientRect().width).toBeGreaterThan(0);
+      expect(getComputedStyle(dot).backgroundColor).toBe(getComputedStyle(label).color);
+      expect(container.textContent).toContain("Checks are still running");
+    });
   } finally {
     document.documentElement.classList.toggle("dark", wasDark);
   }
