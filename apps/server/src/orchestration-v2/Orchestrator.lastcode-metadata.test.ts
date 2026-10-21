@@ -73,6 +73,8 @@ const create = (threadId: ThreadId, projectId: ProjectId) => ({
 });
 
 const decodeCommand = Schema.decodeUnknownSync(OrchestrationV2Command);
+const decodeEventJson = Schema.decodeUnknownEffect(OrchestrationV2DomainEventJson);
+const encodeThreadJson = Schema.encodeEffect(OrchestrationV2AppThreadJson);
 const decodeStoredThread = Schema.decodeEffect(Schema.fromJsonString(OrchestrationV2AppThreadJson));
 
 it.effect(
@@ -88,13 +90,13 @@ it.effect(
       const thread = yield* projections.getThread(threadId);
       const retired = { kind: "question", raisedAt: DateTime.formatIso(thread.updatedAt) };
       for (const type of ["thread.attention-set", "thread.attention-cleared"] as const) {
-        const event = Schema.decodeUnknownSync(OrchestrationV2DomainEventJson)({
+        const event = yield* decodeEventJson({
           id: EventId.make(`retired-metadata:${type}`),
           type,
           threadId,
           occurredAt: DateTime.formatIso(thread.updatedAt),
           payload: {
-            ...Schema.encodeSync(OrchestrationV2AppThreadJson)(thread),
+            ...(yield* encodeThreadJson(thread)),
             attention: type === "thread.attention-set" ? retired : null,
           },
         });
