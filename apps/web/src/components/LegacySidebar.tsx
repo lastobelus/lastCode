@@ -19,11 +19,10 @@ import {
   prStatusIndicator,
   PrStatusTooltipContent,
   ThreadTerminalStatusButton,
+  ThreadStatusLabel,
   ThreadWorktreeIndicator,
   useLinkedThreadPullRequest,
 } from "./ThreadStatusIndicators";
-import { LastCodeThreadStatusLabel } from "./sidebar/LastCodeThreadStatusLabel";
-import { LastCodeStatusGlyph } from "./sidebar/LastCodeStatusGlyph";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
 import { ProjectFavicon } from "./ProjectFavicon";
 import { useAtomValue } from "@effect/atom-react";
@@ -220,7 +219,7 @@ import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrom
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { useIsMobile } from "~/hooks/useMediaQuery";
 import { CommandDialogTrigger } from "./ui/command";
-import { useClientSetting, useClientSettings, updateClientSettings } from "~/hooks/useSettings";
+import { useClientSettings, updateClientSettings } from "~/hooks/useSettings";
 import { primaryServerKeybindingsAtom } from "../state/server";
 import {
   derivePhysicalProjectKey,
@@ -390,7 +389,7 @@ function checkTaskPermission(environmentId: EnvironmentId): boolean {
   return false;
 }
 
-export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowProps) {
+const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowProps) {
   const {
     orderedProjectThreadKeys,
     isActive,
@@ -418,7 +417,6 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
     onFileDropThreads,
     thread,
   } = props;
-  const compactStatusIndicators = useClientSetting("compactLegacySidebarStatuses");
   const canOperateThread = useEnvironmentScope(thread.environmentId, AuthOrchestrationOperateScope);
   const canOperatePreview = useEnvironmentScope(thread.environmentId, AuthPreviewOperateScope);
   const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
@@ -766,9 +764,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
               <PullRequestGlyph.pullRequest className="size-3" />
             </a>
           ) : null}
-          {threadStatus && (
-            <LastCodeThreadStatusLabel status={threadStatus} compact={compactStatusIndicators} />
-          )}
+          {threadStatus && <ThreadStatusLabel status={threadStatus} />}
           {canOperateThread && renamingThreadKey === threadKey ? (
             <input
               ref={handleRenameInputRef}
@@ -1095,9 +1091,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
             }}
           >
             <span className="flex min-w-0 flex-1 items-center gap-2">
-              {hiddenThreadStatus && (
-                <LastCodeThreadStatusLabel status={hiddenThreadStatus} compact />
-              )}
+              {hiddenThreadStatus && <ThreadStatusLabel status={hiddenThreadStatus} compact />}
               <span>Show more</span>
             </span>
           </SidebarMenuSubButton>
@@ -2460,7 +2454,11 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                 }
               >
                 <span className="absolute inset-0 flex items-center justify-center transition-opacity duration-150 group-hover/project-header:opacity-0">
-                  <LastCodeStatusGlyph status={projectStatus} size={9} />
+                  <span
+                    className={`size-[9px] rounded-full ${projectStatus.dotClass} ${
+                      projectStatus.pulse ? "motion-safe:animate-status-pulse" : ""
+                    }`}
+                  />
                 </span>
                 <ChevronRightIcon className="absolute inset-0 m-auto size-3.5 text-icon-muted opacity-0 transition-opacity duration-150 group-hover/project-header:opacity-100" />
               </TooltipTrigger>
