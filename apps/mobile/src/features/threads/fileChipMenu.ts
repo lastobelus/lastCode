@@ -8,7 +8,6 @@ import { hostPreviewMimeTypeFromExtension } from "@t3tools/shared/filePreview";
 
 import {
   isAbsolutePath,
-  resolveFileLinkPath,
   resolveWorkspaceFilePath,
   resolveWorkspaceRelativeFilePath,
 } from "../files/filePath";
@@ -40,9 +39,6 @@ export function resolveFileChipTarget(
     if (!home || !isAbsolutePath(home)) return null;
     path = resolveWorkspaceFilePath(home, path.slice(2));
   }
-  const resolvedPath = resolveFileLinkPath(workspaceRoot, path);
-  if (resolvedPath === null) return null;
-  path = resolvedPath;
   const relativePath = resolveWorkspaceRelativeFilePath(workspaceRoot, path);
   const fullPath = isAbsolutePath(path)
     ? path

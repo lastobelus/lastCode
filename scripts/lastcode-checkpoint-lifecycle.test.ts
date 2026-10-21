@@ -1276,167 +1276,161 @@ exec "$FIXTURE_REAL_GIT" "$@"
   });
 });
 
-describe("checkpoint carry lifecycle", () => {
-  // This complete lifecycle publishes checkpoints and resumes operator-repaired rebases.
-  it("publishes compact revisions, folds source PRs, and reselects retained recovery after main advances", () => {
-    const fixture = initFixture();
-    try {
-      const { repo } = fixture;
-      git(repo, ["add", "--force", "node_modules/.bin/vp"]);
-      const baseA = commit(repo, "fixture upstream base");
-      git(repo, ["tag", NIGHTLY_A, baseA]);
+function publishCarryLifecycleFixture() {
+  const fixture = initFixture();
+  try {
+    const { repo } = fixture;
+    git(repo, ["add", "--force", "node_modules/.bin/vp"]);
+    const baseA = commit(repo, "fixture upstream base");
+    git(repo, ["tag", NIGHTLY_A, baseA]);
 
-      write(repo, "lifecycle-preserved.txt", "latest historical integration resolution\n");
-      const partitionA = commit(
-        repo,
-        "retain historical integration resolution",
-        [
-          "Carry-Group: tooling",
-          "Carry-Fix: fixture#historical-resolution",
-          "Carry-Observation: preserve the latest historical checkpoint behavior",
-          "Carry-Evidence: fixture://historical-checkpoint-b",
-          `Carry-Applies-To: ${NIGHTLY_A}`,
-        ].join("\n"),
-      );
-      const sourceA = commitTree(
-        repo,
-        git(repo, ["rev-parse", `${partitionA}^{tree}`]),
-        baseA,
-        "historical LastCode source A",
-      );
+    write(repo, "lifecycle-preserved.txt", "latest historical integration resolution\n");
+    const partitionA = commit(
+      repo,
+      "retain historical integration resolution",
+      [
+        "Carry-Group: tooling",
+        "Carry-Fix: fixture#historical-resolution",
+        "Carry-Observation: preserve the latest historical checkpoint behavior",
+        "Carry-Evidence: fixture://historical-checkpoint-b",
+        `Carry-Applies-To: ${NIGHTLY_A}`,
+      ].join("\n"),
+    );
+    const sourceA = commitTree(
+      repo,
+      git(repo, ["rev-parse", `${partitionA}^{tree}`]),
+      baseA,
+      "historical LastCode source A",
+    );
 
-      checkout(repo, "upstream-main", baseA);
-      write(repo, "lifecycle-upstream.txt", "upstream B\n");
-      const upstreamB = commit(repo, "upstream B");
-      git(repo, ["tag", NIGHTLY_B, upstreamB]);
-      git(repo, ["push", "--quiet", "upstream", `HEAD:refs/heads/main`, NIGHTLY_A, NIGHTLY_B]);
+    checkout(repo, "upstream-main", baseA);
+    write(repo, "lifecycle-upstream.txt", "upstream B\n");
+    const upstreamB = commit(repo, "upstream B");
+    git(repo, ["tag", NIGHTLY_B, upstreamB]);
+    git(repo, ["push", "--quiet", "upstream", `HEAD:refs/heads/main`, NIGHTLY_A, NIGHTLY_B]);
 
-      checkout(repo, "historical-checkpoint-b", upstreamB);
-      write(repo, "lifecycle-preserved.txt", "latest historical integration resolution\n");
-      write(repo, "checkpoint-only-resolution.txt", "manual integration resolution on B\n");
-      const checkpointB = commit(repo, "historical checkpoint B resolution");
-      const historicalTagB = annotatedCheckpoint(fixture, NIGHTLY_B, checkpointB, sourceA);
+    checkout(repo, "historical-checkpoint-b", upstreamB);
+    write(repo, "lifecycle-preserved.txt", "latest historical integration resolution\n");
+    write(repo, "checkpoint-only-resolution.txt", "manual integration resolution on B\n");
+    const checkpointB = commit(repo, "historical checkpoint B resolution");
+    const historicalTagB = annotatedCheckpoint(fixture, NIGHTLY_B, checkpointB, sourceA);
 
-      checkout(repo, "partition-historical-checkpoint-b", upstreamB);
-      write(repo, "lifecycle-preserved.txt", "latest historical integration resolution\n");
-      write(repo, "checkpoint-only-resolution.txt", "manual integration resolution on B\n");
-      const partitionB = commit(
-        repo,
-        "retain historical checkpoint B resolution",
-        [
-          "Carry-Group: tooling",
-          "Carry-Fix: fixture#historical-checkpoint-b",
-          "Carry-Upstream: https://github.com/example/upstream/pull/42",
-          "Carry-Observation: preserve the latest historical checkpoint tree",
-          "Carry-Evidence: fixture://historical-checkpoint-b",
-          `Carry-Applies-To: ${NIGHTLY_B}`,
-        ].join("\n"),
-      );
-      assert.equal(
-        git(repo, ["rev-parse", `${partitionB}^{tree}`]),
-        git(repo, ["rev-parse", `${checkpointB}^{tree}`]),
-      );
+    checkout(repo, "partition-historical-checkpoint-b", upstreamB);
+    write(repo, "lifecycle-preserved.txt", "latest historical integration resolution\n");
+    write(repo, "checkpoint-only-resolution.txt", "manual integration resolution on B\n");
+    const partitionB = commit(
+      repo,
+      "retain historical checkpoint B resolution",
+      [
+        "Carry-Group: tooling",
+        "Carry-Fix: fixture#historical-checkpoint-b",
+        "Carry-Upstream: https://github.com/example/upstream/pull/42",
+        "Carry-Observation: preserve the latest historical checkpoint tree",
+        "Carry-Evidence: fixture://historical-checkpoint-b",
+        `Carry-Applies-To: ${NIGHTLY_B}`,
+      ].join("\n"),
+    );
+    assert.equal(
+      git(repo, ["rev-parse", `${partitionB}^{tree}`]),
+      git(repo, ["rev-parse", `${checkpointB}^{tree}`]),
+    );
 
-      checkout(repo, "activation-source", sourceA);
-      const manifest = JSON.parse(
-        NodeFS.readFileSync(NodePath.join(repo, "scripts/lastcode-carry-set.json"), "utf8"),
-      ) as Record<string, unknown>;
-      manifest.replay = {
-        mode: "carry",
-        bootstrap: {
-          base: upstreamB,
-          source: checkpointB,
-          head: partitionB,
-          representedSource: sourceA,
-          sourceTag: historicalTagB,
-        },
-      };
-      write(repo, "scripts/lastcode-carry-set.json", `${JSON.stringify(manifest, undefined, 2)}\n`);
-      const activationHead = commit(
-        repo,
-        "activate compact carry replay",
-        [
-          "Carry-Group: tooling",
-          "Carry-Fix: fixture#carry-activation",
-          "Carry-Observation: activate from frozen reviewed commits",
-          "Carry-Evidence: fixture://carry-activation",
-          `Carry-Applies-To: ${NIGHTLY_A}`,
-        ].join("\n"),
-      );
-      const activationRef = `refs/lastcode/carry-sources/pr-1/${activationHead}`;
-      git(repo, ["update-ref", activationRef, activationHead]);
-      const mainA = commitTree(
-        repo,
-        git(repo, ["rev-parse", `${activationHead}^{tree}`]),
-        sourceA,
-        [
-          "activate compact carry replay (#1)",
-          "",
-          `Carry-Source-Ref: ${activationRef}`,
-          `Carry-Source-Base: ${sourceA}`,
-          `Carry-Source-Head: ${activationHead}`,
-        ].join("\n"),
-      );
-      git(repo, ["update-ref", "refs/heads/lastcode-source", mainA]);
-      git(repo, ["push", "--quiet", "origin", `${mainA}:refs/heads/lastcode/main`]);
+    checkout(repo, "activation-source", sourceA);
+    const manifest = JSON.parse(
+      NodeFS.readFileSync(NodePath.join(repo, "scripts/lastcode-carry-set.json"), "utf8"),
+    ) as Record<string, unknown>;
+    manifest.replay = {
+      mode: "carry",
+      bootstrap: {
+        base: upstreamB,
+        source: checkpointB,
+        head: partitionB,
+        representedSource: sourceA,
+        sourceTag: historicalTagB,
+      },
+    };
+    write(repo, "scripts/lastcode-carry-set.json", `${JSON.stringify(manifest, undefined, 2)}\n`);
+    const activationHead = commit(
+      repo,
+      "activate compact carry replay",
+      [
+        "Carry-Group: tooling",
+        "Carry-Fix: fixture#carry-activation",
+        "Carry-Observation: activate from frozen reviewed commits",
+        "Carry-Evidence: fixture://carry-activation",
+        `Carry-Applies-To: ${NIGHTLY_A}`,
+      ].join("\n"),
+    );
+    const activationRef = `refs/lastcode/carry-sources/pr-1/${activationHead}`;
+    git(repo, ["update-ref", activationRef, activationHead]);
+    const mainA = commitTree(
+      repo,
+      git(repo, ["rev-parse", `${activationHead}^{tree}`]),
+      sourceA,
+      [
+        "activate compact carry replay (#1)",
+        "",
+        `Carry-Source-Ref: ${activationRef}`,
+        `Carry-Source-Base: ${sourceA}`,
+        `Carry-Source-Head: ${activationHead}`,
+      ].join("\n"),
+    );
+    git(repo, ["update-ref", "refs/heads/lastcode-source", mainA]);
+    git(repo, ["push", "--quiet", "origin", `${mainA}:refs/heads/lastcode/main`]);
 
-      const first = checkpoint(fixture, ["--revision-only", NIGHTLY_B, "--push-tags"]);
-      assert.equal(first.status, 0, first.stderr || first.stdout);
-      assert.equal(remoteCommit(fixture.origin, `refs/tags/${historicalTagB}`), checkpointB);
-      const revisionB = `lastcode/revision/${NIGHTLY_B}.1`;
-      const compactB = remoteCommit(fixture.origin, `refs/tags/${revisionB}`);
-      assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), mainA);
-      assert.equal(remoteCommit(fixture.origin, `refs/lastcode/sources/${NIGHTLY_B}.1`), mainA);
-      assert.equal(
-        git(repo, ["show", `${compactB}:lifecycle-preserved.txt`]),
-        "latest historical integration resolution",
+    const first = checkpoint(fixture, ["--revision-only", NIGHTLY_B, "--push-tags"]);
+    assert.equal(first.status, 0, first.stderr || first.stdout);
+    assert.equal(remoteCommit(fixture.origin, `refs/tags/${historicalTagB}`), checkpointB);
+    const revisionB = `lastcode/revision/${NIGHTLY_B}.1`;
+    const compactB = remoteCommit(fixture.origin, `refs/tags/${revisionB}`);
+    assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), mainA);
+    assert.equal(remoteCommit(fixture.origin, `refs/lastcode/sources/${NIGHTLY_B}.1`), mainA);
+    assert.equal(
+      git(repo, ["show", `${compactB}:lifecycle-preserved.txt`]),
+      "latest historical integration resolution",
+    );
+    assert.equal(
+      git(repo, ["show", `${compactB}:checkpoint-only-resolution.txt`]),
+      "manual integration resolution on B",
+    );
+    assert.equal(readCarryGroupChain(repo, compactB, upstreamB).length, 6);
+    const quietProvenance = (head: string, base: string) => {
+      const contribution = readCarryGroupChain(repo, head, base)
+        .flatMap(({ contributions }) => contributions)
+        .find(({ sourceCommit }) => sourceCommit === partitionB);
+      assert.deepStrictEqual(contribution?.metadata["Carry-Upstream"], [
+        "https://redirect.github.com/example/upstream/pull/42",
+      ]);
+      assert.notInclude(
+        git(repo, ["log", "--format=%B", `${base}..${head}`]),
+        "https://github.com/example/upstream/pull/42",
       );
-      assert.equal(
-        git(repo, ["show", `${compactB}:checkpoint-only-resolution.txt`]),
-        "manual integration resolution on B",
-      );
-      assert.equal(readCarryGroupChain(repo, compactB, upstreamB).length, 6);
-      const quietProvenance = (head: string, base: string) => {
-        const contribution = readCarryGroupChain(repo, head, base)
-          .flatMap(({ contributions }) => contributions)
-          .find(({ sourceCommit }) => sourceCommit === partitionB);
-        assert.deepStrictEqual(contribution?.metadata["Carry-Upstream"], [
-          "https://redirect.github.com/example/upstream/pull/42",
-        ]);
-        assert.notInclude(
-          git(repo, ["log", "--format=%B", `${base}..${head}`]),
-          "https://github.com/example/upstream/pull/42",
-        );
-      };
-      quietProvenance(compactB, upstreamB);
+    };
+    quietProvenance(compactB, upstreamB);
 
-      checkout(repo, "upstream-main", upstreamB);
-      const skippedNightly = "v9.9.9-nightly.20990103.2";
-      write(
-        repo,
-        "lifecycle-skipped-upstream.txt",
-        "included without an intermediate checkpoint\n",
-      );
-      const skippedUpstream = commit(repo, "intermediate upstream");
-      git(repo, ["tag", skippedNightly, skippedUpstream]);
-      git(repo, ["push", "--quiet", "upstream", skippedNightly]);
-      write(repo, "lifecycle-upstream-next.txt", "upstream C\n");
-      const upstreamC = commit(repo, "upstream C");
-      git(repo, ["tag", NIGHTLY_C, upstreamC]);
-      git(repo, ["push", "--quiet", "upstream", `HEAD:refs/heads/main`, NIGHTLY_C]);
-      checkout(repo, "lastcode-source", mainA);
+    checkout(repo, "upstream-main", upstreamB);
+    const skippedNightly = "v9.9.9-nightly.20990103.2";
+    write(repo, "lifecycle-skipped-upstream.txt", "included without an intermediate checkpoint\n");
+    const skippedUpstream = commit(repo, "intermediate upstream");
+    git(repo, ["tag", skippedNightly, skippedUpstream]);
+    git(repo, ["push", "--quiet", "upstream", skippedNightly]);
+    write(repo, "lifecycle-upstream-next.txt", "upstream C\n");
+    const upstreamC = commit(repo, "upstream C");
+    git(repo, ["tag", NIGHTLY_C, upstreamC]);
+    git(repo, ["push", "--quiet", "upstream", `HEAD:refs/heads/main`, NIGHTLY_C]);
+    checkout(repo, "lastcode-source", mainA);
 
-      const concurrentMain = commitTree(
-        repo,
-        git(repo, ["rev-parse", `${mainA}^{tree}`]),
-        mainA,
-        "concurrent carry source merge",
-      );
-      git(repo, ["push", "--quiet", "origin", `${concurrentMain}:refs/test/concurrent-main`]);
-      const raceHook = NodePath.join(fixture.origin, "hooks", "pre-receive");
-      NodeFS.writeFileSync(
-        raceHook,
-        `#!/bin/sh
+    const concurrentMain = commitTree(
+      repo,
+      git(repo, ["rev-parse", `${mainA}^{tree}`]),
+      mainA,
+      "concurrent carry source merge",
+    );
+    git(repo, ["push", "--quiet", "origin", `${concurrentMain}:refs/test/concurrent-main`]);
+    const raceHook = NodePath.join(fixture.origin, "hooks", "pre-receive");
+    NodeFS.writeFileSync(
+      raceHook,
+      `#!/bin/sh
 while read old new ref; do
   if [ "$ref" = refs/tags/lastcode/checkpoint/${NIGHTLY_C} ]; then
     unset GIT_QUARANTINE_PATH
@@ -1444,102 +1438,113 @@ while read old new ref; do
   fi
 done
 `,
-        { mode: 0o755 },
-      );
-      const changedUpstream = checkpoint(fixture, ["--push-tags", "--promote"]);
-      assert.equal(changedUpstream.status, 0, changedUpstream.stderr || changedUpstream.stdout);
-      assert.match(changedUpstream.stdout, /leaving promotion to a later admitted run/u);
-      assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), concurrentMain);
-      assert.equal(remoteCommit(fixture.origin, `refs/lastcode/sources/${NIGHTLY_C}`), mainA);
-      assert.equal(remoteMissing(fixture.origin, "refs/lastcode/main-write-lock"), true);
-      NodeFS.unlinkSync(raceHook);
-      const compactC = remoteCommit(fixture.origin, `refs/tags/lastcode/checkpoint/${NIGHTLY_C}`);
-      assert.equal(readCarryGroupChain(repo, compactC, upstreamC).length, 6);
-      quietProvenance(compactC, upstreamC);
-      assert.equal(
-        remoteMissing(fixture.origin, `refs/tags/lastcode/checkpoint/${skippedNightly}`),
-        true,
-      );
-      assert.equal(
-        git(repo, ["show", `${compactC}:lifecycle-skipped-upstream.txt`]),
-        "included without an intermediate checkpoint",
-      );
-      // The remaining scenarios use their original fixture source, without deleting its tag.
-      git(fixture.origin, ["update-ref", "refs/heads/lastcode/main", mainA, concurrentMain]);
+      { mode: 0o755 },
+    );
+    const changedUpstream = checkpoint(fixture, ["--push-tags", "--promote"]);
+    assert.equal(changedUpstream.status, 0, changedUpstream.stderr || changedUpstream.stdout);
+    assert.match(changedUpstream.stdout, /leaving promotion to a later admitted run/u);
+    assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), concurrentMain);
+    assert.equal(remoteCommit(fixture.origin, `refs/lastcode/sources/${NIGHTLY_C}`), mainA);
+    assert.equal(remoteMissing(fixture.origin, "refs/lastcode/main-write-lock"), true);
+    NodeFS.unlinkSync(raceHook);
+    const compactC = remoteCommit(fixture.origin, `refs/tags/lastcode/checkpoint/${NIGHTLY_C}`);
+    assert.equal(readCarryGroupChain(repo, compactC, upstreamC).length, 6);
+    quietProvenance(compactC, upstreamC);
+    assert.equal(
+      remoteMissing(fixture.origin, `refs/tags/lastcode/checkpoint/${skippedNightly}`),
+      true,
+    );
+    assert.equal(
+      git(repo, ["show", `${compactC}:lifecycle-skipped-upstream.txt`]),
+      "included without an intermediate checkpoint",
+    );
+    // The remaining scenarios use their original fixture source, without deleting its tag.
+    git(fixture.origin, ["update-ref", "refs/heads/lastcode/main", mainA, concurrentMain]);
 
-      checkout(repo, "source-pr-2", mainA);
-      write(repo, "lifecycle-conflict.txt", "downstream build behavior\n");
-      const sourceHead = commit(
-        repo,
-        "add downstream build behavior",
-        [
-          "Carry-Group: build-ci",
-          "Carry-Fix: fixture#build-behavior",
-          "Carry-Observation: this source PR must join the existing compact generation",
-          "Carry-Evidence: fixture://source-pr-2",
-          `Carry-Applies-To: ${NIGHTLY_C}`,
-        ].join("\n"),
-      );
-      const sourceRef = `refs/lastcode/carry-sources/pr-2/${sourceHead}`;
-      git(repo, ["update-ref", sourceRef, sourceHead]);
-      const mainWithPr = commitTree(
-        repo,
-        git(repo, ["rev-parse", `${sourceHead}^{tree}`]),
-        mainA,
-        [
-          "add downstream build behavior (#2)",
-          "",
-          `Carry-Source-Ref: ${sourceRef}`,
-          `Carry-Source-Base: ${mainA}`,
-          `Carry-Source-Head: ${sourceHead}`,
-        ].join("\n"),
-      );
-      git(repo, ["update-ref", "refs/heads/lastcode-source", mainWithPr]);
-      git(repo, [
-        "push",
-        "--quiet",
-        "origin",
-        `${sourceHead}:${sourceRef}`,
-        `${mainWithPr}:refs/heads/lastcode/main`,
-      ]);
-      checkout(repo, "lastcode-source", mainWithPr);
+    checkout(repo, "source-pr-2", mainA);
+    write(repo, "lifecycle-conflict.txt", "downstream build behavior\n");
+    const sourceHead = commit(
+      repo,
+      "add downstream build behavior",
+      [
+        "Carry-Group: build-ci",
+        "Carry-Fix: fixture#build-behavior",
+        "Carry-Observation: this source PR must join the existing compact generation",
+        "Carry-Evidence: fixture://source-pr-2",
+        `Carry-Applies-To: ${NIGHTLY_C}`,
+      ].join("\n"),
+    );
+    const sourceRef = `refs/lastcode/carry-sources/pr-2/${sourceHead}`;
+    git(repo, ["update-ref", sourceRef, sourceHead]);
+    const mainWithPr = commitTree(
+      repo,
+      git(repo, ["rev-parse", `${sourceHead}^{tree}`]),
+      mainA,
+      [
+        "add downstream build behavior (#2)",
+        "",
+        `Carry-Source-Ref: ${sourceRef}`,
+        `Carry-Source-Base: ${mainA}`,
+        `Carry-Source-Head: ${sourceHead}`,
+      ].join("\n"),
+    );
+    git(repo, ["update-ref", "refs/heads/lastcode-source", mainWithPr]);
+    git(repo, [
+      "push",
+      "--quiet",
+      "origin",
+      `${sourceHead}:${sourceRef}`,
+      `${mainWithPr}:refs/heads/lastcode/main`,
+    ]);
+    checkout(repo, "lastcode-source", mainWithPr);
 
-      const folded = checkpoint(fixture, ["--push-tags"]);
-      assert.equal(folded.status, 0, folded.stderr || folded.stdout);
-      const revisionC = `lastcode/revision/${NIGHTLY_C}.1`;
-      const compactWithPr = remoteCommit(fixture.origin, `refs/tags/${revisionC}`);
-      const buildGroup = readCarryGroupChain(repo, compactWithPr, upstreamC).find(
-        ({ group }) => group === "build-ci",
-      );
-      assert.equal(buildGroup?.contributions.at(-1)?.sourceCommit, sourceHead);
-      quietProvenance(compactWithPr, upstreamC);
-      assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), mainWithPr);
+    const folded = checkpoint(fixture, ["--push-tags"]);
+    assert.equal(folded.status, 0, folded.stderr || folded.stdout);
+    const revisionC = `lastcode/revision/${NIGHTLY_C}.1`;
+    const compactWithPr = remoteCommit(fixture.origin, `refs/tags/${revisionC}`);
+    const buildGroup = readCarryGroupChain(repo, compactWithPr, upstreamC).find(
+      ({ group }) => group === "build-ci",
+    );
+    assert.equal(buildGroup?.contributions.at(-1)?.sourceCommit, sourceHead);
+    quietProvenance(compactWithPr, upstreamC);
+    assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), mainWithPr);
 
-      const rollbackReason = "verify same-source historical rollback";
-      const rollback = checkpoint(fixture, [
-        "--push-tags",
-        "--replay-mode",
-        "historical",
-        "--rollback-reason",
-        rollbackReason,
-      ]);
-      assert.equal(rollback.status, 0, rollback.stderr || rollback.stdout);
-      const historicalRevision = `lastcode/revision/${NIGHTLY_C}.2`;
-      const historicalRevisionMessage = git(repo, [
-        "for-each-ref",
-        `refs/tags/${historicalRevision}`,
-        "--format=%(contents)",
-      ]);
-      assert.match(historicalRevisionMessage, /^Replay-Mode: historical$/mu);
-      assert.match(
-        historicalRevisionMessage,
-        /^Rollback-Reason: verify same-source historical rollback$/mu,
-      );
-      assert.equal(
-        remoteCommit(fixture.origin, `refs/tags/${historicalRevision}`),
-        git(repo, ["rev-parse", `${historicalRevision}^{commit}`]),
-      );
+    const rollbackReason = "verify same-source historical rollback";
+    const rollback = checkpoint(fixture, [
+      "--push-tags",
+      "--replay-mode",
+      "historical",
+      "--rollback-reason",
+      rollbackReason,
+    ]);
+    assert.equal(rollback.status, 0, rollback.stderr || rollback.stdout);
+    const historicalRevision = `lastcode/revision/${NIGHTLY_C}.2`;
+    const historicalRevisionMessage = git(repo, [
+      "for-each-ref",
+      `refs/tags/${historicalRevision}`,
+      "--format=%(contents)",
+    ]);
+    assert.match(historicalRevisionMessage, /^Replay-Mode: historical$/mu);
+    assert.match(
+      historicalRevisionMessage,
+      /^Rollback-Reason: verify same-source historical rollback$/mu,
+    );
+    assert.equal(
+      remoteCommit(fixture.origin, `refs/tags/${historicalRevision}`),
+      git(repo, ["rev-parse", `${historicalRevision}^{commit}`]),
+    );
+    return { fixture, baseA, upstreamC, mainWithPr, sourceHead, raceHook, quietProvenance };
+  } catch (error) {
+    NodeFS.rmSync(fixture.root, { recursive: true, force: true });
+    throw error;
+  }
+}
 
+describe("checkpoint carry lifecycle", () => {
+  it("publishes compact revisions, folds source PRs, and previews retained compilation", () => {
+    const { fixture, mainWithPr } = publishCarryLifecycleFixture();
+    try {
+      const { repo } = fixture;
       checkout(repo, "source-pr-preview", mainWithPr);
       write(repo, "checkpoint-only-resolution.txt", "source replacement during compilation\n");
       const previewSourceHead = commit(
@@ -1651,7 +1656,16 @@ done
       git(repo, ["update-ref", "-d", `refs/heads/sync/nightly/${NIGHTLY_C}`]);
       git(repo, ["push", "--quiet", "--force", "origin", `${mainWithPr}:refs/heads/lastcode/main`]);
       checkout(repo, "lastcode-source", mainWithPr);
+    } finally {
+      NodeFS.rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
 
+  it("reselects retained recovery after main advances", () => {
+    const { fixture, baseA, upstreamC, mainWithPr, sourceHead, raceHook, quietProvenance } =
+      publishCarryLifecycleFixture();
+    try {
+      const { repo } = fixture;
       checkout(repo, "upstream-main", upstreamC);
       write(repo, "lifecycle-conflict.txt", "upstream build behavior\n");
       const upstreamD = commit(repo, "upstream D conflicts with downstream build behavior");
