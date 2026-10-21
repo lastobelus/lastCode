@@ -1335,3 +1335,19 @@ export function mergeDirectPreviewAnnotation(input: {
 }
 
 export { isThreadWokeUnseen } from "@t3tools/client-runtime/state/thread-settled";
+
+/** A current conversation's explicit unread rewind does not itself create new activity. */
+export function resolveThreadVisitDecision(
+  updatedAt: number,
+  visitedAt: number,
+  currentKey: string | null,
+  previousKey: string | null,
+  rewound = false,
+) {
+  if (currentKey === null) return { record: false, nextKey: null };
+  if (!Number.isFinite(updatedAt)) return { record: false, nextKey: previousKey };
+  if (rewound) return { record: false, nextKey: currentKey };
+  if (Number.isFinite(visitedAt) && visitedAt >= updatedAt)
+    return { record: false, nextKey: currentKey };
+  return { record: currentKey !== previousKey, nextKey: currentKey };
+}
