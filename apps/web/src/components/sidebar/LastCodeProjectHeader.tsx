@@ -1,3 +1,4 @@
+import { LastCodeStatusGlyph } from "./LastCodeStatusGlyph";
 import { type CSSProperties, type ReactNode } from "react";
 import type { EnvironmentIconColor } from "@t3tools/contracts/settings";
 import type { useSortable } from "@dnd-kit/sortable";
@@ -40,12 +41,7 @@ function ProjectDisclosure({
         }
       >
         <span className="absolute inset-0 flex items-center justify-center transition-opacity duration-150 group-hover/project-header:opacity-0">
-          <span
-            data-lastcode-sidebar-unscaled-content
-            className={`size-[9px] rounded-full ${status.dotClass} ${
-              status.pulse ? "animate-status-pulse" : ""
-            }`}
-          />
+          <LastCodeStatusGlyph status={status} size={9} />
         </span>
         <ChevronRightIcon className="absolute inset-0 m-auto size-3.5 text-icon-muted opacity-0 transition-opacity duration-150 group-hover/project-header:opacity-100" />
       </TooltipTrigger>

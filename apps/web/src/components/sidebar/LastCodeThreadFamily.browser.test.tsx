@@ -20,6 +20,7 @@ vi.mock("~/hooks/useSettings", () => ({
   useClientSetting: (key: string) =>
     (
       ({
+        lastcodeStatusIcons: {},
         compactLegacySidebarStatuses: false,
         lastcodeSidebarFamilyStatusSubheaders: true,
         legacySidebarThreadGroupingStyle: "typed-groups",

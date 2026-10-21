@@ -1,3 +1,4 @@
+import { LastCodeStatusGlyph } from "./LastCodeStatusGlyph";
 import { ArrowRightLeftIcon, CircleAlertIcon, GitBranchIcon, TerminalIcon } from "lucide-react";
 import type { ProjectIconOverride } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
@@ -190,8 +191,8 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
         ) : null}
         {threadStatus ? (
           <div className={cn("flex min-w-0 items-center gap-2", threadStatus.colorClass)}>
-            <span className="flex size-3 shrink-0 items-center justify-center" aria-hidden>
-              <span className={cn("size-1.5 rounded-full", threadStatus.dotClass)} />
+            <span className="flex size-3.5 shrink-0 items-center justify-center" aria-hidden>
+              <LastCodeStatusGlyph status={{ ...threadStatus, pulse: false }} />
             </span>
             <div className="min-w-0 truncate">{threadStatus.label}</div>
           </div>

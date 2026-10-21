@@ -1,3 +1,5 @@
+import { LastCodeStatusIconSettings } from "./LastCodeStatusIconSettings";
+import { lastCodeStatusIcon } from "../../lastcodeStatusIcons";
 import { usePrimarySettings, updateClientSettings } from "../../hooks/useSettings";
 import { searchableSetting } from "./settingsSearch";
 import { SettingResetButton, SettingsRow } from "./settingsLayout";
@@ -167,12 +169,13 @@ function LastCodeSidebarPresentationSettings() {
       />
       <SettingsRow
         {...searchableSetting("compact-status-indicators")}
-        description="Show colored dot only for agent status, hiding labels like “Working” and “Completed.”"
+        description="Show only the status icon, hiding labels like “Working” and “Completed.”"
         status={
           <span className="inline-flex items-center gap-1.5 rounded-full bg-sidebar px-2 py-1 text-sm text-foreground">
             <ThreadStatusLabel
               compact={clientSettings.compactLegacySidebarStatuses}
               status={STATUS_INDICATOR_PREVIEW}
+              icon={lastCodeStatusIcon("Working", clientSettings.lastcodeStatusIcons)}
             />
             <span>Title</span>
           </span>
@@ -187,6 +190,7 @@ function LastCodeSidebarPresentationSettings() {
           />
         }
       />
+      <LastCodeStatusIconSettings />
       <SettingsRow
         {...searchableSetting("show-worktree-indicators")}
         description="Show the worktree icon beside threads that use a dedicated worktree in the LastCode sidebar."

@@ -383,6 +383,14 @@ export const IncomingMessageFillColor = Schema.NullOr(
 );
 export type IncomingMessageFillColor = typeof IncomingMessageFillColor.Type;
 
+export const LastCodeStatusIcon = Schema.Struct({
+  shape: Schema.Literals(["triangle", "triangle-right", "square", "diamond", "circle"]),
+  style: Schema.Literals(["open", "solid", "outline-fill"]),
+});
+export type LastCodeStatusIcon = typeof LastCodeStatusIcon.Type;
+
+const LastCodeStatusIcons = Schema.Record(Schema.String, LastCodeStatusIcon);
+
 export const ClientSettingsSchema = Schema.Struct({
   notificationMode: NotificationMode.pipe(
     Schema.withDecodingDefault(Effect.succeed("off" as const)),
@@ -542,6 +550,7 @@ export const ClientSettingsSchema = Schema.Struct({
   lastcodeSidebarFamilyStatusSubheaders: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(true)),
   ),
+  lastcodeStatusIcons: LastCodeStatusIcons.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   legacySidebarThreadGroupingStyle: LegacySidebarThreadGroupingStyle.pipe(
     Schema.withDecodingDefault(Effect.succeed("minimal")),
   ),
@@ -1809,6 +1818,7 @@ export const ClientSettingsPatch = Schema.Struct({
   proactivePanelsEnabled: Schema.optionalKey(Schema.Boolean),
   showSkillsInSlashMenu: Schema.optionalKey(Schema.Boolean),
   lastcodeSidebarFamilyStatusSubheaders: Schema.optionalKey(Schema.Boolean),
+  lastcodeStatusIcons: Schema.optionalKey(LastCodeStatusIcons),
   legacySidebarThreadGroupingStyle: Schema.optionalKey(LegacySidebarThreadGroupingStyle),
   legacySidebarEnabled: Schema.optionalKey(Schema.Boolean),
   lastcodeSidebarEnabled: Schema.optionalKey(Schema.Boolean),

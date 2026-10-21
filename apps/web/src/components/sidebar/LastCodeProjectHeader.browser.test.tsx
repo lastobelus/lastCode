@@ -20,7 +20,9 @@ const mocks = vi.hoisted(() => ({
   pointer: vi.fn(),
   parent: vi.fn(),
 }));
-vi.mock("../../hooks/useSettings", () => ({ useClientSetting: () => 90 }));
+vi.mock("../../hooks/useSettings", () => ({
+  useClientSetting: (key: string) => (key === "lastcodeStatusIcons" ? {} : 90),
+}));
 vi.mock("../ProjectFavicon", () => ({ ProjectFavicon: () => <span>Favicon</span> }));
 vi.mock("../../environmentIcons", () => ({ ConnectedEnvironmentIcon: () => null }));
 function member(env: string): SidebarProjectGroupMember {

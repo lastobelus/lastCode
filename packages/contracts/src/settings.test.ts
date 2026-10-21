@@ -240,6 +240,42 @@ describe("storage cleanup settings", () => {
   });
 });
 
+describe("ClientSettings LastCode status icons", () => {
+  it("defaults to no overrides and leaves omitted patches unchanged", () => {
+    expect(decodeClientSettings({}).lastcodeStatusIcons).toEqual({});
+    expect(decodeClientSettingsPatch({})).not.toHaveProperty("lastcodeStatusIcons");
+  });
+
+  it("persists and patches arbitrary status keys with every supported shape and style", () => {
+    const lastcodeStatusIcons = {
+      working: { shape: "triangle", style: "open" },
+      stopped: { shape: "square", style: "solid" },
+      "future-status": { shape: "diamond", style: "open" },
+      custom: { shape: "circle", style: "solid" },
+      tinted: { shape: "triangle-right", style: "outline-fill" },
+    };
+    const preference = { lastcodeStatusIcons };
+    expect(encodeClientSettings(decodeClientSettings(preference))).toMatchObject(preference);
+    expect(decodeClientSettingsPatch(preference)).toEqual(preference);
+    expect(decodeClientSettingsPatch({ lastcodeStatusIcons: {} })).toEqual({
+      lastcodeStatusIcons: {},
+    });
+  });
+
+  it.each([
+    null,
+    "triangle",
+    { working: { shape: "star", style: "open" } },
+    { working: { shape: "triangle", style: "filled" } },
+    { working: { shape: "circle" } },
+    { working: { style: "solid" } },
+    { working: null },
+  ])("rejects invalid overrides: %j", (lastcodeStatusIcons) => {
+    expect(() => decodeClientSettings({ lastcodeStatusIcons })).toThrow();
+    expect(() => decodeClientSettingsPatch({ lastcodeStatusIcons })).toThrow();
+  });
+});
+
 describe("handoffs menu setting", () => {
   it("defaults to seven and accepts the inclusive bounds", () => {
     expect(decodeClientSettings({}).handoffsMenuLimit).toBe(DEFAULT_HANDOFFS_MENU_LIMIT);

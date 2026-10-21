@@ -1114,6 +1114,14 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/lastcode",
   },
   {
+    id: "status-icons",
+    title: "Status icons",
+    to: "/settings/lastcode",
+    searchTerms: [
+      "sidebar status shape triangle right square diamond circle open solid outline color 50% fill",
+    ],
+  },
+  {
     id: "show-worktree-indicators",
     title: "Show worktree indicators (LastCode sidebar)",
     to: "/settings/lastcode",

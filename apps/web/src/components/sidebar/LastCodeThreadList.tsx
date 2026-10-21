@@ -6,7 +6,7 @@ import type { LastCodeSidebarFamilyRow } from "../lastcodeSidebarFamilies.logic"
 import type { useLastCodeProjectThreads } from "./useLastCodeProjectThreads";
 import { lastcodeSidebarScaleStyle } from "../../lastcodeSidebarScale";
 import { SidebarMenuSubItem, SidebarMenuSubButton } from "../ui/sidebar";
-import { ThreadStatusLabel } from "../ThreadStatusIndicators";
+import { LastCodeThreadStatusLabel } from "./LastCodeThreadStatusLabel";
 import { LastCodeSubagentGroup, LastCodeThreadGroupHeading } from "./LastCodeThreadFamily";
 
 interface Props {
@@ -43,7 +43,7 @@ function ThreadListExpansion({
             onClick={() => onChange(true)}
           >
             <span className="flex min-w-0 flex-1 items-center gap-2">
-              {status && <ThreadStatusLabel status={status} compact />}
+              {status && <LastCodeThreadStatusLabel status={status} compact />}
               <span>Show more</span>
             </span>
           </SidebarMenuSubButton>
