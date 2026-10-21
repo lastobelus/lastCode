@@ -27,6 +27,7 @@ import {
 } from "./lib/lastcode-ci-scope.ts";
 import { CiCommandFailure, runCiProcess } from "./lib/lastcode-ci-process.ts";
 import { runCollectedCiSteps, type CiStepResult } from "./lib/lastcode-ci-collection.ts";
+import { pruneCiDiagnostics } from "./lib/lastcode-ci-diagnostics.ts";
 import { recordDependencyUse } from "../packages/shared/src/dependencyActivity.ts";
 import { createGeneratedBuildStage } from "../packages/shared/src/generatedBuildOwnership.ts";
 
@@ -1186,6 +1187,7 @@ async function executeLocalCi(
             status,
             commit: commitBefore,
             toolingCommit,
+            ownerPid: process.pid,
             context: checkpointContext ?? { kind: "pull-request", baseCommit },
             startedAt,
             ...(status !== "running" ? { finishedAt: new Date().toISOString() } : {}),
@@ -1214,6 +1216,13 @@ async function executeLocalCi(
       );
     };
     writeDiagnostics("running");
+    if (diagnosticDirectory) {
+      try {
+        pruneCiDiagnostics(NodePath.dirname(diagnosticDirectory), diagnosticDirectory);
+      } catch (error) {
+        console.warn("[lastcode:ci] Could not prune older validation reports:", error);
+      }
+    }
     if (reportPath) console.log(`[lastcode:ci] Validation report: ${reportPath}`);
     const executeStep = async (step: LocalCiStep, index: number) => {
       signal.throwIfAborted();

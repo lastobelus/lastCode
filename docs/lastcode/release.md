@@ -319,7 +319,10 @@ The Action result links a retained JSON report and per-check output under the
 repository's common Git directory, in `lastcode-ci-diagnostics/`. The report
 records the candidate commit, validation-tool commit, runtime, commands and
 each check's result. Use that inventory to distinguish source failures from
-host-specific failures. An interrupted report is incomplete evidence.
+host-specific failures. Each invocation keeps its own report and the ten most
+recent inactive reports, preserving other runs whose owners are still alive.
+Copy evidence needed for longer-term comparison before that retention window
+expires. An interrupted report is incomplete evidence.
 
 ## Apple Silicon DMG builder
 
