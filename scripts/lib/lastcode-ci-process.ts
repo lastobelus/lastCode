@@ -46,7 +46,8 @@ export function runCiProcess(options: CiProcessOptions): Promise<void> {
       if (spawnError) return reject(spawnError);
       if (cleanupError) return reject(cleanupError);
       if (cancelled) return reject(options.signal.reason ?? new Error("Local CI cancelled."));
-      if (exitCode === null) return reject(new Error("CI command terminated without an exit code."));
+      if (exitCode === null)
+        return reject(new Error("CI command terminated without an exit code."));
       if (exitCode !== 0) {
         return reject(
           new CiCommandFailure(
