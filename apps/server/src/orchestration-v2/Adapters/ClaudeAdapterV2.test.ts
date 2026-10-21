@@ -10342,7 +10342,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           }),
         );
 
-        yield* Queue.offer(harness.sdkMessages, subagentStoppedNotification);
+        // Offering the continuation precedes applying the stopped outcome; wait
+        // for the notification handler before inspecting the session's idle pin.
+        yield* harness.offerAndWait(subagentStoppedNotification);
         yield* harness.awaitContinuation(1);
         // A stopped task and its system notification leave no running work or
         // root output to pin the session while its continuation is queued.
