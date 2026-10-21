@@ -1203,7 +1203,9 @@ async function executeLocalCi(
             steps: steps.map((step, index) => ({
               ...step,
               ...(results.find((result) => result.label === step.label) ?? { status: "pending" }),
-              logPath: NodePath.join(diagnosticDirectory, `${index + 1}.log`),
+              ...(NodeFS.existsSync(NodePath.join(diagnosticDirectory, `${index + 1}.log`))
+                ? { logPath: NodePath.join(diagnosticDirectory, `${index + 1}.log`) }
+                : {}),
             })),
           },
           null,
@@ -1318,6 +1320,25 @@ async function executeLocalCi(
         noteDependencyUse();
       }
     };
+    const assertCandidateUnchanged = async () => {
+      // Synchronous scope/Git-only runs must also dispatch pending cancellation
+      // before publishing success. Revalidate the checkout after yielding.
+      await NodeTimersPromises.setImmediate();
+      signal.throwIfAborted();
+      const commitAfter = await runGitWithCancellation(repoRoot, ["rev-parse", "HEAD"], signal);
+      if (commitAfter !== commitBefore) {
+        throw new Error(`HEAD changed during local CI (${commitBefore} -> ${commitAfter}).`);
+      }
+      await assertCleanWorktreeWithCancellation(repoRoot, signal);
+      if (
+        quickBase &&
+        (await runGitWithCancellation(repoRoot, ["rev-parse", quickBase.remoteRef], signal)) !==
+          baseCommit
+      ) {
+        throw new Error("The Quick CI base changed during validation. Run Quick CI again.");
+      }
+      await assertRepositoryIntegrity(repoRoot, repositoryIntegrity, signal);
+    };
     try {
       if (options.mode === "full") {
         await runCollectedCiSteps({
@@ -1333,6 +1354,7 @@ async function executeLocalCi(
             );
           },
         });
+        await assertCandidateUnchanged();
         const failed = results.filter((result) => result.status === "failed");
         const blocked = results.filter((result) => result.status === "blocked");
         if (failed.length || blocked.length) {
@@ -1362,22 +1384,7 @@ async function executeLocalCi(
       NodeFS.rmSync(transferOutputDirectory, { recursive: true, force: true });
     }
 
-    // Synchronous scope/Git-only runs must also dispatch pending cancellation
-    // before publishing success. Revalidate the checkout after yielding.
-    await NodeTimersPromises.setImmediate();
-    signal.throwIfAborted();
-    const commitAfter = await runGitWithCancellation(repoRoot, ["rev-parse", "HEAD"], signal);
-    if (commitAfter !== commitBefore) {
-      throw new Error(`HEAD changed during local CI (${commitBefore} -> ${commitAfter}).`);
-    }
-    await assertCleanWorktreeWithCancellation(repoRoot, signal);
-    if (
-      quickBase &&
-      (await runGitWithCancellation(repoRoot, ["rev-parse", quickBase.remoteRef], signal)) !==
-        baseCommit
-    ) {
-      throw new Error("The Quick CI base changed during validation. Run Quick CI again.");
-    }
+    if (options.mode === "quick") await assertCandidateUnchanged();
 
     // Verify all owned checks have stopped, but keep capacity until the receipt
     // is published so a queued invocation can reuse the completed validation.
