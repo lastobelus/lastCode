@@ -6,7 +6,8 @@ import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 
 import type { ProviderInstanceEntry } from "../../providerInstances";
 import type { SidebarThreadSummary } from "../../types";
-import { resolveThreadStatusPill, type ThreadStatusPill } from "../Sidebar.logic";
+import type { ThreadStatusPill } from "../Sidebar.logic";
+import { useLastCodeThreadStatus } from "./useLastCodeThreadStatus";
 import { cn } from "~/lib/utils";
 import { ProjectFavicon } from "../ProjectFavicon";
 import type { TerminalStatusIndicator } from "../ThreadStatusIndicators";
@@ -74,10 +75,8 @@ export function SidebarThreadHoverContent(props: SidebarThreadHoverContentProps)
     .map(
       (instanceId) => props.providerEntryByInstanceId?.get(instanceId)?.displayName ?? instanceId,
     );
-  const threadStatus =
-    props.threadStatus === undefined
-      ? resolveThreadStatusPill({ thread: props.thread })
-      : props.threadStatus;
+  const fallbackThreadStatus = useLastCodeThreadStatus(props.thread);
+  const threadStatus = props.threadStatus === undefined ? fallbackThreadStatus : props.threadStatus;
   const actionPresentation =
     props.thread.actionResume?.outcome === "running"
       ? actionRunningPresentation(props.thread.actionResume)

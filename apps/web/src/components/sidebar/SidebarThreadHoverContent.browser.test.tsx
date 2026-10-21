@@ -1,8 +1,10 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vite-plus/test";
-import type { ActionResumeState } from "@t3tools/contracts";
+import { RunId, type ActionResumeState } from "@t3tools/contracts";
+import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { makeThreadFixture } from "../../test-fixtures";
+import { useUiStateStore } from "../../uiStateStore";
 import { SidebarThreadHoverContent } from "./SidebarThreadHoverContent";
 import "../../index.css";
 
@@ -12,6 +14,61 @@ vi.mock("~/hooks/useSupportsMultiplePullRequests", () => ({
 vi.mock("../../state/terminalSessions", () => ({ useKnownTerminalSessions: () => [] }));
 vi.mock("../../state/previewHosting", () => ({ useThreadPreviewLeases: () => [] }));
 vi.mock("../ThreadStatusIndicators", () => ({ ThreadPullRequestsMiniList: () => null }));
+
+it("updates search hover completion from local visits when the server omits visit tracking", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const earlier = "2026-03-09T10:04:00.000Z";
+  const later = "2026-03-09T10:06:00.000Z";
+  const thread = makeThreadFixture({
+    runtime: null,
+    hasActionableProposedPlan: false,
+    latestRun: {
+      runId: RunId.make("search-completion"),
+      status: "completed",
+      assistantMessageId: null,
+      requestedAt: earlier,
+      startedAt: earlier,
+      completedAt: "2026-03-09T10:05:00.000Z",
+    },
+  });
+  delete thread.lastVisitedAt;
+  const key = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
+  const previous = useUiStateStore.getState().threadLastVisitedAtById;
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    useUiStateStore.setState({ threadLastVisitedAtById: { [key]: earlier } });
+    await act(() =>
+      root.render(
+        <SidebarThreadHoverContent
+          thread={thread}
+          projectTitle={null}
+          projectCwd={null}
+          projectFaviconPath={null}
+          environmentLabel={null}
+          providerEntry={null}
+          showInstanceBadge={false}
+          modelInstanceId="codex"
+          modelLabel="Codex"
+          branchMismatch={null}
+          terminalStatus={null}
+          terminalProcessCount={0}
+        />,
+      ),
+    );
+    expect(container.textContent).toContain("Completed");
+    await act(() => useUiStateStore.setState({ threadLastVisitedAtById: { [key]: later } }));
+    expect(container.textContent).not.toContain("Completed");
+    await act(() => useUiStateStore.setState({ threadLastVisitedAtById: { [key]: earlier } }));
+    expect(container.textContent).toContain("Completed");
+  } finally {
+    await act(() => root.unmount());
+    container.remove();
+    useUiStateStore.setState({ threadLastVisitedAtById: previous });
+    vi.unstubAllGlobals();
+  }
+});
 
 it.each([
   { hasPendingApprovals: true, hasPendingUserInput: false, label: "Pending Approval" },
