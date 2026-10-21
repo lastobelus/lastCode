@@ -238,10 +238,7 @@ it.effect.each([
           }
         : {}),
     };
-    for (const thread of [
-      root,
-      child,
-    ])
+    for (const thread of [root, child])
       yield* store.apply({
         id: EventId.make(`create:${thread.id}`),
         type: "thread.created",

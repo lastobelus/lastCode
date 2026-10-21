@@ -241,19 +241,6 @@ describe("threadWokeAt", () => {
     expect(threadWokeAt(shell, { now: NOW })).toBe("2026-04-10T11:00:00.000Z");
   });
 
-  it("reports when a question raised the thread from snooze", () => {
-    expect(
-      threadWokeAt(
-        makeShell({
-          snoozedUntil: FUTURE_WAKE,
-          question: true,
-          questionRaisedAt: "2026-04-10T11:30:00.000Z",
-        }),
-        { now: NOW },
-      ),
-    ).toBe("2026-04-10T11:30:00.000Z");
-  });
-
   it("falls back to runtime activity for blocked/failed early wakes", () => {
     expect(
       threadWokeAt(makeShell({ snoozedUntil: FUTURE_WAKE, runtimeStatus: "failed" }), {
