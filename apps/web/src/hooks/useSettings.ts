@@ -153,8 +153,17 @@ async function hydrateClientSettings(): Promise<void> {
       if (hydrationGeneration !== clientSettingsHydrationGeneration) {
         return;
       }
-      if (persistedSettings) {
-        replaceClientSettingsSnapshot({ ...DEFAULT_CLIENT_SETTINGS, ...persistedSettings });
+      // Previews exercise LastCode on startup without rewriting saved client preferences.
+      const developmentPreview = import.meta.env.DEV && import.meta.env.MODE === "development";
+      if (persistedSettings || developmentPreview) {
+        replaceClientSettingsSnapshot({
+          ...DEFAULT_CLIENT_SETTINGS,
+          ...persistedSettings,
+          ...(developmentPreview ? { lastcodeSidebarEnabled: true } : {}),
+        });
+      }
+      if (developmentPreview) {
+        useSidebarModeStore.setState({ lastcodeHidden: false });
       }
       setClientSettingsHydrationStatus("ready");
     } catch (error) {

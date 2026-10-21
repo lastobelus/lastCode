@@ -161,6 +161,9 @@ a workaround.
 Exercise the affected flow and capture the state that proves it works. Keep
 the saved handoff, isolated state, dependencies, and panel available while the
 user inspects or iterates, including after the process sleeps.
+Development previews start with the LastCode sidebar enabled and active. Verify
+that mode before checking LastCode sidebar features; a deliberate mode change
+is valid only when the scenario calls for another sidebar.
 An assistant turn ending is not teardown. Do not stop a managed handoff at turn end; explicit stop or thread deletion
 cancels its future reopening.
 

@@ -34,10 +34,73 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   vi.restoreAllMocks();
 });
 
 describe("client settings hydration", () => {
+  it.each([null, false, true])(
+    "starts development previews with LastCode enabled and active, saved=%s",
+    async (saved) => {
+      vi.stubEnv("DEV", true);
+      vi.stubEnv("MODE", "development");
+      persistenceMocks.getClientSettings.mockResolvedValue(
+        saved === null
+          ? null
+          : {
+              ...DEFAULT_CLIENT_SETTINGS,
+              lastcodeSidebarEnabled: saved,
+              legacySidebarEnabled: true,
+              timestampFormat: "12-hour",
+            },
+      );
+      useSidebarModeStore.setState({ lastcodeHidden: true });
+
+      await ensureClientSettingsHydrated();
+
+      expect(
+        resolveSidebarMode(
+          getClientSettings(),
+          true,
+          useSidebarModeStore.getState().lastcodeHidden,
+        ),
+      ).toBe("lastcode");
+      if (saved !== null) {
+        expect(getClientSettings()).toMatchObject({
+          legacySidebarEnabled: true,
+          timestampFormat: "12-hour",
+        });
+      }
+      expect(persistenceMocks.setClientSettings).not.toHaveBeenCalled();
+
+      toggleSidebarMode();
+      await ensureClientSettingsHydrated();
+      expect(
+        resolveSidebarMode(
+          getClientSettings(),
+          true,
+          useSidebarModeStore.getState().lastcodeHidden,
+        ),
+      ).toBe("inbox");
+    },
+  );
+
+  it("preserves saved sidebar preferences in production", async () => {
+    vi.stubEnv("DEV", false);
+    vi.stubEnv("MODE", "production");
+    persistenceMocks.getClientSettings.mockResolvedValue({
+      ...DEFAULT_CLIENT_SETTINGS,
+      lastcodeSidebarEnabled: false,
+      legacySidebarEnabled: true,
+    });
+
+    await ensureClientSettingsHydrated();
+
+    expect(getClientSettings().lastcodeSidebarEnabled).toBe(false);
+    expect(resolveSidebarMode(getClientSettings())).toBe("legacy");
+    expect(persistenceMocks.setClientSettings).not.toHaveBeenCalled();
+  });
+
   it.each([false, true])(
     "toggles LastCode presentation without writing either preference, legacy=%s",
     (legacySidebarEnabled) => {
