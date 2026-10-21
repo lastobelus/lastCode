@@ -50,7 +50,7 @@ function Composer({
       disabled={false}
       placeholder=""
       onChange={(...args) => {
-        setPrompt({ value: args[0], cursor: args[1] });
+        setPrompt({ value: args[0], cursor: args[2] });
         onChange?.(...args);
       }}
       onPaste={() => {}}
@@ -144,7 +144,15 @@ it.each([
   });
   expect(serializeEditorDoc(editor.state.doc).value).toBe(`${value}_`);
   expect(textWithMark(editor, "italic")).toEqual([]);
-  expect(textWithMark(editor, "code")).toEqual(code);
+  expect(textWithMark(editor, "code")).toEqual([]);
+  if (code.length > 0) {
+    expect(
+      Array.from(
+        screen.container.querySelectorAll(".composer-md-code"),
+        (node) => node.textContent,
+      ).join(""),
+    ).toBe("`_build`");
+  }
 });
 
 it.each([false, true])(

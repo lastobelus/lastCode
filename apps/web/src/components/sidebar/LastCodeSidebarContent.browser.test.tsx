@@ -1,6 +1,6 @@
-import { act, useEffect, type ComponentProps, type ReactNode } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { act, render, type Screen } from "../../../test/render";
+import { useEffect, type ComponentProps, type ReactNode } from "react";
+import { describe, expect, it, vi } from "vite-plus/test";
 import type { DndContext } from "@dnd-kit/core";
 import { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import {
@@ -221,26 +221,98 @@ const fixture = {
   prewarm: new Set<string>(),
   newThread: async () => null,
 };
-async function render() {
-  await act(() => root.render(<LastCodeSidebarContent />));
+async function show(screen: Screen) {
+  await act(() => screen.rerender(<LastCodeSidebarContent />));
 }
-function section(key: string) {
+function section(container: HTMLElement, key: string) {
   return container.querySelector<HTMLElement>(`[data-project="${key}"]`)!;
 }
-function renderedKeys() {
+function renderedKeys(container: HTMLElement) {
   return [...container.querySelectorAll("section output")].flatMap((o) =>
     o.textContent!.split(",").filter(Boolean),
   );
 }
-let container: HTMLDivElement, root: Root;
-const descriptor = Object.getOwnPropertyDescriptor(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-beforeEach(() => {
+
+describe("content-owned expansion and navigation", () => {
+  it("uses one expansion owner for real rendered order and root navigation without exceeding three prewarms", async () => {
+    setup();
+    await using screen = await render(null);
+
+    await show(screen);
+    expect(renderedKeys(screen.container)).toHaveLength(2);
+    expect(fixture.navigation).toEqual(renderedKeys(screen.container));
+    expect(fixture.prewarm.size).toBe(2);
+    await act(() =>
+      section(screen.container, "group").querySelector<HTMLButtonElement>("button")!.click(),
+    );
+    expect(renderedKeys(screen.container)).toHaveLength(4);
+    expect(fixture.navigation).toEqual(renderedKeys(screen.container));
+    expect(
+      section(screen.container, "other").querySelector("output")!.textContent!.split(","),
+    ).toHaveLength(1);
+    expect(fixture.prewarm.size).toBe(3);
+    expect([...fixture.prewarm]).toEqual(fixture.navigation.slice(0, 3));
+    await act(() =>
+      section(screen.container, "group").querySelector<HTMLButtonElement>("button")!.click(),
+    );
+    expect(renderedKeys(screen.container)).toHaveLength(2);
+    expect(fixture.navigation).toEqual(renderedKeys(screen.container));
+    expect(fixture.prewarm.size).toBe(2);
+  });
+  it("keeps expansion and the draft across real sort-mode remounts while project editor probes reset", async () => {
+    setup();
+    await using screen = await render(null);
+    const { container } = screen;
+
+    await show(screen);
+    const editor = section(screen.container, "group").querySelector<HTMLInputElement>("input")!;
+    const draft = container.querySelector<HTMLInputElement>('input[aria-label="unsent draft"]')!;
+    editor.value = "editing";
+    draft.value = "unsent";
+    await act(() =>
+      section(screen.container, "group").querySelector<HTMLButtonElement>("button")!.click(),
+    );
+    expect(section(screen.container, "group").querySelector("input")).toBe(editor);
+    mocks.manual = false;
+    // The mocked transport publishes a refresh; Content itself remains mounted with no props.
+    await act(() => useUiStateStore.setState({ projectOrder: [] }));
+    expect(section(screen.container, "group").querySelector("button")!.textContent).toBe(
+      "Show less",
+    );
+    expect(section(screen.container, "group").querySelector("input")).not.toBe(editor);
+    expect(container.querySelector('input[aria-label="unsent draft"]')).toBe(draft);
+    expect(draft.value).toBe("unsent");
+    expect(fixture.navigation).toEqual(renderedKeys(screen.container));
+    expect(renderedKeys(screen.container)).toHaveLength(4);
+  });
+  it("retains expansion through scoped route and collection refreshes", async () => {
+    setup();
+    await using screen = await render(null);
+
+    await show(screen);
+    await act(() =>
+      section(screen.container, "group").querySelector<HTMLButtonElement>("button")!.click(),
+    );
+    const target = threads[4]!;
+    fixture.route = scopedThreadKey(scopeThreadRef(target.environmentId, target.id));
+    fixture.projects = [other, grouped];
+    await act(() => useUiStateStore.setState({ projectOrder: [] }));
+    expect(section(screen.container, "other").querySelector("[data-active]")!.textContent).toBe(
+      fixture.route,
+    );
+    expect(section(screen.container, "group").querySelector("[data-active]")!.textContent).toBe("");
+    expect(section(screen.container, "group").querySelector("button")!.textContent).toBe(
+      "Show less",
+    );
+    expect(fixture.navigation).toEqual(renderedKeys(screen.container));
+    await screen.unmount();
+    expect(fixture.prewarm.size).toBe(0);
+  });
+});
+
+function setup() {
   vi.clearAllMocks();
   mocks.manual = true;
-  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
-    configurable: true,
-    value: true,
-  });
   useUiStateStore.setState({
     projectOrder: [],
     projectExpandedById: {},
@@ -251,65 +323,4 @@ beforeEach(() => {
   fixture.route = null;
   fixture.navigation = [];
   fixture.prewarm.clear();
-  container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
-});
-afterEach(async () => {
-  await act(() => root.unmount());
-  container.remove();
-  useUiStateStore.setState({ projectOrder: [] });
-  if (descriptor) Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", descriptor);
-  else Reflect.deleteProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-});
-describe("content-owned expansion and navigation", () => {
-  it("uses one expansion owner for real rendered order and root navigation without exceeding three prewarms", async () => {
-    await render();
-    expect(renderedKeys()).toHaveLength(2);
-    expect(fixture.navigation).toEqual(renderedKeys());
-    expect(fixture.prewarm.size).toBe(2);
-    await act(() => section("group").querySelector<HTMLButtonElement>("button")!.click());
-    expect(renderedKeys()).toHaveLength(4);
-    expect(fixture.navigation).toEqual(renderedKeys());
-    expect(section("other").querySelector("output")!.textContent!.split(",")).toHaveLength(1);
-    expect(fixture.prewarm.size).toBe(3);
-    expect([...fixture.prewarm]).toEqual(fixture.navigation.slice(0, 3));
-    await act(() => section("group").querySelector<HTMLButtonElement>("button")!.click());
-    expect(renderedKeys()).toHaveLength(2);
-    expect(fixture.navigation).toEqual(renderedKeys());
-    expect(fixture.prewarm.size).toBe(2);
-  });
-  it("keeps expansion and the draft across real sort-mode remounts while project editor probes reset", async () => {
-    await render();
-    const editor = section("group").querySelector<HTMLInputElement>("input")!;
-    const draft = container.querySelector<HTMLInputElement>('input[aria-label="unsent draft"]')!;
-    editor.value = "editing";
-    draft.value = "unsent";
-    await act(() => section("group").querySelector<HTMLButtonElement>("button")!.click());
-    expect(section("group").querySelector("input")).toBe(editor);
-    mocks.manual = false;
-    // The mocked transport publishes a refresh; Content itself remains mounted with no props.
-    await act(() => useUiStateStore.setState({ projectOrder: [] }));
-    expect(section("group").querySelector("button")!.textContent).toBe("Show less");
-    expect(section("group").querySelector("input")).not.toBe(editor);
-    expect(container.querySelector('input[aria-label="unsent draft"]')).toBe(draft);
-    expect(draft.value).toBe("unsent");
-    expect(fixture.navigation).toEqual(renderedKeys());
-    expect(renderedKeys()).toHaveLength(4);
-  });
-  it("retains expansion through scoped route and collection refreshes", async () => {
-    await render();
-    await act(() => section("group").querySelector<HTMLButtonElement>("button")!.click());
-    const target = threads[4]!;
-    fixture.route = scopedThreadKey(scopeThreadRef(target.environmentId, target.id));
-    fixture.projects = [other, grouped];
-    await act(() => useUiStateStore.setState({ projectOrder: [] }));
-    expect(section("other").querySelector("[data-active]")!.textContent).toBe(fixture.route);
-    expect(section("group").querySelector("[data-active]")!.textContent).toBe("");
-    expect(section("group").querySelector("button")!.textContent).toBe("Show less");
-    expect(fixture.navigation).toEqual(renderedKeys());
-    await act(() => root.unmount());
-    expect(fixture.prewarm.size).toBe(0);
-    root = createRoot(container);
-  });
-});
+}

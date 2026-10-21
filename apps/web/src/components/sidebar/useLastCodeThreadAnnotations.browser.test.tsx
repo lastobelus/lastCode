@@ -1,15 +1,7 @@
-import { act, useEffect, useState } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import {
-  beforeAll,
-  beforeEach,
-  afterAll,
-  afterEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vite-plus/test";
+import { act, render } from "../../../test/render";
+import { useEffect, useState } from "react";
+
+import { describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId, MessageId, ThreadId } from "@t3tools/contracts";
 import { AsyncResult } from "effect/reactivity";
 import * as Cause from "effect/Cause";
@@ -48,12 +40,18 @@ const first = makeThreadFixture({
   annotation,
 });
 const second = { ...first, environmentId: EnvironmentId.make("second-env") };
-let actions: ReturnType<typeof useLastCodeThreadAnnotations>["actions"];
-function Harness({ revision = 0 }: { revision?: number }) {
+
+function Harness({
+  revision = 0,
+  onActions,
+}: {
+  revision?: number;
+  onActions: (value: ReturnType<typeof useLastCodeThreadAnnotations>["actions"]) => void;
+}) {
   const annotations = useLastCodeThreadAnnotations();
   useEffect(() => {
-    actions = annotations.actions;
-  }, [annotations.actions]);
+    onActions(annotations.actions);
+  }, [annotations.actions, onActions]);
   const [rowsVisible, setRowsVisible] = useState(true);
   return (
     <>
@@ -80,37 +78,7 @@ function Harness({ revision = 0 }: { revision?: number }) {
     </>
   );
 }
-let root: Root | null = null;
-let container: HTMLDivElement | null = null;
-const original = Object.getOwnPropertyDescriptor(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-beforeAll(() =>
-  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
-    configurable: true,
-    value: true,
-  }),
-);
-afterAll(() => {
-  if (original) Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", original);
-  else Reflect.deleteProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-});
-beforeEach(() => {
-  vi.clearAllMocks();
-  mocks.upsert.mockResolvedValue(AsyncResult.success(undefined));
-  mocks.resolve.mockResolvedValue(AsyncResult.success(undefined));
-});
-afterEach(async () => {
-  await act(() => root?.unmount());
-  container?.remove();
-  root = null;
-  container = null;
-  document.body.replaceChildren();
-});
-async function render() {
-  container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
-  await act(() => root?.render(<Harness />));
-}
+
 async function click(label: string) {
   const button = [...document.querySelectorAll("button")].find((b) => b.textContent === label);
   expect(button).toBeDefined();
@@ -131,15 +99,32 @@ function deferred<T>() {
   });
   return { promise, resolve };
 }
+function setup() {
+  vi.clearAllMocks();
+  mocks.upsert.mockResolvedValue(AsyncResult.success(undefined));
+  mocks.resolve.mockResolvedValue(AsyncResult.success(undefined));
+  let actions!: ReturnType<typeof useLastCodeThreadAnnotations>["actions"];
+  const observe = (value: typeof actions) => {
+    actions = value;
+  };
+  return {
+    get actions() {
+      return actions;
+    },
+    view: (revision = 0) => <Harness revision={revision} onActions={observe} />,
+  };
+}
+
 describe("project-owned thread annotation editor", () => {
   it("keeps row actions stable while the project editor changes targets and saves the exact hover destination", async () => {
-    await render();
-    const original = actions;
+    const fixture = setup();
+    await using _screen = await render(fixture.view());
+    const original = fixture.actions;
     await click("Edit first");
     await enter("First draft");
-    expect(actions).toBe(original);
+    expect(fixture.actions).toBe(original);
     await click("Edit second");
-    expect(actions).toBe(original);
+    expect(fixture.actions).toBe(original);
     await click("Hover first");
     expect(mocks.upsert).toHaveBeenLastCalledWith({
       environmentId: first.environmentId,
@@ -148,10 +133,11 @@ describe("project-owned thread annotation editor", () => {
     expect(textarea()).not.toBeNull();
   });
   it("keeps the draft through project refresh and row collapse, then resets after cancel/reopen", async () => {
-    await render();
+    const fixture = setup();
+    await using screen = await render(fixture.view());
     await click("Edit first");
     await enter("Draft");
-    await act(() => root?.render(<Harness revision={1} />));
+    await screen.rerender(fixture.view(1));
     await click("Collapse");
     expect(textarea()?.value).toBe("Draft");
     await click("Cancel");
@@ -161,7 +147,8 @@ describe("project-owned thread annotation editor", () => {
     expect(textarea()?.value).toBe("Original");
   });
   it("retains failed drafts, suppresses interruption and closes only on success", async () => {
-    await render();
+    const fixture = setup();
+    await using _screen = await render(fixture.view());
     await click("Edit second");
     await enter("  New body  ");
     mocks.upsert.mockResolvedValueOnce(AsyncResult.failure(Cause.fail(new Error("Denied"))));
@@ -183,9 +170,10 @@ describe("project-owned thread annotation editor", () => {
     });
   });
   it("serializes hover/editor saves for one scoped thread while allowing the same ID in another environment", async () => {
+    const fixture = setup();
     const pending = deferred<AtomCommandResult<unknown, unknown>>();
     mocks.upsert.mockReturnValueOnce(pending.promise);
-    await render();
+    await using _screen = await render(fixture.view());
     await click("Hover first");
     await click("Edit first");
     await enter("Editor draft");
@@ -203,7 +191,8 @@ describe("project-owned thread annotation editor", () => {
     await expect.poll(textarea).toBeNull();
   });
   it("resolves the exact destination and reports returned failures without treating interruption as failure", async () => {
-    await render();
+    const fixture = setup();
+    await using _screen = await render(fixture.view());
     mocks.resolve.mockResolvedValueOnce(
       AsyncResult.failure(Cause.fail(new Error("Resolve denied"))),
     );

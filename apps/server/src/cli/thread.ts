@@ -276,7 +276,7 @@ const isThreadDispatchUnknownError = Schema.is(ThreadDispatchUnknownError);
 
 export const retryAmbiguousTrackedDispatch = <R>(
   dispatch: Effect.Effect<void, ThreadCliError | ThreadDispatchUnknownError, R>,
-) => dispatch.pipe(Effect.catchTag("ThreadDispatchUnknownError", () => dispatch));
+) => dispatch.pipe(Effect.catchTags({ ThreadDispatchUnknownError: () => dispatch }));
 
 export type ThreadTargetResolution =
   | { readonly kind: "resolved"; readonly thread: OrchestrationV2ThreadShell }
@@ -687,6 +687,37 @@ export const listThreadsOutput = Effect.fn("listThreadsOutput")(function* (
   });
 });
 
+type ThreadCliTurnItem = ThreadCliProjection["turnItems"][number];
+
+function activitySummary(item: ThreadCliTurnItem): string {
+  if (item.type === "approval_request") return item.prompt ?? item.title ?? "Approval requested";
+  if (item.type === "user_input_request") {
+    return item.questions.map((question) => question.question).join("\n");
+  }
+  if ("text" in item) return String(item.text);
+  if ("message" in item) return String(item.message);
+  if ("summary" in item) return String(item.summary);
+  if ("input" in item) return String(item.input);
+  if ("markdown" in item) return String(item.markdown);
+  return item.title ?? item.type.replaceAll("_", " ");
+}
+
+function presentActivity(item: ThreadCliTurnItem): ThreadCliActivity {
+  const pending = item.status === "pending" || item.status === "waiting";
+  let kind = item.type as string;
+  if (item.type === "approval_request") kind = `approval.${pending ? "requested" : "resolved"}`;
+  if (item.type === "user_input_request") kind = `user-input.${pending ? "requested" : "resolved"}`;
+  return {
+    id: item.id,
+    kind,
+    tone: item.status === "failed" ? "error" : pending && "requestId" in item ? "approval" : "tool",
+    summary: activitySummary(item),
+    runId: item.runId,
+    createdAt: DateTime.formatIso(item.startedAt ?? item.updatedAt),
+    ...("requestId" in item ? { payload: { requestId: item.requestId } } : {}),
+  };
+}
+
 function projectThreadCliPresentation(projection: ThreadCliProjection, turnLimit: number) {
   const selectedRuns = projection.runs
     .toSorted((left, right) => right.ordinal - left.ordinal)
@@ -710,40 +741,7 @@ function projectThreadCliPresentation(projection: ThreadCliProjection, turnLimit
         item.type !== "assistant_message" &&
         (item.runId === null || runIds.has(item.runId)),
     )
-    .map((item): ThreadCliActivity => {
-      const summary =
-        item.type === "approval_request"
-          ? (item.prompt ?? item.title ?? "Approval requested")
-          : item.type === "user_input_request"
-            ? item.questions.map((question) => question.question).join("\n")
-            : "text" in item
-              ? item.text
-              : "message" in item
-                ? item.message
-                : "summary" in item
-                  ? item.summary
-                  : "input" in item
-                    ? item.input
-                    : "markdown" in item
-                      ? item.markdown
-                      : (item.title ?? item.type.replaceAll("_", " "));
-      const pending = item.status === "pending" || item.status === "waiting";
-      return {
-        id: item.id,
-        kind:
-          item.type === "approval_request"
-            ? `approval.${pending ? "requested" : "resolved"}`
-            : item.type === "user_input_request"
-              ? `user-input.${pending ? "requested" : "resolved"}`
-              : item.type,
-        tone:
-          item.status === "failed" ? "error" : pending && "requestId" in item ? "approval" : "tool",
-        summary: typeof summary === "string" ? summary : String(summary),
-        runId: item.runId,
-        createdAt: DateTime.formatIso(item.startedAt ?? item.updatedAt),
-        ...("requestId" in item ? { payload: { requestId: item.requestId } } : {}),
-      };
-    });
+    .map(presentActivity);
   return { latestRun: selectedRuns[0] ?? null, ...boundThreadPresentation(messages, activities) };
 }
 
@@ -892,7 +890,7 @@ const tryRunLiveThreadRead = Effect.fn("tryRunLiveThreadRead")(function* (
       );
     }).pipe(
       Effect.provide(
-        EnvironmentAuth.runtimeLayer.pipe(
+        EnvironmentAuth.layerRuntime.pipe(
           Layer.provide(ServerConfig.layer(config)),
           Layer.provide(Layer.succeed(References.MinimumLogLevel, minimumLogLevel)),
         ),
@@ -1004,18 +1002,22 @@ const runThreadSend = Effect.fn("runThreadSend")(function* (
           );
           const crypto = yield* Crypto.Crypto;
           const commandId = CommandId.make(
-            yield* crypto.randomUUIDv4.pipe(
-              Effect.mapError(
-                (cause) => new ThreadCliError({ operation: "send command id generation", cause }),
+            yield* crypto
+              .randomUUIDv4()
+              .pipe(
+                Effect.mapError(
+                  (cause) => new ThreadCliError({ operation: "send command id generation", cause }),
+                ),
               ),
-            ),
           );
           const messageId = MessageId.make(
-            yield* crypto.randomUUIDv4.pipe(
-              Effect.mapError(
-                (cause) => new ThreadCliError({ operation: "send message id generation", cause }),
+            yield* crypto
+              .randomUUIDv4()
+              .pipe(
+                Effect.mapError(
+                  (cause) => new ThreadCliError({ operation: "send message id generation", cause }),
+                ),
               ),
-            ),
           );
           const resolution = resolveThreadTarget(shell.threads, identifier);
           if (resolution.kind === "resolved") {
@@ -1108,7 +1110,7 @@ const runThreadSend = Effect.fn("runThreadSend")(function* (
     );
   }).pipe(
     Effect.provide(
-      EnvironmentAuth.runtimeLayer.pipe(
+      EnvironmentAuth.layerRuntime.pipe(
         Layer.provide(ServerConfig.layer(config)),
         Layer.provide(Layer.succeed(References.MinimumLogLevel, minimumLogLevel)),
       ),
@@ -1183,7 +1185,7 @@ const runThreadWait = Effect.fn("runThreadWait")(function* (
     );
   }).pipe(
     Effect.provide(
-      EnvironmentAuth.runtimeLayer.pipe(
+      EnvironmentAuth.layerRuntime.pipe(
         Layer.provide(ServerConfig.layer(config)),
         Layer.provide(Layer.succeed(References.MinimumLogLevel, config.logLevel)),
       ),
