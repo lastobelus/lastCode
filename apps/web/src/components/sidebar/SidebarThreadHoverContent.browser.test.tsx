@@ -19,18 +19,20 @@ it("updates search hover completion from local visits when the server omits visi
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   const earlier = "2026-03-09T10:04:00.000Z";
   const later = "2026-03-09T10:06:00.000Z";
-  const thread = makeThreadFixture({
-    runtime: null,
-    hasActionableProposedPlan: false,
-    latestRun: {
-      runId: RunId.make("search-completion"),
-      status: "completed",
-      assistantMessageId: null,
-      requestedAt: earlier,
-      startedAt: earlier,
-      completedAt: "2026-03-09T10:05:00.000Z",
-    },
-  });
+  const thread = {
+    ...makeThreadFixture({
+      runtime: null,
+      hasActionableProposedPlan: false,
+      latestRun: {
+        runId: RunId.make("search-completion"),
+        status: "completed",
+        assistantMessageId: null,
+        requestedAt: earlier,
+        startedAt: earlier,
+        completedAt: "2026-03-09T10:05:00.000Z",
+      },
+    }),
+  };
   delete thread.lastVisitedAt;
   const key = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
   const previous = useUiStateStore.getState().threadLastVisitedAtById;
