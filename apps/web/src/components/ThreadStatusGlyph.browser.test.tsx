@@ -23,38 +23,42 @@ async function raster(screen: Screen, icon: LastCodeStatusIcon) {
   return context.getImageData(0, 0, 180, 180);
 }
 
-it.each([
-  ["triangle", 8.196, 7.5],
-  ["triangle-right", 7.5, 8.196],
-  ["diamond", 8.485, 8.485],
-  ["square", 6, 6],
-  ["circle", 6, 6],
-] as const)(
-  "keeps %s's approved outer geometry and interior opacity",
-  async (shape, width, height) => {
+it.each(
+  (
+    [
+      ["triangle", 8.196, 7.5],
+      ["triangle-right", 7.5, 8.196],
+      ["diamond", 8.485, 8.485],
+      ["square", 6, 6],
+      ["circle", 6, 6],
+    ] as const
+  ).flatMap(([shape, width, height]) =>
+    (["open", "solid", "outline-fill"] as const)
+      .filter((style) => shape !== "circle" || style !== "solid")
+      .map((style) => ({ shape, style, width, height })),
+  ),
+)(
+  "keeps $shape ($style)'s approved outer geometry and interior opacity",
+  async ({ shape, style, width, height }) => {
     await using screen = await render(null);
-    for (const style of shape === "circle"
-      ? (["open", "outline-fill"] as const)
-      : (["open", "solid", "outline-fill"] as const)) {
-      const { data } = await raster(screen, { shape, style });
-      const xs: number[] = [];
-      const ys: number[] = [];
-      for (let y = 0; y < 180; y++) {
-        for (let x = 0; x < 180; x++) {
-          if (data[(y * 180 + x) * 4 + 3]! > 32) {
-            xs.push(x);
-            ys.push(y);
-          }
+    const { data } = await raster(screen, { shape, style });
+    const xs: number[] = [];
+    const ys: number[] = [];
+    for (let y = 0; y < 180; y++) {
+      for (let x = 0; x < 180; x++) {
+        if (data[(y * 180 + x) * 4 + 3]! > 32) {
+          xs.push(x);
+          ys.push(y);
         }
       }
-      await vi.waitFor(() => {
-        expect(Math.max(...xs) - Math.min(...xs) + 1).toBeCloseTo(width * 20, -1);
-        expect(Math.max(...ys) - Math.min(...ys) + 1).toBeCloseTo(height * 20, -1);
-        const centerAlpha = data[(90 * 180 + 90) * 4 + 3];
-        expect(centerAlpha).toBe(style === "open" ? 0 : style === "solid" ? 255 : 128);
-        expect(Math.max(...data.filter((_, index) => index % 4 === 3))).toBe(255);
-      });
     }
+    await vi.waitFor(() => {
+      expect(Math.max(...xs) - Math.min(...xs) + 1).toBeCloseTo(width * 20, -1);
+      expect(Math.max(...ys) - Math.min(...ys) + 1).toBeCloseTo(height * 20, -1);
+      const centerAlpha = data[(90 * 180 + 90) * 4 + 3];
+      expect(centerAlpha).toBe(style === "open" ? 0 : style === "solid" ? 255 : 128);
+      expect(Math.max(...data.filter((_, index) => index % 4 === 3))).toBe(255);
+    });
   },
 );
 
