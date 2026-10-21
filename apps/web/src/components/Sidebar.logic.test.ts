@@ -674,7 +674,6 @@ describe("resolveThreadStatusPill", () => {
     },
   );
 
-
   it("shows an active thread wait without a pulse and resumes Working when it ends", () => {
     const blocked = { ...baseThread, blockedOnThreadWait: true };
     expect(resolveSidebarThreadStatus(blocked)).toBe("waiting");
