@@ -74,6 +74,9 @@ const clientSettingsListeners = new Set<() => void>();
 const clientSettingsHydrationListeners = new Set<() => void>();
 type ClientSettingsHydrationStatus = "pending" | "ready" | "failed" | "retrying";
 let clientSettingsSnapshot = DEFAULT_CLIENT_SETTINGS;
+// Session-only preview defaults must never become the base for persisted edits.
+let savedClientSettingsSnapshot = DEFAULT_CLIENT_SETTINGS;
+let developmentSidebarOverride = false;
 let clientSettingsHydrationStatus: ClientSettingsHydrationStatus = "pending";
 let clientSettingsHydrationPromise: Promise<void> | null = null;
 let clientSettingsHydrationGeneration = 0;
@@ -97,8 +100,16 @@ function getClientSettingsSnapshot(): ClientSettings {
 }
 
 function replaceClientSettingsSnapshot(settings: ClientSettings): void {
-  clientSettingsSnapshot = settings;
+  savedClientSettingsSnapshot = settings;
+  clientSettingsSnapshot = developmentSidebarOverride
+    ? { ...settings, lastcodeSidebarEnabled: true }
+    : settings;
   emitClientSettingsChange();
+}
+
+function applyClientSettingsPatch(patch: ClientSettingsPatch): void {
+  if (patch.lastcodeSidebarEnabled !== undefined) developmentSidebarOverride = false;
+  replaceClientSettingsSnapshot({ ...savedClientSettingsSnapshot, ...patch });
 }
 
 function setClientSettingsHydrationStatus(nextStatus: ClientSettingsHydrationStatus): void {
@@ -154,15 +165,14 @@ async function hydrateClientSettings(): Promise<void> {
         return;
       }
       // Previews exercise LastCode on startup without rewriting saved client preferences.
-      const developmentPreview = import.meta.env.DEV && import.meta.env.MODE === "development";
-      if (persistedSettings || developmentPreview) {
+      developmentSidebarOverride = import.meta.env.DEV && import.meta.env.MODE === "development";
+      if (persistedSettings || developmentSidebarOverride) {
         replaceClientSettingsSnapshot({
           ...DEFAULT_CLIENT_SETTINGS,
           ...persistedSettings,
-          ...(developmentPreview ? { lastcodeSidebarEnabled: true } : {}),
         });
       }
-      if (developmentPreview) {
+      if (developmentSidebarOverride) {
         useSidebarModeStore.setState({ lastcodeHidden: false });
       }
       setClientSettingsHydrationStatus("ready");
@@ -213,7 +223,7 @@ export function persistClientSettingsPatch(
   if (deferPatch) {
     deferredClientSettingsPatchCount += 1;
   } else {
-    replaceClientSettingsSnapshot({ ...getClientSettingsSnapshot(), ...patch });
+    applyClientSettingsPatch(patch);
   }
   return enqueueClientSettingsPersistence(async () => {
     if (deferPatch) {
@@ -221,12 +231,12 @@ export function persistClientSettingsPatch(
         if (clientSettingsHydrationStatus !== "ready") {
           await hydrateClientSettings();
         }
-        replaceClientSettingsSnapshot({ ...getClientSettingsSnapshot(), ...patch });
+        applyClientSettingsPatch(patch);
       } finally {
         deferredClientSettingsPatchCount -= 1;
       }
     }
-    await persist(getClientSettingsSnapshot());
+    await persist(savedClientSettingsSnapshot);
   }).catch((error) => {
     console.error(`${CLIENT_SETTINGS_PERSISTENCE_ERROR_SCOPE} persist failed`, {
       operation: "persist",
@@ -255,12 +265,15 @@ export async function persistClientSettingsUpdate(
       await hydrateClientSettings();
     }
     for (;;) {
-      const current = getClientSettingsSnapshot();
+      const current = savedClientSettingsSnapshot;
       const next = update(current);
       await persist(next);
-      if (getClientSettingsSnapshot() === current) {
+      if (savedClientSettingsSnapshot === current) {
+        if (next.lastcodeSidebarEnabled !== current.lastcodeSidebarEnabled) {
+          developmentSidebarOverride = false;
+        }
         replaceClientSettingsSnapshot(next);
-        return next;
+        return getClientSettingsSnapshot();
       }
     }
   });
@@ -780,6 +793,8 @@ export function useUpdatePrimarySettings() {
 export function __resetClientSettingsPersistenceForTests(): void {
   clientSettingsHydrationGeneration += 1;
   clientSettingsSnapshot = DEFAULT_CLIENT_SETTINGS;
+  savedClientSettingsSnapshot = DEFAULT_CLIENT_SETTINGS;
+  developmentSidebarOverride = false;
   clientSettingsHydrationStatus = "pending";
   clientSettingsHydrationPromise = null;
   clientSettingsPersistenceQueue = Promise.resolve();
@@ -791,6 +806,8 @@ export function __resetClientSettingsPersistenceForTests(): void {
 export function __setClientSettingsForTests(settings: ClientSettings): void {
   clientSettingsHydrationGeneration += 1;
   clientSettingsSnapshot = settings;
+  savedClientSettingsSnapshot = settings;
+  developmentSidebarOverride = false;
   clientSettingsHydrationStatus = "ready";
   clientSettingsHydrationPromise = null;
 }

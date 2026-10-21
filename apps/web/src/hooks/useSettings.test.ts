@@ -39,6 +39,52 @@ afterEach(() => {
 });
 
 describe("client settings hydration", () => {
+  it.each(["patch", "update"] as const)(
+    "keeps the development sidebar override out of unrelated %s writes",
+    async (write) => {
+      vi.stubEnv("DEV", true);
+      vi.stubEnv("MODE", "development");
+      persistenceMocks.getClientSettings.mockResolvedValue({
+        ...DEFAULT_CLIENT_SETTINGS,
+        lastcodeSidebarEnabled: false,
+      });
+      await ensureClientSettingsHydrated();
+      expect(getClientSettings().lastcodeSidebarEnabled).toBe(true);
+      expect(persistenceMocks.setClientSettings).not.toHaveBeenCalled();
+
+      if (write === "patch") {
+        await updateClientSettings({ timestampFormat: "12-hour" });
+        await updateClientSettings({ compactLegacySidebarStatuses: true });
+      } else {
+        await persistClientSettingsUpdate((current) => ({
+          ...current,
+          timestampFormat: "12-hour",
+          compactLegacySidebarStatuses: true,
+        }));
+      }
+
+      for (const [saved] of persistenceMocks.setClientSettings.mock.calls) {
+        expect(saved.lastcodeSidebarEnabled).toBe(false);
+      }
+      expect(persistenceMocks.setClientSettings).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          lastcodeSidebarEnabled: false,
+          timestampFormat: "12-hour",
+          compactLegacySidebarStatuses: true,
+        }),
+      );
+      expect(getClientSettings().lastcodeSidebarEnabled).toBe(true);
+
+      await updateClientSettings({ lastcodeSidebarEnabled: false });
+      expect(getClientSettings().lastcodeSidebarEnabled).toBe(false);
+      await updateClientSettings({ lastcodeSidebarEnabled: true });
+      expect(getClientSettings().lastcodeSidebarEnabled).toBe(true);
+      expect(persistenceMocks.setClientSettings).toHaveBeenLastCalledWith(
+        expect.objectContaining({ lastcodeSidebarEnabled: true }),
+      );
+    },
+  );
+
   it.each([null, false, true])(
     "starts development previews with LastCode enabled and active, saved=%s",
     async (saved) => {
