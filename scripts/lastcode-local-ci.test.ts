@@ -24,6 +24,7 @@ import {
   readFullCiStamp,
   readQuickCiReceipt,
   resolveFullCiStampPath,
+  resolveCollectedCiSteps,
   resolveLocalCiSteps,
   resolveQuickCiBase,
   resolveQuickCiReceiptPath,
@@ -62,6 +63,71 @@ function createIntegrityRepository(): string {
 }
 
 describe("lastcode-local-ci", () => {
+  it("plans independent workspace checks without changing Quick CI", () => {
+    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-collection-plan-"));
+    try {
+      NodeFS.writeFileSync(
+        NodePath.join(root, "pnpm-workspace.yaml"),
+        "packages:\n  - packages/*\n",
+      );
+      for (const name of ["first", "later"]) {
+        const directory = NodePath.join(root, "packages", name);
+        NodeFS.mkdirSync(directory, { recursive: true });
+        NodeFS.writeFileSync(
+          NodePath.join(directory, "package.json"),
+          JSON.stringify({
+            name: `@fixture/${name}`,
+            scripts: { test: "node test.cjs", typecheck: "node check.cjs" },
+          }),
+        );
+      }
+      const steps = resolveCollectedCiSteps(root, resolveLocalCiSteps("full"));
+      expect(
+        steps
+          .filter(({ label }) => label.startsWith("Workspace tests ("))
+          .map(({ label }) => label),
+      ).toEqual(["Workspace tests (@fixture/first)", "Workspace tests (@fixture/later)"]);
+      expect(steps.find(({ label }) => label === "Workspace tests (@fixture/later)")).toMatchObject(
+        {
+          command: "vp",
+          args: [
+            "run",
+            "--filter",
+            "@fixture/later",
+            "--fail-if-no-match",
+            "--concurrency-limit",
+            "1",
+            "test",
+            "--maxWorkers=1",
+            "--maxConcurrency=1",
+          ],
+        },
+      );
+      expect(
+        steps.find(({ label }) => label === "Workspace typecheck (@fixture/first)"),
+      ).toMatchObject({
+        command: "vp",
+        args: [
+          "run",
+          "--filter",
+          "@fixture/first",
+          "--fail-if-no-match",
+          "--concurrency-limit",
+          "1",
+          "typecheck",
+        ],
+      });
+      expect(steps.find(({ kind }) => kind === "verify-preload")?.dependsOn).toEqual([
+        "Desktop build",
+      ]);
+      expect(
+        resolveLocalCiSteps("quick").some(({ label }) => label === "Workspace typecheck"),
+      ).toBe(true);
+    } finally {
+      NodeFS.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("formats concise final summaries for resumable output", () => {
     expect(formatLocalCiSummary("full", "abc123")).toBe(
       "[lastcode:ci] Summary: Full local CI passed for abc123.",

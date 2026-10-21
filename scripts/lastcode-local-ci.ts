@@ -20,8 +20,14 @@ import {
   readLocalCiPolicy,
   tryAcquireLocalCiBudget,
 } from "./lib/lastcode-ci-budget.ts";
-import { resolveQuickCiScope, type QuickCiScope } from "./lib/lastcode-ci-scope.ts";
-import { runCiProcess } from "./lib/lastcode-ci-process.ts";
+import {
+  readWorkspacePatterns,
+  resolveQuickCiScope,
+  type QuickCiScope,
+} from "./lib/lastcode-ci-scope.ts";
+import { CiCommandFailure, runCiProcess } from "./lib/lastcode-ci-process.ts";
+import { runCollectedCiSteps, type CiStepResult } from "./lib/lastcode-ci-collection.ts";
+import { pruneCiDiagnostics } from "./lib/lastcode-ci-diagnostics.ts";
 import { recordDependencyUse } from "../packages/shared/src/dependencyActivity.ts";
 import { createGeneratedBuildStage } from "../packages/shared/src/generatedBuildOwnership.ts";
 
@@ -53,7 +59,9 @@ interface DiffWhitespaceStep {
   readonly label: string;
 }
 
-export type LocalCiStep = CommandStep | VerifyPreloadStep | DiffWhitespaceStep;
+export type LocalCiStep = (CommandStep | VerifyPreloadStep | DiffWhitespaceStep) & {
+  readonly dependsOn?: ReadonlyArray<string>;
+};
 
 export const QUICK_CI_GATE_VERSION = 2;
 
@@ -188,8 +196,13 @@ const FULL_STEPS: ReadonlyArray<LocalCiStep> = [
     label: "Desktop build",
     command: "vp",
     args: ["run", "build:desktop"],
+    dependsOn: ["Ensure Electron runtime"],
   },
-  { kind: "verify-preload", label: "Desktop preload bundle assertions" },
+  {
+    kind: "verify-preload",
+    label: "Desktop preload bundle assertions",
+    dependsOn: ["Desktop build"],
+  },
   {
     kind: "command",
     label: "Resource monitor tests",
@@ -218,6 +231,7 @@ const FULL_STEPS: ReadonlyArray<LocalCiStep> = [
     label: "Mobile native static analysis",
     command: "vp",
     args: ["run", "lint:mobile"],
+    dependsOn: ["Mobile native tool prerequisites"],
   },
   {
     kind: "command",
@@ -345,6 +359,69 @@ export function resolveLocalCiSteps(
     if (scope.kind === "full") return [step];
     if (step.label !== "Format and lint") return [step];
     return resolveChangedPathsStep(step, scope, repoRoot);
+  });
+}
+
+/** Recursive task execution stops at the first failed workspace, even with --parallel. */
+export function resolveCollectedCiSteps(
+  repoRoot: string,
+  steps: ReadonlyArray<LocalCiStep>,
+): ReadonlyArray<LocalCiStep> {
+  const patterns = readWorkspacePatterns(
+    NodeFS.readFileSync(NodePath.join(repoRoot, "pnpm-workspace.yaml"), "utf8"),
+  );
+  const workspaces = NodeFS.globSync(
+    patterns.map((pattern) => `${pattern}/package.json`),
+    {
+      cwd: repoRoot,
+    },
+  )
+    .sort()
+    .map((file) => {
+      const manifest = JSON.parse(NodeFS.readFileSync(NodePath.join(repoRoot, file), "utf8")) as {
+        readonly name?: unknown;
+        readonly scripts?: Readonly<Record<string, unknown>>;
+      };
+      if (typeof manifest.name !== "string") {
+        throw new Error(`Full CI requires a named workspace at ${file}.`);
+      }
+      return { name: manifest.name, scripts: manifest.scripts };
+    });
+  if (workspaces.length === 0) throw new Error("Full CI found no workspace packages.");
+  const names = new Set<string>();
+  for (const manifest of workspaces) {
+    if (typeof manifest.name !== "string" || names.has(manifest.name)) {
+      throw new Error("Full CI requires uniquely named workspaces.");
+    }
+    names.add(manifest.name);
+  }
+  return steps.flatMap((step): LocalCiStep[] => {
+    const task =
+      step.label === "Workspace tests"
+        ? "test"
+        : step.label === "Workspace typecheck"
+          ? "typecheck"
+          : undefined;
+    if (!task || step.kind !== "command") return [step];
+    return workspaces
+      .filter((manifest) => typeof manifest.scripts?.[task] === "string")
+      .map((manifest) => ({
+        ...step,
+        label: `${step.label} (${manifest.name})`,
+        args: [
+          "run",
+          "--filter",
+          manifest.name,
+          "--fail-if-no-match",
+          "--concurrency-limit",
+          "1",
+          task,
+          ...(task === "test" ? ["--maxWorkers=1", "--maxConcurrency=1"] : []),
+        ],
+        ...(task === "test" && manifest.name === "@t3tools/desktop"
+          ? { dependsOn: ["Ensure Electron runtime"] }
+          : {}),
+      }));
   });
 }
 
@@ -595,7 +672,7 @@ function runProcess(
       stderr,
       options.failureHelp ?? "",
     ].filter(Boolean);
-    throw new Error(details.join("\n"));
+    throw new CiCommandFailure(details.join("\n"));
   }
 
   return options.capture ? result.stdout.trim() : "";
@@ -1063,7 +1140,9 @@ async function executeLocalCi(
     const scope =
       quickBase && baseCommit ? resolveQuickCiScope(repoRoot, baseCommit, commitBefore) : undefined;
     if (scope) console.log(`[lastcode:ci] Typecheck scope: ${scope.kind} (${scope.reason}).`);
-    const steps = resolveLocalCiSteps(options.mode, scope, policy, repoRoot);
+    const plannedSteps = resolveLocalCiSteps(options.mode, scope, policy, repoRoot);
+    const steps =
+      options.mode === "full" ? resolveCollectedCiSteps(repoRoot, plannedSteps) : plannedSteps;
     await NodeTimersPromises.setImmediate();
     signal.throwIfAborted();
 
@@ -1071,14 +1150,6 @@ async function executeLocalCi(
       NodePath.join(NodeOS.tmpdir(), "lastcode-local-ci-"),
     );
     const isolatedGitConfigPath = NodePath.join(transferOutputDirectory, "gitconfig");
-    const rustToolchainBin =
-      options.mode === "full"
-        ? NodePath.dirname(
-            runProcess(repoRoot, "rustup", ["which", "cargo", "--toolchain", "stable"], {
-              capture: true,
-            }),
-          )
-        : undefined;
     NodeFS.writeFileSync(
       isolatedGitConfigPath,
       [
@@ -1090,114 +1161,250 @@ async function executeLocalCi(
         "",
       ].join("\n"),
     );
-    try {
-      for (const [index, step] of steps.entries()) {
-        signal.throwIfAborted();
-        console.log(`\n[lastcode:ci] ${index + 1}/${steps.length} ${step.label}`);
-        lastCodeAction.progress({
-          state: "working",
-          phase: step.kind,
-          summary: step.label,
-          current: index + 1,
-          total: steps.length,
-          unit: "step",
-        });
-        if (step.kind === "verify-preload") {
-          verifyPreloadBundle(repoRoot);
-          continue;
-        }
-        if (step.kind === "diff-whitespace") {
-          runProcess(repoRoot, "git", ["diff", "--check", `${baseCommit!}...${commitBefore}`]);
-          continue;
-        }
-
-        const env = {
-          ...process.env,
-          ...(step.isolatedGitConfig
-            ? {
-                GIT_CONFIG_GLOBAL: isolatedGitConfigPath,
-                GIT_CONFIG_NOSYSTEM: "1",
-              }
-            : {}),
-          ...(step.rustToolchainPath && rustToolchainBin
-            ? { PATH: `${rustToolchainBin}${NodePath.delimiter}${process.env.PATH ?? ""}` }
-            : {}),
-          ...(step.transferBudgetOutput
-            ? {
-                T3CODE_TRANSFER_BUDGET_REPORT_PATH: NodePath.join(
-                  transferOutputDirectory,
-                  "t3code-transfer-budget.md",
-                ),
-                T3CODE_TRANSFER_BUDGET_RESULT_PATH: NodePath.join(
-                  transferOutputDirectory,
-                  "thread-transfer-result.json",
-                ),
-              }
-            : {}),
-        };
-        const inheritedEnv = cleanGitEnvironment(env);
-        const noteDependencyUse = () => {
-          // Planned Vite+ steps execute installed test/lint/build tools. Git-only
-          // admission, status, wait and dry-run paths don't count as dependency use.
-          if (step.command !== "vp") return;
-          try {
-            recordDependencyUse(repoRoot, Date.now());
-          } catch {
-            console.warn("[lastcode:ci] Could not record dependency use.");
-          }
-        };
-        const debugStage =
-          step.command === "cargo" && step.args[0] === "test"
-            ? createGeneratedBuildStage(repoRoot, "native/resource-monitor/target/debug")
-            : null;
-        noteDependencyUse();
-        try {
-          await runCiProcess({
-            cwd: repoRoot,
-            command: step.command,
-            args: step.args,
-            signal,
-            onSpawn: (pid) => lease.recordChild(pid),
-            env: {
-              ...inheritedEnv,
-              ...(debugStage ? { CARGO_TARGET_DIR: debugStage.directory } : {}),
-              GOMAXPROCS: String(policy.compilerThreads),
-              PATH: `${NodePath.resolve(repoRoot, "node_modules/.bin")}${NodePath.delimiter}${inheritedEnv.PATH ?? ""}`,
+    const diagnosticDirectory =
+      options.mode === "full"
+        ? NodePath.join(
+            repositoryIntegrity.commonGitDir,
+            "lastcode-ci-diagnostics",
+            NodeCrypto.randomUUID(),
+          )
+        : undefined;
+    const reportPath = diagnosticDirectory && NodePath.join(diagnosticDirectory, "report.json");
+    const results: CiStepResult[] = [];
+    const startedAt = new Date().toISOString();
+    const toolingCommit = runGit(import.meta.dirname, ["rev-parse", "HEAD"]);
+    const writeDiagnostics = (
+      status: "running" | "failed" | "passed" | "incomplete",
+      error?: unknown,
+    ) => {
+      if (!diagnosticDirectory || !reportPath) return;
+      NodeFS.mkdirSync(diagnosticDirectory, { recursive: true });
+      const pendingReportPath = `${reportPath}.pending`;
+      // Keep the readable owner report intact if a later write is interrupted.
+      NodeFS.writeFileSync(
+        pendingReportPath,
+        `${JSON.stringify(
+          {
+            schemaVersion: 1,
+            status,
+            commit: commitBefore,
+            toolingCommit,
+            ownerPid: process.pid,
+            context: checkpointContext ?? { kind: "pull-request", baseCommit },
+            startedAt,
+            ...(status !== "running" ? { finishedAt: new Date().toISOString() } : {}),
+            ...(error !== undefined
+              ? { error: error instanceof Error ? error.message : String(error) }
+              : {}),
+            runtime: {
+              node: process.versions.node,
+              icu: process.versions.icu,
+              operatingSystem: NodeOS.type(),
+              machine: NodeOS.machine(),
+              locale: Intl.DateTimeFormat().resolvedOptions(),
+              temporaryDirectory: NodeFS.realpathSync(NodeOS.tmpdir()),
             },
-            ...(step.failureHelp ? { failureHelp: step.failureHelp } : {}),
-          });
-          debugStage?.publish(Date.now(), NodePath.join(debugStage.directory, "debug"));
-        } finally {
-          debugStage?.discard();
-          noteDependencyUse();
-        }
+            steps: steps.map((step, index) => ({
+              ...step,
+              ...(results.find((result) => result.label === step.label) ?? { status: "pending" }),
+              ...(NodeFS.existsSync(NodePath.join(diagnosticDirectory, `${index + 1}.log`))
+                ? { logPath: NodePath.join(diagnosticDirectory, `${index + 1}.log`) }
+                : {}),
+            })),
+          },
+          null,
+          2,
+        )}\n`,
+      );
+      NodeFS.renameSync(pendingReportPath, reportPath);
+    };
+    writeDiagnostics("running");
+    if (diagnosticDirectory) {
+      try {
+        pruneCiDiagnostics(NodePath.dirname(diagnosticDirectory), diagnosticDirectory);
+      } catch (error) {
+        console.warn("[lastcode:ci] Could not prune older validation reports:", error);
       }
+    }
+    if (reportPath) console.log(`[lastcode:ci] Validation report: ${reportPath}`);
+    const executeStep = async (step: LocalCiStep, index: number) => {
+      signal.throwIfAborted();
+      console.log(`\n[lastcode:ci] ${index + 1}/${steps.length} ${step.label}`);
+      lastCodeAction.progress({
+        state: "working",
+        phase: step.kind,
+        summary: step.label,
+        current: index + 1,
+        total: steps.length,
+        unit: "step",
+      });
+      if (step.kind === "verify-preload") {
+        try {
+          verifyPreloadBundle(repoRoot);
+        } catch (error) {
+          throw new CiCommandFailure(error instanceof Error ? error.message : String(error), {
+            cause: error,
+          });
+        }
+        return;
+      }
+      if (step.kind === "diff-whitespace") {
+        runProcess(repoRoot, "git", ["diff", "--check", `${baseCommit!}...${commitBefore}`]);
+        return;
+      }
+
+      const rustToolchainBin = step.rustToolchainPath
+        ? NodePath.dirname(
+            runProcess(repoRoot, "rustup", ["which", "cargo", "--toolchain", "stable"], {
+              capture: true,
+            }),
+          )
+        : undefined;
+      const env = {
+        ...process.env,
+        ...(step.isolatedGitConfig
+          ? {
+              GIT_CONFIG_GLOBAL: isolatedGitConfigPath,
+              GIT_CONFIG_NOSYSTEM: "1",
+            }
+          : {}),
+        ...(step.rustToolchainPath && rustToolchainBin
+          ? { PATH: `${rustToolchainBin}${NodePath.delimiter}${process.env.PATH ?? ""}` }
+          : {}),
+        ...(step.transferBudgetOutput
+          ? {
+              T3CODE_TRANSFER_BUDGET_REPORT_PATH: NodePath.join(
+                transferOutputDirectory,
+                "t3code-transfer-budget.md",
+              ),
+              T3CODE_TRANSFER_BUDGET_RESULT_PATH: NodePath.join(
+                transferOutputDirectory,
+                "thread-transfer-result.json",
+              ),
+            }
+          : {}),
+      };
+      const inheritedEnv = cleanGitEnvironment(env);
+      const noteDependencyUse = () => {
+        // Planned Vite+ steps execute installed test/lint/build tools. Git-only
+        // admission, status, wait and dry-run paths don't count as dependency use.
+        if (step.command !== "vp") return;
+        try {
+          recordDependencyUse(repoRoot, Date.now());
+        } catch {
+          console.warn("[lastcode:ci] Could not record dependency use.");
+        }
+      };
+      const debugStage =
+        step.command === "cargo" && step.args[0] === "test"
+          ? createGeneratedBuildStage(repoRoot, "native/resource-monitor/target/debug")
+          : null;
+      noteDependencyUse();
+      try {
+        await runCiProcess({
+          cwd: repoRoot,
+          command: step.command,
+          args: step.args,
+          signal,
+          onSpawn: (pid) => lease.recordChild(pid),
+          env: {
+            ...inheritedEnv,
+            ...(debugStage ? { CARGO_TARGET_DIR: debugStage.directory } : {}),
+            GOMAXPROCS: String(policy.compilerThreads),
+            PATH: `${NodePath.resolve(repoRoot, "node_modules/.bin")}${NodePath.delimiter}${inheritedEnv.PATH ?? ""}`,
+          },
+          ...(step.failureHelp ? { failureHelp: step.failureHelp } : {}),
+          ...(diagnosticDirectory
+            ? {
+                output: process.stdout,
+                onOutput: (output: string) => {
+                  NodeFS.appendFileSync(
+                    NodePath.join(diagnosticDirectory, `${index + 1}.log`),
+                    output,
+                  );
+                },
+              }
+            : {}),
+        });
+        debugStage?.publish(Date.now(), NodePath.join(debugStage.directory, "debug"));
+      } finally {
+        debugStage?.discard();
+        noteDependencyUse();
+      }
+    };
+    const assertCandidateUnchanged = async () => {
+      // Synchronous scope/Git-only runs must also dispatch pending cancellation
+      // before publishing success. Revalidate the checkout after yielding.
+      await NodeTimersPromises.setImmediate();
+      signal.throwIfAborted();
+      const commitAfter = await runGitWithCancellation(repoRoot, ["rev-parse", "HEAD"], signal);
+      if (commitAfter !== commitBefore) {
+        throw new Error(`HEAD changed during local CI (${commitBefore} -> ${commitAfter}).`);
+      }
+      await assertCleanWorktreeWithCancellation(repoRoot, signal);
+      if (
+        quickBase &&
+        (await runGitWithCancellation(repoRoot, ["rev-parse", quickBase.remoteRef], signal)) !==
+          baseCommit
+      ) {
+        throw new Error("The Quick CI base changed during validation. Run Quick CI again.");
+      }
+      await assertRepositoryIntegrity(repoRoot, repositoryIntegrity, signal);
+    };
+    try {
+      if (options.mode === "full") {
+        await runCollectedCiSteps({
+          steps,
+          signal,
+          execute: executeStep,
+          isCheckFailure: (error) => error instanceof CiCommandFailure,
+          onResult: (result) => {
+            results.push(result);
+            writeDiagnostics("running");
+            console.log(
+              `[lastcode:ci] ${result.status}: ${result.label}${result.error ? `: ${result.error}` : ""}${result.blockedBy ? ` (blocked by ${result.blockedBy.join(", ")})` : ""}`,
+            );
+          },
+        });
+        await assertCandidateUnchanged();
+        const failed = results.filter((result) => result.status === "failed");
+        const blocked = results.filter((result) => result.status === "blocked");
+        if (failed.length || blocked.length) {
+          writeDiagnostics("failed");
+          const summary = `Full CI found ${failed.length} failed and ${blocked.length} blocked checks. Report: ${reportPath}`;
+          lastCodeAction.result({
+            outcome: "attention",
+            reason: "validation-failed",
+            summary,
+            subject: { type: "commit", id: commitBefore, revision: commitBefore },
+            facts: {
+              mode: "full",
+              reportPath: reportPath!,
+              failed: String(failed.length),
+              blocked: String(blocked.length),
+            },
+          });
+          throw new CiCommandFailure(summary);
+        }
+      } else {
+        for (const [index, step] of steps.entries()) await executeStep(step, index);
+      }
+    } catch (error) {
+      if (!(error instanceof CiCommandFailure)) writeDiagnostics("incomplete", error);
+      throw error;
     } finally {
       NodeFS.rmSync(transferOutputDirectory, { recursive: true, force: true });
     }
 
-    // Synchronous scope/Git-only runs must also dispatch pending cancellation
-    // before publishing success. Revalidate the checkout after yielding.
-    await NodeTimersPromises.setImmediate();
-    signal.throwIfAborted();
-    const commitAfter = await runGitWithCancellation(repoRoot, ["rev-parse", "HEAD"], signal);
-    if (commitAfter !== commitBefore) {
-      throw new Error(`HEAD changed during local CI (${commitBefore} -> ${commitAfter}).`);
-    }
-    await assertCleanWorktreeWithCancellation(repoRoot, signal);
-    if (
-      quickBase &&
-      (await runGitWithCancellation(repoRoot, ["rev-parse", quickBase.remoteRef], signal)) !==
-        baseCommit
-    ) {
-      throw new Error("The Quick CI base changed during validation. Run Quick CI again.");
-    }
+    if (options.mode === "quick") await assertCandidateUnchanged();
 
     // Verify all owned checks have stopped, but keep capacity until the receipt
     // is published so a queued invocation can reuse the completed validation.
     lease.recordChild(undefined);
 
     if (options.mode === "full" && (baseCommit || checkpointContext)) {
+      // Required evidence must finish before a stamp can authorize packaging.
+      writeDiagnostics("passed");
       const stampPath = await writeVerifiedFullCiStamp(
         repoRoot,
         repositoryIntegrity,
@@ -1220,7 +1427,7 @@ async function executeLocalCi(
         outcome: "success",
         summary: `Full local CI passed for ${commitBefore}`,
         subject: { type: "commit", id: commitBefore, revision: commitBefore },
-        facts: { mode: "full" },
+        facts: { mode: "full", ...(reportPath ? { reportPath } : {}) },
       });
     } else if (options.mode === "quick" && baseCommit && quickBase) {
       const receiptPath = await writeVerifiedQuickCiReceipt(
@@ -1274,7 +1481,11 @@ async function runLocalCi(options: LocalCiOptions): Promise<void> {
       );
       console.log(`[lastcode:ci] Typecheck scope: ${scope.kind} (${scope.reason}).`);
     }
-    printPlan(options.mode, resolveLocalCiSteps(options.mode, scope, policy, repoRoot));
+    const steps = resolveLocalCiSteps(options.mode, scope, policy, repoRoot);
+    printPlan(
+      options.mode,
+      options.mode === "full" ? resolveCollectedCiSteps(repoRoot, steps) : steps,
+    );
     return;
   }
 

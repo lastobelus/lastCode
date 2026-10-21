@@ -140,7 +140,7 @@ function isInertFile(file: string): boolean {
   return STATIC_FILE.test(file) && /(?:^|\/)(?:docs|public|assets|resources)\//i.test(file);
 }
 
-function readWorkspacePatterns(text: string): ReadonlyArray<string> {
+export function readWorkspacePatterns(text: string): ReadonlyArray<string> {
   const lines = text.split(/\r?\n/);
   const start = lines.findIndex((line) => /^packages:\s*(?:#.*)?$/.test(line));
   if (start < 0) throw new Error("Unsupported or missing workspace package list");

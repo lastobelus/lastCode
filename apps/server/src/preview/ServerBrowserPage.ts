@@ -666,9 +666,6 @@ const readPageMetricsWithinBudget = async (cdp: CDPSession, read: ReadStage) => 
   );
 };
 
-export const readPageMetrics = (cdp: CDPSession) =>
-  withReadBudget({}, (read) => readPageMetricsWithinBudget(cdp, read));
-
 type CaptureOptions = ReadOptions & {
   readonly format: "png" | "jpeg";
   readonly quality?: number;

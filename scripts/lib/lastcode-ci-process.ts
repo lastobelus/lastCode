@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off globalTimers:off -- Host-side CI owns these subprocesses and cancellation timers.
 import * as NodeChildProcess from "node:child_process";
 import * as NodePath from "node:path";
+import type * as NodeStream from "node:stream";
 
 export interface CiProcessOptions {
   readonly cwd: string;
@@ -10,9 +11,13 @@ export interface CiProcessOptions {
   readonly signal: AbortSignal;
   readonly failureHelp?: string;
   readonly onOutput?: (output: string) => void;
+  readonly output?: NodeStream.Writable;
   readonly onSpawn?: (pid: number) => void;
   readonly terminationGraceMs?: number;
 }
+
+/** An ordinary check failure; cancellation and process-ownership failures stay fatal. */
+export class CiCommandFailure extends Error {}
 
 /** Waits for an owned command and its cancellation cleanup before releasing CI capacity. */
 export function runCiProcess(options: CiProcessOptions): Promise<void> {
@@ -25,29 +30,33 @@ export function runCiProcess(options: CiProcessOptions): Promise<void> {
         cwd: options.cwd,
         env: options.env,
         detached: true,
-        stdio: options.onOutput
-          ? ["ignore", "pipe", "pipe", "ipc"]
-          : ["inherit", "inherit", "inherit", "ipc"],
+        stdio:
+          options.onOutput || options.output
+            ? ["ignore", "pipe", "pipe", "ipc"]
+            : ["inherit", "inherit", "inherit", "ipc"],
       },
     );
-    child.stdout?.on("data", (data: Buffer) => options.onOutput?.(data.toString()));
-    child.stderr?.on("data", (data: Buffer) => options.onOutput?.(data.toString()));
     let closed = false;
     let cancelled = false;
     let cancellationFinished = false;
+    let outputFinished = options.output === undefined;
     let exitCode: number | null = null;
     let spawnError: Error | undefined;
     let cleanupError: Error | undefined;
 
     const finish = () => {
-      if (!closed || (cancelled && !cancellationFinished)) return;
+      if (!closed || (cancelled && !cancellationFinished) || (!cancelled && !outputFinished))
+        return;
       options.signal.removeEventListener("abort", abort);
+      options.output?.off("error", outputFailed);
       if (spawnError) return reject(spawnError);
       if (cleanupError) return reject(cleanupError);
       if (cancelled) return reject(options.signal.reason ?? new Error("Local CI cancelled."));
+      if (exitCode === null)
+        return reject(new Error("CI command terminated without an exit code."));
       if (exitCode !== 0) {
         return reject(
-          new Error(
+          new CiCommandFailure(
             [
               `${options.command} ${options.args.join(" ")} failed with exit code ${exitCode ?? "unknown"}.`,
               options.failureHelp,
@@ -84,6 +93,13 @@ export function runCiProcess(options: CiProcessOptions): Promise<void> {
     const abort = () => {
       if (cancelled) return;
       cancelled = true;
+      if (options.output) {
+        child.stdout?.unpipe(options.output);
+        child.stderr?.unpipe(options.output);
+      }
+      // A blocked consumer must not prevent closing the owned child's pipes.
+      child.stdout?.resume();
+      child.stderr?.resume();
       signalGroup("SIGTERM");
       // The launcher may exit before a resistant descendant. Keep the lease
       // until the final group signal even if the launcher's close arrived first.
@@ -93,6 +109,27 @@ export function runCiProcess(options: CiProcessOptions): Promise<void> {
         finish();
       }, options.terminationGraceMs ?? 2_000);
     };
+
+    const outputFailed = (error: Error) => {
+      spawnError = error;
+      abort();
+    };
+    const forwardOutput = (data: Buffer) => {
+      if (cancelled) return;
+      try {
+        options.onOutput?.(data.toString());
+      } catch (error) {
+        spawnError = error instanceof Error ? error : new Error("Could not retain CI output.");
+        abort();
+      }
+    };
+    child.stdout?.on("data", forwardOutput);
+    child.stderr?.on("data", forwardOutput);
+    if (options.output) {
+      options.output.on("error", outputFailed);
+      child.stdout?.pipe(options.output, { end: false });
+      child.stderr?.pipe(options.output, { end: false });
+    }
 
     child.once("error", (error) => {
       spawnError = error;
@@ -107,6 +144,18 @@ export function runCiProcess(options: CiProcessOptions): Promise<void> {
     child.once("close", (code) => {
       closed = true;
       exitCode = code;
+      if (options.output && !cancelled) {
+        // A final callback waits for queued output even below the drain threshold.
+        try {
+          options.output.write("", (error) => {
+            outputFinished = true;
+            if (error) outputFailed(error);
+            finish();
+          });
+        } catch (error) {
+          outputFailed(error instanceof Error ? error : new Error("Could not forward CI output."));
+        }
+      }
       finish();
     });
     options.signal.addEventListener("abort", abort, { once: true });

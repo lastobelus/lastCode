@@ -40,13 +40,9 @@ describe("resolveFileChipTarget", () => {
     });
   });
 
-  it("resolves parent-relative file links against the workspace for host viewing", () => {
-    expect(resolveFileChipTarget("../other/file.ts:18", "/repo")).toEqual({
-      fullPath: "/repo/../other/file.ts",
-    });
-    expect(resolveFileChipTarget("../report.pdf", "C:\\repo")).toEqual({
-      fullPath: "C:\\repo\\..\\report.pdf",
-    });
+  it("rejects parent-relative file links that escape the workspace", () => {
+    expect(resolveFileChipTarget("../other/file.ts:18", "/repo")).toBeNull();
+    expect(resolveFileChipTarget("../report.pdf", "C:\\repo")).toBeNull();
   });
 
   it.each([
