@@ -120,7 +120,7 @@ An empty database is a bad test. Seed your worktree's `.t3` with a copy of real 
 
 ## Verifying
 
-- Before you push, run `vp run check:changed`. It runs CI's fast checks for changed files: format, lint, knip, typecheck of affected packages and dependents, and tests beside changes. CI still runs the full test suites.
+- Before you push, run `vp run check:changed origin/lastcode/main`. It runs CI's fast checks for changed files: format, lint, knip, typecheck of affected packages and dependents, and tests beside changes. Without the ref it compares against `origin/main`, the upstream mirror, and checks the whole fork's diff. CI still runs the full test suites.
 - Smallest proof that the change works. `vp test run <files>` for the tests you touched, targeted lint and typecheck for the scope you changed.
 - Run compiled web React checks with `pnpm --dir apps/web exec vp test run --project unit src/...`; the root Vite config omits the web React compiler. Mounted tests can still pass through compiler fallback. For a new or refactored hook/component, also run `pnpm --dir apps/web exec vp test run --project unit src/reactCompilerCoverage.test.ts -t 'compiles apps/web/src/path/to/file.tsx'` to verify compilation without bailouts.
 - Do not use `npx tsc`. Use `vp run typecheck`; it uses tsc-rs, which is 3x faster.
