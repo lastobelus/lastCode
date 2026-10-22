@@ -66,6 +66,10 @@ it.each([0, 1])(
 );
 
 it("runs the affected-workspace command through the installed task runner", () => {
+  // Reuse the installed project's pin so this isolated fixture avoids registry discovery.
+  const { packageManager } = JSON.parse(
+    NodeFS.readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+  ) as { packageManager: string };
   const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-ci-runner-"));
   const callsPath = NodePath.join(directory, "calls.jsonl");
   const testArgsPath = NodePath.join(directory, "test-args.jsonl");
@@ -81,7 +85,7 @@ it("runs the affected-workspace command through the installed task runner", () =
     );
     NodeFS.writeFileSync(
       NodePath.join(directory, "package.json"),
-      JSON.stringify({ name: "fixture-root", private: true }),
+      JSON.stringify({ name: "fixture-root", private: true, packageManager }),
     );
     NodeFS.writeFileSync(
       NodePath.join(directory, "pnpm-workspace.yaml"),
