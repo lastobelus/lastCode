@@ -399,20 +399,25 @@ describe("an Arabic line", () => {
     await act(async () => {
       editor.commands.setTextSelection(codeStart + 2);
     });
-    const start = editor.view.domAtPos(codeStart);
-    const end = editor.view.domAtPos(codeStart + "sumBy".length);
-    const word = document.createRange();
-    word.setStart(start.node, start.offset);
-    word.setEnd(end.node, end.offset);
-    const text = word.getBoundingClientRect();
-    const markers = [...editor.view.dom.querySelectorAll(".composer-md-syntax")];
-    expect(markers.map((marker) => marker.textContent)).toEqual(["`", "`"]);
-    // Bidi can reorder the literal source spans; both backticks must flank the code.
-    const [left, right] = markers
-      .map((marker) => marker.getBoundingClientRect())
-      .sort((a, b) => a.left - b.left);
-    expect(left!.right).toBeLessThanOrEqual(text.left + 1);
-    expect(right!.left).toBeGreaterThanOrEqual(text.right - 1);
+    await vi.waitFor(() => {
+      const start = editor.view.domAtPos(codeStart);
+      const end = editor.view.domAtPos(codeStart + "sumBy".length);
+      const word = document.createRange();
+      word.setStart(start.node, start.offset);
+      word.setEnd(end.node, end.offset);
+      const text = word.getBoundingClientRect();
+      const markers = [...editor.view.dom.querySelectorAll(".composer-md-syntax")];
+      expect(markers.map((marker) => marker.textContent)).toEqual(["`", "`"]);
+      // Bidi can reorder the literal source spans; both backticks must flank the code.
+      const [left, right] = markers
+        .map((marker) => marker.getBoundingClientRect())
+        .sort((a, b) => a.left - b.left);
+      expect(text.width).toBeGreaterThan(0);
+      expect(left!.width).toBeGreaterThan(0);
+      expect(right!.width).toBeGreaterThan(0);
+      expect(left!.right).toBeLessThanOrEqual(text.left + 1);
+      expect(right!.left).toBeGreaterThanOrEqual(text.right - 1);
+    });
   });
 
   it("starts the next line on the right", async () => {
