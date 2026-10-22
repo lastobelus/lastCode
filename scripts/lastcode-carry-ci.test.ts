@@ -35,6 +35,15 @@ function manifest(repo: string, mode?: "carry"): void {
   );
 }
 
+function activateCarry(repo: string, base: string, source: string): string {
+  write(
+    repo,
+    "scripts/lastcode-carry-set.json",
+    JSON.stringify({ replay: { mode: "carry", bootstrap: { base, source, head: source } } }),
+  );
+  return commit(repo, "activate carry replay", "Carry-Group: tooling");
+}
+
 function fixture(): { readonly cleanup: () => void; readonly repo: string } {
   const repo = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-carry-ci-"));
   git(repo, ["init", "--quiet", "--initial-branch=lastcode/main"]);
@@ -44,17 +53,18 @@ function fixture(): { readonly cleanup: () => void; readonly repo: string } {
 }
 
 function compactFixture(repo: string) {
-  manifest(repo, "carry");
+  manifest(repo);
   write(repo, "shared.txt", "upstream\n");
   const upstream = commit(repo, "upstream");
   write(repo, "shared.txt", "action behavior\n");
   const partition = commit(repo, "action modification", "Carry-Group: resumable-actions");
+  const source = activateCarry(repo, upstream, partition);
   const base = compileCarrySetSameBase({
     repo,
     worktree: repo,
     base: upstream,
-    source: partition,
-    preparedPartition: { base: upstream, source: partition, head: partition },
+    source,
+    preparedPartition: { base: upstream, source, head: source },
   }).head;
   return { upstream, base };
 }
@@ -70,6 +80,25 @@ function snapshot(repo: string) {
 }
 
 describe("LastCode carry CI", () => {
+  it.each([{ mode: "carry" }, { mode: "invalid" }])(
+    "rejects invalid proposed replay configuration $mode even with a compact chain",
+    (replay) => {
+      const { repo, cleanup } = fixture();
+      try {
+        const { base } = compactFixture(repo);
+        write(repo, "scripts/lastcode-carry-set.json", JSON.stringify({ replay }));
+        const head = commit(repo, "change replay configuration", "Carry-Group: build-ci");
+        const before = snapshot(repo);
+        expect(() => validateCarryPullRequest(repo, { base, head, number: 217 })).toThrow(
+          /Carry replay (mode requires replay.bootstrap|manifest mode must be 'carry')/u,
+        );
+        expect(snapshot(repo)).toEqual(before);
+      } finally {
+        cleanup();
+      }
+    },
+  );
+
   it("validates the bootstrap activation PR from the head policy", () => {
     const { repo, cleanup } = fixture();
     try {
@@ -319,17 +348,18 @@ describe("LastCode carry CI", () => {
     ).default;
     const spawn = vi.spyOn(runtimeChildProcess, "spawnSync");
     try {
-      manifest(repo, "carry");
+      manifest(repo);
       for (const path of paths) write(repo, path, "tracked vendor fixture\n");
       const upstream = commit(repo, "upstream");
       write(repo, "tooling.txt", "tooling\n");
       const partition = commit(repo, "tooling contribution", "Carry-Group: tooling");
+      const source = activateCarry(repo, upstream, partition);
       const compact = compileCarrySetSameBase({
         repo,
         worktree: repo,
         base: upstream,
-        source: partition,
-        preparedPartition: { base: upstream, source: partition, head: partition },
+        source,
+        preparedPartition: { base: upstream, source, head: source },
       }).head;
       write(repo, "prior.txt", "retained contribution\n");
       const prior = commit(repo, "prior contribution", "Carry-Group: tooling");

@@ -71,13 +71,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          # Carry validation inspects every commit in the exact PR range.
+          # Carry compilation needs historical blobs, including files excluded by sparse checkouts.
           fetch-depth: 0
-          sparse-checkout: |
-            /*
-            !/.repos/
-            !/apps/mobile/modules/t3-terminal/Vendor/**/*.a
-          sparse-checkout-cone-mode: false
 
       - name: Reject repository-owned PR assets
         run: |

@@ -108,6 +108,18 @@ describe("guarded merge lifecycle", () => {
             "-m",
             "Carry-Group: resumable-actions",
           ]);
+          const contribution = git(repo, ["rev-parse", "HEAD"]);
+          NodeFS.writeFileSync(
+            NodePath.join(repo, "scripts", "lastcode-carry-set.json"),
+            JSON.stringify({
+              replay: {
+                mode: "carry",
+                bootstrap: { base: upstream, source: contribution, head: contribution },
+              },
+            }),
+          );
+          git(repo, ["add", "scripts/lastcode-carry-set.json"]);
+          git(repo, ["commit", "-m", "activate carry replay", "-m", "Carry-Group: tooling"]);
           const partition = git(repo, ["rev-parse", "HEAD"]);
           compileCarrySetSameBase({
             repo,

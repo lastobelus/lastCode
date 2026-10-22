@@ -269,14 +269,14 @@ export function validateCarryPullRequest(
     );
   }
   try {
+    parseManifestReplayConfiguration(manifests[1]);
+    const manifest = [...manifests]
+      .reverse()
+      .find((candidate) => candidate && shouldRetainCarrySources(candidate))!;
     return {
       active: true,
       source,
-      compilation: compilePullRequest(
-        repoRoot,
-        source,
-        manifests.find((manifest) => manifest && shouldRetainCarrySources(manifest))!,
-      ),
+      compilation: compilePullRequest(repoRoot, source, manifest),
     };
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);

@@ -65,7 +65,7 @@ describe("LastCode GitHub CI workflow", () => {
     expect(workflow).toContain("push:\n    branches:\n      - lastcode/main");
     expect(workflow).toContain("permissions:\n  contents: read");
     expect(checkBlock).toContain(
-      "# Carry validation inspects every commit in the exact PR range.\n          fetch-depth: 0",
+      "# Carry compilation needs historical blobs, including files excluded by sparse checkouts.\n          fetch-depth: 0",
     );
     expect(checkBlock).toContain(
       "- name: Validate carry group assignments and same-base compilation",
