@@ -6,6 +6,38 @@ import * as NodeVM from "node:vm";
 import { expect, it } from "vite-plus/test";
 import { previewSettingsPlugin } from "./previewSettings";
 
+it.each([undefined, "", "   "])(
+  "ignores an old snapshot when the current launch has no preparation source (%s)",
+  (source) => {
+    const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "preview-settings-"));
+    try {
+      NodeFS.mkdirSync(NodePath.join(home, "userdata"));
+      NodeFS.writeFileSync(
+        NodePath.join(home, "userdata", "preview-settings.json"),
+        JSON.stringify({
+          id: "earlier-launch",
+          localStorage: { "t3code:theme": "old-theme" },
+        }),
+      );
+      const values = new Map<string, string>();
+      const tags = previewSettingsPlugin(home, source).transformIndexHtml.handler();
+      for (const tag of tags ?? []) {
+        NodeVM.runInNewContext(tag.children, {
+          localStorage: {
+            getItem: (key: string) => values.get(key) ?? null,
+            setItem: (key: string, value: string) => values.set(key, value),
+            removeItem: (key: string) => values.delete(key),
+          },
+        });
+      }
+      expect(values.size).toBe(0);
+      expect(tags).toBeUndefined();
+    } finally {
+      NodeFS.rmSync(home, { recursive: true, force: true });
+    }
+  },
+);
+
 it("seeds saved preferences before startup, preserving edits until the next prepared launch", () => {
   const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "preview-settings-"));
   try {
@@ -30,7 +62,7 @@ it("seeds saved preferences before startup, preserving edits until the next prep
         NodePath.join(home, "userdata", "preview-settings.json"),
         JSON.stringify(snapshot),
       );
-      const transform = previewSettingsPlugin(home).transformIndexHtml;
+      const transform = previewSettingsPlugin(home, "/saved-app/userdata").transformIndexHtml;
       if (!transform || typeof transform !== "object" || !transform.handler) {
         throw new Error("Missing preview startup transform");
       }

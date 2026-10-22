@@ -3,14 +3,17 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import type { Plugin } from "vite-plus";
 
-export function previewSettingsPlugin(homeDir: string | undefined) {
+export function previewSettingsPlugin(
+  homeDir: string | undefined,
+  settingsSource: string | undefined,
+) {
   return {
     name: "lastcode-preview-settings",
     apply: "serve",
     transformIndexHtml: {
       order: "pre",
       handler() {
-        if (!homeDir) return;
+        if (!homeDir || !settingsSource?.trim()) return;
         const path = NodePath.join(homeDir, "userdata", "preview-settings.json");
         if (!NodeFS.existsSync(path)) return;
         const snapshot: unknown = JSON.parse(NodeFS.readFileSync(path, "utf8"));

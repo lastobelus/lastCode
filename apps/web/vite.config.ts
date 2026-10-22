@@ -197,7 +197,7 @@ export default defineConfig(({ command }) => {
     assetsInclude: ["**/*.wasm"],
     plugins: [
       devCompressionPlugin(),
-      previewSettingsPlugin(process.env.T3CODE_HOME),
+      previewSettingsPlugin(process.env.T3CODE_HOME, process.env.T3CODE_PREVIEW_SETTINGS_SOURCE),
       provenancePlugin,
       thirdPartyLicensesPlugin({
         bundleName: "web",
