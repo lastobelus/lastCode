@@ -409,7 +409,11 @@ export function selectIntelBuild(
         );
       }
     } else {
-      dependencies.cancelWorkflowRun(run.databaseId);
+      try {
+        dependencies.cancelWorkflowRun(run.databaseId);
+      } catch (error) {
+        if (dependencies.readWorkflowRun(run.databaseId).status !== "completed") throw error;
+      }
       dependencies.log(
         `[build-intel] Cancelled outdated workflow ${run.databaseId} for ${existing.installable.tag}: ${run.url}`,
       );

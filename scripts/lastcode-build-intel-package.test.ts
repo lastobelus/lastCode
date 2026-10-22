@@ -45,6 +45,7 @@ function harness(input: {
   readonly workflowError?: Error;
   readonly activeRuns?: ReadonlyArray<WorkflowRun>;
   readonly buildFinished?: boolean;
+  readonly cancelError?: Error;
 }) {
   let currentRequest = input.initialRequest ?? request();
   let now = 0;
@@ -76,7 +77,10 @@ function harness(input: {
     listActiveWorkflowRuns: () => input.activeRuns ?? [],
     workflowFilesAreCurrent: (headSha) => headSha === "b".repeat(40),
     workflowBuildHasFinished: () => input.buildFinished ?? false,
-    cancelWorkflowRun: (runId) => calls.push(`cancel:${runId}`),
+    cancelWorkflowRun: (runId) => {
+      calls.push(`cancel:${runId}`);
+      if (input.cancelError) throw input.cancelError;
+    },
     readWorkflowRun: () => {
       calls.push("view");
       const result = viewedRuns[Math.min(viewIndex, viewedRuns.length - 1)];
@@ -198,7 +202,14 @@ describe("lastcode-build-intel-package", () => {
     const token = "intel-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
     const older = "lastcode/checkpoint/v0.0.34-nightly.20260825.1185";
     const newer = "lastcode/revision/v0.0.34-nightly.20260825.1185.10";
-    for (const [runTag, current, status, decision, buildFinished = false] of [
+    for (const [
+      runTag,
+      current,
+      status,
+      decision,
+      buildFinished = false,
+      cancelSettled = false,
+    ] of [
       [tag, true, "in_progress", "attach"],
       [tag, false, "in_progress", "attach", true],
       [tag, true, "requested", "attach"],
@@ -206,6 +217,7 @@ describe("lastcode-build-intel-package", () => {
       [tag, true, "pending", "attach"],
       [tag, false, "queued", "cancel"],
       [tag, false, "pending", "cancel"],
+      [tag, false, "in_progress", "cancel", false, true],
       [older, false, "in_progress", "cancel"],
       [older, true, "queued", "leave"],
       [newer, false, "in_progress", "leave"],
@@ -219,10 +231,11 @@ describe("lastcode-build-intel-package", () => {
       });
       const test = harness({
         buildFinished,
+        ...(cancelSettled ? { cancelError: new Error("workflow already completed") } : {}),
         activeRuns: [active],
         listedRuns: [[], [workflowRun({ status: "completed", conclusion: "success" })]],
         viewedRuns: [
-          { ...active, status: "in_progress" },
+          { ...active, status: cancelSettled ? "completed" : "in_progress" },
           {
             ...active,
             status: "completed",
@@ -246,6 +259,7 @@ describe("lastcode-build-intel-package", () => {
       expect(test.calls.filter((call) => call.startsWith("log:"))).toHaveLength(
         decision === "leave" ? 0 : 1,
       );
+      if (cancelSettled) expect(test.calls).toContain("view");
       if (decision === "attach" || (decision === "cancel" && runTag === tag)) {
         await runSelectedIntelBuild(test.dependencies);
         const dispatch = test.calls.findIndex((call) => call.startsWith("dispatch:"));
