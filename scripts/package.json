@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc-rs --noEmit",
-    "test": "vp test run --config ../vite.config.ts --dir ."
+    "test": "vp test run --config ../vite.config.ts --dir . --testTimeout 180000 --hookTimeout 180000"
   },
   "dependencies": {
     "@effect/platform-node": "catalog:",

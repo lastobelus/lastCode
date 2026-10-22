@@ -1,9 +1,11 @@
+import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import { afterEach, describe, expect, it } from "vite-plus/test";
+import { parse } from "yaml";
 
 import {
   parseImmutableReleaseOptions,
@@ -97,6 +99,72 @@ const validate = (fixture, overrides = {}) =>
   });
 
 describe("immutable Intel release validation", () => {
+  it("runs the workflow-owned gate on the supported tooling runtime without changing the target", () => {
+    const workflow = parse(
+      NodeFS.readFileSync(
+        NodePath.resolve(import.meta.dirname, "../.github/workflows/lastcode-intel-artifact.yml"),
+        "utf8",
+      ),
+    );
+    const gate = workflow.jobs.build.steps.find((step) => step.name === "Run full checkpoint gate");
+    const root = NodeFS.realpathSync(
+      NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-intel-gate-")),
+    );
+    temporaryDirectories.push(root);
+    for (const directory of [
+      "automation/scripts",
+      "target/scripts/node_modules",
+      "target/node_modules",
+    ]) {
+      NodeFS.mkdirSync(NodePath.join(root, directory), { recursive: true });
+    }
+    const targetFile = NodePath.join(root, "target/package.json");
+    const targetManifest = '{"engines":{"node":"^24.13.1"}}\n';
+    NodeFS.writeFileSync(targetFile, targetManifest);
+    const calls = NodePath.join(root, "calls.json");
+    NodeFS.writeFileSync(
+      NodePath.join(root, "vp"),
+      `#!${process.execPath}
+const fs = require('node:fs');
+fs.writeFileSync(process.env.TEST_CALLS, JSON.stringify({ args: process.argv.slice(2), node: process.env.VP_NODE_VERSION, electron: process.env.ELECTRON_RUN_AS_NODE }));
+`,
+      { mode: 0o755 },
+    );
+    const result = NodeChildProcess.spawnSync("bash", ["-e", "-c", gate.run], {
+      cwd: NodePath.join(root, gate["working-directory"]),
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: [root, process.env.PATH ?? ""].join(NodePath.delimiter),
+        GITHUB_WORKSPACE: root,
+        INSTALLABLE_TAG: checkpointTag,
+        VP_NODE_VERSION: "26.12.1",
+        ELECTRON_RUN_AS_NODE: "1",
+        TEST_CALLS: calls,
+      },
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(NodeFS.readFileSync(calls, "utf8"))).toEqual({
+      args: [
+        "node",
+        NodePath.join(root, "automation/scripts/lastcode-local-ci.ts"),
+        "--full",
+        "--checkpoint",
+        checkpointTag,
+        "--web-compiler-test-timeout",
+        "60000",
+      ],
+      node: "24.13.1",
+    });
+    expect(NodeFS.readFileSync(targetFile, "utf8")).toBe(targetManifest);
+    expect(NodeFS.realpathSync(NodePath.join(root, "automation/node_modules"))).toBe(
+      NodePath.join(root, "target/node_modules"),
+    );
+    expect(NodeFS.realpathSync(NodePath.join(root, "automation/scripts/node_modules"))).toBe(
+      NodePath.join(root, "target/scripts/node_modules"),
+    );
+  });
+
   it("isolates write credentials and revalidates the tag before publication", () => {
     const workflow = NodeFS.readFileSync(
       NodePath.resolve(import.meta.dirname, "../.github/workflows/lastcode-intel-artifact.yml"),

@@ -111,6 +111,7 @@ export interface LocalCiOptions {
   readonly prePush: boolean;
   readonly checkpointTag?: string;
   readonly requireLocal?: boolean;
+  readonly webCompilerTestTimeoutMs?: number;
 }
 
 export interface RepositoryIntegritySnapshot {
@@ -258,6 +259,7 @@ export function parseLocalCiOptions(argv: ReadonlyArray<string>): LocalCiOptions
     ["--require-local", "requireLocal"],
   ]);
   let checkpointTag: string | undefined;
+  let webCompilerTestTimeoutMs: number | undefined;
 
   // Checkpoint consumes the next token even when it looks like a flag. Scan errors
   // take precedence over the final mode restrictions, whose order is intentional.
@@ -277,6 +279,20 @@ export function parseLocalCiOptions(argv: ReadonlyArray<string>): LocalCiOptions
         if (!checkpointTag) throw new Error("Missing value for --checkpoint.");
         index += 1;
         break;
+      case "--web-compiler-test-timeout": {
+        const value = argv[index + 1];
+        if (
+          !value ||
+          !/^\d+$/u.test(value) ||
+          !Number.isSafeInteger(Number(value)) ||
+          Number(value) < 15_000
+        ) {
+          throw new Error("--web-compiler-test-timeout requires milliseconds of at least 15000.");
+        }
+        webCompilerTestTimeoutMs = Number(value);
+        index += 1;
+        break;
+      }
       default: {
         const flag = booleanFlags.get(arg);
         if (!flag) throw new Error(`Unknown argument '${arg}'.`);
@@ -292,6 +308,9 @@ export function parseLocalCiOptions(argv: ReadonlyArray<string>): LocalCiOptions
   if (requireLocal && mode !== "quick") {
     throw new Error("--require-local is only supported with --quick.");
   }
+  if (webCompilerTestTimeoutMs !== undefined && (mode !== "full" || !checkpointTag)) {
+    throw new Error("--web-compiler-test-timeout requires --full --checkpoint.");
+  }
 
   return {
     mode,
@@ -299,6 +318,7 @@ export function parseLocalCiOptions(argv: ReadonlyArray<string>): LocalCiOptions
     prePush,
     ...(checkpointTag ? { checkpointTag } : {}),
     ...(requireLocal ? { requireLocal } : {}),
+    ...(webCompilerTestTimeoutMs !== undefined ? { webCompilerTestTimeoutMs } : {}),
   };
 }
 
@@ -366,7 +386,15 @@ export function resolveLocalCiSteps(
 export function resolveCollectedCiSteps(
   repoRoot: string,
   steps: ReadonlyArray<LocalCiStep>,
+  webCompilerTestTimeoutMs?: number,
 ): ReadonlyArray<LocalCiStep> {
+  const compilerTest = "src/reactCompilerCoverage.test.ts";
+  if (
+    webCompilerTestTimeoutMs !== undefined &&
+    !NodeFS.existsSync(NodePath.join(repoRoot, "apps/web", compilerTest))
+  ) {
+    throw new Error("The selected checkpoint has no web React Compiler coverage test.");
+  }
   const patterns = readWorkspacePatterns(
     NodeFS.readFileSync(NodePath.join(repoRoot, "pnpm-workspace.yaml"), "utf8"),
   );
@@ -405,23 +433,63 @@ export function resolveCollectedCiSteps(
     if (!task || step.kind !== "command") return [step];
     return workspaces
       .filter((manifest) => typeof manifest.scripts?.[task] === "string")
-      .map((manifest) => ({
-        ...step,
-        label: `${step.label} (${manifest.name})`,
-        args: [
-          "run",
-          "--filter",
-          manifest.name,
-          "--fail-if-no-match",
-          "--concurrency-limit",
-          "1",
-          task,
-          ...(task === "test" ? ["--maxWorkers=1", "--maxConcurrency=1"] : []),
-        ],
-        ...(task === "test" && manifest.name === "@t3tools/desktop"
-          ? { dependsOn: ["Ensure Electron runtime"] }
-          : {}),
-      }));
+      .flatMap((manifest): LocalCiStep[] => {
+        const workspaceStep = {
+          ...step,
+          label: `${step.label} (${manifest.name})`,
+          args: [
+            "run",
+            "--filter",
+            manifest.name,
+            "--fail-if-no-match",
+            "--concurrency-limit",
+            "1",
+            task,
+            ...(task === "test" ? ["--maxWorkers=1", "--maxConcurrency=1"] : []),
+          ],
+          ...(task === "test" && manifest.name === "@t3tools/desktop"
+            ? { dependsOn: ["Ensure Electron runtime"] }
+            : {}),
+        };
+        if (
+          task !== "test" ||
+          manifest.name !== "@t3tools/web" ||
+          webCompilerTestTimeoutMs === undefined
+        ) {
+          return [workspaceStep];
+        }
+        // Vite+ does not forward CLI file exclusions into inline projects. Split
+        // by this suite's name, then run its entire file with the hosted budget.
+        // Every original assertion still runs; other unit/browser budgets stay intact.
+        return [
+          {
+            ...workspaceStep,
+            args: [...workspaceStep.args, "--testNamePattern=^(?!React Compiler coverage\\b)"],
+          },
+          {
+            ...workspaceStep,
+            label: "Web React Compiler coverage",
+            args: [
+              "exec",
+              "--filter",
+              manifest.name,
+              "--fail-if-no-match",
+              "vp",
+              "test",
+              "run",
+              "--project",
+              "unit",
+              "--project",
+              "browser",
+              "--maxWorkers=1",
+              "--maxConcurrency=1",
+              compilerTest,
+              `--testTimeout=${webCompilerTestTimeoutMs}`,
+              "--passWithNoTests=false",
+            ],
+          },
+        ];
+      });
   });
 }
 
@@ -1142,7 +1210,9 @@ async function executeLocalCi(
     if (scope) console.log(`[lastcode:ci] Typecheck scope: ${scope.kind} (${scope.reason}).`);
     const plannedSteps = resolveLocalCiSteps(options.mode, scope, policy, repoRoot);
     const steps =
-      options.mode === "full" ? resolveCollectedCiSteps(repoRoot, plannedSteps) : plannedSteps;
+      options.mode === "full"
+        ? resolveCollectedCiSteps(repoRoot, plannedSteps, options.webCompilerTestTimeoutMs)
+        : plannedSteps;
     await NodeTimersPromises.setImmediate();
     signal.throwIfAborted();
 
@@ -1484,7 +1554,9 @@ async function runLocalCi(options: LocalCiOptions): Promise<void> {
     const steps = resolveLocalCiSteps(options.mode, scope, policy, repoRoot);
     printPlan(
       options.mode,
-      options.mode === "full" ? resolveCollectedCiSteps(repoRoot, steps) : steps,
+      options.mode === "full"
+        ? resolveCollectedCiSteps(repoRoot, steps, options.webCompilerTestTimeoutMs)
+        : steps,
     );
     return;
   }

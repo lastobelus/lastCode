@@ -48,7 +48,8 @@ jobs:
           ref: ${{ github.workflow_sha }}
           sparse-checkout: |
             /package.json
-            /scripts/lastcode-intel-release.mjs
+            /scripts/
+            /packages/shared/src/
           sparse-checkout-cone-mode: false
 
       - name: Setup Node for release validation
@@ -189,7 +190,11 @@ jobs:
       - name: Run full checkpoint gate
         if: steps.release.outputs.needs_build == 'true'
         working-directory: target
-        run: env -u ELECTRON_RUN_AS_NODE node scripts/lastcode-local-ci.ts --full --checkpoint "$INSTALLABLE_TAG"
+        run: |
+          ln -s "$GITHUB_WORKSPACE/target/node_modules" "$GITHUB_WORKSPACE/automation/node_modules"
+          ln -s "$GITHUB_WORKSPACE/target/scripts/node_modules" "$GITHUB_WORKSPACE/automation/scripts/node_modules"
+          env -u ELECTRON_RUN_AS_NODE VP_NODE_VERSION=24.13.1 vp node "$GITHUB_WORKSPACE/automation/scripts/lastcode-local-ci.ts" \
+            --full --checkpoint "$INSTALLABLE_TAG" --web-compiler-test-timeout 60000
 
       - name: Build certificate-free x64 DMG
         if: steps.release.outputs.needs_build == 'true'

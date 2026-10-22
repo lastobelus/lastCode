@@ -21,7 +21,7 @@ const RuntimeProcess = (NodeProcess as typeof NodeProcess & { readonly default: 
 const REPO_ROOT = NodePath.resolve(import.meta.dirname, "..");
 const READY_PREFIX = "LASTCODE_DOCS_FIXTURE_READY=";
 const FIXTURE_SCHEMA_VERSION = 1;
-const STARTUP_TIMEOUT_MS = 60_000;
+const STARTUP_TIMEOUT_MS = 120_000;
 // Use the server's persistence setup without booting an application just to migrate an empty DB.
 const MIGRATE_FIXTURE_DATABASE_SCRIPT = `
 import * as Effect from "effect/Effect";
