@@ -22,6 +22,7 @@ const BUILD_MANAGED_MARKER = "LastCode managed command: lastcode-build";
 const UPDATE_HELPER_MANAGED_MARKER = "LastCode managed helper: lastcode-local-update";
 const PROGRESS_MODEL_MANAGED_MARKER = "LastCode managed module: local-build-progress";
 const CHECKPOINT_RUN_NOW_MANAGED_MARKER = "LastCode managed module: checkpoint-service-run-now";
+const INTEL_TRIGGER_MANAGED_MARKER = "LastCode managed module: intel-build-trigger";
 
 const ansiEnabled =
   process.stdout.isTTY && !("NO_COLOR" in process.env) && process.env.TERM !== "dumb";
@@ -335,6 +336,7 @@ export function installCommandAssets(automationWorktree, home) {
     "lastcode-checkpoint-service-run-now.mjs",
   );
   const target = NodePath.join(binDirectory, "lastcode-build");
+  const intelTriggerTarget = NodePath.join(libDirectory, "lastcode-intel-build-trigger.mjs");
   const exposedDirectory = NodePath.join(home, ".local", "bin");
   const exposed = NodePath.join(exposedDirectory, "lastcode-build");
   const configPath = NodePath.join(home, ".lastcode", "dashboard.json");
@@ -345,6 +347,7 @@ export function installCommandAssets(automationWorktree, home) {
   assertManagedFile(helperTarget, UPDATE_HELPER_MANAGED_MARKER);
   assertManagedFile(progressModelTarget, PROGRESS_MODEL_MANAGED_MARKER);
   assertManagedFile(checkpointRunNowTarget, CHECKPOINT_RUN_NOW_MANAGED_MARKER);
+  assertManagedFile(intelTriggerTarget, INTEL_TRIGGER_MANAGED_MARKER);
   assertManagedFile(target, BUILD_MANAGED_MARKER);
   assertManagedSymlink(exposed, target);
 
@@ -375,6 +378,10 @@ export function installCommandAssets(automationWorktree, home) {
       "lastcode-checkpoint-service-run-now.mjs",
     ),
     checkpointRunNowTarget,
+  );
+  NodeFS.copyFileSync(
+    new NodeURL.URL("./lib/lastcode-intel-build-trigger.mjs", import.meta.url),
+    intelTriggerTarget,
   );
   NodeFS.writeFileSync(target, renderLauncher(moduleTarget), { encoding: "utf8", mode: 0o755 });
   NodeFS.chmodSync(target, 0o755);
@@ -419,6 +426,7 @@ export function uninstallCommand(home) {
     "lastcode-checkpoint-service-run-now.mjs",
   );
   const target = NodePath.join(binDirectory, "lastcode-build");
+  const intelTriggerTarget = NodePath.join(libDirectory, "lastcode-intel-build-trigger.mjs");
   const exposed = NodePath.join(home, ".local", "bin", "lastcode-build");
   const exposedEntry = NodeFS.lstatSync(exposed, { throwIfNoEntry: false });
   if (exposedEntry && (!exposedEntry.isSymbolicLink() || NodeFS.readlinkSync(exposed) !== target)) {
@@ -430,6 +438,7 @@ export function uninstallCommand(home) {
   assertManagedFile(helperTarget, UPDATE_HELPER_MANAGED_MARKER);
   assertManagedFile(progressModelTarget, PROGRESS_MODEL_MANAGED_MARKER);
   assertManagedFile(checkpointRunNowTarget, CHECKPOINT_RUN_NOW_MANAGED_MARKER);
+  assertManagedFile(intelTriggerTarget, INTEL_TRIGGER_MANAGED_MARKER);
   assertManagedFile(target, BUILD_MANAGED_MARKER);
 
   if (exposedEntry) NodeFS.unlinkSync(exposed);
@@ -438,6 +447,7 @@ export function uninstallCommand(home) {
     helperTarget,
     progressModelTarget,
     checkpointRunNowTarget,
+    intelTriggerTarget,
     target,
   ]) {
     NodeFS.rmSync(path, { force: true });
@@ -529,6 +539,9 @@ async function buildCheckpoint(repoRoot, home, checkpointTag) {
     display.stop(true);
     console.log(style(ansi.green, "Build ready"));
     console.log(NodePath.join(build.outputDir, dmg));
+    if (build.intelTrigger?.status === "failed") {
+      console.error(`Local package is ready; Intel dispatch failed: ${build.intelTrigger.error}`);
+    }
   } finally {
     if (!completed) display.stop(false);
   }

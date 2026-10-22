@@ -1,3 +1,4 @@
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -58,6 +59,55 @@ describe("lastcode project action arguments", () => {
 });
 
 describe("managed LastCode anchor", () => {
+  it.each([
+    { label: "success", stdout: '{"created":["lc-example"]}', exitCode: 0 },
+    { label: "malformed JSON", stdout: 'diagnostic\n{"created":[]}', exitCode: 0 },
+    { label: "command failure", stdout: '{"created":[]}', exitCode: 1 },
+  ])("preserves the subprocess output contract on $label", ({ stdout, exitCode, label }) => {
+    const repoRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-actions-output-"));
+    try {
+      for (const args of [
+        ["init", "--initial-branch=lastcode/main", repoRoot],
+        ["-C", repoRoot, "remote", "add", "upstream", "https://github.com/pingdotgg/t3code.git"],
+      ]) {
+        const result = NodeChildProcess.spawnSync("git", args, { encoding: "utf8" });
+        expect(result.status, result.stderr).toBe(0);
+      }
+      NodeFS.writeFileSync(NodePath.join(repoRoot, "t3.json"), "{}\n");
+      const binDirectory = NodePath.join(repoRoot, "apps", "server", "src");
+      NodeFS.mkdirSync(binDirectory, { recursive: true });
+      NodeFS.writeFileSync(
+        NodePath.join(binDirectory, "bin.ts"),
+        `process.stdout.write(${JSON.stringify(stdout)});\n` +
+          `process.stderr.write("reconciliation diagnostic\\n");\n` +
+          `process.exitCode = ${exitCode};\n`,
+      );
+      const result = NodeChildProcess.spawnSync(
+        process.execPath,
+        [
+          NodePath.join(import.meta.dirname, "lastcode-project-actions.mjs"),
+          "reconcile",
+          "--repo-root",
+          repoRoot,
+          "--base-dir",
+          NodePath.join(repoRoot, "environment"),
+        ],
+        { encoding: "utf8" },
+      );
+      expect(result.stderr).toContain("reconciliation diagnostic");
+      if (label === "success") {
+        expect(result.status).toBe(0);
+        expect(JSON.parse(result.stdout)).toEqual({ created: ["lc-example"] });
+      } else {
+        expect(result.status).toBe(1);
+        expect(result.stdout).toBe("");
+        expect(result.stderr).toContain("[lastcode:project-actions]");
+      }
+    } finally {
+      NodeFS.rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
   it("keys ownership state by normalized workspace", () => {
     const baseDir = "/srv/example/t3-home";
     const first = managedProjectActionStateFile(baseDir, "/srv/example/lastCode");
