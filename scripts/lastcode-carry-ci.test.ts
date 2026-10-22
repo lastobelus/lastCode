@@ -80,6 +80,51 @@ function snapshot(repo: string) {
 }
 
 describe("LastCode carry CI", () => {
+  it.each(["matching", "missing", "moved"])(
+    "validates a %s proposed bootstrap ref even with a compact chain",
+    (state) => {
+      const { repo, cleanup } = fixture();
+      try {
+        const { upstream, base } = compactFixture(repo);
+        const ref = "refs/lastcode/bootstrap/prepared";
+        write(
+          repo,
+          "scripts/lastcode-carry-set.json",
+          JSON.stringify({
+            replay: { mode: "carry", bootstrap: { base: upstream, source: base, head: base, ref } },
+          }),
+        );
+        const head = commit(repo, "change bootstrap ref", "Carry-Group: build-ci");
+        const remote = NodePath.join(repo, "origin.git");
+        git(repo, ["init", "--bare", "--quiet", remote]);
+        if (state !== "missing") {
+          git(remote, [
+            "fetch",
+            "--quiet",
+            repo,
+            `${state === "matching" ? base : upstream}:${ref}`,
+          ]);
+        }
+        git(repo, ["remote", "add", "origin", remote]);
+        const before = snapshot(repo);
+        const validate = () => validateCarryPullRequest(repo, { base, head, number: 218 });
+        if (state === "matching") {
+          const tree = git(repo, ["rev-parse", `${head}^{tree}`]);
+          expect(validate().compilation).toEqual({
+            upstream,
+            sourceTree: tree,
+            compiledTree: tree,
+          });
+        } else {
+          expect(validate).toThrow(/on origin must equal pinned head/u);
+        }
+        expect(snapshot(repo)).toEqual(before);
+      } finally {
+        cleanup();
+      }
+    },
+  );
+
   it.each([{ mode: "carry" }, { mode: "invalid" }])(
     "rejects invalid proposed replay configuration $mode even with a compact chain",
     (replay) => {

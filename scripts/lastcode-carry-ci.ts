@@ -163,7 +163,7 @@ function compilePullRequest(
   manifest: CarryReplayManifest,
 ): NonNullable<CarryCiResult["compilation"]> {
   const compact = compactBase(repoRoot, source.base);
-  const bootstrap = compact ? undefined : parseManifestReplayConfiguration(manifest)?.bootstrap;
+  const bootstrap = parseManifestReplayConfiguration(manifest)?.bootstrap;
   if (!compact && !bootstrap) {
     throw new Error("No compact carry chain or prepared bootstrap is available at the PR base.");
   }
