@@ -18,7 +18,10 @@ import {
 } from "~/browser/browserDefaults";
 import { BrowserSettingsReadError } from "~/browser/openFileInPreview";
 import { desktopBrowserHostFor, previewRuntimeFor } from "~/browser/previewRuntime";
-import { preparedPreviewOpenTarget } from "~/browser/preparedPreviewOpenTarget";
+import {
+  preparedPreviewOpenProfileId,
+  preparedPreviewOpenTarget,
+} from "~/browser/preparedPreviewOpenTarget";
 import { applyPreviewServerSnapshot, rememberPreviewUrl } from "~/previewStateStore";
 import { prepareHostedPreview } from "./previewHostingRecovery";
 
@@ -44,9 +47,16 @@ export async function openPreviewSession<E>(
   if (defaults instanceof BrowserSettingsReadError) {
     return AsyncResult.failure(Cause.fail(defaults));
   }
-  const profileId = input.profileId ?? browserDefaultOpenProfileId(defaults);
   const preparedUrl =
     input.url === undefined ? undefined : await prepareHostedPreview(input.threadRef, input.url);
+  const profileId =
+    preparedUrl === undefined || input.runtime === "desktop"
+      ? (input.profileId ?? browserDefaultOpenProfileId(defaults))
+      : preparedPreviewOpenProfileId(
+          preparedUrl,
+          browserDefaultOpenProfileId(defaults),
+          input.profileId,
+        );
   const runtime = input.runtime ?? previewRuntimeFor(input.threadRef.environmentId);
   const desktopHostId =
     runtime === "server" && input.runtime === undefined

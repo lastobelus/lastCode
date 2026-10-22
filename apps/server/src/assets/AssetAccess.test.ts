@@ -6,12 +6,14 @@ import {
   AssetAccessError,
   AssetCreateUrlInput,
   AssetPreviewTypeValidationError,
+  PreviewHostingLeaseId,
   SOURCE_CONTROL_MEDIA_ASSET,
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
 import { PROJECT_FAVICON_FALLBACK_MARKER } from "@t3tools/shared/projectFavicon";
 import { MCP_APP_MAX_HTML_BYTES } from "@t3tools/shared/mcpApp";
+import { setPreviewBootstrapTokenOnUrl } from "@t3tools/shared/remote";
 import { describe, expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -21,7 +23,7 @@ import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
-import { HttpClientRequest, HttpClientResponse, HttpServerResponse } from "effect/http";
+import { HttpClient, HttpClientRequest, HttpClientResponse, HttpServerResponse } from "effect/http";
 import { vi } from "vite-plus/test";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
@@ -32,7 +34,13 @@ import * as T3ProjectFileLoader from "../project/T3ProjectFileLoader.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import * as ThreadLinkedFiles from "../workspace/ThreadLinkedFiles.ts";
 import { assetFileResponse } from "../http.ts";
-import { ASSET_ROUTE_PREFIX, issueAssetUrl, readMcpAppHtml, resolveAsset } from "./AssetAccess.ts";
+import {
+  ASSET_ROUTE_PREFIX,
+  issueAssetUrl,
+  readMcpAppHtml,
+  renewPreviewAssetUrl,
+  resolveAsset,
+} from "./AssetAccess.ts";
 import * as NativeAppIconResolver from "./NativeAppIconResolver.ts";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import { fakeSourceControlDriverInstance } from "@t3tools/source-control-testing/fakeSourceControlDriver";
@@ -40,6 +48,8 @@ import * as BuiltInDrivers from "../sourceControl/builtInDrivers.ts";
 import { sourceControlDefinitions } from "../sourceControl/sourceControlDefinitions.ts";
 import { sourceControlMediaResponse } from "./sourceControlMediaResponse.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as PreviewHosting from "../preview/Hosting.ts";
+import { managedPreviewResourceResponse } from "./ManagedPreviewResource.ts";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof NodeFSP>();
@@ -49,6 +59,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 const layerConfig = ServerConfig.ServerConfig.layerTest(process.cwd(), {
   prefix: "t3-asset-access-test-",
 });
+const encodeAssetAccessError = Schema.encodeEffect(Schema.fromJsonString(AssetAccessError));
 const screenshotPng = new Uint8Array(24);
 screenshotPng.set([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52,
@@ -101,6 +112,7 @@ const oversizedScreenshotItem = {
 };
 
 const layerTest = Layer.mergeAll(
+  Layer.mock(PreviewHosting.PreviewHosting)({ list: () => Effect.succeed([]) }),
   Layer.mock(ThreadLinkedFiles.ThreadLinkedFiles)({}),
   NodeHttpPlatform.layer,
   Layer.mock(Orchestrator.OrchestratorV2)({
@@ -124,6 +136,384 @@ const layerTest = Layer.mergeAll(
 ).pipe(Layer.provideMerge(NodeServices.layer));
 
 describe("AssetAccess", () => {
+  it.effect("renews only a signed existing document and keeps a healthy capability stable", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-document-renewal-" });
+      const file = path.join(root, "report.pdf");
+      yield* fs.writeFileString(file, "%PDF-test");
+      const issued = yield* issueAssetUrl({
+        resource: { _tag: "media-file", threadId: ThreadId.make("thread-1"), path: file },
+      });
+      const resource = {
+        _tag: "preview-document" as const,
+        threadId: ThreadId.make("thread-1"),
+        url: `https://old-environment.example${issued.relativeUrl}?page=2#chart`,
+        refresh: false,
+      };
+      const healthy = yield* issueAssetUrl({ resource });
+      expect(healthy.relativeUrl).toBe(`${issued.relativeUrl}?page=2#chart`);
+      const refreshed = yield* issueAssetUrl({ resource: { ...resource, refresh: true } });
+      expect(refreshed.expiresAt - healthy.expiresAt).toBe(23 * 60 * 60 * 1000);
+      yield* TestClock.adjust("25 hours");
+      const renewed = yield* issueAssetUrl({ resource });
+      expect(renewed.relativeUrl).not.toBe(healthy.relativeUrl);
+      expect(renewed.relativeUrl.endsWith("/report.pdf?page=2#chart")).toBe(true);
+      expect(renewed.relativeUrl).not.toContain("old-environment.example");
+      const decodePayload = (relativeUrl: string) => {
+        const payload = relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length).split(".")[0]!;
+        return JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+      };
+      const { expiresAt: _old, ...originalIdentity } = decodePayload(issued.relativeUrl);
+      const { expiresAt: _new, ...renewedIdentity } = decodePayload(renewed.relativeUrl);
+      expect(renewedIdentity).toEqual(originalIdentity);
+      for (const url of [
+        "https://external.example/report.pdf",
+        resource.url.replace(/\/api\/assets\/./, "/api/assets/x"),
+        resource.url.replace("report.pdf", "sibling.pdf"),
+      ]) {
+        expect(
+          (yield* issueAssetUrl({ resource: { ...resource, url } }).pipe(Effect.flip))._tag,
+        ).toBe("AssetPreviewDocumentError");
+      }
+      yield* fs.remove(file);
+      expect((yield* issueAssetUrl({ resource }).pipe(Effect.flip))._tag).toBe(
+        "AssetPreviewDocumentError",
+      );
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  describe("managed preview resources", () => {
+    const lease: PreviewHosting.PreviewHostingLease = {
+      id: "lease-media",
+      threadId: "thread-1",
+      terminalId: "terminal-media",
+      command: "serve .",
+      cwd: "/workspace",
+      worktreePath: null,
+      url: "http://127.0.0.1:5173/app",
+      status: "sleeping",
+      handedOffAt: "2026-10-01T00:00:00.000Z",
+      expiresAt: "2026-10-02T00:00:00.000Z",
+    };
+    const resource = {
+      _tag: "managed-preview-resource" as const,
+      threadId: ThreadId.make(lease.threadId),
+      leaseId: PreviewHostingLeaseId.make(lease.id),
+      url: "http://127.0.0.1:5173/media/clip.mp4?version=2#chapter",
+    };
+    const layerHosting = Layer.mock(PreviewHosting.PreviewHosting)({
+      setActivity: () => Effect.void,
+      list: () => Effect.succeed([lease]),
+      recover: () => Effect.succeed(lease),
+    });
+    const resolve = (relativeUrl: string) => {
+      const segments = relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length).split("/");
+      return resolveAsset(segments[0]!, segments.slice(1).join("/"));
+    };
+
+    it.effect(
+      "signs only the owned local listener and renews the exact resource after 24 hours",
+      () =>
+        Effect.gen(function* () {
+          const issued = yield* issueAssetUrl({ resource }).pipe(Effect.provide(layerHosting));
+          const asset = yield* resolve(issued.relativeUrl);
+          expect(asset).toEqual({
+            kind: "managed-preview-resource",
+            threadId: lease.threadId,
+            leaseId: lease.id,
+            url: "http://127.0.0.1:5173/media/clip.mp4?version=2",
+          });
+          const credentialed = yield* issueAssetUrl({
+            resource: {
+              ...resource,
+              url: setPreviewBootstrapTokenOnUrl(new URL(resource.url), "one-use-secret").href,
+            },
+          }).pipe(Effect.provide(layerHosting));
+          expect(yield* resolve(credentialed.relativeUrl)).toEqual(asset);
+          for (const override of [
+            { threadId: ThreadId.make("another-thread") },
+            { leaseId: PreviewHostingLeaseId.make("another-lease") },
+            { url: "http://127.0.0.1:5174/media/clip.mp4" },
+            { url: "http://workstation.example:5173/media/clip.mp4" },
+            { url: "http://user:secret@127.0.0.1:5173/media/clip.mp4" },
+          ]) {
+            const error = yield* issueAssetUrl({ resource: { ...resource, ...override } }).pipe(
+              Effect.provide(layerHosting),
+              Effect.flip,
+            );
+            expect(error._tag).toBe("AssetManagedPreviewResourceError");
+          }
+          yield* TestClock.adjust("23 hours");
+          expect(yield* resolve(issued.relativeUrl)).toEqual(asset);
+          yield* TestClock.adjust("2 hours");
+          expect(yield* resolve(issued.relativeUrl)).toBeNull();
+          const renewed = yield* renewPreviewAssetUrl(
+            `https://environment.example${issued.relativeUrl}`,
+          );
+          expect(yield* resolve(new URL(renewed).pathname)).toEqual(asset);
+          const authenticatedRenewal = yield* issueAssetUrl({
+            resource: {
+              _tag: "preview-document",
+              threadId: resource.threadId,
+              url: `https://old-environment.example${issued.relativeUrl}`,
+              refresh: false,
+            },
+          });
+          expect(yield* resolve(authenticatedRenewal.relativeUrl)).toEqual(asset);
+        }).pipe(Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "wakes the exact lease and streams video ranges without forwarding credentials",
+      () => {
+        const requests: Array<{ url: string; headers: Record<string, string> }> = [];
+        let activeResources = 0;
+        const setActivity = ({ active }: { active: boolean }) =>
+          Effect.sync(() => {
+            activeResources += active ? 1 : -1;
+          });
+        const recover = vi.fn(() =>
+          Effect.sync(() => {
+            expect(activeResources).toBe(1);
+            return lease;
+          }),
+        );
+        return Effect.gen(function* () {
+          const issued = yield* issueAssetUrl({ resource });
+          const asset = yield* resolve(issued.relativeUrl);
+          if (asset?.kind !== "managed-preview-resource")
+            throw new Error("Expected signed resource");
+          const response = HttpServerResponse.toWeb(
+            yield* managedPreviewResourceResponse(asset, {
+              range: "bytes=2-4",
+              "if-range": '"revision"',
+              cookie: "session=private",
+              authorization: "Bearer private",
+            }),
+          );
+          expect(response.status).toBe(206);
+          expect(response.headers.get("content-type")).toBe("video/mp4");
+          expect(response.headers.get("content-range")).toBe("bytes 2-4/10");
+          expect(response.headers.get("set-cookie")).toBeNull();
+          expect(yield* Effect.promise(() => response.text())).toBe("234");
+          expect(requests).toMatchObject([
+            {
+              url: "http://127.0.0.1:5173/media/clip.mp4?version=2",
+              headers: {
+                "accept-encoding": "identity",
+                range: "bytes=2-4",
+                "if-range": '"revision"',
+              },
+            },
+          ]);
+          expect(requests[0]!.headers).not.toHaveProperty("cookie");
+          expect(requests[0]!.headers).not.toHaveProperty("authorization");
+          expect(recover).toHaveBeenCalledExactlyOnceWith({
+            threadId: lease.threadId,
+            leaseId: lease.id,
+            url: lease.url,
+          });
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              layerTest,
+              Layer.mock(PreviewHosting.PreviewHosting)({
+                setActivity,
+                list: () => Effect.succeed([lease]),
+                recover,
+              }),
+            ),
+          ),
+          Effect.provideService(
+            HttpClient.HttpClient,
+            HttpClient.make((request) => {
+              expect(activeResources).toBe(1);
+              requests.push({ url: request.url, headers: { ...request.headers } });
+              return Effect.succeed(
+                HttpClientResponse.fromWeb(
+                  request,
+                  new Response("234", {
+                    status: 206,
+                    headers: {
+                      "content-type": "video/mp4",
+                      "content-length": "3",
+                      "content-range": "bytes 2-4/10",
+                      "accept-ranges": "bytes",
+                      "set-cookie": "session=must-not-escape",
+                    },
+                  }),
+                ),
+              );
+            }),
+          ),
+          Effect.scoped,
+          Effect.tap(() => Effect.sync(() => expect(activeResources).toBe(0))),
+        );
+      },
+    );
+
+    it.effect.each([
+      { status: 302, type: "image/png", expected: 502 },
+      { status: 200, type: "text/html", expected: 415 },
+      { status: 200, type: "application/pdf", expected: 200 },
+      { status: 200, type: "image/png", expected: 200 },
+      { status: 416, type: "text/plain", expected: 416 },
+    ])("narrows media responses for $status $type", ({ status, type, expected }) =>
+      Effect.gen(function* () {
+        const response = yield* managedPreviewResourceResponse(
+          {
+            threadId: lease.threadId,
+            leaseId: lease.id,
+            url: resource.url,
+          },
+          {},
+        );
+        expect(response.status).toBe(expected);
+      }).pipe(
+        Effect.provide(layerHosting),
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make((request) =>
+            Effect.succeed(
+              HttpClientResponse.fromWeb(
+                request,
+                new Response(null, {
+                  status,
+                  headers: {
+                    "content-type": type,
+                    location: "https://external.example/private",
+                    "content-range": "bytes */10",
+                  },
+                }),
+              ),
+            ),
+          ),
+        ),
+        Effect.scoped,
+      ),
+    );
+
+    it.effect("does not fetch after the lease is removed or moved to another listener", () => {
+      const fetched = vi.fn();
+      return Effect.gen(function* () {
+        for (const leases of [[], [{ ...lease, url: "http://127.0.0.1:5174/app" }]]) {
+          const response = yield* managedPreviewResourceResponse(
+            {
+              threadId: lease.threadId,
+              leaseId: lease.id,
+              url: resource.url,
+            },
+            {},
+          ).pipe(
+            Effect.provide(
+              Layer.mock(PreviewHosting.PreviewHosting)({
+                list: () => Effect.succeed(leases),
+              }),
+            ),
+          );
+          expect(response.status).toBe(404);
+        }
+        expect(fetched).not.toHaveBeenCalled();
+      }).pipe(
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make((request) => {
+            fetched();
+            return Effect.succeed(HttpClientResponse.fromWeb(request, new Response(null)));
+          }),
+        ),
+        Effect.scoped,
+      );
+    });
+
+    it.effect("forwards HEAD metadata for a PDF without reading its body", () => {
+      const methods: string[] = [];
+      return Effect.gen(function* () {
+        const result = yield* managedPreviewResourceResponse(
+          {
+            threadId: lease.threadId,
+            leaseId: lease.id,
+            url: "http://127.0.0.1:5173/report.pdf?page=2",
+          },
+          {},
+          "HEAD",
+        );
+        const response = HttpServerResponse.toWeb(result);
+        expect(methods).toEqual(["HEAD"]);
+        expect(response.status).toBe(200);
+        expect(response.headers.get("content-type")).toBe("application/pdf");
+        expect(response.headers.get("content-length")).toBe("100");
+        expect(yield* Effect.promise(() => response.text())).toBe("");
+      }).pipe(
+        Effect.provide(layerHosting),
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make((request) => {
+            methods.push(request.method);
+            return Effect.succeed(
+              HttpClientResponse.fromWeb(
+                request,
+                new Response(null, {
+                  headers: {
+                    "content-type": "application/pdf",
+                    "content-length": "100",
+                    "accept-ranges": "bytes",
+                  },
+                }),
+              ),
+            );
+          }),
+        ),
+        Effect.scoped,
+      );
+    });
+  });
+
+  it.effect(
+    "keeps a Browser document usable for 24 hours and renews its saved identity after expiry",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-browser-document-" });
+        const file = path.join(root, "report.html");
+        yield* fs.writeFileString(file, "<h1>Retained document</h1>");
+        const canonical = yield* fs.realPath(file);
+        const issued = yield* issueAssetUrl({
+          resource: { _tag: "media-file", threadId: ThreadId.make("thread-1"), path: file },
+        });
+        const original = `http://127.0.0.1:3773${issued.relativeUrl}?mode=review#chart`;
+        const retained = yield* renewPreviewAssetUrl(original);
+        const remote = retained.replace("http://127.0.0.1:3773", "https://workspace.example");
+        expect(yield* renewPreviewAssetUrl(remote, 60_000, "http://127.0.0.1:3773")).toBe(retained);
+        const resolveUrl = (url: string) => {
+          const segments = new URL(url).pathname.slice(`${ASSET_ROUTE_PREFIX}/`.length).split("/");
+          return resolveAsset(segments[0]!, segments.slice(1).join("/"));
+        };
+        expect(new URL(retained).search + new URL(retained).hash).toBe("?mode=review#chart");
+        yield* TestClock.adjust("23 hours");
+        expect(yield* resolveUrl(original)).toBeNull();
+        const available = yield* resolveUrl(retained);
+        expect(available).toMatchObject({ kind: "file", path: canonical });
+        expect(yield* renewPreviewAssetUrl(retained, 60_000)).toBe(retained);
+        yield* TestClock.adjust("2 hours");
+        expect(yield* resolveUrl(retained)).toBeNull();
+        const restored = yield* renewPreviewAssetUrl(retained);
+        const reopened = yield* resolveUrl(restored);
+        expect(reopened).toMatchObject({ kind: "file", path: canonical });
+        const invalid = restored.replace(/\/api\/assets\/./, "/api/assets/x");
+        expect(yield* renewPreviewAssetUrl(invalid, 60_000, "http://127.0.0.1:3773")).toBe(invalid);
+        const sibling = new URL(restored);
+        sibling.pathname = sibling.pathname.replace(/report\.html$/, "private.html");
+        expect(yield* resolveUrl(yield* renewPreviewAssetUrl(sibling.href))).toBeNull();
+        yield* fs.writeFileString(path.join(root, "replacement.html"), "<h1>Different file</h1>");
+        yield* fs.rename(path.join(root, "replacement.html"), file);
+        expect(yield* resolveUrl(yield* renewPreviewAssetUrl(restored))).toBeNull();
+      }).pipe(Effect.provide(layerTest)),
+  );
+
   describe("readMcpAppHtml", () => {
     it.effect("accepts snapshots at the stored HTML byte limit", () =>
       Effect.gen(function* () {
@@ -1232,7 +1622,7 @@ describe("AssetAccess", () => {
           resource: { _tag: SOURCE_CONTROL_MEDIA_ASSET, cwd: "/repo", url },
         }).pipe(Effect.flip);
         expect(error._tag).toBe("AssetGitHubMediaUrlValidationError");
-        const encoded = yield* Schema.encodeEffect(Schema.fromJsonString(AssetAccessError))(error);
+        const encoded = yield* encodeAssetAccessError(error);
         expect(encoded).not.toContain(url);
       }
     }).pipe(Effect.provide(layerTest)),

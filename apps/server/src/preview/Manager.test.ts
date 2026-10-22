@@ -14,7 +14,9 @@ import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 import { expect } from "vite-plus/test";
+import { setPreviewBootstrapTokenOnUrl } from "@t3tools/shared/remote";
 
 import * as ServerConfig from "../config.ts";
 import * as PreviewManager from "./Manager.ts";
@@ -45,7 +47,259 @@ const PreviewManagerTestLayer = PreviewManager.layer.pipe(
   Layer.provideMerge(NodeServices.layer),
 );
 
+const isolatedPersistenceConfig = Effect.fn("preview.test.isolatedPersistenceConfig")(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const config = yield* ServerConfig.ServerConfig;
+  const root = yield* fs.makeTempDirectoryScoped({ prefix: "preview-session-persistence-" });
+  return { ...config, stateDir: path.join(root, "state") };
+});
+
 it.layer(PreviewManagerTestLayer)("PreviewManager", (it) => {
+  it.effect("releases native rendering while preserving its destination and desktop identity", () =>
+    Effect.gen(function* () {
+      const manager = yield* PreviewManager.PreviewManager;
+      const threadId = freshThreadId();
+      let closes = 0;
+      const opened = yield* manager.open({
+        threadId,
+        url: "https://report.example/review?mode=logos#chart",
+        runtime: "server",
+        desktopHostId: "desktop-owner",
+        profileId: "profile-work",
+        automationOwner: "agent-owner",
+        desktopPopup: {
+          popupId: "native-popup",
+          close: () =>
+            Effect.sync(() => {
+              closes += 1;
+            }),
+        },
+      });
+      yield* manager.nativeDormantConfirmed({ threadId, tabId: opened.tabId });
+      const { sessions } = yield* manager.list({ threadId });
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0]).toMatchObject({
+        tabId: opened.tabId,
+        desktopHostId: "desktop-owner",
+        profileId: "profile-work",
+        automationOwner: "agent-owner",
+        backingPage: "desktop",
+        navStatus: { _tag: "Loading", url: "https://report.example/review?mode=logos#chart" },
+      });
+      expect(sessions[0]).not.toHaveProperty("desktopPopupId");
+      yield* manager.close({ threadId, tabId: opened.tabId });
+      expect(closes).toBe(0);
+      expect((yield* manager.list({ threadId })).sessions).toEqual([]);
+    }),
+  );
+
+  it.effect("restores canonical tab identities and settings without replaying opened events", () =>
+    Effect.gen(function* () {
+      const config = yield* isolatedPersistenceConfig();
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const create = PreviewManager.make.pipe(
+        Effect.provideService(ServerConfig.ServerConfig, config),
+      );
+      const first = yield* Effect.scoped(create);
+      const threadId = freshThreadId();
+      const destination = "http://127.0.0.1:5173/app/a%2Fb?token=application-code#section";
+      const navigation = setPreviewBootstrapTokenOnUrl(
+        new URL(destination),
+        "one-use-credential",
+      ).href;
+      const opened = yield* first.open({
+        threadId,
+        browserHost: "environment",
+        profileId: "incognito",
+        automationOwner: "agent-owner",
+        url: navigation,
+        reveal: true,
+      });
+      yield* first.reportStatus({
+        threadId,
+        tabId: opened.tabId,
+        serverControlled: true,
+        navStatus: { _tag: "Success", url: navigation, title: "Retained app" },
+        canGoBack: true,
+        canGoForward: true,
+      });
+      yield* first.resize({
+        threadId,
+        tabId: opened.tabId,
+        viewport: { _tag: "freeform", width: 900, height: 700 },
+      });
+      yield* first.adjust({ threadId, tabId: opened.tabId, colorScheme: "dark", zoomFactor: 1.25 });
+      yield* first.requestReveal({ threadId, tabId: opened.tabId, force: true });
+      const discarded = yield* first.open({ threadId, url: "https://example.com/discarded" });
+      yield* first.close({ threadId, tabId: discarded.tabId });
+      const before = yield* first.list({ threadId });
+      const restarted = yield* Effect.scoped(create);
+      const subscription = yield* restarted.subscribeEvents;
+      const after = yield* restarted.list({ threadId });
+      expect(after.serverEpoch).not.toBe(before.serverEpoch);
+      expect(after.sessions).toEqual([
+        expect.objectContaining({
+          threadId,
+          tabId: opened.tabId,
+          profileId: "incognito",
+          automationOwner: "agent-owner",
+          reveal: true,
+          runtime: "server",
+          backingPage: "server",
+          navStatus: { _tag: "Loading", url: destination, title: "Retained app" },
+          canGoBack: false,
+          canGoForward: false,
+          viewport: { _tag: "freeform", width: 900, height: 700 },
+          colorScheme: "dark",
+          zoomFactor: 1.25,
+        }),
+      ]);
+      expect(after.sessions[0]).not.toHaveProperty("revealRequest");
+      expect(yield* PubSub.takeUpTo(subscription, DRAIN_LIMIT)).toEqual([]);
+      const stored = yield* fs.readFileString(path.join(config.stateDir, "preview-sessions.json"));
+      expect(stored).not.toContain("one-use-credential");
+      expect(stored).toContain("token=application-code");
+      expect(
+        (yield* fs.stat(path.join(config.stateDir, "preview-sessions.json"))).mode & 0o777,
+      ).toBe(0o600);
+    }),
+  );
+
+  it.effect(
+    "restores native root and popup destinations pinned to their desktop without stale window identities",
+    () =>
+      Effect.gen(function* () {
+        const config = yield* isolatedPersistenceConfig();
+        const create = PreviewManager.make.pipe(
+          Effect.provideService(ServerConfig.ServerConfig, config),
+        );
+        const first = yield* Effect.scoped(create);
+        const threadId = freshThreadId();
+        const root = yield* first.open({
+          threadId,
+          runtime: "server",
+          desktopHostId: "selected-desktop",
+          profileId: "work-account",
+          automationOwner: "agent-owner",
+          url: "https://example.com/account",
+          createDesktopRoot: () =>
+            Effect.succeed({
+              rootId: "old-native-root",
+              publish: () => Effect.void,
+              close: () => Effect.void,
+            }),
+        });
+        const popup = yield* first.open({
+          threadId,
+          runtime: "server",
+          desktopHostId: "selected-desktop",
+          profileId: "work-account",
+          url: "https://example.com/popup",
+          desktopPopup: { popupId: "old-native-popup" },
+        });
+        const restarted = yield* Effect.scoped(create);
+        const restored = yield* restarted.list({ threadId });
+        expect(restored.sessions.map((tab) => tab.tabId)).toEqual([root.tabId, popup.tabId]);
+        for (const tab of restored.sessions) {
+          expect(tab).toMatchObject({
+            runtime: "server",
+            backingPage: "desktop",
+            desktopHostId: "selected-desktop",
+            profileId: "work-account",
+          });
+          expect(tab).not.toHaveProperty("desktopRootId");
+          expect(tab).not.toHaveProperty("desktopPopupId");
+        }
+        expect(restored.sessions[0]?.automationOwner).toBe("agent-owner");
+        yield* restarted.close({ threadId });
+        const closedRestart = yield* Effect.scoped(create);
+        expect((yield* closedRestart.list({ threadId })).sessions).toEqual([]);
+      }),
+  );
+
+  it.effect.each(["invalid", "duplicate", "oversized"] as const)(
+    "reports %s retained state without replacing it with an empty record",
+    (kind) =>
+      Effect.gen(function* () {
+        const config = yield* isolatedPersistenceConfig();
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const create = PreviewManager.make.pipe(
+          Effect.provideService(ServerConfig.ServerConfig, config),
+        );
+        const first = yield* Effect.scoped(create);
+        const original = yield* first.open({
+          threadId: freshThreadId(),
+          url: "https://example.com/retained",
+        });
+        const file = path.join(config.stateDir, "preview-sessions.json");
+        const broken =
+          kind === "invalid"
+            ? "not valid json"
+            : kind === "duplicate"
+              ? JSON.stringify({ version: 1, sessions: [original, original] })
+              : "x".repeat(4 * 1024 * 1024 + 1);
+        yield* fs.writeFileString(file, broken);
+        const failure = yield* Effect.scoped(create).pipe(Effect.flip);
+        expect(failure).toMatchObject({ _tag: "PreviewSessionStorageError" });
+        expect(yield* fs.readFileString(file)).toBe(broken);
+      }),
+  );
+
+  it.effect.each(["open", "navigate", "close"] as const)(
+    "keeps durable and live state unchanged when an atomic %s save fails",
+    (operation) =>
+      Effect.gen(function* () {
+        const config = yield* isolatedPersistenceConfig();
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const file = path.join(config.stateDir, "preview-sessions.json");
+        let failWrite = false;
+        const guarded = FileSystem.make({
+          ...fs,
+          rename: (from, to) =>
+            failWrite && to === file
+              ? Effect.fail(
+                  PlatformError.systemError({
+                    _tag: "PermissionDenied",
+                    module: "FileSystem",
+                    method: "rename",
+                  }),
+                )
+              : fs.rename(from, to),
+        });
+        const manager = yield* PreviewManager.make.pipe(
+          Effect.provideService(ServerConfig.ServerConfig, config),
+          Effect.provideService(FileSystem.FileSystem, guarded),
+        );
+        const threadId = freshThreadId();
+        const original = yield* manager.open({ threadId, url: "https://example.com/original" });
+        const before = yield* fs.readFileString(file);
+        const subscription = yield* manager.subscribeEvents;
+        failWrite = true;
+        const change =
+          operation === "open"
+            ? manager.open({ threadId, url: "https://example.com/new" }).pipe(Effect.asVoid)
+            : operation === "navigate"
+              ? manager
+                  .navigate({
+                    threadId,
+                    tabId: original.tabId,
+                    url: "https://example.com/new",
+                  })
+                  .pipe(Effect.asVoid)
+              : manager.close({ threadId, tabId: original.tabId });
+        expect(yield* change.pipe(Effect.flip)).toMatchObject({
+          _tag: "PreviewSessionStorageError",
+        });
+        expect((yield* manager.list({ threadId })).sessions).toEqual([original]);
+        expect(yield* fs.readFileString(file)).toBe(before);
+        expect(yield* PubSub.takeUpTo(subscription, DRAIN_LIMIT)).toEqual([]);
+      }),
+  );
+
   it.effect("creates an immutable native root outside the lock before publishing its tab", () =>
     Effect.gen(function* () {
       const manager = yield* PreviewManager.PreviewManager;

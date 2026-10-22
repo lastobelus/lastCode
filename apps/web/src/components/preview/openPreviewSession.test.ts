@@ -223,6 +223,36 @@ describe("openPreviewSession", () => {
   );
 
   it.each(["session", "link"] as const)(
+    "uses the environment for an ordinary managed %s when the default profile is named",
+    async (entryPoint) => {
+      vi.spyOn(entities, "readEnvironmentSupportsServerBrowser").mockReturnValue(true);
+      vi.spyOn(hostingRecovery, "prepareHostedPreview").mockResolvedValue({
+        url: "http://workstation.example:5173/check?x=1#section",
+        localUrl: "http://127.0.0.1:5173/check?x=1#section",
+        managed: true,
+        restored: true,
+      });
+      __setClientSettingsForTests({
+        ...DEFAULT_CLIENT_SETTINGS,
+        browserDefaultProfileId: "work",
+        browserProfiles: [{ id: "work", name: "Work", kind: "persistent" }],
+      });
+      const openPreview = vi.fn(async (_input: { input: PreviewOpenInput }) =>
+        AsyncResult.success(snapshot),
+      );
+      const open = entryPoint === "session" ? openPreviewSession : openUrlInPreview;
+      await open({ openPreview, threadRef, url: "http://localhost:5173/check?x=1#section" });
+      expect(openPreview.mock.calls[0]?.[0].input).toMatchObject({
+        url: "http://127.0.0.1:5173/check?x=1#section",
+        profileId: DEFAULT_BROWSER_PROFILE_ID,
+        runtime: "server",
+        browserHost: "environment",
+      });
+      expect(openPreview.mock.calls[0]?.[0].input).not.toHaveProperty("desktopHostId");
+    },
+  );
+
+  it.each(["session", "link"] as const)(
     "does not open a %s with unread settings and uses the saved profile on retry",
     async (entryPoint) => {
       const failure = new Error("Settings read failed");

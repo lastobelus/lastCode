@@ -100,14 +100,23 @@ The successful tool result establishes a retained handoff and its current
 24-hour process window. LastCode owns the terminal and persists the recipe across
 turn completion and server restarts. Opening the link in its owning thread, or
 returning to its retained Browser panel, restores a stopped server without an
-agent message. A page that is still running keeps its current form state when
-revisited. Idle environment browser pages can sleep while their tabs remain;
-returning recreates the page at its saved address and renews access.
+agent message. Unviewed Browser pages stop background execution while keeping
+their form state for 24 idle hours. At that deadline, or earlier under the live-page
+resource limit, LastCode releases inactive rendering and keeps the saved destination.
+Returning recreates the page and renews access. Browser destinations survive an
+environment restart without eagerly starting all their pages. Published file
+previews renew signed access automatically when their Browser page returns or reloads.
 
-At the process deadline, LastCode closes only that preview's terminal and marks
-the handoff sleeping. A later opening starts a fresh process window after
-readiness succeeds; viewing an already-running process does not extend its
-window. Source and dependencies remain protected while the handoff exists,
+Each environment keeps at most eight managed app processes warm. When another app
+needs to start, LastCode stops the least recently used inactive app and retains its
+handoff for automatic recovery. Viewed pages, recordings, automation, and launches
+are protected. If all eight apps are in use, the new handoff stays saved for Retry
+when capacity becomes available. Browser rendering has its own 32-page limit.
+
+Opening or returning to a managed preview renews its 24-hour process window after
+readiness succeeds, including when the process is already running. At the deadline,
+LastCode closes only that preview's terminal and marks the handoff sleeping.
+Source and dependencies remain protected while the handoff exists,
 including through archive. **Stop all previews & processes** cancels reopening
 and releases protection after cleanup; deleting the thread does the same. A
 failed stop keeps protection until cleanup succeeds. Never stop the terminal or
@@ -134,9 +143,11 @@ uses the owning environment and thread, never an unrelated thread or public
 website. In the integrated Browser, managed app links use an environment-hosted
 page and the saved listener's local address, so a loopback-only app does not
 depend on desktop access to its port. An explicitly selected desktop profile
-keeps its desktop identity and requires a reachable browser destination. External
-browsers and mobile clients also need a reachable listener; restoring a process
-does not create a tunnel or expose a loopback port. A saved previous private
+keeps its desktop identity and requires a reachable browser destination. Native
+mobile opens managed app links in the environment Browser viewer too. External
+browsers still need a reachable listener. Managed images, audio, video, and PDFs
+use signed environment-hosted resource URLs, so their clients do not need access
+to the loopback listener. Restoring a process does not expose its port. A saved previous private
 address is rewritten only when it is known to belong to that environment;
 unknown LAN addresses are left unchanged.
 

@@ -12,13 +12,16 @@ import {
 import { isWebUrl, resolveBrowserLinkTargetPreference } from "~/browser/browserLinkTarget";
 import type { OpenPreviewMutation } from "~/browser/openFileInPreview";
 import { isPreviewAvailableFor } from "~/browser/previewRuntime";
-import { preparedPreviewOpenTarget } from "~/browser/preparedPreviewOpenTarget";
+import {
+  preparedPreviewOpenProfileId,
+  preparedPreviewOpenTarget,
+} from "~/browser/preparedPreviewOpenTarget";
 import { openPreparedExternalUrl } from "~/browser/openPreparedExternalUrl";
 import { recordVisitForThread } from "~/browserHistoryStore";
 import { applyPreviewServerSnapshot } from "~/previewStateStore";
 import { useRightPanelStore } from "~/rightPanelStore";
 
-import { prepareHostedPreview } from "./previewHostingRecovery";
+import { mayBeHostedPreviewUrl, prepareHostedPreview } from "./previewHostingRecovery";
 
 const terminalLinkErrorContext = {
   environmentId: Schema.String,
@@ -79,7 +82,11 @@ export async function openTerminalLinkInPreview<E>(
           { profileName: input.terminalLinkProfileName },
           explicitDefaults,
         );
-  if (typeof window !== "undefined" && !window.desktopBridge) {
+  if (
+    typeof window !== "undefined" &&
+    !window.desktopBridge &&
+    (input.forceBrowser || !mayBeHostedPreviewUrl(input.threadRef, input.url))
+  ) {
     await openPreparedExternalUrl(input.url, async () =>
       hostedPreviewNavigationUrl(await prepareHostedPreview(input.threadRef, input.url)),
     );
@@ -108,7 +115,11 @@ export async function openTerminalLinkInPreview<E>(
   };
 
   const defaults = explicitDefaults ?? (await resolveBrowserDefaults());
-  const profileId = explicitProfileId ?? browserDefaultOpenProfileId(defaults);
+  const profileId = preparedPreviewOpenProfileId(
+    prepared,
+    browserDefaultOpenProfileId(defaults),
+    explicitProfileId,
+  );
   const result = await input.openPreview({
     environmentId: input.threadRef.environmentId,
     input: {

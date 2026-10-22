@@ -46,6 +46,7 @@ export const PreviewHostingLeaseSummary = Schema.Struct({
   url: PreviewUrl,
   handedOffAt: Schema.String,
   expiresAt: Schema.String,
+  runId: Schema.optional(Schema.String.check(Schema.isUUID(4))),
   status: Schema.Literals(["starting", "active", "sleeping"]),
 });
 export type PreviewHostingLeaseSummary = typeof PreviewHostingLeaseSummary.Type;
@@ -69,6 +70,14 @@ export const PreviewHostingListInput = Schema.Struct({
 });
 export type PreviewHostingListInput = typeof PreviewHostingListInput.Type;
 
+export const PreviewHostingActivityInput = Schema.Struct({
+  activityId: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
+  threadId: ThreadId,
+  url: PreviewUrl,
+  active: Schema.Boolean,
+});
+export type PreviewHostingActivityInput = typeof PreviewHostingActivityInput.Type;
+
 export const PreviewHostingStopThreadInput = Schema.Struct({
   threadId: ThreadId,
 });
@@ -77,7 +86,7 @@ export type PreviewHostingStopThreadInput = typeof PreviewHostingStopThreadInput
 export class PreviewHostingError extends Schema.TaggedError<PreviewHostingError>()(
   "PreviewHostingError",
   {
-    reason: Schema.Literals(["invalid_request", "url_in_use", "unavailable"]),
+    reason: Schema.Literals(["invalid_request", "url_in_use", "capacity", "unavailable"]),
     message: Schema.String.check(Schema.isMaxLength(1_024)),
   },
 ) {}

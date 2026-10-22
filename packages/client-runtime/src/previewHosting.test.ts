@@ -39,6 +39,179 @@ const lease = {
 
 describe("prepareHostedPreview", () => {
   beforeEach(() => vi.restoreAllMocks());
+  it("preserves the current app run when another consumer already restarted it", async () => {
+    const runId = "019fc835-d8cb-4a6e-847f-4b63db5c85bb";
+    const prepared = await prepareHostedPreview({
+      threadRef,
+      url: lease.url,
+      environmentUrl: "https://environment.example/",
+      purpose: "resource",
+      list: async () => [lease],
+      recover: async () => ({ ...lease, runId }),
+    });
+    expect(prepared).toMatchObject({ managed: true, runId });
+    expect(prepared).not.toHaveProperty("restarted");
+  });
+
+  it("keeps a healthy connected document stable without querying preview leases", async () => {
+    const url = "https://environment.example/api/assets/signed/report.pdf?page=2#chart";
+    const list = vi.fn(async () => [lease]);
+    const renewDocumentUrl = vi.fn(async () => "/api/assets/signed/report.pdf?page=2#chart");
+    const result = await prepareHostedPreview({
+      threadRef,
+      url,
+      purpose: "resource",
+      environmentUrl: "https://environment.example/",
+      list,
+      recover: async () => lease,
+      renewDocumentUrl,
+    });
+    expect(result).toEqual({ url, managed: false, restored: true });
+    expect(renewDocumentUrl).toHaveBeenCalledExactlyOnceWith(url, false);
+    expect(list).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "http://127.0.0.1:3773/api/assets/expired/report.pdf?page=2#chart",
+    "http://previous-environment.example:3773/api/assets/expired/report.pdf?page=2#chart",
+  ])("renews an owned saved document against its connected origin: %s", async (url) => {
+    const renewDocumentUrl = vi.fn(async () => "/api/assets/renewed/report.pdf?page=2#chart");
+    const list = vi.fn(async () => [lease]);
+    const result = await prepareHostedPreview({
+      threadRef,
+      url,
+      environmentUrl: "https://environment.example/",
+      knownEnvironmentUrls: ["http://previous-environment.example:3773/"],
+      list,
+      recover: async () => lease,
+      renewDocumentUrl,
+    });
+    expect(result).toEqual({
+      url: "https://environment.example/api/assets/renewed/report.pdf?page=2#chart",
+      managed: false,
+      restored: true,
+      restarted: true,
+    });
+    expect(renewDocumentUrl).toHaveBeenCalledExactlyOnceWith(url, true);
+    expect(list).not.toHaveBeenCalled();
+  });
+
+  it("does not offer a foreign asset route to document renewal", async () => {
+    const renewDocumentUrl = vi.fn(async () => "/api/assets/renewed/report.pdf");
+    const url = "https://external.example/api/assets/signed/report.pdf";
+    const result = await prepareHostedPreview({
+      threadRef,
+      url,
+      environmentUrl: "https://environment.example/",
+      list: async () => [lease],
+      recover: async () => lease,
+      renewDocumentUrl,
+    });
+    expect(result).toEqual({ url, managed: false, restored: false });
+    expect(renewDocumentUrl).not.toHaveBeenCalled();
+  });
+
+  it.each(["https://external.example/api/assets/signed/report.pdf", "/other/report.pdf"])(
+    "rejects invalid document renewal destinations: %s",
+    async (issued) => {
+      const list = vi.fn(async () => [lease]);
+      await expect(
+        prepareHostedPreview({
+          threadRef,
+          url: "https://environment.example/api/assets/expired/report.pdf",
+          environmentUrl: "https://environment.example/",
+          list,
+          recover: async () => lease,
+          renewDocumentUrl: async () => issued,
+        }),
+      ).rejects.toBeInstanceOf(HostedPreviewRecoveryError);
+      expect(list).not.toHaveBeenCalled();
+    },
+  );
+
+  it("surfaces document renewal failure without falling back to the expired URL", async () => {
+    const list = vi.fn(async () => [lease]);
+    await expect(
+      prepareHostedPreview({
+        threadRef,
+        url: "https://environment.example/api/assets/expired/report.pdf",
+        environmentUrl: "https://environment.example/",
+        list,
+        recover: async () => lease,
+        renewDocumentUrl: async () => {
+          throw new Error("File unavailable");
+        },
+      }),
+    ).rejects.toBeInstanceOf(HostedPreviewRecoveryError);
+    expect(list).not.toHaveBeenCalled();
+  });
+
+  it("prepares exact remote media on the connected origin without changing Browser identity", async () => {
+    const createResourceUrl = vi.fn(async () => "/api/assets/signed-exact-resource/clip.mp4");
+    const result = await prepareHostedPreview({
+      threadRef,
+      purpose: "resource",
+      url: "http://127.0.0.1:5173/media/clip.mp4?version=2#chapter",
+      environmentUrl: "https://environment.example:8443/",
+      list: async () => [lease],
+      recover: async () => lease,
+      createResourceUrl,
+    });
+    expect(createResourceUrl).toHaveBeenCalledExactlyOnceWith(
+      lease,
+      "http://localhost:5173/media/clip.mp4?version=2#chapter",
+    );
+    expect(result).toEqual({
+      url: "http://127.0.0.1:5173/media/clip.mp4?version=2#chapter",
+      localUrl: "http://localhost:5173/media/clip.mp4?version=2#chapter",
+      resourceUrl: "https://environment.example:8443/api/assets/signed-exact-resource/clip.mp4",
+      managed: true,
+      restored: true,
+    });
+  });
+
+  it("does not request a resource capability for navigation or an unowned resource", async () => {
+    const createResourceUrl = vi.fn(async () => "/api/assets/signed/image.png");
+    const input = {
+      threadRef,
+      environmentUrl: "https://environment.example/",
+      list: async () => [lease],
+      recover: async () => lease,
+      createResourceUrl,
+    };
+    await prepareHostedPreview({ ...input, url: lease.url });
+    const external = await prepareHostedPreview({
+      ...input,
+      purpose: "resource",
+      url: "https://external.example/image.png",
+    });
+    const unowned = await prepareHostedPreview({
+      ...input,
+      purpose: "resource",
+      url: "http://localhost:5174/image.png",
+    });
+    expect(external.managed).toBe(false);
+    expect(unowned.managed).toBe(false);
+    expect(createResourceUrl).not.toHaveBeenCalled();
+  });
+
+  it.each(["https://external.example/api/assets/signed/image.png", "/other/image.png"])(
+    "rejects a resource capability outside the connected asset route: %s",
+    async (issued) => {
+      await expect(
+        prepareHostedPreview({
+          threadRef,
+          purpose: "resource",
+          url: lease.url,
+          environmentUrl: "https://environment.example/",
+          list: async () => [lease],
+          recover: async () => lease,
+          createResourceUrl: async () => issued,
+        }),
+      ).rejects.toBeInstanceOf(HostedPreviewRecoveryError);
+    },
+  );
+
   it("preserves application reset and invite tokens while preparing and retargeting a bootstrap", async () => {
     const destination =
       "http://localhost:5173/reset?token=application-reset#token=application-invite";

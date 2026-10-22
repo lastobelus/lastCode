@@ -20,7 +20,10 @@ import { AsyncResult } from "effect/reactivity";
 import { prepareHostedPreview } from "~/components/preview/previewHostingRecovery";
 import { resolveAssetUrl } from "~/assets/assetUrls";
 import { isPreviewAvailableFor } from "~/browser/previewRuntime";
-import { preparedPreviewOpenTarget } from "./preparedPreviewOpenTarget";
+import {
+  preparedPreviewOpenProfileId,
+  preparedPreviewOpenTarget,
+} from "./preparedPreviewOpenTarget";
 import {
   applyPreviewServerSnapshot,
   capturePreviewOpenFocus,
@@ -92,7 +95,11 @@ export async function openPreparedUrlInPreview<E>(
   if (defaults instanceof BrowserSettingsReadError) {
     return AsyncResult.failure(Cause.fail(defaults));
   }
-  const profileId = input.profileId ?? browserDefaultOpenProfileId(defaults);
+  const profileId = preparedPreviewOpenProfileId(
+    prepared,
+    browserDefaultOpenProfileId(defaults),
+    input.profileId,
+  );
   const result = await input.openPreview({
     environmentId: input.threadRef.environmentId,
     input: {

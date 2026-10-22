@@ -220,6 +220,7 @@ const RPC_AGGREGATES = {
   [WS_METHODS.previewClaimRecovery]: "preview",
   [WS_METHODS.previewHostingList]: "preview",
   [WS_METHODS.previewHostingRecover]: "preview",
+  [WS_METHODS.previewHostingActivity]: "preview",
   [WS_METHODS.previewHostingStopThread]: "preview",
   [WS_METHODS.subscribeDesktopBrowserCommands]: "preview",
   [WS_METHODS.subscribePreviewHosting]: "preview",

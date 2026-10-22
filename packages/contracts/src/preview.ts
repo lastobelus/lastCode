@@ -253,6 +253,15 @@ export class PreviewRecoveryStorageError extends Schema.TaggedError<PreviewRecov
   }
 }
 
+export class PreviewSessionStorageError extends Schema.TaggedError<PreviewSessionStorageError>()(
+  "PreviewSessionStorageError",
+  { cause: Schema.Defect() },
+) {
+  override get message() {
+    return "Could not read or save retained browser tabs. Their saved record was left intact.";
+  }
+}
+
 export const PreviewRefreshInput = Schema.Struct({
   threadId: ThreadId,
   tabId: PreviewTabId,
@@ -476,6 +485,7 @@ export const PreviewError = Schema.Union([
   PreviewInvalidUrlError,
   PreviewControlRequiredError,
   PreviewRecoveryStorageError,
+  PreviewSessionStorageError,
   PreviewNativeCloseError,
   PreviewNativeCreateError,
   PreviewProfileHostError,

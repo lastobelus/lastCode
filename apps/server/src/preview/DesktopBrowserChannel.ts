@@ -88,12 +88,16 @@ export class DesktopBrowserChannel extends Context.Service<
     /** Subscribe before checking so concurrent attaches cannot be missed. */
     readonly awaitAttached: (key: DesktopTabKey, timeout: Duration.Input) => Effect.Effect<boolean>;
     readonly detached: Stream.Stream<DesktopTabKey>;
+    readonly dormant: Stream.Stream<
+      DesktopTabKey & { readonly rootId?: string; readonly popupId?: string }
+    >;
     readonly attached: Stream.Stream<DesktopTabKey>;
     /** Authenticated host registrations, including hosts already connected at subscription. */
     readonly connectedHosts: Stream.Stream<string>;
     readonly isAttached: (key: DesktopTabKey) => Effect.Effect<boolean>;
     /** Synchronous registry lookup so presentation and tab registration cannot interleave. */
     readonly isPresented: (key: DesktopTabKey) => boolean;
+    readonly isRendering: (key: DesktopTabKey) => boolean;
     readonly presentations: Stream.Stream<DesktopTabKey>;
     readonly popups: Stream.Stream<
       DesktopTabKey & { readonly popupId: string; readonly url: string }
@@ -175,7 +179,7 @@ const make = Effect.gen(function* () {
   const changes = yield* PubSub.unbounded<{ key: DesktopTabKey; attached: boolean }>();
   const attachedTabs = new Map<
     string,
-    DesktopTabKey & { supportsNativeSurface: boolean; presented: boolean }
+    DesktopTabKey & { supportsNativeSurface: boolean; presented: boolean; rendering: boolean }
   >();
   const presentations = yield* PubSub.unbounded<DesktopTabKey>();
   const connectedHosts = yield* PubSub.unbounded<string>();
@@ -184,6 +188,9 @@ const make = Effect.gen(function* () {
   >();
   const closedPopups = yield* PubSub.unbounded<DesktopTabKey & { readonly popupId: string }>();
   const closedRoots = yield* PubSub.unbounded<DesktopTabKey & { readonly rootId: string }>();
+  const dormant = yield* PubSub.unbounded<
+    DesktopTabKey & { readonly rootId?: string; readonly popupId?: string }
+  >();
   const roots = new Map<
     string,
     {
@@ -413,6 +420,27 @@ const make = Effect.gen(function* () {
       ).pipe(Effect.asVoid);
     }
     switch (event.type) {
+      case "dormant": {
+        if (event.rootId !== undefined) {
+          const root = roots.get(id);
+          if (!root || root.rootId !== event.rootId || !root.published) return Effect.void;
+          roots.delete(id);
+        }
+        if (event.popupId !== undefined) {
+          for (const [announcementId, popup] of popupAnnouncements) {
+            if (
+              popup.popupId === event.popupId &&
+              (popup.desktopHostId ?? "local") === desktopHostId
+            )
+              popupAnnouncements.delete(announcementId);
+          }
+        }
+        return PubSub.publish(dormant, {
+          ...key,
+          ...(event.rootId === undefined ? {} : { rootId: event.rootId }),
+          ...(event.popupId === undefined ? {} : { popupId: event.popupId }),
+        }).pipe(Effect.asVoid);
+      }
       case "rootPresence":
       case "popupPresence": {
         const kind = event.type === "rootPresence" ? "root" : "popup";
@@ -499,6 +527,12 @@ const make = Effect.gen(function* () {
         tab.presented = event.presented;
         return PubSub.publish(presentations, key).pipe(Effect.asVoid);
       }
+      case "rendering": {
+        const tab = attachedTabs.get(id);
+        if (!tab || tab.rendering === event.active) return Effect.void;
+        tab.rendering = event.active;
+        return PubSub.publish(presentations, key).pipe(Effect.asVoid);
+      }
       case "download": {
         const directory = downloadDirectories.get(id);
         const offsets = downloadOffsets.get(id) ?? new Map<string, number>();
@@ -566,6 +600,7 @@ const make = Effect.gen(function* () {
           ...key,
           supportsNativeSurface: event.supportsNativeSurface === true,
           presented: event.presented === true,
+          rendering: event.rendering === true,
         });
         return pending.pipe(
           Effect.andThen(PubSub.publish(changes, { key, attached: true })),
@@ -946,6 +981,7 @@ const make = Effect.gen(function* () {
       }),
     ),
     closedPopups: Stream.fromPubSub(closedPopups),
+    dormant: Stream.fromPubSub(dormant),
     probePopup: (key, popupId) => probeNative(key, "popup", popupId),
     probeRoot: (key, rootId) => probeNative(key, "root", rootId),
     reconcileRoots: (desktopHostId, serverEpoch) =>
@@ -1203,6 +1239,10 @@ const make = Effect.gen(function* () {
         Effect.gen(function* () {
           const subscription = yield* PubSub.subscribe(changes);
           if (attachedTabs.has(keyOf(key))) return true;
+          yield* command(
+            { type: "wake", threadId: key.threadId, tabId: key.tabId },
+            key.desktopHostId,
+          );
           return yield* Stream.fromSubscription(subscription).pipe(
             Stream.filter((change) => change.attached && keyOf(change.key) === keyOf(key)),
             Stream.runHead,
@@ -1222,6 +1262,7 @@ const make = Effect.gen(function* () {
     ),
     isAttached: (key) => Effect.sync(() => attachedTabs.has(keyOf(key))),
     isPresented: (key) => attachedTabs.get(keyOf(key))?.presented === true,
+    isRendering: (key) => attachedTabs.get(keyOf(key))?.rendering === true,
     presentations: Stream.fromPubSub(presentations),
     surface: Effect.fn("DesktopBrowserChannel.surface")(function* (key, input, timeoutMs = 2_500) {
       const attached = attachedTabs.get(keyOf(key));

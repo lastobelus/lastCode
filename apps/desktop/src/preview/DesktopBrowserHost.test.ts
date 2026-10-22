@@ -114,6 +114,10 @@ const makeDebuggee = () => {
           resolve({ targetInfo: { targetId: "GUEST" } });
           return;
         }
+        if (method === "Page.setWebLifecycleState") {
+          resolve({});
+          return;
+        }
         sent.push(params?.id);
         pending.push(() => resolve({ method }));
         sendWaiters.shift()?.();
@@ -191,6 +195,12 @@ const makePopup = (initialVisible = true, initiallyAttached = false) => {
     getContentSize: () => [640, 480],
     close: () => {
       closeCount += 1;
+      events.emit("close", { defaultPrevented: false });
+      destroyed = true;
+      events.emit("closed");
+    },
+    destroy: () => {
+      closeCount += 1;
       destroyed = true;
       events.emit("closed");
     },
@@ -230,7 +240,6 @@ const makeRoot = () => {
       size = [width, height];
     },
     getContentSize: () => size,
-    destroy: root.window.close,
   });
   let zoomFactor = 1;
   let windowOpenHandler:
@@ -251,6 +260,215 @@ const makeRoot = () => {
     openWindow: (details: Electron.HandlerDetails) => windowOpenHandler?.(details),
   };
 };
+
+it.effect(
+  "unloads an idle native root without reporting a deliberate close, and protects active rendering",
+  () =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      const events = yield* Queue.unbounded<DesktopBrowserEvent>();
+      yield* host.remoteEvents.pipe(
+        Stream.runForEach(({ event }) => Queue.offer(events, event)),
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      const root = makeRoot();
+      host.setRootFactory(() => Effect.succeed(root.window));
+      yield* host.bindEnvironment("host-a", "environment-a", profileResolver("environment-a"));
+      yield* host.handleRemoteCommand({
+        desktopHostId: "host-a",
+        command: {
+          type: "createRoot",
+          ...key,
+          serverEpoch: "epoch",
+          requestId: "create",
+          profileId: "default",
+          url: "https://example.test/",
+        },
+      });
+      expect((yield* Queue.take(events)).type).toBe("attached");
+      const created = yield* Queue.take(events);
+      if (created.type !== "rootCreated" || created.rootId === null)
+        throw new Error("Expected root creation");
+      const identity = {
+        ...key,
+        rootId: created.rootId,
+        requestId: "create",
+        profileId: "default",
+      };
+      yield* host.handleRemoteCommand({
+        desktopHostId: "host-a",
+        command: { type: "acceptRoot", ...identity },
+      });
+      yield* host.handleRemoteCommand({
+        desktopHostId: "host-a",
+        command: { type: "publishRoot", ...identity },
+      });
+      yield* Queue.clear(events);
+      yield* host.handleRemoteCommand({
+        desktopHostId: "host-a",
+        command: {
+          type: "surface",
+          ...key,
+          action: "acquire",
+          requestId: "render",
+          leaseId: "active",
+        },
+      });
+      expect((yield* Queue.take(events)).type).toBe("surfaceReady");
+      yield* TestClock.adjust("25 hours");
+      expect(root.window.isDestroyed()).toBe(false);
+      yield* host.handleRemoteCommand({
+        desktopHostId: "host-a",
+        command: {
+          type: "surface",
+          ...key,
+          action: "release",
+          requestId: "release",
+          leaseId: "active",
+        },
+      });
+      yield* Queue.take(events);
+      yield* TestClock.adjust("24 hours");
+      expect(yield* Queue.take(events)).toEqual({
+        type: "dormant",
+        ...key,
+        rootId: created.rootId,
+      });
+      expect((yield* Queue.take(events)).type).toBe("detached");
+      expect(root.window.isDestroyed()).toBe(true);
+      expect(yield* Queue.clear(events)).toEqual([]);
+    }),
+);
+
+it.effect.each([false, true])(
+  "a published root retains its target on unexpected loss but honors an explicit window close (%s)",
+  (explicit) =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      const events = yield* Queue.unbounded<DesktopBrowserEvent>();
+      yield* host.remoteEvents.pipe(
+        Stream.runForEach(({ event }) => Queue.offer(events, event)),
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      const root = makeRoot();
+      host.setRootFactory(() => Effect.succeed(root.window));
+      yield* host.bindEnvironment("host-a", "environment-a", profileResolver("environment-a"));
+      yield* host.handleRemoteCommand({
+        desktopHostId: "host-a",
+        command: {
+          type: "createRoot",
+          ...key,
+          serverEpoch: "epoch",
+          requestId: "create",
+          profileId: "default",
+          url: "https://example.test/saved",
+        },
+      });
+      yield* Queue.take(events);
+      const created = yield* Queue.take(events);
+      if (created.type !== "rootCreated" || created.rootId === null)
+        throw new Error("Expected root creation");
+      const identity = {
+        ...key,
+        rootId: created.rootId,
+        requestId: "create",
+        profileId: "default",
+      };
+      yield* host.handleRemoteCommand({
+        desktopHostId: "host-a",
+        command: { type: "acceptRoot", ...identity },
+      });
+      yield* host.handleRemoteCommand({
+        desktopHostId: "host-a",
+        command: { type: "publishRoot", ...identity },
+      });
+      yield* Queue.clear(events);
+      if (explicit) root.window.close();
+      else root.contents.debugger.detach();
+      expect((yield* Queue.take(events)).type).toBe("detached");
+      expect(yield* Queue.take(events)).toEqual({
+        type: explicit ? "rootClosed" : "dormant",
+        ...key,
+        rootId: created.rootId,
+      });
+      expect(root.window.isDestroyed()).toBe(true);
+      expect(yield* Queue.clear(events)).toEqual([]);
+    }),
+);
+
+it.effect.each([false, true])(
+  "a popup retains its target on unexpected loss but honors an explicit window close (%s)",
+  (explicit) =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      const events = yield* Queue.unbounded<DesktopBrowserEvent>();
+      yield* host.remoteEvents.pipe(
+        Stream.runForEach(({ event }) => Queue.offer(events, event)),
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      const source = { ...key, desktopHostId: "host-a" };
+      host.attach(source, makeDebuggee().tab, "source");
+      yield* Queue.take(events);
+      const popup = makePopup();
+      host.registerPopup(source, popup.window);
+      const created = yield* Queue.take(events);
+      if (created.type !== "popupCreated") throw new Error("Expected popup creation");
+      if (explicit) popup.window.close();
+      else popup.contents.debugger.detach();
+      expect(yield* Queue.take(events)).toEqual({
+        type: explicit ? "popupClosed" : "dormant",
+        ...key,
+        popupId: created.popupId,
+      });
+    }),
+);
+
+it.effect("waits for a frozen guest to thaw before acknowledging its rendering surface", () =>
+  Effect.gen(function* () {
+    const host = yield* DesktopBrowserHost.make.pipe(
+      Effect.provide(DesktopClientSettings.layerTest()),
+    );
+    const debuggee = makeDebuggee();
+    const thawed = Promise.withResolvers<void>();
+    const entered = Promise.withResolvers<void>();
+    const states: string[] = [];
+    debuggee.tab.debugger.sendCommand = async (method, params) => {
+      if (method === "Page.setWebLifecycleState") {
+        states.push(params.state);
+        if (params.state === "active") {
+          entered.resolve();
+          await thawed.promise;
+        }
+      }
+      return {};
+    };
+    host.attach({ ...key, desktopHostId: "host-a" }, debuggee.tab, "runtime");
+    const rendering = yield* host
+      .handleRemoteCommand({
+        desktopHostId: "host-a",
+        command: {
+          type: "surface",
+          ...key,
+          requestId: "render",
+          leaseId: "active",
+          action: "acquire",
+        },
+      })
+      .pipe(Effect.forkScoped);
+    yield* Effect.promise(() => entered.promise);
+    expect(debuggee.surfaceRequests).toEqual([]);
+    thawed.resolve();
+    yield* Fiber.join(rendering);
+    expect(debuggee.surfaceRequests).toHaveLength(1);
+    expect(states.at(-1)).toBe("active");
+  }),
+);
 
 it.effect.each(["foreground-tab", "background-tab"] as const)(
   "%s navigation creates and registers a hidden child without replacing its native opener",
@@ -972,7 +1190,7 @@ it.effect(
         yield* send({ type: "publishRoot", ...attempt });
         yield* send({ type: "disconnect" });
       }
-      yield* TestClock.adjust("365 days");
+      yield* TestClock.adjust("23 hours");
       yield* host.handleRemoteCommand({
         desktopHostId: "host-a",
         command: {
@@ -1200,11 +1418,7 @@ it.effect("main-window closure destroys published automation roots and their chi
       yield* Queue.take(events),
       yield* Queue.take(events),
     ];
-    expect(closed.map((event) => event.type).sort()).toEqual([
-      "detached",
-      "popupClosed",
-      "rootClosed",
-    ]);
+    expect(closed.map((event) => event.type).sort()).toEqual(["detached", "dormant", "dormant"]);
     // A child delivered after owner closure is destroyed before registration.
     const lateChild = makeRoot();
     root.contents.emit("did-create-window", lateChild.window);
@@ -1421,7 +1635,9 @@ it.effect.each(["Input.insertText", "Input.dispatchKeyEvent"])(
       const event = yield* Queue.take(events);
       if (event.type !== "cdp") throw new Error("Expected keyboard response");
       expect(JSON.parse(event.message)).toMatchObject({ id: 1, result: { method } });
-      expect(commands).toEqual([{ method, params, sessionId: undefined }]);
+      expect(commands.filter((command) => command.method.startsWith("Input."))).toEqual([
+        { method, params, sessionId: undefined },
+      ]);
     }),
 );
 
@@ -1741,7 +1957,9 @@ describe("DesktopBrowserHost", () => {
         if (withdrawal === "closed") popup.window.close();
         else popup.contents.debugger.detach();
         // The ordinary native close/withdrawal notification was lost offline.
-        expect((yield* Queue.take(events)).event).toMatchObject({ type: "popupClosed" });
+        expect((yield* Queue.take(events)).event).toMatchObject({
+          type: withdrawal === "closed" ? "popupClosed" : "dormant",
+        });
         const closesBeforeProbe = popup.closeCount();
         for (const popupId of [created.popupId, "unknown-popup"]) {
           const requestId = `presence:${popupId}`;
@@ -1807,7 +2025,7 @@ describe("DesktopBrowserHost", () => {
       yield* Queue.take(events);
       popup.contents.debugger.detach();
       expect((yield* Queue.take(events)).event).toEqual({
-        type: "popupClosed",
+        type: "dormant",
         ...key,
         popupId: created.popupId,
       });
@@ -2107,6 +2325,39 @@ describe("DesktopBrowserHost", () => {
         });
         expect(popup.attachCount()).toBe(1);
       }),
+  );
+
+  it.effect("reports hidden recording activity without claiming that its window is presented", () =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      const events = yield* Queue.unbounded<typeof DesktopBrowserEvent.Type>();
+      yield* host.remoteEvents.pipe(
+        Stream.runForEach(({ event }) => Queue.offer(events, event)),
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      const debuggee = makeDebuggee();
+      host.setMainWindow(makePresentationWindow(false).window);
+      host.attach({ ...key, desktopHostId: "remote-a" }, debuggee.tab, "runtime-a");
+      expect(yield* Queue.take(events)).toEqual({
+        type: "attached",
+        ...key,
+        supportsNativeSurface: true,
+      });
+      host.setPresentation({ runtimeTabId: "runtime-a", presented: false, rendering: true }, 77);
+      expect(yield* Queue.take(events)).toEqual({ type: "rendering", ...key, active: true });
+      yield* host.handleRemoteCommand({ desktopHostId: "remote-a", command: { type: "announce" } });
+      expect(yield* Queue.take(events)).toEqual({
+        type: "attached",
+        ...key,
+        supportsNativeSurface: true,
+        rendering: true,
+      });
+      host.setPresentation({ runtimeTabId: "runtime-a", presented: false, rendering: false }, 77);
+      expect(yield* Queue.take(events)).toEqual({ type: "rendering", ...key, active: false });
+      expect(yield* Queue.size(events)).toBe(0);
+    }),
   );
 
   it.effect(

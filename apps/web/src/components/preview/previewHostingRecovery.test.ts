@@ -1,8 +1,16 @@
-import { EnvironmentId, ThreadId, type PreviewHostingLeaseSummary } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ThreadId,
+  PreviewHostingError,
+  type PreviewHostingLeaseSummary,
+} from "@t3tools/contracts";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import * as Cause from "effect/Cause";
+import { AsyncResult } from "effect/reactivity";
 
 const mocks = vi.hoisted(() => ({
   run: vi.fn(),
+  query: vi.fn(),
   connection: vi.fn(() => ({
     httpBaseUrl: "http://managed-server.example:3773",
     target: {
@@ -14,7 +22,14 @@ const mocks = vi.hoisted(() => ({
   list: {},
   recover: {},
 }));
-vi.mock("@t3tools/client-runtime/state/runtime", () => ({ runAtomCommand: mocks.run }));
+vi.mock("@t3tools/client-runtime/state/runtime", async (original) => ({
+  ...(await original<typeof import("@t3tools/client-runtime/state/runtime")>()),
+  runAtomCommand: mocks.run,
+  executeAtomQuery: mocks.query,
+}));
+vi.mock("~/state/assets", () => ({
+  assetEnvironment: { createUrl: (input: unknown) => input },
+}));
 vi.mock("~/rpc/atomRegistry", () => ({ appAtomRegistry: {} }));
 vi.mock("~/state/session", () => ({
   readPreparedConnection: mocks.connection,
@@ -48,12 +63,69 @@ const lease: PreviewHostingLeaseSummary = {
 };
 beforeEach(() => {
   mocks.run.mockReset();
+  mocks.query.mockReset();
+  mocks.query.mockResolvedValue({
+    _tag: "Success",
+    value: { relativeUrl: "/api/assets/resource/report.png", expiresAt: 1790000000000 },
+  });
   mocks.connection.mockClear();
   mocks.configuredEndpoint.mockReset();
   mocks.configuredEndpoint.mockReturnValue(null);
 });
 
 describe("native preview reopening", () => {
+  it("preserves the actionable capacity error when a saved app cannot yet restart", async () => {
+    const message =
+      "Managed previews are at capacity. Your preview is saved. Close an active Browser view or finish its automation or recording, then retry.";
+    mocks.run.mockResolvedValueOnce(AsyncResult.success([lease])).mockResolvedValueOnce(
+      AsyncResult.failure(
+        Cause.fail(
+          new PreviewHostingError({
+            reason: "capacity",
+            message: "sensitive internal diagnostics",
+          }),
+        ),
+      ),
+    );
+    await expect(prepareHostedPreview(owner, lease.url)).rejects.toThrow(message);
+  });
+  it("renews retained signed documents without changing the selected desktop profile", async () => {
+    const url = "http://managed-server.example:3773/api/assets/old/report.html?mode=review#chart";
+    mocks.query.mockResolvedValue({
+      _tag: "Success",
+      value: {
+        relativeUrl: "/api/assets/fresh/report.html?mode=review#chart",
+        expiresAt: 1790000000000,
+      },
+    });
+    expect(await prepareHostedPreview(owner, url, "resource")).toEqual({
+      url: "http://managed-server.example:3773/api/assets/fresh/report.html?mode=review#chart",
+      managed: false,
+      restored: true,
+      restarted: true,
+    });
+    expect(mocks.query.mock.calls[0]?.[1]).toMatchObject({
+      input: {
+        resource: { _tag: "preview-document", threadId: owner.threadId, url, refresh: false },
+      },
+    });
+    expect(mocks.run).not.toHaveBeenCalled();
+  });
+
+  it("keeps a healthy document unchanged on return and refreshes access for explicit navigation", async () => {
+    const relativeUrl = "/api/assets/current/report.html";
+    const url = `http://managed-server.example:3773${relativeUrl}`;
+    mocks.query.mockResolvedValue({
+      _tag: "Success",
+      value: { relativeUrl, expiresAt: 1790000000000 },
+    });
+    expect(await prepareHostedPreview(owner, url, "resource")).not.toHaveProperty("restarted");
+    await prepareHostedPreview(owner, url);
+    expect(mocks.query.mock.calls[1]?.[1]).toMatchObject({
+      input: { resource: { refresh: true } },
+    });
+  });
+
   it("restores the owning lease across remote origin resolution without an agent message", async () => {
     mocks.run
       .mockResolvedValueOnce({ _tag: "Success", value: [lease] })
@@ -83,6 +155,7 @@ describe("native preview reopening", () => {
       prepareHostedPreview(owner, "http://192.168.1.24:5173/qa?version=1#first"),
     ).resolves.toEqual({
       url: "http://100.100.12.4:5173/qa?version=1#first",
+      localUrl: "http://localhost:5173/qa?version=1#first",
       managed: true,
       restored: true,
     });
@@ -101,6 +174,7 @@ describe("native preview reopening", () => {
       prepareHostedPreview(owner, "http://192.168.1.24:5173/qa?version=1#first"),
     ).resolves.toEqual({
       url: "http://100.100.12.4:5173/qa?version=1#first",
+      localUrl: "http://localhost:5173/qa?version=1#first",
       managed: true,
       restored: true,
     });

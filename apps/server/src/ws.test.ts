@@ -28,6 +28,7 @@ import * as ThreadReadBroker from "./mcp/ThreadReadBroker.ts";
 import * as OrchestratorMcpService from "./mcp/OrchestratorMcpService.ts";
 import * as DesktopBrowserChannel from "./preview/DesktopBrowserChannel.ts";
 import * as PreviewHosting from "./preview/Hosting.ts";
+import * as NativeAppIconResolver from "./assets/NativeAppIconResolver.ts";
 import * as EnvironmentPause from "./environment/EnvironmentPause.ts";
 import * as UpdateDrainAdmission from "./updateDrain/UpdateDrainAdmission.ts";
 import * as ThreadLinkedFiles from "./workspace/ThreadLinkedFiles.ts";
@@ -370,6 +371,7 @@ it.effect("shell snapshots leave idle subagent children out only for clients tha
 const layerUnusedConfigRpcServices = Layer.mergeAll(
   Layer.mock(EnvironmentPause.EnvironmentPause)({}),
   Layer.mock(PreviewHosting.PreviewHosting)({}),
+  Layer.mock(NativeAppIconResolver.NativeAppIconResolver)({}),
   Layer.mock(ThreadLinkedFiles.ThreadLinkedFiles)({}),
   Layer.mock(ThreadRecoveryService.ThreadRecoveryService)({}),
   Layer.mock(ThreadRecoveryRepairService.ThreadRecoveryRepairService)({}),
@@ -618,6 +620,7 @@ it.effect(
           Layer.mock(DesktopBrowserChannel.DesktopBrowserChannel)({
             available: false,
             isPresented: () => false,
+            isRendering: () => false,
           }),
           Layer.mock(ThreadReadBroker.ThreadReadBroker)({
             forSession: () => ({ authorize: () => Effect.die("Unexpected thread authorization") }),

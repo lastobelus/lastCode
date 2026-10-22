@@ -18,7 +18,11 @@ const hostingMocks = vi.hoisted(() => ({
     restored: false,
   })),
 }));
-vi.mock("./previewHostingRecovery", () => ({ prepareHostedPreview: hostingMocks.prepare }));
+vi.mock("./previewHostingRecovery", () => ({
+  prepareHostedPreview: hostingMocks.prepare,
+  mayBeHostedPreviewUrl: (_ref: ScopedThreadRef, url: string) =>
+    /^http:\/\/(localhost|127\.0\.0\.1)/.test(url),
+}));
 vi.mock("~/state/entities", () => ({
   readEnvironmentSupportsServerBrowser: () => true,
   readEnvironmentHasLocalDesktopBrowser: () => true,
@@ -118,6 +122,36 @@ describe("openTerminalLinkInPreview", () => {
     expect(fallbackToBrowser).not.toHaveBeenCalled();
   });
 
+  it.each(["desktop", "web"])(
+    "opens a managed terminal link from %s in its environment despite a named default profile",
+    async (client) => {
+      if (client === "web") vi.stubGlobal("window", { open: vi.fn() });
+      vi.spyOn(previewRuntime, "isPreviewAvailableFor").mockReturnValue(true);
+      browserDefaultsMocks.resolve.mockResolvedValue({ ...hydratedDefaults, profileId: "work" });
+      const url = "http://localhost:5173/app?case=terminal#section";
+      const localUrl = "http://127.0.0.1:5173/app?case=terminal#section";
+      hostingMocks.prepare.mockResolvedValue({ url, localUrl, managed: true, restored: true });
+      const openPreview = vi.fn(async (_input: { input: PreviewOpenInput }) =>
+        AsyncResult.success(snapshot),
+      );
+      const fallbackToBrowser = vi.fn();
+      await openTerminalLinkInPreview({
+        url,
+        threadRef,
+        openPreview,
+        fallbackToBrowser,
+        forceBrowser: false,
+      });
+      expect(openPreview.mock.calls[0]?.[0].input).toMatchObject({
+        url: localUrl,
+        profileId: "default",
+        runtime: "server",
+        browserHost: "environment",
+      });
+      expect(fallbackToBrowser).not.toHaveBeenCalled();
+    },
+  );
+
   it("keeps a managed Action's named profile on its selected desktop", async () => {
     vi.spyOn(previewRuntime, "previewRuntimeFor").mockReturnValue("server");
     vi.spyOn(previewRuntime, "desktopBrowserHostFor").mockReturnValue("selected-desktop");
@@ -192,7 +226,7 @@ describe("openTerminalLinkInPreview", () => {
   );
 
   it.each([false, true])(
-    "keeps ordinary hosted-web links external after managed recovery (modifier=%s)",
+    "keeps public hosted-web links external (modifier=%s)",
     async (forceBrowser) => {
       const replace = vi.fn();
       const externalOpen = vi.fn(() => ({
@@ -204,9 +238,8 @@ describe("openTerminalLinkInPreview", () => {
       }));
       vi.stubGlobal("window", { open: externalOpen });
       vi.spyOn(previewRuntime, "isPreviewAvailableFor").mockReturnValue(true);
-      const url = "http://localhost:5173/qa";
-      const resolved = "http://workstation.example:5173/qa";
-      hostingMocks.prepare.mockResolvedValue({ url: resolved, managed: true, restored: true });
+      const url = "https://example.com/docs";
+      hostingMocks.prepare.mockResolvedValue({ url, managed: false, restored: false });
       const openPreview = vi.fn(async () => AsyncResult.success(snapshot));
       const fallbackToBrowser = vi.fn();
       await openTerminalLinkInPreview({
@@ -218,7 +251,7 @@ describe("openTerminalLinkInPreview", () => {
       });
       expect(externalOpen).toHaveBeenCalledExactlyOnceWith("about:blank", "_blank");
       expect(hostingMocks.prepare).toHaveBeenCalledExactlyOnceWith(threadRef, url);
-      expect(replace).toHaveBeenCalledExactlyOnceWith(resolved);
+      expect(replace).toHaveBeenCalledExactlyOnceWith(url);
       expect(browserDefaultsMocks.resolve).not.toHaveBeenCalled();
       expect(openPreview).not.toHaveBeenCalled();
       expect(fallbackToBrowser).not.toHaveBeenCalled();

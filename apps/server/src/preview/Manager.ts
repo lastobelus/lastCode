@@ -15,11 +15,12 @@ import {
   type PreviewReportStatusInput,
   type PreviewRecoveryClaim,
   PreviewRecoveryStorageError,
+  PreviewSessionStorageError,
   type PreviewResizeInput,
   type PreviewAdjustInput,
   FILL_PREVIEW_VIEWPORT,
   PreviewSessionLookupError,
-  type PreviewSessionSnapshot,
+  PreviewSessionSnapshot,
 } from "@t3tools/contracts";
 import {
   isPreviewUrlNormalizationError,
@@ -43,6 +44,7 @@ import * as Schema from "effect/Schema";
 import { CommandId, MessageId } from "@t3tools/contracts";
 import { ServerConfig } from "../config.ts";
 import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
+import { stripPreviewBootstrapTokenFromUrl } from "@t3tools/shared/remote";
 
 export class PreviewManager extends Context.Service<
   PreviewManager,
@@ -94,7 +96,10 @@ export class PreviewManager extends Context.Service<
     /** Trusted native destruction notification; never exposed on public close inputs. */
     readonly nativeClosedConfirmed: (
       input: PreviewCloseInput & { readonly tabId: string },
-    ) => Effect.Effect<void>;
+    ) => Effect.Effect<void, PreviewSessionStorageError>;
+    readonly nativeDormantConfirmed: (
+      input: PreviewCloseInput & { readonly tabId: string },
+    ) => Effect.Effect<void, PreviewError>;
     readonly list: (input: PreviewListInput) => Effect.Effect<PreviewListResult>;
     readonly events: Stream.Stream<PreviewEvent>;
     readonly subscribeEvents: Effect.Effect<PubSub.Subscription<PreviewEvent>, never, Scope.Scope>;
@@ -112,7 +117,39 @@ interface ManagerState {
   readonly revision: number;
 }
 
-const initialState: ManagerState = { sessions: new Map(), revision: 0 };
+const MAX_SESSION_FILE_BYTES = 4 * 1024 * 1024;
+const PreviewSessionFileJson = Schema.fromJsonString(
+  Schema.Struct({ version: Schema.Literal(1), sessions: Schema.Array(PreviewSessionSnapshot) }),
+);
+const decodePreviewSessionFile = Schema.decodeUnknownEffect(PreviewSessionFileJson);
+const encodePreviewSessionFile = Schema.encodeEffect(PreviewSessionFileJson);
+const isPreviewSessionStorageError = Schema.is(PreviewSessionStorageError);
+
+/** Native windows and browser history cannot survive an environment restart. */
+function dormantSnapshot(snapshot: PreviewSessionSnapshot): PreviewSessionSnapshot {
+  const {
+    desktopRootId: _root,
+    desktopPopupId: _popup,
+    revealRequest: _reveal,
+    ...retained
+  } = snapshot;
+  return {
+    ...retained,
+    navStatus:
+      snapshot.navStatus._tag === "Idle"
+        ? snapshot.navStatus
+        : {
+            _tag: "Loading",
+            url: stripPreviewBootstrapTokenFromUrl(new URL(snapshot.navStatus.url)).href,
+            title: snapshot.navStatus.title,
+          },
+    canGoBack: false,
+    canGoForward: false,
+    ...(snapshot.backingPage === "desktop-root" || snapshot.backingPage === "desktop-popup"
+      ? { backingPage: "desktop" as const }
+      : {}),
+  };
+}
 
 const RECOVERY_CLAIM_TTL_MS = 24 * 60 * 60 * 1_000;
 const RecoveryClaimRecord = Schema.Struct({
@@ -179,6 +216,52 @@ export const make = Effect.gen(function* PreviewManagerMake() {
   const serverConfig = yield* ServerConfig;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const sessionsPath = path.join(serverConfig.stateDir, "preview-sessions.json");
+  const loadedSessions = yield* Effect.gen(function* () {
+    if (!(yield* fileSystem.exists(sessionsPath))) return new Map<string, PreviewSessionState>();
+    const info = yield* fileSystem.stat(sessionsPath);
+    if (info.size > MAX_SESSION_FILE_BYTES) {
+      return yield* new PreviewSessionStorageError({
+        cause: new Error("Preview session record exceeds its size limit."),
+      });
+    }
+    const contents = yield* fileSystem.readFileString(sessionsPath);
+    const decoded = yield* decodePreviewSessionFile(contents);
+    return yield* Effect.try(() => {
+      const sessions = new Map<string, PreviewSessionState>();
+      for (const saved of decoded.sessions) {
+        const snapshot = dormantSnapshot(saved);
+        const key = compositeKey(snapshot.threadId, snapshot.tabId);
+        if (sessions.has(key)) throw new Error("Duplicate retained preview tab identity.");
+        sessions.set(key, { threadId: snapshot.threadId, tabId: snapshot.tabId, snapshot });
+      }
+      return sessions;
+    });
+  }).pipe(
+    Effect.mapError((cause) =>
+      isPreviewSessionStorageError(cause) ? cause : new PreviewSessionStorageError({ cause }),
+    ),
+  );
+  const persistSessions = Effect.fn("PreviewManager.persistSessions")(
+    function* (sessions: ReadonlyMap<string, PreviewSessionState>) {
+      const retained = yield* Effect.try(() =>
+        [...sessions.values()].map((session) => dormantSnapshot(session.snapshot)),
+      );
+      const contents = yield* encodePreviewSessionFile({ version: 1, sessions: retained });
+      if (new TextEncoder().encode(contents).byteLength > MAX_SESSION_FILE_BYTES) {
+        return yield* new PreviewSessionStorageError({
+          cause: new Error("Preview session record exceeds its size limit."),
+        });
+      }
+      yield* writeFileStringAtomically({ filePath: sessionsPath, contents, mode: 0o600 }).pipe(
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(Path.Path, path),
+      );
+    },
+    Effect.mapError((cause) =>
+      isPreviewSessionStorageError(cause) ? cause : new PreviewSessionStorageError({ cause }),
+    ),
+  );
   const recoveryClaimsPath = path.join(serverConfig.stateDir, "preview-recovery-claims.json");
   const loadedRecoveryClaims = yield* fileSystem.exists(recoveryClaimsPath).pipe(
     Effect.flatMap((exists) =>
@@ -201,7 +284,10 @@ export const make = Effect.gen(function* PreviewManagerMake() {
   );
   const recoveryClaimsLoadError = loadedRecoveryClaims.loadError;
   const recoveryClaimsRef = yield* SynchronizedRef.make(loadedRecoveryClaims.claims);
-  const stateRef = yield* SynchronizedRef.make<ManagerState>(initialState);
+  const stateRef = yield* SynchronizedRef.make<ManagerState>({
+    sessions: loadedSessions,
+    revision: 0,
+  });
   const nativeCloseGuards = new Map<string, () => Effect.Effect<void, PreviewError>>();
   const eventsPubSub = yield* PubSub.unbounded<PreviewEvent>();
   const events: Stream.Stream<PreviewEvent> = Stream.fromPubSub(eventsPubSub);
@@ -213,7 +299,7 @@ export const make = Effect.gen(function* PreviewManagerMake() {
     mutator: (
       session: PreviewSessionState,
     ) => Effect.Effect<{ next: PreviewSessionState; emit: PreviewEventDraft | null; result: R }, E>,
-  ): Effect.Effect<R, E | PreviewSessionLookupError> => {
+  ): Effect.Effect<R, E | PreviewSessionLookupError | PreviewSessionStorageError> => {
     type ModifyResult =
       | { kind: "fail"; error: PreviewSessionLookupError }
       | { kind: "ok"; result: R };
@@ -230,6 +316,9 @@ export const make = Effect.gen(function* PreviewManagerMake() {
         Effect.flatMap(
           Effect.fn("PreviewManager.commitMutation")(function* ({ next, emit, result }) {
             const revision = emit ? state.revision + 1 : state.revision;
+            const sessions = new Map(state.sessions);
+            sessions.set(compositeKey(threadId, tabId), next);
+            if (next !== session) yield* persistSessions(sessions);
             if (emit) {
               yield* PubSub.publish(eventsPubSub, {
                 ...emit,
@@ -237,8 +326,6 @@ export const make = Effect.gen(function* PreviewManagerMake() {
                 serverEpoch,
               } as PreviewEvent);
             }
-            const sessions = new Map(state.sessions);
-            sessions.set(compositeKey(threadId, tabId), next);
             return [{ kind: "ok", result } as ModifyResult, { sessions, revision }] as readonly [
               ModifyResult,
               ManagerState,
@@ -332,6 +419,7 @@ export const make = Effect.gen(function* PreviewManagerMake() {
           });
           input.beforePublish?.(snapshot);
           if (nativeRoot) yield* nativeRoot.publish();
+          yield* persistSessions(sessions);
           publicationCommitted = true;
           if (snapshot.backingPage === "desktop-popup" && input.desktopPopup?.close)
             nativeCloseGuards.set(compositeKey(input.threadId, tabId), input.desktopPopup.close);
@@ -623,11 +711,13 @@ export const make = Effect.gen(function* PreviewManagerMake() {
       if (eventsToEmit.length === 0) {
         return Effect.succeed([undefined, state] as const);
       }
-      return Effect.as(
-        Effect.forEach(eventsToEmit, (event) => PubSub.publish(eventsPubSub, event), {
-          discard: true,
-        }),
-        [undefined, { sessions, revision }] as const,
+      return persistSessions(sessions).pipe(
+        Effect.andThen(
+          Effect.forEach(eventsToEmit, (event) => PubSub.publish(eventsPubSub, event), {
+            discard: true,
+          }),
+        ),
+        Effect.as([undefined, { sessions, revision }] as const),
       );
     });
     for (const key of targetKeys) nativeCloseGuards.delete(key);
@@ -729,6 +819,33 @@ export const make = Effect.gen(function* PreviewManagerMake() {
     );
   });
 
+  const nativeDormantConfirmed: PreviewManager["Service"]["nativeDormantConfirmed"] = Effect.fn(
+    "PreviewManager.nativeDormantConfirmed",
+  )(function* (input) {
+    yield* mutateExistingSession(
+      input.threadId,
+      input.tabId,
+      Effect.fn("PreviewManager.releaseNativeRendering")(function* (session) {
+        const snapshot = {
+          ...dormantSnapshot(session.snapshot),
+          updatedAt: yield* currentIsoTimestamp,
+        };
+        return {
+          next: { ...session, snapshot },
+          emit: {
+            type: "navigated" as const,
+            threadId: session.threadId,
+            tabId: session.tabId,
+            createdAt: snapshot.updatedAt,
+            snapshot,
+          },
+          result: undefined,
+        };
+      }),
+    );
+    nativeCloseGuards.delete(compositeKey(input.threadId, input.tabId));
+  });
+
   return PreviewManager.of({
     open,
     requestReveal,
@@ -741,6 +858,7 @@ export const make = Effect.gen(function* PreviewManagerMake() {
     close,
     nativeClosedConfirmed: (input) =>
       commitClosed(new Set([compositeKey(input.threadId, input.tabId)])),
+    nativeDormantConfirmed,
     list,
     events,
     subscribeEvents: PubSub.subscribe(eventsPubSub),

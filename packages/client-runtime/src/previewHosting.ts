@@ -1,8 +1,10 @@
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import type { ConnectionCatalogEntry } from "./connection/catalog.ts";
 import type { PreparedConnection } from "./connection/model.ts";
 import {
   PREVIEW_URL_MAX_LENGTH,
+  PreviewHostingError,
   type PreviewHostingLeaseSummary,
   type PreviewHostingRecoverResult,
   type ScopedThreadRef,
@@ -49,7 +51,9 @@ export class HostedPreviewUrlTooLongError extends Error {
 export class HostedPreviewRecoveryError extends Error {
   constructor(cause?: unknown) {
     super(
-      "The saved preview could not be started. Retry opening it when its environment is available.",
+      Schema.is(PreviewHostingError)(cause) && cause.reason === "capacity"
+        ? "Managed previews are at capacity. Your preview is saved. Close an active Browser view or finish its automation or recording, then retry."
+        : "The saved preview could not be started. Retry opening it when its environment is available.",
       { cause },
     );
     this.name = "HostedPreviewRecoveryError";
@@ -69,17 +73,25 @@ export interface PrepareHostedPreviewInput {
     lease: PreviewHostingLeaseSummary,
     options: { readonly bootstrap: boolean },
   ) => Promise<PreviewHostingRecoverResult>;
+  readonly createResourceUrl?: (
+    lease: PreviewHostingLeaseSummary,
+    localUrl: string,
+  ) => Promise<string>;
+  readonly renewDocumentUrl?: (url: string, refresh: boolean) => Promise<string>;
 }
 
 export interface PreparedHostedPreview {
   readonly url: string;
   /** Verified lease destination as reached by a browser in the owning environment. */
   readonly localUrl?: string;
+  /** Signed exact resource URL on the connected environment origin for native media viewers. */
+  readonly resourceUrl?: string;
   readonly managed: boolean;
   readonly restored: boolean;
   /** One-use navigation only; never save in handoffs, history, or copied links. */
   readonly navigationUrl?: string;
   readonly restarted?: boolean;
+  readonly runId?: string;
 }
 
 /** Use only at the navigation boundary; retained destinations stay credential-free. */
@@ -140,6 +152,35 @@ export function prepareHostedPreview(
   } catch {
     return Promise.resolve(original);
   }
+  if (
+    input.renewDocumentUrl !== undefined &&
+    (target.protocol === "http:" || target.protocol === "https:") &&
+    target.pathname.startsWith("/api/assets/") &&
+    (isLoopbackHost(target.hostname) ||
+      target.origin === environment.origin ||
+      input.knownEnvironmentUrls?.some((known) => {
+        try {
+          return new URL(known).origin === target.origin;
+        } catch {
+          return false;
+        }
+      }))
+  ) {
+    return (async () => {
+      try {
+        const issued = await input.renewDocumentUrl!(input.url, input.purpose !== "resource");
+        const renewed = connectedAssetUrl(issued, environment);
+        return {
+          url: renewed,
+          managed: false,
+          restored: true,
+          ...(renewed === input.url ? {} : { restarted: true }),
+        };
+      } catch (cause) {
+        throw new HostedPreviewRecoveryError(cause);
+      }
+    })();
+  }
   const targetIsLoopback = isLoopbackHost(target.hostname);
   const targetIsCurrentEnvironment =
     normalizeHostname(target.hostname) === normalizeHostname(environment.hostname);
@@ -196,6 +237,15 @@ export function prepareHostedPreview(
       throw new HostedPreviewRecoveryError(cause);
     }
     if (recovered === null) throw new HostedPreviewRecoveryError();
+    let resourceUrl: string | undefined;
+    if (input.purpose === "resource" && input.createResourceUrl !== undefined) {
+      try {
+        const issued = await input.createResourceUrl(owned, localUrl);
+        resourceUrl = connectedAssetUrl(issued, environment);
+      } catch (cause) {
+        throw new HostedPreviewRecoveryError(cause);
+      }
+    }
     const navigationUrl =
       input.purpose !== "resource" && recovered.bootstrapToken
         ? setPreviewBootstrapTokenOnUrl(new URL(destination), recovered.bootstrapToken).href
@@ -205,12 +255,27 @@ export function prepareHostedPreview(
     return {
       url: destination,
       localUrl,
+      ...(resourceUrl === undefined ? {} : { resourceUrl }),
       managed: true,
       restored: true,
       ...(navigationUrl === undefined ? {} : { navigationUrl }),
       ...(recovered.restarted ? { restarted: true } : {}),
+      ...(recovered.runId === undefined ? {} : { runId: recovered.runId }),
     };
   })();
+}
+
+function connectedAssetUrl(issued: string, environment: URL): string {
+  const asset = new URL(issued, environment);
+  if (
+    (environment.protocol !== "http:" && environment.protocol !== "https:") ||
+    asset.origin !== environment.origin ||
+    asset.username !== "" ||
+    asset.password !== "" ||
+    !asset.pathname.startsWith("/api/assets/")
+  )
+    throw new HostedPreviewRecoveryError();
+  return asset.href;
 }
 
 function isKnownPreviousPrivateAddress(

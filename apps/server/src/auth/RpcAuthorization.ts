@@ -210,6 +210,7 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.previewReportProfiles]: AuthPreviewOperateScope,
   [WS_METHODS.previewHostingList]: AuthOrchestrationReadScope,
   [WS_METHODS.previewHostingRecover]: AuthTerminalOperateScope,
+  [WS_METHODS.previewHostingActivity]: AuthPreviewOperateScope,
   [WS_METHODS.previewHostingStopThread]: AuthTerminalOperateScope,
   [WS_METHODS.subscribePreviewHosting]: AuthOrchestrationReadScope,
   [WS_METHODS.previewReportStatus]: AuthPreviewOperateScope,
@@ -277,6 +278,7 @@ const requiredScopesForRpcCall = (
   }
   if (method === WS_METHODS.assetsCreateUrl) {
     const { resource } = decodeAssetCreateUrlInput(payload);
+    if (resource._tag === "managed-preview-resource") return [AuthTerminalOperateScope];
     return [
       resource._tag === "workspace-file" ||
       (resource._tag === "media-file" && resource.linkedThreadFile !== true) ||

@@ -1,5 +1,6 @@
 import {
   isBuiltInBrowserProfileId,
+  DEFAULT_BROWSER_PROFILE_ID,
   type EnvironmentId,
   type PreviewRuntime,
 } from "@t3tools/contracts";
@@ -10,6 +11,19 @@ import {
 
 import { readEnvironmentSupportsServerBrowser } from "~/state/entities";
 import { desktopBrowserHostFor, previewRuntimeFor } from "./previewRuntime";
+
+export function preparedPreviewOpenProfileId(
+  prepared: PreparedHostedPreview,
+  defaultProfileId: string,
+  explicitProfileId?: string,
+) {
+  return (
+    explicitProfileId ??
+    (prepared.managed && prepared.localUrl !== undefined
+      ? DEFAULT_BROWSER_PROFILE_ID
+      : defaultProfileId)
+  );
+}
 
 /** A managed app's loopback listener is reachable from its environment's browser. */
 export function preparedPreviewOpenTarget(

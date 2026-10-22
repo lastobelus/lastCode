@@ -56,10 +56,20 @@ export type DesktopBrowserSurfaceRequest = typeof DesktopBrowserSurfaceRequest.T
 export const DesktopBrowserSurfaceResponse = Schema.Struct(SurfaceResponse);
 export type DesktopBrowserSurfaceResponse = typeof DesktopBrowserSurfaceResponse.Type;
 
+/** A physical desktop owns admission and unloading; a wake never changes the selected tab. */
+export const DesktopBrowserRendererRequest = Schema.Struct({
+  ...TabKey,
+  environmentId: Schema.String,
+  desktopHostId: Schema.String,
+  action: Schema.Literals(["wake", "unload"]),
+});
+export type DesktopBrowserRendererRequest = typeof DesktopBrowserRendererRequest.Type;
+
 /** Selected renderer Browser slot; the native host checks actual window visibility. */
 export const DesktopBrowserPresentationInput = Schema.Struct({
   runtimeTabId: Schema.String,
   presented: Schema.Boolean,
+  rendering: Schema.optionalKey(Schema.Boolean),
 });
 export type DesktopBrowserPresentationInput = typeof DesktopBrowserPresentationInput.Type;
 
@@ -67,6 +77,12 @@ export const DESKTOP_BROWSER_DOWNLOAD_MAX_BYTES = 64 * 1024 * 1024;
 export const DESKTOP_BROWSER_DOWNLOAD_CHUNK_BYTES = 192 * 1024;
 
 export const DesktopBrowserEvent = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("dormant"),
+    ...TabKey,
+    rootId: Schema.optionalKey(Schema.String),
+    popupId: Schema.optionalKey(Schema.String),
+  }),
   Schema.Struct({ type: Schema.Literal("rootAccepted"), ...RootAttempt, accepted: Schema.Boolean }),
   Schema.Struct({
     type: Schema.Literal("rootCreated"),
@@ -138,8 +154,10 @@ export const DesktopBrowserEvent = Schema.Union([
     /** Advertised by native hosts that acknowledge rendering leases. */
     supportsNativeSurface: Schema.optionalKey(Schema.Boolean),
     presented: Schema.optionalKey(Schema.Boolean),
+    rendering: Schema.optionalKey(Schema.Boolean),
   }),
   Schema.Struct({ type: Schema.Literal("presentation"), ...TabKey, presented: Schema.Boolean }),
+  Schema.Struct({ type: Schema.Literal("rendering"), ...TabKey, active: Schema.Boolean }),
   /** Its `<webview>` went away: closed, crashed, swapped, or devtools took the debugger. */
   Schema.Struct({ type: Schema.Literal("detached"), ...TabKey }),
   Schema.Struct({ type: Schema.Literal("cdp"), ...TabKey, message: Schema.String }),
@@ -147,6 +165,7 @@ export const DesktopBrowserEvent = Schema.Union([
 export type DesktopBrowserEvent = typeof DesktopBrowserEvent.Type;
 
 export const DesktopBrowserCommand = Schema.Union([
+  Schema.Struct({ type: Schema.Literal("wake"), ...TabKey }),
   /** Authoritative root requests for this owner; older epochs and omitted requests are retired. */
   Schema.Struct({
     type: Schema.Literal("reconcileRoots"),
@@ -239,6 +258,7 @@ export class DesktopBrowserTransportError extends Schema.TaggedError<DesktopBrow
   {
     reason: Schema.Literals([
       "host-unavailable",
+      "at-capacity",
       "download-transfer-failed",
       "layout-timeout",
       "guest-unavailable",
@@ -250,6 +270,8 @@ export class DesktopBrowserTransportError extends Schema.TaggedError<DesktopBrow
   },
 ) {
   override get message(): string {
+    if (this.reason === "at-capacity")
+      return "The desktop browser is at capacity while its previews are in use. This preview is saved; retry after another preview becomes inactive.";
     if (this.reason === "root-unsupported")
       return "This desktop app cannot create the native browser pages required by this server. Update the desktop app to a compatible release to run browser automation.";
     if (this.reason === "profile-unavailable")

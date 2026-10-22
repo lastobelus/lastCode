@@ -11,6 +11,8 @@ import {
   type DesktopBrowserSurfaceRequest,
   type DesktopBrowserSurfaceResponse,
   type DesktopBrowserEvent as DesktopBrowserEventType,
+  type DesktopBrowserPresentationInput,
+  type DesktopBrowserRendererRequest,
   type PreviewViewportSetting,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -26,11 +28,15 @@ import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import { createNativeBrowserLifetime } from "./NativeBrowserLifetime.ts";
 import * as Semaphore from "effect/Semaphore";
 
 import * as DesktopClientSettings from "../settings/DesktopClientSettings.ts";
 import type { resolvePartitionScope } from "./BrowserProfileScope.ts";
-import { DESKTOP_BROWSER_SURFACE_REQUEST_CHANNEL } from "../ipc/channels.ts";
+import {
+  DESKTOP_BROWSER_SURFACE_REQUEST_CHANNEL,
+  DESKTOP_BROWSER_RENDERER_REQUEST_CHANNEL,
+} from "../ipc/channels.ts";
 
 import { createCdpRelayConnection, type CdpRelayConnection } from "./CdpRelay.ts";
 import { sendPageCommand } from "./GuestInput.ts";
@@ -91,6 +97,9 @@ interface AttachedTab {
   screenshotTurn: object | null;
   readonly waitingScreenshots: Array<() => void>;
   presented: boolean;
+  rendering: boolean;
+  lifecycle: Promise<void>;
+  frozen: boolean | undefined;
   downloadDirectory: string | null;
   pendingDownloadGuid: string | null;
   agentInputAt: number;
@@ -122,7 +131,10 @@ interface NativePopup {
   readonly window: Electron.BrowserWindow;
   readonly contents: Electron.WebContents;
   readonly release: () => void;
+  lifecycle: Promise<void>;
+  frozen: boolean | undefined;
   boundKey: DesktopBrowserTabKey | undefined;
+  closing: boolean;
   closeRequest: { readonly requestId: string; canceled: boolean } | undefined;
 }
 
@@ -159,13 +171,12 @@ export class DesktopBrowserHost extends Context.Service<
       debuggee: DesktopBrowserTabDebugger,
       runtimeTabId: string,
     ) => void;
+    readonly reserveTab: (runtimeTabId: string, key: DesktopBrowserTabKey) => boolean;
+    readonly releaseReservation: (runtimeTabId: string) => void;
     /** Registers only the actual child window delivered by Electron's did-create-window. */
     readonly registerPopup: (source: DesktopBrowserTabKey, window: Electron.BrowserWindow) => void;
     readonly surfaceResponse: (response: DesktopBrowserSurfaceResponse, senderId: number) => void;
-    readonly setPresentation: (
-      input: { readonly runtimeTabId: string; readonly presented: boolean },
-      senderId: number,
-    ) => void;
+    readonly setPresentation: (input: DesktopBrowserPresentationInput, senderId: number) => void;
     readonly setMainWindow: (window: Electron.BrowserWindow) => void;
     readonly setPictureInPictureWindow: (
       runtimeTabId: string,
@@ -262,9 +273,80 @@ export const make = Effect.gen(function* () {
   const creationKey = (key: DesktopBrowserTabKey, requestId: string, profileId: string) =>
     JSON.stringify([keyOf(key), requestId, profileId]);
   const presentedSlots = new Map<string, number>();
+  const renderingSlots = new Map<string, number>();
   const emit = (event: DesktopBrowserEventType, desktopHostId = "local") =>
     runFork(PubSub.publish(outbox, { desktopHostId, event }));
   let mainWindow: Electron.BrowserWindow | null = null;
+  const sendRendererRequest = (key: DesktopBrowserTabKey, action: "wake" | "unload") => {
+    const desktopHostId = key.desktopHostId ?? "local";
+    const binding = environmentBindings.get(desktopHostId);
+    if (!binding || !mainWindow || mainWindow.isDestroyed()) return;
+    const request: DesktopBrowserRendererRequest = {
+      threadId: key.threadId,
+      tabId: key.tabId,
+      environmentId: binding.environmentId,
+      desktopHostId,
+      action,
+    };
+    mainWindow.webContents.send(DESKTOP_BROWSER_RENDERER_REQUEST_CHANNEL, request);
+  };
+  let residentIds: ReadonlySet<string> = new Set();
+  const pendingSlots = new Map<string, DesktopBrowserTabKey>();
+  const unboundPopups = new Map<string, NativePopup>();
+  const lifetime = createNativeBrowserLifetime({
+    now,
+    schedule: (delayMs, task) => {
+      const fiber = runFork(Effect.sleep(delayMs).pipe(Effect.andThen(Effect.sync(task))));
+      return () => {
+        runFork(Fiber.interrupt(fiber));
+      };
+    },
+    changed: (next) => {
+      const removed = [...residentIds].filter((id) => !next.has(id));
+      residentIds = next;
+      for (const id of removed) {
+        const tab = tabs.get(id);
+        if (!tab) {
+          const reservation = [...pendingSlots].find(([, key]) => keyOf(key) === id);
+          const popup = reservation ? unboundPopups.get(reservation[0]) : undefined;
+          if (popup) {
+            popups.delete(popup.id);
+            popup.release();
+            emit(
+              {
+                type: "dormant",
+                threadId: popup.source.threadId,
+                tabId: popup.source.tabId,
+                popupId: popup.id,
+              },
+              popup.source.desktopHostId,
+            );
+            if (!popup.window.isDestroyed()) popup.window.destroy();
+          }
+          continue;
+        }
+        const popup = tab.popup;
+        // Policy unloading retires Chromium, never the saved preview. Detach the
+        // destructive native-close listeners before destroying an owned window.
+        emit(
+          {
+            type: "dormant",
+            threadId: tab.key.threadId,
+            tabId: tab.key.tabId,
+            ...(popup?.kind === "root" ? { rootId: popup.id } : {}),
+            ...(popup?.kind === "popup" ? { popupId: popup.id } : {}),
+          },
+          tab.key.desktopHostId,
+        );
+        if (popup) {
+          popups.delete(popup.id);
+          popup.release();
+        } else sendRendererRequest(tab.key, "unload");
+        detach(tab.key);
+        if (popup && !popup.window.isDestroyed()) popup.window.destroy();
+      }
+    },
+  });
   let releaseMainWindow: (() => void) | undefined;
   const makeAutomationLifetime = () => ({
     closed: false,
@@ -311,12 +393,99 @@ export const make = Effect.gen(function* () {
     const presented = tab.popup
       ? windowVisible(tab.popup.window)
       : nativePresented(tab.runtimeTabId, tab.debuggee.webContents.hostWebContents?.id);
-    if (tab.presented === presented) return;
+    if (tab.presented === presented) {
+      syncNativeLifetime();
+      return;
+    }
     tab.presented = presented;
     emit(
       { type: "presentation", threadId: tab.key.threadId, tabId: tab.key.tabId, presented },
       tab.key.desktopHostId,
     );
+    syncNativeLifetime();
+  };
+  const rendererRenderingActive = (tab: AttachedTab) =>
+    renderingSlots.get(tab.runtimeTabId) === tab.debuggee.webContents.hostWebContents?.id &&
+    renderingSlots.has(tab.runtimeTabId);
+  const renderingActive = (tab: AttachedTab) =>
+    tab.presented ||
+    tab.renderingLeases.size > 0 ||
+    rendererRenderingActive(tab) ||
+    (tab.popup?.creation !== undefined && tab.popup.creation.stage !== "published");
+  const syncNativeLifetime = () => {
+    const pendingIds = [...pendingSlots.values()].map(keyOf);
+    const demanded = new Set<string>(
+      [...pendingSlots]
+        .filter(
+          ([slot]) => !unboundPopups.has(slot) || windowVisible(unboundPopups.get(slot)?.window),
+        )
+        .map(([, key]) => keyOf(key)),
+    );
+    for (const [id, tab] of tabs) {
+      const active = renderingActive(tab);
+      // Server surface leases already protect their process through the server's activity owner.
+      const rendererActive = rendererRenderingActive(tab);
+      if (tab.rendering !== rendererActive) {
+        tab.rendering = rendererActive;
+        emit(
+          {
+            type: "rendering",
+            threadId: tab.key.threadId,
+            tabId: tab.key.tabId,
+            active: rendererActive,
+          },
+          tab.key.desktopHostId,
+        );
+      }
+      if (active) demanded.add(id);
+      const update = tab.lifecycle.then(async () => {
+        const frozen = !renderingActive(tab);
+        if (tabs.get(id) !== tab || tab.frozen === frozen || tab.debuggee.webContents.isDestroyed())
+          return;
+        await tab.debuggee.debugger.sendCommand("Page.setWebLifecycleState", {
+          state: frozen ? "frozen" : "active",
+        });
+        tab.frozen = frozen;
+      });
+      tab.lifecycle = update.catch(() => undefined);
+    }
+    for (const popup of unboundPopups.values()) {
+      popup.lifecycle = popup.lifecycle
+        .then(async () => {
+          const frozen = !windowVisible(popup.window);
+          if (popup.boundKey || popup.contents.isDestroyed() || popup.frozen === frozen) return;
+          await popup.contents.debugger.sendCommand("Page.setWebLifecycleState", {
+            state: frozen ? "frozen" : "active",
+          });
+          popup.frozen = frozen;
+        })
+        .catch(() => undefined);
+    }
+    // New attachments were created by actual viewer or automation demand.
+    // Admit them once even when their first presentation update is still in flight.
+    for (const id of tabs.keys()) if (!residentIds.has(id)) demanded.add(id);
+    lifetime.update(new Set([...tabs.keys(), ...pendingIds]), demanded);
+  };
+  const reserveTab = (runtimeTabId: string, key: DesktopBrowserTabKey) => {
+    syncNativeLifetime();
+    if (!lifetime.reserve(keyOf(key))) return false;
+    pendingSlots.set(runtimeTabId, key);
+    syncNativeLifetime();
+    return true;
+  };
+  const releaseReservation = (runtimeTabId: string) => {
+    pendingSlots.delete(runtimeTabId);
+    unboundPopups.delete(runtimeTabId);
+    scheduleNativeLifetime();
+  };
+  let syncQueued = false;
+  const scheduleNativeLifetime = () => {
+    if (syncQueued) return;
+    syncQueued = true;
+    queueMicrotask(() => {
+      syncQueued = false;
+      syncNativeLifetime();
+    });
   };
   const observeWindow = (window: Electron.BrowserWindow, changed: () => void) => {
     window.on("show", changed);
@@ -335,6 +504,7 @@ export const make = Effect.gen(function* () {
   yield* Effect.addFinalizer(() =>
     Effect.sync(() => {
       releaseMainWindow?.();
+      lifetime.dispose();
       closeAutomationLifetime(automationLifetime);
       for (const entry of pictureInPictureWindows.values()) entry.release();
       for (const popup of popups.values()) {
@@ -402,6 +572,7 @@ export const make = Effect.gen(function* () {
     tab.surfaceLeases.delete(leaseId);
     tab.renderingLeases.get(leaseId)?.();
     tab.renderingLeases.delete(leaseId);
+    scheduleNativeLifetime();
   };
   let nextSurfaceRequest = 0;
   const pendingSurfaces = new Map<
@@ -643,9 +814,10 @@ export const make = Effect.gen(function* () {
     const id = keyOf(key);
     const tab = tabs.get(id);
     if (!tab) return;
-    clearSurfaceLeases(tab);
     tabs.delete(id);
     tab.relay = null;
+    clearSurfaceLeases(tab);
+    scheduleNativeLifetime();
     if (tab.remoteDownloadDirectory) {
       void tab.remoteDownloadDirectory
         .then((directory) => NodeFSP.rm(directory, { recursive: true, force: true }))
@@ -680,6 +852,9 @@ export const make = Effect.gen(function* () {
       presented: popup
         ? windowVisible(popup.window)
         : nativePresented(runtimeTabId, debuggee.webContents.hostWebContents?.id),
+      rendering: false,
+      lifecycle: popup?.lifecycle ?? Promise.resolve(),
+      frozen: popup?.frozen,
       downloadDirectory: null,
       pendingDownloadGuid: null,
       agentInputAt: Number.NEGATIVE_INFINITY,
@@ -720,7 +895,12 @@ export const make = Effect.gen(function* () {
         if (tab.screenshotTurn !== null) nextScreenshot(tab);
       },
     };
+    tab.rendering = rendererRenderingActive(tab);
     tabs.set(id, tab);
+    for (const [slot, pending] of pendingSlots)
+      if (keyOf(pending) === id) pendingSlots.delete(slot);
+    syncNativeLifetime();
+    scheduleNativeLifetime();
     debuggee.debugger.on("message", tab.onMessage);
     debuggee.webContents.on("did-navigate", tab.onNewDocument);
     emit(
@@ -730,6 +910,7 @@ export const make = Effect.gen(function* () {
         tabId: key.tabId,
         supportsNativeSurface: true,
         ...(tab.presented ? { presented: true } : {}),
+        ...(tab.rendering ? { rendering: true } : {}),
       },
       key.desktopHostId,
     );
@@ -753,8 +934,17 @@ export const make = Effect.gen(function* () {
       return;
     }
     const id = NodeCrypto.randomUUID();
+    if (!creation && !reserveTab(`popup:${id}`, { ...source, tabId: `popup:${id}` })) {
+      debuggee.detach();
+      if (!window.isDestroyed()) window.destroy();
+      return;
+    }
     const cleanup = () => {
       if (popups.get(id) !== popup) return;
+      const deliberate =
+        popup.closing || (popup.closeRequest !== undefined && !popup.closeRequest.canceled);
+      const retain =
+        !deliberate && (popup.kind === "popup" || popup.creation?.stage === "published");
       popups.delete(id);
       if (popup.kind === "root") {
         if (popup.boundKey) detach(popup.boundKey);
@@ -764,9 +954,16 @@ export const make = Effect.gen(function* () {
         if (!window.isDestroyed()) window.destroy();
       }
       emit(
-        popup.kind === "root"
-          ? { type: "rootClosed", threadId: source.threadId, tabId: source.tabId, rootId: id }
-          : { type: "popupClosed", threadId: source.threadId, tabId: source.tabId, popupId: id },
+        retain
+          ? {
+              type: "dormant",
+              threadId: source.threadId,
+              tabId: source.tabId,
+              ...(popup.kind === "root" ? { rootId: id } : { popupId: id }),
+            }
+          : popup.kind === "root"
+            ? { type: "rootClosed", threadId: source.threadId, tabId: source.tabId, rootId: id }
+            : { type: "popupClosed", threadId: source.threadId, tabId: source.tabId, popupId: id },
         source.desktopHostId,
       );
       if (popup.kind === "popup") {
@@ -777,6 +974,7 @@ export const make = Effect.gen(function* () {
     const changed = () => {
       const tab = popup.boundKey ? tabs.get(keyOf(popup.boundKey)) : undefined;
       if (tab) updatePresentation(tab);
+      else syncNativeLifetime();
     };
     const canceled = (requestId: string | undefined) => {
       const request = popup.closeRequest;
@@ -788,6 +986,7 @@ export const make = Effect.gen(function* () {
       )
         return;
       request.canceled = true;
+      popup.closing = false;
       emit(
         popup.kind === "root"
           ? {
@@ -808,16 +1007,23 @@ export const make = Effect.gen(function* () {
       );
     };
     const windowClosing = (event: Electron.Event) => {
+      popup.closing = true;
       const requestId = popup.closeRequest?.requestId;
       queueMicrotask(() => {
-        if (event.defaultPrevented) canceled(requestId);
+        if (event.defaultPrevented) {
+          popup.closing = false;
+          canceled(requestId);
+        }
       });
     };
     const unloadPrevented = (event: Electron.Event) => {
       const requestId = popup.closeRequest?.requestId;
       queueMicrotask(() => {
         // Electron reverses preventDefault here: it permits the unload.
-        if (!event.defaultPrevented) canceled(requestId);
+        if (!event.defaultPrevented) {
+          popup.closing = false;
+          canceled(requestId);
+        }
       });
     };
     const stopObserving = observeWindow(window, changed);
@@ -830,7 +1036,11 @@ export const make = Effect.gen(function* () {
       contents,
       boundKey: creation ? source : undefined,
       closeRequest: undefined,
+      closing: false,
+      lifecycle: Promise.resolve(),
+      frozen: undefined,
       release: () => {
+        releaseReservation(`popup:${id}`);
         stopObserving();
         window.off("closed", cleanup);
         window.off("close", windowClosing);
@@ -841,6 +1051,8 @@ export const make = Effect.gen(function* () {
       },
     };
     popups.set(id, popup);
+    if (!creation) unboundPopups.set(`popup:${id}`, popup);
+    scheduleNativeLifetime();
     window.on("closed", cleanup);
     window.on("close", windowClosing);
     contents.on("destroyed", cleanup);
@@ -861,6 +1073,10 @@ export const make = Effect.gen(function* () {
   };
   const registerPopup = (source: DesktopBrowserTabKey, window: Electron.BrowserWindow) => {
     registerNativePage(source, window);
+  };
+  const discardNativePage = (page: NativePopup) => {
+    page.closing = true;
+    if (!page.window.isDestroyed()) page.window.destroy();
   };
 
   const configureAutomationPage = (
@@ -978,6 +1194,10 @@ export const make = Effect.gen(function* () {
               respond(null, "guest-unavailable");
               return;
             }
+            if (!reserveTab(`root-reservation:${attempt}`, key)) {
+              respond(null, "guest-unavailable");
+              return;
+            }
             let window: Electron.BrowserWindow | undefined;
             const created = yield* createRootWindow({
               environmentId,
@@ -1041,6 +1261,7 @@ export const make = Effect.gen(function* () {
           Effect.ensuring(
             Effect.sync(() => {
               pendingRootCreations.delete(attempt);
+              releaseReservation(`root-reservation:${attempt}`);
               canceledCreations.delete(attempt);
             }),
           ),
@@ -1049,6 +1270,10 @@ export const make = Effect.gen(function* () {
 
   const handleCommand = (command: DesktopBrowserCommand, desktopHostId = "local") =>
     Effect.suspend(() => {
+      if (command.type === "wake") {
+        sendRendererRequest({ ...command, desktopHostId }, "wake");
+        return Effect.void;
+      }
       if (command.type === "resolveUrl") return Effect.void;
       if (command.type === "createRoot") {
         // Register the attempt before the next serial command can cancel it.
@@ -1071,6 +1296,7 @@ export const make = Effect.gen(function* () {
             root.creation.stage = "accepted";
           if (command.type === "publishRoot" && root.creation.stage === "accepted")
             root.creation.stage = "published";
+          scheduleNativeLifetime();
         }
         if (command.type === "acceptRoot")
           emit(
@@ -1106,7 +1332,7 @@ export const make = Effect.gen(function* () {
           root.creation.stage !== "published" &&
           !root.window.isDestroyed()
         )
-          root.window.destroy();
+          discardNativePage(root);
         emit(
           {
             type: "rootCreated",
@@ -1128,7 +1354,7 @@ export const make = Effect.gen(function* () {
           keyOf(root.source) === keyOf(key) &&
           !root.window.isDestroyed()
         )
-          root.window.destroy();
+          discardNativePage(root);
         else emit({ type: "rootClosed", ...key, rootId: command.rootId }, desktopHostId);
         return Effect.void;
       }
@@ -1149,7 +1375,7 @@ export const make = Effect.gen(function* () {
               !retained.has(root.creation.requestId)) &&
             !root.window.isDestroyed()
           )
-            root.window.destroy();
+            discardNativePage(root);
         return Effect.void;
       }
       if (command.type === "announce") return announceAll(desktopHostId);
@@ -1163,7 +1389,7 @@ export const make = Effect.gen(function* () {
             root.creation?.stage === "created" &&
             !root.window.isDestroyed()
           ) {
-            root.window.destroy();
+            discardNativePage(root);
           }
         for (const tab of tabs.values()) {
           if ((tab.key.desktopHostId ?? "local") !== desktopHostId) continue;
@@ -1355,6 +1581,9 @@ export const make = Effect.gen(function* () {
         if (popup.boundKey && keyOf(popup.boundKey) !== keyOf(key)) return Effect.void;
         const existing = tabs.get(keyOf(key));
         if (existing && existing.popup !== popup) return Effect.void;
+        releaseReservation(`popup:${popup.id}`);
+        syncNativeLifetime();
+        if (!reserveTab(`popup-bind:${popup.id}`, key)) return Effect.void;
         popup.boundKey = key;
         attach(
           key,
@@ -1406,75 +1635,97 @@ export const make = Effect.gen(function* () {
             command.leaseId,
             command.timeoutMs === undefined ? null : now() + command.timeoutMs,
           );
+          syncNativeLifetime();
         }
-        if (tab.popup) {
-          let viewport: DesktopBrowserSurfaceResponse["viewport"] = null;
-          try {
-            if (tab.popup.kind === "root" && command.action === "acquire") {
-              const size =
-                command.viewport && command.viewport._tag !== "fill"
-                  ? command.viewport
-                  : command.viewportSize;
-              if (size) tab.popup.window.setContentSize(size.width, size.height);
-              if (command.zoomFactor !== undefined)
-                tab.popup.contents.setZoomFactor(command.zoomFactor);
-            }
-            const [width, height] = tab.popup.window.getContentSize();
-            if (
-              !tab.popup.window.isDestroyed() &&
-              width !== undefined &&
-              height !== undefined &&
-              width > 0 &&
-              height > 0
-            )
-              viewport = { width, height };
-          } catch {
-            // The popup can close between the command and sampling its bounds.
-          }
-          if (viewport === null) releaseSurfaceLease(tab, command.leaseId);
-          emit(
-            {
-              type: "surfaceReady",
-              threadId: command.threadId,
-              tabId: command.tabId,
-              requestId: command.requestId,
-              viewport,
-              ...(viewport === null ? { reason: "guest-unavailable" as const } : {}),
-            },
-            desktopHostId,
-          );
-          return Effect.void;
-        }
-        // Renderer request IDs belong to this process, avoiding collisions between backends.
-        const requestId = `surface:${++nextSurfaceRequest}`;
-        const request = { ...command, requestId, runtimeTabId: tab.runtimeTabId };
-        const timer = runFork(
-          Effect.sleep(2500).pipe(
-            Effect.andThen(() =>
-              Effect.sync(() =>
+        return Effect.promise(() => tab.lifecycle).pipe(
+          Effect.andThen(
+            Effect.sync(() => {
+              if (command.action === "acquire" && tab.frozen !== false) {
+                releaseSurfaceLease(tab, command.leaseId);
+                emit(
+                  {
+                    type: "surfaceReady",
+                    threadId: command.threadId,
+                    tabId: command.tabId,
+                    requestId: command.requestId,
+                    viewport: null,
+                    reason: "guest-unavailable",
+                  },
+                  desktopHostId,
+                );
+                return;
+              }
+              if (tab.popup) {
+                let viewport: DesktopBrowserSurfaceResponse["viewport"] = null;
+                try {
+                  if (tab.popup.kind === "root" && command.action === "acquire") {
+                    const size =
+                      command.viewport && command.viewport._tag !== "fill"
+                        ? command.viewport
+                        : command.viewportSize;
+                    if (size) tab.popup.window.setContentSize(size.width, size.height);
+                    if (command.zoomFactor !== undefined)
+                      tab.popup.contents.setZoomFactor(command.zoomFactor);
+                  }
+                  const [width, height] = tab.popup.window.getContentSize();
+                  if (
+                    !tab.popup.window.isDestroyed() &&
+                    width !== undefined &&
+                    height !== undefined &&
+                    width > 0 &&
+                    height > 0
+                  )
+                    viewport = { width, height };
+                } catch {
+                  // The popup can close between the command and sampling its bounds.
+                }
+                if (viewport === null) releaseSurfaceLease(tab, command.leaseId);
+                emit(
+                  {
+                    type: "surfaceReady",
+                    threadId: command.threadId,
+                    tabId: command.tabId,
+                    requestId: command.requestId,
+                    viewport,
+                    ...(viewport === null ? { reason: "guest-unavailable" as const } : {}),
+                  },
+                  desktopHostId,
+                );
+                return;
+              }
+              // Renderer request IDs belong to this process, avoiding collisions between backends.
+              const requestId = `surface:${++nextSurfaceRequest}`;
+              const request = { ...command, requestId, runtimeTabId: tab.runtimeTabId };
+              const timer = runFork(
+                Effect.sleep(2500).pipe(
+                  Effect.andThen(() =>
+                    Effect.sync(() =>
+                      finishSurface(requestId, {
+                        requestId,
+                        viewport: null,
+                        reason: "layout-timeout",
+                      }),
+                    ),
+                  ),
+                ),
+              );
+              pendingSurfaces.set(requestId, {
+                tab,
+                request,
+                serverRequestId: command.requestId,
+                senderId: tab.debuggee.webContents.hostWebContents?.id ?? -1,
+                timer,
+              });
+              if (!sendSurface(tab, request))
                 finishSurface(requestId, {
                   requestId,
                   viewport: null,
-                  reason: "layout-timeout",
-                }),
-              ),
-            ),
+                  reason: "guest-unavailable",
+                });
+              return;
+            }),
           ),
         );
-        pendingSurfaces.set(requestId, {
-          tab,
-          request,
-          serverRequestId: command.requestId,
-          senderId: tab.debuggee.webContents.hostWebContents?.id ?? -1,
-          timer,
-        });
-        if (!sendSurface(tab, request))
-          finishSurface(requestId, {
-            requestId,
-            viewport: null,
-            reason: "guest-unavailable",
-          });
-        return Effect.void;
       }
       if (!tab) return Effect.void;
       if (command.type === "pointer") {
@@ -1515,6 +1766,7 @@ export const make = Effect.gen(function* () {
                 tabId: tab.key.tabId,
                 supportsNativeSurface: true,
                 ...(tab.presented ? { presented: true } : {}),
+                ...(tab.rendering ? { rendering: true } : {}),
               },
             });
           },
@@ -1595,6 +1847,8 @@ export const make = Effect.gen(function* () {
         : handleCommand(command);
     },
     attach,
+    reserveTab,
+    releaseReservation,
     registerPopup,
     setPresentation: (input, senderId) => {
       const tab = [...tabs.values()].find((tab) => tab.runtimeTabId === input.runtimeTabId);
@@ -1604,6 +1858,9 @@ export const make = Effect.gen(function* () {
       if (input.presented) presentedSlots.set(input.runtimeTabId, senderId);
       else if (presentedSlots.get(input.runtimeTabId) === senderId)
         presentedSlots.delete(input.runtimeTabId);
+      if (input.rendering) renderingSlots.set(input.runtimeTabId, senderId);
+      else if (renderingSlots.get(input.runtimeTabId) === senderId)
+        renderingSlots.delete(input.runtimeTabId);
       if (!tab) return;
       updatePresentation(tab);
     },

@@ -20,6 +20,8 @@ import * as ProjectFaviconResolver from "../project/ProjectFaviconResolver.ts";
 import * as ThreadLinkedFiles from "../workspace/ThreadLinkedFiles.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import * as AssetAccess from "../assets/AssetAccess.ts";
+import * as NativeAppIconResolver from "../assets/NativeAppIconResolver.ts";
+import * as PreviewHosting from "./Hosting.ts";
 import type * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import * as PreviewAutomationBroker from "../mcp/PreviewAutomationBroker.ts";
 
@@ -52,6 +54,11 @@ const make = Effect.gen(function* () {
     ),
     Context.add(ThreadLinkedFiles.ThreadLinkedFiles, yield* ThreadLinkedFiles.ThreadLinkedFiles),
     Context.add(WorkspacePaths.WorkspacePaths, yield* WorkspacePaths.WorkspacePaths),
+    Context.add(PreviewHosting.PreviewHosting, yield* PreviewHosting.PreviewHosting),
+    Context.add(
+      NativeAppIconResolver.NativeAppIconResolver,
+      yield* NativeAppIconResolver.NativeAppIconResolver,
+    ),
   );
   const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
   const server = yield* HttpServer.HttpServer;

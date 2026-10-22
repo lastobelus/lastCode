@@ -22,6 +22,11 @@ import "~/index.css";
 import { act, render, stubGlobal } from "../../../test/render";
 
 import type { PreviewableServer } from "./useDiscoveredLocalServers";
+import {
+  markDesktopBrowserTabReady,
+  markDesktopBrowserTabUnavailable,
+  registerDesktopBrowserDemand,
+} from "~/browser/desktopBrowserDemand";
 
 const mocks = vi.hoisted(() => ({
   openExternal: vi.fn(async (_url: string): Promise<void> => undefined),
@@ -49,6 +54,7 @@ const mocks = vi.hoisted(() => ({
     | null,
   preparationPurposes: [] as Array<string | undefined>,
   refresh: vi.fn(async (): Promise<void> => undefined),
+  ensureDesktop: vi.fn(async (_tabId: string): Promise<void> => undefined),
   navStatus: { _tag: "Success", url: "http://example.com/", title: "Example" } as
     | { _tag: "Success"; url: string; title: string }
     | { _tag: "LoadFailed"; url: string; code: number; description: string },
@@ -73,6 +79,11 @@ const mocks = vi.hoisted(() => ({
   recordingTabIds: new Set<string>(),
   recordingRuntimeTabId: null as string | null,
   recordVisitForThread: vi.fn(),
+}));
+
+vi.mock(import("~/browser/desktopBrowserDemand"), async (original) => ({
+  ...(await original()),
+  ensureDesktopBrowserTab: mocks.ensureDesktop,
 }));
 
 const STUB_BROWSER_DEFAULTS = {
@@ -329,6 +340,8 @@ function annotation(id: string, screenshot: unknown = null) {
 function setup() {
   vi.clearAllMocks();
   mocks.recoverHostedPreview.mockReset().mockResolvedValue(false);
+  mocks.ensureDesktop.mockReset().mockResolvedValue(undefined);
+  markDesktopBrowserTabReady(TEST_RUNTIME_TAB_ID);
   mocks.preparedRecoveryUrl = null;
   mocks.localRecoveryUrl = null;
   mocks.hostingLeases = [];
@@ -462,6 +475,62 @@ describe("PreviewView", () => {
     expect(mocks.navigate).not.toHaveBeenCalled();
   });
 
+  it.each(["default", "work-account"])(
+    "retries a failed native cold mount in its retained %s profile",
+    async (profileId) => {
+      setup();
+      const unregister = registerDesktopBrowserDemand(TEST_RUNTIME_TAB_ID, () => () => undefined);
+      using _demand = { [Symbol.dispose]: unregister };
+      await using screen = await render(null);
+      const url = failedManagedDesktop(profileId);
+      mocks.navStatus = { _tag: "Success", url, title: "Managed app" };
+      await act(() =>
+        markDesktopBrowserTabUnavailable(
+          TEST_RUNTIME_TAB_ID,
+          new Error("The inactive preview could not be restored."),
+        ),
+      );
+      await act(() => screen.rerender(<div className="flex h-[600px] flex-col">{view()}</div>));
+      await expect
+        .element(page.getByRole("button", { name: "Retry preview", exact: true }))
+        .toBeVisible();
+      mocks.ensureDesktop.mockImplementationOnce(async () =>
+        markDesktopBrowserTabReady(TEST_RUNTIME_TAB_ID),
+      );
+      await act(async () =>
+        userEvent.click(page.getByRole("button", { name: "Retry preview", exact: true })),
+      );
+      expect(mocks.refresh).toHaveBeenCalledExactlyOnceWith(TEST_RUNTIME_TAB_ID);
+      await expect
+        .element(page.getByRole("button", { name: "Retry preview", exact: true }))
+        .not.toBeInTheDocument();
+      expect(mocks.openPreview).not.toHaveBeenCalled();
+      expect(mocks.closePreview).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not let an old refresh replace navigation chosen during a cold wake", async () => {
+    setup();
+    await using screen = await render(null);
+    let releaseWake!: () => void;
+    const wake = new Promise<void>((resolve) => {
+      releaseWake = resolve;
+    });
+    mocks.ensureDesktop.mockImplementationOnce(() => wake);
+    await act(() => screen.rerender(view()));
+    await act(async () =>
+      userEvent.click(page.getByRole("button", { name: "Refresh", exact: true })),
+    );
+    const next = "http://example.com/new-destination";
+    await userEvent.fill(page.getByRole("textbox", { name: "Search or enter URL" }), next);
+    await act(async () => userEvent.keyboard("{Enter}"));
+    mocks.navStatus = { _tag: "Success", url: next, title: "New destination" };
+    await act(() => screen.rerender(view()));
+    await act(async () => releaseWake());
+    expect(mocks.navigate).toHaveBeenCalledExactlyOnceWith(TEST_RUNTIME_TAB_ID, next);
+    expect(mocks.refresh).not.toHaveBeenCalled();
+  });
+
   it("keeps a failed managed tab in its named desktop profile", async () => {
     setup();
     await using screen = await render(null);
@@ -525,13 +594,14 @@ describe("PreviewView", () => {
     },
   );
 
-  it("retains a restarted panel through StrictMode and waits for stream control before sending", async () => {
+  it("retains an explicit refresh through StrictMode and waits for stream control before sending", async () => {
     setup();
     await using screen = await render(null);
     mocks.serverRuntime = true;
     mocks.restarted = true;
     mocks.navStatus = { _tag: "Success", url: "http://localhost:5173/qa", title: "QA" };
     mocks.recoverHostedPreview.mockResolvedValue(true);
+    requestHostedPreviewRefresh(TEST_THREAD_REF, "tab-1", mocks.navStatus.url);
     await act(() =>
       screen.rerender(
         <StrictMode>
@@ -557,6 +627,7 @@ describe("PreviewView", () => {
     mocks.restarted = true;
     mocks.navStatus = { _tag: "Success", url: "http://localhost:5173/qa", title: "QA" };
     mocks.recoverHostedPreview.mockResolvedValue(true);
+    requestHostedPreviewRefresh(TEST_THREAD_REF, "tab-1", mocks.navStatus.url);
     mocks.serverReload.mockReturnValueOnce(false).mockReturnValue(true);
     await act(() =>
       screen.rerender(<PreviewView threadRef={TEST_THREAD_REF} tabId="tab-1" visible />),
@@ -626,7 +697,10 @@ describe("PreviewView", () => {
             };
       mocks.restarted = status === "Success";
       mocks.recoverHostedPreview.mockResolvedValue(true);
-      if (status === "Success") mocks.recoverHostedPreview.mockResolvedValueOnce(true);
+      if (status === "Success") {
+        requestHostedPreviewRefresh(TEST_THREAD_REF, "tab-1", mocks.navStatus.url);
+        mocks.recoverHostedPreview.mockResolvedValueOnce(true);
+      }
       let finishOldAuthentication!: (restored: boolean) => void;
       mocks.recoverHostedPreview.mockImplementationOnce(
         () =>
@@ -651,7 +725,7 @@ describe("PreviewView", () => {
     },
   );
 
-  it("prepares a retained panel after its environment connection hydrates", async () => {
+  it("leaves ordinary return recovery to the renderer after its environment connection hydrates", async () => {
     setup();
     await using screen = await render(null);
     mocks.environmentUrl = null;
@@ -665,8 +739,9 @@ describe("PreviewView", () => {
     await act(() =>
       screen.rerender(<PreviewView threadRef={TEST_THREAD_REF} tabId="tab-1" visible />),
     );
-    expect(mocks.preparationPurposes).toEqual(["resource", undefined]);
-    expect(mocks.refresh).toHaveBeenCalledTimes(1);
+    expect(mocks.preparationPurposes).toEqual([]);
+    expect(mocks.refresh).not.toHaveBeenCalled();
+    expect(mocks.serverReload).not.toHaveBeenCalled();
   });
 
   it.each(["submit", "reload", "automatic"])(

@@ -14,19 +14,45 @@ import { ensureElectronRuntime } from "./ensure-electron-runtime.mjs";
 
 const directory = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
 const desktopDirectory = NodePath.resolve(directory, "..");
+const serverDirectory = NodePath.resolve(directory, "../../server");
+const repositoryDirectory = NodePath.resolve(desktopDirectory, "../..");
 const scratch = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "browser-surface-smoke-"));
 const require = NodeModule.createRequire(NodePath.resolve(directory, "../../server/package.json"));
+const desktopRequire = NodeModule.createRequire(NodePath.join(desktopDirectory, "package.json"));
+const { parse } = desktopRequire("acorn");
 // Playwright's pinned runtime already bundles its WebSocket server implementation.
 const wsModulePath = NodePath.join(
   NodePath.dirname(require.resolve("playwright-core/package.json")),
   "lib/utilsBundle.js",
 );
 await NodeFSP.mkdir(NodePath.join(scratch, "user-data"));
-await NodeFSP.symlink(
-  NodePath.join(desktopDirectory, "node_modules"),
-  NodePath.join(scratch, "node_modules"),
-  "dir",
-);
+const fixtureModules = NodePath.join(scratch, "node_modules");
+await NodeFSP.mkdir(fixtureModules);
+const linkedPackages = new Set();
+for (const owner of [desktopDirectory, serverDirectory, repositoryDirectory]) {
+  const installed = NodePath.join(owner, "node_modules");
+  for (const entry of await NodeFSP.readdir(installed, { withFileTypes: true })) {
+    if (entry.name.startsWith(".")) continue;
+    const names = entry.name.startsWith("@")
+      ? (await NodeFSP.readdir(NodePath.join(installed, entry.name))).map(
+          (name) => `${entry.name}/${name}`,
+        )
+      : [entry.name];
+    for (const name of names) {
+      if (linkedPackages.has(name)) continue;
+      const destination = NodePath.join(fixtureModules, name);
+      await NodeFSP.mkdir(NodePath.dirname(destination), { recursive: true });
+      await NodeFSP.symlink(
+        await NodeFSP.realpath(NodePath.join(installed, name)),
+        destination,
+        "dir",
+      );
+      linkedPackages.add(name);
+    }
+  }
+}
+const emittedChunks = [];
+const emittedFiles = new Set();
 async function bundle(entry, format, output, native = false) {
   const result = await build({
     configFile: false,
@@ -41,6 +67,11 @@ async function bundle(entry, format, output, native = false) {
       lib: { entry: NodePath.join(directory, entry), formats: [format], name: "SurfaceSmoke" },
       rolldownOptions: {
         ...(native ? { platform: "node" } : {}),
+        output: {
+          entryFileNames: output,
+          chunkFileNames: `${NodePath.parse(output).name}-[name]-[hash].${format === "cjs" ? "cjs" : "js"}`,
+          assetFileNames: `${NodePath.parse(output).name}-[name]-[hash][extname]`,
+        },
         external: native
           ? [
               ...NodeModule.builtinModules,
@@ -54,17 +85,26 @@ async function bundle(entry, format, output, native = false) {
       },
     },
   });
-  const code = (Array.isArray(result) ? result[0] : result).output.find(
-    (chunk) => chunk.type === "chunk",
-  )?.code;
-  NodeAssert.ok(code, `Missing ${entry} bundle`);
-  if (!native)
-    NodeAssert.doesNotMatch(
-      code,
-      /\bprocess\.env\.NODE_ENV\b/,
-      "Browser bundle contains an unbound Node environment probe",
-    );
-  await NodeFSP.writeFile(NodePath.join(scratch, output), code);
+  const files = (Array.isArray(result) ? result : [result]).flatMap((bundle) => bundle.output);
+  NodeAssert.ok(
+    files.some((file) => file.type === "chunk" && file.isEntry && file.fileName === output),
+    `Missing ${entry} entry bundle ${output}`,
+  );
+  for (const file of files) {
+    if (file.type === "chunk") {
+      if (!native)
+        NodeAssert.doesNotMatch(
+          file.code,
+          /\bprocess\.env\.NODE_ENV\b/,
+          "Browser bundle contains an unbound Node environment probe",
+        );
+      emittedChunks.push(file);
+    }
+    const destination = NodePath.join(scratch, file.fileName);
+    await NodeFSP.mkdir(NodePath.dirname(destination), { recursive: true });
+    await NodeFSP.writeFile(destination, file.type === "chunk" ? file.code : file.source);
+    emittedFiles.add(file.fileName);
+  }
 }
 async function existingElectronRuntime() {
   const desktopRequire = NodeModule.createRequire(NodePath.join(desktopDirectory, "package.json"));
@@ -85,6 +125,95 @@ async function existingElectronRuntime() {
 await bundle("browser-surface.fixture.mjs", "cjs", "main.cjs", true);
 await bundle("browser-surface.preload.mjs", "cjs", "preload.cjs", true);
 await bundle("browser-surface.renderer.mjs", "iife", "renderer.js");
+let verifiedRelativeImports = 0;
+const externalReferences = new Set();
+for (const chunk of emittedChunks) {
+  const references = new Set([...chunk.imports, ...chunk.dynamicImports]);
+  const nodes = [parse(chunk.code, { ecmaVersion: "latest", sourceType: "module" })];
+  const requireAliases = new Set(["require", "__require"]);
+  const calls = [];
+  while (nodes.length > 0) {
+    const node = nodes.pop();
+    if (
+      node.type === "VariableDeclarator" &&
+      node.id.type === "Identifier" &&
+      node.init?.type === "CallExpression" &&
+      ((node.init.callee.type === "Identifier" && node.init.callee.name === "createRequire") ||
+        (node.init.callee.type === "MemberExpression" &&
+          node.init.callee.property.name === "createRequire"))
+    )
+      requireAliases.add(node.id.name);
+    if (node.type === "CallExpression") calls.push(node);
+    if (node.type === "ImportExpression" && typeof node.source.value === "string")
+      references.add(node.source.value);
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) {
+        for (const child of value) if (child?.type) nodes.push(child);
+      } else if (value?.type) nodes.push(value);
+    }
+  }
+  for (const call of calls) {
+    const loader =
+      (call.callee.type === "Identifier" && requireAliases.has(call.callee.name)) ||
+      (call.callee.type === "MemberExpression" &&
+        call.callee.object.type === "Identifier" &&
+        ((call.callee.object.name === "module" && call.callee.property.name === "require") ||
+          (requireAliases.has(call.callee.object.name) &&
+            call.callee.property.name === "resolve")));
+    if (loader && typeof call.arguments[0]?.value === "string")
+      references.add(call.arguments[0].value);
+  }
+  for (const reference of references) {
+    const destination = reference.startsWith(".")
+      ? NodePath.resolve(scratch, NodePath.dirname(chunk.fileName), reference)
+      : emittedFiles.has(reference)
+        ? NodePath.join(scratch, reference)
+        : undefined;
+    if (destination === undefined) {
+      if (!NodeModule.isBuiltin(reference) && !NodePath.isAbsolute(reference))
+        externalReferences.add(reference);
+      continue;
+    }
+    NodeAssert.ok(
+      (await NodeFSP.stat(destination)).isFile(),
+      `Missing generated import ${reference} from ${chunk.fileName}`,
+    );
+    verifiedRelativeImports += 1;
+  }
+}
+const fixtureRequire = NodeModule.createRequire(NodePath.join(scratch, "main.cjs"));
+for (const reference of externalReferences) fixtureRequire.resolve(reference);
+const externalLoads = [...externalReferences]
+  .filter((reference) => reference !== "electron")
+  .sort();
+const dependencyProbe = NodeChildProcess.spawnSync(
+  process.execPath,
+  [
+    "--input-type=commonjs",
+    "-e",
+    `for (const name of ${JSON.stringify(externalLoads)}) require(name);`,
+  ],
+  { cwd: scratch, encoding: "utf8", timeout: 10000 },
+);
+NodeAssert.equal(dependencyProbe.error, undefined, dependencyProbe.error?.message);
+NodeAssert.equal(
+  dependencyProbe.status,
+  0,
+  `Fixture external dependency load failed: ${dependencyProbe.stderr}`,
+);
+await NodeFSP.writeFile(
+  NodePath.join(scratch, "bootstrap.cjs"),
+  `const { app } = require("electron");
+app.setPath("userData", require("node:path").join(process.argv[2], "user-data"));
+const fail = cause => {
+  console.error("Browser surface fixture bootstrap failed:", cause?.stack ?? cause);
+  app.exit(1);
+};
+process.on("uncaughtException", fail);
+process.on("unhandledRejection", fail);
+try { require("./main.cjs"); } catch (cause) { fail(cause); }
+`,
+);
 await NodeFSP.writeFile(
   NodePath.join(scratch, "index.html"),
   '<!doctype html><html><head><style>html,body{margin:0;overflow:hidden}body{background:#eee}</style></head><body><script src="renderer.js"></script></body></html>',
@@ -92,9 +221,14 @@ await NodeFSP.writeFile(
 const manifest = {
   scratch,
   main: NodePath.join(scratch, "main.cjs"),
+  bootstrap: NodePath.join(scratch, "bootstrap.cjs"),
   wsModulePath,
+  generatedFiles: [...emittedFiles].sort(),
+  verifiedRelativeImports,
+  verifiedExternalImports: [...externalReferences].sort(),
+  verifiedExternalLoads: externalLoads,
   scope:
-    "ordinary hidden Electron fixture; never launches the installed app or reads live user data",
+    "ordinary hidden Electron fixture, including real named-profile guest lifecycle and 32-page capacity; never launches the installed app or reads live user data",
 };
 console.log(JSON.stringify(manifest));
 if (!process.argv.includes("--build-only")) {
@@ -107,7 +241,7 @@ if (!process.argv.includes("--build-only")) {
     : ensureElectronRuntime();
   const child = NodeChildProcess.spawnSync(
     electronRuntime,
-    [manifest.main, scratch, wsModulePath],
+    [manifest.bootstrap, scratch, wsModulePath],
     {
       encoding: "utf8",
       env: environment,

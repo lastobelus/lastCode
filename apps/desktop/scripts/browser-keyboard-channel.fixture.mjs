@@ -13,10 +13,12 @@ import * as Stream from "effect/Stream";
 import * as BrowserRootWindow from "../src/preview/BrowserRootWindow.ts";
 import { resolvePartitionScope } from "../src/preview/BrowserProfileScope.ts";
 import * as ServerConfig from "../../server/src/config.ts";
+import * as ServerSecretStore from "../../server/src/auth/ServerSecretStore.ts";
 import * as ServerEnvironment from "../../server/src/environment/ServerEnvironment.ts";
 import * as Broker from "../../server/src/mcp/PreviewAutomationBroker.ts";
 import * as Channel from "../../server/src/preview/DesktopBrowserChannel.ts";
 import * as Manager from "../../server/src/preview/Manager.ts";
+import * as Hosting from "../../server/src/preview/Hosting.ts";
 import * as PreviewBrowser from "../../server/src/preview/PreviewBrowser.ts";
 import * as ServerBrowser from "../../server/src/preview/ServerBrowser.ts";
 
@@ -131,6 +133,14 @@ export async function runNativeKeyboardChannelFixture({
             Broker.layer,
             Manager.layer.pipe(Layer.provide(configLayer)),
             configLayer,
+            Layer.mock(ServerSecretStore.ServerSecretStore)({
+              getOrCreateRandom: (_name, bytes) => Effect.succeed(new Uint8Array(bytes).fill(7)),
+            }),
+            Layer.mock(Hosting.PreviewHosting)({
+              setActivity: () => Effect.void,
+              list: () => Effect.succeed([]),
+              prepareNavigation: () => Effect.succeed({ managed: false }),
+            }),
             Layer.succeed(Channel.DesktopBrowserChannel, channel),
             Layer.succeed(ServerEnvironment.ServerEnvironment, {
               getEnvironmentId: Effect.succeed(scope.environmentId),
