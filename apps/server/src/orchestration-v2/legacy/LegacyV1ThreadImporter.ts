@@ -1,4 +1,4 @@
-import { ThreadAnnotation, ThreadAttention, ThreadWorktreeCleanup } from "@t3tools/contracts";
+import { ThreadAnnotation, ThreadWorktreeCleanup } from "@t3tools/contracts";
 import {
   threadPullRequestKeysEqual,
   threadPullRequestsOf,
@@ -65,7 +65,6 @@ interface LegacyThreadRow {
   readonly branch_pull_request_json: string | null;
   readonly active_order_key: string | null;
   readonly annotation_json: string | null;
-  readonly attention_json: string | null;
   readonly persistent: number;
   readonly worktree_cleanup_json: string | null;
   readonly deleted_at: string | null;
@@ -147,7 +146,6 @@ const decodeStoredThread = Schema.decodeUnknownOption(
   Schema.fromJsonString(OrchestrationV2AppThreadJson),
 );
 const decodeAnnotation = Schema.decodeEffect(Schema.fromJsonString(ThreadAnnotation));
-const decodeAttention = Schema.decodeEffect(Schema.fromJsonString(ThreadAttention));
 const decodeCleanup = Schema.decodeEffect(Schema.fromJsonString(ThreadWorktreeCleanup));
 const decodeMessage = Schema.decodeEffect(
   Schema.fromJsonString(OrchestrationV2ConversationMessageJson),
@@ -258,7 +256,6 @@ const importedThread = Effect.fn("LegacyV1ThreadImporter.importedThread")(functi
     historyOrigin: "v1_import",
     persistent: row.persistent === 1,
     annotation: row.annotation_json === null ? null : yield* decodeAnnotation(row.annotation_json),
-    attention: row.attention_json === null ? null : yield* decodeAttention(row.attention_json),
     worktreeCleanup:
       row.worktree_cleanup_json === null ? null : yield* decodeCleanup(row.worktree_cleanup_json),
     lineage: {
@@ -502,7 +499,6 @@ const make = Effect.gen(function* () {
         thread.branch_pull_request_json,
         thread.active_order_key,
         thread.annotation_json,
-        thread.attention_json,
         thread.persistent,
         thread.worktree_cleanup_json,
         thread.deleted_at,
@@ -522,7 +518,6 @@ const make = Effect.gen(function* () {
          OR json_type(projection.payload_json, '$.branchPullRequest') IS NULL
          OR json_type(projection.payload_json, '$.activeOrderKey') IS NULL
          OR json_type(projection.payload_json, '$.annotation') IS NULL
-         OR json_type(projection.payload_json, '$.attention') IS NULL
          OR json_type(projection.payload_json, '$.persistent') IS NULL
          OR json_type(projection.payload_json, '$.worktreeCleanup') IS NULL
       ORDER BY thread.created_at ASC, thread.thread_id ASC
@@ -537,7 +532,6 @@ const make = Effect.gen(function* () {
       const repaired: OrchestrationV2AppThread = {
         ...current,
         annotation: current.annotation === undefined ? legacy.annotation : current.annotation,
-        attention: current.attention === undefined ? legacy.attention : current.attention,
         persistent: current.persistent === undefined ? legacy.persistent : current.persistent,
         worktreeCleanup:
           current.worktreeCleanup === undefined ? legacy.worktreeCleanup : current.worktreeCleanup,
@@ -667,7 +661,6 @@ const make = Effect.gen(function* () {
         thread.branch_pull_request_json,
         thread.active_order_key,
         thread.annotation_json,
-        thread.attention_json,
         thread.persistent,
         thread.worktree_cleanup_json,
         thread.deleted_at

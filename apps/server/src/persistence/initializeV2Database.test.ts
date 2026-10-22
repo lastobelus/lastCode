@@ -70,7 +70,7 @@ it.effect(
         assert.equal(shell.thread.annotation?.body, "Keep resolved note");
         assert.equal(shell.thread.annotation?.anchorMessageId, "message-0");
         assert.equal(shell.thread.annotation?.resolvedAt, "2026-01-02T00:00:00.000Z");
-        assert.equal(shell.thread.attention?.kind, "question");
+        assert.isFalse("attention" in shell.thread);
         assert.deepStrictEqual(
           (yield* sql`SELECT migration_id, name FROM lastcode_sql_migrations ORDER BY migration_id`).map(
             (row) => [row.migration_id, row.name] as const,

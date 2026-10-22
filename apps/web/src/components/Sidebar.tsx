@@ -237,6 +237,7 @@ import {
   resolveSidebarRowAccessibility,
   type SidebarDropVerb,
   resolveSidebarThreadStatus,
+  resolveThreadStatusPill,
   resolveThreadLastVisitedAt,
   searchSidebarThreads,
   shouldCreateNewThreadInCurrentProject,
@@ -1668,12 +1669,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         icon: "input" as const,
         className: "text-indigo-600 dark:text-indigo-300",
       };
-    if (status === "question")
-      return {
-        label: "Question",
-        icon: "question" as const,
-        className: "text-violet-600 dark:text-violet-300",
-      };
     if (status === "working")
       return {
         label: thread.goal?.status === "active" ? "Goal" : "Working",
@@ -1699,7 +1694,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     !thread.hasPendingApprovals &&
     !thread.hasPendingUserInput &&
     !thread.pendingSubagentRequest &&
-    thread.attention?.kind !== "question" &&
     thread.pendingBackgroundTasks.length === 0 &&
     cleanup === null &&
     status !== "not-responding" &&
@@ -1741,6 +1735,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const detailsTooltip = (
     <SidebarThreadTooltip
       thread={thread}
+      threadStatus={resolveThreadStatusPill({ thread: { ...thread, lastVisitedAt } })}
       projectTitle={props.project?.title ?? null}
       projectCwd={props.project?.workspaceRoot ?? null}
       projectFaviconPath={props.project?.faviconPath ?? null}
@@ -2521,13 +2516,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                             <CircleAlertIcon aria-hidden className="size-4 shrink-0" />
                           ) : topStatus.icon === "done" ? (
                             <CircleCheckIcon aria-hidden className="size-4 shrink-0" />
-                          ) : topStatus.icon === "question" ? (
-                            <span
-                              aria-hidden
-                              className="inline-flex h-4 w-2.5 shrink-0 items-center justify-center text-sm font-semibold leading-none"
-                            >
-                              ?
-                            </span>
                           ) : null}
                           {/* The label alone is the live region: a role="status"
                             wrapper around the ticking duration would make

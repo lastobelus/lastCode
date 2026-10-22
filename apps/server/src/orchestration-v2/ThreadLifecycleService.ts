@@ -5,7 +5,6 @@ import {
   type ProviderInteractionMode,
   type RuntimeMode,
   ThreadId,
-  type ThreadAttention,
   type ThreadDashboardItemInput,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -30,8 +29,6 @@ export class ThreadLifecycleError extends Schema.TaggedError<ThreadLifecycleErro
       "upsert-annotation",
       "resolve-annotation",
       "reopen-annotation",
-      "set-attention",
-      "clear-attention",
       "upsert-dashboard-item",
       "remove-dashboard-item",
     ]),
@@ -62,15 +59,6 @@ export class ThreadLifecycleService extends Context.Service<
       readonly threadId: ThreadId;
     }) => Effect.Effect<Pick<OrchestrationV2ThreadProjection, "thread">, ThreadLifecycleError>;
     readonly reopenAnnotation: (input: {
-      readonly commandId: CommandId;
-      readonly threadId: ThreadId;
-    }) => Effect.Effect<Pick<OrchestrationV2ThreadProjection, "thread">, ThreadLifecycleError>;
-    readonly setAttention: (input: {
-      readonly commandId: CommandId;
-      readonly threadId: ThreadId;
-      readonly attention: ThreadAttention;
-    }) => Effect.Effect<Pick<OrchestrationV2ThreadProjection, "thread">, ThreadLifecycleError>;
-    readonly clearAttention: (input: {
       readonly commandId: CommandId;
       readonly threadId: ThreadId;
     }) => Effect.Effect<Pick<OrchestrationV2ThreadProjection, "thread">, ThreadLifecycleError>;
@@ -148,10 +136,6 @@ const make = Effect.gen(function* () {
       }),
     reopenAnnotation: (input) =>
       dispatch("reopen-annotation", input.threadId, { type: "thread.annotation.reopen", ...input }),
-    setAttention: (input) =>
-      dispatch("set-attention", input.threadId, { type: "thread.attention.set", ...input }),
-    clearAttention: (input) =>
-      dispatch("clear-attention", input.threadId, { type: "thread.attention.clear", ...input }),
     upsertDashboardItem: (input) =>
       dispatch("upsert-dashboard-item", input.threadId, {
         type: "thread.dashboard-item.upsert",

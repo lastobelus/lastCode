@@ -27,8 +27,6 @@ function makeShell(input: {
   readonly runtimeStatus?: "starting" | "running" | "completed" | "failed";
   readonly pending?: "approval" | "user-input";
   readonly runRequestedAt?: string | null;
-  readonly question?: boolean;
-  readonly questionRaisedAt?: string;
   readonly runCompletedAt?: string | null;
 }): ThreadSnoozeShell {
   return {
@@ -36,9 +34,6 @@ function makeShell(input: {
     snoozedAt: input.snoozedAt ?? (input.snoozedUntil != null ? SNOOZED_AT : null),
     hasPendingApprovals: input.pending === "approval",
     hasPendingUserInput: input.pending === "user-input",
-    attention: input.question
-      ? { kind: "question", raisedAt: input.questionRaisedAt ?? SNOOZED_AT }
-      : null,
     runtime:
       input.runtimeStatus === undefined
         ? null
@@ -65,11 +60,6 @@ function makeQueuedTurnShell(overrides: Partial<QueuedTurnShell> = {}): QueuedTu
 }
 
 describe("effectiveSnoozed", () => {
-  it("raises a question attention even before the scheduled wake", () => {
-    expect(
-      effectiveSnoozed(makeShell({ snoozedUntil: FUTURE_WAKE, question: true }), { now: NOW }),
-    ).toBe(false);
-  });
   it("never hides on malformed wake data", () => {
     expect(effectiveSnoozed(makeShell({ snoozedUntil: "not-a-date" }), { now: NOW })).toBe(false);
   });
@@ -168,11 +158,6 @@ describe("threadRaisedHandWhileSnoozed", () => {
 });
 
 describe("canSnooze", () => {
-  it("refuses question attention", () => {
-    expect(
-      canSnooze({ ...makeShell({ question: true }), latestUserMessageAt: null }, { now: NOW }),
-    ).toBe(false);
-  });
   it("refuses blocked-on-you work", () => {
     expect(
       canSnooze({ ...makeShell({ pending: "approval" }), latestUserMessageAt: null }, { now: NOW }),
@@ -254,19 +239,6 @@ describe("threadWokeAt", () => {
     });
     expect(effectiveSnoozed(shell, { now: NOW })).toBe(false);
     expect(threadWokeAt(shell, { now: NOW })).toBe("2026-04-10T11:00:00.000Z");
-  });
-
-  it("reports when a question raised the thread from snooze", () => {
-    expect(
-      threadWokeAt(
-        makeShell({
-          snoozedUntil: FUTURE_WAKE,
-          question: true,
-          questionRaisedAt: "2026-04-10T11:30:00.000Z",
-        }),
-        { now: NOW },
-      ),
-    ).toBe("2026-04-10T11:30:00.000Z");
   });
 
   it("falls back to runtime activity for blocked/failed early wakes", () => {

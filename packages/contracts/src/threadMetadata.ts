@@ -17,12 +17,6 @@ export const ThreadAnnotation = Schema.Struct({
 });
 export type ThreadAnnotation = typeof ThreadAnnotation.Type;
 
-export const ThreadAttention = Schema.Struct({
-  kind: Schema.Literal("question"),
-  raisedAt: IsoDateTime,
-});
-export type ThreadAttention = typeof ThreadAttention.Type;
-
 export const THREAD_DASHBOARD_MAX_ITEMS = 32;
 
 const ThreadDashboardItemId = TrimmedNonEmptyString.check(Schema.isMaxLength(80));
@@ -102,8 +96,3 @@ export const ThreadWorktreeCleanup = Schema.Union([
   }),
 ]);
 export type ThreadWorktreeCleanup = typeof ThreadWorktreeCleanup.Type;
-
-export class ThreadAttentionToolError extends Schema.TaggedError<ThreadAttentionToolError>()(
-  "ThreadAttentionToolError",
-  { message: Schema.String },
-) {}

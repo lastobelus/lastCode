@@ -141,7 +141,6 @@ export interface EnvironmentThreadShell {
   readonly deletedAt: string | null;
   readonly persistent?: boolean;
   readonly annotation?: import("@t3tools/contracts").ThreadAnnotation | null;
-  readonly attention?: import("@t3tools/contracts").ThreadAttention | null;
   readonly dashboardItems?: ReadonlyArray<import("@t3tools/contracts").ThreadDashboardItem>;
   readonly actionResume?: import("@t3tools/contracts").ActionResumeState | null;
   readonly worktreeCleanup?: import("@t3tools/contracts").ThreadWorktreeCleanup | null;
@@ -328,7 +327,6 @@ export function presentThreadShell(
     deletedAt: nullableIso(thread.deletedAt),
     ...(thread.persistent === undefined ? {} : { persistent: thread.persistent }),
     annotation: threadAnnotationOf(thread),
-    attention: thread.attention ?? null,
     dashboardItems: thread.dashboardItems ?? [],
     // Cached shells and retained events can still carry a parent's Action.
     actionResume: thread.actionResume?.threadId === thread.id ? thread.actionResume : null,

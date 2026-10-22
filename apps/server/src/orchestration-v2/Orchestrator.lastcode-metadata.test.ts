@@ -4,13 +4,12 @@ import {
   EventId,
   MessageId,
   OrchestrationV2Command,
+  OrchestrationV2DomainEventJson,
   OrchestrationV2AppThreadJson,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
-  RunId,
-  TurnItemId,
   UpdateDrainAdmissionError,
   UpdateDrainRequestId,
   UpdateDrainTargetVersion,
@@ -74,109 +73,67 @@ const create = (threadId: ThreadId, projectId: ProjectId) => ({
 });
 
 const decodeCommand = Schema.decodeUnknownSync(OrchestrationV2Command);
+const decodeEventJson = Schema.decodeUnknownEffect(OrchestrationV2DomainEventJson);
+const encodeThreadJson = Schema.encodeEffect(OrchestrationV2AppThreadJson);
 const decodeStoredThread = Schema.decodeEffect(Schema.fromJsonString(OrchestrationV2AppThreadJson));
 
 it.effect(
-  "preserves a question through automatic usage recovery and clears it on a user reply",
+  "reads retired attention history without restoring question state or blocking settlement",
   () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const projections = yield* ProjectionStore.ProjectionStoreV2;
       const sink = yield* EventSink.EventSinkV2;
-      const threadId = ThreadId.make("attention:automatic-recovery");
-      yield* orchestrator.dispatch(create(threadId, ProjectId.make("attention:project")));
-      const send = (suffix: string) => ({
-        type: "message.dispatch" as const,
-        commandId: CommandId.make(`attention:send:${suffix}`),
-        threadId,
-        messageId: MessageId.make(`attention:message:${suffix}`),
-        text: "Continue working",
-        attachments: [],
-        createdBy: "user" as const,
-        creationSource: "web" as const,
-        dispatchMode: { type: "queue_after_active" as const },
-      });
-      yield* orchestrator.dispatch(send("initial"));
-      const run = (yield* projections.getThreadRecords(threadId, ["runs"])).runs[0];
-      assert.isDefined(run);
-      const now = yield* DateTime.now;
-      const resetAt = DateTime.formatIso(DateTime.add(now, { seconds: 1 }));
-      yield* sink.write({
-        events: [
-          {
-            id: EventId.make("attention:run-failed"),
-            type: "run.updated",
-            threadId,
-            occurredAt: now,
-            payload: { ...run, status: "failed", completedAt: now },
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("retired-metadata:thread");
+      yield* orchestrator.dispatch(create(threadId, ProjectId.make("retired-metadata:project")));
+      const thread = yield* projections.getThread(threadId);
+      const retired = { kind: "question", raisedAt: DateTime.formatIso(thread.updatedAt) };
+      for (const type of ["thread.attention-set", "thread.attention-cleared"] as const) {
+        const event = yield* decodeEventJson({
+          id: EventId.make(`retired-metadata:${type}`),
+          type,
+          threadId,
+          occurredAt: DateTime.formatIso(thread.updatedAt),
+          payload: {
+            ...(yield* encodeThreadJson(thread)),
+            attention: type === "thread.attention-set" ? retired : null,
           },
-          {
-            id: EventId.make("attention:limit-error"),
-            type: "turn-item.updated",
+        });
+        assert.isFalse("attention" in event.payload);
+        yield* sink.write({ events: [event] });
+        assert.isFalse("attention" in (yield* projections.getThread(threadId)));
+      }
+      // A saved projection can predate retirement without an event replay or migration.
+      yield* sql`UPDATE orchestration_v2_projection_threads
+      SET payload_json = json_set(payload_json, '$.attention', json(${JSON.stringify(retired)}))
+      WHERE thread_id = ${threadId}`;
+      assert.isFalse("attention" in (yield* projections.getThread(threadId)));
+      assert.isFalse("attention" in (yield* projections.getThreadShell(threadId))!);
+      assert.equal((yield* projections.getSettlementCandidates(threadId)).length, 1);
+      yield* orchestrator.dispatch({
+        type: "thread.snooze",
+        commandId: CommandId.make("retired-metadata:snooze"),
+        threadId,
+        snoozedUntil: "2099-01-01T00:00:00.000Z",
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.auto-settle",
+        commandId: CommandId.make("retired-metadata:settle"),
+        threadId,
+        snapshotAt: yield* DateTime.now,
+      });
+      assert.equal((yield* projections.getThread(threadId)).settledOverride, "settled");
+      for (const type of ["thread.attention.set", "thread.attention.clear"]) {
+        assert.throws(() =>
+          decodeCommand({
+            type,
+            commandId: "retired-metadata:rejected",
             threadId,
-            occurredAt: now,
-            payload: {
-              id: TurnItemId.make("attention:limit-error"),
-              type: "error",
-              threadId,
-              runId: run.id,
-              nodeId: run.rootNodeId,
-              providerThreadId: null,
-              providerTurnId: null,
-              nativeItemRef: null,
-              parentItemId: null,
-              ordinal: 2,
-              status: "failed",
-              title: "Usage limit reached",
-              startedAt: now,
-              completedAt: now,
-              updatedAt: now,
-              failure: {
-                class: "usage_limit",
-                message: "Plan limit reached",
-                code: "usageLimitExceeded",
-                retryable: null,
-                resetAt,
-              },
-            },
-          },
-        ],
-      });
-      yield* orchestrator.dispatch({
-        type: "thread.metadata.update",
-        commandId: CommandId.make("attention:arm-recovery"),
-        threadId,
-        limitRecovery: { runId: run.id, resetAt, autoResume: true },
-      });
-      const recovery = (yield* projections.getThread(threadId)).limitRecovery;
-      assert.ok(recovery != null);
-      yield* orchestrator.dispatch({
-        type: "thread.attention.set",
-        commandId: CommandId.make("attention:raise-question"),
-        threadId,
-        attention: { kind: "question", raisedAt: DateTime.formatIso(now) },
-      });
-      yield* orchestrator.dispatch({
-        ...send("stale-recovery"),
-        creationSource: "server",
-        dispatchMode: { type: "start_immediately" },
-        usageLimitContinuationOfRunId: RunId.make("attention:stale-run"),
-      });
-      assert.equal((yield* projections.getThread(threadId)).attention?.kind, "question");
-      yield* TestClock.adjust("1 second");
-      yield* orchestrator.dispatch({
-        ...send("automatic-recovery"),
-        creationSource: "server",
-        dispatchMode: { type: "start_immediately" },
-        usageLimitContinuationOfRunId: run.id,
-        ...(recovery.requestId === undefined
-          ? {}
-          : { usageLimitRecoveryRequestId: recovery.requestId }),
-      });
-      assert.equal((yield* projections.getThreadRecords(threadId, ["runs"])).runs.length, 2);
-      assert.equal((yield* projections.getThread(threadId)).attention?.kind, "question");
-      yield* orchestrator.dispatch(send("human-reply"));
-      assert.isNull((yield* projections.getThread(threadId)).attention);
+            attention: retired,
+          }),
+        );
+      }
     }).pipe(Effect.provide(testLayer)),
 );
 
@@ -427,120 +384,81 @@ it.effect("atomically replaces the global persistent owner and rejects destructi
   }).pipe(Effect.provide(testLayer)),
 );
 
-it.effect(
-  "retains note anchors and resolution, and keeps explicit attention independent of viewing",
-  () =>
-    Effect.gen(function* () {
-      const orchestrator = yield* Orchestrator.OrchestratorV2;
-      const projections = yield* ProjectionStore.ProjectionStoreV2;
-      const sink = yield* EventSink.EventSinkV2;
-      const threadId = ThreadId.make("notes:thread");
-      yield* orchestrator.dispatch(create(threadId, ProjectId.make("notes:project")));
-      const firstAt = DateTime.makeUnsafe("2026-01-01T00:00:00.000Z");
-      const addMessage = (id: string, at: DateTime.Utc) =>
-        sink.write({
-          events: [
-            {
-              id: EventId.make(`event:${id}`),
-              type: "message.updated",
+it.effect("retains note anchors and resolution through edits and settlement", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const sink = yield* EventSink.EventSinkV2;
+    const threadId = ThreadId.make("notes:thread");
+    yield* orchestrator.dispatch(create(threadId, ProjectId.make("notes:project")));
+    const firstAt = DateTime.makeUnsafe("2026-01-01T00:00:00.000Z");
+    const addMessage = (id: string, at: DateTime.Utc) =>
+      sink.write({
+        events: [
+          {
+            id: EventId.make(`event:${id}`),
+            type: "message.updated",
+            threadId,
+            occurredAt: at,
+            payload: {
+              id: MessageId.make(id),
               threadId,
-              occurredAt: at,
-              payload: {
-                id: MessageId.make(id),
-                threadId,
-                runId: null,
-                nodeId: null,
-                role: "user",
-                text: "A user message",
-                attachments: [],
-                streaming: false,
-                createdAt: at,
-                updatedAt: at,
-                createdBy: "user",
-                creationSource: "web",
-              },
+              runId: null,
+              nodeId: null,
+              role: "user",
+              text: "A user message",
+              attachments: [],
+              streaming: false,
+              createdAt: at,
+              updatedAt: at,
+              createdBy: "user",
+              creationSource: "web",
             },
-          ],
-        });
-      yield* addMessage("note:first", firstAt);
-      yield* orchestrator.dispatch({
-        type: "thread.annotation.upsert",
-        commandId: CommandId.make("note:create"),
-        threadId,
-        body: "Saved note",
+          },
+        ],
       });
-      yield* addMessage("note:second", DateTime.add(firstAt, { seconds: 1 }));
-      assert.equal(
-        (yield* projections.getThread(threadId)).annotation?.anchorMessageId,
-        "note:first",
-      );
-      yield* orchestrator.dispatch({
-        type: "thread.annotation.resolve",
-        commandId: CommandId.make("note:resolve"),
-        threadId,
-      });
-      const resolved = (yield* projections.getThread(threadId)).annotation;
-      assert.equal(resolved?.anchorMessageId, "note:second");
-      assert.isNotNull(resolved?.resolvedAt);
-      yield* orchestrator.dispatch({
-        type: "thread.annotation.upsert",
-        commandId: CommandId.make("note:edit"),
-        threadId,
-        body: "Edited resolved note",
-      });
-      assert.equal(
-        (yield* projections.getThread(threadId)).annotation?.resolvedAt,
-        resolved?.resolvedAt,
-      );
-      yield* orchestrator.dispatch({
-        type: "thread.annotation.reopen",
-        commandId: CommandId.make("note:reopen"),
-        threadId,
-      });
-      const raisedAt = "2026-01-02T00:00:00.000Z";
-      yield* orchestrator.dispatch({
-        type: "thread.attention.set",
-        commandId: CommandId.make("question:raise"),
-        threadId,
-        attention: { kind: "question", raisedAt },
-      });
-      yield* orchestrator.dispatch({
-        type: "thread.visit",
-        commandId: CommandId.make("question:view"),
-        threadId,
-        visitedAt: raisedAt,
-      });
-      assert.equal((yield* projections.getThreadShell(threadId))?.attention?.raisedAt, raisedAt);
-      assert.equal(
-        (yield* Effect.exit(
-          orchestrator.dispatch({
-            type: "thread.auto-settle",
-            commandId: CommandId.make("question:auto-settle"),
-            threadId,
-            snapshotAt: yield* DateTime.now,
-          }),
-        ))._tag,
-        "Failure",
-      );
-      assert.equal(
-        (yield* Effect.exit(
-          orchestrator.dispatch({
-            type: "thread.snooze",
-            commandId: CommandId.make("question:snooze"),
-            threadId,
-            snoozedUntil: "2099-01-01T00:00:00.000Z",
-          }),
-        ))._tag,
-        "Failure",
-      );
-      yield* orchestrator.dispatch({
-        type: "thread.settle",
-        commandId: CommandId.make("question:settle"),
-        threadId,
-      });
-      assert.isNull((yield* projections.getThread(threadId)).attention);
-      assert.isNull((yield* projections.getThread(threadId)).annotation?.resolvedAt);
-    }).pipe(Effect.provide(testLayer)),
+    yield* addMessage("note:first", firstAt);
+    yield* orchestrator.dispatch({
+      type: "thread.annotation.upsert",
+      commandId: CommandId.make("note:create"),
+      threadId,
+      body: "Saved note",
+    });
+    yield* addMessage("note:second", DateTime.add(firstAt, { seconds: 1 }));
+    assert.equal(
+      (yield* projections.getThread(threadId)).annotation?.anchorMessageId,
+      "note:first",
+    );
+    yield* orchestrator.dispatch({
+      type: "thread.annotation.resolve",
+      commandId: CommandId.make("note:resolve"),
+      threadId,
+    });
+    const resolved = (yield* projections.getThread(threadId)).annotation;
+    assert.equal(resolved?.anchorMessageId, "note:second");
+    assert.isNotNull(resolved?.resolvedAt);
+    yield* orchestrator.dispatch({
+      type: "thread.annotation.upsert",
+      commandId: CommandId.make("note:edit"),
+      threadId,
+      body: "Edited resolved note",
+    });
+    assert.equal(
+      (yield* projections.getThread(threadId)).annotation?.resolvedAt,
+      resolved?.resolvedAt,
+    );
+    yield* orchestrator.dispatch({
+      type: "thread.annotation.reopen",
+      commandId: CommandId.make("note:reopen"),
+      threadId,
+    });
+    yield* orchestrator.dispatch({
+      type: "thread.settle",
+      commandId: CommandId.make("note:settle"),
+      threadId,
+    });
+    assert.isNull((yield* projections.getThread(threadId)).annotation?.resolvedAt);
+  }).pipe(Effect.provide(testLayer)),
 );
 
 it.effect("starts child notes independently of historical copied and resolved parent notes", () =>
@@ -887,11 +805,6 @@ it.effect(
       assert.deepEqual((yield* projections.getThread(threadId)).dashboardItems, items);
       yield* upsert("reopen-first", dashboardItem("question-1"));
       assert.isNull((yield* projections.getThread(threadId)).settledOverride);
-      yield* orchestrator.dispatch({
-        type: "thread.attention.clear",
-        commandId: CommandId.make("dashboard:clear-attention"),
-        threadId,
-      });
       yield* orchestrator.dispatch({
         type: "message.dispatch",
         commandId: CommandId.make("dashboard:send"),

@@ -577,7 +577,7 @@ describe("V2 client presentation", () => {
 });
 
 describe("LastCode shell metadata", () => {
-  it("keeps annotations, question attention, persistence and cleanup in the presentation", () => {
+  it("keeps annotations, persistence and cleanup in the presentation", () => {
     const annotation = {
       body: "Keep this review open",
       anchorMessageId: MessageId.make("annotation-anchor"),
@@ -585,7 +585,6 @@ describe("LastCode shell metadata", () => {
       updatedAt: "2026-06-20T00:00:00.000Z",
       resolvedAt: null,
     };
-    const attention = { kind: "question" as const, raisedAt: "2026-06-20T00:00:00.000Z" };
     const worktreeCleanup = {
       status: "failed" as const,
       repositoryRoot: "/workspace/project",
@@ -598,12 +597,10 @@ describe("LastCode shell metadata", () => {
       ...v2ThreadShell,
       persistent: true,
       annotation,
-      attention,
       worktreeCleanup,
     });
     expect(shell.persistent).toBe(true);
     expect(shell.annotation).toBe(annotation);
-    expect(shell.attention).toBe(attention);
     expect(shell.worktreeCleanup).toBe(worktreeCleanup);
   });
 });

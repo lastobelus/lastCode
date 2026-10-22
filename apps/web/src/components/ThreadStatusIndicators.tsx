@@ -812,7 +812,7 @@ export function ThreadStatusLabel({
   status,
   compact = false,
 }: {
-  status: Pick<ThreadStatusPill, "colorClass" | "dotClass" | "marker" | "pulse" | "description"> & {
+  status: Pick<ThreadStatusPill, "colorClass" | "dotClass" | "pulse" | "description"> & {
     label: string;
   };
   compact?: boolean;
@@ -831,21 +831,12 @@ export function ThreadStatusLabel({
             />
           }
         >
-          {status.marker ? (
-            <span
-              data-lastcode-sidebar-unscaled-content
-              className="inline-flex h-3.5 w-2.5 items-center justify-center text-sm font-semibold leading-none"
-            >
-              {status.marker}
-            </span>
-          ) : (
-            <span
-              data-lastcode-sidebar-unscaled-content
-              className={`size-1.5 rounded-full ${status.dotClass} ${
-                status.pulse ? "motion-safe:animate-status-pulse" : ""
-              }`}
-            />
-          )}
+          <span
+            data-lastcode-sidebar-unscaled-content
+            className={`size-1.5 rounded-full ${status.dotClass} ${
+              status.pulse ? "motion-safe:animate-status-pulse" : ""
+            }`}
+          />
         </TooltipTrigger>
         <TooltipPopup side="top">{status.description ?? status.label}</TooltipPopup>
       </Tooltip>
@@ -865,21 +856,12 @@ export function ThreadStatusLabel({
           />
         }
       >
-        {status.marker ? (
-          <span
-            data-lastcode-sidebar-unscaled-content
-            className="inline-flex h-3.5 w-2.5 items-center justify-center text-sm font-semibold leading-none"
-          >
-            {status.marker}
-          </span>
-        ) : (
-          <span
-            data-lastcode-sidebar-unscaled-content
-            className={`size-1.5 rounded-full ${status.dotClass} ${
-              status.pulse ? "motion-safe:animate-status-pulse" : ""
-            }`}
-          />
-        )}
+        <span
+          data-lastcode-sidebar-unscaled-content
+          className={`size-1.5 rounded-full ${status.dotClass} ${
+            status.pulse ? "motion-safe:animate-status-pulse" : ""
+          }`}
+        />
         <span className="hidden md:inline">{status.label}</span>
       </TooltipTrigger>
       <TooltipPopup side="top">{status.description ?? status.label}</TooltipPopup>

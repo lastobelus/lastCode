@@ -47,6 +47,17 @@ its terminal session. Use the worktree's ignored `.t3` state.
 Before managed launch, resolve the absolute path of this worktree's `.t3`
 directory. Substitute that literal path for `<isolated-home>` in the selected
 recipe (the quoted argument works in POSIX shells, PowerShell, and cmd.exe).
+To match the running LastCode's saved preferences, include
+`T3CODE_PREVIEW_SETTINGS_SOURCE` (its userdata directory),
+`T3CODE_PREVIEW_BROWSER_PROFILE` (its Electron profile directory), and
+`T3CODE_PREVIEW_SETTINGS_ORIGIN` (its browser storage origin) in both the dry run
+and retained launch environment. Resolve these from the actual running
+installation: packaged LastCode uses `lastcode://app`, while development
+Electron uses `lastcode-dev://app`. The origin is required because reading the
+wrong namespace can silently return no saved browser preferences. The runner
+copies settings and keyboard shortcuts into isolated state on each launch; the web preview seeds its browser preferences and themes
+once for that launch, before the app reads them. Later preview edits remain
+local. Keep source paths and copied preferences out of public artifacts.
 When the Browser runs on the same machine as the app, use the local recipe:
 
 ```text
@@ -161,6 +172,9 @@ a workaround.
 Exercise the affected flow and capture the state that proves it works. Keep
 the saved handoff, isolated state, dependencies, and panel available while the
 user inspects or iterates, including after the process sleeps.
+Verify that the copied preferences match the running app, and that LastCode is
+enabled and active before checking LastCode sidebar features. A deliberate mode
+change is valid when the scenario calls for another sidebar.
 An assistant turn ending is not teardown. Do not stop a managed handoff at turn end; explicit stop or thread deletion
 cancels its future reopening.
 

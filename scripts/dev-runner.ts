@@ -24,6 +24,7 @@ import { ChildProcess } from "effect/process";
 
 import { type DevShareError, shareDevServer, unshareDevServer } from "./lib/dev-share.ts";
 import { loadRepoEnv } from "./lib/public-config.ts";
+import { preparePreviewSettings } from "../apps/server/scripts/prepare-preview-settings.ts";
 
 Object.assign(process.env, loadRepoEnv());
 
@@ -663,6 +664,42 @@ export const runDevRunnerWithInput = Effect.fn("dev-runner.runDevRunnerWithInput
   // surprising side effect from a command documented as inert.
   if (input.dryRun) {
     return;
+  }
+
+  const settingsSource = hostEnvironment.T3CODE_PREVIEW_SETTINGS_SOURCE?.trim();
+  if (settingsSource) {
+    const browserProfile = hostEnvironment.T3CODE_PREVIEW_BROWSER_PROFILE?.trim();
+    if (!browserProfile) {
+      return yield* new DevRunnerConfigurationError({
+        configKeys: ["T3CODE_PREVIEW_BROWSER_PROFILE"],
+        cause: "A browser profile is required when copying preview settings.",
+      });
+    }
+    const settingsOrigin = hostEnvironment.T3CODE_PREVIEW_SETTINGS_ORIGIN?.trim();
+    if (!settingsOrigin) {
+      return yield* new DevRunnerConfigurationError({
+        configKeys: ["T3CODE_PREVIEW_SETTINGS_ORIGIN"],
+        cause: "An explicit browser origin is required when copying preview settings.",
+      });
+    }
+    yield* Effect.tryPromise({
+      try: () =>
+        preparePreviewSettings({
+          sourceStateDir: settingsSource,
+          sourceBrowserProfile: browserProfile,
+          sourceOrigin: settingsOrigin,
+          targetHome: baseDir,
+        }),
+      catch: (cause) =>
+        new DevRunnerConfigurationError({
+          configKeys: [
+            "T3CODE_PREVIEW_SETTINGS_SOURCE",
+            "T3CODE_PREVIEW_BROWSER_PROFILE",
+            "T3CODE_PREVIEW_SETTINGS_ORIGIN",
+          ],
+          cause,
+        }),
+    });
   }
 
   const sharedWebPort = BASE_WEB_PORT + webOffset;

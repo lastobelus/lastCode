@@ -137,16 +137,14 @@ describe("project dashboard", () => {
     const requests = thread({
       hasPendingApprovals: true,
       hasPendingUserInput: true,
-      attention: { kind: "question", raisedAt: at },
       hasActionableProposedPlan: true,
     });
     const board = buildProjectDashboard([waiting, requests]);
     expect(board.counts.waiting).toBe(1);
-    expect(board.counts.needsAttention).toBe(4);
+    expect(board.counts.needsAttention).toBe(3);
     expect(board.entries.map((entry) => entry.kind).sort()).toEqual([
       "approval",
       "input",
-      "question",
       "review",
     ]);
   });

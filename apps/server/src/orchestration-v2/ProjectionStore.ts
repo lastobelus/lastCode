@@ -215,7 +215,6 @@ export type ProjectionSettlementCandidate = Pick<
   | "settledOverride"
   | "pinnedAt"
   | "autoSettleDisabledAt"
-  | "attention"
   | "dashboardItems"
   | "snoozedUntil"
   | "snoozedAt"
@@ -1671,7 +1670,6 @@ export function threadShellFromProjection(
     worktreePath: projection.thread.worktreePath,
     persistent: projection.thread.persistent ?? false,
     annotation: projection.thread.annotation ?? null,
-    attention: projection.thread.attention ?? null,
     dashboardItems: projection.thread.dashboardItems ?? [],
     actionResume: projection.thread.actionResume ?? null,
     worktreeCleanup: projection.thread.worktreeCleanup ?? null,
@@ -1975,7 +1973,6 @@ function shellFromState(input: {
     worktreePath: input.state.thread.worktreePath,
     persistent: input.state.thread.persistent ?? false,
     annotation: input.state.thread.annotation ?? null,
-    attention: input.state.thread.attention ?? null,
     dashboardItems: input.state.thread.dashboardItems ?? [],
     actionResume: input.state.thread.actionResume ?? null,
     worktreeCleanup: input.state.thread.worktreeCleanup ?? null,
@@ -6380,7 +6377,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               AND json_extract(t.payload_json, '$.settledOverride') IS NULL
               AND json_extract(t.payload_json, '$.pinnedAt') IS NULL
               AND json_extract(t.payload_json, '$.autoSettleDisabledAt') IS NULL
-              AND json_extract(t.payload_json, '$.attention') IS NULL
               AND NOT EXISTS (
                 SELECT 1 FROM json_each(t.payload_json, '$.dashboardItems') item
                 WHERE json_extract(item.value, '$.status') = 'open'
@@ -6415,7 +6411,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   pinnedAt: thread.pinnedAt ?? null,
 
                   autoSettleDisabledAt: thread.autoSettleDisabledAt ?? null,
-                  attention: thread.attention ?? null,
                   snoozedUntil: thread.snoozedUntil ?? null,
                   snoozedAt: thread.snoozedAt ?? null,
                   status,
@@ -7092,7 +7087,6 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                 thread.settledOverride === null &&
                 thread.pinnedAt == null &&
                 thread.autoSettleDisabledAt == null &&
-                thread.attention == null &&
                 !hasOpenActionableDashboardItems(thread.dashboardItems) &&
                 !runs.some(isActivityRunForShell) &&
                 !runtimeRequests.some((request) => request.status === "pending"),
