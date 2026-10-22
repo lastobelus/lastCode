@@ -72,17 +72,19 @@ function presentation(
 export function useEnrichedLinkVariants(
   assets: ReadonlyArray<MarkdownDocumentAsset>,
   props: SelectableMarkdownTextProps,
+  authoredFileLinks: ReadonlySet<string>,
 ) {
   const { linkCustomization, skills, textStyle } = props;
   const links = useMemo(() => {
     const byUrl = new Map<string, MarkdownLinkCustomization>();
     for (const asset of assets) {
-      if (asset.kind !== "link" || byUrl.has(asset.url)) continue;
+      if (asset.kind !== "link" || byUrl.has(asset.url) || authoredFileLinks.has(asset.url))
+        continue;
       const value = presentation(asset.url, { linkCustomization, skills, textStyle });
       if (value) byUrl.set(asset.url, value);
     }
     return byUrl;
-  }, [assets, linkCustomization, skills, textStyle]);
+  }, [assets, linkCustomization, skills, textStyle, authoredFileLinks]);
   const chipForegrounds = useMemo(
     () =>
       new Map(
