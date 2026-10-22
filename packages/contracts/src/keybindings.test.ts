@@ -2,7 +2,7 @@ import { assert, it } from "@effect/vitest";
 import * as Schema from "effect/Schema";
 import * as Effect from "effect/Effect";
 
-import { ResolvedKeybindingsConfig } from "./keybindings.ts";
+import { KeybindingRule, ResolvedKeybindingsConfig } from "./keybindings.ts";
 
 const decode = <S extends Schema.Top>(
   schema: S,
@@ -48,5 +48,35 @@ it.effect("drops malformed resolved rule entries", () =>
       parsed.map((rule) => rule.command),
       ["terminal.toggle"],
     );
+  }),
+);
+
+it.effect("rejects invalid command values", () =>
+  Effect.gen(function* () {
+    for (const command of ["script..run", "script. setup .run"]) {
+      const result = yield* Effect.exit(
+        decode(KeybindingRule, {
+          key: "mod+j",
+          command,
+        }),
+      );
+      assert.strictEqual(result._tag, "Failure");
+    }
+  }),
+);
+
+it.effect("accepts dynamic script run commands", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decode(KeybindingRule, {
+      key: "mod+r",
+      command: "script.setup.run",
+    });
+    assert.strictEqual(parsed.command, "script.setup.run");
+
+    const parsedExternalId = yield* decode(KeybindingRule, {
+      key: "mod+r",
+      command: "script.123e4567-e89b-42d3-a456-426614174000.run",
+    });
+    assert.strictEqual(parsedExternalId.command, "script.123e4567-e89b-42d3-a456-426614174000.run");
   }),
 );

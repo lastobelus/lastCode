@@ -1425,7 +1425,7 @@ interface SidebarDraftRowData {
   composer: ComposerThreadDraftState;
 }
 
-const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
+export const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
   projectByKey: ReadonlyMap<string, EnvironmentProject>;
   projectDisplayNameByKey: ReadonlyMap<string, string>;
   scopedProjectKeys: ReadonlySet<string> | null;
