@@ -5,7 +5,6 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import { afterEach, describe, expect, it } from "vite-plus/test";
-import { parse } from "yaml";
 
 import {
   parseImmutableReleaseOptions,
@@ -13,6 +12,7 @@ import {
   validateImmutableReleaseRepository,
   validateIntelReleaseDirectory,
 } from "./lastcode-intel-release.mjs";
+import { assertCheckpointCiStamp, assertFullCiStamp } from "./lastcode-local-ci.ts";
 
 const checkpointTag = "lastcode/revision/v1.2.3-nightly.20260821.7.2";
 const commit = "a".repeat(40);
@@ -99,70 +99,65 @@ const validate = (fixture, overrides = {}) =>
   });
 
 describe("immutable Intel release validation", () => {
-  it("runs the workflow-owned gate on the supported tooling runtime without changing the target", () => {
-    const workflow = parse(
-      NodeFS.readFileSync(
-        NodePath.resolve(import.meta.dirname, "../.github/workflows/lastcode-intel-artifact.yml"),
-        "utf8",
-      ),
+  it("authorizes packaging only for the exact hosted Intel target without authorizing PR CI", () => {
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-intel-gate-"));
+    temporaryDirectories.push(directory);
+    const git = (...args) =>
+      NodeChildProcess.execFileSync("git", args, { cwd: directory, encoding: "utf8" }).trim();
+    git("init", "--quiet");
+    git(
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.com",
+      "commit",
+      "--allow-empty",
+      "-m",
+      "fixture",
     );
-    const gate = workflow.jobs.build.steps.find((step) => step.name === "Run full checkpoint gate");
-    const root = NodeFS.realpathSync(
-      NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-intel-gate-")),
-    );
-    temporaryDirectories.push(root);
-    for (const directory of [
-      "automation/scripts",
-      "target/scripts/node_modules",
-      "target/node_modules",
-    ]) {
-      NodeFS.mkdirSync(NodePath.join(root, directory), { recursive: true });
+    const targetCommit = git("rev-parse", "HEAD");
+    const upstreamTag = "v1.2.3-nightly.20260821.7";
+    git("tag", upstreamTag);
+    const commonGitDir = git("rev-parse", "--path-format=absolute", "--git-common-dir");
+    const helper = NodePath.join(import.meta.dirname, "lastcode-intel-release.mjs");
+    const run = (tag, sha, hosted = true) =>
+      NodeChildProcess.spawnSync(process.execPath, [helper, "authorize-packaging", tag, sha], {
+        cwd: directory,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GITHUB_ACTIONS: String(hosted),
+          GITHUB_WORKFLOW: "LastCode Intel artifact",
+          RUNNER_OS: "macOS",
+          RUNNER_ARCH: "X64",
+        },
+      });
+    for (const tag of [`lastcode/checkpoint/${upstreamTag}`, checkpointTag]) {
+      git("tag", tag);
+      expect(run(tag, targetCommit, false).status).toBe(1);
+      expect(run(tag, commit).status).toBe(1);
+      expect(
+        NodeFS.existsSync(NodePath.join(commonGitDir, "lastcode-ci", `${targetCommit}.json`)),
+      ).toBe(false);
+      const result = run(tag, targetCommit);
+      expect(result.stderr).toBe("");
+      expect(result.status).toBe(0);
+      expect(assertCheckpointCiStamp(commonGitDir, targetCommit, tag, targetCommit)).toMatchObject({
+        schemaVersion: 2,
+        commit: targetCommit,
+        packagingAuthorization: "hosted-intel",
+        context: {
+          kind: "checkpoint",
+          checkpointTag: tag,
+          upstreamCommit: targetCommit,
+          upstreamTag,
+        },
+      });
+      expect(() => assertFullCiStamp(commonGitDir, targetCommit, targetCommit)).toThrow(
+        "Full local CI was not run",
+      );
+      NodeFS.rmSync(NodePath.join(commonGitDir, "lastcode-ci", `${targetCommit}.json`));
     }
-    const targetFile = NodePath.join(root, "target/package.json");
-    const targetManifest = '{"engines":{"node":"^24.13.1"}}\n';
-    NodeFS.writeFileSync(targetFile, targetManifest);
-    const calls = NodePath.join(root, "calls.json");
-    NodeFS.writeFileSync(
-      NodePath.join(root, "vp"),
-      `#!${process.execPath}
-const fs = require('node:fs');
-fs.writeFileSync(process.env.TEST_CALLS, JSON.stringify({ args: process.argv.slice(2), node: process.env.VP_NODE_VERSION, electron: process.env.ELECTRON_RUN_AS_NODE }));
-`,
-      { mode: 0o755 },
-    );
-    const result = NodeChildProcess.spawnSync("bash", ["-e", "-c", gate.run], {
-      cwd: NodePath.join(root, gate["working-directory"]),
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        PATH: [root, process.env.PATH ?? ""].join(NodePath.delimiter),
-        GITHUB_WORKSPACE: root,
-        INSTALLABLE_TAG: checkpointTag,
-        VP_NODE_VERSION: "26.12.1",
-        ELECTRON_RUN_AS_NODE: "1",
-        TEST_CALLS: calls,
-      },
-    });
-    expect(result.status, result.stderr).toBe(0);
-    expect(JSON.parse(NodeFS.readFileSync(calls, "utf8"))).toEqual({
-      args: [
-        "node",
-        NodePath.join(root, "automation/scripts/lastcode-local-ci.ts"),
-        "--full",
-        "--checkpoint",
-        checkpointTag,
-        "--web-compiler-test-timeout",
-        "60000",
-      ],
-      node: "24.13.1",
-    });
-    expect(NodeFS.readFileSync(targetFile, "utf8")).toBe(targetManifest);
-    expect(NodeFS.realpathSync(NodePath.join(root, "automation/node_modules"))).toBe(
-      NodePath.join(root, "target/node_modules"),
-    );
-    expect(NodeFS.realpathSync(NodePath.join(root, "automation/scripts/node_modules"))).toBe(
-      NodePath.join(root, "target/scripts/node_modules"),
-    );
   });
 
   it("isolates write credentials and revalidates the tag before publication", () => {

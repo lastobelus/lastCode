@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 // LastCode-only release validation for the manual Intel artifact workflow.
+import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
@@ -12,6 +13,61 @@ const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 
 function fail(message) {
   throw new Error(message);
+}
+
+function authorizeIntelPackaging(checkpointTag, commit) {
+  if (
+    process.env.GITHUB_ACTIONS !== "true" ||
+    process.env.GITHUB_WORKFLOW !== "LastCode Intel artifact" ||
+    process.env.RUNNER_OS !== "macOS" ||
+    process.env.RUNNER_ARCH !== "X64"
+  ) {
+    fail("Packaging authorization is only supported in the hosted Intel artifact workflow.");
+  }
+  if (
+    !/^lastcode\/(?:checkpoint|revision)\/v[0-9]+\.[0-9]+\.[0-9]+-nightly\.[0-9]{8}\.[0-9]+(?:\.[0-9]+)?$/u.test(
+      checkpointTag,
+    ) ||
+    !SHA1_PATTERN.test(commit)
+  ) {
+    fail("Expected an exact installable tag and full commit SHA.");
+  }
+  const git = (...args) => NodeChildProcess.execFileSync("git", args, { encoding: "utf8" }).trim();
+  if (
+    git("rev-parse", "HEAD") !== commit ||
+    git("rev-parse", `refs/tags/${checkpointTag}^{commit}`) !== commit
+  ) {
+    fail("Checkout and installable tag must match the advertised commit.");
+  }
+  const version = checkpointTag.replace(/^lastcode\/(?:checkpoint|revision)\//u, "");
+  const upstreamTag = checkpointTag.startsWith("lastcode/revision/")
+    ? version.slice(0, version.lastIndexOf("."))
+    : version;
+  const upstreamCommit = git("rev-parse", `refs/tags/${upstreamTag}^{commit}`);
+  git("merge-base", "--is-ancestor", upstreamCommit, commit);
+  const commonGitDir = git("rev-parse", "--path-format=absolute", "--git-common-dir");
+  const stampPath = NodePath.join(commonGitDir, "lastcode-ci", `${commit}.json`);
+  NodeFS.mkdirSync(NodePath.dirname(stampPath), { recursive: true });
+  // Intel consumers only install versions the Apple Silicon checkpoint host installed
+  // after full CI, during packaging or before repair publication. This authorizes hosted
+  // Intel packaging without tests, using the immutable target packager's required schema.
+  NodeFS.writeFileSync(
+    stampPath,
+    `${JSON.stringify(
+      {
+        schemaVersion: 2,
+        commit,
+        completedAt: new Date().toISOString(),
+        packagingAuthorization: "hosted-intel",
+        context: { kind: "checkpoint", checkpointTag, upstreamCommit, upstreamTag },
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  process.stdout.write(
+    `Authorized hosted Intel packaging for ${checkpointTag} at ${commit}; no tests were run.\n`,
+  );
 }
 
 function readJson(path, label) {
@@ -291,6 +347,11 @@ export function parseIntelReleaseOptions(argv) {
 }
 
 function main(argv) {
+  if (argv[0] === "authorize-packaging") {
+    if (argv.length !== 3) fail("Expected authorize-packaging TAG COMMIT.");
+    authorizeIntelPackaging(argv[1], argv[2]);
+    return;
+  }
   if (argv[0] === "validate-repository") {
     validateImmutableReleaseRepository(parseImmutableReleaseOptions(argv));
     process.stdout.write("Validated GitHub immutable release policy.\n");
