@@ -94,7 +94,7 @@ function SenderBreadcrumb({
                 "flex min-w-0 items-center gap-1.5",
                 thread === sender ? "font-medium text-foreground" : "text-muted-foreground",
               )}
-              style={{ paddingInlineStart: `${(index + 1) * 0.875}rem` }}
+              style={{ paddingInlineStart: `min(${(index + 1) * 0.875}rem, 12ch)` }}
             >
               <ChevronRightIcon aria-hidden className="size-3 shrink-0 text-muted-foreground" />
               {isSidebarSubagentThread(thread) ? (
