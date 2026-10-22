@@ -217,7 +217,8 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.test != 'false' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # Include dependency setup and the complete package test run in the deadline.
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v6
