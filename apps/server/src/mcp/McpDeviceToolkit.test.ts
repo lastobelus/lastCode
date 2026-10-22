@@ -205,7 +205,7 @@ const layerTest = McpHttpServer.layerDeviceToolkit.pipe(
   Layer.provide(layerAccess),
   Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-device-toolkit-test-" })),
   Layer.provide(layerProjectsMock),
-        Layer.provide(NodeServices.layer),
+  Layer.provide(NodeServices.layer),
 );
 
 it.effect("registers the device tools and returns the screenshot as image content", () =>
@@ -393,6 +393,9 @@ it.effect("does not boot or issue a credential when agent readiness is unsupport
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
         Layer.provide(layerUnsupported),
+        Layer.provide(
+          ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-device-unsupported-" }),
+        ),
         Layer.provide(layerAccess),
         Layer.provide(layerProjectsMock),
         Layer.provide(NodeServices.layer),
@@ -472,7 +475,10 @@ it.effect.each([
         agentTarget: () =>
           Effect.sync(() => {
             operations.push("agent helper");
-            return { agentDeviceId: device.id, args: ["--config", "/host.json", "--session", "thread-device"] };
+            return {
+              agentDeviceId: device.id,
+              args: ["--config", "/host.json", "--session", "thread-device"],
+            };
           }),
         open: (input) =>
           Effect.sync(() => {
@@ -498,6 +504,7 @@ it.effect.each([
           }),
       });
       const dependencies = Layer.mergeAll(
+        layerProjectsMock,
         observedService,
         McpToolAccessTestkit.liveThreadsLayer,
         McpToolAccessTestkit.liveThreadProjectionsLayer,
@@ -606,7 +613,10 @@ it.effect.each([
           expect(input.openedSession).toBe(openedSession);
           if (stage === "denied" || stage === "config") return yield* failure;
           issued = true;
-          return { agentDeviceId: openedSession.deviceId, args: ["--config", "/host.json", "--session", "opened-device-session"] };
+          return {
+            agentDeviceId: openedSession.deviceId,
+            args: ["--config", "/host.json", "--session", "opened-device-session"],
+          };
         }),
       agentCli: stage === "cli" ? Effect.fail(failure) : Effect.succeed("/cli"),
       abortOpen: (session) =>
@@ -728,6 +738,9 @@ it.effect("rolls back the opened session when post-open credential issuance is i
           Layer.provideMerge(McpServer.McpServer.layer),
           Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
           Layer.provide(delayedDevices),
+          Layer.provide(
+            ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-device-delayed-" }),
+          ),
           Layer.provide(layerAccess),
           Layer.provide(layerProjectsMock),
           Layer.provide(NodeServices.layer),
@@ -782,6 +795,7 @@ it.effect.each([
         abortOpen: () => Effect.die("No session should be opened for revoked access"),
       });
       const access = Layer.mergeAll(
+        layerProjectsMock,
         McpToolAccessTestkit.liveThreadsLayer,
         McpToolAccessTestkit.liveThreadProjectionsLayer,
         Layer.mock(ProjectStore.ProjectStoreV2)({
@@ -818,6 +832,10 @@ it.effect.each([
             Layer.provideMerge(McpServer.McpServer.layer),
             Layer.provide(devices),
             Layer.provide(access),
+            Layer.provide(
+              ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-device-revoke-readiness-" }),
+            ),
+            Layer.provide(NodeServices.layer),
           ),
         ),
       );

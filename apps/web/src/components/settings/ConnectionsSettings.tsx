@@ -33,6 +33,7 @@ import {
 } from "./ConnectionsSettings.logic";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
 import { LocalEnvironmentSetting } from "./LocalEnvironmentSetting";
+import { EnvironmentPauseControl } from "../EnvironmentPauseControl";
 import { searchableSetting } from "./settingsSearch";
 import { EnvironmentIconMenu } from "./EnvironmentIconPicker";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
@@ -1030,6 +1031,17 @@ export function ConnectionsSettings() {
     />
   );
 
+  // Pause requires thread access, not permission or availability to manage the WSL backend.
+  const secondaryLocalPauseControls = savedEnvironments
+    .filter((environment) => isDesktopLocalConnectionTarget(environment.entry.target))
+    .map((environment) => (
+      <EnvironmentPauseControl
+        key={environment.environmentId}
+        environment={environment}
+        showEnvironmentLabel
+      />
+    ));
+
   const primarySettings = (
     <>
       {primaryEnvironmentId !== null ? (
@@ -1061,30 +1073,48 @@ export function ConnectionsSettings() {
             }
             headerAction={
               primaryEnvironmentId !== null ? (
-                <Menu>
-                  <MenuTrigger
-                    render={
-                      <Button
-                        type="button"
-                        variant="ghost-muted"
-                        size="icon-xs"
-                        aria-label="More actions for this machine"
-                      />
-                    }
-                  >
-                    <EllipsisIcon className="size-3.5" />
-                  </MenuTrigger>
-                  <MenuPopup align="end">
-                    <EnvironmentIconMenu
-                      environmentId={primaryEnvironmentId}
-                      serverConfig={primaryServerConfig}
+                <div className="flex items-center gap-1">
+                  {secondaryLocalPauseControls}
+                  {!desktopBridge && primaryEnvironment ? (
+                    <EnvironmentPauseControl
+                      key={primaryEnvironment.environmentId}
+                      environment={primaryEnvironment}
                     />
-                  </MenuPopup>
-                </Menu>
+                  ) : null}
+                  <Menu>
+                    <MenuTrigger
+                      render={
+                        <Button
+                          type="button"
+                          variant="ghost-muted"
+                          size="icon-xs"
+                          aria-label="More actions for this machine"
+                        />
+                      }
+                    >
+                      <EllipsisIcon className="size-3.5" />
+                    </MenuTrigger>
+                    <MenuPopup align="end">
+                      <EnvironmentIconMenu
+                        environmentId={primaryEnvironmentId}
+                        serverConfig={primaryServerConfig}
+                      />
+                    </MenuPopup>
+                  </Menu>
+                </div>
               ) : null
             }
           >
-            <LocalEnvironmentSetting />
+            <LocalEnvironmentSetting
+              pauseControl={
+                primaryEnvironment ? (
+                  <EnvironmentPauseControl
+                    key={primaryEnvironment.environmentId}
+                    environment={primaryEnvironment}
+                  />
+                ) : null
+              }
+            />
             {canManageLocalBackend ? (
               <SettingsRow
                 title="Version"
@@ -1476,7 +1506,12 @@ export function ConnectionsSettings() {
           </Dialog>
         </>
       ) : (
-        <SettingsSection {...searchableSetting("connections-environment")}>
+        <SettingsSection
+          {...searchableSetting("connections-environment")}
+          headerAction={
+            <div className="flex items-center gap-1">{secondaryLocalPauseControls}</div>
+          }
+        >
           <SettingsRow
             title="No environment selected"
             description="Connect an environment to view its settings and access."

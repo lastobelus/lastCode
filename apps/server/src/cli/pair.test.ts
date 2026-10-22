@@ -144,7 +144,7 @@ describe("t3 pair", () => {
             Effect.gen(function* () {
               if (!ChildProcess.isStandardCommand(command))
                 return yield* Effect.die("Unexpected pipeline");
-              if (command.args[0] === "serve") {
+              if (command.args[0] === "serve" && command.args.includes("--bg")) {
                 const target = command.args.at(-1)!;
                 const descriptor = yield* Effect.promise(async () =>
                   (await fetch(new URL("/.well-known/t3/environment", target))).json(),
@@ -160,7 +160,11 @@ describe("t3 pair", () => {
                 unref: Effect.succeed(Effect.void),
                 stdin: Sink.drain,
                 stdout: Stream.make(
-                  new TextEncoder().encode('{"Self":{"DNSName":"pair-test.tail.ts.net."}}'),
+                  new TextEncoder().encode(
+                    command.args[0] === "status"
+                      ? '{"Self":{"DNSName":"pair-test.tail.ts.net."}}'
+                      : "{}",
+                  ),
                 ),
                 stderr: Stream.empty,
                 all: Stream.empty,

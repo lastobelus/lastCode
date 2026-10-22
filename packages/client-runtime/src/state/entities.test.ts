@@ -575,3 +575,32 @@ describe("V2 client presentation", () => {
     ]);
   });
 });
+
+describe("LastCode shell metadata", () => {
+  it("keeps annotations, persistence and cleanup in the presentation", () => {
+    const annotation = {
+      body: "Keep this review open",
+      anchorMessageId: MessageId.make("annotation-anchor"),
+      createdAt: "2026-06-20T00:00:00.000Z",
+      updatedAt: "2026-06-20T00:00:00.000Z",
+      resolvedAt: null,
+    };
+    const worktreeCleanup = {
+      status: "failed" as const,
+      repositoryRoot: "/workspace/project",
+      worktreePath: "/workspace/worktree",
+      startedAt: "2026-06-20T00:00:00.000Z",
+      failedAt: "2026-06-20T00:01:00.000Z",
+      error: "Worktree is busy",
+    };
+    const shell = presentThreadShell(environmentId, {
+      ...v2ThreadShell,
+      persistent: true,
+      annotation,
+      worktreeCleanup,
+    });
+    expect(shell.persistent).toBe(true);
+    expect(shell.annotation).toBe(annotation);
+    expect(shell.worktreeCleanup).toBe(worktreeCleanup);
+  });
+});
