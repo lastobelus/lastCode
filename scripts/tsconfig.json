@@ -8,6 +8,8 @@
   },
   "include": [
     "**/*.ts",
+    "../apps/server/scripts/prepare-preview-settings.ts",
+    "../apps/desktop/src/app/chromiumLocalStorage.ts",
     "../packages/shared/src/dependencyActivity.ts",
     "../packages/shared/src/generatedBuildOwnership.ts"
   ]

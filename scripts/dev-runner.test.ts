@@ -332,6 +332,33 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
   });
 
   describe("runDevRunnerWithInput", () => {
+    it.effect("rejects incomplete preview preference sources before starting a process", () => {
+      let spawned = false;
+      const spawnerLayer = Layer.succeed(
+        ChildProcessSpawner.ChildProcessSpawner,
+        ChildProcessSpawner.make(() => {
+          spawned = true;
+          return Effect.succeed(mockProcess(0));
+        }),
+      );
+
+      return Effect.gen(function* () {
+        const error = yield* runDevRunnerWithInput(devServerInput).pipe(
+          Effect.provide(Layer.mergeAll(emptyConfigLayer, netServiceLayer, spawnerLayer)),
+          Effect.provideService(HostProcess.Platform, "linux"),
+          Effect.provideService(HostProcess.Environment, {
+            T3CODE_PREVIEW_SETTINGS_SOURCE: "/saved-app/userdata",
+          }),
+          Effect.flip,
+        );
+
+        assert.equal(error._tag, "DevRunnerConfigurationError");
+        if (error._tag !== "DevRunnerConfigurationError") return;
+        assert.deepStrictEqual(error.configKeys, ["T3CODE_PREVIEW_BROWSER_PROFILE"]);
+        assert.equal(spawned, false);
+      });
+    });
+
     it.effect("preserves process spawn context and the exact platform cause", () => {
       const cause = PlatformError.systemError({
         _tag: "NotFound",

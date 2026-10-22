@@ -670,18 +670,25 @@ export const runDevRunnerWithInput = Effect.fn("dev-runner.runDevRunnerWithInput
   if (settingsSource) {
     const browserProfile = hostEnvironment.T3CODE_PREVIEW_BROWSER_PROFILE?.trim();
     if (!browserProfile) {
-      return yield* Effect.fail(
-        new Error("T3CODE_PREVIEW_BROWSER_PROFILE is required when copying preview settings."),
-      );
+      return yield* new DevRunnerConfigurationError({
+        configKeys: ["T3CODE_PREVIEW_BROWSER_PROFILE"],
+        cause: "A browser profile is required when copying preview settings.",
+      });
     }
-    yield* Effect.tryPromise(() =>
-      preparePreviewSettings({
-        sourceStateDir: settingsSource,
-        sourceBrowserProfile: browserProfile,
-        sourceOrigin: hostEnvironment.T3CODE_PREVIEW_SETTINGS_ORIGIN ?? "lastcode://app",
-        targetHome: baseDir,
-      }),
-    );
+    yield* Effect.tryPromise({
+      try: () =>
+        preparePreviewSettings({
+          sourceStateDir: settingsSource,
+          sourceBrowserProfile: browserProfile,
+          sourceOrigin: hostEnvironment.T3CODE_PREVIEW_SETTINGS_ORIGIN ?? "lastcode://app",
+          targetHome: baseDir,
+        }),
+      catch: (cause) =>
+        new DevRunnerConfigurationError({
+          configKeys: ["T3CODE_PREVIEW_SETTINGS_SOURCE", "T3CODE_PREVIEW_BROWSER_PROFILE"],
+          cause,
+        }),
+    });
   }
 
   const sharedWebPort = BASE_WEB_PORT + webOffset;
