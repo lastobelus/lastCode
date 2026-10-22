@@ -407,13 +407,12 @@ until LastCode intentionally publishes compatible releases.
 The resumable **Build Intel package (macOS)** Project Action dispatches the manual
 **LastCode Intel artifact** workflow for one exact
 `lastcode/checkpoint/...` or `lastcode/revision/...` tag and its full advertised
-commit. It rejects moving refs and tag/commit mismatches, runs the checkpoint's
-full CI gate on `macos-15-intel`, and builds a certificate-free x64 artifact.
-The gate runner comes from the workflow's pinned automation checkout and runs
-against the unchanged installable checkout. React Compiler coverage runs in its
-own test invocation with a 60-second per-case execution budget on hosted Intel.
-Other application test budgets and the complete test set remain unchanged;
-tooling fixtures have separate hosted execution budgets.
+commit. It rejects moving refs and tag/commit mismatches. The Intel job runs no
+tests: it only builds and validates the certificate-free x64 artifact on
+`macos-15-intel`. Intel consumers only install a version the Apple Silicon
+checkpoint host has installed. That host requires full CI before installation:
+in its package build for ordinary checkpoints, or before publication for repair
+revisions and selected recoveries.
 
 The agent chooses the target explicitly. First record and verify that exact remote
 tag in the current worktree:
@@ -463,7 +462,7 @@ asset set to a fresh publication job, which revalidates the assets and tag befor
 receiving write access; target-controlled build steps never share that token.
 
 A rerun for a complete matching release exits successfully before dependency
-installation, CI, or packaging. An existing draft, non-prerelease, partial,
+installation or packaging. An existing draft, non-prerelease, partial,
 foreign, or mismatched asset set fails closed. Automation never clobbers or
 deletes an exact-tag release. Recovery from a partial or conflicting publication
 therefore requires a maintainer decision rather than silently changing an
