@@ -44,6 +44,7 @@ function harness(input: {
   readonly viewedRuns?: ReadonlyArray<WorkflowRun>;
   readonly workflowError?: Error;
   readonly activeRuns?: ReadonlyArray<WorkflowRun>;
+  readonly buildFinished?: boolean;
 }) {
   let currentRequest = input.initialRequest ?? request();
   let now = 0;
@@ -74,6 +75,7 @@ function harness(input: {
     },
     listActiveWorkflowRuns: () => input.activeRuns ?? [],
     workflowFilesAreCurrent: (headSha) => headSha === "b".repeat(40),
+    workflowBuildHasFinished: () => input.buildFinished ?? false,
     cancelWorkflowRun: (runId) => calls.push(`cancel:${runId}`),
     readWorkflowRun: () => {
       calls.push("view");
@@ -192,12 +194,13 @@ describe("lastcode-build-intel-package", () => {
     expect(calls).toEqual(["lock:enter", "lock:exit"]);
   });
 
-  it("attaches current builds and replaces only outdated same-or-older targets after cancellation completes", async () => {
+  it("attaches reusable builds and replaces only outdated same-or-older targets after cancellation completes", async () => {
     const token = "intel-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
     const older = "lastcode/checkpoint/v0.0.34-nightly.20260825.1185";
     const newer = "lastcode/revision/v0.0.34-nightly.20260825.1185.10";
-    for (const [runTag, current, status, decision] of [
+    for (const [runTag, current, status, decision, buildFinished = false] of [
       [tag, true, "in_progress", "attach"],
+      [tag, false, "in_progress", "attach", true],
       [tag, true, "requested", "attach"],
       [tag, true, "waiting", "attach"],
       [tag, true, "pending", "attach"],
@@ -215,6 +218,7 @@ describe("lastcode-build-intel-package", () => {
         status,
       });
       const test = harness({
+        buildFinished,
         activeRuns: [active],
         listedRuns: [[], [workflowRun({ status: "completed", conclusion: "success" })]],
         viewedRuns: [

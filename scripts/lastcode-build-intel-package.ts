@@ -64,6 +64,7 @@ export interface BuildIntelDependencies {
   readonly listWorkflowRuns: () => ReadonlyArray<WorkflowRun>;
   readonly listActiveWorkflowRuns: () => ReadonlyArray<WorkflowRun>;
   readonly workflowFilesAreCurrent: (headSha: string) => boolean;
+  readonly workflowBuildHasFinished: (runId: number) => boolean;
   readonly cancelWorkflowRun: (runId: number) => void;
   readonly readWorkflowRun: (runId: number) => WorkflowRun;
   readonly readRelease: (tag: string) => IntelRelease;
@@ -331,6 +332,15 @@ export function createBuildIntelDependencies(): BuildIntelDependencies {
       workflowComparisons.set(headSha, current);
       return current;
     },
+    workflowBuildHasFinished: (runId) =>
+      runGhJson<{
+        readonly jobs: ReadonlyArray<{ readonly name: string; readonly status: string }>;
+      }>(["run", "view", String(runId), "--repo", repository, "--json", "jobs"]).jobs.some(
+        (job) =>
+          (job.name === "Validate and build macOS x64" && job.status === "completed") ||
+          (job.name === "Publish immutable exact-tag assets" &&
+            (job.status === "in_progress" || job.status === "completed")),
+      ),
     cancelWorkflowRun: (runId) => {
       runCommand("gh", ["run", "cancel", String(runId), "--repo", repository]);
     },
@@ -384,18 +394,18 @@ export function selectIntelBuild(
     fail("Expected an exact lastcode/checkpoint/... or lastcode/revision/... nightly tag.");
   const dependencies = input.dependencies ?? createBuildIntelDependencies();
   let attached: { readonly run: WorkflowRun; readonly requestToken: string } | undefined;
-  // Across machines, preserve newer tags and current workflows; same-tag duplicates queue and reuse complete releases.
+  // Across machines, preserve newer tags, current workflows and built packages; same-tag duplicates queue and reuse complete releases.
   for (const run of dependencies.listActiveWorkflowRuns()) {
     if (run.status === "completed") continue;
     const existing = workflowRunTarget(run);
     if (!existing || compareLastCodeInstallableTags(existing.installable, installable) > 0)
       continue;
     const current = dependencies.workflowFilesAreCurrent(run.headSha);
-    if (current) {
+    if (current || dependencies.workflowBuildHasFinished(run.databaseId)) {
       if (existing.installable.tag === target.tag && !attached) {
         attached = { run, requestToken: existing.requestToken };
         dependencies.log(
-          `[build-intel] Attaching to current workflow ${run.databaseId} for ${target.tag}: ${run.url}`,
+          `[build-intel] Attaching to reusable workflow ${run.databaseId} for ${target.tag}: ${run.url}`,
         );
       }
     } else {

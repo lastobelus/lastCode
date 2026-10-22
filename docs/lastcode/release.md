@@ -440,9 +440,10 @@ to appear and then records the matching run ID for later reattachment. If GitHub
 never registers it, select the tag again to create a deliberate new request.
 
 Selection attaches to an active exact-tag build when its workflow and checked-out
-automation files match current `origin/lastcode/main`, saving its token and run ID
-without dispatching again. It cancels outdated builds for the selected or older
-tags, preserving newer targets and every current-workflow build. Before dispatching
+automation files match current `origin/lastcode/main` or its package build has
+finished, saving its token and run ID without dispatching again. It cancels
+unfinished outdated builds for the selected or older tags, preserving newer targets,
+current-workflow builds, and packages being published. Before dispatching
 a replacement, the Action waits for active same-tag runs to finish cancellation.
 
 The Action only builds and publishes. It never stages, installs, promotes,
