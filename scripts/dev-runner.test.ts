@@ -6,6 +6,8 @@ import * as NodePath from "node:path";
 import * as NetService from "@t3tools/shared/Net";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { assert, describe, it } from "@effect/vitest";
+import { vi } from "vite-plus/test";
+import * as PreviewSettings from "../apps/server/scripts/prepare-preview-settings.ts";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -333,6 +335,94 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
   });
 
   describe("runDevRunnerWithInput", () => {
+    it.effect("rejects incomplete preview preference sources before starting a process", () => {
+      let spawned = false;
+      const spawnerLayer = Layer.succeed(
+        ChildProcessSpawner.ChildProcessSpawner,
+        ChildProcessSpawner.make(() => {
+          spawned = true;
+          return Effect.succeed(mockProcess(0));
+        }),
+      );
+
+      return Effect.gen(function* () {
+        const error = yield* runDevRunnerWithInput(devServerInput).pipe(
+          Effect.provide(Layer.mergeAll(emptyConfigLayer, netServiceLayer, spawnerLayer)),
+          Effect.provideService(HostProcess.Platform, "linux"),
+          Effect.provideService(HostProcess.Environment, {
+            T3CODE_PREVIEW_SETTINGS_SOURCE: "/saved-app/userdata",
+          }),
+          Effect.flip,
+        );
+
+        assert.equal(error._tag, "DevRunnerConfigurationError");
+        if (error._tag !== "DevRunnerConfigurationError") return;
+        assert.deepStrictEqual(error.configKeys, ["T3CODE_PREVIEW_BROWSER_PROFILE"]);
+        assert.equal(spawned, false);
+      });
+    });
+
+    it.effect.each([undefined, "", "   "])(
+      "rejects a missing preview origin (%s) before preparation",
+      (origin) =>
+        Effect.gen(function* () {
+          using prepare = vi
+            .spyOn(PreviewSettings, "preparePreviewSettings")
+            .mockRejectedValue(new Error("Preparation must not run without an origin"));
+          let spawned = false;
+          const spawnerLayer = Layer.succeed(
+            ChildProcessSpawner.ChildProcessSpawner,
+            ChildProcessSpawner.make(() => {
+              spawned = true;
+              return Effect.succeed(mockProcess(0));
+            }),
+          );
+          const error = yield* runDevRunnerWithInput(devServerInput).pipe(
+            Effect.provide(Layer.mergeAll(emptyConfigLayer, netServiceLayer, spawnerLayer)),
+            Effect.provideService(HostProcess.Platform, "linux"),
+            Effect.provideService(HostProcess.Environment, {
+              T3CODE_PREVIEW_SETTINGS_SOURCE: "/saved-app/userdata",
+              T3CODE_PREVIEW_BROWSER_PROFILE: "/saved-app/profile",
+              ...(origin === undefined ? {} : { T3CODE_PREVIEW_SETTINGS_ORIGIN: origin }),
+            }),
+            Effect.flip,
+          );
+          assert.equal(error._tag, "DevRunnerConfigurationError");
+          if (error._tag !== "DevRunnerConfigurationError") return;
+          assert.deepStrictEqual(error.configKeys, ["T3CODE_PREVIEW_SETTINGS_ORIGIN"]);
+          assert.equal(prepare.mock.calls.length, 0);
+          assert.equal(spawned, false);
+        }),
+    );
+
+    it.effect.each(["lastcode-dev://app", " \tlastcode-dev://app \n"])(
+      "normalizes the explicit preview origin (%s)",
+      (origin) =>
+        Effect.gen(function* () {
+          using prepare = vi.spyOn(PreviewSettings, "preparePreviewSettings").mockResolvedValue({
+            id: "00000000-0000-4000-8000-000000000001",
+            settingsPath: "/preview/userdata/preview-settings.json",
+            copiedFiles: [],
+            browserPreferenceCount: 1,
+          });
+          const spawnerLayer = Layer.succeed(
+            ChildProcessSpawner.ChildProcessSpawner,
+            ChildProcessSpawner.make(() => Effect.succeed(mockProcess(0))),
+          );
+          yield* runDevRunnerWithInput(devServerInput).pipe(
+            Effect.provide(Layer.mergeAll(emptyConfigLayer, netServiceLayer, spawnerLayer)),
+            Effect.provideService(HostProcess.Platform, "linux"),
+            Effect.provideService(HostProcess.Environment, {
+              T3CODE_PREVIEW_SETTINGS_SOURCE: "/saved-app/userdata",
+              T3CODE_PREVIEW_BROWSER_PROFILE: "/saved-app/profile",
+              T3CODE_PREVIEW_SETTINGS_ORIGIN: origin,
+            }),
+          );
+          assert.equal(prepare.mock.calls.length, 1);
+          assert.equal(prepare.mock.calls[0]?.[0].sourceOrigin, "lastcode-dev://app");
+        }),
+    );
+
     it.effect("preserves process spawn context and the exact platform cause", () => {
       const cause = PlatformError.systemError({
         _tag: "NotFound",
@@ -492,7 +582,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
 
       it.effect("defaults T3CODE_BUNDLED_DEV=1 for a shared run", () =>
         Effect.gen(function* () {
-          const env = yield* shareSpawnedEnv({ ambientBundledDev: undefined });
+          const { env } = yield* shareSpawned({ ambientBundledDev: undefined });
           assert.equal(env?.T3CODE_BUNDLED_DEV, "1");
           assert.equal(env?.T3CODE_WEB_BIND_HOST, "127.0.0.1");
         }),
@@ -565,7 +655,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           assert.notInclude(vpArgs, "dev:built");
           assert.equal(env?.T3CODE_BUNDLED_DEV, "1");
           const serve = tailscaleCalls.find((args) => args.includes("--bg"));
-          assert.equal(serve?.at(-1), `http://localhost:${env?.PORT}`);
+          assert.equal(serve?.at(-1), `http://127.0.0.1:${env?.PORT}`);
         }),
       );
     });

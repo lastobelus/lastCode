@@ -23,6 +23,7 @@ import { ChildProcess } from "effect/process";
 
 import { type DevShareError, shareDevServer, unshareDevServer } from "./lib/dev-share.ts";
 import { loadRepoEnv } from "./lib/public-config.ts";
+import { preparePreviewSettings } from "../apps/server/scripts/prepare-preview-settings.ts";
 
 Object.assign(process.env, loadRepoEnv());
 
@@ -771,6 +772,42 @@ export const runDevRunnerWithInput = Effect.fn("dev-runner.runDevRunnerWithInput
     return;
   }
 
+  const settingsSource = hostEnvironment.T3CODE_PREVIEW_SETTINGS_SOURCE?.trim();
+  if (settingsSource) {
+    const browserProfile = hostEnvironment.T3CODE_PREVIEW_BROWSER_PROFILE?.trim();
+    if (!browserProfile) {
+      return yield* new DevRunnerConfigurationError({
+        configKeys: ["T3CODE_PREVIEW_BROWSER_PROFILE"],
+        cause: "A browser profile is required when copying preview settings.",
+      });
+    }
+    const settingsOrigin = hostEnvironment.T3CODE_PREVIEW_SETTINGS_ORIGIN?.trim();
+    if (!settingsOrigin) {
+      return yield* new DevRunnerConfigurationError({
+        configKeys: ["T3CODE_PREVIEW_SETTINGS_ORIGIN"],
+        cause: "An explicit browser origin is required when copying preview settings.",
+      });
+    }
+    yield* Effect.tryPromise({
+      try: () =>
+        preparePreviewSettings({
+          sourceStateDir: settingsSource,
+          sourceBrowserProfile: browserProfile,
+          sourceOrigin: settingsOrigin,
+          targetHome: baseDir,
+        }),
+      catch: (cause) =>
+        new DevRunnerConfigurationError({
+          configKeys: [
+            "T3CODE_PREVIEW_SETTINGS_SOURCE",
+            "T3CODE_PREVIEW_BROWSER_PROFILE",
+            "T3CODE_PREVIEW_SETTINGS_ORIGIN",
+          ],
+          cause,
+        }),
+    });
+  }
+
   const sharedWebPort = BASE_WEB_PORT + webOffset;
   let built = false;
   if (input.share) {
@@ -871,6 +908,16 @@ export const runDevRunnerWithInput = Effect.fn("dev-runner.runDevRunnerWithInput
     argumentCount: args.length,
     shell: spawnCommand.shell,
   } as const;
+  // This runner is a concrete dependency-backed execution, unlike opening a
+  // terminal or asking an agent for status. Renew again after its child stops.
+  const usageCwd = yield* HostProcess.WorkingDirectory;
+  const noteDependencyUse = Effect.gen(function* () {
+    const now = yield* Clock.currentTimeMillis;
+    yield* Effect.try(() => recordDependencyUse(usageCwd, now)).pipe(
+      Effect.catch(() => Effect.logDebug("Could not record development dependency use")),
+    );
+  });
+  yield* Effect.acquireRelease(noteDependencyUse, () => noteDependencyUse);
   const child = yield* ChildProcess.make(spawnCommand.command, spawnCommand.args, {
     stdin: "inherit",
     stdout: "inherit",

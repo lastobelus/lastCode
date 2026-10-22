@@ -147,7 +147,7 @@ describe("shareDevServer", () => {
         webPort: 5788,
         localTarget: { port: 7733, host: "[::1]" },
       }).pipe(Effect.provide(spawnerLayer({ calls })));
-      assert.equal(result.url, "https://host.example.ts.net:5788");
+      assert.equal(result.url, "https://host.example.ts.net:5788/");
       assert.deepEqual(calls, [
         ["status", "--json"],
         ["serve", "status", "--json"],
