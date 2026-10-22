@@ -675,17 +675,28 @@ export const runDevRunnerWithInput = Effect.fn("dev-runner.runDevRunnerWithInput
         cause: "A browser profile is required when copying preview settings.",
       });
     }
+    const settingsOrigin = hostEnvironment.T3CODE_PREVIEW_SETTINGS_ORIGIN;
+    if (!settingsOrigin?.trim()) {
+      return yield* new DevRunnerConfigurationError({
+        configKeys: ["T3CODE_PREVIEW_SETTINGS_ORIGIN"],
+        cause: "An explicit browser origin is required when copying preview settings.",
+      });
+    }
     yield* Effect.tryPromise({
       try: () =>
         preparePreviewSettings({
           sourceStateDir: settingsSource,
           sourceBrowserProfile: browserProfile,
-          sourceOrigin: hostEnvironment.T3CODE_PREVIEW_SETTINGS_ORIGIN ?? "lastcode://app",
+          sourceOrigin: settingsOrigin,
           targetHome: baseDir,
         }),
       catch: (cause) =>
         new DevRunnerConfigurationError({
-          configKeys: ["T3CODE_PREVIEW_SETTINGS_SOURCE", "T3CODE_PREVIEW_BROWSER_PROFILE"],
+          configKeys: [
+            "T3CODE_PREVIEW_SETTINGS_SOURCE",
+            "T3CODE_PREVIEW_BROWSER_PROFILE",
+            "T3CODE_PREVIEW_SETTINGS_ORIGIN",
+          ],
           cause,
         }),
     });
