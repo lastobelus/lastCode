@@ -1,59 +1,73 @@
-import { afterEach, expect, it, vi } from "vite-plus/test";
+import { expect, it, vi } from "vite-plus/test";
 import { bindSidebarPageScroll } from "./sidebarPageScroll";
 
-const originalHitTest = Object.getOwnPropertyDescriptor(document, "elementFromPoint");
-const disposers: Array<() => void> = [];
-afterEach(() => {
-  disposers.splice(0).forEach((dispose) => dispose());
-  document.body.replaceChildren();
-  vi.restoreAllMocks();
-  if (originalHitTest) Object.defineProperty(document, "elementFromPoint", originalHitTest);
-  else Reflect.deleteProperty(document, "elementFromPoint");
-});
-
-function sidebar() {
-  const inner = document.createElement("div");
-  inner.dataset.slot = "sidebar-inner";
-  inner.innerHTML =
-    '<header></header><section><div data-slot="scroll-area-viewport"><div data-sidebar="content"></div></div></section><button data-sidebar="rail"></button>';
-  document.body.append(inner);
-  const scrollArea = inner.querySelector("section")!;
-  const viewport = scrollArea.firstElementChild as HTMLElement;
-  const rail = inner.lastElementChild as HTMLElement;
-  Object.defineProperties(viewport, {
-    scrollTop: { value: 0, writable: true, configurable: true },
-    scrollHeight: { value: 2000, configurable: true },
-    clientHeight: { value: 600 },
+function createFixture() {
+  const stack = new DisposableStack();
+  const originalHitTest = Object.getOwnPropertyDescriptor(document, "elementFromPoint");
+  stack.defer(() => {
+    if (originalHitTest) Object.defineProperty(document, "elementFromPoint", originalHitTest);
+    else Reflect.deleteProperty(document, "elementFromPoint");
   });
-  vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue({ top: 100, bottom: 700 } as DOMRect);
-  viewport.scrollBy = (options: ScrollToOptions | number = {}, y?: number) => {
-    const delta = typeof options === "number" ? (y ?? 0) : (options.top ?? 0);
-    viewport.scrollTop = Math.max(0, Math.min(1400, viewport.scrollTop + delta));
+  const append = (...elements: HTMLElement[]) => {
+    document.body.append(...elements);
+    elements.forEach((element) => stack.defer(() => element.remove()));
   };
-  const dispose = bindSidebarPageScroll(scrollArea)!;
-  disposers.push(dispose);
-  return { viewport, rail, header: inner.firstElementChild!, dispose };
+  function sidebar() {
+    const inner = document.createElement("div");
+    inner.dataset.slot = "sidebar-inner";
+    inner.innerHTML =
+      '<header></header><section><div data-slot="scroll-area-viewport"><div data-sidebar="content"></div></div></section><button data-sidebar="rail"></button>';
+    append(inner);
+    const scrollArea = inner.querySelector("section")!;
+    const viewport = scrollArea.firstElementChild as HTMLElement;
+    const rail = inner.lastElementChild as HTMLElement;
+    Object.defineProperties(viewport, {
+      scrollTop: { value: 0, writable: true, configurable: true },
+      scrollHeight: { value: 2000, configurable: true },
+      clientHeight: { value: 600 },
+    });
+    stack.use(
+      vi
+        .spyOn(viewport, "getBoundingClientRect")
+        .mockReturnValue({ top: 100, bottom: 700 } as DOMRect),
+    );
+    viewport.scrollBy = (options: ScrollToOptions | number = {}, y?: number) => {
+      const delta = typeof options === "number" ? (y ?? 0) : (options.top ?? 0);
+      viewport.scrollTop = Math.max(0, Math.min(1400, viewport.scrollTop + delta));
+    };
+    const dispose = bindSidebarPageScroll(scrollArea)!;
+    stack.defer(dispose);
+    return { viewport, rail, header: inner.firstElementChild!, dispose };
+  }
+
+  const hover = (target: Element | null, y = 300, pointerType = "mouse") => {
+    Object.defineProperty(document, "elementFromPoint", {
+      value: () => target,
+      configurable: true,
+    });
+    const event = new MouseEvent("pointermove", { bubbles: true, clientX: 150, clientY: y });
+    Object.defineProperty(event, "pointerType", { value: pointerType });
+    document.dispatchEvent(event);
+  };
+  const composer = () => {
+    const editor = document.createElement("textarea");
+    append(editor);
+    editor.focus();
+    return editor;
+  };
+
+  return { sidebar, composer, hover, append, [Symbol.dispose]: () => stack.dispose() };
 }
 
-const hover = (target: Element | null, y = 300, pointerType = "mouse") => {
-  Object.defineProperty(document, "elementFromPoint", { value: () => target, configurable: true });
-  const event = new MouseEvent("pointermove", { bubbles: true, clientX: 150, clientY: y });
-  Object.defineProperty(event, "pointerType", { value: pointerType });
-  document.dispatchEvent(event);
-};
 const key = (target: Element, key = "PageDown", options: KeyboardEventInit = {}) => {
   const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...options });
   target.dispatchEvent(event);
   return event;
 };
-const composer = () => {
-  const editor = document.createElement("textarea");
-  document.body.append(editor);
-  editor.focus();
-  return editor;
-};
 
 it("pages the hovered list in both directions without changing composer focus or routing to the composer", () => {
+  using dom = createFixture();
+  const { sidebar, composer, hover } = dom;
   const { viewport } = sidebar();
   const editor = composer();
   const composerKey = vi.fn();
@@ -69,6 +83,8 @@ it("pages the hovered list in both directions without changing composer focus or
 });
 
 it("targets only the hovered sidebar, including its resize edge, and consumes boundary pages", () => {
+  using dom = createFixture();
+  const { sidebar, composer, hover } = dom;
   const first = sidebar();
   const second = sidebar();
   const editor = composer();
@@ -85,6 +101,8 @@ it("targets only the hovered sidebar, including its resize edge, and consumes bo
 });
 
 it("leaves keys outside the list, under an overlay, in header/footer positions, or without mouse hover alone", () => {
+  using dom = createFixture();
+  const { sidebar, composer, hover } = dom;
   const { viewport, rail, header } = sidebar();
   const editor = composer();
   expect(key(editor).defaultPrevented).toBe(false);
@@ -102,6 +120,8 @@ it("leaves keys outside the list, under an overlay, in header/footer positions, 
 });
 
 it("preserves modified keys, composition, sidebar editing, and focused floating controls", () => {
+  using dom = createFixture();
+  const { sidebar, composer, hover } = dom;
   const { viewport } = sidebar();
   const editor = composer();
   hover(viewport);
@@ -124,13 +144,15 @@ it("preserves modified keys, composition, sidebar editing, and focused floating 
   menu.setAttribute("role", "menu");
   const item = document.createElement("button");
   menu.append(item);
-  document.body.append(menu);
+  dom.append(menu);
   item.focus();
   expect(key(item).defaultPrevented).toBe(false);
   expect(viewport.scrollTop).toBe(0);
 });
 
 it("preserves fixed-header search and focused controls managing a separate results listbox", () => {
+  using dom = createFixture();
+  const { sidebar, hover } = dom;
   const { viewport, header } = sidebar();
   const search = document.createElement("input");
   header.append(search);
@@ -151,7 +173,7 @@ it("preserves fixed-header search and focused controls managing a separate resul
   const results = document.createElement("div");
   results.id = "results";
   results.setAttribute("role", "listbox");
-  document.body.append(control, results);
+  dom.append(control, results);
   control.focus();
   expect(key(control).defaultPrevented).toBe(false);
   expect(viewport.scrollTop).toBe(0);
@@ -159,6 +181,8 @@ it("preserves fixed-header search and focused controls managing a separate resul
 });
 
 it("releases stale pointer state and the binding, and leaves a list with no overflow alone", () => {
+  using dom = createFixture();
+  const { sidebar, composer, hover } = dom;
   const { viewport, dispose } = sidebar();
   const editor = composer();
   hover(viewport);

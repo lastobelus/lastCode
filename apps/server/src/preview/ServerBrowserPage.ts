@@ -18,7 +18,7 @@ import {
   type PreviewAutomationWaitForInput,
 } from "@t3tools/contracts";
 import { constVoid } from "effect/Function";
-import type { CDPSession, ConsoleMessage, Frame, Locator, Page } from "playwright-core";
+import type { CDPSession, ConsoleMessage, Frame, Locator, Page, Route } from "playwright-core";
 import * as NodeCrypto from "node:crypto";
 import { BrowserControlInterrupted } from "./SessionControl.ts";
 
@@ -36,6 +36,36 @@ export class ServerBrowserOperationError extends Error {
     super(message);
     this.tag = tag;
     this.detail = detail;
+  }
+}
+
+/** Install access in this page's cookie context before navigating; never put credentials in URLs. */
+export async function prepareBrowserCredential(
+  page: Page,
+  destination: string,
+  credential: string,
+  timeoutMs: number,
+): Promise<void> {
+  // Playwright cannot abort this request with our signal. Drain it before handing off
+  // control so a cancelled operation cannot write cookies into later work.
+  try {
+    const response = await page
+      .context()
+      .request.post(new URL("/api/auth/browser-session", destination).href, {
+        data: { credential },
+        maxRedirects: 0,
+        timeout: Math.max(1, Math.min(timeoutMs, 5_000)),
+      });
+    try {
+      if (!response.ok()) throw new Error("Browser session exchange was rejected.");
+    } finally {
+      await response.dispose();
+    }
+  } catch {
+    throw new ServerBrowserOperationError(
+      "PreviewAutomationExecutionError",
+      "The browser destination rejected development access. Use the HTTPS destination produced by the retained development recipe with --share.",
+    );
   }
 }
 
@@ -70,6 +100,65 @@ export const toOperationError = (cause: unknown): ServerBrowserOperationError =>
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_READ_TIMEOUT_MS = 10_000;
 const DEFAULT_CAPTURE_TIMEOUT_MS = 3_000;
+
+/** Redirect an existing navigation without appending a new history entry. */
+export const navigateWithRedirect = async (
+  page: Page,
+  storedUrl: string,
+  destination: string,
+  navigate: (redirected: boolean) => Promise<unknown>,
+  signal?: AbortSignal,
+) => {
+  signal?.throwIfAborted();
+  if (destination === storedUrl) {
+    await navigate(false);
+    return;
+  }
+  const requestUrl = new URL(storedUrl);
+  requestUrl.hash = "";
+  const matches = (url: URL) => url.href === requestUrl.href;
+  const pending = new Set<Promise<void>>();
+  const redirect = (route: Route) => {
+    const work = (async () => {
+      const request = route.request();
+      if (!request.isNavigationRequest() || request.frame() !== page.mainFrame()) {
+        await route.fallback();
+      } else if (signal?.aborted) {
+        await route.abort("aborted");
+      } else {
+        await route.fulfill({ status: 302, headers: { location: destination } });
+      }
+    })();
+    pending.add(work);
+    void work.then(
+      () => pending.delete(work),
+      () => pending.delete(work),
+    );
+    return work;
+  };
+  await page.route(matches, redirect);
+  try {
+    signal?.throwIfAborted();
+    await navigate(true);
+    signal?.throwIfAborted();
+    // Cached and same-document history traversal can commit without a request to redirect.
+    if (page.url() === storedUrl) {
+      const committed = page.waitForURL((url) => url.href !== storedUrl, {
+        waitUntil: "commit",
+        timeout: DEFAULT_TIMEOUT_MS,
+      });
+      void committed.catch(constVoid);
+      await page.evaluate(`location.replace(${JSON.stringify(destination)})`);
+      await committed;
+    }
+  } finally {
+    try {
+      await page.unroute(matches, redirect);
+    } finally {
+      await Promise.allSettled(pending);
+    }
+  }
+};
 
 type ReadOptions = {
   readonly timeoutMs?: number | undefined;
@@ -608,17 +697,24 @@ const captureViewportWithinBudget = async (
   options: CaptureOptions,
   read: ReadStage,
 ) => {
-  let clip;
+  let clip: (Viewport & { x: number; y: number; scale: number }) | undefined;
   if (options.scale < 1) {
-    const viewport = options.viewport ?? (await viewportSizeWithinBudget(page, cdp, read));
-    let offset = options.offset;
-    if (!offset) {
-      const { cssVisualViewport } = await read("Page.getLayoutMetrics", () =>
-        cdp.send("Page.getLayoutMetrics"),
-      );
-      const zoom = cssVisualViewport.zoom ?? 1;
-      offset = { x: cssVisualViewport.pageX * zoom, y: cssVisualViewport.pageY * zoom };
-    }
+    const metrics =
+      options.viewport && options.offset
+        ? undefined
+        : await read("Page.getLayoutMetrics", () => cdp.send("Page.getLayoutMetrics"));
+    const nativeViewport = page.viewportSize();
+    // Explicit snapshot metrics are already in DIP; otherwise native metrics need page zoom.
+    const zoom = nativeViewport ? 1 : (metrics?.cssVisualViewport.zoom ?? 1);
+    const viewport = options.viewport ??
+      nativeViewport ?? {
+        width: Math.max(1, metrics!.cssVisualViewport.clientWidth * zoom),
+        height: Math.max(1, metrics!.cssVisualViewport.clientHeight * zoom),
+      };
+    const offset = options.offset ?? {
+      x: metrics!.cssVisualViewport.pageX * zoom,
+      y: metrics!.cssVisualViewport.pageY * zoom,
+    };
     clip = { ...offset, ...viewport, scale: options.scale };
   }
   const { data } = await read("Page.captureScreenshot", () =>
@@ -651,8 +747,20 @@ type SnapshotInput = ReadOptions & {
 /** The scale a page renders at and its viewport in device-independent pixels, a clip's units. */
 const renderingOf = async (input: SnapshotInput, read: ReadStage) => {
   if (input.renderScale !== "display") {
-    const viewport = await viewportSizeWithinBudget(input.page, input.cdp, read);
-    return { renderScale: input.renderScale, viewport, offset: undefined };
+    const viewport = input.page.viewportSize();
+    if (viewport) return { renderScale: input.renderScale, viewport, offset: undefined };
+    const { cssVisualViewport } = await read("Page.getLayoutMetrics", () =>
+      input.cdp.send("Page.getLayoutMetrics"),
+    );
+    const zoom = cssVisualViewport.zoom ?? 1;
+    return {
+      renderScale: input.renderScale / zoom,
+      viewport: {
+        width: Math.max(1, Math.round(cssVisualViewport.clientWidth * zoom)),
+        height: Math.max(1, Math.round(cssVisualViewport.clientHeight * zoom)),
+      },
+      offset: { x: cssVisualViewport.pageX * zoom, y: cssVisualViewport.pageY * zoom },
+    };
   }
   // The display ratio a desktop page reports includes its page zoom, and its sizes are CSS pixels.
   const page = await readPageMetricsWithinBudget(input.cdp, read);

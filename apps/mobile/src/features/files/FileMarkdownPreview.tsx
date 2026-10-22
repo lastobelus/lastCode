@@ -1,9 +1,15 @@
 import { settlePromise } from "@t3tools/client-runtime/state/runtime";
-import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import type { EnvironmentId, PreviewHostingLeaseSummary, ThreadId } from "@t3tools/contracts";
 import { resolveMobileMarkdownMediaSource } from "../../lib/markdownMediaSource";
 import { getBrowseDirectoryPath } from "@t3tools/client-runtime/state/projects";
 import { useState } from "react";
-import { RefreshControl, ScrollView, View } from "react-native";
+import * as Option from "effect/Option";
+import { MediaVideoPlayer } from "../../components/MediaVideoPlayer";
+import {
+  openThreadFeedMarkdownUrl,
+  preparedThreadFeedMediaActionsSource,
+} from "../../lib/prepareThreadFeedPreview";
+import { Alert, RefreshControl, ScrollView, View } from "react-native";
 
 import { tryOpenExternalUrl } from "../../lib/openExternalUrl";
 import { FONT_FAMILIES } from "../../lib/fontFamilies";
@@ -13,6 +19,7 @@ import {
   ThreadMarkdownImage,
   ThreadMarkdownImageView,
   ThreadMarkdownImageUnavailable,
+  ThreadMarkdownPreparedUri,
 } from "../threads/ThreadMarkdownImage";
 import { ThreadMarkdownVideo } from "../threads/ThreadMarkdownVideo";
 import { resolveMarkdownMediaPreview } from "../../lib/markdownMedia";
@@ -24,9 +31,14 @@ import { useAppearancePreferences } from "../settings/appearance/AppearancePrefe
 import {
   SelectableMarkdownText,
   type MarkdownImageRenderer,
+  type MarkdownImageSourceResolver,
   type NativeMarkdownTextStyle,
 } from "../../native/SelectableMarkdownText";
 import { resolveWorkspaceFilePath } from "./filePath";
+import { previewEnvironment } from "../../state/preview";
+import { useAtomCommand } from "../../state/use-atom-command";
+import { usePreparedConnection, useConfiguredPreviewEnvironmentUrl } from "../../state/session";
+import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 
 interface MarkdownPreviewStyles {
   readonly nativeTextStyle: NativeMarkdownTextStyle;
@@ -81,6 +93,13 @@ export function FileMarkdownPreview(props: {
   const [isPullRefreshing, setIsPullRefreshing] = useState(false);
   const [expandedFile, setExpandedFile] = useState<FilePreviewSource | null>(null);
   const [expandedVideo, setExpandedVideo] = useState<VideoPreviewSource | null>(null);
+  const listHostedPreviews = useAtomCommand(previewEnvironment.hostingList, {
+    reportFailure: false,
+  });
+  const recoverHostedPreviewLease = useAtomCommand(previewEnvironment.hostingRecover, {
+    reportFailure: false,
+  });
+  const preparedConnection = usePreparedConnection(props.environmentId);
   const handlePullToRefresh = async () => {
     if (!props.onRefresh) {
       return;
@@ -93,6 +112,60 @@ export function FileMarkdownPreview(props: {
   const markdownDirectory = getBrowseDirectoryPath(
     resolveWorkspaceFilePath(props.cwd, props.relativePath),
   );
+  const connection = Option.getOrNull(preparedConnection);
+  const knownEnvironmentUrl = useConfiguredPreviewEnvironmentUrl(props.environmentId, connection);
+  const prepareMediaUrl = (href: string, purpose: "navigation" | "resource" = "resource") => {
+    const threadRef =
+      props.threadId === null
+        ? null
+        : { environmentId: props.environmentId, threadId: props.threadId };
+    return openThreadFeedMarkdownUrl(
+      threadRef === null || connection === null
+        ? null
+        : {
+            threadRef,
+            purpose,
+            environmentUrl: connection.httpBaseUrl,
+            knownEnvironmentUrls: knownEnvironmentUrl === null ? [] : [knownEnvironmentUrl],
+            list: async () => {
+              const result = await listHostedPreviews({
+                environmentId: props.environmentId,
+                input: { threadId: threadRef.threadId },
+              });
+              if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+              return result.value;
+            },
+            recover: async (
+              lease: PreviewHostingLeaseSummary,
+              options: { readonly bootstrap: boolean },
+            ) => {
+              const result = await recoverHostedPreviewLease({
+                environmentId: props.environmentId,
+                input: {
+                  threadId: threadRef.threadId,
+                  leaseId: lease.leaseId,
+                  url: lease.url,
+                  bootstrap: options.bootstrap,
+                },
+              });
+              if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+              return result.value;
+            },
+          },
+      href,
+      (url) => url,
+    );
+  };
+  const openExternalLink = (href: string) => {
+    void prepareMediaUrl(href, "navigation")
+      .then((url) => tryOpenExternalUrl(url, "markdown-link"))
+      .catch(() =>
+        Alert.alert(
+          "Preview unavailable",
+          "The preview could not be restored. Tap the link to retry.",
+        ),
+      );
+  };
   const renderImage: MarkdownImageRenderer = (image) => {
     const media = resolveMobileMarkdownMediaSource(image.href, {
       threadId: props.threadId ?? undefined,
@@ -107,30 +180,61 @@ export function FileMarkdownPreview(props: {
       imageEmbed: true,
     });
     if (media?.access === "direct") {
-      if (media.kind === "video") {
-        return (
-          <ThreadMarkdownVideo
-            source={{
-              type: "media",
-              name: media.name,
-              mimeType: media.mimeType,
-              uri: normalizeNativeMarkdownUrl(media.uri),
-              actionsSource: preview?.source.actionsSource,
-            }}
-            thumbnailVisible
-          />
-        );
-      }
+      const originalUri = normalizeNativeMarkdownUrl(media.uri);
+      const sourceKey = JSON.stringify([
+        props.environmentId,
+        props.threadId,
+        connection?.httpBaseUrl,
+        originalUri,
+      ]);
       return (
-        <ThreadMarkdownImageView
-          uri={normalizeNativeMarkdownUrl(media.uri)}
-          sourceKey={media.uri}
-          unavailable={false}
-          alt={image.alt}
-          format={media.mimeType === "image/svg+xml" ? "svg" : undefined}
-          actionsSource={preview?.source.actionsSource}
-          onPressPreview={setExpandedFile}
-        />
+        <ThreadMarkdownPreparedUri
+          key={image.href}
+          uri={originalUri}
+          sourceKey={sourceKey}
+          prepareUrl={prepareMediaUrl}
+        >
+          {({ uri, status }) =>
+            media.kind === "video" ? (
+              <MediaVideoPlayer
+                uri={uri}
+                unavailable={status === "unavailable"}
+                name={image.alt ?? "Video"}
+                thumbnailKey={sourceKey}
+                thumbnailVisible
+                actionsSource={preparedThreadFeedMediaActionsSource(
+                  preview?.source.actionsSource,
+                  uri ?? originalUri,
+                )}
+                resolvePlaybackUri={() => prepareMediaUrl(originalUri)}
+              />
+            ) : (
+              <ThreadMarkdownImageView
+                uri={uri}
+                sourceKey={sourceKey}
+                unavailable={status === "unavailable"}
+                alt={image.alt}
+                format={media.mimeType === "image/svg+xml" ? "svg" : undefined}
+                actionsSource={preparedThreadFeedMediaActionsSource(
+                  preview?.source.actionsSource,
+                  uri ?? originalUri,
+                )}
+                onPressPreview={(source) => {
+                  void prepareMediaUrl(originalUri).then((url) =>
+                    setExpandedFile({
+                      ...source,
+                      uri: url,
+                      actionsSource: preparedThreadFeedMediaActionsSource(
+                        source.actionsSource,
+                        url,
+                      ),
+                    }),
+                  );
+                }}
+              />
+            )
+          }
+        </ThreadMarkdownPreparedUri>
       );
     }
     if (props.captured || media === null || media.access === "unavailable") {
@@ -155,12 +259,18 @@ export function FileMarkdownPreview(props: {
     );
   };
   const styles = useMarkdownPreviewStyles();
-  const resolveImageSource = useMarkdownImageSource({
+  const resolveNativeImageSource = useMarkdownImageSource({
     environmentId: props.environmentId,
     threadId: props.threadId,
     workspaceRoot: markdownDirectory,
     captured: props.captured,
   });
+  const resolveImageSource: MarkdownImageSourceResolver = async (image) => {
+    const source = await resolveNativeImageSource(image);
+    return source && /^(?:https?:)?\/\//i.test(image.href)
+      ? { ...source, uri: await prepareMediaUrl(source.uri) }
+      : source;
+  };
   const openMedia = (href: string, imageEmbed = false) => {
     const media = resolveMarkdownMediaPreview(href, {
       environmentId: props.environmentId,
@@ -170,15 +280,52 @@ export function FileMarkdownPreview(props: {
       imageEmbed,
     });
     if (!media) return false;
-    if (media.kind === "video") setExpandedVideo(media.source);
-    else setExpandedFile(media.source);
+    const open = (uri?: string) => {
+      if (media.kind === "video") {
+        setExpandedVideo(
+          uri
+            ? {
+                ...media.source,
+                uri,
+                actionsSource: preparedThreadFeedMediaActionsSource(
+                  media.source.actionsSource,
+                  uri,
+                ),
+              }
+            : media.source,
+        );
+      } else {
+        setExpandedFile(
+          uri
+            ? {
+                ...media.source,
+                uri,
+                actionsSource: preparedThreadFeedMediaActionsSource(
+                  media.source.actionsSource,
+                  uri,
+                ),
+              }
+            : media.source,
+        );
+      }
+    };
+    if ("uri" in media.source && /^https?:\/\//i.test(media.source.uri)) {
+      void prepareMediaUrl(media.source.uri)
+        .then(open)
+        .catch(() =>
+          Alert.alert(
+            "Preview unavailable",
+            "The preview could not be restored. Tap the link to retry.",
+          ),
+        );
+    } else open();
     return true;
   };
   const onImagePress = (href: string) => {
     openMedia(href, true);
   };
   const onLinkPress = (href: string) => {
-    if (!openMedia(href)) void tryOpenExternalUrl(href, "markdown-link");
+    if (!openMedia(href)) openExternalLink(href);
   };
 
   return (

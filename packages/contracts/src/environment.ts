@@ -72,6 +72,7 @@ export const ServerSelfUpdateCapability = Schema.Literals([
 export type ServerSelfUpdateCapability = typeof ServerSelfUpdateCapability.Type;
 
 export const ExecutionEnvironmentCapabilities = Schema.Struct({
+  environmentPause: Schema.optionalKey(Schema.Boolean),
   repositoryIdentity: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   connectionProbe: Schema.optionalKey(Schema.Boolean),
   attachmentUploads: Schema.optionalKey(Schema.Boolean),
@@ -88,6 +89,13 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   inlineMessageContext: Schema.optionalKey(Schema.Boolean),
   requiredWorktreeBootstrap: Schema.optionalKey(Schema.Boolean),
   threadSettlement: Schema.optionalKey(Schema.Boolean),
+  /** Server reads recursive owned families and enforces archive consent and
+      provider shutdown. Missing support requires an update before archiving. */
+  threadArchiveFamilies: Schema.optionalKey(Schema.Boolean),
+  /** Server returns active/unread family members and accepts archive_after_review.
+      Clients requiring this policy must not query older archive-family payloads. */
+  threadArchiveFamiliesV2: Schema.optionalKey(Schema.Boolean),
+  /** Server evaluates merge and inactivity settlement without a client. */
   threadAutoSettlement: Schema.optionalKey(Schema.Boolean),
   /** Server persists the environment-owned Local CI policy. */
   lastcodeLocalCi: Schema.optionalKey(Schema.Boolean),
@@ -129,6 +137,12 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   usagePriceOverrides: Schema.optionalKey(Schema.Boolean),
   usageModelAliases: Schema.optionalKey(Schema.Boolean),
   threadPinning: Schema.optionalKey(Schema.Boolean),
+  /** Server understands thread.persistence.set and enforces archive/delete protection. */
+  threadPersistence: Schema.optionalKey(Schema.Boolean),
+  /** Server streams hosted preview lifetimes and can stop a thread's previews and terminals. */
+  previewHostingProcessControl: Schema.optionalKey(Schema.Boolean),
+  /** Server understands thread.pin.reorder (and orderKey on thread.pin).
+      Same version-skew contract as threadSettlement. */
   threadPinReorder: Schema.optionalKey(Schema.Boolean),
   threadActiveReorder: Schema.optionalKey(Schema.Boolean),
   threadAutoSettleOptOut: Schema.optionalKey(Schema.Boolean),
@@ -140,6 +154,9 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   threadPullRequests: Schema.optionalKey(Schema.Boolean),
   threadPullRequestWatch: Schema.optionalKey(Schema.Boolean),
   pullRequestStackActions: Schema.optionalKey(Schema.Boolean),
+  /** Server understands thread annotation create/edit/resolve/reopen commands
+      and exposes annotation state in thread shell/detail snapshots. */
+  threadAnnotations: Schema.optionalKey(Schema.Boolean),
   /** Server durably owns thread worktree cleanup after deletion and understands
       deleteWorktree plus cleanup retry/abandon commands. */
   threadWorktreeCleanup: Schema.optionalKey(Schema.Boolean),

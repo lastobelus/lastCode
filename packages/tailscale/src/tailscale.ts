@@ -107,11 +107,13 @@ export class TailscaleCommandTimeoutError extends Schema.TaggedError<TailscaleCo
   }
 }
 
-type TailscaleCommandError =
-  | TailscaleCommandSpawnError
-  | TailscaleCommandOutputError
-  | TailscaleCommandExitError
-  | TailscaleCommandTimeoutError;
+const TailscaleCommandError = Schema.Union([
+  TailscaleCommandSpawnError,
+  TailscaleCommandOutputError,
+  TailscaleCommandExitError,
+  TailscaleCommandTimeoutError,
+]);
+type TailscaleCommandError = typeof TailscaleCommandError.Type;
 
 export class TailscaleStatusParseError extends Schema.TaggedError<TailscaleStatusParseError>()(
   "TailscaleStatusParseError",
@@ -122,7 +124,7 @@ export class TailscaleStatusParseError extends Schema.TaggedError<TailscaleStatu
   }
 }
 
-export class TailscaleServePortOccupiedError extends Schema.TaggedErrorClass<TailscaleServePortOccupiedError>()(
+export class TailscaleServePortOccupiedError extends Schema.TaggedError<TailscaleServePortOccupiedError>()(
   "TailscaleServePortOccupiedError",
   { servePort: Schema.Number },
 ) {
@@ -431,7 +433,11 @@ const runTailscaleCommand = Effect.fn("tailscale.runTailscaleCommand")(function*
       ),
     );
     const [stdout, stderr, exitCode] = yield* Effect.all(
-      [collectStdout(child.stdout), collectStderr(child.stderr), child.exitCode.pipe(Effect.map(Number))],
+      [
+        collectStdout(child.stdout),
+        collectStderr(child.stderr),
+        child.exitCode.pipe(Effect.map(Number)),
+      ],
       { concurrency: "unbounded" },
     ).pipe(
       Effect.mapError((cause) => new TailscaleCommandOutputError({ ...commandContext, cause })),
@@ -578,11 +584,12 @@ export const ensureTailscaleServe = (input: {
   });
 };
 
-export const disableTailscaleServe = Effect.fn("tailscale.disableTailscaleServe")(function* (input: {
-  readonly servePort?: number;
-  readonly localPort: number;
-  readonly localHost?: string;
-}): Effect.fn.Return<void, TailscaleServeError, ChildProcessSpawner.ChildProcessSpawner> {
+export const disableTailscaleServe = Effect.fn("tailscale.disableTailscaleServe")(
+  function* (input: {
+    readonly servePort?: number;
+    readonly localPort: number;
+    readonly localHost?: string;
+  }): Effect.fn.Return<void, TailscaleServeError, ChildProcessSpawner.ChildProcessSpawner> {
     const servePort = input.servePort ?? DEFAULT_TAILSCALE_SERVE_PORT;
     const localHost = input.localHost ?? "127.0.0.1";
     const proxy = `http://${localHost}:${input.localPort}`;
@@ -594,7 +601,8 @@ export const disableTailscaleServe = Effect.fn("tailscale.disableTailscaleServe"
       return yield* new TailscaleServePortOccupiedError({ servePort });
     }
     yield* runTailscaleCommand(["serve", `--https=${servePort}`, "off"], TAILSCALE_SERVE_TIMEOUT);
-  });
+  },
+);
 
 export const probeTailscaleHttpsEndpoint = Effect.fn("tailscale.probeTailscaleHttpsEndpoint")(
   function* (input: { readonly baseUrl: string; readonly timeout?: Duration.Input }) {

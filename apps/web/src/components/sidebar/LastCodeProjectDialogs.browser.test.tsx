@@ -1,6 +1,6 @@
-import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { act, render, type Screen } from "../../../test/render";
+
+import { describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId, ProjectId, ProviderInstanceId } from "@t3tools/contracts";
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import { AsyncResult } from "effect/reactivity";
@@ -47,10 +47,7 @@ const member: SidebarProjectGroupMember = {
   updatedAt: "2026-03-09T10:00:00Z",
   scripts: [],
 };
-let root: Root;
-let container: HTMLDivElement;
-beforeEach(() => {
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+function setup() {
   vi.clearAllMocks();
   mocks.command.mockResolvedValue(AsyncResult.success(undefined));
   mocks.canOperate = true;
@@ -58,22 +55,17 @@ beforeEach(() => {
     sidebarProjectGroupingMode: "repository",
     sidebarProjectGroupingOverrides: {},
   };
-  container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
-});
-afterEach(async () => {
-  await act(() => root.unmount());
-  container.remove();
-  document.body.replaceChildren();
-  vi.unstubAllGlobals();
-});
-async function rename(target: SidebarProjectGroupMember | null, onClose = vi.fn()) {
-  await act(() => root.render(<LastCodeProjectRenameDialog target={target} onClose={onClose} />));
+}
+async function rename(screen: Screen, target: SidebarProjectGroupMember | null, onClose = vi.fn()) {
+  await screen.rerender(<LastCodeProjectRenameDialog target={target} onClose={onClose} />);
   return onClose;
 }
-async function grouping(target: SidebarProjectGroupMember | null, onClose = vi.fn()) {
-  await act(() => root.render(<LastCodeProjectGroupingDialog target={target} onClose={onClose} />));
+async function grouping(
+  screen: Screen,
+  target: SidebarProjectGroupMember | null,
+  onClose = vi.fn(),
+) {
+  await screen.rerender(<LastCodeProjectGroupingDialog target={target} onClose={onClose} />);
   return onClose;
 }
 const input = () => document.querySelector<HTMLInputElement>('input[aria-label="Project title"]')!;
@@ -92,15 +84,17 @@ async function click(label: string) {
 }
 describe("project dialog draft lifetimes", () => {
   it("retains a rename draft through refresh, but resets for close/reopen and same-id other environment", async () => {
-    await rename(member);
+    setup();
+    await using screen = await render(null);
+    await rename(screen, member);
     await draft("Unsaved");
-    await rename({ ...member, title: "Refreshed", updatedAt: "2026-03-10T10:00:00Z" });
+    await rename(screen, { ...member, title: "Refreshed", updatedAt: "2026-03-10T10:00:00Z" });
     expect(input().value).toBe("Unsaved");
-    await rename(null);
-    await rename(member);
+    await rename(screen, null);
+    await rename(screen, member);
     expect(input().value).toBe("Original");
     await draft("Again");
-    await rename({
+    await rename(screen, {
       ...member,
       environmentId: EnvironmentId.make("other-env"),
       title: "Other member",
@@ -108,7 +102,9 @@ describe("project dialog draft lifetimes", () => {
     expect(input().value).toBe("Other member");
   });
   it("keeps the renamed draft and dialog open on mutation failure, then closes on success", async () => {
-    const close = await rename(member);
+    setup();
+    await using screen = await render(null);
+    const close = await rename(screen, member);
     await draft("  New title  ");
     mocks.command.mockResolvedValueOnce(AsyncResult.failure(Cause.fail(new Error("Denied"))));
     await click("Save");
@@ -125,7 +121,9 @@ describe("project dialog draft lifetimes", () => {
     expect(close).toHaveBeenCalledOnce();
   });
   it("validates empty titles and closes an unchanged title without mutation", async () => {
-    const close = await rename(member);
+    setup();
+    await using screen = await render(null);
+    const close = await rename(screen, member);
     await draft("   ");
     await click("Save");
     expect(close).not.toHaveBeenCalled();
@@ -139,8 +137,10 @@ describe("project dialog draft lifetimes", () => {
     expect(mocks.command).not.toHaveBeenCalled();
   });
   it("disables rename input and save for a read-only target", async () => {
+    setup();
+    await using screen = await render(null);
     mocks.canOperate = false;
-    await rename(member);
+    await rename(screen, member);
     expect(input().disabled).toBe(true);
     expect(
       Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find(
@@ -150,6 +150,8 @@ describe("project dialog draft lifetimes", () => {
     expect(mocks.command).not.toHaveBeenCalled();
   });
   it("retains grouping selection through override refresh and writes only the exact client preference", async () => {
+    setup();
+    await using screen = await render(null);
     const key = deriveProjectGroupingOverrideKey(member);
     mocks.settings = {
       ...mocks.settings,
@@ -158,7 +160,7 @@ describe("project dialog draft lifetimes", () => {
         other: "repository_path",
       },
     };
-    const close = await grouping(member);
+    const close = await grouping(screen, member);
     mocks.settings = {
       ...mocks.settings,
       sidebarProjectGroupingOverrides: {
@@ -166,7 +168,7 @@ describe("project dialog draft lifetimes", () => {
         other: "repository_path",
       },
     };
-    await grouping({ ...member, title: "Refresh" }, close);
+    await grouping(screen, { ...member, title: "Refresh" }, close);
     await click("Save");
     expect(mocks.update).toHaveBeenCalledWith({
       sidebarProjectGroupingOverrides: { [key]: "separate", other: "repository_path" },
@@ -175,6 +177,8 @@ describe("project dialog draft lifetimes", () => {
     expect(mocks.command).not.toHaveBeenCalled();
   });
   it("reopens with current overrides and inherit deletes only its own override", async () => {
+    setup();
+    await using screen = await render(null);
     const key = deriveProjectGroupingOverrideKey(member);
     mocks.settings = {
       ...mocks.settings,
@@ -183,13 +187,13 @@ describe("project dialog draft lifetimes", () => {
         other: "repository_path",
       },
     };
-    await grouping(member);
-    await grouping(null);
+    await grouping(screen, member);
+    await grouping(screen, null);
     mocks.settings = {
       ...mocks.settings,
       sidebarProjectGroupingOverrides: { other: "repository_path" },
     };
-    await grouping(member);
+    await grouping(screen, member);
     await click("Save");
     expect(mocks.update).toHaveBeenCalledWith({
       sidebarProjectGroupingOverrides: { other: "repository_path" },

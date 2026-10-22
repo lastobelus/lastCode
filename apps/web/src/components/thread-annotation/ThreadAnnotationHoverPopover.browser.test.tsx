@@ -1,9 +1,9 @@
+import { act, render } from "../../../test/render";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { EnvironmentId, MessageId, ThreadId, type ThreadAnnotation } from "@t3tools/contracts";
-import { act, useState } from "react";
+import { useState } from "react";
 import { userEvent } from "vite-plus/test/browser";
-import { createRoot, type Root } from "react-dom/client";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import "~/index.css";
 
@@ -92,61 +92,34 @@ function HoverHarness({
   );
 }
 
-let root: Root | null = null;
-let container: HTMLDivElement | null = null;
-const previousActEnvironment = Object.getOwnPropertyDescriptor(
-  globalThis,
-  "IS_REACT_ACT_ENVIRONMENT",
-);
-
-beforeAll(() => {
-  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
-    configurable: true,
-    value: true,
-  });
-});
-
-afterAll(() => {
-  if (previousActEnvironment) {
-    Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", previousActEnvironment);
-  } else {
-    Reflect.deleteProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-  }
-});
-
-afterEach(async () => {
-  if (root) await act(() => root?.unmount());
-  container?.remove();
-  root = null;
-  container = null;
-  document.body.replaceChildren();
-});
-
 async function renderHoverCard() {
   const onNavigate = vi.fn();
   const onRowClick = vi.fn();
   const onEdit = vi.fn();
-  container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
-  await act(() =>
-    root?.render(<HoverHarness onNavigate={onNavigate} onRowClick={onRowClick} onEdit={onEdit} />),
+  await using stack = new AsyncDisposableStack();
+  const screen = stack.use(
+    await render(<HoverHarness onNavigate={onNavigate} onRowClick={onRowClick} onEdit={onEdit} />),
   );
   // The browser pointer survives DOM cleanup between tests. Start away from the row.
-  await act(() => userEvent.hover(button("Outside control")));
+  await userEvent.hover(button("Outside control"));
   await expect.poll(popup).toBeNull();
   const setAnnotationActive = (annotationActive: boolean) =>
-    act(() =>
-      root?.render(
-        <HoverHarness
-          onNavigate={onNavigate}
-          onRowClick={onRowClick}
-          onEdit={onEdit}
-          annotationActive={annotationActive}
-        />,
-      ),
+    screen.rerender(
+      <HoverHarness
+        onNavigate={onNavigate}
+        onRowClick={onRowClick}
+        onEdit={onEdit}
+        annotationActive={annotationActive}
+      />,
     );
-  return { onNavigate, onRowClick, onEdit, setAnnotationActive };
+  const environment = stack.move();
+  return {
+    onNavigate,
+    onRowClick,
+    onEdit,
+    setAnnotationActive,
+    [Symbol.asyncDispose]: () => environment.disposeAsync(),
+  };
 }
 
 function button(label: string) {
@@ -168,24 +141,26 @@ function popup() {
 }
 
 async function hoverNavigation() {
-  await act(() => userEvent.hover(navigationTrigger()));
+  await userEvent.hover(navigationTrigger());
   await expect.poll(popup).not.toBeNull();
 }
 
 async function leaveNavigation() {
-  await act(() => userEvent.hover(button("Outside control")));
+  await userEvent.hover(button("Outside control"));
 }
 
 describe("ThreadAnnotationHoverPopover", () => {
   it("dismisses after pointer exit when a click leaves the navigation row focused", async () => {
-    await renderHoverCard();
+    await using _fixture = await renderHoverCard();
     await hoverNavigation();
     // Programmatic focus does not establish pointer modality.
     const row = navigationTrigger();
     const matches = row.matches.bind(row);
-    vi.spyOn(row, "matches").mockImplementation((selector) =>
-      selector === ":focus-visible" ? false : matches(selector),
-    );
+    using _matches = vi
+      .spyOn(row, "matches")
+      .mockImplementation((selector) =>
+        selector === ":focus-visible" ? false : matches(selector),
+      );
     await act(() => {
       navigationTrigger().focus();
       navigationTrigger().click();
@@ -196,7 +171,8 @@ describe("ThreadAnnotationHoverPopover", () => {
   });
 
   it("keeps the focused navigation row mounted when its annotation is resolved or reopened", async () => {
-    const { setAnnotationActive } = await renderHoverCard();
+    await using fixture = await renderHoverCard();
+    const { setAnnotationActive } = fixture;
     const row = navigationTrigger();
     await act(() => row.focus());
     for (const active of [false, true]) {
@@ -207,7 +183,8 @@ describe("ThreadAnnotationHoverPopover", () => {
   });
 
   it("does not restore an old open card when an annotation disappears and returns", async () => {
-    const { setAnnotationActive } = await renderHoverCard();
+    await using fixture = await renderHoverCard();
+    const { setAnnotationActive } = fixture;
     await hoverNavigation();
     await setAnnotationActive(false);
     await expect.poll(popup).toBeNull();
@@ -227,7 +204,8 @@ describe("ThreadAnnotationHoverPopover", () => {
   ])(
     "activates the composed navigation row once for $key with $ctrlKey/$shiftKey",
     async (keys) => {
-      const { onNavigate, onRowClick } = await renderHoverCard();
+      await using fixture = await renderHoverCard();
+      const { onNavigate, onRowClick } = fixture;
       await act(() => {
         for (const type of ["keydown", "keyup"]) {
           navigationTrigger().dispatchEvent(
@@ -243,7 +221,7 @@ describe("ThreadAnnotationHoverPopover", () => {
   it.each(["focus outside", "Escape"] as const)(
     "keeps a focused Edit control after hover ends, then dismisses on %s",
     async (dismissal) => {
-      await renderHoverCard();
+      await using _fixture = await renderHoverCard();
       await hoverNavigation();
       const edit = button("Edit");
       await act(() => edit.focus());
@@ -267,7 +245,8 @@ describe("ThreadAnnotationHoverPopover", () => {
   );
 
   it("opens from the annotation marker without navigating and lets Edit act", async () => {
-    const { onNavigate, onEdit } = await renderHoverCard();
+    await using fixture = await renderHoverCard();
+    const { onNavigate, onEdit } = fixture;
     await act(() => button("Show annotation").click());
     expect(popup()).not.toBeNull();
     expect(onNavigate).not.toHaveBeenCalled();
@@ -278,7 +257,7 @@ describe("ThreadAnnotationHoverPopover", () => {
   });
 
   it("still toggles a marker-opened card after focus enters its controls", async () => {
-    await renderHoverCard();
+    await using _fixture = await renderHoverCard();
     await act(() => button("Show annotation").click());
     await act(() => button("Edit").focus());
     expect(popup()).not.toBeNull();
@@ -288,7 +267,8 @@ describe("ThreadAnnotationHoverPopover", () => {
   });
 
   it("navigates without pinning a hover card when the navigation trigger is clicked", async () => {
-    const { onNavigate } = await renderHoverCard();
+    await using fixture = await renderHoverCard();
+    const { onNavigate } = fixture;
     await act(() => navigationTrigger().click());
     expect(onNavigate).toHaveBeenCalledOnce();
     await expect.poll(popup).toBeNull();
