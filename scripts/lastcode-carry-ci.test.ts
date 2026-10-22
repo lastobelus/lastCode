@@ -105,6 +105,128 @@ describe("LastCode carry CI", () => {
     }
   });
 
+  it("fetches a remote-only prepared bootstrap without changing caller state", () => {
+    const { repo, cleanup } = fixture();
+    try {
+      manifest(repo);
+      write(repo, "base.txt", "base\n");
+      const upstream = commit(repo, "upstream");
+      write(repo, "tooling.txt", "tooling\n");
+      const base = commit(repo, "historical source");
+      const prepared = git(repo, [
+        "commit-tree",
+        `${base}^{tree}`,
+        "-p",
+        upstream,
+        "-m",
+        "prepared contribution",
+        "-m",
+        "Carry-Group: tooling",
+      ]);
+      const ref = "refs/lastcode/bootstrap/prepared";
+      write(
+        repo,
+        "scripts/lastcode-carry-set.json",
+        JSON.stringify({
+          replay: {
+            mode: "carry",
+            bootstrap: { base: upstream, source: base, head: prepared, ref },
+          },
+        }),
+      );
+      const head = commit(repo, "activate carry replay", "Carry-Group: tooling");
+      const remote = NodePath.join(repo, "remote.git");
+      git(repo, ["init", "--bare", "--quiet", remote]);
+      git(repo, [
+        "push",
+        "--quiet",
+        remote,
+        `${head}:refs/heads/lastcode/main`,
+        `${prepared}:${ref}`,
+      ]);
+      git(remote, ["update-ref", "refs/tags/prepared", prepared]);
+      const caller = NodePath.join(repo, "caller");
+      git(repo, [
+        "clone",
+        "--quiet",
+        "--no-local",
+        "--single-branch",
+        "--branch=lastcode/main",
+        remote,
+        caller,
+      ]);
+      expect(
+        NodeChildProcess.spawnSync("git", ["cat-file", "-e", `${prepared}^{commit}`], {
+          cwd: caller,
+        }).status,
+      ).not.toBe(0);
+      git(caller, [
+        "config",
+        "--add",
+        "remote.origin.fetch",
+        `+${ref}:refs/remotes/origin/bootstrap`,
+      ]);
+      git(caller, ["config", "remote.origin.tagOpt", "--tags"]);
+      git(caller, ["update-ref", "refs/remotes/origin/bootstrap", base]);
+      write(caller, ".git/FETCH_HEAD", "preserve fetch state\n");
+      write(caller, "base.txt", "staged work\n");
+      git(caller, ["add", "base.txt"]);
+      write(caller, "base.txt", "unstaged work\n");
+      write(caller, "untracked.txt", "untracked work\n");
+      const before = snapshot(caller);
+
+      expect(validateCarryPullRequest(caller, { base, head, number: 213 }).compilation).toEqual({
+        upstream,
+        sourceTree: git(caller, ["rev-parse", `${head}^{tree}`]),
+        compiledTree: git(caller, ["rev-parse", `${head}^{tree}`]),
+      });
+      expect(git(caller, ["rev-parse", "--verify", `${prepared}^{commit}`])).toBe(prepared);
+      expect(snapshot(caller)).toEqual(before);
+      expect(NodeFS.readFileSync(NodePath.join(caller, ".git/FETCH_HEAD"), "utf8")).toBe(
+        "preserve fetch state\n",
+      );
+      expect(NodeFS.readFileSync(NodePath.join(caller, "base.txt"), "utf8")).toBe(
+        "unstaged work\n",
+      );
+      expect(NodeFS.readFileSync(NodePath.join(caller, "untracked.txt"), "utf8")).toBe(
+        "untracked work\n",
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it.each([
+    ["refs/lastcode/bootstrap/prepared:refs/heads/other", /fully qualified Git ref/u],
+    ["refs/lastcode/bootstrap/prepared", /on origin must equal pinned head/u],
+  ])("rejects an invalid or moved bootstrap ref %s", (ref, message) => {
+    const { repo, cleanup } = fixture();
+    try {
+      manifest(repo);
+      write(repo, "base.txt", "base\n");
+      const upstream = commit(repo, "upstream");
+      write(repo, "tooling.txt", "tooling\n");
+      const base = commit(repo, "prepared contribution", "Carry-Group: tooling");
+      write(
+        repo,
+        "scripts/lastcode-carry-set.json",
+        JSON.stringify({
+          replay: { mode: "carry", bootstrap: { base: upstream, source: base, head: base, ref } },
+        }),
+      );
+      const head = commit(repo, "activate carry replay", "Carry-Group: tooling");
+      const remote = NodePath.join(repo, "remote.git");
+      git(repo, ["init", "--bare", "--quiet", remote]);
+      git(remote, ["fetch", "--quiet", repo, `${upstream}:refs/lastcode/bootstrap/prepared`]);
+      git(repo, ["remote", "add", "origin", remote]);
+      const before = snapshot(repo);
+      expect(() => validateCarryPullRequest(repo, { base, head, number: 214 })).toThrow(message);
+      expect(snapshot(repo)).toEqual(before);
+    } finally {
+      cleanup();
+    }
+  });
+
   it("rejects valid source assignments that conflict when regrouped, preserving the caller", () => {
     const { repo, cleanup } = fixture();
     try {

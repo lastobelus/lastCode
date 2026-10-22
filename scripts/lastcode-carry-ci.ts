@@ -6,7 +6,10 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import { parseManifestReplayConfiguration } from "./lastcode-carry-checkpoint.ts";
+import {
+  parseManifestReplayConfiguration,
+  type CarryBootstrap,
+} from "./lastcode-carry-checkpoint.ts";
 import { cleanGitEnvironment } from "./lastcode-nightly.ts";
 
 import {
@@ -126,6 +129,34 @@ function includeTopicBase(repoRoot: string, source: CarrySourceDelivery, stop: s
   return { ...source, base };
 }
 
+function fetchBootstrapObjects(repoRoot: string, bootstrap: CarryBootstrap): void {
+  const ref = bootstrap.ref;
+  if (ref === undefined) return;
+  if (
+    !ref.startsWith("refs/") ||
+    git(repoRoot, ["check-ref-format", ref], { allowFailure: true }) === undefined
+  ) {
+    throw new Error("Carry bootstrap ref must be a fully qualified Git ref.");
+  }
+  const remote = git(repoRoot, ["ls-remote", "--refs", "origin", ref]);
+  if (remote !== `${bootstrap.head}\t${ref}`) {
+    throw new Error(
+      `Carry bootstrap ref ${ref} on origin must equal pinned head ${bootstrap.head}.`,
+    );
+  }
+  // Empty refmap suppresses configured tracking updates; only the pinned objects may enter the caller.
+  git(repoRoot, [
+    "fetch",
+    "--no-tags",
+    "--no-write-fetch-head",
+    "--refmap=",
+    "--no-recurse-submodules",
+    "--no-auto-maintenance",
+    "origin",
+    bootstrap.head,
+  ]);
+}
+
 function compilePullRequest(
   repoRoot: string,
   source: CarrySourceDelivery,
@@ -136,6 +167,7 @@ function compilePullRequest(
   if (!compact && !bootstrap) {
     throw new Error("No compact carry chain or prepared bootstrap is available at the PR base.");
   }
+  if (bootstrap) fetchBootstrapObjects(repoRoot, bootstrap);
   // A topic base can end in unsquashed parent contributions. Model the whole
   // unpublished tail together, while retaining the child's actual delivery range.
   const compilationSource = includeTopicBase(

@@ -648,8 +648,12 @@ function assertWorktreeHead(worktree: string, expected: string): void {
   const actual = resolveCommit(worktree, "HEAD");
   if (actual !== expected)
     throw new Error(`Carry replay worktree is at ${actual}, expected ${expected}.`);
-  if (runGit(worktree, ["status", "--porcelain", "--untracked-files=all"])) {
-    throw new Error("Carry replay worktree must be clean before replay starts.");
+  const status = runGit(worktree, ["status", "--porcelain", "--untracked-files=all"]);
+  if (status) {
+    const diff = runGit(worktree, ["diff", "--raw", "--no-abbrev"]);
+    throw new Error(
+      `Carry replay worktree must be clean before replay starts.\n${status}${diff ? `\n${diff}` : ""}`,
+    );
   }
 }
 
