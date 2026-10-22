@@ -4,7 +4,7 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import { assert, describe, it } from "@effect/vitest";
+import { afterAll, assert, beforeAll, describe, it } from "@effect/vitest";
 
 import { readCarryGroupChain } from "./lastcode-carry-replay.ts";
 import { acquireMainWriteLock } from "./lastcode-main-write-lock.ts";
@@ -1276,6 +1276,19 @@ exec "$FIXTURE_REAL_GIT" "$@"
   });
 });
 
+function assertQuietCarryProvenance(repo: string, partitionB: string, head: string, base: string) {
+  const contribution = readCarryGroupChain(repo, head, base)
+    .flatMap(({ contributions }) => contributions)
+    .find(({ sourceCommit }) => sourceCommit === partitionB);
+  assert.deepStrictEqual(contribution?.metadata["Carry-Upstream"], [
+    "https://redirect.github.com/example/upstream/pull/42",
+  ]);
+  assert.notInclude(
+    git(repo, ["log", "--format=%B", `${base}..${head}`]),
+    "https://github.com/example/upstream/pull/42",
+  );
+}
+
 function publishCarryLifecycleFixture() {
   const fixture = initFixture();
   try {
@@ -1394,18 +1407,8 @@ function publishCarryLifecycleFixture() {
       "manual integration resolution on B",
     );
     assert.equal(readCarryGroupChain(repo, compactB, upstreamB).length, 6);
-    const quietProvenance = (head: string, base: string) => {
-      const contribution = readCarryGroupChain(repo, head, base)
-        .flatMap(({ contributions }) => contributions)
-        .find(({ sourceCommit }) => sourceCommit === partitionB);
-      assert.deepStrictEqual(contribution?.metadata["Carry-Upstream"], [
-        "https://redirect.github.com/example/upstream/pull/42",
-      ]);
-      assert.notInclude(
-        git(repo, ["log", "--format=%B", `${base}..${head}`]),
-        "https://github.com/example/upstream/pull/42",
-      );
-    };
+    const quietProvenance = (head: string, base: string) =>
+      assertQuietCarryProvenance(repo, partitionB, head, base);
     quietProvenance(compactB, upstreamB);
 
     checkout(repo, "upstream-main", upstreamB);
@@ -1533,16 +1536,74 @@ done
       remoteCommit(fixture.origin, `refs/tags/${historicalRevision}`),
       git(repo, ["rev-parse", `${historicalRevision}^{commit}`]),
     );
-    return { fixture, baseA, upstreamC, mainWithPr, sourceHead, raceHook, quietProvenance };
+    return {
+      fixture,
+      baseA,
+      partitionB,
+      upstreamC,
+      mainWithPr,
+      sourceHead,
+      raceHook,
+      quietProvenance,
+    };
   } catch (error) {
     NodeFS.rmSync(fixture.root, { recursive: true, force: true });
     throw error;
   }
 }
 
+function copyPublishedCarryLifecycle(published: ReturnType<typeof publishCarryLifecycleFixture>) {
+  const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lastcode-carry-scenario-"));
+  try {
+    // A retained worktree contains absolute Git links and must never become part of the baseline.
+    const worktrees = git(published.fixture.repo, ["worktree", "list", "--porcelain"])
+      .split("\n")
+      .filter((line) => line.startsWith("worktree "));
+    if (worktrees.length !== 1) {
+      throw new Error("Published carry baseline must not contain linked worktrees.");
+    }
+    NodeFS.cpSync(published.fixture.root, root, { recursive: true, verbatimSymlinks: true });
+    const fixture = {
+      ...published.fixture,
+      root,
+      repo: NodePath.join(root, "repository"),
+      origin: NodePath.join(root, "origin.git"),
+      upstream: NodePath.join(root, "upstream.git"),
+      home: NodePath.join(root, "home"),
+    };
+    git(fixture.repo, ["remote", "set-url", "origin", fixture.origin]);
+    git(fixture.repo, ["remote", "set-url", "upstream", fixture.upstream]);
+    return {
+      ...published,
+      fixture,
+      raceHook: NodePath.join(fixture.origin, "hooks", "pre-receive"),
+      quietProvenance: (head: string, base: string) =>
+        assertQuietCarryProvenance(fixture.repo, published.partitionB, head, base),
+    };
+  } catch (error) {
+    NodeFS.rmSync(root, { recursive: true, force: true });
+    throw error;
+  }
+}
+
 describe("checkpoint carry lifecycle", () => {
+  let publishedLifecycle: ReturnType<typeof publishCarryLifecycleFixture> | undefined;
+  // Share publication work, then copy its Git history so each scenario owns all mutable state.
+  beforeAll(() => {
+    publishedLifecycle = publishCarryLifecycleFixture();
+  });
+  afterAll(() => {
+    if (publishedLifecycle) {
+      NodeFS.rmSync(publishedLifecycle.fixture.root, { recursive: true, force: true });
+    }
+  });
+  const scenario = () => {
+    if (!publishedLifecycle) throw new Error("Carry lifecycle baseline was not published.");
+    return copyPublishedCarryLifecycle(publishedLifecycle);
+  };
+
   it("publishes compact revisions, folds source PRs, and previews retained compilation", () => {
-    const { fixture, mainWithPr } = publishCarryLifecycleFixture();
+    const { fixture, mainWithPr } = scenario();
     try {
       const { repo } = fixture;
       checkout(repo, "source-pr-preview", mainWithPr);
@@ -1663,7 +1724,7 @@ describe("checkpoint carry lifecycle", () => {
 
   it("reselects retained recovery after main advances", () => {
     const { fixture, baseA, upstreamC, mainWithPr, sourceHead, raceHook, quietProvenance } =
-      publishCarryLifecycleFixture();
+      scenario();
     try {
       const { repo } = fixture;
       checkout(repo, "upstream-main", upstreamC);
@@ -1937,7 +1998,9 @@ done
       NodeFS.rmSync(fixture.root, { recursive: true, force: true });
     }
   });
+});
 
+describe("checkpoint carry lifecycle validation", () => {
   it("blocks the first carry revision when it would drop checkpoint-only resolutions", () => {
     const fixture = initFixture();
     try {
