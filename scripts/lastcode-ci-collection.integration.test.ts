@@ -145,7 +145,8 @@ it.each([
         {
           cwd: root,
           encoding: "utf8",
-          timeout: 20_000,
+          // The fixture completes a full subprocess gate while hosted CI runs other packages.
+          timeout: 120_000,
           env: {
             ...env,
             PATH: [bin, NodePath.dirname(node), env.PATH ?? ""].join(NodePath.delimiter),

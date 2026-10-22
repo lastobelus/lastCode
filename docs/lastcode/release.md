@@ -399,8 +399,9 @@ commit. It rejects moving refs and tag/commit mismatches, runs the checkpoint's
 full CI gate on `macos-15-intel`, and builds a certificate-free x64 artifact.
 The gate runner comes from the workflow's pinned automation checkout and runs
 against the unchanged installable checkout. React Compiler coverage runs in its
-own test invocation with a 60-second per-case execution budget on hosted Intel;
-all other test budgets and the complete test set remain unchanged.
+own test invocation with a 60-second per-case execution budget on hosted Intel.
+Other application test budgets and the complete test set remain unchanged;
+tooling fixtures have separate hosted execution budgets.
 
 The agent chooses the target explicitly. First record and verify that exact remote
 tag in the current worktree:
