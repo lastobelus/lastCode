@@ -1840,6 +1840,39 @@ describe("LastCode checkpoint supervisor", () => {
     expect(message).toContain("nightly-checkpoint.stderr.log");
   });
 
+  it("reports the recorded checkpoint blocker instead of unrelated test stderr", () => {
+    let historyReads = 0;
+    const commandError = "vp run -r typecheck failed with exit code 1.";
+    const test = fixture({
+      dependencies: {
+        latestFailedCheckpointRun: () =>
+          historyReads++ === 0
+            ? null
+            : {
+                status: "failed",
+                upstreamTag: "nightly-1",
+                failurePhase: "smoke",
+                recoveryBranch: "sync/nightly/nightly-1",
+                error: commandError,
+              },
+        runPhase: (phase) => {
+          if (phase === "checkpoint") {
+            throw Object.assign(new Error("node failed with exit code 1."), {
+              diagnostic: "Could not apply fixture commit; successfully rebased fixture.",
+            });
+          }
+        },
+      },
+    });
+
+    expect(() => runCheckpointSupervisor({}, test.dependencies)).toThrow(
+      "node failed with exit code 1.",
+    );
+    expect(test.state.incident.failure.diagnostic).toBe(commandError);
+    expect(test.messages[0].message).toContain(`Diagnostic: ${commandError}`);
+    expect(test.messages[0].message).not.toContain("fixture commit");
+  });
+
   it("distinguishes different recorded checkpoint blockers behind the same wrapper error", () => {
     const baseFailure = {
       phase: "checkpoint",

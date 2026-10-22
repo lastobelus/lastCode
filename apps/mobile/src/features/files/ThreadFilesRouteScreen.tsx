@@ -2,6 +2,7 @@ import { formatFilePathForClipboard } from "@t3tools/client-runtime/media-action
 import { resolvePathLinkTarget } from "@t3tools/shared/fileLinks";
 import { resolveFilesystemReadAccess } from "@t3tools/client-runtime/state/filesystem";
 import { environmentSession } from "../../state/session";
+import { useEnvironmentPresentation } from "../../state/presentation";
 import { NativeStackScreenOptions } from "../../native/StackHeader";
 import { StackActions, useNavigation, type StaticScreenProps } from "@react-navigation/native";
 import { useEffect, useId, useRef, useState } from "react";
@@ -28,12 +29,12 @@ import { isPdfFile } from "../../lib/filePreview";
 import { tryOpenExternalUrl } from "../../lib/openExternalUrl";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import type { MediaVideoPreviewSource } from "../../lib/videoPreviewSource";
+import { useHostFileAccess } from "../../state/assets";
 import { useMediaActions } from "../../state/mediaActions";
 import { type MediaActionsSource } from "../../lib/mediaActionsSource";
 import { useThreadSelection } from "../../state/use-thread-selection";
 import { useSelectedThreadWorktree } from "../../state/use-selected-thread-worktree";
 import { useEnvironmentQuery } from "../../state/query";
-import { useEnvironmentPresentation } from "../../state/presentation";
 import { projectEnvironment } from "../../state/projects";
 import type { AssetUrlFailureReason } from "../../state/asset-url-state";
 import {
@@ -97,7 +98,13 @@ function FilesBrowserHeader(props: {
               {
                 title: "File options",
                 icon: "ellipsis",
-                items: [{ id: "refresh", title: "Refresh files", onPress: props.onRefresh }],
+                items: [
+                  {
+                    id: "refresh",
+                    title: "Refresh files",
+                    onPress: props.onRefresh,
+                  },
+                ],
               },
             ]
           : undefined
@@ -590,17 +597,9 @@ export function ThreadFileScreen(props: ThreadFileRouteScreenProps) {
   const { cwd, environmentId, projectName, selectedThread, threadId } = useThreadFilesWorkspace(
     props.route.params,
   );
-  const fileAccessSession = useEnvironmentQuery(
-    environmentId !== null ? environmentSession.sessionStateAtom(environmentId) : null,
-  );
-  const fileEnvironment = useEnvironmentPresentation(environmentId);
-  const fileAccess = resolveFilesystemReadAccess({
-    isCatalogReady: fileEnvironment.isReady,
-    connection: fileEnvironment.presentation?.connection ?? null,
-    session: fileAccessSession.data,
-    sessionError: fileAccessSession.error,
-  });
+  const fileAccess = useHostFileAccess(environmentId);
   const { canReadFiles } = fileAccess;
+  const canReadLinkedFile = threadId !== null && fileAccess.canReadLinkedFiles;
   const targetPath =
     cwd !== null && relativePath !== null ? resolveWorkspaceFilePath(cwd, relativePath) : null;
   const metadata = useEnvironmentQuery(
@@ -608,7 +607,8 @@ export function ThreadFileScreen(props: ThreadFileRouteScreenProps) {
       ? projectEnvironment.fileMetadata({ environmentId, input: { path: targetPath } })
       : null,
   );
-  const metadataPending = !metadata.isSuccess && metadata.error === null;
+  const metadataPending =
+    canReadFiles && targetPath !== null && !metadata.isSuccess && metadata.error === null;
   const directoryPath = metadata.data?.kind === "directory" ? targetPath : null;
   const [searchQuery, setSearchQuery] = useState("");
   const entriesQuery = useFileTreeEntries({
@@ -705,14 +705,18 @@ export function ThreadFileScreen(props: ThreadFileRouteScreenProps) {
     !isAudioFile &&
     (resolvedActiveMode === "source" || isMarkdownPreviewFile(relativePath));
   const fileQuery = useEnvironmentQuery(
-    canReadFiles &&
+    (canReadFiles || canReadLinkedFile) &&
       environmentId !== null &&
       cwd !== null &&
       relativePath !== null &&
       needsFileContents
       ? projectEnvironment.readFile({
           environmentId,
-          input: { cwd, relativePath },
+          input: {
+            cwd,
+            relativePath,
+            ...(!canReadFiles && threadId !== null ? { linkedThreadId: threadId } : {}),
+          },
         })
       : null,
   );
@@ -746,7 +750,7 @@ export function ThreadFileScreen(props: ThreadFileRouteScreenProps) {
     else navigation.navigate("ThreadFile", destination);
   };
   const renderInspector = (headerInset: number) =>
-    fileInspector.supported && environmentId !== null && cwd !== null ? (
+    canReadFiles && fileInspector.supported && environmentId !== null && cwd !== null ? (
       <ThreadFileNavigatorPane
         cwd={directoryPath ?? cwd}
         environmentId={environmentId}
@@ -894,7 +898,7 @@ export function ThreadFileScreen(props: ThreadFileRouteScreenProps) {
     return <LoadingScreen message="Opening file..." messagePlacement="above-spinner" />;
   }
 
-  if (!canReadFiles) {
+  if (!canReadFiles && !canReadLinkedFile) {
     if (fileAccess.isPending) {
       return <LoadingScreen message="Checking file access..." messagePlacement="above-spinner" />;
     }
@@ -950,16 +954,17 @@ export function ThreadFileScreen(props: ThreadFileRouteScreenProps) {
     );
   }
 
-  const headerSubtitle = fileHeaderSubtitle(projectName, relativePath);
+  const displayedPath = fileData?.relativePath ?? relativePath;
+  const headerSubtitle = fileHeaderSubtitle(projectName, displayedPath);
 
   return (
     <View className="flex-1 bg-sheet">
       <FileHeader
-        title={basename(relativePath)}
+        title={basename(displayedPath)}
         subtitle={headerSubtitle}
         iconColor={iconColor}
         activeMode={resolvedActiveMode}
-        fileInspectorSupported={fileInspector.supported}
+        fileInspectorSupported={canReadFiles && fileInspector.supported}
         onBack={handleBack}
         onReturnToThread={handleReturnToThread}
         actions={fileMenuActions}
@@ -979,7 +984,7 @@ export function ThreadFileScreen(props: ThreadFileRouteScreenProps) {
           fileContents={fileData?.contents ?? null}
           fileError={fileQuery.error}
           initialLine={targetLine}
-          relativePath={relativePath}
+          relativePath={displayedPath}
           threadId={threadId}
           truncated={fileData?.truncated ?? false}
           onRefresh={() => fileQuery.refresh()}

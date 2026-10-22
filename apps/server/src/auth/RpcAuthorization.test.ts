@@ -8,6 +8,8 @@ import {
   ProviderInstanceId,
   ThreadId,
   AuthOrchestrationOperateScope,
+  AuthPreviewOperateScope,
+  ORCHESTRATION_V2_WS_METHODS,
   AuthOrchestrationReadScope,
   AuthSourceControlWriteScope,
   AuthTerminalReadScope,
@@ -33,8 +35,6 @@ describe("RPC authorization scopes", () => {
     expect(new Set(Object.keys(RPC_REQUIRED_SCOPES))).toEqual(new Set(WsRpcGroup.requests.keys()));
   });
 
-  });
-
   it("requires history read permission for each cross-environment routing operation", () => {
     for (const method of [
       WS_METHODS.threadReadLocal,
@@ -43,6 +43,8 @@ describe("RPC authorization scopes", () => {
     ]) {
       expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationReadScope);
     }
+  });
+
   it("keeps webhook delivery logs, which hold request bodies, behind operate scope", () => {
     for (const method of [
       WS_METHODS.scheduledTasksListWebhookDeliveries,
@@ -64,6 +66,27 @@ describe("RPC authorization scopes", () => {
       AuthOrchestrationOperateScope,
     );
     expect(requiredScopeForRpcMethod(WS_METHODS.serverClaimUpdateActivation)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+  });
+
+  it("keeps hosted preview observation read-only and process control terminal-authorized", () => {
+    expect(requiredScopeForRpcMethod(WS_METHODS.previewHostingList)).toBe(
+      AuthOrchestrationReadScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.previewHostingRecover)).toBe(
+      AuthTerminalOperateScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.subscribePreviewHosting)).toBe(
+      AuthOrchestrationReadScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.previewHostingStopThread)).toBe(
+      AuthTerminalOperateScope,
+    );
+  });
+
+  it("keeps agent recovery claims behind task operation permission", () => {
+    expect(requiredScopeForRpcMethod(WS_METHODS.previewClaimRecovery)).toBe(
       AuthOrchestrationOperateScope,
     );
   });
@@ -153,6 +176,59 @@ describe("RPC scope middleware", () => {
     }).pipe(Effect.scoped),
   );
 });
+
+it("requires preview control permission for native browser messages", () => {
+  for (const method of [
+    WS_METHODS.subscribeDesktopBrowserCommands,
+    WS_METHODS.desktopBrowserEvent,
+  ]) {
+    expect(requiredScopeForRpcMethod(method)).toBe(AuthPreviewOperateScope);
+  }
+});
+
+it.effect.each([
+  { scopes: [AuthPreviewOperateScope], allowed: true },
+  { scopes: [AuthOrchestrationOperateScope], allowed: false },
+])("authorizes native browser events using preview permission ($allowed)", ({ scopes, allowed }) =>
+  Effect.gen(function* () {
+    const group = WsRpcGroup.omit(
+      ...[...WsRpcGroup.requests.keys()].filter(
+        (
+          tag,
+        ): tag is Exclude<
+          keyof typeof RPC_REQUIRED_SCOPES,
+          typeof WS_METHODS.desktopBrowserEvent
+        > => tag !== WS_METHODS.desktopBrowserEvent,
+      ),
+    );
+    let handled = false;
+    const client = yield* RpcTest.makeClient(group).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          group.toLayerHandler(WS_METHODS.desktopBrowserEvent, () =>
+            Effect.sync(() => {
+              handled = true;
+            }),
+          ),
+          RpcAuthorization.layer(scopes),
+        ),
+      ),
+    );
+    const result = yield* client[WS_METHODS.desktopBrowserEvent]({
+      desktopHostId: "desktop-host",
+      event: { type: "attached", threadId: "thread-1", tabId: "tab-1" },
+    }).pipe(Effect.result);
+    expect(handled).toBe(allowed);
+    if (allowed) {
+      expect(result._tag).toBe("Success");
+    } else {
+      expect(result).toMatchObject({
+        _tag: "Failure",
+        failure: { requiredPermission: AuthPreviewOperateScope },
+      });
+    }
+  }).pipe(Effect.scoped),
+);
 
 describe("settings mutation authorization", () => {
   const group = WsRpcGroup.omit(
@@ -340,9 +416,23 @@ it.effect("separates host file URLs from readable attachment URLs", () =>
     yield* client[WS_METHODS.assetsCreateUrl]({
       resource: { _tag: "attachment", attachmentId: "image" },
     });
+    yield* client[WS_METHODS.assetsCreateUrl]({
+      resource: {
+        _tag: "media-file",
+        threadId: ThreadId.make("thread"),
+        path: "image.png",
+        linkedThreadFile: true,
+      },
+    });
     for (const resource of [
       { _tag: "workspace-file", threadId: ThreadId.make("thread"), path: "file.txt" },
       { _tag: "media-file", threadId: ThreadId.make("thread"), path: "/repo/image.png" },
+      {
+        _tag: "media-file",
+        threadId: ThreadId.make("thread"),
+        path: "/repo/image.png",
+        linkedThreadFile: false,
+      },
       { _tag: "draft-workspace-file", cwd: "/repo", path: "file.txt" },
     ] as const) {
       expect(
@@ -352,6 +442,49 @@ it.effect("separates host file URLs from readable attachment URLs", () =>
         requiredPermission: AuthFilesystemReadScope,
       });
     }
+    expect(handled).toBe(2);
+  }).pipe(Effect.scoped),
+);
+
+it.effect("allows only tagged thread file reads with orchestration read permission", () =>
+  Effect.gen(function* () {
+    const group = WsRpcGroup.omit(
+      ...[...WsRpcGroup.requests.keys()].filter(
+        (
+          tag,
+        ): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, typeof WS_METHODS.projectsReadFile> =>
+          tag !== WS_METHODS.projectsReadFile,
+      ),
+    );
+    let handled = 0;
+    const client = yield* RpcTest.makeClient(group).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          group.toLayerHandler(WS_METHODS.projectsReadFile, () =>
+            Effect.sync(() => {
+              handled++;
+              return {
+                relativePath: "report.md",
+                contents: "artifact",
+                byteLength: 8,
+                truncated: false,
+              };
+            }),
+          ),
+          RpcAuthorization.layer([AuthOrchestrationReadScope]),
+        ),
+      ),
+    );
+    yield* client[WS_METHODS.projectsReadFile]({
+      cwd: "/repo",
+      relativePath: "report.md",
+      linkedThreadId: ThreadId.make("thread"),
+    });
+    expect(
+      yield* client[WS_METHODS.projectsReadFile]({ cwd: "/repo", relativePath: "report.md" }).pipe(
+        Effect.flip,
+      ),
+    ).toMatchObject({ requiredPermission: AuthFilesystemReadScope });
     expect(handled).toBe(1);
   }).pipe(Effect.scoped),
 );
@@ -394,5 +527,34 @@ it.effect("denies manual cleanup before the handler without settings permission"
       requiredPermission: AuthSettingsWriteScope,
     });
     expect(handled).toBe(false);
+  }).pipe(Effect.scoped),
+);
+
+it.effect("blocks archive-family activity repair under a read-only token", () =>
+  Effect.gen(function* () {
+    const method = ORCHESTRATION_V2_WS_METHODS.getThreadArchiveFamily;
+    const group = WsRpcGroup.omit(
+      ...[...WsRpcGroup.requests.keys()].filter(
+        (tag): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, typeof method> => tag !== method,
+      ),
+    );
+    let inspected = false;
+    const client = yield* RpcTest.makeClient(group).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          group.toLayerHandler(method, () =>
+            Effect.sync(() => {
+              inspected = true;
+              throw new Error("Unauthorized archive inspection ran.");
+            }),
+          ),
+          RpcAuthorization.layer([AuthOrchestrationReadScope]),
+        ),
+      ),
+    );
+    expect(
+      yield* client[method]({ threadId: ThreadId.make("archive-owner") }).pipe(Effect.flip),
+    ).toMatchObject({ requiredPermission: AuthOrchestrationOperateScope });
+    expect(inspected).toBe(false);
   }).pipe(Effect.scoped),
 );
