@@ -117,6 +117,7 @@ export interface ReplayUngroupedInput {
 interface GitOptions {
   readonly allowFailure?: boolean;
   readonly environment?: NodeJS.ProcessEnv;
+  readonly input?: string;
 }
 
 interface ReplayItem {
@@ -137,8 +138,9 @@ function runGit(cwd: string, args: ReadonlyArray<string>, options: GitOptions = 
     cwd,
     encoding: "utf8",
     env: options.environment ?? cleanGitEnvironment(process.env),
+    input: options.input,
     maxBuffer: 64 * 1024 * 1024,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: [options.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
   });
   if (result.error) throw result.error;
   if (result.status !== 0) {
@@ -441,14 +443,9 @@ function normalizeCarryDeletions(
         const tree = runGit(repo, ["write-tree"], { environment });
         return tree === resolveTree(repo, parent)
           ? undefined
-          : runGit(repo, [
-              "commit-tree",
-              tree,
-              "-p",
-              parent,
-              "-m",
-              commitMessage(repo, item.commit),
-            ]);
+          : runGit(repo, ["commit-tree", tree, "-p", parent, "-F", "-"], {
+              input: commitMessage(repo, item.commit),
+            });
       };
       try {
         // A deletion follows the carried introduction, so regrouping cannot re-add it.
@@ -673,8 +670,9 @@ function createAnchor(
     GIT_COMMITTER_NAME: "LastCode carry replay",
     GIT_COMMITTER_EMAIL: "carry-replay@localhost",
   };
-  return runGit(repo, ["commit-tree", resolveTree(repo, base), "-p", base, "-m", message], {
+  return runGit(repo, ["commit-tree", resolveTree(repo, base), "-p", base, "-F", "-"], {
     environment,
+    input: message,
   });
 }
 
