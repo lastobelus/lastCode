@@ -1514,7 +1514,8 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             },
           ],
         });
-        const eventsAtRequest = yield* Deferred.make<ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>>();
+        const eventsAtRequest =
+          yield* Deferred.make<ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>>();
         const publishedEvents: Array<ProviderAdapter.ProviderAdapterV2Event> = [];
         const harness = yield* makeCodexReplayHarness(transcript, (event) =>
           Effect.gen(function* () {

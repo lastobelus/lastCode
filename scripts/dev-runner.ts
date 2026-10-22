@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { recordDependencyUse } from "../packages/shared/src/dependencyActivity.ts";
+import * as Clock from "effect/Clock";
 
 import * as NodeOS from "node:os";
 

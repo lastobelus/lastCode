@@ -1,9 +1,11 @@
 import {
   AuthOrchestrationOperateScope,
   EnvironmentId,
+  ProviderInstanceId,
   ThreadId,
   type ContextMenuItem,
 } from "@t3tools/contracts";
+import type { ThreadRuntimeSummary } from "@t3tools/client-runtime/state/models";
 import { AsyncResult } from "effect/reactivity";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -19,8 +21,14 @@ function deferred<T>() {
 
 const state = vi.hoisted(() => ({
   granted: new Set<string>(),
+  tracksVisits: true,
   effects: [] as string[],
   completed: deferred<void>(),
+  runtime: null as ThreadRuntimeSummary | null,
+  archivePendingStatus: null as "stopping" | "failed" | null,
+  dismissalRequests: [] as unknown[][],
+  archiveRequests: [] as unknown[][],
+  persistent: false,
   show: vi.fn<
     (
       items: ReadonlyArray<ContextMenuItem<ThreadActionMenuId>>,
@@ -35,7 +43,8 @@ function recordEffect(action: string) {
 }
 
 vi.mock("../components/CustomSnoozeDialog", () => ({ requestCustomSnooze: vi.fn() }));
-vi.mock("react", () => ({
+vi.mock("react", async (original) => ({
+  ...(await original<typeof import("react")>()),
   useCallback: (callback: unknown) => callback,
   useMemo: (factory: () => unknown) => factory(),
 }));
@@ -47,8 +56,10 @@ vi.mock("../state/session", () => ({
     scope === AuthOrchestrationOperateScope && state.granted.has(environmentId),
 }));
 vi.mock("../state/entities", () => ({
+  readEnvironmentSupportsVisitedTracking: () => state.tracksVisits,
   readEnvironmentSupportsAutoSettleOptOut: () => true,
   readEnvironmentSupportsPinning: () => true,
+  readEnvironmentSupportsPersistence: () => true,
   readEnvironmentSupportsSettlement: () => true,
   readEnvironmentSupportsSnooze: () => true,
   readEnvironmentSupportsTitleRegeneration: () => true,
@@ -59,13 +70,31 @@ vi.mock("../state/entities", () => ({
     title: "Thread",
     branch: "main",
     worktreePath: null,
-    runtime: null,
+    runtime: state.runtime,
+    archivePending:
+      state.archivePendingStatus === null
+        ? null
+        : {
+            status: state.archivePendingStatus,
+            threadId: "original-owner",
+            commandId: "observed-failure",
+          },
+    persistent: state.persistent,
     latestRun: null,
   }),
   useProjects: () => [{ id: "project", environmentId: "secondary" }],
 }));
 vi.mock("../state/environments", () => ({ usePrimaryEnvironmentId: () => "primary" }));
 vi.mock("../state/threads", () => ({ threadEnvironment: { updateMetadata: "metadata" } }));
+vi.mock("../state/terminal", () => ({ terminalEnvironment: { close: "close" } }));
+vi.mock("../state/terminalSessions", () => ({ useThreadRunningTerminalIds: () => [] }));
+vi.mock("../state/previewHosting", () => ({
+  usePreviewProcessControlsSupported: () => false,
+  useThreadPreviewLeases: () => [],
+  useStopThreadProcesses: () => vi.fn(),
+}));
+vi.mock("../handoffs/handoffsStore", () => ({ useThreadHandoffs: () => [] }));
+vi.mock("../handoffs/useOpenHandoff", () => ({ useOpenHandoff: () => vi.fn() }));
 vi.mock("../state/use-atom-command", () => ({
   useAtomCommand: () => async () => {
     recordEffect("metadata");
@@ -122,10 +151,16 @@ vi.mock("./useSettings", () => ({
     }),
 }));
 vi.mock("./useThreadActions", () => ({
-  useThreadActions: () =>
-    Object.fromEntries(
+  useThreadActions: () => ({
+    unarchiveThread: async (...args: unknown[]) => {
+      state.dismissalRequests.push(args);
+      recordEffect("dismissal");
+      return AsyncResult.success(undefined);
+    },
+    ...Object.fromEntries(
       [
         "markThreadUnread",
+        "markThreadRead",
         "settleThread",
         "unsettleThread",
         "snoozeThread",
@@ -136,12 +171,20 @@ vi.mock("./useThreadActions", () => ({
         "deleteThread",
       ].map((action) => [
         action,
-        async () => {
-          recordEffect(action === "markThreadUnread" ? "mark-unread" : action);
+        async (...args: unknown[]) => {
+          if (action === "archiveThread") state.archiveRequests.push(args);
+          recordEffect(
+            action === "markThreadUnread"
+              ? "mark-unread"
+              : action === "markThreadRead"
+                ? "mark-read"
+                : action,
+          );
           return AsyncResult.success(undefined);
         },
       ]),
     ),
+  }),
 }));
 
 import { useThreadActionMenu } from "./useThreadActionMenu";
@@ -159,24 +202,129 @@ const createMenu = () =>
   });
 
 beforeEach(() => {
+  state.tracksVisits = true;
   state.granted = new Set(["primary"]);
   state.effects = [];
   state.completed = deferred<void>();
+  state.runtime = null;
+  state.archivePendingStatus = null;
+  state.dismissalRequests = [];
+  state.archiveRequests = [];
+  state.persistent = false;
   state.show.mockReset().mockResolvedValue(null);
 });
 
 describe("thread menu permissions", () => {
-  it.each(["rename", "regenerate-title", "delete", "pin", "settle", "archive"] as const)(
-    "%s rechecks after the native menu closes",
-    async (action) => {
-      state.granted.add("secondary");
-      const choice = deferred<ThreadActionMenuId | null>();
-      state.show.mockReturnValue(choice.promise);
-      createMenu().openMenu(position);
-      state.granted.delete("secondary");
-      choice.resolve(action);
-      await state.completed.promise;
-      expect(state.effects).toEqual([]);
-    },
-  );
+  it("disables synced read markers for a denied destination environment", () => {
+    createMenu().openMenu(position);
+    const items = state.show.mock.calls[0]![0];
+    expect(items.find((item) => item.id === "mark-read")?.disabled).toBe(true);
+    expect(items.find((item) => item.id === "mark-unread")?.disabled).toBe(true);
+  });
+
+  it.each([
+    "rename",
+    "regenerate-title",
+    "delete",
+    "pin",
+    "settle",
+    "archive",
+    "dismiss-archive-failure",
+  ] as const)("%s rechecks after the native menu closes", async (action) => {
+    state.granted.add("secondary");
+    const choice = deferred<ThreadActionMenuId | null>();
+    state.show.mockReturnValue(choice.promise);
+    createMenu().openMenu(position);
+    state.granted.delete("secondary");
+    choice.resolve(action);
+    await state.completed.promise;
+    expect(state.effects).toEqual([]);
+  });
+  it.each([
+    ["mark-unread", "mark-unread"],
+    ["mark-read", "mark-read"],
+  ] as const)("keeps %s available without task permission", async (action, effect) => {
+    state.tracksVisits = false;
+    state.show.mockResolvedValue(action);
+    createMenu().openMenu(position);
+    await state.completed.promise;
+    expect(state.effects).toEqual([effect]);
+  });
+});
+
+describe("thread menu archive retries", () => {
+  it("preserves the displayed retry attempt when the failure is dismissed while the native menu is open", async () => {
+    state.granted.add("secondary");
+    state.archivePendingStatus = "failed";
+    const choice = deferred<ThreadActionMenuId | null>();
+    state.show.mockReturnValue(choice.promise);
+    createMenu().openMenu(position);
+    state.archivePendingStatus = null;
+    choice.resolve("archive");
+    await state.completed.promise;
+    expect(state.archiveRequests).toEqual([
+      [
+        { environmentId: "secondary", threadId: "thread" },
+        expect.objectContaining({ expectedArchiveCommandId: "observed-failure" }),
+      ],
+    ]);
+  });
+  it("dismisses the original owner's observed failure even if state changes while the menu is open", async () => {
+    state.granted.add("secondary");
+    state.archivePendingStatus = "failed";
+    const choice = deferred<ThreadActionMenuId | null>();
+    state.show.mockReturnValue(choice.promise);
+    createMenu().openMenu(position);
+    state.archivePendingStatus = "stopping";
+    choice.resolve("dismiss-archive-failure");
+    await state.completed.promise;
+    expect(state.dismissalRequests).toEqual([
+      [
+        { environmentId: "secondary", threadId: "original-owner" },
+        { expectedArchiveCommandId: "observed-failure" },
+      ],
+    ]);
+  });
+  const nativeRuntime: ThreadRuntimeSummary = {
+    status: "running",
+    activeRunId: null,
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    providerName: "Codex",
+    lastError: null,
+    updatedAt: "2026-03-09T10:00:00.000Z",
+  };
+
+  it("routes active work and failed native shutdown through the archive family handler", async () => {
+    state.granted.add("secondary");
+    state.runtime = nativeRuntime;
+    const menu = createMenu();
+    menu.openMenu(position);
+    expect(state.show.mock.calls[0]![0].find((item) => item.id === "archive")?.disabled).not.toBe(
+      true,
+    );
+
+    state.archivePendingStatus = "stopping";
+    menu.openMenu(position);
+    expect(state.show.mock.calls[1]![0].find((item) => item.id === "archive")?.disabled).not.toBe(
+      true,
+    );
+
+    state.archivePendingStatus = "failed";
+    state.show.mockResolvedValue("archive");
+    menu.openMenu(position);
+    await state.completed.promise;
+    expect(state.show.mock.calls[2]![0].find((item) => item.id === "archive")?.disabled).not.toBe(
+      true,
+    );
+    expect(state.effects).toEqual(["archiveThread"]);
+  });
+
+  it("keeps a protected native thread's failed archive retry disabled", () => {
+    state.granted.add("secondary");
+    state.runtime = nativeRuntime;
+    state.archivePendingStatus = "failed";
+    state.persistent = true;
+    createMenu().openMenu(position);
+    expect(state.show.mock.calls[0]![0].find((item) => item.id === "archive")?.disabled).toBe(true);
+  });
 });
