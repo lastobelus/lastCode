@@ -49,7 +49,8 @@ asks for an upstream contribution; never pause to ask whether to go upstream.
 ## Implement and Validate
 
 1. Implement the smallest complete change, including focused regression tests
-   for backend or automation behavior.
+   for backend or automation behavior. [Build repairs](#build-repairs) skip
+   the new tests.
 2. Run the smallest relevant tests and lint required by `AGENTS.md`. Use the
    Quick CI policy below for workspace typechecks; do not recreate a deferred
    local gate with parallel TypeScript processes.
@@ -93,6 +94,24 @@ does not prove an active merge.
 When `lastcode/main` advances, obtain fresh validation against the new base
 before merging. Refresh the PR branch as needed; validation from the previous
 base does not remain valid merely because the PR head is unchanged.
+
+## Build Repairs
+
+A build repair is a PR whose only purpose is making a failed checkpoint,
+revision, or Intel package build pass. Upstream moves fast, so most builds need
+one. Its goal is a published package, not a complete fix.
+
+- Make the smallest change that gets the failing step through. Raising a
+  timeout that only the build host exceeds, or quarantining a test that fails
+  only there, is acceptable. Add no regression tests or hardening beyond the
+  failure.
+- Fix only review findings that would break the build or the product. Dismiss
+  the rest with a one-line reason such as "hardening; out of scope for a build
+  repair", then merge when the gates pass.
+- If unrelated tooling breaks along the way, mention it and keep going on the
+  build.
+
+All other PRs keep the full workflow in this skill.
 
 ## Babysit and Merge
 
