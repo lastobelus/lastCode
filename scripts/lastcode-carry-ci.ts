@@ -215,7 +215,8 @@ function compilePullRequest(
       "-m",
       carrySquashBody("Carry admission candidate", compilationSource),
     ])!;
-    git(isolated, ["checkout", "--quiet", "--detach", squash]);
+    // Materialize every tracked file even when an existing index already matches this tree.
+    git(isolated, ["checkout", "--quiet", "--force", "--detach", squash]);
     const result = compileCarrySetSameBase({
       repo: isolated,
       worktree: isolated,

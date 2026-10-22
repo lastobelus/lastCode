@@ -1,10 +1,11 @@
 // @effect-diagnostics nodeBuiltinImport:off -- These tests exercise exact commit ranges in disposable repositories.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
+import * as NodeModule from "node:module";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import { compileCarrySetSameBase } from "./lastcode-carry-replay.ts";
 import { carrySquashBody, validateCarrySourceRange } from "./lastcode-carry-delivery.ts";
@@ -300,6 +301,102 @@ describe("LastCode carry CI", () => {
       });
       expect(snapshot(repo)).toEqual(before);
     } finally {
+      cleanup();
+    }
+  });
+
+  it("restores missing ordinary-index files in the isolated checkout, preserving caller work", () => {
+    const { repo, cleanup } = fixture();
+    const nativeSpawn = NodeChildProcess.spawnSync;
+    const paths = [
+      ".repos/alchemy-effect/.gitattributes",
+      "apps/mobile/modules/t3-terminal/Vendor/libghostty/GhosttyKit.xcframework/ios-arm64/libghostty-fat.a",
+    ];
+    const runtimeChildProcess = (
+      NodeChildProcess as typeof NodeChildProcess & {
+        readonly default: typeof NodeChildProcess;
+      }
+    ).default;
+    const spawn = vi.spyOn(runtimeChildProcess, "spawnSync");
+    try {
+      manifest(repo, "carry");
+      for (const path of paths) write(repo, path, "tracked vendor fixture\n");
+      const upstream = commit(repo, "upstream");
+      write(repo, "tooling.txt", "tooling\n");
+      const partition = commit(repo, "tooling contribution", "Carry-Group: tooling");
+      const compact = compileCarrySetSameBase({
+        repo,
+        worktree: repo,
+        base: upstream,
+        source: partition,
+        preparedPartition: { base: upstream, source: partition, head: partition },
+      }).head;
+      write(repo, "prior.txt", "retained contribution\n");
+      const prior = commit(repo, "prior contribution", "Carry-Group: tooling");
+      const retained = validateCarrySourceRange(repo, 215, compact, prior);
+      git(repo, ["update-ref", retained.ref, prior]);
+      const base = git(repo, [
+        "commit-tree",
+        `${prior}^{tree}`,
+        "-p",
+        compact,
+        "-m",
+        carrySquashBody("prior squash", retained),
+      ]);
+      git(repo, ["checkout", "--quiet", "--detach", base]);
+      write(repo, "pr.txt", "proposed contribution\n");
+      const head = commit(repo, "proposed contribution", "Carry-Group: build-ci");
+      const tree = git(repo, ["rev-parse", `${head}^{tree}`]);
+      write(repo, "pr.txt", "staged work\n");
+      git(repo, ["add", "pr.txt"]);
+      write(repo, "pr.txt", "unstaged work\n");
+      write(repo, "untracked.txt", "untracked work\n");
+      const before = snapshot(repo);
+      const index = NodeFS.readFileSync(NodePath.join(repo, ".git/index"));
+      const config = NodeFS.readFileSync(NodePath.join(repo, ".git/config"));
+      let seeded = 0;
+      spawn.mockImplementation((command, args, options) => {
+        const result = nativeSpawn(command, args, options);
+        if (
+          command === "git" &&
+          args !== undefined &&
+          args.includes("clone") &&
+          args.includes("--no-checkout") &&
+          args.at(-2) === repo &&
+          result.status === 0
+        ) {
+          const isolated = args.at(-1)!;
+          // Model the hosted failure: ordinary H entries with physically missing files.
+          git(isolated, ["read-tree", "HEAD"]);
+          git(isolated, ["checkout-index", "--all"]);
+          for (const path of paths) NodeFS.unlinkSync(NodePath.join(isolated, path));
+          expect(git(isolated, ["write-tree"])).toBe(tree);
+          expect(git(isolated, ["ls-files", "-t", "--", ...paths])).toBe(
+            paths.map((path) => `H ${path}`).join("\n"),
+          );
+          expect(git(isolated, ["diff", "--name-only"]).split("\n")).toEqual(paths);
+          seeded++;
+        }
+        return result;
+      });
+      NodeModule.syncBuiltinESMExports();
+
+      expect(validateCarryPullRequest(repo, { base, head, number: 216 }).compilation).toEqual({
+        upstream,
+        sourceTree: tree,
+        compiledTree: tree,
+      });
+      expect(seeded).toBe(1);
+      expect(snapshot(repo)).toEqual(before);
+      expect(NodeFS.readFileSync(NodePath.join(repo, ".git/index"))).toEqual(index);
+      expect(NodeFS.readFileSync(NodePath.join(repo, ".git/config"))).toEqual(config);
+      expect(NodeFS.readFileSync(NodePath.join(repo, "pr.txt"), "utf8")).toBe("unstaged work\n");
+      expect(NodeFS.readFileSync(NodePath.join(repo, "untracked.txt"), "utf8")).toBe(
+        "untracked work\n",
+      );
+    } finally {
+      spawn.mockRestore();
+      NodeModule.syncBuiltinESMExports();
       cleanup();
     }
   });

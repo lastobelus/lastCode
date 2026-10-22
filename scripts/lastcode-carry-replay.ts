@@ -650,50 +650,12 @@ function assertWorktreeHead(worktree: string, expected: string): void {
     throw new Error(`Carry replay worktree is at ${actual}, expected ${expected}.`);
   const status = runGit(worktree, ["status", "--porcelain", "--untracked-files=all"]);
   if (status) {
-    const paths = [
-      ".repos/alchemy-effect/.gitattributes",
-      "apps/mobile/modules/t3-terminal/Vendor/libghostty/GhosttyKit.xcframework/ios-arm64/libghostty-fat.a",
-    ];
-    const diagnostics = {
-      cwd: worktree,
-      realpath: NodeFS.realpathSync(worktree),
-      gitPaths: runGit(worktree, [
-        "rev-parse",
-        "--show-toplevel",
-        "--absolute-git-dir",
-        "--git-common-dir",
-        "--git-path",
-        "index",
-      ]),
-      expectedHead: expected,
-      actualHead: actual,
-      tree: resolveTree(worktree, "HEAD"),
-      configuration: runGit(
-        worktree,
-        [
-          "config",
-          "--show-origin",
-          "--get-regexp",
-          "^(core\\.(worktree|sparsecheckout|sparsecheckoutcone|filemode|symlinks)|extensions\\.worktreeconfig)$",
-        ],
-        { allowFailure: true },
-      ),
-      files: paths.map((path) => {
-        const file = NodeFS.lstatSync(NodePath.join(worktree, path), { throwIfNoEntry: false });
-        return {
-          path,
-          type: file?.isSymbolicLink() ? "symlink" : file?.isFile() ? "file" : "missing",
-          entry: runGit(worktree, ["ls-files", "--stage", "--", path]),
-          flags: runGit(worktree, ["ls-files", "-t", "--", path]),
-        };
-      }),
-    };
     const diff = runGit(worktree, ["diff", "--raw", "--no-abbrev"])
       .split("\n")
       .slice(0, 20)
       .join("\n");
     throw new Error(
-      `Carry replay worktree must be clean before replay starts.\n${status.split("\n").slice(0, 20).join("\n")}\n${diff}\n${JSON.stringify(diagnostics)}`,
+      `Carry replay worktree must be clean before replay starts.\n${status.split("\n").slice(0, 20).join("\n")}\n${diff}`,
     );
   }
 }
