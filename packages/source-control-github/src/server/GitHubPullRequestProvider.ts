@@ -461,16 +461,14 @@ export const make = Effect.gen(function* () {
                 input.host,
                 reviewThreads.botLogins,
               ),
-              // A comment out of `gh pr view --json` carries none of its own: that read
+              // A comment out of the activity read carries none of its own: that read
               // reports no reaction at all, so they arrive from the GraphQL page by node id.
               reactions: comment.reactions ?? reviewThreads.reactionsById.get(comment.id) ?? [],
               editedAt: reviewThreads.editedAtById.get(comment.id) ?? comment.editedAt ?? null,
             }))
             .toSorted((left, right) => left.createdAt.localeCompare(right.createdAt)),
-          // `gh pr view --json comments,reviews` follows GitHub's cursors itself, so those two
-          // are always whole and only the thread walk can stop short of the host.
-          commentCount: pullRequest.comments.length + reviewThreads.commentCount,
-          commentsTruncated: reviewThreads.truncated,
+          commentCount: pullRequest.commentCount + reviewThreads.commentCount,
+          commentsTruncated: pullRequest.truncated || reviewThreads.truncated,
           reviewThreadsTruncated: reviewThreads.reviewThreadsTruncated,
           reviewThreads: reviewThreads.reviewThreads.map((thread) => ({
             ...thread,
