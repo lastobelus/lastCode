@@ -70,6 +70,85 @@ it("replaces stale preview preferences when the source now uses defaults", async
   expect(await NodeFSP.readdir(NodePath.join(state, "themes"))).toEqual(["keep.txt"]);
 });
 
+it("rereads a changing browser profile before publishing preview preferences", async () => {
+  await using setup = await fixture();
+  let attempts = 0;
+  const result = await preparePreviewSettings(setup.options, async () => {
+    attempts++;
+    if (attempts < 3) throw new Error("database changed while reading");
+    return new Map([["t3code:typography-advanced", "true"]]);
+  });
+  expect(attempts).toBe(3);
+  const seed = JSON.parse(await NodeFSP.readFile(result.settingsPath, "utf8"));
+  expect(seed.localStorage["t3code:typography-advanced"]).toBe("true");
+});
+
+it("stops after three failed profile snapshots without writing preview settings", async () => {
+  await using setup = await fixture();
+  let attempts = 0;
+  const failure = new Error("unreadable profile");
+  await expect(
+    preparePreviewSettings(setup.options, async () => {
+      attempts++;
+      throw failure;
+    }),
+  ).rejects.toBe(failure);
+  expect(attempts).toBe(3);
+  await expect(NodeFSP.stat(setup.options.targetHome)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+it.each(["client-settings.json", "settings.json", "preview-settings.json"])(
+  "refuses an existing destination %s link outside the isolated home",
+  async (name) => {
+    await using setup = await fixture();
+    const externalFile = NodePath.join(setup.root, "external-preferences.json");
+    const original = '{"externalPreference":"keep"}';
+    await NodeFSP.writeFile(externalFile, original);
+    const stateDir = NodePath.join(setup.options.targetHome, "userdata");
+    await NodeFSP.mkdir(stateDir, { recursive: true });
+    await NodeFSP.symlink(externalFile, NodePath.join(stateDir, name));
+    if (name === "settings.json") {
+      await NodeFSP.writeFile(NodePath.join(setup.options.sourceStateDir, name), "{}");
+    }
+    await expect(preparePreviewSettings(setup.options, async () => new Map())).rejects.toThrow(
+      "within the preview home",
+    );
+    expect(await NodeFSP.readFile(externalFile, "utf8")).toBe(original);
+  },
+);
+
+it("refuses a dangling destination link that would create a file outside the preview home", async () => {
+  await using setup = await fixture();
+  const externalFile = NodePath.join(setup.root, "missing-preferences.json");
+  const stateDir = NodePath.join(setup.options.targetHome, "userdata");
+  await NodeFSP.mkdir(stateDir, { recursive: true });
+  await NodeFSP.symlink(externalFile, NodePath.join(stateDir, "client-settings.json"));
+  await expect(preparePreviewSettings(setup.options, async () => new Map())).rejects.toThrow(
+    "within the preview home",
+  );
+  await expect(NodeFSP.stat(externalFile)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+it.each(["userdata", "userdata/themes"])(
+  "refuses a destination %s directory link outside the preview home before cleanup",
+  async (name) => {
+    await using setup = await fixture();
+    const externalDir = NodePath.join(setup.root, "external-directory");
+    await NodeFSP.mkdir(externalDir);
+    await NodeFSP.writeFile(NodePath.join(externalDir, "keep.json"), "unchanged");
+    const destination = NodePath.join(setup.options.targetHome, name);
+    await NodeFSP.mkdir(NodePath.dirname(destination), { recursive: true });
+    await NodeFSP.symlink(externalDir, destination);
+    await expect(preparePreviewSettings(setup.options, async () => new Map())).rejects.toThrow(
+      "within the preview home",
+    );
+    expect(await NodeFSP.readdir(externalDir)).toEqual(["keep.json"]);
+    expect(await NodeFSP.readFile(NodePath.join(externalDir, "keep.json"), "utf8")).toBe(
+      "unchanged",
+    );
+  },
+);
+
 it("seeds only saved themes and client preferences, clears absent theme keys, and refreshes the seed ID", async () => {
   await using setup = await fixture();
   const settings = { unknownFuturePreference: "preserved" };

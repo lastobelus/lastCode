@@ -27,6 +27,18 @@ const readSavedLocalStorage: LocalStorageReader = (directory, origin) =>
     readChromiumLocalStorage(directory, origin).pipe(Effect.provide(NodeServices.layer)),
   );
 
+async function readStableLocalStorage(read: LocalStorageReader, directory: string, origin: string) {
+  // The lock-free reader rejects snapshots changed by a live LevelDB flush.
+  // Each retry rereads the profile; a persistent failure still aborts preparation.
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await read(directory, origin);
+    } catch (error) {
+      if (attempt === 3) throw error;
+    }
+  }
+}
+
 const settingsFiles = [
   "client-settings.json",
   "settings.json",
@@ -125,6 +137,7 @@ export async function preparePreviewSettings(
   }
   const filesToCopy = [...settingsFiles, ...themeFiles];
   const targetHome = NodePath.resolve(options.targetHome);
+  const resolvedTargetHome = await resolveDestination(targetHome);
   const targetStateDir = NodePath.join(targetHome, "userdata");
   const settingsPath = NodePath.join(targetStateDir, "preview-settings.json");
   const destinations = [
@@ -140,6 +153,9 @@ export async function preparePreviewSettings(
       throw new Error(
         "Preview settings destination must be separate from the source state and browser profile.",
       );
+    }
+    if (!isWithin(resolved, resolvedTargetHome)) {
+      throw new Error("Preview settings destinations must stay within the preview home.");
     }
   }
 
@@ -157,7 +173,8 @@ export async function preparePreviewSettings(
     throw new Error("Saved client settings must contain a settings object.");
   }
 
-  const savedStorage = await readLocalStorage(
+  const savedStorage = await readStableLocalStorage(
+    readLocalStorage,
     NodePath.join(sourceBrowserProfile, "Local Storage", "leveldb"),
     options.sourceOrigin,
   );
