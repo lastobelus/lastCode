@@ -39,6 +39,13 @@ export function IncomingMessageFrame({
   const liftedUnit = useRef<HTMLDivElement>(null);
   const visibleSummary = useRef<HTMLButtonElement>(null);
   const liftedSummary = useRef<HTMLButtonElement>(null);
+  const mountLiftedUnit = (node: HTMLDivElement | null) => {
+    liftedUnit.current = node;
+    // The resting summary becomes inert before the popover's deferred autofocus.
+    if (node && focused && !node.contains(document.activeElement)) {
+      liftedSummary.current?.focus({ preventScroll: true });
+    }
+  };
   const originalBubble = useRef<HTMLDivElement>(null);
   const previousExpanded = useRef(expanded);
   const previousLifted = useRef(false);
@@ -267,7 +274,7 @@ export function IncomingMessageFrame({
                   className="z-[130] w-[calc(var(--anchor-width)+10px)] data-[anchor-hidden]:invisible"
                 >
                   <PopoverPrimitive.Popup
-                    ref={liftedUnit}
+                    ref={mountLiftedUnit}
                     initialFocus={focused ? liftedSummary : false}
                     finalFocus={false}
                     className="group/incoming flex w-full min-w-0 flex-col items-end gap-1 border border-border p-1 text-sm outline-none"

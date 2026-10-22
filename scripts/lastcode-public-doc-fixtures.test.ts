@@ -1,5 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off globalTimers:off globalFetch:off - Focused host-side fixture contract tests use disposable directories and child Node processes.
-import { assert, it } from "@effect/vitest";
+import { afterAll, assert, beforeAll, describe, it } from "@effect/vitest";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
@@ -292,16 +292,21 @@ it("prepares a fake packaged updater that emits valid inspect and build states",
   }
 });
 
-it("runs the public-doc fixture lifecycle in isolated state", async () => {
-  const outputDirectory = await NodeFSP.mkdtemp(
-    NodePath.join(NodeOS.tmpdir(), "lastcode-public-doc-lifecycle-test-"),
-  );
-  const { stdout: head } = await execFile("git", ["rev-parse", "HEAD"], {
-    cwd: REPO_ROOT,
-    encoding: "utf8",
-  });
+describe("public-doc fixture lifecycle", () => {
+  let outputDirectory: string;
+  let head: string;
   let ready: Record<string, unknown> | undefined;
-  try {
+
+  // Two cold server starts belong to fixture preparation; replay has its own checks below.
+  beforeAll(async () => {
+    outputDirectory = await NodeFSP.mkdtemp(
+      NodePath.join(NodeOS.tmpdir(), "lastcode-public-doc-lifecycle-test-"),
+    );
+    const source = await execFile("git", ["rev-parse", "HEAD"], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+    });
+    head = source.stdout;
     await runPublicDocsFixture(
       { commit: head.trim(), outputDirectory },
       {
@@ -312,6 +317,13 @@ it("runs the public-doc fixture lifecycle in isolated state", async () => {
         },
       },
     );
+  });
+
+  afterAll(async () => {
+    if (outputDirectory) await NodeFSP.rm(outputDirectory, { recursive: true, force: true });
+  });
+
+  it("runs the public-doc fixture lifecycle in isolated state", async () => {
     if (!ready) throw new Error("Fixture did not emit ready metadata.");
     assert.equal(ready.sourceCommit, head.trim());
     assert.equal(ready.projectId, PUBLIC_DOCS_PROJECT_ID);
@@ -358,21 +370,21 @@ it("runs the public-doc fixture lifecycle in isolated state", async () => {
       database.close();
     }
 
+    const commitIdentity = await execFile("git", ["log", "-1", "--format=%an <%ae>"], {
+      cwd: NodePath.join(outputDirectory, "environment", "workspace", "lastcode-docs-demo"),
+      encoding: "utf8",
+    });
+    assert.equal(commitIdentity.stdout.trim(), "LastCode Docs Fixture <fixture@example.invalid>");
+  });
+
+  it("rebuilds the public-doc fixture from native V2 records", async () => {
     const reconstructed = await inspectNativeFixtureReplay(
       NodePath.join(outputDirectory, "environment", "userdata", "statev2.sqlite"),
       PUBLIC_DOCS_THREADS.map(({ id }) => id),
     );
     assert.equal(reconstructed.valid, true);
     assert.deepEqual(reconstructed.after, reconstructed.before);
-
-    const commitIdentity = await execFile("git", ["log", "-1", "--format=%an <%ae>"], {
-      cwd: NodePath.join(outputDirectory, "environment", "workspace", "lastcode-docs-demo"),
-      encoding: "utf8",
-    });
-    assert.equal(commitIdentity.stdout.trim(), "LastCode Docs Fixture <fixture@example.invalid>");
-  } finally {
-    await NodeFSP.rm(outputDirectory, { recursive: true, force: true });
-  }
+  });
 });
 
 it("seeds and rebuilds the mobile showcase using native V2 records", async () => {
