@@ -287,6 +287,58 @@ describe("incoming message interaction", () => {
     expect(mounted).toHaveBeenCalledOnce();
   });
 
+  it("moves keyboard focus before the resting summary becomes unfocusable", async () => {
+    await using fixture = await setup();
+    const { container, rerender } = fixture;
+    let invalidatedFocus = false;
+    let sawLift = false;
+    const observer = new MutationObserver(() => {
+      if (!container.querySelector("[data-incoming-message-lifted='true']")) return;
+      sawLift = true;
+      const active = document.activeElement;
+      if (
+        active instanceof HTMLElement &&
+        container.contains(active) &&
+        active.closest("[inert]")
+      ) {
+        invalidatedFocus = true;
+        // A browser may repair focus on the newly inert subtree before popup autofocus runs.
+        active.blur();
+      }
+    });
+    observer.observe(container, { attributes: true, childList: true, subtree: true });
+    using _observer = { [Symbol.dispose]: () => observer.disconnect() };
+    await rerender(
+      <IncomingMessageFrame
+        preview={resolveIncomingMessagePreview({
+          role: "user",
+          createdBy: "agent",
+          text: "Original request.\nDetails continue here.",
+          incomingSummary: {
+            status: "ready",
+            text: "Inspect status and continue the authorized work.",
+          },
+        })}
+        surface="neutral"
+        fillColor={null}
+        attachments={null}
+        renderOriginal={() => <p>Original request.</p>}
+        renderActions={() => <button type="button">Copy original</button>}
+      />,
+    );
+    await userEvent.tab();
+    await waitForPopupFocus("lifted");
+    expect(sawLift).toBe(true);
+    expect(invalidatedFocus).toBe(false);
+    await userEvent.tab();
+    expect(document.activeElement?.textContent).toBe("Copy original");
+    await userEvent.tab();
+    await vi.waitFor(() => {
+      expect(document.querySelector("[data-incoming-message-lift]")).toBeNull();
+      expect(container.contains(document.activeElement)).toBe(false);
+    });
+  });
+
   it.each(["summary", "copy"] as const)(
     "dismisses Escape from %s, restores focus, and lets Tab reach Copy without reopening",
     async (focusedControl) => {
