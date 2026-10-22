@@ -70,6 +70,47 @@ it("replaces stale preview preferences when the source now uses defaults", async
   expect(await NodeFSP.readdir(NodePath.join(state, "themes"))).toEqual(["keep.txt"]);
 });
 
+it("seeds default client preferences and removes the stale copy when the source file is absent", async () => {
+  await using setup = await fixture();
+  await NodeFSP.unlink(NodePath.join(setup.options.sourceStateDir, "client-settings.json"));
+  const targetFile = NodePath.join(setup.options.targetHome, "userdata", "client-settings.json");
+  await NodeFSP.mkdir(NodePath.dirname(targetFile), { recursive: true });
+  await NodeFSP.writeFile(targetFile, '{"lastcodeSidebarEnabled":true}');
+  const result = await preparePreviewSettings(setup.options, async () => new Map());
+  const seed = JSON.parse(await NodeFSP.readFile(result.settingsPath, "utf8"));
+  expect(JSON.parse(seed.localStorage["t3code:client-settings:v1"])).toEqual({});
+  expect(result.copiedFiles).not.toContain("client-settings.json");
+  await expect(NodeFSP.stat(targetFile)).rejects.toMatchObject({ code: "ENOENT" });
+  await expect(
+    NodeFSP.stat(NodePath.join(setup.options.sourceStateDir, "client-settings.json")),
+  ).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+it("preserves non-missing client settings read errors without writing preview state", async () => {
+  await using setup = await fixture();
+  const sourceFile = NodePath.join(setup.options.sourceStateDir, "client-settings.json");
+  await NodeFSP.unlink(sourceFile);
+  await NodeFSP.mkdir(sourceFile);
+  await expect(preparePreviewSettings(setup.options, async () => new Map())).rejects.toMatchObject({
+    code: "EISDIR",
+  });
+  await expect(NodeFSP.stat(setup.options.targetHome)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+it.each(["not json", "null", "[]", '{"pullRequestMergeMethod":12}'])(
+  "uses empty global UI preferences for invalid optional state (%s)",
+  async (raw) => {
+    await using setup = await fixture();
+    const result = await preparePreviewSettings(
+      setup.options,
+      async () => new Map([["t3code:ui-state:v1", raw]]),
+    );
+    const seed = JSON.parse(await NodeFSP.readFile(result.settingsPath, "utf8"));
+    expect(JSON.parse(seed.localStorage["t3code:ui-state:v1"])).toEqual({});
+    expect(JSON.parse(seed.localStorage["t3code:client-settings:v1"])).toEqual({});
+  },
+);
+
 it("rereads a changing browser profile before publishing preview preferences", async () => {
   await using setup = await fixture();
   let attempts = 0;

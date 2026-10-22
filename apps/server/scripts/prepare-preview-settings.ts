@@ -159,8 +159,14 @@ export async function preparePreviewSettings(
     }
   }
 
-  const clientBytes = await NodeFSP.readFile(NodePath.join(sourceStateDir, "client-settings.json"));
-  const document = decodeSavedSettings(clientBytes.toString("utf8"));
+  const clientBytes = await NodeFSP.readFile(
+    NodePath.join(sourceStateDir, "client-settings.json"),
+  ).catch((error: unknown) => {
+    if (!isMissing(error)) throw error;
+    return undefined;
+  });
+  const document =
+    clientBytes === undefined ? {} : decodeSavedSettings(clientBytes.toString("utf8"));
   if (document === null || typeof document !== "object" || Array.isArray(document)) {
     throw new Error("Saved client settings must be a JSON object.");
   }
@@ -189,9 +195,14 @@ export async function preparePreviewSettings(
     }
   }
   localStorage["t3code:client-settings:v1"] = JSON.stringify(clientSettings);
-  localStorage["t3code:ui-state:v1"] = JSON.stringify(
-    decodeUiPreferences(savedStorage.get("t3code:ui-state:v1") ?? "{}"),
-  );
+  localStorage["t3code:ui-state:v1"] = "{}";
+  try {
+    localStorage["t3code:ui-state:v1"] = JSON.stringify(
+      decodeUiPreferences(savedStorage.get("t3code:ui-state:v1") ?? "{}"),
+    );
+  } catch {
+    // The app also falls back to initial UI state when optional persisted state is invalid.
+  }
 
   await NodeFSP.mkdir(targetStateDir, { recursive: true });
   const targetThemesDir = NodePath.join(targetStateDir, "themes");
@@ -209,8 +220,12 @@ export async function preparePreviewSettings(
   }
   const copiedFiles: string[] = [];
   for (const name of filesToCopy) {
+    if (name === "client-settings.json" && clientBytes === undefined) {
+      await NodeFSP.rm(NodePath.join(targetStateDir, name), { force: true });
+      continue;
+    }
     try {
-      if (name === "client-settings.json") {
+      if (name === "client-settings.json" && clientBytes !== undefined) {
         await NodeFSP.writeFile(NodePath.join(targetStateDir, name), clientBytes);
       } else {
         await NodeFSP.copyFile(
