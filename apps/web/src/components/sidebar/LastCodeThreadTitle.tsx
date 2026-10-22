@@ -2,7 +2,7 @@ import { MessageSquareLockIcon } from "lucide-react";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { actionRunningPresentation } from "@t3tools/shared/actionResume";
 import { useClientSetting } from "~/hooks/useSettings";
-import { ThreadStatusLabel } from "../ThreadStatusIndicators";
+import { LastCodeThreadStatusLabel } from "./LastCodeThreadStatusLabel";
 import type { ThreadStatusPill } from "../Sidebar.logic";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { ThreadDashboardIndicator } from "../dashboard/ThreadDashboardIndicator";
@@ -180,8 +180,8 @@ export function LastCodeThreadTitle({
     <>
       <WaitingAction thread={thread} threadStatus={threadStatus} />
       {threadStatus && (
-        <span className="inline-flex min-w-0 max-w-[35%] overflow-hidden">
-          <ThreadStatusLabel status={threadStatus} compact={compactStatusIndicators} />
+        <span className="inline-flex min-w-0 max-w-[35%]">
+          <LastCodeThreadStatusLabel status={threadStatus} compact={compactStatusIndicators} />
         </span>
       )}
       {renameTarget ? (

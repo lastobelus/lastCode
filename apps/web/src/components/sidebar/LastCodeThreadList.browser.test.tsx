@@ -21,11 +21,13 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@formkit/auto-animate", () => ({ autoAnimate: mocks.animate }));
 vi.mock("~/hooks/useSettings", () => ({
   useClientSetting: (key: string) =>
-    key === "legacySidebarThreadGroupingStyle"
-      ? "typed-groups"
-      : key === "lastcodeSidebarFamilyStatusSubheaders"
-        ? mocks.subheaders
-        : false,
+    key === "lastcodeStatusIcons"
+      ? {}
+      : key === "legacySidebarThreadGroupingStyle"
+        ? "typed-groups"
+        : key === "lastcodeSidebarFamilyStatusSubheaders"
+          ? mocks.subheaders
+          : false,
 }));
 vi.mock("../ThreadStatusIndicators", () => ({ ThreadStatusLabel: () => null }));
 const parent = makeThreadFixture({

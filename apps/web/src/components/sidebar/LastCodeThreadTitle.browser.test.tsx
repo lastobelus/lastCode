@@ -22,11 +22,13 @@ vi.mock("~/hooks/useSettings", async () => {
           };
         },
         () =>
-          key === "compactLegacySidebarStatuses"
-            ? mocks.compact
-            : key === "lastcodeSidebarFamilyStatusSubheaders"
-              ? mocks.subheaders
-              : "typed-groups",
+          key === "lastcodeStatusIcons"
+            ? mocks.icons
+            : key === "compactLegacySidebarStatuses"
+              ? mocks.compact
+              : key === "lastcodeSidebarFamilyStatusSubheaders"
+                ? mocks.subheaders
+                : "typed-groups",
       ),
   };
 });
@@ -70,6 +72,7 @@ import { useLastCodeThreadEditing } from "./useLastCodeThreadEditing";
 import { SidebarPresentation } from "./SidebarPresentation";
 import { useSidebarModeStore } from "../../sidebarMode";
 const mocks = vi.hoisted(() => ({
+  icons: {},
   update: vi.fn<(value: unknown) => Promise<AtomCommandResult<unknown, unknown>>>(),
   toast: vi.fn(),
   rowDoubleClick: vi.fn(),

@@ -331,8 +331,13 @@ their standard size. On desktop, **View → Actual Size**, **Zoom In**, and **Zo
 zoom the whole application and compose with the LastCode sidebar scale.
 To keep the same status colors while using less horizontal space, enable **Compact status
 indicators** in **Settings → LastCode → Appearance**. LastCode thread rows then show only the
-colored status dot; the full status remains available as a tooltip. This preference is off by
+colored status icon; the full status remains available as a tooltip. This preference is off by
 default.
+
+Use **Status icons** in the same settings section to choose a circle, square, diamond, triangle,
+or right-pointing triangle for each agent status. Each shape supports an outline, a solid fill,
+or an outline with a 50% fill. Colors and status meanings stay the same. New statuses use a solid
+circle until you choose another icon; resetting Status icons restores solid circles for all statuses.
 
 To hide the worktree icon beside threads that use a dedicated worktree, turn off **Show worktree
 indicators** in **Settings -> LastCode -> Appearance**. The icon remains visible by default.

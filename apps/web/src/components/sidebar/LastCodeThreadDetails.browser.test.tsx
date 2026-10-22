@@ -38,11 +38,13 @@ const editing = {
 };
 vi.mock("../../hooks/useSettings", () => ({
   useClientSetting: (key: string) =>
-    key === "legacySidebarThreadGroupingStyle"
-      ? "typed-groups"
-      : key === "lastcodeSidebarFamilyStatusSubheaders"
-        ? mocks.subheaders
-        : mocks.worktrees,
+    key === "lastcodeStatusIcons"
+      ? {}
+      : key === "legacySidebarThreadGroupingStyle"
+        ? "typed-groups"
+        : key === "lastcodeSidebarFamilyStatusSubheaders"
+          ? mocks.subheaders
+          : mocks.worktrees,
 }));
 vi.mock("../ThreadStatusIndicators", () => ({
   ThreadStatusLabel: () => null,

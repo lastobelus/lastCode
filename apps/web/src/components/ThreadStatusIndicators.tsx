@@ -1,3 +1,5 @@
+import type { LastCodeStatusIcon } from "@t3tools/contracts/settings";
+import { ThreadStatusGlyph } from "./ThreadStatusGlyph";
 import {
   scopeProjectRef,
   scopedThreadKey,
@@ -811,11 +813,13 @@ export function ThreadWorktreeIndicator({
 export function ThreadStatusLabel({
   status,
   compact = false,
+  icon,
 }: {
   status: Pick<ThreadStatusPill, "colorClass" | "dotClass" | "pulse" | "description"> & {
     label: string;
   };
   compact?: boolean;
+  icon?: LastCodeStatusIcon | undefined;
 }) {
   if (compact) {
     return (
@@ -831,12 +835,16 @@ export function ThreadStatusLabel({
             />
           }
         >
-          <span
-            data-lastcode-sidebar-unscaled-content
-            className={`size-1.5 rounded-full ${status.dotClass} ${
-              status.pulse ? "motion-safe:animate-status-pulse" : ""
-            }`}
-          />
+          {icon ? (
+            <ThreadStatusGlyph icon={icon} dotClass={status.dotClass} pulse={status.pulse} />
+          ) : (
+            <span
+              data-lastcode-sidebar-unscaled-content
+              className={`size-1.5 rounded-full ${status.dotClass} ${
+                status.pulse ? "motion-safe:animate-status-pulse" : ""
+              }`}
+            />
+          )}
         </TooltipTrigger>
         <TooltipPopup side="top">{status.description ?? status.label}</TooltipPopup>
       </Tooltip>
@@ -852,17 +860,23 @@ export function ThreadStatusLabel({
             aria-label={
               status.description ? `${status.label}. ${status.description}` : status.label
             }
-            className={`inline-flex items-center gap-1 text-3xs ${status.colorClass}`}
+            className={`inline-flex items-center gap-1 text-3xs ${icon ? "min-w-0 max-w-full" : ""} ${status.colorClass}`}
           />
         }
       >
-        <span
-          data-lastcode-sidebar-unscaled-content
-          className={`size-1.5 rounded-full ${status.dotClass} ${
-            status.pulse ? "motion-safe:animate-status-pulse" : ""
-          }`}
-        />
-        <span className="hidden md:inline">{status.label}</span>
+        {icon ? (
+          <ThreadStatusGlyph icon={icon} dotClass={status.dotClass} pulse={status.pulse} />
+        ) : (
+          <span
+            data-lastcode-sidebar-unscaled-content
+            className={`size-1.5 rounded-full ${status.dotClass} ${
+              status.pulse ? "motion-safe:animate-status-pulse" : ""
+            }`}
+          />
+        )}
+        <span className={icon ? "hidden min-w-0 truncate md:inline" : "hidden md:inline"}>
+          {status.label}
+        </span>
       </TooltipTrigger>
       <TooltipPopup side="top">{status.description ?? status.label}</TooltipPopup>
     </Tooltip>

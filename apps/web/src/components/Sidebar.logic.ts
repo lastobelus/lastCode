@@ -641,23 +641,104 @@ export interface ThreadStatusPill {
   pulse: boolean;
 }
 
-const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
-  "Pending Approval": 7,
-  "Awaiting Input": 6,
-  Failed: 3.5,
-  Working: 3,
-  Connecting: 3,
-  Waiting: 2.5,
-  "Plan Ready": 2,
-  Completed: 1,
-  Deleting: 7,
-  "Deleting (Queued)": 7,
-  "Cleanup failed": 8,
-  "Not responding": 8,
-  "Needs repair": 8,
-  "Archiving…": 7,
-  "Archive failed": 8,
-};
+const THREAD_STATUS_PRIORITY = {
+  "Pending Approval": {
+    priority: 7,
+    presentation: {
+      colorClass: "text-amber-600 dark:text-amber-300/90",
+      dotClass: "bg-amber-500 dark:bg-amber-300/90",
+      pulse: false,
+    },
+  },
+  "Awaiting Input": {
+    priority: 6,
+    presentation: {
+      colorClass: "text-indigo-600 dark:text-indigo-300/90",
+      dotClass: "bg-indigo-500 dark:bg-indigo-300/90",
+      pulse: false,
+    },
+  },
+  Failed: {
+    priority: 3.5,
+    presentation: {
+      colorClass: "text-red-600 dark:text-red-300/90",
+      dotClass: "bg-red-500 dark:bg-red-300/90",
+      pulse: false,
+    },
+  },
+  Working: {
+    priority: 3,
+    presentation: {
+      colorClass: "text-sky-600 dark:text-sky-300/80",
+      dotClass: "bg-sky-500 dark:bg-sky-300/80",
+      pulse: true,
+    },
+  },
+  Connecting: {
+    priority: 3,
+    presentation: {
+      colorClass: "text-sky-600 dark:text-sky-300/80",
+      dotClass: "bg-sky-500 dark:bg-sky-300/80",
+      pulse: true,
+    },
+  },
+  Waiting: {
+    priority: 2.5,
+    presentation: {
+      colorClass: "text-sidebar-muted-foreground",
+      dotClass: "bg-sidebar-muted-foreground",
+      pulse: false,
+    },
+  },
+  "Plan Ready": {
+    priority: 2,
+    presentation: {
+      colorClass: "text-violet-600 dark:text-violet-300/90",
+      dotClass: "bg-violet-500 dark:bg-violet-300/90",
+      pulse: false,
+    },
+  },
+  Completed: {
+    priority: 1,
+    presentation: {
+      colorClass: "text-emerald-600 dark:text-emerald-300/90",
+      dotClass: "bg-emerald-500 dark:bg-emerald-300/90",
+      pulse: false,
+    },
+  },
+  Deleting: { priority: 7 },
+  "Deleting (Queued)": { priority: 7 },
+  "Cleanup failed": { priority: 8 },
+  "Not responding": { priority: 8 },
+  "Needs repair": { priority: 8 },
+  "Archiving…": { priority: 7 },
+  "Archive failed": { priority: 8 },
+} satisfies Record<
+  ThreadStatusPill["label"],
+  { priority: number; presentation?: Omit<ThreadStatusPill, "label"> }
+>;
+
+// Only downstream operational labels are excluded, so a new upstream status is
+// automatically offered without maintaining another list of upstream labels.
+const LASTCODE_OPERATIONAL_STATUS_LABELS = new Set<string>([
+  "Deleting",
+  "Deleting (Queued)",
+  "Cleanup failed",
+  "Not responding",
+  "Needs repair",
+  "Archiving…",
+  "Archive failed",
+]);
+
+export const configurableThreadStatuses = Object.entries(THREAD_STATUS_PRIORITY)
+  .filter(([label]) => !LASTCODE_OPERATIONAL_STATUS_LABELS.has(label))
+  .map(([label, entry]) => ({
+    label,
+    colorClass: "text-sidebar-muted-foreground",
+    dotClass: "bg-sidebar-muted-foreground",
+    pulse: false,
+    ...("presentation" in entry ? entry.presentation : {}),
+  }));
 
 type ThreadStatusInput = Pick<
   SidebarThreadSummary,
@@ -1218,31 +1299,19 @@ export function resolveThreadStatusPill(input: {
   if (thread.hasPendingApprovals || thread.pendingSubagentRequest === "approval") {
     return {
       label: "Pending Approval",
-      colorClass: "text-amber-600 dark:text-amber-300/90",
-      dotClass: "bg-amber-500 dark:bg-amber-300/90",
-      pulse: false,
+      ...THREAD_STATUS_PRIORITY["Pending Approval"].presentation,
     };
   }
 
   if (thread.hasPendingUserInput || thread.pendingSubagentRequest === "user_input") {
-    return {
-      label: "Awaiting Input",
-      colorClass: "text-indigo-600 dark:text-indigo-300/90",
-      dotClass: "bg-indigo-500 dark:bg-indigo-300/90",
-      pulse: false,
-    };
+    return { label: "Awaiting Input", ...THREAD_STATUS_PRIORITY["Awaiting Input"].presentation };
   }
 
   if (
     (thread.runtime?.status === "running" && thread.blockedOnThreadWait !== true) ||
     thread.runtime?.status === "waiting"
   ) {
-    return {
-      label: "Working",
-      colorClass: "text-sky-600 dark:text-sky-300/80",
-      dotClass: "bg-sky-500 dark:bg-sky-300/80",
-      pulse: true,
-    };
+    return { label: "Working", ...THREAD_STATUS_PRIORITY["Working"].presentation };
   }
 
   if (
@@ -1250,33 +1319,18 @@ export function resolveThreadStatusPill(input: {
     thread.runtime?.status === "starting" ||
     thread.runtime?.status === "queued"
   ) {
-    return {
-      label: "Connecting",
-      colorClass: "text-sky-600 dark:text-sky-300/80",
-      dotClass: "bg-sky-500 dark:bg-sky-300/80",
-      pulse: true,
-    };
+    return { label: "Connecting", ...THREAD_STATUS_PRIORITY["Connecting"].presentation };
   }
 
   if (
     (thread.runtime?.status === "running" && thread.blockedOnThreadWait === true) ||
     backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? [])
   ) {
-    return {
-      label: "Waiting",
-      colorClass: "text-sidebar-muted-foreground",
-      dotClass: "bg-sidebar-muted-foreground",
-      pulse: false,
-    };
+    return { label: "Waiting", ...THREAD_STATUS_PRIORITY["Waiting"].presentation };
   }
 
   if (hasUnseenFailure(thread)) {
-    return {
-      label: "Failed",
-      colorClass: "text-red-600 dark:text-red-300/90",
-      dotClass: "bg-red-500 dark:bg-red-300/90",
-      pulse: false,
-    };
+    return { label: "Failed", ...THREAD_STATUS_PRIORITY["Failed"].presentation };
   }
 
   const hasPlanReadyPrompt =
@@ -1285,12 +1339,7 @@ export function resolveThreadStatusPill(input: {
     isLatestRunSettled(thread.latestRun, thread.runtime) &&
     thread.hasActionableProposedPlan;
   if (hasPlanReadyPrompt) {
-    return {
-      label: "Plan Ready",
-      colorClass: "text-violet-600 dark:text-violet-300/90",
-      dotClass: "bg-violet-500 dark:bg-violet-300/90",
-      pulse: false,
-    };
+    return { label: "Plan Ready", ...THREAD_STATUS_PRIORITY["Plan Ready"].presentation };
   }
 
   if (thread.actionResume?.outcome === "running") {
@@ -1310,12 +1359,7 @@ export function resolveThreadStatusPill(input: {
   }
 
   if (hasUnseenCompletion(thread)) {
-    return {
-      label: "Completed",
-      colorClass: "text-emerald-600 dark:text-emerald-300/90",
-      dotClass: "bg-emerald-500 dark:bg-emerald-300/90",
-      pulse: false,
-    };
+    return { label: "Completed", ...THREAD_STATUS_PRIORITY["Completed"].presentation };
   }
 
   return null;
@@ -1330,7 +1374,8 @@ export function resolveProjectStatusIndicator(
     if (status === null) continue;
     if (
       highestPriorityStatus === null ||
-      THREAD_STATUS_PRIORITY[status.label] > THREAD_STATUS_PRIORITY[highestPriorityStatus.label]
+      THREAD_STATUS_PRIORITY[status.label].priority >
+        THREAD_STATUS_PRIORITY[highestPriorityStatus.label].priority
     ) {
       highestPriorityStatus = status;
     }

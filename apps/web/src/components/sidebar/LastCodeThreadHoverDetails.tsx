@@ -3,6 +3,7 @@ import type { ThreadStatusPill } from "../Sidebar.logic";
 import type { ComponentProps } from "react";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { readThreadShell } from "../../state/entities";
+import { LastCodeStatusGlyph } from "./LastCodeStatusGlyph";
 import {
   SidebarThreadHoverContent,
   SidebarThreadCleanupHoverContent,
@@ -41,6 +42,7 @@ export function LastCodeThreadHoverDetails({
       ) : null}
 
       <SidebarThreadHoverContent
+        renderStatusGlyph={(status) => <LastCodeStatusGlyph status={status} />}
         branchMismatch={sourceControl.branchMismatch}
         environmentLabel={identity.threadEnvironmentLabel}
         environmentIconColor={identity.environmentIconColor}

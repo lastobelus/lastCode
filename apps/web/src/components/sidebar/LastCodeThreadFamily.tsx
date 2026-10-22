@@ -5,7 +5,7 @@ import { cn } from "../../lib/utils";
 import { useClientSetting } from "~/hooks/useSettings";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { SidebarMenuSubItem } from "../ui/sidebar";
-import { ThreadStatusLabel } from "../ThreadStatusIndicators";
+import { LastCodeThreadStatusLabel } from "./LastCodeThreadStatusLabel";
 import { useLastCodeSidebarFamiliesStore } from "../lastcodeSidebarFamilies.store";
 import {
   lastcodeSidebarFamilySummary,
@@ -160,7 +160,7 @@ export function LastCodeSubagentGroup({
         <span>Subagents</span>
         <span className="text-secondary-label">{item.count}</span>
         {!item.expanded && item.status ? (
-          <ThreadStatusLabel status={item.status} compact={compactStatusIndicators} />
+          <LastCodeThreadStatusLabel status={item.status} compact={compactStatusIndicators} />
         ) : null}
       </button>
     </SidebarMenuSubItem>
@@ -230,7 +230,7 @@ export function LastCodeThreadFamilySummary({
     return (
       <span className="flex items-center gap-1 truncate text-3xs leading-3 text-sidebar-muted-foreground">
         {family.descendantsStatus ? (
-          <ThreadStatusLabel status={family.descendantsStatus} compact />
+          <LastCodeThreadStatusLabel status={family.descendantsStatus} compact />
         ) : null}
         <span className="truncate">{lastcodeSidebarFamilySummary(family)}</span>
       </span>
@@ -240,10 +240,10 @@ export function LastCodeThreadFamilySummary({
       {family.descendantsStatus ? (
         <>
           <span className="inline-flex shrink-0 @sm/lastcode-sidebar:hidden">
-            <ThreadStatusLabel status={family.descendantsStatus} compact />
+            <LastCodeThreadStatusLabel status={family.descendantsStatus} compact />
           </span>
-          <span className="hidden min-w-0 overflow-hidden @sm/lastcode-sidebar:inline-flex">
-            <ThreadStatusLabel
+          <span className="hidden min-w-0 @sm/lastcode-sidebar:inline-flex">
+            <LastCodeThreadStatusLabel
               status={family.descendantsStatus}
               compact={!showSubheaders || compactStatusIndicators}
             />

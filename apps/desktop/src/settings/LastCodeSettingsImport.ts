@@ -241,6 +241,7 @@ function mergeClientSettings(sourceRaw: string, destinationRaw: string | null): 
     legacySidebarScale: destination.legacySidebarScale,
     lastcodeSidebarEnabled: destination.lastcodeSidebarEnabled,
     lastcodeSidebarFamilyStatusSubheaders: destination.lastcodeSidebarFamilyStatusSubheaders,
+    lastcodeStatusIcons: destination.lastcodeStatusIcons,
     roundedProjectIcons: destination.roundedProjectIcons,
     showLocalEnvironmentIcon: destination.showLocalEnvironmentIcon,
     showThreadProviderBadge: destination.showThreadProviderBadge,
