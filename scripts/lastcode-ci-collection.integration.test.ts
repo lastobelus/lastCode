@@ -31,19 +31,43 @@ function fixtureNodeExecutable(): string {
   throw new Error("CI collection fixture requires the supported project Node on PATH.");
 }
 
-it.each([
-  { scenario: "failed checks", changeCandidate: false, allPass: false, failFinalReport: false },
-  { scenario: "changed candidate", changeCandidate: true, allPass: false, failFinalReport: false },
-  { scenario: "all checks pass", changeCandidate: false, allPass: true, failFinalReport: false },
-  {
-    scenario: "final report write fails",
-    changeCandidate: false,
-    allPass: true,
-    failFinalReport: true,
-  },
-])(
-  "collects candidate validation and authorizes only complete success: $scenario",
-  ({ changeCandidate, allPass, failFinalReport }) => {
+it.each(
+  [
+    { scenario: "failed checks", changeCandidate: false, allPass: false, failFinalReport: false },
+    {
+      scenario: "changed candidate",
+      changeCandidate: true,
+      allPass: false,
+      failFinalReport: false,
+    },
+    { scenario: "all checks pass", changeCandidate: false, allPass: true, failFinalReport: false },
+    {
+      scenario: "final report write fails",
+      changeCandidate: false,
+      allPass: true,
+      failFinalReport: true,
+    },
+  ]
+    .flatMap((scenario) =>
+      [false, true].map((candidate) => ({
+        ...scenario,
+        candidate,
+        changeUpstream: false,
+      })),
+    )
+    .concat([
+      {
+        scenario: "changed upstream",
+        changeCandidate: false,
+        allPass: true,
+        failFinalReport: false,
+        candidate: true,
+        changeUpstream: true,
+      },
+    ]),
+)(
+  "collects validation and authorizes only complete success: $scenario (candidate: $candidate)",
+  ({ changeCandidate, allPass, failFinalReport, candidate, changeUpstream }) => {
     const directory = NodeFS.mkdtempSync(
       NodePath.join(NodeOS.tmpdir(), "lastcode-full-collection-"),
     );
@@ -93,7 +117,15 @@ it.each([
       const nightly = "v1.2.3-nightly.20260811.1";
       const tag = `lastcode/checkpoint/${nightly}`;
       git("tag", nightly);
-      git("tag", tag);
+      if (!candidate) git("tag", tag);
+      const sourceCommit = git(
+        "commit-tree",
+        git("rev-parse", "HEAD^{tree}"),
+        "-p",
+        head,
+        "-m",
+        "recorded source assertion",
+      );
       executable(
         "vp",
         [
@@ -102,6 +134,11 @@ it.each([
           ...(changeCandidate
             ? [
                 `if (args.includes('test')) fs.appendFileSync(${JSON.stringify(NodePath.join(root, "packages/first/package.json"))}, '\\n');`,
+              ]
+            : []),
+          ...(changeUpstream
+            ? [
+                `if (args.includes('typecheck')) require('node:child_process').execFileSync('git', ['tag', '--force', ${JSON.stringify(nightly)}, ${JSON.stringify(sourceCommit)}]);`,
               ]
             : []),
           ...(allPass
@@ -139,8 +176,18 @@ it.each([
           preload,
           NodePath.resolve(import.meta.dirname, "lastcode-local-ci.ts"),
           "--full",
-          "--checkpoint",
-          tag,
+          ...(candidate
+            ? [
+                "--candidate",
+                tag,
+                "--candidate-commit",
+                head,
+                "--upstream-commit",
+                head,
+                "--source-commit",
+                sourceCommit,
+              ]
+            : ["--checkpoint", tag]),
         ],
         {
           cwd: root,
@@ -154,17 +201,23 @@ it.each([
         },
       );
       expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(
-        allPass && !failFinalReport ? 0 : 1,
+        allPass && !failFinalReport && !changeUpstream ? 0 : 1,
       );
       const reportPath = result.stdout.match(/Validation report: (.+)/)?.[1];
       expect(reportPath).toBeDefined();
       const report = JSON.parse(NodeFS.readFileSync(reportPath!, "utf8")) as {
         status: string;
         commit: string;
+        context: {
+          kind: string;
+          sourceCommit?: string;
+          checkpointTag: string;
+          upstreamCommit: string;
+        };
         steps: Array<{ label: string; status: string; blockedBy?: string[]; logPath: string }>;
       };
       expect(report.status).toBe(
-        changeCandidate
+        changeCandidate || changeUpstream
           ? "incomplete"
           : allPass
             ? failFinalReport
@@ -173,6 +226,12 @@ it.each([
             : "failed",
       );
       expect(report.commit).toBe(head);
+      expect(report.context).toMatchObject({
+        kind: candidate ? "checkpoint-candidate" : "checkpoint",
+        checkpointTag: tag,
+        upstreamCommit: head,
+        ...(candidate ? { sourceCommit } : {}),
+      });
       expect(
         report.steps.find(({ label }) => label === "Workspace tests (@fixture/first)")?.status,
       ).toBe(allPass ? "passed" : "failed");
@@ -192,8 +251,10 @@ it.each([
         report.steps.every(({ status }) => ["passed", "failed", "blocked"].includes(status)),
       ).toBe(true);
       expect(NodeFS.existsSync(resolveFullCiStampPath(NodePath.join(root, ".git"), head))).toBe(
-        allPass && !failFinalReport,
+        allPass && !failFinalReport && !changeUpstream,
       );
+      if (candidate) expect(git("tag", "--list", tag)).toBe("");
+      if (changeUpstream) expect(result.stderr).toContain("Candidate upstream");
       if (allPass) expect(report.steps.every(({ status }) => status === "passed")).toBe(true);
       if (failFinalReport)
         expect(result.stderr).toContain("fixture final diagnostics write failed");

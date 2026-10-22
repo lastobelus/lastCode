@@ -110,8 +110,16 @@ export interface LocalCiOptions {
   readonly dryRun: boolean;
   readonly prePush: boolean;
   readonly checkpointTag?: string;
+  readonly candidate?: CheckpointCiCandidate;
   readonly requireLocal?: boolean;
   readonly webCompilerTestTimeoutMs?: number;
+}
+
+export interface CheckpointCiCandidate {
+  readonly checkpointTag: string;
+  readonly commit: string;
+  readonly upstreamCommit: string;
+  readonly sourceCommit: string;
 }
 
 export interface RepositoryIntegritySnapshot {
@@ -260,6 +268,13 @@ export function parseLocalCiOptions(argv: ReadonlyArray<string>): LocalCiOptions
   ]);
   let checkpointTag: string | undefined;
   let webCompilerTestTimeoutMs: number | undefined;
+  const candidateValues = new Map<string, string>();
+  const candidateFlags = new Set([
+    "--candidate",
+    "--candidate-commit",
+    "--upstream-commit",
+    "--source-commit",
+  ]);
 
   // Checkpoint consumes the next token even when it looks like a flag. Scan errors
   // take precedence over the final mode restrictions, whose order is intentional.
@@ -294,6 +309,13 @@ export function parseLocalCiOptions(argv: ReadonlyArray<string>): LocalCiOptions
         break;
       }
       default: {
+        if (candidateFlags.has(arg!)) {
+          const value = argv[index + 1];
+          if (!value) throw new Error(`Missing value for ${arg}.`);
+          candidateValues.set(arg!, value);
+          index += 1;
+          break;
+        }
         const flag = booleanFlags.get(arg);
         if (!flag) throw new Error(`Unknown argument '${arg}'.`);
         flags[flag] = true;
@@ -312,11 +334,37 @@ export function parseLocalCiOptions(argv: ReadonlyArray<string>): LocalCiOptions
     throw new Error("--web-compiler-test-timeout requires --full --checkpoint.");
   }
 
+  let candidate: CheckpointCiCandidate | undefined;
+  if (candidateValues.size > 0) {
+    if (mode !== "full" || checkpointTag) {
+      throw new Error("--candidate requires --full and cannot be combined with --checkpoint.");
+    }
+    for (const flag of candidateFlags) {
+      if (!candidateValues.has(flag)) throw new Error(`--candidate requires ${flag}.`);
+    }
+    const tag = candidateValues.get("--candidate")!;
+    if (!parseLastCodeInstallableTag(tag)) {
+      throw new Error(`Invalid LastCode candidate tag '${tag}'.`);
+    }
+    for (const flag of ["--candidate-commit", "--upstream-commit", "--source-commit"]) {
+      if (!/^[\da-f]{40}$/i.test(candidateValues.get(flag)!)) {
+        throw new Error(`${flag} requires a full commit ID.`);
+      }
+    }
+    candidate = {
+      checkpointTag: tag,
+      commit: candidateValues.get("--candidate-commit")!,
+      upstreamCommit: candidateValues.get("--upstream-commit")!,
+      sourceCommit: candidateValues.get("--source-commit")!,
+    };
+  }
+
   return {
     mode,
     dryRun,
     prePush,
     ...(checkpointTag ? { checkpointTag } : {}),
+    ...(candidate ? { candidate } : {}),
     ...(requireLocal ? { requireLocal } : {}),
     ...(webCompilerTestTimeoutMs !== undefined ? { webCompilerTestTimeoutMs } : {}),
   };
@@ -1041,8 +1089,29 @@ async function executeLocalCi(
   let baseCommit: string | undefined;
   let quickBase: QuickCiBase | undefined;
   let checkpointContext: Extract<FullCiStamp["context"], { kind: "checkpoint" }> | undefined;
+  const assertCandidatePins = () => {
+    const candidate = options.candidate;
+    if (!candidate) return;
+    if (candidate.commit !== commitBefore) {
+      throw new Error(`HEAD ${commitBefore} does not match candidate ${candidate.commit}.`);
+    }
+    const upstreamTag = parseLastCodeInstallableTag(candidate.checkpointTag)!.nightly.tag;
+    if (runGit(repoRoot, ["rev-parse", `${upstreamTag}^{commit}`]) !== candidate.upstreamCommit) {
+      throw new Error(`Candidate upstream ${upstreamTag} changed; inspect and select again.`);
+    }
+    if (runGit(repoRoot, ["tag", "--list", candidate.checkpointTag])) {
+      throw new Error(`Candidate tag ${candidate.checkpointTag} already exists; use --checkpoint.`);
+    }
+    runGit(repoRoot, ["cat-file", "-e", `${candidate.sourceCommit}^{commit}`]);
+  };
   if (options.mode === "full") {
-    if (options.checkpointTag) {
+    if (options.candidate) {
+      assertCandidatePins();
+      const { checkpointTag, upstreamCommit } = options.candidate;
+      const upstreamTag = parseLastCodeInstallableTag(checkpointTag)!.nightly.tag;
+      assertBaseIsAncestor(repoRoot, upstreamCommit, commitBefore, upstreamTag);
+      checkpointContext = { kind: "checkpoint", checkpointTag, upstreamCommit, upstreamTag };
+    } else if (options.checkpointTag) {
       const installable = parseLastCodeInstallableTag(options.checkpointTag);
       if (!installable)
         throw new Error(`Invalid LastCode installable tag '${options.checkpointTag}'.`);
@@ -1260,7 +1329,13 @@ async function executeLocalCi(
             commit: commitBefore,
             toolingCommit,
             ownerPid: process.pid,
-            context: checkpointContext ?? { kind: "pull-request", baseCommit },
+            context: options.candidate
+              ? {
+                  ...checkpointContext,
+                  kind: "checkpoint-candidate",
+                  sourceCommit: options.candidate.sourceCommit,
+                }
+              : (checkpointContext ?? { kind: "pull-request", baseCommit }),
             startedAt,
             ...(status !== "running" ? { finishedAt: new Date().toISOString() } : {}),
             ...(error !== undefined
@@ -1411,6 +1486,7 @@ async function executeLocalCi(
       if (commitAfter !== commitBefore) {
         throw new Error(`HEAD changed during local CI (${commitBefore} -> ${commitAfter}).`);
       }
+      assertCandidatePins();
       await assertCleanWorktreeWithCancellation(repoRoot, signal);
       if (
         quickBase &&

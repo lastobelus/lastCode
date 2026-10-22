@@ -255,6 +255,42 @@ describe("lastcode-local-ci", () => {
   });
 
   describe("local CI option parsing", () => {
+    it("requires an exact unpublished candidate identity and full validation", () => {
+      const candidate = {
+        checkpointTag: "lastcode/checkpoint/v1.2.3-nightly.20260811.1",
+        commit: "1".repeat(40),
+        upstreamCommit: "2".repeat(40),
+        sourceCommit: "3".repeat(40),
+      };
+      const args = [
+        "--candidate",
+        candidate.checkpointTag,
+        "--candidate-commit",
+        candidate.commit,
+        "--upstream-commit",
+        candidate.upstreamCommit,
+        "--source-commit",
+        candidate.sourceCommit,
+      ];
+      expect(parseLocalCiOptions(args)).toEqual({
+        mode: "full",
+        dryRun: false,
+        prePush: false,
+        candidate,
+      });
+      expect(() => parseLocalCiOptions([...args, "--quick"])).toThrow("requires --full");
+      expect(() => parseLocalCiOptions([...args, "--checkpoint", candidate.checkpointTag])).toThrow(
+        "cannot be combined with --checkpoint",
+      );
+      expect(() => parseLocalCiOptions(args.slice(0, -2))).toThrow("requires --source-commit");
+      expect(() => parseLocalCiOptions([...args, "--candidate-commit", "short"])).toThrow(
+        "requires a full commit ID",
+      );
+      expect(() => parseLocalCiOptions([...args, "--candidate", "not-an-installable"])).toThrow(
+        "Invalid LastCode candidate tag",
+      );
+    });
+
     it("uses the last mode and tolerates repeated booleans and separators", () => {
       expect(parseLocalCiOptions(["--quick", "--dry-run", "--full", "--", "--dry-run"])).toEqual({
         mode: "full",

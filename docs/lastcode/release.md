@@ -252,9 +252,13 @@ that exact LastCode main revision. Inspect the replay and subsequent commits
 before making it; upstream ancestry alone cannot prove this after a rebase.
 Selection requires a clean, completed `sync/nightly/<nightly>` worktree and is
 bound to its head, nightly, and current source. The service skips only that
-nightly's rebase and reruns the full checkpoint smoke gate. It publishes the
-immutable tag and source ref, then promotes main with a lease against the selected
-source commit. Open PRs do not block publication or promotion. Merges made after
+nightly's rebase and runs Full CI against the unpublished candidate before
+publication. Repair revisions use the same complete validation. Ordinary
+checkpoints retain their fast smoke gate; an ordinary check failure triggers a
+Full CI diagnostic pass so later independent failures are visible in the same
+recovery. Dependency preparation and interrupted execution remain fatal.
+The service publishes the immutable tag and source ref, then promotes main with a
+lease against the selected source commit. Open PRs do not block publication or promotion. Merges made after
 selection or during validation do not invalidate it: the tag still publishes,
 promotion waits, and the exact selection and recovery worktree remain retained.
 A retry recognizes the published tag and retries only its promotion; it does not
@@ -312,6 +316,14 @@ pnpm run lastcode:ci -- --checkpoint lastcode/checkpoint/<upstream-nightly-tag>
 The resulting stamp binds the exact LastCode commit, installable tag, upstream
 tag, and upstream commit. A PR stamp cannot authorize a checkpoint build, and a
 checkpoint stamp cannot authorize a PR merge.
+
+Checkpoint recovery supplies an unpublished-candidate context automatically,
+pinning the planned installable tag, candidate commit, upstream commit and
+recorded source commit. It does not require the source to remain an ancestor
+after replay. A successful pass produces the same exact-tag stamp that packaging
+can reuse after publication; the builder still requires the actual installable
+tag to resolve to the validated commit. Failed or incomplete candidates cannot
+publish a passing stamp or proceed to publication.
 
 Full CI collects independent failures in one pass, including separate test and
 typecheck results for each workspace. Fix the complete candidate's failure list
