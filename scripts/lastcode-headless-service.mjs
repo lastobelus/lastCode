@@ -14,7 +14,8 @@ const DEFAULT_APP_PATH = "/Applications/LastCode.app";
 const STOP_TIMEOUT_MS = 120_000;
 const START_TIMEOUT_MS = 30_000;
 const READINESS_REQUEST_TIMEOUT_MS = 2_000;
-const VERSION_TIMEOUT_MS = 10_000;
+// The packaged CLI loads the server command graph even for --version.
+const VERSION_TIMEOUT_MS = 60_000;
 
 function fail(message) {
   throw new Error(message);

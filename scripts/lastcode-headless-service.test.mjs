@@ -385,7 +385,7 @@ describe("LastCode headless service", () => {
     ).toBe("0.9.0");
     expect(invocation.options).toMatchObject({
       capture: true,
-      timeoutMs: 10_000,
+      timeoutMs: 60_000,
     });
   });
 
