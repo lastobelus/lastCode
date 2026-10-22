@@ -1,3 +1,5 @@
+import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import * as PublishedDocumentPreview from "../preview/PublishedDocumentPreview.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import { expect, it } from "@effect/vitest";
@@ -116,6 +118,7 @@ it.effect("isolates full and restricted tool discovery over HTTP", () =>
         Layer.provide(ThreadReadBroker.layer),
         Layer.provide(
           Layer.mergeAll(
+            McpProviderSessions.layer,
             Layer.mock(McpSessionRegistry.McpSessionRegistry)({
               resolve: (token) =>
                 Effect.succeed(
@@ -131,6 +134,7 @@ it.effect("isolates full and restricted tool discovery over HTTP", () =>
             Layer.mock(ProjectStore.ProjectStoreV2)({}),
             Layer.mock(DeviceService.DeviceService)({}),
             Layer.mock(PreviewHosting.PreviewHosting)({}),
+            Layer.mock(PublishedDocumentPreview.PublishedDocumentPreview)({}),
             Layer.mock(PreviewBrowser.PreviewBrowser)({
               executable: Effect.die("tool discovery must not launch a browser"),
               installed: Effect.succeedNone,
@@ -146,6 +150,7 @@ it.effect("isolates full and restricted tool discovery over HTTP", () =>
             Layer.mock(ProjectService.ProjectService)({}),
             ServerSettings.layerTest({}),
             Layer.mock(GitWorkflowService.GitWorkflowService)({}),
+            Layer.mock(PullRequestReviewGuideService.PullRequestReviewGuideService)({}),
             Layer.mock(ProjectSetupScriptRunner.ProjectSetupScriptRunner)({}),
             Layer.mock(VcsStatusBroadcaster.VcsStatusBroadcaster)({}),
             Layer.mock(UpdateDrainAdmission)({}),
@@ -225,12 +230,13 @@ it.effect("isolates full and restricted tool discovery over HTTP", () =>
           expect.arrayContaining([
             "html_preview",
             "html_render",
-            "set_thread_attention",
             "upsert_dashboard_item",
             "delegate_task",
             "t3_thread_launch",
           ]),
         );
+        expect(names).not.toContain("set_thread_attention");
+        expect(names).not.toContain("clear_thread_attention");
         expect(new Set(names).size).toBe(names.length);
       }
       for (const name of ["preview_status", "device_list", "list_project_actions"]) {
@@ -270,6 +276,7 @@ const client = McpSchema.McpServerClient.of({
 });
 const layerTest = McpHttpServer.layerPreviewToolkit.pipe(
   Layer.provide(Layer.mock(PreviewHosting.PreviewHosting)({})),
+  Layer.provide(Layer.mock(PublishedDocumentPreview.PublishedDocumentPreview)({})),
   Layer.provideMerge(McpServer.McpServer.layer),
   Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
   Layer.provideMerge(PreviewAutomationBroker.layer),
@@ -377,6 +384,49 @@ const layerRecordingTools = (calls: Array<unknown>) => {
     ),
   );
 };
+
+it.effect("retains safe unavailable diagnostics in the snapshot's custom MCP adapter", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
+      const connected = yield* Deferred.make<void>();
+      const clientId = "https://workstation.example/private-host";
+      const events = yield* broker.connect({ clientId, environmentId });
+      let correlation: { requestId: string; connectionId: string } | undefined;
+      yield* Stream.runForEach(events, (event) => {
+        if (event.type === "connected") return Deferred.succeed(connected, undefined);
+        correlation = { requestId: event.request.requestId, connectionId: event.connectionId };
+        return broker.respond({
+          clientId,
+          ...correlation,
+          ok: false,
+          error: {
+            _tag: "PreviewAutomationRemoteUnavailableError",
+            message: "https://page.example/?token=credential",
+            detail: { reason: "guest-unavailable", profile: "private-profile" },
+          },
+        });
+      }).pipe(Effect.forkScoped);
+      yield* Deferred.await(connected);
+      const result = yield* callSnapshot({ includeImage: false });
+      const error = {
+        _tag: "PreviewAutomationRemoteUnavailableError",
+        operation: "snapshot",
+        failureCount: 1,
+        message: "Preview automation snapshot is unavailable.",
+        reason: "guest-unavailable",
+        ...correlation,
+      };
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toEqual({ error });
+      expect(result.content).toHaveLength(1);
+      const content = result.content[0];
+      expect(content?.type).toBe("text");
+      if (content?.type === "text") expect(decodeJsonText(content.text)).toEqual(error);
+      expect(JSON.stringify(result)).not.toMatch(/private|credential|https:|cause|stack/);
+    }),
+  ).pipe(Effect.provide(layerTest)),
+);
 
 it.effect("returns the Action service's update drain rejection over MCP", () =>
   Effect.gen(function* () {

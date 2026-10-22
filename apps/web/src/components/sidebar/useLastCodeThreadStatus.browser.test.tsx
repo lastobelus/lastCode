@@ -1,6 +1,5 @@
-import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from "vite-plus/test";
+import { act, render as renderUi } from "../../../test/render";
+import { expect, it } from "vite-plus/test";
 import { EnvironmentId, RunId } from "@t3tools/contracts";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { makeThreadFixture } from "../../test-fixtures";
@@ -29,36 +28,19 @@ function Status({ thread }: { thread: typeof first }) {
   const status = useLastCodeThreadStatus(thread);
   return <output data-environment={thread.environmentId}>{status?.label ?? "Read"}</output>;
 }
-let root: Root, container: HTMLDivElement;
-const original = Object.getOwnPropertyDescriptor(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-let previous: Record<string, string>;
-beforeAll(() =>
-  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
-    configurable: true,
-    value: true,
-  }),
-);
-afterAll(() => {
-  if (original) Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", original);
-  else Reflect.deleteProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-});
-beforeEach(() => {
-  previous = useUiStateStore.getState().threadLastVisitedAtById;
+async function setup() {
+  await using stack = new AsyncDisposableStack();
+  const previous = useUiStateStore.getState().threadLastVisitedAtById;
+  stack.defer(() => {
+    useUiStateStore.setState({ threadLastVisitedAtById: previous });
+  });
   useUiStateStore.setState({
     threadLastVisitedAtById: { [key(first)]: earlier, [key(remote)]: earlier },
   });
-  container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
-});
-afterEach(async () => {
-  await act(() => root.unmount());
-  container.remove();
-  useUiStateStore.setState({ threadLastVisitedAtById: previous });
-});
-async function render(serverLastVisitedAt: string | null | undefined = undefined) {
-  await act(() =>
-    root.render(
+  const screen = stack.use(await renderUi(null));
+  const { container, rerender } = screen;
+  async function render(serverLastVisitedAt: string | null | undefined = undefined) {
+    await rerender(
       <>
         <Status
           thread={{
@@ -68,12 +50,17 @@ async function render(serverLastVisitedAt: string | null | undefined = undefined
         />
         <Status thread={remote} />
       </>,
-    ),
-  );
+    );
+  }
+  const label = (environment: string) =>
+    container.querySelector(`output[data-environment="${environment}"]`)?.textContent;
+  const owner = stack.move();
+  return { render, label, [Symbol.asyncDispose]: () => owner.disposeAsync() };
 }
-const label = (environment: string) =>
-  container.querySelector(`output[data-environment="${environment}"]`)?.textContent;
 it("updates only the visited destination when two environments reuse a thread ID", async () => {
+  await using fixture = await setup();
+  const { render, label } = fixture;
+
   await render();
   expect(label("first")).toBe("Completed");
   expect(label("remote")).toBe("Completed");
@@ -89,6 +76,9 @@ it("updates only the visited destination when two environments reuse a thread ID
   expect(label("remote")).toBe("Completed");
 });
 it("keeps the server visit rewind authoritative over a newer local watermark", async () => {
+  await using fixture = await setup();
+  const { render, label } = fixture;
+
   useUiStateStore.setState({ threadLastVisitedAtById: { [key(first)]: later } });
   await render(earlier);
   expect(label("first")).toBe("Completed");
@@ -96,6 +86,9 @@ it("keeps the server visit rewind authoritative over a newer local watermark", a
   expect(label("first")).toBe("Read");
 });
 it("treats an explicit server null as read while omitted tracking uses local visits", async () => {
+  await using fixture = await setup();
+  const { render, label } = fixture;
+
   await render(null);
   expect(label("first")).toBe("Read");
   await render();

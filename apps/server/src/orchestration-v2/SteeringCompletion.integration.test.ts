@@ -1104,9 +1104,8 @@ it.effect("queues a plain send behind the stopped queue and releases its hold", 
           runId: started[0]!.runId,
           holdQueue: true,
         });
-        // The provider has not stopped yet, so a plain send still resolves to a steer.
+        // Stop has not reached the provider yet; plain send must queue instead of steering.
         yield* send("sent", "auto");
-        yield* worker.drain();
 
         const projection = yield* orchestrator.getThreadProjection(threadId);
         assert.deepEqual(steered, []);
@@ -1122,6 +1121,7 @@ it.effect("queues a plain send behind the stopped queue and releases its hold", 
         );
         // The user sent it, so the queue they stopped runs again once the provider stops.
         assert.isFalse(queued.some((run) => run.queueHeld === true));
+        yield* worker.drain();
       }).pipe(Effect.provide(layer));
     }),
   ),

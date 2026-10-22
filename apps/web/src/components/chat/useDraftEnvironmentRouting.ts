@@ -1,3 +1,7 @@
+import {
+  loadBalancingDecisionLog,
+  loadBalancingExclusionReason,
+} from "../../lib/loadBalancingDiagnostics";
 import { useLoadBalancedEnvironment } from "../../hooks/useLoadBalancedEnvironment";
 import { useLogicalProjectEnvironments } from "../../hooks/useLogicalProjectEnvironments";
 import { useScratchProject } from "../../hooks/useScratchProject";
@@ -74,45 +78,84 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
   const allProjects = useProjects();
   const { openScratchProject } = useScratchProject();
   const needsLoadBalancing = automaticEnvironment && !draftThread?.loadBalancedEnvironmentId;
-  const loadBalancingCandidates = needsLoadBalancing
-    ? logicalProjectEnvironments
-        .filter((candidate) => {
-          const environment = environmentById.get(candidate.environmentId);
-          return (
-            environment?.connection.phase === "connected" &&
-            (loadBalancingSettings.loadBalancingWeights[candidate.environmentId] ?? 50) > 0 &&
+  const loadBalancingHosts = (() =>
+    needsLoadBalancing
+      ? logicalProjectEnvironments
+          .filter((candidate) =>
             referencedThreadContexts.every(
               (record) => record.environmentId === candidate.environmentId,
-            ) &&
-            providersByEnvironment
-              .get(candidate.environmentId)
-              ?.some(
-                (provider) =>
-                  (activeProviderInstanceId === null ||
-                    provider.instanceId === activeProviderInstanceId) &&
-                  provider.driver === selectedProvider &&
-                  (environment.serverConfig?.settings
+            ),
+          )
+          .map((candidate) => {
+            const environment = environmentById.get(candidate.environmentId);
+            const weight =
+              loadBalancingSettings.loadBalancingWeights[candidate.environmentId] ?? 50;
+            const serverSettings = environment?.serverConfig?.settings;
+            return {
+              environmentId: candidate.environmentId,
+              label: candidate.label,
+              weight,
+              exclusionReason: loadBalancingExclusionReason({
+                connectionPhase: environment?.connection.phase,
+                weight,
+                providers: providersByEnvironment.get(candidate.environmentId)?.map((provider) => ({
+                  ...provider,
+                  // The destination project may override the machine switch.
+                  enabled: serverSettings
                     ? resolveProjectProviderInstanceEnabled(
-                        environment.serverConfig.settings,
+                        serverSettings,
                         candidate.projectId,
                         provider.instanceId,
                       )
-                    : provider.enabled) &&
-                  provider.installed &&
-                  provider.status !== "error" &&
-                  provider.auth.status !== "unauthenticated" &&
-                  provider.availability !== "unavailable",
-              )
-          );
-        })
-        .map((candidate) => candidate.environmentId)
-    : [];
+                    : provider.enabled,
+                })),
+                providerInstanceId: activeProviderInstanceId,
+                providerDriver: selectedProvider,
+              }),
+            };
+          })
+      : [])();
+  const loadBalancingCandidates = loadBalancingHosts
+    .filter((host) => host.exclusionReason === null)
+    .map((host) => host.environmentId);
   const loadBalancing = useLoadBalancedEnvironment(
     loadBalancingCandidates,
     loadBalancingSettings.loadBalancingWeights,
   );
   useEffect(() => {
     if (!needsLoadBalancing || loadBalancing.pending || !draftId || sendInFlightRef.current) return;
+    try {
+      loadBalancingDecisionLog.record({
+        draftId,
+        threadId: draftThread?.threadId ?? null,
+        providerInstanceId: activeProviderInstanceId,
+        providerDriver: selectedProvider,
+        selectedEnvironmentId: loadBalancing.environmentId,
+        candidates: loadBalancingHosts.map((host) => {
+          const evaluation = loadBalancing.decision.candidates.find(
+            (candidate) => candidate.environmentId === host.environmentId,
+          );
+          return evaluation
+            ? { ...evaluation, label: host.label }
+            : {
+                environmentId: host.environmentId,
+                label: host.label,
+                weight: host.weight,
+                receivedAt: null,
+                sampleAgeMs: null,
+                resources: null,
+                score: null,
+                reason: host.exclusionReason,
+              };
+        }),
+      });
+    } catch {
+      toastManager.add({
+        type: "error",
+        id: "auto-balance-log-failed",
+        title: "Could not save Auto balance decision logs",
+      });
+    }
     const target = logicalProjectEnvironments.find(
       (environment) => environment.environmentId === loadBalancing.environmentId,
     );
@@ -126,6 +169,11 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
     needsLoadBalancing,
     loadBalancing.pending,
     loadBalancing.environmentId,
+    loadBalancing.decision,
+    loadBalancingHosts,
+    draftThread?.threadId,
+    activeProviderInstanceId,
+    selectedProvider,
     draftId,
     logicalProjectEnvironments,
     sendInFlightRef,
@@ -156,7 +204,7 @@ export function useDraftEnvironmentRouting(input: DraftEnvironmentRoutingInput) 
   const onAutoEnvironmentStable = useStableCallback(onAutoEnvironment);
   const autoEnvironmentLabel = automaticEnvironment
     ? draftThread?.loadBalancedEnvironmentId
-      ? "Auto balance"
+      ? `Auto balance · ${logicalProjectEnvironments.find((environment) => environment.environmentId === draftThread.loadBalancedEnvironmentId)?.label ?? "Selected machine"}`
       : loadBalancing.pending
         ? "Checking machines…"
         : loadBalancing.failed

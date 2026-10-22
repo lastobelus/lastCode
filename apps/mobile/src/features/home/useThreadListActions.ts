@@ -2,8 +2,13 @@ import type { ThreadMoveDestination } from "../threads/threadOrder";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import * as ThreadUndo from "@t3tools/client-runtime/state/thread-undo";
 import { showThreadUndoNotice } from "./thread-undo-notice";
+import { THREAD_ARCHIVE_UPDATE_REQUIRED_MESSAGE } from "@t3tools/client-runtime/state/thread-archive";
 import { canSnooze, effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
-import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
+import {
+  AuthOrchestrationOperateScope,
+  type CommandId,
+  type ThreadArchiveChildDisposition,
+} from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Haptics from "expo-haptics";
 import { useRef } from "react";
@@ -30,7 +35,7 @@ import {
   threadDropLifecycle,
 } from "../threads/threadOrder";
 import { getThreadListV2OrderedSection } from "../threads/threadListV2";
-import { threadCanArchive } from "./threadArchive";
+import { resolveThreadArchiveFamily, threadUnarchiveTargetId } from "./threadArchive";
 import { resolveThreadTitleRename } from "../threads/thread-title-rename";
 
 /** Version skew: never send settle/unsettle to a server that predates them
@@ -119,12 +124,26 @@ function checkThreadOperationPermission(thread: EnvironmentThreadShell, title: s
 
 function useThreadActionExecutor(
   onCompleted?: (action: ThreadListAction, thread: EnvironmentThreadShell) => void,
+  archivedThreads?: readonly EnvironmentThreadShell[],
 ) {
-  const archiveMutation = useAtomCommand(threadEnvironment.archive, { reportFailure: false });
-  const unarchiveMutation = useAtomCommand(threadEnvironment.unarchive, { reportFailure: false });
-  const deleteMutation = useAtomCommand(threadEnvironment.delete, { reportFailure: false });
-  const settleMutation = useAtomCommand(threadEnvironment.settle, { reportFailure: false });
-  const unsettleMutation = useAtomCommand(threadEnvironment.unsettle, { reportFailure: false });
+  const archiveMutation = useAtomCommand(threadEnvironment.archive, {
+    reportFailure: false,
+  });
+  const loadArchiveFamily = useAtomCommand(threadEnvironment.loadArchiveFamily, {
+    reportFailure: false,
+  });
+  const unarchiveMutation = useAtomCommand(threadEnvironment.unarchive, {
+    reportFailure: false,
+  });
+  const deleteMutation = useAtomCommand(threadEnvironment.delete, {
+    reportFailure: false,
+  });
+  const settleMutation = useAtomCommand(threadEnvironment.settle, {
+    reportFailure: false,
+  });
+  const unsettleMutation = useAtomCommand(threadEnvironment.unsettle, {
+    reportFailure: false,
+  });
   const inFlightThreadKeys = useRef(new Set<string>());
 
   const executeAction = async (
@@ -140,7 +159,104 @@ function useThreadActionExecutor(
 
     inFlightThreadKeys.current.add(key);
     selectionHaptic();
-    const succeeded = await (async () => {
+    return await (async () => {
+      let archiveInput: {
+        threadId: EnvironmentThreadShell["id"];
+        childDisposition: ThreadArchiveChildDisposition;
+        expectedChildThreadIds: readonly EnvironmentThreadShell["id"][];
+        expectedArchiveCommandId?: CommandId;
+      } = {
+        threadId: thread.id,
+        childDisposition: "archive_if_idle",
+        expectedChildThreadIds: [],
+      };
+      if (action === "archive") {
+        if (
+          appAtomRegistry.get(environmentServerConfigsAtom).get(thread.environmentId)?.environment
+            .capabilities.threadArchiveFamiliesV2 !== true
+        ) {
+          Dialog.alert("Server update required", THREAD_ARCHIVE_UPDATE_REQUIRED_MESSAGE);
+          return false;
+        }
+        const shells = appAtomRegistry.get(environmentThreadShells.threadShellsAtom);
+        const observedFailure =
+          thread.archivePending?.status === "failed" ? thread.archivePending : undefined;
+        thread =
+          shells.find(
+            (candidate) =>
+              candidate.id === thread.id && candidate.environmentId === thread.environmentId,
+          ) ?? thread;
+        const failedAttempt =
+          observedFailure ??
+          (thread.archivePending?.status === "failed" ? thread.archivePending : undefined);
+        const archiveThreadId = failedAttempt?.threadId ?? thread.id;
+        const familyResult = await loadArchiveFamily({
+          environmentId: thread.environmentId,
+          input: { threadId: archiveThreadId },
+        });
+        if (familyResult._tag === "Failure") {
+          Dialog.alert(
+            actionFailureTitle(action),
+            actionFailureMessage(action, familyResult.cause),
+          );
+          return false;
+        }
+        const owner = familyResult.value.threads.find(
+          (candidate) =>
+            candidate.id === archiveThreadId && candidate.environmentId === thread.environmentId,
+        );
+        if (!owner) {
+          Dialog.alert(
+            actionFailureTitle(action),
+            "The archive owner is no longer available. Refresh the thread list before retrying.",
+          );
+          return false;
+        }
+        thread = owner;
+        if (thread.persistent === true) {
+          Dialog.alert(
+            actionFailureTitle(action),
+            "This thread is persistent. Remove its persistent protection before archiving it.",
+          );
+          return false;
+        }
+        const family = resolveThreadArchiveFamily(familyResult.value);
+
+        const childDisposition = family.requiresConfirmation
+          ? await new Promise<typeof family.disposition | null>((resolve) => {
+              Dialog.alert(
+                `Archive "${thread.title || "Untitled thread"}"?`,
+                family.message,
+                [
+                  {
+                    text: family.blocked ? "Close" : "Cancel",
+                    style: "cancel",
+                    onPress: () => resolve(null),
+                  },
+                  ...(!family.blocked
+                    ? [
+                        {
+                          text: family.confirmLabel,
+                          style: "destructive" as const,
+                          onPress: () => resolve(family.disposition),
+                        },
+                      ]
+                    : []),
+                ],
+                { cancelable: true, onDismiss: () => resolve(null) },
+              );
+            })
+          : "archive_if_idle";
+        if (childDisposition === null) return false;
+        archiveInput = {
+          threadId: thread.id,
+          ...(failedAttempt === undefined
+            ? {}
+            : { expectedArchiveCommandId: failedAttempt.commandId }),
+          childDisposition,
+          expectedChildThreadIds: family.childThreadIds,
+        };
+      }
       if (
         (action === "settle" || action === "unsettle") &&
         !environmentSupportsSettlement(thread.environmentId)
@@ -151,42 +267,46 @@ function useThreadActionExecutor(
         );
         return false;
       }
-      if (action === "archive" && !threadCanArchive(thread.runtime)) {
-        Dialog.alert(
-          actionFailureTitle(action),
-          "This thread is working. Interrupt it first, then try again.",
-        );
-        return false;
-      }
       if (action === "unsettle") ThreadUndo.invalidate("settle", key);
       if (action === "archive" || action === "delete") {
         for (const kind of ["settle", "snooze", "pin"]) ThreadUndo.invalidate(kind, key);
       }
       onStarted?.();
-      const result = await withThreadDismissal(
-        key,
-        async () =>
-          action === "unsettle"
-            ? // reason "user" pins the thread active: auto-settle stays
-              // suppressed until real activity clears the pin server-side.
-              await unsettleMutation({
-                environmentId: thread.environmentId,
-                input: { threadId: thread.id, reason: "user" },
-              })
-            : await (
-                action === "settle"
-                  ? settleMutation
-                  : action === "archive"
-                    ? archiveMutation
-                    : action === "unarchive"
-                      ? unarchiveMutation
-                      : deleteMutation
-              )({
-                environmentId: thread.environmentId,
-                input: { threadId: thread.id },
-              }),
-        (result) => result._tag === "Success",
-      );
+      // Family archive waits for provider shutdown; keep its row visible
+      // until the server confirms success, including when shutdown fails.
+      const result =
+        action === "archive"
+          ? await archiveMutation({
+              environmentId: thread.environmentId,
+              input: archiveInput,
+            })
+          : await withThreadDismissal(
+              key,
+              async () =>
+                action === "unsettle"
+                  ? // reason "user" pins the thread active: auto-settle stays
+                    // suppressed until real activity clears the pin server-side.
+                    await unsettleMutation({
+                      environmentId: thread.environmentId,
+                      input: { threadId: thread.id, reason: "user" },
+                    })
+                  : await (
+                      action === "settle"
+                        ? settleMutation
+                        : action === "unarchive"
+                          ? unarchiveMutation
+                          : deleteMutation
+                    )({
+                      environmentId: thread.environmentId,
+                      input: {
+                        threadId:
+                          action === "unarchive"
+                            ? threadUnarchiveTargetId(thread, archivedThreads)
+                            : thread.id,
+                      },
+                    }),
+              (result) => result._tag === "Success",
+            );
       if (result._tag === "Failure") {
         Dialog.alert(actionFailureTitle(action), actionFailureMessage(action, result.cause));
         return false;
@@ -196,9 +316,9 @@ function useThreadActionExecutor(
       }
       onCompleted?.(action, thread);
       return true;
-    })();
-    inFlightThreadKeys.current.delete(key);
-    return succeeded;
+    })().finally(() => {
+      inFlightThreadKeys.current.delete(key);
+    });
   };
 
   return executeAction;
@@ -212,7 +332,7 @@ function confirmThreadDeletion(
 ) {
   if (!checkThreadOperationPermission(thread, actionFailureTitle("delete"))) return;
   const title = "Delete thread?";
-  const message = `“${thread.title}” will be permanently deleted, including its terminal history.`;
+  const message = `“${thread.title}” and any of its subagents, including archived ones, will be deleted; other forks and independent threads are kept. This cannot be undone.`;
   Dialog.confirm({
     title,
     message,
@@ -245,10 +365,18 @@ export function useThreadListActions(): {
   readonly regenerateThreadTitle: (thread: EnvironmentThreadShell) => Promise<boolean>;
 } {
   const executeAction = useThreadActionExecutor();
-  const snoozeMutation = useAtomCommand(threadEnvironment.snooze, { reportFailure: false });
-  const unsnoozeMutation = useAtomCommand(threadEnvironment.unsnooze, { reportFailure: false });
-  const pinMutation = useAtomCommand(threadEnvironment.pin, { reportFailure: false });
-  const unpinMutation = useAtomCommand(threadEnvironment.unpin, { reportFailure: false });
+  const snoozeMutation = useAtomCommand(threadEnvironment.snooze, {
+    reportFailure: false,
+  });
+  const unsnoozeMutation = useAtomCommand(threadEnvironment.unsnooze, {
+    reportFailure: false,
+  });
+  const pinMutation = useAtomCommand(threadEnvironment.pin, {
+    reportFailure: false,
+  });
+  const unpinMutation = useAtomCommand(threadEnvironment.unpin, {
+    reportFailure: false,
+  });
   const setAutoSettleMutation = useAtomCommand(threadEnvironment.setAutoSettle, {
     reportFailure: false,
   });
@@ -575,7 +703,10 @@ export function useThreadListActions(): {
   };
   const renameThread = (thread: EnvironmentThreadShell) => {
     const commit = (title: string) => {
-      const resolution = resolveThreadTitleRename({ title, originalTitle: thread.title });
+      const resolution = resolveThreadTitleRename({
+        title,
+        originalTitle: thread.title,
+      });
       if (resolution.action === "reject-empty") {
         Dialog.alert("Could not rename thread", "Thread title cannot be empty.");
         return;
@@ -718,7 +849,10 @@ export function useThreadListActions(): {
           ThreadUndo.invalidate("snooze", scopedThreadKey(thread.environmentId, thread.id));
           const result = await pinMutation({
             environmentId: thread.environmentId,
-            input: { threadId: thread.id, ...(orderKey === undefined ? {} : { orderKey }) },
+            input: {
+              threadId: thread.id,
+              ...(orderKey === undefined ? {} : { orderKey }),
+            },
           });
           if (result._tag === "Failure") {
             Dialog.alert("Could not pin thread", String(Cause.squash(result.cause)));
@@ -787,6 +921,7 @@ export function useThreadListActions(): {
 
 export function useArchivedThreadListActions(
   onCompleted: (thread: EnvironmentThreadShell) => void,
+  archivedThreads: readonly EnvironmentThreadShell[],
 ): {
   readonly unarchiveThread: (thread: EnvironmentThreadShell) => void;
   readonly confirmDeleteThread: (thread: EnvironmentThreadShell) => void;
@@ -794,7 +929,7 @@ export function useArchivedThreadListActions(
   const handleCompleted = (_action: ThreadListAction, thread: EnvironmentThreadShell) => {
     onCompleted(thread);
   };
-  const executeAction = useThreadActionExecutor(handleCompleted);
+  const executeAction = useThreadActionExecutor(handleCompleted, archivedThreads);
   const unarchiveThread = (thread: EnvironmentThreadShell) => {
     void executeAction("unarchive", thread);
   };

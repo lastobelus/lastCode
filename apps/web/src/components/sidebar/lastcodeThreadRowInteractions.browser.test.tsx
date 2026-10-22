@@ -1,15 +1,5 @@
-import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import {
-  afterAll,
-  afterEach,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vite-plus/test";
+import { act, render } from "../../../test/render";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { AuthOrchestrationOperateScope, EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { makeThreadFixture } from "../../test-fixtures";
@@ -71,15 +61,16 @@ const cleanups = [
     error: "Busy",
   },
 ] satisfies Array<typeof thread.worktreeCleanup>;
-let promises: Promise<void>[];
 function Harness({
   cleanup = null,
   mobile = false,
   renaming = false,
+  promises,
 }: {
   cleanup?: typeof thread.worktreeCleanup;
   mobile?: boolean;
   renaming?: boolean;
+  promises: Promise<void>[];
 }) {
   const value = { ...thread, worktreeCleanup: cleanup ?? null };
   const selected = useThreadSelectionStore((state) =>
@@ -121,59 +112,48 @@ function Harness({
     </div>
   );
 }
-let root: Root, container: HTMLDivElement;
-const original = Object.getOwnPropertyDescriptor(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-beforeAll(() =>
-  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
-    configurable: true,
-    value: true,
-  }),
-);
-afterAll(() => {
-  if (original) Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", original);
-  else Reflect.deleteProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-});
-beforeEach(() => {
+function setup() {
   vi.clearAllMocks();
   mocks.allowed = true;
   mocks.menu.mockResolvedValue();
   mocks.bulk.mockResolvedValue();
-  promises = [];
   useThreadSelectionStore.getState().clearSelection();
-  container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
-});
-afterEach(async () => {
-  await act(() => root.unmount());
-  container.remove();
-  useThreadSelectionStore.getState().clearSelection();
-});
-async function render(props: Parameters<typeof Harness>[0] = {}) {
-  await act(() => root.render(<Harness {...props} />));
+  return { [Symbol.dispose]: () => useThreadSelectionStore.getState().clearSelection() };
 }
-const row = () => container.querySelector<HTMLElement>('[data-testid="row"]')!;
-async function key(value: string, nested = false, shiftKey = false) {
-  await act(async () => {
-    (nested ? container.querySelector("button")! : row()).dispatchEvent(
-      new KeyboardEvent("keydown", { key: value, shiftKey, bubbles: true, cancelable: true }),
-    );
-    await Promise.all(promises);
-  });
-}
-async function context() {
-  await act(async () => {
-    row().dispatchEvent(
-      new MouseEvent("contextmenu", { clientX: 11, clientY: 22, bubbles: true, cancelable: true }),
-    );
-    await Promise.all(promises);
+async function renderRow(props: Omit<Parameters<typeof Harness>[0], "promises"> = {}) {
+  const promises: Promise<void>[] = [];
+  const screen = await render(<Harness {...props} promises={promises} />, { router: false });
+  const row = () => screen.container.querySelector<HTMLElement>('[data-testid="row"]')!;
+  return Object.assign(screen, {
+    row,
+    key: (value: string, nested = false, shiftKey = false) =>
+      act(async () => {
+        (nested ? screen.container.querySelector("button")! : row()).dispatchEvent(
+          new KeyboardEvent("keydown", { key: value, shiftKey, bubbles: true, cancelable: true }),
+        );
+        await Promise.all(promises);
+      }),
+    context: () =>
+      act(async () => {
+        row().dispatchEvent(
+          new MouseEvent("contextmenu", {
+            clientX: 11,
+            clientY: 22,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+        await Promise.all(promises);
+      }),
   });
 }
 describe("row activation and menu routing", () => {
   it.each(cleanups)(
     "keeps pointer and keyboard cleanup gates equivalent for $status",
     async (cleanup) => {
-      await render({ cleanup });
+      using _fixture = setup();
+      await using screen = await renderRow({ cleanup });
+      const { row, key } = screen;
       await act(() => row().click());
       await key("Enter");
       expect(mocks.navigate).toHaveBeenCalledTimes(cleanup == null ? 2 : 0);
@@ -181,7 +161,9 @@ describe("row activation and menu routing", () => {
     },
   );
   it("renames the exact destination on an ordinary row-body double click", async () => {
-    await render();
+    using _fixture = setup();
+    await using screen = await renderRow();
+    const { container } = screen;
     await act(() =>
       container
         .querySelector("span")!
@@ -196,7 +178,9 @@ describe("row activation and menu routing", () => {
   it.each(["metaKey", "ctrlKey", "shiftKey", "altKey"])(
     "leaves %s double clicks to selection",
     async (modifier) => {
-      await render();
+      using _fixture = setup();
+      await using screen = await renderRow();
+      const { row } = screen;
       await act(() =>
         row().dispatchEvent(new MouseEvent("dblclick", { bubbles: true, [modifier]: true })),
       );
@@ -206,13 +190,17 @@ describe("row activation and menu routing", () => {
   it.each([{ mobile: true }, { renaming: true }, { cleanup: cleanups[1]! }])(
     "preserves mobile, editor and cleanup restrictions: %j",
     async (props) => {
-      await render(props);
+      using _fixture = setup();
+      await using screen = await renderRow(props);
+      const { row } = screen;
       await act(() => row().dispatchEvent(new MouseEvent("dblclick", { bubbles: true })));
       expect(mocks.rename).not.toHaveBeenCalled();
     },
   );
   it("rereads destination permission and ignores nested controls for rename/navigation/menu keys", async () => {
-    await render();
+    using _fixture = setup();
+    await using screen = await renderRow();
+    const { row, key, container } = screen;
     mocks.allowed = false;
     await act(() => row().dispatchEvent(new MouseEvent("dblclick", { bubbles: true })));
     mocks.allowed = true;
@@ -230,9 +218,13 @@ describe("row activation and menu routing", () => {
   it.each(["ContextMenu", "F10"])(
     "routes %s through the same selected bulk menu and anchor",
     async (value) => {
-      await render();
+      using _fixture = setup();
+      await using screen = await renderRow();
+      const { row, key } = screen;
       await act(() => useThreadSelectionStore.getState().toggleThread(scopedThreadKey(threadRef)));
-      vi.spyOn(row(), "getBoundingClientRect").mockReturnValue(new DOMRect(30, 40, 200, 24));
+      using _bounds = vi
+        .spyOn(row(), "getBoundingClientRect")
+        .mockReturnValue(new DOMRect(30, 40, 200, 24));
       await key(value, false, value === "F10");
       expect(mocks.bulk).toHaveBeenCalledExactlyOnceWith({ x: 46, y: 64 });
       expect(mocks.menu).not.toHaveBeenCalled();
@@ -240,7 +232,9 @@ describe("row activation and menu routing", () => {
     },
   );
   it("clears other selected entries before opening this exact row menu", async () => {
-    await render();
+    using _fixture = setup();
+    await using screen = await renderRow();
+    const { context } = screen;
     await act(() => useThreadSelectionStore.getState().toggleThread(foreignKey));
     await context();
     expect(useThreadSelectionStore.getState().hasSelection()).toBe(false);
@@ -250,7 +244,9 @@ describe("row activation and menu routing", () => {
   it.each(cleanups.slice(1))(
     "never opens or clears selection for cleanup $status",
     async (cleanup) => {
-      await render({ cleanup });
+      using _fixture = setup();
+      await using screen = await renderRow({ cleanup });
+      const { context } = screen;
       await act(() => useThreadSelectionStore.getState().toggleThread(foreignKey));
       await context();
       expect(useThreadSelectionStore.getState().hasSelection()).toBe(true);
@@ -259,7 +255,9 @@ describe("row activation and menu routing", () => {
     },
   );
   it("reports rejected single and bulk menu work without navigation or unintended selection cleanup", async () => {
-    await render();
+    using _fixture = setup();
+    await using screen = await renderRow();
+    const { context } = screen;
     mocks.menu.mockRejectedValueOnce(new Error("Single failed"));
     await context();
     expect(mocks.toast).toHaveBeenLastCalledWith(

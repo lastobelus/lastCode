@@ -33,6 +33,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
 import { forkParked } from "../serverActivation.ts";
+import * as EnvironmentPauseStore from "../environment/EnvironmentPauseStore.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
@@ -40,7 +41,7 @@ import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as CommandReceipts from "../orchestration-v2/CommandReceiptStore.ts";
 import * as ActionRunStore from "./ActionRunStore.ts";
 import * as UpdateDrainAdmission from "../updateDrain/UpdateDrainAdmission.ts";
-import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
+import { ProviderRegistry } from "../provider/ProviderRegistry.ts";
 
 const ACTION_RESUME_PROVIDER_DRIVERS = new Set([
   ProviderDriverKind.make("codex"),
@@ -272,6 +273,15 @@ const mapActionResumeError =
     );
 
 const make = Effect.gen(function* () {
+  const pauseStore = yield* Effect.serviceOption(EnvironmentPauseStore.EnvironmentPauseStore);
+  const automationPaused = Option.isSome(pauseStore)
+    ? pauseStore.value.get.pipe(
+        Effect.map((session) => session !== null && session.phase !== "resuming"),
+      )
+    : Effect.succeed(false);
+  const recoveringEnvironmentPause = Option.isSome(pauseStore)
+    ? pauseStore.value.get.pipe(Effect.map((session) => session !== null))
+    : Effect.succeed(false);
   const serviceScope = yield* Effect.scope;
   const clock = yield* Clock.Clock;
   const crypto = yield* Crypto.Crypto;
@@ -511,6 +521,13 @@ const make = Effect.gen(function* () {
       protocolCaptureByRunId.delete(state.runId);
       return;
     }
+    // Completion is already retained in the Action ledger. Do not wake the
+    // provider merely to acknowledge the pause; Resume will retry this result.
+    if (yield* automationPaused) {
+      if (state.heldByEnvironmentPause !== true)
+        yield* persistState({ ...state, heldByEnvironmentPause: true });
+      return;
+    }
     const thread = yield* eligibleThreadForFollowUp(threadId);
     if (thread === null) return;
     const retained = yield* runs.get(threadId, state.runId);
@@ -626,8 +643,8 @@ const make = Effect.gen(function* () {
         ),
       );
 
-  const cancel = (threadId: ThreadId, outcome: "cancelled_by_user" | "cancelled_by_archive") =>
-    Effect.gen(function* () {
+  const cancel = Effect.fn("ActionResume.cancel")(
+    function* (threadId: ThreadId, outcome: "cancelled_by_user" | "cancelled_by_archive") {
       const current = registry.getLatest(threadId);
       if (current === null) return;
       if (current.outcome === "running") {
@@ -655,15 +672,18 @@ const make = Effect.gen(function* () {
           }),
         );
       }
-    }).pipe(
-      Effect.catchCause((cause) =>
-        Effect.logError("Failed to cancel or dispose Project Action state", {
-          threadId,
-          outcome,
-          cause: Cause.pretty(cause),
-        }),
+    },
+    (effect, threadId, outcome) =>
+      effect.pipe(
+        Effect.catchCause((cause) =>
+          Effect.logError("Failed to cancel or dispose Project Action state", {
+            threadId,
+            outcome,
+            cause: Cause.pretty(cause),
+          }),
+        ),
       ),
-    );
+  );
 
   const disposeDeleted = Effect.fn("ActionResume.disposeDeleted")(function* (threadId: ThreadId) {
     yield* mutex.withPermits(1)(
@@ -761,9 +781,9 @@ const make = Effect.gen(function* () {
       });
     }
     const { thread, project } = yield* resolveProjectContext(invocation.threadId);
-    const runId = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
+    const runId = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
     const terminalId = `action-${runId}`;
-    const eventToken = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
+    const eventToken = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
     const startedAt = yield* nowIso;
     const state: ActionResumeState = {
       runId,
@@ -795,6 +815,9 @@ const make = Effect.gen(function* () {
         threadId: invocation.threadId,
         terminalId,
         cwd,
+        ...(script.terminalLinkProfileName === undefined
+          ? {}
+          : { terminalLinkProfileName: script.terminalLinkProfileName }),
         worktreePath: thread.worktreePath,
         env,
         cols: 120,
@@ -1140,8 +1163,21 @@ const make = Effect.gen(function* () {
             delivery: "available",
             finishedAt,
           });
-        } else if (state.delivery === "pending" && shell.archivePending?.status !== "stopping") {
-          // A stopping archive keeps the completed result's delivery intent across restart.
+        } else if (
+          state.delivery === "pending" &&
+          state.heldByEnvironmentPause !== true &&
+          (yield* recoveringEnvironmentPause)
+        ) {
+          // Completion may have committed just before shutdown, before its
+          // live delivery saw the pause. Retain that hold before it can clear.
+          yield* persistState({ ...state, heldByEnvironmentPause: true });
+        } else if (
+          state.delivery === "pending" &&
+          state.heldByEnvironmentPause !== true &&
+          shell.archivePending?.status !== "stopping" &&
+          !(yield* recoveringEnvironmentPause)
+        ) {
+          // Environment pause and a stopping archive retain automatic delivery intent.
           yield* persistState({ ...state, delivery: "available" });
         } else if (
           shell.actionResume?.runId !== state.runId ||

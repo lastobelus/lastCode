@@ -196,8 +196,15 @@ describe("LastCode GitHub CI workflow", () => {
     const check = asRecord(jobs?.check);
     const gate = asRecord(jobs?.ci_gate);
     expect(check?.needs).toEqual([
-      "changes", "lint", "build", "test", "test_web", "test_server", "rust",
-      "mobile_native_static_analysis", "release_smoke",
+      "changes",
+      "lint",
+      "build",
+      "test",
+      "test_web",
+      "test_server",
+      "rust",
+      "mobile_native_static_analysis",
+      "release_smoke",
     ]);
     expect(gate?.needs).toEqual(["check"]);
     expect(gateBlock).toContain("name: CI Gate");

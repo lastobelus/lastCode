@@ -1,10 +1,13 @@
 import {
   CommandId,
+  type EventId,
+  isOrchestrationV2WorkActive,
   type OrchestrationV2Run,
   OrchestrationV2DomainEvent,
   type OrchestrationV2ProviderThread,
   OrchestrationV2StoredEvent,
   ProviderThreadId,
+  type ProviderSessionId,
   RunAttemptId,
   RunId,
   RuntimeRequestId,
@@ -66,6 +69,17 @@ export class EventSinkStreamError extends Schema.TaggedError<EventSinkStreamErro
 export const EventSinkV2Error = Schema.Union([EventSinkWriteError, EventSinkStreamError]);
 export type EventSinkV2Error = typeof EventSinkV2Error.Type;
 
+interface RecoveredBackgroundGuard {
+  readonly threadId: ThreadId;
+  readonly runId: RunId;
+  readonly providerThreadId: ProviderThreadId;
+  readonly providerSessionId: ProviderSessionId;
+  readonly eventIds: ReadonlyArray<EventId>;
+}
+
+/**
+ * SERVICE DEFINITION
+ */
 export interface EventSinkV2Shape {
   readonly write: (input: {
     /** Return no events if another thread owns this native session at commit time. */
@@ -93,6 +107,7 @@ export interface EventSinkV2Shape {
     readonly effects: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
   }) => Effect.Effect<ReadonlyArray<OrchestrationV2StoredEvent>, EventSinkV2Error>;
   readonly writeIfRunCurrent: (input: {
+    readonly guardRecoveredBackground?: RecoveredBackgroundGuard;
     readonly guardPendingUserInputCancellations?: boolean;
     readonly commandId?: CommandId;
     readonly threadId: ThreadId;
@@ -115,6 +130,7 @@ export interface EventSinkV2Shape {
    * a newer attempt that already claimed the thread.
    */
   readonly writeIfProviderThreadOwner: (input: {
+    readonly guardRecoveredBackground?: RecoveredBackgroundGuard;
     readonly guardPendingUserInputCancellations?: boolean;
     readonly commandId?: CommandId;
     readonly providerThreadId: ProviderThreadId;
@@ -122,6 +138,7 @@ export interface EventSinkV2Shape {
     readonly activeAttemptId: RunAttemptId;
     readonly expectedLastRunOrdinal: number;
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
+    readonly effects?: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
   }) => Effect.Effect<
     {
       readonly committed: boolean;
@@ -154,7 +171,9 @@ export interface EventSinkV2Shape {
     readonly effects: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
     readonly cancelUnsettledEffects?: {
       readonly effectTypes: ReadonlyArray<EffectOutbox.OrchestrationEffectRequestV2["type"]>;
+      readonly threadIds?: ReadonlyArray<ThreadId>;
       readonly reason: string;
+      readonly preserveUnstartedAutomatic?: boolean;
     };
   }) => Effect.Effect<
     {
@@ -360,6 +379,200 @@ const layerBase: Layer.Layer<
       );
     };
 
+    const guardRecoveredBackground = Effect.fn("EventSink.guardRecoveredBackground")(function* (
+      events: ReadonlyArray<OrchestrationV2DomainEvent>,
+      guard: RecoveredBackgroundGuard | undefined,
+    ) {
+      if (guard === undefined) return events;
+      const guardedIds = new Set(guard.eventIds);
+      const source = yield* projectionStore.getThreadRecords(guard.threadId, [
+        "subagents",
+        "providerThreads",
+        "turnItems",
+      ]);
+      const sourceThread = source.providerThreads.find(
+        (thread) =>
+          thread.id === guard.providerThreadId &&
+          thread.providerSessionId === guard.providerSessionId,
+      );
+      if (sourceThread === undefined) {
+        return events.filter((event) => !guardedIds.has(event.id));
+      }
+      const records = new Map<
+        ThreadId,
+        ProjectionStore.ProjectionRecords<
+          "runs" | "nodes" | "subagents" | "turnItems" | "providerThreads"
+        >
+      >();
+      const load = Effect.fnUntraced(function* (threadId: ThreadId) {
+        const existing = records.get(threadId);
+        if (existing !== undefined) return existing;
+        const current = yield* projectionStore.getThreadRecords(threadId, [
+          "runs",
+          "nodes",
+          "subagents",
+          "turnItems",
+          "providerThreads",
+        ]);
+        records.set(threadId, current);
+        return current;
+      });
+      const nativeSubagents = source.subagents.filter(
+        (subagent) =>
+          subagent.threadId === guard.threadId &&
+          subagent.runId === guard.runId &&
+          subagent.origin === "provider_native" &&
+          subagent.providerInstanceId === sourceThread.providerInstanceId &&
+          (subagent.providerThreadId === null ||
+            source.providerThreads.some(
+              (thread) =>
+                thread.id === subagent.providerThreadId &&
+                thread.providerSessionId === guard.providerSessionId,
+            )),
+      );
+      const nativeOwners = [
+        ...nativeSubagents.map((subagent) => ({
+          id: subagent.id,
+          childThreadId: subagent.childThreadId,
+        })),
+        ...source.turnItems.flatMap((item) =>
+          item.type === "subagent" &&
+          item.threadId === guard.threadId &&
+          item.runId === guard.runId &&
+          item.origin === "provider_native" &&
+          item.providerInstanceId === sourceThread.providerInstanceId &&
+          !source.subagents.some((subagent) => subagent.id === item.subagentId) &&
+          (item.providerThreadId === null ||
+            source.providerThreads.some(
+              (thread) =>
+                thread.id === item.providerThreadId &&
+                thread.providerSessionId === guard.providerSessionId,
+            ))
+            ? [{ id: item.subagentId, childThreadId: item.childThreadId }]
+            : [],
+        ),
+      ];
+      const kept: OrchestrationV2DomainEvent[] = [];
+      for (const event of events) {
+        if (!guardedIds.has(event.id)) {
+          kept.push(event);
+          continue;
+        }
+        const current = yield* load(event.threadId);
+        const ownsThread =
+          event.threadId === guard.threadId ||
+          nativeOwners.some((subagent) => subagent.childThreadId === event.threadId);
+        if (!ownsThread) continue;
+        const ownsEntity = (entity: {
+          readonly runId: RunId | null;
+          readonly providerThreadId?: ProviderThreadId | null | undefined;
+        }) =>
+          (entity.runId === guard.runId ||
+            (event.threadId !== guard.threadId &&
+              entity.runId === null &&
+              !current.runs.some((run) => run.id !== guard.runId && run.startedAt !== null))) &&
+          (entity.providerThreadId === null ||
+            entity.providerThreadId === undefined ||
+            current.providerThreads.some(
+              (thread) =>
+                thread.id === entity.providerThreadId &&
+                thread.providerSessionId === guard.providerSessionId,
+            ));
+        switch (event.type) {
+          case "provider-thread.updated": {
+            if (event.payload.id !== guard.providerThreadId || event.threadId !== guard.threadId)
+              continue;
+            kept.push({
+              ...event,
+              payload: {
+                ...sourceThread,
+                status: event.payload.status,
+                pendingBackgroundTasks: [],
+                updatedAt: event.occurredAt,
+              },
+            });
+            break;
+          }
+          case "subagent.updated": {
+            const saved = current.subagents.find((row) => row.id === event.payload.id);
+            if (
+              saved === undefined ||
+              !isOrchestrationV2WorkActive(saved.status) ||
+              saved.runId !== event.payload.runId ||
+              saved.providerThreadId !== event.payload.providerThreadId ||
+              saved.childThreadId !== event.payload.childThreadId ||
+              !nativeOwners.some((owner) => owner.id === saved.id)
+            )
+              continue;
+            kept.push({
+              ...event,
+              payload: {
+                ...saved,
+                status: "interrupted",
+                completedAt: event.occurredAt,
+                updatedAt: event.occurredAt,
+              },
+            });
+            break;
+          }
+          case "node.updated": {
+            const saved = current.nodes.find((row) => row.id === event.payload.id);
+            if (
+              saved === undefined ||
+              !isOrchestrationV2WorkActive(saved.status) ||
+              saved.runId !== event.payload.runId ||
+              saved.rootNodeId !== event.payload.rootNodeId ||
+              saved.kind !== event.payload.kind ||
+              saved.providerThreadId !== event.payload.providerThreadId ||
+              saved.providerTurnId !== event.payload.providerTurnId ||
+              saved.parentNodeId !== event.payload.parentNodeId ||
+              !ownsEntity(saved) ||
+              (event.threadId === guard.threadId &&
+                !nativeOwners.some((owner) => owner.id === saved.id))
+            )
+              continue;
+            kept.push({
+              ...event,
+              payload: { ...saved, status: "interrupted", completedAt: event.occurredAt },
+            });
+            break;
+          }
+          case "turn-item.updated": {
+            const saved = current.turnItems.find((row) => row.id === event.payload.id);
+            if (
+              saved === undefined ||
+              !isOrchestrationV2WorkActive(saved.status) ||
+              saved.type !== event.payload.type ||
+              saved.runId !== event.payload.runId ||
+              saved.nodeId !== event.payload.nodeId ||
+              saved.providerThreadId !== event.payload.providerThreadId ||
+              saved.providerTurnId !== event.payload.providerTurnId ||
+              !ownsEntity(saved) ||
+              (saved.type === "subagent" &&
+                !nativeOwners.some((owner) => owner.id === saved.subagentId))
+            )
+              continue;
+            kept.push({
+              ...event,
+              payload: {
+                ...saved,
+                ...("streaming" in saved ? { streaming: false } : {}),
+                status: "interrupted",
+                completedAt: event.occurredAt,
+                updatedAt: event.occurredAt,
+              },
+            });
+            break;
+          }
+          default:
+            // The guard is only for background entity updates. Never let a
+            // caller smuggle a root lifecycle or an unrelated entity through.
+            break;
+        }
+      }
+      return kept;
+    });
+
     const applyStoredEvents =
       /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
       Effect.fnUntraced(function* (storedEvents: ReadonlyArray<OrchestrationV2StoredEvent>) {
@@ -501,10 +714,14 @@ const layerBase: Layer.Layer<
               };
             }
 
+            const guarded = yield* guardRecoveredBackground(
+              input.events,
+              input.guardRecoveredBackground,
+            );
             const normalized = yield* normalizeEvents(
               input.guardPendingUserInputCancellations === true
-                ? yield* guardUserInputCancellations(input.events)
-                : input.events,
+                ? yield* guardUserInputCancellations(guarded)
+                : guarded,
             );
             const storedEvents = yield* eventStore.append({
               ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
@@ -566,22 +783,31 @@ const layerBase: Layer.Layer<
             };
           }
 
+          const guarded = yield* guardRecoveredBackground(
+            input.events,
+            input.guardRecoveredBackground,
+          );
           const normalized = yield* normalizeEvents(
             input.guardPendingUserInputCancellations === true
-              ? yield* guardUserInputCancellations(input.events)
-              : input.events,
+              ? yield* guardUserInputCancellations(guarded)
+              : guarded,
           );
           const storedEvents = yield* eventStore.append({
             ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
             events: normalized,
           });
           const outcomes = yield* applyStoredEvents(storedEvents);
+          yield* effectOutbox.enqueue(input.effects ?? []);
           return { committed: true as const, storedEvents, outcomes };
         }),
         (result) =>
-          result.committed
-            ? publishStoredEvents(result.storedEvents, result.outcomes)
-            : Effect.void,
+          Effect.gen(function* () {
+            if (!result.committed) return;
+            if (input.effects !== undefined && input.effects.length > 0) {
+              yield* effectOutbox.notifyAvailable(input.effects.length);
+            }
+            yield* publishStoredEvents(result.storedEvents, result.outcomes);
+          }),
       );
     });
 
@@ -682,10 +908,19 @@ const layerBase: Layer.Layer<
           const cancelledEffectIds =
             input.cancelUnsettledEffects === undefined
               ? []
-              : yield* effectOutbox.cancelUnsettled({
-                  threadId: input.threadId,
-                  ...input.cancelUnsettledEffects,
-                });
+              : (yield* Effect.forEach(
+                  input.cancelUnsettledEffects.threadIds ?? [input.threadId],
+                  (threadId) =>
+                    effectOutbox.cancelUnsettled({
+                      threadId,
+                      effectTypes: input.cancelUnsettledEffects!.effectTypes,
+                      reason: input.cancelUnsettledEffects!.reason,
+                      ...(input.cancelUnsettledEffects!.preserveUnstartedAutomatic === true
+                        ? { preserveUnstartedAutomatic: true }
+                        : {}),
+                    }),
+                  { concurrency: 1 },
+                )).flat();
           return { receipt, storedEvents, outcomes, committed: true as const, cancelledEffectIds };
         }),
         (result) =>

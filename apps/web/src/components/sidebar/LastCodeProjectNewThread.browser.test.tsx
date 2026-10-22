@@ -1,15 +1,5 @@
-import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import {
-  afterAll,
-  afterEach,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vite-plus/test";
+import { act, render, type Screen } from "../../../test/render";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId, ProjectId, ProviderInstanceId } from "@t3tools/contracts";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import type { useNewThreadHandler } from "../../hooks/useHandleNewThread";
@@ -71,36 +61,10 @@ function project(members = [first, remote], key = "group"): SidebarProjectSnapsh
     remoteEnvironmentLabels: ["remote"],
   };
 }
-let root: Root, container: HTMLDivElement;
-const original = Object.getOwnPropertyDescriptor(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-beforeAll(() =>
-  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
-    configurable: true,
-    value: true,
-  }),
-);
-afterAll(() => {
-  if (original) Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", original);
-  else Reflect.deleteProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-});
-beforeEach(() => {
-  vi.clearAllMocks();
-  mocks.mobile = true;
-  mocks.enabled = true;
-  mocks.available = true;
-  mocks.show.mockResolvedValue(null);
-  create.mockResolvedValue(null);
-  container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
-});
-afterEach(async () => {
-  await act(() => root.unmount());
-  container.remove();
-});
-async function render(value = project(), handleNewThread = create) {
+
+async function show(screen: Screen, value = project(), handleNewThread = create) {
   await act(() =>
-    root.render(
+    screen.rerender(
       <div onClick={mocks.parentClick}>
         <LastCodeProjectNewThread
           project={value}
@@ -111,7 +75,7 @@ async function render(value = project(), handleNewThread = create) {
     ),
   );
 }
-async function click() {
+async function click(container: HTMLElement) {
   await act(async () => {
     container
       .querySelector("button")!
@@ -127,9 +91,12 @@ describe("project New thread targeting", () => {
   it.each([true, false])(
     "creates a sole physical member manually with mobile=%s and isolates the header click",
     async (mobile) => {
+      setup();
+      await using screen = await render(null);
+
       mocks.mobile = mobile;
-      await render(project([remote]));
-      await click();
+      await show(screen, project([remote]));
+      await click(screen.container);
       expect(create).toHaveBeenCalledExactlyOnceWith(
         scopeProjectRef(remote.environmentId, remote.id),
         { environmentSelection: "manual" },
@@ -147,13 +114,16 @@ describe("project New thread targeting", () => {
   it.each([remote.physicalProjectKey, "auto"])(
     "routes grouped choice %s through the existing creation path",
     async (choice) => {
+      setup();
+      await using screen = await render(null);
+
       let resolve!: (value: string) => void;
       const pending = new Promise<string>((done) => {
         resolve = done;
       });
       mocks.show.mockReturnValueOnce(pending);
-      await render();
-      await click();
+      await show(screen);
+      await click(screen.container);
       expect(create).not.toHaveBeenCalled();
       expect(mocks.close).not.toHaveBeenCalled();
       expect(mocks.show.mock.calls[0]![1]).toEqual({ x: 25, y: 70 });
@@ -177,13 +147,19 @@ describe("project New thread targeting", () => {
   it.each(["disabled", "same environment", "No project"])(
     "omits auto balancing for %s",
     async (reason) => {
+      setup();
+      await using screen = await render(null);
+
       mocks.enabled = reason !== "disabled";
       const members =
         reason === "same environment"
           ? [first, { ...remote, environmentId: first.environmentId }]
           : [first, remote];
-      await render(project(members, reason === "No project" ? NO_PROJECT_GROUP_KEY : "group"));
-      await click();
+      await show(
+        screen,
+        project(members, reason === "No project" ? NO_PROJECT_GROUP_KEY : "group"),
+      );
+      await click(screen.container);
       expect(menu().map((item) => item.id)).toEqual([
         first.physicalProjectKey,
         remote.physicalProjectKey,
@@ -193,26 +169,35 @@ describe("project New thread targeting", () => {
   it.each([null, "unknown:member"])(
     "does not create or close the sheet for cancelled/unknown choice %s",
     async (choice) => {
+      setup();
+      await using screen = await render(null);
+
       mocks.show.mockResolvedValueOnce(choice);
-      await render();
-      await click();
+      await show(screen);
+      await click(screen.container);
       expect(create).not.toHaveBeenCalled();
       expect(mocks.close).not.toHaveBeenCalled();
       expect(mocks.toast).not.toHaveBeenCalled();
     },
   );
   it("does nothing when the chooser API is absent", async () => {
+    setup();
+    await using screen = await render(null);
+
     mocks.available = false;
-    await render();
-    await click();
+    await show(screen);
+    await click(screen.container);
     expect(mocks.show).not.toHaveBeenCalled();
     expect(create).not.toHaveBeenCalled();
     expect(mocks.close).not.toHaveBeenCalled();
   });
   it("reports chooser failure without creating or closing the mobile sheet", async () => {
+    setup();
+    await using screen = await render(null);
+
     mocks.show.mockRejectedValueOnce(new Error("Chooser failed"));
-    await render();
-    await click();
+    await show(screen);
+    await click(screen.container);
     expect(mocks.toast).toHaveBeenCalledExactlyOnceWith({
       type: "error",
       title: "Could not choose environment",
@@ -222,9 +207,12 @@ describe("project New thread targeting", () => {
     expect(mocks.close).not.toHaveBeenCalled();
   });
   it("retains the create failure report after closing the mobile sheet", async () => {
+    setup();
+    await using screen = await render(null);
+
     create.mockRejectedValueOnce(new Error("Create failed"));
-    await render(project([remote]));
-    await click();
+    await show(screen, project([remote]));
+    await click(screen.container);
     expect(mocks.close).toHaveBeenCalledExactlyOnceWith(false);
     expect(mocks.toast).toHaveBeenCalledExactlyOnceWith({
       type: "error",
@@ -233,13 +221,17 @@ describe("project New thread targeting", () => {
     });
   });
   it("uses the refreshed physical member and creation callback on the next click", async () => {
-    await render(project([first]));
+    setup();
+    await using screen = await render(null);
+    const { container } = screen;
+
+    await show(screen, project([first]));
     const button = container.querySelector("button");
     const refreshed = { ...remote, id: ProjectId.make("new-project") };
     const newer = vi.fn<ReturnType<typeof useNewThreadHandler>>().mockResolvedValue(null);
-    await render(project([refreshed]), newer);
+    await show(screen, project([refreshed]), newer);
     expect(container.querySelector("button")).toBe(button);
-    await click();
+    await click(screen.container);
     expect(create).not.toHaveBeenCalled();
     expect(newer).toHaveBeenCalledExactlyOnceWith(
       scopeProjectRef(refreshed.environmentId, refreshed.id),
@@ -247,3 +239,12 @@ describe("project New thread targeting", () => {
     );
   });
 });
+
+function setup() {
+  vi.clearAllMocks();
+  mocks.mobile = true;
+  mocks.enabled = true;
+  mocks.available = true;
+  mocks.show.mockResolvedValue(null);
+  create.mockResolvedValue(null);
+}

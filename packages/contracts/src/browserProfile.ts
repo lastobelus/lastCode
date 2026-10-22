@@ -1,3 +1,20 @@
+/**
+ * Browser profiles - named identities for the in-app preview browser.
+ *
+ * Each profile maps to its own Electron session partition, so cookies and
+ * storage are isolated between them: a tab opened under "Work" cannot see
+ * "Personal"'s logins. Profiles are client-local, like the other browser
+ * defaults, because the Chromium guest they configure is desktop-local.
+ * Named identities share their session across environments on the same desktop;
+ * Default and Incognito keep environment-local storage.
+ *
+ * Two profiles are built in and cannot be edited or removed:
+ * - `default` keeps the partition scope the browser used before profiles
+ *   existed, so upgrading does not sign anyone out.
+ * - `incognito` maps to a non-persistent partition for throwaway sessions.
+ *
+ * @module BrowserProfile
+ */
 import * as Schema from "effect/Schema";
 import { TrimmedNonEmptyString } from "./baseSchemas.ts";
 

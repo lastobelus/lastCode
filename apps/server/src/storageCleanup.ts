@@ -992,7 +992,7 @@ const make = Effect.gen(function* () {
     scope?: OwnershipScope,
   ) {
     if (scope !== undefined) {
-      // Core events also carry visits, attention and PR updates. Compare their
+      // Core events also carry visits, metadata and PR updates. Compare their
       // ownership fields rather than treating ordinary conversation activity as
       // a workspace change. Keep all observed transitions, including a new owner
       // that moves away again before the final check.

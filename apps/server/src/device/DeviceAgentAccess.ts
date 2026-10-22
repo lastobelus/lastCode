@@ -15,16 +15,16 @@ import * as ServerSettings from "../serverSettings.ts";
 export const AGENT_DEVICE_ROUTE_PREFIX = "/api/agent-device";
 
 /** Shared consent check; callers supply their existing thread reader. */
-export const currentThreadDeviceAccess = <E>(
-  thread: Effect.Effect<
-    {
-      readonly projectId: import("@t3tools/contracts").ProjectId;
-      readonly deletedAt: import("effect/DateTime").Utc | null;
-    } | null,
-    E
-  >,
-) =>
-  Effect.gen(function* () {
+export const currentThreadDeviceAccess = Effect.fn("DeviceAgentAccess.currentThreadDeviceAccess")(
+  function* <E>(
+    thread: Effect.Effect<
+      {
+        readonly projectId: import("@t3tools/contracts").ProjectId;
+        readonly deletedAt: import("effect/DateTime").Utc | null;
+      } | null,
+      E
+    >,
+  ) {
     const projects = yield* ProjectStore.ProjectStoreV2;
     const settings = yield* ServerSettings.ServerSettingsService;
     const current = yield* thread;
@@ -36,7 +36,9 @@ export const currentThreadDeviceAccess = <E>(
       value.enableDeviceSupport &&
       resolveProjectSettings(value, current.projectId).settings.enableAgentDeviceAccess
     );
-  }).pipe(Effect.orElseSucceed(() => false));
+  },
+  Effect.orElseSucceed(() => false),
+);
 
 export class DeviceAgentAccessDenied extends Schema.TaggedError<DeviceAgentAccessDenied>()(
   "DeviceAgentAccessDenied",
@@ -151,7 +153,7 @@ const make = Effect.gen(function* () {
       const existing = slots.get(key);
       // Reissuing a config must not invalidate commands already using it.
       if (existing !== undefined) return existing;
-      const token = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
+      const token = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
       credentials.set(token, target);
       slots.set(key, token);
       return token;
@@ -168,26 +170,25 @@ const make = Effect.gen(function* () {
       return target;
     }, credentialLock.withPermit),
     ownsResource: (target, resource) => Effect.sync(() => owns(target, resource)),
-    recordResource: (target, resource) =>
-      Effect.gen(function* () {
-        const token = slots.get(targetKey(target));
-        if (token === undefined || credentials.get(token) !== target)
-          return yield* new DeviceAgentAccessDenied({});
-        const now = expireResources();
-        const key = resourceKey(target, resource);
-        const previous = resources.get(key);
-        if (previous !== undefined && previous.owner !== owner(target))
-          return yield* new DeviceAgentAccessDenied({});
-        resources.delete(key);
-        resources.set(key, {
-          owner: owner(target),
-          expiresAt: now + (resource.kind === "artifact" ? 15 : 5) * 60_000,
-        });
-        if (resources.size > 4096) {
-          const oldest = resources.keys().next().value;
-          if (oldest !== undefined) resources.delete(oldest);
-        }
-      }).pipe(credentialLock.withPermit),
+    recordResource: Effect.fn("DeviceAgentAccess.recordResource")(function* (target, resource) {
+      const token = slots.get(targetKey(target));
+      if (token === undefined || credentials.get(token) !== target)
+        return yield* new DeviceAgentAccessDenied({});
+      const now = expireResources();
+      const key = resourceKey(target, resource);
+      const previous = resources.get(key);
+      if (previous !== undefined && previous.owner !== owner(target))
+        return yield* new DeviceAgentAccessDenied({});
+      resources.delete(key);
+      resources.set(key, {
+        owner: owner(target),
+        expiresAt: now + (resource.kind === "artifact" ? 15 : 5) * 60_000,
+      });
+      if (resources.size > 4096) {
+        const oldest = resources.keys().next().value;
+        if (oldest !== undefined) resources.delete(oldest);
+      }
+    }, credentialLock.withPermit),
   });
 });
 

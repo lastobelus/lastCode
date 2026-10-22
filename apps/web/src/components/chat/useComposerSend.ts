@@ -1,3 +1,4 @@
+import type { useChatThreadAnnotation } from "../thread-annotation/useChatThreadAnnotation";
 import {
   mergeDirectPreviewAnnotation,
   resolveBackgroundDraftWorkspaceOptions,
@@ -51,7 +52,6 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import {
   type ComposerSubmissionIntent,
-  collapseExpandedComposerCursor,
   parseStandaloneComposerSlashCommand,
 } from "../../composer-logic";
 import { resolvePlanFollowUpSubmission } from "../../proposedPlan";
@@ -92,7 +92,10 @@ import {
 } from "./composerSend.logic";
 import { usePlanFollowUpSend } from "./useProposedPlanSend";
 import { useMultipleModelSend } from "./useMultipleModelSend";
-import { type ComposerDispatchMode } from "@t3tools/client-runtime/state/composer-dispatch";
+import {
+  applyComposerQueueConstraint,
+  type ComposerDispatchMode,
+} from "@t3tools/client-runtime/state/composer-dispatch";
 import {
   awaitAttachmentUploads,
   getUploadedAttachments,
@@ -157,6 +160,9 @@ type UsageLimitsPanel = ReturnType<typeof useUsageLimitsPanel>;
 type TimelineFollow = ReturnType<typeof useTimelineFollow>;
 
 interface ComposerSendInput {
+  readonly forceQueueFollowUps: boolean;
+  readonly canAutoBalance: boolean;
+  readonly chatAnnotation: ReturnType<typeof useChatThreadAnnotation>;
   readonly environmentId: EnvironmentId;
   readonly routeThreadKey: string;
   readonly currentRouteThreadKeyRef: { readonly current: string | null };
@@ -247,6 +253,9 @@ interface ComposerSendInput {
  */
 export function useComposerSend(input: ComposerSendInput) {
   const {
+    forceQueueFollowUps,
+    canAutoBalance,
+    chatAnnotation,
     environmentId,
     routeThreadKey,
     currentRouteThreadKeyRef,
@@ -382,7 +391,7 @@ export function useComposerSend(input: ComposerSendInput) {
 
   const onSend = async (
     e?: { preventDefault: () => void },
-    dispatchMode: ComposerDispatchMode = "auto",
+    rawDispatchMode: ComposerDispatchMode = "auto",
     submissionIntent: ComposerSubmissionIntent = "foreground",
     directAnnotation?: {
       annotation: PreviewAnnotationPayload;
@@ -390,6 +399,7 @@ export function useComposerSend(input: ComposerSendInput) {
     },
   ) => {
     e?.preventDefault();
+    const dispatchMode = applyComposerQueueConstraint(rawDispatchMode, forceQueueFollowUps);
     // What the user pressed send on; uploads below can take a while, and a redirect must not
     // decline approvals for a draft that changed meanwhile.
     const promptAtSend = promptRef.current;
@@ -470,7 +480,30 @@ export function useComposerSend(input: ComposerSendInput) {
       onAdvanceActivePendingUserInput();
       return;
     }
-    if (!sendCtx?.providerAvailable) {
+    if (!sendCtx) {
+      notifyDirectAnnotationAttached();
+      return;
+    }
+    const submittedAnnotationPrompt = promptRef.current;
+    const annotationSubmission = chatAnnotation.interceptSubmission({
+      target: composerDraftTarget,
+      prompt: submittedAnnotationPrompt,
+      directAnnotation: directAnnotation !== undefined,
+      onDraftConsumed: () => {
+        if (
+          currentRouteThreadKeyRef.current !== routeThreadKey ||
+          promptRef.current !== submittedAnnotationPrompt
+        )
+          return;
+        promptRef.current = "";
+        composerRef.current?.resetCursorState();
+      },
+    });
+    if (annotationSubmission) {
+      await annotationSubmission;
+      return;
+    }
+    if (!sendCtx.providerAvailable) {
       notifyDirectAnnotationAttached();
       return;
     }
@@ -774,7 +807,7 @@ export function useComposerSend(input: ComposerSendInput) {
       baseBranchForWorktree,
       compactBeforeSend,
       turnDispatchMode,
-      shouldQueueBehindActiveRun,
+      shouldQueueBehindActiveRun: plannedQueueBehindActiveRun,
     } = planComposerTurn({
       messageText: messageTextForSend,
       sendQueuesBehindSetup,
@@ -788,6 +821,8 @@ export function useComposerSend(input: ComposerSendInput) {
       phase,
       dispatchMode,
     });
+    const shouldQueueBehindActiveRun =
+      plannedQueueBehindActiveRun || (forceQueueFollowUps && dispatchMode === "queue");
     if (missingWorktreeBaseBranch) {
       setThreadError(threadIdForSend, "Select a base branch before sending in New worktree mode.");
       return;
@@ -1242,6 +1277,8 @@ export function useComposerSend(input: ComposerSendInput) {
                 envMode: sendEnvMode,
                 branch: activeThreadBranch,
                 startFromOrigin,
+                canAutoBalance,
+                environmentSelection: draftThread?.environmentSelection,
               }),
             ),
           );
@@ -1334,7 +1371,7 @@ export function useComposerSend(input: ComposerSendInput) {
           composerFilesRef.current = composerFilesSnapshot;
           composerTerminalContextsRef.current = composerTerminalContextsSnapshot;
           composerRef.current?.resetCursorState({
-            cursor: collapseExpandedComposerCursor(messageTextForSend, messageTextForSend.length),
+            cursor: messageTextForSend.length,
             prompt: messageTextForSend,
             detectTrigger: true,
           });
