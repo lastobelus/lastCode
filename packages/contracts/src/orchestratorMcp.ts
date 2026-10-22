@@ -34,6 +34,7 @@ import {
 import { ThreadTitleRegeneration } from "./threadTitle.ts";
 import {
   OrchestrationV2Actor,
+  OrchestrationV2AppThread,
   OrchestrationV2CreationSource,
   OrchestrationV2RunStatus,
   OrchestrationV2TurnItemStatus,
@@ -283,6 +284,8 @@ export const OrchestratorMcpCreatedThread = Schema.Struct({
   title: Schema.String,
   createdBy: OrchestrationV2Actor,
   creationSource: OrchestrationV2CreationSource,
+  creatorThreadId: Schema.optional(ThreadId),
+  creatorGrouping: OrchestrationV2AppThread.fields.creatorGrouping,
   providerInstanceId: ProviderInstanceId,
   model: Schema.String,
 });
@@ -336,6 +339,8 @@ export const OrchestratorMcpThreadListItem = Schema.Struct({
   title: Schema.String,
   createdBy: OrchestrationV2Actor,
   creationSource: OrchestrationV2CreationSource,
+  creatorThreadId: Schema.optional(ThreadId),
+  creatorGrouping: OrchestrationV2AppThread.fields.creatorGrouping,
   status: OrchestratorMcpThreadStatus,
   latestRunId: Schema.NullOr(RunId),
   providerInstanceId: ProviderInstanceId,
@@ -410,6 +415,8 @@ export const OrchestratorMcpThreadDetail = Schema.Struct({
   title: Schema.String,
   createdBy: OrchestrationV2Actor,
   creationSource: OrchestrationV2CreationSource,
+  creatorThreadId: Schema.optional(ThreadId),
+  creatorGrouping: OrchestrationV2AppThread.fields.creatorGrouping,
   status: OrchestratorMcpThreadStatus,
   latestRunId: Schema.NullOr(RunId),
   activeRunId: Schema.NullOr(RunId),
