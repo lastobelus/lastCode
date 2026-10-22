@@ -996,6 +996,18 @@ export function createServerEnvironmentAtoms<R, E>(
 
   return {
     configValueAtom,
+    buildReviewTargets: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:build-review-targets",
+      tag: WS_METHODS.serverGetBuildReviewTargets,
+    }),
+    previewBuildReview: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:preview-build-review",
+      tag: WS_METHODS.serverPreviewBuildReview,
+    }),
+    selectBuildReview: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:select-build-review",
+      tag: WS_METHODS.serverSelectBuildReview,
+    }),
     runStorageCleanup: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:run-storage-cleanup",
       tag: WS_METHODS.serverRunStorageCleanup,
