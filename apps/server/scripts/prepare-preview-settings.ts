@@ -128,7 +128,7 @@ export async function preparePreviewSettings(
   if (sourceThemesDir) {
     protectedSources.push(sourceThemesDir);
     for (const entry of await NodeFSP.readdir(sourceThemesDir, { withFileTypes: true })) {
-      if (!entry.name.endsWith(".json") || (!entry.isFile() && !entry.isSymbolicLink())) continue;
+      if (!entry.name.endsWith(".json") || !entry.isFile()) continue;
       const themePath = await NodeFSP.realpath(NodePath.join(sourceThemesDir, entry.name));
       if (!(await NodeFSP.stat(themePath)).isFile()) continue;
       themeFiles.push(NodePath.join("themes", entry.name));

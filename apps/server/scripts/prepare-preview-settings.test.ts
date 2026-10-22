@@ -310,6 +310,31 @@ it("refuses a dangling destination link into a missing source preference file", 
   ).rejects.toMatchObject({ code: "ENOENT" });
 });
 
+it.each(["existing", "missing"])("skips theme symlinks (%s target)", async (target) => {
+  await using setup = await fixture();
+  const { options } = setup;
+  const sourceThemes = NodePath.join(options.sourceStateDir, "themes");
+  const targetThemes = NodePath.join(options.targetHome, "userdata", "themes");
+  const externalTheme = NodePath.join(setup.root, "external-theme.json");
+  await NodeFSP.mkdir(sourceThemes);
+  await NodeFSP.mkdir(targetThemes, { recursive: true });
+  if (target === "existing") await NodeFSP.writeFile(externalTheme, '{"id":"unpublished"}');
+  await NodeFSP.symlink(externalTheme, NodePath.join(sourceThemes, "linked.json"));
+  await NodeFSP.writeFile(NodePath.join(sourceThemes, "regular.json"), '{"id":"published"}');
+  await NodeFSP.writeFile(NodePath.join(targetThemes, "linked.json"), '{"id":"stale"}');
+
+  const result = await preparePreviewSettings(options, async () => new Map());
+
+  expect(result.copiedFiles).toEqual(["client-settings.json", "themes/regular.json"]);
+  expect(await NodeFSP.readdir(targetThemes)).toEqual(["regular.json"]);
+  expect(await NodeFSP.readFile(NodePath.join(targetThemes, "regular.json"), "utf8")).toBe(
+    '{"id":"published"}',
+  );
+  expect((await NodeFSP.lstat(NodePath.join(sourceThemes, "linked.json"))).isSymbolicLink()).toBe(
+    true,
+  );
+});
+
 it("copies published JSON themes byte-for-byte from a linked source directory", async () => {
   await using setup = await fixture();
   const { options } = setup;
