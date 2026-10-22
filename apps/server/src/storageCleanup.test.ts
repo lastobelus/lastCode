@@ -455,10 +455,11 @@ const cleanupFixture = (
               dependencyInspectionHook = null;
               yield* hook;
             }
-            // Before Git's own clean check: inside `git worktree remove`, or on
-            // Windows the same status check the removal makes before deleting.
+            // Inventory also uses --porcelain; inject only during removal,
+            // before Git's own clean check or the removal helper's equivalent.
             if (
               editBeforeRemoval &&
+              input.operation === "StorageCleanup.cleanupGit" &&
               (input.args.includes("remove") || input.args.includes("--porcelain"))
             )
               yield* fs.writeFileString(`${worktree}/tracked.txt`, "late edit\n");
