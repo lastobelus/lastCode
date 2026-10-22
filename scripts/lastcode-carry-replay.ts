@@ -146,6 +146,7 @@ function runGit(cwd: string, args: ReadonlyArray<string>, options: GitOptions = 
     throw new Error(
       [
         `git ${args.join(" ")} failed with exit code ${result.status ?? "unknown"}.`,
+        result.stdout.trim(),
         result.stderr.trim(),
       ]
         .filter(Boolean)
