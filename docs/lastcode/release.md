@@ -404,7 +404,7 @@ until LastCode intentionally publishes compatible releases.
 
 ## Intel DMG build publication
 
-The resumable **Build Intel package (macOS)** Project Action dispatches the manual
+The resumable **Build Intel package (macOS)** Project Action attaches to or dispatches the manual
 **LastCode Intel artifact** workflow for one exact
 `lastcode/checkpoint/...` or `lastcode/revision/...` tag and its full advertised
 commit. It rejects moving refs and tag/commit mismatches. The Intel job runs no
@@ -428,8 +428,8 @@ the connected client may run anywhere, and that environment need not be an Intel
 builder. The actual x64 build runs on GitHub's hosted Intel runner. For
 agent-triggered
 one-shot continuation, enable **Allow Codex and Claude to run and resume** on that
-Action in Project Settings. The Action attaches a unique request token to the
-dispatch, waits for only the matching workflow run, and returns to the thread on
+Action in Project Settings. The Action follows the selected build's request token
+and run ID, and returns to the thread on
 success, workflow failure or cancellation, missing workflow configuration, or a
 run-registration timeout. It reports both the workflow-run URL and immutable
 release URL.
@@ -438,6 +438,12 @@ The request is marked before dispatch so an interrupted or ambiguous transport
 result is never dispatched a second time. The Action waits for the unique token
 to appear and then records the matching run ID for later reattachment. If GitHub
 never registers it, select the tag again to create a deliberate new request.
+
+Selection attaches to an active exact-tag build when its workflow and checked-out
+automation files match current `origin/lastcode/main`, saving its token and run ID
+without dispatching again. It cancels outdated builds for the selected or older
+tags, preserving newer targets and every current-workflow build. Before dispatching
+a replacement, the Action waits for active same-tag runs to finish cancellation.
 
 The Action only builds and publishes. It never stages, installs, promotes,
 restarts, or updates an Intel artifact-consumer node. Those remain separate

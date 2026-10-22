@@ -43,6 +43,7 @@ function harness(input: {
   readonly listedRuns?: ReadonlyArray<ReadonlyArray<WorkflowRun>>;
   readonly viewedRuns?: ReadonlyArray<WorkflowRun>;
   readonly workflowError?: Error;
+  readonly activeRuns?: ReadonlyArray<WorkflowRun>;
 }) {
   let currentRequest = input.initialRequest ?? request();
   let now = 0;
@@ -71,6 +72,9 @@ function harness(input: {
       listIndex += 1;
       return result;
     },
+    listActiveWorkflowRuns: () => input.activeRuns ?? [],
+    workflowFilesAreCurrent: (headSha) => headSha === "b".repeat(40),
+    cancelWorkflowRun: (runId) => calls.push(`cancel:${runId}`),
     readWorkflowRun: () => {
       calls.push("view");
       const result = viewedRuns[Math.min(viewIndex, viewedRuns.length - 1)];
@@ -168,6 +172,7 @@ describe("lastcode-build-intel-package", () => {
     const calls: string[] = [];
     const selected = selectIntelBuild(tag, {
       resolveTag: (candidate) => ({ tag: candidate, commit }),
+      dependencies: harness({}).dependencies,
       writeRequest: (value) => {
         written = value;
       },
@@ -185,6 +190,65 @@ describe("lastcode-build-intel-package", () => {
     expect(selected).toEqual(request());
     expect(written).toEqual(selected);
     expect(calls).toEqual(["lock:enter", "lock:exit"]);
+  });
+
+  it("attaches current builds and replaces only outdated same-or-older targets after cancellation completes", async () => {
+    const token = "intel-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    const older = "lastcode/checkpoint/v0.0.34-nightly.20260825.1185";
+    const newer = "lastcode/revision/v0.0.34-nightly.20260825.1185.10";
+    for (const [runTag, current, status, decision] of [
+      [tag, true, "in_progress", "attach"],
+      [tag, false, "queued", "cancel"],
+      [older, false, "in_progress", "cancel"],
+      [older, true, "queued", "leave"],
+      [newer, false, "in_progress", "leave"],
+      [tag, false, "completed", "leave"],
+    ] as const) {
+      const active = workflowRun({
+        databaseId: 456,
+        displayTitle: workflowRunName({ installableTag: runTag, requestToken: token }),
+        headSha: (current ? "b" : "c").repeat(40),
+        status,
+      });
+      const test = harness({
+        activeRuns: [active],
+        listedRuns: [[], [workflowRun({ status: "completed", conclusion: "success" })]],
+        viewedRuns: [
+          { ...active, status: "in_progress" },
+          {
+            ...active,
+            status: "completed",
+            conclusion: decision === "attach" ? "success" : "cancelled",
+          },
+        ],
+      });
+      const selected = selectIntelBuild(tag, {
+        dependencies: test.dependencies,
+        resolveTag: () => ({ tag, commit }),
+        writeRequest: test.dependencies.writeRequest,
+        withRequestLock: test.dependencies.withRequestLock,
+        nowIso: () => request().selectedAt,
+        uuid: () => "12345678-1234-1234-1234-123456789abc",
+      });
+      expect(selected.workflowRunId).toBe(decision === "attach" ? 456 : null);
+      expect(selected.requestToken).toBe(decision === "attach" ? token : request().requestToken);
+      expect(test.calls.filter((call) => call.startsWith("cancel:"))).toEqual(
+        decision === "cancel" ? ["cancel:456"] : [],
+      );
+      expect(test.calls.filter((call) => call.startsWith("log:"))).toHaveLength(
+        decision === "leave" ? 0 : 1,
+      );
+      if (decision === "attach" || (decision === "cancel" && runTag === tag)) {
+        await runSelectedIntelBuild(test.dependencies);
+        const dispatch = test.calls.findIndex((call) => call.startsWith("dispatch:"));
+        if (decision === "attach") {
+          expect(dispatch).toBe(-1);
+        } else {
+          expect(test.calls.filter((call) => call === "view")).toHaveLength(2);
+          expect(dispatch).toBeGreaterThan(test.calls.lastIndexOf("view"));
+        }
+      }
+    }
   });
 
   it("correlates only the exact request-token run", () => {

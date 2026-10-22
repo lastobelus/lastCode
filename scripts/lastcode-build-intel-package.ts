@@ -7,6 +7,7 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
 import { acquirePortableLock } from "./lastcode-lock.mjs";
+import { compareLastCodeInstallableTags, parseLastCodeInstallableTag } from "./lastcode-nightly.ts";
 import { lastCodeAction } from "./lib/lastcode-action-kit.ts";
 
 const DEFAULT_REPOSITORY = "lastobelus/lastCode";
@@ -61,6 +62,9 @@ export interface BuildIntelDependencies {
   readonly verifyWorkflow: () => void;
   readonly dispatchWorkflow: (request: BuildRequest) => void;
   readonly listWorkflowRuns: () => ReadonlyArray<WorkflowRun>;
+  readonly listActiveWorkflowRuns: () => ReadonlyArray<WorkflowRun>;
+  readonly workflowFilesAreCurrent: (headSha: string) => boolean;
+  readonly cancelWorkflowRun: (runId: number) => void;
   readonly readWorkflowRun: (runId: number) => WorkflowRun;
   readonly readRelease: (tag: string) => IntelRelease;
   readonly readRequest: () => BuildRequest;
@@ -157,6 +161,13 @@ export function workflowRunName(request: Pick<BuildRequest, "installableTag" | "
   return `Build Intel package · ${request.installableTag} · ${request.requestToken}`;
 }
 
+function workflowRunTarget(run: WorkflowRun) {
+  const [prefix, tag, requestToken, extra] = run.displayTitle.split(" · ");
+  if (prefix !== "Build Intel package" || !tag || !requestToken || extra !== undefined) return null;
+  const installable = parseLastCodeInstallableTag(tag);
+  return installable ? { installable, requestToken } : null;
+}
+
 export function findCorrelatedRun(
   request: Pick<BuildRequest, "installableTag" | "requestToken">,
   runs: ReadonlyArray<WorkflowRun>,
@@ -249,6 +260,24 @@ function removeRequestFile(requestToken: string): void {
 
 export function createBuildIntelDependencies(): BuildIntelDependencies {
   const repository = process.env.LASTCODE_GITHUB_REPOSITORY ?? DEFAULT_REPOSITORY;
+  const listWorkflowRuns = (status?: string) =>
+    runGhJson<ReadonlyArray<WorkflowRun>>([
+      "run",
+      "list",
+      "--repo",
+      repository,
+      "--workflow",
+      WORKFLOW_FILE,
+      "--event",
+      "workflow_dispatch",
+      "--limit",
+      "100",
+      ...(status ? ["--status", status] : []),
+      "--json",
+      "databaseId,displayTitle,status,conclusion,url,headSha,createdAt",
+    ]);
+  let workflowBase: string | undefined;
+  const workflowComparisons = new Map<string, boolean>();
   return {
     now: () => Date.now(),
     nowIso: () => new Date().toISOString(),
@@ -279,21 +308,33 @@ export function createBuildIntelDependencies(): BuildIntelDependencies {
         `request_token=${request.requestToken}`,
       ]);
     },
-    listWorkflowRuns: () =>
-      runGhJson<ReadonlyArray<WorkflowRun>>([
-        "run",
-        "list",
-        "--repo",
-        repository,
-        "--workflow",
-        WORKFLOW_FILE,
-        "--event",
-        "workflow_dispatch",
-        "--limit",
-        "100",
-        "--json",
-        "databaseId,displayTitle,status,conclusion,url,headSha,createdAt",
-      ]),
+    listWorkflowRuns,
+    listActiveWorkflowRuns: () => ["queued", "in_progress"].flatMap(listWorkflowRuns),
+    workflowFilesAreCurrent: (headSha) => {
+      const cached = workflowComparisons.get(headSha);
+      if (cached !== undefined) return cached;
+      if (!workflowBase) {
+        runCommand("git", ["fetch", "--no-tags", DEFAULT_REMOTE, DEFAULT_BRANCH]);
+        workflowBase = runCommand("git", ["rev-parse", `${DEFAULT_REMOTE}/${DEFAULT_BRANCH}`]);
+      }
+      runCommand("git", ["fetch", "--no-tags", DEFAULT_REMOTE, headSha]);
+      const current =
+        runCommand("git", [
+          "diff",
+          "--name-only",
+          headSha,
+          workflowBase,
+          "--",
+          `.github/workflows/${WORKFLOW_FILE}`,
+          "package.json",
+          "scripts/lastcode-intel-release.mjs",
+        ]) === "";
+      workflowComparisons.set(headSha, current);
+      return current;
+    },
+    cancelWorkflowRun: (runId) => {
+      runCommand("gh", ["run", "cancel", String(runId), "--repo", repository]);
+    },
     readWorkflowRun: (runId) =>
       runGhJson<WorkflowRun>([
         "run",
@@ -335,17 +376,44 @@ export function selectIntelBuild(
     readonly withRequestLock?: <T>(operation: () => T) => T;
     readonly nowIso?: () => string;
     readonly uuid?: () => string;
+    readonly dependencies?: BuildIntelDependencies;
   } = {},
 ): BuildRequest {
   const target = (input.resolveTag ?? resolveRemoteInstallableTag)(tag);
+  const installable = parseLastCodeInstallableTag(target.tag);
+  if (!installable)
+    fail("Expected an exact lastcode/checkpoint/... or lastcode/revision/... nightly tag.");
+  const dependencies = input.dependencies ?? createBuildIntelDependencies();
+  let attached: { readonly run: WorkflowRun; readonly requestToken: string } | undefined;
+  // Across machines, preserve newer tags and current workflows; same-tag duplicates queue and reuse complete releases.
+  for (const run of dependencies.listActiveWorkflowRuns()) {
+    if (run.status !== "queued" && run.status !== "in_progress") continue;
+    const existing = workflowRunTarget(run);
+    if (!existing || compareLastCodeInstallableTags(existing.installable, installable) > 0)
+      continue;
+    const current = dependencies.workflowFilesAreCurrent(run.headSha);
+    if (current) {
+      if (existing.installable.tag === target.tag && !attached) {
+        attached = { run, requestToken: existing.requestToken };
+        dependencies.log(
+          `[build-intel] Attaching to current workflow ${run.databaseId} for ${target.tag}: ${run.url}`,
+        );
+      }
+    } else {
+      dependencies.cancelWorkflowRun(run.databaseId);
+      dependencies.log(
+        `[build-intel] Cancelled outdated workflow ${run.databaseId} for ${existing.installable.tag}: ${run.url}`,
+      );
+    }
+  }
   const request: BuildRequest = {
     schemaVersion: REQUEST_SCHEMA_VERSION,
     installableTag: target.tag,
     installableCommit: target.commit,
-    requestToken: `intel-${(input.uuid ?? NodeCrypto.randomUUID)()}`,
+    requestToken: attached?.requestToken ?? `intel-${(input.uuid ?? NodeCrypto.randomUUID)()}`,
     selectedAt: (input.nowIso ?? (() => new Date().toISOString()))(),
     dispatchAttemptedAt: null,
-    workflowRunId: null,
+    workflowRunId: attached?.run.databaseId ?? null,
   };
   (input.withRequestLock ?? withRequestFileLock)(() =>
     (input.writeRequest ?? writeRequestFile)(request),
@@ -412,6 +480,18 @@ export async function runSelectedIntelBuild(
     summary: "Preparing the Intel package workflow",
   });
   dependencies.verifyWorkflow();
+
+  const selected = dependencies.readRequest();
+  if (selected.workflowRunId === null && selected.dispatchAttemptedAt === null) {
+    for (const active of dependencies.listActiveWorkflowRuns()) {
+      if (
+        workflowRunTarget(active)?.installable.tag === selected.installableTag &&
+        active.displayTitle !== workflowRunName(selected)
+      ) {
+        await waitForCompletion(active, dependencies);
+      }
+    }
+  }
 
   let { request, run } = dependencies.withRequestLock(() => {
     let lockedRequest = dependencies.readRequest();
