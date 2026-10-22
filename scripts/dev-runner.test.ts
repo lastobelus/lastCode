@@ -394,30 +394,32 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
         }),
     );
 
-    it.effect("passes the explicit development origin intact to preview preparation", () =>
-      Effect.gen(function* () {
-        using prepare = vi.spyOn(PreviewSettings, "preparePreviewSettings").mockResolvedValue({
-          id: "00000000-0000-4000-8000-000000000001",
-          settingsPath: "/preview/userdata/preview-settings.json",
-          copiedFiles: [],
-          browserPreferenceCount: 1,
-        });
-        const spawnerLayer = Layer.succeed(
-          ChildProcessSpawner.ChildProcessSpawner,
-          ChildProcessSpawner.make(() => Effect.succeed(mockProcess(0))),
-        );
-        yield* runDevRunnerWithInput(devServerInput).pipe(
-          Effect.provide(Layer.mergeAll(emptyConfigLayer, netServiceLayer, spawnerLayer)),
-          Effect.provideService(HostProcess.Platform, "linux"),
-          Effect.provideService(HostProcess.Environment, {
-            T3CODE_PREVIEW_SETTINGS_SOURCE: "/saved-app/userdata",
-            T3CODE_PREVIEW_BROWSER_PROFILE: "/saved-app/profile",
-            T3CODE_PREVIEW_SETTINGS_ORIGIN: "lastcode-dev://app",
-          }),
-        );
-        assert.equal(prepare.mock.calls.length, 1);
-        assert.equal(prepare.mock.calls[0]?.[0].sourceOrigin, "lastcode-dev://app");
-      }),
+    it.effect.each(["lastcode-dev://app", " \tlastcode-dev://app \n"])(
+      "normalizes the explicit preview origin (%s)",
+      (origin) =>
+        Effect.gen(function* () {
+          using prepare = vi.spyOn(PreviewSettings, "preparePreviewSettings").mockResolvedValue({
+            id: "00000000-0000-4000-8000-000000000001",
+            settingsPath: "/preview/userdata/preview-settings.json",
+            copiedFiles: [],
+            browserPreferenceCount: 1,
+          });
+          const spawnerLayer = Layer.succeed(
+            ChildProcessSpawner.ChildProcessSpawner,
+            ChildProcessSpawner.make(() => Effect.succeed(mockProcess(0))),
+          );
+          yield* runDevRunnerWithInput(devServerInput).pipe(
+            Effect.provide(Layer.mergeAll(emptyConfigLayer, netServiceLayer, spawnerLayer)),
+            Effect.provideService(HostProcess.Platform, "linux"),
+            Effect.provideService(HostProcess.Environment, {
+              T3CODE_PREVIEW_SETTINGS_SOURCE: "/saved-app/userdata",
+              T3CODE_PREVIEW_BROWSER_PROFILE: "/saved-app/profile",
+              T3CODE_PREVIEW_SETTINGS_ORIGIN: origin,
+            }),
+          );
+          assert.equal(prepare.mock.calls.length, 1);
+          assert.equal(prepare.mock.calls[0]?.[0].sourceOrigin, "lastcode-dev://app");
+        }),
     );
 
     it.effect("preserves process spawn context and the exact platform cause", () => {

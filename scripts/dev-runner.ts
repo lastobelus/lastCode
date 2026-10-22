@@ -675,8 +675,8 @@ export const runDevRunnerWithInput = Effect.fn("dev-runner.runDevRunnerWithInput
         cause: "A browser profile is required when copying preview settings.",
       });
     }
-    const settingsOrigin = hostEnvironment.T3CODE_PREVIEW_SETTINGS_ORIGIN;
-    if (!settingsOrigin?.trim()) {
+    const settingsOrigin = hostEnvironment.T3CODE_PREVIEW_SETTINGS_ORIGIN?.trim();
+    if (!settingsOrigin) {
       return yield* new DevRunnerConfigurationError({
         configKeys: ["T3CODE_PREVIEW_SETTINGS_ORIGIN"],
         cause: "An explicit browser origin is required when copying preview settings.",
