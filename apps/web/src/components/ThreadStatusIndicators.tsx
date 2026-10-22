@@ -1,3 +1,5 @@
+import type { LastCodeStatusIcon } from "@t3tools/contracts/settings";
+import { ThreadStatusGlyph } from "./ThreadStatusGlyph";
 import {
   scopeProjectRef,
   scopedThreadKey,
@@ -710,7 +712,7 @@ export function terminalStatusFromRunningIds(
   };
 }
 
-function synchronizeTerminalPulse(event: AnimationEvent<SVGSVGElement>) {
+export function synchronizeTerminalPulse(event: AnimationEvent<SVGSVGElement>) {
   if (event.animationName !== "status-pulse") return;
 
   for (const animation of event.currentTarget.getAnimations()) {
@@ -806,9 +808,13 @@ export function ThreadWorktreeIndicator({
 export function ThreadStatusLabel({
   status,
   compact = false,
+  icon,
 }: {
-  status: ThreadStatusPill;
+  status: Pick<ThreadStatusPill, "colorClass" | "dotClass" | "pulse" | "description"> & {
+    label: string;
+  };
   compact?: boolean;
+  icon?: LastCodeStatusIcon | undefined;
 }) {
   if (compact) {
     return (
@@ -817,18 +823,25 @@ export function ThreadStatusLabel({
           render={
             <span
               role="img"
-              aria-label={status.label}
+              aria-label={
+                status.description ? `${status.label}. ${status.description}` : status.label
+              }
               className={`inline-flex size-3.5 shrink-0 items-center justify-center ${status.colorClass}`}
             />
           }
         >
-          <span
-            className={`size-[9px] rounded-full ${status.dotClass} ${
-              status.pulse ? "motion-safe:animate-status-pulse" : ""
-            }`}
-          />
+          {icon ? (
+            <ThreadStatusGlyph icon={icon} dotClass={status.dotClass} pulse={status.pulse} />
+          ) : (
+            <span
+              data-lastcode-sidebar-unscaled-content
+              className={`size-1.5 rounded-full ${status.dotClass} ${
+                status.pulse ? "motion-safe:animate-status-pulse" : ""
+              }`}
+            />
+          )}
         </TooltipTrigger>
-        <TooltipPopup side="top">{status.label}</TooltipPopup>
+        <TooltipPopup side="top">{status.description ?? status.label}</TooltipPopup>
       </Tooltip>
     );
   }
@@ -839,19 +852,28 @@ export function ThreadStatusLabel({
         render={
           <span
             role="img"
-            aria-label={status.label}
-            className={`inline-flex items-center gap-1 text-3xs ${status.colorClass}`}
+            aria-label={
+              status.description ? `${status.label}. ${status.description}` : status.label
+            }
+            className={`inline-flex items-center gap-1 text-3xs ${icon ? "min-w-0 max-w-full" : ""} ${status.colorClass}`}
           />
         }
       >
-        <span
-          className={`h-1.5 w-1.5 rounded-full ${status.dotClass} ${
-            status.pulse ? "motion-safe:animate-status-pulse" : ""
-          }`}
-        />
-        <span className="hidden md:inline">{status.label}</span>
+        {icon ? (
+          <ThreadStatusGlyph icon={icon} dotClass={status.dotClass} pulse={status.pulse} />
+        ) : (
+          <span
+            data-lastcode-sidebar-unscaled-content
+            className={`size-1.5 rounded-full ${status.dotClass} ${
+              status.pulse ? "motion-safe:animate-status-pulse" : ""
+            }`}
+          />
+        )}
+        <span className={icon ? "hidden min-w-0 truncate md:inline" : "hidden md:inline"}>
+          {status.label}
+        </span>
       </TooltipTrigger>
-      <TooltipPopup side="top">{status.label}</TooltipPopup>
+      <TooltipPopup side="top">{status.description ?? status.label}</TooltipPopup>
     </Tooltip>
   );
 }

@@ -7,6 +7,7 @@ import {
   getThreadAutoSettlementSearchAvailability,
   isSettingsSearchScopeAvailable,
   searchSettings,
+  searchableSetting,
   SETTINGS_SEARCH_ITEMS,
   type SettingsSearchItem,
 } from "./settingsSearch";
@@ -72,6 +73,13 @@ describe("searchSettings", () => {
     } finally {
       localeLowerCase.mockRestore();
     }
+    expect(searchSettings("compact status").map((item) => item.id)).toEqual([
+      "compact-status-indicators",
+      "family-status-subheaders",
+    ]);
+    expect(searchSettings("worktree indicators").map((item) => item.id)).toEqual([
+      "show-worktree-indicators",
+    ]);
     expect(searchSettings("xyzzy")).toEqual([]);
   });
 
@@ -147,6 +155,12 @@ describe("searchSettings", () => {
   it("keeps catalog result ids unique", () => {
     const ids = SETTINGS_SEARCH_ITEMS.map((item) => item.id);
     expect(new Set(ids).size).toBe(ids.length);
+  });
+  it("connects the LastCode worktree-indicator setting to its catalog anchor", () => {
+    expect(searchableSetting("show-worktree-indicators")).toEqual({
+      id: "show-worktree-indicators",
+      title: "Show worktree indicators (LastCode sidebar)",
+    });
   });
 });
 
@@ -241,5 +255,49 @@ describe("auto-settlement search availability", () => {
         environmentIds: selected.map((entry) => entry.environmentId),
       }).isTargetAvailable,
     ).toBe(true);
+  });
+  it("routes LastCode sidebar scaling to LastCode settings", () => {
+    expect(searchSettings("scale LastCode sidebar")[0]).toMatchObject({
+      id: "scale-legacy-sidebar",
+      to: "/settings/lastcode",
+    });
+  });
+
+  it("finds the independent LastCode sidebar override", () => {
+    expect(searchSettings("LastCode sidebar")[0]).toMatchObject({
+      id: "lastcode-sidebar",
+      to: "/settings/lastcode",
+    });
+  });
+
+  it.each([
+    ["show thread provider badges", "show-thread-provider-badges"],
+    ["provider badge size", "thread-provider-badge-size"],
+    ["provider badge transparency", "thread-provider-badge-transparency"],
+  ])("routes %s to the always-visible badge toggle", (query, id) => {
+    const result = searchSettings(query)[0];
+    expect(result).toMatchObject({
+      id,
+      to: "/settings/lastcode",
+    });
+    expect(result?.targetId ?? result?.id).toBe("show-thread-provider-badges");
+  });
+
+  it("finds badge transparency through opacity search", () => {
+    expect(searchSettings("provider badge opacity")).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "thread-provider-badge-transparency",
+          to: "/settings/lastcode",
+        }),
+      ]),
+    );
+  });
+
+  it("routes project icon rounding to LastCode settings", () => {
+    expect(searchSettings("rounded project icons")[0]).toMatchObject({
+      id: "rounded-project-icons",
+      to: "/settings/lastcode",
+    });
   });
 });
