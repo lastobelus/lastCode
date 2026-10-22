@@ -64,7 +64,7 @@ export interface BuildIntelDependencies {
   readonly listWorkflowRuns: () => ReadonlyArray<WorkflowRun>;
   readonly listActiveWorkflowRuns: () => ReadonlyArray<WorkflowRun>;
   readonly workflowFilesAreCurrent: (headSha: string) => boolean;
-  readonly workflowBuildHasFinished: (runId: number) => boolean;
+  readonly readWorkflowBuildConclusion: (runId: number) => string | null;
   readonly cancelWorkflowRun: (runId: number) => void;
   readonly readWorkflowRun: (runId: number) => WorkflowRun;
   readonly readRelease: (tag: string) => IntelRelease;
@@ -332,15 +332,12 @@ export function createBuildIntelDependencies(): BuildIntelDependencies {
       workflowComparisons.set(headSha, current);
       return current;
     },
-    workflowBuildHasFinished: (runId) =>
+    readWorkflowBuildConclusion: (runId) =>
       runGhJson<{
-        readonly jobs: ReadonlyArray<{ readonly name: string; readonly status: string }>;
-      }>(["run", "view", String(runId), "--repo", repository, "--json", "jobs"]).jobs.some(
-        (job) =>
-          (job.name === "Validate and build macOS x64" && job.status === "completed") ||
-          (job.name === "Publish immutable exact-tag assets" &&
-            (job.status === "in_progress" || job.status === "completed")),
-      ),
+        readonly jobs: ReadonlyArray<{ readonly name: string; readonly conclusion: string | null }>;
+      }>(["run", "view", String(runId), "--repo", repository, "--json", "jobs"]).jobs.find(
+        (job) => job.name === "Validate and build macOS x64",
+      )?.conclusion ?? null,
     cancelWorkflowRun: (runId) => {
       runCommand("gh", ["run", "cancel", String(runId), "--repo", repository]);
     },
@@ -401,7 +398,7 @@ export function selectIntelBuild(
     if (!existing || compareLastCodeInstallableTags(existing.installable, installable) > 0)
       continue;
     const current = dependencies.workflowFilesAreCurrent(run.headSha);
-    if (current || dependencies.workflowBuildHasFinished(run.databaseId)) {
+    if (current || dependencies.readWorkflowBuildConclusion(run.databaseId) === "success") {
       if (existing.installable.tag === target.tag && !attached) {
         attached = { run, requestToken: existing.requestToken };
         dependencies.log(

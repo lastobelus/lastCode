@@ -44,7 +44,7 @@ function harness(input: {
   readonly viewedRuns?: ReadonlyArray<WorkflowRun>;
   readonly workflowError?: Error;
   readonly activeRuns?: ReadonlyArray<WorkflowRun>;
-  readonly buildFinished?: boolean;
+  readonly buildConclusion?: string | null;
   readonly cancelError?: Error;
 }) {
   let currentRequest = input.initialRequest ?? request();
@@ -76,7 +76,7 @@ function harness(input: {
     },
     listActiveWorkflowRuns: () => input.activeRuns ?? [],
     workflowFilesAreCurrent: (headSha) => headSha === "b".repeat(40),
-    workflowBuildHasFinished: () => input.buildFinished ?? false,
+    readWorkflowBuildConclusion: () => input.buildConclusion ?? null,
     cancelWorkflowRun: (runId) => {
       calls.push(`cancel:${runId}`);
       if (input.cancelError) throw input.cancelError;
@@ -207,17 +207,18 @@ describe("lastcode-build-intel-package", () => {
       current,
       status,
       decision,
-      buildFinished = false,
+      buildConclusion = null,
       cancelSettled = false,
     ] of [
       [tag, true, "in_progress", "attach"],
-      [tag, false, "in_progress", "attach", true],
+      [tag, false, "in_progress", "attach", "success"],
+      [tag, false, "in_progress", "cancel", "failure"],
       [tag, true, "requested", "attach"],
       [tag, true, "waiting", "attach"],
       [tag, true, "pending", "attach"],
       [tag, false, "queued", "cancel"],
       [tag, false, "pending", "cancel"],
-      [tag, false, "in_progress", "cancel", false, true],
+      [tag, false, "in_progress", "cancel", null, true],
       [older, false, "in_progress", "cancel"],
       [older, true, "queued", "leave"],
       [newer, false, "in_progress", "leave"],
@@ -230,7 +231,7 @@ describe("lastcode-build-intel-package", () => {
         status,
       });
       const test = harness({
-        buildFinished,
+        buildConclusion,
         ...(cancelSettled ? { cancelError: new Error("workflow already completed") } : {}),
         activeRuns: [active],
         listedRuns: [[], [workflowRun({ status: "completed", conclusion: "success" })]],
