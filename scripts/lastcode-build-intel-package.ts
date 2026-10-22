@@ -260,7 +260,7 @@ function removeRequestFile(requestToken: string): void {
 
 export function createBuildIntelDependencies(): BuildIntelDependencies {
   const repository = process.env.LASTCODE_GITHUB_REPOSITORY ?? DEFAULT_REPOSITORY;
-  const listWorkflowRuns = (status?: string) =>
+  const listWorkflowRuns = () =>
     runGhJson<ReadonlyArray<WorkflowRun>>([
       "run",
       "list",
@@ -272,7 +272,6 @@ export function createBuildIntelDependencies(): BuildIntelDependencies {
       "workflow_dispatch",
       "--limit",
       "100",
-      ...(status ? ["--status", status] : []),
       "--json",
       "databaseId,displayTitle,status,conclusion,url,headSha,createdAt",
     ]);
@@ -309,7 +308,7 @@ export function createBuildIntelDependencies(): BuildIntelDependencies {
       ]);
     },
     listWorkflowRuns,
-    listActiveWorkflowRuns: () => ["queued", "in_progress"].flatMap(listWorkflowRuns),
+    listActiveWorkflowRuns: () => listWorkflowRuns().filter((run) => run.status !== "completed"),
     workflowFilesAreCurrent: (headSha) => {
       const cached = workflowComparisons.get(headSha);
       if (cached !== undefined) return cached;
@@ -387,7 +386,7 @@ export function selectIntelBuild(
   let attached: { readonly run: WorkflowRun; readonly requestToken: string } | undefined;
   // Across machines, preserve newer tags and current workflows; same-tag duplicates queue and reuse complete releases.
   for (const run of dependencies.listActiveWorkflowRuns()) {
-    if (run.status !== "queued" && run.status !== "in_progress") continue;
+    if (run.status === "completed") continue;
     const existing = workflowRunTarget(run);
     if (!existing || compareLastCodeInstallableTags(existing.installable, installable) > 0)
       continue;

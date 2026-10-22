@@ -198,7 +198,11 @@ describe("lastcode-build-intel-package", () => {
     const newer = "lastcode/revision/v0.0.34-nightly.20260825.1185.10";
     for (const [runTag, current, status, decision] of [
       [tag, true, "in_progress", "attach"],
+      [tag, true, "requested", "attach"],
+      [tag, true, "waiting", "attach"],
+      [tag, true, "pending", "attach"],
       [tag, false, "queued", "cancel"],
+      [tag, false, "pending", "cancel"],
       [older, false, "in_progress", "cancel"],
       [older, true, "queued", "leave"],
       [newer, false, "in_progress", "leave"],
