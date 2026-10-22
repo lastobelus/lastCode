@@ -22,6 +22,7 @@ import { loadRepoEnv } from "../../scripts/lib/public-config";
 import { thirdPartyLicensesPlugin } from "../../scripts/lib/third-party-licenses";
 import { tailwindPlugins } from "./vite/tailwind";
 import { warmBundledDevPlugin } from "./vite/warmBundledDev";
+import { previewSettingsPlugin } from "./vite/previewSettings";
 import { createBuildOwnershipPlugin, resolveHostedWebAssetBrand } from "./vite/buildOwnership.ts";
 
 const repoEnv = loadRepoEnv();
@@ -196,6 +197,7 @@ export default defineConfig(({ command }) => {
     assetsInclude: ["**/*.wasm"],
     plugins: [
       devCompressionPlugin(),
+      previewSettingsPlugin(process.env.T3CODE_HOME),
       provenancePlugin,
       thirdPartyLicensesPlugin({
         bundleName: "web",

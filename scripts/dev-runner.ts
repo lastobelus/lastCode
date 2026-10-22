@@ -24,6 +24,7 @@ import { ChildProcess } from "effect/process";
 
 import { type DevShareError, shareDevServer, unshareDevServer } from "./lib/dev-share.ts";
 import { loadRepoEnv } from "./lib/public-config.ts";
+import { preparePreviewSettings } from "../apps/server/scripts/prepare-preview-settings.ts";
 
 Object.assign(process.env, loadRepoEnv());
 
@@ -663,6 +664,24 @@ export const runDevRunnerWithInput = Effect.fn("dev-runner.runDevRunnerWithInput
   // surprising side effect from a command documented as inert.
   if (input.dryRun) {
     return;
+  }
+
+  const settingsSource = hostEnvironment.T3CODE_PREVIEW_SETTINGS_SOURCE?.trim();
+  if (settingsSource) {
+    const browserProfile = hostEnvironment.T3CODE_PREVIEW_BROWSER_PROFILE?.trim();
+    if (!browserProfile) {
+      return yield* Effect.fail(
+        new Error("T3CODE_PREVIEW_BROWSER_PROFILE is required when copying preview settings."),
+      );
+    }
+    yield* Effect.tryPromise(() =>
+      preparePreviewSettings({
+        sourceStateDir: settingsSource,
+        sourceBrowserProfile: browserProfile,
+        sourceOrigin: hostEnvironment.T3CODE_PREVIEW_SETTINGS_ORIGIN ?? "lastcode://app",
+        targetHome: baseDir,
+      }),
+    );
   }
 
   const sharedWebPort = BASE_WEB_PORT + webOffset;
