@@ -16,7 +16,7 @@ import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environ
 import type { ReactNode } from "react";
 
 import "~/index.css";
-import { act, render as renderUi, type Screen } from "../../test/render";
+import { act, fakeTimers, render as renderUi, type Screen } from "../../test/render";
 import { describe, expect, it, vi } from "vite-plus/test";
 import type { previewBridge } from "~/components/preview/previewBridge";
 
@@ -92,7 +92,6 @@ import {
   ensureClientSettingsHydrated,
 } from "~/hooks/useSettings";
 import { useBrowserSurfaceStore } from "./browserSurfaceStore";
-import * as desktopTabLifetime from "./desktopTabLifetime";
 import { HostedBrowserWebview } from "./HostedBrowserWebview";
 import { ElectronBrowserHost } from "./ElectronBrowserHost";
 import { previewRuntimeTabId } from "./previewRuntimeTabId";
@@ -606,7 +605,7 @@ describe("Electron browser hosting outside the selected thread", () => {
       await oldRead.promise;
     });
     expect(mocks.createTab).toHaveBeenCalledOnce();
-    vi.useFakeTimers();
+    using _timers = fakeTimers();
     restarted = true;
     await act(() => {
       appAtomRegistry.set(
@@ -682,7 +681,7 @@ describe("Electron browser hosting outside the selected thread", () => {
     );
     expect(mocks.registerWebview).toHaveBeenCalledExactlyOnceWith(runtimeTabId, 43);
 
-    vi.useFakeTimers();
+    using _timers = fakeTimers();
     await act(() => {
       appAtomRegistry.set(previewList, AsyncResult.success(initialList, { waiting: true }));
     });
@@ -772,7 +771,7 @@ describe("Electron browser hosting outside the selected thread", () => {
     expect(mocks.createTab).toHaveBeenCalledTimes(3);
     expect(mocks.registerWebview).toHaveBeenCalledTimes(3);
 
-    vi.useFakeTimers();
+    using _timers = fakeTimers();
     await act(() => {
       appAtomRegistry.set(
         previewEventsFor(threadRef.environmentId),
@@ -837,12 +836,11 @@ describe("Electron browser hosting outside the selected thread", () => {
 });
 
 async function cleanup() {
-  vi.useFakeTimers();
+  using _timers = fakeTimers();
   await screen?.[Symbol.asyncDispose]();
   screen = undefined;
   container.remove();
   await vi.advanceTimersByTimeAsync(0);
-  vi.useRealTimers();
   __resetClientSettingsPersistenceForTests();
   useBrowserSurfaceStore.setState({ activityByTabId: {}, byTabId: {} });
   vi.restoreAllMocks();
@@ -898,5 +896,4 @@ describe("HostedBrowserWebview settings hydration", () => {
     });
     expect(browserPresentation).toHaveBeenLastCalledWith({ runtimeTabId, presented: false });
   });
-
 });

@@ -14,6 +14,10 @@ import {
   resolveProviderInstanceEnabled,
   ServerSettings,
   ServerSettingsPatch,
+  StorageCleanupReport,
+  DEFAULT_HANDOFFS_MENU_LIMIT,
+  MAX_HANDOFFS_MENU_LIMIT,
+  MIN_HANDOFFS_MENU_LIMIT,
 } from "./settings.ts";
 
 const decodeClientSettings = Schema.decodeUnknownSync(ClientSettingsSchema);
@@ -24,6 +28,125 @@ const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
 
+const encodeCleanupReport = Schema.encodeSync(StorageCleanupReport);
+const decodeCleanupReport = Schema.decodeUnknownSync(StorageCleanupReport);
+const previousReport = Schema.Struct({
+  trigger: Schema.Literals(["automatic", "manual"]),
+  startedAt: Schema.String,
+  finishedAt: Schema.String,
+  entries: Schema.Array(
+    Schema.Struct({
+      kind: Schema.Literals(["worktree", "browser-artifacts", "logs"]),
+      outcome: Schema.Literals(["removed", "kept", "failed"]),
+      reason: Schema.String,
+      path: Schema.NullOr(Schema.String),
+      threadId: Schema.NullOr(Schema.String),
+      threadTitle: Schema.NullOr(Schema.String),
+      bytes: Schema.NullOr(Schema.Number),
+      files: Schema.NullOr(Schema.Number),
+    }),
+  ),
+  counts: Schema.Struct({ removed: Schema.Number, kept: Schema.Number, failed: Schema.Number }),
+  omittedCount: Schema.Number,
+  bytesFreed: Schema.Number,
+});
+const decodePreviousCleanupReport = Schema.decodeUnknownSync(previousReport);
+
+describe("storage cleanup report wire format", () => {
+  it("keeps dependency outcomes decodable by clients predating dependency reports", () => {
+    // This is the report decoder shipped before dependency reporting. Unknown
+    // additive fields can be ignored, but a new kind would reject the whole report.
+    const report = {
+      trigger: "manual" as const,
+      startedAt: "2026-06-10T12:00:00.000Z",
+      finishedAt: "2026-06-10T12:00:01.000Z",
+      entries: [
+        {
+          kind: "worktree" as const,
+          worktreeResource: "dependencies" as const,
+          outcome: "removed" as const,
+          reason: "Dependency install removed",
+          path: "/managed-worktrees/example/node_modules",
+          projectPath: null,
+          threadId: null,
+          threadTitle: null,
+          bytes: 1024,
+          files: null,
+        },
+      ],
+      counts: { removed: 1, kept: 0, failed: 0 },
+      omittedCount: 0,
+      bytesFreed: 1024,
+    };
+    const wire = encodeCleanupReport(report);
+    expect(decodePreviousCleanupReport(wire).entries).toEqual([
+      expect.objectContaining({
+        kind: "worktree",
+        outcome: "removed",
+        reason: "Dependency install removed",
+        path: report.entries[0]!.path,
+      }),
+    ]);
+    expect(decodeCleanupReport(wire).entries[0]?.worktreeResource).toBe("dependencies");
+  });
+});
+
+describe("ServerSettings local CI limits", () => {
+  it("uses responsive defaults and fills omitted persisted limits", () => {
+    expect(decodeServerSettings({}).lastcodeLocalCi).toEqual({
+      quickCiMode: "auto",
+      maxConcurrentRuns: 1,
+      packageConcurrency: 1,
+      compilerThreads: 2,
+      backgroundPriority: true,
+    });
+    expect(
+      decodeServerSettings({ lastcodeLocalCi: { packageConcurrency: 3 } }).lastcodeLocalCi,
+    ).toEqual({ ...DEFAULT_SERVER_SETTINGS.lastcodeLocalCi, packageConcurrency: 3 });
+  });
+
+  it("preserves partial patches and round-trips the maximum limits", () => {
+    expect(decodeServerSettingsPatch({ lastcodeLocalCi: { compilerThreads: 4 } })).toEqual({
+      lastcodeLocalCi: { compilerThreads: 4 },
+    });
+    const input = {
+      lastcodeLocalCi: {
+        maxConcurrentRuns: 4,
+        packageConcurrency: 8,
+        compilerThreads: 16,
+        backgroundPriority: false,
+      },
+    };
+    expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
+    expect(decodeServerSettingsPatch(input)).toEqual(input);
+  });
+
+  it.each(["auto", "local", "github"])(
+    "round-trips Quick CI mode %s without filling partial writes",
+    (quickCiMode) => {
+      const input = { lastcodeLocalCi: { quickCiMode } };
+      expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
+      expect(decodeServerSettingsPatch(input)).toEqual(input);
+    },
+  );
+
+  it.each([
+    ["maxConcurrentRuns", 0],
+    ["maxConcurrentRuns", 5],
+    ["packageConcurrency", 0],
+    ["packageConcurrency", 9],
+    ["compilerThreads", 0],
+    ["compilerThreads", 17],
+    ["compilerThreads", 1.5],
+    ["backgroundPriority", "true"],
+    ["quickCiMode", "unsupported"],
+  ])("rejects invalid %s: %s", (key, value) => {
+    const input = { lastcodeLocalCi: { [key]: value } };
+    expect(() => decodeServerSettings(input)).toThrow();
+    expect(() => decodeServerSettingsPatch(input)).toThrow();
+  });
+});
+
 describe("storage cleanup settings", () => {
   it("keeps cleanup disabled for existing installations", () => {
     expect(decodeServerSettings({}).worktreeCleanup).toBeNull();
@@ -32,11 +155,31 @@ describe("storage cleanup settings", () => {
       worktreeSettledAfterDays: null,
       worktreeOnMerge: false,
       worktreeOnDelete: false,
+      worktreeDependenciesAfterDays: null,
       worktreeUnchanged: false,
       worktreeKeepWhen: "uncommitted-changes",
       browserArtifactsAfterDays: null,
       logsAfterDays: null,
     });
+  });
+
+  it("accepts dependency retention and keeps it off in saved older custom rules", () => {
+    expect(
+      decodeServerSettingsPatch({ storageCleanup: { worktreeDependenciesAfterDays: 14 } }),
+    ).toEqual({ storageCleanup: { worktreeDependenciesAfterDays: 14 } });
+    expect(
+      decodeServerSettings({
+        worktreeCleanup: {
+          mode: "custom",
+          rules: {
+            worktreeAfterDays: null,
+            worktreeOnMerge: false,
+            worktreeOnDelete: false,
+            worktreeUnchanged: false,
+          },
+        },
+      }).worktreeCleanup,
+    ).toMatchObject({ mode: "custom", rules: { worktreeDependenciesAfterDays: null } });
   });
 
   it("accepts partial custom patches but requires complete stored project rules", () => {
@@ -98,6 +241,25 @@ describe("storage cleanup settings", () => {
   });
 });
 
+describe("handoffs menu setting", () => {
+  it("defaults to seven and accepts the inclusive bounds", () => {
+    expect(decodeClientSettings({}).handoffsMenuLimit).toBe(DEFAULT_HANDOFFS_MENU_LIMIT);
+    expect(
+      decodeClientSettings({ handoffsMenuLimit: MIN_HANDOFFS_MENU_LIMIT }).handoffsMenuLimit,
+    ).toBe(1);
+    expect(
+      decodeClientSettings({ handoffsMenuLimit: MAX_HANDOFFS_MENU_LIMIT }).handoffsMenuLimit,
+    ).toBe(50);
+    expect(decodeClientSettingsPatch({ handoffsMenuLimit: 12 }).handoffsMenuLimit).toBe(12);
+  });
+
+  it("rejects non-integers and values outside the bounds", () => {
+    for (const value of [0, 51, 1.5, "7"]) {
+      expect(() => decodeClientSettings({ handoffsMenuLimit: value })).toThrow();
+      expect(() => decodeClientSettingsPatch({ handoffsMenuLimit: value })).toThrow();
+    }
+  });
+});
 describe("ServerSettings usage price overrides", () => {
   const prices = { inputCostPerMillionTokens: 2, outputCostPerMillionTokens: 8 };
 
@@ -339,4 +501,239 @@ describe("server model preferences", () => {
     expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
     expect(decodeServerSettingsPatch(input)).toEqual(input);
   });
+});
+
+describe("ClientSettings environment icons", () => {
+  it("defaults to semantic colors with the local icon hidden", () => {
+    const settings = decodeClientSettings({});
+    expect(settings.environmentIconColors).toEqual({});
+    expect(settings.showLocalEnvironmentIcon).toBe(false);
+  });
+
+  it("accepts per-environment hex colors and the local icon opt-in", () => {
+    const input = {
+      environmentIconColors: { primary: "#2563eb", remote: "#7C3AED" },
+      showLocalEnvironmentIcon: true,
+    };
+    expect(decodeClientSettings(input)).toMatchObject(input);
+    expect(decodeClientSettingsPatch(input)).toEqual(input);
+  });
+
+  it.each(["blue", "#123", "#12345678", "#gg0000"])(
+    "rejects an invalid environment icon color: %s",
+    (color) => {
+      expect(() => decodeClientSettings({ environmentIconColors: { primary: color } })).toThrow();
+      expect(() =>
+        decodeClientSettingsPatch({ environmentIconColors: { primary: color } }),
+      ).toThrow();
+    },
+  );
+});
+
+describe("ClientSettings thread provider badges", () => {
+  it("enables opaque provider badges at 80% for existing client settings", () => {
+    const settings = decodeClientSettings({ showLocalEnvironmentIcon: false });
+    expect(settings.showThreadProviderBadge).toBe(true);
+    expect(settings.threadProviderBadgeSize).toBe(80);
+    expect(settings.threadProviderBadgeTransparency).toBe(0);
+  });
+
+  it("keeps omitted badge preferences out of partial updates", () => {
+    const patch = decodeClientSettingsPatch({ showLocalEnvironmentIcon: true });
+    expect(patch).not.toHaveProperty("showThreadProviderBadge");
+    expect(patch).not.toHaveProperty("threadProviderBadgeSize");
+    expect(patch).not.toHaveProperty("threadProviderBadgeTransparency");
+  });
+
+  it("persists badge appearance while badges are disabled", () => {
+    const input = {
+      showThreadProviderBadge: false,
+      threadProviderBadgeSize: 65,
+      threadProviderBadgeTransparency: 30,
+    };
+    expect(decodeClientSettings(input)).toMatchObject(input);
+    expect(decodeClientSettingsPatch(input)).toEqual(input);
+  });
+
+  it.each([
+    ["threadProviderBadgeSize", 10, 100],
+    ["threadProviderBadgeTransparency", 0, 100],
+  ] as const)("validates percentage bounds for %s", (key, minimum, maximum) => {
+    for (const value of [minimum, maximum]) {
+      expect(decodeClientSettings({ [key]: value })[key]).toBe(value);
+      expect(decodeClientSettingsPatch({ [key]: value })).toEqual({ [key]: value });
+    }
+    for (const value of [minimum - 1, maximum + 1, minimum + 0.5, "50", null]) {
+      expect(() => decodeClientSettings({ [key]: value })).toThrow();
+      expect(() => decodeClientSettingsPatch({ [key]: value })).toThrow();
+    }
+  });
+
+  it.each(["yes", 1, null])("rejects a non-boolean badge toggle: %s", (value) => {
+    expect(() => decodeClientSettings({ showThreadProviderBadge: value })).toThrow();
+    expect(() => decodeClientSettingsPatch({ showThreadProviderBadge: value })).toThrow();
+  });
+});
+
+describe("ClientSettings project icons", () => {
+  it("defaults to unrounded icons and preserves an explicit opt-in", () => {
+    expect(decodeClientSettings({}).roundedProjectIcons).toBe(false);
+    expect(decodeClientSettings({ roundedProjectIcons: true }).roundedProjectIcons).toBe(true);
+    expect(decodeClientSettingsPatch({ roundedProjectIcons: true }).roundedProjectIcons).toBe(true);
+  });
+});
+
+describe("ClientSettings LastCode sidebar preferences", () => {
+  it("defaults to the current sidebar", () => {
+    const settings = decodeClientSettings({});
+    expect(settings.compactLegacySidebarStatuses).toBe(false);
+    expect(settings.showThreadWorktreeIndicators).toBe(true);
+    expect(settings.legacySidebarScale).toBe(100);
+    expect(settings.legacySidebarThreadGroupingStyle).toBe("minimal");
+    expect(settings.legacySidebarEnabled).toBe(false);
+    expect(settings.lastcodeSidebarEnabled).toBe(false);
+  });
+
+  it("preserves an explicit thread grouping choice", () => {
+    expect(
+      decodeClientSettings({ legacySidebarThreadGroupingStyle: "typed-groups" })
+        .legacySidebarThreadGroupingStyle,
+    ).toBe("typed-groups");
+    expect(
+      decodeClientSettings({ legacySidebarThreadGroupingStyle: "minimal" })
+        .legacySidebarThreadGroupingStyle,
+    ).toBe("minimal");
+  });
+
+  it.each([false, true])(
+    "decodes the independent LastCode choice with legacy=%s",
+    (legacySidebarEnabled) => {
+      const input = { lastcodeSidebarEnabled: true, legacySidebarEnabled, legacySidebarScale: 75 };
+      expect(decodeClientSettings(input)).toMatchObject(input);
+      expect(decodeClientSettingsPatch(input)).toEqual(input);
+      expect(decodeClientSettings({ legacySidebarEnabled }).lastcodeSidebarEnabled).toBe(false);
+    },
+  );
+
+  it.each(["yes", 1, null])(
+    "rejects an invalid LastCode sidebar choice: %s",
+    (lastcodeSidebarEnabled) => {
+      expect(() => decodeClientSettings({ lastcodeSidebarEnabled })).toThrow();
+      expect(() => decodeClientSettingsPatch({ lastcodeSidebarEnabled })).toThrow();
+    },
+  );
+
+  it("defaults family status subheaders on and preserves an explicit opt-out", () => {
+    expect(decodeClientSettings({}).lastcodeSidebarFamilyStatusSubheaders).toBe(true);
+    expect(
+      decodeClientSettings({ legacySidebarEnabled: true }).lastcodeSidebarFamilyStatusSubheaders,
+    ).toBe(true);
+    expect(
+      decodeClientSettings({ lastcodeSidebarFamilyStatusSubheaders: false })
+        .lastcodeSidebarFamilyStatusSubheaders,
+    ).toBe(false);
+    expect(decodeClientSettingsPatch({ lastcodeSidebarFamilyStatusSubheaders: false })).toEqual({
+      lastcodeSidebarFamilyStatusSubheaders: false,
+    });
+    expect(() =>
+      decodeClientSettingsPatch({ lastcodeSidebarFamilyStatusSubheaders: "false" }),
+    ).toThrow();
+  });
+
+  it("preserves compact legacy sidebar status indicators", () => {
+    expect(
+      decodeClientSettings({ compactLegacySidebarStatuses: true }).compactLegacySidebarStatuses,
+    ).toBe(true);
+    expect(
+      decodeClientSettingsPatch({ compactLegacySidebarStatuses: true })
+        .compactLegacySidebarStatuses,
+    ).toBe(true);
+  });
+
+  it("preserves an explicit worktree indicator preference", () => {
+    expect(
+      decodeClientSettings({ showThreadWorktreeIndicators: false }).showThreadWorktreeIndicators,
+    ).toBe(false);
+    expect(
+      decodeClientSettingsPatch({ showThreadWorktreeIndicators: false })
+        .showThreadWorktreeIndicators,
+    ).toBe(false);
+  });
+
+  it.each([50, 75, 100])("accepts a legacy sidebar scale within 50..100: %s", (value) => {
+    expect(decodeClientSettings({ legacySidebarScale: value }).legacySidebarScale).toBe(value);
+    expect(decodeClientSettingsPatch({ legacySidebarScale: value }).legacySidebarScale).toBe(value);
+  });
+
+  it.each([49, 101, 74.5])("rejects an invalid legacy sidebar scale: %s", (value) => {
+    expect(() => decodeClientSettings({ legacySidebarScale: value })).toThrow();
+    expect(() => decodeClientSettingsPatch({ legacySidebarScale: value })).toThrow();
+  });
+});
+
+describe("ClientSettings incoming message appearance", () => {
+  it("uses neutral theme fill when existing settings have no appearance choice", () => {
+    expect(decodeClientSettings({ timestampFormat: "12-hour" })).toMatchObject({
+      incomingMessageStyle: "neutral",
+      incomingMessageFillColor: null,
+      timestampFormat: "12-hour",
+    });
+    expect(decodeClientSettingsPatch({})).not.toHaveProperty("incomingMessageStyle");
+    expect(decodeClientSettingsPatch({})).not.toHaveProperty("incomingMessageFillColor");
+  });
+
+  it.each(["neutral", "outline"])("round-trips the %s style with a saved fill", (style) => {
+    const preference = { incomingMessageStyle: style, incomingMessageFillColor: "#a1B2c3" };
+    expect(encodeClientSettings(decodeClientSettings(preference))).toMatchObject(preference);
+    expect(decodeClientSettingsPatch(preference)).toEqual(preference);
+  });
+
+  it("accepts an explicit reset to automatic theme fill", () => {
+    expect(decodeClientSettingsPatch({ incomingMessageFillColor: null })).toEqual({
+      incomingMessageFillColor: null,
+    });
+    expect(
+      encodeClientSettings(decodeClientSettings({ incomingMessageFillColor: null }))
+        .incomingMessageFillColor,
+    ).toBeNull();
+  });
+
+  it("rejects unsupported styles", () => {
+    expect(() => decodeClientSettings({ incomingMessageStyle: "filled" })).toThrow();
+    expect(() => decodeClientSettingsPatch({ incomingMessageStyle: "filled" })).toThrow();
+  });
+
+  it.each(["", "red", "#abc", "#aabbccdd", "#gggggg", "rgb(0,0,0)"])(
+    "rejects invalid fill color %s",
+    (incomingMessageFillColor) => {
+      expect(() => decodeClientSettings({ incomingMessageFillColor })).toThrow();
+      expect(() => decodeClientSettingsPatch({ incomingMessageFillColor })).toThrow();
+    },
+  );
+});
+
+describe("ClientSettings larger scrollbars", () => {
+  it("is opt-in with defaults that clear the pane resize target", () => {
+    const settings = decodeClientSettings({});
+
+    expect(settings.largerScrollbarsEnabled).toBe(false);
+    expect(settings.scrollbarWidth).toBe(10);
+    expect(settings.scrollbarMargin).toBe(4);
+  });
+
+  it.each([
+    ["scrollbarWidth", 1, 12],
+    ["scrollbarMargin", 0, 6],
+  ] as const)("accepts the inclusive %s range", (key, minimum, maximum) => {
+    expect(decodeClientSettingsPatch({ [key]: minimum })).toEqual({ [key]: minimum });
+    expect(decodeClientSettingsPatch({ [key]: maximum })).toEqual({ [key]: maximum });
+    expect(() => decodeClientSettingsPatch({ [key]: minimum - 1 })).toThrow();
+    expect(() => decodeClientSettingsPatch({ [key]: maximum + 1 })).toThrow();
+  });
+});
+
+it.each([-1, 1.5, 3651])("rejects invalid dependency retention %s", (days) => {
+  expect(() =>
+    decodeServerSettingsPatch({ storageCleanup: { worktreeDependenciesAfterDays: days } }),
+  ).toThrow();
 });

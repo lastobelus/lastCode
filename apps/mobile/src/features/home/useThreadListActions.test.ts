@@ -461,7 +461,7 @@ describe("thread action undo", () => {
 });
 
 describe("thread archive guard", () => {
-  it("keeps active provider runs out of the archive", async () => {
+  it("keeps active provider runs out of the archive without stop consent", async () => {
     const thread = makeThread({
       runtime: {
         status: "running",
@@ -472,9 +472,22 @@ describe("thread archive guard", () => {
         updatedAt: "2026-09-02T00:00:00.000Z",
       },
     });
+    state.archiveFamily = makeArchiveDecision([thread], [], {
+      activeThreadIds: [thread.id],
+      activeThreads: [thread],
+      requiresConfirmation: true,
+    });
+    state.afterAlert = () => {
+      expect(state.requests).toEqual([]);
+      expect(state.alerts.at(-1)?.buttons?.map(({ text }) => text)).toEqual([
+        "Cancel",
+        "Stop active threads & archive",
+      ]);
+      state.alerts.at(-1)!.buttons![0]!.onPress!();
+    };
     expect(await useThreadListActions().archiveThread(thread)).toBe(false);
     expect(state.requests).toEqual([]);
     expect(state.archivedRefreshes).toEqual([]);
-    expect(state.alerts.at(-1)?.title).toBe("Could not archive thread");
+    expect(state.alerts.at(-1)?.title).toBe('Archive "Thread"?');
   });
 });
