@@ -8,9 +8,10 @@ import * as NodePath from "node:path";
 
 import {
   parseManifestReplayConfiguration,
+  validateHistoricalBootstrapSourceTag,
   type CarryBootstrap,
 } from "./lastcode-carry-checkpoint.ts";
-import { cleanGitEnvironment } from "./lastcode-nightly.ts";
+import { cleanGitEnvironment, parseLastCodeInstallableTag } from "./lastcode-nightly.ts";
 
 import {
   carrySquashBody,
@@ -168,12 +169,29 @@ function compilePullRequest(
     throw new Error("No compact carry chain or prepared bootstrap is available at the PR base.");
   }
   if (bootstrap) fetchBootstrapObjects(repoRoot, bootstrap);
+  let representedSource: string | undefined;
+  if (!compact && bootstrap?.sourceTag) {
+    const tagRef = `refs/tags/${bootstrap.sourceTag}`;
+    const commit = parseLastCodeInstallableTag(bootstrap.sourceTag)
+      ? git(repoRoot, ["rev-list", "-n", "1", tagRef], { allowFailure: true })
+      : undefined;
+    representedSource = validateHistoricalBootstrapSourceTag(
+      bootstrap,
+      commit
+        ? {
+            commit,
+            annotated: git(repoRoot, ["cat-file", "-t", tagRef]) === "tag",
+            message: git(repoRoot, ["for-each-ref", tagRef, "--format=%(contents)"])!,
+          }
+        : undefined,
+    );
+  }
   // A topic base can end in unsquashed parent contributions. Model the whole
   // unpublished tail together, while retaining the child's actual delivery range.
   const compilationSource = includeTopicBase(
     repoRoot,
     source,
-    compact?.head ?? bootstrap!.representedSource ?? bootstrap!.source,
+    compact?.head ?? representedSource ?? bootstrap!.source,
   );
   const temporaryRoot = NodeFS.mkdtempSync(
     NodePath.join(NodeOS.tmpdir(), "lastcode-carry-admission-"),
@@ -226,9 +244,7 @@ function compilePullRequest(
         ? { previousCompactHead: compact.head }
         : {
             preparedPartition: bootstrap!,
-            ...(bootstrap!.representedSource
-              ? { representedSource: bootstrap!.representedSource }
-              : {}),
+            ...(representedSource ? { representedSource } : {}),
           }),
     });
     const compiledTree = git(isolated, ["rev-parse", `${result.head}^{tree}`])!;

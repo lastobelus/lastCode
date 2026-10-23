@@ -476,6 +476,98 @@ describe("LastCode carry CI", () => {
     }
   });
 
+  it.each([
+    { state: "matching", error: undefined },
+    { state: "missing", error: "not an available installable" },
+    { state: "lightweight", error: "must be annotated" },
+    { state: "wrong target", error: "resolves to" },
+    { state: "wrong source", error: "records Source-Commit" },
+    { state: "wrong upstream", error: "records Upstream-Commit" },
+  ])("validates $state historical bootstrap tag identity before activation", ({ state, error }) => {
+    const { repo, cleanup } = fixture();
+    try {
+      manifest(repo);
+      write(repo, "base.txt", "old upstream\n");
+      const oldUpstream = commit(repo, "old upstream");
+      write(repo, "base.txt", "new upstream\n");
+      write(repo, "tooling.txt", "tooling\n");
+      const representedSource = commit(repo, "historical fork source");
+      git(repo, ["checkout", "--quiet", "--detach", oldUpstream]);
+      write(repo, "base.txt", "new upstream\n");
+      const upstream = commit(repo, "new upstream");
+      write(repo, "tooling.txt", "tooling\n");
+      const partition = commit(repo, "prepared contribution", "Carry-Group: tooling");
+      expect(git(repo, ["rev-parse", `${partition}^{tree}`])).toBe(
+        git(repo, ["rev-parse", `${representedSource}^{tree}`]),
+      );
+      expect(git(repo, ["merge-base", upstream, representedSource])).toBe(oldUpstream);
+      const sourceTag = "lastcode/checkpoint/v0.1.0-nightly.20990102.1";
+      if (state === "lightweight") {
+        git(repo, ["tag", sourceTag, partition]);
+      } else if (state !== "missing") {
+        git(repo, [
+          "tag",
+          "--annotate",
+          sourceTag,
+          state === "wrong target" ? upstream : partition,
+          "--message",
+          `Source-Commit: ${state === "wrong source" ? oldUpstream : representedSource}\nUpstream-Commit: ${state === "wrong upstream" ? oldUpstream : upstream}`,
+        ]);
+      }
+      git(repo, ["checkout", "--quiet", "--detach", representedSource]);
+      write(
+        repo,
+        "scripts/lastcode-carry-set.json",
+        JSON.stringify({
+          replay: {
+            mode: "carry",
+            bootstrap: {
+              base: upstream,
+              source: partition,
+              head: partition,
+              representedSource,
+              sourceTag,
+            },
+          },
+        }),
+      );
+      const head = commit(repo, "activate historical bootstrap", "Carry-Group: tooling");
+      const tree = git(repo, ["rev-parse", `${head}^{tree}`]);
+      write(repo, "tooling.txt", "staged work\n");
+      git(repo, ["add", "tooling.txt"]);
+      write(repo, "tooling.txt", "unstaged work\n");
+      write(repo, "untracked.txt", "untracked work\n");
+      const before = snapshot(repo);
+      const index = NodeFS.readFileSync(NodePath.join(repo, ".git/index"));
+      const config = NodeFS.readFileSync(NodePath.join(repo, ".git/config"));
+      const validate = () =>
+        validateCarryPullRequest(repo, { base: representedSource, head, number: 219 });
+      try {
+        if (error === undefined) {
+          expect(validate().compilation).toEqual({
+            upstream,
+            sourceTree: tree,
+            compiledTree: tree,
+          });
+        } else {
+          expect(validate).toThrow(error);
+        }
+      } finally {
+        expect(snapshot(repo)).toEqual(before);
+        expect(NodeFS.readFileSync(NodePath.join(repo, ".git/index"))).toEqual(index);
+        expect(NodeFS.readFileSync(NodePath.join(repo, ".git/config"))).toEqual(config);
+        expect(NodeFS.readFileSync(NodePath.join(repo, "tooling.txt"), "utf8")).toBe(
+          "unstaged work\n",
+        );
+        expect(NodeFS.readFileSync(NodePath.join(repo, "untracked.txt"), "utf8")).toBe(
+          "untracked work\n",
+        );
+      }
+    } finally {
+      cleanup();
+    }
+  });
+
   it("rejects a clean bootstrap compilation whose tree differs from the proposed source", () => {
     const { repo, cleanup } = fixture();
     try {
@@ -503,6 +595,14 @@ describe("LastCode carry CI", () => {
           },
         }),
       );
+      git(repo, [
+        "tag",
+        "--annotate",
+        "lastcode/checkpoint/v0.1.0-nightly.20261022.1",
+        partition,
+        "--message",
+        `Source-Commit: ${base}\nUpstream-Commit: ${upstream}`,
+      ]);
       const head = commit(repo, "activate mismatched partition", "Carry-Group: tooling");
       const before = snapshot(repo);
       expect(() => validateCarryPullRequest(repo, { base, head, number: 211 })).toThrow(
