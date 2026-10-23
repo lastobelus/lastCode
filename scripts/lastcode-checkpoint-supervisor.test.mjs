@@ -880,7 +880,7 @@ describe("LastCode checkpoint supervisor", () => {
     expect(execute.mock.calls.some(([, , , args]) => args[0] === "fetch")).toBe(false);
   });
 
-  it("records a blocked primary checkout refresh as a checkpoint service failure", () => {
+  it("keeps checkpoint success when the primary checkout refresh fails", () => {
     const test = fixture({
       dependencies: {
         refreshPrimaryCheckout: () => {
@@ -889,17 +889,21 @@ describe("LastCode checkpoint supervisor", () => {
       },
     });
 
-    expect(() => runCheckpointSupervisor({}, test.dependencies)).toThrow(
-      "primary checkout has uncommitted changes",
-    );
-    expect(test.state).toMatchObject({
-      status: "failed",
-      phase: "checkout-refresh",
-      incident: { failure: { phase: "checkout-refresh" } },
+    expect(runCheckpointSupervisor({}, test.dependencies)).toMatchObject({
+      status: "success",
+      phase: "complete",
+      maintenanceWarning: {
+        phase: "checkout-refresh",
+        error: "primary checkout has uncommitted changes",
+      },
     });
+    expect(test.state.lastSuccessAt).toBe(test.state.finishedAt);
+    expect(test.state.incident).toBeUndefined();
+    expect(test.messages).toEqual([]);
+    expect(test.dependencies.reconcileProjectActions).not.toHaveBeenCalled();
   });
 
-  it("records Project Action reconciliation failure after a successful checkout refresh", () => {
+  it("keeps checkpoint success when Project Action reconciliation fails", () => {
     const test = fixture({
       dependencies: {
         refreshPrimaryCheckout: () => "/srv/example/lastCode",
@@ -909,14 +913,88 @@ describe("LastCode checkpoint supervisor", () => {
       },
     });
 
-    expect(() => runCheckpointSupervisor({}, test.dependencies)).toThrow(
-      "Project Action reconciliation failed",
-    );
-    expect(test.state).toMatchObject({
-      status: "failed",
-      phase: "project-actions",
-      incident: { failure: { phase: "project-actions" } },
+    expect(runCheckpointSupervisor({}, test.dependencies)).toMatchObject({
+      status: "success",
+      phase: "complete",
+      maintenanceWarning: {
+        phase: "project-actions",
+        error: "Project Action reconciliation failed",
+      },
     });
+    expect(test.state.lastSuccessAt).toBe(test.state.finishedAt);
+    expect(test.messages).toEqual([]);
+  });
+
+  it("resolves the previous incident even when post-checkpoint dependencies fail", () => {
+    const failed = fixture({
+      dependencies: {
+        runPhase: () => {
+          throw new Error("dependency installation failed");
+        },
+      },
+    });
+    expect(() => runCheckpointSupervisor({}, failed.dependencies)).toThrow(
+      "dependency installation failed",
+    );
+    const recovered = fixture({
+      state: failed.state,
+      dependencies: {
+        refreshPrimaryCheckout: () => {
+          throw new Error("dependency refresh failed");
+        },
+      },
+    });
+
+    runCheckpointSupervisor({}, recovered.dependencies);
+
+    expect(recovered.state).toMatchObject({
+      status: "success",
+      lastSuccessAt: recovered.state.finishedAt,
+      incident: {
+        fingerprint: failed.state.incident.fingerprint,
+        resolvedAt: recovered.state.finishedAt,
+        resolutionDelivery: "sent",
+      },
+      maintenanceWarning: { phase: "checkout-refresh", error: "dependency refresh failed" },
+    });
+    expect(recovered.states.every((state) => state.status === "success")).toBe(true);
+    expect(recovered.messages).toHaveLength(1);
+    expect(recovered.messages[0].message).toContain("completed successfully again");
+  });
+
+  it("clears the maintenance warning after a clean follow-up run", () => {
+    const test = fixture({
+      state: {
+        status: "success",
+        maintenanceWarning: { phase: "checkout-dependencies", error: "dependency refresh failed" },
+      },
+    });
+
+    runCheckpointSupervisor({}, test.dependencies);
+
+    expect(test.state.status).toBe("success");
+    expect(test.state.maintenanceWarning).toBeUndefined();
+    expect(test.messages).toEqual([]);
+  });
+
+  it("still fails an installation before the checkpoint command runs", () => {
+    const test = fixture({
+      dependencies: {
+        runPhase: vi.fn((phase) => {
+          if (phase === "dependencies") throw new Error("dependency installation failed");
+        }),
+      },
+    });
+
+    expect(() => runCheckpointSupervisor({}, test.dependencies)).toThrow(
+      "dependency installation failed",
+    );
+    expect(test.state).toMatchObject({ status: "failed", phase: "dependencies" });
+    expect(test.state.lastSuccessAt).toBeUndefined();
+    expect(test.dependencies.runPhase.mock.calls.some(([phase]) => phase === "checkpoint")).toBe(
+      false,
+    );
+    expect(test.dependencies.refreshPrimaryCheckout).not.toHaveBeenCalled();
   });
 
   it("persists a new checkpoint blocker before alerting one maintenance thread", () => {
