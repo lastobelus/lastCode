@@ -120,6 +120,7 @@ fi
 if [ -n "$FIXTURE_UNPUBLISHED_TAG" ] && git show-ref --verify --quiet "refs/tags/$FIXTURE_UNPUBLISHED_TAG"; then echo 'candidate tag was published before validation'; exit 74; fi
 if [ -n "$FIXTURE_CI_EVENTS" ]; then printf 'vp %s\\n' "$*" >> "$FIXTURE_CI_EVENTS"; fi
 if [ "$1" = check ] && [ -f "$FIXTURE_CI_FAILURES/lint" ]; then echo 'fixture lint failure'; exit 71; fi
+if [ "$1" = run ] && [ "$2" = -r ] && [ "$5" = typecheck ] && [ -f "$FIXTURE_CI_FAILURES/typecheck" ]; then echo 'fixture smoke typecheck failure'; exit 72; fi
 if [ "$1" = run ] && [ "$2" = --filter ] && [ "$3" = @fixture/early ] && [ "$7" = typecheck ] && [ -f "$FIXTURE_CI_FAILURES/typecheck" ]; then echo 'fixture early typecheck failure'; exit 72; fi
 if [ "$1" = run ] && [ "$2" = --filter ] && [ "$3" = @fixture/later ] && [ "$7" = test ] && [ -f "$FIXTURE_CI_FAILURES/test" ]; then echo 'fixture later test failure'; exit 73; fi
 if [ "$1" = run ] && [ "$2" = build:desktop ]; then
@@ -759,18 +760,23 @@ function candidateReports(commonGitDir: string): CandidateReport[] {
 }
 
 describe("complete checkpoint candidate validation", () => {
-  it.each(["smoke checks", "dependency installation"] as const)(
+  it.each(["lint", "smoke checks", "dependency installation"] as const)(
     "retains an initial checkpoint after failed %s and collects only ordinary check failures",
     (failure) => {
       const { fixture, source, environment } = historicalFixture();
       try {
         const failures = NodePath.join(fixture.root, "ci-failures");
-        const checks = failure === "smoke checks" ? ["lint", "typecheck", "test"] : ["install"];
+        const events = NodePath.join(fixture.root, "ci-events");
+        const checks =
+          failure === "smoke checks"
+            ? ["typecheck", "test"]
+            : [failure === "lint" ? "lint" : "install"];
         for (const check of checks) write(failures, check, "fail\n");
         const tag = `lastcode/checkpoint/${NIGHTLY_B}`;
         const result = checkpoint(fixture, ["--push-tags", "--promote"], {
           ...environment,
           FIXTURE_CI_FAILURES: failures,
+          FIXTURE_CI_EVENTS: events,
           FIXTURE_UNPUBLISHED_TAG: tag,
         });
         assert.notEqual(result.status, 0);
@@ -789,11 +795,7 @@ describe("complete checkpoint candidate validation", () => {
           assert.equal(report.context.sourceCommit, source);
           assert.deepStrictEqual(
             report.steps.filter((step) => step.status === "failed").map((step) => step.label),
-            [
-              "Format and lint",
-              "Workspace typecheck (@fixture/early)",
-              "Workspace tests (@fixture/later)",
-            ],
+            ["Workspace typecheck (@fixture/early)", "Workspace tests (@fixture/later)"],
           );
           assert.equal(
             report.steps.every((step) => ["passed", "failed"].includes(step.status)),
@@ -803,9 +805,15 @@ describe("complete checkpoint candidate validation", () => {
             report.steps.find((step) => step.label === "Release smoke")?.status,
             "passed",
           );
-        } else {
+        } else if (failure === "dependency installation") {
           assert.include(result.stderr, "install --frozen-lockfile");
           assert.equal(reports.length, 0, result.stdout);
+        } else {
+          assert.include(result.stdout, "fixture lint failure");
+          assert.equal(reports.length, 0, result.stdout);
+          const leafEvents = NodeFS.readFileSync(events, "utf8").trim().split("\n");
+          assert.equal(leafEvents.at(-1), "vp check");
+          assert.equal(leafEvents.filter((event) => event === "vp check").length, 1);
         }
         const retained = recoveryWorktree(fixture.repo);
         assert.equal(NodeFS.existsSync(retained), true);
@@ -884,7 +892,6 @@ describe("complete checkpoint candidate validation", () => {
         const upstreamCommit = git(repo, ["rev-parse", `${NIGHTLY_B}^{commit}`]);
         const failures = NodePath.join(fixture.root, "ci-failures");
         const events = NodePath.join(fixture.root, "ci-events");
-        for (const check of ["lint", "typecheck", "test"]) write(failures, check, "fail\n");
         const reportCount = candidateReports(commonGitDir).length;
         const ciEnvironment = {
           ...environment,
@@ -892,6 +899,20 @@ describe("complete checkpoint candidate validation", () => {
           FIXTURE_CI_EVENTS: events,
           FIXTURE_UNPUBLISHED_TAG: tag,
         };
+        if (mode !== "revision") {
+          write(failures, "lint", "fail\n");
+          const lintFailed = checkpoint(fixture, ["--push-tags", "--promote"], ciEnvironment);
+          assert.notEqual(lintFailed.status, 0);
+          assert.include(lintFailed.stdout, "fixture lint failure");
+          assert.equal(candidateReports(commonGitDir).length, reportCount, lintFailed.stdout);
+          assert.equal(NodeFS.readFileSync(events, "utf8").trim().split("\n").at(-1), "vp check");
+          assert.equal(remoteMissing(fixture.origin, `refs/tags/${tag}`), true);
+          assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), recordedSource);
+          if (selection !== undefined)
+            assert.equal(NodeFS.readFileSync(selectionPath, "utf8"), selection);
+          NodeFS.rmSync(NodePath.join(failures, "lint"));
+        }
+        for (const check of ["typecheck", "test"]) write(failures, check, "fail\n");
         const failed = checkpoint(fixture, ["--push-tags", "--promote"], ciEnvironment);
         assert.notEqual(failed.status, 0);
         const reports = candidateReports(commonGitDir);
@@ -907,11 +928,7 @@ describe("complete checkpoint candidate validation", () => {
         assert.equal(report!.context.upstreamCommit, upstreamCommit);
         assert.deepStrictEqual(
           report!.steps.filter((step) => step.status === "failed").map((step) => step.label),
-          [
-            "Format and lint",
-            "Workspace typecheck (@fixture/early)",
-            "Workspace tests (@fixture/later)",
-          ],
+          ["Workspace typecheck (@fixture/early)", "Workspace tests (@fixture/later)"],
         );
         assert.equal(
           report!.steps.every((step) => ["passed", "failed"].includes(step.status)),

@@ -1556,6 +1556,7 @@ function prepareCheckpointValidation(repoRoot: string, worktree: string): void {
   run(worktree, vp.bootstrap, ["install", "--frozen-lockfile"], { environment });
   migrationDependenciesInstalled(worktree);
   assertForkInvariants(worktree);
+  run(worktree, vp.isolated, checkpointSmokeFormatAndLintCommand(), { environment });
 }
 
 function runFullCandidateValidation(
@@ -1599,7 +1600,6 @@ function runSmokeGate(repoRoot: string, worktree: string, candidate: CheckpointC
   const vp = checkpointVpPaths(repoRoot, worktree);
   const environment = checkpointSmokeEnvironment(worktree);
   try {
-    run(worktree, vp.isolated, checkpointSmokeFormatAndLintCommand(), { environment });
     run(
       worktree,
       vp.isolated,
