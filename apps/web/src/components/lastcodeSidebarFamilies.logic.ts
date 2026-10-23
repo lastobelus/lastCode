@@ -63,6 +63,14 @@ export function lastcodeSidebarSubagentStatusLabel(
   return RUN_STATUS_LABELS.get(thread.latestRun?.status ?? "") ?? "Idle";
 }
 
+// The parent agent decides whether a failed subagent needs human attention.
+export function lastcodeSidebarInheritedStatus(
+  thread: SidebarThreadSummary,
+  status: ThreadStatusPill | null,
+): ThreadStatusPill | null {
+  return isSidebarSubagentThread(thread) && status?.label === "Failed" ? null : status;
+}
+
 export function lastcodeSidebarIsAgentCreated(thread: SidebarThreadSummary): boolean {
   return thread.source.createdBy === "agent" && thread.lineage.relationshipToParent === null;
 }
@@ -392,7 +400,7 @@ function aggregateFamilyRows(
     parent.descendantsStatus = resolveProjectStatusIndicator([
       parent.descendantsStatus,
       row.descendantsStatus,
-      rowStatus,
+      lastcodeSidebarInheritedStatus(row.thread, rowStatus),
     ]);
   }
 }
