@@ -4,11 +4,8 @@ import {
   formatComposerContextHref,
   formatComposerContextReference,
 } from "@t3tools/shared/composerContextReferences";
-import {
-  markdownWithHtml,
-  markdownWithInlineFileLinks,
-  markdownWithTableBreaks,
-} from "../lib/markdownDocument";
+import { prepareEnrichedMarkdown } from "../lib/enrichedMarkdown";
+import { markdownWithInlineFileLinks, markdownWithTableBreaks } from "../lib/markdownDocument";
 import { useCallback, useMemo, useState, type ReactNode } from "react";
 import { Platform, Share, StyleSheet, View } from "react-native";
 import {
@@ -154,14 +151,16 @@ function enrichedStyle(
 export function MobileEnrichedMarkdownText(props: SelectableMarkdownTextProps) {
   const { renderImage, resolveImageSource } = props;
   const { themeAppearance, mathRenderingEnabled } = useAppearancePreferences();
-  const markdown = useMemo(
-    () =>
-      markdownWithTableBreaks(
-        markdownWithInlineFileLinks(
-          markdownWithHtml(props.markdown),
-          ENRICHED_INLINE_FILE_LINK_REGEX,
+  const { markdown, authoredFileLinks } = useMemo(
+    () => {
+      const prepared = prepareEnrichedMarkdown(props.markdown);
+      return {
+        ...prepared,
+        markdown: markdownWithTableBreaks(
+          markdownWithInlineFileLinks(prepared.markdown, ENRICHED_INLINE_FILE_LINK_REGEX),
         ),
-      ),
+      };
+    },
     [props.markdown],
   );
   const [documentAssets, setDocumentAssets] = useState<DocumentAssetsEvent["assets"]>([]);
@@ -184,7 +183,11 @@ export function MobileEnrichedMarkdownText(props: SelectableMarkdownTextProps) {
         : assets,
     );
   }, []);
-  const { linkVariants, linkPillContent } = useEnrichedLinkVariants(documentAssets, props);
+  const { linkVariants, linkPillContent } = useEnrichedLinkVariants(
+    documentAssets,
+    props,
+    authoredFileLinks,
+  );
   const linkRecognition = useMemo(
     () => ({
       text: enrichedSkillLinkRegex(props.skills) ?? undefined,

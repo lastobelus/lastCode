@@ -4,6 +4,7 @@ import * as SchemaTransformation from "effect/SchemaTransformation";
 
 import {
   ContextTransferId,
+  EnvironmentId,
   IsoDateTime,
   MessageId,
   NodeId,
@@ -330,6 +331,8 @@ export type OrchestratorMcpThreadPullRequest = typeof OrchestratorMcpThreadPullR
 
 export const OrchestratorMcpThreadListItem = Schema.Struct({
   threadId: ThreadId,
+  environmentId: EnvironmentId,
+  link: Schema.String,
   title: Schema.String,
   createdBy: OrchestrationV2Actor,
   creationSource: OrchestrationV2CreationSource,
@@ -379,6 +382,10 @@ const clampedPositiveInt = (maximum: number) =>
 
 export const OrchestratorMcpThreadReadInput = Schema.Struct({
   threadId: ThreadId,
+  environmentId: Schema.optional(EnvironmentId).annotate({
+    description:
+      "Optional owning environment. Omit to try this environment, then the client’s other connected environments. Use the returned environmentId for subsequent pages.",
+  }),
   itemId: Schema.optional(TurnItemId),
   textOffset: Schema.optional(NonNegativeInt),
   view: Schema.optional(Schema.Literals(["messages", "activity"])),
@@ -397,6 +404,8 @@ export type OrchestratorMcpThreadReadInput = typeof OrchestratorMcpThreadReadInp
 
 export const OrchestratorMcpThreadDetail = Schema.Struct({
   threadId: ThreadId,
+  environmentId: EnvironmentId,
+  link: Schema.String,
   projectId: ProjectId,
   title: Schema.String,
   createdBy: OrchestrationV2Actor,
@@ -470,6 +479,22 @@ export const OrchestratorMcpThreadReadResult = Schema.Struct({
   hasMore: Schema.Boolean,
 });
 export type OrchestratorMcpThreadReadResult = typeof OrchestratorMcpThreadReadResult.Type;
+
+/** Read requests forwarded through an authenticated client’s existing connections. */
+export const ThreadReadRequest = Schema.Struct({
+  connectionId: TrimmedNonEmptyString,
+  requestId: TrimmedNonEmptyString,
+  input: OrchestratorMcpThreadReadInput,
+});
+export type ThreadReadRequest = typeof ThreadReadRequest.Type;
+
+export const ThreadReadResponse = Schema.Struct({
+  connectionId: TrimmedNonEmptyString,
+  requestId: TrimmedNonEmptyString,
+  result: Schema.NullOr(OrchestratorMcpThreadReadResult),
+  unavailableEnvironmentIds: Schema.Array(EnvironmentId),
+});
+export type ThreadReadResponse = typeof ThreadReadResponse.Type;
 
 export const OrchestratorMcpThreadSendInput = Schema.Struct({
   threadId: ThreadId,
@@ -708,6 +733,7 @@ export class OrchestratorMcpFailure extends Schema.TaggedError<OrchestratorMcpFa
   "OrchestratorMcpFailure",
   {
     code: Schema.Literals([
+      "environment_unavailable",
       "capability_denied",
       "parent_not_active",
       "provider_unavailable",
