@@ -160,57 +160,55 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
     run: Effect.fn("test.run_boot_service_command")(function* (
       input: ProcessRunner.ProcessRunInput,
     ) {
-        const command = `${input.command} ${input.args.join(" ")}`;
-        commands.push(command);
-        invocations.push(input);
-        timeouts.set(command, input.timeout);
-        const failed = command === control.failCommand;
-        if (!failed && command === "loginctl enable-linger --no-ask-password 501")
-          control.linger = "yes";
-        if (!failed && command === "systemctl --user enable t3code.service")
-          control.enabled = true;
-        if (!failed && command === "systemctl --user restart t3code.service")
-          control.active = true;
-        // A failed stop can still have stopped the service.
-        if (command === "systemctl --user stop t3code.service") control.active = false;
-        if (
-          control.stateAfterStop !== undefined &&
-          (command === "systemctl --user stop t3code.service" ||
-            command.startsWith("launchctl bootout "))
-        ) {
-          yield* fs.writeFileString(statePath, control.stateAfterStop).pipe(Effect.orDie);
-        }
-        const call = (control.callCounts.get(command) ?? 0) + 1;
-        control.callCounts.set(command, call);
-        const signal = control.signals.get(command);
-        if (signal !== undefined) yield* Deferred.succeed(signal, undefined);
-        const fixture = control.fixtures.get(command);
-        if (fixture) return fixture(call);
-        if (failed) return processResult({ code: 1 });
-        if (command === `launchctl print ${launchdServiceTarget}`) {
-          return processResult({
-            code: 113,
-            stderr: `Bad request.\n${launchdNotLoadedMessage}\n`,
-          });
-        }
+      const command = `${input.command} ${input.args.join(" ")}`;
+      commands.push(command);
+      invocations.push(input);
+      timeouts.set(command, input.timeout);
+      const failed = command === control.failCommand;
+      if (!failed && command === "loginctl enable-linger --no-ask-password 501")
+        control.linger = "yes";
+      if (!failed && command === "systemctl --user enable t3code.service") control.enabled = true;
+      if (!failed && command === "systemctl --user restart t3code.service") control.active = true;
+      // A failed stop can still have stopped the service.
+      if (command === "systemctl --user stop t3code.service") control.active = false;
+      if (
+        control.stateAfterStop !== undefined &&
+        (command === "systemctl --user stop t3code.service" ||
+          command.startsWith("launchctl bootout "))
+      ) {
+        yield* fs.writeFileString(statePath, control.stateAfterStop).pipe(Effect.orDie);
+      }
+      const call = (control.callCounts.get(command) ?? 0) + 1;
+      control.callCounts.set(command, call);
+      const signal = control.signals.get(command);
+      if (signal !== undefined) yield* Deferred.succeed(signal, undefined);
+      const fixture = control.fixtures.get(command);
+      if (fixture) return fixture(call);
+      if (failed) return processResult({ code: 1 });
+      if (command === `launchctl print ${launchdServiceTarget}`) {
         return processResult({
-          stdout:
-            input.args[0] === "--version"
-              ? `t3 v${/versions\/([^/]+)\//.exec(input.command)?.[1] ?? "1.2.3"}\n`
-              : input.command === "loginctl" && input.args[0] === "show-user"
-                ? `${control.linger}\n`
-                : input.args[1] === "is-enabled"
-                  ? control.enabled
-                    ? "enabled\n"
-                    : "disabled\n"
-                  : "",
-          code:
-            (input.args[1] === "is-active" && !control.active) ||
-            (input.args[1] === "is-enabled" && !control.enabled)
-              ? 1
-              : 0,
+          code: 113,
+          stderr: `Bad request.\n${launchdNotLoadedMessage}\n`,
         });
-      }),
+      }
+      return processResult({
+        stdout:
+          input.args[0] === "--version"
+            ? `t3 v${/versions\/([^/]+)\//.exec(input.command)?.[1] ?? "1.2.3"}\n`
+            : input.command === "loginctl" && input.args[0] === "show-user"
+              ? `${control.linger}\n`
+              : input.args[1] === "is-enabled"
+                ? control.enabled
+                  ? "enabled\n"
+                  : "disabled\n"
+                : "",
+        code:
+          (input.args[1] === "is-active" && !control.active) ||
+          (input.args[1] === "is-enabled" && !control.enabled)
+            ? 1
+            : 0,
+      });
+    }),
   });
   const makeService = (
     environmentPath: string | undefined = installerPath,

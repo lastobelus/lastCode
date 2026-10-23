@@ -384,14 +384,14 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
     pendingKey: null,
   }));
   const [threadSidebars] = useState(() => ({
-  lastcode: (
-    <Suspense fallback={<SidebarChromeHeader isElectron={isElectron} />}>
-      <LastCodeSidebar />
-    </Suspense>
-  ),
-  legacy: <LegacyThreadSidebar routeReveal={sidebarRouteReveal} />,
-  inbox: <ThreadSidebar routeReveal={sidebarRouteReveal} />,
-}));
+    lastcode: (
+      <Suspense fallback={<SidebarChromeHeader isElectron={isElectron} />}>
+        <LastCodeSidebar />
+      </Suspense>
+    ),
+    legacy: <LegacyThreadSidebar routeReveal={sidebarRouteReveal} />,
+    inbox: <ThreadSidebar routeReveal={sidebarRouteReveal} />,
+  }));
   const { active: panelAnimationsActive, durationMs: panelAnimationDurationMs } =
     usePanelAnimationSettings();
   useThreadVisitedMigration();

@@ -1,6 +1,7 @@
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { searchableMessageSegments } from "@t3tools/shared/threadFindText";
 import { countThreadSearchOccurrences } from "@t3tools/shared/threadSearch";
+import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import { type ReactElement } from "react";
 import { describe, expect, it, vi } from "vite-plus/test";
@@ -9,20 +10,60 @@ import { act, render } from "../../test/render";
 import "../index.css";
 
 import { filesystemEnvironment } from "../state/filesystem";
-import { useRightPanelStore } from "../rightPanelStore";
-import { setMarkdownTaskChecked } from "./files/filePreviewMode";
+import { useRightPanelStore, selectThreadRightPanelState } from "../rightPanelStore";
+import { setMarkdownTaskChecked } from "../markdownTaskList";
 import { MarkdownFindContext } from "./chat/markdownFindContext";
 import { collectThreadFindRanges } from "./chat/threadFindHighlights";
+import { readThreadHandoffs, useHandoffsStore } from "../handoffs/handoffsStore";
+import { toastManager } from "./ui/toast";
 
-const { workspaceSearch, filesystemMetadata } = vi.hoisted(() => ({
-  workspaceSearch: vi.fn(),
+const markdownOpenMocks = vi.hoisted(() => ({
+  prepareHostedPreview: vi.fn(),
+  searchProjectEntries: vi.fn(),
+  createAssetUrl: vi.fn(),
+  openPullRequest: vi.fn(),
+  denyFilesystemRead: false,
+  preparedConnection: null as { httpBaseUrl: string } | null,
+  localApi: undefined as unknown,
+}));
+vi.mock(import("../localApi"), async (original) => {
+  const actual = await original();
+  return {
+    ...actual,
+    readLocalApi: (() => markdownOpenMocks.localApi ?? actual.readLocalApi()) as never,
+    ensureLocalApi: (() => markdownOpenMocks.localApi ?? actual.ensureLocalApi()) as never,
+  };
+});
+vi.mock(import("./preview/previewHostingRecovery"), async (original) => ({
+  ...(await original()),
+  prepareHostedPreview: markdownOpenMocks.prepareHostedPreview,
+  mayBeHostedPreviewUrl: (_ref: unknown, url: string) => url.startsWith("http://localhost:4173/"),
+}));
+vi.mock(import("../state/entities"), async (original) => ({
+  ...(await original()),
+  readEnvironmentSupportsServerBrowser: () => true,
+}));
+vi.mock(import("~/lib/openPullRequestLink"), async (original) => ({
+  ...(await original()),
+  resolvePullRequestPreviewTarget: () => null,
+  useOpenChangeRequestLink: (() => markdownOpenMocks.openPullRequest) as never,
+}));
+
+const { filesystemMetadata } = vi.hoisted(() => ({
   filesystemMetadata: vi.fn(),
 }));
-vi.mock(import("../state/use-atom-query-runner"), async (original) => ({
-  ...(await original()),
-  useAtomQueryRunner: ((family: unknown) =>
-    family === filesystemEnvironment.getMetadata ? filesystemMetadata : workspaceSearch) as never,
-}));
+vi.mock(import("../state/use-atom-query-runner"), async (original) => {
+  const { projectEnvironment } = await import("../state/projects");
+  return {
+    ...(await original()),
+    useAtomQueryRunner: ((family: unknown) =>
+      family === filesystemEnvironment.getMetadata
+        ? filesystemMetadata
+        : family === projectEnvironment.searchEntries
+          ? markdownOpenMocks.searchProjectEntries
+          : markdownOpenMocks.createAssetUrl) as never,
+  };
+});
 
 // Atoms derived from the server config run in the real registry over a missing config.
 vi.mock(import("../state/server"), async (original) => {
@@ -36,14 +77,21 @@ vi.mock(import("../state/server"), async (original) => {
 });
 // A standard client session, so environment-owned file links can open.
 vi.mock(import("../state/session"), async (original) => {
-  const { AuthStandardClientScopes } = await import("@t3tools/contracts");
+  const { AuthStandardClientScopes, AuthFilesystemReadScope } = await import("@t3tools/contracts");
   const granted = new Set<string>(AuthStandardClientScopes);
   const hasScope = (environmentId: unknown, scope: string) =>
-    environmentId !== null && granted.has(scope);
+    environmentId !== null &&
+    !(markdownOpenMocks.denyFilesystemRead && scope === AuthFilesystemReadScope) &&
+    granted.has(scope);
   return {
     ...(await original()),
     useEnvironmentScope: hasScope as never,
     readEnvironmentScope: hasScope as never,
+    readPreparedConnection: (() => markdownOpenMocks.preparedConnection) as never,
+    usePreparedConnection: (() =>
+      markdownOpenMocks.preparedConnection === null
+        ? { _tag: "None" }
+        : { _tag: "Some", value: markdownOpenMocks.preparedConnection }) as never,
   };
 });
 vi.mock(import("../remoteOpen"), async (original) => ({
@@ -51,14 +99,17 @@ vi.mock(import("../remoteOpen"), async (original) => ({
   useRemoteOpenResolution: () => ({ state: { mode: "local-exec" }, isResolved: true }) as never,
 }));
 // File-label tests exercise authored media and copy text without depending on external requests.
-vi.mock(import("@t3tools/client-runtime/markdown-images"), async (original) => {
+vi.mock(import("@t3tools/shared/markdownImages"), async (original) => {
   const actual = await original();
   return {
     ...actual,
     classifyMarkdownImageSource: (
       ...args: Parameters<typeof actual.classifyMarkdownImageSource>
     ) => {
-      if (args[0] === "https://example.com/preview.png" || args[0] === "https://example.com/a.png") {
+      if (
+        args[0] === "https://example.com/preview.png" ||
+        args[0] === "https://example.com/a.png"
+      ) {
         return {
           _tag: "Direct" as const,
           uri: "data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20width=%221%22%20height=%221%22/%3E",
@@ -103,8 +154,18 @@ import { chatMarkdownClipboardPayload } from "../markdown-clipboard";
 function setup() {
   settingsOverrides.mathRenderingEnabled = false;
   renderDiagram.mockReset();
-  workspaceSearch.mockReset().mockResolvedValue(AsyncResult.success({ entries: [] }));
   filesystemMetadata.mockReset().mockResolvedValue(AsyncResult.success({ entries: [null] }));
+  markdownOpenMocks.prepareHostedPreview.mockReset();
+  markdownOpenMocks.searchProjectEntries
+    .mockReset()
+    .mockResolvedValue(AsyncResult.success({ entries: [] }));
+  markdownOpenMocks.createAssetUrl.mockReset();
+  markdownOpenMocks.openPullRequest.mockReset().mockReturnValue(false);
+  markdownOpenMocks.denyFilesystemRead = false;
+  markdownOpenMocks.preparedConnection = null;
+  markdownOpenMocks.localApi = undefined;
+  useHandoffsStore.setState({ byThreadKey: {} });
+  useRightPanelStore.setState({ byThreadKey: {} });
 }
 
 function renderText(text: string, props: Partial<Parameters<typeof ChatMarkdown>[0]> = {}) {
@@ -231,7 +292,7 @@ describe("ChatMarkdown workspace file opens", () => {
     const pending = new Promise<typeof result>((resolve) => {
       resolvePending = resolve;
     });
-    workspaceSearch.mockReturnValueOnce(pending);
+    markdownOpenMocks.searchProjectEntries.mockReturnValueOnce(pending);
     using openFile = vi
       .spyOn(useRightPanelStore.getState(), "openFile")
       .mockImplementation(() => {});
@@ -245,14 +306,14 @@ describe("ChatMarkdown workspace file opens", () => {
     const { container } = screen;
     const [notes, other] = container.querySelectorAll("a");
     await act(async () => notes!.click());
-    expect(workspaceSearch).toHaveBeenCalledOnce();
+    expect(markdownOpenMocks.searchProjectEntries).toHaveBeenCalledOnce();
     expect(openFile).not.toHaveBeenCalled();
 
     await act(async () => other!.click());
     await act(async () => resolvePending(result));
 
     expect(openFile).toHaveBeenCalledExactlyOnceWith(threadRef, "/elsewhere/b.md", 9);
-    expect(workspaceSearch).toHaveBeenCalledOnce();
+    expect(markdownOpenMocks.searchProjectEntries).toHaveBeenCalledOnce();
   });
 });
 
@@ -454,4 +515,330 @@ describe("ChatMarkdown Windows file links", () => {
       expect(fileHrefs(container)).toEqual([]);
     }
   });
+});
+
+describe("ChatMarkdown managed destinations", () => {
+  const threadRef = {
+    environmentId: EnvironmentId.make("markdown-env"),
+    threadId: ThreadId.make("markdown-thread"),
+  };
+  function pendingPreparation() {
+    let finish!: (result: { url: string; managed: boolean; restored: boolean }) => void;
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    markdownOpenMocks.prepareHostedPreview.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+          entered();
+        }),
+    );
+    return { started, finish: (url: string) => finish({ url, managed: true, restored: true }) };
+  }
+
+  it.each([
+    [
+      "http://localhost:4173/docs?mode=preview",
+      "https://workstation.example:4173/docs?mode=preview",
+    ],
+    ["https://example.com/docs?mode=public", "https://example.com/docs?mode=public"],
+  ])("opens a desktop context-menu link at its prepared destination", async (href, preparedUrl) => {
+    setup();
+    using _desktopBridge = new DisposableStack();
+    _desktopBridge.defer(() => vi.unstubAllGlobals());
+    vi.stubGlobal("desktopBridge", {});
+    const openExternal = vi.fn().mockResolvedValue(undefined);
+    markdownOpenMocks.localApi = {
+      contextMenu: { show: vi.fn().mockResolvedValue("open-external") },
+      shell: { openExternal },
+    };
+    const preparation = pendingPreparation();
+    await using screen = await renderText(`[docs](${href})`, { cwd: undefined, threadRef });
+    const { container } = screen;
+    await act(async () => {
+      container.querySelector("a")!.dispatchEvent(
+        new MouseEvent("contextmenu", {
+          bubbles: true,
+          cancelable: true,
+          clientX: 4,
+          clientY: 8,
+        }),
+      );
+      await preparation.started;
+    });
+    expect(openExternal).not.toHaveBeenCalled();
+    await act(async () => preparation.finish(preparedUrl));
+    await vi.waitFor(() => expect(openExternal).toHaveBeenCalledWith(preparedUrl));
+    expect(markdownOpenMocks.prepareHostedPreview).toHaveBeenCalledWith(threadRef, href);
+  });
+
+  it.each(["png", "mp4"])("waits for recovery before opening a %s link", async (extension) => {
+    setup();
+    const href = `http://localhost:4173/preview.${extension}`;
+    const preparedUrl = `https://workstation.example:4173/preview.${extension}`;
+    const preparation = pendingPreparation();
+    const onImageExpand = vi.fn();
+    await using screen = await renderText(`[media](${href})`, {
+      cwd: undefined,
+      threadRef,
+      onImageExpand,
+    });
+    const { container } = screen;
+    await act(async () => {
+      container.querySelector<HTMLAnchorElement>("a")!.click();
+      await preparation.started;
+    });
+    expect(onImageExpand).not.toHaveBeenCalled();
+    await act(async () => preparation.finish(preparedUrl));
+    await vi.waitFor(() =>
+      expect(onImageExpand).toHaveBeenCalledExactlyOnceWith({
+        index: 0,
+        images: [
+          expect.objectContaining({
+            src: preparedUrl,
+            originalUrl: preparedUrl,
+            actionsSource: expect.objectContaining({ src: preparedUrl }),
+          }),
+        ],
+      }),
+    );
+    expect(markdownOpenMocks.prepareHostedPreview).toHaveBeenCalledWith(
+      threadRef,
+      href,
+      "resource",
+    );
+  });
+
+  it.each(["png", "mp4"])("prepares embedded %s before loading its bytes", async (extension) => {
+    setup();
+    const source = `http://localhost:4173/report.${extension}`;
+    const destination = `https://workstation.example:4173/report.${extension}`;
+    const preparation = pendingPreparation();
+    await using screen = await renderText(`![report](${source})`, { cwd: "/workspace", threadRef });
+    const { container } = screen;
+    expect(markdownOpenMocks.prepareHostedPreview).toHaveBeenCalledWith(
+      threadRef,
+      source,
+      "resource",
+    );
+    expect(container.querySelector("img[src], video[src]")).toBeNull();
+    await act(async () => preparation.finish(destination));
+    expect(container.querySelector("img[src], video[src]")?.getAttribute("src")).toBe(destination);
+    expect(container.querySelector(`[src="${source}"]`)).toBeNull();
+    if (extension === "mp4") {
+      markdownOpenMocks.prepareHostedPreview.mockResolvedValueOnce({
+        url: destination,
+        managed: true,
+        restored: true,
+      });
+      const play = container.querySelector<HTMLButtonElement>('button[aria-label="Play report"]');
+      expect(play).not.toBeNull();
+      await act(async () => play!.click());
+      expect(markdownOpenMocks.prepareHostedPreview).toHaveBeenNthCalledWith(
+        2,
+        threadRef,
+        source,
+        "resource",
+      );
+    }
+  });
+
+  it("ignores preparation for an embedded image after its source changes", async () => {
+    setup();
+    const first = pendingPreparation();
+    const second = pendingPreparation();
+    await using screen = await render(
+      <ChatMarkdown
+        cwd="/workspace"
+        text="![report](http://localhost:4173/first.png)"
+        threadRef={threadRef}
+      />,
+    );
+    const { container, rerender } = screen;
+    await rerender(
+      <ChatMarkdown
+        cwd="/workspace"
+        text="![report](http://localhost:4173/second.png)"
+        threadRef={threadRef}
+      />,
+    );
+    await act(async () => first.finish("https://workstation.example:4173/first.png"));
+    expect(container.querySelector("img[src]")).toBeNull();
+    await act(async () => second.finish("https://workstation.example:4173/second.png"));
+    expect(container.querySelector("img[src]")?.getAttribute("src")).toBe(
+      "https://workstation.example:4173/second.png",
+    );
+  });
+});
+
+describe("chat file handoffs", () => {
+  it("captures the opened PR surface and retains its host", async () => {
+    setup();
+    const ref = {
+      environmentId: EnvironmentId.make("pr-env"),
+      threadId: ThreadId.make("pr-thread"),
+    };
+    const target = {
+      projectId: "host-fallback-project",
+      host: "github.example",
+      repository: "other/repo",
+      number: 8,
+      url: "https://github.example/other/repo/pull/8",
+    };
+    markdownOpenMocks.openPullRequest.mockImplementationOnce(() => {
+      useRightPanelStore.getState().openPullRequest(ref, target);
+      return true;
+    });
+    await using screen = await renderText(`[Review this PR](${target.url})`, {
+      cwd: "/repo",
+      threadRef: ref,
+    });
+    const { container } = screen;
+    await act(async () => container.querySelector<HTMLAnchorElement>("a")!.click());
+    expect(readThreadHandoffs(ref)[0]).toMatchObject({
+      markdownLabel: "Review this PR",
+      target: { kind: "pull-request", ...target },
+    });
+    expect(readThreadHandoffs(ref)[0]?.target).not.toHaveProperty("environmentId");
+  });
+
+  it("keeps the authored label when a resolved file is reopened by filename", async () => {
+    setup();
+    const ref = {
+      environmentId: EnvironmentId.make("file-env"),
+      threadId: ThreadId.make("handoff-thread"),
+    };
+    await using screen = await render(
+      <ChatMarkdown cwd="/repo" threadRef={ref} text="[Final report](/repo/docs/report.md)" />,
+    );
+    const { container, rerender } = screen;
+    const open = () => act(async () => container.querySelector<HTMLAnchorElement>("a")!.click());
+    await open();
+    expect(readThreadHandoffs(ref)).toHaveLength(1);
+    expect(readThreadHandoffs(ref)[0]).toMatchObject({
+      markdownLabel: "Final report",
+      target: { kind: "file", path: "/repo/docs/report.md" },
+    });
+    expect(
+      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, ref).activeSurfaceId,
+    ).toBe("file:docs/report.md");
+    await rerender(
+      <ChatMarkdown cwd="/repo" threadRef={ref} text="[report.md](/repo/docs/report.md)" />,
+    );
+    await open();
+    expect(readThreadHandoffs(ref)).toHaveLength(1);
+    expect(readThreadHandoffs(ref)[0]?.markdownLabel).toBe("Final report");
+    expect(readThreadHandoffs(ref)[0]?.sequence).toBe(2);
+  });
+});
+
+describe("chat file link destination ownership", () => {
+  it.each([
+    ["/repo/report.md:12", "report.md", false],
+    ["./report.md:12", "./report.md", false],
+    ["file:///repo/report.md#L12", "report.md", false],
+    ["report.md#L12", "nested/report.md", true],
+    ["report.md:12", "nested/report.md", true],
+    ["test_utils.py:12", "test_utils.py", true],
+    ["__init__.py:12", "__init__.py", true],
+    ["_config.yml:12", "_config.yml", true],
+    ["2024-notes.md:12", "2024-notes.md", true],
+  ])("opens %s without losing explicit path intent", async (href, expectedPath, shouldSearch) => {
+    setup();
+    const ref = {
+      environmentId: EnvironmentId.make("file-link-env"),
+      threadId: ThreadId.make("file-link-thread"),
+    };
+    markdownOpenMocks.searchProjectEntries.mockResolvedValue(
+      AsyncResult.success({ entries: [{ path: "nested/report.md", kind: "file" }] }),
+    );
+    await using screen = await renderText(`[report.md](${href})`, { cwd: "/repo", threadRef: ref });
+    const { container } = screen;
+    await act(async () =>
+      container.querySelector<HTMLAnchorElement>(".chat-markdown-file-link")!.click(),
+    );
+    await vi.waitFor(() =>
+      expect(
+        selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, ref).activeSurfaceId,
+      ).toBe(`file:${expectedPath}`),
+    );
+    const panel = selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, ref);
+    expect(panel.surfaces.find((surface) => surface.id === panel.activeSurfaceId)).toMatchObject({
+      revealLine: 12,
+    });
+    expect(markdownOpenMocks.searchProjectEntries).toHaveBeenCalledTimes(shouldSearch ? 1 : 0);
+    if (shouldSearch)
+      expect(markdownOpenMocks.searchProjectEntries).toHaveBeenCalledWith({
+        environmentId: ref.environmentId,
+        input: { cwd: "/repo", query: expectedPath.split("/").at(-1), limit: 25, kind: "file" },
+      });
+  });
+});
+
+describe("restricted chat media expansion", () => {
+  it.each([true, false])(
+    "scopes fresh requests and expands only granted media (%s)",
+    async (granted) => {
+      setup();
+      const ref = {
+        environmentId: EnvironmentId.make("restricted-media-env"),
+        threadId: ThreadId.make("restricted-media-thread"),
+      };
+      markdownOpenMocks.denyFilesystemRead = true;
+      markdownOpenMocks.preparedConnection = { httpBaseUrl: "https://workstation.example" };
+      markdownOpenMocks.createAssetUrl.mockResolvedValue(
+        granted
+          ? AsyncResult.success({ relativeUrl: "/api/assets/linked-image" })
+          : AsyncResult.failure(Cause.fail(new Error("File is not published"))),
+      );
+      const onImageExpand = vi.fn();
+      using toast = vi.spyOn(toastManager, "add").mockReturnValue("restricted-media-toast");
+      await using screen = await renderText("[image](/tmp/linked.png)", {
+        cwd: "/repo",
+        threadRef: ref,
+        onImageExpand,
+      });
+      const { container } = screen;
+      await act(async () => container.querySelector<HTMLAnchorElement>("a")!.click());
+      await vi.waitFor(() =>
+        expect(markdownOpenMocks.createAssetUrl).toHaveBeenCalledExactlyOnceWith({
+          environmentId: ref.environmentId,
+          input: {
+            resource: {
+              _tag: "media-file",
+              threadId: ref.threadId,
+              path: "/tmp/linked.png",
+              linkedThreadFile: true,
+            },
+          },
+        }),
+      );
+      if (granted) {
+        await vi.waitFor(() =>
+          expect(onImageExpand).toHaveBeenCalledWith({
+            index: 0,
+            images: [
+              expect.objectContaining({
+                src: "https://workstation.example/api/assets/linked-image",
+              }),
+            ],
+          }),
+        );
+        expect(toast).not.toHaveBeenCalled();
+      } else {
+        await vi.waitFor(() =>
+          expect(toast).toHaveBeenCalledWith(
+            expect.objectContaining({
+              title: "Media unavailable",
+              description: "File is not published",
+            }),
+          ),
+        );
+        expect(onImageExpand).not.toHaveBeenCalled();
+        expect(readThreadHandoffs(ref)).toEqual([]);
+      }
+    },
+  );
 });

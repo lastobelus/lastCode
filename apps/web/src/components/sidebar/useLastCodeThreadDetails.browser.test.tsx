@@ -1,15 +1,6 @@
-import { act, useEffect } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import {
-  afterAll,
-  afterEach,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vite-plus/test";
+import { act, render, stubGlobal } from "../../../test/render";
+import { useEffect } from "react";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { useLastCodeThreadDetails } from "./useLastCodeThreadDetails";
@@ -47,42 +38,10 @@ function Harness({ revision = 0 }: { revision?: number }) {
     </>
   );
 }
-let root: Root, container: HTMLDivElement;
-let frames: FrameRequestCallback[];
-const original = Object.getOwnPropertyDescriptor(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-beforeAll(() =>
-  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
-    configurable: true,
-    value: true,
-  }),
-);
-afterAll(() => {
-  if (original) Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", original);
-  else Reflect.deleteProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-});
-beforeEach(() => {
-  vi.clearAllMocks();
-  frames = [];
-  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
-    frames.push(callback);
-    return frames.length;
-  });
-  container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
-});
-afterEach(async () => {
-  await act(() => root.unmount());
-  container.remove();
-  vi.unstubAllGlobals();
-});
-async function render() {
-  await act(() => root.render(<Harness />));
-}
-async function activate() {
+async function activate(container: HTMLElement) {
   await act(() => container.querySelector("button")!.click());
 }
-async function flushFocus() {
+async function flushFocus(frames: FrameRequestCallback[]) {
   await act(() => {
     const pending = frames.splice(0);
     for (const callback of pending) callback(0);
@@ -91,11 +50,18 @@ async function flushFocus() {
 const latest = () => observe.mock.calls.at(-1)![0];
 describe("row details lifetime", () => {
   it("retains the handle, IDs and navigation anchor across row refresh", async () => {
-    await render();
+    vi.clearAllMocks();
+    const frames: FrameRequestCallback[] = [];
+    using _frames = stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    await using screen = await render(<Harness />);
+    const container = screen.container;
     const before = latest();
     const anchor = before.threadNavigationRef.current;
-    await activate();
-    await act(() => root.render(<Harness revision={1} />));
+    await activate(container);
+    await screen.rerender(<Harness revision={1} />);
     const after = latest();
     expect(after.annotationPopoverHandle).toBe(before.annotationPopoverHandle);
     expect(after.annotationTriggerId).toBe(before.annotationTriggerId);
@@ -104,8 +70,15 @@ describe("row details lifetime", () => {
     expect(container.querySelector("output")?.textContent).toBe("true");
   });
   it("cancels the exact row archive confirmation and deactivates on pointer exit", async () => {
-    await render();
-    await activate();
+    vi.clearAllMocks();
+    const frames: FrameRequestCallback[] = [];
+    using _frames = stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    await using screen = await render(<Harness />);
+    const container = screen.container;
+    await activate(container);
     await act(() =>
       container
         .querySelector("li")!
@@ -115,15 +88,22 @@ describe("row details lifetime", () => {
     expect(container.querySelector("output")?.textContent).toBe("false");
   });
   it("keeps details active for internal focus movement, then cancels on actual row exit", async () => {
-    await render();
-    await activate();
+    vi.clearAllMocks();
+    const frames: FrameRequestCallback[] = [];
+    using _frames = stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    await using screen = await render(<Harness />);
+    const container = screen.container;
+    await activate(container);
     await act(() => container.querySelector("button")!.focus());
     await act(() => container.querySelector("input")!.focus());
-    await flushFocus();
+    await flushFocus(frames);
     expect(editing.cancelArchiveConfirmation).not.toHaveBeenCalled();
     expect(container.querySelector("output")?.textContent).toBe("true");
     await act(() => container.querySelectorAll("button")[1]!.focus());
-    await flushFocus();
+    await flushFocus(frames);
     expect(editing.cancelArchiveConfirmation).toHaveBeenCalledExactlyOnceWith(ref);
     expect(container.querySelector("output")?.textContent).toBe("false");
   });

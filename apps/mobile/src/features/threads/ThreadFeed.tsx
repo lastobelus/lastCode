@@ -234,7 +234,7 @@ import {
   needsWorkspaceBasenameLookup,
   pickWorkspaceBasenameMatch,
   WORKSPACE_BASENAME_LOOKUP_LIMIT,
-} from "@t3tools/client-runtime/workspace-basename-lookup";
+} from "@t3tools/shared/workspaceBasenameLookup";
 import { useLiveThreadLinkLabels, useQuietThreadShell } from "../../state/entities";
 import { usePreparedConnection, useConfiguredPreviewEnvironmentUrl } from "../../state/session";
 import {
@@ -1175,6 +1175,7 @@ function ThreadAutomationMessageRow(props: {
             {props.timestampLabel}
           </Text>
           <UserMessageCopyButton
+            accessibilityLabel="Copy automation message"
             text={props.text}
             onCopy={undefined}
             tintColor={props.iconSubtleColor}

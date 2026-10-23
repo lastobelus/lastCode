@@ -5,6 +5,7 @@ import { createJSONStorage, persist } from "zustand/middleware";
 import { useShallow } from "zustand/react/shallow";
 
 import { normalizePreviewUrl } from "@t3tools/shared/preview";
+import { stripPreviewBootstrapTokenFromUrl } from "@t3tools/shared/remote";
 import { readPreparedConnection } from "~/state/session";
 
 import { isLocalLoopbackHost, normalizeHostname } from "./browser/browserTargetResolver";
@@ -32,6 +33,7 @@ export function normalizeHistoryUrl(raw: string): string | null {
     return null;
   }
   parsed.username = parsed.password = "";
+  parsed = stripPreviewBootstrapTokenFromUrl(parsed);
   return parsed.href.length > BROWSER_HISTORY_MAX_URL_LENGTH ? null : parsed.href;
 }
 

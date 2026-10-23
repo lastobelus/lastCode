@@ -1,4 +1,4 @@
-import { classifyMarkdownImageSource } from "@t3tools/client-runtime/markdown-images";
+import { classifyMarkdownImageSource } from "@t3tools/shared/markdownImages";
 import {
   resolveMediaSource,
   type ResolveMediaSourceInput,

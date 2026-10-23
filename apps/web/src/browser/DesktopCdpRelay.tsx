@@ -32,9 +32,20 @@ const commands = createEnvironmentSubscriptionAtomFamily(connectionAtomRuntime, 
   label: "desktop-browser:commands",
   idleTtlMs: 0,
   subscribe: (input: { desktopHostId: string; environmentId: EnvironmentId }) =>
-    subscribe(WS_METHODS.subscribeDesktopBrowserCommands, {
-      desktopHostId: input.desktopHostId,
-    }).pipe(
+    Stream.unwrap(
+      Effect.promise(() =>
+        window.desktopBridge!.preview!.bindBrowserEnvironment({
+          desktopHostId: input.desktopHostId,
+          environmentId: input.environmentId,
+        }),
+      ).pipe(
+        Effect.as(
+          subscribe(WS_METHODS.subscribeDesktopBrowserCommands, {
+            desktopHostId: input.desktopHostId,
+          }),
+        ),
+      ),
+    ).pipe(
       Stream.mapEffect((command) =>
         command.type === "resolveUrl"
           ? request(WS_METHODS.desktopBrowserEvent, {
