@@ -948,10 +948,6 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
       );
     }
     dependencies.runPhase("checkpoint", process.execPath, CHECKPOINT_ARGS);
-    phase = "checkout-refresh";
-    const primaryWorktree = dependencies.refreshPrimaryCheckout();
-    phase = "project-actions";
-    dependencies.reconcileProjectActions(primaryWorktree, projectActionTrustAllowlist(config));
   } catch (error) {
     const finishedAt = dependencies.now();
     let checkpointRun = null;
@@ -1062,6 +1058,26 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
     throw error;
   }
 
+  let maintenanceWarning;
+  try {
+    phase = "checkout-refresh";
+    const primaryWorktree = dependencies.refreshPrimaryCheckout();
+    phase = "project-actions";
+    dependencies.reconcileProjectActions(primaryWorktree, projectActionTrustAllowlist(config));
+  } catch (error) {
+    // Publication already succeeded; checkout maintenance cannot invalidate that checkpoint.
+    maintenanceWarning = {
+      phase: error instanceof CommandFailure ? error.phase : phase,
+      error: boundedCommandDiagnostic(error instanceof Error ? error.message : String(error)),
+      ...(error instanceof CommandFailure && error.diagnostic
+        ? { diagnostic: error.diagnostic }
+        : {}),
+    };
+    console.error(
+      `[lastcode:checkpoint-supervisor] Post-checkpoint maintenance warning (${maintenanceWarning.phase}): ${maintenanceWarning.diagnostic ?? maintenanceWarning.error}`,
+    );
+  }
+
   const finishedAt = dependencies.now();
   const deliveryConfigured = Boolean(config?.recoveryThreadId);
   let incident = durableIncident(previous?.incident);
@@ -1142,6 +1158,7 @@ export function runCheckpointSupervisor(options = {}, overrides = {}) {
     startedAt,
     finishedAt,
     lastSuccessAt: finishedAt,
+    ...(maintenanceWarning ? { maintenanceWarning } : {}),
     ...(pendingResolutions.length > 0 ? { pendingResolutions } : {}),
     ...(unresolvedIncidents.length > 0 ? { pendingIncidents: unresolvedIncidents } : {}),
     ...(incident ? { incident } : {}),
