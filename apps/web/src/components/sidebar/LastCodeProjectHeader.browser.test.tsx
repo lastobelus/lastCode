@@ -88,6 +88,7 @@ function Harness({ manual = true }: { manual?: boolean }) {
           expanded={expanded}
           status={null}
           environments={[]}
+          latestThreadTimestamp={null}
           drag={{ manual, handle }}
           gestures={gestures}
           showMenu={mocks.menu}
