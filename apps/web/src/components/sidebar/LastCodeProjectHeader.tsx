@@ -215,7 +215,7 @@ export function LastCodeProjectHeader({
             groups remain inspectable without overlapping the action or title. */}
       <ProjectEnvironmentBadges entries={projectEnvironmentIcons} />
       {showTimestamp ? (
-        <span className="pointer-events-none absolute top-1 right-2 inline-flex h-5 w-[calc(3rem*var(--lastcode-sidebar-content-zoom))] items-center justify-end transition-opacity duration-150 max-sm:right-[calc(0.5rem+1.5rem*var(--lastcode-sidebar-content-zoom)+var(--thread-metadata-gap))] sm:group-hover/project-header:opacity-0 sm:group-focus-within/project-header:opacity-0">
+        <span className="pointer-events-none absolute top-1 right-2 inline-flex h-5 w-[calc(3rem*var(--lastcode-sidebar-content-zoom))] items-center justify-end transition-opacity duration-150 max-sm:right-[calc(0.5rem+1.5rem*var(--lastcode-sidebar-content-zoom)+var(--thread-metadata-gap))] sm:group-hover/project-header:opacity-0 sm:group-has-[:focus-visible]/project-header:opacity-0">
           <span
             className="text-3xs tabular-nums text-secondary-label"
             data-lastcode-sidebar-unscaled-content
