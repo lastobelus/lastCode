@@ -8,7 +8,10 @@ import {
   resolveThreadLastVisitedAt,
   resolveThreadStatusPill,
 } from "../Sidebar.logic";
-import { projectLastCodeSidebarFamilies } from "../lastcodeSidebarFamilies.logic";
+import {
+  lastcodeSidebarInheritedStatus,
+  projectLastCodeSidebarFamilies,
+} from "../lastcodeSidebarFamilies.logic";
 
 export function projectLastCodeProjectThreads(
   threads: readonly SidebarThreadSummary[],
@@ -21,11 +24,13 @@ export function projectLastCodeProjectThreads(
     threads: visibleThreads,
   });
   const statusForThread = options.statusForThread ?? (() => null);
+  const inheritedStatusForThread = (thread: SidebarThreadSummary) =>
+    lastcodeSidebarInheritedStatus(thread, statusForThread(thread));
   return {
     familyProjection,
-    projectStatus: resolveProjectStatusIndicator(visibleThreads.map(statusForThread)),
+    projectStatus: resolveProjectStatusIndicator(visibleThreads.map(inheritedStatusForThread)),
     hiddenThreadStatus: resolveProjectStatusIndicator(
-      familyProjection.hiddenThreads.map(statusForThread),
+      familyProjection.hiddenThreads.map(inheritedStatusForThread),
     ),
   };
 }

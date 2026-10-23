@@ -11,6 +11,7 @@ import { makeThreadFixture } from "../../test-fixtures";
 import { useUiStateStore } from "../../uiStateStore";
 import { useLastCodeSidebarFamiliesStore } from "../lastcodeSidebarFamilies.store";
 import { lastcodeSidebarSubagentGroupKey } from "../lastcodeSidebarFamilies.logic";
+import { resolveThreadStatusPill } from "../Sidebar.logic";
 import { useLastCodeProjectThreads } from "./useLastCodeProjectThreads";
 import {
   projectLastCodeProjectThreads,
@@ -52,6 +53,36 @@ const project = {
     scopeProjectRef(other.environmentId, other.projectId),
   ],
 };
+it.each(["subagent", "fork"] as const)(
+  "keeps %s failure handling consistent in project and overflow indicators",
+  (relationshipToParent) => {
+    const failed = makeThreadFixture({
+      ...child,
+      lineage: { ...child.lineage, relationshipToParent },
+      latestRun: {
+        runId: RunId.make("failed-run"),
+        status: "failed",
+        requestedAt: null,
+        startedAt: null,
+        completedAt: "2026-01-01T00:01:00.000Z",
+        assistantMessageId: null,
+      },
+    });
+    const result = projectLastCodeProjectThreads([parent, failed], "created_at", {
+      collapsedByKey: {},
+      activeThreadKey: null,
+      projectExpanded: false,
+      previewCount: 0,
+      listExpanded: false,
+      groupingStyle: "typed-groups",
+      statusForThread: (thread) => resolveThreadStatusPill({ thread }),
+    });
+    const expected = relationshipToParent === "subagent" ? null : "Failed";
+    expect(result.projectStatus?.label ?? null).toBe(expected);
+    expect(result.hiddenThreadStatus?.label ?? null).toBe(expected);
+  },
+);
+
 const observe = vi.fn<(value: ReturnType<typeof useLastCodeProjectThreads>) => void>();
 function Harness({
   expanded = true,
