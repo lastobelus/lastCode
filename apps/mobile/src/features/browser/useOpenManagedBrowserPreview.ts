@@ -6,14 +6,33 @@ import { previewEnvironment } from "../../state/preview";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { assetEnvironment } from "../../state/assets";
 import { useAtomQueryRunner } from "../../state/use-atom-query-runner";
+import { useEnvironmentServerConfig } from "../../state/entities";
+import { environmentSession } from "../../state/session";
+
+function useSupportsPreviewAssetRecovery(threadRef: ScopedThreadRef | null) {
+  const config = useEnvironmentServerConfig(threadRef?.environmentId ?? null);
+  const bootstrap = useAtomQueryRunner(environmentSession.bootstrap, {
+    reportFailure: false,
+    refresh: true,
+  });
+  return async () => {
+    if (threadRef === null) throw new Error("The preview has no owning thread.");
+    if (config !== null) return config.environment.capabilities.previewAssetRecovery === true;
+    const result = await bootstrap({ environmentId: threadRef.environmentId, input: undefined });
+    if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+    return result.value.config.environment.capabilities.previewAssetRecovery === true;
+  };
+}
 
 export function useRenewPreviewDocumentUrl(threadRef: ScopedThreadRef | null) {
+  const supportsAssetRecovery = useSupportsPreviewAssetRecovery(threadRef);
   const createUrl = useAtomQueryRunner(assetEnvironment.createUrl, {
     reportFailure: false,
     refresh: true,
   });
-  return async (url: string, refresh: boolean): Promise<string> => {
+  return async (url: string, refresh: boolean): Promise<string | null> => {
     if (threadRef === null) throw new Error("The preview has no owning thread.");
+    if (!(await supportsAssetRecovery())) return null;
     const result = await createUrl({
       environmentId: threadRef.environmentId,
       input: { resource: { _tag: "preview-document", threadId: threadRef.threadId, url, refresh } },
@@ -24,12 +43,14 @@ export function useRenewPreviewDocumentUrl(threadRef: ScopedThreadRef | null) {
 }
 
 export function useCreateManagedPreviewResourceUrl(threadRef: ScopedThreadRef | null) {
+  const supportsAssetRecovery = useSupportsPreviewAssetRecovery(threadRef);
   const createUrl = useAtomQueryRunner(assetEnvironment.createUrl, {
     reportFailure: false,
     refresh: true,
   });
-  return async (lease: PreviewHostingLeaseSummary, url: string): Promise<string> => {
+  return async (lease: PreviewHostingLeaseSummary, url: string): Promise<string | null> => {
     if (threadRef === null) throw new Error("The preview has no owning thread.");
+    if (!(await supportsAssetRecovery())) return null;
     const result = await createUrl({
       environmentId: threadRef.environmentId,
       input: {

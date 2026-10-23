@@ -128,6 +128,9 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   threadPersistence: Schema.optionalKey(Schema.Boolean),
   /** Server streams hosted preview lifetimes and can stop a thread's previews and terminals. */
   previewHostingProcessControl: Schema.optionalKey(Schema.Boolean),
+  /** Clients request these operations only when the owning environment advertises them. */
+  previewHostingActivity: Schema.optionalKey(Schema.Boolean),
+  previewAssetRecovery: Schema.optionalKey(Schema.Boolean),
   /** Server understands thread.pin.reorder (and orderKey on thread.pin).
       Same version-skew contract as threadSettlement. */
   threadPinReorder: Schema.optionalKey(Schema.Boolean),

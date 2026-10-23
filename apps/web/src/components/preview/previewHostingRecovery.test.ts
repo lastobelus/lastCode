@@ -11,6 +11,10 @@ import { AsyncResult } from "effect/reactivity";
 const mocks = vi.hoisted(() => ({
   run: vi.fn(),
   query: vi.fn(),
+  config:
+    vi.fn<
+      () => { environment: { capabilities: { previewAssetRecovery?: boolean | undefined } } } | null
+    >(),
   connection: vi.fn(() => ({
     httpBaseUrl: "http://managed-server.example:3773",
     target: {
@@ -21,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   configuredEndpoint: vi.fn<() => string | null>(() => null),
   list: {},
   recover: {},
+  bootstrap: {},
 }));
 vi.mock("@t3tools/client-runtime/state/runtime", async (original) => ({
   ...(await original<typeof import("@t3tools/client-runtime/state/runtime")>()),
@@ -30,8 +35,12 @@ vi.mock("@t3tools/client-runtime/state/runtime", async (original) => ({
 vi.mock("~/state/assets", () => ({
   assetEnvironment: { createUrl: (input: unknown) => input },
 }));
-vi.mock("~/rpc/atomRegistry", () => ({ appAtomRegistry: {} }));
+vi.mock("~/rpc/atomRegistry", () => ({ appAtomRegistry: { get: mocks.config } }));
+vi.mock("~/state/server", () => ({
+  serverEnvironment: { configValueAtom: (environmentId: string) => environmentId },
+}));
 vi.mock("~/state/session", () => ({
+  environmentSession: { bootstrap: () => mocks.bootstrap },
   readPreparedConnection: mocks.connection,
   readConfiguredPreviewEnvironmentUrl: () =>
     mocks.configuredEndpoint() ??
@@ -62,6 +71,8 @@ const lease: PreviewHostingLeaseSummary = {
   status: "active",
 };
 beforeEach(() => {
+  mocks.config.mockReset();
+  mocks.config.mockReturnValue({ environment: { capabilities: { previewAssetRecovery: true } } });
   mocks.run.mockReset();
   mocks.query.mockReset();
   mocks.query.mockResolvedValue({
@@ -74,6 +85,98 @@ beforeEach(() => {
 });
 
 describe("native preview reopening", () => {
+  it.each([true, undefined])(
+    "waits for bootstrap before choosing signed-document renewal: %s",
+    async (previewAssetRecovery) => {
+      mocks.config.mockReturnValue(null);
+      let ready!: (value: unknown) => void;
+      mocks.query.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            ready = resolve;
+          }),
+      );
+      const url = "http://managed-server.example:3773/api/assets/expired/report.html";
+      const opened = vi.fn();
+      const pending = prepareHostedPreview(owner, url).then(opened);
+      expect(mocks.query).toHaveBeenCalledExactlyOnceWith(expect.anything(), mocks.bootstrap, {
+        reportFailure: false,
+        refresh: true,
+      });
+      expect(opened).not.toHaveBeenCalled();
+      ready(
+        AsyncResult.success({
+          config: { environment: { capabilities: { previewAssetRecovery } } },
+          prepared: mocks.connection(),
+        }),
+      );
+      await pending;
+      expect(opened).toHaveBeenCalledExactlyOnceWith(
+        previewAssetRecovery
+          ? expect.objectContaining({
+              url: "http://managed-server.example:3773/api/assets/resource/report.png",
+              restored: true,
+            })
+          : { url, managed: false, restored: false },
+      );
+      expect(mocks.query).toHaveBeenCalledTimes(previewAssetRecovery ? 2 : 1);
+      expect(mocks.run).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects failed bootstrap without returning an expired signed document", async () => {
+    mocks.config.mockReturnValue(null);
+    mocks.query.mockResolvedValue(AsyncResult.failure(Cause.fail(new Error("Readiness failed"))));
+    const opened = vi.fn();
+    await expect(
+      prepareHostedPreview(
+        owner,
+        "http://managed-server.example:3773/api/assets/expired/report.html",
+      ).then(opened),
+    ).rejects.toThrow("The saved preview could not be started.");
+    expect(opened).not.toHaveBeenCalled();
+    expect(mocks.query).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([undefined, false])(
+    "opens an older environment's signed link without renewal support: %s",
+    async (previewAssetRecovery) => {
+      mocks.config.mockReturnValue({ environment: { capabilities: { previewAssetRecovery } } });
+      const url =
+        "http://managed-server.example:3773/api/assets/current/report.html?mode=review#chart";
+      await expect(prepareHostedPreview(owner, url)).resolves.toEqual({
+        url,
+        managed: false,
+        restored: false,
+      });
+      expect(mocks.query).not.toHaveBeenCalled();
+      expect(mocks.run).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not disguise an advertised document-renewal failure as a usable old link", async () => {
+    mocks.query.mockResolvedValue(AsyncResult.failure(Cause.fail(new Error("File unavailable"))));
+    await expect(
+      prepareHostedPreview(
+        owner,
+        "http://managed-server.example:3773/api/assets/current/report.html",
+      ),
+    ).rejects.toThrow("The saved preview could not be started.");
+    expect(mocks.run).not.toHaveBeenCalled();
+  });
+
+  it("keeps an older environment's managed resource route without sending a new resource tag", async () => {
+    mocks.config.mockReturnValue({ environment: { capabilities: {} } });
+    mocks.run
+      .mockResolvedValueOnce(AsyncResult.success([lease]))
+      .mockResolvedValueOnce(AsyncResult.success(lease));
+    await expect(prepareHostedPreview(owner, lease.url, "resource")).resolves.toMatchObject({
+      managed: true,
+      restored: true,
+    });
+    expect(mocks.query).not.toHaveBeenCalled();
+  });
+
   it("preserves the actionable capacity error when a saved app cannot yet restart", async () => {
     const message =
       "Managed previews are at capacity. Your preview is saved. Close an active Browser view or finish its automation or recording, then retry.";

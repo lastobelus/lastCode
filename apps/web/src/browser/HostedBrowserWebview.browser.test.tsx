@@ -8,7 +8,9 @@ import {
   type PreviewEvent,
   type PreviewListResult,
   type PreviewSessionSnapshot,
+  type ServerConfig,
 } from "@t3tools/contracts";
+import { AVAILABLE_CONNECTION_STATE } from "@t3tools/client-runtime/connection";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { Cause, Effect } from "effect";
 import type { OpenPreviewMutation } from "./openFileInPreview";
@@ -61,13 +63,28 @@ vi.mock("~/hooks/useTheme", () => ({ useTheme: () => ({ resolvedTheme: "light" }
 vi.mock("~/state/session", async (importOriginal) => ({
   ...(await importOriginal<typeof import("~/state/session")>()),
   useEnvironmentScope: () => true,
+  environmentSession: {
+    ...(await importOriginal<typeof import("~/state/session")>()).environmentSession,
+    initialConfigValueAtom: () => hostingConfig,
+  },
 }));
+vi.mock(import("~/connection/catalog"), async (original) => {
+  const actual = await original();
+  return {
+    ...actual,
+    environmentCatalog: { ...actual.environmentCatalog, stateAtom: () => hostingConnection },
+  };
+});
 vi.mock("~/state/primaryEnvironment", async () => {
   const { Atom } = await import("effect/reactivity");
   return { primaryEnvironmentIdAtom: Atom.make("desktop-primary") };
 });
 vi.mock("~/state/preview", () => ({
   previewEnvironment: {
+    hostingActivity: {
+      label: "preview:hosting-activity",
+      run: () => Promise.resolve({ _tag: "Success", value: undefined }),
+    },
     open: {
       label: "preview:open",
       run: (_registry: unknown, input: Parameters<OpenPreviewMutation>[0]) =>
@@ -113,6 +130,16 @@ const previewEvents = new Map<
   Atom.Writable<AsyncResult.AsyncResult<PreviewEvent>, AsyncResult.AsyncResult<PreviewEvent>>
 >();
 const previewList = Atom.make<AsyncResult.AsyncResult<PreviewListResult>>(AsyncResult.initial());
+const hostingConfig = Atom.make<ServerConfig>({
+  environment: { capabilities: {} },
+} as ServerConfig);
+const hostingConnection = Atom.make(
+  AsyncResult.success({
+    ...AVAILABLE_CONNECTION_STATE,
+    phase: "connected" as const,
+    generation: 1,
+  }),
+);
 const threadListValues = Atom.family((_threadKey: string) =>
   Atom.make<AsyncResult.AsyncResult<PreviewListResult>>(AsyncResult.initial()),
 );

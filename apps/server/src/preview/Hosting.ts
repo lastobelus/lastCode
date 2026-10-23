@@ -155,6 +155,7 @@ export class PreviewHosting extends Context.Service<
       readonly threadId: string;
       readonly leaseId: PreviewHostingLeaseId;
       readonly url: string;
+      readonly resource?: boolean;
     }) => Effect.Effect<
       (PreviewHostingLease & { readonly restarted?: boolean }) | null,
       PreviewHostingError | TerminalManager.TerminalError
@@ -340,6 +341,20 @@ const make = Effect.gen(function* () {
   const lastUsedAt = new Map<string, number>();
   const reservedProcesses = new Set<string>();
   const inFlight = new Map<string, number>();
+  const hasActivity = (lease: PreviewHostingLease) =>
+    [...activities.values()].some(
+      (activity) =>
+        activity.threadId === lease.threadId && activity.portKey === discoveryPortKey(lease.url),
+    );
+  const isDemanded = (lease: PreviewHostingLease) =>
+    hasActivity(lease) || inFlight.has(lease.id) || reservedProcesses.has(lease.id);
+  // Activity is transient. Keep its idle deadline in memory instead of writing
+  // hosting state twice for every streamed resource request.
+  const idleExpiresAt = (lease: PreviewHostingLease) =>
+    Math.max(
+      Date.parse(lease.expiresAt),
+      (lastUsedAt.get(lease.id) ?? -Infinity) + PREVIEW_HOSTING_LEASE_MS,
+    );
   const listeners = new Set<
     (leases: ReadonlyArray<PreviewHostingLeaseMetadata>) => Effect.Effect<void>
   >();
@@ -410,7 +425,10 @@ const make = Effect.gen(function* () {
       }),
     );
 
-  const withLeaseLock = <A, E, R>(leaseId: string, effect: Effect.Effect<A, E, R>) => {
+  const withLeaseSemaphore = <A, E, R>(
+    leaseId: string,
+    use: (semaphore: Semaphore.Semaphore) => Effect.Effect<A, E, R>,
+  ) => {
     const acquire = SynchronizedRef.modifyEffect(leaseLocks, (current) => {
       const existing = current.get(leaseId);
       if (existing) {
@@ -430,7 +448,7 @@ const make = Effect.gen(function* () {
     });
     return Effect.acquireUseRelease(
       acquire,
-      (entry) => entry.semaphore.withPermit(effect),
+      (entry) => use(entry.semaphore),
       ({ semaphore }) =>
         SynchronizedRef.update(leaseLocks, (current) => {
           const entry = current.get(leaseId);
@@ -442,6 +460,10 @@ const make = Effect.gen(function* () {
         }),
     );
   };
+  const withLeaseLock = <A, E, R>(leaseId: string, effect: Effect.Effect<A, E, R>) =>
+    withLeaseSemaphore(leaseId, (semaphore) => semaphore.withPermit(effect));
+  const tryWithLeaseLock = <A, E, R>(leaseId: string, effect: Effect.Effect<A, E, R>) =>
+    withLeaseSemaphore(leaseId, (semaphore) => semaphore.withPermitsIfAvailable(1)(effect));
 
   const nowMillis = Effect.map(DateTime.now, (now) => DateTime.toEpochMillis(now));
   const setActivity: PreviewHosting["Service"]["setActivity"] = Effect.fn(
@@ -467,6 +489,7 @@ const make = Effect.gen(function* () {
         lastUsedAt.set(lease.id, usedAt);
       }
     }
+    yield* Queue.offer(wakeups, undefined);
   }, warmProcessGate.withPermit);
   const findLease = (leaseId: string) =>
     SynchronizedRef.get(leasesRef).pipe(
@@ -680,36 +703,49 @@ const make = Effect.gen(function* () {
     );
   });
 
-  const expireLocked = Effect.fn("PreviewHosting.expireLocked")(function* (
+  const reserveExpiryLocked = Effect.fn("PreviewHosting.reserveExpiryLocked")(function* (
     lease: PreviewHostingLease,
   ) {
     const currentTime = yield* nowMillis;
     let latest = yield* findLease(lease.id);
-    if (latest === null) return;
+    if (latest === null) return null;
     if (
       latest.status !== "expired" &&
       !latest.cleanupPending &&
-      (latest.status === "sleeping" || Date.parse(latest.expiresAt) > currentTime)
+      (latest.status === "sleeping" || isDemanded(latest) || idleExpiresAt(latest) > currentTime)
     )
-      return;
+      return null;
     if (latest.status !== "expired" && !latest.cleanupPending) {
       latest = { ...latest, status: "sleeping", cleanupPending: true };
       yield* setLease(latest, false);
     }
-    yield* closeOwnedTerminal(latest).pipe(
+    return latest;
+  });
+
+  const completeExpiryLocked = Effect.fn("PreviewHosting.completeExpiryLocked")(function* (
+    lease: PreviewHostingLease,
+  ) {
+    yield* closeOwnedTerminal(lease).pipe(
       Effect.tap(() =>
-        latest!.status === "expired"
-          ? removeLease(latest!.id)
-          : setLease({ ...latest!, cleanupPending: false }, false),
+        lease.status === "expired"
+          ? removeLease(lease.id)
+          : setLease({ ...lease, cleanupPending: false }, false),
       ),
       Effect.catch((error) =>
         Effect.logWarning("failed to close expired preview terminal", {
-          threadId: latest!.threadId,
-          terminalId: latest!.terminalId,
+          threadId: lease.threadId,
+          terminalId: lease.terminalId,
           error: error.message,
         }),
       ),
     );
+  });
+
+  const expireLocked = Effect.fn("PreviewHosting.expireLocked")(function* (
+    lease: PreviewHostingLease,
+  ) {
+    const reserved = yield* reserveExpiryLocked(lease);
+    if (reserved !== null) yield* completeExpiryLocked(reserved);
   });
 
   const stopRecoveryLocked = Effect.fnUntraced(function* (leaseId: string) {
@@ -743,6 +779,7 @@ const make = Effect.gen(function* () {
     requested: PreviewHostingLease,
   ) {
     if (reservedProcesses.has(requested.id)) return;
+    const lockedVictims = new Set<string>();
     while (true) {
       const leases = yield* SynchronizedRef.get(leasesRef);
       yield* terminals.refreshMetadata;
@@ -770,13 +807,9 @@ const make = Effect.gen(function* () {
             lease.status !== "starting" &&
             lease.status !== "expired" &&
             !lease.cleanupPending &&
-            !inFlight.has(lease.id) &&
             !reservedProcesses.has(lease.id) &&
-            ![...activities.values()].some(
-              (activity) =>
-                activity.threadId === lease.threadId &&
-                activity.portKey === discoveryPortKey(lease.url),
-            ),
+            !lockedVictims.has(lease.id) &&
+            !hasActivity(lease),
         )
         .toSorted(
           (left, right) =>
@@ -784,7 +817,9 @@ const make = Effect.gen(function* () {
             (lastUsedAt.get(right.id) ?? Date.parse(right.expiresAt) - PREVIEW_HOSTING_LEASE_MS),
         )[0];
       if (victim !== undefined) {
-        const unloaded = yield* withLeaseLock(
+        // Recovery holds its lease lock before requesting admission. Never wait
+        // for that lock while holding the admission gate in the opposite order.
+        const unloaded = yield* tryWithLeaseLock(
           victim.id,
           Effect.suspend(() =>
             inFlight.has(victim.id)
@@ -792,7 +827,10 @@ const make = Effect.gen(function* () {
               : stopRecoveryLocked(victim.id).pipe(Effect.as(true)),
           ),
         );
-        if (!unloaded) continue;
+        if (Option.isNone(unloaded) || !unloaded.value) {
+          lockedVictims.add(victim.id);
+          continue;
+        }
         const stopped = yield* findLease(victim.id);
         if (stopped === null || !stopped.cleanupPending) continue;
       }
@@ -804,7 +842,7 @@ const make = Effect.gen(function* () {
     }
   }, warmProcessGate.withPermit);
 
-  const ensureLeaseReady = (leaseId: string) =>
+  const ensureLeaseReady = (leaseId: string, resource = false) =>
     Effect.suspend(() => {
       let launchedCommand = false;
       return Effect.acquireUseRelease(
@@ -822,7 +860,7 @@ const make = Effect.gen(function* () {
               }
               if (
                 lease.cleanupPending ||
-                (lease.status !== "sleeping" && Date.parse(lease.expiresAt) <= currentTime)
+                (lease.status !== "sleeping" && idleExpiresAt(lease) <= currentTime)
               ) {
                 yield* expireLocked(lease);
                 lease = yield* findLease(leaseId);
@@ -836,6 +874,15 @@ const make = Effect.gen(function* () {
 
               const startsHandoff = lease.status === "starting";
               const previous = yield* verifyLaunchOwnership(lease);
+              // Media already holds activity for the response lifetime. Fresh
+              // ownership is enough for a healthy app; do not repeat readiness,
+              // persistence, and subscriber updates for every HEAD or range.
+              if (resource && lease.status === "active" && previous.responding) {
+                const latest = yield* findLease(lease.id);
+                if (latest === null || latest.status === "expired") return null;
+                lastUsedAt.set(lease.id, yield* nowMillis);
+                return { lease: latest, restarted: false };
+              }
               if (
                 !startsHandoff &&
                 !previous.responding &&
@@ -950,7 +997,7 @@ const make = Effect.gen(function* () {
               inFlight.delete(leaseId);
               reservedProcesses.delete(leaseId);
             } else inFlight.set(leaseId, users - 1);
-          }),
+          }).pipe(Effect.andThen(Queue.offer(wakeups, undefined))),
       );
     });
 
@@ -1240,7 +1287,7 @@ const make = Effect.gen(function* () {
         yield* withLeaseLock(lease.id, expireLocked(lease));
         return null;
       }
-      const ready = yield* ensureLeaseReady(lease.id);
+      const ready = yield* ensureLeaseReady(lease.id, input.resource);
       return ready === null
         ? null
         : { ...ready.lease, ...(ready.restarted ? { restarted: true } : {}) };
@@ -1281,7 +1328,7 @@ const make = Effect.gen(function* () {
         lease.threadId === threadId &&
         lease.terminalId === terminalId &&
         lease.status !== "expired" &&
-        Date.parse(lease.expiresAt) > currentTime,
+        (isDemanded(lease) || idleExpiresAt(lease) > currentTime),
     );
   });
 
@@ -1365,12 +1412,20 @@ const make = Effect.gen(function* () {
       (lease) =>
         lease.status === "expired" ||
         lease.cleanupPending ||
-        (lease.status !== "sleeping" && Date.parse(lease.expiresAt) <= currentTime),
+        (lease.status !== "sleeping" && !isDemanded(lease) && idleExpiresAt(lease) <= currentTime),
     );
     yield* Effect.forEach(
       due,
       (lease) =>
-        withLeaseLock(lease.id, expireLocked(lease)).pipe(
+        withLeaseLock(
+          lease.id,
+          Effect.gen(function* () {
+            const reserved = yield* warmProcessGate.withPermit(reserveExpiryLocked(lease));
+            // cleanupPending counts the process until its shutdown acknowledgment;
+            // other leases and activity updates need not wait for that shutdown.
+            if (reserved !== null) yield* completeExpiryLocked(reserved);
+          }),
+        ).pipe(
           Effect.catch((error) =>
             Effect.logWarning("failed to expire preview lease; cleanup will retry", {
               threadId: lease.threadId,
@@ -1394,14 +1449,15 @@ const make = Effect.gen(function* () {
         .filter(
           (lease) =>
             (lease.status === "active" || lease.status === "starting") &&
-            Date.parse(lease.expiresAt) > checkedAt,
+            !isDemanded(lease) &&
+            idleExpiresAt(lease) > checkedAt,
         )
-        .map((lease) => Date.parse(lease.expiresAt));
+        .map(idleExpiresAt);
       const failedCleanupPending = leases.some(
         (lease) =>
           lease.status === "expired" ||
           lease.cleanupPending ||
-          (lease.status !== "sleeping" && Date.parse(lease.expiresAt) <= now),
+          (lease.status !== "sleeping" && !isDemanded(lease) && idleExpiresAt(lease) <= now),
       );
       const activeDelayMs =
         activeExpiry.length === 0 ? undefined : Math.max(0, Math.min(...activeExpiry) - now);

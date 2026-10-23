@@ -314,6 +314,7 @@ describe("AssetAccess", () => {
             threadId: lease.threadId,
             leaseId: lease.id,
             url: lease.url,
+            resource: true,
           });
         }).pipe(
           Effect.provide(

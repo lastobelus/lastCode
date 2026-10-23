@@ -1,6 +1,10 @@
 // @effect-diagnostics nodeBuiltinImport:off - Stands in for an Electron debugger.
 import { describe, expect, it } from "@effect/vitest";
-import { DesktopBrowserEvent, type DesktopBrowserSurfaceRequest } from "@t3tools/contracts";
+import {
+  DesktopBrowserEvent,
+  type DesktopBrowserRendererRequest,
+  type DesktopBrowserSurfaceRequest,
+} from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -102,19 +106,20 @@ const makeRenderingContents = (initial = true) => {
   };
 };
 
-const makeDebuggee = () => {
+const makeDebuggee = (onLifecycle?: (state: string) => void) => {
   const emitter = new NodeEvents.EventEmitter();
   const pending: Array<() => void> = [];
   const sent: Array<unknown> = [];
   const sendWaiters: Array<() => void> = [];
   const debuggee = Object.assign(emitter, {
-    sendCommand: (method: string, params?: { id?: number }) =>
+    sendCommand: (method: string, params?: { id?: number; state?: string }) =>
       new Promise((resolve) => {
         if (method === "Target.getTargetInfo") {
           resolve({ targetInfo: { targetId: "GUEST" } });
           return;
         }
         if (method === "Page.setWebLifecycleState") {
+          if (params?.state) onLifecycle?.(params.state);
           resolve({});
           return;
         }
@@ -155,6 +160,106 @@ const makeDebuggee = () => {
     releaseFirst: () => pending.shift()?.(),
   };
 };
+
+it.effect(
+  "shares one 32-page native budget across remote and local renderer tabs, protecting viewers and rendering",
+  () =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      const main = makePresentationWindow();
+      const requests: DesktopBrowserRendererRequest[] = [];
+      Object.assign(main.window.webContents, {
+        send: (_channel: string, request: DesktopBrowserRendererRequest) => requests.push(request),
+      });
+      host.setMainWindow(main.window);
+      for (const id of ["local", "remote-a", "remote-b"])
+        yield* host.bindEnvironment(id, `environment-${id}`, profileResolver(`environment-${id}`));
+      const keys = Array.from({ length: 33 }, (_, index) => ({
+        threadId: "shared-thread-id",
+        tabId: `tab-${index}`,
+        desktopHostId: ["remote-a", "remote-b", "local"][index % 3]!,
+      }));
+      for (let index = 0; index < 32; index++) {
+        const runtimeTabId = `runtime-${index}`;
+        const key = keys[index]!;
+        host.setPresentation({ runtimeTabId, presented: index > 1, rendering: index === 1 }, 77);
+        expect(host.reserveTab(runtimeTabId, key)).toBe(true);
+        host.attach(key, makeDebuggee().tab, runtimeTabId);
+      }
+      expect(host.reserveTab("runtime-32", keys[32]!)).toBe(true);
+      expect(requests).toEqual([
+        {
+          ...keys[0]!,
+          environmentId: "environment-remote-a",
+          action: "unload",
+        },
+      ]);
+      host.setPresentation({ runtimeTabId: "runtime-32", presented: true }, 77);
+      host.attach(keys[32]!, makeDebuggee().tab, "runtime-32");
+      expect(host.reserveTab("over-capacity", { ...key, tabId: "overflow" })).toBe(false);
+      // Returning to a saved target reuses the same budget and evicts only an inactive page.
+      host.setPresentation({ runtimeTabId: "runtime-2", presented: false }, 77);
+      expect(host.reserveTab("runtime-0", keys[0]!)).toBe(true);
+      host.setPresentation({ runtimeTabId: "runtime-0", presented: true }, 77);
+      host.attach(keys[0]!, makeDebuggee().tab, "runtime-0");
+      expect(requests.map((request) => request.tabId)).toEqual(["tab-0", "tab-2"]);
+      expect(host.reserveTab("still-over-capacity", { ...key, tabId: "overflow" })).toBe(false);
+    }),
+);
+
+it.effect(
+  "freezes remote renderer tabs, keeps recording/automation warm, and unloads after 24 inactive hours",
+  () =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make.pipe(
+        Effect.provide(DesktopClientSettings.layerTest()),
+      );
+      const main = makePresentationWindow();
+      const requests = yield* Queue.unbounded<DesktopBrowserRendererRequest>();
+      const lifecycle = yield* Queue.unbounded<string>();
+      Object.assign(main.window.webContents, {
+        send: (_channel: string, request: DesktopBrowserRendererRequest) =>
+          Queue.offerUnsafe(requests, request),
+      });
+      host.setMainWindow(main.window);
+      yield* host.bindEnvironment(
+        "remote",
+        "remote-environment",
+        profileResolver("remote-environment"),
+      );
+      const remoteKey = { ...key, desktopHostId: "remote" };
+      const guest = () => makeDebuggee((state) => Queue.offerUnsafe(lifecycle, state));
+      expect(host.reserveTab("remote-runtime", remoteKey)).toBe(true);
+      host.attach(remoteKey, guest().tab, "remote-runtime");
+      expect(yield* Queue.take(lifecycle)).toBe("frozen");
+      yield* TestClock.adjust("23 hours");
+      expect(yield* Queue.clear(requests)).toEqual([]);
+      host.setPresentation(
+        { runtimeTabId: "remote-runtime", presented: false, rendering: true },
+        77,
+      );
+      expect(yield* Queue.take(lifecycle)).toBe("active");
+      yield* TestClock.adjust("25 hours");
+      expect(yield* Queue.clear(requests)).toEqual([]);
+      host.setPresentation(
+        { runtimeTabId: "remote-runtime", presented: false, rendering: false },
+        77,
+      );
+      expect(yield* Queue.take(lifecycle)).toBe("frozen");
+      yield* TestClock.adjust("24 hours");
+      expect(yield* Queue.take(requests)).toEqual({
+        ...remoteKey,
+        environmentId: "remote-environment",
+        action: "unload",
+      });
+      expect(host.reserveTab("remote-runtime", remoteKey)).toBe(true);
+      host.setPresentation({ runtimeTabId: "remote-runtime", presented: true }, 77);
+      host.attach(remoteKey, guest().tab, "remote-runtime");
+      expect(yield* Queue.take(lifecycle)).toBe("active");
+    }),
+);
 
 const makePopup = (initialVisible = true, initiallyAttached = false) => {
   const events = new NodeEvents.EventEmitter();

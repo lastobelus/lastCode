@@ -241,9 +241,37 @@ export const make = Effect.gen(function* PreviewManagerMake() {
     Effect.mapError((cause) =>
       isPreviewSessionStorageError(cause) ? cause : new PreviewSessionStorageError({ cause }),
     ),
+    Effect.matchEffect({
+      onSuccess: (sessions) => Effect.succeed({ sessions, loadError: null }),
+      onFailure: Effect.fn("PreviewManager.quarantineSessions")(function* (loadError) {
+        const sessions = new Map<string, PreviewSessionState>();
+        const backupPath = `${sessionsPath}.unreadable-${serverEpoch}`;
+        const quarantineError = yield* fileSystem.rename(sessionsPath, backupPath).pipe(
+          Effect.match({
+            onSuccess: () => null,
+            onFailure: (cause) => new PreviewSessionStorageError({ cause }),
+          }),
+        );
+        if (quarantineError !== null) return { sessions, loadError: quarantineError };
+        yield* Effect.logWarning(
+          "Saved preview sessions could not be restored; the unreadable file was preserved in a backup.",
+          { sessionsPath, backupPath, error: loadError.message },
+        );
+        return { sessions, loadError: null };
+      }),
+    }),
   );
+  const sessionsLoadError = loadedSessions.loadError;
+  if (sessionsLoadError !== null) {
+    yield* Effect.logWarning(
+      "Saved preview sessions could not be restored or backed up; session changes are disabled to preserve the file.",
+      { sessionsPath, error: sessionsLoadError.message },
+    );
+  }
   const persistSessions = Effect.fn("PreviewManager.persistSessions")(
     function* (sessions: ReadonlyMap<string, PreviewSessionState>) {
+      // Preserve unreadable state for repair rather than replacing it with a new history.
+      if (sessionsLoadError !== null) return yield* sessionsLoadError;
       const retained = yield* Effect.try(() =>
         [...sessions.values()].map((session) => dormantSnapshot(session.snapshot)),
       );
@@ -285,7 +313,7 @@ export const make = Effect.gen(function* PreviewManagerMake() {
   const recoveryClaimsLoadError = loadedRecoveryClaims.loadError;
   const recoveryClaimsRef = yield* SynchronizedRef.make(loadedRecoveryClaims.claims);
   const stateRef = yield* SynchronizedRef.make<ManagerState>({
-    sessions: loadedSessions,
+    sessions: loadedSessions.sessions,
     revision: 0,
   });
   const nativeCloseGuards = new Map<string, () => Effect.Effect<void, PreviewError>>();
@@ -342,6 +370,7 @@ export const make = Effect.gen(function* PreviewManagerMake() {
 
   const open: PreviewManager["Service"]["open"] = Effect.fn("PreviewManager.open")(
     function* (input) {
+      if (sessionsLoadError !== null) return yield* sessionsLoadError;
       const environmentHosted = input.environmentHosted || input.browserHost === "environment";
       if (
         environmentHosted &&

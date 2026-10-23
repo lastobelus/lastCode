@@ -24,6 +24,26 @@ const lease = {
 };
 
 describe("prepareThenOpenThreadFeedUrl", () => {
+  it("opens an older environment's signed document without unsupported preparation", async () => {
+    const url = "https://workspace.example/api/assets/current/report.html?mode=review#chart";
+    const open = vi.fn((destination: string) => destination);
+    const list = vi.fn(async () => [lease]);
+    await expect(
+      prepareThenOpenThreadFeedUrl(
+        {
+          threadRef,
+          url,
+          environmentUrl: "https://workspace.example/",
+          list,
+          recover: async () => lease,
+        },
+        open,
+      ),
+    ).resolves.toBe(url);
+    expect(open).toHaveBeenCalledExactlyOnceWith(url);
+    expect(list).not.toHaveBeenCalled();
+  });
+
   it("opens managed media through the connected environment instead of its loopback listener", async () => {
     const source = { ...lease, url: "http://localhost:5173/report.pdf?run=7" };
     const open = vi.fn((url: string) => url);

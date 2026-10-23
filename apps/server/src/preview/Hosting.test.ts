@@ -779,54 +779,65 @@ describe("PreviewHosting", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
-  it.effect(
-    "does not choose a queued recovery as an eviction victim while it holds its lease lock",
-    () =>
-      Effect.gen(function* () {
-        const refreshing = yield* Deferred.make<void>();
-        const finishRefresh = yield* Deferred.make<void>();
-        let refreshes = 0;
-        const fixture = yield* warmProcessFixture(8, {
-          onRefreshMetadata: () =>
-            Effect.suspend(() =>
-              ++refreshes === 1
-                ? Deferred.succeed(refreshing, undefined).pipe(
-                    Effect.andThen(Deferred.await(finishRefresh)),
-                  )
-                : Effect.void,
-            ),
-        });
-        const original = fixture.leases[0]!;
-        const server: DiscoveredLocalServer = {
-          host: "localhost",
-          port: 6_000,
-          url: original.url,
-          pid: 100,
-          processName: "node",
-          terminal: { threadId: ThreadId.make(original.threadId), terminalId: original.terminalId },
-        };
-        yield* Effect.scoped(
-          Effect.gen(function* () {
-            const hosting = yield* PreviewHosting.PreviewHosting;
-            const recovery = yield* hosting
-              .recover({
-                threadId: original.threadId,
-                leaseId: PreviewHostingLeaseId.make(original.id),
-                url: original.url,
-              })
-              .pipe(Effect.forkScoped);
-            yield* Deferred.await(refreshing);
-            const started = yield* hosting.launch(fixture.request);
-            assert.equal(started.status, "active");
-            assert.deepEqual(fixture.harness.closes, [
-              { threadId: fixture.leases[1]!.threadId, terminalId: fixture.leases[1]!.terminalId },
-            ]);
-            yield* Deferred.succeed(finishRefresh, undefined);
-            assert.equal((yield* Fiber.join(recovery))?.status, "active");
-            assert.equal(fixture.harness.summaries.length, 8);
-          }).pipe(Effect.provide(hostingLayer(fixture.config, fixture.harness, true, [server]))),
-        );
-      }).pipe(Effect.provide(NodeServices.layer)),
+  it.effect("skips a locked eviction candidate whose recovery also needs admission", () =>
+    Effect.gen(function* () {
+      const refreshing = yield* Deferred.make<void>();
+      const finishRefresh = yield* Deferred.make<void>();
+      let refreshes = 0;
+      const fixture = yield* warmProcessFixture(8, {
+        onRefreshMetadata: () =>
+          Effect.suspend(() =>
+            ++refreshes === 1
+              ? Deferred.succeed(refreshing, undefined).pipe(
+                  Effect.andThen(Deferred.await(finishRefresh)),
+                )
+              : Effect.void,
+          ),
+      });
+      const original = fixture.leases[0]!;
+      const layer = PreviewHosting.layer.pipe(
+        Layer.provideMerge(
+          Layer.mergeAll(
+            NodeServices.layer,
+            FetchHttpClient.layer,
+            ServerConfig.layer(fixture.config),
+            terminalLayer(fixture.harness),
+            Layer.mock(NetService.NetService)({
+              hasListenerOnHost: () => Effect.succeed(false),
+            }),
+            discoveryLayer(true, [], fixture.harness),
+          ),
+        ),
+      );
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const recovery = yield* hosting
+            .recover({
+              threadId: original.threadId,
+              leaseId: PreviewHostingLeaseId.make(original.id),
+              url: original.url,
+            })
+            .pipe(Effect.forkScoped);
+          yield* Deferred.await(refreshing);
+          const started = yield* hosting.launch(fixture.request);
+          assert.equal(started.status, "active");
+          assert.deepEqual(fixture.harness.closes, [
+            { threadId: fixture.leases[1]!.threadId, terminalId: fixture.leases[1]!.terminalId },
+          ]);
+          yield* Deferred.succeed(finishRefresh, undefined);
+          const recovered = yield* Fiber.join(recovery);
+          assert.equal(recovered?.status, "active");
+          assert.equal(recovered?.restarted, true);
+          assert.equal(fixture.harness.summaries.length, 8);
+          assert.equal(fixture.harness.opens.length, 2);
+          assert.deepEqual(
+            fixture.harness.closes.map((entry) => entry.terminalId),
+            [fixture.leases[1]!.terminalId, original.terminalId],
+          );
+        }).pipe(Effect.provide(layer)),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 
   it.effect.each([false, true])(
@@ -2970,6 +2981,377 @@ describe("PreviewHosting", () => {
           ),
         );
       }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("releases the expiry gate during shutdown while counting the stopping process", () =>
+    Effect.gen(function* () {
+      const shutdownStarted = yield* Deferred.make<void>();
+      const allowShutdown = yield* Deferred.make<void>();
+      const slowCleaned = yield* Deferred.make<void>();
+      const independentCleaned = yield* Deferred.make<void>();
+      const acknowledged = new Set<string>();
+      let liveProcesses = 8;
+      const fixture = yield* warmProcessFixture(8, {
+        onWaitForThreadShutdown: (threadId) =>
+          Effect.gen(function* () {
+            if (acknowledged.has(threadId)) return;
+            if (threadId === "thread-0") {
+              yield* Deferred.succeed(shutdownStarted, undefined);
+              yield* Deferred.await(allowShutdown);
+            }
+            acknowledged.add(threadId);
+            liveProcesses--;
+          }),
+        onOpen: () =>
+          Effect.sync(() => {
+            assert.isBelow(liveProcesses, 8);
+            liveProcesses++;
+          }),
+      });
+      const slow = fixture.leases[0]!;
+      const independent = fixture.leases[1]!;
+      const healthy = fixture.leases[2]!;
+      yield* fixture.fs.writeFileString(
+        `${fixture.config.stateDir}/preview-hosting.json`,
+        encodePersistedHostingState({
+          version: 1,
+          leases: fixture.leases.map((lease) => ({ ...lease, expiresAt: slow.expiresAt })),
+        }),
+      );
+      const server: DiscoveredLocalServer = {
+        host: "localhost",
+        port: 6_002,
+        url: healthy.url,
+        pid: 100,
+        processName: "node",
+        terminal: { threadId: ThreadId.make(healthy.threadId), terminalId: healthy.terminalId },
+      };
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          yield* hosting.subscribe(() =>
+            Effect.gen(function* () {
+              const leases = yield* hosting.list().pipe(Effect.orDie);
+              for (const [leaseId, cleaned] of [
+                [slow.id, slowCleaned],
+                [independent.id, independentCleaned],
+              ] as const) {
+                if (
+                  leases.some(
+                    (lease) =>
+                      lease.id === leaseId &&
+                      lease.status === "sleeping" &&
+                      lease.cleanupPending === false,
+                  )
+                )
+                  yield* Deferred.succeed(cleaned, undefined);
+              }
+            }),
+          );
+          for (const lease of fixture.leases.slice(2)) {
+            yield* hosting.setActivity({
+              activityId: lease.id,
+              threadId: lease.threadId,
+              url: lease.url,
+              active: true,
+            });
+          }
+          yield* TestClock.adjust(Duration.millis(PreviewHosting.PREVIEW_HOSTING_LEASE_MS));
+          yield* Deferred.await(shutdownStarted);
+          const activity = {
+            activityId: "during-expiry",
+            threadId: healthy.threadId,
+            url: healthy.url,
+          };
+          yield* hosting.setActivity({ ...activity, active: true });
+          assert.equal(
+            (yield* hosting.recover({
+              threadId: healthy.threadId,
+              leaseId: PreviewHostingLeaseId.make(healthy.id),
+              url: healthy.url,
+            }))?.status,
+            "active",
+          );
+          yield* hosting.setActivity({ ...activity, active: false });
+          yield* Deferred.await(independentCleaned);
+          assert.isFalse(acknowledged.has(slow.threadId));
+          assert.equal(liveProcesses, 7);
+          assert.isTrue(
+            (yield* hosting.list()).find((lease) => lease.id === slow.id)?.cleanupPending,
+          );
+
+          const admitted = yield* hosting.launch(fixture.request);
+          yield* hosting.setActivity({
+            activityId: admitted.id,
+            threadId: admitted.threadId,
+            url: admitted.url,
+            active: true,
+          });
+          const nextRequest = {
+            ...fixture.request,
+            threadId: "another-thread",
+            url: "http://localhost:7001/app",
+          };
+          const blocked = yield* hosting.launch(nextRequest).pipe(Effect.result);
+          assert.equal(blocked._tag, "Failure");
+          if (blocked._tag === "Failure") {
+            assert.equal(blocked.failure._tag, "PreviewHostingError");
+            if (blocked.failure._tag === "PreviewHostingError")
+              assert.equal(blocked.failure.operation, "capacity");
+          }
+          assert.equal(fixture.harness.opens.length, 1);
+          assert.equal(liveProcesses, 8);
+          yield* Deferred.succeed(allowShutdown, undefined);
+          yield* Deferred.await(slowCleaned);
+          assert.equal(liveProcesses, 7);
+          assert.equal((yield* hosting.launch(nextRequest)).status, "active");
+          assert.equal(fixture.harness.opens.length, 2);
+          assert.equal(liveProcesses, 8);
+        }).pipe(Effect.provide(hostingLayer(fixture.config, fixture.harness, true, [server]))),
+      ).pipe(Effect.ensuring(Deferred.succeed(allowShutdown, undefined)));
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("expires only after 24 idle hours following the last matching activity", () =>
+    Effect.gen(function* () {
+      const closed = yield* Deferred.make<void>();
+      const fixture = yield* warmProcessFixture(1, {
+        onClose: () => Deferred.succeed(closed, undefined).pipe(Effect.asVoid),
+      });
+      const original = fixture.leases[0]!;
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const view = {
+            activityId: "visible",
+            threadId: original.threadId,
+            url: original.url,
+          };
+          const recording = {
+            ...view,
+            activityId: "recording",
+            url: original.url.replace("localhost", "127.0.0.1"),
+          };
+          yield* hosting.setActivity({ ...view, active: true });
+          yield* hosting.setActivity({ ...recording, active: true });
+          yield* TestClock.adjust(Duration.days(2));
+          assert.deepEqual(fixture.harness.closes, []);
+          assert.isTrue(yield* hosting.ownsTerminal(original.threadId, original.terminalId));
+          yield* hosting.setActivity({ ...view, active: false });
+          yield* TestClock.adjust(Duration.days(1));
+          assert.deepEqual(fixture.harness.closes, []);
+          yield* hosting.setActivity({ ...recording, active: false });
+          yield* TestClock.adjust(Duration.millis(PreviewHosting.PREVIEW_HOSTING_LEASE_MS - 1));
+          assert.deepEqual(fixture.harness.closes, []);
+          assert.isTrue(yield* hosting.ownsTerminal(original.threadId, original.terminalId));
+          yield* TestClock.adjust(Duration.millis(1));
+          yield* Deferred.await(closed);
+          assert.deepEqual(fixture.harness.closes, [
+            { threadId: original.threadId, terminalId: original.terminalId },
+          ]);
+          assert.equal((yield* hosting.list())[0]?.status, "sleeping");
+          const recovered = yield* hosting.recover({
+            threadId: original.threadId,
+            leaseId: PreviewHostingLeaseId.make(original.id),
+            url: original.url,
+            resource: true,
+          });
+          assert.equal(recovered?.status, "active");
+          assert.equal(recovered?.restarted, true);
+          assert.equal(fixture.harness.writes.length, 1);
+        }).pipe(Effect.provide(fixture.layer)),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("keeps an in-flight recovery protected when its old idle deadline passes", () =>
+    Effect.gen(function* () {
+      const inspecting = yield* Deferred.make<void>();
+      const finishInspection = yield* Deferred.make<void>();
+      let refreshes = 0;
+      const fixture = yield* warmProcessFixture(1, {
+        onRefreshMetadata: () =>
+          Effect.suspend(() =>
+            ++refreshes === 1
+              ? Deferred.succeed(inspecting, undefined).pipe(
+                  Effect.andThen(Deferred.await(finishInspection)),
+                )
+              : Effect.void,
+          ),
+      });
+      const original = fixture.leases[0]!;
+      const server: DiscoveredLocalServer = {
+        host: "localhost",
+        port: 6_000,
+        url: original.url,
+        pid: 100,
+        processName: "node",
+        terminal: { threadId: ThreadId.make(original.threadId), terminalId: original.terminalId },
+      };
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          const recovering = yield* hosting
+            .recover({
+              threadId: original.threadId,
+              leaseId: PreviewHostingLeaseId.make(original.id),
+              url: original.url,
+            })
+            .pipe(Effect.forkScoped);
+          yield* Deferred.await(inspecting);
+          yield* TestClock.adjust(Duration.days(1));
+          assert.deepEqual(fixture.harness.closes, []);
+          yield* Deferred.succeed(finishInspection, undefined);
+          assert.equal((yield* Fiber.join(recovering))?.status, "active");
+          assert.deepEqual(fixture.harness.closes, []);
+        }).pipe(Effect.provide(hostingLayer(fixture.config, fixture.harness, true, [server]))),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("verifies healthy media ownership without repeating readiness or state writes", () =>
+    Effect.gen(function* () {
+      const fixture = yield* warmProcessFixture(1);
+      const original = fixture.leases[0]!;
+      const server: DiscoveredLocalServer = {
+        host: "localhost",
+        port: 6_000,
+        url: original.url,
+        pid: 100,
+        processName: "node",
+        terminal: { threadId: ThreadId.make(original.threadId), terminalId: original.terminalId },
+      };
+      let owner: DiscoveredLocalServer["terminal"] = server.terminal;
+      let scans = 0;
+      let subscriptions = 0;
+      let writes = 0;
+      let updates = 0;
+      const fileSystemLayer = Layer.succeed(FileSystem.FileSystem, {
+        ...fixture.fs,
+        writeFileString: (filePath, data, options) => {
+          writes++;
+          return fixture.fs.writeFileString(filePath, data, options);
+        },
+      });
+      const discovery = Layer.mock(PortScanner.PortDiscovery)({
+        scan: () =>
+          Effect.sync(() => {
+            scans++;
+            return [{ ...server, terminal: owner }];
+          }),
+        subscribe: () =>
+          Effect.sync(() => {
+            subscriptions++;
+          }),
+        retain: Effect.void,
+      });
+      const layer = PreviewHosting.layer.pipe(
+        Layer.provide(fileSystemLayer),
+        Layer.provideMerge(
+          Layer.mergeAll(
+            NodeServices.layer,
+            FetchHttpClient.layer,
+            ServerConfig.layer(fixture.config),
+            terminalLayer(fixture.harness),
+            listeningNetworkLayer,
+            discovery,
+          ),
+        ),
+      );
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          yield* hosting.subscribe(() =>
+            Effect.sync(() => {
+              updates++;
+            }),
+          );
+          const input = {
+            threadId: original.threadId,
+            leaseId: PreviewHostingLeaseId.make(original.id),
+            url: original.url,
+            resource: true,
+          };
+          const activity = { activityId: "media", threadId: original.threadId, url: original.url };
+          for (let index = 0; index < 3; index++) {
+            yield* hosting.setActivity({ ...activity, active: true });
+            assert.equal((yield* hosting.recover(input))?.status, "active");
+            yield* hosting.setActivity({ ...activity, active: false });
+          }
+          assert.equal(scans, 3);
+          assert.equal(subscriptions, 0);
+          assert.equal(writes, 0);
+          assert.equal(updates, 1);
+          assert.deepEqual(fixture.harness.opens, []);
+          assert.deepEqual(fixture.harness.closes, []);
+          owner = { threadId: ThreadId.make("foreign-thread"), terminalId: "foreign-terminal" };
+          const rejected = yield* hosting.recover(input).pipe(Effect.result);
+          assert.equal(rejected._tag, "Failure");
+          if (rejected._tag === "Failure") {
+            assert.equal(rejected.failure._tag, "PreviewHostingError");
+            assert.include(rejected.failure.message, "does not own");
+          }
+          assert.equal(scans, 4);
+          assert.equal(subscriptions, 0);
+          assert.deepEqual(fixture.harness.writes, []);
+        }).pipe(Effect.provide(layer)),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("cancels healthy resource recovery when its thread stops during ownership checks", () =>
+    Effect.gen(function* () {
+      const inspecting = yield* Deferred.make<void>();
+      const finishInspection = yield* Deferred.make<void>();
+      const cancelled = yield* Deferred.make<void>();
+      let refreshes = 0;
+      const fixture = yield* warmProcessFixture(1, {
+        onRefreshMetadata: () =>
+          Effect.suspend(() =>
+            ++refreshes === 1
+              ? Deferred.succeed(inspecting, undefined).pipe(
+                  Effect.andThen(Deferred.await(finishInspection)),
+                )
+              : Effect.void,
+          ),
+      });
+      const original = fixture.leases[0]!;
+      const server: DiscoveredLocalServer = {
+        host: "localhost",
+        port: 6_000,
+        url: original.url,
+        pid: 100,
+        processName: "node",
+        terminal: { threadId: ThreadId.make(original.threadId), terminalId: original.terminalId },
+      };
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const hosting = yield* PreviewHosting.PreviewHosting;
+          yield* hosting.subscribe((leases) =>
+            leases.length === 0
+              ? Deferred.succeed(cancelled, undefined).pipe(Effect.asVoid)
+              : Effect.void,
+          );
+          const recovering = yield* hosting
+            .recover({
+              threadId: original.threadId,
+              leaseId: PreviewHostingLeaseId.make(original.id),
+              url: original.url,
+              resource: true,
+            })
+            .pipe(Effect.forkScoped);
+          yield* Deferred.await(inspecting);
+          const stopping = yield* hosting.stopThread(original.threadId).pipe(Effect.forkScoped);
+          yield* Deferred.await(cancelled);
+          yield* Deferred.succeed(finishInspection, undefined);
+          assert.isNull(yield* Fiber.join(recovering));
+          yield* Fiber.join(stopping);
+          assert.deepEqual(fixture.harness.opens, []);
+          assert.deepEqual(fixture.harness.writes, []);
+          assert.deepEqual(yield* hosting.list(), []);
+        }).pipe(Effect.provide(hostingLayer(fixture.config, fixture.harness, true, [server]))),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 
   it.effect("sleeps only its terminal and retains the handoff until explicit stop", () =>

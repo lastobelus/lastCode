@@ -13,8 +13,10 @@ import type { PreparedConnection } from "../connection/model.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import * as ManagedRelay from "../relay/managedRelay.ts";
 import { safeErrorLogAttributes } from "../errors/safeLog.ts";
+import { EnvironmentRpcUnavailableError, getInitialServerConfig } from "../rpc/client.ts";
 import { executeAuthenticatedEnvironmentHttpRequest } from "./environmentHttpAuth.ts";
 import { followStreamInEnvironment } from "./environmentStreams.ts";
+import { createEnvironmentQueryAtomFamily } from "./runtime.ts";
 
 /** @public Required to name the error in consumers' inferred session results. */
 export class SessionHttpClientUnavailable extends Data.TaggedError(
@@ -62,6 +64,23 @@ export const fetchEnvironmentSessionState = Effect.fn(
 function makeEnvironmentSessionAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry.EnvironmentRegistry | R, E>,
 ) {
+  const bootstrap = createEnvironmentQueryAtomFamily(runtime, {
+    label: "environment.bootstrap",
+    staleTimeMs: 0,
+    execute: Effect.fn("clientRuntime.state.bootstrap")(function* (_input: void) {
+      const config = yield* getInitialServerConfig();
+      const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
+      const prepared = yield* SubscriptionRef.get(supervisor.prepared);
+      if (Option.isNone(prepared)) {
+        return yield* new EnvironmentRpcUnavailableError({
+          environmentId: supervisor.target.environmentId,
+          message: "The environment connection is not ready.",
+        });
+      }
+      return { config, prepared: prepared.value };
+    }),
+  });
+
   const initialConfigAtom = Atom.family((environmentId: EnvironmentId) =>
     runtime.atom(
       followStreamInEnvironment(
@@ -156,6 +175,7 @@ function makeEnvironmentSessionAtoms<R, E>(
   );
 
   return {
+    bootstrap,
     initialConfigAtom,
     initialConfigValueAtom,
     preparedConnectionAtom,

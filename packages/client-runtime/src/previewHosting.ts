@@ -48,10 +48,12 @@ export class HostedPreviewUrlTooLongError extends Error {
   }
 }
 
+const isPreviewHostingError = Schema.is(PreviewHostingError);
+
 export class HostedPreviewRecoveryError extends Error {
   constructor(cause?: unknown) {
     super(
-      Schema.is(PreviewHostingError)(cause) && cause.reason === "capacity"
+      isPreviewHostingError(cause) && cause.reason === "capacity"
         ? "Managed previews are at capacity. Your preview is saved. Close an active Browser view or finish its automation or recording, then retry."
         : "The saved preview could not be started. Retry opening it when its environment is available.",
       { cause },
@@ -73,11 +75,13 @@ export interface PrepareHostedPreviewInput {
     lease: PreviewHostingLeaseSummary,
     options: { readonly bootstrap: boolean },
   ) => Promise<PreviewHostingRecoverResult>;
-  readonly createResourceUrl?: (
-    lease: PreviewHostingLeaseSummary,
-    localUrl: string,
-  ) => Promise<string>;
-  readonly renewDocumentUrl?: (url: string, refresh: boolean) => Promise<string>;
+  /** Asset callbacks return null only when bootstrap confirms recovery is unsupported. */
+  readonly createResourceUrl?:
+    | ((lease: PreviewHostingLeaseSummary, localUrl: string) => Promise<string | null>)
+    | undefined;
+  readonly renewDocumentUrl?:
+    | ((url: string, refresh: boolean) => Promise<string | null>)
+    | undefined;
 }
 
 export interface PreparedHostedPreview {
@@ -153,7 +157,6 @@ export function prepareHostedPreview(
     return Promise.resolve(original);
   }
   if (
-    input.renewDocumentUrl !== undefined &&
     (target.protocol === "http:" || target.protocol === "https:") &&
     target.pathname.startsWith("/api/assets/") &&
     (isLoopbackHost(target.hostname) ||
@@ -166,9 +169,11 @@ export function prepareHostedPreview(
         }
       }))
   ) {
+    if (input.renewDocumentUrl === undefined) return Promise.resolve(original);
     return (async () => {
       try {
         const issued = await input.renewDocumentUrl!(input.url, input.purpose !== "resource");
+        if (issued === null) return original;
         const renewed = connectedAssetUrl(issued, environment);
         return {
           url: renewed,
@@ -241,7 +246,7 @@ export function prepareHostedPreview(
     if (input.purpose === "resource" && input.createResourceUrl !== undefined) {
       try {
         const issued = await input.createResourceUrl(owned, localUrl);
-        resourceUrl = connectedAssetUrl(issued, environment);
+        if (issued !== null) resourceUrl = connectedAssetUrl(issued, environment);
       } catch (cause) {
         throw new HostedPreviewRecoveryError(cause);
       }

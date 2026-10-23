@@ -1,5 +1,6 @@
 import {
   prepareHostedPreview as prepareOwnedPreview,
+  HostedPreviewRecoveryError,
   type PreparedHostedPreview,
 } from "@t3tools/client-runtime/preview-hosting";
 import {
@@ -11,9 +12,14 @@ import type { ScopedThreadRef } from "@t3tools/contracts";
 import { isPrivateNetworkHost } from "@t3tools/shared/hostClassification";
 
 import { appAtomRegistry } from "~/rpc/atomRegistry";
-import { readPreparedConnection, readConfiguredPreviewEnvironmentUrl } from "~/state/session";
+import {
+  environmentSession,
+  readPreparedConnection,
+  readConfiguredPreviewEnvironmentUrl,
+} from "~/state/session";
 import { previewEnvironment } from "~/state/preview";
 import { assetEnvironment } from "~/state/assets";
+import { serverEnvironment } from "~/state/server";
 
 export { selectHostedPreview } from "@t3tools/client-runtime/preview-hosting";
 
@@ -38,29 +44,43 @@ export async function prepareHostedPreview(
   url: string,
   purpose: "navigation" | "resource" = "navigation",
 ): Promise<PreparedHostedPreview> {
-  const connection = readPreparedConnection(threadRef.environmentId);
-  if (!connection) return { url, managed: false, restored: false };
+  let connection = readPreparedConnection(threadRef.environmentId);
+  let config = appAtomRegistry.get(serverEnvironment.configValueAtom(threadRef.environmentId));
+  if (connection === null || config === null) {
+    const result = await executeAtomQuery(
+      appAtomRegistry,
+      environmentSession.bootstrap({ environmentId: threadRef.environmentId, input: undefined }),
+      { reportFailure: false, refresh: true },
+    );
+    if (result._tag === "Failure")
+      throw new HostedPreviewRecoveryError(squashAtomCommandFailure(result));
+    connection = result.value.prepared;
+    config = result.value.config;
+  }
   const configuredEndpoint = readConfiguredPreviewEnvironmentUrl(threadRef.environmentId);
+  const supportsAssetRecovery = config.environment.capabilities.previewAssetRecovery === true;
   return prepareOwnedPreview({
     threadRef,
     url,
     purpose,
     environmentUrl: connection.httpBaseUrl,
     knownEnvironmentUrls: configuredEndpoint === null ? [] : [configuredEndpoint],
-    renewDocumentUrl: async (url, refresh) => {
-      const result = await executeAtomQuery(
-        appAtomRegistry,
-        assetEnvironment.createUrl({
-          environmentId: threadRef.environmentId,
-          input: {
-            resource: { _tag: "preview-document", threadId: threadRef.threadId, url, refresh },
-          },
-        }),
-        { reportFailure: false, refresh: true },
-      );
-      if (result._tag === "Failure") throw new Error("Preview document unavailable.");
-      return result.value.relativeUrl;
-    },
+    renewDocumentUrl: supportsAssetRecovery
+      ? async (url, refresh) => {
+          const result = await executeAtomQuery(
+            appAtomRegistry,
+            assetEnvironment.createUrl({
+              environmentId: threadRef.environmentId,
+              input: {
+                resource: { _tag: "preview-document", threadId: threadRef.threadId, url, refresh },
+              },
+            }),
+            { reportFailure: false, refresh: true },
+          );
+          if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+          return result.value.relativeUrl;
+        }
+      : undefined,
     list: async () => {
       const result = await runAtomCommand(
         appAtomRegistry,
@@ -92,25 +112,27 @@ export async function prepareHostedPreview(
       if (result._tag === "Failure") throw squashAtomCommandFailure(result);
       return result.value;
     },
-    createResourceUrl: async (lease, localUrl) => {
-      const result = await executeAtomQuery(
-        appAtomRegistry,
-        assetEnvironment.createUrl({
-          environmentId: threadRef.environmentId,
-          input: {
-            resource: {
-              _tag: "managed-preview-resource",
-              threadId: threadRef.threadId,
-              leaseId: lease.leaseId,
-              url: localUrl,
-            },
-          },
-        }),
-        { reportFailure: false, refresh: true },
-      );
-      if (result._tag === "Failure") throw new Error("Preview resource unavailable.");
-      return result.value.relativeUrl;
-    },
+    createResourceUrl: supportsAssetRecovery
+      ? async (lease, localUrl) => {
+          const result = await executeAtomQuery(
+            appAtomRegistry,
+            assetEnvironment.createUrl({
+              environmentId: threadRef.environmentId,
+              input: {
+                resource: {
+                  _tag: "managed-preview-resource",
+                  threadId: threadRef.threadId,
+                  leaseId: lease.leaseId,
+                  url: localUrl,
+                },
+              },
+            }),
+            { reportFailure: false, refresh: true },
+          );
+          if (result._tag === "Failure") throw new Error("Preview resource unavailable.");
+          return result.value.relativeUrl;
+        }
+      : undefined,
   });
 }
 

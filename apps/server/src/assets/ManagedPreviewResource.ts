@@ -64,6 +64,7 @@ export const managedPreviewResourceResponse = Effect.fn("ManagedPreviewResource.
       threadId: ThreadId.make(asset.threadId),
       leaseId: PreviewHostingLeaseId.make(asset.leaseId),
       url: lease.url,
+      resource: true,
     });
     if (recovered === null || canonicalManagedPreviewResource(target, recovered.url) !== target)
       return HttpServerResponse.empty({ status: 404, headers: RESPONSE_HEADERS });

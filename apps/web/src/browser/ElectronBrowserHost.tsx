@@ -10,6 +10,8 @@ import {
 } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import * as Cause from "effect/Cause";
+import * as Option from "effect/Option";
+import { AsyncResult } from "effect/reactivity";
 import { type ComponentProps, useEffect, useEffectEvent, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 
@@ -22,7 +24,9 @@ import { useClientSettingsHydrated } from "~/hooks/useSettings";
 import { useDesktopHostedPreviewSessions } from "~/components/preview/usePreviewSession";
 import { useActivePreviewSessions } from "~/previewStateStore";
 import { previewEnvironment } from "~/state/preview";
-import { useEnvironmentScope } from "~/state/session";
+import { environmentSession, useEnvironmentScope } from "~/state/session";
+import { environmentCatalog } from "~/connection/catalog";
+import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { useEnvironmentHasLocalDesktopBrowser } from "~/state/entities";
 
@@ -38,6 +42,7 @@ import { acquireBrowserSurfaceActivity, useBrowserSurfaceStore } from "./browser
 import { useActiveBrowserRecordingTabIds } from "./browserRecording";
 import { prepareHostedPreview } from "~/components/preview/previewHostingRecovery";
 import { hostedPreviewNavigationUrl } from "@t3tools/client-runtime/preview-hosting";
+import { stripPreviewBootstrapTokenFromUrl } from "@t3tools/shared/remote";
 import { withDesktopTab } from "./desktopTabLifetime";
 import { getDesktopBrowserHostId } from "./desktopBrowserTransport";
 import {
@@ -52,6 +57,15 @@ function reportLinkOpenFailure(cause: unknown) {
     title: "Could not open the link in the browser",
     description: cause instanceof Error ? cause.message : undefined,
   });
+}
+
+function canonicalBrowserDestination(url: string | null): string | null {
+  if (url === null) return null;
+  try {
+    return stripPreviewBootstrapTokenFromUrl(new URL(url)).href;
+  } catch {
+    return url;
+  }
 }
 
 export function ElectronBrowserHost() {
@@ -386,6 +400,15 @@ function PreparedBrowserWebview({
   demanded,
   ...props
 }: ComponentProps<typeof HostedBrowserWebview> & { readonly demanded: boolean }) {
+  const connection = Option.getOrNull(
+    AsyncResult.value(useAtomValue(environmentCatalog.stateAtom(props.threadRef.environmentId))),
+  );
+  const connectionGeneration = connection?.phase === "connected" ? connection.generation : null;
+  const config = useAtomValue(
+    environmentSession.initialConfigValueAtom(props.threadRef.environmentId),
+  );
+  const configReady = config !== null;
+  const supportsActivity = config?.environment.capabilities.previewHostingActivity === true;
   const setHostingActivity = useAtomCommand(previewEnvironment.hostingActivity, {
     reportFailure: false,
   });
@@ -397,12 +420,15 @@ function PreparedBrowserWebview({
   );
   const [source, setSource] = useState<{
     readonly url: string | null;
+    readonly destination: string | null;
     readonly runId: string | undefined;
   } | null>(null);
   const prepare = useEffectEvent(async (url: string | null) => {
+    const destination = canonicalBrowserDestination(url);
     if (url === null)
       return {
         url: null,
+        destination,
         restarted: false,
         runId: undefined,
         cold: source === null,
@@ -413,8 +439,12 @@ function PreparedBrowserWebview({
       url,
       source === null ? "navigation" : "resource",
     );
+    // A canonical navigation has already loaded its new destination. Only a return to the
+    // document whose run we observed needs a reload when another observer restarted it.
     const restarted =
-      prepared.runId !== undefined ? prepared.runId !== source?.runId : prepared.restarted === true;
+      prepared.runId !== undefined && source?.destination === destination
+        ? prepared.runId !== source.runId
+        : prepared.restarted === true;
     const navigation =
       source !== null && restarted
         ? await prepareHostedPreview(props.threadRef, url, "navigation")
@@ -422,6 +452,7 @@ function PreparedBrowserWebview({
     const navigationUrl = hostedPreviewNavigationUrl(navigation);
     return {
       url: navigationUrl,
+      destination,
       restarted,
       runId: navigation.runId,
       cold: source === null,
@@ -429,7 +460,7 @@ function PreparedBrowserWebview({
     };
   });
   useEffect(() => {
-    if (!demanded) return;
+    if (!demanded || connectionGeneration === null || !configReady) return;
     let disposed = false;
     const command = {
       environmentId: props.threadRef.environmentId,
@@ -440,24 +471,26 @@ function PreparedBrowserWebview({
         active: true,
       },
     };
-    const acknowledged = updateActivity(command);
+    const acknowledged = supportsActivity ? updateActivity(command) : Promise.resolve();
     void acknowledged
       .then(() => (disposed ? undefined : prepare(props.initialUrl)))
       .then((prepared) => {
         if (disposed || prepared === undefined) return;
-        setSource((current) => current ?? { url: prepared.url, runId: prepared.runId });
+        const nextSource = {
+          url: prepared.url,
+          destination: prepared.destination,
+          runId: prepared.runId,
+        };
         if (!prepared.cold && prepared.restarted && prepared.url !== null) {
           const bridge = window.desktopBridge?.preview;
           if (bridge)
             withDesktopTab(props.runtimeTabId, async () => {
+              if (disposed) return;
               if (prepared.sameUrl) await bridge.refresh(props.runtimeTabId);
               else await bridge.navigate(props.runtimeTabId, prepared.url!);
-              if (!disposed)
-                setSource((current) =>
-                  current === null ? null : { ...current, runId: prepared.runId },
-                );
+              if (!disposed) setSource(nextSource);
             });
-        }
+        } else setSource(nextSource);
       })
       .catch((cause) => {
         if (disposed) return;
@@ -466,13 +499,26 @@ function PreparedBrowserWebview({
       });
     return () => {
       disposed = true;
+      if (!supportsActivity) return;
       void acknowledged
-        .catch(() => undefined)
-        .then(() => updateActivity({ ...command, input: { ...command.input, active: false } }))
+        .then(() => {
+          const current = Option.getOrNull(
+            AsyncResult.value(
+              appAtomRegistry.get(environmentCatalog.stateAtom(command.environmentId)),
+            ),
+          );
+          // Disconnect releases this connection's declarations on the server. A late ACK must
+          // never send its release through a replacement connection.
+          if (current?.phase === "connected" && current.generation === connectionGeneration)
+            return updateActivity({ ...command, input: { ...command.input, active: false } });
+        })
         .catch(() => undefined);
     };
   }, [
     demanded,
+    connectionGeneration,
+    configReady,
+    supportsActivity,
     props.runtimeTabId,
     props.initialUrl,
     props.threadRef.environmentId,

@@ -39,6 +39,57 @@ const lease = {
 
 describe("prepareHostedPreview", () => {
   beforeEach(() => vi.restoreAllMocks());
+  it("preserves a signed document when deferred capability discovery reports unsupported", async () => {
+    const url = "https://environment.example/api/assets/expired/report.html";
+    const list = vi.fn(async () => [lease]);
+    const renewDocumentUrl = vi.fn(async () => null);
+    await expect(
+      prepareHostedPreview({
+        threadRef,
+        url,
+        environmentUrl: "https://environment.example/",
+        list,
+        recover: async () => lease,
+        renewDocumentUrl,
+      }),
+    ).resolves.toEqual({ url, managed: false, restored: false });
+    expect(renewDocumentUrl).toHaveBeenCalledExactlyOnceWith(url, true);
+    expect(list).not.toHaveBeenCalled();
+  });
+
+  it("omits the resource URL when deferred capability discovery reports unsupported", async () => {
+    const createResourceUrl = vi.fn(async () => null);
+    const prepared = await prepareHostedPreview({
+      threadRef,
+      url: lease.url,
+      purpose: "resource",
+      environmentUrl: "https://environment.example/",
+      list: async () => [lease],
+      recover: async () => lease,
+      createResourceUrl,
+    });
+    expect(prepared).toMatchObject({ managed: true, restored: true });
+    expect(prepared).not.toHaveProperty("resourceUrl");
+    expect(createResourceUrl).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a signed document usable when its environment has no renewal operation", async () => {
+    const url = "https://environment.example/api/assets/current/report.html?mode=review#chart";
+    const list = vi.fn(async () => [lease]);
+    const recover = vi.fn(async () => lease);
+    await expect(
+      prepareHostedPreview({
+        threadRef,
+        url,
+        environmentUrl: "https://environment.example/",
+        list,
+        recover,
+      }),
+    ).resolves.toEqual({ url, managed: false, restored: false });
+    expect(list).not.toHaveBeenCalled();
+    expect(recover).not.toHaveBeenCalled();
+  });
+
   it("preserves the current app run when another consumer already restarted it", async () => {
     const runId = "019fc835-d8cb-4a6e-847f-4b63db5c85bb";
     const prepared = await prepareHostedPreview({

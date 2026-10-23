@@ -1,5 +1,6 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeBuffer from "node:buffer";
 import { it } from "@effect/vitest";
 import {
   type PreviewEvent,
@@ -11,6 +12,7 @@ import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as PubSub from "effect/PubSub";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -219,33 +221,248 @@ it.layer(PreviewManagerTestLayer)("PreviewManager", (it) => {
       }),
   );
 
-  it.effect.each(["invalid", "duplicate", "oversized"] as const)(
-    "reports %s retained state without replacing it with an empty record",
-    (kind) =>
+  it.effect.each([
+    "unreadable",
+    "invalid",
+    "incompatible-version",
+    "incompatible-session",
+    "duplicate",
+    "oversized",
+    "unparseable-url",
+  ] as const)("backs up %s retained state and opens durable new previews", (kind) =>
+    Effect.gen(function* () {
+      const config = yield* isolatedPersistenceConfig();
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const create = PreviewManager.make.pipe(
+        Effect.provideService(ServerConfig.ServerConfig, config),
+      );
+      const first = yield* Effect.scoped(create);
+      const threadId = freshThreadId();
+      const original = yield* first.open({
+        threadId,
+        url: "https://example.com/retained",
+      });
+      const file = path.join(config.stateDir, "preview-sessions.json");
+      let broken: string;
+      switch (kind) {
+        case "unreadable":
+          broken = JSON.stringify({ version: 1, sessions: [original] });
+          break;
+        case "invalid":
+          broken = "not valid json";
+          break;
+        case "incompatible-version":
+          broken = JSON.stringify({ version: 2, sessions: [original] });
+          break;
+        case "incompatible-session":
+          broken = JSON.stringify({ version: 1, sessions: [original, { threadId }] });
+          break;
+        case "duplicate":
+          broken = JSON.stringify({ version: 1, sessions: [original, original] });
+          break;
+        case "oversized":
+          broken = "x".repeat(4 * 1024 * 1024 + 1);
+          break;
+        case "unparseable-url":
+          broken = JSON.stringify({
+            version: 1,
+            sessions: [
+              original,
+              {
+                ...original,
+                tabId: "unparseable-tab",
+                navStatus: { _tag: "Loading", url: "http://[invalid", title: "" },
+              },
+            ],
+          });
+          break;
+      }
+      yield* fs.writeFileString(file, broken);
+      const originalBytes = yield* fs.readFile(file);
+      let sessionWrites = 0;
+      const guarded = FileSystem.make({
+        ...fs,
+        readFile: (filePath) =>
+          kind === "unreadable" && filePath === file
+            ? Effect.fail(
+                PlatformError.systemError({
+                  _tag: "PermissionDenied",
+                  module: "FileSystem",
+                  method: "readFile",
+                }),
+              )
+            : fs.readFile(filePath),
+        rename: (from, to) => {
+          if (to === file) sessionWrites += 1;
+          return fs.rename(from, to);
+        },
+      });
+      const warnings: unknown[] = [];
+      const logger = Logger.make(({ logLevel, message }) => {
+        if (logLevel === "Warn") warnings.push(message);
+      });
+      const restarted = yield* Effect.scoped(create).pipe(
+        Effect.provideService(FileSystem.FileSystem, guarded),
+        Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
+      );
+      const subscription = yield* restarted.subscribeEvents;
+      expect(yield* restarted.list({})).toMatchObject({ sessions: [], revision: 0 });
+      const backups = (yield* fs.readDirectory(config.stateDir)).filter((name) =>
+        name.startsWith("preview-sessions.json.unreadable-"),
+      );
+      expect(backups).toHaveLength(1);
+      const backupPath = path.join(config.stateDir, backups[0]!);
+      expect(NodeBuffer.Buffer.compare(yield* fs.readFile(backupPath), originalBytes)).toBe(0);
+      expect(yield* fs.exists(file)).toBe(false);
+      expect(sessionWrites).toBe(0);
+      expect(yield* PubSub.takeUpTo(subscription, DRAIN_LIMIT)).toEqual([]);
+      expect(warnings).toEqual([
+        expect.arrayContaining([
+          expect.objectContaining({
+            sessionsPath: file,
+            backupPath,
+            error: expect.stringContaining("left intact"),
+          }),
+        ]),
+      ]);
+      const opened = yield* restarted.open({ threadId, url: "https://example.com/new" });
+      expect((yield* restarted.list({ threadId })).sessions).toEqual([opened]);
+      expect(yield* PubSub.takeUpTo(subscription, DRAIN_LIMIT)).toEqual([
+        expect.objectContaining({ type: "opened", snapshot: opened }),
+      ]);
+      expect(sessionWrites).toBe(1);
+      const reloaded = yield* Effect.scoped(create);
+      expect((yield* reloaded.list({ threadId })).sessions).toEqual([opened]);
+      expect(NodeBuffer.Buffer.compare(yield* fs.readFile(backupPath), originalBytes)).toBe(0);
+      expect(
+        (yield* fs.readDirectory(config.stateDir)).filter((name) =>
+          name.startsWith("preview-sessions.json.unreadable-"),
+        ),
+      ).toEqual(backups);
+    }),
+  );
+
+  it.effect(
+    "preserves the original and blocks writes when backing up unreadable sessions fails",
+    () =>
       Effect.gen(function* () {
         const config = yield* isolatedPersistenceConfig();
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const create = PreviewManager.make.pipe(
-          Effect.provideService(ServerConfig.ServerConfig, config),
-        );
-        const first = yield* Effect.scoped(create);
-        const original = yield* first.open({
-          threadId: freshThreadId(),
-          url: "https://example.com/retained",
-        });
         const file = path.join(config.stateDir, "preview-sessions.json");
-        const broken =
-          kind === "invalid"
-            ? "not valid json"
-            : kind === "duplicate"
-              ? JSON.stringify({ version: 1, sessions: [original, original] })
-              : "x".repeat(4 * 1024 * 1024 + 1);
-        yield* fs.writeFileString(file, broken);
-        const failure = yield* Effect.scoped(create).pipe(Effect.flip);
-        expect(failure).toMatchObject({ _tag: "PreviewSessionStorageError" });
-        expect(yield* fs.readFileString(file)).toBe(broken);
+        yield* fs.makeDirectory(config.stateDir, { recursive: true });
+        yield* fs.writeFileString(file, "not valid json");
+        const originalBytes = yield* fs.readFile(file);
+        const renameFailure = PlatformError.systemError({
+          _tag: "PermissionDenied",
+          module: "FileSystem",
+          method: "rename",
+        });
+        let renameAttempts = 0;
+        const guarded = FileSystem.make({
+          ...fs,
+          rename: () => {
+            renameAttempts += 1;
+            return Effect.fail(renameFailure);
+          },
+        });
+        const warnings: unknown[] = [];
+        const logger = Logger.make(({ logLevel, message }) => {
+          if (logLevel === "Warn") warnings.push(message);
+        });
+        const restarted = yield* PreviewManager.make.pipe(
+          Effect.provideService(ServerConfig.ServerConfig, config),
+          Effect.provideService(FileSystem.FileSystem, guarded),
+          Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
+        );
+        const subscription = yield* restarted.subscribeEvents;
+        const threadId = freshThreadId();
+        expect(yield* restarted.list({})).toMatchObject({ sessions: [], revision: 0 });
+        expect(warnings).toEqual([
+          expect.arrayContaining([
+            expect.objectContaining({
+              sessionsPath: file,
+              error: expect.stringContaining("left intact"),
+            }),
+          ]),
+        ]);
+        const failure = yield* restarted
+          .open({ threadId, url: "https://example.com/new" })
+          .pipe(Effect.flip);
+        expect(failure).toMatchObject({
+          _tag: "PreviewSessionStorageError",
+          cause: renameFailure,
+        });
+        let nativeCreates = 0;
+        expect(
+          yield* restarted
+            .open({
+              threadId,
+              runtime: "server",
+              desktopHostId: "selected-desktop",
+              automationOwner: "agent-owner",
+              createDesktopRoot: () => {
+                nativeCreates += 1;
+                return Effect.succeed({
+                  rootId: "unexpected-native-root",
+                  publish: () => Effect.void,
+                  close: () => Effect.void,
+                });
+              },
+            })
+            .pipe(Effect.flip),
+        ).toBe(failure);
+        yield* restarted.close({ threadId });
+        expect(yield* restarted.list({ threadId })).toMatchObject({ sessions: [], revision: 0 });
+        expect(yield* PubSub.takeUpTo(subscription, DRAIN_LIMIT)).toEqual([]);
+        expect(nativeCreates).toBe(0);
+        expect(renameAttempts).toBe(1);
+        expect(NodeBuffer.Buffer.compare(yield* fs.readFile(file), originalBytes)).toBe(0);
+        expect(yield* fs.readDirectory(config.stateDir)).toEqual(["preview-sessions.json"]);
       }),
+  );
+
+  it.effect("keeps distinct byte-preserving backups across repeated startup recoveries", () =>
+    Effect.gen(function* () {
+      const config = yield* isolatedPersistenceConfig();
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const file = path.join(config.stateDir, "preview-sessions.json");
+      const create = PreviewManager.make.pipe(
+        Effect.provideService(ServerConfig.ServerConfig, config),
+      );
+      yield* fs.makeDirectory(config.stateDir, { recursive: true });
+      const firstBytes = new Uint8Array([0xff, 0x00, 0x7b]);
+      yield* fs.writeFile(file, firstBytes);
+      yield* Effect.scoped(create);
+      const [firstBackup] = yield* fs.readDirectory(config.stateDir);
+      expect(firstBackup).toMatch(/^preview-sessions\.json\.unreadable-/);
+      const secondBytes = new TextEncoder().encode('{"version":2,"sessions":[]}');
+      yield* fs.writeFile(file, secondBytes);
+      const restarted = yield* Effect.scoped(create);
+      const backups = yield* fs.readDirectory(config.stateDir);
+      expect(backups).toHaveLength(2);
+      const secondBackup = backups.find((name) => name !== firstBackup);
+      expect(secondBackup).toMatch(/^preview-sessions\.json\.unreadable-/);
+      expect(
+        NodeBuffer.Buffer.compare(
+          yield* fs.readFile(path.join(config.stateDir, firstBackup!)),
+          firstBytes,
+        ),
+      ).toBe(0);
+      expect(
+        NodeBuffer.Buffer.compare(
+          yield* fs.readFile(path.join(config.stateDir, secondBackup!)),
+          secondBytes,
+        ),
+      ).toBe(0);
+      const opened = yield* restarted.open({
+        threadId: freshThreadId(),
+        url: "https://example.com/new",
+      });
+      expect((yield* restarted.list({})).sessions).toEqual([opened]);
+    }),
   );
 
   it.effect.each(["open", "navigate", "close"] as const)(

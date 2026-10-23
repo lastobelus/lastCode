@@ -1,6 +1,7 @@
 // Run explicitly: node apps/desktop/scripts/browser-surface.smoke.mjs
 // --build-only prepares isolated artifacts without launching Electron.
 // --existing-electron uses the installed dependency without repairing or downloading a runtime.
+// --react-lifecycle mounts the production React host against fixture remote-environment state.
 import * as NodeAssert from "node:assert/strict";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
@@ -16,6 +17,8 @@ const directory = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
 const desktopDirectory = NodePath.resolve(directory, "..");
 const serverDirectory = NodePath.resolve(directory, "../../server");
 const repositoryDirectory = NodePath.resolve(desktopDirectory, "../..");
+const reactLifecycle = process.argv.includes("--react-lifecycle");
+const webDirectory = NodePath.resolve(directory, "../../web");
 const scratch = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "browser-surface-smoke-"));
 const require = NodeModule.createRequire(NodePath.resolve(directory, "../../server/package.json"));
 const desktopRequire = NodeModule.createRequire(NodePath.join(desktopDirectory, "package.json"));
@@ -54,12 +57,58 @@ for (const owner of [desktopDirectory, serverDirectory, repositoryDirectory]) {
 const emittedChunks = [];
 const emittedFiles = new Set();
 async function bundle(entry, format, output, native = false) {
+  const fixtureBoundary = NodePath.join(directory, "browser-surface.react-state.fixture.mjs");
+  const fixtureModules = new Set(
+    [
+      "state/primaryEnvironment",
+      "state/session",
+      "state/preview",
+      "state/entities",
+      "state/use-atom-command",
+      "connection/catalog",
+      "hooks/useSettings",
+      "previewStateStore",
+      "components/preview/usePreviewSession",
+      "components/preview/usePreviewBridge",
+      "components/preview/previewHostingRecovery",
+      "components/ui/toast",
+      "lib/utils",
+      "browser/DesktopCdpRelay",
+      "browser/useDesktopBrowserSessions",
+      "browser/browserRecording",
+      "browser/openFileInPreview",
+      "browser/BrowserDeviceToolbar",
+    ].map((path) => NodePath.join(webDirectory, "src", path)),
+  );
   const result = await build({
     configFile: false,
     logLevel: "error",
     // Library builds retain React's environment probe unless explicitly replaced for a browser.
     ...(!native ? { define: { "process.env.NODE_ENV": JSON.stringify("production") } } : {}),
     ...(native ? { resolve: { conditions: ["node"], mainFields: ["module", "main"] } } : {}),
+    ...(reactLifecycle && !native
+      ? {
+          root: webDirectory,
+          resolve: {
+            alias: { "~": NodePath.join(webDirectory, "src") },
+            dedupe: ["react", "react-dom", "zustand", "@effect/atom-react"],
+          },
+          plugins: [
+            {
+              name: "react-smoke-external-state",
+              enforce: "pre",
+              resolveId(id, importer) {
+                const path = id.startsWith("~/")
+                  ? NodePath.join(webDirectory, "src", id.slice(2))
+                  : id.startsWith(".") && importer
+                    ? NodePath.resolve(NodePath.dirname(importer), id)
+                    : id;
+                if (fixtureModules.has(path.replace(/\.(tsx?|mjs)$/, ""))) return fixtureBoundary;
+              },
+            },
+          ],
+        }
+      : {}),
     build: {
       write: false,
       minify: false,
@@ -122,9 +171,33 @@ async function existingElectronRuntime() {
   await NodeFSP.access(executable, NodeFS.constants.X_OK);
   return executable;
 }
-await bundle("browser-surface.fixture.mjs", "cjs", "main.cjs", true);
-await bundle("browser-surface.preload.mjs", "cjs", "preload.cjs", true);
-await bundle("browser-surface.renderer.mjs", "iife", "renderer.js");
+const fixturePrefix = reactLifecycle ? "browser-surface.react" : "browser-surface";
+await bundle(`${fixturePrefix}.fixture.mjs`, "cjs", "main.cjs", true);
+await bundle(`${fixturePrefix}.preload.mjs`, "cjs", "preload.cjs", true);
+await bundle(`${fixturePrefix}.renderer.mjs`, "iife", "renderer.js");
+if (reactLifecycle)
+  await bundle("../src/preview-pick-preload.ts", "cjs", "preview-pick-preload.cjs", true);
+const productionModules = reactLifecycle
+  ? [
+      "apps/web/src/browser/ElectronBrowserHost.tsx",
+      "apps/web/src/browser/HostedBrowserWebview.tsx",
+      "apps/web/src/browser/desktopTabLifetime.ts",
+      "apps/web/src/components/preview/previewBridge.ts",
+      "packages/client-runtime/src/previewHosting.ts",
+      "apps/desktop/src/preload.ts",
+      "apps/desktop/src/ipc/methods/preview.ts",
+      "apps/desktop/src/preview/Manager.ts",
+      "apps/desktop/src/preview/DesktopBrowserHost.ts",
+      "apps/desktop/src/preview/NativeBrowserLifetime.ts",
+    ]
+  : [];
+for (const path of productionModules)
+  NodeAssert.ok(
+    emittedChunks.some((chunk) =>
+      Object.keys(chunk.modules).includes(NodePath.join(repositoryDirectory, path)),
+    ),
+    `React smoke must bundle the production module ${path}`,
+  );
 let verifiedRelativeImports = 0;
 const externalReferences = new Set();
 for (const chunk of emittedChunks) {
@@ -216,7 +289,11 @@ try { require("./main.cjs"); } catch (cause) { fail(cause); }
 );
 await NodeFSP.writeFile(
   NodePath.join(scratch, "index.html"),
-  '<!doctype html><html><head><style>html,body{margin:0;overflow:hidden}body{background:#eee}</style></head><body><script src="renderer.js"></script></body></html>',
+  `<!doctype html><html><head><style>html,body{margin:0;overflow:hidden}body{background:#eee}${
+    reactLifecycle
+      ? ".contents{display:contents}.fixed{position:fixed}.relative{position:relative}.absolute{position:absolute}.flex{display:flex}.overflow-hidden{overflow:hidden}"
+      : ""
+  }</style></head><body><script src="renderer.js"></script></body></html>`,
 );
 const manifest = {
   scratch,
@@ -224,11 +301,13 @@ const manifest = {
   bootstrap: NodePath.join(scratch, "bootstrap.cjs"),
   wsModulePath,
   generatedFiles: [...emittedFiles].sort(),
+  ...(reactLifecycle ? { productionModules } : {}),
   verifiedRelativeImports,
   verifiedExternalImports: [...externalReferences].sort(),
   verifiedExternalLoads: externalLoads,
-  scope:
-    "ordinary hidden Electron fixture, including real named-profile guest lifecycle and 32-page capacity; never launches the installed app or reads live user data",
+  scope: reactLifecycle
+    ? "production React ElectronBrowserHost/HostedBrowserWebview, desktop preload, IPC, Manager and native host; fixture remote config/hosting responses, injected connection generation and monotonic time; no real WS reconnect or live data"
+    : "ordinary hidden Electron fixture, including real named-profile guest lifecycle and 32-page capacity; never launches the installed app or reads live user data",
 };
 console.log(JSON.stringify(manifest));
 if (!process.argv.includes("--build-only")) {
@@ -245,7 +324,7 @@ if (!process.argv.includes("--build-only")) {
     {
       encoding: "utf8",
       env: environment,
-      timeout: 60000,
+      timeout: reactLifecycle ? 120000 : 60000,
       killSignal: "SIGKILL",
     },
   );
