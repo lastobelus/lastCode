@@ -20,8 +20,6 @@ import {
   DesktopPreviewWebviewConfigSchema,
   PreviewAnnotationSubmissionResultSchema,
   PreviewCaptureFailure,
-  DEFAULT_BROWSER_PROFILE_ID,
-  INCOGNITO_BROWSER_PROFILE_ID,
   PreviewForwardedShortcut,
   MAX_KEYBINDINGS_COUNT,
 } from "@t3tools/contracts";
@@ -32,6 +30,7 @@ import * as NodeURL from "node:url";
 
 import * as ElectronWindow from "../../electron/ElectronWindow.ts";
 import * as BrowserImport from "../../preview/BrowserImport/BrowserImport.ts";
+import * as BrowserProfileScope from "../../preview/BrowserProfileScope.ts";
 import * as PreviewManager from "../../preview/Manager.ts";
 import { normalizeCaptureFailure } from "../../preview/captureErrors.ts";
 import * as DesktopClientSettings from "../../settings/DesktopClientSettings.ts";
@@ -242,7 +241,7 @@ const closePictureInPicture = tabMethod(
   (manager, tabId) => manager.closePictureInPicture(tabId),
 );
 
-const clearCookies = DesktopIpc.makeIpcMethod({
+export const clearCookies = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.PREVIEW_CLEAR_COOKIES_CHANNEL,
   payload: DesktopPreviewClearDataInputSchema,
   result: Schema.Void,
@@ -252,7 +251,7 @@ const clearCookies = DesktopIpc.makeIpcMethod({
   }),
 });
 
-const clearCache = DesktopIpc.makeIpcMethod({
+export const clearCache = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.PREVIEW_CLEAR_CACHE_CHANNEL,
   payload: DesktopPreviewClearDataInputSchema,
   result: Schema.Void,
@@ -261,32 +260,6 @@ const clearCache = DesktopIpc.makeIpcMethod({
     yield* manager.clearCache(yield* resolveClearPartitions(manager, environmentId, profileId));
   }),
 });
-
-/**
- * The default profile keeps the bare environment id it used before profiles
- * existed, so upgrading does not strand anyone's existing logins in an orphaned
- * partition.
- */
-export function resolvePartitionScope(
-  environmentId: string,
-  profileId: string | undefined,
-): {
-  readonly scope: string;
-  readonly persistent: boolean;
-  readonly namespace?: "profile";
-} {
-  if (profileId === undefined || profileId === DEFAULT_BROWSER_PROFILE_ID) {
-    return { scope: environmentId, persistent: true };
-  }
-  // JSON's tuple framing is injective for strings, including lone UTF-16
-  // surrogates (which it escapes). URI encoding throws on those supported ids,
-  // while replacing them with U+FFFD would collapse distinct identities.
-  return {
-    scope: JSON.stringify([environmentId, profileId]),
-    persistent: profileId !== INCOGNITO_BROWSER_PROFILE_ID,
-    namespace: "profile" as const,
-  };
-}
 
 /**
  * Clearing without a profile keeps the historical "everything" behaviour for
@@ -299,7 +272,10 @@ const resolveClearPartitions = Effect.fn("desktop.ipc.preview.resolveClearPartit
   profileId: string | undefined,
 ) {
   if (profileId === undefined) return undefined;
-  const { scope, persistent, namespace } = resolvePartitionScope(environmentId, profileId);
+  const { scope, persistent, namespace } = yield* BrowserProfileScope.browserProfileScope(
+    environmentId,
+    profileId,
+  );
   // Loading the session is what puts the partition in the map the clear walks.
   // Deriving the partition string alone leaves nothing to match, so clearing a
   // profile with no tab open this run — after a restart, or when deleting a
@@ -308,13 +284,16 @@ const resolveClearPartitions = Effect.fn("desktop.ipc.preview.resolveClearPartit
   return [yield* manager.getBrowserPartition(scope, persistent, namespace)];
 });
 
-const getPreviewConfig = DesktopIpc.makeIpcMethod({
+export const getPreviewConfig = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.PREVIEW_GET_CONFIG_CHANNEL,
   payload: DesktopPreviewConfigInputSchema,
   result: DesktopPreviewWebviewConfigSchema,
   handler: Effect.fn("desktop.ipc.preview.getConfig")(function* ({ environmentId, profileId }) {
     const manager = yield* PreviewManager.PreviewManager;
-    const { scope, persistent, namespace } = resolvePartitionScope(environmentId, profileId);
+    const { scope, persistent, namespace } = yield* BrowserProfileScope.browserProfileScope(
+      environmentId,
+      profileId,
+    );
     // Creating the session first is what installs the UA rewrite and permission
     // handlers; a guest that attached to an untouched partition would run with
     // Electron's default UA and Chromium's default permission behaviour.
@@ -348,7 +327,7 @@ export const importBrowserCookies = DesktopIpc.makeIpcMethod({
     const browserImport = yield* BrowserImport.BrowserImport;
     // Derived in main from the same helper the webview config uses, so cookies
     // land in exactly the partition the profile's tabs attach to.
-    const { scope, persistent, namespace } = resolvePartitionScope(
+    const { scope, persistent, namespace } = yield* BrowserProfileScope.browserProfileScope(
       environmentId,
       importInput.targetProfileId,
     );
@@ -453,9 +432,6 @@ export const methods = [
   setZoomFactor,
   setAudioMuted,
   openDevTools,
-  clearCookies,
-  clearCache,
-  getPreviewConfig,
   setAnnotationTheme,
   setAnnotationSendEnabled,
   pickElement,

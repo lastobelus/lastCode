@@ -80,7 +80,11 @@ export function EnvironmentRow({
           and distinct from disabled ones. */}
       <span className={cn("flex items-center", dimmed && "opacity-60")}>
         {icon ?? (
-          <EnvironmentMachineIcon aria-hidden kind={kind} className="size-4 text-muted-foreground" />
+          <EnvironmentMachineIcon
+            aria-hidden
+            kind={kind}
+            className="size-4 text-muted-foreground"
+          />
         )}
       </span>
       <div className={cn("min-w-0", dimmed && "opacity-60")}>

@@ -5,6 +5,7 @@ import {
   type ProviderInteractionMode,
   type RuntimeMode,
   ThreadId,
+  type ThreadDashboardItemInput,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -24,6 +25,12 @@ export class ThreadLifecycleError extends Schema.TaggedError<ThreadLifecycleErro
       "set-runtime-mode",
       "set-interaction-mode",
       "set-model-selection",
+      "set-persistence",
+      "upsert-annotation",
+      "resolve-annotation",
+      "reopen-annotation",
+      "upsert-dashboard-item",
+      "remove-dashboard-item",
     ]),
     threadId: ThreadId,
     cause: Schema.Defect(),
@@ -37,9 +44,39 @@ export class ThreadLifecycleError extends Schema.TaggedError<ThreadLifecycleErro
 export class ThreadLifecycleService extends Context.Service<
   ThreadLifecycleService,
   {
+    readonly setPersistence: (input: {
+      readonly commandId: CommandId;
+      readonly threadId: ThreadId;
+      readonly persistent: boolean;
+    }) => Effect.Effect<Pick<OrchestrationV2ThreadProjection, "thread">, ThreadLifecycleError>;
+    readonly upsertAnnotation: (input: {
+      readonly commandId: CommandId;
+      readonly threadId: ThreadId;
+      readonly body: string;
+    }) => Effect.Effect<Pick<OrchestrationV2ThreadProjection, "thread">, ThreadLifecycleError>;
+    readonly resolveAnnotation: (input: {
+      readonly commandId: CommandId;
+      readonly threadId: ThreadId;
+    }) => Effect.Effect<Pick<OrchestrationV2ThreadProjection, "thread">, ThreadLifecycleError>;
+    readonly reopenAnnotation: (input: {
+      readonly commandId: CommandId;
+      readonly threadId: ThreadId;
+    }) => Effect.Effect<Pick<OrchestrationV2ThreadProjection, "thread">, ThreadLifecycleError>;
+    readonly upsertDashboardItem: (input: {
+      readonly commandId: CommandId;
+      readonly threadId: ThreadId;
+      readonly item: ThreadDashboardItemInput;
+    }) => Effect.Effect<Pick<OrchestrationV2ThreadProjection, "thread">, ThreadLifecycleError>;
+    readonly removeDashboardItem: (input: {
+      readonly commandId: CommandId;
+      readonly threadId: ThreadId;
+      readonly itemId: string;
+    }) => Effect.Effect<Pick<OrchestrationV2ThreadProjection, "thread">, ThreadLifecycleError>;
     readonly archive: (input: {
       readonly commandId: CommandId;
       readonly threadId: ThreadId;
+      readonly childDisposition?: "archive_if_idle" | "archive_after_review" | "stop_and_archive";
+      readonly expectedChildThreadIds?: ReadonlyArray<ThreadId>;
     }) => Effect.Effect<Pick<OrchestrationV2ThreadProjection, "thread">, ThreadLifecycleError>;
     readonly unarchive: (input: {
       readonly commandId: CommandId;
@@ -88,11 +125,31 @@ const make = Effect.gen(function* () {
     );
 
   return ThreadLifecycleService.of({
+    setPersistence: (input) =>
+      dispatch("set-persistence", input.threadId, { type: "thread.persistence.set", ...input }),
+    upsertAnnotation: (input) =>
+      dispatch("upsert-annotation", input.threadId, { type: "thread.annotation.upsert", ...input }),
+    resolveAnnotation: (input) =>
+      dispatch("resolve-annotation", input.threadId, {
+        type: "thread.annotation.resolve",
+        ...input,
+      }),
+    reopenAnnotation: (input) =>
+      dispatch("reopen-annotation", input.threadId, { type: "thread.annotation.reopen", ...input }),
+    upsertDashboardItem: (input) =>
+      dispatch("upsert-dashboard-item", input.threadId, {
+        type: "thread.dashboard-item.upsert",
+        ...input,
+      }),
+    removeDashboardItem: (input) =>
+      dispatch("remove-dashboard-item", input.threadId, {
+        type: "thread.dashboard-item.remove",
+        ...input,
+      }),
     archive: (input) =>
       dispatch("archive", input.threadId, {
         type: "thread.archive",
-        commandId: input.commandId,
-        threadId: input.threadId,
+        ...input,
       }),
     unarchive: (input) =>
       dispatch("unarchive", input.threadId, {

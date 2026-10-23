@@ -3,13 +3,7 @@ import { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import StarterKit from "@tiptap/starter-kit";
 import { describe, expect, it } from "vite-plus/test";
 
-import {
-  buildDocJson,
-  ComposerBlockExtensions,
-  ComposerCodeBlockExtension,
-  ComposerCodeExtension,
-  ComposerListExtensions,
-} from "./composer-rich-text-doc";
+import { buildDocJson } from "./composer-rich-text-doc";
 import { composerTextDirections } from "./composer-text-direction";
 
 const schema = getSchemaByResolvedExtensions(
@@ -24,10 +18,6 @@ const schema = getSchemaByResolvedExtensions(
       orderedList: false,
       code: false,
     }),
-    ComposerCodeExtension,
-    ComposerCodeBlockExtension,
-    ...ComposerListExtensions,
-    ...ComposerBlockExtensions,
   ]),
 );
 
@@ -45,7 +35,15 @@ describe("composerTextDirections", () => {
   });
 
   it("gives a list one direction, from all of its items", () => {
-    expect(directions("- Vitest\n- اختبر الدالة الجديدة\n- وأضف تعليق")).toEqual(["rtl"]);
+    expect(directions("- Vitest\n- اختبر الدالة الجديدة\n- وأضف تعليق")).toEqual([
+      "rtl",
+      "rtl",
+      "rtl",
+    ]);
+  });
+
+  it("gives a quote one direction without counting inline code", () => {
+    expect(directions("> `React`\n> اختبر الدالة\n> وأضف تعليق")).toEqual(["rtl", "rtl", "rtl"]);
   });
 
   it("continues the line above until a line has letters", () => {
@@ -55,6 +53,8 @@ describe("composerTextDirections", () => {
   it("keeps a code block left to right inside Arabic text", () => {
     expect(directions("اكتب الدالة\n```\n// احسب مجموع القيم هنا\n```\nثم اختبرها")).toEqual([
       "rtl",
+      "ltr",
+      "ltr",
       "ltr",
       "rtl",
     ]);
