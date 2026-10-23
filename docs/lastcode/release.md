@@ -1,31 +1,76 @@
 # LastCode Local Release Workflow
 
-LastCode uses a local waste-prevention gate, GitHub-hosted pull-request CI, and
+LastCode uses optional local checks, required GitHub-hosted pull-request CI, and
 ad-hoc macOS releases. The GitHub-hosted packaging path is manually dispatched
 for an exact Intel checkpoint or revision; releases have no schedule.
 
 Nightly source tracking is documented separately in
 [Nightly Checkpoint Workflow](nightly-workflow.md).
 
+## Worktree preparation
+
+Worktrees created by LastCode initially contain source and linked environment files.
+When tests, development, or a build need dependencies, run the **Prepare Dependencies**
+Project Action in that worktree. Grant agent resume permission before first use;
+managed installations use `--trusted-project-action lc-prepare-dependencies`
+as described in the [setup trust instructions](setup.md#clone-and-bootstrap).
+It requires the exact pnpm version pinned by that
+worktree's `package.json` and installs from its lockfile without building or warming
+web caches. **Run Quick CI** includes this preparation
+automatically. For a saved Full CI Action, copy the **Run Quick CI** command from
+`t3.json` and change its final `--quick` argument to `--full`. The Node launcher
+resolves the primary preparation helper while preserving the target worktree cwd,
+and stops before CI if preparation fails. It works without shell-specific environment
+expansion or command chaining. Repeat preparation after dependency
+cleanup. A successful install does not verify every file inside existing packages: if a tool
+still reports missing package files, diagnose the affected installation before retrying or
+removing anything.
+
 ## Pull Request CI
 
-Ordinary branch pushes run the quick gate through `.vite-hooks/pre-push`:
+Ordinary branch pushes apply the Quick CI policy through `.vite-hooks/pre-push`:
 
 ```bash
 pnpm lastcode:ci:quick
 ```
 
-Quick CI is a local waste-prevention gate, not merge authority. It checks the
-exact branch diff for whitespace errors, repository formatting and lint, and
-workspace types. The implementing agent runs focused tests for changed behavior;
+Quick CI catches problems locally when that reduces turnaround time. GitHub CI
+remains required for merging. When local checks run, Quick CI checks the
+exact branch diff for whitespace errors and checks formatting and lint on changed
+files. Typechecks cover changed workspaces and their consumers, including shared
+source and TypeScript configuration relationships. Documentation and inert asset
+changes do not start typecheckers. Workspace metadata, toolchain/configuration
+changes, or uncertain ownership retain the complete workspace gate. The
+implementing agent runs focused tests for changed behavior;
 GitHub CI retains comprehensive tests,
 Electron setup, builds, Rust, native analysis, and release smoke coverage.
 
-Agents run the independent **Run Quick CI** Project Action before a push. A
-successful action records the exact head and the selected workstream base ref and
+Automatic mode, the default, starts local checks immediately when the shared
+machine budget has capacity. Otherwise it defers to GitHub without queuing.
+Always local waits for capacity; GitHub only skips local checks. Set the mode in
+Settings → LastCode → Local CI, or use `pnpm lastcode:ci:quick -- --require-local`
+for an explicitly local run. Full CI always runs locally and waits for capacity.
+
+Agents can run the independent **Run Quick CI** Project Action before a push.
+A local pass records the exact head and the selected workstream base ref and
 commit: `upstream/main` for upstream `fix/*` and `feat/*` branches, or
 `origin/lastcode/main` for LastCode branches. The pre-push hook consumes that
-receipt without rerunning validation.
+receipt without rerunning validation. Explicit Quick CI runs reuse the same
+receipt, including when another run finishes that validation while they queue
+in Always local mode. A deferral reports `validation: github-only` for the exact
+head and base without recording a passing receipt. Do not recreate deferred
+checks with direct parallel workspace typechecks.
+
+Local CI shares a resource budget across worktrees and independent clones on the
+same machine. Explicit local runs wait in their existing Action or terminal and
+can be cancelled. Settings → LastCode → Local CI controls each environment's run
+limit, package concurrency, native TypeScript compiler CPU limit, and background priority;
+mobile exposes the same controls in Maintenance. Defaults allow one CI run and
+one package check at a time, cap native TypeScript compiler CPU parallelism at two, and use
+lower CPU priority. A running check keeps its launch settings; changes apply to
+new runs. The strictest limit among active runs applies while environments with
+different settings share the machine. Cancelled runs keep their capacity until
+their owned subprocesses have stopped.
 
 LastCode setup reconciles non-setup Actions from `t3.json` through the
 event-sourced project command path. The checkpoint supervisor repeats the
@@ -53,8 +98,9 @@ Settings remain local user state.
 The action never pushes: after it resumes, the agent still decides whether and
 what to push. A changed head, changed base tracking ref, or dirty worktree makes
 the receipt unusable. Without a matching receipt, ordinary command-line pushes
-run Quick CI synchronously and record one for transport retries of the same
-commit.
+follow the selected mode synchronously: run locally, defer when capacity is
+busy, or skip local checks. Only a local pass records a receipt for transport
+retries of the same commit. Keep the pre-push hook enabled in every mode.
 
 The checkpoint runner is the narrow exception: after a checkpoint or revision
 candidate passes its dedicated smoke gate, its immutable tag and subsequent
@@ -82,9 +128,9 @@ Local CI has three independent Git-safety boundaries:
    shared Git config and snapshots its repository-wide settings. It checks the
    value, protected settings, and common Git directory again on every exit,
    including failed CI runs. Any protected change fails the gate with the config
-   path to inspect. Existing per-branch settings are preserved too, while new
-   branch keys are allowed because T3 and GitHub CLI legitimately add
-   branch/worktree bookkeeping while CI runs in another worktree.
+   path to inspect. Settings for existing branches stay protected. New
+   branch keys, and removed keys after a branch is renamed or deleted, are allowed
+   because other worktrees can legitimately change branch bookkeeping during CI.
 
 These guards protect the primary checkout and every linked worktree, which all
 share the same Git config. They specifically prevent temporary-repository tests
@@ -187,6 +233,11 @@ commits, do not delete the worktree and rely on rerere: Git only remembers
 conflict resolutions, not subsequent repairs. Commit the repairs and incorporate
 any downstream merges made since that attempt before selecting its exact head.
 
+If you finish a retained carry rebase with manual `git rebase --continue` calls,
+select its clean six-group head once before appending repair commits. This records
+the completed replay plan so a later selection can fold those repairs into their
+owning groups.
+
 In carry mode, append the incorporated PR's partitioned source commits and any
 repair commits to the retained head. Each appended commit must name its owning
 `Carry-Group`; do not append an unpartitioned merge or squash. Explicit selection
@@ -203,9 +254,13 @@ that exact LastCode main revision. Inspect the replay and subsequent commits
 before making it; upstream ancestry alone cannot prove this after a rebase.
 Selection requires a clean, completed `sync/nightly/<nightly>` worktree and is
 bound to its head, nightly, and current source. The service skips only that
-nightly's rebase and reruns the full checkpoint smoke gate. It publishes the
-immutable tag and source ref, then promotes main with a lease against the selected
-source commit. Open PRs do not block publication or promotion. Merges made after
+nightly's rebase and runs Full CI against the unpublished candidate before
+publication. Repair revisions use the same complete validation. Ordinary
+checkpoints retain their fast smoke gate; an ordinary check failure triggers a
+Full CI diagnostic pass so later independent failures are visible in the same
+recovery. Dependency preparation and interrupted execution remain fatal.
+The service publishes the immutable tag and source ref, then promotes main with a
+lease against the selected source commit. Open PRs do not block publication or promotion. Merges made after
 selection or during validation do not invalidate it: the tag still publishes,
 promotion waits, and the exact selection and recovery worktree remain retained.
 A retry recognizes the published tag and retries only its promotion; it does not
@@ -263,6 +318,30 @@ pnpm run lastcode:ci -- --checkpoint lastcode/checkpoint/<upstream-nightly-tag>
 The resulting stamp binds the exact LastCode commit, installable tag, upstream
 tag, and upstream commit. A PR stamp cannot authorize a checkpoint build, and a
 checkpoint stamp cannot authorize a PR merge.
+
+Checkpoint recovery supplies an unpublished-candidate context automatically,
+pinning the planned installable tag, candidate commit, upstream commit and
+recorded source commit. It does not require the source to remain an ancestor
+after replay. A successful pass produces the same exact-tag stamp that packaging
+can reuse after publication; the builder still requires the actual installable
+tag to resolve to the validated commit. Failed or incomplete candidates cannot
+publish a passing stamp or proceed to publication.
+
+Full CI collects independent failures in one pass, including separate test and
+typecheck results for each workspace. Fix the complete candidate's failure list
+as one checkpoint repair batch before opening successive repair PRs. Checks
+that need a failed prerequisite are reported as blocked; cancellation and
+process-ownership failures stop the run. Any failed or blocked check prevents a
+passing CI stamp and packaging. Quick CI retains its fast failure behavior.
+
+The Action result links a retained JSON report and per-check output under the
+repository's common Git directory, in `lastcode-ci-diagnostics/`. The report
+records the candidate commit, validation-tool commit, runtime, commands and
+each check's result. Use that inventory to distinguish source failures from
+host-specific failures. Each invocation keeps its own report and the ten most
+recent inactive reports, preserving other runs whose owners are still alive.
+Copy evidence needed for longer-term comparison before that retention window
+expires. An interrupted report is incomplete evidence.
 
 ## Apple Silicon DMG builder
 
@@ -327,11 +406,15 @@ until LastCode intentionally publishes compatible releases.
 
 ## Intel DMG build publication
 
-The resumable **Build Intel package (macOS)** Project Action dispatches the manual
+The resumable **Build Intel package (macOS)** Project Action attaches to or dispatches the manual
 **LastCode Intel artifact** workflow for one exact
 `lastcode/checkpoint/...` or `lastcode/revision/...` tag and its full advertised
-commit. It rejects moving refs and tag/commit mismatches, runs the checkpoint's
-full CI gate on `macos-15-intel`, and builds a certificate-free x64 artifact.
+commit. It rejects moving refs and tag/commit mismatches. The Intel job runs no
+tests: it only builds and validates the certificate-free x64 artifact on
+`macos-15-intel`. Intel consumers only install a version the Apple Silicon
+checkpoint host has installed. That host requires full CI before installation:
+in its package build for ordinary checkpoints, or before publication for repair
+revisions and selected recoveries.
 
 The agent chooses the target explicitly. First record and verify that exact remote
 tag in the current worktree:
@@ -347,8 +430,8 @@ the connected client may run anywhere, and that environment need not be an Intel
 builder. The actual x64 build runs on GitHub's hosted Intel runner. For
 agent-triggered
 one-shot continuation, enable **Allow Codex and Claude to run and resume** on that
-Action in Project Settings. The Action attaches a unique request token to the
-dispatch, waits for only the matching workflow run, and returns to the thread on
+Action in Project Settings. The Action follows the selected build's request token
+and run ID, and returns to the thread on
 success, workflow failure or cancellation, missing workflow configuration, or a
 run-registration timeout. It reports both the workflow-run URL and immutable
 release URL.
@@ -357,6 +440,13 @@ The request is marked before dispatch so an interrupted or ambiguous transport
 result is never dispatched a second time. The Action waits for the unique token
 to appear and then records the matching run ID for later reattachment. If GitHub
 never registers it, select the tag again to create a deliberate new request.
+
+Selection attaches to an active exact-tag build when its workflow and checked-out
+automation files match current `origin/lastcode/main` or its package build has
+succeeded, saving its token and run ID without dispatching again. It cancels
+outdated builds without a successful package for the selected or older tags,
+preserving newer targets, current-workflow builds, and packages being published. Before dispatching
+a replacement, the Action waits for active same-tag runs to finish cancellation.
 
 The Action only builds and publishes. It never stages, installs, promotes,
 restarts, or updates an Intel artifact-consumer node. Those remain separate
@@ -381,7 +471,7 @@ asset set to a fresh publication job, which revalidates the assets and tag befor
 receiving write access; target-controlled build steps never share that token.
 
 A rerun for a complete matching release exits successfully before dependency
-installation, CI, or packaging. An existing draft, non-prerelease, partial,
+installation or packaging. An existing draft, non-prerelease, partial,
 foreign, or mismatched asset set fails closed. Automation never clobbers or
 deletes an exact-tag release. Recovery from a partial or conflicting publication
 therefore requires a maintainer decision rather than silently changing an
@@ -418,6 +508,7 @@ prerelease without stopping LastCode:
 
 ```bash
 pnpm lastcode:intel-stage stage
+pnpm lastcode:intel-stage stage --maximum-version 1.2.3-nightly.20260821.7
 pnpm lastcode:intel-stage stage --maximum-version-host version-source.example
 pnpm lastcode:intel-stage status
 ```
@@ -440,6 +531,21 @@ topology. If SSH is unavailable or the remote version is not a LastCode
 nightly, staging stops before changing the current pending selection.
 The SSH read is non-interactive and requires key-based access; it never opens a
 password prompt.
+
+`--maximum-version <nightly>` supplies the ceiling directly and performs no SSH
+read. It accepts a bare checkpoint or revision nightly version, such as
+`1.2.3-nightly.20260821.7` or `1.2.3-nightly.20260821.7.2`. The explicit ceiling
+and `--maximum-version-host` are mutually exclusive. A missing or invalid
+ceiling fails before staging changes anything; lowering a valid ceiling clears
+a pending candidate above it.
+
+Stage results include `currentVersion`, `maximumVersion` (or `null` without a
+ceiling), and `availableVersion` (or `null` without an eligible release).
+When the ceiling is newer but there is neither a newer eligible release
+nor a newer pending candidate, the status is `waiting-for-release` rather than
+`up-to-date`.
+An available intermediate update still returns `staged` or `pending`; its
+version can be compared with `maximumVersion` to detect remaining lag.
 
 ### Deployment primitives
 

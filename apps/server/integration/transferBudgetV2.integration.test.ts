@@ -17,6 +17,7 @@ import {
   ORCHESTRATION_V2_WS_METHODS,
   OrchestrationV2RpcSchemas,
   OrchestrationV2ThreadDetailSnapshot,
+  OrchestrationV2ThreadShell,
   OrchestrationV2ShellSnapshot,
   OrchestrationV2GetThreadProjectionError,
   OrchestrationV2GetShellSnapshotError,
@@ -74,6 +75,7 @@ const decodeThreadSnapshot = Schema.decodeUnknownEffect(
 const decodeShellSnapshot = Schema.decodeUnknownEffect(
   Schema.fromJsonString(Schema.toCodecJson(OrchestrationV2ShellSnapshot)),
 );
+const encodeThreadShell = Schema.encodeUnknownSync(Schema.toCodecJson(OrchestrationV2ThreadShell));
 
 const layerPersistence = EventSink.layer.pipe(
   Layer.provideMerge(EventStore.layerFromOrchestrationEventStore),
@@ -243,8 +245,8 @@ it.live("reports V2 thread HTTP and WebSocket transfer budgets", () =>
           for (let index = 0; index < TRANSFER_HISTORY_TURN_COUNT; index++)
             yield* sink.write({ events: turnEvents(provider, index, false) });
           const context = yield* Effect.context<
-          Layer.Success<typeof layerServices> | FileSystem.FileSystem
-        >();
+            Layer.Success<typeof layerServices> | FileSystem.FileSystem
+          >();
           const server = yield* Layer.build(
             HttpRouter.serve(layerRoutes, { disableListenLog: true }).pipe(
               Layer.provide(Layer.succeedContext(context)),
@@ -310,9 +312,11 @@ it.live("reports V2 thread HTTP and WebSocket transfer budgets", () =>
           // Shell items carry the shell read when their batch is projected, and unchanged
           // shells are skipped, so a turn split across batches may never yield an item at
           // the last sequence. Wait for the final shell instead.
-          const finalShell = yield* projection.getThreadShell(THREAD_ID);
+          // Optional archive fields serialize undefined as null; compare the wire values.
+          const finalShell = encodeThreadShell(yield* projection.getThreadShell(THREAD_ID));
           const shellTerminal = (item: StreamItem) =>
-            item.kind === "thread.updated" && NodeUtil.isDeepStrictEqual(item.thread, finalShell);
+            item.kind === "thread.updated" &&
+            NodeUtil.isDeepStrictEqual(encodeThreadShell(item.thread), finalShell);
           for (const queue of [tq, ttq]) yield* collectUntil(queue, threadTerminal);
           for (const queue of [sq, ssq]) yield* collectUntil(queue, shellTerminal);
           const measuredTurnWebSocket = difference(thread.recorder.totals(), threadBefore);
