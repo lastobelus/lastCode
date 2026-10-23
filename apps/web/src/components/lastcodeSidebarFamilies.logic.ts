@@ -1,4 +1,5 @@
 import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import type { ScopedThreadRef } from "@t3tools/contracts";
 import { threadShellIsVisible } from "@t3tools/client-runtime/state/models";
 import type { SidebarThreadSummary } from "../types";
 import {
@@ -240,6 +241,22 @@ function buildFamilyGraph(threads: readonly SidebarThreadSummary[]) {
   connectCreators(graph);
   detachFamilyCycles(graph);
   return { ...graph, ...orderFamilyChildren(graph) };
+}
+
+export function lastcodeSidebarThreadPath(
+  threads: readonly SidebarThreadSummary[],
+  senderRef: ScopedThreadRef,
+): readonly SidebarThreadSummary[] {
+  const { byKey, parentByKey } = buildFamilyGraph(threads);
+  const path: SidebarThreadSummary[] = [];
+  let cursor: string | undefined = scopedThreadKey(senderRef);
+  while (cursor !== undefined) {
+    const thread = byKey.get(cursor);
+    if (thread === undefined) break;
+    path.push(thread);
+    cursor = parentByKey.get(cursor);
+  }
+  return path.toReversed();
 }
 
 type FamilyProjectionInput = {

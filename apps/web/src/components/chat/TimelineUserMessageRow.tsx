@@ -3,6 +3,7 @@ import { IncomingMessageFrame } from "./IncomingMessageFrame";
 import { formatIncomingMessageOriginal } from "./incomingMessageOriginal";
 import { findRevealRef } from "./markdownFindContext";
 import { type MessageId, type ServerProviderSkill, ThreadId } from "@t3tools/contracts";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
   resolveIncomingMessagePreview,
   resolveUserMessagePresentation,
@@ -33,7 +34,7 @@ import {
 } from "lucide-react";
 import { Link as LinkIconNode } from "lucide";
 import { Spinner } from "../ui/spinner";
-import { Button, InlineButton } from "../ui/button";
+import { Button } from "../ui/button";
 import { useAssetUrlRefresh, useAssetUrls, useAssetUrlState } from "../../assets/assetUrls";
 import { AttachmentImage } from "../media/AttachmentImage";
 import { MediaVideoPlayer } from "../media/MediaVideoPlayer";
@@ -75,6 +76,7 @@ import {
 } from "./TimelineRowParts";
 import { UserMessageContextReferenceChip } from "./UserMessageContextChips";
 import { resolvePreviewAnnotationImage } from "./TimelineUserMessageRow.logic";
+import { AgentMessageSource } from "./AgentMessageSource";
 
 function UserVideoAttachment({ file }: { readonly file: ChatFileAttachment }) {
   const ctx = use(TimelineRowCtx);
@@ -590,13 +592,11 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
       ) : userMessage.attribution === "agent" ? (
         <p className="me-1 text-2xs text-muted-foreground/70" data-user-message-attribution="agent">
           {senderThreadId ? (
-            <InlineButton
-              onClick={() => ctx.onOpenThread(senderThreadId)}
-              tone="muted"
-              aria-label="Open sending thread"
-            >
-              Sent by another agent
-            </InlineButton>
+            <AgentMessageSource
+              senderRef={scopeThreadRef(ctx.activeThreadEnvironmentId, senderThreadId)}
+              currentThreadRef={ctx.threadRef}
+              onOpenThread={() => ctx.onOpenThread(senderThreadId)}
+            />
           ) : (
             "Sent by another agent"
           )}
