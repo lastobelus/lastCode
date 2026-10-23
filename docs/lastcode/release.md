@@ -253,10 +253,13 @@ before making it; upstream ancestry alone cannot prove this after a rebase.
 Selection requires a clean, completed `sync/nightly/<nightly>` worktree and is
 bound to its head, nightly, and current source. The service skips only that
 nightly's rebase and runs Full CI against the unpublished candidate before
-publication. Repair revisions use the same complete validation. Ordinary
-checkpoints retain their fast smoke gate; an ordinary check failure triggers a
-Full CI diagnostic pass so later independent failures are visible in the same
-recovery. Dependency preparation and interrupted execution remain fatal.
+publication. Repair revisions use the same complete validation. Every
+checkpoint first runs the `vp check` format/lint gate after dependency
+installation and fork invariants; a failure there aborts immediately with
+retained recovery and no Full CI diagnostic pass. Ordinary checkpoints then
+retain their fast smoke gate; any later check failure triggers a Full CI
+diagnostic pass so independent failures are visible in the same recovery.
+Dependency preparation and interrupted execution remain fatal.
 The service publishes the immutable tag and source ref, then promotes main with a
 lease against the selected source commit. Open PRs do not block publication or promotion. Merges made after
 selection or during validation do not invalidate it: the tag still publishes,
