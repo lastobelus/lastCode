@@ -71,13 +71,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          # Carry validation inspects every commit in the exact PR range.
+          # Carry compilation needs historical blobs, including files excluded by sparse checkouts.
           fetch-depth: 0
-          sparse-checkout: |
-            /*
-            !/.repos/
-            !/apps/mobile/modules/t3-terminal/Vendor/**/*.a
-          sparse-checkout-cone-mode: false
 
       - name: Reject repository-owned PR assets
         run: |
@@ -98,13 +93,15 @@ jobs:
           path: ~/.cache/electron
           key: electron-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('node_modules/.pnpm/electron@*/node_modules/electron/package.json') }}
 
-      - name: Validate carry group assignments
+      - name: Validate carry group assignments and same-base compilation
         if: ${{ github.event_name == 'pull_request' }}
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: node scripts/lastcode-carry-ci.ts
+        run: |
+          git fetch --no-tags origin 'refs/lastcode/carry-sources/*:refs/lastcode/carry-sources/*'
+          node scripts/lastcode-carry-ci.ts
 
       - name: Ensure Electron runtime is installed
         run: vp run --filter @t3tools/desktop ensure:electron

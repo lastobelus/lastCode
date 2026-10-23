@@ -19,13 +19,9 @@ import {
 import { type GithubCiEvidence, readGithubCi } from "./lastcode-github-ci.ts";
 import { readReviewData, validateReviewForMerge } from "./lastcode-pr-gates.ts";
 import { acquireMainWriteLock } from "./lastcode-main-write-lock.ts";
-import {
-  carrySquashBody,
-  preserveCarrySource,
-  shouldRetainCarrySources,
-  validateCarrySourceRange,
-  type CarryReplayManifest,
-} from "./lastcode-carry-delivery.ts";
+import { carrySquashBody, preserveCarrySource } from "./lastcode-carry-delivery.ts";
+
+import { validateCarryPullRequest } from "./lastcode-carry-ci.ts";
 
 const LASTCODE_GITHUB_REPOSITORY = process.env.LASTCODE_GITHUB_REPOSITORY ?? "lastobelus/lastCode";
 
@@ -40,11 +36,6 @@ export interface PullRequestForMerge {
   readonly baseRefOid: string;
   readonly mergeable: string;
   readonly mergeStateStatus: string;
-}
-
-function readCarryReplayManifest(repoRoot: string): CarryReplayManifest {
-  const path = NodePath.join(repoRoot, "scripts", "lastcode-carry-set.json");
-  return JSON.parse(NodeFS.readFileSync(path, "utf8")) as CarryReplayManifest;
 }
 
 function writeSquashBody(body: string): { readonly cleanup: () => void; readonly path: string } {
@@ -242,9 +233,17 @@ function main(argv: ReadonlyArray<string>): void {
     );
   }
   validatePullRequestForMerge(confirmedPullRequest, commit, baseCommit);
-  const carrySource = shouldRetainCarrySources(readCarryReplayManifest(repoRoot))
-    ? validateCarrySourceRange(repoRoot, pullRequest.number, baseCommit, commit)
-    : undefined;
+  runCommand(repoRoot, "git", [
+    "fetch",
+    "--no-tags",
+    LASTCODE_ORIGIN_REMOTE,
+    "refs/lastcode/carry-sources/*:refs/lastcode/carry-sources/*",
+  ]);
+  const carrySource = validateCarryPullRequest(repoRoot, {
+    number: pullRequest.number,
+    base: baseCommit,
+    head: commit,
+  }).source;
 
   if (dryRun) {
     console.log(

@@ -202,6 +202,13 @@ or upstream version; `Carry-Supersedes` identifies replaced evidence or fixes.
 These are observations for future repair agents, not instructions to follow
 regardless of changed circumstances. Avoid private infrastructure or raw logs.
 
+PR CI and guarded merge compile the existing carry groups plus the proposed
+contributions on the same upstream base and require the compiled tree to equal
+the exact PR head tree. A conflict blocks merge while the owning PR can still
+reconcile its contribution. This proves regrouping, not compatibility with a
+future nightly. Validation uses a disposable repository and leaves the source
+checkout untouched.
+
 The guarded merge retains the exact reviewed source range in an immutable ref
 before squashing and supplies `Carry-Source-Ref`, `Carry-Source-Base`, and
 `Carry-Source-Head`. Do not write those reserved trailers into the PR body. The

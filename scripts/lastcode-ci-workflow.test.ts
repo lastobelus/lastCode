@@ -65,13 +65,18 @@ describe("LastCode GitHub CI workflow", () => {
     expect(workflow).toContain("push:\n    branches:\n      - lastcode/main");
     expect(workflow).toContain("permissions:\n  contents: read");
     expect(checkBlock).toContain(
-      "# Carry validation inspects every commit in the exact PR range.\n          fetch-depth: 0",
+      "# Carry compilation needs historical blobs, including files excluded by sparse checkouts.\n          fetch-depth: 0",
     );
-    expect(checkBlock).toContain("- name: Validate carry group assignments");
+    expect(checkBlock).toContain(
+      "- name: Validate carry group assignments and same-base compilation",
+    );
     expect(checkBlock).toContain("BASE_SHA: ${{ github.event.pull_request.base.sha }}");
     expect(checkBlock).toContain("HEAD_SHA: ${{ github.event.pull_request.head.sha }}");
     expect(checkBlock).toContain("PR_NUMBER: ${{ github.event.pull_request.number }}");
-    expect(checkBlock).toContain("run: node scripts/lastcode-carry-ci.ts");
+    expect(checkBlock).toContain(
+      "git fetch --no-tags origin 'refs/lastcode/carry-sources/*:refs/lastcode/carry-sources/*'",
+    );
+    expect(checkBlock).toContain("node scripts/lastcode-carry-ci.ts");
     expect(hasNonstandardRunnerConfiguration(workflow)).toBe(false);
     expect(workflow).toContain("runs-on: ubuntu-24.04");
     expect(workflow).toContain("runs-on: macos-26");

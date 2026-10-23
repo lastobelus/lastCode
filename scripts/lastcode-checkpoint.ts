@@ -22,11 +22,13 @@ import {
   normalizeCheckpointCommits,
 } from "./lastcode-quiet-references.ts";
 import {
+  checkpointTrailer,
   immutableSourceFetchRefspec,
   installablePublicationArgs,
   readManifestReplayConfiguration,
   resolveCheckpointReplay,
   sourceObjectRef,
+  validateHistoricalBootstrapSourceTag,
   type CarryBootstrap,
   type CheckpointReplayMode,
   type EffectiveReplayConfiguration,
@@ -859,38 +861,23 @@ export function validateHistoricalBootstrapSource(input: {
   const { representedSource, sourceTag } = input.bootstrap;
   if (!representedSource || !sourceTag) return undefined;
   const installable = input.installables.find(({ tag }) => tag === sourceTag);
-  if (!installable) {
-    throw new Error(`Carry bootstrap source tag ${sourceTag} is not an available installable.`);
-  }
-  if (
-    git(input.repoRoot, ["cat-file", "-t", `refs/tags/${sourceTag}`], { allowFailure: true }) !==
-    "tag"
-  ) {
-    throw new Error(`Carry bootstrap source tag ${sourceTag} must be annotated.`);
-  }
-  if (installable.commit !== input.bootstrap.source) {
-    throw new Error(
-      `Carry bootstrap source tag ${sourceTag} resolves to ${installable.commit}, expected ${input.bootstrap.source}.`,
-    );
-  }
-  const message = git(input.repoRoot, [
-    "for-each-ref",
-    `refs/tags/${sourceTag}`,
-    "--format=%(contents)",
-  ]);
-  const recordedSource = checkpointTrailer(message, "Source-Commit");
-  if (recordedSource !== representedSource) {
-    throw new Error(
-      `Carry bootstrap source tag ${sourceTag} records Source-Commit ${recordedSource ?? "missing"}, expected ${representedSource}.`,
-    );
-  }
-  const recordedUpstream = checkpointTrailer(message, "Upstream-Commit");
-  if (recordedUpstream !== input.bootstrap.base) {
-    throw new Error(
-      `Carry bootstrap source tag ${sourceTag} records Upstream-Commit ${recordedUpstream ?? "missing"}, expected ${input.bootstrap.base}.`,
-    );
-  }
-  return representedSource;
+  return validateHistoricalBootstrapSourceTag(
+    input.bootstrap,
+    installable
+      ? {
+          commit: installable.commit,
+          annotated:
+            git(input.repoRoot, ["cat-file", "-t", `refs/tags/${sourceTag}`], {
+              allowFailure: true,
+            }) === "tag",
+          message: git(input.repoRoot, [
+            "for-each-ref",
+            `refs/tags/${sourceTag}`,
+            "--format=%(contents)",
+          ]),
+        }
+      : undefined,
+  );
 }
 
 export function resolveRevisionPlan(input: {
@@ -1378,11 +1365,6 @@ export function checkpointMessage(input: {
 
 export function checkpointSourceCommit(message: string): string | undefined {
   return checkpointTrailer(message, "Source-Commit");
-}
-
-export function checkpointTrailer(message: string, name: string): string | undefined {
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`^${escaped}:\\s*(\\S(?:.*\\S)?)\\s*$`, "m").exec(message)?.[1];
 }
 
 export function checkpointReplayMode(message: string): CheckpointReplayMode | undefined {
