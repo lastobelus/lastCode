@@ -59,6 +59,7 @@ import type { AssistantCitationSourceAnchor } from "~/lib/assistantTextSelection
 import { type AssistantCitationRequest } from "./AssistantCitationSource";
 import { useAssistantCitationTarget, type CitationHistoryPage } from "./useAssistantCitationTarget";
 import {
+  isActionResumeResultMessage,
   resolveTimelineIsAtEnd,
   resolveTimelineMinimapHasPersistentGutter,
   resolveTimelineMinimapCurrentIndex,
@@ -103,6 +104,7 @@ import {
 } from "./TimelineWorkGroupRows";
 import { UserMessageRow } from "./TimelineUserMessageRow";
 import {
+  SystemTimelineRow,
   AssistantTimelineRow,
   AssistantMetaTimelineRow,
   ProposedPlanTimelineRow,
@@ -353,6 +355,9 @@ const ConversationTimeline = memo(function ConversationTimeline({
   historyControls,
   loadEarlier = null,
 }: MessagesTimelineProps) {
+  const [expandedActionMessageIds, setExpandedActionMessageIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   const listIdentityKey = displayThreadKey ?? routeThreadKey;
   // The remembered position is a snapshot taken when the list identity changes;
   // scrolling keeps rewriting the stored entry, which must not move the restore.
@@ -508,6 +513,19 @@ const ConversationTimeline = memo(function ConversationTimeline({
         next.delete(attemptId);
       } else {
         next.add(attemptId);
+      }
+      return next;
+    });
+  };
+
+  const onToggleActionFollowUp = (rowId: string) => {
+    suspendEndScrollMaintenanceForDisclosure(rowId);
+    setExpandedActionMessageIds((existing) => {
+      const next = new Set(existing);
+      if (next.has(rowId)) {
+        next.delete(rowId);
+      } else {
+        next.add(rowId);
       }
       return next;
     });
@@ -895,6 +913,8 @@ const ConversationTimeline = memo(function ConversationTimeline({
   }, [timelineViewportElement, rows.length, reportContentOverflow, chatWidth]);
 
   const sharedState: TimelineRowSharedState = {
+    expandedActionMessageIds,
+    onToggleActionFollowUp,
     citationRequest: readyCitationRequest,
     listRef,
     timestampFormat,
@@ -1258,7 +1278,13 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       {row.kind === "turn-fold" ? <TurnFoldTimelineRow row={row} /> : null}
       {row.kind === "attempt-fold" ? <AttemptFoldTimelineRow row={row} /> : null}
       {row.kind === "context-compaction" ? <ContextCompactionTimelineRow row={row} /> : null}
-      {row.kind === "message" && row.message.role === "user" ? <UserMessageRow row={row} /> : null}
+      {row.kind === "message" && row.message.role === "user" ? (
+        isActionResumeResultMessage(row.message) ? (
+          <SystemTimelineRow row={row} />
+        ) : (
+          <UserMessageRow row={row} />
+        )
+      ) : null}
       {row.kind === "message" && row.message.role === "assistant" ? (
         <AssistantTimelineRow row={row} />
       ) : null}
