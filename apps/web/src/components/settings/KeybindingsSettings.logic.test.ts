@@ -9,6 +9,8 @@ import { resolveShortcutCommand } from "../../keybindings";
 
 import {
   buildKeybindingRows,
+  buildKeybindingCommandOptions,
+  commandLabel,
   keybindingConflictLabels,
   keybindingFromKeyboardEvent,
   parseWhenExpressionDraft,
@@ -221,6 +223,11 @@ describe("KeybindingsSettings.logic", () => {
         },
       },
     });
+  });
+
+  it("offers the LastCode sidebar presentation command with its label", () => {
+    expect(commandLabel("sidebar.mode.toggle")).toBe("Sidebar: Toggle Presentation");
+    expect(buildKeybindingCommandOptions([])).toContain("sidebar.mode.toggle");
   });
 
   it("reports conflicting shortcuts that share an active when context", () => {
