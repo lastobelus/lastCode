@@ -122,6 +122,9 @@ it.effect("preserves installed status after probes and cleans failed agent activ
         ),
       ),
     );
+    yield* host.stopAgent;
+    expect(modes).toEqual(["stop-agent"]);
+    expect(forwards).toBe(0);
     yield* host.ensureReady(() => Effect.void);
     yield* SshDeviceHost.probe({
       kind: "ssh",

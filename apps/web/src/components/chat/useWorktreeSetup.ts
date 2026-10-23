@@ -84,16 +84,19 @@ export function useWorktreeSetup(input: {
   );
   const latestSnapshot = snapshotQuery.data;
   // A newer snapshot replaces the held one; a late older one for the same
-  // thread does not. Switching routes drops it.
+  // thread does not. Switching routes replaces the previous route's history.
   const [heldFor, setHeldFor] = useState<{
     readonly routeThreadRef: ScopedThreadRef;
     readonly latestSnapshot: WorktreeSetupSnapshot | null | undefined;
   }>({ routeThreadRef, latestSnapshot: null });
-  if (heldFor.routeThreadRef !== routeThreadRef || heldFor.latestSnapshot !== latestSnapshot) {
-    const routeChanged = heldFor.routeThreadRef !== routeThreadRef;
+  // ChatView recreates scoped refs during render; only their durable ids mark a route change.
+  const routeChanged =
+    heldFor.routeThreadRef.environmentId !== routeThreadRef.environmentId ||
+    heldFor.routeThreadRef.threadId !== routeThreadRef.threadId;
+  if (routeChanged || heldFor.latestSnapshot !== latestSnapshot) {
     setHeldFor({ routeThreadRef, latestSnapshot });
     if (routeChanged) {
-      setHeldSnapshot(null);
+      setHeldSnapshot(latestSnapshot?.threadId === target.threadId ? latestSnapshot : null);
     } else if (latestSnapshot) {
       setHeldSnapshot((current) =>
         current?.threadId === latestSnapshot.threadId && current.sequence > latestSnapshot.sequence
