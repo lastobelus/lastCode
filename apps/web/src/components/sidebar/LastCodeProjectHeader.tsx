@@ -5,10 +5,10 @@ import type { useSortable } from "@dnd-kit/sortable";
 import { ChevronRightIcon } from "lucide-react";
 import { useClientSetting } from "../../hooks/useSettings";
 import { lastcodeSidebarScaleStyle } from "../../lastcodeSidebarScale";
-import { formatRelativeTimeLabel } from "../../timestampFormat";
 import { ConnectedEnvironmentIcon, type ProjectEnvironmentIconEntry } from "../../environmentIcons";
 import { NO_PROJECT_GROUP_KEY, type SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
 import { ProjectFavicon } from "../ProjectFavicon";
+import { RelativeTime } from "../RelativeTime";
 import type { ThreadStatusPill } from "../Sidebar.logic";
 import { SidebarMenuButton } from "../ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -220,7 +220,7 @@ export function LastCodeProjectHeader({
             className="text-3xs tabular-nums text-secondary-label"
             data-lastcode-sidebar-unscaled-content
           >
-            {formatRelativeTimeLabel(latestThreadTimestamp)}
+            <RelativeTime timestamp={latestThreadTimestamp} />
           </span>
         </span>
       ) : null}
