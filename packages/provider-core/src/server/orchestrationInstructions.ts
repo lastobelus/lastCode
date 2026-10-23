@@ -8,16 +8,22 @@ import type { ProviderInteractionMode } from "@t3tools/contracts";
 export const T3_CODE_ORCHESTRATION_SECTIONS: ReadonlyArray<string> = [
   `## T3 Code orchestration
 
-- Pasted thread IDs are valid references. Use \`t3_thread_read\`; it tries the client’s other connected environments after a local miss. Try the lookup before asking which environment owns a thread. Reuse the returned environmentId for pagination and paste the returned link when referring to it. Remote reads do not make mutation tools cross-environment.
-
 The \`t3-code\` MCP server provides app-owned orchestration. Treat these concepts distinctly:
 
 - A delegated task/subagent is child work owned by the current thread. Use \`orchestrator_capabilities\` to discover the current provider/model IDs from the same live catalog as the composer, including configured custom models. It lists a short set of models per provider; pass \`search\` to find others. Do not treat a native tool's model list as the full list of available subagent models. Prefer native subagent tools for same-provider work only when they support the chosen model and no model options are requested or inherited. Use \`delegate_task\` with that provider instance and model when native tools cannot, including for same-provider work. Also use \`delegate_task\` for cross-provider or explicitly T3-owned child tasks. For a child task that needs a separate checkout, use \`delegate_task\` with \`isolation:"worktree"\` across any provider or model. It starts from the parent local commit and runs project setup; uncommitted edits are not copied. Retain each returned \`taskId\`, and use \`task_status\` or \`task_cancel\` to manage it. The returned \`childThreadId\` is backing storage for the subagent, not the target for starting another delegated review round.
 - \`t3_thread_launch\` and \`create_threads\` create ordinary top-level T3 conversations. Use them only when the user explicitly asks for separate/new/top-level threads or conversations. Never use them merely because the user said "subagent" or requested parallel delegated work.
 - For every T3 delegated review round, call \`delegate_task\` again. Include the original brief, prior findings, responses, and unresolved objections in each new task prompt. Track each round by its own \`taskId\`. Use a distinct \`clientRequestId\` per round, stable across retries of that round. Do not use \`t3_thread_send\` on \`childThreadId\` to continue a delegated review.`,
   `- \`schedule_task\` creates persistent recurring work in the app scheduler. Pass \`schedule\` as a structured object, never as JSON text: \`{"type":"interval","everyMs":3600000}\` for an interval, or \`{"type":"fixed_time","timeOfDay":"09:00","weekdays":[1,2,3,4,5]}\` for a wall-clock schedule, or \`{"type":"webhook"}\` to run on each request to the returned \`webhookUrl\` (the run sees the request only through \`{{body.path}}\`-style placeholders in the prompt). By default runs return to the current thread, which suits orchestrating: each trigger arrives here and you delegate or dedupe; set \`bindToCurrentThread=false\` only when the user wants a fresh thread for every run. After scheduling a timer, report the returned cadence and next run time; for a webhook, report its \`webhookUrl\`, or say T3 Connect remote access is needed if it is missing.
-- When you need a secret from the user (a token, API key, or webhook signing secret), call \`request_secret\` so they enter it privately, then pass the returned \`secretRef\` to the tool that needs it, e.g. \`signature.secretRef\` on a webhook task for a sender that signs requests such as GitHub. A \`secretRef\` works once. Never ask for a secret in chat, never invent one, and never repeat one.
-- To mention another thread to the user, use the ready-to-paste \`link\` returned by \`t3_thread_list\` or \`t3_thread_read\`. Preserve it exactly so T3 Code opens the owning environment and shows the thread’s current title.`,
+- When you need a secret from the user (a token, API key, or webhook signing secret), call \`request_secret\` so they enter it privately, then pass the returned \`secretRef\` to the tool that needs it, e.g. \`signature.secretRef\` on a webhook task for a sender that signs requests such as GitHub. A \`secretRef\` works once. Never ask for a secret in chat, never invent one, and never repeat one.`,
+  `### Find mentioned threads
+
+When the user mentions or pastes another thread, finding it is your job; they should not have to track which environment owns it. Thread IDs are opaque. UI threads use bare UUIDs and agent-launched threads can use IDs such as \`mcp:<uuid>\`; the prefix is part of the ID, so pass the full ID unchanged.
+
+Start with \`t3_thread_read\`. After a local miss it asks the T3 client's other connected environments; reuse the returned \`thread.environmentId\` for later pages. \`thread_not_found\` covers only the environments it reached, and \`environment_unavailable\` means some could not be checked, so neither proves the thread is missing or calls for asking the user yet. Keep looking with access you already have: \`t3_thread_search\` or \`t3_thread_list\` (including \`settled=true\`) for a title or partial ID, then the \`lastcode-thread\` CLI (\`list\`, \`read\`, \`send\`, \`wait\`) on this host or on known hosts you already reach over SSH, at \`<LastCode home>/userdata/bin/lastcode-thread\` when it is not on \`PATH\`. If that wrapper is absent, use the owning installation's \`thread\` subcommand with its actual \`--base-dir\` and \`--state-dir\`. Its \`list\` returns only the 50 most recently updated active threads (check \`threadsTruncated\`), and it never sees archived or deleted threads.
+
+Mutation tools such as \`t3_thread_send\` act only in this environment. When the user wants a thread elsewhere contacted, run \`lastcode-thread send\` on its owning host; the message arrives without a link back to you, so name the source thread in it. A \`"kind":"accepted"\` result confirms delivery; \`send --wait\` returns a tracked turn result instead, where \`"kind":"completed"\` confirms delivery and completion. A wait timeout does not mean delivery failed: resume its \`waitHandle\` instead of resending. For \`dispatch-unknown\` or \`transport-unknown\`, read the target's history before retrying. An authorization or permission refusal is a boundary, not a miss: report it instead of routing around it. Ask the user only after these routes are exhausted, naming what you checked and the specific access or detail still missing.
+
+To mention another thread to the user, use the ready-to-paste \`link\` returned by \`t3_thread_list\` or \`t3_thread_read\`. Preserve it exactly so T3 Code opens the owning environment and shows the thread’s current title.`,
   `### Choose the workspace before starting a new thread
 
 For independent implementation or a PR stack in its own worktree, use \`t3_thread_launch\` with an explicit \`workspaceStrategy\`. It creates or selects the workspace, binds the new thread to it, and prepares it before the agent starts. Put the task in \`message\`, not \`prompt\`:
@@ -52,7 +58,9 @@ export const T3_CODE_BROWSER_TOOL_INSTRUCTIONS = `
 
 You are running inside T3 Code. The \`t3-code\` MCP server is the product-native collaborative browser shared with the user. When it exposes \`preview_*\` tools, prefer those tools for browser navigation, inspection, interaction, screenshots, and recordings.
 
-For browser work, first call \`preview_status\`. If no automation-capable preview is attached, call \`preview_open\` before concluding that the browser is unavailable. Then use \`preview_navigate\`, \`preview_snapshot\`, and the focused interaction tools. Prefer snapshot-provided locators over coordinates.
+For routine QA within the user's requested task, use a thread-owned background browser against isolated test state without a separate browser-permission prompt. Call \`preview_status\`, then create a dedicated QA tab with \`preview_open({ open: false, reuseExistingTab: false })\`. Retain the returned \`tabId\` and use it for subsequent calls; reuse that QA tab for the rest of the task. Do not hide or repurpose a tab the user is inspecting. Do not focus applications, switch the user's thread, or operate their live workspace. Explicit user restrictions and permission requirements for foreground computer use or human acceptance still apply.
+
+A new blank tab can briefly report \`available: false\` while its native browser starts; use \`preview_navigate\`, which waits for readiness, before declaring the browser unavailable. Then use \`preview_snapshot\` and the focused interaction tools. Prefer snapshot-provided locators over coordinates. A managed server readiness failure is separate from browser permission: inspect the returned readiness and terminal-status diagnostics, the launch command, actual listening port, and ownership. Terminal transcripts are not returned and a failed initial launch cleans up its terminal; do not search for deleted output or infer a specific startup error from status alone. Repair an identified startup problem and retry within a bounded attempt. Do not ask the user to open a browser to fix a server launch failure.
 
 \`preview_status\` lists every browser tab in this thread, including tabs the user opened. When the user asks about "this page" or a page they have open, read their tab: pass its \`tabId\` to \`preview_snapshot\` or \`preview_wait_for\`, or omit \`tabId\` when you have no tab of your own. You may act on the user's tab, including \`preview_evaluate\`, only while its owner is \`unclaimed\`; while it is \`human\`, the user is driving, so read it with \`preview_snapshot\` or open your own tab. To use a browser profile (a set of saved logins), pass \`profileId\` from \`preview_status\` profiles to \`preview_open\`.
 
@@ -61,6 +69,11 @@ Do not switch to global browser skills, Chrome, Node REPL browser automation, st
 - the user asks for another browser, or invokes a skill or documented repository workflow that names one; follow that workflow and report any prerequisite it is missing;
 - preview calls on an open tab have failed twice on the same step (timeouts, \`chrome-error://\` pages, a different client answering). Quote the raw error and switch without asking the user which browser to use.
 `;
+
+export const T3_CODE_MCP_INSTRUCTIONS = [
+  T3_CODE_BROWSER_TOOL_INSTRUCTIONS.trim(),
+  T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim(),
+].join("\n\n");
 
 const T3_CODE_ACP_DEFAULT_MODE_INSTRUCTIONS = `## T3 Code interaction mode: Default
 
@@ -96,9 +109,7 @@ export function t3AcpPromptWithInstructions(input: {
     input.state.interactionMode === "plan"
       ? T3_CODE_ACP_PLAN_MODE_INSTRUCTIONS
       : T3_CODE_ACP_DEFAULT_MODE_INSTRUCTIONS,
-    ...(input.state.hasT3Mcp
-      ? [T3_CODE_BROWSER_TOOL_INSTRUCTIONS.trim(), T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim()]
-      : []),
+    ...(input.state.hasT3Mcp ? [T3_CODE_MCP_INSTRUCTIONS] : []),
   ];
   return `<t3_code_instructions>\n${instructions.join("\n\n")}\n</t3_code_instructions>\n\n<user_request>\n${input.prompt}\n</user_request>`;
 }
@@ -107,7 +118,7 @@ export function t3AcpPromptWithInstructions(input: {
  * Keep the wrapper explicit so it cannot be mistaken for text authored by the user.
  */
 function prependT3OrchestrationInstructions(prompt: string): string {
-  return `<t3_code_orchestration_instructions>${T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim()}</t3_code_orchestration_instructions>\n\n<user_request>\n${prompt}\n</user_request>`;
+  return `<t3_code_orchestration_instructions>${T3_CODE_MCP_INSTRUCTIONS}</t3_code_orchestration_instructions>\n\n<user_request>\n${prompt}\n</user_request>`;
 }
 
 export function t3OrchestrationPromptForFirstRun(input: {
@@ -121,5 +132,5 @@ export function t3OrchestrationPromptForFirstRun(input: {
 }
 
 export function t3OrchestrationSystemPrompt(hasT3Mcp: boolean): string | undefined {
-  return hasT3Mcp ? T3_CODE_ORCHESTRATION_INSTRUCTIONS : undefined;
+  return hasT3Mcp ? T3_CODE_MCP_INSTRUCTIONS : undefined;
 }
