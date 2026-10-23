@@ -12,6 +12,7 @@ import {
   lastcodeSidebarInheritedStatus,
   projectLastCodeSidebarFamilies,
 } from "../lastcodeSidebarFamilies.logic";
+import { getThreadSortTimestamp } from "@t3tools/client-runtime/state/thread-sort";
 
 export function projectLastCodeProjectThreads(
   threads: readonly SidebarThreadSummary[],
@@ -26,7 +27,14 @@ export function projectLastCodeProjectThreads(
   const statusForThread = options.statusForThread ?? (() => null);
   const inheritedStatusForThread = (thread: SidebarThreadSummary) =>
     lastcodeSidebarInheritedStatus(thread, statusForThread(thread));
+  const latestTimestamp = visibleThreads.reduce(
+    (latest, thread) => Math.max(latest, getThreadSortTimestamp(thread, "updated_at")),
+    Number.NEGATIVE_INFINITY,
+  );
   return {
+    latestThreadTimestamp: Number.isFinite(latestTimestamp)
+      ? new Date(latestTimestamp).toISOString()
+      : null,
     familyProjection,
     projectStatus: resolveProjectStatusIndicator(visibleThreads.map(inheritedStatusForThread)),
     hiddenThreadStatus: resolveProjectStatusIndicator(

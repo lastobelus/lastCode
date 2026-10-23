@@ -38,8 +38,14 @@ export function LastCodeSidebarProject(props: Props) {
   const expanded = useUiStateStore((state) =>
     resolveProjectExpanded(state.projectExpandedById, preferenceKeys),
   );
-  const { threadsByKey, projectStatus, hiddenThreadStatus, familyProjection, olderSettled } =
-    useLastCodeProjectThreads(project, activeThreadKey, expanded, listExpanded);
+  const {
+    threadsByKey,
+    projectStatus,
+    hiddenThreadStatus,
+    familyProjection,
+    olderSettled,
+    latestThreadTimestamp,
+  } = useLastCodeProjectThreads(project, activeThreadKey, expanded, listExpanded);
   const editing = useLastCodeThreadEditing();
   const annotations = useLastCodeThreadAnnotations();
   const navigation = useLastCodeThreadNavigation(familyProjection.orderedThreadKeys);
@@ -70,6 +76,7 @@ export function LastCodeSidebarProject(props: Props) {
         expanded={expanded}
         status={projectStatus}
         environments={environments}
+        latestThreadTimestamp={latestThreadTimestamp}
         drag={{ manual: props.dragHandle !== null, handle: props.dragHandle }}
         gestures={props.gestures}
         showMenu={showProjectMenu}

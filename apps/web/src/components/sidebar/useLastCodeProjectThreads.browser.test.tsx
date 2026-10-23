@@ -139,6 +139,7 @@ vi.mock("../../state/entities", () => ({ useThreadShellsForProjectRefs: () => th
 vi.mock("../../hooks/useSettings", () => ({
   useClientSetting: (key: keyof typeof settings) => settings[key],
 }));
+
 const key = (thread: typeof parent) =>
   scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
 const project = {
