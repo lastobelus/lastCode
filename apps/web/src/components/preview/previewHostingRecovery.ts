@@ -46,7 +46,30 @@ export async function prepareHostedPreview(
 ): Promise<PreparedHostedPreview> {
   let connection = readPreparedConnection(threadRef.environmentId);
   let config = appAtomRegistry.get(serverEnvironment.configValueAtom(threadRef.environmentId));
+  let configuredEndpoint = readConfiguredPreviewEnvironmentUrl(threadRef.environmentId);
   if (connection === null || config === null) {
+    const original = { url, managed: false, restored: false } as const;
+    let target: URL;
+    try {
+      target = new URL(url);
+    } catch {
+      return original;
+    }
+    if (
+      (target.protocol !== "http:" && target.protocol !== "https:") ||
+      (!target.pathname.startsWith("/api/assets/") &&
+        !isPrivateNetworkHost(target.hostname) &&
+        ![connection?.httpBaseUrl, configuredEndpoint].some((endpoint) => {
+          if (!endpoint) return false;
+          try {
+            return new URL(endpoint).hostname === target.hostname;
+          } catch {
+            return false;
+          }
+        }))
+    ) {
+      return original;
+    }
     const result = await executeAtomQuery(
       appAtomRegistry,
       environmentSession.bootstrap({ environmentId: threadRef.environmentId, input: undefined }),
@@ -56,8 +79,8 @@ export async function prepareHostedPreview(
       throw new HostedPreviewRecoveryError(squashAtomCommandFailure(result));
     connection = result.value.prepared;
     config = result.value.config;
+    configuredEndpoint = readConfiguredPreviewEnvironmentUrl(threadRef.environmentId);
   }
-  const configuredEndpoint = readConfiguredPreviewEnvironmentUrl(threadRef.environmentId);
   const supportsAssetRecovery = config.environment.capabilities.previewAssetRecovery === true;
   return prepareOwnedPreview({
     threadRef,

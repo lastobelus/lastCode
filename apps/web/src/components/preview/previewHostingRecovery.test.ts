@@ -15,7 +15,12 @@ const mocks = vi.hoisted(() => ({
     vi.fn<
       () => { environment: { capabilities: { previewAssetRecovery?: boolean | undefined } } } | null
     >(),
-  connection: vi.fn(() => ({
+  connection: vi.fn<
+    () => {
+      httpBaseUrl: string;
+      target: { _tag: string; httpBaseUrl: string };
+    } | null
+  >(() => ({
     httpBaseUrl: "http://managed-server.example:3773",
     target: {
       _tag: "PrimaryConnectionTarget",
@@ -42,11 +47,13 @@ vi.mock("~/state/server", () => ({
 vi.mock("~/state/session", () => ({
   environmentSession: { bootstrap: () => mocks.bootstrap },
   readPreparedConnection: mocks.connection,
-  readConfiguredPreviewEnvironmentUrl: () =>
-    mocks.configuredEndpoint() ??
-    (mocks.connection().target._tag === "PrimaryConnectionTarget"
-      ? mocks.connection().target.httpBaseUrl
-      : null),
+  readConfiguredPreviewEnvironmentUrl: () => {
+    const connection = mocks.connection();
+    return (
+      mocks.configuredEndpoint() ??
+      (connection?.target._tag === "PrimaryConnectionTarget" ? connection.target.httpBaseUrl : null)
+    );
+  },
 }));
 vi.mock("~/state/preview", () => ({
   previewEnvironment: { hostingList: mocks.list, hostingRecover: mocks.recover },
@@ -79,12 +86,67 @@ beforeEach(() => {
     _tag: "Success",
     value: { relativeUrl: "/api/assets/resource/report.png", expiresAt: 1790000000000 },
   });
-  mocks.connection.mockClear();
+  mocks.connection.mockReset();
   mocks.configuredEndpoint.mockReset();
   mocks.configuredEndpoint.mockReturnValue(null);
 });
 
 describe("native preview reopening", () => {
+  it.each([
+    "https://github.com/example/project/pull/73",
+    "mailto:developer@example.com",
+    "custom-app://open/project",
+    "not-a-url",
+  ])("opens unrelated links without waiting for a disconnected environment: %s", async (url) => {
+    mocks.connection.mockReturnValue(null);
+    mocks.config.mockReturnValue(null);
+    await expect(prepareHostedPreview(owner, url)).resolves.toEqual({
+      url,
+      managed: false,
+      restored: false,
+    });
+    expect(mocks.query).not.toHaveBeenCalled();
+    expect(mocks.run).not.toHaveBeenCalled();
+  });
+
+  it("opens public links while the connected environment is still loading its config", async () => {
+    mocks.config.mockReturnValue(null);
+    const url = "https://github.com/example/project/pull/73";
+    await expect(prepareHostedPreview(owner, url)).resolves.toEqual({
+      url,
+      managed: false,
+      restored: false,
+    });
+    expect(mocks.query).not.toHaveBeenCalled();
+    expect(mocks.run).not.toHaveBeenCalled();
+  });
+
+  it.each(["http://localhost:5173/qa", "http://managed-server.example:5173/qa"])(
+    "still bootstraps a saved app while its connection or config is loading: %s",
+    async (url) => {
+      const prepared = mocks.connection();
+      if (url.startsWith("http://localhost")) mocks.connection.mockReturnValue(null);
+      mocks.config.mockReturnValue(null);
+      mocks.query.mockResolvedValueOnce(
+        AsyncResult.success({
+          prepared,
+          config: { environment: { capabilities: { previewAssetRecovery: true } } },
+        }),
+      );
+      mocks.run
+        .mockResolvedValueOnce(AsyncResult.success([lease]))
+        .mockResolvedValueOnce(AsyncResult.success(lease));
+      await expect(prepareHostedPreview(owner, url)).resolves.toMatchObject({
+        managed: true,
+        restored: true,
+      });
+      expect(mocks.query).toHaveBeenCalledExactlyOnceWith(expect.anything(), mocks.bootstrap, {
+        reportFailure: false,
+        refresh: true,
+      });
+    },
+  );
+
   it.each([true, undefined])(
     "waits for bootstrap before choosing signed-document renewal: %s",
     async (previewAssetRecovery) => {
