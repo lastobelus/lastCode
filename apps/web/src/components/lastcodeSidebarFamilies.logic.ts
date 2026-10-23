@@ -389,10 +389,13 @@ function aggregateFamilyRows(
     ownCounts.set(label, (ownCounts.get(label) ?? 0) + 1);
     mergeStatusCounts(parent.descendantStatusCounts, row.descendantStatusCounts);
     mergeStatusCounts(parent.createdThreadStatusCounts, row.createdThreadStatusCounts);
+    // The parent agent decides whether a failed subagent needs human attention.
+    const inheritedStatus =
+      isSidebarSubagentThread(row.thread) && rowStatus?.label === "Failed" ? null : rowStatus;
     parent.descendantsStatus = resolveProjectStatusIndicator([
       parent.descendantsStatus,
       row.descendantsStatus,
-      rowStatus,
+      inheritedStatus,
     ]);
   }
 }

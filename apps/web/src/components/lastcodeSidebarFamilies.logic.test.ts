@@ -105,7 +105,7 @@ describe("legacy sidebar subagent families", () => {
       });
       expect(result.allRows[1]).toMatchObject({
         descendantCount: 1,
-        descendantsStatus: { label: "Failed" },
+        descendantsStatus: null,
       });
       expect(lastcodeSidebarFamilySummary(result.allRows[0]!)).toBe(
         "2 subagents (1 awaiting input, 1 failed)",
@@ -298,6 +298,51 @@ describe("legacy sidebar subagent families", () => {
     expect(lastcodeSidebarFamilySummary(result.renderedRows[0]!)).toBe("1 subagent (1 working)");
     expect(resolveThreadStatusPill({ thread: parent })).toBeNull();
   });
+
+  it.each(["minimal", "typed-groups"] as const)(
+    "keeps unread and read subagent failures off ancestor rows in %s families",
+    (groupingStyle) => {
+      const parent = thread("parent", undefined, {
+        lastVisitedAt: "2026-01-01T00:00:00Z",
+        latestRun: {
+          runId: RunId.make("successful-parent-run"),
+          status: "completed",
+          requestedAt: null,
+          startedAt: null,
+          completedAt: "2026-01-01T00:03:00Z",
+          assistantMessageId: null,
+        },
+      });
+      const helper = thread("helper", "parent");
+      const replacement = thread("replacement", "parent", { latestRun: parent.latestRun });
+      for (const lastVisitedAt of ["2026-01-01T00:00:00Z", "2026-01-01T00:04:00Z"]) {
+        const failed = thread("failed", "helper", {
+          lastVisitedAt,
+          latestRun: {
+            ...parent.latestRun!,
+            runId: RunId.make("failed-subagent-run"),
+            status: "failed",
+            completedAt: "2026-01-01T00:01:00Z",
+          },
+          runtime: { ...helper.runtime!, status: "failed", lastError: "Provider failed" },
+        });
+        const result = project([parent, helper, failed, replacement], {
+          groupingStyle,
+          collapsedByKey: {},
+        });
+        expect(keys(result)).toEqual(["parent"]);
+        expect(result.allRows.map((row) => row.descendantsStatus)).toEqual([
+          null,
+          null,
+          null,
+          null,
+        ]);
+        expect(lastcodeSidebarFamilySummary(result.allRows[0]!)).toContain("1 failed");
+        expect(lastcodeSidebarSubagentStatusLabel(failed, null)).toBe("Failed");
+        expect(resolveThreadStatusPill({ thread: parent })?.label).toBe("Completed");
+      }
+    },
+  );
 
   it("aggregates failures from ordinary children in a default-collapsed minimal family", () => {
     const parent = thread("parent");
