@@ -48,7 +48,11 @@ import {
 } from "@t3tools/contracts";
 import { renderAssistantCitationsAsText } from "@t3tools/shared/assistantCitations";
 import { encodeComposerContextFragment } from "@t3tools/shared/composerContextClipboard";
-import { parseThreadLinkHref, resolveThreadLinkRef } from "@t3tools/shared/threadLinks";
+import {
+  parseThreadLinkReference,
+  resolveThreadLinkReference,
+  resolveThreadLinkRef,
+} from "@t3tools/shared/threadLinks";
 import { PROMPT_LINK_MAX_PROMPT_LENGTH } from "@t3tools/shared/promptLinks";
 import {
   parseComposerContextHref,
@@ -63,7 +67,6 @@ import {
   type CodexArtifactTemplate,
 } from "@t3tools/shared/codexArtifactTemplates";
 import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
-import { isMarkdownFileLinkLabel } from "@t3tools/shared/markdownLinks";
 import { formatAttachmentSize } from "@t3tools/client-runtime/state/attachments";
 import {
   executeAtomQuery,
@@ -2186,9 +2189,17 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     });
   };
   const resolveLinkedThread = (href: string) => {
-    const linkedThreadId = parseThreadLinkHref(href);
-    if (!linkedThreadId) return null;
-    const source = scopeThreadRef(props.environmentId, linkedThreadId);
+    const reference = parseThreadLinkReference(href);
+    if (!reference) return null;
+    const resolved = resolveThreadLinkReference(reference, (threadId, environmentId) =>
+      appAtomRegistry.get(
+        environmentThreadShells.threadShellAtom(
+          scopeThreadRef(environmentId ?? props.environmentId, threadId),
+        ),
+      ) ?? undefined,
+    );
+    const source = scopeThreadRef(resolved.environmentId ?? props.environmentId, resolved.threadId);
+    if (resolved.value !== undefined || reference.environmentId !== undefined) return source;
     return (
       resolveThreadLinkRef(source, appAtomRegistry.get(environmentThreadShells.threadRefsAtom)) ??
       source

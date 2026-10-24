@@ -13,7 +13,12 @@ import {
 } from "./dev-share.ts";
 
 const TAILNET_STATUS = JSON.stringify({ Self: { DNSName: "host.example.ts.net." } });
-const NO_HANDLER_STDERR = "error: failed to remove web serve: handler does not exist";
+const EMPTY_SERVE_STATUS = JSON.stringify({ TCP: {}, Web: {} });
+const serveStatus = (proxy: string) =>
+  JSON.stringify({
+    TCP: { 5788: { HTTPS: true } },
+    Web: { "host.example.ts.net:5788": { Handlers: { "/": { Proxy: proxy } } } },
+  });
 
 interface CallResult {
   readonly exitCode: number;
@@ -22,21 +27,29 @@ interface CallResult {
 
 const encode = (value: string) => Stream.make(new TextEncoder().encode(value));
 
+/**
+ * Answers the two status commands independently and lets each test set the
+ * outcome of the mutating `off` and `serve` calls.
+ */
 const spawnerLayer = (input: {
   readonly off?: CallResult;
   readonly serve?: CallResult;
   readonly calls?: Array<ReadonlyArray<string>>;
+  readonly serveStatus?: string;
 }) =>
   Layer.succeed(
     ChildProcessSpawner.ChildProcessSpawner,
     ChildProcessSpawner.make((command) => {
       const args = "args" in command ? (command.args as ReadonlyArray<string>) : [];
       input.calls?.push(args);
-      const result: CallResult = args.includes("status")
-        ? { exitCode: 0 }
-        : args.includes("off")
-          ? (input.off ?? { exitCode: 0 })
-          : (input.serve ?? { exitCode: 0 });
+      const isTailnetStatus = args[0] === "status";
+      const isServeStatus = args[0] === "serve" && args[1] === "status";
+      const result: CallResult =
+        isTailnetStatus || isServeStatus
+          ? { exitCode: 0 }
+          : args.includes("off")
+            ? (input.off ?? { exitCode: 0 })
+            : (input.serve ?? { exitCode: 0 });
 
       return Effect.succeed(
         ChildProcessSpawner.makeHandle({
@@ -46,7 +59,11 @@ const spawnerLayer = (input: {
           kill: () => Effect.void,
           unref: Effect.succeed(Effect.void),
           stdin: Sink.drain,
-          stdout: args.includes("status") ? encode(TAILNET_STATUS) : Stream.empty,
+          stdout: isTailnetStatus
+            ? encode(TAILNET_STATUS)
+            : isServeStatus
+              ? encode(input.serveStatus ?? EMPTY_SERVE_STATUS)
+              : Stream.empty,
           stderr: result.stderr ? encode(result.stderr) : Stream.empty,
           all: Stream.empty,
           getInputFd: () => Sink.drain,
@@ -57,13 +74,39 @@ const spawnerLayer = (input: {
   );
 
 describe("unshareDevServer", () => {
-  // `tailscale serve … off` exits 1 when the port had no mapping, which is the
-  // normal first-share case — the port is clear, so this must not be an error.
-  it.effect("treats a missing handler as cleared", () =>
+  it.effect("removes only the selected built-client target", () =>
+    Effect.gen(function* () {
+      const calls: Array<ReadonlyArray<string>> = [];
+      const result = yield* unshareDevServer(5788, { port: 7733, host: "127.0.0.1" }).pipe(
+        Effect.provide(
+          spawnerLayer({ calls, serveStatus: serveStatus("http://127.0.0.1:7733") }),
+        ),
+      );
+      assert.isTrue(result.cleared);
+      assert.deepEqual(calls, [
+        ["serve", "status", "--json"],
+        ["serve", "--https=5788", "off"],
+      ]);
+    }),
+  );
+
+  it.effect("treats a removed mapping as cleared", () =>
     Effect.gen(function* () {
       const result = yield* unshareDevServer(5788).pipe(
-        Effect.provide(spawnerLayer({ off: { exitCode: 1, stderr: NO_HANDLER_STDERR } })),
+        Effect.provide(
+          spawnerLayer({
+            off: { exitCode: 0 },
+            serveStatus: serveStatus("http://127.0.0.1:5788"),
+          }),
+        ),
       );
+      assert.isTrue(result.cleared);
+    }),
+  );
+
+  it.effect("treats a missing handler as cleared", () =>
+    Effect.gen(function* () {
+      const result = yield* unshareDevServer(5788).pipe(Effect.provide(spawnerLayer({})));
       assert.isTrue(result.cleared);
     }),
   );
@@ -71,27 +114,69 @@ describe("unshareDevServer", () => {
   it.effect("reports a genuine removal failure as not cleared", () =>
     Effect.gen(function* () {
       const result = yield* unshareDevServer(5788).pipe(
-        Effect.provide(spawnerLayer({ off: { exitCode: 1, stderr: "permission denied" } })),
+        Effect.provide(
+          spawnerLayer({
+            off: { exitCode: 1, stderr: "permission denied" },
+            serveStatus: serveStatus("http://127.0.0.1:5788"),
+          }),
+        ),
       );
       assert.isFalse(result.cleared);
       assert.include(result.explanation, "permission denied");
       assert.equal(result.cause?._tag, "TailscaleCommandExitError");
     }),
   );
+
+  it.effect("does not remove another service's handler", () =>
+    Effect.gen(function* () {
+      const result = yield* unshareDevServer(5788).pipe(
+        Effect.provide(spawnerLayer({ serveStatus: serveStatus("http://127.0.0.1:39831") })),
+      );
+      assert.isFalse(result.cleared);
+      assert.include(result.explanation, "different Tailscale Serve handler");
+      assert.equal(result.cause?._tag, "TailscaleServePortOccupiedError");
+    }),
+  );
 });
 
 describe("shareDevServer", () => {
-  // Vite binds `localhost`, which modern Node resolves to `::1` first, so a
-  // 127.0.0.1 target would proxy to a loopback nothing listens on.
-  it.effect("proxies to the localhost name Vite binds, not 127.0.0.1", () =>
+  it.effect("publishes a built-client target under the selected web port", () =>
     Effect.gen(function* () {
       const calls: Array<ReadonlyArray<string>> = [];
-      yield* shareDevServer({ webPort: 5788 }).pipe(
-        Effect.provide(spawnerLayer({ off: { exitCode: 0 }, calls })),
+      const result = yield* shareDevServer({
+        webPort: 5788,
+        localTarget: { port: 7733, host: "[::1]" },
+      }).pipe(Effect.provide(spawnerLayer({ calls })));
+      assert.equal(result.url, "https://host.example.ts.net:5788");
+      assert.deepEqual(calls, [
+        ["status", "--json"],
+        ["serve", "status", "--json"],
+        ["serve", "--bg", "--https=5788", "http://[::1]:7733"],
+      ]);
+    }),
+  );
+
+  it.effect("reports a serve failure without claiming another mapping was removed", () =>
+    Effect.gen(function* () {
+      const error: DevShareError = yield* shareDevServer({ webPort: 5788 }).pipe(
+        Effect.provide(
+          spawnerLayer({
+            serve: { exitCode: 1, stderr: "port already in use" },
+          }),
+        ),
+        Effect.flip,
       );
 
-      const serveCall = calls.find((args) => args.includes("--bg"));
-      assert.deepEqual(serveCall, ["serve", "--bg", "--https=5788", "http://localhost:5788"]);
+      assert.instanceOf(error, DevServeFailedError);
+      assert.equal(error.webPort, 5788);
+      assert.equal(
+        (error.cause as { _tag?: string } | undefined)?._tag,
+        "TailscaleCommandExitError",
+      );
+      assert.notInclude(error.message, "port already in use");
+      assert.include(error.message, "run the command by hand");
+      assert.notInclude(error.message, "cleared");
+      assert.include(error.message, "5788");
     }),
   );
 
@@ -100,7 +185,6 @@ describe("shareDevServer", () => {
       const error: DevShareError = yield* shareDevServer({ webPort: 5788 }).pipe(
         Effect.provide(
           spawnerLayer({
-            off: { exitCode: 0 },
             serve: {
               exitCode: 1,
               stderr: "permission denied for tskey-auth-secret-token-value",
@@ -111,24 +195,21 @@ describe("shareDevServer", () => {
       );
 
       assert.instanceOf(error, DevServeFailedError);
-      assert.equal(error.stage, "serve");
       assert.include(error.message, "permission denied");
       assert.include(error.message, "elevated privileges");
       assert.notInclude(error.message, "tskey-auth-secret-token-value");
     }),
   );
 
-  it.effect("refuses to serve when the existing mapping could not be cleared", () =>
+  it.effect("refuses to replace an occupied Serve port", () =>
     Effect.gen(function* () {
       const error: DevShareError = yield* shareDevServer({ webPort: 5788 }).pipe(
-        Effect.provide(spawnerLayer({ off: { exitCode: 1, stderr: "permission denied" } })),
+        Effect.provide(spawnerLayer({ serveStatus: serveStatus("http://127.0.0.1:39831") })),
         Effect.flip,
       );
 
       assert.instanceOf(error, DevServeFailedError);
-      assert.equal(error.stage, "clear-existing");
-      assert.include(error.message, "could not clear the existing mapping");
-      assert.include(error.message, "permission denied");
+      assert.include(error.message, "different Tailscale Serve handler");
     }),
   );
 });
