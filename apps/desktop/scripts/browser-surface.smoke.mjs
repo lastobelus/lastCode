@@ -3,6 +3,7 @@
 // --existing-electron uses the installed dependency without repairing or downloading a runtime.
 // --react-lifecycle mounts the production React host against fixture remote-environment state.
 // --credential-access isolates the real desktop cookie exchange and first authenticated load.
+// --open-link isolates a production desktop-renderer managed-link click (no remote WS).
 import * as NodeAssert from "node:assert/strict";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
@@ -20,7 +21,11 @@ const serverDirectory = NodePath.resolve(directory, "../../server");
 const repositoryDirectory = NodePath.resolve(desktopDirectory, "../..");
 const reactLifecycle = process.argv.includes("--react-lifecycle");
 const credentialAccessOnly = process.argv.includes("--credential-access");
-NodeAssert.ok(!(reactLifecycle && credentialAccessOnly), "Select one integration scenario.");
+const openLink = process.argv.includes("--open-link");
+NodeAssert.ok(
+  [reactLifecycle, credentialAccessOnly, openLink].filter(Boolean).length <= 1,
+  "Select one integration scenario.",
+);
 const webDirectory = NodePath.resolve(directory, "../../web");
 const scratch = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "browser-surface-smoke-"));
 const require = NodeModule.createRequire(NodePath.resolve(directory, "../../server/package.json"));
@@ -60,28 +65,44 @@ for (const owner of [desktopDirectory, serverDirectory, repositoryDirectory]) {
 const emittedChunks = [];
 const emittedFiles = new Set();
 async function bundle(entry, format, output, native = false) {
-  const fixtureBoundary = NodePath.join(directory, "browser-surface.react-state.fixture.mjs");
+  const fixtureBoundary = NodePath.join(
+    directory,
+    openLink ? "browser-open-link.state.fixture.mjs" : "browser-surface.react-state.fixture.mjs",
+  );
   const fixtureModules = new Set(
-    [
-      "state/primaryEnvironment",
-      "state/session",
-      "state/preview",
-      "state/entities",
-      "state/use-atom-command",
-      "connection/catalog",
-      "hooks/useSettings",
-      "previewStateStore",
-      "components/preview/usePreviewSession",
-      "components/preview/usePreviewBridge",
-      "components/preview/previewHostingRecovery",
-      "components/ui/toast",
-      "lib/utils",
-      "browser/DesktopCdpRelay",
-      "browser/useDesktopBrowserSessions",
-      "browser/browserRecording",
-      "browser/openFileInPreview",
-      "browser/BrowserDeviceToolbar",
-    ].map((path) => NodePath.join(webDirectory, "src", path)),
+    (openLink
+      ? [
+          "state/primaryEnvironment",
+          "state/session",
+          "state/entities",
+          "state/preview",
+          "state/use-atom-command",
+          "hooks/useSettings",
+          "components/preview/previewHostingRecovery",
+          "assets/assetUrls",
+          "lib/utils",
+        ]
+      : [
+          "state/primaryEnvironment",
+          "state/session",
+          "state/preview",
+          "state/entities",
+          "state/use-atom-command",
+          "connection/catalog",
+          "hooks/useSettings",
+          "previewStateStore",
+          "components/preview/usePreviewSession",
+          "components/preview/usePreviewBridge",
+          "components/preview/previewHostingRecovery",
+          "components/ui/toast",
+          "lib/utils",
+          "browser/DesktopCdpRelay",
+          "browser/useDesktopBrowserSessions",
+          "browser/browserRecording",
+          "browser/openFileInPreview",
+          "browser/BrowserDeviceToolbar",
+        ]
+    ).map((path) => NodePath.join(webDirectory, "src", path)),
   );
   const result = await build({
     configFile: false,
@@ -89,7 +110,7 @@ async function bundle(entry, format, output, native = false) {
     // Library builds retain React's environment probe unless explicitly replaced for a browser.
     ...(!native ? { define: { "process.env.NODE_ENV": JSON.stringify("production") } } : {}),
     ...(native ? { resolve: { conditions: ["node"], mainFields: ["module", "main"] } } : {}),
-    ...(reactLifecycle && !native
+    ...((reactLifecycle || openLink) && !native
       ? {
           root: webDirectory,
           resolve: {
@@ -174,32 +195,51 @@ async function existingElectronRuntime() {
   await NodeFSP.access(executable, NodeFS.constants.X_OK);
   return executable;
 }
-const fixturePrefix = reactLifecycle ? "browser-surface.react" : "browser-surface";
+const fixturePrefix = openLink
+  ? "browser-open-link"
+  : reactLifecycle
+    ? "browser-surface.react"
+    : "browser-surface";
 await bundle(`${fixturePrefix}.fixture.mjs`, "cjs", "main.cjs", true);
 await bundle(`${fixturePrefix}.preload.mjs`, "cjs", "preload.cjs", true);
 await bundle(`${fixturePrefix}.renderer.mjs`, "iife", "renderer.js");
 if (reactLifecycle)
   await bundle("../src/preview-pick-preload.ts", "cjs", "preview-pick-preload.cjs", true);
-const productionModules = reactLifecycle
+const productionModules = openLink
   ? [
-      "apps/web/src/browser/ElectronBrowserHost.tsx",
-      "apps/web/src/browser/HostedBrowserWebview.tsx",
-      "apps/web/src/browser/desktopTabLifetime.ts",
-      "apps/web/src/components/preview/previewBridge.ts",
+      "apps/web/src/browser/useOpenLink.ts",
+      "apps/web/src/browser/browserLinkTarget.ts",
+      "apps/web/src/browser/browserDefaults.ts",
+      "apps/web/src/browser/openFileInPreview.ts",
+      "apps/web/src/browser/preparedPreviewOpenTarget.ts",
+      "apps/web/src/browser/previewRuntime.ts",
+      "apps/web/src/previewStateStore.ts",
+      "apps/web/src/rightPanelStore.ts",
+      "apps/web/src/browserHistoryStore.ts",
+      "apps/web/src/localApi.ts",
       "packages/client-runtime/src/previewHosting.ts",
       "apps/desktop/src/preload.ts",
-      "apps/desktop/src/ipc/methods/preview.ts",
-      "apps/desktop/src/preview/Manager.ts",
-      "apps/desktop/src/preview/DesktopBrowserHost.ts",
-      "apps/desktop/src/preview/NativeBrowserLifetime.ts",
     ]
-  : [];
+  : reactLifecycle
+    ? [
+        "apps/web/src/browser/ElectronBrowserHost.tsx",
+        "apps/web/src/browser/HostedBrowserWebview.tsx",
+        "apps/web/src/browser/desktopTabLifetime.ts",
+        "apps/web/src/components/preview/previewBridge.ts",
+        "packages/client-runtime/src/previewHosting.ts",
+        "apps/desktop/src/preload.ts",
+        "apps/desktop/src/ipc/methods/preview.ts",
+        "apps/desktop/src/preview/Manager.ts",
+        "apps/desktop/src/preview/DesktopBrowserHost.ts",
+        "apps/desktop/src/preview/NativeBrowserLifetime.ts",
+      ]
+    : [];
 for (const path of productionModules)
   NodeAssert.ok(
     emittedChunks.some((chunk) =>
       Object.keys(chunk.modules).includes(NodePath.join(repositoryDirectory, path)),
     ),
-    `React smoke must bundle the production module ${path}`,
+    `Integration smoke must bundle the production module ${path}`,
   );
 let verifiedRelativeImports = 0;
 const externalReferences = new Set();
@@ -304,13 +344,15 @@ const manifest = {
   bootstrap: NodePath.join(scratch, "bootstrap.cjs"),
   wsModulePath,
   generatedFiles: [...emittedFiles].sort(),
-  ...(reactLifecycle ? { productionModules } : {}),
+  ...(reactLifecycle || openLink ? { productionModules } : {}),
   verifiedRelativeImports,
   verifiedExternalImports: [...externalReferences].sort(),
   verifiedExternalLoads: externalLoads,
-  scope: reactLifecycle
-    ? "production React ElectronBrowserHost/HostedBrowserWebview, desktop preload, IPC, Manager and native host; fixture remote config/hosting responses, injected connection generation and monotonic time; no real WS reconnect or live data"
-    : "ordinary hidden Electron fixture, including real named-profile guest lifecycle and 32-page capacity; never launches the installed app or reads live user data",
+  scope: openLink
+    ? "hidden native Electron renderer click with production useOpenLink, prepared target, panel/focus/history stores, local API and preload; fixture settings hydration, owner scope/capability, lease/recovery and Browser RPC; no remote WS, full app hydration or server Browser page"
+    : reactLifecycle
+      ? "production React ElectronBrowserHost/HostedBrowserWebview, desktop preload, IPC, Manager and native host; fixture remote config/hosting responses, injected connection generation and monotonic time; no real WS reconnect or live data"
+      : "ordinary hidden Electron fixture, including real named-profile guest lifecycle and 32-page capacity; never launches the installed app or reads live user data",
 };
 console.log(JSON.stringify(manifest));
 if (!process.argv.includes("--build-only")) {
@@ -318,9 +360,10 @@ if (!process.argv.includes("--build-only")) {
   delete environment.ELECTRON_RUN_AS_NODE;
   delete environment.VITE_DEV_SERVER_URL;
   delete environment.T3CODE_HOME;
-  const electronRuntime = process.argv.includes("--existing-electron")
-    ? await existingElectronRuntime()
-    : ensureElectronRuntime();
+  const electronRuntime =
+    openLink || process.argv.includes("--existing-electron")
+      ? await existingElectronRuntime()
+      : ensureElectronRuntime();
   const child = NodeChildProcess.spawnSync(
     electronRuntime,
     [
