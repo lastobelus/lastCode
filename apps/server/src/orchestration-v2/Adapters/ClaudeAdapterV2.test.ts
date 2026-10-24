@@ -10204,7 +10204,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         yield* harness.awaitTerminal(1);
         assert.isTrue(yield* harness.hasPendingBackgroundWork);
 
-        yield* Queue.offer(harness.sdkMessages, subagentStoppedNotification);
+        // Offering the continuation precedes applying the stopped outcome; wait
+        // for the notification handler before inspecting the session's idle pin.
+        yield* harness.offerAndWait(subagentStoppedNotification);
         yield* harness.awaitContinuation(1);
 
         yield* Queue.offer(
