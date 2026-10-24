@@ -24,6 +24,8 @@ export interface TimelineRowSharedState {
   citationRequest: AssistantCitationTarget | null;
   listRef: React.RefObject<LegendListRef | null>;
   timestampFormat: TimestampFormat;
+  expandedActionMessageIds: ReadonlySet<string>;
+  onToggleActionFollowUp: (rowId: string) => void;
   routeThreadKey: string;
   threadRef: ScopedThreadRef | null;
   markdownCwd: string | undefined;

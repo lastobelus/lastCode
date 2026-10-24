@@ -50,7 +50,8 @@ const READ_FAILURE_LIMIT = 8;
 const QUIET_REREAD_MS = 10 * 60_000;
 /**
  * With a host fingerprint, how long until the activity is read again anyway: the fingerprint
- * does not see edits to comments inside review threads.
+ * does not see edits to comments inside review threads, or reactions on reviews and their
+ * comments.
  */
 const FINGERPRINT_REREAD_MS = 30 * 60_000;
 
