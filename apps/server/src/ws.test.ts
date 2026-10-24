@@ -23,6 +23,15 @@ import { RpcGroup, RpcMessage, RpcServer } from "effect/rpc";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
+import * as ThreadReadBroker from "./mcp/ThreadReadBroker.ts";
+import * as OrchestratorMcpService from "./mcp/OrchestratorMcpService.ts";
+import * as DesktopBrowserChannel from "./preview/DesktopBrowserChannel.ts";
+import * as PreviewHosting from "./preview/Hosting.ts";
+import * as EnvironmentPause from "./environment/EnvironmentPause.ts";
+import * as UpdateDrainAdmission from "./updateDrain/UpdateDrainAdmission.ts";
+import * as ThreadLinkedFiles from "./workspace/ThreadLinkedFiles.ts";
+import * as ThreadRecoveryService from "./orchestration-v2/ThreadRecoveryService.ts";
+import * as ThreadRecoveryRepairService from "./orchestration-v2/ThreadRecoveryRepairService.ts";
 import * as ServerBrowser from "./preview/ServerBrowser.ts";
 import * as AcpRegistryRuntimeCoordinator from "@t3tools/provider-acp-registry/server/AcpRegistryRuntimeCoordinator";
 import * as AcpRegistrySupport from "@t3tools/provider-acp-registry/server/AcpRegistrySupport";
@@ -292,6 +301,12 @@ it.live.each(["thread", "shell"] as const)(
 
 // Build the production RPC layer; unrelated capabilities fail if this test calls them.
 const layerUnusedConfigRpcServices = Layer.mergeAll(
+  Layer.mock(EnvironmentPause.EnvironmentPause)({}),
+  Layer.mock(PreviewHosting.PreviewHosting)({}),
+  Layer.mock(ThreadLinkedFiles.ThreadLinkedFiles)({}),
+  Layer.mock(ThreadRecoveryService.ThreadRecoveryService)({}),
+  Layer.mock(ThreadRecoveryRepairService.ThreadRecoveryRepairService)({}),
+  Layer.mock(UpdateDrainAdmission.UpdateDrainAdmission)({}),
   Layer.mock(ServerSecretStore.ServerSecretStore)({}),
   Layer.mock(WorkspacePaths.WorkspacePaths)({}),
   Layer.mock(TraceDiagnostics.TraceDiagnostics)({}),
@@ -414,6 +429,7 @@ it.effect(
           namedProjectsRoot: process.cwd(),
         }),
         Layer.mock(ServerEnvironment.ServerEnvironment)({
+          getEnvironmentId: Effect.succeed(EnvironmentId.make("config-test")),
           getDescriptor: Effect.succeed({
             environmentId: EnvironmentId.make("config-test"),
             label: "Config test",
@@ -466,7 +482,9 @@ it.effect(
             },
             {},
             {},
-            yield* PreviewAutomationBroker.PreviewAutomationBroker,
+            yield* DesktopBrowserChannel.DesktopBrowserChannel,
+            yield* ThreadReadBroker.ThreadReadBroker,
+            yield* OrchestratorMcpService.OrchestratorMcpService,
             yield* ServerBrowser.ServerBrowser,
           ).pipe(Layer.provide(configRpcServices)),
         ),
@@ -529,6 +547,14 @@ it.effect(
         Layer.mergeAll(
           Layer.fresh(layerConfigSources),
           Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+          Layer.mock(DesktopBrowserChannel.DesktopBrowserChannel)({
+            available: false,
+            isPresented: () => false,
+          }),
+          Layer.mock(ThreadReadBroker.ThreadReadBroker)({
+            forSession: () => ({ authorize: () => Effect.die("Unexpected thread authorization") }),
+          }),
+          Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({}),
           Layer.mock(ServerBrowser.ServerBrowser)({}),
         ),
       ),

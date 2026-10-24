@@ -1,5 +1,12 @@
 import { Schema } from "effect";
-import { NonNegativeInt, PositiveInt, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import {
+  CommandId,
+  MessageId,
+  NonNegativeInt,
+  PositiveInt,
+  ThreadId,
+  TrimmedNonEmptyString,
+} from "./baseSchemas.ts";
 import { BROWSER_PROFILE_MAX_COUNT, BrowserProfile, BrowserProfileId } from "./browserProfile.ts";
 
 export const PREVIEW_URL_MAX_LENGTH = 2_048;
@@ -182,7 +189,11 @@ export const PreviewSessionSnapshot = Schema.Struct({
   profileId: Schema.optional(BrowserProfileId),
   runtime: Schema.optional(PreviewRuntime),
   /** Server-selected page owner, fixed before the tab is published. Only server-runtime tabs set it. */
-  backingPage: Schema.optional(Schema.Literals(["desktop", "desktop-popup", "server"])),
+  backingPage: Schema.optional(
+    Schema.Literals(["desktop", "desktop-root", "desktop-popup", "server"]),
+  ),
+  /** Permanent hidden native page identity, fixed before this tab is published. */
+  desktopRootId: Schema.optional(Schema.String),
   /** Existing native popup identity; this tab streams its window instead of creating a guest. */
   desktopPopupId: Schema.optional(Schema.String),
   /** Desktop cookie jar selected for this tab; never fall back to another browser. */
@@ -205,6 +216,8 @@ export const PreviewOpenInput = Schema.Struct({
   viewport: Schema.optional(PreviewViewportSetting),
   profileId: Schema.optional(BrowserProfileId),
   runtime: Schema.optional(PreviewRuntime),
+  /** Desktop cookie jar selected for this tab; never fall back to another browser. */
+  desktopHostId: Schema.optional(Schema.String),
   /** Create a visible tab without selecting it when its opened event arrives. */
   background: Schema.optional(Schema.Boolean),
   /** Originating client's selection when the open began; echoed only in its creation event. */
@@ -229,6 +242,29 @@ export const PreviewReportStatusInput = Schema.Struct({
   canGoForward: Schema.Boolean,
 });
 export type PreviewReportStatusInput = typeof PreviewReportStatusInput.Type;
+
+/** Claim a recovery dispatch identity for one exact failed URL in a thread. */
+export const PreviewClaimRecoveryInput = Schema.Struct({
+  threadId: ThreadId,
+  tabId: PreviewTabId,
+  url: Url,
+});
+export type PreviewClaimRecoveryInput = typeof PreviewClaimRecoveryInput.Type;
+
+export const PreviewRecoveryClaim = Schema.Struct({
+  commandId: CommandId,
+  messageId: MessageId,
+});
+export type PreviewRecoveryClaim = typeof PreviewRecoveryClaim.Type;
+
+export class PreviewRecoveryStorageError extends Schema.TaggedError<PreviewRecoveryStorageError>()(
+  "PreviewRecoveryStorageError",
+  { cause: Schema.Defect() },
+) {
+  override get message() {
+    return "Could not persist the preview recovery request identity.";
+  }
+}
 
 export const PreviewRefreshInput = Schema.Struct({
   threadId: ThreadId,
@@ -432,11 +468,21 @@ export class PreviewNativeCloseError extends Schema.TaggedError<PreviewNativeClo
   }
 }
 
+export class PreviewNativeCreateError extends Schema.TaggedError<PreviewNativeCreateError>()(
+  "PreviewNativeCreateError",
+  { tabId: Schema.String, cause: Schema.Defect() },
+) {
+  override get message() {
+    return "The selected desktop could not create an independent browser page. Keep that desktop connected and retry; another browser was not substituted.";
+  }
+}
+
 export const PreviewError = Schema.Union([
   PreviewSessionLookupError,
   PreviewInvalidUrlError,
   PreviewControlRequiredError,
   PreviewRecoveryStorageError,
   PreviewNativeCloseError,
+  PreviewNativeCreateError,
 ]);
 export type PreviewError = typeof PreviewError.Type;

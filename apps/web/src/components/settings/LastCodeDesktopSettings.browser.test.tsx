@@ -1,7 +1,7 @@
+import { act, render, stubGlobal } from "../../../test/render";
 import type { DesktopBridge } from "@t3tools/contracts";
-import { type ReactNode, act } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import type { ReactNode } from "react";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import { LastCodeImportSettings } from "./LastCodeImportSettings";
 import { LastCodeLocalUpdatesSettings } from "./LastCodeLocalUpdatesSettings";
@@ -45,8 +45,6 @@ vi.mock("../ui/button", () => ({
   Button: (props: Record<string, unknown>) => <button {...props} />,
 }));
 
-let root: Root;
-let host: HTMLDivElement;
 const preference = { supported: true, showAndInstallLocalNightlies: false, message: null };
 const preview = {
   sourceDirectory: "/example/t3",
@@ -57,21 +55,12 @@ const preview = {
   message: null,
 };
 
-beforeEach(() => {
+function setup() {
   state.desktop = true;
   state.update = null;
   state.toast.mockClear();
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  host = document.createElement("div");
-  document.body.append(host);
-  root = createRoot(host);
-  Object.defineProperty(window, "desktopBridge", { configurable: true, value: undefined });
-});
-afterEach(async () => {
-  await act(() => root.unmount());
-  host.remove();
-  vi.unstubAllGlobals();
-});
+  return stubGlobal("desktopBridge", undefined);
+}
 function setDesktopBridge(
   desktopBridge: Partial<
     Pick<
@@ -96,32 +85,30 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function button() {
-  return host.querySelector("button")!;
-}
-
 describe("LastCode desktop settings", () => {
   it("keeps web controls disabled without requiring a desktop bridge", async () => {
+    using _fixture = setup();
+    await using screen = await render(<></>, { router: false });
+    const button = () => screen.container.querySelector("button")!;
     state.desktop = false;
-    await act(() => {
-      root.render(<LastCodeLocalUpdatesSettings />);
-    });
+    await screen.rerender(<LastCodeLocalUpdatesSettings />);
     expect(button().disabled).toBe(true);
-    await act(() => root.render(<LastCodeImportSettings />));
+    await screen.rerender(<LastCodeImportSettings />);
     expect(button().disabled).toBe(true);
     expect(state.toast).not.toHaveBeenCalled();
   });
 
   it("loads the saved preference, disables during persistence and recovers after rejection", async () => {
+    using _fixture = setup();
+    await using screen = await render(<></>, { router: false });
+    const button = () => screen.container.querySelector("button")!;
     const write = deferred<typeof preference>();
     const save = vi.fn(() => write.promise);
     setDesktopBridge({
       getLastCodeSettings: async () => preference,
       setShowAndInstallLocalNightlies: save,
     });
-    await act(() => {
-      root.render(<LastCodeLocalUpdatesSettings />);
-    });
+    await screen.rerender(<LastCodeLocalUpdatesSettings />);
     expect(button().disabled).toBe(false);
     await act(() => button().click());
     expect(button().disabled).toBe(true);
@@ -138,6 +125,9 @@ describe("LastCode desktop settings", () => {
   });
 
   it("uses the persisted response and blocks toggles while a local update is ready", async () => {
+    using _fixture = setup();
+    await using screen = await render(<></>, { router: false });
+    const button = () => screen.container.querySelector("button")!;
     setDesktopBridge({
       getLastCodeSettings: async () => preference,
       setShowAndInstallLocalNightlies: async () => ({
@@ -145,25 +135,24 @@ describe("LastCode desktop settings", () => {
         showAndInstallLocalNightlies: true,
       }),
     });
-    await act(() => {
-      root.render(<LastCodeLocalUpdatesSettings />);
-    });
+    await screen.rerender(<LastCodeLocalUpdatesSettings />);
     await act(() => button().click());
     expect(button().getAttribute("aria-pressed")).toBe("true");
     state.update = { source: "lastcode-local", status: "downloaded" };
-    await act(() => root.render(<LastCodeLocalUpdatesSettings />));
+    await screen.rerender(<LastCodeLocalUpdatesSettings />);
     expect(button().disabled).toBe(true);
   });
 
   it("leaves import disabled after success for restart, and reports the backup location", async () => {
+    using _fixture = setup();
+    await using screen = await render(<></>, { router: false });
+    const button = () => screen.container.querySelector("button")!;
     const operation = deferred<{ imported: []; backupDirectory: string }>();
     setDesktopBridge({
       previewT3SettingsImport: async () => preview,
       importT3Settings: () => operation.promise,
     });
-    await act(() => {
-      root.render(<LastCodeImportSettings />);
-    });
+    await screen.rerender(<LastCodeImportSettings />);
     expect(button().disabled).toBe(false);
     await act(() => button().click());
     expect(button().disabled).toBe(true);
@@ -178,6 +167,9 @@ describe("LastCode desktop settings", () => {
   });
 
   it("allows retry after a failed import without reloading its preview", async () => {
+    using _fixture = setup();
+    await using screen = await render(<></>, { router: false });
+    const button = () => screen.container.querySelector("button")!;
     const run = vi
       .fn()
       .mockRejectedValueOnce(new Error("import failed"))
@@ -187,9 +179,7 @@ describe("LastCode desktop settings", () => {
       previewT3SettingsImport: inspect,
       importT3Settings: run,
     });
-    await act(() => {
-      root.render(<LastCodeImportSettings />);
-    });
+    await screen.rerender(<LastCodeImportSettings />);
     await act(() => button().click());
     expect(button().disabled).toBe(false);
     await act(() => button().click());
@@ -199,14 +189,15 @@ describe("LastCode desktop settings", () => {
   });
 
   it("reports a preview read failure and keeps import unavailable", async () => {
+    using _fixture = setup();
+    await using screen = await render(<></>, { router: false });
+    const button = () => screen.container.querySelector("button")!;
     setDesktopBridge({
       previewT3SettingsImport: async () => {
         throw new Error("preview failed");
       },
     });
-    await act(() => {
-      root.render(<LastCodeImportSettings />);
-    });
+    await screen.rerender(<LastCodeImportSettings />);
     expect(button().disabled).toBe(true);
     expect(state.toast).toHaveBeenCalledWith(
       expect.objectContaining({

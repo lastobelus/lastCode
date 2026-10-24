@@ -695,6 +695,37 @@ export const listThreadsOutput = Effect.fn("listThreadsOutput")(function* (
   });
 });
 
+type ThreadCliTurnItem = ThreadCliProjection["turnItems"][number];
+
+function activitySummary(item: ThreadCliTurnItem): string {
+  if (item.type === "approval_request") return item.prompt ?? item.title ?? "Approval requested";
+  if (item.type === "user_input_request") {
+    return item.questions.map((question) => question.question).join("\n");
+  }
+  if ("text" in item) return String(item.text);
+  if ("message" in item) return String(item.message);
+  if ("summary" in item) return String(item.summary);
+  if ("input" in item) return String(item.input);
+  if ("markdown" in item) return String(item.markdown);
+  return item.title ?? item.type.replaceAll("_", " ");
+}
+
+function presentActivity(item: ThreadCliTurnItem): ThreadCliActivity {
+  const pending = item.status === "pending" || item.status === "waiting";
+  let kind = item.type as string;
+  if (item.type === "approval_request") kind = `approval.${pending ? "requested" : "resolved"}`;
+  if (item.type === "user_input_request") kind = `user-input.${pending ? "requested" : "resolved"}`;
+  return {
+    id: item.id,
+    kind,
+    tone: item.status === "failed" ? "error" : pending && "requestId" in item ? "approval" : "tool",
+    summary: activitySummary(item),
+    runId: item.runId,
+    createdAt: DateTime.formatIso(item.startedAt ?? item.updatedAt),
+    ...("requestId" in item ? { payload: { requestId: item.requestId } } : {}),
+  };
+}
+
 function projectThreadCliPresentation(projection: ThreadCliProjection, turnLimit: number) {
   const selectedRuns = projection.runs
     .toSorted((left, right) => right.ordinal - left.ordinal)
@@ -718,40 +749,7 @@ function projectThreadCliPresentation(projection: ThreadCliProjection, turnLimit
         item.type !== "assistant_message" &&
         (item.runId === null || runIds.has(item.runId)),
     )
-    .map((item): ThreadCliActivity => {
-      const summary =
-        item.type === "approval_request"
-          ? (item.prompt ?? item.title ?? "Approval requested")
-          : item.type === "user_input_request"
-            ? item.questions.map((question) => question.question).join("\n")
-            : "text" in item
-              ? String(item.text)
-              : "message" in item
-                ? String(item.message)
-                : "summary" in item
-                  ? String(item.summary)
-                  : "input" in item
-                    ? String(item.input)
-                    : "markdown" in item
-                      ? String(item.markdown)
-                      : (item.title ?? item.type.replaceAll("_", " "));
-      const pending = item.status === "pending" || item.status === "waiting";
-      return {
-        id: item.id,
-        kind:
-          item.type === "approval_request"
-            ? `approval.${pending ? "requested" : "resolved"}`
-            : item.type === "user_input_request"
-              ? `user-input.${pending ? "requested" : "resolved"}`
-              : item.type,
-        tone:
-          item.status === "failed" ? "error" : pending && "requestId" in item ? "approval" : "tool",
-        summary: typeof summary === "string" ? summary : String(summary),
-        runId: item.runId,
-        createdAt: DateTime.formatIso(item.startedAt ?? item.updatedAt),
-        ...("requestId" in item ? { payload: { requestId: item.requestId } } : {}),
-      };
-    });
+    .map(presentActivity);
   return { latestRun: selectedRuns[0] ?? null, ...boundThreadPresentation(messages, activities) };
 }
 
@@ -1012,18 +1010,22 @@ const runThreadSend = Effect.fn("runThreadSend")(function* (
           );
           const crypto = yield* Crypto.Crypto;
           const commandId = CommandId.make(
-            yield* crypto.randomUUIDv4.pipe(
-              Effect.mapError(
-                (cause) => new ThreadCliError({ operation: "send command id generation", cause }),
+            yield* crypto
+              .randomUUIDv4()
+              .pipe(
+                Effect.mapError(
+                  (cause) => new ThreadCliError({ operation: "send command id generation", cause }),
+                ),
               ),
-            ),
           );
           const messageId = MessageId.make(
-            yield* crypto.randomUUIDv4.pipe(
-              Effect.mapError(
-                (cause) => new ThreadCliError({ operation: "send message id generation", cause }),
+            yield* crypto
+              .randomUUIDv4()
+              .pipe(
+                Effect.mapError(
+                  (cause) => new ThreadCliError({ operation: "send message id generation", cause }),
+                ),
               ),
-            ),
           );
           const resolution = resolveThreadTarget(shell.threads, identifier);
           if (resolution.kind === "resolved") {
@@ -1330,7 +1332,8 @@ const sendCommand = Command.make("send", {
     Effect.gen(function* () {
       if (Option.isSome(flags.message) === Option.isSome(flags.positionalMessage)) {
         return yield* new ThreadUsageError({
-          detail: "Pass exactly one message: --message <text> for tracked LastCode JSON, or a positional message for MCP reply output.",
+          detail:
+            "Pass exactly one message: --message <text> for tracked LastCode JSON, or a positional message for MCP reply output.",
         });
       }
       if (Option.isSome(flags.positionalMessage)) {
@@ -1344,10 +1347,7 @@ const sendCommand = Command.make("send", {
       const message = Option.getOrThrow(flags.message);
       const timeoutMs = yield* decodeThreadWaitDuration(
         Option.getOrElse(flags.timeout, () => "10 minutes"),
-      ).pipe(
-        Effect.map(Duration.toMillis),
-        Effect.flatMap(decodeThreadWaitTimeoutMs),
-      );
+      ).pipe(Effect.map(Duration.toMillis), Effect.flatMap(decodeThreadWaitTimeoutMs));
       return yield* runThreadSend(
         flags,
         flags.thread,

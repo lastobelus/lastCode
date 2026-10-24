@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import { EnvironmentId, ProjectId, RunId, ThreadId } from "@t3tools/contracts";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { makeThreadFixture, type ThreadFixtureOverrides } from "../test-fixtures";
 import {
   lastcodeSidebarFamilySummary,
@@ -8,6 +9,7 @@ import {
   lastcodeSidebarIsAgentCreated,
   lastcodeSidebarSubagentStatusLabel,
   lastcodeSidebarThreadKey,
+  lastcodeSidebarThreadPath,
   lastcodeSidebarSubagentGroupKey,
   projectLastCodeSidebarFamilies,
 } from "./lastcodeSidebarFamilies.logic";
@@ -562,6 +564,84 @@ function created(
     ...(creatorId ? { creatorThreadId: ThreadId.make(creatorId), creatorGrouping: grouping } : {}),
   };
 }
+
+describe("sidebar thread paths", () => {
+  const ref = (value: ReturnType<typeof thread>) => scopeThreadRef(value.environmentId, value.id);
+
+  it("returns root-to-sender paths through grouped creators and subagents", () => {
+    const root = thread("root");
+    const conversation = created("conversation", "root");
+    const child = thread("child", "conversation");
+    const sender = thread("sender", "child");
+    expect(lastcodeSidebarThreadPath([sender, child, root, conversation], ref(sender))).toEqual([
+      root,
+      conversation,
+      child,
+      sender,
+    ]);
+  });
+
+  it("does not include independent creators", () => {
+    const root = thread("root");
+    const sender = created("sender", "root", "independent");
+    expect(lastcodeSidebarThreadPath([root, sender], ref(sender))).toEqual([sender]);
+  });
+
+  it("stops at missing parents and returns no path for a missing sender", () => {
+    const sender = thread("sender", "missing");
+    expect(lastcodeSidebarThreadPath([sender], ref(sender))).toEqual([sender]);
+    expect(lastcodeSidebarThreadPath([], ref(sender))).toEqual([]);
+    const missingCreator = created("conversation", "missing");
+    expect(lastcodeSidebarThreadPath([missingCreator], ref(missingCreator))).toEqual([
+      missingCreator,
+    ]);
+  });
+
+  it.each(["subagent", "creator"] as const)(
+    "keeps %s ancestry inside its environment and project",
+    (relationship) => {
+      const parent = thread("parent");
+      const sender =
+        relationship === "subagent" ? thread("sender", "parent") : created("sender", "parent");
+      const remoteParent = { ...parent, environmentId: EnvironmentId.make("remote") };
+      const otherProjectParent = { ...parent, projectId: ProjectId.make("other-project") };
+      expect(lastcodeSidebarThreadPath([remoteParent, sender], ref(sender))).toEqual([sender]);
+      expect(lastcodeSidebarThreadPath([otherProjectParent, sender], ref(sender))).toEqual([
+        sender,
+      ]);
+      expect(lastcodeSidebarThreadPath([remoteParent, sender, parent], ref(sender))).toEqual([
+        parent,
+        sender,
+      ]);
+      expect(
+        lastcodeSidebarThreadPath([sender], scopeThreadRef(remoteParent.environmentId, sender.id)),
+      ).toEqual([]);
+    },
+  );
+
+  it("detaches lineage cycles while preserving descendants", () => {
+    const a = thread("a", "b");
+    const b = thread("b", "a");
+    const sender = thread("sender", "a");
+    expect(lastcodeSidebarThreadPath([a, b, sender], ref(sender))).toEqual([a, sender]);
+    expect(lastcodeSidebarThreadPath([a, b, sender], ref(b))).toEqual([b]);
+  });
+
+  it("detaches creator cycles and preserves subagent ownership in mixed cycles", () => {
+    const a = created("a", "b");
+    const b = created("b", "a");
+    expect(lastcodeSidebarThreadPath([a, b], ref(a))).toEqual([a]);
+    const parent = created("parent", "sender");
+    const sender = thread("sender", "parent");
+    expect(lastcodeSidebarThreadPath([sender, parent], ref(sender))).toEqual([parent, sender]);
+  });
+
+  it("keeps caller-supplied ancestors without changing their visibility", () => {
+    const parent = thread("parent", undefined, { archivedAt: "2026-01-01T00:00:00Z" });
+    const sender = thread("sender", "parent");
+    expect(lastcodeSidebarThreadPath([parent, sender], ref(sender))).toEqual([parent, sender]);
+  });
+});
 
 describe("legacy sidebar creator grouping", () => {
   it("groups ordinary conversations by trusted creator without changing their identity or lineage", () => {

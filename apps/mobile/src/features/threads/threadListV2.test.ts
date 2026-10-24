@@ -35,6 +35,8 @@ import {
   getThreadListV2OrderedSection,
   resolveThreadListV2CleanupActions,
   resolveThreadListV2SnoozeMenuSelection,
+  resolveThreadListV2SnoozeGateExpiryMs,
+  resolveThreadListV2WokeAt,
   resolveThreadListV2Status,
   resolveThreadListV2SwipeActions,
   withThreadListV2ArchiveAction,
@@ -1992,7 +1994,7 @@ describe("LastCode mobile thread state", () => {
     exitSignal: null,
   };
 
-  it("keeps Action waiting/progress visible behind question and runtime priorities", () => {
+  it("keeps Action waiting/progress visible behind native input and runtime priorities", () => {
     const thread = makeThread({ id: actionResume.threadId, title: "Action", actionResume });
     expect(resolveThreadListV2Status(thread)).toBe("waiting");
     expect(resolveThreadStatus(thread)?.kind).toBe("waiting");
@@ -2006,10 +2008,8 @@ describe("LastCode mobile thread state", () => {
         },
       }),
     ).toBe("working");
-    const question = { ...thread, attention: { kind: "question" as const, raisedAt: NOW } };
-    expect(resolveThreadListV2Status(question)).toBe("question");
-    expect(resolveThreadListV2Status({ ...question, hasPendingApprovals: true })).toBe("approval");
-    expect(resolveThreadListV2Status({ ...question, hasPendingUserInput: true })).toBe("input");
+    expect(resolveThreadListV2Status({ ...thread, hasPendingApprovals: true })).toBe("approval");
+    expect(resolveThreadListV2Status({ ...thread, hasPendingUserInput: true })).toBe("input");
     const runtime = {
       status: "running" as const,
       activeRunId: RunId.make("run-1"),

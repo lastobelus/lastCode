@@ -461,8 +461,7 @@ export const make = Effect.gen(function* () {
                 input.host,
                 reviewThreads.botLogins,
               ),
-              // A comment out of the activity read carries none of its own: that read
-              // reports no reaction at all, so they arrive from the GraphQL page by node id.
+              // Prefer reactions from the activity read, with the review-thread read as fallback.
               reactions: comment.reactions ?? reviewThreads.reactionsById.get(comment.id) ?? [],
               editedAt: reviewThreads.editedAtById.get(comment.id) ?? comment.editedAt ?? null,
             }))

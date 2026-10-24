@@ -5,9 +5,13 @@ import * as Option from "effect/Option";
 import { Atom } from "effect/reactivity";
 import {
   WS_METHODS,
+  ORCHESTRATION_V2_WS_METHODS,
   type EnvironmentId,
   type OrchestrationV2ShellSnapshot,
 } from "@t3tools/contracts";
+
+import { type EnvironmentRpcInput, request } from "../rpc/client.ts";
+import { awaitThreadShell } from "./threadShellAvailability.ts";
 
 import { createOptimisticThreadLifecycle } from "./threadLifecycle.ts";
 import * as DateTime from "effect/DateTime";
@@ -16,6 +20,7 @@ import {
   createAtomCommandScheduler,
   createEnvironmentCommand,
   createEnvironmentRpcCommand,
+  mapAtomCommandResult,
 } from "./runtime.ts";
 import {
   type ArchiveThreadInput,
@@ -23,11 +28,19 @@ import {
   type RetryWorkspacePreparationInput,
   type CreateThreadInput,
   type DeleteThreadInput,
+  type RetryThreadWorktreeCleanupInput,
+  type AbandonThreadWorktreeCleanupInput,
+  type SetThreadPersistenceInput,
+  type UpsertThreadAnnotationInput,
+  type ResolveThreadAnnotationInput,
+  type ReopenThreadAnnotationInput,
   type EditQueuedRunInput,
   type InterruptThreadTurnInput,
   type MarkThreadUnreadInput,
   type ForkThreadFromRunInput,
   type MergeThreadBackInput,
+  type RequestSubagentPromotionInput,
+  type CancelSubagentPromotionInput,
   type PromoteQueuedRunInput,
   type ReorderQueuedRunInput,
   type ResumeThreadQueueInput,
@@ -58,11 +71,19 @@ import {
   cancelQueuedRun,
   createThread,
   deleteThread,
+  retryThreadWorktreeCleanup,
+  abandonThreadWorktreeCleanup,
+  setThreadPersistence,
+  upsertThreadAnnotation,
+  resolveThreadAnnotation,
+  reopenThreadAnnotation,
   editQueuedRun,
   interruptThreadTurn,
   forkThreadFromRun,
   markThreadUnread,
   mergeThreadBack,
+  requestSubagentPromotion,
+  cancelSubagentPromotion,
   promoteQueuedRun,
   reorderQueuedRun,
   resumeThreadQueue,
@@ -94,6 +115,7 @@ import {
 import type { EnvironmentRegistry } from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import * as ThreadHistoryController from "./threadHistoryController.ts";
+import { presentThreadShell } from "./models.ts";
 
 export type LoadEarlierThreadHistoryInput = {
   readonly threadId: ThreadId;
@@ -105,6 +127,12 @@ export type {
   CancelQueuedRunInput,
   CreateThreadInput,
   DeleteThreadInput,
+  RetryThreadWorktreeCleanupInput,
+  AbandonThreadWorktreeCleanupInput,
+  SetThreadPersistenceInput,
+  UpsertThreadAnnotationInput,
+  ResolveThreadAnnotationInput,
+  ReopenThreadAnnotationInput,
   EditQueuedRunInput,
   InterruptThreadTurnInput,
   MarkThreadUnreadInput,
@@ -198,6 +226,63 @@ export function createThreadEnvironmentAtoms<R, E>(
     delete: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:delete",
       execute: (input: DeleteThreadInput) => deleteThread(input),
+      scheduler,
+      concurrency,
+    }),
+    retryWorktreeCleanup: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:retryWorktreeCleanup",
+      execute: (input: RetryThreadWorktreeCleanupInput) => retryThreadWorktreeCleanup(input),
+      scheduler,
+      concurrency,
+    }),
+    abandonWorktreeCleanup: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:abandonWorktreeCleanup",
+      execute: (input: AbandonThreadWorktreeCleanupInput) => abandonThreadWorktreeCleanup(input),
+      scheduler,
+      concurrency,
+    }),
+    setPersistence: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:setPersistence",
+      execute: (input: SetThreadPersistenceInput) => setThreadPersistence(input),
+      scheduler,
+      concurrency,
+    }),
+    upsertAnnotation: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:upsertAnnotation",
+      execute: (input: UpsertThreadAnnotationInput) => upsertThreadAnnotation(input),
+      scheduler,
+      concurrency,
+    }),
+    resolveAnnotation: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:resolveAnnotation",
+      execute: (input: ResolveThreadAnnotationInput) => resolveThreadAnnotation(input),
+      scheduler,
+      concurrency,
+    }),
+    reopenAnnotation: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:reopenAnnotation",
+      execute: (input: ReopenThreadAnnotationInput) => reopenThreadAnnotation(input),
+      scheduler,
+      concurrency,
+    }),
+    recoverThread: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:commands:thread:recoverThread",
+      tag: ORCHESTRATION_V2_WS_METHODS.recoverThread,
+      scheduler,
+      concurrency,
+    }),
+    repairThread: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:repairThread",
+      execute: (
+        input: EnvironmentRpcInput<typeof ORCHESTRATION_V2_WS_METHODS.repairThread>,
+        registry,
+        environmentId,
+      ) =>
+        request(ORCHESTRATION_V2_WS_METHODS.repairThread, input).pipe(
+          Effect.tap(({ threadId }) =>
+            awaitThreadShell(registry, snapshotAtom(environmentId), threadId),
+          ),
+        ),
       scheduler,
       concurrency,
     }),
@@ -378,6 +463,18 @@ export function createThreadEnvironmentAtoms<R, E>(
         key: ({ environmentId, input }) => JSON.stringify([environmentId, input.sourceThreadId]),
       },
     }),
+    requestSubagentPromotion: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:subagent:promote",
+      execute: (input: RequestSubagentPromotionInput) => requestSubagentPromotion(input),
+      scheduler,
+      concurrency,
+    }),
+    cancelSubagentPromotion: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:subagent:cancel-promotion",
+      execute: (input: CancelSubagentPromotionInput) => cancelSubagentPromotion(input),
+      scheduler,
+      concurrency,
+    }),
     mergeBack: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:merge-back",
       execute: (input: MergeThreadBackInput) => mergeThreadBack(input),
@@ -440,8 +537,40 @@ export function createThreadEnvironmentAtoms<R, E>(
       concurrency,
     }),
   };
+  // Inspection may reconcile provider-proven stale activity, so use the write guard.
+  const archiveFamily = createEnvironmentRpcCommand(runtime, {
+    label: "environment-data:commands:thread:archive-family",
+    tag: ORCHESTRATION_V2_WS_METHODS.getThreadArchiveFamily,
+    scheduler,
+    concurrency,
+  });
   const optimistic = createOptimisticThreadLifecycle(snapshotAtom);
   return {
+    loadArchiveFamily: {
+      ...archiveFamily,
+      run: async (...[registry, target]: Parameters<typeof archiveFamily.run>) =>
+        mapAtomCommandResult(await archiveFamily.run(registry, target), (family) => {
+          const threads = family.threads.map((shell) =>
+            presentThreadShell(target.environmentId, shell),
+          );
+          const byId = new Map(threads.map((thread) => [thread.id, thread]));
+          const select = (ids: readonly ThreadId[]) =>
+            ids.flatMap((id) => {
+              const thread = byId.get(id);
+              return thread === undefined ? [] : [thread];
+            });
+          return {
+            ...family,
+            threads,
+            children: select(family.childThreadIds),
+            activeChildren: select(family.activeChildThreadIds),
+            activeThreads: select(family.activeThreadIds),
+            unreadThreads: select(family.unreadThreadIds),
+            promotableChildren: select(family.promotableChildThreadIds),
+            protectedChildren: select(family.protectedChildThreadIds),
+          };
+        }),
+    },
     ...commands,
     snapshotAtom: optimistic.snapshotAtom,
     settle: optimistic.wrap(commands.settle, (thread, _input, now, accepted) =>

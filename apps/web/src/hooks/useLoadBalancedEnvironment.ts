@@ -1,12 +1,12 @@
 import { RegistryContext, useAtomValue } from "@effect/atom-react";
-import { chooseLoadBalancedEnvironment } from "@t3tools/client-runtime/load-balancing";
+import { evaluateLoadBalancedEnvironments } from "@t3tools/client-runtime/load-balancing";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { Atom } from "effect/reactivity";
 import { useContext } from "react";
 
 import { serverEnvironment } from "../state/server";
 
-// Mirrors the freshness window in chooseLoadBalancedEnvironment.
+// Mirrors the freshness window in evaluateLoadBalancedEnvironments.
 const HOST_RESOURCES_FRESH_MS = 15_000;
 
 // Keyed by content: callers derive the list every render.
@@ -21,7 +21,8 @@ const hostResourcesAtom = Atom.family((environmentIdsKey: string) =>
       return {
         environmentId,
         resources: result._tag === "Success" ? result.value : null,
-        receivedAt: result._tag === "Success" ? result.timestamp : 0,
+        ...(result._tag === "Success" ? { receivedAt: result.timestamp } : {}),
+        resourcesRequestFailed: result._tag === "Failure",
         pending: result._tag === "Initial" || result.waiting,
         failed: result._tag === "Failure",
       };
@@ -29,7 +30,9 @@ const hostResourcesAtom = Atom.family((environmentIdsKey: string) =>
     // Re-read when the next fresh snapshot ages out, so a frozen evaluatedAt never selects it.
     const nextExpiry = Math.min(
       ...resources
-        .map((resource) => resource.receivedAt + HOST_RESOURCES_FRESH_MS)
+        .flatMap((resource) =>
+          resource.receivedAt === undefined ? [] : [resource.receivedAt + HOST_RESOURCES_FRESH_MS],
+        )
         .filter((expiresAt) => expiresAt >= evaluatedAt),
     );
     if (Number.isFinite(nextExpiry)) {
@@ -53,14 +56,16 @@ export function useLoadBalancedEnvironment(
   };
   const { evaluatedAt, resources } = useAtomValue(hostResourcesAtom(environmentIds.join("\n")));
   const pending = resources.some((resource) => resource.pending);
-  const environmentId = chooseLoadBalancedEnvironment(
+  const decision = evaluateLoadBalancedEnvironments(
     resources.map((resource) => ({
       ...resource,
       weight: weights[resource.environmentId] ?? 50,
     })),
     evaluatedAt,
-  ) as EnvironmentId | null;
+  );
+  const environmentId = decision.selectedEnvironmentId as EnvironmentId | null;
   return {
+    decision,
     refresh,
     pending,
     environmentId,

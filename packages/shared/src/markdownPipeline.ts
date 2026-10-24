@@ -12,7 +12,7 @@ import {
   CODEX_ARTIFACT_TEMPLATE_HAST_PROPERTIES,
   remarkCodexDirectives,
 } from "./codexMarkdownDirectives.ts";
-import { isWindowsDrivePathHref } from "./markdownLinks.ts";
+import { isWindowsDrivePathHref, parseMarkdownFileLink } from "./markdownLinks.ts";
 import { THREAD_LINK_PROTOCOL } from "./threadLinks.ts";
 
 type MarkdownImageHastNode = {
@@ -276,6 +276,10 @@ function remarkPreserveCodeMeta() {
   };
 }
 
+/**
+ * Encode filename position colons before sanitization and tag inline code.
+ * Code inside links stays untagged to avoid nested anchors.
+ */
 function remarkNormalizeLinksAndTagInlineCode() {
   return (tree: MarkdownAstNode) => {
     const visit = (node: MarkdownAstNode, insideLink: boolean) => {
@@ -285,6 +289,15 @@ function remarkNormalizeLinksAndTagInlineCode() {
         /^[A-Za-z]:[\\/]/.test(node.url)
       ) {
         node.url = `file:///${node.url.replaceAll("\\", "/")}`;
+      } else if (
+        (node.type === "link" || node.type === "definition") &&
+        typeof node.url === "string" &&
+        /^[^/\\?#]*:/.test(node.url)
+      ) {
+        const target = parseMarkdownFileLink(node.url);
+        if (target && !/[\\/]/.test(target.path)) {
+          node.url = node.url.replaceAll(":", "%3A");
+        }
       }
       if (node.type === "inlineCode" && !insideLink) {
         node.data = {

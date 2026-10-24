@@ -4,10 +4,14 @@ import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 
 import type { DiffThemeName } from "~/lib/diffRendering";
-import { languageOfInfoString } from "~/composer-code-languages";
+import { flatToPm } from "~/composer-rich-text-doc";
+import { composerFenceCode } from "~/lastcodeComposerSourceEdits";
+import { MAX_COMPOSER_LIVE_PREVIEW_LENGTH } from "~/lastcodeComposerLivePreview";
+import { composerLivePreviewKey } from "~/lastcodeComposerLivePreviewTiptap";
 import { getSyntaxHighlighterPromise } from "~/lib/syntaxHighlighting";
 
 interface HighlightedBlock {
+  /** Guards against repainting a block whose text and language are unchanged. */
   readonly signature: string;
   readonly decorations: ReadonlyArray<{ from: number; to: number; color: string }>;
 }
@@ -24,21 +28,29 @@ const DEFERRED_HIGHLIGHT_DELAY_MS = 300;
 function shouldHighlightCodeBlock(code: string): boolean {
   return code.length <= MAX_HIGHLIGHTED_CODE_BLOCK_LENGTH;
 }
-function blockSignature(node: ProseMirrorNode, theme: DiffThemeName): string {
-  return [theme, String(node.attrs.language ?? ""), node.textContent].join("\u0000");
+
+function blockSignature(block: { language: string; code: string }, theme: DiffThemeName): string {
+  return [theme, block.language, block.code].join("\u0000");
 }
 
 /**
- * The composer's code blocks, which are always top-level: list items and
- * quotes cannot hold one. Scanning only the top level keeps a keystroke in a
- * long draft from walking every node in it.
+ * The presentation parser already found the fences; reuse its collapsed
+ * source so chips before a fence do not shift the token offsets.
  */
-function collectCodeBlocks(state: EditorState): Array<{ node: ProseMirrorNode; pos: number }> {
-  const blocks: Array<{ node: ProseMirrorNode; pos: number }> = [];
-  state.doc.forEach((node, pos) => {
-    if (node.type.name === "codeBlock") blocks.push({ node, pos });
-  });
-  return blocks;
+function collectCodeBlocks(state: EditorState) {
+  const preview = composerLivePreviewKey.getState(state);
+  if (
+    !preview?.enabled ||
+    preview.composing ||
+    preview.source.length > MAX_COMPOSER_LIVE_PREVIEW_LENGTH
+  )
+    return [];
+  return preview.ranges.fences
+    .map((fence) => ({
+      ...composerFenceCode(preview.source, fence),
+      language: fence.language || "text",
+    }))
+    .filter((block) => shouldHighlightCodeBlock(block.code));
 }
 
 export function composerCodeBlockHighlight(options: {
@@ -46,6 +58,8 @@ export function composerCodeBlockHighlight(options: {
 }): Extension {
   return Extension.create({
     name: "composerCodeBlockHighlight",
+    // Its apply reads the preview's newly parsed ranges and position map.
+    priority: 90,
 
     addProseMirrorPlugins() {
       // Every keystroke in a code block mints a new signature, so each scan
@@ -64,7 +78,14 @@ export function composerCodeBlockHighlight(options: {
             init: () => DecorationSet.empty,
             apply(transaction, value, _oldState, newState) {
               const mapped = value.map(transaction.mapping, transaction.doc);
-              if (!transaction.docChanged && !transaction.getMeta(composerCodeBlockHighlightKey)) {
+              const preview = composerLivePreviewKey.getState(newState);
+              if (!preview?.enabled) return DecorationSet.empty;
+              if (
+                preview.composing ||
+                (!transaction.docChanged &&
+                  !transaction.getMeta(composerCodeBlockHighlightKey) &&
+                  !transaction.getMeta(composerLivePreviewKey))
+              ) {
                 return mapped;
               }
               return buildDecorations(newState, cache, options.resolveTheme(), mapped);
@@ -81,33 +102,42 @@ export function composerCodeBlockHighlight(options: {
             let disposed = false;
             let paintedTheme = options.resolveTheme();
             let scannedDoc: ProseMirrorNode | null = null;
+            let scannedRanges = composerLivePreviewKey.getState(view.state)?.ranges;
+            let scannedEnabled: boolean | undefined;
             let deferredRefresh: ReturnType<typeof setTimeout> | undefined;
 
-            // Repaint dispatches and selection changes must not restart the debounce.
+            // Repaints and selection changes must not restart the debounce.
             const refresh = (deferLong: boolean) => {
               const theme = options.resolveTheme();
+              const preview = composerLivePreviewKey.getState(view.state);
+              // Composition maps the existing colors until its final ranges are parsed.
+              if (preview?.composing) return;
               const themeChanged = theme !== paintedTheme;
               paintedTheme = theme;
               // A selection change cannot alter what needs tokenizing, and
               // building a signature means concatenating every block's text.
-              if (!themeChanged && view.state.doc === scannedDoc) return;
+              if (
+                !themeChanged &&
+                view.state.doc === scannedDoc &&
+                preview?.ranges === scannedRanges &&
+                preview?.enabled === scannedEnabled
+              )
+                return;
               clearTimeout(deferredRefresh);
               scannedDoc = view.state.doc;
+              scannedRanges = preview?.ranges;
+              scannedEnabled = preview?.enabled;
               const blocks = collectCodeBlocks(view.state);
-              const signatures = new Set(blocks.map(({ node }) => blockSignature(node, theme)));
+              const signatures = new Set(blocks.map((block) => blockSignature(block, theme)));
               live = signatures;
               for (const signature of cache.keys()) {
                 if (!live.has(signature)) cache.delete(signature);
               }
-              const missing = blocks.filter(
-                ({ node }) =>
-                  shouldHighlightCodeBlock(node.textContent) &&
-                  !cache.has(blockSignature(node, theme)),
-              );
+              const missing = blocks.filter((block) => !cache.has(blockSignature(block, theme)));
               const pending =
                 deferLong && !themeChanged
                   ? missing.filter(
-                      ({ node }) => node.textContent.length <= DEFERRED_HIGHLIGHT_CODE_BLOCK_LENGTH,
+                      (block) => block.code.length <= DEFERRED_HIGHLIGHT_CODE_BLOCK_LENGTH,
                     )
                   : missing;
               if (pending.length < missing.length) {
@@ -124,20 +154,15 @@ export function composerCodeBlockHighlight(options: {
               }
 
               void Promise.allSettled(
-                pending.map(async ({ node }) => {
-                  // The stored info string keeps everything after the language
-                  // (`js title=x`); Shiki wants only the name.
-                  const language =
-                    languageOfInfoString(String(node.attrs.language ?? "")) || "text";
-                  const signature = blockSignature(node, theme);
-                  // Cache failure as plain text to clear retained colors.
+                pending.map(async (block) => {
+                  const { code, language } = block;
+                  const signature = blockSignature(block, theme);
                   const highlighter = await getSyntaxHighlighterPromise(language).catch(() => null);
-                  // An older request must not bypass the debounce if its text returns.
                   if (disposed || live !== signatures || cache.has(signature)) return;
                   cache.set(signature, {
                     signature,
                     decorations: highlighter
-                      ? tokenizeBlock(highlighter, node.textContent, language, theme)
+                      ? tokenizeBlock(highlighter, code, language, theme)
                       : [],
                   });
                 }),
@@ -201,6 +226,15 @@ export function tokenizeBlock(
   return decorations;
 }
 
+/** Shiki offsets belong to code with container prefixes removed. */
+function sourceOffset(
+  lines: ReturnType<typeof composerFenceCode>["lines"],
+  offset: number,
+): number | undefined {
+  const line = lines.find((line) => offset >= line.codeFrom && offset <= line.codeTo);
+  return line ? line.sourceFrom + offset - line.codeFrom : undefined;
+}
+
 function buildDecorations(
   state: EditorState,
   cache: Map<string, HighlightedBlock>,
@@ -208,33 +242,30 @@ function buildDecorations(
   previous: DecorationSet,
 ): DecorationSet {
   const decorations: Decoration[] = [];
-  for (const { node, pos } of collectCodeBlocks(state)) {
-    if (!shouldHighlightCodeBlock(node.textContent)) continue;
-    const highlighted = cache.get(blockSignature(node, theme));
+  const preview = composerLivePreviewKey.getState(state);
+  if (!preview?.enabled || preview.composing) return DecorationSet.empty;
+  for (const block of collectCodeBlocks(state)) {
+    const highlighted = cache.get(blockSignature(block, theme));
     if (!highlighted) {
-      // A mapped token can span split fences and the paragraph between them.
-      const start = pos + 1;
-      const end = start + node.content.size;
-      for (const decoration of previous.find(start, end)) {
-        if (decoration.from >= start && decoration.to <= end) {
-          decorations.push(decoration);
-          continue;
+      // Clip mapped colors to each source code line, excluding quote/list prefixes
+      // and any prose exposed when an edited fence splits into separate fences.
+      for (const line of block.lines) {
+        const start = flatToPm(preview.map, line.sourceFrom);
+        const end = flatToPm(preview.map, line.sourceFrom + line.codeTo - line.codeFrom);
+        for (const decoration of previous.find(start, end)) {
+          const from = Math.max(start, decoration.from);
+          const to = Math.min(end, decoration.to);
+          if (from < to) decorations.push(colorDecoration(from, to, decoration.spec.color));
         }
-        const from = Math.max(decoration.from, start);
-        const to = Math.min(decoration.to, end);
-        if (from < to) decorations.push(colorDecoration(from, to, decoration.spec.color));
       }
       continue;
     }
-    // Token offsets index the block's text, which lines up with document
-    // positions only because `codeBlock` is `text*` with no marks — one
-    // unmarked text node, so `content.size === textContent.length`. Allowing
-    // marks or hard breaks in the code block would desync these silently.
-    if (node.content.size !== node.textContent.length) continue;
-    const start = pos + 1;
     for (const decoration of highlighted.decorations) {
+      const from = sourceOffset(block.lines, decoration.from);
+      const to = sourceOffset(block.lines, decoration.to);
+      if (from === undefined || to === undefined) continue;
       decorations.push(
-        colorDecoration(start + decoration.from, start + decoration.to, decoration.color),
+        colorDecoration(flatToPm(preview.map, from), flatToPm(preview.map, to), decoration.color),
       );
     }
   }

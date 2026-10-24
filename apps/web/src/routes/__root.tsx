@@ -22,6 +22,7 @@ import { CustomSnoozeDialogHost } from "../components/CustomSnoozeDialog";
 import { AddProjectToMachineDialogHost } from "../components/AddProjectToMachineDialog";
 import { ConfirmDialogHost } from "../components/ConfirmDialogHost";
 import { KeybindingsConfigWarning } from "../components/KeybindingsConfigWarning";
+import { ThreadArchiveDialogHost } from "../components/ThreadArchiveDialog";
 import { FirstRunGate } from "../components/onboarding/FirstRunGate";
 import { ConnectOnboardingDialog } from "../components/cloud/ConnectOnboardingDialog";
 import { RelayClientInstallDialog } from "../components/cloud/RelayClientInstallDialog";
@@ -57,6 +58,7 @@ import { isElectron } from "../env";
 import { cn } from "../lib/utils";
 import { applyAppearanceFontVariables } from "~/appearanceFonts";
 import { applyAppearanceContrast } from "~/appearanceContrast";
+import { applyScrollbarAppearance } from "~/scrollbarAppearance";
 import { useClientSettings } from "../hooks/useSettings";
 import {
   deriveLogicalProjectKeyFromSettings,
@@ -227,6 +229,7 @@ function RootRouteView() {
         <ProviderAuthCallbackCoordinator />
         <ChatGptWelcomeCoordinator />
         <ProjectIconAppearanceSync />
+        <ScrollbarAppearanceSync />
         <FirstRunGate
           enabled={primaryEnvironmentAuthenticated}
           hostedStatic={authGateState.status === "hosted-static"}
@@ -242,6 +245,7 @@ function RootRouteView() {
           <ThreadNotificationCoordinator />
           <ReopenClosedViewShortcut />
           <ConfirmDialogHost />
+          <ThreadArchiveDialogHost />
           <CustomSnoozeDialogHost />
           <SlowRpcRequestToastCoordinator />
           <HostFreezeToastCoordinator />
@@ -318,6 +322,30 @@ function ProjectIconAppearanceSync() {
       document.documentElement.removeAttribute("data-rounded-project-icons");
     };
   }, [roundedProjectIcons]);
+
+  return null;
+}
+
+function ScrollbarAppearanceSync() {
+  const largerScrollbarsEnabled = useClientSettings((settings) => settings.largerScrollbarsEnabled);
+  const scrollbarWidth = useClientSettings((settings) => settings.scrollbarWidth);
+  const scrollbarMargin = useClientSettings((settings) => settings.scrollbarMargin);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    applyScrollbarAppearance(root, {
+      enabled: largerScrollbarsEnabled,
+      width: scrollbarWidth,
+      margin: scrollbarMargin,
+    });
+    return () => {
+      applyScrollbarAppearance(root, {
+        enabled: false,
+        width: scrollbarWidth,
+        margin: scrollbarMargin,
+      });
+    };
+  }, [largerScrollbarsEnabled, scrollbarMargin, scrollbarWidth]);
 
   return null;
 }
