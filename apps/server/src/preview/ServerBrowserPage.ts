@@ -67,7 +67,7 @@ export async function prepareBrowserCredential(
   } catch (cause) {
     const failure = cause instanceof Error ? cause.message : "";
     const category =
-      status !== undefined && status >= 400
+      status !== undefined && (status < 200 || status >= 300)
         ? "http"
         : /Storage\.(getCookies|setCookies)/.test(failure)
           ? "cookie-context"

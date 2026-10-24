@@ -4,20 +4,29 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { prepareHostedPreview } from "~/components/preview/previewHostingRecovery";
+import {
+  mayBeHostedPreviewUrl,
+  prepareHostedPreview,
+} from "~/components/preview/previewHostingRecovery";
 
 import { recordVisitForThread } from "~/browserHistoryStore";
 import { readLocalApi } from "~/localApi";
+import { readEnvironmentSupportsServerBrowser } from "~/state/entities";
 import { previewEnvironment } from "~/state/preview";
 import { readEnvironmentScope } from "~/state/session";
 import { useAtomCommand } from "~/state/use-atom-command";
 
 import {
   canOpenLinksInApp,
+  isWebUrl,
   resolveBrowserLinkTargetPreference,
   resolveLinkTarget,
 } from "./browserLinkTarget";
-import { BrowserSettingsReadError, openUrlInPreview } from "./openFileInPreview";
+import {
+  BrowserSettingsReadError,
+  openPreparedUrlInPreview,
+  openUrlInPreview,
+} from "./openFileInPreview";
 import { openPreparedExternalUrl } from "./openPreparedExternalUrl";
 
 const NO_MODIFIER = { metaKey: false, ctrlKey: false } as const;
@@ -38,12 +47,41 @@ export function useOpenLink(threadRef: ScopedThreadRef | null | undefined): (
   return async (url, options = {}) => {
     const targetThreadRef = options.threadRef ?? threadRef;
     if (!window.desktopBridge) {
-      await openPreparedExternalUrl(url, async () => {
-        await resolveBrowserLinkTargetPreference();
-        return targetThreadRef
-          ? hostedPreviewNavigationUrl(await prepareHostedPreview(targetThreadRef, url))
-          : url;
-      });
+      await openPreparedExternalUrl(
+        url,
+        async () => {
+          await resolveBrowserLinkTargetPreference();
+          if (!targetThreadRef) return url;
+          const prepared = await prepareHostedPreview(targetThreadRef, url);
+          if (
+            prepared.managed &&
+            isWebUrl(url) &&
+            readEnvironmentScope(targetThreadRef.environmentId, AuthPreviewOperateScope) &&
+            readEnvironmentSupportsServerBrowser(targetThreadRef.environmentId)
+          ) {
+            const event = options.event ?? NO_MODIFIER;
+            const result = await openPreparedUrlInPreview(
+              {
+                threadRef: targetThreadRef,
+                url,
+                openPreview,
+                background: event.metaKey || event.ctrlKey || options.event?.button === 1,
+              },
+              prepared,
+            );
+            if (isAtomCommandInterrupted(result)) return null;
+            if (result._tag === "Success") {
+              recordVisitForThread(targetThreadRef, url);
+              return null;
+            }
+            throw squashAtomCommandFailure(result);
+          }
+          return hostedPreviewNavigationUrl(prepared);
+        },
+        {
+          allowWithoutPopup: targetThreadRef != null && mayBeHostedPreviewUrl(targetThreadRef, url),
+        },
+      );
       return;
     }
     const target = resolveLinkTarget({

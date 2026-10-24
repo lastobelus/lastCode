@@ -136,27 +136,30 @@ describe("browser credential failures", () => {
     if (category === "cookie-context") expect(String(error)).not.toContain("--share");
   });
 
-  it("preserves an HTTP rejection and disposes its response without exposing its body", async () => {
-    const dispose = vi.fn().mockResolvedValue(undefined);
-    const page = {
-      context: () => ({
-        request: {
-          post: vi.fn().mockResolvedValue({ ok: () => false, status: () => 401, dispose }),
-        },
-      }),
-    } as unknown as Page;
-    const error = await ServerBrowserPage.prepareBrowserCredential(
-      page,
-      "https://managed-server.example/qa",
-      "private-one-use-credential",
-      15_000,
-    ).catch((error: unknown) => error);
-    expect(error).toMatchObject({ detail: { category: "http", status: 401 } });
-    expect(String(error)).toContain("HTTP 401");
-    expect(String(error)).not.toContain("--share");
-    expect(String(error)).not.toContain("private");
-    expect(dispose).toHaveBeenCalledOnce();
-  });
+  it.each([302, 401, 503])(
+    "preserves HTTP %s and disposes its response without exposing its body",
+    async (status) => {
+      const dispose = vi.fn().mockResolvedValue(undefined);
+      const page = {
+        context: () => ({
+          request: {
+            post: vi.fn().mockResolvedValue({ ok: () => false, status: () => status, dispose }),
+          },
+        }),
+      } as unknown as Page;
+      const error = await ServerBrowserPage.prepareBrowserCredential(
+        page,
+        "https://managed-server.example/qa",
+        "private-one-use-credential",
+        15_000,
+      ).catch((error: unknown) => error);
+      expect(error).toMatchObject({ detail: { category: "http", status } });
+      expect(String(error)).toContain(`HTTP ${status}`);
+      expect(String(error)).not.toContain("--share");
+      expect(String(error)).not.toContain("private");
+      expect(dispose).toHaveBeenCalledOnce();
+    },
+  );
 });
 
 describe("server browser element refs", () => {
