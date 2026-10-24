@@ -216,12 +216,24 @@ export function prepareHostedPreview(
       return original;
     }
     const threadLeases = leases.filter((lease) => lease.threadId === input.threadRef.threadId);
-    const owned = targetIsPreviousPrivateAddress
-      ? selectExactPrivateHostedPreview(target, threadLeases)
-      : selectHostedPreview(target, threadLeases);
+    const selectOwned = targetIsPreviousPrivateAddress
+      ? selectExactPrivateHostedPreview
+      : selectHostedPreview;
+    let owned = selectOwned(target, threadLeases);
+    if (!owned && target.protocol === "https:" && !targetIsLoopback) {
+      // A published HTTPS endpoint can proxy the same port's owned HTTP listener.
+      // Address ownership was checked above; preserve the physical port across schemes.
+      const localHttp = new URL(target);
+      localHttp.protocol = "http:";
+      localHttp.port = target.port || "443";
+      owned = selectOwned(localHttp, threadLeases);
+    }
     if (!owned) return original;
     const localDestination = new URL(target);
-    localDestination.hostname = new URL(owned.url).hostname;
+    const canonical = new URL(owned.url);
+    localDestination.protocol = canonical.protocol;
+    localDestination.hostname = canonical.hostname;
+    localDestination.port = canonical.port;
     const localUrl = localDestination.href;
     const destination = resolveOwnedPreviewUrl(target, environment, targetIsPreviousPrivateAddress);
     if (destination.length > PREVIEW_URL_MAX_LENGTH || localUrl.length > PREVIEW_URL_MAX_LENGTH)

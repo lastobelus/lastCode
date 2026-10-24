@@ -39,6 +39,76 @@ const lease = {
 
 describe("prepareHostedPreview", () => {
   beforeEach(() => vi.restoreAllMocks());
+  it("recovers a shared HTTPS destination through its saved sleeping HTTP listener", async () => {
+    const sleeping = { ...lease, status: "sleeping" as const };
+    const url = lease.url.replace("http://localhost", "https://environment.example");
+    const recover = vi.fn(async () => ({
+      ...lease,
+      restarted: true,
+      bootstrapToken: "fixture-navigation",
+    }));
+    const prepared = await prepareHostedPreview({
+      threadRef,
+      url,
+      environmentUrl: "https://environment.example/",
+      list: async () => [sleeping],
+      recover,
+    });
+    expect(prepared).toMatchObject({ url, localUrl: lease.url, managed: true, restored: true });
+    expect(recover).toHaveBeenCalledExactlyOnceWith(sleeping, { bootstrap: true });
+    expect(getPairingTokenFromUrl(new URL(prepared.navigationUrl!))).toBe("fixture-navigation");
+  });
+
+  it("prefers an exact HTTPS lease over the HTTP listener on the same port", async () => {
+    const secure = {
+      ...lease,
+      leaseId: PreviewHostingLeaseId.make("secure-lease"),
+      url: lease.url.replace("http:", "https:"),
+    };
+    const url = secure.url.replace("localhost", "environment.example");
+    const recover = vi.fn(async () => secure);
+    const prepared = await prepareHostedPreview({
+      threadRef,
+      url,
+      environmentUrl: "https://environment.example/",
+      list: async () => [lease, secure],
+      recover,
+    });
+    expect(prepared.localUrl).toBe(secure.url);
+    expect(recover).toHaveBeenCalledExactlyOnceWith(secure, { bootstrap: true });
+  });
+
+  it("does not match the implicit HTTPS port to an HTTP port 80 listener", async () => {
+    const url = "https://environment.example/preview";
+    const recover = vi.fn(async () => lease);
+    const prepared = await prepareHostedPreview({
+      threadRef,
+      url,
+      environmentUrl: "https://environment.example/",
+      list: async () => [{ ...lease, url: "http://localhost/preview" }],
+      recover,
+    });
+    expect(prepared).toEqual({ url, managed: false, restored: false });
+    expect(recover).not.toHaveBeenCalled();
+  });
+
+  it("does not recover an unrelated HTTPS host through an owned HTTP listener", async () => {
+    const url = lease.url.replace("http://localhost", "https://external.example");
+    const list = vi.fn(async () => [lease]);
+    const recover = vi.fn(async () => lease);
+    expect(
+      await prepareHostedPreview({
+        threadRef,
+        url,
+        environmentUrl: "https://environment.example/",
+        list,
+        recover,
+      }),
+    ).toEqual({ url, managed: false, restored: false });
+    expect(list).not.toHaveBeenCalled();
+    expect(recover).not.toHaveBeenCalled();
+  });
+
   it("preserves a signed document when deferred capability discovery reports unsupported", async () => {
     const url = "https://environment.example/api/assets/expired/report.html";
     const list = vi.fn(async () => [lease]);
