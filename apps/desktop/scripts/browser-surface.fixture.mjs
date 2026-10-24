@@ -1015,15 +1015,26 @@ async function main() {
           }
           if (request.action === 'unload') {
             fixture.guest.remove();
+            fixture.wrapper.remove();
+            window.surfaceSmokeLifecycleGuests.delete(descriptor.runtimeTabId);
             return;
           }
           if (fixture.guest.isConnected) return;
           await new Promise((resolve, reject) => {
-            fixture.guest.addEventListener('dom-ready', () => {
+            let registering = false;
+            const register = () => {
+              if (registering) return;
+              let webContentsId;
+              try { webContentsId = fixture.guest.getWebContentsId(); } catch { return; }
+              if (!Number.isInteger(webContentsId) || webContentsId <= 0) return;
+              registering = true;
               window.surfaceSmokeBridge.registerGuest(
-                descriptor.runtimeTabId, fixture.guest.getWebContentsId()
+                descriptor.runtimeTabId, webContentsId
               ).then(resolve, reject);
-            }, { once: true });
+            };
+            // Match production: a hidden about:blank guest can attach before DOM readiness.
+            fixture.guest.addEventListener('did-attach', register, { once: true });
+            fixture.guest.addEventListener('dom-ready', register, { once: true });
             fixture.wrapper.append(fixture.guest);
           });
         };
@@ -1099,9 +1110,9 @@ async function main() {
       const attached = nextSignal(hostSignals, `attached:${tab.tabId}`);
       const mounted = nextSignal(rendererSignals, `wake:${tab.tabId}`);
       await send({ type: "wake", ...key(tab) });
-      await milestone("dormant native guest reattached", () => attached);
+      await milestone(`native guest ${tab.tabId} reattached`, () => attached);
       NodeAssert.equal(
-        (await milestone("dormant native renderer remounted", () => mounted)).error,
+        (await milestone(`native renderer ${tab.tabId} remounted`, () => mounted)).error,
         undefined,
       );
     };

@@ -3,6 +3,7 @@ import {
   EnvironmentId,
   ThreadId,
   type BrowserLinkTarget,
+  type PreviewOpenInput,
   type PreviewSessionSnapshot,
   type ScopedThreadRef,
 } from "@t3tools/contracts";
@@ -132,31 +133,44 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-async function renderLink(url = sourceUrl, targetThreadRef?: ScopedThreadRef) {
-  let opening!: Promise<void>;
-  function Link() {
+async function renderLinks(urls: readonly string[], targetThreadRef?: ScopedThreadRef) {
+  const openings = new Map<string, Promise<void>>();
+  function Link({ url }: { url: string }) {
     const openLink = useOpenLink(threadRef);
     return (
       <a
         href={url}
         onClick={(event) => {
           event.preventDefault();
-          opening = openLink(url, { event, threadRef: targetThreadRef });
+          openings.set(url, openLink(url, { event, threadRef: targetThreadRef }));
         }}
       >
         Open link
       </a>
     );
   }
-  await act(async () => root.render(<Link />));
+  await act(async () => root.render(urls.map((url) => <Link key={url} url={url} />)));
   return {
-    click: (options?: MouseEventInit) => {
-      container
-        .querySelector("a")!
+    click: (url: string, options?: MouseEventInit) => {
+      [...container.querySelectorAll("a")]
+        .find((link) => link.getAttribute("href") === url)!
         .dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, ...options }));
-      return opening;
+      return openings.get(url)!;
     },
   };
+}
+
+async function renderLink(url = sourceUrl, targetThreadRef?: ScopedThreadRef) {
+  const links = await renderLinks([url], targetThreadRef);
+  return { click: (options?: MouseEventInit) => links.click(url, options) };
+}
+
+function deferredPreparation() {
+  let finish!: (destination: PreparedHostedPreview) => void;
+  const promise = new Promise<PreparedHostedPreview>((resolve) => {
+    finish = resolve;
+  });
+  return { promise, finish };
 }
 
 function reservePopup() {
@@ -182,17 +196,14 @@ describe("web link opening", () => {
     async (preference) => {
       mocks.resolvePreference.mockResolvedValueOnce(preference);
       const { open, tab } = reservePopup();
-      let finish!: (destination: PreparedHostedPreview) => void;
-      mocks.prepareHostedPreview.mockImplementationOnce(
-        () => new Promise((resolve) => (finish = resolve)),
-      );
+      const preparation = deferredPreparation();
+      mocks.prepareHostedPreview.mockReturnValueOnce(preparation.promise);
       const link = await renderLink();
       const opening = link.click();
       expect(open).toHaveBeenCalledExactlyOnceWith("about:blank", "_blank");
       expect(mocks.openPreview).not.toHaveBeenCalled();
       await act(async () => {
-        await vi.waitFor(() => expect(mocks.prepareHostedPreview).toHaveBeenCalledOnce());
-        finish(prepared);
+        preparation.finish(prepared);
         await opening;
       });
 
@@ -376,15 +387,247 @@ describe("web link opening", () => {
       expectNoVisit();
     },
   );
+});
 
-  it("keeps the desktop system-browser path without reserving a client popup", async () => {
-    vi.stubGlobal("desktopBridge", {});
-    mocks.resolvePreference.mockResolvedValueOnce("system");
-    const open = vi.spyOn(window, "open");
+describe("desktop link opening", () => {
+  beforeEach(() => vi.stubGlobal("desktopBridge", {}));
+
+  it.each(["system", "app"] as const)(
+    "opens a remote managed link in its owning panel with the %s preference",
+    async (preference) => {
+      mocks.resolvePreference.mockResolvedValueOnce(preference);
+      const open = vi.spyOn(window, "open");
+      const link = await renderLink();
+      await act(async () => link.click());
+      expect(open).not.toHaveBeenCalled();
+      expect(mocks.openExternal).not.toHaveBeenCalled();
+      expect(mocks.prepareHostedPreview).toHaveBeenCalledExactlyOnceWith(threadRef, sourceUrl);
+      expect(mocks.openPreview).toHaveBeenCalledExactlyOnceWith({
+        environmentId: threadRef.environmentId,
+        input: expect.objectContaining({
+          threadId: threadRef.threadId,
+          url: prepared.localUrl,
+          runtime: "server",
+          browserHost: "environment",
+        }),
+      });
+      expect(
+        selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, threadRef)?.id,
+      ).toBe(`browser:${snapshot.tabId}`);
+      expect(useBrowserHistoryStore.getState().byProjectKey["managed-link-project"]).toEqual([
+        expect.objectContaining({ url: sourceUrl }),
+      ]);
+    },
+  );
+
+  it.each([{ metaKey: true }, { ctrlKey: true }, { button: 1 }])(
+    "opens remote managed modifier intent %o in the owning browser background",
+    async (event) => {
+      const link = await renderLink();
+      await act(async () => link.click(event));
+      expect(mocks.openPreview).toHaveBeenCalledExactlyOnceWith({
+        environmentId: threadRef.environmentId,
+        input: expect.objectContaining({
+          url: prepared.localUrl,
+          runtime: "server",
+          browserHost: "environment",
+          background: true,
+        }),
+      });
+      expect(
+        selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, threadRef),
+      ).toBeNull();
+      expect(mocks.openExternal).not.toHaveBeenCalled();
+      expect(mocks.prepareHostedPreview).toHaveBeenCalledExactlyOnceWith(threadRef, sourceUrl);
+    },
+  );
+
+  it.each(["localhost", "127.0.0.1", "[::1]"])(
+    "keeps a local %s managed destination in the system browser",
+    async (host) => {
+      const url = `http://${host}:5173/app/a%2Fb?q=1#section`;
+      mocks.prepareHostedPreview.mockResolvedValueOnce({ ...prepared, url });
+      vi.stubGlobal("desktopBridge", {});
+      const open = vi.spyOn(window, "open");
+      const link = await renderLink();
+      await act(async () => link.click());
+      expect(open).not.toHaveBeenCalled();
+      expect(mocks.openExternal).toHaveBeenCalledExactlyOnceWith(url);
+      expect(mocks.openPreview).not.toHaveBeenCalled();
+      expect(mocks.prepareHostedPreview).toHaveBeenCalledExactlyOnceWith(threadRef, sourceUrl);
+      expectNoVisit();
+    },
+  );
+
+  it.each(["permission", "unavailable", "unmanaged"])(
+    "preserves the desktop fallback for %s links",
+    async (reason) => {
+      if (reason === "permission") {
+        mocks.readScope.mockReturnValue(false);
+        mocks.resolvePreference.mockResolvedValueOnce("app");
+      }
+      if (reason === "unavailable") mocks.serverBrowser = false;
+      if (reason === "unmanaged")
+        mocks.prepareHostedPreview.mockResolvedValueOnce({ ...prepared, managed: false });
+      const link = await renderLink();
+      await act(async () => link.click());
+      expect(mocks.openExternal).toHaveBeenCalledExactlyOnceWith(prepared.url);
+      expect(mocks.openPreview).not.toHaveBeenCalled();
+      expect(mocks.prepareHostedPreview).toHaveBeenCalledExactlyOnceWith(threadRef, sourceUrl);
+      expectNoVisit();
+    },
+  );
+
+  it.each([
+    ["system", {}, false],
+    ["app", {}, true],
+    ["app", { metaKey: true }, false],
+  ] as const)(
+    "preserves public desktop links with preference %s and event %o",
+    async (preference, event, inApp) => {
+      const url = "https://github.com/example/project/pull/42";
+      mocks.resolvePreference.mockResolvedValueOnce(preference);
+      mocks.prepareHostedPreview.mockResolvedValueOnce({ url, managed: false, restored: false });
+      const link = await renderLink(url);
+      await act(async () => link.click(event));
+      expect(mocks.prepareHostedPreview).toHaveBeenCalledExactlyOnceWith(threadRef, url);
+      if (inApp) {
+        expect(mocks.openExternal).not.toHaveBeenCalled();
+        expect(mocks.openPreview).toHaveBeenCalledExactlyOnceWith({
+          environmentId: threadRef.environmentId,
+          input: expect.objectContaining({ url }),
+        });
+        expect(mocks.openPreview.mock.calls[0]?.[0].input).not.toHaveProperty("browserHost");
+      } else {
+        expect(mocks.openExternal).toHaveBeenCalledExactlyOnceWith(url);
+        expect(mocks.openPreview).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it("reuses the prepared navigation when an ordinary desktop app open falls back externally", async () => {
+    const navigationUrl = setPreviewBootstrapTokenOnUrl(new URL(prepared.url), "one-use").href;
+    mocks.resolvePreference.mockResolvedValueOnce("app");
+    mocks.prepareHostedPreview.mockResolvedValueOnce({
+      ...prepared,
+      navigationUrl,
+      managed: false,
+    });
+    mocks.openPreview.mockResolvedValueOnce(AsyncResult.failure(Cause.fail(new Error("failed"))));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
     const link = await renderLink();
     await act(async () => link.click());
-    expect(open).not.toHaveBeenCalled();
-    expect(mocks.openExternal).toHaveBeenCalledExactlyOnceWith(prepared.url);
-    expect(mocks.openPreview).not.toHaveBeenCalled();
+    expect(mocks.openExternal).toHaveBeenCalledExactlyOnceWith(navigationUrl);
+    expect(mocks.prepareHostedPreview).toHaveBeenCalledExactlyOnceWith(threadRef, sourceUrl);
+    expectNoVisit();
+  });
+
+  it("reports a remote managed desktop open failure without falling back to the client", async () => {
+    const failure = new Error("failed");
+    mocks.openPreview.mockResolvedValueOnce(AsyncResult.failure(Cause.fail(failure)));
+    const link = await renderLink();
+    await expect(link.click()).rejects.toBe(failure);
+    expect(mocks.openExternal).not.toHaveBeenCalled();
+    expect(mocks.prepareHostedPreview).toHaveBeenCalledExactlyOnceWith(threadRef, sourceUrl);
+    expectNoVisit();
+  });
+
+  it("keeps an interrupted remote managed desktop open silent", async () => {
+    mocks.openPreview.mockResolvedValueOnce(AsyncResult.failure(Cause.interrupt()));
+    const link = await renderLink();
+    await act(async () => link.click());
+    expect(mocks.openExternal).not.toHaveBeenCalled();
+    expectNoVisit();
+  });
+});
+
+describe.each(["web", "desktop"])("%s managed link focus", (surface) => {
+  beforeEach(() => {
+    if (surface === "desktop") vi.stubGlobal("desktopBridge", {});
+    else reservePopup();
+  });
+
+  it("orders delayed recovery by click so an earlier slow link cannot steal focus", async () => {
+    const fastSource = "http://localhost:5173/fast";
+    const fastPrepared = {
+      ...prepared,
+      url: "https://workstation.example:5173/fast",
+      localUrl: "http://127.0.0.1:5173/fast",
+    };
+    const slow = deferredPreparation();
+    mocks.prepareHostedPreview.mockImplementation((_ref, url) =>
+      url === sourceUrl ? slow.promise : Promise.resolve(fastPrepared),
+    );
+    mocks.openPreview.mockImplementation(async ({ input }: { input: PreviewOpenInput }) =>
+      AsyncResult.success({
+        ...snapshot,
+        tabId: input.url === prepared.localUrl ? "slow-tab" : "fast-tab",
+      }),
+    );
+    const links = await renderLinks([sourceUrl, fastSource]);
+    const revision = useRightPanelStore.getState().getUserActionRevision(threadRef);
+    const first = links.click(sourceUrl);
+    expect(useRightPanelStore.getState().getUserActionRevision(threadRef)).toBe(revision + 1);
+    const second = links.click(fastSource);
+    expect(useRightPanelStore.getState().getUserActionRevision(threadRef)).toBe(revision + 2);
+    await act(async () => second);
+    expect(
+      selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, threadRef)?.id,
+    ).toBe("browser:fast-tab");
+    await act(async () => {
+      slow.finish(prepared);
+      await first;
+    });
+    expect(
+      selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, threadRef)?.id,
+    ).toBe("browser:fast-tab");
+    expect(
+      mocks.openPreview.mock.calls.map(([request]) => request.input.focus.userActionRevision),
+    ).toEqual([revision + 2, revision + 1]);
+    expect(Object.keys(readThreadPreviewState(threadRef).sessions).sort()).toEqual([
+      "fast-tab",
+      "slow-tab",
+    ]);
+    expect(mocks.prepareHostedPreview).toHaveBeenCalledTimes(2);
+  });
+
+  it("preserves a manual panel choice made while a managed link is recovering", async () => {
+    const preparation = deferredPreparation();
+    mocks.prepareHostedPreview.mockReturnValueOnce(preparation.promise);
+    const link = await renderLink();
+    const revision = useRightPanelStore.getState().getUserActionRevision(threadRef);
+    const opening = link.click();
+    expect(useRightPanelStore.getState().getUserActionRevision(threadRef)).toBe(revision + 1);
+    useRightPanelStore.getState().open(threadRef, "files");
+    await act(async () => {
+      preparation.finish(prepared);
+      await opening;
+    });
+    expect(
+      selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, threadRef)?.id,
+    ).toBe("files");
+    expect(readThreadPreviewState(threadRef).sessions[snapshot.tabId]).toEqual(snapshot);
+    expect(mocks.openPreview.mock.calls[0]?.[0].input.focus.userActionRevision).toBe(revision + 1);
+    expect(mocks.prepareHostedPreview).toHaveBeenCalledExactlyOnceWith(threadRef, sourceUrl);
+  });
+
+  it("captures background modifier opens without superseding a pending foreground click", async () => {
+    const preparation = deferredPreparation();
+    mocks.prepareHostedPreview.mockReturnValueOnce(preparation.promise);
+    const link = await renderLink();
+    const revision = useRightPanelStore.getState().recordSelectionIntent(threadRef);
+    const opening = link.click({ metaKey: true });
+    expect(useRightPanelStore.getState().getUserActionRevision(threadRef)).toBe(revision);
+    await act(async () => {
+      preparation.finish(prepared);
+      await opening;
+    });
+    expect(mocks.openPreview.mock.calls[0]?.[0].input).toMatchObject({
+      background: true,
+      focus: { userActionRevision: revision },
+    });
+    expect(
+      selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, threadRef),
+    ).toBeNull();
   });
 });
