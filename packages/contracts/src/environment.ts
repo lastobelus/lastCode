@@ -99,6 +99,15 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   settledWorktreeCleanup: Schema.optionalKey(Schema.Boolean),
   worktreesDirectory: Schema.optionalKey(Schema.Boolean),
   threadAutoSettlementScope: Schema.optionalKey(Schema.Boolean),
+  worktreeDependencyCleanup: Schema.optionalKey(Schema.Boolean),
+  /** Verified compiler outputs share the resolved dependency-cleanup rule. */
+  worktreeBuildCleanup: Schema.optionalKey(Schema.Boolean),
+  /** Exact-file review of older build outputs, independently of compiler provenance. */
+  worktreeBuildReview: Schema.optionalKey(Schema.Boolean),
+  /** Whole-worktree cleanup preserves unknown, untracked, and ignored local files
+      regardless of `worktreeKeepWhen`. Missing on servers with the legacy policy. */
+  worktreeLocalPreservation: Schema.optionalKey(Schema.Boolean),
+  /** Server persists the opt-in for continuing interrupted threads after restarts. */
   threadRestartContinuation: Schema.optionalKey(Schema.Boolean),
   projectSettingsOverrides: Schema.optionalKey(Schema.Boolean),
   /**
@@ -129,6 +138,12 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   threadPullRequests: Schema.optionalKey(Schema.Boolean),
   threadPullRequestWatch: Schema.optionalKey(Schema.Boolean),
   pullRequestStackActions: Schema.optionalKey(Schema.Boolean),
+  /** Server durably owns thread worktree cleanup after deletion and understands
+      deleteWorktree plus cleanup retry/abandon commands. */
+  threadWorktreeCleanup: Schema.optionalKey(Schema.Boolean),
+  /** The update path clients should offer for this server. Absent on
+      servers that must be relaunched manually (dev checkouts, Windows
+      foreground runs, pre-update servers). */
   serverSelfUpdate: Schema.optionalKey(ServerSelfUpdateCapability),
   /** Manual commands must update this install, not the host's default global prefix. */
   serverInstallation: ForwardCompatibleOptional(ServerInstallation),
