@@ -109,6 +109,24 @@ describe("prepareHostedPreview", () => {
     expect(recover).not.toHaveBeenCalled();
   });
 
+  it("leaves a previous private HTTPS link unchanged when only an HTTP recipe exists", async () => {
+    const url = lease.url.replace("http://localhost", "https://previous-managed-server");
+    const list = vi.fn(async () => [lease]);
+    const recover = vi.fn(async () => lease);
+    expect(
+      await prepareHostedPreview({
+        threadRef,
+        url,
+        environmentUrl: "https://managed-server:8443/",
+        knownEnvironmentUrls: ["https://previous-managed-server:8080/"],
+        list,
+        recover,
+      }),
+    ).toEqual({ url, managed: false, restored: false });
+    expect(list).toHaveBeenCalledOnce();
+    expect(recover).not.toHaveBeenCalled();
+  });
+
   it("preserves a signed document when deferred capability discovery reports unsupported", async () => {
     const url = "https://environment.example/api/assets/expired/report.html";
     const list = vi.fn(async () => [lease]);

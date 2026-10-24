@@ -220,9 +220,14 @@ export function prepareHostedPreview(
       ? selectExactPrivateHostedPreview
       : selectHostedPreview;
     let owned = selectOwned(target, threadLeases);
-    if (!owned && target.protocol === "https:" && !targetIsLoopback) {
+    if (
+      !owned &&
+      target.protocol === "https:" &&
+      !targetIsLoopback &&
+      !targetIsPreviousPrivateAddress
+    ) {
       // A published HTTPS endpoint can proxy the same port's owned HTTP listener.
-      // Address ownership was checked above; preserve the physical port across schemes.
+      // Restrict this to the current host so resolution preserves its TLS hostname.
       const localHttp = new URL(target);
       localHttp.protocol = "http:";
       localHttp.port = target.port || "443";
