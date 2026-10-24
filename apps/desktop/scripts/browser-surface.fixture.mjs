@@ -34,6 +34,7 @@ import { runNativeKeyboardFixture } from "./browser-keyboard-root.fixture.mjs";
 import { runNativeKeyboardChannelFixture } from "./browser-keyboard-channel.fixture.mjs";
 
 const [scratch, wsModulePath] = process.argv.slice(2);
+const credentialAccessOnly = process.argv.includes("--credential-access");
 NodeAssert.ok(scratch && wsModulePath, "isolated fixture arguments required");
 app.setPath("userData", NodePath.join(scratch, "user-data"));
 app.on("window-all-closed", () => {});
@@ -241,7 +242,36 @@ async function main() {
   let finishFailedCapture;
   let renderScale = 1;
   const resumedChildSessions = new Set();
+  const authenticatedDocuments = [];
   const fixtureServer = NodeHttp.createServer((request, response) => {
+    if (request.url === "/api/auth/browser-session") {
+      let body = "";
+      request.setEncoding("utf8");
+      request.on("data", (chunk) => {
+        body += chunk;
+      });
+      request.on("end", () => {
+        if (JSON.parse(body).credential !== "fixture-one-use") {
+          response.writeHead(401).end();
+          return;
+        }
+        response.writeHead(200, {
+          "Content-Type": "application/json",
+          "Set-Cookie": "native-fixture-session=accepted; Path=/; HttpOnly; SameSite=Lax",
+        });
+        response.end("{}");
+      });
+      return;
+    }
+    if (request.url === "/authenticated-document") {
+      authenticatedDocuments.push(request.headers.cookie ?? "");
+      response.writeHead(
+        request.headers.cookie?.includes("native-fixture-session=accepted") ? 200 : 401,
+        { "Content-Type": "text/html" },
+      );
+      response.end("<h1>Native browser sign-in ready</h1>");
+      return;
+    }
     if (request.url === "/child-frame") {
       response.writeHead(200, { "content-type": "text/html" });
       response.end(
@@ -471,6 +501,66 @@ async function main() {
       pages.push({ page, cdp: await page.context().newCDPSession(page) });
     }
     const { page, cdp } = pages[0];
+    await milestone(
+      "desktop relay browser credential exchange",
+      async () => {
+        const context = page.context();
+        const initialCookies = await milestone("read native profile cookies", () =>
+          context.cookies(fixtureOrigin),
+        );
+        NodeAssert.equal(
+          initialCookies.some(({ name }) => name === "native-fixture-session"),
+          false,
+        );
+        await milestone("install native browser access", () =>
+          ServerBrowserPage.prepareBrowserCredential(
+            page,
+            `${fixtureOrigin}/authenticated-document`,
+            "fixture-one-use",
+            15000,
+          ),
+        );
+        const response = await milestone("first authenticated native document", () =>
+          page.goto(`${fixtureOrigin}/authenticated-document`),
+        );
+        NodeAssert.equal(response.status(), 200);
+        NodeAssert.equal(await page.locator("h1").innerText(), "Native browser sign-in ready");
+        NodeAssert.deepEqual(authenticatedDocuments, ["native-fixture-session=accepted"]);
+        NodeAssert.ok(
+          (await context.cookies(fixtureOrigin)).some(
+            ({ name, value, httpOnly }) =>
+              name === "native-fixture-session" && value === "accepted" && httpOnly,
+          ),
+        );
+        NodeAssert.equal(
+          (await pages[1].page.context().cookies(fixtureOrigin)).some(
+            ({ name }) => name === "native-fixture-session",
+          ),
+          false,
+          "browser access remains in the selected native profile",
+        );
+        await page.goto(`${fixtureOrigin}/${tabs[0].tabId}`);
+      },
+      15000,
+    );
+    results.push(
+      "production desktop CDP cookie relay installs browser access before the first document and isolates profiles",
+    );
+    if (credentialAccessOnly) {
+      console.log(
+        JSON.stringify({
+          result: "passed",
+          mode: "credential-access",
+          assertions: results,
+          actual:
+            "production desktop host, CDP relay, native cookie partitions and ServerBrowserPage credential preparation with Playwright request",
+          mocked:
+            "loopback HTTP server issues a fixture session cookie for a fixture one-use credential",
+          excluded: "installed runtime, remote TLS routing, other native lifecycle scenarios",
+        }),
+      );
+      return;
+    }
     const childOrigin = `http://localhost:${fixtureServer.address().port}`;
     await milestone("cross-site child frame", () =>
       page.evaluate(

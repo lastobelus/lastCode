@@ -113,6 +113,52 @@ describe("native viewport", () => {
   });
 });
 
+describe("browser credential failures", () => {
+  it.each([
+    ["Protocol error (Storage.getCookies): unsupported; private diagnostic", "cookie-context"],
+    ["Protocol error (Storage.setCookies): unsupported; private diagnostic", "cookie-context"],
+    ["Request timed out; private diagnostic", "timeout"],
+    ["CERT_HAS_EXPIRED; private diagnostic", "TLS error"],
+    ["ECONNREFUSED; private diagnostic", "network error"],
+  ])("reports a safe failure category for %s", async (message, category) => {
+    const post = vi.fn().mockRejectedValue(new Error(message));
+    const page = { context: () => ({ request: { post } }) } as unknown as Page;
+    const error = await ServerBrowserPage.prepareBrowserCredential(
+      page,
+      "https://managed-server.example/qa",
+      "private-one-use-credential",
+      15_000,
+    ).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(ServerBrowserPage.ServerBrowserOperationError);
+    expect(error).toMatchObject({ detail: { boundary: "browser-credential", category } });
+    expect(String(error)).not.toContain("private");
+    expect(String(error)).not.toContain("managed-server.example");
+    if (category === "cookie-context") expect(String(error)).not.toContain("--share");
+  });
+
+  it("preserves an HTTP rejection and disposes its response without exposing its body", async () => {
+    const dispose = vi.fn().mockResolvedValue(undefined);
+    const page = {
+      context: () => ({
+        request: {
+          post: vi.fn().mockResolvedValue({ ok: () => false, status: () => 401, dispose }),
+        },
+      }),
+    } as unknown as Page;
+    const error = await ServerBrowserPage.prepareBrowserCredential(
+      page,
+      "https://managed-server.example/qa",
+      "private-one-use-credential",
+      15_000,
+    ).catch((error: unknown) => error);
+    expect(error).toMatchObject({ detail: { category: "http", status: 401 } });
+    expect(String(error)).toContain("HTTP 401");
+    expect(String(error)).not.toContain("--share");
+    expect(String(error)).not.toContain("private");
+    expect(dispose).toHaveBeenCalledOnce();
+  });
+});
+
 describe("server browser element refs", () => {
   let browser: Browser;
   let context: BrowserContext;

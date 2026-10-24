@@ -2,6 +2,7 @@
 // --build-only prepares isolated artifacts without launching Electron.
 // --existing-electron uses the installed dependency without repairing or downloading a runtime.
 // --react-lifecycle mounts the production React host against fixture remote-environment state.
+// --credential-access isolates the real desktop cookie exchange and first authenticated load.
 import * as NodeAssert from "node:assert/strict";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
@@ -18,6 +19,8 @@ const desktopDirectory = NodePath.resolve(directory, "..");
 const serverDirectory = NodePath.resolve(directory, "../../server");
 const repositoryDirectory = NodePath.resolve(desktopDirectory, "../..");
 const reactLifecycle = process.argv.includes("--react-lifecycle");
+const credentialAccessOnly = process.argv.includes("--credential-access");
+NodeAssert.ok(!(reactLifecycle && credentialAccessOnly), "Select one integration scenario.");
 const webDirectory = NodePath.resolve(directory, "../../web");
 const scratch = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "browser-surface-smoke-"));
 const require = NodeModule.createRequire(NodePath.resolve(directory, "../../server/package.json"));
@@ -320,7 +323,12 @@ if (!process.argv.includes("--build-only")) {
     : ensureElectronRuntime();
   const child = NodeChildProcess.spawnSync(
     electronRuntime,
-    [manifest.bootstrap, scratch, wsModulePath],
+    [
+      manifest.bootstrap,
+      scratch,
+      wsModulePath,
+      ...(credentialAccessOnly ? ["--credential-access"] : []),
+    ],
     {
       encoding: "utf8",
       env: environment,

@@ -49,6 +49,7 @@ export async function prepareBrowserCredential(
 ): Promise<void> {
   // Playwright cannot abort this request with our signal. Drain it before handing off
   // control so a cancelled operation cannot write cookies into later work.
+  let status: number | undefined;
   try {
     const response = await page
       .context()
@@ -58,15 +59,34 @@ export async function prepareBrowserCredential(
         timeout: Math.max(1, Math.min(timeoutMs, 5_000)),
       });
     try {
+      status = response.status();
       if (!response.ok()) throw new Error("Browser session exchange was rejected.");
     } finally {
       await response.dispose();
     }
-  } catch {
-    throw new ServerBrowserOperationError(
-      "PreviewAutomationExecutionError",
-      "The browser destination rejected development access. Use the HTTPS destination produced by the retained development recipe with --share.",
-    );
+  } catch (cause) {
+    const failure = cause instanceof Error ? cause.message : "";
+    const category =
+      status !== undefined && status >= 400
+        ? "http"
+        : /Storage\.(getCookies|setCookies)/.test(failure)
+          ? "cookie-context"
+          : /timeout|timed out|ETIMEDOUT/i.test(failure)
+            ? "timeout"
+            : /certificate|TLS|SSL|ERR_CERT|CERT_|UNABLE_TO_VERIFY/i.test(failure)
+              ? "TLS error"
+              : "network error";
+    const message =
+      category === "http"
+        ? `Couldn't sign this browser in to the development server: the server answered with HTTP ${status}. Check that this address is the app's development server and that it was launched with the same development credential.`
+        : category === "cookie-context"
+          ? "Couldn't sign this browser in to the development server: this browser couldn't set up its sign-in cookies. This browser connection doesn't support development sign-in."
+          : `Couldn't sign this browser in to the development server: the server couldn't be reached (${category}). If this browser runs on a different machine than the app, use the HTTPS address published by --share.`;
+    throw new ServerBrowserOperationError("PreviewAutomationExecutionError", message, {
+      boundary: "browser-credential",
+      category,
+      ...(status === undefined ? {} : { status }),
+    });
   }
 }
 
