@@ -32,6 +32,11 @@ disclosure also provides these controls:
 On mobile, the thread shows a **Waiting for _Action name_** notice above the composer with a
 **Cancel** control.
 
-If LastCode restarts after an Action finished but before its follow-up was queued, the thread
-explains that the Action was interrupted. Choose **Resume agent** to deliver only the saved
-follow-up, or **Discard** to remove it. LastCode does not restart the command automatically.
+If the environment is paused when an Action finishes, LastCode still queues the follow-up, and the
+agent handles it after you resume the environment. If LastCode restarts after an Action finished
+but before its follow-up was delivered, LastCode retries the delivery when it starts again; you
+don't need to do anything.
+
+If LastCode restarts with an Action's outcome still unknown, the thread explains that the Action was
+interrupted. Choose **Resume agent** to send the agent what was saved from the run, or **Discard**
+to remove it. LastCode does not restart the command automatically.

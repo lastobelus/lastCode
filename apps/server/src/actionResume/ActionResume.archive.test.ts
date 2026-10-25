@@ -24,6 +24,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as WorkspaceAcquisitionTestkit from "../workspace/WorkspaceAcquisition.testkit.ts";
 import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -43,6 +44,7 @@ import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.t
 import * as ProviderReplayHarness from "../orchestration-v2/testkit/ProviderReplayHarness.ts";
 import * as ProviderEventIngestor from "../orchestration-v2/ProviderEventIngestor.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import { makePausedEnvironment } from "../orchestration-v2/EnvironmentAutomation.testkit.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ActionRunStore from "./ActionRunStore.ts";
@@ -192,6 +194,7 @@ const makeHarness = Effect.fn("ActionArchiveTest.makeHarness")(function* (
   const emit = (event: TerminalEvent) =>
     Effect.forEach([...listeners], (listener) => listener(event), { discard: true });
   const written = yield* Deferred.make<void>();
+  const writes = yield* Queue.unbounded<void>();
   const closed = yield* Deferred.make<void>();
   let terminalWrites = 0;
   let terminalCloses = 0;
@@ -225,7 +228,10 @@ const makeHarness = Effect.fn("ActionArchiveTest.makeHarness")(function* (
     write: () =>
       Effect.sync(() => {
         terminalWrites += 1;
-      }).pipe(Effect.andThen(Deferred.succeed(written, undefined))),
+      }).pipe(
+        Effect.andThen(Queue.offer(writes, undefined)),
+        Effect.andThen(Deferred.succeed(written, undefined)),
+      ),
     close: () =>
       Effect.sync(() => {
         terminalCloses += 1;
@@ -254,6 +260,7 @@ const makeHarness = Effect.fn("ActionArchiveTest.makeHarness")(function* (
     layer: Layer.mergeAll(replay, threads, receipts, runs, actions, ingestor),
     attempted,
     written,
+    writes,
     closed,
     beforeDelivery: (effect: Effect.Effect<void>) => {
       beforeDelivery = effect;
@@ -266,6 +273,81 @@ const makeHarness = Effect.fn("ActionArchiveTest.makeHarness")(function* (
     emit: (event: TerminalEvent) => emit(event),
   };
 });
+
+it.effect(
+  "queues a completed Action during environment pause without blocking another Action",
+  () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness(false);
+      const pause = yield* makePausedEnvironment;
+      yield* Effect.gen(function* () {
+        const threads = yield* ThreadManagement.ThreadManagementService;
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const actions = yield* ActionResume.ActionResume;
+        const runs = yield* ActionRunStore.ActionRunStore;
+        yield* threads.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("action-pause:create"),
+          threadId,
+          projectId,
+          title: "Paused Action",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdBy: "user",
+          creationSource: "web",
+        });
+        const invocation = { threadId, providerInstanceId: instanceId };
+        const action = yield* actions.runProjectActionAndResume(invocation, "qa");
+        yield* Queue.take(harness.writes);
+        yield* harness.emit({
+          type: "exited",
+          threadId,
+          terminalId: action.terminalId,
+          exitCode: 0,
+          exitSignal: null,
+        });
+        assert.equal(
+          Option.getOrThrow(yield* runs.get(threadId, action.runId)).state.delivery,
+          "delivered",
+        );
+        yield* actions.retryPendingFollowUps;
+        yield* orchestrator.resumeQueuedRuns;
+        const paused = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(paused.runs.length, 1);
+        assert.equal(paused.runs[0]?.status, "queued");
+        assert.equal(paused.messages[0]?.id, `action-resume:${action.runId}:follow-up`);
+        assert.deepEqual((yield* actions.inspectActionRun(invocation, action.runId)).status, {
+          state: "environment_paused",
+          environmentPaused: true,
+          automaticResumeArmed: false,
+          attentionRequired: true,
+        });
+        assert.isTrue((yield* actions.listProjectActions(invocation))[0]?.resumeEligible);
+        const next = yield* actions.runProjectActionAndResume(invocation, "qa");
+        yield* Queue.take(harness.writes);
+        assert.notEqual(next.runId, action.runId);
+        assert.equal(harness.terminalWrites(), 2);
+        yield* actions.cancelByArchive(threadId);
+
+        yield* pause.resume;
+        yield* orchestrator.resumeQueuedRuns;
+        yield* actions.retryPendingFollowUps;
+        const resumed = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(resumed.runs.length, 1);
+        assert.equal(resumed.runs[0]?.status, "starting");
+        assert.equal(resumed.messages.length, 1);
+        assert.deepEqual((yield* actions.inspectActionRun(invocation, action.runId)).status, {
+          state: "follow_up_active",
+          environmentPaused: false,
+          automaticResumeArmed: false,
+          attentionRequired: false,
+        });
+      }).pipe(Effect.provide(harness.layer.pipe(Layer.provide(pause.layer))));
+    }),
+);
 
 it.effect("queues one Action result when notification promotion wins the eligibility read", () =>
   Effect.gen(function* () {
