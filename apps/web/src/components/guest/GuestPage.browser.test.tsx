@@ -377,24 +377,24 @@ describe("GuestPage", () => {
         },
       }),
     );
+    await vi.waitFor(() =>
+      expect(screen.container.querySelector('[data-message-id="guest-row"]')).not.toBeNull(),
+    );
     await expectAtEnd();
     for (const [index, words] of [10, 40, 120].entries()) {
+      const text = "Checking the logout flow now. ".repeat(words);
       send(
         threadEvent(6 + index, {
           type: "turn-item.updated",
           payload: {
-            ...reply(
-              "logout-reply",
-              31,
-              `Logout reply\n\n${"Checking the logout flow now. ".repeat(words)}`,
-              "run-2",
-            ),
+            ...reply("logout-reply", 31, `Logout reply\n\n${text}`, "run-2"),
             streaming: true,
           },
         }),
       );
-      await expectAtEnd();
       await expect.element(screen.getByText("Logout reply")).toBeInTheDocument();
+      await expect.element(screen.getByText(text.trim(), { exact: true })).toBeInTheDocument();
+      await expectAtEnd();
     }
   });
 });

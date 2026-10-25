@@ -152,7 +152,11 @@ import {
   selectThreadRightPanelState,
   useRightPanelStore,
 } from "../rightPanelStore";
-import { isPreviewSupportedInRuntime, useThreadPreviewState } from "../previewStateStore";
+import {
+  isPreviewSupportedInRuntime,
+  useThreadPreviewState,
+  hiddenPreviewTabIds,
+} from "../previewStateStore";
 import { previewRuntimeTabId } from "../browser/previewRuntimeTabId";
 import { ThreadPreviewMiniPlayer } from "./preview/ThreadPreviewMiniPlayer";
 import { usePreviewSession } from "./preview/usePreviewSession";
@@ -989,11 +993,7 @@ export default function ChatView(props: ChatViewProps) {
 
   useEffect(() => {
     if (!activeThreadRef || !previewSessionsReady) return;
-    const hiddenTabIds = new Set(
-      Object.values(activePreviewState.sessions)
-        .filter((session) => session.runtime === "server" && session.reveal === false)
-        .map((session) => session.tabId),
-    );
+    const hiddenTabIds = hiddenPreviewTabIds(activePreviewState.sessions);
     useRightPanelStore
       .getState()
       .reconcileBrowserSurfaces(

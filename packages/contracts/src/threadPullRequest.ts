@@ -92,6 +92,17 @@ export const ThreadPullRequestWatch = Schema.Struct({
   remarksThrough: IsoDateTime,
   /** Reported remarks at remarksThrough, so late arrivals at that timestamp still count. */
   remarkIds: Schema.Array(TrimmedNonEmptyString),
+  /** Named reactions on the own account's comments already reported, keyed by comment/content/actor. */
+  reactionKeys: Schema.Array(TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  /**
+   * The highest reaction total reported on an own comment whose reactors the host named only in
+   * part, keyed by comment/content, so people past the named page still count once.
+   */
+  reactionCounts: Schema.Record(TrimmedNonEmptyString, NonNegativeInt).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
   conflicting: Schema.Boolean,
   /** Consecutive comment-only wakes; limited to prevent bot loops. */
   wakes: NonNegativeInt,

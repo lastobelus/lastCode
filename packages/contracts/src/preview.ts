@@ -137,6 +137,12 @@ export const PreviewNavStatus = Schema.Union([
 ]);
 export type PreviewNavStatus = typeof PreviewNavStatus.Type;
 
+/**
+ * Who controls the tab. `desktop` is controlled by its Electron client;
+ * `server` is controlled by the environment's automation service. A server
+ * tab's `backingPage` selects either native Electron or headless Chromium.
+ * Absent means `desktop`.
+ */
 export const PreviewRuntime = Schema.Literals(["desktop", "server"]);
 export type PreviewRuntime = typeof PreviewRuntime.Type;
 
@@ -160,6 +166,12 @@ export const PreviewSessionSnapshot = Schema.Struct({
   /** Fixed at open; Electron cannot change a webview partition after attach without losing page state. */
   profileId: Schema.optional(BrowserProfileId),
   runtime: Schema.optional(PreviewRuntime),
+  /** Server-selected page owner, fixed before the tab is published. Only server-runtime tabs set it. */
+  backingPage: Schema.optional(Schema.Literals(["desktop", "desktop-popup", "server"])),
+  /** Existing native popup identity; this tab streams its window instead of creating a guest. */
+  desktopPopupId: Schema.optional(Schema.String),
+  /** Desktop cookie jar selected for this tab; never fall back to another browser. */
+  desktopHostId: Schema.optional(Schema.String),
   automationOwner: Schema.optional(Schema.String),
   reveal: Schema.optional(Schema.Boolean),
   revealRequest: Schema.optional(Schema.Struct({ id: Schema.String, force: Schema.Boolean })),
@@ -167,12 +179,21 @@ export const PreviewSessionSnapshot = Schema.Struct({
 });
 export type PreviewSessionSnapshot = typeof PreviewSessionSnapshot.Type;
 
+const PreviewOpenFocus = Schema.Struct({
+  clientId: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
+  userActionRevision: NonNegativeInt,
+});
+
 export const PreviewOpenInput = Schema.Struct({
   threadId: ThreadId,
   url: Schema.optional(Url),
   viewport: Schema.optional(PreviewViewportSetting),
   profileId: Schema.optional(BrowserProfileId),
   runtime: Schema.optional(PreviewRuntime),
+  /** Create a visible tab without selecting it when its opened event arrives. */
+  background: Schema.optional(Schema.Boolean),
+  /** Originating client's selection when the open began; echoed only in its creation event. */
+  focus: Schema.optional(PreviewOpenFocus),
   reveal: Schema.optional(Schema.Boolean),
 });
 export type PreviewOpenInput = typeof PreviewOpenInput.Type;
@@ -243,7 +264,8 @@ export const PreviewClearProfileInput = Schema.Struct({
 export type PreviewClearProfileInput = typeof PreviewClearProfileInput.Type;
 
 export const PreviewListInput = Schema.Struct({
-  threadId: ThreadId,
+  /** Omit to list this environment's tabs for its persistent desktop host. */
+  threadId: Schema.optional(ThreadId),
 });
 export type PreviewListInput = typeof PreviewListInput.Type;
 
@@ -268,6 +290,9 @@ const PreviewOpenedEvent = Schema.Struct({
   ...PreviewEventBaseSchema.fields,
   type: Schema.Literal("opened"),
   snapshot: PreviewSessionSnapshot,
+  /** Creation focus intent, independent of hidden automation-tab visibility. */
+  background: Schema.optional(Schema.Boolean),
+  focus: Schema.optional(PreviewOpenFocus),
 });
 
 const PreviewNavigatedEvent = Schema.Struct({
@@ -379,9 +404,22 @@ export class PreviewClearProfileError extends Schema.TaggedError<PreviewClearPro
   }
 }
 
+export class PreviewNativeCloseError extends Schema.TaggedError<PreviewNativeCloseError>()(
+  "PreviewNativeCloseError",
+  { tabId: Schema.String, reason: Schema.Literals(["unavailable", "canceled"]) },
+) {
+  override get message() {
+    return this.reason === "canceled"
+      ? "The native browser window canceled closing. The tab remains open."
+      : "The native browser window has not confirmed closing. The tab remains available until it does.";
+  }
+}
+
 export const PreviewError = Schema.Union([
   PreviewSessionLookupError,
   PreviewInvalidUrlError,
   PreviewControlRequiredError,
+  PreviewRecoveryStorageError,
+  PreviewNativeCloseError,
 ]);
 export type PreviewError = typeof PreviewError.Type;

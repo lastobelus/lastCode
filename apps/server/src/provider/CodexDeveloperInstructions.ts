@@ -24,15 +24,27 @@ const normalizeAvailability = (
 ): T3CodeToolAvailability =>
   typeof availability === "boolean" ? { browser: availability, device: false } : availability;
 
-/** Instructions for unavailable tools would steer the model away from its remaining automation. */
-const toolInstructions = (availability: boolean | T3CodeToolAvailability): string => {
+/**
+ * Codex retains omitted keys, so unavailable tools need a replacement value
+ * that supersedes earlier guidance without steering away from alternatives.
+ */
+const toolInstructions = (availability: boolean | T3CodeToolAvailability) => {
   const tools = normalizeAvailability(availability);
-  return [
-    tools.browser ? T3_CODE_BROWSER_TOOL_INSTRUCTIONS : "",
-    tools.device ? T3_CODE_DEVICE_TOOL_INSTRUCTIONS : "",
-  ]
-    .filter(Boolean)
-    .join("\n\n");
+  // LastCode's browser guidance plus device guidance exceeds the per-entry cap.
+  return {
+    t3_code_tools_browser: {
+      kind: "application" as const,
+      value: tools.browser
+        ? T3_CODE_BROWSER_TOOL_INSTRUCTIONS
+        : "T3 Code browser tools are unavailable in this session. Disregard earlier T3 Code browser-tool guidance and use available alternatives.",
+    },
+    t3_code_tools_device: {
+      kind: "application" as const,
+      value: tools.device
+        ? T3_CODE_DEVICE_TOOL_INSTRUCTIONS
+        : "T3 Code device tools are unavailable in this session. Disregard earlier T3 Code device-tool guidance and use available alternatives.",
+    },
+  };
 };
 
 const CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS = `<collaboration_mode># Plan Mode (Conversational)
@@ -208,6 +220,6 @@ export function buildCodexAdditionalContext(
       kind: "application",
       value: buildRuntimeInstructions({ harness: "Codex", ...runtime }),
     },
-    ...(tools ? { t3_code_tools: { kind: "application", value: tools } } : {}),
+    ...tools,
   };
 }

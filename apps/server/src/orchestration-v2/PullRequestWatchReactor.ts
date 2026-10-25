@@ -164,6 +164,8 @@ function watchesEqual(left: ThreadPullRequestWatch, right: ThreadPullRequestWatc
     (left.owedChecks ?? []).join("\n") === (right.owedChecks ?? []).join("\n") &&
     left.remarksThrough === right.remarksThrough &&
     left.remarkIds.join("\n") === right.remarkIds.join("\n") &&
+    left.reactionKeys.join("\n") === right.reactionKeys.join("\n") &&
+    JSON.stringify(left.reactionCounts) === JSON.stringify(right.reactionCounts) &&
     left.conflicting === right.conflicting &&
     left.wakes === right.wakes &&
     left.checksAwaitedSince === right.checksAwaitedSince

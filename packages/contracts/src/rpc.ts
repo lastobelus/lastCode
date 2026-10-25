@@ -301,6 +301,13 @@ import {
 } from "./device.ts";
 import {} from "./previewAutomation.ts";
 import {
+  OrchestratorMcpFailure,
+  OrchestratorMcpThreadReadInput,
+  OrchestratorMcpThreadReadResult,
+  ThreadReadRequest,
+  ThreadReadResponse,
+} from "./orchestratorMcp.ts";
+import {
   ServerConfigStreamEvent,
   DesktopUpdateCommitInput,
   OtlpEndpointCheckInput,
@@ -456,6 +463,9 @@ export const WS_METHODS = {
   terminalRestart: "terminal.restart",
   terminalClose: "terminal.close",
 
+  threadReadLocal: "threadRead.local",
+  threadReadConnect: "threadRead.connect",
+  threadReadRespond: "threadRead.respond",
   previewOpen: "preview.open",
   previewNavigate: "preview.navigate",
   previewResize: "preview.resize",
@@ -1493,6 +1503,22 @@ const WsTerminalCloseRpc = Rpc.make(WS_METHODS.terminalClose, {
   error: Schema.Union([TerminalError, EnvironmentAuthorizationError]),
 });
 
+const WsThreadReadLocalRpc = Rpc.make(WS_METHODS.threadReadLocal, {
+  payload: OrchestratorMcpThreadReadInput,
+  success: OrchestratorMcpThreadReadResult,
+  error: Schema.Union([OrchestratorMcpFailure, EnvironmentAuthorizationError]),
+});
+const WsThreadReadConnectRpc = Rpc.make(WS_METHODS.threadReadConnect, {
+  payload: Schema.Struct({}),
+  success: ThreadReadRequest,
+  stream: true,
+  error: EnvironmentAuthorizationError,
+});
+const WsThreadReadRespondRpc = Rpc.make(WS_METHODS.threadReadRespond, {
+  payload: ThreadReadResponse,
+  error: Schema.Union([OrchestratorMcpFailure, EnvironmentAuthorizationError]),
+});
+
 const WsPreviewOpenRpc = Rpc.make(WS_METHODS.previewOpen, {
   payload: PreviewOpenInput,
   success: PreviewSessionSnapshot,
@@ -1897,6 +1923,9 @@ export class RpcScopeAuthorization extends RpcMiddleware.Service<RpcScopeAuthori
 
 export const WsRpcGroup = RpcGroup.make(
   WsGuestShareCreateRpc,
+  WsThreadReadLocalRpc,
+  WsThreadReadConnectRpc,
+  WsThreadReadRespondRpc,
   WsServerProbeRpc,
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,

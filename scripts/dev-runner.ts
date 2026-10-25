@@ -5,6 +5,7 @@ import * as NodeOS from "node:os";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NetService from "@t3tools/shared/Net";
+import { SHARED_DEV_LOOPBACK_HOST } from "@t3tools/shared/devProxy";
 import { resolveGitWorktreePath, resolveWorktreeT3Home } from "@t3tools/shared/devHome";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
@@ -320,6 +321,8 @@ export const createDevRunnerEnv = Effect.fn("dev-runner.createDevRunnerEnv")(fun
       devUrl?.toString() ??
       `http://${isDesktopMode ? DESKTOP_DEV_LOOPBACK_HOST : "localhost"}:${webPort}`,
   };
+  // Keep ordinary dev on its default binding; sharing sets the exact proxy address.
+  output.T3CODE_WEB_BIND_HOST = "";
 
   if (configuredBaseDir !== undefined) {
     output.T3CODE_HOME = resolvedBaseDir;
@@ -771,22 +774,21 @@ export const runDevRunnerWithInput = Effect.fn("dev-runner.runDevRunnerWithInput
       // process (and reboots), so the cleanup has to be registered atomically
       // with creating it. An interrupt landing in between would otherwise
       // leave a mapping pointing at a port nothing is listening on.
+      // Built clients are served by the backend; cleanup must verify that
+      // same target before removing the mapping.
+      const localTarget = input.built
+        ? {
+            port: Number(env.T3CODE_PORT),
+            host: ["::1", "[::1]"].includes(input.host?.trim() ?? "") ? "[::1]" : "127.0.0.1",
+          }
+        : undefined;
       const shared = yield* Effect.acquireRelease(
         shareDevServer({
           webPort: sharedWebPort,
-          // The backend binds 127.0.0.1 unless --host changes it. A wildcard
-          // still answers there; `--host ::1` binds only the IPv6 loopback.
-          ...(input.built
-            ? {
-                localTarget: {
-                  port: Number(env.T3CODE_PORT),
-                  host: ["::1", "[::1]"].includes(input.host?.trim() ?? "") ? "[::1]" : "127.0.0.1",
-                },
-              }
-            : {}),
+          ...(localTarget ? { localTarget } : {}),
         }),
         () =>
-          unshareDevServer(sharedWebPort).pipe(
+          unshareDevServer(sharedWebPort, localTarget).pipe(
             Effect.flatMap((result) =>
               result.cleared
                 ? Effect.void
@@ -810,6 +812,7 @@ export const runDevRunnerWithInput = Effect.fn("dev-runner.runDevRunnerWithInput
       );
 
       if (shared) {
+        env.T3CODE_WEB_BIND_HOST = SHARED_DEV_LOOPBACK_HOST;
         // The app is reached from the tailnet origin. Vite already allows
         // *.ts.net hosts; the backend needs the origin for credentialed
         // requests that bypass the proxy (desktop renderer, direct calls).

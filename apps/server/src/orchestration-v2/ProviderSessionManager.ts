@@ -41,7 +41,7 @@ import {
   withMetrics,
 } from "../observability/Metrics.ts";
 import { ProviderWorkspaceMissingError } from "../provider/Errors.ts";
-import * as ProjectService from "../project/ProjectService.ts";
+import * as ProjectStore from "./ProjectStore.ts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ServerSettings from "../serverSettings.ts";
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
@@ -312,7 +312,9 @@ export const layerWithOptions = (
       const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
       /** Unreadable settings must preserve explicit browser-access opt-outs. */
       const serverSettings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
-      const projectService = yield* Effect.serviceOption(ProjectService.ProjectService);
+      // Access only needs project existence; ProjectService depends on update
+      // admission, which constructs this manager before the rest of the runtime.
+      const projectStore = yield* Effect.serviceOption(ProjectStore.ProjectStoreV2);
       const eventSink = yield* EventSink.EventSinkV2;
       const commandOutput = yield* CommandOutputHub.CommandOutputHub;
       const idAllocator = yield* IdAllocator.IdAllocatorV2;
@@ -333,8 +335,8 @@ export const layerWithOptions = (
               (entry) => entry.enableAgentDeviceAccess !== undefined,
             );
             if (browserOverridden || deviceOverridden) {
-              const project = Option.isSome(projectService)
-                ? yield* projectService.value.getById(thread.projectId)
+              const project = Option.isSome(projectStore)
+                ? yield* projectStore.value.get(thread.projectId)
                 : Option.none();
               if (Option.isNone(project))
                 return {

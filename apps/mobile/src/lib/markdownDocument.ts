@@ -1,4 +1,5 @@
 import type { Root, RootContent } from "mdast";
+import { characterEntities } from "character-entities";
 import { unified } from "unified";
 import remarkParse from "remark-parse";
 import remarkGfm from "remark-gfm";
@@ -15,30 +16,16 @@ function decodeCodePoint(codePoint: number, entity: string): string {
 
 function decodeHtmlEntities(value: string): string {
   return value.replace(
-    /&(?:#(\d+)|#x([0-9a-f]+)|amp|apos|gt|lt|nbsp|quot);/gi,
-    (entity, decimal: string | undefined, hexadecimal: string | undefined) => {
-      if (decimal) {
-        return decodeCodePoint(Number.parseInt(decimal, 10), entity);
-      }
-      if (hexadecimal) {
-        return decodeCodePoint(Number.parseInt(hexadecimal, 16), entity);
-      }
-      switch (entity.toLowerCase()) {
-        case "&amp;":
-          return "&";
-        case "&apos;":
-          return "'";
-        case "&gt;":
-          return ">";
-        case "&lt;":
-          return "<";
-        case "&nbsp;":
-          return "\u00a0";
-        case "&quot;":
-          return '"';
-        default:
-          return entity;
-      }
+    /&(?:#(\d+)|#[xX]([0-9a-fA-F]+)|([a-zA-Z][a-zA-Z0-9]+));/g,
+    (
+      entity,
+      decimal: string | undefined,
+      hexadecimal: string | undefined,
+      named: string | undefined,
+    ) => {
+      if (decimal) return decodeCodePoint(Number.parseInt(decimal, 10), entity);
+      if (hexadecimal) return decodeCodePoint(Number.parseInt(hexadecimal, 16), entity);
+      return named && Object.hasOwn(characterEntities, named) ? characterEntities[named]! : entity;
     },
   );
 }

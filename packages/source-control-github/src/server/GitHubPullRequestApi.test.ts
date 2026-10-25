@@ -3,6 +3,7 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { afterEach, assert, expect, it, vi } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
+import * as DateTime from "effect/DateTime";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Result from "effect/Result";
@@ -353,7 +354,6 @@ function reviewThreadsPage(
           viewerDidAuthor: false,
           author: null,
           reactionGroups: [],
-          comments: { nodes: [] },
           reviews: { nodes: [] },
           reviewRequests: {
             nodes: requestedReviewers.map((requestedReviewer) => ({ requestedReviewer })),
@@ -3748,5 +3748,130 @@ layer("GitHubPullRequestApi.layer", (it) => {
 
       assert.strictEqual(lookupsOf.get(HOT), 1);
     }),
+  );
+
+  it.effect.each([
+    { commentCount: 101, requestIndex: 0 },
+    { commentCount: 101, requestIndex: 100 },
+    { commentCount: 1000, requestIndex: 999 },
+    { commentCount: 1001, requestIndex: 1000 },
+  ])(
+    "hydrates review-request reactions at index $requestIndex of $commentCount comments",
+    ({ commentCount, requestIndex }) =>
+      Effect.gen(function* () {
+        const requestId = `IC_${requestIndex + 1}`;
+        const requestEditedAt = DateTime.formatIso(
+          DateTime.add(DateTime.makeUnsafe("2026-07-01T00:00:00Z"), { minutes: requestIndex }),
+        );
+        const reactionGroups = [
+          {
+            content: "THUMBS_UP",
+            viewerHasReacted: true,
+            reactors: {
+              totalCount: 2,
+              nodes: [
+                { __typename: "User", login: "MAINTAINER" },
+                { __typename: "Bot", login: "codex[bot]" },
+              ],
+            },
+          },
+        ];
+        const comments = Array.from({ length: commentCount }, (_, index) => ({
+          id: `IC_${index + 1}`,
+          body: index === requestIndex ? "@codex review" : `Comment ${index + 1}`,
+          createdAt: DateTime.formatIso(
+            DateTime.add(DateTime.makeUnsafe("2026-07-01T00:00:00Z"), { minutes: index }),
+          ),
+          lastEditedAt: index === requestIndex ? requestEditedAt : null,
+          author: null,
+          url: `https://github.com/acme/web/pull/7#issuecomment-${index + 1}`,
+        }));
+        mockedExecute.mockImplementation((call) => {
+          if (call.kind !== "graphql") throw new Error("Expected a GraphQL activity read");
+          if (call.operationName === "PullRequestActivity") {
+            const start = Number(call.variables?.commentsAfter ?? 0);
+            const newestFirst = call.query
+              .replace(/[\s,]+/g, "")
+              .includes("orderBy:{field:UPDATED_ATdirection:DESC}");
+            const orderedComments = newestFirst ? comments.toReversed() : comments;
+            const hasNextPage = start + 100 < commentCount;
+            return Effect.succeed(
+              output(
+                encodeJson({
+                  data: {
+                    viewer: { login: "maintainer" },
+                    repository: {
+                      pullRequest: {
+                        comments: {
+                          totalCount: commentCount,
+                          pageInfo: {
+                            hasNextPage,
+                            endCursor: hasNextPage ? String(start + 100) : null,
+                          },
+                          nodes: orderedComments.slice(start, start + 100).map((comment) => ({
+                            ...comment,
+                            ...(call.query.includes("reactionGroups")
+                              ? { reactionGroups: comment.id === requestId ? reactionGroups : [] }
+                              : {}),
+                          })),
+                        },
+                        ...(call.variables?.withReviews
+                          ? {
+                              reviews: {
+                                totalCount: 1,
+                                pageInfo: lastPage,
+                                nodes: [
+                                  {
+                                    id: "PRR_empty",
+                                    body: "",
+                                    state: "COMMENTED",
+                                    submittedAt: "2026-07-01T00:00:00Z",
+                                    lastEditedAt: null,
+                                    author: null,
+                                    url: "https://github.com/acme/web/pull/7#pullrequestreview-empty",
+                                  },
+                                ],
+                              },
+                            }
+                          : {}),
+                      },
+                    },
+                  },
+                }),
+              ),
+            );
+          }
+          if (call.operationName === "ReviewThreads") {
+            return Effect.succeed(output(reviewThreadsPage([], null)));
+          }
+          throw new Error(`Unexpected GraphQL operation: ${call.operationName}`);
+        });
+        const provider = yield* GitHubPullRequestProvider.make;
+
+        const activity = yield* provider.getChangeRequestActivity({
+          cwd: "/w",
+          repository: "acme/web",
+          host: "github.com",
+          number: 7,
+        });
+
+        expect(activity.comments).toHaveLength(Math.min(commentCount, 1000));
+        expect(activity.comments.find(({ id }) => id === requestId)).toMatchObject({
+          body: "@codex review",
+          editedAt: requestEditedAt,
+          reactions: [
+            { content: "thumbs-up", count: 2, actors: ["codex[bot]"], viewerHasReacted: true },
+          ],
+        });
+        expect(activity.comments.map(({ id }) => id)).toEqual(
+          comments.slice(-1000).map(({ id }) => id),
+        );
+        expect(activity.commentsTruncated).toBe(commentCount > 1000);
+        expect(activity.reviewThreadsTruncated).toBe(false);
+        expect(activity.commentCount).toBe(commentCount);
+        expect(mockedExecute).toHaveBeenCalledTimes(
+          Math.ceil(Math.min(commentCount, 1000) / 100) + 1,
+        );
+      }),
   );
 });
