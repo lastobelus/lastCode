@@ -259,6 +259,7 @@ overrides:
   alchemy: 2.0.0-beta.80
   expo-audio: 58.0.9
   expo-network: 58.0.3
+  expo-notifications: 58.1.5
   '@clerk/expo-native-components': 0.4.0
   expo-sharing: 58.0.19
   expo-widgets: 58.0.20
