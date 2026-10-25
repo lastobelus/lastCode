@@ -53,7 +53,7 @@ git remote add upstream https://github.com/pingdotgg/t3code.git
 Run the guarded bootstrap from the checkout:
 
 ```bash
-mise exec node@24.13.1 -- node scripts/lastcode-setup.mjs \
+MISE_ACTIVATE_AGGRESSIVE=1 mise exec node@24.13.1 -- node scripts/lastcode-setup.mjs \
   --enable-nightly-writes \
   --checkpoint-daily-at "$LASTCODE_CHECKPOINT_DAILY_AT" \
   --checkpoint-time-zone "$LASTCODE_CHECKPOINT_TIME_ZONE"

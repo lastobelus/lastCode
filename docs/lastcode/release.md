@@ -349,7 +349,7 @@ For an authorized local Apple Silicon build, first select one exact installable
 checkpoint or revision in the requesting thread's worktree:
 
 ```bash
-mise exec node@24.13.1 -- node "$T3CODE_PROJECT_ROOT/scripts/lastcode-build-local-package.ts" select \
+MISE_ACTIVATE_AGGRESSIVE=1 mise exec node@24.13.1 -- node "$T3CODE_PROJECT_ROOT/scripts/lastcode-build-local-package.ts" select \
   --tag lastcode/revision/v0.0.34-nightly.20260825.1185.3
 ```
 
