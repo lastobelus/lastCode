@@ -5,6 +5,8 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
+import type { CheckpointCiCandidate } from "./lastcode-local-ci.ts";
+import { CiCommandFailure } from "./lib/lastcode-ci-process.ts";
 
 import {
   migrationDependenciesInstalled,
@@ -19,11 +21,13 @@ import {
   normalizeCheckpointCommits,
 } from "./lastcode-quiet-references.ts";
 import {
+  checkpointTrailer,
   immutableSourceFetchRefspec,
   installablePublicationArgs,
   readManifestReplayConfiguration,
   resolveCheckpointReplay,
   sourceObjectRef,
+  validateHistoricalBootstrapSourceTag,
   type CarryBootstrap,
   type CheckpointReplayMode,
   type EffectiveReplayConfiguration,
@@ -261,10 +265,11 @@ function run(
     stdio: options.capture ? ["ignore", "pipe", "pipe"] : "inherit",
   });
   if (result.error) throw result.error;
+  if (result.signal) throw new Error(`${command} terminated by ${result.signal}.`);
   if (result.status !== 0) {
     if (options.allowFailure) return "";
     const details = options.capture ? result.stderr.trim() : "";
-    throw new Error(
+    throw new CiCommandFailure(
       [`${command} ${args.join(" ")} failed with exit code ${result.status ?? "unknown"}.`, details]
         .filter(Boolean)
         .join("\n"),
@@ -852,38 +857,23 @@ export function validateHistoricalBootstrapSource(input: {
   const { representedSource, sourceTag } = input.bootstrap;
   if (!representedSource || !sourceTag) return undefined;
   const installable = input.installables.find(({ tag }) => tag === sourceTag);
-  if (!installable) {
-    throw new Error(`Carry bootstrap source tag ${sourceTag} is not an available installable.`);
-  }
-  if (
-    git(input.repoRoot, ["cat-file", "-t", `refs/tags/${sourceTag}`], { allowFailure: true }) !==
-    "tag"
-  ) {
-    throw new Error(`Carry bootstrap source tag ${sourceTag} must be annotated.`);
-  }
-  if (installable.commit !== input.bootstrap.source) {
-    throw new Error(
-      `Carry bootstrap source tag ${sourceTag} resolves to ${installable.commit}, expected ${input.bootstrap.source}.`,
-    );
-  }
-  const message = git(input.repoRoot, [
-    "for-each-ref",
-    `refs/tags/${sourceTag}`,
-    "--format=%(contents)",
-  ]);
-  const recordedSource = checkpointTrailer(message, "Source-Commit");
-  if (recordedSource !== representedSource) {
-    throw new Error(
-      `Carry bootstrap source tag ${sourceTag} records Source-Commit ${recordedSource ?? "missing"}, expected ${representedSource}.`,
-    );
-  }
-  const recordedUpstream = checkpointTrailer(message, "Upstream-Commit");
-  if (recordedUpstream !== input.bootstrap.base) {
-    throw new Error(
-      `Carry bootstrap source tag ${sourceTag} records Upstream-Commit ${recordedUpstream ?? "missing"}, expected ${input.bootstrap.base}.`,
-    );
-  }
-  return representedSource;
+  return validateHistoricalBootstrapSourceTag(
+    input.bootstrap,
+    installable
+      ? {
+          commit: installable.commit,
+          annotated:
+            git(input.repoRoot, ["cat-file", "-t", `refs/tags/${sourceTag}`], {
+              allowFailure: true,
+            }) === "tag",
+          message: git(input.repoRoot, [
+            "for-each-ref",
+            `refs/tags/${sourceTag}`,
+            "--format=%(contents)",
+          ]),
+        }
+      : undefined,
+  );
 }
 
 export function resolveRevisionPlan(input: {
@@ -1372,11 +1362,6 @@ export function checkpointSourceCommit(message: string): string | undefined {
   return checkpointTrailer(message, "Source-Commit");
 }
 
-export function checkpointTrailer(message: string, name: string): string | undefined {
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`^${escaped}:\\s*(\\S(?:.*\\S)?)\\s*$`, "m").exec(message)?.[1];
-}
-
 export function checkpointReplayMode(message: string): CheckpointReplayMode | undefined {
   const mode = checkpointTrailer(message, "Replay-Mode");
   return mode === "carry" || mode === "historical" ? mode : undefined;
@@ -1546,7 +1531,7 @@ function assertForkInvariants(worktree: string): void {
   const requiredText = new Map([
     ["packages/shared/src/desktopDistribution.ts", "codes.lastobelus.lastcode"],
     ["apps/web/src/components/branding/LastCodeWordmark.tsx", "LastCode"],
-    ["scripts/lastcode-build-mac-arm64.ts", "lastcode/checkpoint/"],
+    ["scripts/lastcode-build-mac.ts", "lastcode/checkpoint/"],
   ]);
   for (const [relativePath, expected] of requiredText) {
     const path = NodePath.join(worktree, relativePath);
@@ -1559,36 +1544,85 @@ function assertForkInvariants(worktree: string): void {
   run(worktree, "git", ["diff", "--check"]);
 }
 
-function runSmokeGate(repoRoot: string, worktree: string): void {
+function prepareCheckpointValidation(repoRoot: string, worktree: string): void {
   const vp = checkpointVpPaths(repoRoot, worktree);
   const environment = checkpointSmokeEnvironment(worktree);
   console.log("[lastcode:checkpoint] Installing checkpoint worktree dependencies...");
   run(worktree, vp.bootstrap, ["install", "--frozen-lockfile"], { environment });
   migrationDependenciesInstalled(worktree);
   assertForkInvariants(worktree);
-  run(worktree, vp.isolated, checkpointSmokeFormatAndLintCommand(), { environment });
+}
+
+function runFullCandidateValidation(
+  repoRoot: string,
+  worktree: string,
+  candidate: CheckpointCiCandidate,
+): void {
+  console.log(
+    "[lastcode:checkpoint] Collecting complete candidate validation before publication...",
+  );
   run(
     worktree,
-    vp.isolated,
+    process.execPath,
     [
-      "test",
-      "run",
-      "scripts/lastcode-carry-checkpoint.test.ts",
-      "scripts/lastcode-carry-replay.test.ts",
-      "scripts/lastcode-quiet-references.test.ts",
-      "scripts/lastcode-quiet-recovery.test.ts",
-      "scripts/lastcode-nightly.test.ts",
-      "scripts/lastcode-checkpoint.test.ts",
-      "scripts/lastcode-local-ci.test.ts",
-      "scripts/lastcode-ci-workflow.test.ts",
-      "scripts/lastcode-daily-intel-package.test.ts",
-      "scripts/build-desktop-artifact.test.ts",
-      "apps/desktop/src/electron/ElectronProtocol.test.ts",
+      NodePath.join(repoRoot, "scripts/lastcode-local-ci.ts"),
+      "--full",
+      "--candidate",
+      candidate.checkpointTag,
+      "--candidate-commit",
+      candidate.commit,
+      "--upstream-commit",
+      candidate.upstreamCommit,
+      "--source-commit",
+      candidate.sourceCommit,
     ],
-    { environment },
+    { environment: checkpointSmokeEnvironment(worktree) },
   );
-  for (const args of checkpointSmokeTypecheckCommands()) {
-    run(worktree, vp.isolated, args, { environment });
+}
+
+function runCandidateGate(
+  repoRoot: string,
+  worktree: string,
+  candidate: CheckpointCiCandidate,
+): void {
+  prepareCheckpointValidation(repoRoot, worktree);
+  runFullCandidateValidation(repoRoot, worktree, candidate);
+}
+
+function runSmokeGate(repoRoot: string, worktree: string, candidate: CheckpointCiCandidate): void {
+  prepareCheckpointValidation(repoRoot, worktree);
+  const vp = checkpointVpPaths(repoRoot, worktree);
+  const environment = checkpointSmokeEnvironment(worktree);
+  try {
+    run(worktree, vp.isolated, checkpointSmokeFormatAndLintCommand(), { environment });
+    run(
+      worktree,
+      vp.isolated,
+      [
+        "test",
+        "run",
+        "scripts/lastcode-carry-checkpoint.test.ts",
+        "scripts/lastcode-carry-replay.test.ts",
+        "scripts/lastcode-quiet-references.test.ts",
+        "scripts/lastcode-quiet-recovery.test.ts",
+        "scripts/lastcode-nightly.test.ts",
+        "scripts/lastcode-checkpoint.test.ts",
+        "scripts/lastcode-local-ci.test.ts",
+        "scripts/lastcode-ci-workflow.test.ts",
+        "scripts/lastcode-daily-intel-package.test.ts",
+        "scripts/build-desktop-artifact.test.ts",
+        "apps/desktop/src/electron/ElectronProtocol.test.ts",
+      ],
+      { environment },
+    );
+    for (const args of checkpointSmokeTypecheckCommands()) {
+      run(worktree, vp.isolated, args, { environment });
+    }
+  } catch (error) {
+    if (!(error instanceof CiCommandFailure)) throw error;
+    console.error(`[lastcode:checkpoint] Smoke check failed: ${error.message}`);
+    runFullCandidateValidation(repoRoot, worktree, candidate);
+    throw error;
   }
 }
 
@@ -1732,7 +1766,13 @@ function publishRevisionIfNeeded(
     // With no replay, the revision tags the existing published source object.
     // Keep that history (which may contain merges) rather than manufacturing new commits.
     failurePhase = "smoke";
-    if (options.smoke) runSmokeGate(repoRoot, worktree);
+    if (options.smoke)
+      runCandidateGate(repoRoot, worktree, {
+        checkpointTag: plan.installableTag,
+        commit: candidateCommit,
+        upstreamCommit,
+        sourceCommit,
+      });
     assertPinnedNightly(repoRoot, plan.nightly.tag, upstreamCommit);
     if (
       git(worktree, ["rev-parse", "HEAD"]) !== candidateCommit ||
@@ -2652,7 +2692,19 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         selection = { ...selection, head: normalizedHead };
         writeRecoverySelection(selectionPath, selection);
       }
-      runSmokeGate(repoRoot, worktree);
+      const selectedNightly = parseNightlyTag(selection.nightlyTag);
+      if (!selectedNightly) throw new Error("Selected recovery has an invalid nightly tag.");
+      const plannedTag = checkpoints.some(
+        (checkpoint) => checkpoint.nightly.tag === selectedNightly.tag,
+      )
+        ? nextRevisionPlan(selectedNightly, installables).installableTag
+        : checkpointTagFromNightlyTag(selectedNightly.tag);
+      runCandidateGate(repoRoot, worktree, {
+        checkpointTag: plannedTag,
+        commit: selection.head,
+        upstreamCommit,
+        sourceCommit: selection.sourceCommit,
+      });
       assertPinnedNightly(repoRoot, selection.nightlyTag, upstreamCommit);
       if (
         git(worktree, ["rev-parse", "HEAD"]) !== selection.head ||
@@ -2908,7 +2960,13 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
     try {
       if (carryWorktreePrepared) {
         const worktree = automationWorktree();
-        if (options.smoke) runSmokeGate(repoRoot, worktree);
+        if (options.smoke)
+          runSmokeGate(repoRoot, worktree, {
+            checkpointTag: checkpointTagFromNightlyTag(plan.baseNightly.tag),
+            commit: candidateCommit,
+            upstreamCommit: plan.baseNightly.commit,
+            sourceCommit,
+          });
         assertPinnedNightly(repoRoot, plan.baseNightly.tag, plan.baseNightly.commit);
         if (
           git(worktree, ["rev-parse", "HEAD"]) !== candidateCommit ||
@@ -3051,7 +3109,13 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
       let pendingTag: string | undefined;
       let carryRevisionFailurePhase: "publication" | "smoke" = "smoke";
       try {
-        if (options.smoke) runSmokeGate(repoRoot, worktree);
+        if (options.smoke)
+          runCandidateGate(repoRoot, worktree, {
+            checkpointTag: revisionPlan.installableTag,
+            commit: candidateCommit,
+            upstreamCommit: plan.baseNightly.commit,
+            sourceCommit,
+          });
         assertPinnedNightly(repoRoot, plan.baseNightly.tag, plan.baseNightly.commit);
         if (
           git(worktree, ["rev-parse", "HEAD"]) !== candidateCommit ||
@@ -3289,7 +3353,13 @@ function runCheckpoint(repoRoot: string, options: CheckpointOptions, selectionPa
         }
       }
       failurePhase = "smoke";
-      if (options.smoke) runSmokeGate(repoRoot, worktree);
+      if (options.smoke)
+        runSmokeGate(repoRoot, worktree, {
+          checkpointTag: checkpointTagFromNightlyTag(nightly.tag),
+          commit: candidateCommit,
+          upstreamCommit: nightly.commit,
+          sourceCommit,
+        });
       assertPinnedNightly(repoRoot, nightly.tag, nightly.commit);
       if (
         git(worktree, ["rev-parse", "HEAD"]) !== candidateCommit ||

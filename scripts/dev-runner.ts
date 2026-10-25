@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { recordDependencyUse } from "../packages/shared/src/dependencyActivity.ts";
+import * as Clock from "effect/Clock";
 
 import * as NodeOS from "node:os";
 
@@ -807,12 +809,8 @@ export const runDevRunnerWithInput = Effect.fn("dev-runner.runDevRunnerWithInput
         "[dev-runner] --share is not supported for dev:desktop (the renderer is pinned to loopback). Use `dev`, which runs the whole browser stack.",
       );
     } else {
-      // acquireRelease, not share-then-addFinalizer: the mapping outlives this
-      // process (and reboots), so the cleanup has to be registered atomically
-      // with creating it. An interrupt landing in between would otherwise
-      // leave a mapping pointing at a port nothing is listening on.
-      // Built clients are served by the backend; cleanup must verify that
-      // same target before removing the mapping.
+      // Mappings survive process exit/reboots, so acquireRelease must register cleanup atomically.
+      // Built clients use the backend port; cleanup must verify the same target before removal.
       const localTarget = input.built
         ? {
             port: Number(env.T3CODE_PORT),

@@ -51,6 +51,15 @@ const ITEMS: ReadonlyArray<SettingsSearchItem> = [
 ];
 
 describe("searchSettings", () => {
+  it.each(["quick ci mode", "github only", "always local"])(
+    "finds the environment Quick CI mode for %s",
+    (query) => {
+      expect(searchSettings(query).map((item) => item.id)).toContain("local-ci-quick-mode");
+      expect(SETTINGS_SEARCH_ITEMS.find((item) => item.id === "local-ci-quick-mode")?.scope).toBe(
+        "environment-defaults",
+      );
+    },
+  );
   it("matches titles, sections, and remembered setting details", () => {
     expect(searchSettings("word", ITEMS).map((item) => item.id)).toEqual(["word-wrap"]);
     expect(searchSettings("network", ITEMS).map((item) => item.id)).toEqual(["network-access"]);

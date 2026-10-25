@@ -23,6 +23,7 @@ import type * as Scope from "effect/Scope";
 import { TestClock } from "effect/testing";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
+import * as DesktopClientSettings from "../settings/DesktopClientSettings.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopRendererHistory from "../telemetry/DesktopRendererHistory.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
@@ -213,6 +214,7 @@ const managerLayer = (platform: NodeJS.Platform = "darwin") =>
       }),
     ),
     Layer.provideMerge(DesktopBrowserHost.layer),
+    Layer.provideMerge(DesktopClientSettings.layerTest()),
     Layer.provideMerge(layerBrowserSession),
     Layer.provideMerge(
       Layer.mock(PreviewPasskeys.PreviewPasskeys)({
@@ -1487,6 +1489,8 @@ describe("PreviewManager", () => {
         yield* manager.registerWebview("tab_shutdown", 42);
         yield* manager.setMainWindow({
           isDestroyed: () => false,
+          on: vi.fn(),
+          off: vi.fn(),
           once: (event: string, listener: () => void) => windowEvents.set(event, listener),
           webContents: { setBackgroundThrottling: vi.fn() },
         } as never);
@@ -1513,6 +1517,8 @@ describe("PreviewManager", () => {
         const replacement = yield* manager
           .setMainWindow({
             isDestroyed: () => destroyed,
+            on: vi.fn(),
+            off: vi.fn(),
             once: vi.fn(),
             webContents: { setBackgroundThrottling: vi.fn() },
           } as never)
@@ -2311,6 +2317,12 @@ describe("PreviewManager", () => {
       Effect.gen(function* () {
         const picked = new Map<number, (event: unknown, ...args: unknown[]) => void>();
         const capturePage = vi.fn(async () => ({
+          isEmpty: () => false,
+          crop: (rect: Electron.Rectangle) => ({
+            isEmpty: () => false,
+            getSize: () => ({ width: rect.width, height: rect.height }),
+            toDataURL: () => "data:image/png;base64,YW5ub3RhdGlvbg==",
+          }),
           toJPEG: () => Buffer.from("annotation"),
           toDataURL: () => "data:image/png;base64,YW5ub3RhdGlvbg==",
           getSize: () => ({ width: 10, height: 10 }),
@@ -2412,6 +2424,7 @@ describe("PreviewManager", () => {
           }));
           fromId.mockReturnValue(
             Object.assign(makeTestPreviewWebContents(capturePage), {
+              executeJavaScript: vi.fn(async () => ({ width: 1000, height: 600 })),
               isFocused: () => true,
               once: vi.fn(),
               ipc: {
@@ -2570,6 +2583,248 @@ describe("PreviewManager", () => {
           artifactDirectory: "/tmp/t3/dev/browser-artifacts",
         });
         expect("cause" in error).toBe(false);
+      }),
+    ),
+  );
+  effectIt.effect.each(["same URL", "another URL"] as const)(
+    "keeps an error-document navigation failed until a genuine retry to %s starts",
+    (destination) =>
+      withManager((manager) =>
+        Effect.gen(function* () {
+          let url = "http://localhost:5733/";
+          let loading = false;
+          const listeners = new Map<string, (...args: unknown[]) => void>();
+          fromId.mockReturnValue({
+            id: 42,
+            isDestroyed: () => false,
+            getType: () => "webview",
+            getURL: () => url,
+            getTitle: () => "localhost:5733",
+            isLoadingMainFrame: () => loading,
+            getZoomFactor: () => 1,
+            setZoomFactor: vi.fn(),
+            setAudioMuted: vi.fn(),
+            isCurrentlyAudible: () => false,
+            on: vi.fn((event: string, listener: (...args: unknown[]) => void) => {
+              listeners.set(event, listener);
+            }),
+            off: vi.fn(),
+            ipc: { on: vi.fn(), off: vi.fn() },
+            send: webviewSend,
+            navigationHistory: { canGoBack: () => false, canGoForward: () => false },
+            setIgnoreMenuShortcuts: vi.fn(),
+            setWindowOpenHandler: vi.fn(),
+            debugger: {
+              isAttached: () => false,
+              attach: vi.fn(),
+              sendCommand: vi.fn(async () => undefined),
+              on: vi.fn(),
+              off: vi.fn(),
+            },
+          } as never);
+          const statuses: PreviewManager.PreviewNavStatus[] = [];
+          let observed: Deferred.Deferred<PreviewManager.PreviewNavStatus> | null = null;
+          yield* manager.subscribeStateChanges((_tabId, state) =>
+            Effect.gen(function* () {
+              statuses.push(state.navStatus);
+              if (observed !== null) yield* Deferred.succeed(observed, state.navStatus);
+            }),
+          );
+          yield* manager.createTab("tab_failed");
+          yield* manager.registerWebview("tab_failed", 42);
+          const emitAndObserve = Effect.fnUntraced(function* (event: string, ...args: unknown[]) {
+            const milestone = yield* Deferred.make<PreviewManager.PreviewNavStatus>();
+            observed = milestone;
+            const listener = listeners.get(event);
+            expect(listener).toBeDefined();
+            listener!(...args);
+            const status = yield* Deferred.await(milestone);
+            observed = null;
+            return status;
+          });
+
+          // Subframe failures and aborted requests must not replace the main-frame state.
+          const initialCount = statuses.length;
+          listeners.get("did-fail-load")?.(
+            {},
+            -105,
+            "ERR_NAME_NOT_RESOLVED",
+            "https://missing-frame.example/",
+            false,
+          );
+          listeners.get("did-fail-load")?.({}, -3, "ERR_ABORTED", url, true);
+          expect(statuses).toHaveLength(initialCount);
+          expect(statuses.at(-1)?.kind).toBe("Success");
+
+          loading = true;
+          expect((yield* emitAndObserve("did-start-loading")).kind).toBe("Loading");
+          const failure = yield* emitAndObserve(
+            "did-fail-load",
+            {},
+            -102,
+            "ERR_CONNECTION_REFUSED",
+            url,
+            true,
+          );
+          expect(failure).toEqual({
+            kind: "LoadFailed",
+            url,
+            title: "localhost:5733",
+            code: -102,
+            description: "ERR_CONNECTION_REFUSED",
+          });
+
+          // The error document can update its title while Chromium is still loading.
+          expect(yield* emitAndObserve("page-title-updated")).toEqual(failure);
+          expect(yield* emitAndObserve("did-navigate")).toEqual(failure);
+          expect(yield* emitAndObserve("did-navigate-in-page")).toEqual(failure);
+
+          // Finishing the error document does not mean the requested page loaded.
+          loading = false;
+          expect(yield* emitAndObserve("did-navigate")).toEqual(failure);
+          expect(yield* emitAndObserve("did-stop-loading")).toEqual(failure);
+          expect(yield* emitAndObserve("page-title-updated")).toEqual(failure);
+          expect(yield* emitAndObserve("did-navigate-in-page")).toEqual(failure);
+
+          const failedCount = statuses.length;
+          listeners.get("did-fail-load")?.({}, -3, "ERR_ABORTED", url, true);
+          listeners.get("did-fail-load")?.({}, -102, "ERR_CONNECTION_REFUSED", url, false);
+          expect(statuses).toHaveLength(failedCount);
+          expect(statuses.at(-1)).toEqual(failure);
+
+          if (destination === "another URL") url = "https://recovered.example/";
+          loading = true;
+          // Aggregate loading includes iframe requests, so only a new document in
+          // the main frame can release the pending failure and start a retry.
+          expect(yield* emitAndObserve("did-start-loading")).toEqual(failure);
+          listeners.get("did-start-navigation")?.({ isMainFrame: false, isSameDocument: false });
+          expect(yield* emitAndObserve("page-title-updated")).toEqual(failure);
+          loading = false;
+          expect(yield* emitAndObserve("did-stop-loading")).toEqual(failure);
+          listeners.get("did-start-navigation")?.({ isMainFrame: true, isSameDocument: true });
+          expect(yield* emitAndObserve("did-navigate-in-page")).toEqual(failure);
+
+          loading = true;
+          expect(
+            yield* emitAndObserve("did-start-navigation", {
+              isMainFrame: true,
+              isSameDocument: false,
+            }),
+          ).toEqual({
+            kind: "Loading",
+            url,
+            title: "localhost:5733",
+          });
+          loading = false;
+          expect(yield* emitAndObserve("did-navigate")).toEqual({
+            kind: "Success",
+            url,
+            title: "localhost:5733",
+          });
+          expect((yield* emitAndObserve("did-stop-loading")).kind).toBe("Success");
+        }),
+      ),
+  );
+
+  effectIt.effect("delivers the iframe annotation with its native image crop", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        let pickedReady = Promise.withResolvers<void>();
+        let onPicked: ((event: unknown, ...args: unknown[]) => void) | undefined;
+        const crop = vi.fn(() => ({
+          isEmpty: () => false,
+          getSize: () => ({ width: 200, height: 60 }),
+          toDataURL: () => "data:image/png;base64,crop",
+        }));
+        const capturePage = vi.fn(async (...args: unknown[]) => {
+          if (args.length) throw new Error("UnknownVizError");
+          return {
+            isEmpty: () => false,
+            getSize: () => ({ width: 1280, height: 720 }),
+            toJPEG: () => Buffer.from("image"),
+            crop,
+          };
+        });
+        const wc = Object.assign(makeTestPreviewWebContents(capturePage), {
+          once: vi.fn(),
+          isFocused: () => true,
+        });
+        wc.ipc.removeListener = vi.fn();
+        vi.mocked(wc.ipc.on).mockImplementation((channel, listener) => {
+          if (channel === "preview:element-picked") {
+            onPicked = (event, ...args) => listener(event as Electron.IpcMainEvent, ...args);
+            pickedReady.resolve();
+          }
+          return wc.ipc;
+        });
+        fromId.mockReturnValue(wc);
+        yield* manager.createTab("tab_1");
+        yield* manager.registerWebview("tab_1", 42);
+        const pick = yield* manager.pickElement("tab_1").pipe(Effect.forkChild);
+        yield* Effect.promise(() => pickedReady.promise);
+        const rect = { x: 900, y: 300, width: 200, height: 60 };
+        const payload = {
+          id: "annotation_1",
+          pageUrl: "https://example.com/editor",
+          pageTitle: "Editor",
+          comment: "Tighten this spacing",
+          elements: [
+            {
+              id: "element_1",
+              rect,
+              element: {
+                pageUrl: "about:srcdoc",
+                pageTitle: "Preview",
+                tagName: "h1",
+                selector: "h1",
+                htmlPreview: "<h1>Preview</h1>",
+                componentName: null,
+                source: null,
+                stack: [],
+                styles: "color: black",
+                pickedAt: "2026-06-11T00:00:00.000Z",
+                framePath: [{ pageUrl: "https://example.com/editor", selector: "iframe" }],
+              },
+            },
+          ],
+          regions: [],
+          strokes: [],
+          styleChanges: [],
+          screenshot: null,
+          createdAt: "2026-06-11T00:00:00.000Z",
+        };
+        capturePage.mockRejectedValueOnce(new Error("Compositor warming up"));
+        onPicked?.({}, payload, rect, "attach");
+        yield* TestClock.adjust("120 millis");
+        const result = yield* Fiber.join(pick);
+        expect(result).toEqual({
+          annotation: {
+            ...payload,
+            screenshot: {
+              dataUrl: "data:image/png;base64,crop",
+              width: 200,
+              height: 60,
+              cropRect: rect,
+            },
+          },
+          submission: "attach",
+        });
+        expect(capturePage).toHaveBeenCalledTimes(2);
+        expect(capturePage).toHaveBeenCalledWith();
+        expect(crop).toHaveBeenCalledWith(rect);
+        expect(webviewSend).toHaveBeenCalledWith("preview:annotation-captured");
+        capturePage.mockRejectedValue(new Error("Compositor unavailable"));
+        yield* manager.setAnnotationSendEnabled("tab_1", true);
+        pickedReady = Promise.withResolvers<void>();
+        const failedPick = yield* manager.pickElement("tab_1").pipe(Effect.forkChild);
+        yield* Effect.promise(() => pickedReady.promise);
+        onPicked?.({}, payload, rect, "send");
+        yield* TestClock.adjust("1 second");
+        expect(yield* Fiber.join(failedPick)).toEqual({
+          annotation: payload,
+          submission: "send",
+          screenshotFailed: true,
+        });
       }),
     ),
   );

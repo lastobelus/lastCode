@@ -10,7 +10,7 @@ import {
 import { AsyncResult } from "effect/reactivity";
 import { expect, it, vi } from "vite-plus/test";
 
-import { act, render } from "../../test/render";
+import { act, render, stubGlobal } from "../../test/render";
 import { useRightPanelStore } from "../rightPanelStore";
 
 const state = vi.hoisted(() => ({
@@ -56,6 +56,7 @@ vi.mock(import("../state/session"), async (original) => {
         },
         () => readEnvironmentScope(id, scope),
       ),
+    readPreparedConnection: () => null,
   };
 });
 vi.mock(import("../state/server"), async (original) => {
@@ -86,14 +87,17 @@ vi.mock(import("../hooks/useLocalStorage"), async (original) => ({
   useLocalStorage: (() => ["vscode", vi.fn()]) as never,
   getLocalStorageItem: (() => "vscode") as never,
 }));
-vi.mock(import("../localApi"), async (original) => ({
-  ...(await original()),
-  readLocalApi: () =>
-    ({
-      contextMenu: { show: state.choose },
-      shell: { openExternal: state.openExternal },
-    }) as never,
-}));
+vi.mock(import("../localApi"), async (original) => {
+  const api = {
+    contextMenu: { show: state.choose },
+    shell: { openExternal: state.openExternal },
+  };
+  return {
+    ...(await original()),
+    readLocalApi: (() => api) as never,
+    ensureLocalApi: (() => api) as never,
+  };
+});
 vi.mock(import("@t3tools/client-runtime/change-request-links"), async (original) => ({
   ...(await original()),
   resolvePullRequestPreviewTarget: () => null,
@@ -141,6 +145,7 @@ function setup() {
       await state.copy(await (await item.getType("text/plain")).text());
     }),
   );
+  stack.use(stubGlobal("desktopBridge", {}));
   return stack.move();
 }
 
