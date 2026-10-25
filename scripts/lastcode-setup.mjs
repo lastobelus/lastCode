@@ -225,7 +225,7 @@ function main(argv) {
   const options = parseOptions(argv);
   if (options.help) {
     console.log(
-      "Usage: mise exec node@24.13.1 -- node scripts/lastcode-setup.mjs --enable-nightly-writes (--checkpoint-interval-seconds <seconds> | --checkpoint-daily-at <HH:MM> --checkpoint-time-zone <IANA-zone>) [--trusted-project-action <lc-id>]... [--dry-run]",
+      "Usage: MISE_ACTIVATE_AGGRESSIVE=1 mise exec node@24.13.1 -- node scripts/lastcode-setup.mjs --enable-nightly-writes (--checkpoint-interval-seconds <seconds> | --checkpoint-daily-at <HH:MM> --checkpoint-time-zone <IANA-zone>) [--trusted-project-action <lc-id>]... [--dry-run]",
     );
     console.log();
     console.log(
