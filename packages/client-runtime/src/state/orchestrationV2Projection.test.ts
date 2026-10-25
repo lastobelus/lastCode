@@ -517,6 +517,27 @@ describe("applyOrchestrationV2ProjectionEvent", () => {
     expect(next?.visibleTurnItems).toEqual([inheritedRow]);
     expect(next?.visibleTurnItems[0]).toBe(inheritedRow);
   });
+
+  it("retains ordinary creator history while receiving a synchronized placement change", () => {
+    const thread = {
+      ...emptyProjection.thread,
+      createdBy: "agent" as const,
+      creatorThreadId: ThreadId.make("creator:origin"),
+      creatorGrouping: "independent" as const,
+    };
+    const next = applyOrchestrationV2ProjectionEvent(emptyProjection, {
+      id: EventId.make("creator:placement"),
+      type: "thread.metadata-updated",
+      threadId,
+      occurredAt: now,
+      payload: thread,
+    });
+    expect(next?.thread.creatorThreadId).toBe(thread.creatorThreadId);
+    expect(next?.thread.creatorGrouping).toBe("independent");
+    expect(next?.thread.lineage).toEqual(emptyProjection.thread.lineage);
+    expect(next?.runs).toBe(emptyProjection.runs);
+    expect(next?.messages).toBe(emptyProjection.messages);
+  });
 });
 
 it("does not scan every row against every run for a streaming item update", () => {
