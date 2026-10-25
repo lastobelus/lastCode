@@ -171,6 +171,45 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
     reference === null ||
     displayTargets.some((entry) => entry.settings[key] !== reference.settings[key]);
   const writeSettings = useSettingsWriter();
+  const supportsDependencies = supportsMobileWorktreeDependencyCleanup(targets, projectSelected);
+  const supportsBuilds =
+    targets.length > 0 &&
+    targets.every(
+      (target) =>
+        target.environment.serverConfig.environment.capabilities.worktreeBuildCleanup === true,
+    );
+  const anyBuildsSupported = targets.some(
+    (target) =>
+      target.environment.serverConfig.environment.capabilities.worktreeBuildCleanup === true,
+  );
+  const preservationSupported =
+    targets.length > 0 &&
+    targets.every(
+      (target) =>
+        target.environment.serverConfig.environment.capabilities.worktreeLocalPreservation === true,
+    );
+  const anyPreservationSupported = targets.some(
+    (target) =>
+      target.environment.serverConfig.environment.capabilities.worktreeLocalPreservation === true,
+  );
+  const disposableOutputsLabel = anyBuildsSupported
+    ? "Remove inactive dependencies and build outputs"
+    : "Remove inactive worktree dependencies";
+  const disposableOutputsResources = supportsBuilds
+    ? "Remove recognized dependencies and unchanged verified build outputs on supported selected environments."
+    : anyBuildsSupported
+      ? "Remove recognized dependencies where supported. Build outputs are reclaimed only on selected environments with build cleanup support."
+      : "Remove recognized npm or pnpm dependencies where supported. Build outputs are kept.";
+  const disposableOutputsTiming = preservationSupported
+    ? "When this rule is enabled, every shared owner must be archived for immediate cleanup. Unarchived and ownerless worktrees use the configured delay since actual use."
+    : anyPreservationSupported
+      ? "Updated environments clean archived owners immediately when every owner is archived and cleanup is enabled; unarchived and ownerless worktrees use the configured delay since actual use. Older selected environments use their existing thread-inactivity rule."
+      : "Selected environments use their existing thread-inactivity rule.";
+  const disposableOutputsDescription = `${disposableOutputsResources} ${disposableOutputsTiming} This rule keeps source and other files. Active consumers prevent cleanup. Reinstall or rebuild before resuming work.`;
+  const pageProjectKeys = PAGE_PROJECT_KEYS[props.page].filter(
+    (key) => key !== "worktreeCleanup" || supportsDependencies,
+  );
+  const dependencySettings = resolveMobileWorktreeDependencySettings(displayTargets);
   const write = (patch: ServerSettingsPatch) => {
     if (writeInFlight.current) {
       const queued = queuedPatch.current;
@@ -490,6 +529,114 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                       />
                     </View>
                   </SettingsSection>
+                  {supportsDependencies ? (
+                    <>
+                      {projectSelected ? (
+                        <SettingsSection
+                          title="Automatic worktree cleanup"
+                          trailing={
+                            pendingWrites === 0 && dependencySettings.mode === null ? (
+                              <MixedValuesLabel projectSelected />
+                            ) : null
+                          }
+                        >
+                          {WORKTREE_CLEANUP_CHOICES.map((choice, index) => (
+                            <SettingsChoiceRow
+                              key={choice.mode}
+                              label={choice.label}
+                              description={choice.description}
+                              selected={dependencySettings.mode === choice.mode}
+                              separated={index > 0}
+                              disabled={disabled}
+                              onPress={() => {
+                                if (disabled || !supportsDependencies) return;
+                                persistWrites(
+                                  planMobileWorktreeDependencyCleanup(targets, true, {
+                                    kind: "mode",
+                                    value: choice.mode,
+                                  }),
+                                );
+                              }}
+                            />
+                          ))}
+                        </SettingsSection>
+                      ) : null}
+                      <SettingsSection
+                        title="Worktree dependencies"
+                        trailing={
+                          pendingWrites === 0 && dependencySettings.mixedDays ? (
+                            <MixedValuesLabel projectSelected={projectSelected} />
+                          ) : null
+                        }
+                      >
+                        <SettingsSwitchRow
+                          icon="archivebox"
+                          label={disposableOutputsLabel}
+                          subtitle={disposableOutputsDescription}
+                          value={dependencySettings.enabled}
+                          disabled={dependenciesDisabled}
+                          onValueChange={(enabled) =>
+                            updateDependencyDays(
+                              enabled ? DEFAULT_MOBILE_DEPENDENCY_RETENTION_DAYS : null,
+                            )
+                          }
+                        />
+                        {dependencySettings.enabled === true ? (
+                          <View className="border-t border-border-subtle">
+                            <ListRowLayout
+                              icon="clock"
+                              label="Inactive days"
+                              description="1 to 3650 days"
+                              disabled={dependenciesDisabled}
+                              accessory={
+                                <RetentionDaysField
+                                  key={targets
+                                    .map(
+                                      (target) =>
+                                        `${target.environment.environmentId}:${target.projectId}`,
+                                    )
+                                    .join(",")}
+                                  value={dependencySettings.days}
+                                  disabled={dependenciesDisabled}
+                                  onValueChange={updateDependencyDays}
+                                />
+                              }
+                            />
+                          </View>
+                        ) : null}
+                        {projectSelected && dependencySettings.mode !== "custom" ? (
+                          <Text className="px-4 pb-4 text-sm text-foreground-muted">
+                            Select Custom to change this project's dependency cleanup.
+                          </Text>
+                        ) : null}
+                      </SettingsSection>
+                    </>
+                  ) : (
+                    <SettingsSection title="Worktree dependencies">
+                      <Text className="p-4 text-sm text-foreground-muted">
+                        {projectSelected
+                          ? "Update the selected environments to configure project worktree and dependency cleanup."
+                          : "Choose updated macOS or Linux environments to use dependency cleanup."}
+                      </Text>
+                    </SettingsSection>
+                  )}
+                  {!projectSelected ? (
+                    supportsLocalCi ? (
+                      <LocalCiSettingsSection
+                        settings={displayTargets.map((target) => target.settings.lastcodeLocalCi)}
+                        disabled={disabledFor("lastcodeLocalCi")}
+                        onChange={(lastcodeLocalCi) => {
+                          if (supportsLocalCi) write({ lastcodeLocalCi });
+                        }}
+                      />
+                    ) : (
+                      <SettingsSection title="Local CI">
+                        <Text className="p-4 text-sm text-foreground-muted">
+                          Update older servers to configure Local CI.
+                        </Text>
+                      </SettingsSection>
+                    )
+                  ) : null}
                 </>
               ) : null}
             </>

@@ -5,8 +5,7 @@ import {
   type ModelSelection,
   type ProjectIconOverride,
   ProjectId,
-  type ProjectScript,
-  SCRIPT_RUN_COMMAND_PATTERN,
+  ProjectScript,
   type ThreadEnvMode,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -39,13 +38,25 @@ export interface ProjectMetaUpdateCommand {
   readonly scripts?: ReadonlyArray<ProjectScript>;
 }
 
+export interface ProjectScriptsReconcileCommand {
+  readonly type: "project.scripts.reconcile";
+  readonly commandId: CommandId;
+  readonly projectId: ProjectId;
+  readonly expectedScripts: ReadonlyArray<ProjectScript>;
+  readonly scripts: ReadonlyArray<ProjectScript>;
+}
+
 export interface ProjectDeleteCommand {
   readonly type: "project.delete";
   readonly commandId: CommandId;
   readonly projectId: ProjectId;
 }
 
-export type ProjectCommand = ProjectCreateCommand | ProjectMetaUpdateCommand | ProjectDeleteCommand;
+export type ProjectCommand =
+  | ProjectCreateCommand
+  | ProjectMetaUpdateCommand
+  | ProjectDeleteCommand
+  | ProjectScriptsReconcileCommand;
 
 export class ProjectCommandInvariantError extends Schema.TaggedError<ProjectCommandInvariantError>()(
   "ProjectCommandInvariantError",
@@ -102,7 +113,7 @@ export interface ProjectCommandState {
 }
 
 const monogramSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
-const isScriptRunCommand = Schema.is(SCRIPT_RUN_COMMAND_PATTERN);
+const newScriptIdPattern = new RegExp(`^[a-z0-9][a-z0-9-]{0,${MAX_SCRIPT_ID_LENGTH - 1}}$`);
 
 /** Read state and commit the planned event under the project lock. */
 export function planProjectCommand(input: {
@@ -167,6 +178,27 @@ export function planProjectCommand(input: {
       });
     }
 
+    case "project.scripts.reconcile": {
+      const project = activeProject;
+      if (project === undefined) return missingProject();
+      if (
+        !Schema.toEquivalence(Schema.Array(ProjectScript))(project.scripts, command.expectedScripts)
+      ) {
+        return invariant(
+          "Project Actions changed while reconciliation was preparing. Retry from the current project state.",
+        );
+      }
+      return planProjectCommand({
+        ...input,
+        command: {
+          type: "project.meta.update",
+          commandId: command.commandId,
+          projectId: command.projectId,
+          scripts: command.scripts,
+        },
+      });
+    }
+
     case "project.meta.update": {
       const project = activeProject;
       if (project === undefined) return missingProject();
@@ -180,7 +212,8 @@ export function planProjectCommand(input: {
         // Allow editing or removing persisted invalid script ids, while rejecting new invalid ids.
         const existingIds = new Set(project.scripts.map((script) => script.id));
         for (const script of command.scripts) {
-          if (!existingIds.has(script.id) && !isScriptRunCommand(`script.${script.id}.run`)) {
+          if (!existingIds.has(script.id) && !newScriptIdPattern.test(script.id)) {
+            // The raw ID is unbounded user input and this detail is persisted.
             return invariant(
               `Script IDs must be 1-${MAX_SCRIPT_ID_LENGTH} lowercase letters, digits or hyphens, starting with a letter or digit (got ${script.id.length} characters).`,
             );

@@ -16,26 +16,6 @@
       "vite": { "entry": [".github/**/*.test.cjs"] },
       "vitest": { "entry": [".github/**/*.test.cjs"] },
     },
-    "scripts": {
-      // Knip loads its preprocessor through a CLI option; native verification and
-      // worktree setup (from t3.json) run directly. release-desktop.yml bundles the
-      // Windows verify script with esbuild through a path knip does not trace, and
-      // electron-builder loads the macOS signer by path.
-      "entry": [
-        // These fixture scripts are injected into a browser page by path.
-        "fixtures/*/*.js",
-        "knip-schemas.ts",
-        "mobile-native-client.ts",
-        "setup-worktree.ts",
-        "sign-macos.ts",
-        "verify-windows-desktop-artifact.ts",
-      ],
-      "ignoreDependencies": ["esbuild"],
-      // The `t3` npm package's files: copied into the package, never imported.
-      // knip-schemas.test.ts writes a throwaway project to .knip-test-*, which a
-      // knip run beside it in check:changed must not report.
-      "ignore": ["npm-launcher/**", ".knip-test-*/**"],
-    },
     "apps/server": {
       // Vite+ pack entries and the launcher used by installed background services.
       "entry": [
@@ -75,10 +55,39 @@
         "src/preview-pip-preload.ts!",
         "src/mac-permission-preload.ts!",
         "src/preview/Annotation.css!",
+        "scripts/picker-frames.smoke.mjs",
+        "scripts/picker-electron-capture.smoke.mjs",
+        // The browser surface smoke command bundles these entries by filename.
+        "scripts/browser-surface.smoke.mjs",
+        "scripts/browser-surface.fixture.mjs",
+        "scripts/browser-surface.preload.mjs",
+        "scripts/browser-surface.renderer.mjs",
       ],
       // The injected runtime resolves Playwright by string; release tooling runs
       // electron-builder from this workspace, outside its package scripts.
       "ignoreDependencies": ["playwright-core", "electron-builder"],
+    },
+    "scripts": {
+      // Spawned by filename, or declarations paired with JavaScript tooling.
+      "entry": [
+        // These fixture scripts are injected into a browser page by path.
+        "fixtures/*/*.js",
+        "knip-schemas.ts",
+        "mobile-native-client.ts",
+        "setup-worktree.ts",
+        "sign-macos.ts",
+        "verify-windows-desktop-artifact.ts",
+        "fixtures/lastcode-docs-install.mjs",
+        "fixtures/lastcode-docs-local-update.mjs",
+        "lastcode-packaged-server-supervisor.mjs!",
+        "lib/lastcode-ci-worker.mjs!",
+        "lastcode-local-update.d.mts",
+        "lastcode-lock.d.mts",
+      ],
+      // esbuild bundles the Windows verifier, and electron-builder loads the signer by path.
+      "ignoreDependencies": ["esbuild"],
+      // The npm launcher is copied into the package rather than imported.
+      "ignore": ["npm-launcher/**", ".knip-test-*/**"],
     },
     "apps/web": {
       // Worktree setup (scripts/setup-worktree.ts) runs this directly, and evidence

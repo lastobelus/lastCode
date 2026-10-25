@@ -10,6 +10,8 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as TestConsole from "effect/testing/TestConsole";
 import { Command } from "effect/cli";
+import type { QuitError } from "effect/Terminal";
+import type { CliError } from "effect/cli/CliError";
 
 import { cli } from "../binCli.ts";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
@@ -18,8 +20,17 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 // Windows chmod cannot force these directory or file permission failures.
 const windowsHost = HostProcess.Platform.defaultValue() === "win32";
 
-const runCli = (args: ReadonlyArray<string>) =>
-  Command.runWith(cli, { version: "0.0.0" })(args).pipe(
+const runCommand: (
+  args: ReadonlyArray<string>,
+) => Effect.Effect<
+  void,
+  Exclude<Command.Error<typeof cli>, QuitError> | CliError,
+  NodeServices.NodeServices | NetService.NetService
+> = Command.runWith(cli, { version: "0.0.0" });
+const runCli = (
+  args: ReadonlyArray<string>,
+): Effect.Effect<void, Effect.Error<ReturnType<typeof runCommand>>> =>
+  runCommand(args).pipe(
     Effect.provide(Layer.mergeAll(NodeServices.layer, NetService.layer, TestConsole.layer)),
   );
 
