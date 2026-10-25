@@ -5,6 +5,7 @@ import { AsyncResult } from "effect/reactivity";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import * as previewRuntime from "~/browser/previewRuntime";
+import type { OpenPreviewMutation } from "~/browser/openFileInPreview";
 
 import {
   openTerminalLinkInPreview,
@@ -79,6 +80,27 @@ const snapshot: PreviewSessionSnapshot = {
   canGoForward: false,
   updatedAt: "2026-06-20T00:00:00.000Z",
 };
+
+function installWebPopup() {
+  const tab = {
+    opener: {},
+    closed: false,
+    document: { createElement: () => ({}), head: { append: vi.fn() } },
+    location: { replace: vi.fn() },
+    close: vi.fn(),
+  };
+  const externalOpen = vi.fn(() => tab);
+  vi.stubGlobal("window", { open: externalOpen });
+  return { tab, externalOpen };
+}
+
+function deferredRecovery() {
+  let resolve!: (value: PreparedHostedPreview) => void;
+  const promise = new Promise<PreparedHostedPreview>((complete) => {
+    resolve = complete;
+  });
+  return { promise, resolve };
+}
 
 beforeEach(() => {
   vi.stubGlobal("window", { desktopBridge: {} });
@@ -254,6 +276,76 @@ describe("openTerminalLinkInPreview", () => {
       expect(replace).toHaveBeenCalledExactlyOnceWith(url);
       expect(browserDefaultsMocks.resolve).not.toHaveBeenCalled();
       expect(openPreview).not.toHaveBeenCalled();
+      expect(fallbackToBrowser).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["system preference", "unavailable preview"])(
+    "reserves a hosted terminal link's external tab before recovery with %s",
+    async (reason) => {
+      const { tab, externalOpen } = installWebPopup();
+      vi.spyOn(previewRuntime, "isPreviewAvailableFor").mockReturnValue(
+        reason !== "unavailable preview",
+      );
+      linkTargetMocks.preference.mockReturnValue(reason === "system preference" ? "system" : "app");
+      const recovery = deferredRecovery();
+      hostingMocks.prepare.mockReturnValueOnce(recovery.promise);
+      const fallbackToBrowser = vi.fn();
+      const openPreview = vi.fn(async () => AsyncResult.success(snapshot));
+      const url = "http://localhost:5173/app";
+      const resolved = "http://workstation.example:5173/app";
+
+      const opening = openTerminalLinkInPreview({
+        url,
+        threadRef,
+        openPreview,
+        fallbackToBrowser,
+        forceBrowser: false,
+      });
+      const reservationsAtClick = [...externalOpen.mock.calls];
+      recovery.resolve({ url: resolved, managed: true, restored: true });
+      await opening;
+
+      expect(reservationsAtClick).toEqual([["about:blank", "_blank"]]);
+      expect(hostingMocks.prepare).toHaveBeenCalledExactlyOnceWith(threadRef, url);
+      expect(tab.location.replace).toHaveBeenCalledExactlyOnceWith(resolved);
+      expect(tab.close).not.toHaveBeenCalled();
+      expect(openPreview).not.toHaveBeenCalled();
+      expect(fallbackToBrowser).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["success", "interrupted"])(
+    "closes the terminal link reservation after integrated opening ends with %s",
+    async (outcome) => {
+      const { tab, externalOpen } = installWebPopup();
+      vi.spyOn(previewRuntime, "isPreviewAvailableFor").mockReturnValue(true);
+      const recovery = deferredRecovery();
+      hostingMocks.prepare.mockReturnValueOnce(recovery.promise);
+      const openPreview = vi.fn<OpenPreviewMutation<never>>(async () =>
+        outcome === "success"
+          ? AsyncResult.success(snapshot)
+          : AsyncResult.failure(Cause.interrupt()),
+      );
+      const fallbackToBrowser = vi.fn();
+      const url = "http://localhost:5173/app";
+
+      const opening = openTerminalLinkInPreview({
+        url,
+        threadRef,
+        openPreview,
+        fallbackToBrowser,
+        forceBrowser: false,
+      });
+      const reservationsAtClick = [...externalOpen.mock.calls];
+      recovery.resolve({ url, managed: true, restored: true });
+      await opening;
+
+      expect(reservationsAtClick).toEqual([["about:blank", "_blank"]]);
+      expect(hostingMocks.prepare).toHaveBeenCalledExactlyOnceWith(threadRef, url);
+      expect(openPreview).toHaveBeenCalledOnce();
+      expect(tab.close).toHaveBeenCalledOnce();
+      expect(tab.location.replace).not.toHaveBeenCalled();
       expect(fallbackToBrowser).not.toHaveBeenCalled();
     },
   );

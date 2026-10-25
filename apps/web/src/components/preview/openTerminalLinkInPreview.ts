@@ -63,13 +63,10 @@ interface OpenTerminalLinkInPreviewInput<E> {
 export async function openTerminalLinkInPreview<E>(
   input: OpenTerminalLinkInPreviewInput<E>,
 ): Promise<void> {
+  const webClient = typeof window !== "undefined" && !window.desktopBridge;
   // A web client cannot validate or reuse the owning desktop's cookie jar,
   // including when a modifier requests an external browser.
-  if (
-    typeof window !== "undefined" &&
-    !window.desktopBridge &&
-    input.terminalLinkProfileName !== undefined
-  ) {
+  if (webClient && input.terminalLinkProfileName !== undefined) {
     throw new TerminalLinkProfileUnavailableError({ reason: "hosted-web" });
   }
   // Resolve explicit intent before either browser opens. Never infer it from the URL.
@@ -82,64 +79,67 @@ export async function openTerminalLinkInPreview<E>(
           { profileName: input.terminalLinkProfileName },
           explicitDefaults,
         );
-  if (
-    typeof window !== "undefined" &&
-    !window.desktopBridge &&
-    (input.forceBrowser || !mayBeHostedPreviewUrl(input.threadRef, input.url))
-  ) {
-    await openPreparedExternalUrl(input.url, async () =>
-      hostedPreviewNavigationUrl(await prepareHostedPreview(input.threadRef, input.url)),
-    );
-    return;
-  }
-  const prepared = await prepareHostedPreview(input.threadRef, input.url);
-  const supportsPreview =
-    !input.forceBrowser &&
-    isWebUrl(input.url) &&
-    isPreviewAvailableFor(input.threadRef.environmentId) &&
-    input.threadRef.threadId.length > 0 &&
-    (await resolveBrowserLinkTargetPreference()) === "app";
+  const potentialIntegratedLink =
+    webClient && !input.forceBrowser && mayBeHostedPreviewUrl(input.threadRef, input.url);
+  const prepareDestination = async () => {
+    const prepared = await prepareHostedPreview(input.threadRef, input.url);
+    if (webClient && !potentialIntegratedLink) return hostedPreviewNavigationUrl(prepared);
+    const supportsPreview =
+      !input.forceBrowser &&
+      isWebUrl(input.url) &&
+      isPreviewAvailableFor(input.threadRef.environmentId) &&
+      input.threadRef.threadId.length > 0 &&
+      (await resolveBrowserLinkTargetPreference()) === "app";
 
-  if (!supportsPreview) {
-    if (explicitProfileId !== undefined && !input.forceBrowser) {
-      throw new TerminalLinkProfileUnavailableError({ reason: "preview-unavailable" });
+    if (!supportsPreview) {
+      if (explicitProfileId !== undefined && !input.forceBrowser) {
+        throw new TerminalLinkProfileUnavailableError({ reason: "preview-unavailable" });
+      }
+      return hostedPreviewNavigationUrl(prepared);
     }
-    input.fallbackToBrowser(hostedPreviewNavigationUrl(prepared));
-    return;
-  }
 
-  const errorContext = {
-    environmentId: input.threadRef.environmentId,
-    threadId: input.threadRef.threadId,
-    targetOrigin: new URL(input.url).origin,
+    const errorContext = {
+      environmentId: input.threadRef.environmentId,
+      threadId: input.threadRef.threadId,
+      targetOrigin: new URL(input.url).origin,
+    };
+
+    const defaults = explicitDefaults ?? (await resolveBrowserDefaults());
+    const profileId = preparedPreviewOpenProfileId(
+      prepared,
+      browserDefaultOpenProfileId(defaults),
+      explicitProfileId,
+    );
+    const result = await input.openPreview({
+      environmentId: input.threadRef.environmentId,
+      input: {
+        threadId: input.threadRef.threadId,
+        ...preparedPreviewOpenTarget(input.threadRef.environmentId, prepared, input.url, profileId),
+        viewport: browserDefaultOpenViewport(defaults),
+        profileId,
+      },
+    });
+    if (result._tag === "Failure") {
+      if (isAtomCommandInterrupted(result)) {
+        return null;
+      }
+      const error = new TerminalLinkPreviewOpenError({ ...errorContext, cause: result.cause });
+      if (explicitProfileId !== undefined) throw error;
+      console.error(error);
+      return hostedPreviewNavigationUrl(prepared);
+    }
+    recordVisitForThread(input.threadRef, input.url);
+    applyPreviewServerSnapshot(input.threadRef, result.value);
+    useRightPanelStore.getState().openBrowser(input.threadRef, result.value.tabId);
+    return null;
   };
 
-  const defaults = explicitDefaults ?? (await resolveBrowserDefaults());
-  const profileId = preparedPreviewOpenProfileId(
-    prepared,
-    browserDefaultOpenProfileId(defaults),
-    explicitProfileId,
-  );
-  const result = await input.openPreview({
-    environmentId: input.threadRef.environmentId,
-    input: {
-      threadId: input.threadRef.threadId,
-      ...preparedPreviewOpenTarget(input.threadRef.environmentId, prepared, input.url, profileId),
-      viewport: browserDefaultOpenViewport(defaults),
-      profileId,
-    },
-  });
-  if (result._tag === "Failure") {
-    if (isAtomCommandInterrupted(result)) {
-      return;
-    }
-    const error = new TerminalLinkPreviewOpenError({ ...errorContext, cause: result.cause });
-    if (explicitProfileId !== undefined) throw error;
-    console.error(error);
-    input.fallbackToBrowser(hostedPreviewNavigationUrl(prepared));
+  if (webClient) {
+    await openPreparedExternalUrl(input.url, prepareDestination, {
+      allowWithoutPopup: potentialIntegratedLink,
+    });
     return;
   }
-  recordVisitForThread(input.threadRef, input.url);
-  applyPreviewServerSnapshot(input.threadRef, result.value);
-  useRightPanelStore.getState().openBrowser(input.threadRef, result.value.tabId);
+  const destination = await prepareDestination();
+  if (destination !== null) input.fallbackToBrowser(destination);
 }
