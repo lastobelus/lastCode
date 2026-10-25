@@ -347,7 +347,6 @@ export const make = Effect.gen(function* () {
       const outcome = yield* Deferred.make<"ready" | "exited">();
       let reading = false;
       let carry = "";
-      let busy = false;
       let activity = 0;
       const unsubscribe = yield* input.subscribe((event) => {
         if (event.threadId !== input.threadId || event.terminalId !== input.terminalId) {
@@ -356,11 +355,9 @@ export const make = Effect.gen(function* () {
         activity += 1;
         // A new shell process starts idle; the manager resets its subprocess state without an event.
         if (event.type === "started" || event.type === "restarted") {
-          busy = false;
           reading = false;
           carry = "";
         }
-        if (event.type === "activity") busy = event.hasRunningSubprocess;
         if (event.type === "output") {
           const text = carry + event.data;
           carry = text.slice(-(BRACKETED_PASTE_ON.length - 1));
@@ -371,17 +368,16 @@ export const make = Effect.gen(function* () {
         }
         return reading ? Deferred.succeed(outcome, "ready").pipe(Effect.asVoid) : Effect.void;
       });
-      const seen = activity;
-      const currentBusy = yield* terminalManager.hasRunningSubprocess({
-        threadId: input.threadId,
-        terminalId: input.terminalId,
-      });
-      if (activity === seen) busy = currentBusy;
-      // A startup prompt runs as a child process, so a busy shell keeps waiting for the user.
+      // Background jobs remain owned, but only foreground programs can hold startup input.
       const quiet = Effect.gen(function* () {
         while (true) {
           const seen = activity;
           yield* Effect.sleep(SHELL_QUIET_FALLBACK);
+          if (activity !== seen) continue;
+          const busy = yield* terminalManager.hasForegroundSubprocess({
+            threadId: input.threadId,
+            terminalId: input.terminalId,
+          });
           if (activity !== seen) continue;
           if (!busy) return "ready" as const;
           yield* input.onStartupPrompt;
