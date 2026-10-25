@@ -33,7 +33,6 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
 import { forkParked } from "../serverActivation.ts";
-import * as EnvironmentPauseStore from "../environment/EnvironmentPauseStore.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
@@ -273,15 +272,6 @@ const mapActionResumeError =
     );
 
 const make = Effect.gen(function* () {
-  const pauseStore = yield* Effect.serviceOption(EnvironmentPauseStore.EnvironmentPauseStore);
-  const automationPaused = Option.isSome(pauseStore)
-    ? pauseStore.value.get.pipe(
-        Effect.map((session) => session !== null && session.phase !== "resuming"),
-      )
-    : Effect.succeed(false);
-  const recoveringEnvironmentPause = Option.isSome(pauseStore)
-    ? pauseStore.value.get.pipe(Effect.map((session) => session !== null))
-    : Effect.succeed(false);
   const serviceScope = yield* Effect.scope;
   const clock = yield* Clock.Clock;
   const crypto = yield* Crypto.Crypto;
@@ -521,13 +511,6 @@ const make = Effect.gen(function* () {
       protocolCaptureByRunId.delete(state.runId);
       return;
     }
-    // Completion is already retained in the Action ledger. Do not wake the
-    // provider merely to acknowledge the pause; Resume will retry this result.
-    if (yield* automationPaused) {
-      if (state.heldByEnvironmentPause !== true)
-        yield* persistState({ ...state, heldByEnvironmentPause: true });
-      return;
-    }
     const thread = yield* eligibleThreadForFollowUp(threadId);
     if (thread === null) return;
     const retained = yield* runs.get(threadId, state.runId);
@@ -558,7 +541,7 @@ const make = Effect.gen(function* () {
       attachments: [],
       createdBy: "system",
       creationSource: "server",
-      // Serialized V2 admission queues a raced user turn rather than steering it.
+      // The orchestrator queues paused automatic wakes without starting a provider.
       dispatchMode: { type: "queue_after_active" },
     });
     yield* persistState({ ...state, delivery: "delivered" });
@@ -751,6 +734,7 @@ const make = Effect.gen(function* () {
     const providerSupported = yield* providerSupportsActionResume(invocation.providerInstanceId);
     const { project } = yield* resolveProjectContext(invocation.threadId);
     const scripts = yield* resolveActions(project);
+    yield* deliverPending(invocation.threadId);
     const launchBlocked = actionBlocksNewLaunch(registry.getLatest(invocation.threadId));
     return scripts.map((script) => {
       const disabledReason = !providerSupported
@@ -881,6 +865,7 @@ const make = Effect.gen(function* () {
           message: `Project Action "${script.name}" is not opted in for agent-triggered resume.`,
         });
       }
+      yield* deliverPending(invocation.threadId);
       return yield* mutex.withPermits(1)(
         admission.admit("action-resume", launchActionUnlocked(invocation, script)).pipe(
           Effect.catchTags({
@@ -1164,22 +1149,6 @@ const make = Effect.gen(function* () {
             finishedAt,
           });
         } else if (
-          state.delivery === "pending" &&
-          state.heldByEnvironmentPause !== true &&
-          (yield* recoveringEnvironmentPause)
-        ) {
-          // Completion may have committed just before shutdown, before its
-          // live delivery saw the pause. Retain that hold before it can clear.
-          yield* persistState({ ...state, heldByEnvironmentPause: true });
-        } else if (
-          state.delivery === "pending" &&
-          state.heldByEnvironmentPause !== true &&
-          shell.archivePending?.status !== "stopping" &&
-          !(yield* recoveringEnvironmentPause)
-        ) {
-          // Environment pause and a stopping archive retain automatic delivery intent.
-          yield* persistState({ ...state, delivery: "available" });
-        } else if (
           shell.actionResume?.runId !== state.runId ||
           shell.actionResume.revision !== state.revision
         ) {
@@ -1199,6 +1168,7 @@ const make = Effect.gen(function* () {
   yield* forkParked(
     Effect.gen(function* () {
       yield* mutex.withPermits(1)(reconcile(initialStates));
+      yield* retryPendingFollowUps;
       yield* Stream.runForEach(Stream.fromQueue(domainEvents), (event) => {
         const threadId = event.threadId;
         if (event.type === "thread.archived") return cancel(threadId, "cancelled_by_archive");

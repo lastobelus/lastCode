@@ -42,6 +42,7 @@ import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.t
 import * as ProviderReplayHarness from "../orchestration-v2/testkit/ProviderReplayHarness.ts";
 import * as ProviderEventIngestor from "../orchestration-v2/ProviderEventIngestor.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import { makePausedEnvironment } from "../orchestration-v2/EnvironmentAutomation.testkit.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ActionRunStore from "./ActionRunStore.ts";
@@ -248,6 +249,67 @@ const makeHarness = Effect.fn("ActionArchiveTest.makeHarness")(function* (
       Effect.suspend(() => listener?.(event) ?? Effect.die("Action terminal is not subscribed")),
   };
 });
+
+it.effect(
+  "queues a completed Action during environment pause without blocking another Action",
+  () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness(false);
+      const pause = yield* makePausedEnvironment;
+      yield* Effect.gen(function* () {
+        const threads = yield* ThreadManagement.ThreadManagementService;
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const actions = yield* ActionResume.ActionResume;
+        const runs = yield* ActionRunStore.ActionRunStore;
+        yield* threads.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("action-pause:create"),
+          threadId,
+          projectId,
+          title: "Paused Action",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdBy: "user",
+          creationSource: "web",
+        });
+        const invocation = { threadId, providerInstanceId: instanceId };
+        const action = yield* actions.runProjectActionAndResume(invocation, "qa");
+        yield* harness.emit({
+          type: "exited",
+          threadId,
+          terminalId: action.terminalId,
+          exitCode: 0,
+          exitSignal: null,
+        });
+        assert.equal(
+          Option.getOrThrow(yield* runs.get(threadId, action.runId)).state.delivery,
+          "delivered",
+        );
+        yield* actions.retryPendingFollowUps;
+        yield* orchestrator.resumeQueuedRuns;
+        const paused = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(paused.runs.length, 1);
+        assert.equal(paused.runs[0]?.status, "queued");
+        assert.equal(paused.messages[0]?.id, `action-resume:${action.runId}:follow-up`);
+        assert.isTrue((yield* actions.listProjectActions(invocation))[0]?.resumeEligible);
+        const next = yield* actions.runProjectActionAndResume(invocation, "qa");
+        assert.notEqual(next.runId, action.runId);
+        assert.equal(harness.terminalWrites(), 2);
+        yield* actions.cancelByArchive(threadId);
+
+        yield* pause.resume;
+        yield* orchestrator.resumeQueuedRuns;
+        yield* actions.retryPendingFollowUps;
+        const resumed = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(resumed.runs.length, 1);
+        assert.equal(resumed.runs[0]?.status, "starting");
+        assert.equal(resumed.messages.length, 1);
+      }).pipe(Effect.provide(harness.layer.pipe(Layer.provide(pause.layer))));
+    }),
+);
 
 it.effect("queues one Action result when notification promotion wins the eligibility read", () =>
   Effect.gen(function* () {

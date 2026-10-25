@@ -690,7 +690,7 @@ it.effect(
     }).pipe(Effect.provide(StoreTestLayer)),
 );
 
-it.effect("recovers running and pending states only after explicit resume", () =>
+it.effect("recovers interrupted running Actions only after explicit resume", () =>
   Effect.gen(function* () {
     const h = yield* makeHarness;
     yield* h.store.save(retained("lost"), "saved output");
@@ -713,23 +713,6 @@ it.effect("recovers running and pending states only after explicit resume", () =
         "saved output",
       );
     }).pipe(Effect.provide(h.layer));
-    h.state.metadataReceipt = yield* Deferred.make<void>();
-    yield* h.store.save(
-      retained("pending", {
-        outcome: "succeeded",
-        delivery: "pending",
-        startedAt: "2026-08-18T00:00:00.000Z",
-      }),
-    );
-    yield* Effect.gen(function* () {
-      const actions = yield* ActionResume.ActionResume;
-      yield* Deferred.await(h.state.metadataReceipt!);
-      assert.equal(h.state.latest?.runId, "pending");
-      assert.equal(h.state.latest?.delivery, "available");
-      yield* actions.discardInterrupted(threadId);
-      assert.equal(h.state.latest?.delivery, "disposed");
-      assert.equal(h.followUps().length, 1);
-    }).pipe(Effect.provide(Layer.fresh(h.layer)));
   }).pipe(Effect.provide(StoreTestLayer)),
 );
 
@@ -831,14 +814,18 @@ it.effect.each(["running", "pending"] as const)(
         });
         yield* Deferred.succeed(activation, undefined);
         yield* Deferred.await(metadataReceipt);
+        if (status === "pending") {
+          yield* Deferred.await(h.delivered);
+          yield* actions.retryPendingFollowUps;
+        }
         assert.equal(h.state.latest?.runId, run.runId);
-        assert.equal(h.state.latest?.delivery, "available");
+        assert.equal(h.state.latest?.delivery, status === "running" ? "available" : "delivered");
         assert.equal(h.state.latest?.outcome, status === "running" ? "process_lost" : "succeeded");
         assert.equal(
           (yield* actions.inspectActionRun(invocation, run.runId)).outputTail,
           "first-upgrade output",
         );
-        assert.equal(h.followUps().length, 0);
+        assert.equal(h.followUps().length, status === "running" ? 0 : 1);
         assert.equal(h.opened.length, 0);
       }).pipe(Effect.provide(layer));
     }).pipe(Effect.provide(StoreTestLayer)),
@@ -1527,116 +1514,72 @@ it.effect(
     }).pipe(Effect.provide(StoreTestLayer)),
 );
 
-it.effect("retains a completed Action while paused and delivers once after Resume", () =>
-  Effect.gen(function* () {
-    const h = yield* makeHarness;
-    const pause = yield* makePausedEnvironment;
-    yield* Effect.gen(function* () {
-      const actions = yield* ActionResume.ActionResume;
-      const run = yield* actions.runProjectActionAndResume(invocation, "qa");
-      yield* h.emit({
-        type: "exited",
-        threadId,
-        terminalId: run.terminalId,
-        exitCode: 0,
-        exitSignal: null,
-      });
-      yield* actions.retryPendingFollowUps;
-      assert.equal(h.state.latest?.delivery, "pending");
-      assert.equal(h.followUps().length, 0);
-      yield* pause.resume;
-      yield* actions.retryPendingFollowUps;
-      yield* actions.retryPendingFollowUps;
-      assert.equal(h.state.latest?.delivery, "delivered");
-      assert.equal(h.followUps().length, 1);
-      assert.equal(h.followUps()[0]?.messageId, `action-resume:${run.runId}:follow-up`);
-    }).pipe(Effect.provide(h.layer.pipe(Layer.provide(pause.layer))));
-  }).pipe(Effect.provide(StoreTestLayer)),
+it.effect.each(["list", "launch"] as const)(
+  "retries a completed pending follow-up before an Action %s checks admission",
+  (operation) =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness;
+      yield* Effect.gen(function* () {
+        const actions = yield* ActionResume.ActionResume;
+        const run = yield* actions.runProjectActionAndResume(invocation, "qa");
+        h.state.failDelivery = true;
+        yield* h.emit({
+          type: "exited",
+          threadId,
+          terminalId: run.terminalId,
+          exitCode: 0,
+          exitSignal: null,
+        });
+        assert.equal(h.state.latest?.delivery, "pending");
+        h.state.failDelivery = false;
+        if (operation === "list") {
+          assert.isTrue((yield* actions.listProjectActions(invocation))[0]?.resumeEligible);
+        } else {
+          const next = yield* actions.runProjectActionAndResume(invocation, "qa");
+          assert.notEqual(next.runId, run.runId);
+        }
+        assert.equal(h.followUps().length, 1);
+        assert.equal(h.followUps()[0]?.messageId, `action-resume:${run.runId}:follow-up`);
+        assert.equal(
+          Option.getOrThrow(yield* h.store.get(threadId, run.runId)).state.delivery,
+          "delivered",
+        );
+      }).pipe(Effect.provide(h.layer));
+    }).pipe(Effect.provide(StoreTestLayer)),
 );
 
-it.effect("delivers a pause-held result once after Resume clears and the service restarts", () =>
-  Effect.gen(function* () {
-    const h = yield* makeHarness;
-    const pause = yield* makePausedEnvironment;
-    let runId: string | undefined;
-    yield* Effect.gen(function* () {
-      const actions = yield* ActionResume.ActionResume;
-      const run = yield* actions.runProjectActionAndResume(invocation, "qa");
-      runId = run.runId;
-      yield* h.emit({
-        type: "output",
-        threadId,
-        terminalId: run.terminalId,
-        data:
-          ActionResume.actionOutputMarker(run.runId, "start") +
-          "saved while paused" +
-          ActionResume.actionOutputMarker(run.runId, "end"),
-      });
-      yield* h.emit({
-        type: "exited",
-        threadId,
-        terminalId: run.terminalId,
-        exitCode: 0,
-        exitSignal: null,
-      });
-      const held = Option.getOrThrow(yield* h.store.get(threadId, run.runId));
-      assert.equal(held.state.delivery, "pending");
-      assert.isTrue(held.state.heldByEnvironmentPause);
-      assert.equal(held.outputTail, "saved while paused");
-      yield* actions.retryPendingFollowUps;
-      yield* actions.retryPendingFollowUps;
-      assert.equal(h.state.latest?.revision, held.state.revision);
-      assert.equal(h.followUps().length, 0);
-      yield* pause.resume;
-      // The session can clear before the next open-state scheduler scan.
-      yield* Ref.set(pause.state, null);
-    }).pipe(Effect.provide(h.layer.pipe(Layer.provide(pause.layer))));
-
-    yield* Effect.gen(function* () {
-      const actions = yield* ActionResume.ActionResume;
-      // This is the automatic open-state retry, with no manual Action Resume.
-      yield* actions.retryPendingFollowUps;
-      yield* actions.retryPendingFollowUps;
-      assert.equal(h.state.latest?.delivery, "delivered");
-      assert.equal(h.followUps().length, 1);
-      assert.equal(h.followUps()[0]?.messageId, `action-resume:${runId}:follow-up`);
-      assert.include(h.followUps()[0]!.text, "saved while paused");
-    }).pipe(Effect.provide(Layer.fresh(h.layer.pipe(Layer.provide(pause.layer)))));
-  }).pipe(Effect.provide(StoreTestLayer)),
-);
-
-it.effect.each(["pausing", "resuming"] as const)(
-  "keeps an environment-deferred Action pending across restart during %s",
-  (phase) =>
+it.effect.each(
+  (["pausing", "resuming", "cleared"] as const).flatMap((phase) =>
+    [false, true].map((heldByEnvironmentPause) => ({ phase, heldByEnvironmentPause })),
+  ),
+)(
+  "automatically queues a completed Action at startup with pause $phase and held=$heldByEnvironmentPause",
+  ({ phase, heldByEnvironmentPause }) =>
     Effect.gen(function* () {
       const h = yield* makeHarness;
       const pause = yield* makePausedEnvironment;
       if (phase === "resuming") yield* pause.resume;
-      yield* h.store.save(
-        retained("environment-deferred", { outcome: "succeeded", delivery: "pending" }),
-        "retained output",
-      );
+      if (phase === "cleared") yield* Ref.set(pause.state, null);
+      const run = retained("completed-before-restart", {
+        outcome: "succeeded",
+        delivery: "pending",
+        heldByEnvironmentPause,
+        finishedAt: nowIso,
+        exitCode: 0,
+      });
+      yield* h.store.save(run, "retained before restart");
+      h.state.latest = run;
       h.state.metadataReceipt = yield* Deferred.make<void>();
       yield* Effect.gen(function* () {
-        yield* ActionResume.ActionResume;
-        yield* Deferred.await(h.state.metadataReceipt!);
-        if (phase === "pausing") {
-          assert.equal(h.state.latest?.delivery, "pending");
-          assert.equal(h.followUps().length, 0);
-        }
-        assert.isTrue(
-          Option.getOrThrow(yield* h.store.get(threadId, "environment-deferred")).state
-            .heldByEnvironmentPause,
-        );
-        yield* pause.resume;
-        yield* Ref.set(pause.state, null);
-      }).pipe(Effect.provide(h.layer.pipe(Layer.provide(pause.layer))));
-      yield* Effect.gen(function* () {
         const actions = yield* ActionResume.ActionResume;
-        yield* actions.retryPendingFollowUps;
+        yield* Deferred.await(h.state.metadataReceipt!);
+        assert.equal(h.state.latest?.delivery, "delivered");
         yield* actions.retryPendingFollowUps;
         assert.equal(h.followUps().length, 1);
-        assert.include(h.followUps()[0]!.text, "retained output");
-      }).pipe(Effect.provide(Layer.fresh(h.layer.pipe(Layer.provide(pause.layer)))));
+        assert.equal(h.followUps()[0]?.messageId, `action-resume:${run.runId}:follow-up`);
+        assert.include(h.followUps()[0]!.text, "retained before restart");
+        assert.isTrue((yield* actions.listProjectActions(invocation))[0]?.resumeEligible);
+        assert.equal(h.opened.length, 0);
+      }).pipe(Effect.provide(h.layer.pipe(Layer.provide(pause.layer))));
     }).pipe(Effect.provide(StoreTestLayer)),
 );
