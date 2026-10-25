@@ -15009,7 +15009,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const threadIds = new Set([commandThreadId(command)]);
       if (command.type === "message.dispatch") {
         if (command.senderThreadId !== undefined) threadIds.add(command.senderThreadId);
-        if (command.createdBy === "user" || command.creationSource === "mcp") {
+        if (mayStartSubagentFollowup(command)) {
           const parentThreadId = yield* appOwnedSubagentParentThreadId(command.threadId).pipe(
             Effect.mapError(
               (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
