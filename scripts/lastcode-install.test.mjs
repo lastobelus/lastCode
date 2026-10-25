@@ -1,10 +1,11 @@
 import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
+import * as NodeModule from "node:module";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import { afterEach, describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   acquireInstallLock,
@@ -34,6 +35,8 @@ import {
 const temporaryDirectories = [];
 
 afterEach(() => {
+  vi.restoreAllMocks();
+  NodeModule.syncBuiltinESMExports();
   for (const directory of temporaryDirectories.splice(0)) {
     NodeFS.rmSync(directory, { force: true, recursive: true });
   }
@@ -49,6 +52,23 @@ function temporaryDirectory() {
 const itMacOnly = it.runIf(process.platform === "darwin");
 
 describe("LastCode userland install command", () => {
+  function mountWarning(path, device = "1234") {
+    return `lsof: WARNING: can't stat() apfs file system ${path}\n      Output information may be incomplete.\n      assuming "dev=${device}" from mount table\n`;
+  }
+
+  function mockFileInspection(result) {
+    vi.spyOn(NodeChildProcess.default, "spawnSync").mockImplementation((command) => ({
+      pid: 42,
+      output: [],
+      signal: null,
+      status: 0,
+      stdout: "1 /sbin/launchd\n",
+      stderr: "",
+      ...(command === "/usr/sbin/lsof" ? result : {}),
+    }));
+    NodeModule.syncBuiltinESMExports();
+  }
+
   function idleFixture() {
     const root = temporaryDirectory();
     const targetPath = NodePath.join(root, "LastCode.app");
@@ -134,6 +154,87 @@ describe("LastCode userland install command", () => {
     expect(() => appBundleIsInUse(fixture.targetPath, { runCommand: () => "" })).toThrow(
       "Could not inspect",
     );
+  });
+
+  it("accepts unrelated APFS mount warnings without losing open bundle files", () => {
+    const fixture = idleFixture();
+    const stderr =
+      mountWarning("/Volumes/unavailable-volume") + mountWarning("/Volumes/another-volume");
+    mockFileInspection({ status: 1, stdout: "", stderr });
+    expect(appBundleIsInUse(fixture.targetPath)).toBe(false);
+
+    mockFileInspection({ status: 0, stdout: "p42\nnfixture file\n", stderr });
+    expect(appBundleIsInUse(fixture.targetPath)).toBe(true);
+  });
+
+  it.each([
+    "bundle",
+    "ancestor",
+    "root",
+    "case",
+    "descendant",
+    "unknown",
+    "mixed",
+    "incomplete",
+    "escaped",
+    "same-device",
+  ])("rejects %s inspection warnings", (scenario) => {
+    const fixture = idleFixture();
+    const warnings = {
+      bundle: mountWarning(fixture.targetPath),
+      ancestor: mountWarning(NodePath.dirname(fixture.targetPath)),
+      root: mountWarning("/"),
+      case: mountWarning(fixture.targetPath.toUpperCase()),
+      descendant: mountWarning(NodePath.join(fixture.targetPath, "Contents")),
+      unknown: "lsof: inspection denied\n",
+      mixed: `${mountWarning("/Volumes/unavailable-volume")}lsof: inspection denied\n`,
+      incomplete: "      Output information may be incomplete.\n",
+      escaped: mountWarning("/Volumes/unavailable\\040volume"),
+      "same-device": mountWarning(
+        "/Volumes/unavailable-volume",
+        NodeFS.statSync(fixture.targetPath).dev.toString(16),
+      ),
+    };
+    mockFileInspection({ status: 1, stdout: "", stderr: warnings[scenario] });
+    expect(() => appBundleIsInUse(fixture.targetPath)).toThrow();
+  });
+
+  it("rejects failed lsof commands even with an unrelated APFS warning", () => {
+    const fixture = idleFixture();
+    mockFileInspection({
+      status: 2,
+      stdout: "",
+      stderr: mountWarning("/Volumes/unavailable-volume"),
+    });
+    expect(() => appBundleIsInUse(fixture.targetPath)).toThrow();
+  });
+
+  it("rejects warnings about the canonical bundle behind a symlink", () => {
+    const fixture = idleFixture();
+    const alias = NodePath.join(NodePath.dirname(fixture.targetPath), "alias.app");
+    NodeFS.symlinkSync(fixture.targetPath, alias);
+    mockFileInspection({
+      status: 1,
+      stdout: "",
+      stderr: mountWarning(NodeFS.realpathSync(fixture.targetPath)),
+    });
+    expect(() => appBundleIsInUse(alias)).toThrow();
+  });
+
+  it("does not reinspect an unrelated inaccessible mount", () => {
+    const fixture = idleFixture();
+    const mount = "/Volumes/unavailable-volume";
+    const nativeExists = NodeFS.existsSync;
+    const nativeRealpath = NodeFS.realpathSync;
+    vi.spyOn(NodeFS.default, "existsSync").mockImplementation(
+      (path) => path === mount || nativeExists(path),
+    );
+    vi.spyOn(NodeFS.default, "realpathSync").mockImplementation((path) => {
+      if (path === mount) throw new Error("mount access denied");
+      return nativeRealpath(path);
+    });
+    mockFileInspection({ status: 1, stdout: "", stderr: mountWarning(mount) });
+    expect(appBundleIsInUse(fixture.targetPath)).toBe(false);
   });
 
   it("installs an idle fixture without quitting or launching", async () => {
