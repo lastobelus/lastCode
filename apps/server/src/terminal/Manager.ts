@@ -254,6 +254,12 @@ export class TerminalManager extends Context.Service<
       listener: (event: TerminalMetadataStreamEvent) => Effect.Effect<void>,
     ) => Effect.Effect<() => void>;
 
+    /** Only the current shell; terminating predecessors remain visible in drain metadata. */
+    readonly hasRunningSubprocess: (input: {
+      readonly threadId: string;
+      readonly terminalId: string;
+    }) => Effect.Effect<boolean>;
+
     /** Read current terminal metadata without subscribing to runtime events. */
     readonly metadata: Effect.Effect<ReadonlyArray<TerminalSummary>>;
 
@@ -4221,6 +4227,17 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         }),
     );
 
+  const hasRunningSubprocess = Effect.fn("terminal.hasRunningSubprocess")(
+    (input: { readonly threadId: string; readonly terminalId: string }) =>
+      readManagerState.pipe(
+        Effect.map(
+          (state) =>
+            state.sessions.get(toSessionKey(input.threadId, input.terminalId))
+              ?.hasRunningSubprocess ?? false,
+        ),
+      ),
+  );
+
   const history: TerminalManager["Service"]["history"] = (input) => {
     return flushPersist(input.threadId, input.terminalId).pipe(
       Effect.andThen(readHistory(input.threadId, input.terminalId)),
@@ -4245,6 +4262,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     closeIdle,
     subscribe,
     subscribeMetadata,
+    hasRunningSubprocess,
     metadata: readAllTerminalMetadata(),
     refreshMetadata: pollSubprocessActivity(true).pipe(Effect.andThen(readAllTerminalMetadata())),
   });

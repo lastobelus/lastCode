@@ -5382,6 +5382,47 @@ it.layer(
       }),
   );
 
+  it.effect("reads live subprocess activity while a previous shell is still terminating", () =>
+    Effect.gen(function* () {
+      const busy = yield* Ref.make(false);
+      const { manager, ptyAdapter, baseDir } = yield* createManager(5, {
+        subprocessInspector: () =>
+          Ref.get(busy).pipe(
+            Effect.map((hasRunningSubprocess) => ({
+              hasRunningSubprocess,
+              childCommand: hasRunningSubprocess ? "tool" : null,
+              processIds: [],
+            })),
+          ),
+      });
+      const input = openInput();
+      expect(yield* manager.hasRunningSubprocess(input)).toBe(false);
+      yield* manager.open(input);
+      const previous = ptyAdapter.processes[0]!;
+      previous.exitOnKill = undefined;
+      const replacement = yield* manager.open({ ...input, cwd: baseDir, worktreePath: baseDir });
+      expect(replacement.pid).not.toBe(previous.pid);
+      expect((yield* manager.metadata)[0]).toMatchObject({
+        pid: previous.pid,
+        hasRunningSubprocess: true,
+      });
+      expect(yield* manager.hasRunningSubprocess(input)).toBe(false);
+      yield* Ref.set(busy, true);
+      yield* manager.refreshMetadata;
+      expect(yield* manager.hasRunningSubprocess(input)).toBe(true);
+      const removed = yield* Deferred.make<void>();
+      const unsubscribe = yield* manager.subscribeMetadata((event) =>
+        event.type === "upsert" && event.terminal.pid === replacement.pid
+          ? Deferred.succeed(removed, undefined).pipe(Effect.asVoid)
+          : Effect.void,
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+      previous.emitExit({ exitCode: 0, signal: 9 });
+      yield* Deferred.await(removed);
+      expect((yield* manager.metadata)[0]?.pid).toBe(replacement.pid);
+    }),
+  );
+
   it.effect("keeps a closing terminal in blocker metadata until kill escalation finishes", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter } = yield* createManager(5, { processKillGraceMs: 10 });
