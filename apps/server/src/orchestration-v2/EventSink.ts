@@ -277,7 +277,7 @@ const layerBase: Layer.Layer<
       transaction: Effect.Effect<A, E, R>,
       publish: (committed: A) => Effect.Effect<void>,
     ) =>
-      Effect.suspend(() => {
+      Effect.uninterruptibleMask((restore) => {
         let holdsLane = false;
         const takeLane = publishLane.take(1).pipe(
           Effect.andThen(
@@ -287,8 +287,10 @@ const layerBase: Layer.Layer<
           ),
           Effect.uninterruptible,
         );
+        // Cancellation can roll back transaction work, but a committed batch must
+        // reach subscribers before its writer exits or a parent can miss child completion.
         return sql
-          .withTransaction(Effect.tap(transaction, () => takeLane))
+          .withTransaction(restore(Effect.tap(transaction, () => takeLane)))
           .pipe(
             Effect.tap(publish),
             Effect.ensuring(
