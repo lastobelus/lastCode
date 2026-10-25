@@ -194,7 +194,13 @@ function run(command, args, options = {}) {
     const detail = options.inherit ? "" : result.stderr.trim() || result.stdout.trim();
     throw new Error(detail || `${command} failed with exit code ${result.status}.`);
   }
-  if (options.rejectStderr && result.stderr.trim()) throw new Error(result.stderr.trim());
+  if (
+    options.rejectStderr &&
+    result.stderr.trim() &&
+    !options.allowedStderr?.(result.stderr.trim())
+  ) {
+    throw new Error(result.stderr.trim());
+  }
   if (options.inherit) return "";
   return (options.output === "stderr" ? result.stderr : result.stdout).trim();
 }
@@ -467,6 +473,42 @@ async function readHandoffCommand(stream = process.stdin) {
   throw new Error("Install handoff closed before COMMIT or CANCEL.");
 }
 
+function unrelatedApfsMountWarnings(stderr, bundlePaths, bundleDevice) {
+  const lines = stderr.split("\n");
+  for (let index = 0; index < lines.length; index += 3) {
+    const mount = /^lsof: WARNING: can't stat\(\) apfs file system (\/[^\\\r\n]*)$/u.exec(
+      lines[index],
+    )?.[1];
+    const device = /^      assuming "dev=([a-f\d]+)" from mount table$/u.exec(
+      lines[index + 2] ?? "",
+    )?.[1];
+    if (
+      !mount ||
+      lines[index + 1] !== "      Output information may be incomplete." ||
+      !device ||
+      Number.parseInt(device, 16) === bundleDevice
+    ) {
+      return false;
+    }
+    const mountPath = NodePath.resolve(
+      NodeFS.existsSync(mount) ? NodeFS.realpathSync(mount) : mount,
+    ).toLowerCase();
+    if (
+      bundlePaths.some((path) => {
+        const bundlePath = path.toLowerCase();
+        return (
+          bundlePath === mountPath ||
+          bundlePath.startsWith(mountPath.endsWith("/") ? mountPath : `${mountPath}/`) ||
+          mountPath.startsWith(`${bundlePath}/`)
+        );
+      })
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 // Check path references as well as open bundle files: a bundled server may run
 // without a GUI, and a desktop/helper can open resources after startup.
 export function appBundleIsInUse(targetPath, options = {}) {
@@ -486,9 +528,12 @@ export function appBundleIsInUse(targetPath, options = {}) {
     }
   }
   if (!NodeFS.existsSync(resolved)) return false;
+  const bundleDevice = NodeFS.statSync(resolved).dev;
   const files = runCommand("/usr/sbin/lsof", ["-nP", "-Fpn", "+D", resolved], {
     allowedExitCodes: [1],
     rejectStderr: true,
+    // Darwin scans every mount; an unrelated mount's stat failure does not affect +D's file identities.
+    allowedStderr: (stderr) => unrelatedApfsMountWarnings(stderr, paths, bundleDevice),
     timeoutMs: 30_000,
   });
   if (files && !/^p\d+$/mu.test(files)) throw new Error("Invalid bundle file inspection output.");
