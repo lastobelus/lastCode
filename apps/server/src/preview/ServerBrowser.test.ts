@@ -18,6 +18,7 @@ import {
   type PreviewViewportSetting,
   type DesktopBrowserCommand,
 } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -325,7 +326,7 @@ function makeContext(onClose?: (context: BrowserContext) => void) {
       post: vi.fn(async (url: string, _options: unknown) => {
         await credentialPreparation?.(url);
         cookies.add(new URL(url).origin);
-        return { ok: () => true, dispose: vi.fn(async () => {}) };
+        return { ok: () => true, status: () => 200, dispose: vi.fn(async () => {}) };
       }),
     },
     applyNativeRendering: (input: {
@@ -1728,6 +1729,7 @@ it.live("cancelled authentication drains cookie writes before takeover and typin
         events.push("cookie written");
         return {
           ok: () => true,
+          status: () => 200,
           dispose: vi.fn(async () => {
             events.push("response disposed");
           }),
@@ -2035,6 +2037,12 @@ it.live.each([
       const started = Promise.withResolvers<void>();
       const committed = Promise.withResolvers<void>();
       const page = contexts[0]!.page;
+      const corrected = Promise.withResolvers<void>();
+      const goto = page.goto.getMockImplementation()!;
+      page.goto.mockImplementation(async (url) => {
+        await goto(url);
+        if (url === "http://localhost:5173/fixed") corrected.resolve();
+      });
       page[method].mockImplementationOnce(() => {
         started.resolve();
         return committed.promise;
@@ -2054,7 +2062,7 @@ it.live.each([
       }).pipe(Effect.forkScoped);
       yield* Effect.addFinalizer(() => Effect.sync(() => committed.resolve()));
       // The text reaches the page while the first navigation is still uncommitted.
-      yield* Effect.promise(() => typed.promise);
+      yield* Effect.promise(() => Promise.all([typed.promise, corrected.promise]));
       expect(page.goto).toHaveBeenLastCalledWith(
         "http://localhost:5173/fixed",
         expect.objectContaining({ waitUntil: "commit" }),

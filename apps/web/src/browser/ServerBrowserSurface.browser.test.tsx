@@ -27,7 +27,9 @@ describe("server viewer document visibility", () => {
   it("releases the hidden client viewer and reconnects when the user returns", async () => {
     mocks.connect.mockClear();
     let visibility: DocumentVisibilityState = "visible";
-    using _visibility = vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibility);
+    using _visibility = vi
+      .spyOn(document, "visibilityState", "get")
+      .mockImplementation(() => visibility);
     const container = document.createElement("div");
     container.style.cssText = "width:640px;height:480px;position:relative";
     await using _screen = await render(

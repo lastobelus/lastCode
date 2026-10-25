@@ -110,11 +110,13 @@ it.live.each(["SIGTERM", "SIGHUP"] as const)(
       const stopped = new Promise<void>((resolve) => runner.once("close", () => resolve()));
       try {
         await new Promise<void>((resolve, reject) => {
+          // oxlint-disable t3code/no-real-time-wait-in-tests -- A failure deadline bounds the real subprocess; readiness itself comes from its stdout event.
           // @effect-diagnostics-next-line globalTimers:off -- Real child process deadlines must use native time.
           const timeout = setTimeout(
             () => reject(new Error("Process fixture did not start")),
             8000,
           );
+          // oxlint-enable t3code/no-real-time-wait-in-tests
           runner.once("error", reject);
           runner.once("exit", () => {
             clearTimeout(timeout);
@@ -132,11 +134,13 @@ it.live.each(["SIGTERM", "SIGHUP"] as const)(
         });
         runner.kill(signal);
         await new Promise<void>((resolve, reject) => {
+          // oxlint-disable t3code/no-real-time-wait-in-tests -- A failure deadline bounds a stuck child; successful shutdown is acknowledged by its close event.
           // @effect-diagnostics-next-line globalTimers:off -- Real child process deadlines must use native time.
           const deadline = setTimeout(
             () => reject(new Error("Runner exited without stopping its descendant")),
             5000,
           );
+          // oxlint-enable t3code/no-real-time-wait-in-tests
           void stopped.then(() => {
             clearTimeout(deadline);
             resolve();
@@ -161,7 +165,6 @@ it.live.each(["SIGTERM", "SIGHUP"] as const)(
         NodeFS.rmSync(root, { recursive: true, force: true });
       }
     }),
-  { timeout: 15_000 },
 );
 
 it.layer(NodeServices.layer)("dev-runner", (it) => {

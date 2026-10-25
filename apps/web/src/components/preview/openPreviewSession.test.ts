@@ -11,6 +11,22 @@ import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
+vi.mock("~/browser/previewRuntime", () => ({
+  previewRuntimeFor: vi.fn(() => undefined),
+  desktopBrowserHostFor: vi.fn(() => undefined),
+  isPreviewAvailableFor: vi.fn(() => false),
+}));
+vi.mock("~/state/entities", () => ({
+  readEnvironmentSupportsServerBrowser: vi.fn(() => false),
+}));
+vi.mock("./previewHostingRecovery", () => ({
+  prepareHostedPreview: vi.fn(async (_ref: ScopedThreadRef, url: string) => ({
+    url,
+    managed: false,
+    restored: false,
+  })),
+}));
+
 import * as browserDefaults from "~/browser/browserDefaults";
 import * as previewRuntime from "~/browser/previewRuntime";
 import * as hostingRecovery from "./previewHostingRecovery";
@@ -73,6 +89,15 @@ const applyOpenedEvent = (opened: PreviewSessionSnapshot, background = false) =>
   });
 
 beforeEach(() => {
+  vi.mocked(previewRuntime.previewRuntimeFor).mockReturnValue(undefined);
+  vi.mocked(previewRuntime.desktopBrowserHostFor).mockReturnValue(undefined);
+  vi.mocked(previewRuntime.isPreviewAvailableFor).mockReturnValue(false);
+  vi.mocked(entities.readEnvironmentSupportsServerBrowser).mockReturnValue(false);
+  vi.mocked(hostingRecovery.prepareHostedPreview).mockImplementation(async (_ref, url) => ({
+    url,
+    managed: false,
+    restored: false,
+  }));
   resetPreviewStateForTests();
   useRightPanelStore.setState({
     byThreadKey: {},

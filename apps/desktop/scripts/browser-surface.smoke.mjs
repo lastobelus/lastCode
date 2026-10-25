@@ -1,9 +1,6 @@
-// Run explicitly: node apps/desktop/scripts/browser-surface.smoke.mjs
-// --build-only prepares isolated artifacts without launching Electron.
-// --existing-electron uses the installed dependency without repairing or downloading a runtime.
-// --react-lifecycle mounts the production React host against fixture remote-environment state.
-// --credential-access isolates the real desktop cookie exchange and first authenticated load.
-// --open-link isolates a production desktop-renderer managed-link click (no remote WS).
+// Run explicitly: node apps/desktop/scripts/browser-surface.smoke.mjs; --build-only skips Electron.
+// Use --existing-electron to avoid runtime installation.
+// --react-lifecycle, --credential-access, and --open-link select focused proofs.
 import * as NodeAssert from "node:assert/strict";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";

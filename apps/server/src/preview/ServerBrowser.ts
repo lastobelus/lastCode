@@ -1352,8 +1352,9 @@ const make = Effect.gen(function* () {
           });
           dropTab(tab, false);
         }
-        ready.reject(cause);
-        throw cause;
+        const error = ServerBrowserPage.toOperationError(cause, NAVIGATION_TIMEOUT_MS);
+        ready.reject(error);
+        throw error;
       });
     } else if (
       snapshot.navStatus._tag === "Loading" &&
@@ -1366,7 +1367,7 @@ const make = Effect.gen(function* () {
         (desktop || adopted) && page.url() === snapshot.navStatus.url
           ? page.reload(options)
           : page.goto(snapshot.navStatus.url, options)
-).then(constVoid, (cause: unknown) => {
+      ).then(constVoid, (cause: unknown) => {
         throw ServerBrowserPage.toOperationError(cause, NAVIGATION_TIMEOUT_MS);
       });
     }

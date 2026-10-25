@@ -462,9 +462,7 @@ describe("PreviewView", () => {
     mocks.recoverHostedPreview.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
     await act(() => screen.rerender(<div className="flex h-[600px] flex-col">{view()}</div>));
     expect(mocks.openPreview).not.toHaveBeenCalled();
-    await act(async () =>
-      userEvent.click(page.getByRole("button", { name: "Retry preview", exact: true })),
-    );
+    await userEvent.click(page.getByRole("button", { name: "Retry preview", exact: true }));
     expect(mocks.openPreview).toHaveBeenCalledOnce();
     expect(mocks.openPreview.mock.calls[0]?.[0].input).toMatchObject({
       url: mocks.localRecoveryUrl,
@@ -497,9 +495,7 @@ describe("PreviewView", () => {
       mocks.ensureDesktop.mockImplementationOnce(async () =>
         markDesktopBrowserTabReady(TEST_RUNTIME_TAB_ID),
       );
-      await act(async () =>
-        userEvent.click(page.getByRole("button", { name: "Retry preview", exact: true })),
-      );
+      await userEvent.click(page.getByRole("button", { name: "Retry preview", exact: true }));
       expect(mocks.refresh).toHaveBeenCalledExactlyOnceWith(TEST_RUNTIME_TAB_ID);
       await expect
         .element(page.getByRole("button", { name: "Retry preview", exact: true }))
@@ -518,12 +514,10 @@ describe("PreviewView", () => {
     });
     mocks.ensureDesktop.mockImplementationOnce(() => wake);
     await act(() => screen.rerender(view()));
-    await act(async () =>
-      userEvent.click(page.getByRole("button", { name: "Refresh", exact: true })),
-    );
+    await userEvent.click(page.getByRole("button", { name: "Refresh", exact: true }));
     const next = "http://example.com/new-destination";
     await userEvent.fill(page.getByRole("textbox", { name: "Search or enter URL" }), next);
-    await act(async () => userEvent.keyboard("{Enter}"));
+    await userEvent.keyboard("{Enter}");
     mocks.navStatus = { _tag: "Success", url: next, title: "New destination" };
     await act(() => screen.rerender(view()));
     await act(async () => releaseWake());
@@ -562,7 +556,9 @@ describe("PreviewView", () => {
       expect(mocks.openPreview).toHaveBeenCalledOnce();
       if (change === "hidden")
         await act(() =>
-          screen.rerender(<PreviewView threadRef={TEST_THREAD_REF} tabId="tab-1" visible={false} />),
+          screen.rerender(
+            <PreviewView threadRef={TEST_THREAD_REF} tabId="tab-1" visible={false} />,
+          ),
         );
       else if (change === "url") {
         mocks.navStatus = { _tag: "Success", url: "https://example.com/newer", title: "Newer" };

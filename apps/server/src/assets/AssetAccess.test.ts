@@ -60,6 +60,7 @@ const layerConfig = ServerConfig.ServerConfig.layerTest(process.cwd(), {
   prefix: "t3-asset-access-test-",
 });
 const encodeAssetAccessError = Schema.encodeEffect(Schema.fromJsonString(AssetAccessError));
+const decodeAssetCreateUrlInput = Schema.decodeUnknownEffect(AssetCreateUrlInput);
 const screenshotPng = new Uint8Array(24);
 screenshotPng.set([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52,
@@ -1586,7 +1587,7 @@ describe("AssetAccess", () => {
     ]);
     return Effect.gen(function* () {
       // Every client and server release spells the resource this way on the wire.
-      const { resource } = yield* Schema.decodeUnknownEffect(AssetCreateUrlInput)({
+      const { resource } = yield* decodeAssetCreateUrlInput({
         resource: { _tag: "github-media", cwd: "/repo", url },
       });
       const issued = yield* issueAssetUrl({ resource });

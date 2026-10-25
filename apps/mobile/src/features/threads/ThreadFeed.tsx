@@ -2635,15 +2635,18 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             setExpandedVideo((current) => current ?? source);
           const mediaUrl = "uri" in media.source ? media.source.uri : null;
           if (mediaUrl !== null && /^https?:\/\//i.test(mediaUrl)) {
-            void openThreadFeedMarkdownUrl(previewPreparationInput(mediaUrl, "resource"), mediaUrl, (url) =>
-              openVideo({
-                ...media.source,
-                uri: url,
-                actionsSource: preparedThreadFeedMediaActionsSource(
-                  media.source.actionsSource,
-                  url,
-                ),
-              }),
+            void openThreadFeedMarkdownUrl(
+              previewPreparationInput(mediaUrl, "resource"),
+              mediaUrl,
+              (url) =>
+                openVideo({
+                  ...media.source,
+                  uri: url,
+                  actionsSource: preparedThreadFeedMediaActionsSource(
+                    media.source.actionsSource,
+                    url,
+                  ),
+                }),
             );
           } else {
             openVideo(media.source);
@@ -2653,15 +2656,18 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             setExpandedFile((current) => current ?? source);
           const mediaUrl = "uri" in media.source ? media.source.uri : null;
           if (mediaUrl !== null && /^https?:\/\//i.test(mediaUrl)) {
-            void openThreadFeedMarkdownUrl(previewPreparationInput(mediaUrl, "resource"), mediaUrl, (url) =>
-              openImage({
-                ...media.source,
-                uri: url,
-                actionsSource: preparedThreadFeedMediaActionsSource(
-                  media.source.actionsSource,
-                  url,
-                ),
-              }),
+            void openThreadFeedMarkdownUrl(
+              previewPreparationInput(mediaUrl, "resource"),
+              mediaUrl,
+              (url) =>
+                openImage({
+                  ...media.source,
+                  uri: url,
+                  actionsSource: preparedThreadFeedMediaActionsSource(
+                    media.source.actionsSource,
+                    url,
+                  ),
+                }),
             );
           } else {
             openImage(media.source);
