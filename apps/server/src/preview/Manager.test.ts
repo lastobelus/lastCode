@@ -17,7 +17,8 @@ import * as PubSub from "effect/PubSub";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
-import { expect } from "vite-plus/test";
+import { expect, vi } from "vite-plus/test";
+import * as Preview from "@t3tools/shared/preview";
 import { setPreviewBootstrapTokenOnUrl } from "@t3tools/shared/remote";
 
 import * as ServerConfig from "../config.ts";
@@ -166,6 +167,48 @@ it.layer(PreviewManagerTestLayer)("PreviewManager", (it) => {
       expect(
         (yield* fs.stat(path.join(config.stateDir, "preview-sessions.json"))).mode & 0o777,
       ).toBe(0o600);
+    }),
+  );
+
+  it.effect("preserves restored desktop tabs when a restarted process reuses its tab counter", () =>
+    Effect.gen(function* () {
+      using _tabIds = vi.spyOn(Preview, "newPreviewTabId").mockReturnValue("tab_1");
+      const config = yield* isolatedPersistenceConfig();
+      const create = PreviewManager.make.pipe(
+        Effect.provideService(ServerConfig.ServerConfig, config),
+      );
+      const first = yield* Effect.scoped(create);
+      const threadId = freshThreadId();
+      const saved = yield* first.open({
+        threadId,
+        runtime: "desktop",
+        profileId: "work-account",
+        url: "https://example.com/saved",
+      });
+      const restarted = yield* Effect.scoped(create);
+      expect((yield* restarted.list({ threadId })).sessions).toEqual([saved]);
+      const opened = yield* restarted.open({
+        threadId,
+        runtime: "desktop",
+        profileId: "incognito",
+        url: "https://example.com/new",
+      });
+      expect(opened.tabId).not.toBe(saved.tabId);
+      expect((yield* restarted.list({ threadId })).sessions).toEqual([saved, opened]);
+      const selected = yield* restarted.navigate({
+        threadId,
+        tabId: saved.tabId,
+        url: "https://example.com/saved/next",
+      });
+      expect(selected).toMatchObject({ tabId: saved.tabId, profileId: "work-account" });
+      const restoredAgain = yield* Effect.scoped(create);
+      expect((yield* restoredAgain.list({ threadId })).sessions).toEqual([
+        {
+          ...selected,
+          navStatus: { _tag: "Loading", url: "https://example.com/saved/next", title: "" },
+        },
+        opened,
+      ]);
     }),
   );
 

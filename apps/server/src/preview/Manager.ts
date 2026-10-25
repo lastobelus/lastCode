@@ -391,7 +391,7 @@ export const make = Effect.gen(function* PreviewManagerMake() {
             ? "local"
             : undefined));
       // Persisted client surfaces must not bind to a different tab after a server restart.
-      const tabId = `${newPreviewTabId()}${runtime === "server" ? `_${serverEpoch}` : ""}`;
+      const tabId = `${newPreviewTabId()}_${serverEpoch}`;
       const updatedAt = yield* currentIsoTimestamp;
       const createDesktopRoot =
         runtime === "server" &&

@@ -38,7 +38,9 @@ export function readEnvironmentSupportsServerBrowser(environmentId) {
   owner(environmentId);
   return true;
 }
-export const useEnvironmentSupportsServerBrowser = readEnvironmentSupportsServerBrowser;
+export function useEnvironmentSupportsServerBrowser(environmentId) {
+  return readEnvironmentSupportsServerBrowser(environmentId);
+}
 export function readEnvironmentHasLocalDesktopBrowser(environmentId) {
   owner(environmentId);
   return false;
