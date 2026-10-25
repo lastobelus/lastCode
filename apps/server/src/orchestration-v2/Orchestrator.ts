@@ -8345,6 +8345,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const parentThreadId = child.lineage.parentThreadId;
     if (
       child.lineage.relationshipToParent !== "subagent" ||
+      child.lineage.independent === true ||
       parentThreadId === null ||
       (command.notification === undefined &&
         command.createdBy !== "user" &&
@@ -8373,7 +8374,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         task.childThreadId === child.id &&
         task.id === (child.forkedFrom?.type === "node" ? child.forkedFrom.nodeId : undefined),
     );
-    if (original === undefined || original.result === null) return;
+    if (original === undefined || original.ownershipReleased === true || original.result === null)
+      return;
     const owner =
       parent.runs.filter(isBlockingRun).toSorted((a, b) => b.ordinal - a.ordinal)[0] ??
       latestExecutedRun(parent.runs);

@@ -20,6 +20,8 @@ import {
   TurnItemId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as EnvironmentPauseStore from "../environment/EnvironmentPauseStore.ts";
+import { makePausedEnvironment } from "./EnvironmentAutomation.testkit.ts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
@@ -1139,25 +1141,36 @@ const seedRestartCancelledChild = (input: {
     return { taskId, childThreadId, childRunId };
   });
 
-it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
-  "delegated background wakes",
-  (it) => {
-    it.effect("delivers a background command's wake result to the parent exactly once", () =>
+const layerFollowups = Layer.merge(layerTest, ProviderContinuationRequests.layer).pipe(
+  Layer.provideMerge(
+    Layer.unwrap(
+      makePausedEnvironment.pipe(
+        Effect.tap((pause) => pause.resume),
+        Effect.map((pause) => pause.layer),
+      ),
+    ),
+  ),
+);
+
+it.layer(layerFollowups)("delegated background wakes", (it) => {
+  it.effect.each(["active", "paused", "released", "independent"] as const)(
+    "handles a background command's wake after the original result while %s",
+    (state) =>
       Effect.gen(function* () {
         const orchestrator = yield* Orchestrator.OrchestratorV2;
         const eventSink = yield* EventSink.EventSinkV2;
         const requests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
         const now = yield* DateTime.now;
-        const parentThreadId = ThreadId.make(`thread:background-wake-parent-active`);
-        const projectId = ProjectId.make(`project:background-wake-active`);
-        const parentRunId = RunId.make(`run:background-wake-parent-active`);
-        const rootNodeId = NodeId.make(`node:background-wake-parent-active`);
+        const parentThreadId = ThreadId.make(`thread:background-wake-parent-${state}`);
+        const projectId = ProjectId.make(`project:background-wake-${state}`);
+        const parentRunId = RunId.make(`run:background-wake-parent-${state}`);
+        const rootNodeId = NodeId.make(`node:background-wake-parent-${state}`);
         yield* seedParentWithTerminalTask({
           threadId: parentThreadId,
           projectId,
           runId: parentRunId,
           rootNodeId,
-          taskId: NodeId.make(`node:background-wake-seed-active`),
+          taskId: NodeId.make(`node:background-wake-seed-${state}`),
           deliveryState: "acknowledged",
           now,
         });
@@ -1166,7 +1179,7 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
           projectId,
           parentRunId,
           rootNodeId,
-          name: `background-wake-child-active`,
+          name: `background-wake-child-${state}`,
           completionWake: "always",
           continuationPending: false,
           runStatus: "completed",
@@ -1177,7 +1190,7 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
         while (firstWake.threadId !== parentThreadId) firstWake = yield* requests.take;
         yield* orchestrator.dispatch({
           type: "delegated_task.completion-delivery.acknowledge",
-          commandId: CommandId.make(`command:background-wake-ack-active`),
+          commandId: CommandId.make(`command:background-wake-ack-${state}`),
           parentThreadId,
           taskId: child.taskId,
           observedByRunId: parentRunId,
@@ -1186,10 +1199,10 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
           (run) => run.id === parentRunId,
         )!;
         yield* eventSink.write({
-          commandId: reconcileCommandId(`background-wake-parent-finished-active`),
+          commandId: reconcileCommandId(`background-wake-parent-finished-${state}`),
           events: [
             {
-              id: EventId.make(`event:background-wake-parent-finished-active`),
+              id: EventId.make(`event:background-wake-parent-finished-${state}`),
               type: "run.updated",
               threadId: parentThreadId,
               runId: parentRunId,
@@ -1199,12 +1212,46 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
           ],
         });
 
-        const wakeMessageId = MessageId.make(`message:background-wake-active`);
+        const originalParent = yield* orchestrator.getThreadProjection(parentThreadId);
+        const originalTask = originalParent.subagents.find((task) => task.id === child.taskId)!;
+        if (state === "released" || state === "independent") {
+          const childThread = (yield* orchestrator.getThreadProjection(child.childThreadId)).thread;
+          yield* eventSink.write({
+            events: [
+              state === "released"
+                ? {
+                    id: EventId.make(`event:background-wake-released-${state}`),
+                    type: "subagent.updated",
+                    threadId: parentThreadId,
+                    occurredAt: now,
+                    payload: {
+                      ...originalTask,
+                      ownershipReleased: true,
+                      completionDelivery: { state: "disposed", observedByRunId: null },
+                    },
+                  }
+                : {
+                    id: EventId.make(`event:background-wake-independent-${state}`),
+                    type: "thread.metadata-updated",
+                    threadId: child.childThreadId,
+                    occurredAt: now,
+                    payload: {
+                      ...childThread,
+                      lineage: { ...childThread.lineage, independent: true },
+                    },
+                  },
+            ],
+          });
+        }
+        const pauseStore = yield* EnvironmentPauseStore.EnvironmentPauseStore;
+        if (state === "paused")
+          yield* pauseStore.update((session) => ({ ...session!, phase: "paused" }));
+        const wakeMessageId = MessageId.make(`message:background-wake-${state}`);
         yield* orchestrator.dispatch({
           type: "message.dispatch",
           createdBy: "agent",
           creationSource: "provider",
-          commandId: CommandId.make(`command:background-wake-active`),
+          commandId: CommandId.make(`command:background-wake-${state}`),
           threadId: child.childThreadId,
           messageId: wakeMessageId,
           text: "Background activity updated",
@@ -1216,21 +1263,42 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
           attachments: [],
           dispatchMode: { type: "queue_after_active" },
         });
-        const run = (yield* orchestrator.getThreadProjection(child.childThreadId)).runs.find(
+        let run = (yield* orchestrator.getThreadProjection(child.childThreadId)).runs.find(
           (row) => row.userMessageId === wakeMessageId,
         )!;
+        if (state === "released" || state === "independent") {
+          assert.isUndefined(run.delegatedTaskId);
+          const parent = yield* orchestrator.getThreadProjection(parentThreadId);
+          assert.equal(parent.subagents.length, originalParent.subagents.length);
+          assert.deepEqual(parent.runs, originalParent.runs);
+          return;
+        }
         assert.isDefined(run.delegatedTaskId);
+        if (state === "paused") {
+          assert.equal(run.status, "queued");
+          assert.isNull(
+            (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+              (task) => task.id === run.delegatedTaskId,
+            )!.result,
+          );
+          yield* pauseStore.update((session) => ({ ...session!, phase: "resuming" }));
+          yield* orchestrator.resumeQueuedRuns;
+          run = (yield* orchestrator.getThreadProjection(child.childThreadId)).runs.find(
+            (row) => row.userMessageId === wakeMessageId,
+          )!;
+          assert.notEqual(run.status, "queued");
+        }
         yield* eventSink.write({
-          commandId: reconcileCommandId(`background-wake-finished-active`),
+          commandId: reconcileCommandId(`background-wake-finished-${state}`),
           events: [
             {
-              id: EventId.make(`event:background-wake-result-active`),
+              id: EventId.make(`event:background-wake-result-${state}`),
               type: "message.updated",
               threadId: child.childThreadId,
               runId: run.id,
               occurredAt: now,
               payload: {
-                id: MessageId.make(`message:background-wake-result-active`),
+                id: MessageId.make(`message:background-wake-result-${state}`),
                 threadId: child.childThreadId,
                 runId: run.id,
                 nodeId: null,
@@ -1245,7 +1313,7 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
               },
             },
             {
-              id: EventId.make(`event:background-wake-finished-active`),
+              id: EventId.make(`event:background-wake-finished-${state}`),
               type: "run.updated",
               threadId: child.childThreadId,
               runId: run.id,
@@ -1276,7 +1344,7 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
           type: "message.dispatch",
           createdBy: "agent",
           creationSource: "server",
-          commandId: CommandId.make(`command:background-wake-delivery-active`),
+          commandId: CommandId.make(`command:background-wake-delivery-${state}`),
           threadId: parentThreadId,
           messageId: delivery.messageId,
           text: "Child background work finished",
@@ -1308,9 +1376,8 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
           1,
         );
       }),
-    );
-  },
-);
+  );
+});
 
 it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
   "subagent follow-ups",
