@@ -213,8 +213,28 @@ describe("LastCode userland install command", () => {
     const fixture = idleFixture();
     const alias = NodePath.join(NodePath.dirname(fixture.targetPath), "alias.app");
     NodeFS.symlinkSync(fixture.targetPath, alias);
-    mockFileInspection({ status: 1, stdout: "", stderr: mountWarning(fixture.targetPath) });
+    mockFileInspection({
+      status: 1,
+      stdout: "",
+      stderr: mountWarning(NodeFS.realpathSync(fixture.targetPath)),
+    });
     expect(() => appBundleIsInUse(alias)).toThrow();
+  });
+
+  it("does not reinspect an unrelated inaccessible mount", () => {
+    const fixture = idleFixture();
+    const mount = "/Volumes/unavailable-volume";
+    const nativeExists = NodeFS.existsSync;
+    const nativeRealpath = NodeFS.realpathSync;
+    vi.spyOn(NodeFS.default, "existsSync").mockImplementation(
+      (path) => path === mount || nativeExists(path),
+    );
+    vi.spyOn(NodeFS.default, "realpathSync").mockImplementation((path) => {
+      if (path === mount) throw new Error("mount access denied");
+      return nativeRealpath(path);
+    });
+    mockFileInspection({ status: 1, stdout: "", stderr: mountWarning(mount) });
+    expect(appBundleIsInUse(fixture.targetPath)).toBe(false);
   });
 
   it("installs an idle fixture without quitting or launching", async () => {

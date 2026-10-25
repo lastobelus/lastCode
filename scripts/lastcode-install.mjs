@@ -490,9 +490,7 @@ function unrelatedApfsMountWarnings(stderr, bundlePaths, bundleDevice) {
     ) {
       return false;
     }
-    const mountPath = NodePath.resolve(
-      NodeFS.existsSync(mount) ? NodeFS.realpathSync(mount) : mount,
-    ).toLowerCase();
+    const mountPath = NodePath.resolve(mount).toLowerCase();
     if (
       bundlePaths.some((path) => {
         const bundlePath = path.toLowerCase();
