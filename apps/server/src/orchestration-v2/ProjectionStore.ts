@@ -762,11 +762,20 @@ function preserveCompletionDelivery(
   return { ...next, completionDelivery: current.completionDelivery };
 }
 
+// Children created during an Action once copied its parent's running state.
+// That Action belongs to its stamped thread, even when reading retained rows
+// or replaying the creation event after the parent has finished.
+function withOwnedActionResume(thread: OrchestrationV2AppThread): OrchestrationV2AppThread {
+  return thread.actionResume != null && thread.actionResume.threadId !== thread.id
+    ? { ...thread, actionResume: null }
+    : thread;
+}
+
 export function emptyProjection(
   event: Extract<OrchestrationV2DomainEvent, { readonly type: "thread.created" }>,
 ): OrchestrationV2ThreadProjection {
   return {
-    thread: event.payload,
+    thread: withOwnedActionResume(event.payload),
     runs: [],
     attempts: [],
     nodes: [],
@@ -835,7 +844,7 @@ export function applyToProjection(
     case "thread.guest-share-updated":
       return {
         ...base,
-        thread: event.payload,
+        thread: withOwnedActionResume(event.payload),
       };
     // Reordering and PR refreshes preserve the orchestrator's activity timestamp.
     case "thread.active-reordered":
@@ -849,7 +858,7 @@ export function applyToProjection(
     case "thread.marked-unread":
       return {
         ...projection,
-        thread: event.payload,
+        thread: withOwnedActionResume(event.payload),
       };
     case "run.created":
     case "run.updated":
@@ -1212,9 +1221,11 @@ const encodeContextTransferPayload = Schema.encodeEffect(
   Schema.fromJsonString(OrchestrationV2ContextTransferJsonSchema),
 );
 
-const decodeThreadPayload = Schema.decodeUnknownEffect(
+const decodeStoredThreadPayload = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationV2AppThreadJsonSchema),
 );
+const decodeThreadPayload = (payload: string) =>
+  decodeStoredThreadPayload(payload).pipe(Effect.map(withOwnedActionResume));
 const decodeRunPayload = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationV2RunJsonSchema),
 );

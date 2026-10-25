@@ -973,6 +973,12 @@ export function toPullRequestSummary(pr: SummarizedPullRequest): GitHubPullReque
   };
 }
 
+/**
+ * Two parts, so a watch reads only what moved: `status` needs the detail read and `remarks` also
+ * needs the activity read. Reactions are fingerprinted only on the recent issue-comment page,
+ * where reviewer bots react to review requests; review and inline-comment reactions wait for
+ * the periodic full read.
+ */
 export interface GitHubPullRequestWatchFingerprint {
   readonly status: string;
   readonly remarks: string;

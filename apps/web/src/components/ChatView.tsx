@@ -21,6 +21,7 @@ import { useComposerResume } from "./chat/useComposerResume";
 import { useImplementPlanInNewThread } from "./chat/useProposedPlanSend";
 import { ThreadFind, ThreadFindCanvas, type ThreadFindControls } from "./chat/ThreadFindProvider";
 import { THREAD_FIND_BAR_RESERVED_HEIGHT } from "./chat/ThreadFindBar";
+import { useActionResumeBanners } from "./chat/useActionResumeBanners";
 import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
 import { resolveDraftHeroState } from "./ChatView.logic";
 import { useQueuedRunEdit } from "./chat/useQueuedRunEdit";
@@ -2468,6 +2469,16 @@ export default function ChatView(props: ChatViewProps) {
     scrollToEnd,
     persistThreadSettingsForNextTurn,
   });
+  const {
+    runningBanner: runningResumableActionBannerItem,
+    interruptedBanner: interruptedActionBannerItem,
+  } = useActionResumeBanners({
+    routeThreadRef,
+    threadRef: activeThreadRef,
+    action: activeThreadShell?.actionResume ?? null,
+    onRequestTerminalFocus: () => setTerminalFocusRequestId((value) => value + 1),
+    onThreadError: setThreadError,
+  });
   const activeThreadHasCompactableConversation = serverVisibleTurnItems.some(
     ({ item }) =>
       item.type === "user_message" &&
@@ -2590,6 +2601,10 @@ export default function ChatView(props: ChatViewProps) {
     const backgroundWorkItems = [childInputBanner, goalBanner, backgroundWorkBanner].filter(
       (item) => item !== null,
     );
+    const interruptedActionItems =
+      interruptedActionBannerItem === null ? [] : [interruptedActionBannerItem];
+    const runningActionItems =
+      runningResumableActionBannerItem === null ? [] : [runningResumableActionBannerItem];
     const usageLimitsItems = usageLimitsBanner === null ? [] : [usageLimitsBanner];
     const projectCloneItems = projectCloneBannerItem === null ? [] : [projectCloneBannerItem];
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
@@ -2599,6 +2614,8 @@ export default function ChatView(props: ChatViewProps) {
         ...usageLimitsItems,
         ...projectCloneItems,
         ...systemComposerBannerItems,
+        ...interruptedActionItems,
+        ...runningActionItems,
         ...backgroundWorkItems,
       ];
     }
@@ -2608,6 +2625,8 @@ export default function ChatView(props: ChatViewProps) {
       ...usageLimitsItems,
       ...projectCloneItems,
       ...systemComposerBannerItems,
+      ...interruptedActionItems,
+      ...runningActionItems,
       ...backgroundWorkItems,
       branchMismatchBannerItem({
         mismatchKey: activeBranchMismatchKey,
