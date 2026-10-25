@@ -1,3 +1,4 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
@@ -8,6 +9,7 @@ import {
   type TerminalOpenInput,
   type TerminalRestartInput,
   type TerminalSummary,
+  ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
   TerminalProviderInstanceNotFoundError,
@@ -39,6 +41,9 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TerminalManager from "./Manager.ts";
+import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
+import * as ProjectService from "../project/ProjectService.ts";
+import * as UpdateDrainAdmission from "../updateDrain/UpdateDrainAdmission.ts";
 import { terminalOutputStream } from "./OutputProtocol.ts";
 import * as PtyAdapter from "@t3tools/shared/PtyAdapter";
 
@@ -5382,10 +5387,135 @@ it.layer(
       }),
   );
 
-  it.effect("reads live subprocess activity while a previous shell is still terminating", () =>
+  it.effect(
+    "setup proceeds with a retained background job after the foreground startup prompt returns",
+    () =>
+      Effect.gen(function* () {
+        const foregroundStartup = yield* Ref.make<"separate" | "shared" | "background">("separate");
+        const owned = yield* Ref.make<ReadonlyArray<number>>([]);
+        const processRunner: ProcessRunner.ProcessRunner["Service"] = {
+          run: (input) =>
+            Ref.get(foregroundStartup).pipe(
+              Effect.map((stage) => {
+                const foreground = stage !== "background";
+                const group = stage === "separate" ? 9002 : 9000;
+                expect(input.args).toEqual(["-eo", "pid=,pgid=,tpgid=,comm="]);
+                return {
+                  stdout: `9000 9000 ${group} bash\n9001 9001 ${group} background-worker\n${foreground ? `9002 ${group} ${group} installer\n` : ""}`,
+                  stderr: "",
+                  code: ChildProcessSpawner.ExitCode(0),
+                  timedOut: false,
+                  stdoutTruncated: false,
+                  stderrTruncated: false,
+                  stdoutInvalidUtf8: false,
+                  stderrInvalidUtf8: false,
+                };
+              }),
+            ),
+        };
+        const { manager, ptyAdapter, baseDir } = yield* createManager(5, {
+          shellResolver: () => "/bin/bash",
+          processTable: Ref.get(foregroundStartup).pipe(
+            Effect.map((stage) => [
+              { pid: 9000, ppid: 1, name: "bash" },
+              { pid: 9001, ppid: 9000, name: "background-worker" },
+              ...(stage !== "background" ? [{ pid: 9002, ppid: 9000, name: "installer" }] : []),
+            ]),
+          ),
+          registerTerminalProcesses: ({ processIds }) => Ref.set(owned, processIds),
+        }).pipe(Effect.provideService(ProcessRunner.ProcessRunner, processRunner));
+        const runnerLayer = ProjectSetupScriptRunner.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              Layer.succeed(TerminalManager.TerminalManager, manager),
+              Layer.mock(ProjectService.ProjectService)({}),
+              Layer.mock(UpdateDrainAdmission.UpdateDrainAdmission)({
+                admit: (_kind, effect) => effect,
+              }),
+              ServerSettings.layerTest(),
+              NodeCrypto.layer,
+            ),
+          ),
+        );
+        yield* Effect.gen(function* () {
+          const runner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
+          const result = yield* runner.runForThread({
+            threadId: "thread-1",
+            worktreePath: baseDir,
+            observeCompletion: {},
+            project: {
+              id: ProjectId.make("setup-background"),
+              workspaceRoot: baseDir,
+              scripts: [
+                {
+                  id: "setup",
+                  name: "Setup",
+                  command: "prepare-worktree",
+                  icon: "configure",
+                  runOnWorktreeCreate: true,
+                },
+              ],
+            },
+          });
+          if (result.status !== "started" || !result.completion)
+            return yield* Effect.die("missing setup completion");
+          const process = ptyAdapter.processes[0]!;
+          process.exitOnKill = "SIGTERM";
+          yield* manager.refreshMetadata;
+          yield* TestClock.adjust("3 seconds");
+          expect(process.writes).toEqual([]);
+          yield* Ref.set(foregroundStartup, "shared");
+          yield* TestClock.adjust("3 seconds");
+          expect(process.writes).toEqual([]);
+          yield* Ref.set(foregroundStartup, "background");
+          expect((yield* manager.metadata)[0]?.hasRunningSubprocess).toBe(true);
+          yield* TestClock.adjust("3 seconds");
+          expect(process.writes).toHaveLength(1);
+          expect(yield* Ref.get(owned)).toContain(9001);
+          const sentinel = /__T3_SETUP_DONE___[a-f0-9]+:/u.exec(process.writes[0]!)?.[0];
+          expect(sentinel).toBeDefined();
+          process.emitData(`\r\n${sentinel}0\r\n$ `);
+          expect((yield* result.completion).exitCode).toBe(0);
+          expect(process.killed).toBe(false);
+          expect((yield* manager.metadata)[0]?.hasRunningSubprocess).toBe(true);
+          expect(yield* Ref.get(owned)).toContain(9001);
+        }).pipe(Effect.provide(runnerLayer));
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            TestClock.layer(),
+            layerWithHostPlatform("linux"),
+            Layer.succeed(HostProcess.Environment, { SHELL: "/bin/bash" }),
+          ),
+        ),
+      ),
+  );
+
+  it.effect("reads foreground activity while a previous shell is still terminating", () =>
     Effect.gen(function* () {
       const busy = yield* Ref.make(false);
-      const { manager, ptyAdapter, baseDir } = yield* createManager(5, {
+      const ptyAdapter = new FakePtyAdapter();
+      const processRunner: ProcessRunner.ProcessRunner["Service"] = {
+        run: () =>
+          Ref.get(busy).pipe(
+            Effect.map((foreground) => {
+              const current = ptyAdapter.processes.at(-1)!;
+              const group = foreground ? 9100 : current.pid;
+              return {
+                stdout: `${current.pid} ${current.pid} ${group} zsh\n${foreground ? `9100 9100 9100 tool\n` : ""}`,
+                stderr: "",
+                code: ChildProcessSpawner.ExitCode(0),
+                timedOut: false,
+                stdoutTruncated: false,
+                stderrTruncated: false,
+                stdoutInvalidUtf8: false,
+                stderrInvalidUtf8: false,
+              };
+            }),
+          ),
+      };
+      const { manager, baseDir } = yield* createManager(5, {
+        ptyAdapter,
         subprocessInspector: () =>
           Ref.get(busy).pipe(
             Effect.map((hasRunningSubprocess) => ({
@@ -5394,9 +5524,9 @@ it.layer(
               processIds: [],
             })),
           ),
-      });
+      }).pipe(Effect.provideService(ProcessRunner.ProcessRunner, processRunner));
       const input = openInput();
-      expect(yield* manager.hasRunningSubprocess(input)).toBe(false);
+      expect(yield* manager.hasForegroundSubprocess(input)).toBe(false);
       yield* manager.open(input);
       const previous = ptyAdapter.processes[0]!;
       previous.exitOnKill = undefined;
@@ -5406,10 +5536,10 @@ it.layer(
         pid: previous.pid,
         hasRunningSubprocess: true,
       });
-      expect(yield* manager.hasRunningSubprocess(input)).toBe(false);
+      expect(yield* manager.hasForegroundSubprocess(input)).toBe(false);
       yield* Ref.set(busy, true);
       yield* manager.refreshMetadata;
-      expect(yield* manager.hasRunningSubprocess(input)).toBe(true);
+      expect(yield* manager.hasForegroundSubprocess(input)).toBe(true);
       const removed = yield* Deferred.make<void>();
       const unsubscribe = yield* manager.subscribeMetadata((event) =>
         event.type === "upsert" && event.terminal.pid === replacement.pid

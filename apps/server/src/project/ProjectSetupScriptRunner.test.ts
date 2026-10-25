@@ -191,7 +191,7 @@ function makeHarness(
           subscribe,
           closeIdle,
           refreshMetadata: Effect.succeed([]),
-          hasRunningSubprocess: () => Effect.sync(() => busy),
+          hasForegroundSubprocess: () => Effect.sync(() => busy),
           metadata: Effect.sync(() =>
             previousSnapshot
               ? [

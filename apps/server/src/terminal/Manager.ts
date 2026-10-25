@@ -254,8 +254,8 @@ export class TerminalManager extends Context.Service<
       listener: (event: TerminalMetadataStreamEvent) => Effect.Effect<void>,
     ) => Effect.Effect<() => void>;
 
-    /** Only the current shell; terminating predecessors remain visible in drain metadata. */
-    readonly hasRunningSubprocess: (input: {
+    /** Foreground input ownership only; background and terminating jobs remain drain blockers. */
+    readonly hasForegroundSubprocess: (input: {
       readonly threadId: string;
       readonly terminalId: string;
     }) => Effect.Effect<boolean>;
@@ -848,6 +848,34 @@ function isRecognizedPosixShell(name: string | null): name is string {
   );
 }
 
+function foregroundSubprocessBusy(
+  stdout: string,
+  terminalPid: number,
+  expectedShellName: string | null,
+  platform: NodeJS.Platform,
+): boolean {
+  const processes = new Map<number, { group: number; foreground: number; command: string }>();
+  for (const line of stdout.split(/\r?\n/g)) {
+    if (line.trim().length === 0) continue;
+    const match = /^\s*(\d+)\s+(\d+)\s+(-?\d+)\s+(.+)$/.exec(line);
+    if (!match) return true;
+    const pid = Number(match[1]);
+    const group = Number(match[2]);
+    const foreground = Number(match[3]);
+    if (![pid, group, foreground].every(Number.isSafeInteger)) return true;
+    processes.set(pid, { group, foreground, command: match[4]! });
+  }
+  const shell = processes.get(terminalPid);
+  if (!shell || shell.foreground <= 0 || shell.group !== shell.foreground) return true;
+  const shellName = normalizeRootCommandName(shell.command, platform);
+  if (shellName === null || (!isRecognizedPosixShell(shellName) && shellName !== expectedShellName))
+    return true;
+  // With job control disabled, a foreground child shares the shell's process group.
+  return [...processes].some(
+    ([pid, process]) => pid !== terminalPid && process.group === shell.foreground,
+  );
+}
+
 function deriveSubprocessInspectResult(
   snapshot: TerminalProcessTableSnapshot,
   terminalPid: number,
@@ -926,18 +954,15 @@ const resolvePosixPsCommand = Effect.fn("terminal.resolvePosixPsCommand")(functi
   return "ps";
 });
 
-const posixProcessTableSnapshot = Effect.fn("terminal.posixProcessTableSnapshot")(function* (
+const posixPsOutput = Effect.fn("terminal.posixPsOutput")(function* (
   psCommand: string,
-): Effect.fn.Return<
-  TerminalProcessTableSnapshot,
-  TerminalSubprocessCheckError,
-  ProcessRunner.ProcessRunner
-> {
+  columns: string,
+): Effect.fn.Return<string, TerminalSubprocessCheckError, ProcessRunner.ProcessRunner> {
   const processRunner = yield* ProcessRunner.ProcessRunner;
   const result = yield* processRunner
     .run({
       command: psCommand,
-      args: ["-eo", "pid=,ppid=,comm="],
+      args: ["-eo", columns],
       timeout: "1 second",
       maxOutputBytes: 524_288,
       outputMode: "truncate",
@@ -961,8 +986,13 @@ const posixProcessTableSnapshot = Effect.fn("terminal.posixProcessTableSnapshot"
       stdoutTruncated: result.stdoutTruncated,
     });
   }
-  return parsePosixProcessTable(result.stdout);
+  return result.stdout;
 });
+
+const posixProcessTableSnapshot = Effect.fn("terminal.posixProcessTableSnapshot")(
+  (psCommand: string) =>
+    posixPsOutput(psCommand, "pid=,ppid=,comm=").pipe(Effect.map(parsePosixProcessTable)),
+);
 
 const windowsProcessTableSnapshot = Effect.fn("terminal.windowsProcessTableSnapshot")(
   function* (): Effect.fn.Return<
@@ -1725,11 +1755,14 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       return { ...input, env };
     },
   );
+  const posixPsCommand = yield* Effect.cached(
+    resolvePosixPsCommand().pipe(Effect.provideService(FileSystem.FileSystem, fileSystem)),
+  );
   // Share one process table per poll; per-terminal scans can exhaust PIDs on busy hosts.
   const fallbackProcessTableSnapshot = (
     platform === "win32"
       ? windowsProcessTableSnapshot()
-      : posixProcessTableSnapshot(yield* resolvePosixPsCommand())
+      : posixProcessTableSnapshot(yield* posixPsCommand)
   ).pipe(Effect.provideService(ProcessRunner.ProcessRunner, processRunner));
   const processTableSnapshot: Effect.Effect<
     {
@@ -4227,16 +4260,27 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         }),
     );
 
-  const hasRunningSubprocess = Effect.fn("terminal.hasRunningSubprocess")(
-    (input: { readonly threadId: string; readonly terminalId: string }) =>
-      readManagerState.pipe(
-        Effect.map(
-          (state) =>
-            state.sessions.get(toSessionKey(input.threadId, input.terminalId))
-              ?.hasRunningSubprocess ?? false,
-        ),
-      ),
-  );
+  const hasForegroundSubprocess = Effect.fn("terminal.hasForegroundSubprocess")(function* (input: {
+    readonly threadId: string;
+    readonly terminalId: string;
+  }) {
+    const key = toSessionKey(input.threadId, input.terminalId);
+    const session = (yield* readManagerState).sessions.get(key);
+    if (!session || session.status !== "running" || session.pid === null || !session.process)
+      return false;
+    const process = session.process;
+    const terminalPid = session.pid;
+    const shellName = session.observedShellName ?? session.spawnedShellName;
+    const busy = yield* posixPsOutput(yield* posixPsCommand, "pid=,pgid=,tpgid=,comm=").pipe(
+      Effect.provideService(ProcessRunner.ProcessRunner, processRunner),
+      Effect.match({
+        onFailure: () => true,
+        onSuccess: (stdout) => foregroundSubprocessBusy(stdout, terminalPid, shellName, platform),
+      }),
+    );
+    const current = (yield* readManagerState).sessions.get(key);
+    return current?.process !== process || current.pid !== terminalPid ? true : busy;
+  });
 
   const history: TerminalManager["Service"]["history"] = (input) => {
     return flushPersist(input.threadId, input.terminalId).pipe(
@@ -4262,7 +4306,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     closeIdle,
     subscribe,
     subscribeMetadata,
-    hasRunningSubprocess,
+    hasForegroundSubprocess,
     metadata: readAllTerminalMetadata(),
     refreshMetadata: pollSubprocessActivity(true).pipe(Effect.andThen(readAllTerminalMetadata())),
   });
