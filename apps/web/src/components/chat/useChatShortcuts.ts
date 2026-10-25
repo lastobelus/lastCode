@@ -1,3 +1,4 @@
+import { composerFormattingDelimiterForShortcut } from "../../lastcodeComposerSourceShortcuts";
 import type { KeybindingCommand, ResolvedKeybindingsConfig } from "@t3tools/contracts";
 import { useEffect, useEffectEvent } from "react";
 import { isCommandPaletteOpen } from "../../commandPaletteBus";
@@ -70,6 +71,13 @@ export function useChatShortcuts(input: ChatShortcutsInput) {
       event.stopPropagation();
       return;
     }
+
+    if (
+      composerFormattingDelimiterForShortcut(event) &&
+      event.target instanceof HTMLElement &&
+      event.target.closest('[data-composer-rich-text="true"]')
+    )
+      return;
 
     const command = resolveChatShortcutCommand(event, keybindings, input.scriptKeybindings, {
       context: shortcutContext,

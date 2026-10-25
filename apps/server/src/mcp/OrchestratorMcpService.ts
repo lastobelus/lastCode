@@ -98,6 +98,7 @@ import {
   type DispatchModeRefusal,
 } from "../orchestration-v2/DispatchModeLimit.ts";
 import { runOutcome } from "../orchestration-v2/RestartBackgroundNote.ts";
+import { DelegatedTaskCancellation } from "../orchestration-v2/DelegatedTaskCancellation.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
@@ -187,11 +188,11 @@ export interface OrchestratorMcpServiceShape {
     scope: McpInvocationScope,
     input: OrchestratorMcpThreadListInput,
   ) => Effect.Effect<OrchestratorMcpThreadListResult, OrchestratorMcpFailure>;
-  readonly readThreadLocal: (
+  readonly readThread: (
     scope: McpInvocationScope,
     input: OrchestratorMcpThreadReadInput,
   ) => Effect.Effect<OrchestratorMcpThreadReadResult, OrchestratorMcpFailure>;
-  readonly readThread: (
+  readonly readThreadLocal: (
     scope: McpInvocationScope,
     input: OrchestratorMcpThreadReadInput,
   ) => Effect.Effect<OrchestratorMcpThreadReadResult, OrchestratorMcpFailure>;
@@ -920,6 +921,14 @@ function threadDetail(
     interactionMode: projection.thread.interactionMode,
     linkedPullRequest: projection.thread.linkedPullRequest ?? null,
     pullRequests: threadPullRequests(projection.thread.pullRequests),
+    ...(projection.thread.recovery === undefined
+      ? {}
+      : {
+          recovery: {
+            ...projection.thread.recovery,
+            updatedAt: DateTime.formatIso(projection.thread.recovery.updatedAt),
+          },
+        }),
     titleRegeneration:
       projection.thread.titleRegeneration === undefined ||
       projection.thread.titleRegeneration === null
@@ -1188,10 +1197,10 @@ const make = Effect.gen(function* () {
     } as const;
   });
 
-  const resolveReadAuthority = (
-    source: Pick<OrchestrationV2ThreadProjection, "thread" | "runs" | "contextTransfers">,
-    run: OrchestrationV2Run | undefined,
-  ) => ThreadReadBroker.resolveAuthority(threadReadBroker, source, run, loadProjection);
+  /** The run a loaded caller is acting from; remote read authority follows this run only. */
+  const callerRunId = (caller: Pick<OrchestrationV2ThreadProjection, "runs">) =>
+    (ThreadManagementService.latestActiveRun(caller) ?? ThreadManagementService.latestRun(caller))
+      ?.id;
 
   const loadThreadCaller = Effect.fn("OrchestratorMcpService.loadThreadCaller")(function* (
     scope: McpInvocationScope,
@@ -2435,15 +2444,29 @@ const make = Effect.gen(function* () {
       const current = yield* readTask(scope, input.taskId);
       const key = yield* requestKey(input.clientRequestId);
       const parentProjection = yield* loadProjection(scope.thread.threadId);
+      const parentTask = parentProjection.subagents.find(
+        (task) => task.id === input.taskId && task.origin === "app_owned",
+      );
+      const releasedTaskFailure = () =>
+        failure(
+          "task_not_cancellable",
+          "This task's child is now independent. Stop it from its own thread.",
+        );
+      if (parentTask?.ownershipReleased === true) return yield* releasedTaskFailure();
       // Cancelling stops the child and every task under it, each a write to a
       // thread its user may have raised above the parent's modes since it was
       // delegated. All of them are checked before anything is stopped.
       const assertStoppable = Effect.fn("OrchestratorMcpService.assertStoppable")(function* (
         threadId: ThreadId,
+        isRoot = false,
       ): Effect.fn.Return<void, OrchestratorMcpFailure> {
         const shell = yield* threadManagement
           .getThreadShell(threadId)
           .pipe(Effect.mapError(threadManagementFailure));
+        if (shell?.lineage.independent === true) {
+          if (isRoot) return yield* releasedTaskFailure();
+          return;
+        }
         if (shell !== null && shell.deletedAt === null) {
           yield* resolveRuntimeMode(parentProjection.thread.runtimeMode, shell.runtimeMode);
           yield* resolveInteractionMode(
@@ -2455,15 +2478,16 @@ const make = Effect.gen(function* () {
           .getThreadRecords(threadId, ["subagents"])
           .pipe(Effect.mapError(threadManagementFailure));
         for (const task of subagents) {
-          if (task.origin === "app_owned" && task.childThreadId !== null) {
+          if (
+            task.origin === "app_owned" &&
+            task.childThreadId !== null &&
+            task.ownershipReleased !== true
+          ) {
             yield* assertStoppable(task.childThreadId);
           }
         }
       });
-      yield* assertStoppable(current.childThreadId);
-      const parentTask = parentProjection.subagents.find(
-        (task) => task.id === input.taskId && task.origin === "app_owned",
-      );
+      yield* assertStoppable(current.childThreadId, true);
       const disposeCompletionDelivery =
         parentTask?.completionDelivery?.state === "disposed"
           ? Effect.void
@@ -2545,6 +2569,13 @@ const make = Effect.gen(function* () {
       // caught again under that thread's lock, which leaves it running.
       const refused = yield* Ref.make<DispatchModeRefusal | undefined>(undefined);
       const stopWithinLimit = stopChild.pipe(
+        Effect.provideService(DelegatedTaskCancellation, [
+          {
+            parentThreadId: scope.thread.threadId,
+            taskId: input.taskId,
+            childThreadId: current.childThreadId,
+          },
+        ]),
         Effect.provideService(DispatchModeLimit, {
           runtimeMode: parentProjection.thread.runtimeMode,
           interactionMode: parentProjection.thread.interactionMode,
@@ -2643,6 +2674,7 @@ const make = Effect.gen(function* () {
           );
         }
         const parentNodeId = parentRun.rootNodeId;
+        const readAuthorization = yield* threadReadBroker.inherit(parent.thread.id, parentRun.id);
         const providers = yield* loadProviders;
         const key = yield* requestKey(input.clientRequestId);
         const created = yield* Effect.forEach(
@@ -2725,17 +2757,7 @@ const make = Effect.gen(function* () {
                 yield* threadManagement
                   .dispatchLaunch({
                     claim,
-                    beforeInitialMessage: Effect.gen(function* () {
-                      const authority = yield* resolveReadAuthority(parent, parentRun);
-                      if (authority === undefined) return;
-                      const existing = yield* loadProjection(threadId);
-                      yield* threadReadBroker.authorize({
-                        threadId,
-                        messageId,
-                        sessionId: authority.sessionId,
-                        alreadyStored: existing.runs.some((run) => run.userMessageId === messageId),
-                      });
-                    }).pipe(Effect.orDie),
+                    beforeInitialMessage: readAuthorization.authorize(threadId, messageId),
                     initialMessage: {
                       type: "message.dispatch",
                       createdBy: "agent",
@@ -2860,26 +2882,16 @@ const make = Effect.gen(function* () {
     }),
     readThreadLocal,
     readThread: Effect.fn("OrchestratorMcpService.readThread")(function* (scope, input) {
-      // Validate the caller before allowing a miss to leave this environment.
       const { parent } = yield* loadCaller(scope);
       return yield* readThreadLocal(scope, input).pipe(
         Effect.catchIf(
           (error) => error.code === "thread_not_found",
+          // Only a T3 thread's run carries client authority. Other callers, including
+          // OAuth clients and reads forwarded from a client, stay in this environment.
           (error) =>
-            Effect.gen(function* () {
-              if (parent === undefined) return yield* error;
-              const run =
-                ThreadManagementService.latestActiveRun(parent) ??
-                ThreadManagementService.latestRun(parent);
-              const authority = yield* resolveReadAuthority(parent, run);
-              if (authority === undefined) {
-                return yield* failure(
-                  "environment_unavailable",
-                  "This run has no connected client authorized to read other environments. Send a new message from the client connected to those environments and retry.",
-                );
-              }
-              return yield* threadReadBroker.read(authority.threadId, authority.messageId, input);
-            }),
+            parent === undefined
+              ? Effect.fail(error)
+              : threadReadBroker.read(parent.thread.id, callerRunId(parent), input),
         ),
       );
     }),
@@ -2896,6 +2908,10 @@ const make = Effect.gen(function* () {
         requestKey: key,
         operation: "thread-send",
       });
+      const readAuthorization =
+        parent === undefined
+          ? ThreadReadAuthorization.defaultValue()
+          : yield* threadReadBroker.inherit(parent.thread.id, callerRunId(parent));
       const result = yield* threadManagement
         .sendToThread({
           projectId: target.thread.projectId,
@@ -2914,25 +2930,7 @@ const make = Effect.gen(function* () {
           creationSource: "mcp",
         })
         .pipe(
-          Effect.provideService(ThreadReadAuthorization, {
-            authorize: (threadId, messageId) =>
-              Effect.gen(function* () {
-                if (parent === undefined) return;
-                const authority = yield* resolveReadAuthority(
-                  parent,
-                  ThreadManagementService.latestActiveRun(parent) ??
-                    ThreadManagementService.latestRun(parent),
-                );
-                if (authority === undefined) return;
-                const existing = yield* loadProjection(threadId);
-                yield* threadReadBroker.authorize({
-                  threadId,
-                  messageId,
-                  sessionId: authority.sessionId,
-                  alreadyStored: existing.runs.some((run) => run.userMessageId === messageId),
-                });
-              }).pipe(Effect.catch(() => Effect.void)),
-          }),
+          Effect.provideService(ThreadReadAuthorization, readAuthorization),
           Effect.mapError((error) =>
             isThreadManagementError(error)
               ? threadManagementFailure(error)

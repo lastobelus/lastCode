@@ -1,3 +1,9 @@
+/**
+ * Named profiles isolate cookies and share sessions across environments on one desktop.
+ * Built-in Default/Incognito stay environment-local and immutable; Default preserves sign-ins.
+ * Incognito uses a non-persistent partition.
+ * @module BrowserProfile
+ */
 import * as Schema from "effect/Schema";
 import { TrimmedNonEmptyString } from "./baseSchemas.ts";
 

@@ -8,7 +8,9 @@ import {
   PreviewAutomationEvaluateInput,
   PreviewAutomationHoverInput,
   PreviewAutomationNavigateInput,
-  PreviewAutomationOpenInput,
+  PreviewAutomationMcpOpenInput,
+  PreviewAutomationProfiles,
+  PreviewAutomationPublishedDocumentError,
   PreviewAutomationPressInput,
   PreviewAutomationRecordingArtifact,
   PreviewAutomationRecordingStatus,
@@ -25,6 +27,10 @@ import {
   PreviewAutomationTypeInput,
   PreviewAutomationUploadInput,
   PreviewAutomationWaitForInput,
+  PreviewAutomationUnavailableError,
+  PreviewHostingError,
+  PreviewHostingLaunchInput,
+  PreviewHostingLeaseSummary,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import * as FileSystem from "effect/FileSystem";
@@ -34,6 +40,9 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import * as ServerConfig from "../../../config.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as PublishedDocumentPreview from "../../../preview/PublishedDocumentPreview.ts";
+import * as PreviewHosting from "../../../preview/Hosting.ts";
+import { PreviewRemoteUnavailableFailure } from "./errors.ts";
 
 const dependencies = [
   McpInvocationContext.McpInvocationContext,
@@ -41,7 +50,12 @@ const dependencies = [
   PreviewAutomationBroker.PreviewAutomationBroker,
 ];
 
-const PreviewToolFailure = Schema.Union([PreviewAutomationError, OrchestratorMcpFailure]);
+/** What a browser action fails with, including the access gate's refusal. */
+const PreviewToolFailure = Schema.Union([
+  PreviewAutomationError,
+  PreviewRemoteUnavailableFailure,
+  OrchestratorMcpFailure,
+]);
 
 const presentationFields = { toolIcon: Schema.optional(ToolActivityIcon) };
 
@@ -60,7 +74,7 @@ const readonlyBrowserTool = <T extends Tool.Any>(tool: T): T =>
 
 const PreviewStatusTool = Tool.make("preview_status", {
   description:
-    "Report whether a collaborative browser tab is automation-capable, including its control owner, pending dialog, URL, title, visibility, loading state, viewport mode, and measured CSS-pixel size. Pass tabId to inspect a specific tab; omit it to use this agent session's current tab, or the tab the user is viewing when you have none. Server hosts also list every tab in the thread (tabs) with its owner, including tabs the user opened, and the browser profiles preview_open accepts. You can read any listed tab; act only on your own tabs, or on an unclaimed tab while no human controls it.",
+    "Report whether a collaborative browser tab is automation-capable, including its control owner, pending dialog, URL, title, visibility, loading state, viewport mode, and measured CSS-pixel size, and actual profileId/profileName when the desktop supports profiles. Pass tabId to inspect a specific tab; omit it to use this agent session's current tab, or the tab the user is viewing when you have none. Server hosts also list every tab in the thread (tabs) with its owner, including tabs the user opened, and the browser profiles preview_open accepts. You can read any listed tab; act only on your own tabs, or on an unclaimed tab while no human controls it.",
   parameters: PreviewAutomationTabTargetInput,
   success: PreviewAutomationStatus,
   failure: PreviewToolFailure,
@@ -71,14 +85,58 @@ const PreviewStatusTool = Tool.make("preview_status", {
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, true);
 
+const PreviewProfilesTool = Tool.make("preview_profiles", {
+  description:
+    "List existing browser profiles (id, name, kind) and the configured defaultProfileId on this agent session's desktop host. Names may repeat; select a stable ID when they do. Named profiles share their sign-in across environments on that desktop; Default and Incognito remain environment-local. This tool does not create profiles, change the default, or open a tab.",
+  success: PreviewAutomationProfiles,
+  failure: PreviewToolFailure,
+  dependencies,
+})
+  .annotate(Tool.Title, "List browser profiles")
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true);
+
+const PreviewHostTool = Tool.make("preview_host", {
+  description:
+    "Prepare a retained thread-owned local web preview in a managed terminal. Provide the exact shell command, working directory, and local HTTP URL. The command can serve a development app or static HTML files. Use this before sharing the returned link. Processes sleep after 24 hours, but the saved setup and source remain until explicit stop or thread deletion. Opening the in-thread link restores a stopped server automatically for another run window. For isolated T3 dev QA, set browserAuth: t3-dev and retain a fixed T3CODE_DEV_AUTH_TOKEN in env; emit only the clean URL.",
+  parameters: PreviewHostingLaunchInput,
+  success: PreviewHostingLeaseSummary,
+  failure: Schema.Union([
+    PreviewHostingError,
+    PreviewAutomationUnavailableError,
+    OrchestratorMcpFailure,
+  ]),
+  dependencies: [...dependencies, PreviewHosting.PreviewHosting],
+})
+  .annotate(Tool.Title, "Host a local preview")
+  .annotate(Tool.OpenWorld, true)
+  .annotate(Tool.Destructive, true);
+
+const PreviewStopThreadTool = Tool.make("preview_stop_thread", {
+  description:
+    "Permanently cancel every managed preview lease and stop all app-managed terminal processes in this agent's own thread. Stopped previews cannot restart when their old links are opened. Ordinary terminal history is preserved, and other threads and agent providers are untouched.",
+  success: PreviewActionResult,
+  failure: Schema.Union([
+    PreviewHostingError,
+    PreviewAutomationUnavailableError,
+    OrchestratorMcpFailure,
+  ]),
+  dependencies: [...dependencies, PreviewHosting.PreviewHosting],
+})
+  .annotate(Tool.Title, "Stop thread previews and processes")
+  .annotate(Tool.OpenWorld, true)
+  .annotate(Tool.Destructive, true)
+  .annotate(Tool.Idempotent, true);
+
 const PreviewOpenTool = browserTool(
   Tool.make("preview_open", {
     description:
-      "Initialize a collaborative browser tab and open its thread-bound inline preview by default. Set open=false for background-only automation. Pass tabId to reuse a specific existing tab, set reuseExistingTab=false to create another tab, or omit both to use this agent session's current tab. Parallel subagents sharing a provider session must each open with reuseExistingTab=false and pass their returned tabId on every call. Pass profileId (an id or name from preview_status profiles) to open under a browser profile and its saved logins; omit it for the user's default profile. Another agent session's tabs can be read but not operated.",
-    parameters: PreviewAutomationOpenInput,
+      "Initialize a collaborative browser tab and open its thread-bound inline preview by default. Use target:{kind:'published-document',path:'report.html'} to open an exact file already published by an assistant in this calling thread, through signed HTTP in the environment browser. This target cannot be combined with url or desktop hosting; attachments are not supported. Set open=false for background-only automation. Choose browserHost='environment' for QA of this environment's loopback apps: the page runs on the server and streams into the same Browser panel, defaulting to isolated Incognito storage; explicitly selecting Default uses persistent storage in that environment. Choose browserHost='desktop' for desktop sign-ins such as Logged in Developer. Omit browserHost to retain the existing hosting policy. Pass tabId to reuse a specific existing tab, set reuseExistingTab=false to create another tab, or omit both to use this agent session's current tab. To select an existing cookie jar without changing the default, use exactly one of profileName (exact unique name) or profileId from preview_profiles for desktop hosting, or Default/Incognito for environment hosting. Existing tabs retain their host and profile; a mismatch creates a new tab unless an exact tabId was supplied, which fails. Unknown or ambiguous profiles fail. Another agent session's tabs can be read but not operated. Parallel subagents must each open with reuseExistingTab=false and pass the returned tabId on every call.",
+    parameters: PreviewAutomationMcpOpenInput,
     success: PreviewAutomationStatus,
-    failure: PreviewToolFailure,
-    dependencies,
+    failure: Schema.Union([PreviewToolFailure, PreviewAutomationPublishedDocumentError]),
+    dependencies: [...dependencies, PublishedDocumentPreview.PublishedDocumentPreview],
   })
     .annotate(Tool.Title, "Open browser preview")
     .annotate(Tool.Destructive, false),
@@ -306,7 +364,10 @@ const PreviewRecordingStopTool = safeBrowserTool(
 
 export const PreviewToolkit = Toolkit.make(
   PreviewDialogTool,
+  PreviewHostTool,
+  PreviewStopThreadTool,
   PreviewStatusTool,
+  PreviewProfilesTool,
   PreviewOpenTool,
   PreviewNavigateTool,
   PreviewResizeTool,
@@ -328,7 +389,10 @@ export const PreviewToolkit = Toolkit.make(
 
 export const PreviewStandardToolkit = Toolkit.make(
   PreviewDialogTool,
+  PreviewHostTool,
+  PreviewStopThreadTool,
   PreviewStatusTool,
+  PreviewProfilesTool,
   PreviewOpenTool,
   PreviewNavigateTool,
   PreviewResizeTool,

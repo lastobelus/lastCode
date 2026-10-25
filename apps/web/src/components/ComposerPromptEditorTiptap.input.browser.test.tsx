@@ -52,7 +52,7 @@ function Composer({
       disabled={false}
       placeholder=""
       onChange={(...args) => {
-        setPrompt({ value: args[0], cursor: args[1] });
+        setPrompt({ value: args[0], cursor: args[2] });
         onChange?.(...args);
       }}
       onPaste={() => {}}
@@ -146,7 +146,15 @@ it.each([
   });
   expect(serializeEditorDoc(editor.state.doc).value).toBe(`${value}_`);
   expect(textWithMark(editor, "italic")).toEqual([]);
-  expect(textWithMark(editor, "code")).toEqual(code);
+  expect(textWithMark(editor, "code")).toEqual([]);
+  if (code.length > 0) {
+    expect(
+      Array.from(
+        screen.container.querySelectorAll(".composer-md-code"),
+        (node) => node.textContent,
+      ).join(""),
+    ).toBe("`_build`");
+  }
 });
 
 it("bolds with Mod+B only when text is selected", async () => {
@@ -160,12 +168,13 @@ it("bolds with Mod+B only when text is selected", async () => {
   await userEvent.keyboard(modB);
   // Without the guard, Tiptap stores bold for the next typed text.
   expect(editor.state.storedMarks).toBeNull();
+  expect(serializeEditorDoc(editor.state.doc).value).toBe("ship it");
 
   await act(async () => {
     editor.commands.setTextSelection({ from: 1, to: 5 });
   });
   await userEvent.keyboard(modB);
-  await vi.waitFor(() => expect(textWithMark(editor, "bold")).toEqual(["ship"]));
+  await vi.waitFor(() => expect(serializeEditorDoc(editor.state.doc).value).toBe("**ship** it"));
 });
 
 it.each([false, true])(
@@ -383,42 +392,53 @@ describe("an Arabic line", () => {
   }
 
   it("leaves inline code through its start with ArrowRight, which points back", async () => {
-    // Positions: اكتب at 1-5, sumBy at 6-11, الان at 12-16.
-    await using screen = await mountEditor("اكتب `sumBy` الان");
+    const source = "اكتب `sumBy` الان";
+    const inlineStart = source.indexOf("`") + 1;
+    const codeStart = source.indexOf("sumBy") + 1;
+    const codeEnd = codeStart + "sumBy".length;
+    await using screen = await mountEditor(source);
     const { editor } = screen;
     await focusEnd(editor);
-    const caret = () => ({
-      head: editor.state.selection.head,
-      inCode: (editor.state.storedMarks ?? editor.state.selection.$head.marks()).length > 0,
-    });
+    // Inline code is decorated source text, so the caret retains the backticks.
+    const caret = () => editor.state.selection.head;
     const visited = [caret()];
-    while (visited.at(-1)!.head > 5) {
+    while (visited.at(-1)! >= inlineStart) {
       const before = visited.at(-1)!;
       await userEvent.keyboard("{ArrowRight}");
-      await vi.waitFor(() => {
-        const after = caret();
-        expect(after.head < before.head || after.inCode !== before.inCode).toBe(true);
-      });
+      await vi.waitFor(() => expect(caret()).toBeLessThan(before));
       visited.push(caret());
     }
-    expect(visited.some((stop) => stop.inCode)).toBe(true);
+    expect(visited.some((head) => head > codeStart && head < codeEnd)).toBe(true);
+    expect(serializeEditorDoc(editor.state.doc).value).toBe(source);
   });
 
   it("shows the backticks on either side of inline code it is editing", async () => {
-    await using screen = await mountEditor("اكتب `sumBy` الان");
+    const source = "اكتب `sumBy` الان";
+    const codeStart = source.indexOf("sumBy") + 1;
+    await using screen = await mountEditor(source);
     const { editor } = screen;
     await act(async () => {
-      editor.commands.setTextSelection("اكتب su".length + 1);
+      editor.commands.setTextSelection(codeStart + 2);
     });
-    const code = editor.view.dom.querySelector("code")!;
-    const word = document.createRange();
-    word.selectNodeContents([...code.childNodes].find((node) => node instanceof Text)!);
-    const text = word.getBoundingClientRect();
-    const [open, close] = [...editor.view.dom.querySelectorAll(".composer-rich-marker")].map(
-      (marker) => marker.getBoundingClientRect(),
-    );
-    expect(open!.right).toBeLessThanOrEqual(text.left + 1);
-    expect(close!.left).toBeGreaterThanOrEqual(text.right - 1);
+    await vi.waitFor(() => {
+      const start = editor.view.domAtPos(codeStart);
+      const end = editor.view.domAtPos(codeStart + "sumBy".length);
+      const word = document.createRange();
+      word.setStart(start.node, start.offset);
+      word.setEnd(end.node, end.offset);
+      const text = word.getBoundingClientRect();
+      const markers = [...editor.view.dom.querySelectorAll(".composer-md-syntax")];
+      expect(markers.map((marker) => marker.textContent)).toEqual(["`", "`"]);
+      // Bidi can reorder the literal source spans; both backticks must flank the code.
+      const [left, right] = markers
+        .map((marker) => marker.getBoundingClientRect())
+        .sort((a, b) => a.left - b.left);
+      expect(text.width).toBeGreaterThan(0);
+      expect(left!.width).toBeGreaterThan(0);
+      expect(right!.width).toBeGreaterThan(0);
+      expect(left!.right).toBeLessThanOrEqual(text.left + 1);
+      expect(right!.left).toBeGreaterThanOrEqual(text.right - 1);
+    });
   });
 
   it("starts the next line on the right", async () => {

@@ -1,3 +1,4 @@
+import { recordServerBrowserHandoff } from "./serverBrowserHandoff";
 import type { DeviceServiceState, ScopedThreadRef } from "@t3tools/contracts";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { useEffect, useRef } from "react";
@@ -109,6 +110,7 @@ export function useAgentOpenedPreviews(input: {
         : !previous.has(session.tabId);
       if (!fresh || session.reveal !== true) continue;
       if (!autoShowFloatingPreview && requested?.force !== true) continue;
+      void recordServerBrowserHandoff(threadRef, session);
       const surface = panelSurfaces.find(
         (surface) => surface.kind === "preview" && surface.resourceId === session.tabId,
       );

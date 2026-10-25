@@ -28,8 +28,23 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { forkParked } from "../serverActivation.ts";
+import * as EnvironmentPauseStore from "../environment/EnvironmentPauseStore.ts";
 
 export const OrchestrationEffectRequestV2 = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("environment-pause.record-delivery"),
+    messageId: MessageId,
+    delivered: Schema.Boolean,
+  }),
+  Schema.Struct({ type: Schema.Literal("thread.archive"), requestId: CommandId }),
+  Schema.Struct({
+    type: Schema.Literal("incoming-message.summarize"),
+    messageId: MessageId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("subagent.promote"),
+    requestId: CommandId,
+  }),
   Schema.Struct({
     type: Schema.Literal("provider-runtime.continue"),
     sourceRunId: RunId,
@@ -106,6 +121,9 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
     type: Schema.Literal("preview.cleanup"),
   }),
   Schema.Struct({
+    type: Schema.Literal("terminal.archive-cleanup"),
+  }),
+  Schema.Struct({
     type: Schema.Literal("attachment.cleanup"),
     attachmentIds: Schema.Array(Schema.String),
   }),
@@ -124,6 +142,9 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
 export type OrchestrationEffectRequestV2 = typeof OrchestrationEffectRequestV2.Type;
 
 export const REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS = [
+  "environment-pause.record-delivery",
+  "thread.archive",
+  "subagent.promote",
   "provider-runtime.continue",
   "provider-session.detach",
   "provider-thread.rollback",
@@ -131,8 +152,10 @@ export const REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS = [
   "scheduled-tasks.cleanup",
   "terminal.cleanup",
   "preview.cleanup",
+  "terminal.archive-cleanup",
   "attachment.cleanup",
   "thread-title.generate",
+  "incoming-message.summarize",
   "delegated-tasks.stop",
 ] as const satisfies ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
 
@@ -197,12 +220,28 @@ export class EffectOutboxError extends Schema.TaggedError<EffectOutboxError>()(
 const isEffectOutboxError = Schema.is(EffectOutboxError);
 
 export interface EffectOutboxV2Shape {
+  /** Automatic work that can be held by pause without a provider execution claim. */
+  readonly deferredAutomaticExecution: Effect.Effect<
+    ReadonlyArray<{ readonly threadId: ThreadId; readonly runId: RunId }>,
+    EffectOutboxError
+  >;
+  /** Unstarted automatic work that Resume can release without separate queue consent. */
+  readonly pendingAutomaticRelease: Effect.Effect<
+    ReadonlyArray<{ readonly threadId: ThreadId; readonly runId: RunId }>,
+    EffectOutboxError
+  >;
+  /** Accepted execution that may start or continue after its shell appears idle. */
+  readonly pendingExecution: Effect.Effect<
+    ReadonlyArray<{ readonly threadId: ThreadId; readonly providerMessage: boolean }>,
+    EffectOutboxError
+  >;
   /** Unfinished cleanup, including pending retry backoff, without decoding payloads. */
   readonly pendingCleanup: Effect.Effect<
     ReadonlyArray<{ readonly threadId: ThreadId }>,
     EffectOutboxError
   >;
   readonly awaitAvailable: Effect.Effect<void>;
+  readonly awaitIncomingSummaryAvailable: Effect.Effect<void>;
   readonly notifyAvailable: (count?: number) => Effect.Effect<void>;
   /** Persist rows only. Notify workers after the surrounding transaction commits. */
   readonly enqueue: (
@@ -218,6 +257,7 @@ export interface EffectOutboxV2Shape {
     readonly threadId: ThreadId;
     readonly effectTypes: ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
     readonly reason: string;
+    readonly preserveUnstartedAutomatic?: boolean;
   }) => Effect.Effect<ReadonlyArray<string>, EffectOutboxError>;
   readonly signalCancellations: (effectIds: ReadonlyArray<string>) => Effect.Effect<void>;
   readonly awaitCancellation: (effectId: string) => Effect.Effect<void>;
@@ -232,8 +272,18 @@ export interface EffectOutboxV2Shape {
     readonly workerId: string;
     readonly leaseDurationMs: number;
     readonly excludeRestartContinuations?: boolean;
+    readonly incomingSummaryLane?: "only" | "exclude";
   }) => Effect.Effect<Option.Option<OrchestrationEffectV2>, EffectOutboxError>;
+  /** Return an unexecuted automatic claim to pending if pause won the claim race. */
+  readonly deferIfEnvironmentPaused: (input: {
+    readonly effectId: string;
+    readonly workerId: string;
+  }) => Effect.Effect<boolean, EffectOutboxError>;
   readonly nextClaimableAt: Effect.Effect<Option.Option<DateTime.Utc>, EffectOutboxError>;
+  readonly nextIncomingSummaryClaimableAt: Effect.Effect<
+    Option.Option<DateTime.Utc>,
+    EffectOutboxError
+  >;
   readonly succeed: (input: {
     readonly effectId: string;
     readonly workerId: string;
@@ -301,7 +351,70 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
   EffectOutboxV2,
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
+    const pauseStore = yield* Effect.serviceOption(EnvironmentPauseStore.EnvironmentPauseStore);
+    const automationPaused = Option.isSome(pauseStore)
+      ? pauseStore.value.get.pipe(
+          Effect.map((session) => session !== null && session.phase !== "resuming"),
+        )
+      : Effect.succeed(false);
+    const automaticMessage = sql`
+      message.message_id NOT LIKE 'environment-pause:%'
+      AND (
+        json_extract(message.payload_json, '$.notification') IS NOT NULL
+        OR json_extract(message.payload_json, '$.delegatedCompletion') IS NOT NULL
+        OR json_extract(message.payload_json, '$.scheduledTaskId') IS NOT NULL
+        OR message.message_id LIKE 'message:restart-continuation:%'
+        OR message.message_id LIKE 'limit-resume:%'
+        OR (json_extract(message.payload_json, '$.createdBy') = 'system'
+          AND json_extract(message.payload_json, '$.creationSource') = 'server')
+      )
+    `;
+    const automaticEffect = (alias: "candidate" | "active") => sql`
+      (
+        ${sql(alias)}.effect_type = 'provider-runtime.continue'
+        OR (
+          ${sql(alias)}.effect_type IN (
+            'provider-turn.start', 'provider-turn.restart', 'provider-turn.steer',
+            'incoming-message.summarize', 'thread-title.generate'
+          )
+          AND EXISTS (
+            SELECT 1 FROM orchestration_v2_projection_messages AS message
+            WHERE message.thread_id = ${sql(alias)}.thread_id
+              AND (
+                message.run_id = json_extract(${sql(alias)}.payload_json, '$.runId')
+                OR message.message_id = json_extract(${sql(alias)}.payload_json, '$.messageId')
+                OR message.message_id = json_extract(${sql(alias)}.payload_json, '$.kind.messageId')
+              )
+              AND ${automaticMessage}
+          )
+        )
+      )
+    `;
+    // These rows never reached a provider. A retained Pause session, including
+    // Resume in progress, preserves its existing delivery instead of replacing it.
+    const unstartedAutomaticTurn = sql`
+      candidate.effect_type = 'provider-turn.start'
+      AND candidate.status = 'pending'
+      AND candidate.attempt_count = 0
+      AND ${automaticEffect("candidate")}
+      AND EXISTS (
+        SELECT 1 FROM orchestration_v2_projection_runs AS run
+        JOIN orchestration_v2_projection_threads AS thread ON thread.thread_id = run.thread_id
+        WHERE run.thread_id = candidate.thread_id
+          AND run.run_id = json_extract(candidate.payload_json, '$.runId')
+          AND run.status IN ('queued', 'starting')
+          AND json_extract(run.payload_json, '$.queueHeld') IS NOT 1
+          AND thread.archived_at IS NULL AND thread.deleted_at IS NULL
+      )
+    `;
+    const hasRetainedPause = Option.isSome(pauseStore)
+      ? pauseStore.value.get.pipe(Effect.map((session) => session !== null))
+      : Effect.succeed(false);
+    // Availability is only a bounded latency hint; durable rows remain
+    // authoritative. Retaining a small burst lets multiple worker slots wake
+    // for distinct threads without allowing notifications to grow unbounded.
     const available = yield* Queue.dropping<void>(64);
+    const incomingSummaryAvailable = yield* Queue.dropping<void>(1);
     const cancellationSignals = new Map<string, Deferred.Deferred<void>>();
     const settledSignals = new Map<string, Deferred.Deferred<void>>();
     const signalSettled = (effectIds: ReadonlyArray<string>) =>
@@ -319,11 +432,14 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
       Queue.offerAll(
         available,
         Array.from({ length: Math.min(64, Math.max(0, Math.floor(count))) }, () => undefined),
-      ).pipe(Effect.asVoid);
-    // Retry backoff must block later effects so turns cannot race a pending rollback.
+      ).pipe(Effect.andThen(Queue.offer(incomingSummaryAvailable, undefined)), Effect.asVoid);
+    // Each thread runs lifecycle effects in rowid order, including retry backoff, so a failed
+    // rollback finishes before a later turn starts. Claims excluding restart continuations ignore them.
+    // Title and preview metadata have separate per-thread lanes so they cannot delay lifecycle work.
     const claimableCandidatePredicate = (
       availableBefore?: string,
       excludeRestartContinuations = false,
+      paused = false,
     ) =>
       sql`
         ${
@@ -332,6 +448,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             : sql`candidate.available_at <= ${availableBefore}`
         }
         AND candidate.status = 'pending'
+        AND ${paused ? sql`NOT ${automaticEffect("candidate")}` : sql`1 = 1`}
         AND NOT EXISTS (
           SELECT 1
           FROM orchestration_v2_effect_outbox AS active
@@ -341,6 +458,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
               OR (
                 active.status = 'pending'
                 AND active.rowid < candidate.rowid
+                AND ${paused ? sql`NOT ${automaticEffect("active")}` : sql`1 = 1`}
                 AND ${
                   excludeRestartContinuations
                     ? sql`active.effect_type != 'provider-runtime.continue'`
@@ -355,8 +473,13 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
               )
               OR
               (
-                candidate.effect_type != 'thread-title.generate'
-                AND active.effect_type != 'thread-title.generate'
+                candidate.effect_type = 'incoming-message.summarize'
+                AND active.effect_type = 'incoming-message.summarize'
+              )
+              OR
+              (
+                candidate.effect_type NOT IN ('thread-title.generate', 'incoming-message.summarize')
+                AND active.effect_type NOT IN ('thread-title.generate', 'incoming-message.summarize')
               )
             )
         )
@@ -375,17 +498,134 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
         Effect.mapError((cause) => new EffectOutboxError({ operation, cause })),
       );
 
+    const nextClaimableAt = Effect.fn("EffectOutbox.nextClaimableAt")(
+      function* (incomingSummaryLane: "only" | "exclude") {
+        const paused = yield* automationPaused;
+        const rows = yield* sql<{ readonly available_at: string | null }>`
+        SELECT MIN(candidate.available_at) AS available_at
+        FROM orchestration_v2_effect_outbox AS candidate
+        WHERE ${claimableCandidatePredicate(undefined, false, paused)}
+          AND ${incomingSummaryLane === "only" ? sql`candidate.effect_type = 'incoming-message.summarize'` : sql`candidate.effect_type != 'incoming-message.summarize'`}
+      `.pipe(NodeSqliteClient.readOnly, Effect.withTracerEnabled(false));
+        const availableAt = rows[0]?.available_at;
+        if (availableAt === undefined || availableAt === null) return Option.none();
+        const parsed = DateTime.make(availableAt);
+        if (Option.isNone(parsed)) {
+          return yield* new EffectOutboxError({
+            operation: "next-claimable",
+            cause: "Invalid effect availability timestamp.",
+          });
+        }
+        return parsed;
+      },
+      Effect.mapError((cause) =>
+        isEffectOutboxError(cause)
+          ? cause
+          : new EffectOutboxError({ operation: "next-claimable", cause }),
+      ),
+    );
+
+    const automaticExecution = Effect.fn("EffectOutbox.automaticExecution")(
+      function* (eligibleOnly: boolean) {
+        const rows = yield* sql<{ readonly thread_id: string; readonly run_id: string }>`
+          SELECT DISTINCT run.thread_id, run.run_id
+          FROM orchestration_v2_projection_runs AS run
+          JOIN orchestration_v2_projection_messages AS message
+            ON message.thread_id = run.thread_id
+            AND message.message_id = json_extract(run.payload_json, '$.userMessageId')
+          WHERE ${automaticMessage}
+            AND ${
+              eligibleOnly
+                ? sql`
+                  EXISTS (
+                    SELECT 1 FROM orchestration_v2_projection_threads AS thread
+                    WHERE thread.thread_id = run.thread_id
+                      AND thread.archived_at IS NULL AND thread.deleted_at IS NULL
+                  )
+                  AND json_extract(run.payload_json, '$.queueHeld') IS NOT 1
+                  AND (run.status != 'queued' OR NOT EXISTS (
+                    SELECT 1 FROM orchestration_v2_projection_runs AS held
+                    WHERE held.thread_id = run.thread_id AND held.status = 'queued'
+                      AND json_extract(held.payload_json, '$.queueHeld') = 1
+                  ))
+                `
+                : sql`1 = 1`
+            }
+            AND (
+              run.status = 'queued'
+              OR (run.status = 'starting' AND EXISTS (
+                SELECT 1 FROM orchestration_v2_effect_outbox AS candidate
+                WHERE candidate.thread_id = run.thread_id
+                  AND candidate.effect_type = 'provider-turn.start'
+                  AND json_extract(candidate.payload_json, '$.runId') = run.run_id
+                  AND candidate.status = 'pending'
+                  AND candidate.attempt_count = 0
+              ))
+            )
+          ORDER BY run.thread_id, run.run_id
+        `;
+        return rows.map((row) => ({
+          threadId: ThreadId.make(row.thread_id),
+          runId: RunId.make(row.run_id),
+        }));
+      },
+      (effect, eligibleOnly) =>
+        effect.pipe(
+          Effect.mapError(
+            (cause) =>
+              new EffectOutboxError({
+                operation: eligibleOnly
+                  ? "pending-automatic-release"
+                  : "deferred-automatic-execution",
+                cause,
+              }),
+          ),
+        ),
+    );
+
     const service: EffectOutboxV2Shape = {
+      deferredAutomaticExecution: automaticExecution(false),
+      pendingAutomaticRelease: automaticExecution(true),
+      pendingExecution: Effect.gen(function* () {
+        const paused = yield* automationPaused;
+        return yield* sql<{ thread_id: string; provider_message: number }>`
+        SELECT candidate.thread_id,
+          MAX(CASE WHEN candidate.effect_type IN (
+            'provider-turn.start', 'provider-turn.restart', 'provider-turn.steer',
+            'provider-runtime.continue', 'runtime-request.respond'
+          ) THEN 1 ELSE 0 END) AS provider_message
+        FROM orchestration_v2_effect_outbox AS candidate
+        WHERE candidate.status IN ('pending', 'running')
+          AND ${paused ? sql`(candidate.status = 'running' OR NOT ${automaticEffect("candidate")})` : sql`1 = 1`}
+          AND candidate.effect_type IN (
+          'thread.archive', 'subagent.promote', 'provider-runtime.continue',
+          'provider-turn.start', 'provider-turn.restart', 'provider-turn.steer',
+          'runtime-request.respond', 'provider-thread.rollback', 'checkpoint.capture',
+          'delegated-tasks.stop'
+        ) GROUP BY candidate.thread_id ORDER BY candidate.thread_id
+      `;
+      }).pipe(
+        Effect.map((rows) =>
+          rows.map((row) => ({
+            threadId: ThreadId.make(row.thread_id),
+            providerMessage: row.provider_message === 1,
+          })),
+        ),
+        Effect.mapError(
+          (cause) => new EffectOutboxError({ operation: "pending-execution", cause }),
+        ),
+      ),
       pendingCleanup: sql<{ thread_id: string }>`
         SELECT DISTINCT thread_id
         FROM orchestration_v2_effect_outbox
         WHERE status IN ('pending', 'running')
-          AND effect_type IN ('provider-session.detach', 'terminal.cleanup', 'terminal.archive-cleanup')
+          AND effect_type IN ('provider-session.detach', 'terminal.cleanup', 'terminal.archive-cleanup', 'preview.cleanup')
         ORDER BY thread_id
       `.pipe(
         Effect.map((rows) => rows.map((row) => ({ threadId: ThreadId.make(row.thread_id) }))),
         Effect.mapError((cause) => new EffectOutboxError({ operation: "pending-cleanup", cause })),
       ),
+      awaitIncomingSummaryAvailable: Queue.take(incomingSummaryAvailable),
       enqueue: Effect.fn("EffectOutbox.enqueue")(
         function* (effects) {
           const now = yield* DateTime.now;
@@ -459,11 +699,12 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
           ),
         ),
       cancelUnsettled: Effect.fn("EffectOutbox.cancelUnsettled")(
-        function* ({ threadId, effectTypes, reason }) {
+        function* ({ threadId, effectTypes, reason, preserveUnstartedAutomatic = false }) {
           if (effectTypes.length === 0) return [];
           const now = DateTime.formatIso(yield* DateTime.now);
+          const preserve = preserveUnstartedAutomatic && (yield* hasRetainedPause);
           const rows = yield* sql<{ readonly effect_id: string }>`
-            UPDATE orchestration_v2_effect_outbox
+            UPDATE orchestration_v2_effect_outbox AS candidate
             SET
               status = 'cancelled',
               lease_owner = NULL,
@@ -474,6 +715,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             WHERE thread_id = ${threadId}
               AND status IN ('pending', 'running')
               AND effect_type IN ${sql.in(effectTypes)}
+              AND ${preserve ? sql`NOT (${unstartedAutomaticTurn})` : sql`1 = 1`}
             RETURNING effect_id
           `;
           return rows.map(({ effect_id }) => effect_id);
@@ -509,8 +751,9 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
       }),
       reconcileAfterProcessLoss: Effect.gen(function* () {
         const now = DateTime.formatIso(yield* DateTime.now);
+        const preserve = yield* hasRetainedPause;
         const cancelledRows = yield* sql<{ readonly effect_id: string }>`
-          UPDATE orchestration_v2_effect_outbox
+          UPDATE orchestration_v2_effect_outbox AS candidate
           SET
             status = 'cancelled',
             lease_owner = NULL,
@@ -520,6 +763,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             last_error = 'Cancelled because the server process ended before the effect completed.'
           WHERE status IN ('pending', 'running')
             AND effect_type IN ${sql.in(PROCESS_BOUND_EFFECT_TYPES)}
+            AND ${preserve ? sql`NOT (${unstartedAutomaticTurn})` : sql`1 = 1`}
           RETURNING effect_id
         `;
         const requeuedRows = yield* sql<{ readonly effect_id: string }>`
@@ -544,7 +788,13 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
       ),
       // The worker polls for the next effect even when there is no work to claim.
       claimNext: Effect.fnUntraced(
-        function* ({ workerId, leaseDurationMs, excludeRestartContinuations = false }) {
+        function* ({
+          workerId,
+          leaseDurationMs,
+          excludeRestartContinuations = false,
+          incomingSummaryLane,
+        }) {
+          const paused = yield* automationPaused;
           const now = yield* DateTime.now;
           const nowIso = DateTime.formatIso(now);
           const leaseExpiresAt = DateTime.formatIso(
@@ -563,8 +813,9 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             WHERE effect_id = (
               SELECT candidate.effect_id
               FROM orchestration_v2_effect_outbox AS candidate
-              WHERE ${claimableCandidatePredicate(nowIso, excludeRestartContinuations)}
+              WHERE ${claimableCandidatePredicate(nowIso, excludeRestartContinuations, paused)}
                 AND ${excludeRestartContinuations ? sql`candidate.effect_type != 'provider-runtime.continue'` : sql`1 = 1`}
+                AND ${incomingSummaryLane === "only" ? sql`candidate.effect_type = 'incoming-message.summarize'` : incomingSummaryLane === "exclude" ? sql`candidate.effect_type != 'incoming-message.summarize'` : sql`1 = 1`}
               ORDER BY candidate.available_at ASC, candidate.created_at ASC, candidate.effect_id ASC
               LIMIT 1
             )
@@ -578,28 +829,29 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
         },
         Effect.mapError((cause) => new EffectOutboxError({ operation: "claim", cause })),
       ),
-      nextClaimableAt: Effect.gen(function* () {
-        const rows = yield* sql<{ readonly available_at: string | null }>`
-          SELECT MIN(candidate.available_at) AS available_at
-          FROM orchestration_v2_effect_outbox AS candidate
-          WHERE ${claimableCandidatePredicate()}
-        `.pipe(NodeSqliteClient.readOnly, Effect.withTracerEnabled(false));
-        const availableAt = rows[0]?.available_at;
-        if (availableAt === undefined || availableAt === null) return Option.none();
-        const parsed = DateTime.make(availableAt);
-        if (Option.isNone(parsed)) {
-          return yield* new EffectOutboxError({
-            operation: "next-claimable",
-            cause: `Invalid available_at timestamp: ${availableAt}`,
-          });
-        }
-        return parsed;
-      }).pipe(
-        Effect.mapError((cause) =>
-          isEffectOutboxError(cause)
-            ? cause
-            : new EffectOutboxError({ operation: "next-claimable", cause }),
-        ),
+      nextClaimableAt: nextClaimableAt("exclude"),
+      nextIncomingSummaryClaimableAt: nextClaimableAt("only"),
+      deferIfEnvironmentPaused: Effect.fn("EffectOutbox.deferIfEnvironmentPaused")(
+        function* ({ effectId, workerId }) {
+          if (!(yield* automationPaused)) return false;
+          const rows = yield* sql<{ readonly effect_id: string }>`
+          UPDATE orchestration_v2_effect_outbox AS candidate
+          SET status = 'pending', attempt_count = MAX(0, attempt_count - 1),
+            lease_owner = NULL, lease_expires_at = NULL
+          WHERE candidate.effect_id = ${effectId}
+            AND candidate.status = 'running' AND candidate.lease_owner = ${workerId}
+            AND ${automaticEffect("candidate")}
+          RETURNING effect_id
+        `;
+          return rows.length > 0;
+        },
+        (effect, { effectId, workerId: _workerId }) =>
+          effect.pipe(
+            Effect.mapError(
+              (cause) =>
+                new EffectOutboxError({ operation: "defer-environment-pause", effectId, cause }),
+            ),
+          ),
       ),
       succeed: Effect.fn("EffectOutbox.succeed")(
         function* ({ effectId, workerId }) {

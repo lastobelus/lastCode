@@ -25,6 +25,8 @@ export const AssetResource = Schema.Union([
   Schema.TaggedStruct("media-file", {
     threadId: ThreadId,
     path: TrimmedNonEmptyString.check(Schema.isMaxLength(ASSET_PATH_MAX_LENGTH)),
+    /** Restrict access to the exact file published by an assistant in this thread. */
+    linkedThreadFile: Schema.optionalKey(Schema.Boolean),
   }),
   Schema.TaggedStruct("draft-workspace-file", {
     cwd: TrimmedNonEmptyString.check(Schema.isMaxLength(ASSET_PATH_MAX_LENGTH)),

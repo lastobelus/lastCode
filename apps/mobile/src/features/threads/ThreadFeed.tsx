@@ -252,7 +252,7 @@ import {
   needsWorkspaceBasenameLookup,
   pickWorkspaceBasenameMatch,
   WORKSPACE_BASENAME_LOOKUP_LIMIT,
-} from "@t3tools/client-runtime/workspace-basename-lookup";
+} from "@t3tools/shared/workspaceBasenameLookup";
 import {
   useLiveThreadLinkLabels,
   useQuietThreadShell,

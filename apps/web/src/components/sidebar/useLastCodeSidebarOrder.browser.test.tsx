@@ -1,6 +1,5 @@
-import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { act, render } from "../../../test/render";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import type { Project } from "../../types";
@@ -94,29 +93,25 @@ function Harness({
     </>
   );
 }
-let root: Root, container: HTMLDivElement;
-const original = Object.getOwnPropertyDescriptor(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-beforeEach(() => {
-  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
-    configurable: true,
-    value: true,
-  });
+function setup() {
+  const ui = useUiStateStore.getState();
+  const families = useLastCodeSidebarFamiliesStore.getState();
+  const preferences = { ...settings };
   useUiStateStore.setState({ projectExpandedById: {}, threadLastVisitedAtById: {} });
   useLastCodeSidebarFamiliesStore.setState({ collapsedByKey: {} });
-  container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
-});
-afterEach(async () => {
-  await act(() => root.unmount());
-  container.remove();
-  useUiStateStore.setState({ projectExpandedById: {}, threadLastVisitedAtById: {} });
-  useLastCodeSidebarFamiliesStore.setState({ collapsedByKey: {} });
-  if (original) Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", original);
-  else Reflect.deleteProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-});
+  return {
+    [Symbol.dispose]() {
+      useUiStateStore.setState(ui);
+      useLastCodeSidebarFamiliesStore.setState(families);
+      Object.assign(settings, preferences);
+    },
+  };
+}
 describe("actual root and project order parity", () => {
   it("matches both subheader modes with independent parent and group collapse inputs on one retained mount", async () => {
+    using _fixture = setup();
+    await using screen = await render(<></>, { router: false });
+    const { container } = screen;
     let input: HTMLInputElement | undefined;
     for (const subheaders of [true, false])
       for (const grouping of ["minimal", "typed-groups"] as const)
@@ -127,7 +122,7 @@ describe("actual root and project order parity", () => {
                 for (const groupCollapsed of [undefined, false, true]) {
                   settings.lastcodeSidebarFamilyStatusSubheaders = subheaders;
                   settings.legacySidebarThreadGroupingStyle = grouping;
-                  await act(() => {
+                  await act(async () => {
                     useUiStateStore.getState().setProjectExpanded([group.projectKey], expanded);
                     useLastCodeSidebarFamiliesStore.setState({
                       collapsedByKey: {
@@ -137,7 +132,9 @@ describe("actual root and project order parity", () => {
                           : { [lastcodeSidebarSubagentGroupKey(key(parent))]: groupCollapsed }),
                       },
                     });
-                    root.render(<Harness expanded={expanded} list={list} active={active} />);
+                    await screen.rerender(
+                      <Harness expanded={expanded} list={list} active={active} />,
+                    );
                   });
                   expect(container.querySelector('[data-testid="navigation"]')!.textContent).toBe(
                     container.querySelector('[data-testid="rendering"]')!.textContent,

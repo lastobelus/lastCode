@@ -6,6 +6,7 @@ import type {
   MessageId,
   OrchestrationV2Actor,
   OrchestrationV2CreationSource,
+  OrchestrationV2ConversationMessage,
   OrchestrationV2PlanArtifact,
   OrchestrationV2UserMessageInputIntent,
   PlanId,
@@ -83,6 +84,7 @@ export interface ChatMessage {
   readonly createdBy?: OrchestrationV2Actor;
   readonly creationSource?: OrchestrationV2CreationSource;
   readonly scheduledTaskId?: ScheduledTaskId;
+  readonly incomingSummary?: OrchestrationV2ConversationMessage["incomingSummary"];
   readonly senderThreadId?: ThreadId;
   readonly idleCompaction?: import("@t3tools/contracts").OrchestrationV2IdleCompaction;
   readonly createdAt: string;

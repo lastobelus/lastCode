@@ -1,4 +1,6 @@
 import * as GuestShareService from "../guest/GuestShareService.ts";
+import * as EnvironmentPause from "../environment/EnvironmentPause.ts";
+import * as EnvironmentPauseStore from "../environment/EnvironmentPauseStore.ts";
 import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as Layer from "effect/Layer";
@@ -36,6 +38,7 @@ import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import * as ProviderContinuationService from "./ProviderContinuationService.ts";
 import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationService.ts";
+import * as IncomingMessageSummaryService from "./IncomingMessageSummaryService.ts";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
@@ -59,8 +62,13 @@ import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as UpdateDrain from "../updateDrain/UpdateDrain.ts";
 import * as UpdateDrainAdmission from "../updateDrain/UpdateDrainAdmission.ts";
 import * as ThreadWait from "../threadTools/ThreadWait.ts";
+import * as ActionResume from "../actionResume/ActionResume.ts";
+import * as ActionRunStore from "../actionResume/ActionRunStore.ts";
 import * as UpdateDrainRepositoryPersistence from "../persistence/UpdateDrainRepository.ts";
 import * as WorktreeCleanupService from "./WorktreeCleanupService.ts";
+import * as SubagentPromotionService from "./SubagentPromotionService.ts";
+import * as ThreadRecovery from "./ThreadRecoveryService.ts";
+import * as ThreadRecoveryRepair from "./ThreadRecoveryRepairService.ts";
 
 export const layerEventInfrastructure = Layer.mergeAll(
   OrchestrationEventStore.layer,
@@ -171,6 +179,17 @@ const layerProviderAuthServiceProvided = ProviderAuthService.layer.pipe(
   Layer.provide(Layer.merge(ProjectionStore.layer, layerProviderSessionManagerProvided)),
 );
 
+const layerThreadRecoveryProvided = ThreadRecovery.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      ProjectionStore.layer,
+      layerEventSinkProvided,
+      IdAllocator.layer,
+      ThreadCommandExecutor.layer,
+    ),
+  ),
+);
+
 const layerRunExecutionServiceProvided = RunExecutionService.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -180,6 +199,8 @@ const layerRunExecutionServiceProvided = RunExecutionService.layer.pipe(
       IdAllocator.layer,
       layerProviderEventIngestorProvided,
       TurnItemPositionStore.layer,
+      layerThreadRecoveryProvided,
+      ProjectionStore.layer,
     ),
   ),
 );
@@ -277,6 +298,7 @@ const layerThreadManagementProvided = ThreadManagementService.layerWithLegacyImp
       layerLegacyV1ThreadImporterProvided,
       layerCommandReceiptStoreProvided,
       layerProviderSessionManagerProvided,
+      layerThreadRecoveryProvided,
     ),
   ),
 );
@@ -331,6 +353,19 @@ const layerThreadLifecycleProvided = ThreadLifecycleService.layer.pipe(
 const layerSecretRequestsProvided = SecretRequests.layer.pipe(
   Layer.provide(layerThreadManagementProvided),
 );
+const layerThreadRecoveryRepairProvided = ThreadRecoveryRepair.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      layerThreadManagementProvided,
+      ProjectionStore.layer,
+      layerCommandReceiptStoreProvided,
+      ProjectStore.layer,
+      layerThreadLaunchProvided,
+      layerThreadRecoveryProvided,
+    ),
+  ),
+);
+
 const layerScheduledTaskProvided = ScheduledTaskService.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -355,9 +390,24 @@ const layerThreadTitleRegenerationProvided = ThreadTitleRegenerationService.laye
     Layer.mergeAll(layerThreadManagementProvided, ProjectStore.layer, TextGeneration.layer),
   ),
 );
+const layerIncomingMessageSummaryProvided = IncomingMessageSummaryService.layer.pipe(
+  Layer.provide(Layer.mergeAll(layerThreadManagementProvided, TextGeneration.layer)),
+);
+const layerSubagentPromotionProvided = SubagentPromotionService.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      ProjectionStore.layer,
+      layerProviderAdapterRegistryProvided,
+      layerRuntimePolicyProvided,
+      layerOrchestratorProvided,
+    ),
+  ),
+);
+
 const layerEffectExecutorProvided = EffectWorker.layerExecutor.pipe(
   Layer.provide(
     Layer.mergeAll(
+      EffectOutbox.layer,
       layerRunFinalizationServiceProvided,
       layerCheckpointRollbackServiceProvided,
       layerProviderSessionManagerProvided,
@@ -365,7 +415,9 @@ const layerEffectExecutorProvided = EffectWorker.layerExecutor.pipe(
       layerProviderTurnStartServiceProvided,
       layerRuntimeRequestServiceProvided,
       layerThreadTitleRegenerationProvided,
+      layerIncomingMessageSummaryProvided,
       layerThreadManagementProvided,
+      layerSubagentPromotionProvided,
     ),
   ),
 );
@@ -397,6 +449,7 @@ const layerMcpAppRequestsProvided = McpAppRequests.layer.pipe(
 
 export const layer = Layer.mergeAll(
   layerCommandOutputHubProvided,
+  layerThreadRecoveryProvided,
   layerEventSinkProvided,
   layerOrchestratorProvided,
   layerMcpAppRequestsProvided,
@@ -409,9 +462,49 @@ export const layer = Layer.mergeAll(
   layerLegacyV1ThreadImporterProvided,
 );
 
+const layerEnvironmentPauseProvided = EnvironmentPause.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      EnvironmentPauseStore.layer,
+      layerThreadManagementProvided,
+      ProjectionStore.layer,
+      EffectOutbox.layer,
+      layerProviderSessionManagerProvided,
+    ),
+  ),
+);
+
+const layerEnvironmentAutomationResume = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const scheduler = yield* Scheduler.Scheduler;
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const actions = yield* ActionResume.ActionResume;
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    // Durable sources make missed transitions and restart recovery harmless.
+    // Scheduler holds this source while paused; no connectivity signal releases it.
+    yield* scheduler.register(
+      "environment-pause-resume",
+      Effect.gen(function* () {
+        yield* actions.retryPendingFollowUps;
+        yield* orchestrator.resumeQueuedRuns;
+        yield* outbox.notifyAvailable();
+      }),
+    );
+  }),
+).pipe(
+  Layer.provide(
+    Layer.mergeAll(layerOrchestratorProvided, layerActionResumeProvided, EffectOutbox.layer),
+  ),
+);
+
 export const layerProduction = Layer.mergeAll(
+  layerEnvironmentAutomationResume,
+  layerEnvironmentPauseProvided,
+  layerThreadRecoveryRepairProvided,
+  layerThreadWaitProvided,
+  layerActionResumeProvided,
   layerWorktreeCleanupWorkerProvided,
-  layer.pipe(Layer.provide(layerProjectService)),
+  layer.pipe(Layer.provide(Layer.merge(layerProjectService, EnvironmentPauseStore.layer))),
   layerProjectService,
   layerManagedProjectFoldersProvided,
   layerThreadLaunchProvided,
@@ -434,7 +527,9 @@ export const layerProduction = Layer.mergeAll(
   layerAgentSessionImporterProvided,
   EffectOutbox.layerPruneWorker.pipe(Layer.provide(EffectOutbox.layer)),
 ).pipe(
+  Layer.provideMerge(layerUpdateDrainAdmission),
   Layer.provide(ResourceCleanupService.layer.pipe(Layer.provide(layerScheduledTaskProvided))),
   Layer.provide(Scheduler.layer),
+  Layer.provideMerge(EnvironmentPauseStore.layer),
   Layer.provideMerge(layerEventInfrastructure),
 );

@@ -35,6 +35,7 @@ import { ThreadTitleRegeneration } from "./threadTitle.ts";
 import {
   OrchestrationV2Actor,
   OrchestrationV2AppThread,
+  OrchestrationV2ThreadRecovery,
   OrchestrationV2CreationSource,
   OrchestrationV2RunStatus,
   OrchestrationV2TurnItemStatus,
@@ -421,6 +422,9 @@ export const OrchestratorMcpThreadDetail = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   linkedPullRequest: Schema.NullOr(ThreadLinkedPullRequest),
   pullRequests: Schema.optional(Schema.Array(OrchestratorMcpThreadPullRequest)),
+  recovery: Schema.optional(
+    Schema.Struct({ ...OrchestrationV2ThreadRecovery.fields, updatedAt: IsoDateTime }),
+  ),
   titleRegeneration: Schema.NullOr(ThreadTitleRegeneration),
   branch: Schema.NullOr(Schema.String),
   worktreePath: Schema.NullOr(Schema.String),

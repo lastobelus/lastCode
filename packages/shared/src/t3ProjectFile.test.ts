@@ -36,3 +36,11 @@ it("rejects an invalid stable script id from project JSON", () => {
     parseT3ProjectFile('{"scripts":[{"id":"Dev Server","name":"Dev","command":"pnpm dev"}]}'),
   ).toBeNull();
 });
+
+it("decodes explicit terminal-link intent without an embedded URL", () => {
+  expect(
+    decodeJson(
+      '{ "scripts": [{ "name": "Sign in", "command": "auth-tool login", "terminalLinkProfileName": "Work account" }] }',
+    ).scripts?.[0]?.terminalLinkProfileName,
+  ).toBe("Work account");
+});

@@ -209,7 +209,7 @@ export function HomeRouteScreen() {
         {/* Screen options merge shallowly; restore the header after split view. */}
         {workspace !== null && Platform.OS === "ios" ? null : (
           <NativeStackScreenOptions
-            optionsVersion={headerWidth}
+            optionsVersion={[headerWidth]}
             options={{
               ...getConnectionAwareBrandHeaderOptions({
                 headerWidth,

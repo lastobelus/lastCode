@@ -1,6 +1,13 @@
+import { useClientSettings } from "~/hooks/useSettings";
+import { IncomingMessageFrame } from "./IncomingMessageFrame";
+import { formatIncomingMessageOriginal } from "./incomingMessageOriginal";
 import { findRevealRef } from "./markdownFindContext";
 import { type MessageId, type ServerProviderSkill, ThreadId } from "@t3tools/contracts";
-import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import {
+  resolveIncomingMessagePreview,
+  resolveUserMessagePresentation,
+} from "@t3tools/client-runtime/user-message";
 import { Link } from "@tanstack/react-router";
 import { useQuietThreadShell } from "../../state/entities";
 import { useEnvironmentQuery } from "../../state/query";
@@ -23,12 +30,11 @@ import {
   ChevronDownIcon,
   DownloadIcon,
   EyeIcon,
-  type LucideIcon,
-  MessagesSquareIcon,
   Redo2Icon,
   Undo2Icon,
 } from "lucide-react";
 import { Link as LinkIconNode } from "lucide";
+import { Spinner } from "../ui/spinner";
 import { Button, InlineButton } from "../ui/button";
 import { useAssetUrlRefresh, useAssetUrls, useAssetUrlState } from "../../assets/assetUrls";
 import { AttachmentImage } from "../media/AttachmentImage";
@@ -72,6 +78,7 @@ import {
 } from "./TimelineRowParts";
 import { UserMessageContextReferenceChip } from "./UserMessageContextChips";
 import { resolvePreviewAnnotationImage } from "./TimelineUserMessageRow.logic";
+import { AgentMessageSource } from "./AgentMessageSource";
 
 function UserVideoAttachment({ file }: { readonly file: ChatFileAttachment }) {
   const ctx = use(TimelineRowCtx);
@@ -138,6 +145,11 @@ function AutomationMessageRow({ row }: { row: Extract<TimelineRow, { kind: "mess
   const [expanded, setExpanded] = useState(false);
   const revealRef = findRevealRef(() => setExpanded(true));
   const { text, scheduledTaskId } = resolveUserMessagePresentation(row.message);
+  const incomingPreview = resolveIncomingMessagePreview(row.message);
+  const incomingMessageStyle = useClientSettings((settings) => settings.incomingMessageStyle);
+  const incomingMessageFillColor = useClientSettings(
+    (settings) => settings.incomingMessageFillColor,
+  );
   const tasksQuery = useEnvironmentQuery(
     scheduledTaskId
       ? serverEnvironment.scheduledTasksLive({
@@ -147,7 +159,9 @@ function AutomationMessageRow({ row }: { row: Extract<TimelineRow, { kind: "mess
       : null,
   );
   const taskTitle = tasksQuery.data?.tasks.find((task) => task.id === scheduledTaskId)?.title;
-  const summary = taskTitle ?? text.trim().split(/\r?\n/, 1)[0] ?? "";
+  const summary = incomingPreview.isSummary
+    ? incomingPreview.previewText
+    : (taskTitle ?? text.trim().split(/\r?\n/, 1)[0] ?? "");
 
   const revertTurnCount = row.revertTurnCount;
   const promptLink = promptLinkFor(text);
@@ -162,17 +176,39 @@ function AutomationMessageRow({ row }: { row: Extract<TimelineRow, { kind: "mess
       ) : null}
       <div
         className={cn(
-          "min-w-0 max-w-[80%] rounded-2xl bg-message text-message-foreground",
+          "min-w-0 max-w-[80%] rounded-2xl text-foreground",
+          incomingMessageStyle === "neutral" ? "bg-muted" : "border border-border",
           expanded && "w-full",
         )}
+        style={
+          incomingMessageStyle === "neutral" && incomingMessageFillColor
+            ? { backgroundColor: incomingMessageFillColor }
+            : undefined
+        }
       >
-        <FoldedMessageHeader
-          icon={CalendarClockIcon}
-          label="Automation"
-          summary={summary}
-          expanded={expanded}
-          onToggle={() => setExpanded((value) => !value)}
-        />
+        <button
+          type="button"
+          aria-expanded={expanded}
+          data-scroll-anchor-ignore
+          onClick={() => setExpanded((value) => !value)}
+          className="flex w-full min-w-0 items-center gap-1.5 rounded-2xl px-3 py-2 text-left text-sm focus-visible:outline-2 focus-visible:outline-ring"
+        >
+          <CalendarClockIcon className="size-4 shrink-0 stroke-2 text-muted-foreground" />
+          <span className="shrink-0 text-muted-foreground">Automation</span>
+          {incomingPreview.pending ? (
+            <Spinner size="xs" tone="muted" aria-label="Preparing summary" />
+          ) : null}
+          {incomingPreview.isSummary && !expanded ? (
+            <span className="shrink-0 text-2xs text-muted-foreground">Summary · Luna</span>
+          ) : null}
+          <span className="min-w-0 flex-1 truncate">{summary}</span>
+          <ChevronDownIcon
+            className={cn(
+              "size-3.5 shrink-0 text-muted-foreground transition-transform",
+              expanded && "rotate-180",
+            )}
+          />
+        </button>
         {bodyMounted ? (
           // `beforematch` does not bubble, so the reveal listener sits on the hidden fold itself.
           <div
@@ -224,35 +260,6 @@ function AutomationMessageRow({ row }: { row: Extract<TimelineRow, { kind: "mess
   );
 }
 
-function FoldedMessageHeader(props: {
-  icon: LucideIcon;
-  label: string;
-  summary: string;
-  expanded: boolean;
-  onToggle: () => void;
-}) {
-  const Icon = props.icon;
-  return (
-    <button
-      type="button"
-      aria-expanded={props.expanded}
-      data-scroll-anchor-ignore
-      onClick={props.onToggle}
-      className="flex w-full min-w-0 items-center gap-1.5 rounded-2xl px-3 py-2 text-left text-sm focus-visible:outline-2 focus-visible:outline-ring"
-    >
-      <Icon className="size-4 shrink-0 stroke-2 text-muted-foreground" />
-      <span className="max-w-1/2 shrink-0 truncate text-muted-foreground">{props.label}</span>
-      <span className="min-w-0 flex-1 truncate">{props.summary}</span>
-      <ChevronDownIcon
-        className={cn(
-          "size-3.5 shrink-0 text-muted-foreground transition-transform",
-          props.expanded && "rotate-180",
-        )}
-      />
-    </button>
-  );
-}
-
 function UserMessageProjectedStatus({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const status = row.projectedItem?.item.status;
   if (
@@ -295,14 +302,15 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
     (attachment) => !isImageAttachment(attachment) && !isFileAttachment(attachment),
   );
   const userMessage = resolveUserMessagePresentation(row.message);
-  // Messages from other agents fold to one line so the user's own messages stay easy to find.
-  const folded = userMessage.attribution === "agent";
-  const [expanded, setExpanded] = useState(false);
-  const revealFoldRef = findRevealRef(() => setExpanded(true));
   const senderShell = useQuietThreadShell(
-    folded && senderThreadId
+    userMessage.attribution === "agent" && senderThreadId
       ? { environmentId: ctx.activeThreadEnvironmentId, threadId: senderThreadId }
       : null,
+  );
+  const incomingPreview = resolveIncomingMessagePreview(row.message);
+  const incomingMessageStyle = useClientSettings((settings) => settings.incomingMessageStyle);
+  const incomingMessageFillColor = useClientSettings(
+    (settings) => settings.incomingMessageFillColor,
   );
   const resolvedContext = resolveUserMessageContext(
     userMessage.attribution === "guest" ? { ...row.message, text: userMessage.text } : row.message,
@@ -325,11 +333,6 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
     (reference) => reference.label,
   );
   const promptLink = promptLinkFor(plainText);
-  const foldSummary =
-    plainText
-      .split(/\r?\n/)
-      .find((line) => line.trim().length > 0)
-      ?.trim() ?? "";
   const contextClipboardFragment =
     resolvedContext.records.length === 0
       ? null
@@ -417,10 +420,184 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
     );
   };
 
+  const attachments = (
+    <>
+      {(regularImages.length > 0 || userVideos.length > 0) && (
+        <div className="mb-2 grid max-w-[210px] grid-cols-2 gap-2">
+          {regularImages.map((image) => (
+            <div
+              key={image.id}
+              className={cn(
+                "bg-background/70",
+                image.source?.kind === "snap-shot" && image.previewUrl
+                  ? cn(SNAP_SHOT_ATTACHMENT_FRAME_CLASS, "col-span-2")
+                  : "aspect-[4/3] overflow-hidden rounded-lg border border-border/80",
+              )}
+            >
+              {image.previewUrl ? (
+                <button
+                  type="button"
+                  className="block h-full w-full cursor-zoom-in"
+                  aria-label={`Preview ${image.name}`}
+                  onClick={() => {
+                    const preview = buildExpandedImagePreview(regularImages, image.id);
+                    if (!preview) return;
+                    ctx.onImageExpand(preview);
+                  }}
+                >
+                  <AttachmentImage
+                    name={image.name}
+                    mimeType={image.mimeType}
+                    src={image.previewUrl}
+                    alt={image.name}
+                    decoding="async"
+                    className="block size-full object-cover"
+                  />
+                </button>
+              ) : (
+                <div className="flex min-h-[72px] items-center justify-center px-2 py-3 text-center text-2xs text-muted-foreground/70">
+                  {image.name}
+                </div>
+              )}
+              {image.previewUrl && image.source?.kind === "snap-shot" ? (
+                <SnapShotAttachmentDetails source={image.source} />
+              ) : null}
+            </div>
+          ))}
+          {userVideos.map((file) => (
+            <UserVideoAttachment key={file.id} file={file} />
+          ))}
+        </div>
+      )}
+      {unchippedFiles.length > 0 || unknownAttachments.length > 0 ? (
+        <div className="mb-2 flex flex-col gap-1">
+          {unchippedFiles.map((file) => {
+            const fileIdentity = (
+              <>
+                <PierreEntryIcon pathValue={file.name} kind="file" theme={ctx.resolvedTheme} />
+                <span className="min-w-0 flex-1 truncate">{file.name}</span>
+              </>
+            );
+            if (file.downloadable !== false) {
+              return (
+                <div key={file.id} className="flex min-w-0 items-center gap-1">
+                  <button
+                    type="button"
+                    aria-label={`Preview ${file.name}`}
+                    onClick={() => ctx.onFileOpen(file)}
+                    className="focus-visible:ring-ring/70 flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md py-1 text-left text-sm hover:underline focus-visible:ring-2 focus-visible:ring-inset focus-visible:outline-none"
+                  >
+                    {fileIdentity}
+                    <EyeIcon className="size-4 shrink-0" />
+                  </button>
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={
+                        <Button
+                          size="icon-xs"
+                          variant="ghost-muted"
+                          aria-label={`Download ${file.name}`}
+                          onClick={() => ctx.onFileDownload(file)}
+                        />
+                      }
+                    >
+                      <DownloadIcon />
+                    </TooltipTrigger>
+                    <TooltipPopup side="top">Download {file.name}</TooltipPopup>
+                  </Tooltip>
+                </div>
+              );
+            }
+
+            return (
+              <div key={file.id} className="flex min-w-0 items-center gap-2 py-1 text-sm">
+                {fileIdentity}
+              </div>
+            );
+          })}
+          {unknownAttachments.map((attachment) => (
+            <div key={attachment.id} className="flex min-w-0 items-center gap-2 py-1 text-sm">
+              <PierreEntryIcon pathValue={attachment.name} kind="file" theme={ctx.resolvedTheme} />
+              <span className="min-w-0 flex-1 truncate">{attachment.name}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </>
+  );
+  const renderActions = (incomingActions?: { expanded: boolean; toggle: () => void }) => (
+    <div
+      className={cn(
+        "flex w-full items-center justify-end pe-1 text-xs tabular-nums opacity-0 transition-opacity duration-200 pointer-coarse:opacity-100 focus-within:opacity-100 group-hover:opacity-100",
+        incomingPreview.isIncoming
+          ? "group-data-[incoming-message-lifted=true]/incoming:opacity-100"
+          : "max-w-[80%]",
+      )}
+    >
+      <div className="flex shrink-0 items-center gap-2">
+        {userMessage.attribution === "agent" && incomingActions?.expanded && senderThreadId ? (
+          <InlineButton onClick={() => ctx.onOpenThread(senderThreadId)} tone="muted">
+            Open thread
+          </InlineButton>
+        ) : null}
+        {incomingPreview.isSummary && incomingActions && !incomingActions.expanded ? (
+          <>
+            <button
+              type="button"
+              className="cursor-pointer rounded-sm text-muted-foreground hover:text-foreground hover:underline focus-visible:outline-2 focus-visible:outline-ring"
+              onClick={incomingActions.toggle}
+              data-scroll-anchor-ignore
+            >
+              Summary · Luna
+            </button>
+            <span aria-hidden className="text-muted-foreground/50">
+              ·
+            </span>
+          </>
+        ) : incomingPreview.pending && incomingActions && !incomingActions.expanded ? (
+          <span className="text-muted-foreground">Summarizing…</span>
+        ) : null}
+        <Tooltip>
+          <TooltipTrigger render={<p className="text-muted-foreground text-xs tabular-nums" />}>
+            {formatDayAwareTimestamp(row.message.createdAt, ctx.timestampFormat)}
+          </TooltipTrigger>
+          <TooltipPopup>
+            {formatChatTimestampTooltip(row.message.createdAt, ctx.timestampFormat)}
+          </TooltipPopup>
+        </Tooltip>
+        <div className="flex items-center gap-0.5">
+          {typeof revertTurnCount === "number" && (
+            <RevertUserMessageButton turnCount={revertTurnCount} messageId={row.message.id} />
+          )}
+          {resolvedContext.text && (
+            <MessageCopyButton
+              // Structured paste needs the canonical links to retain their positions.
+              text={contextClipboardFragment ? resolvedContext.text : plainText}
+              {...(contextClipboardFragment
+                ? {
+                    extraFlavors: { [COMPOSER_CONTEXT_CLIPBOARD_MIME]: contextClipboardFragment },
+                  }
+                : {})}
+              variant="ghost"
+            />
+          )}
+          {promptLink !== null && (
+            <MessageCopyButton
+              text={promptLink}
+              label="Copy prompt link"
+              icon={LinkIconNode}
+              variant="ghost"
+            />
+          )}
+        </div>
+      </div>
+    </div>
+  );
+
   return (
     <div
       className="group flex flex-col items-end gap-1"
-      data-user-message-attribution={folded ? "agent" : undefined}
+      data-user-message-attribution={userMessage.attribution === "agent" ? "agent" : undefined}
     >
       {userMessage.attribution === "t3code" ? (
         <p
@@ -428,6 +605,19 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
           data-user-message-attribution="t3code"
         >
           Sent by T3 Code
+        </p>
+      ) : userMessage.attribution === "agent" ? (
+        <p className="me-1 text-2xs text-muted-foreground/70" data-user-message-attribution="agent">
+          {senderShell?.title.trim() ? <span>{senderShell.title.trim()} · </span> : null}
+          {senderThreadId ? (
+            <AgentMessageSource
+              senderRef={scopeThreadRef(ctx.activeThreadEnvironmentId, senderThreadId)}
+              currentThreadRef={ctx.threadRef}
+              onOpenThread={() => ctx.onOpenThread(senderThreadId)}
+            />
+          ) : (
+            "Sent by another agent"
+          )}
         </p>
       ) : null}
       {/* The row's heading already names the guest for screen readers. */}
@@ -440,203 +630,60 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
       row.message.inputIntent === "promoted_queued_to_steer" ? (
         <UserMessageIntentMarker intent={row.message.inputIntent} />
       ) : null}
-      <div
-        className={cn(
-          "relative min-w-0 max-w-[80%] rounded-2xl text-message-foreground",
-          userMessage.attribution === "guest" ? guestBubbleClassName(false) : "bg-message",
-          !folded && "p-3",
-          folded && expanded && "w-full",
-        )}
-      >
-        {folded ? (
-          <FoldedMessageHeader
-            icon={MessagesSquareIcon}
-            label={senderShell?.title.trim() || "Agent"}
-            summary={foldSummary}
-            expanded={expanded}
-            onToggle={() => setExpanded((value) => !value)}
+      {incomingPreview.isIncoming ? (
+        <>
+          <MessageAuthorHeading>
+            {userMessage.attribution === "automation"
+              ? "Automation"
+              : senderShell?.title.trim() || "Another agent"}
+          </MessageAuthorHeading>
+          <IncomingMessageFrame
+            preview={incomingPreview}
+            surface={incomingMessageStyle}
+            fillColor={incomingMessageFillColor}
+            attachments={attachments}
+            attachmentCount={row.message.attachments?.length ?? 0}
+            renderOriginal={() => (
+              <div
+                onCopyCapture={onBodyCopyCapture}
+                data-user-message-body="true"
+                data-thread-find-text="true"
+              >
+                <IncomingMessageOriginalBody
+                  text={resolvedContext.text}
+                  formatJson={incomingPreview.canExpand}
+                  renderContextReference={renderContextReference}
+                  skills={ctx.skills}
+                  markdownCwd={ctx.markdownCwd}
+                />
+              </div>
+            )}
+            renderActions={renderActions}
           />
-        ) : null}
-        {/* Find reads the DOM, so a folded message stays mounted but hidden while find is open. */}
-        {!folded || expanded || ctx.findActive ? (
-          <div
-            ref={folded ? revealFoldRef : undefined}
-            hidden={folded && !expanded}
-            className={cn(
-              folded && "px-3 pb-3",
-              folded && !ctx.findActive && "max-h-96 overflow-auto",
-            )}
-          >
-            <MessageAuthorHeading>
-              {userMessage.guestName === undefined ? "You" : `${userMessage.guestName} (guest)`}
-            </MessageAuthorHeading>
-            {(regularImages.length > 0 || userVideos.length > 0) && (
-              <div className="mb-2 grid max-w-[210px] grid-cols-2 gap-2">
-                {regularImages.map((image) => (
-                  <div
-                    key={image.id}
-                    className={cn(
-                      "bg-background/70",
-                      image.source?.kind === "snap-shot" && image.previewUrl
-                        ? cn(SNAP_SHOT_ATTACHMENT_FRAME_CLASS, "col-span-2")
-                        : "aspect-[4/3] overflow-hidden rounded-lg border border-border/80",
-                    )}
-                  >
-                    {image.previewUrl ? (
-                      <button
-                        type="button"
-                        className="block h-full w-full cursor-zoom-in"
-                        aria-label={`Preview ${image.name}`}
-                        onClick={() => {
-                          const preview = buildExpandedImagePreview(regularImages, image.id);
-                          if (!preview) return;
-                          ctx.onImageExpand(preview);
-                        }}
-                      >
-                        <AttachmentImage
-                          name={image.name}
-                          mimeType={image.mimeType}
-                          src={image.previewUrl}
-                          alt={image.name}
-                          decoding="async"
-                          className="block size-full object-cover"
-                        />
-                      </button>
-                    ) : (
-                      <div className="flex min-h-[72px] items-center justify-center px-2 py-3 text-center text-2xs text-muted-foreground/70">
-                        {image.name}
-                      </div>
-                    )}
-                    {image.previewUrl && image.source?.kind === "snap-shot" ? (
-                      <SnapShotAttachmentDetails source={image.source} />
-                    ) : null}
-                  </div>
-                ))}
-                {userVideos.map((file) => (
-                  <UserVideoAttachment key={file.id} file={file} />
-                ))}
-              </div>
-            )}
-            {unchippedFiles.length > 0 || unknownAttachments.length > 0 ? (
-              <div className="mb-2 flex flex-col gap-1">
-                {unchippedFiles.map((file) => {
-                  const fileIdentity = (
-                    <>
-                      <PierreEntryIcon
-                        pathValue={file.name}
-                        kind="file"
-                        theme={ctx.resolvedTheme}
-                      />
-                      <span className="min-w-0 flex-1 truncate">{file.name}</span>
-                    </>
-                  );
-                  if (file.downloadable !== false) {
-                    return (
-                      <div key={file.id} className="flex min-w-0 items-center gap-1">
-                        <button
-                          type="button"
-                          aria-label={`Preview ${file.name}`}
-                          onClick={() => ctx.onFileOpen(file)}
-                          className="focus-visible:ring-ring/70 flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md py-1 text-left text-sm hover:underline focus-visible:ring-2 focus-visible:ring-inset focus-visible:outline-none"
-                        >
-                          {fileIdentity}
-                          <EyeIcon className="size-4 shrink-0" />
-                        </button>
-                        <Tooltip>
-                          <TooltipTrigger
-                            render={
-                              <Button
-                                size="icon-xs"
-                                variant="ghost-muted"
-                                aria-label={`Download ${file.name}`}
-                                onClick={() => ctx.onFileDownload(file)}
-                              />
-                            }
-                          >
-                            <DownloadIcon />
-                          </TooltipTrigger>
-                          <TooltipPopup side="top">Download {file.name}</TooltipPopup>
-                        </Tooltip>
-                      </div>
-                    );
-                  }
-
-                  return (
-                    <div key={file.id} className="flex min-w-0 items-center gap-2 py-1 text-sm">
-                      {fileIdentity}
-                    </div>
-                  );
-                })}
-                {unknownAttachments.map((attachment) => (
-                  <div key={attachment.id} className="flex min-w-0 items-center gap-2 py-1 text-sm">
-                    <PierreEntryIcon
-                      pathValue={attachment.name}
-                      kind="file"
-                      theme={ctx.resolvedTheme}
-                    />
-                    <span className="min-w-0 flex-1 truncate">{attachment.name}</span>
-                  </div>
-                ))}
-              </div>
-            ) : null}
-            <div onCopyCapture={onBodyCopyCapture}>
-              <CollapsibleUserMessageBody
-                text={resolvedContext.text}
-                renderContextReference={renderContextReference}
-                skills={ctx.skills}
-                markdownCwd={ctx.markdownCwd}
-                collapsible={!folded}
-              />
-            </div>
-          </div>
-        ) : null}
-      </div>
-      <UserMessageProjectedStatus row={row} />
-      {!folded || expanded ? (
-        <div className="flex w-full max-w-[80%] items-center justify-end pe-1 text-xs tabular-nums opacity-0 transition-opacity duration-200 pointer-coarse:opacity-100 focus-within:opacity-100 group-hover:opacity-100">
-          <div className="flex shrink-0 items-center gap-2">
-            {folded && senderThreadId ? (
-              <InlineButton onClick={() => ctx.onOpenThread(senderThreadId)} tone="muted">
-                Open thread
-              </InlineButton>
-            ) : null}
-            <Tooltip>
-              <TooltipTrigger render={<p className="text-muted-foreground text-xs tabular-nums" />}>
-                {formatDayAwareTimestamp(row.message.createdAt, ctx.timestampFormat)}
-              </TooltipTrigger>
-              <TooltipPopup>
-                {formatChatTimestampTooltip(row.message.createdAt, ctx.timestampFormat)}
-              </TooltipPopup>
-            </Tooltip>
-            <div className="flex items-center gap-0.5">
-              {typeof revertTurnCount === "number" && (
-                <RevertUserMessageButton turnCount={revertTurnCount} messageId={row.message.id} />
-              )}
-              {resolvedContext.text && (
-                <MessageCopyButton
-                  text={contextClipboardFragment ? resolvedContext.text : plainText}
-                  {...(contextClipboardFragment
-                    ? {
-                        extraFlavors: {
-                          [COMPOSER_CONTEXT_CLIPBOARD_MIME]: contextClipboardFragment,
-                        },
-                      }
-                    : {})}
-                  variant="ghost"
-                />
-              )}
-              {promptLink !== null && (
-                <MessageCopyButton
-                  text={promptLink}
-                  label="Copy prompt link"
-                  icon={LinkIconNode}
-                  variant="ghost"
-                />
-              )}
-            </div>
+        </>
+      ) : (
+        <div
+          className={cn(
+            "relative max-w-[80%] rounded-2xl p-3 text-message-foreground",
+            userMessage.attribution === "guest" ? guestBubbleClassName(false) : "bg-message",
+          )}
+        >
+          <MessageAuthorHeading>
+            {userMessage.guestName === undefined ? "You" : `${userMessage.guestName} (guest)`}
+          </MessageAuthorHeading>
+          {attachments}
+          <div onCopyCapture={onBodyCopyCapture}>
+            <CollapsibleUserMessageBody
+              text={resolvedContext.text}
+              renderContextReference={renderContextReference}
+              skills={ctx.skills}
+              markdownCwd={ctx.markdownCwd}
+            />
           </div>
         </div>
-      ) : null}
+      )}
+      <UserMessageProjectedStatus row={row} />
+      {incomingPreview.isIncoming ? null : renderActions()}
     </div>
   );
 }
@@ -708,15 +755,13 @@ const CollapsibleUserMessageBody = memo(function CollapsibleUserMessageBody(prop
   renderContextReference: (reference: ChatMarkdownContextReference) => ReactNode;
   skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   markdownCwd: string | undefined;
-  collapsible?: boolean;
   footer?: ReactNode;
 }) {
   const [expanded, setExpanded] = useState(false);
   const revealForFind = () => setExpanded(true);
   const revealRef = findRevealRef(revealForFind);
   const hasVisibleBody = props.text.trim().length > 0;
-  const canCollapse =
-    props.collapsible !== false && hasVisibleBody && shouldCollapseUserMessage(props.text);
+  const canCollapse = hasVisibleBody && shouldCollapseUserMessage(props.text);
   const isCollapsed = canCollapse && !expanded;
   const showCollapseControl = canCollapse;
 
@@ -777,6 +822,17 @@ const CollapsibleUserMessageBody = memo(function CollapsibleUserMessageBody(prop
       ) : null}
     </div>
   );
+});
+
+const IncomingMessageOriginalBody = memo(function IncomingMessageOriginalBody(props: {
+  text: string;
+  formatJson: boolean;
+  renderContextReference: (reference: ChatMarkdownContextReference) => ReactNode;
+  skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
+  markdownCwd: string | undefined;
+}) {
+  const text = props.formatJson ? formatIncomingMessageOriginal(props.text) : props.text;
+  return <UserMessageBody {...props} text={text} />;
 });
 
 const UserMessageBody = memo(function UserMessageBody(props: {

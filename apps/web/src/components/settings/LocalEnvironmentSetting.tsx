@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 
 import { isLocalEnvironmentDisabled } from "../../localEnvironment";
 import {
@@ -17,7 +17,7 @@ import { SettingsRow } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
 
 // Toggling relaunches desktop; the switch reflects startup state.
-export function LocalEnvironmentSetting() {
+export function LocalEnvironmentSetting({ pauseControl }: { pauseControl?: ReactNode }) {
   const setEnabled = window.desktopBridge?.setLocalEnvironmentEnabled;
   const [enabled] = useState(() => !isLocalEnvironmentDisabled());
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -46,12 +46,15 @@ export function LocalEnvironmentSetting() {
             : "Turned off. Agents only run in remote environments."
         }
         control={
-          <Switch
-            checked={enabled}
-            disabled={isUpdating}
-            onCheckedChange={() => setConfirmOpen(true)}
-            aria-label="Local environment"
-          />
+          <div className="flex items-center gap-2">
+            {enabled ? pauseControl : null}
+            <Switch
+              checked={enabled}
+              disabled={isUpdating}
+              onCheckedChange={() => setConfirmOpen(true)}
+              aria-label="Local environment"
+            />
+          </div>
         }
       />
       <AlertDialog

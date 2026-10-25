@@ -437,6 +437,7 @@ const profileRequests: Array<{ desktopHostId?: string }> = [];
 const profileCatalogues = new Map<string, ProfileCatalogue>();
 /** Pages the fake desktop takes back or returns; the channel's streams emit them. */
 const desktopDetaches = new NodeEvents.EventEmitter();
+let desktopDetachSubscribed = Promise.withResolvers<void>();
 const desktopTabs = new Set<string>();
 const desktopRenders = (tabId: string) => {
   if (desktopRendersNext) {
@@ -452,6 +453,7 @@ let desktopPageSetup:
   | null = null;
 const presentedDesktopTabs = new Set<string>();
 const desktopPresentations = new NodeEvents.EventEmitter();
+let desktopPresentationSubscribed = Promise.withResolvers<void>();
 const desktopPopupEvents = new NodeEvents.EventEmitter();
 let nativePopupCreatedSeen: PromiseWithResolvers<void> | null = null;
 let nativePopupClosedSeen: PromiseWithResolvers<void> | null = null;
@@ -606,6 +608,7 @@ const dependencies = Layer.mergeAll(
           const onDetach = (key: { threadId: string; tabId: string }) =>
             Queue.offerUnsafe(queue, key);
           desktopDetaches.on("detach", onDetach);
+          desktopDetachSubscribed.resolve();
           return onDetach;
         }),
         (onDetach) => Effect.sync(() => desktopDetaches.off("detach", onDetach)),
@@ -770,6 +773,7 @@ const dependencies = Layer.mergeAll(
             const listener = (key: { threadId: string; tabId: string; desktopHostId: string }) =>
               Queue.offerUnsafe(queue, key);
             desktopPresentations.on("presentation", listener);
+            desktopPresentationSubscribed.resolve();
             return listener;
           }),
           (listener) => Effect.sync(() => desktopPresentations.off("presentation", listener)),
@@ -893,6 +897,8 @@ beforeEach(() => {
   keyCopy = "";
   focusedFrame = null;
   desktopTabs.clear();
+  desktopDetachSubscribed = Promise.withResolvers<void>();
+  desktopPresentationSubscribed = Promise.withResolvers<void>();
   presentedDesktopTabs.clear();
   nativeRenderingGate = null;
   nativeRenderingEntered = null;
@@ -6013,7 +6019,7 @@ it.live.each([true, false])(
           input: { colorScheme: "dark" },
         });
         const viewer = yield* browser.attachViewer(viewerInput(tabId, false));
-        while (desktopDetaches.listenerCount("detach") === 0) yield* Effect.yieldNow;
+        yield* Effect.promise(() => desktopDetachSubscribed.promise);
         desktopDetaches.emit("detach", { threadId: scope.thread.threadId, tabId });
         let end = yield* Queue.take(viewer.output);
         while (end._tag !== "reconnect") end = yield* Queue.take(viewer.output);
@@ -6425,7 +6431,7 @@ it.live(
           streamViewers: 0,
           revealRequested: true,
         });
-        while (desktopPresentations.listenerCount("presentation") === 0) yield* Effect.yieldNow;
+        yield* Effect.promise(() => desktopPresentationSubscribed.promise);
         presentedDesktopTabs.add(tabId);
         desktopPresentations.emit("presentation", {
           threadId: scope.thread.threadId,

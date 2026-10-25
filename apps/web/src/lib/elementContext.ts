@@ -12,6 +12,9 @@ export interface ElementContextSelection {
   pageTitle: string | null;
   tagName: string;
   selector: string | null;
+  /** Outer-to-inner iframe selectors for elements in embedded documents. */
+  framePath?: NonNullable<PickedElementPayload["framePath"]>;
+  /** Truncated outer-HTML preview. */
   htmlPreview: string;
   componentName: string | null;
   source: PickedElementStackFrame | null;
@@ -42,6 +45,14 @@ export function normalizeElementContextSelection(
     pageTitle: raw.pageTitle?.trim() ?? null,
     tagName,
     selector: raw.selector?.trim() || null,
+    ...(raw.framePath?.length
+      ? {
+          framePath: raw.framePath.slice(0, 32).map((frame) => ({
+            pageUrl: truncateString(frame.pageUrl.trim(), 2000),
+            selector: truncateString(frame.selector.trim(), 2000),
+          })),
+        }
+      : {}),
     htmlPreview: truncateString(normalizeText(raw.htmlPreview), ELEMENT_CONTEXT_HTML_PREVIEW_LIMIT),
     componentName: raw.componentName?.trim() || null,
     source: stackFrame

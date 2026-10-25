@@ -55,6 +55,7 @@ export function useComposerMenuItems({
   pullRequestRepository,
   threadPullRequests,
   planModeUiEnabled,
+  threadAnnotationsSupported,
   compactSlashCommandAvailable,
   selectedProvider,
   selectedProviderSkills,
@@ -69,6 +70,7 @@ export function useComposerMenuItems({
   readonly pullRequestRepository: string | null;
   readonly threadPullRequests: ReadonlyArray<ThreadPullRequestLink> | undefined;
   readonly planModeUiEnabled: boolean;
+  readonly threadAnnotationsSupported: boolean;
   readonly compactSlashCommandAvailable: boolean;
   readonly selectedProvider: ProviderDriverKind;
   readonly selectedProviderSkills: ServerProvider["skills"];
@@ -187,6 +189,17 @@ export function useComposerMenuItems({
           label: "/model",
           description: "Switch response model for this thread",
         },
+        ...(threadAnnotationsSupported
+          ? ([
+              {
+                id: "slash:annotate",
+                type: "slash-command",
+                command: "annotate",
+                label: "/annotate",
+                description: "Add or edit this thread's annotation",
+              },
+            ] as const)
+          : []),
         ...(planModeUiEnabled
           ? ([
               {

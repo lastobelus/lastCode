@@ -40,7 +40,7 @@ const THREAD_FIND_IGNORE_PROPS = {
   "data-thread-find-ignore": "",
 } as React.HTMLAttributes<HTMLDivElement>;
 
-export function MarkdownCodeBlockFrame({
+function MarkdownCodeBlockFrame({
   as: Wrapper = "div",
   language,
   fenceTitle,

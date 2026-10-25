@@ -6,6 +6,7 @@ import { useAtomValue } from "@effect/atom-react";
 import { threadRuntimeIsActive } from "@t3tools/client-runtime/state/shell";
 import type { ThreadCheckpointSummary } from "@t3tools/client-runtime/state/thread-checkpoints";
 import { resolvePendingHandoff } from "@t3tools/client-runtime/handoff";
+import { recoveryQueuesFollowUps } from "@t3tools/client-runtime/state/thread-recovery";
 import {
   deriveProviderSubagentStatus,
   deriveRunlessWorkStartedAt,
@@ -195,7 +196,10 @@ export function useThreadComposerState() {
   });
   const [isSavingQueuedEdit, setIsSavingQueuedEdit] = useState(false);
   const savingQueuedEditRef = useRef(false);
-  const pastedTextFileNamesRef = useRef<{ threadKey: string | null; names: Set<string> }>({
+  const pastedTextFileNamesRef = useRef<{
+    threadKey: string | null;
+    names: Set<string>;
+  }>({
     threadKey: null,
     names: new Set(),
   });
@@ -326,6 +330,10 @@ export function useThreadComposerState() {
   const selectedThreadRuntime = selectedThreadProjection
     ? deriveThreadRuntime(selectedThreadProjection.projection)
     : (selectedThreadShell?.runtime ?? null);
+  const forceQueue = recoveryQueuesFollowUps(
+    selectedThreadShell?.recovery,
+    selectedThreadRuntime?.activeRunId,
+  );
   const selectedThreadActivityRun = selectedThreadProjection
     ? deriveThreadActivityRun(selectedThreadProjection.projection)
     : (selectedThreadShell?.latestRun ?? null);
@@ -367,7 +375,8 @@ export function useThreadComposerState() {
     );
   })();
   // A compacting turn cannot take steering input, so follow-ups queue meanwhile.
-  const canSteerActiveTurn = queueWorkflow?.canPromoteToSteer === true && !isCompacting;
+  const canSteerActiveTurn =
+    !forceQueue && queueWorkflow?.canPromoteToSteer === true && !isCompacting;
   // A stop or a restart holds the queue, completion wakes included, until it
   // is resumed; the queue sheet lists only the user's own messages.
   const queueHeld = queueWorkflow?.isHeld === true;
@@ -672,6 +681,7 @@ export function useThreadComposerState() {
       running: activeThreadBusy && canSteerActiveTurn,
       alternateModifier: followUpOverride !== undefined && followUpOverride !== activeTurnDefault,
       activeTurnDefault,
+      forceQueue,
     });
     const setupRunning = [selectedThreadActivityRun?.status, selectedThreadRuntime?.status].some(
       (status) => status === "preparing" || status === "starting",
@@ -714,7 +724,9 @@ export function useThreadComposerState() {
           context: draft.context,
           attachments: [],
         });
-        appendComposerDraftAttachments(threadKey, attachments, { allowOverflow: true });
+        appendComposerDraftAttachments(threadKey, attachments, {
+          allowOverflow: true,
+        });
         setThreadComposerError(
           threadKey,
           error instanceof Error ? error.message : "Failed to save the queued message.",
@@ -889,6 +901,7 @@ export function useThreadComposerState() {
     followUpBehavior,
     canSteerActiveTurn,
     queueHeld,
+    forceQueue,
     queuedRunEdit,
     isSavingQueuedEdit,
     cancelQueuedRunEdit,

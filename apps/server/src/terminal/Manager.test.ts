@@ -243,6 +243,23 @@ const historyLogPath = (logsDir: string, threadId = "thread-1") =>
     Effect.map(({ join }) => join(logsDir, `terminal_${Base64Url.encode(threadId)}.log`)),
   );
 
+const multiTerminalHistoryLogPath = (
+  logsDir: string,
+  threadId = "thread-1",
+  terminalId = DEFAULT_TERMINAL_ID,
+) =>
+  Effect.service(Path.Path).pipe(
+    Effect.map(({ join }) => {
+      const threadPart = `terminal_${Base64Url.encode(threadId)}`;
+      return join(
+        logsDir,
+        terminalId === DEFAULT_TERMINAL_ID
+          ? `${threadPart}.log`
+          : `${threadPart}_${Base64Url.encode(terminalId)}.log`,
+      );
+    }),
+  );
+
 interface CreateManagerOptions {
   logsDir?: string;
   shellResolver?: () => string;
@@ -966,23 +983,21 @@ it.layer(
     }),
   );
 
-  (undefined,
-    false,
-    it.effect("refuses to create a missing terminal for read-only attach", () =>
-      Effect.gen(function* () {
-        const { manager, ptyAdapter } = yield* createManager();
-        const result = yield* manager
-          .attachStream(openInput(), () => Effect.void, undefined, false)
-          .pipe(Effect.result);
+  it.effect("refuses to create a missing terminal for read-only attach", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager();
+      const result = yield* manager
+        .attachStream(openInput(), () => Effect.void, undefined, false)
+        .pipe(Effect.result);
 
-        assert.equal(result._tag, "Failure");
-        assert.equal(
-          result._tag === "Failure" ? result.failure._tag : null,
-          "TerminalSessionLookupError",
-        );
-        expect(ptyAdapter.spawnInputs).toHaveLength(0);
-      }),
-    ));
+      assert.equal(result._tag, "Failure");
+      assert.equal(
+        result._tag === "Failure" ? result.failure._tag : null,
+        "TerminalSessionLookupError",
+      );
+      expect(ptyAdapter.spawnInputs).toHaveLength(0);
+    }),
+  );
 
   it.effect.each(["awaiting-exit", "metadata-removed"] as const)(
     "rejects attachment queued during shutdown when %s and permits a fresh attachment afterward",

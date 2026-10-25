@@ -81,7 +81,11 @@ import {
 
 type SidebarListItem =
   | ThreadListV2ListItem
-  | { readonly type: "v2-show-more"; readonly key: string; readonly hiddenCount: number };
+  | {
+      readonly type: "v2-show-more";
+      readonly key: string;
+      readonly hiddenCount: number;
+    };
 
 const SIDEBAR_STICKY_HEADER_HEIGHT = 106;
 
@@ -276,6 +280,7 @@ function ThreadNavigationSidebarPane(
     pinReorderEnvironmentIds,
     activeReorderEnvironmentIds,
     titleRegenerationEnvironmentIds,
+    persistenceEnvironmentIds,
   } = listEnvironments;
   const resolveProviderInstance = useThreadRowProviderInstanceResolver(providersByEnvironmentId);
   const pendingOrder = usePendingThreadOrder(nowMinute, snoozeWakeTick);
@@ -583,6 +588,7 @@ function ThreadNavigationSidebarPane(
             onRenameThread={renameThread}
             onRegenerateThreadTitle={regenerateThreadTitle}
             titleRegenerationSupported={titleRegenerationEnvironmentIds.has(thread.environmentId)}
+            persistenceSupported={persistenceEnvironmentIds.has(thread.environmentId)}
             settlementSupported={settlementEnvironmentIds.has(thread.environmentId)}
             onSettleThread={settleThread}
             snoozeSupported={snoozeEnvironmentIds.has(thread.environmentId)}

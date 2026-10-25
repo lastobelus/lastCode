@@ -4,30 +4,20 @@ import * as DateTime from "effect/DateTime";
 import type { EnvironmentThreadShell, PendingSubagentRequest } from "./models.ts";
 
 interface SettlementRunLike {
-  readonly turnId?: unknown;
-  readonly assistantMessageId?: unknown;
   readonly status?: string;
-  readonly state?: string;
   readonly requestedAt?: string | null;
   readonly startedAt?: string | null;
   readonly completedAt?: string | null;
 }
 
 interface SettlementRuntimeLike {
-  readonly threadId?: unknown;
-  readonly providerName?: unknown;
-  readonly runtimeMode?: unknown;
-  readonly activeTurnId?: unknown;
-  readonly lastError?: unknown;
   readonly status: string;
   readonly updatedAt?: string;
 }
 
 interface QueuedThreadShell {
   readonly latestUserMessageAt?: string | null;
-  readonly latestTurn?: SettlementRunLike | null;
   readonly latestRun?: SettlementRunLike | null;
-  readonly session?: SettlementRuntimeLike | null;
   readonly runtime?: SettlementRuntimeLike | null;
 }
 
@@ -38,6 +28,11 @@ interface QueuedThreadShell {
 export const QUEUED_TURN_START_GRACE_MS = 2 * 60 * 1_000;
 const DAY_MS = 24 * 60 * 60 * 1_000;
 
+/**
+ * A user message no run has picked up yet: it is strictly newer than every
+ * timestamp on the latest run, within the bounded adoption grace window.
+ * Preparing, queued and starting runtime states are explicit pending work.
+ */
 export function hasQueuedTurnStart(
   shell: QueuedThreadShell,
   options: { readonly now: string },
@@ -50,7 +45,9 @@ export function hasQueuedTurnStart(
     return true;
   }
   if (shell.latestUserMessageAt == null) return false;
-  if (shell.session?.status === "error") return false;
+  // A failed run start clears the queued state: the failure is already
+  // visible (status edge / error).
+  if (shell.runtime?.status === "failed") return false;
   const messageAt = Date.parse(shell.latestUserMessageAt);
   if (Number.isNaN(messageAt)) return false;
   const nowMs = Date.parse(options.now);
@@ -60,7 +57,7 @@ export function hasQueuedTurnStart(
   // that would otherwise hold the queued state for the whole skew. Mirrors
   // the decider's guard.
   if (Math.abs(nowMs - messageAt) > QUEUED_TURN_START_GRACE_MS) return false;
-  const turn = shell.latestRun ?? shell.latestTurn ?? null;
+  const turn = shell.latestRun ?? null;
   if (turn === null) return true;
   return [turn.requestedAt, turn.startedAt, turn.completedAt].every(
     (candidate) => candidate == null || Date.parse(candidate) < messageAt,
@@ -96,17 +93,17 @@ export function threadRaisedHandWhileSnoozed(shell: ThreadSnoozeShell): boolean 
 }
 
 // V2 runtime.updatedAt includes metadata writes; prefer the failed run's completion.
-// Legacy sessions only expose the runtime timestamp.
 function failureEdgeAt(shell: ThreadSnoozeShell): string | null | undefined {
-  const runtime = shell.runtime ?? shell.session ?? null;
-  if (runtime?.status !== "error" && runtime?.status !== "failed") return undefined;
-  const latestRun = shell.latestRun ?? shell.latestTurn ?? null;
+  const runtime = shell.runtime ?? null;
+  if (runtime?.status !== "failed") return undefined;
+  const latestRun = shell.latestRun ?? null;
   if (latestRun?.status === "failed" && latestRun.completedAt != null) {
     return latestRun.completedAt;
   }
   return runtime.updatedAt ?? null;
 }
 
+/** Snooze hides work without stopping it; keep pending requests and unadopted messages visible. */
 export function canSnooze(
   shell: Pick<
     ThreadSnoozeShell,
@@ -115,9 +112,7 @@ export function canSnooze(
     | "pendingSubagentRequest"
     | "pendingGuestMessageCount"
     | "latestUserMessageAt"
-    | "latestTurn"
     | "latestRun"
-    | "session"
     | "runtime"
     | "source"
   >,
@@ -164,7 +159,7 @@ export function threadWokeAt(
     ) {
       return failedAt;
     }
-    const runtime = shell.runtime ?? shell.session ?? null;
+    const runtime = shell.runtime ?? null;
     return runtime?.updatedAt ?? shell.snoozedAt ?? null;
   }
   return wakeAtMs <= Date.parse(options.now) ? shell.snoozedUntil : null;

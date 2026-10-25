@@ -89,6 +89,7 @@ function setup() {
     ...DEFAULT_SERVER_SETTINGS,
     storageCleanup: {
       worktreeKeepWhen: "uncommitted-changes",
+      worktreeDependenciesAfterDays: null,
       worktreeAfterDays: null,
       worktreeSettledAfterDays: null,
       worktreeOnMerge: false,

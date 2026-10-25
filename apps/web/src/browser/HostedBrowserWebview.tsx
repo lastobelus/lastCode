@@ -61,6 +61,7 @@ export function HostedBrowserWebview(props: {
   readonly profileId: string | undefined;
   readonly zoomFactor: number;
   readonly serverDriven?: boolean;
+  readonly desktopHostId?: string | undefined;
   readonly serverRendering?: {
     readonly colorScheme: DesktopPreviewColorScheme;
     readonly zoomFactor: number;
@@ -76,6 +77,7 @@ export function HostedBrowserWebview(props: {
     zoomFactor,
     profileId,
     serverDriven = false,
+    desktopHostId,
     serverRendering,
   } = props;
   const clientSettingsHydrated = useClientSettingsHydrated();
@@ -114,14 +116,21 @@ export function HostedBrowserWebview(props: {
     crashRecoveryRef.current = INITIAL_WEBVIEW_CRASH_RECOVERY_STATE;
     const lease = acquireDesktopTab(
       runtimeTabId,
-      serverDriven ? { threadId: threadRef.threadId, tabId } : undefined,
+      serverDriven ? { threadId: threadRef.threadId, tabId, desktopHostId } : undefined,
     );
     tabLeaseRef.current = lease;
     return () => {
       if (tabLeaseRef.current === lease) tabLeaseRef.current = null;
       lease.release();
     };
-  }, [clientSettingsHydrated, runtimeTabId, serverDriven, tabId, threadRef.threadId]);
+  }, [
+    clientSettingsHydrated,
+    runtimeTabId,
+    serverDriven,
+    tabId,
+    threadRef.threadId,
+    desktopHostId,
+  ]);
 
   useEffect(() => {
     const bridge = window.desktopBridge?.preview;

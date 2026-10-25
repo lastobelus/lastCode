@@ -1,7 +1,7 @@
-import { act, useEffect, useState } from "react";
+import { act, render, type Screen } from "../../../test/render";
+import { useEffect, useState } from "react";
 import type { ComponentProps } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
+import { expect, it, vi } from "vite-plus/test";
 import { EnvironmentId, ProjectId, ProviderInstanceId } from "@t3tools/contracts";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import type {
@@ -82,23 +82,10 @@ function Consumer({ project }: { project: SidebarProjectSnapshot }) {
     </>
   );
 }
-let root: Root, container: HTMLDivElement;
-beforeEach(() => {
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  vi.clearAllMocks();
-  mocks.primary = "first";
-  container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
-});
-afterEach(async () => {
-  await act(() => root.unmount());
-  container.remove();
-  vi.unstubAllGlobals();
-});
-async function render(project = grouped, props = presentation) {
+
+async function show(screen: Screen, project = grouped, props = presentation) {
   await act(() =>
-    root.render(
+    screen.rerender(
       <LastCodeSidebarPresentationProvider {...props}>
         <Consumer project={project} />
       </LastCodeSidebarPresentationProvider>,
@@ -106,16 +93,20 @@ async function render(project = grouped, props = presentation) {
   );
 }
 it("refreshes known-environment colors while preserving the same editor and stable unchanged badge snapshot", async () => {
-  await render();
+  setup();
+  await using screen = await render(null);
+  const { container } = screen;
+
+  await show(screen);
   const input = container.querySelector("input")!;
   await act(() => {
     input.value = "unsaved";
     input.dispatchEvent(new Event("input", { bubbles: true }));
   });
   expect(container.querySelector("output")?.textContent).toBe("first (local):blue / remote:red");
-  await render();
+  await show(screen);
   expect(mocks.badges).toHaveBeenCalledTimes(1);
-  await render(grouped, {
+  await show(screen, grouped, {
     ...presentation,
     projectEnvironments: {
       ...presentation.projectEnvironments,
@@ -129,15 +120,24 @@ it("refreshes known-environment colors while preserving the same editor and stab
   expect(input.value).toBe("unsaved");
 });
 it("applies the local-icon choice to a single member and refreshes the primary environment ordering", async () => {
+  setup();
+  await using screen = await render(null);
+  const { container } = screen;
+
   const local = makeProject([first]);
-  await render(local);
+  await show(screen, local);
   expect(container.querySelector("output")?.textContent).toBe("");
-  await render(local, {
+  await show(screen, local, {
     ...presentation,
     projectEnvironments: { ...presentation.projectEnvironments, showLocalEnvironmentIcon: true },
   });
   expect(container.querySelector("output")?.textContent).toBe("first (local):blue");
   mocks.primary = "remote";
-  await render();
+  await show(screen);
   expect(container.querySelector("output")?.textContent).toBe("remote (local):red / first:blue");
 });
+
+function setup() {
+  vi.clearAllMocks();
+  mocks.primary = "first";
+}

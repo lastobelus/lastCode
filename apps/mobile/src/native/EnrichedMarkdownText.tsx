@@ -152,18 +152,15 @@ function enrichedStyle(
 export function MobileEnrichedMarkdownText(props: SelectableMarkdownTextProps) {
   const { renderImage, resolveImageSource } = props;
   const { themeAppearance, mathRenderingEnabled } = useAppearancePreferences();
-  const { markdown, authoredFileLinks } = useMemo(
-    () => {
-      const prepared = prepareEnrichedMarkdown(props.markdown);
-      return {
-        ...prepared,
-        markdown: markdownWithTableBreaks(
-          markdownWithInlineFileLinks(prepared.markdown, ENRICHED_INLINE_FILE_LINK_REGEX),
-        ),
-      };
-    },
-    [props.markdown],
-  );
+  const { markdown, authoredFileLinks } = useMemo(() => {
+    const prepared = prepareEnrichedMarkdown(props.markdown);
+    return {
+      ...prepared,
+      markdown: markdownWithTableBreaks(
+        markdownWithInlineFileLinks(prepared.markdown, ENRICHED_INLINE_FILE_LINK_REGEX),
+      ),
+    };
+  }, [props.markdown]);
   const [parsedLinkUrls, setParsedLinkUrls] = useState<ReadonlyArray<string>>([]);
   const onLinksChange = useCallback((links: MarkdownLinkOccurrence[]) => {
     const urls = [...new Set(links.map((link) => link.url))];

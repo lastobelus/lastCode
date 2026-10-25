@@ -127,6 +127,12 @@ function shouldPublishAgentAwarenessEvent(
     case "turn-item.updated":
       return isTurnItemPayload(event.payload) && turnItemUpdateCanEndBackgroundWork(event.payload);
     case "message.updated":
+    case "thread.persistence-changed":
+    case "thread.annotation-upserted":
+    case "thread.annotation-resolved":
+    case "thread.annotation-reopened":
+    case "thread.attention-set":
+    case "thread.attention-cleared":
     case "plan.updated":
     case "checkpoint-scope.created":
     case "checkpoint.captured":
@@ -513,6 +519,7 @@ export const make = Effect.gen(function* () {
     const threadShell = yield* threads.getThreadShell(threadId);
     if (
       threadShell?.lineage.relationshipToParent === "subagent" &&
+      threadShell.lineage.independent !== true &&
       !(yield* Ref.get(publishedStateByThreadRef)).has(threadId)
     ) {
       // Subagents have no relay rows to clear; per-event tombstones would needlessly redeliver user aggregates.

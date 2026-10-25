@@ -9,16 +9,14 @@ import {
   PreviewViewportSetting,
   PreviewViewportSize,
 } from "./preview.ts";
+import { BrowserProfile, BrowserProfileId, BrowserProfileName } from "./browserProfile.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
-import { BrowserProfileId } from "./browserProfile.ts";
 
 const BoundedUrl = Schema.String.check(Schema.isTrimmed())
   .check(Schema.isNonEmpty())
   .check(Schema.isMaxLength(2048));
 const URL_GUIDANCE =
   "Absolute http(s) URL or a schemeless host such as t3.chat or localhost:5173. Schemeless public hosts use https; loopback hosts use http.";
-const PROFILE_GUIDANCE =
-  "Browser profile for a new tab, by id or name (case-insensitive) from preview_status profiles. Omit to use the user's default profile. A tab keeps the profile it opened with.";
 const OptionalTimeoutMs = Schema.optional(
   Schema.Int.check(Schema.isGreaterThan(0))
     .check(Schema.isLessThanOrEqualTo(60_000))
@@ -48,6 +46,8 @@ const PREVIEW_AUTOMATION_OPERATIONS = [
 
 export const PREVIEW_AUTOMATION_SERVER_OPERATIONS = [
   ...PREVIEW_AUTOMATION_OPERATIONS,
+  "profiles",
+  "openWithProfile",
   "dialog",
   "close",
   "upload",
@@ -82,8 +82,16 @@ export const PreviewAutomationProfile = Schema.Struct({
 });
 export type PreviewAutomationProfile = typeof PreviewAutomationProfile.Type;
 
+export const PreviewAutomationProfiles = Schema.Struct({
+  profiles: Schema.Array(BrowserProfile),
+  defaultProfileId: BrowserProfileId,
+});
+export type PreviewAutomationProfiles = typeof PreviewAutomationProfiles.Type;
+
 export const PreviewAutomationStatus = Schema.Struct({
   available: Schema.Boolean,
+  /** The machine hosting this tab, independent of its streamed viewer. */
+  browserHost: Schema.optional(Schema.Literals(["environment", "desktop"])),
   visible: Schema.Boolean,
   /** Native user-visible presentation, independent of background rendering leases. */
   nativePresented: Schema.optional(Schema.Boolean),
@@ -111,6 +119,11 @@ export const PreviewAutomationStatus = Schema.Struct({
       }),
     ),
   ),
+  /** Actual profile of the desktop page used by this tab. */
+  profileId: Schema.optional(Schema.NullOr(BrowserProfileId)),
+  /** Null when there is no tab or its profile has since been deleted. */
+  profileName: Schema.optional(Schema.NullOr(BrowserProfileName)),
+  /** Optional for compatibility with desktop hosts predating viewport sizing. */
   viewportSetting: Schema.optional(PreviewViewportSetting),
   viewport: Schema.optional(PreviewRenderedViewportSize),
   fileChooser: Schema.optional(
@@ -159,6 +172,18 @@ export type PreviewAutomationDialogInput = typeof PreviewAutomationDialogInput.T
 
 export const PreviewAutomationOpenInput = Schema.Struct({
   ...PreviewAutomationTabTargetFields,
+  browserHost: Schema.optional(Schema.Literals(["environment", "desktop"])).annotate({
+    description:
+      "Choose environment to run the page in this environment's browser and reach its loopback apps without exposing a port. New environment tabs default to isolated Incognito storage; explicitly selecting Default uses this environment's persistent storage, never desktop sign-ins. Choose desktop for existing desktop profiles. Omit to retain the current hosting policy. An exact tabId cannot switch hosts.",
+  }),
+  profileId: Schema.optional(BrowserProfileId).annotate({
+    description:
+      "Desktop browser profile ID from preview_profiles, or default/incognito for environment hosting. Mutually exclusive with profileName. Omit both to use the configured desktop default or isolated environment Incognito for new tabs; reused tabs retain their profile.",
+  }),
+  profileName: Schema.optional(BrowserProfileName).annotate({
+    description:
+      "Exact desktop profile name from preview_profiles, or Default/Incognito for environment hosting. Mutually exclusive with profileId. Unknown or duplicate desktop names fail; use profileId to disambiguate.",
+  }),
   url: Schema.optional(BoundedUrl).annotate({
     description: `Optional initial page URL. ${URL_GUIDANCE} Omit to open a blank tab.`,
   }),
@@ -177,15 +202,18 @@ export const PreviewAutomationOpenInput = Schema.Struct({
   reuseExistingTab: Schema.optional(
     Schema.Boolean.annotate({
       description:
-        "Reuse tabId when supplied, otherwise this agent session's current tab. Defaults to true; set false to create a new tab.",
+        "Reuse tabId when supplied, otherwise this agent session's current tab. Defaults to true; set false to create a new tab. An explicit profile mismatch creates a new tab when tabId is omitted; an exact tabId mismatch fails. Existing tabs never switch profiles.",
     }),
   ),
-  profileId: Schema.optional(
-    TrimmedNonEmptyString.check(Schema.isMaxLength(64)).annotate({
-      description: PROFILE_GUIDANCE,
-    }),
-  ).annotate({ description: PROFILE_GUIDANCE }),
 })
+  .check(
+    Schema.makeFilter(
+      (input) =>
+        input.profileId === undefined ||
+        input.profileName === undefined ||
+        "Provide only one of profileId or profileName.",
+    ),
+  )
   .check(
     Schema.makeFilter(
       (input) =>
@@ -198,6 +226,35 @@ export const PreviewAutomationOpenInput = Schema.Struct({
       "Opens the collaborative browser for the current thread. Use preview_navigate afterward when readiness waiting matters.",
   });
 export type PreviewAutomationOpenInput = typeof PreviewAutomationOpenInput.Type;
+
+/** The own-thread document target is resolved by MCP before reaching a browser host. */
+export const PreviewAutomationMcpOpenInput = PreviewAutomationOpenInput.mapFields(
+  (fields) => ({
+    ...fields,
+    target: Schema.optional(
+      Schema.Struct({
+        kind: Schema.Literal("published-document"),
+        path: TrimmedNonEmptyString.annotate({
+          description:
+            "Exact file path published by a current assistant message in this calling thread. Attachments are not supported.",
+        }),
+      }),
+    ).annotate({
+      description:
+        "Open this thread's assistant-published file through the signed asset route in the environment browser. Mutually exclusive with url; desktop hosting is not supported.",
+    }),
+  }),
+  // Adding an optional target leaves the existing profile and tab checks valid.
+  { unsafePreserveChecks: true },
+).check(
+  Schema.makeFilter(
+    (input) =>
+      input.target === undefined ||
+      (input.url === undefined && input.browserHost !== "desktop") ||
+      "A published-document target cannot be combined with url or desktop hosting.",
+  ),
+);
+export type PreviewAutomationMcpOpenInput = typeof PreviewAutomationMcpOpenInput.Type;
 
 export const BrowserNavigationTarget = Schema.Union([
   Schema.Struct({
@@ -913,6 +970,9 @@ export class PreviewAutomationNoAvailableHostError extends Schema.TaggedError<Pr
   },
 ) {
   override get message(): string {
+    if (this.operation === "profiles" || this.operation === "openWithProfile") {
+      return "Browser profile selection requires an available environment browser and the connected desktop that owns the requested profile. Call preview_profiles to inspect the available profiles. The requested profile was not opened.";
+    }
     return `No preview automation host is available for ${this.operation} in environment ${this.environmentId}. The server-owned browser may be starting or reconnecting. Retry preview_status, then call preview_open if no tab is available. If it remains unavailable, report the browser connection failure.`;
   }
 }
@@ -1008,6 +1068,18 @@ export class PreviewAutomationExecutionError extends Schema.TaggedError<PreviewA
   }
 }
 
+export class PreviewAutomationProfileError extends Schema.TaggedError<PreviewAutomationProfileError>()(
+  "PreviewAutomationProfileError",
+  {
+    reason: Schema.Literals(["unknown", "ambiguous", "tab-mismatch"]),
+    detail: Schema.String,
+  },
+) {
+  override get message(): string {
+    return this.detail;
+  }
+}
+
 export class PreviewAutomationInvalidSelectorError extends Schema.TaggedError<PreviewAutomationInvalidSelectorError>()(
   "PreviewAutomationInvalidSelectorError",
   {
@@ -1083,11 +1155,20 @@ export class PreviewAutomationRequestQueueClosedError extends Schema.TaggedError
   }
 }
 
+/** Native surface failures that can be reported without exposing page or host details. */
+export const PreviewAutomationAvailabilityReason = Schema.Literals([
+  "guest-unavailable",
+  "surface-unsupported",
+  "layout-timeout",
+  "host-unavailable",
+]);
+
 export class PreviewAutomationRemoteUnavailableError extends Schema.TaggedError<PreviewAutomationRemoteUnavailableError>()(
   "PreviewAutomationRemoteUnavailableError",
   {
     ...PreviewAutomationRequestErrorFields,
     ...PreviewAutomationRemoteDiagnosticFields,
+    reason: Schema.optional(PreviewAutomationAvailabilityReason),
   },
 ) {
   override get message(): string {
@@ -1143,6 +1224,21 @@ export class PreviewAutomationRecordingDeadlineExpiredError extends Schema.Tagge
   }
 }
 
+export class PreviewAutomationPublishedDocumentError extends Schema.TaggedError<PreviewAutomationPublishedDocumentError>()(
+  "PreviewAutomationPublishedDocumentError",
+  {
+    threadId: ThreadId,
+    reason: Schema.Literals(["file-unavailable", "http-unavailable"]),
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return this.reason === "http-unavailable"
+      ? "The environment's HTTP server cannot serve this published document."
+      : "This document is unavailable or is not published by an assistant in this thread.";
+  }
+}
+
 export const PreviewAutomationError = Schema.Union([
   PreviewAutomationRecordingTransferError,
   PreviewAutomationRecordingDesktopUpdateRequiredError,
@@ -1156,6 +1252,7 @@ export const PreviewAutomationError = Schema.Union([
   PreviewAutomationControlInterruptedError,
   PreviewAutomationExecutionError,
   PreviewAutomationInvalidSelectorError,
+  PreviewAutomationProfileError,
   PreviewAutomationTargetNotEditableError,
   PreviewAutomationResultTooLargeError,
   PreviewAutomationClientDisconnectedError,
