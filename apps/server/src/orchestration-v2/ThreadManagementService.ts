@@ -1,3 +1,6 @@
+import * as ProjectionStore from "./ProjectionStore.ts";
+import { userFacingDispatchErrorMessage } from "./UserFacingErrors.ts";
+import type { DeleteThreadsInput, DeleteThreadsResult } from "@t3tools/contracts";
 import type {
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
@@ -35,6 +38,7 @@ import {
   RunId,
   type ScheduledTaskId,
   ThreadId,
+  WorktreeSuspensionRequestError,
   type TurnItemId,
 } from "@t3tools/contracts";
 import { threadTranscriptHeader } from "@t3tools/shared/threadTranscript";
@@ -63,8 +67,11 @@ import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ThreadRecovery from "./ThreadRecoveryService.ts";
 import { withVerifiedArchiveActivity } from "./ThreadArchiveActivity.ts";
+import * as WorkspaceLifecycle from "../workspace/WorkspaceLifecycle.ts";
 
 const isThreadAboveModeLimitError = Schema.is(Orchestrator.OrchestratorThreadAboveModeLimitError);
+
+const isWorktreeSuspensionRequestError = Schema.is(WorktreeSuspensionRequestError);
 
 export type ThreadManagementSendMode = "auto" | "queue" | "steer" | "restart" | "cooperative";
 
@@ -343,6 +350,9 @@ export type ThreadManagementError = typeof ThreadManagementError.Type;
 type ThreadManagementFailure = ThreadManagementError | Orchestrator.OrchestratorV2Error;
 
 export interface ThreadManagementServiceShape {
+  readonly deleteMany: (
+    input: DeleteThreadsInput,
+  ) => Effect.Effect<DeleteThreadsResult, WorktreeSuspensionRequestError>;
   readonly searchThreadStream: (
     input: OrchestrationV2SearchThreadInput,
   ) => Stream.Stream<OrchestrationV2SearchThreadResult, Orchestrator.OrchestratorV2Error>;
@@ -368,6 +378,7 @@ export interface ThreadManagementServiceShape {
    */
   readonly dispatch: (
     command: OrchestrationV2ServerCommand,
+    options?: Orchestrator.OrchestratorV2DispatchOptions,
   ) => Effect.Effect<
     Orchestrator.OrchestratorV2DispatchResult,
     Orchestrator.OrchestratorV2Error | ThreadManagementProviderInstanceDisabledError
@@ -567,6 +578,8 @@ const make = Effect.gen(function* () {
   const legacyImporter = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+  const workspaceLifecycle = yield* Effect.serviceOption(WorkspaceLifecycle.WorkspaceLifecycle);
+  const projections = yield* ProjectionStore.ProjectionStoreV2;
 
   const assertProviderInstanceEnabled: ThreadManagementServiceShape["assertProviderInstanceEnabled"] =
     (input) =>
@@ -725,12 +738,12 @@ const make = Effect.gen(function* () {
     }
   };
 
-  const dispatch: ThreadManagementServiceShape["dispatch"] = Effect.fn(
+  const dispatchAccepted: ThreadManagementServiceShape["dispatch"] = Effect.fn(
     "ThreadManagementService.dispatch",
-  )(function* (command) {
+  )(function* (command, options) {
     yield* ensureCommandTranscripts(command);
     yield* assertDispatchTargetEnabled(command);
-    const result = yield* orchestrator.dispatch(command);
+    const result = yield* orchestrator.dispatch(command, options);
     if (command.type !== "thread.archive") return result;
     const pending = result.storedEvents.some(
       (stored) =>
@@ -782,6 +795,134 @@ const make = Effect.gen(function* () {
       sequence: completion.value.sequence,
       storedEvents: [completion.value],
     };
+  });
+
+  const dispatch: ThreadManagementServiceShape["dispatch"] = Effect.fn(
+    "ThreadManagementService.workspaceLifecycle",
+  )(function* (command, options) {
+    if (command.type !== "thread.archive" && command.type !== "thread.delete") {
+      return yield* dispatchAccepted(command, options);
+    }
+    if (Option.isNone(workspaceLifecycle)) {
+      // Environments without saved-workspace support retain all data. A discard
+      // request cannot be downgraded into an ordinary lifecycle mutation.
+      if (command.savedWorkspace?.mode === "discard") {
+        return yield* new Orchestrator.OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: new WorktreeSuspensionRequestError({
+            reason: "unavailable",
+            message: "Saved workspace disposal is unavailable.",
+          }),
+        });
+      }
+      return yield* dispatchAccepted(command, options);
+    }
+    return yield* workspaceLifecycle.value
+      .run(
+        {
+          operation: command.type === "thread.archive" ? "archive" : "delete",
+          target: { kind: "threads", threadIds: [command.threadId] },
+          commandId: command.commandId,
+          ...(command.savedWorkspace === undefined
+            ? {}
+            : { savedWorkspace: command.savedWorkspace }),
+        },
+        dispatchAccepted(command, options),
+      )
+      .pipe(
+        Effect.mapError((cause) =>
+          isWorktreeSuspensionRequestError(cause)
+            ? new Orchestrator.OrchestratorDispatchError({
+                commandId: command.commandId,
+                commandType: command.type,
+                cause,
+              })
+            : cause,
+        ),
+      );
+  });
+
+  const deleteMany: ThreadManagementServiceShape["deleteMany"] = Effect.fn(
+    "ThreadManagementService.deleteMany",
+  )(function* (input) {
+    const selected = [
+      ...new Map(input.threads.map((thread) => [thread.threadId, thread])).values(),
+    ];
+    const families = yield* Effect.forEach(selected, (thread) =>
+      projections.getOwnedThreadIds(thread.threadId),
+    ).pipe(
+      Effect.mapError(
+        () =>
+          new WorktreeSuspensionRequestError({
+            reason: "changed",
+            message: "The selected thread families could not be reviewed.",
+          }),
+      ),
+    );
+    const allThreadIds = [...new Set(families.flat())];
+    if (allThreadIds.length > 1000)
+      return yield* new WorktreeSuspensionRequestError({
+        reason: "protected",
+        message: "Delete a smaller selection of thread families.",
+      });
+    const roots = selected.filter(
+      (thread, index) =>
+        !families.some((family, other) => other !== index && family.includes(thread.threadId)),
+    );
+    const deleteReceipts = roots.map((thread) => ({
+      threadId: thread.threadId,
+      commandId: CommandId.make(`${input.commandId}:delete:${thread.threadId}`),
+    }));
+    const deletedThreadIds = new Set<ThreadId>();
+    const commit = Effect.gen(function* () {
+      for (const [index, thread] of roots.entries()) {
+        const receipt = deleteReceipts[index]!;
+        yield* dispatchAccepted({
+          type: "thread.delete",
+          ...receipt,
+          ...(thread.deleteWorktree === undefined ? {} : { deleteWorktree: thread.deleteWorktree }),
+        });
+        for (const id of families[
+          selected.findIndex((entry) => entry.threadId === thread.threadId)
+        ] ?? [])
+          deletedThreadIds.add(id);
+      }
+    });
+    const operation = Option.isSome(workspaceLifecycle)
+      ? workspaceLifecycle.value.run(
+          {
+            operation: "delete",
+            target: {
+              kind: "threads",
+              threadIds: selected.map((thread) => thread.threadId).sort(),
+            },
+            commandId: input.commandId,
+            deleteReceipts,
+            ...(input.savedWorkspace === undefined ? {} : { savedWorkspace: input.savedWorkspace }),
+          },
+          commit,
+        )
+      : input.savedWorkspace?.mode === "discard"
+        ? Effect.fail(
+            new WorktreeSuspensionRequestError({
+              reason: "unavailable",
+              message: "Saved workspace disposal is unavailable.",
+            }),
+          )
+        : commit;
+    const result = yield* operation.pipe(Effect.result);
+    if (result._tag === "Failure") {
+      const message =
+        userFacingDispatchErrorMessage(result.failure) ??
+        (isWorktreeSuspensionRequestError(result.failure)
+          ? result.failure.message
+          : "The thread selection was not fully deleted. Saved data has been retained until its exact deletion outcome can be verified.");
+      if (deletedThreadIds.size === 0)
+        return yield* new WorktreeSuspensionRequestError({ reason: "changed", message });
+      return { deletedThreadIds: [...deletedThreadIds], failureMessage: message };
+    }
+    return { deletedThreadIds: [...deletedThreadIds] };
   });
 
   const dispatchLaunch: ThreadManagementServiceShape["dispatchLaunch"] = Effect.fn(
@@ -1421,6 +1562,7 @@ const make = Effect.gen(function* () {
         Effect.andThen(orchestrator.searchThread(input)),
       ),
     dispatch,
+    deleteMany,
     dispatchLaunch,
     getThreadHistoryPage: (threadId, cursor, throughEntryId, conversationOnly) =>
       ensureProjectionTranscript(threadId).pipe(
@@ -1499,6 +1641,7 @@ export const layer: Layer.Layer<
   | ProviderSessionManager.ProviderSessionManagerV2
   | ServerSettings.ServerSettingsService
   | CommandReceiptStore.CommandReceiptStoreV2
+  | ProjectionStore.ProjectionStoreV2
 > = Layer.effect(ThreadManagementService, make).pipe(
   Layer.provide(layerLegacyV1ThreadImporterNoop),
   Layer.provide(ThreadCommandExecutor.layer),
@@ -1512,4 +1655,5 @@ export const layerWithLegacyImporter: Layer.Layer<
   | ProviderSessionManager.ProviderSessionManagerV2
   | ServerSettings.ServerSettingsService
   | CommandReceiptStore.CommandReceiptStoreV2
+  | ProjectionStore.ProjectionStoreV2
 > = Layer.effect(ThreadManagementService, make).pipe(Layer.provide(ThreadCommandExecutor.layer));

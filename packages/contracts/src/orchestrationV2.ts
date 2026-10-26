@@ -1,5 +1,10 @@
 import { ActionResumeState } from "./actionResume.ts";
 import {
+  WorktreeSuspensionSummary,
+  WorktreeSuspensionTransitionInput,
+} from "./worktreeSuspension.ts";
+import { SavedWorkspaceDisposition } from "./workspaceLifecycle.ts";
+import {
   ThreadAnnotation,
   ThreadDashboardItemInput,
   ThreadDashboardItems,
@@ -494,6 +499,8 @@ export const OrchestrationV2AppThread = Schema.Struct({
   dashboardItems: Schema.optional(ThreadDashboardItems),
   actionResume: Schema.optional(Schema.NullOr(ActionResumeState)),
   worktreeCleanup: Schema.optional(Schema.NullOr(ThreadWorktreeCleanup)),
+  worktreeSuspension: Schema.optional(WorktreeSuspensionSummary),
+  workspaceUserAdopted: Schema.optional(Schema.Boolean),
   lineage: OrchestrationV2AppThreadLineage,
   forkedFrom: Schema.NullOr(
     Schema.Union([
@@ -2015,6 +2022,8 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   actionResume: Schema.optional(Schema.NullOr(ActionResumeState)),
   subagentPromotion: Schema.optional(Schema.NullOr(OrchestrationV2SubagentPromotion)),
   worktreeCleanup: Schema.optional(Schema.NullOr(ThreadWorktreeCleanup)),
+  worktreeSuspension: Schema.optional(WorktreeSuspensionSummary),
+  workspaceUserAdopted: Schema.optional(Schema.Boolean),
   latestRunId: Schema.NullOr(RunId),
   latestRunRequestedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   latestRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
@@ -2896,6 +2905,7 @@ export const OrchestrationV2Command = Schema.Union([
     expectedChildThreadIds: Schema.optional(Schema.Array(ThreadId)),
     /** Retries only this failed archive attempt on its original owner. */
     expectedArchiveCommandId: Schema.optional(CommandId),
+    savedWorkspace: Schema.optionalKey(SavedWorkspaceDisposition),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.guest-share.close"),
@@ -2921,6 +2931,7 @@ export const OrchestrationV2Command = Schema.Union([
     threadId: ThreadId,
     deleteWorktree: Schema.optional(Schema.Boolean),
     repositoryKey: Schema.optional(TrimmedNonEmptyString),
+    savedWorkspace: Schema.optionalKey(SavedWorkspaceDisposition),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.worktree-cleanup.retry"),
@@ -3018,6 +3029,7 @@ export const OrchestrationV2Command = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("thread.metadata.update"),
     actionResume: Schema.optional(Schema.NullOr(ActionResumeState)),
+    workspaceUserAdopted: Schema.optional(Schema.Literal(true)),
     commandId: CommandId,
     threadId: ThreadId,
     title: Schema.optional(TrimmedNonEmptyString),
@@ -3388,6 +3400,10 @@ const OrchestrationV2InternalCommand = Schema.Union([
     guestMessageId: GuestMessageId,
     text: Schema.String,
     attachments: Schema.optional(Schema.Array(ChatAttachment)),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.worktree-suspension.transition"),
+    ...WorktreeSuspensionTransitionInput.fields,
   }),
   /** Records the workspace result of an accepted launch or preparation retry. */
   Schema.Struct({

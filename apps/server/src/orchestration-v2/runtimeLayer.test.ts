@@ -38,6 +38,8 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as WorkspaceAcquisitionTestkit from "../workspace/WorkspaceAcquisition.testkit.ts";
+import * as SuspensionRegistryTestkit from "../workspace/WorktreeSuspensionRegistry.testkit.ts";
 import * as Path from "effect/Path";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
@@ -93,7 +95,9 @@ import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter"
 import { makePausedEnvironment } from "./EnvironmentAutomation.testkit.ts";
 import * as Ref from "effect/Ref";
 
-const layerPlatformTest = Layer.merge(
+const layerPlatformTest = Layer.mergeAll(
+  WorkspaceAcquisitionTestkit.layer,
+  SuspensionRegistryTestkit.layer,
   NodeServices.layer,
   Layer.mock(SourceControlProviderRegistry.SourceControlProviderRegistry)({
     resolveLink: () => Effect.die("unused title link"),

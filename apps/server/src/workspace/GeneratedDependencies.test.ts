@@ -47,6 +47,7 @@ import * as DependencyMounts from "./DependencyMounts.ts";
 import * as WorktreeConsumers from "./WorktreeConsumers.ts";
 import * as WorktreeCleanup from "../orchestration-v2/WorktreeCleanupService.ts";
 import * as StorageCleanup from "../storageCleanup.ts";
+import * as SuspensionTestkit from "./WorktreeSuspension.testkit.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
@@ -2168,7 +2169,7 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
     }),
   );
   const cleanupContext = yield* Layer.build(StorageCleanup.layer).pipe(
-    Effect.provide(dependencies),
+    Effect.provide(Layer.merge(SuspensionTestkit.layer, dependencies)),
     Effect.provideService(
       ServerActivation.ServerActivation,
       workerLifecycle ? Effect.void : Effect.never,

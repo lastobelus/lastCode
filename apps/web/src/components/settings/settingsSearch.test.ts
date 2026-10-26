@@ -52,6 +52,16 @@ const ITEMS: ReadonlyArray<SettingsSearchItem> = [
 ];
 
 describe("searchSettings", () => {
+  it.each([
+    ["suspend settled worktrees", "storage-suspension-policy"],
+    ["LastCode restore saved workspace", "storage-saved-workspaces"],
+    ["permanent deletion", "storage-worktrees"],
+  ])("finds %s on the single Storage page", (query, id) => {
+    expect(searchSettings(query)).toContainEqual(
+      expect.objectContaining({ id, to: "/settings/storage", scope: "project-defaults" }),
+    );
+  });
+
   it.each(["incoming messages", "neutral fill", "outline"])(
     "finds incoming message appearance for %s",
     (query) => {

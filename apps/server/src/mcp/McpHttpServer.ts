@@ -78,6 +78,8 @@ import * as HtmlHandlers from "./toolkits/html/handlers.ts";
 import { HtmlPreviewTool, HtmlPreviewToolkit, HtmlRenderToolkit } from "./toolkits/html/tools.ts";
 import * as ActionResumeHandlers from "./toolkits/actionResume/handlers.ts";
 import { ActionResumeToolkit } from "./toolkits/actionResume/tools.ts";
+import * as WorktreeSuspensionHandlers from "./toolkits/worktreeSuspension/handlers.ts";
+import { WorktreeSuspensionToolkit } from "./toolkits/worktreeSuspension/tools.ts";
 import * as ThreadDashboardHandlers from "./toolkits/threadDashboard/handlers.ts";
 import { ThreadDashboardToolkit } from "./toolkits/threadDashboard/tools.ts";
 
@@ -1103,6 +1105,11 @@ export const layerActionResumeToolkit = toolkitRegistration(
   ActionResumeHandlers.layer,
 );
 
+export const layerWorktreeSuspensionToolkit = toolkitRegistration(
+  WorktreeSuspensionToolkit,
+  WorktreeSuspensionHandlers.layer,
+);
+
 const layerThreadDashboardToolkit = toolkitRegistration(
   ThreadDashboardToolkit,
   ThreadDashboardHandlers.layer,
@@ -1132,6 +1139,7 @@ const layerFullToolkit = Layer.mergeAll(
   layerDeviceToolkit,
   layerHtmlToolkit,
   layerActionResumeToolkit,
+  layerWorktreeSuspensionToolkit,
   layerThreadDashboardToolkit,
 ).pipe(Layer.provideMerge(makeMcpTransport("/mcp")));
 
@@ -1145,6 +1153,7 @@ const layerThreadOnlyToolkit = Layer.mergeAll(
   layerProjectRegistration,
   layerEnvironmentToolkit,
   layerWorktreeToolkitRegistration,
+  layerWorktreeSuspensionToolkit,
   layerThreadDashboardToolkit,
   layerPullRequestsToolkit,
 ).pipe(Layer.provideMerge(makeMcpTransport("/mcp/thread")));

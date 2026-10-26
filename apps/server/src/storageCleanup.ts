@@ -74,6 +74,8 @@ import { isNetworkPath } from "@t3tools/shared/path";
 import * as GeneratedDependencies from "./workspace/GeneratedDependencies.ts";
 import * as GeneratedBuilds from "./workspace/GeneratedBuilds.ts";
 import * as WorktreeConsumers from "./workspace/WorktreeConsumers.ts";
+import { WorktreeSuspension } from "./workspace/WorktreeSuspension.ts";
+import { WorktreeSuspensionRegistry } from "./workspace/WorktreeSuspensionRegistry.ts";
 
 const decodeCleanupThread = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationV2AppThreadJson),
@@ -147,11 +149,16 @@ function sameProjectWorktreePolicies(left: ServerSettings, right: ServerSettings
       ...Object.keys(left.projectSettingsOverrides),
       ...Object.keys(right.projectSettingsOverrides),
     ]),
-  ].every((projectId) =>
-    Equal.equals(
-      left.projectSettingsOverrides[projectId as ProjectId]?.worktreeCleanup,
-      right.projectSettingsOverrides[projectId as ProjectId]?.worktreeCleanup,
-    ),
+  ].every(
+    (projectId) =>
+      Equal.equals(
+        left.projectSettingsOverrides[projectId as ProjectId]?.worktreeCleanup,
+        right.projectSettingsOverrides[projectId as ProjectId]?.worktreeCleanup,
+      ) &&
+      Equal.equals(
+        left.projectSettingsOverrides[projectId as ProjectId]?.worktreeSuspension,
+        right.projectSettingsOverrides[projectId as ProjectId]?.worktreeSuspension,
+      ),
   );
 }
 
@@ -275,6 +282,18 @@ export class StorageCleanup extends Context.Service<
 >()("t3/storageCleanup") {}
 
 const make = Effect.gen(function* () {
+  const savedWorkspaces = yield* WorktreeSuspension;
+  const suspensionRegistry = yield* WorktreeSuspensionRegistry;
+  const savedWorkspaceProtection = Effect.fn("StorageCleanup.savedWorkspaceProtection")(
+    (workspacePath: string) =>
+      suspensionRegistry
+        .automaticProtection(workspacePath)
+        .pipe(
+          Effect.catch(() =>
+            Effect.succeed("Saved workspace authority could not be verified; files were retained."),
+          ),
+        ),
+  );
   const config = yield* ServerConfig.ServerConfig;
   const settingsService = yield* Settings.ServerSettingsService;
   const projectStore = yield* ProjectStore.ProjectStoreV2;
@@ -1166,6 +1185,7 @@ const make = Effect.gen(function* () {
       used = false,
       persist = true,
     ) {
+      if (yield* savedWorkspaceProtection(input.worktreePath)) return null;
       if (generatedBuilds)
         return yield* builds.observe(
           buildInput(input),
@@ -1748,6 +1768,11 @@ const make = Effect.gen(function* () {
         files: null,
       };
       entries.push(entry);
+      const savedProtection = yield* savedWorkspaceProtection(cwd);
+      if (savedProtection !== null) {
+        entry.reason = savedProtection;
+        continue;
+      }
       const candidate = mappings[0]!;
       const { project, branch, recordedPath } = candidate;
       const reviewRoot = roots.find((root) => inside(root, cwd));
@@ -1823,6 +1848,8 @@ const make = Effect.gen(function* () {
       };
       const cleanOwnerless = Effect.gen(function* () {
         const consumerReason = Effect.fnUntraced(function* () {
+          const savedProtection = yield* savedWorkspaceProtection(cwd);
+          if (savedProtection !== null) return savedProtection;
           if (processCwds === null) return "Could not check running processes safely";
           if (processCwds.some((processCwd) => processCwd === cwd || inside(cwd, processCwd)))
             return "A running process is using this worktree";
@@ -1845,8 +1872,8 @@ const make = Effect.gen(function* () {
               inside(path.join(cwd, "node_modules"), processCwd),
           ) ?? false,
         );
-        if (observation === null) return keep(unrecognizedReason());
         if (protectedReason !== null) return keep(protectedReason);
+        if (observation === null) return keep(unrecognizedReason());
         if (!review && observation.lastUsedAt >= now - days * DAY_MS) {
           return keep(
             observation.renewed
@@ -1982,6 +2009,19 @@ const make = Effect.gen(function* () {
           serverSettings,
           thread.projectId,
         ).worktreeDependenciesAfterDays;
+        const savedProtection = yield* savedWorkspaceProtection(thread.cleanupPath);
+        if (savedProtection !== null) {
+          if (yield* outputExists(thread.cleanupPath))
+            noteCandidate(
+              thread,
+              thread.cleanupPath,
+              "workspaceRoot" in thread
+                ? thread.workspaceRoot
+                : (snapshot.projects.find((project) => project.id === thread.projectId)
+                    ?.workspaceRoot ?? null),
+            ).reason = savedProtection;
+          return [];
+        }
         const contextKey = reviewContext(
           thread.projectId,
           thread.cleanupPath,
@@ -2261,6 +2301,8 @@ const make = Effect.gen(function* () {
               });
               const candidateStillIdle = Effect.fn("StorageCleanup.dependencyCandidateStillIdle")(
                 function* () {
+                  const savedProtection = yield* savedWorkspaceProtection(worktreePath);
+                  if (savedProtection !== null) return keep(savedProtection);
                   if (!archived) {
                     const dependencyActivity = yield* observe(
                       { managedWorktreesRoot, worktreePath, repositoryRoot: project.workspaceRoot },
@@ -2712,6 +2754,8 @@ const make = Effect.gen(function* () {
       });
       yield* Effect.gen(function* () {
         if (!(yield* fs.exists(worktreePath))) return;
+        const savedProtection = yield* savedWorkspaceProtection(worktreePath);
+        if (savedProtection !== null) return keep(savedProtection);
         if (
           deleted &&
           !settings.worktreeOnDelete &&
@@ -2908,6 +2952,8 @@ const make = Effect.gen(function* () {
           );
         // Re-read this path's threads and sessions so new activity cancels removal; full per-worktree snapshots take seconds.
         const blockedSinceCheck = Effect.fnUntraced(function* () {
+          const savedProtection = yield* savedWorkspaceProtection(worktreePath);
+          if (savedProtection !== null) return savedProtection;
           if (generatedBuildReviewProtection(worktreePath))
             return "reviewed build content protects this worktree";
           const latestProjects = yield* projectStore.listShells();
@@ -3390,6 +3436,7 @@ const make = Effect.gen(function* () {
         }),
       ),
     );
+    yield* savedWorkspaces.sweep;
     if (
       trigger === "manual" ||
       anyWorktreePolicy(
@@ -3641,6 +3688,7 @@ const make = Effect.gen(function* () {
         if (
           Equal.equals(settings.storageCleanup, lastSettings.storageCleanup) &&
           Equal.equals(settings.worktreeCleanup, lastSettings.worktreeCleanup) &&
+          Equal.equals(settings.worktreeSuspension, lastSettings.worktreeSuspension) &&
           sameProjectWorktreePolicies(settings, lastSettings)
         )
           return Effect.void;

@@ -1,3 +1,4 @@
+import { mergeWorktreeSuspensionMenuItems } from "./worktreeSuspensionMenu";
 import { type EnvironmentId, type ScopedProjectRef } from "@t3tools/contracts";
 import { useSidebarProviderBadgePreferences } from "./sidebar/SidebarEnvironmentIcon";
 import { getArchiveRecoveryRows } from "@t3tools/client-runtime/state/thread-archive";
@@ -116,6 +117,7 @@ import {
   canMarkThreadReadState,
   withThreadReadPermissions,
 } from "../hooks/threadReadActions";
+import { useWorktreeSuspensionActions } from "../hooks/useWorktreeSuspensionActions";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { useSidebarProjectGroups } from "../hooks/useSidebarProjectGroups";
 import { useTerminalFocus } from "../hooks/useTerminalFocus";
@@ -763,6 +765,7 @@ const SIDEBAR_DRAG_DISTANCE = 6;
 const SIDEBAR_DRAG_LABEL_HEIGHT = 24;
 
 export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReveal }) {
+  const workspaceActions = useWorktreeSuspensionActions();
   const {
     projects,
     serverConfigs,
@@ -777,7 +780,6 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const router = useRouter();
   const { isMobile, setOpenMobile } = useSidebar();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
-  const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
   const timestampFormat = useClientSettings((s) => s.timestampFormat);
   const handoffsMenuLimit = useClientSettings((s) => s.handoffsMenuLimit);
   const openHandoff = useOpenHandoff();
@@ -800,7 +802,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     markThreadRead,
     archiveThread,
     unarchiveThread,
-    deleteThread,
+    confirmAndDeleteThread,
+    confirmThreadDeletion,
+    deleteThreads,
     setThreadPersistence,
   } = useThreadActions();
   const updateThreadMetadata = useOrchestrationCommand(threadEnvironment.updateMetadata, {
@@ -2296,18 +2300,10 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       // Keep the handler safe if a platform context-menu implementation ever
       // returns a disabled item.
       if (hasPersistentThread) return;
-      if (confirmThreadDelete) {
-        const confirmed = await settlePromise(() =>
-          api.dialogs.confirm(
-            [
-              `Delete ${count} thread${count === 1 ? "" : "s"}?`,
-              `This also deletes any of ${count === 1 ? "its" : "their"} subagents, including archived ones; unselected forks and independent threads are kept. This cannot be undone.`,
-            ].join("\n"),
-            { variant: "destructive" },
-          ),
-        );
-        if (confirmed._tag === "Failure" || !confirmed.value) return;
-      }
+      const savedDataChoice = await confirmThreadDeletion(
+        actionTargets.map((thread) => scopeThreadRef(thread.environmentId, thread.id)),
+      );
+      if (savedDataChoice._tag !== "Success" || savedDataChoice.value === null) return;
       // The menu and confirmation dialog may stay open while another client
       // changes persistence. Rebuild from live shell state immediately before
       // the destructive batch so an ordinary thread cannot be deleted before
@@ -2323,25 +2319,15 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       if (!deleteEntries || !checkThreadOperations(deleteEntries.map(({ thread }) => thread)))
         return;
       if (deleteEntries.some(({ thread }) => thread.worktreeCleanup != null)) return;
-      // Grown as deletions actually land, never seeded with the whole batch:
-      // orphaned-worktree detection must only discount threads that are
-      // really gone, or the first delete would treat still-alive batch mates
-      // as deleted and remove a worktree they still point at.
-      const deletedThreadKeys = new Set<string>();
-      let firstError: unknown = null;
-      for (const { threadKey, thread } of deleteEntries) {
-        const result = await deleteThread(scopeThreadRef(thread.environmentId, thread.id), {
-          deletedThreadKeys,
-        });
-        if (result._tag === "Failure") {
-          if (isAtomCommandInterrupted(result)) break;
-          if (firstError === null || firstError === undefined) {
-            firstError = squashAtomCommandFailure(result);
-          }
-          continue;
-        }
-        deletedThreadKeys.add(threadKey);
-      }
+      const outcome = await deleteThreads(
+        deleteEntries.map(({ thread }) => scopeThreadRef(thread.environmentId, thread.id)),
+        savedDataChoice.value,
+      );
+      const deletedThreadKeys = outcome.deletedThreadKeys;
+      const firstError =
+        outcome.firstFailure?._tag === "Failure"
+          ? squashAtomCommandFailure(outcome.firstFailure)
+          : null;
       if (firstError !== null) {
         toastManager.add(
           stackedThreadToast({
@@ -2465,45 +2451,48 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             [
               { id: "open-dashboard" as const, label: "Open dashboard", icon: "layout-dashboard" },
               ...withThreadReadPermissions(
-                buildThreadActionMenuItems({
-                  canOperate: readEnvironmentScope(
-                    threadRef.environmentId,
-                    AuthOrchestrationOperateScope,
-                  ),
-                  branch: thread.branch ?? null,
-                  projectFilter: threadProjectGroup
-                    ? {
-                        label: threadProjectGroup.displayName,
-                        isActive: projectScopeKey === threadProjectGroup.projectKey,
-                      }
-                    : null,
-                  isPinned,
-                  isPersistent: thread.persistent === true,
-                  archiveFailed: thread.archivePending?.status === "failed",
-                  isSettled,
-                  autoSettleEnabled: thread.autoSettleDisabledAt == null,
-                  isSnoozed,
-                  canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
-                  isRegeneratingTitle,
-                  canShareWithGuest: appAtomRegistry.get(
-                    canShareWithGuestAtom(threadRef.environmentId),
-                  ),
-                  hasRunningAction: thread.actionResume?.outcome === "running",
-                  hasStoppableProcesses,
-                  supports: {
-                    settlement: supportsSettlement,
-                    autoSettleOptOut: supportsAutoSettleOptOut,
-                    snooze: supportsSnooze,
-                    pinning: supportsPinning,
-                    persistence:
-                      serverConfigs.get(thread.environmentId)?.environment.capabilities
-                        .threadPersistence === true,
-                    titleRegeneration: supportsTitleRegeneration,
-                  },
-                  snoozePresets,
-                  handoffs: handoffDescriptors,
-                  handoffsOverflow: handoffs.length > handoffDescriptors.length,
-                }),
+                mergeWorktreeSuspensionMenuItems(
+                  buildThreadActionMenuItems({
+                    canOperate: readEnvironmentScope(
+                      threadRef.environmentId,
+                      AuthOrchestrationOperateScope,
+                    ),
+                    branch: thread.branch ?? null,
+                    projectFilter: threadProjectGroup
+                      ? {
+                          label: threadProjectGroup.displayName,
+                          isActive: projectScopeKey === threadProjectGroup.projectKey,
+                        }
+                      : null,
+                    isPinned,
+                    isPersistent: thread.persistent === true,
+                    archiveFailed: thread.archivePending?.status === "failed",
+                    isSettled,
+                    autoSettleEnabled: thread.autoSettleDisabledAt == null,
+                    isSnoozed,
+                    canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
+                    isRegeneratingTitle,
+                    canShareWithGuest: appAtomRegistry.get(
+                      canShareWithGuestAtom(threadRef.environmentId),
+                    ),
+                    hasRunningAction: thread.actionResume?.outcome === "running",
+                    hasStoppableProcesses,
+                    supports: {
+                      settlement: supportsSettlement,
+                      autoSettleOptOut: supportsAutoSettleOptOut,
+                      snooze: supportsSnooze,
+                      pinning: supportsPinning,
+                      persistence:
+                        serverConfigs.get(thread.environmentId)?.environment.capabilities
+                          .threadPersistence === true,
+                      titleRegeneration: supportsTitleRegeneration,
+                    },
+                    snoozePresets,
+                    handoffs: handoffDescriptors,
+                    handoffsOverflow: handoffs.length > handoffDescriptors.length,
+                  }),
+                  workspaceActions.menuItems(thread),
+                ),
                 [threadRef],
               ),
             ],
@@ -2511,6 +2500,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           ),
         );
         if (clicked._tag === "Failure" || clicked.value === null) return;
+        if (await workspaceActions.run(clicked.value, threadRef)) return;
         if (clicked.value === "handoff-show-all") {
           await router.navigate({
             to: "/$environmentId/$threadId",
@@ -2721,9 +2711,11 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             }
             return;
           }
-          case "archive": {
+          case "archive":
+          case "archive-discard": {
             let didArchive = false;
             const result = await archiveThread(threadRef, {
+              discardSavedWorkspace: clicked.value === "archive-discard",
               ...(thread.archivePending?.status === "failed"
                 ? { expectedArchiveCommandId: thread.archivePending.commandId }
                 : {}),
@@ -2747,19 +2739,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             return;
           }
           case "delete": {
-            if (confirmThreadDelete) {
-              const confirmed = await settlePromise(() =>
-                api.dialogs.confirm(
-                  [
-                    `Delete thread "${thread.title}"?`,
-                    "This also deletes any of its subagents, including archived ones; other forks and independent threads are kept. This cannot be undone.",
-                  ].join("\n"),
-                  { variant: "destructive" },
-                ),
-              );
-              if (confirmed._tag === "Failure" || !confirmed.value) return;
-            }
-            const result = await deleteThread(threadRef);
+            const result = await confirmAndDeleteThread(threadRef);
             if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
               const error = squashAtomCommandFailure(result);
               toastManager.add(

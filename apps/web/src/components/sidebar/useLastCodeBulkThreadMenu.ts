@@ -52,8 +52,14 @@ function selectionMenu(entries: ReturnType<typeof readSelectedThreadEntries>) {
 }
 
 export function useLastCodeBulkThreadMenu() {
-  const { archiveThreads, deleteThread, markThreadUnread, markThreadRead } =
-    useLastCodeThreadActions();
+  const {
+    archiveThreads,
+    deleteThread,
+    deleteThreads,
+    confirmThreadDeletion,
+    markThreadUnread,
+    markThreadRead,
+  } = useLastCodeThreadActions();
   const appSettingsConfirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
   const removeFromSelection = useThreadSelectionStore((s) => s.removeFromSelection);
   return async (position: { x: number; y: number }) => {
@@ -92,6 +98,8 @@ export function useLastCodeBulkThreadMenu() {
       removeFromSelection,
       confirm: (message, options) => api.dialogs.confirm(message, options),
       confirmDeletion: appSettingsConfirmThreadDelete,
+      confirmSavedData: confirmThreadDeletion,
+      deleteThreads,
       deleteThread,
       threadExists: (ref) => readThreadShell(ref) !== null,
     });

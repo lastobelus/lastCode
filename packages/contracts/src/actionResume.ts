@@ -253,5 +253,6 @@ export class ActionResumeError extends Schema.TaggedError<ActionResumeError>()(
       "internal_error",
     ]),
     message: Schema.String,
+    cause: Schema.optionalKey(Schema.Defect()),
   },
 ) {}

@@ -538,6 +538,14 @@
     "./generatedBuildOwnership": {
       "types": "./src/generatedBuildOwnership.ts",
       "import": "./src/generatedBuildOwnership.ts"
+    },
+    "./worktreeSuspension": {
+      "types": "./src/worktreeSuspension.ts",
+      "import": "./src/worktreeSuspension.ts"
+    },
+    "./worktreeSuspensionPolicy": {
+      "types": "./src/worktreeSuspensionPolicy.ts",
+      "import": "./src/worktreeSuspensionPolicy.ts"
     }
   },
   "scripts": {

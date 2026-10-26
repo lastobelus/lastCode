@@ -61,6 +61,9 @@ export const projectMutationOperation = Effect.fn("projectMutationOperation")(fu
           commandId: mutation.commandId,
           projectId: mutation.projectId,
           ...(mutation.force === undefined ? {} : { force: mutation.force }),
+          ...(mutation.savedWorkspace === undefined
+            ? {}
+            : { savedWorkspace: mutation.savedWorkspace }),
         },
         afterDelete?.(mutation.projectId),
       );

@@ -1,4 +1,4 @@
-import { ProjectId, type ProjectScript, type TerminalEvent } from "@t3tools/contracts";
+import { ProjectId, ThreadId, type ProjectScript, type TerminalEvent } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import {
   projectScriptRuntimeEnv,
@@ -21,6 +21,8 @@ import * as Schema from "effect/Schema";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as UpdateDrainAdmission from "../updateDrain/UpdateDrainAdmission.ts";
+import * as WorkspaceAcquisition from "../workspace/WorkspaceAcquisition.ts";
+import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import * as ProjectService from "./ProjectService.ts";
 
 export interface ProjectSetupScriptRunnerResultNoScript {
@@ -191,6 +193,7 @@ function wrapCommandForCompletion(
 
 /** @public */
 export const make = Effect.gen(function* () {
+  const workspaceAcquisition = yield* WorkspaceAcquisition.WorkspaceAcquisition;
   const projects = yield* ProjectService.ProjectService;
   const terminalManager = yield* TerminalManager.TerminalManager;
   const updateDrainAdmission = yield* UpdateDrainAdmission.UpdateDrainAdmission;
@@ -394,235 +397,263 @@ export const make = Effect.gen(function* () {
 
   const runForThread: ProjectSetupScriptRunner["Service"]["runForThread"] = Effect.fn(
     "ProjectSetupScriptRunner.runForThread",
-  )(function* (input) {
-    const errorContext = {
-      threadId: input.threadId,
-      worktreePath: input.worktreePath,
-      ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
-      ...(input.projectCwd === undefined ? {} : { projectCwd: input.projectCwd }),
-    };
-    const suppliedProject = input.project;
-    const projectById =
-      suppliedProject ??
-      (input.projectId
-        ? yield* projects.getById(ProjectId.make(input.projectId)).pipe(
-            Effect.map(Option.getOrUndefined),
+  )(function* (requestedInput) {
+    return yield* withWorkspaceLease(
+      requestedInput.worktreePath,
+      Effect.gen(function* () {
+        const acquired = yield* workspaceAcquisition
+          .acquire({
+            path: requestedInput.worktreePath,
+            threadId: ThreadId.make(requestedInput.threadId),
+            purpose: "setup",
+          })
+          .pipe(
             Effect.mapError(
               (cause) =>
                 new ProjectSetupScriptOperationError({
-                  ...errorContext,
-                  operation: "resolveProject",
+                  threadId: requestedInput.threadId,
+                  worktreePath: requestedInput.worktreePath,
+                  operation: "admitSetupScript",
                   cause,
                 }),
             ),
-          )
-        : null);
-    const project =
-      suppliedProject ??
-      projectById ??
-      (input.projectCwd
-        ? yield* projects.getByWorkspaceRoot(input.projectCwd).pipe(
-            Effect.map(Option.getOrUndefined),
-            Effect.mapError(
-              (cause) =>
-                new ProjectSetupScriptOperationError({
-                  ...errorContext,
-                  operation: "resolveProject",
-                  cause,
-                }),
-            ),
-          )
-        : null);
-
-    if (!project) {
-      return yield* new ProjectSetupScriptProjectNotFoundError(errorContext);
-    }
-
-    const settings = yield* serverSettings.getSettings.pipe(
-      Effect.mapError(
-        (cause) =>
-          new ProjectSetupScriptOperationError({
-            ...errorContext,
-            operation: "readSettings",
-            cause,
-          }),
-      ),
-    );
-    const trigger = input.trigger ?? "setup";
-    const scripts = resolveProjectScripts(settings, project);
-    const script =
-      trigger === "settle" ? settleProjectScript(scripts) : setupProjectScript(scripts);
-    if (!script) {
-      return {
-        status: "no-script",
-      } as const;
-    }
-
-    // Earlier settle shells may still run foreground programs; do not type resumed settles into them.
-    const terminalId =
-      input.preferredTerminalId ??
-      (trigger === "settle"
-        ? `settle-${script.id}-${(yield* crypto.randomUUIDv4().pipe(Effect.orDie)).slice(0, 8)}`
-        : `setup-${script.id}`);
-    const cwd = input.worktreePath;
-    const env = {
-      ...projectScriptRuntimeEnv({
-        project: { cwd: project.workspaceRoot },
-        worktreePath: input.worktreePath,
-      }),
-      // Before client attachment, truecolor probes wait for terminal replies nobody can send.
-      COLORTERM: "",
-    };
-    const observe = input.observeCompletion;
-    const completionToken = observe
-      ? (yield* crypto.randomUUIDv4().pipe(Effect.orDie)).replaceAll("-", "")
-      : null;
-    const commandLine =
-      observe && completionToken
-        ? wrapCommandForCompletion(
-            script.command,
-            completionShell,
-            completionSentinel(completionToken),
-          )
-        : script.command;
-
-    const observed = yield* updateDrainAdmission
-      .admit(
-        "setup-script",
-        Effect.gen(function* () {
-          const pendingKey = `${input.threadId}\u0000${terminalId}`;
-          const previous = pendingWrites.get(pendingKey);
-          if (previous) yield* Fiber.interrupt(previous);
-          const events = yield* stageTerminalEvents({ threadId: input.threadId, terminalId });
-          const observed =
-            observe && completionToken
-              ? yield* observeTerminalCompletion({
-                  threadId: input.threadId,
-                  terminalId,
-                  subscribe: events.subscribe,
-                  sentinel: completionSentinel(completionToken),
-                  sentinelPattern: completionSentinelPattern(completionToken),
-                  echoedWrapperLines: commandLine.split("\r").filter((line) => line.length > 0),
-                  onOutputLine: observe.onOutputLine,
-                })
-              : undefined;
-          const readiness =
-            completionShell === "powershell"
-              ? undefined
-              : yield* watchShellReadiness({
-                  threadId: input.threadId,
-                  terminalId,
-                  onStartupPrompt: observed?.flushPartialLine ?? Effect.void,
-                  subscribe: events.subscribe,
-                });
-
-          yield* terminalManager
-            .open({
+          );
+        return yield* withWorkspaceLease(
+          acquired.path,
+          Effect.gen(function* () {
+            const input = { ...requestedInput, worktreePath: acquired.path };
+            const errorContext = {
               threadId: input.threadId,
-              terminalId,
-              cwd,
-              terminalLinkProfileName: script.terminalLinkProfileName ?? null,
               worktreePath: input.worktreePath,
-              env: { ...env, NO_COLOR: "1", FORCE_COLOR: "0" },
-            })
-            .pipe(
+              ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
+              ...(input.projectCwd === undefined ? {} : { projectCwd: input.projectCwd }),
+            };
+            const suppliedProject = input.project;
+            const projectById =
+              suppliedProject ??
+              (input.projectId
+                ? yield* projects.getById(ProjectId.make(input.projectId)).pipe(
+                    Effect.map(Option.getOrUndefined),
+                    Effect.mapError(
+                      (cause) =>
+                        new ProjectSetupScriptOperationError({
+                          ...errorContext,
+                          operation: "resolveProject",
+                          cause,
+                        }),
+                    ),
+                  )
+                : null);
+            const project =
+              suppliedProject ??
+              projectById ??
+              (input.projectCwd
+                ? yield* projects.getByWorkspaceRoot(input.projectCwd).pipe(
+                    Effect.map(Option.getOrUndefined),
+                    Effect.mapError(
+                      (cause) =>
+                        new ProjectSetupScriptOperationError({
+                          ...errorContext,
+                          operation: "resolveProject",
+                          cause,
+                        }),
+                    ),
+                  )
+                : null);
+
+            if (!project) {
+              return yield* new ProjectSetupScriptProjectNotFoundError(errorContext);
+            }
+
+            const settings = yield* serverSettings.getSettings.pipe(
               Effect.mapError(
                 (cause) =>
                   new ProjectSetupScriptOperationError({
                     ...errorContext,
-                    operation: "openTerminal",
+                    operation: "readSettings",
                     cause,
                   }),
               ),
-              Effect.onError(() =>
-                Effect.sync(() => {
-                  observed?.unsubscribe();
-                  readiness?.unsubscribe();
-                  events.unsubscribe();
+            );
+            const trigger = input.trigger ?? "setup";
+            const scripts = resolveProjectScripts(settings, project);
+            const script =
+              trigger === "settle" ? settleProjectScript(scripts) : setupProjectScript(scripts);
+            if (!script) {
+              return {
+                status: "no-script",
+              } as const;
+            }
+
+            // Earlier settle shells may still run foreground programs; do not type resumed settles into them.
+            const terminalId =
+              input.preferredTerminalId ??
+              (trigger === "settle"
+                ? `settle-${script.id}-${(yield* crypto.randomUUIDv4().pipe(Effect.orDie)).slice(0, 8)}`
+                : `setup-${script.id}`);
+            const cwd = input.worktreePath;
+            const env = {
+              ...projectScriptRuntimeEnv({
+                project: { cwd: project.workspaceRoot },
+                worktreePath: input.worktreePath,
+              }),
+              // Before client attachment, truecolor probes wait for terminal replies nobody can send.
+              COLORTERM: "",
+            };
+            const observe = input.observeCompletion;
+            const completionToken = observe
+              ? (yield* crypto.randomUUIDv4().pipe(Effect.orDie)).replaceAll("-", "")
+              : null;
+            const commandLine =
+              observe && completionToken
+                ? wrapCommandForCompletion(
+                    script.command,
+                    completionShell,
+                    completionSentinel(completionToken),
+                  )
+                : script.command;
+
+            const observed = yield* updateDrainAdmission
+              .admit(
+                "setup-script",
+                Effect.gen(function* () {
+                  const pendingKey = `${input.threadId}\u0000${terminalId}`;
+                  const previous = pendingWrites.get(pendingKey);
+                  if (previous) yield* Fiber.interrupt(previous);
+                  const events = yield* stageTerminalEvents({ threadId: input.threadId, terminalId });
+                  const observed =
+                    observe && completionToken
+                      ? yield* observeTerminalCompletion({
+                          threadId: input.threadId,
+                          terminalId,
+                          subscribe: events.subscribe,
+                          sentinel: completionSentinel(completionToken),
+                          sentinelPattern: completionSentinelPattern(completionToken),
+                          echoedWrapperLines: commandLine.split("\r").filter((line) => line.length > 0),
+                          onOutputLine: observe.onOutputLine,
+                        })
+                      : undefined;
+                  const readiness =
+                    completionShell === "powershell"
+                      ? undefined
+                      : yield* watchShellReadiness({
+                          threadId: input.threadId,
+                          terminalId,
+                          onStartupPrompt: observed?.flushPartialLine ?? Effect.void,
+                          subscribe: events.subscribe,
+                        });
+
+                  yield* terminalManager
+                    .open({
+                      threadId: input.threadId,
+                      terminalId,
+                      cwd,
+                      terminalLinkProfileName: script.terminalLinkProfileName ?? null,
+                      worktreePath: input.worktreePath,
+                      env: { ...env, NO_COLOR: "1", FORCE_COLOR: "0" },
+                    })
+                    .pipe(
+                      Effect.mapError(
+                        (cause) =>
+                          new ProjectSetupScriptOperationError({
+                            ...errorContext,
+                            operation: "openTerminal",
+                            cause,
+                          }),
+                      ),
+                      Effect.onError(() =>
+                        Effect.sync(() => {
+                          observed?.unsubscribe();
+                          readiness?.unsubscribe();
+                          events.unsubscribe();
+                        }),
+                      ),
+                    );
+
+                  yield* events.activate;
+
+                  // Readiness can wait on user input; only the actual write holds admission again.
+                  const writing = yield* (readiness?.wait ?? Effect.succeed("ready" as const)).pipe(
+                    Effect.flatMap((shell) =>
+                      shell === "exited"
+                        ? Effect.void
+                        : updateDrainAdmission.admit(
+                            "setup-script",
+                            Effect.suspend(() =>
+                              terminalManager.write({
+                                threadId: input.threadId,
+                                terminalId,
+                                data: projectScriptTerminalInput(commandLine),
+                              }),
+                            ),
+                          ),
+                    ),
+                    Effect.onError(() => observed?.abandon ?? Effect.void),
+                    Effect.catchCause((cause) =>
+                      Effect.logWarning("project script command was not written", {
+                        ...errorContext,
+                        terminalId,
+                        cause,
+                      }),
+                    ),
+                    Effect.ensuring(
+                      Effect.sync(() => {
+                        readiness?.unsubscribe();
+                        if (!observed) events.unsubscribe();
+                      }),
+                    ),
+                    Effect.forkIn(serviceScope, { startImmediately: true }),
+                  );
+                  pendingWrites.set(pendingKey, writing);
+                  writing.addObserver(() => {
+                    if (pendingWrites.get(pendingKey) === writing) pendingWrites.delete(pendingKey);
+                  });
+                  return observed;
                 }),
+              )
+              .pipe(
+                Effect.catchTags({
+                  UpdateDrainAdmissionError: (cause) =>
+                    Effect.fail(
+                      new ProjectSetupScriptOperationError({
+                        ...errorContext,
+                        operation: "admitSetupScript",
+                        cause,
+                      }),
+                    ),
+                  UpdateDrainError: (cause) =>
+                    Effect.fail(
+                      new ProjectSetupScriptOperationError({
+                        ...errorContext,
+                        operation: "admitSetupScript",
+                        cause,
+                      }),
+                    ),
+                }),
+              );
+
+            const completion = observed?.completion.pipe(
+              Effect.tap(({ exitCode }) =>
+                exitCode === 0
+                  ? terminalManager.closeIdle({ threadId: input.threadId, terminalId })
+                  : Effect.void,
               ),
             );
 
-          yield* events.activate;
-
-          // Readiness can wait on user input; only the actual write holds admission again.
-          const writing = yield* (readiness?.wait ?? Effect.succeed("ready" as const)).pipe(
-            Effect.flatMap((shell) =>
-              shell === "exited"
-                ? Effect.void
-                : updateDrainAdmission.admit(
-                    "setup-script",
-                    Effect.suspend(() =>
-                      terminalManager.write({
-                        threadId: input.threadId,
-                        terminalId,
-                        data: projectScriptTerminalInput(commandLine),
-                      }),
-                    ),
-                  ),
-            ),
-            Effect.onError(() => observed?.abandon ?? Effect.void),
-            Effect.catchCause((cause) =>
-              Effect.logWarning("project script command was not written", {
-                ...errorContext,
-                terminalId,
-                cause,
-              }),
-            ),
-            Effect.ensuring(
-              Effect.sync(() => {
-                readiness?.unsubscribe();
-                if (!observed) events.unsubscribe();
-              }),
-            ),
-            Effect.forkIn(serviceScope, { startImmediately: true }),
-          );
-          pendingWrites.set(pendingKey, writing);
-          writing.addObserver(() => {
-            if (pendingWrites.get(pendingKey) === writing) pendingWrites.delete(pendingKey);
-          });
-          return observed;
-        }),
-      )
-      .pipe(
-        Effect.catchTags({
-          UpdateDrainAdmissionError: (cause) =>
-            Effect.fail(
-              new ProjectSetupScriptOperationError({
-                ...errorContext,
-                operation: "admitSetupScript",
-                cause,
-              }),
-            ),
-          UpdateDrainError: (cause) =>
-            Effect.fail(
-              new ProjectSetupScriptOperationError({
-                ...errorContext,
-                operation: "admitSetupScript",
-                cause,
-              }),
-            ),
-        }),
-      );
-
-    const completion = observed?.completion.pipe(
-      Effect.tap(({ exitCode }) =>
-        exitCode === 0
-          ? terminalManager.closeIdle({ threadId: input.threadId, terminalId })
-          : Effect.void,
-      ),
+            return {
+              status: "started",
+              scriptId: script.id,
+              scriptName: script.name,
+              scriptCommand: script.command,
+              terminalId,
+              cwd,
+              async: script.async !== false,
+              ...(completion ? { completion } : {}),
+            } as const;
+          }),
+        );
+      }),
     );
-
-    return {
-      status: "started",
-      scriptId: script.id,
-      scriptName: script.name,
-      scriptCommand: script.command,
-      terminalId,
-      cwd,
-      async: script.async !== false,
-      ...(completion ? { completion } : {}),
-    } as const;
   });
 
   return ProjectSetupScriptRunner.of({ runForThread });

@@ -187,6 +187,39 @@ Open **Settings → Storage** to enable automatic cleanup on one machine or all 
 environments. Policies are off by default and run on the server at startup, when changed, and
 hourly. Offline machines keep their existing policies.
 
+### Suspend worktrees
+
+Use **Suspend settled worktrees** to save local work and put away a checkout without archiving
+its conversation. Choose a delay and which threads may suspend: subagents, untouched
+agent-created children, or other threads. These choices start Off. A separate child checkout
+can suspend while its parent remains open; a shared checkout stays until every owner qualifies.
+The delay starts from settlement or the last workspace use or restore, whichever is later.
+Project **Off** pauses automatic suspension as well as cleanup.
+
+You can also choose **Suspend worktree** from a thread's menu. Staged changes, unstaged changes
+and supported local files, including ignored notes, are saved before the checkout is removed.
+Active work and unsupported or oversized workspaces are kept. Suspension does not change any
+existing permanent deletion rule; those rules remain under **Permanent deletion**.
+
+Continuing work restores the current saved copy first. Manual **Restore worktree** also enables
+**Keep workspace**, which protects it from automatic suspension, dependency/build cleanup and
+permanent worktree cleanup. Release that hold separately when you are ready for the configured
+rules to apply again. Releasing a hold does not restart an already elapsed cleanup delay.
+
+Open **Saved workspaces** on this page to restore or deliberately discard saved copies.
+Archive keeps them; **Archive and discard saved workspace** combines both choices. Thread and
+project deletion let you discard saved data or keep it for recovery. Discarding a current copy
+does not require restoring it first, and permanently loses its saved uncommitted work and notes.
+Git branches and ordinary checkpoints remain. After discarding, use **Create fresh worktree**
+to continue from Git rather than recover the discarded changes.
+Copies kept after deleting their threads remain in Saved workspaces; an environment administrator
+can release their hold and discard them there.
+
+Saved workspaces have no automatic expiry. They are local recovery, not a backup: restoration
+depends on both this environment's saved data and the repository's Git data.
+
+### Permanent deletion and generated files
+
 Select a project to set **Automatic worktree cleanup** to **Inherit**, **Off**, or **Custom**.
 Inherit follows each machine's rules; Off disables automatic worktree deletion and dependency
 removal for that project. Custom applies separate worktree rules to the selected project or checkout.

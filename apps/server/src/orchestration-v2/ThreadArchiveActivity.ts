@@ -39,9 +39,11 @@ export function withVerifiedArchiveActivity(
   return {
     ...threads,
     getThreadArchiveFamily,
-    dispatch: (command) =>
+    dispatch: (command, options) =>
       command.type === "thread.archive"
-        ? getThreadArchiveFamily(command.threadId).pipe(Effect.andThen(threads.dispatch(command)))
-        : threads.dispatch(command),
+        ? getThreadArchiveFamily(command.threadId).pipe(
+            Effect.andThen(threads.dispatch(command, options)),
+          )
+        : threads.dispatch(command, options),
   };
 }

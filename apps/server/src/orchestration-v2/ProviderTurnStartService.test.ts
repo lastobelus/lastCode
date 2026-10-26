@@ -34,6 +34,8 @@ import * as Stream from "effect/Stream";
 
 import * as ServerConfig from "../config.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
+import * as WorkspaceAcquisitionTestkit from "../workspace/WorkspaceAcquisition.testkit.ts";
+import * as WorkspaceAcquisition from "../workspace/WorkspaceAcquisition.ts";
 import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
@@ -92,6 +94,7 @@ function startWithMissingWorktree(
     [managedWorktreesDir]: managedWorktreesDir,
     [`${managedWorktreesDir}/project`]: `${managedWorktreesDir}/project`,
   },
+  acquire?: WorkspaceAcquisition.WorkspaceAcquisition["Service"]["acquire"],
 ) {
   const threadId = ThreadId.make("thread_provider_turn_start_projection_failure");
   const runId = RunId.make("run_provider_turn_start_projection_failure");
@@ -142,6 +145,11 @@ function startWithMissingWorktree(
   const pruneWorktrees = vi.fn(() => Effect.void);
   const createWorktree = vi.fn(() => Effect.succeed({} as never));
   const layer = ProviderTurnStart.layer.pipe(
+    Layer.provide(
+      acquire === undefined
+        ? WorkspaceAcquisitionTestkit.layer
+        : WorkspaceAcquisitionTestkit.layerWith(acquire),
+    ),
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({}),
@@ -219,6 +227,22 @@ function startWithMissingWorktree(
     projectionReads: () => projectionReadCount,
   };
 }
+
+it.each(["snapshot-unavailable", "discarded", "blocked"] as const)(
+  "does not recreate from a branch when saved workspace acquisition is %s",
+  async (reason) => {
+    const fixture = startWithMissingWorktree(
+      `${managedWorktreesDir}/project/saved`,
+      undefined,
+      () => Effect.fail(new WorkspaceAcquisition.WorkspaceUnavailableError({ reason })),
+    );
+    const error = await fixture.start;
+    expect(error.cause).toBeInstanceOf(WorkspaceAcquisition.WorkspaceUnavailableError);
+    expect(fixture.pruneWorktrees).not.toHaveBeenCalled();
+    expect(fixture.createWorktree).not.toHaveBeenCalled();
+    expect(fixture.startRootRun).not.toHaveBeenCalled();
+  },
+);
 
 it.each([
   {
@@ -843,6 +867,7 @@ function makeLocalCommandHarness(input: {
     }),
   );
   const layer = ProviderTurnStart.layer.pipe(
+    Layer.provide(WorkspaceAcquisitionTestkit.layer),
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({

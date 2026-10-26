@@ -22,6 +22,7 @@ import * as Fiber from "effect/Fiber";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as WorkspaceAcquisitionTestkit from "../workspace/WorkspaceAcquisition.testkit.ts";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 
@@ -217,6 +218,7 @@ const makeHarness = Effect.fn("ActionArchiveTest.makeHarness")(function* (
     history: () => Effect.succeed("retained Action output"),
   });
   const actions = ActionResume.layer.pipe(
+    Layer.provide(WorkspaceAcquisitionTestkit.layer),
     Layer.provide(
       Layer.mergeAll(
         actionThreads,

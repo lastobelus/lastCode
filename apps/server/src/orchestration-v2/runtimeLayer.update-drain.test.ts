@@ -9,6 +9,7 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as WorkspaceAcquisitionTestkit from "../workspace/WorkspaceAcquisition.testkit.ts";
 
 import * as ServerConfig from "../config.ts";
 import * as McpSessionRegistryTestkit from "../mcp/McpSessionRegistry.testkit.ts";
@@ -62,6 +63,7 @@ const layer = Layer.mergeAll(
   Layer.provide(SqlitePersistence.layerMemory),
   Layer.provide(ServerSettings.layerTest()),
   Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "admission-wiring-" })),
+  Layer.provide(WorkspaceAcquisitionTestkit.layer),
   Layer.provide(NodeServices.layer),
 );
 

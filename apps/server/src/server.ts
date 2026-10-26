@@ -3,6 +3,11 @@ import type { RelayManagedEndpointRuntimeConfig } from "@t3tools/contracts/relay
 import * as Random from "effect/Random";
 import * as DatabaseStorage from "./persistence/DatabaseStorage.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
+import * as WorktreeSuspension from "./workspace/WorktreeSuspension.ts";
+import * as WorkspaceAcquisition from "./workspace/WorkspaceAcquisition.ts";
+import * as WorktreeSuspensionRegistry from "./workspace/WorktreeSuspensionRegistry.ts";
+import * as WorkspaceLifecycle from "./workspace/WorkspaceLifecycle.ts";
+import * as CommandReceiptStore from "./orchestration-v2/CommandReceiptStore.ts";
 import * as PullRequestSyncReactor from "./orchestration-v2/PullRequestSyncReactor.ts";
 import * as PullRequestWatchReactor from "./orchestration-v2/PullRequestWatchReactor.ts";
 import * as DelegatedTaskQuestionReactor from "./orchestration-v2/DelegatedTaskQuestionReactor.ts";
@@ -604,7 +609,14 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   HeldHooksWaker.layer,
   layerThreadSettlementWorker,
   layerIdleCompactionWorker,
-  StorageCleanup.layer.pipe(Layer.provide(ProjectionStoreV2.layer)),
+  StorageCleanup.layer.pipe(
+    Layer.provideMerge(
+      WorktreeSuspension.layer.pipe(
+        Layer.provide(CommandReceiptStore.layerFromApplicationReceipts),
+      ),
+    ),
+    Layer.provide(ProjectionStoreV2.layer),
+  ),
   DatabaseStorage.layer.pipe(
     Layer.provide(ProjectionMaintenance.layer),
     Layer.provide(
@@ -721,6 +733,9 @@ const layerRuntimeDependencies = layerRuntimeCoreDependencies.pipe(
   Layer.provideMerge(DirectEndpoints.layer),
   Layer.provideMerge(ServerLifecycleEvents.layer),
   Layer.provide(NetService.layer),
+  Layer.provideMerge(WorkspaceAcquisition.layer),
+  Layer.provideMerge(WorktreeSuspensionRegistry.layer),
+  Layer.provideMerge(WorkspaceLifecycle.layer),
 );
 
 const layerCommandReadiness = HttpRouter.middleware(

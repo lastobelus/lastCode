@@ -73,7 +73,12 @@ vi.mock("./LastCodeThreadActions", () => ({
     setThreadPersistence: mocks.persistence,
     unarchiveThread: mocks.unarchive,
     deleteThread: mocks.delete,
+    confirmAndDeleteThread: mocks.delete,
+    archiveThread: mocks.archive,
   }),
+}));
+vi.mock("../../hooks/useWorktreeSuspensionActions", () => ({
+  useWorktreeSuspensionActions: () => ({ menuItems: () => [], run: async () => false }),
 }));
 vi.mock("../../localApi", () => ({
   readLocalApi: () => ({ contextMenu: { show: mocks.menu }, dialogs: { confirm: mocks.confirm } }),

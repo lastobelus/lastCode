@@ -13,6 +13,7 @@ import {
   resolveProjectSettings,
   resolveSendEnvMode,
   resolveWorktreeCleanup,
+  resolveWorktreeSuspension,
 } from "./projectSettings.ts";
 import { applyServerSettingsPatch } from "./serverSettings.ts";
 
@@ -414,5 +415,134 @@ describe("resolveWorktreeCleanup", () => {
       resolveWorktreeCleanup(applyServerSettingsPatch(edited, { worktreeCleanup: null }), null)
         .worktreeAfterDays,
     ).toBe(8);
+  });
+});
+
+describe("resolveWorktreeSuspension", () => {
+  const custom = {
+    mode: "custom" as const,
+    afterDays: 3,
+    scopes: { subagents: false, untouchedChildren: true, otherThreads: false },
+  };
+
+  it("uses environment Off by default and inherits its configured policy", () => {
+    expect(resolveWorktreeSuspension(DEFAULT_SERVER_SETTINGS, projectId)).toEqual({ mode: "off" });
+    const environment = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      worktreeSuspension: custom,
+      storageCleanup: { worktreeAfterDays: 30, worktreeOnMerge: true },
+    });
+    expect(resolveWorktreeSuspension(environment, projectId)).toEqual(custom);
+    expect(resolveProjectSettings(environment, projectId).sources.worktreeSuspension).toBe(
+      "environment",
+    );
+    expect(resolveWorktreeCleanup(environment, projectId).worktreeAfterDays).toBe(30);
+    expect(resolveWorktreeCleanup(environment, projectId).worktreeOnMerge).toBe(true);
+  });
+
+  it("supports project Off, Custom and resetting to Inherit independently", () => {
+    const environment = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      worktreeSuspension: custom,
+    });
+    const off = applyServerSettingsPatch(environment, {
+      projectSettingsOverrides: { [projectId]: { worktreeSuspension: { mode: "off" } } },
+    });
+    expect(resolveWorktreeSuspension(off, projectId)).toEqual({ mode: "off" });
+    expect(resolveWorktreeSuspension(off, otherProjectId)).toEqual(custom);
+    expect(resolveProjectSettings(off, projectId).sources.worktreeSuspension).toBe("project");
+    const projectPolicy = {
+      mode: "custom" as const,
+      afterDays: 14,
+      scopes: { subagents: true, untouchedChildren: false, otherThreads: true },
+    };
+    const overridden = applyServerSettingsPatch(off, {
+      projectSettingsOverrides: { [projectId]: { worktreeSuspension: projectPolicy } },
+    });
+    expect(resolveWorktreeSuspension(overridden, projectId)).toEqual(projectPolicy);
+    expect(resolveWorktreeSuspension(overridden, otherProjectId)).toEqual(custom);
+    const inherited = applyServerSettingsPatch(overridden, {
+      projectSettingsOverrides: {
+        [projectId]: clearProjectSettingsOverrides(overridden, projectId, ["worktreeSuspension"]),
+      },
+    });
+    expect(resolveWorktreeSuspension(inherited, projectId)).toEqual(custom);
+    expect(resolveProjectSettings(inherited, projectId).sources.worktreeSuspension).toBe(
+      "environment",
+    );
+  });
+
+  it("allows independent suspension when environment cleanup is Off", () => {
+    const settings = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      worktreeCleanup: { mode: "off" },
+      worktreeSuspension: custom,
+    });
+    expect(resolveWorktreeSuspension(settings, null)).toEqual(custom);
+    expect(resolveWorktreeSuspension(settings, projectId)).toEqual(custom);
+    expect(resolveProjectSettings(settings, projectId).sources.worktreeCleanup).toBe("environment");
+    expect(resolveWorktreeCleanup(settings, projectId)).toEqual(
+      resolveWorktreeCleanup(settings, null),
+    );
+    expect(settings.worktreeCleanup).toEqual({ mode: "off" });
+    expect(settings.storageCleanup).toEqual(DEFAULT_SERVER_SETTINGS.storageCleanup);
+  });
+
+  it("does not turn inherited environment cleanup Off into a project veto", () => {
+    const settings = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      worktreeCleanup: { mode: "off" },
+      worktreeSuspension: custom,
+      projectSettingsOverrides: { [projectId]: { defaultAutoPull: true } },
+    });
+    expect(resolveWorktreeSuspension(settings, projectId)).toEqual(custom);
+    const resolved = resolveProjectSettings(settings, projectId);
+    expect(resolved.settings.worktreeCleanup).toEqual({ mode: "off" });
+    expect(resolved.sources.worktreeCleanup).toBe("environment");
+    expect(resolved.sources.worktreeSuspension).toBe("environment");
+  });
+
+  it("keeps explicit project cleanup Off as a veto even when suspension is enabled", () => {
+    const settings = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      worktreeCleanup: { mode: "off" },
+      worktreeSuspension: custom,
+      projectSettingsOverrides: {
+        [projectId]: { worktreeCleanup: { mode: "off" }, worktreeSuspension: custom },
+      },
+    });
+    const cleanupBefore = resolveWorktreeCleanup(settings, projectId);
+    expect(resolveWorktreeSuspension(settings, projectId)).toEqual({ mode: "off" });
+    expect(resolveProjectSettings(settings, projectId).sources.worktreeCleanup).toBe("project");
+    expect(resolveWorktreeSuspension(settings, otherProjectId)).toEqual(custom);
+    expect(resolveWorktreeCleanup(settings, projectId)).toEqual(cleanupBefore);
+    const inherited = applyServerSettingsPatch(settings, {
+      projectSettingsOverrides: {
+        [projectId]: clearProjectSettingsOverrides(settings, projectId, ["worktreeCleanup"]),
+      },
+    });
+    expect(resolveWorktreeSuspension(inherited, projectId)).toEqual(custom);
+    expect(resolveProjectSettings(inherited, projectId).sources.worktreeCleanup).toBe(
+      "environment",
+    );
+  });
+
+  it("preserves explicit suspension Off while environment cleanup is Off", () => {
+    const settings = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      worktreeCleanup: { mode: "off" },
+      worktreeSuspension: custom,
+      projectSettingsOverrides: { [projectId]: { worktreeSuspension: { mode: "off" } } },
+    });
+    expect(resolveWorktreeSuspension(settings, projectId)).toEqual({ mode: "off" });
+    expect(resolveProjectSettings(settings, projectId).sources.worktreeSuspension).toBe("project");
+    expect(resolveWorktreeSuspension(settings, otherProjectId)).toEqual(custom);
+  });
+
+  it("can enable top-level suspension while permanent deletion remains disabled", () => {
+    const settings = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      worktreeSuspension: { ...custom, scopes: { ...custom.scopes, otherThreads: true } },
+    });
+    expect(resolveWorktreeSuspension(settings, projectId)).toMatchObject({
+      mode: "custom",
+      scopes: { otherThreads: true },
+    });
+    expect(resolveWorktreeCleanup(settings, projectId)).toEqual(
+      resolveWorktreeCleanup(DEFAULT_SERVER_SETTINGS, projectId),
+    );
   });
 });

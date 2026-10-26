@@ -57,11 +57,38 @@ function context(worktreePath: string, root: string) {
 }
 type Context = NonNullable<ReturnType<typeof context>>;
 
+/** Snapshot capture and output publication must agree before either moves files. */
+export function acquireGeneratedWorktreeMutation(worktreePath: string) {
+  const ctx = context(worktreePath, "apps/web/dist");
+  if (ctx === null) throw new Error("Workspace preservation requires a linked checkout");
+  const commonFile = NodePath.join(ctx.gitDir, "commondir");
+  let common = ctx.gitDir;
+  try {
+    common = NodeFS.realpathSync(
+      NodePath.resolve(ctx.gitDir, NodeFS.readFileSync(commonFile, "utf8").trim()),
+    );
+  } catch (error) {
+    // A separate primary Git directory is its own common directory.
+    if (!missing(error)) throw error;
+  }
+  const key = NodeCrypto.createHash("sha256").update(ctx.gitDir).digest("hex");
+  return acquirePortableLock(common, `t3-workspace-${key}.mutation`, "workspace preservation");
+}
+
 function acquireBuildMutationLock(ctx: Context) {
   const name = `${NodePath.basename(ctx.recordPath)}.publish`;
+  const workspaceRelease = acquireGeneratedWorktreeMutation(ctx.cwd);
   try {
-    return acquirePortableLock(ctx.gitDir, name, "generated build update");
+    const rootRelease = acquirePortableLock(ctx.gitDir, name, "generated build update");
+    return () => {
+      try {
+        rootRelease();
+      } finally {
+        workspaceRelease();
+      }
+    };
   } catch (error) {
+    workspaceRelease();
     if (error instanceof PortableLockContentionError)
       throw new PortableLockContentionError(
         `${error.message} Retry after the current output operation finishes. If the owner is unknown, inspect ${NodePath.join(ctx.gitDir, name)} lock metadata before recovery; do not clear a live owner's lock.`,

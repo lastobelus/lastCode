@@ -14,6 +14,8 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as WorkspaceAcquisitionTestkit from "../workspace/WorkspaceAcquisition.testkit.ts";
+import * as WorkspaceAcquisition from "../workspace/WorkspaceAcquisition.ts";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 
@@ -48,6 +50,7 @@ function makeHarness(
     readonly writeEffect?: Effect.Effect<void>;
     readonly foregroundEffect?: Effect.Effect<boolean>;
     readonly terminalLinkProfileName?: string;
+    readonly acquire?: WorkspaceAcquisition.WorkspaceAcquisition["Service"]["acquire"];
   } = {},
 ) {
   const terminalSnapshot = (
@@ -156,6 +159,11 @@ function makeHarness(
     deletedAt: null,
   };
   const layer = ProjectSetupScriptRunner.layer.pipe(
+    Layer.provide(
+      options.acquire === undefined
+        ? WorkspaceAcquisitionTestkit.layer
+        : WorkspaceAcquisitionTestkit.layerWith(options.acquire),
+    ),
     Layer.provideMerge(
       UpdateDrainAdmission.layer.pipe(
         Layer.provide(
@@ -214,6 +222,24 @@ function makeHarness(
 
   return { layer, open, write, listeners, projectId, closeIdle, project, emit, terminalSnapshot };
 }
+
+it.effect("uses the restored path when preparing setup command environment", () => {
+  const { layer, open, projectId } = makeHarness({
+    acquire: () =>
+      Effect.succeed({ path: "/managed/example/restored", branch: "recovered", restored: true }),
+  });
+  return Effect.gen(function* () {
+    const runner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
+    const result = yield* runner.runForThread({
+      threadId: "setup:restored",
+      projectId,
+      worktreePath: "/managed/example/old",
+    });
+    assert.equal(result.status, "started");
+    assert.equal(open.mock.calls[0]?.[0].cwd, "/managed/example/restored");
+    assert.equal(open.mock.calls[0]?.[0].env?.T3CODE_WORKTREE_PATH, "/managed/example/restored");
+  }).pipe(Effect.provide(layer));
+});
 
 it.effect("rejects setup before opening a terminal while update admission is closed", () => {
   const { layer, open, write, listeners, projectId } = makeHarness();

@@ -157,6 +157,30 @@ const SOURCE_CONTROL_HOST_TERMS = sourceControlClients.definitions
 
 export const SETTINGS_SEARCH_ITEMS = [
   {
+    id: "storage-suspension-policy",
+    targetId: "storage-suspension",
+    title: "Suspend worktrees automatically",
+    to: "/settings/storage",
+    scope: "project-defaults",
+    searchTerms: [
+      "LastCode suspend settled worktrees restore saved workspace delay days subagents children untouched joined adopted keep workspace inherit off custom",
+    ],
+  },
+  {
+    id: "storage-saved-workspaces",
+    title: "Saved workspaces",
+    to: "/settings/storage",
+    scope: "project-defaults",
+    searchTerms: ["LastCode suspension recovery restore discard saved local work snapshot"],
+  },
+  {
+    id: "storage-dependencies",
+    title: "Dependencies and verified builds",
+    to: "/settings/storage",
+    scope: "project-defaults",
+    searchTerms: ["storage cleanup dependencies builds dist compiler cargo npm pnpm node_modules"],
+  },
+  {
     id: "storage-worktree-keep-when",
     targetId: "storage-worktrees",
     title: "Local work is preserved",
@@ -216,7 +240,7 @@ export const SETTINGS_SEARCH_ITEMS = [
   },
   {
     id: "storage-worktrees",
-    title: "Worktree cleanup",
+    title: "Permanent deletion",
     to: "/settings/storage",
     scope: "project-defaults",
     searchTerms: [

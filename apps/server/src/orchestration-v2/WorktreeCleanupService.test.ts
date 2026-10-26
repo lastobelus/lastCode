@@ -15,6 +15,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as SuspensionRegistry from "../workspace/WorktreeSuspensionRegistry.ts";
 import * as Ref from "effect/Ref";
 import { TestClock } from "effect/testing";
 
@@ -60,6 +61,10 @@ const makeHarness = Effect.fn(function* (
     append: (value: string) => Effect.Effect<void>,
   ) => Effect.Effect<void, PreviewHosting.PreviewHostingError | Terminal.TerminalError>,
   protectedPreviewPaths: ReadonlyArray<string> = [],
+  protection: Effect.Effect<
+    string | null,
+    SuspensionRegistry.SuspensionRegistryError
+  > = Effect.succeed(null),
 ) {
   const state = yield* Ref.make(initial);
   const timeline = yield* Ref.make<ReadonlyArray<string>>([]);
@@ -70,6 +75,13 @@ const makeHarness = Effect.fn(function* (
   const getThread = (threadId: ThreadId) =>
     Ref.get(state).pipe(Effect.map((rows) => rows.find((row) => row.id === threadId)!));
   const layer = Cleanup.layer.pipe(
+    Layer.provide(
+      Layer.mock(SuspensionRegistry.WorktreeSuspensionRegistry)({
+        root: "/test/saved-workspaces",
+        automaticProtection: () => protection,
+        list: Effect.succeed([]),
+      }),
+    ),
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(Projection.ProjectionStoreV2)({
@@ -91,6 +103,7 @@ const makeHarness = Effect.fn(function* (
               threads: [],
               archivedThreads: [],
             }),
+          getThreadWorktreePaths: () => Effect.succeed([]),
         }),
         Layer.mock(Project.ProjectStoreV2)({ listShells: () => Ref.get(projectRoots) }),
         Layer.mock(Threads.ThreadManagementService)({
@@ -244,6 +257,39 @@ it.effect("resumes tombstones and persists completion after provider teardown an
       assert.equal((yield* Ref.get(harness.state))[0]!.worktreeCleanup, null);
     }).pipe(Effect.provide(harness.layer));
   }).pipe(Effect.scoped),
+);
+
+it.effect.each(["held", "catalog-unavailable"] as const)(
+  "retains worktree data before teardown when %s",
+  (reason) =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness(
+        [pending("retained")],
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        [],
+        reason === "held"
+          ? Effect.succeed("Keep workspace is enabled.")
+          : Effect.fail(new SuspensionRegistry.SuspensionRegistryError({ operation: "read" })),
+      );
+      yield* Effect.gen(function* () {
+        const service = yield* Cleanup.WorktreeCleanupService;
+        yield* service.reconcile;
+        yield* service.drain;
+        const timeline = yield* Ref.get(harness.timeline);
+        assert.isFalse(
+          timeline.some(
+            (entry) =>
+              entry.startsWith("remove:") ||
+              entry.startsWith("terminal:") ||
+              entry.startsWith("detach:"),
+          ),
+        );
+        assert.equal((yield* Ref.get(harness.state))[0]?.worktreeCleanup?.status, "failed");
+      }).pipe(Effect.provide(harness.layer));
+    }).pipe(Effect.scoped),
 );
 
 it.effect("removes preview leases before closing terminals and deleting a worktree", () =>

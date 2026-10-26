@@ -30,6 +30,7 @@ import {
   RpcScopeAuthorization,
   WS_METHODS,
   WsRpcGroup,
+  SavedWorkspaceDisposition,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -268,11 +269,24 @@ const requiredScopesForSettingsUpdate = (payload: unknown) => {
 };
 
 const decodeProjectMutation = Schema.decodeUnknownSync(ProjectMutation);
+const decodeSavedDisposition = Schema.decodeUnknownSync(
+  Schema.Struct({
+    savedWorkspace: Schema.optionalKey(SavedWorkspaceDisposition),
+  }),
+);
 
 const requiredScopesForRpcCall = (
   method: string,
   payload: unknown,
 ): ReadonlyArray<AuthEnvironmentScope> => {
+  if (
+    (method === ORCHESTRATION_V2_WS_METHODS.dispatchCommand ||
+      method === WS_METHODS.projectsMutate ||
+      method === WS_METHODS.serverDeleteThreads) &&
+    decodeSavedDisposition(payload).savedWorkspace?.mode === "discard"
+  ) {
+    return clientRpcRequiredScopes(method, payload);
+  }
   if (method === WS_METHODS.serverRetryResourceTelemetry) {
     return [AuthEnvironmentMaintainScope, AuthDiagnosticsReadScope];
   }

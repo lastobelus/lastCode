@@ -1,3 +1,4 @@
+import { WorktreeSuspensionRequestError } from "@t3tools/contracts";
 import { ThreadReadAuthorization } from "./orchestration-v2/ThreadReadAuthorization.ts";
 import * as EnvironmentPause from "./environment/EnvironmentPause.ts";
 import { ThreadRecoveryOperationError } from "@t3tools/contracts";
@@ -32,6 +33,7 @@ import {
   AuthAccessStreamError,
   type AuthAccessStreamEvent,
   AuthOrchestrationOperateScope,
+  AuthEnvironmentMaintainScope,
   type AuthEnvironmentScope,
   type ScheduledTaskListResult,
   AuthSessionId,
@@ -79,6 +81,8 @@ import {
   ProjectSearchEntriesError,
   ProjectWriteFileError,
   ProjectMutationError,
+  ExternalLauncherEditorSpawnError,
+  AuthFilesystemWriteScope,
   ProviderUploadFeedbackError,
   ProviderSetupError,
   RelayClientInstallFailedError,
@@ -190,6 +194,9 @@ import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as ServerSettings from "./serverSettings.ts";
 import * as DatabaseStorage from "./persistence/DatabaseStorage.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
+import * as WorktreeSuspension from "./workspace/WorktreeSuspension.ts";
+import { WorkspaceAcquisition } from "./workspace/WorkspaceAcquisition.ts";
+import { WorkspaceLifecycle } from "./workspace/WorkspaceLifecycle.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import { terminalOutputStream, withTerminalOutputWindow } from "./terminal/OutputProtocol.ts";
 import * as ThreadReadBroker from "./mcp/ThreadReadBroker.ts";
@@ -573,6 +580,8 @@ const ServerWsRpcGroup = WsRpcGroup.middleware(RpcInstrumentation);
 const CoreServerWsRpcGroup = ServerWsRpcGroup.omit(
   ...Object.values(ORCHESTRATION_V2_WS_METHODS),
   WS_METHODS.assetsCreateUrl,
+  WS_METHODS.serverDeleteThreads,
+  WS_METHODS.serverSetKeepWorkspace,
   WS_METHODS.threadReadLocal,
   WS_METHODS.threadReadConnect,
   WS_METHODS.threadReadRespond,
@@ -1382,6 +1391,9 @@ const layerCoreWsRpc = (
       const config = yield* ServerConfig.ServerConfig;
       const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
       const storageCleanup = yield* StorageCleanup.StorageCleanup;
+      const savedWorkspaces = yield* WorktreeSuspension.WorktreeSuspension;
+      const workspaceAcquisition = yield* WorkspaceAcquisition;
+      const workspaceLifecycle = yield* WorkspaceLifecycle;
       const databaseStorage = yield* DatabaseStorage.DatabaseStorage;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
@@ -1960,7 +1972,7 @@ const layerCoreWsRpc = (
                 .enqueueCommand(
                   (command.type === "prepared-run.retry"
                     ? threadLaunch.retryPreparation(command)
-                    : ThreadMessageIntake.dispatchCommand(
+                    : ThreadMessageIntake.dispatchUserCommand(
                         ThreadManagementService.withCreationProvenance(command, {
                           createdBy: "user",
                           creationSource:
@@ -2339,6 +2351,29 @@ const layerCoreWsRpc = (
         }),
       );
 
+      const layerThreadDeletionRpc = ServerWsRpcGroup.toLayerHandler(
+        WS_METHODS.serverDeleteThreads,
+        (input) =>
+          startup.enqueueCommand(threadManagement.deleteMany(input)).pipe(
+            Effect.mapError((cause) =>
+              cause._tag === "WorktreeSuspensionRequestError"
+                ? cause
+                : new WorktreeSuspensionRequestError({
+                    reason: "unavailable",
+                    message: "Thread deletion is unavailable before command readiness.",
+                  }),
+            ),
+          ),
+      );
+
+      const layerWorkspaceHoldRpc = ServerWsRpcGroup.toLayerHandler(
+        WS_METHODS.serverSetKeepWorkspace,
+        (input) =>
+          savedWorkspaces.setKeepWorkspace(input, {
+            allowOrphans: currentSession.scopes.includes(AuthEnvironmentMaintainScope),
+          }),
+      );
+
       const handlers = CoreServerWsRpcGroup.of({
         [WS_METHODS.scheduledTasksList]: (_input) =>
           scheduledTasks.list().pipe(Effect.map(withVisibleWebhookUrls)),
@@ -2708,6 +2743,24 @@ const layerCoreWsRpc = (
             return { keybindings: keybindingsConfig, issues: [] };
           }),
         [WS_METHODS.serverRunStorageCleanup]: () => storageCleanup.runNow,
+        [WS_METHODS.serverListSavedWorkspaces]: (input) =>
+          savedWorkspaces.list(input, {
+            allowOrphans: currentSession.scopes.includes(AuthEnvironmentMaintainScope),
+          }),
+        [WS_METHODS.serverPreviewWorkspaceLifecycle]: (input) =>
+          workspaceLifecycle.preview(input, {
+            allowOrphans: currentSession.scopes.includes(AuthEnvironmentMaintainScope),
+          }),
+        [WS_METHODS.serverPreviewWorktreeSuspension]: (input) =>
+          savedWorkspaces.previewSuspend(input),
+        [WS_METHODS.serverSuspendWorktree]: (input) => savedWorkspaces.suspend(input),
+        [WS_METHODS.serverRestoreWorktree]: (input) =>
+          savedWorkspaces.restore(input, {
+            allowOrphans: currentSession.scopes.includes(AuthEnvironmentMaintainScope),
+          }),
+        [WS_METHODS.serverPreviewWorktreeDiscard]: (input) => savedWorkspaces.previewDiscard(input),
+        [WS_METHODS.serverDiscardWorktreeSnapshots]: (input) => savedWorkspaces.discard(input),
+        [WS_METHODS.serverCreateFreshWorktree]: (input) => savedWorkspaces.createFresh(input),
         [WS_METHODS.serverGetStorageCleanupReport]: () => storageCleanup.reports,
         [WS_METHODS.serverGetBuildReviewTargets]: (input) =>
           storageCleanup.buildReviewTargets(input),
@@ -3032,7 +3085,27 @@ const layerCoreWsRpc = (
                 }),
             ),
           ),
-        [WS_METHODS.shellOpenInEditor]: (input) => externalLauncher.launchEditor(input),
+        [WS_METHODS.shellOpenInEditor]: (input) =>
+          input.editor === "file-manager"
+            ? externalLauncher.launchEditor(input)
+            : authorizeEffect(
+                AuthFilesystemWriteScope,
+                workspaceAcquisition.acquire({ path: input.cwd, purpose: "editor" }).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ExternalLauncherEditorSpawnError({
+                        command: "restore-workspace",
+                        args: [],
+                        editor: input.editor,
+                        target: input.cwd,
+                        cause,
+                      }),
+                  ),
+                  Effect.flatMap((workspace) =>
+                    externalLauncher.launchEditor({ ...input, cwd: workspace.path }),
+                  ),
+                ),
+              ),
         [WS_METHODS.filesystemGetMetadata]: (input) => workspaceFileSystem.getMetadata(input),
         [WS_METHODS.filesystemBrowse]: (input) =>
           workspaceEntries.browse(input).pipe(
@@ -3483,6 +3556,8 @@ const layerCoreWsRpc = (
         OtherWsRpcGroup.toLayer(otherHandlers),
         layerAssetRpc,
         layerOrchestrationRpc,
+        layerThreadDeletionRpc,
+        layerWorkspaceHoldRpc,
       );
     }),
   ).pipe(
@@ -3586,6 +3661,9 @@ type WsRequestServices =
   | SessionStore.SessionStore
   | SourceControlRepositoryService.SourceControlRepositoryService
   | StorageCleanup.StorageCleanup
+  | WorktreeSuspension.WorktreeSuspension
+  | WorkspaceAcquisition
+  | WorkspaceLifecycle
   | TerminalManager.TerminalManager
   | ThreadLaunchService.ThreadLaunchService
   | ThreadLinkedFiles.ThreadLinkedFiles

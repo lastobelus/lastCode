@@ -16,6 +16,7 @@ import * as TestClock from "effect/testing/TestClock";
 import * as Duration from "effect/Duration";
 import { FetchHttpClient, HttpClient } from "effect/http";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
+import * as WorkspaceAcquisitionTestkit from "../workspace/WorkspaceAcquisition.testkit.ts";
 
 import {
   PreviewHostingLeaseId,
@@ -325,6 +326,7 @@ function hostingLayer(
   httpLayer: Layer.Layer<HttpClient.HttpClient> = FetchHttpClient.layer,
 ) {
   const dependencies = Layer.mergeAll(
+    WorkspaceAcquisitionTestkit.layer,
     httpLayer,
     listeningNetworkLayer,
     NodeServices.layer,
@@ -1050,7 +1052,7 @@ describe("PreviewHosting", () => {
               }),
           },
         }),
-      ).pipe(Layer.provide(ProcessRunner.layer));
+      ).pipe(Layer.provide(WorkspaceAcquisitionTestkit.layer), Layer.provide(ProcessRunner.layer));
       const dependencies = Layer.mergeAll(
         listeningNetworkLayer,
         FetchHttpClient.layer,
@@ -1098,7 +1100,14 @@ describe("PreviewHosting", () => {
           );
           yield* terminals.close({ threadId: "thread-2" });
           yield* terminals.waitForThreadShutdown("thread-2");
-        }).pipe(Effect.provide(PreviewHosting.layer.pipe(Layer.provideMerge(dependencies)))),
+        }).pipe(
+          Effect.provide(
+            PreviewHosting.layer.pipe(
+              Layer.provide(WorkspaceAcquisitionTestkit.layer),
+              Layer.provideMerge(dependencies),
+            ),
+          ),
+        ),
       );
     }).pipe(Effect.provide(NodeServices.layer)),
   );
@@ -2373,6 +2382,8 @@ describe("PreviewHosting", () => {
           retain: Effect.void,
         });
         const layer = PreviewHosting.layer.pipe(
+          Layer.provide(WorkspaceAcquisitionTestkit.layer),
+          Layer.provide(WorkspaceAcquisitionTestkit.layer),
           Layer.provide(fileSystem),
           Layer.provideMerge(
             Layer.mergeAll(
@@ -4222,6 +4233,7 @@ describe("PreviewHosting", () => {
           retain: Effect.void,
         });
         const layer = PreviewHosting.layer.pipe(
+          Layer.provide(WorkspaceAcquisitionTestkit.layer),
           Layer.provideMerge(
             Layer.mergeAll(
               NodeServices.layer,
@@ -4359,6 +4371,7 @@ describe("PreviewHosting", () => {
           retain: Effect.void,
         });
         const layer = PreviewHosting.layer.pipe(
+          Layer.provide(WorkspaceAcquisitionTestkit.layer),
           Layer.provideMerge(
             Layer.mergeAll(
               NodeServices.layer,

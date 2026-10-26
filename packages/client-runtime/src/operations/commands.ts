@@ -1,3 +1,4 @@
+import type { SavedWorkspaceDisposition } from "@t3tools/contracts";
 import { remapComposerContextAttachments } from "@t3tools/shared/composerContextReferences";
 import {
   type ThreadLinkedPullRequest,
@@ -65,6 +66,7 @@ export interface UpdateProjectInput extends CommandMetadata {
 }
 
 export interface DeleteProjectInput extends CommandMetadata {
+  readonly savedWorkspace?: SavedWorkspaceDisposition;
   readonly projectId: ProjectId;
   readonly force?: boolean;
 }
@@ -85,6 +87,7 @@ export interface ThreadCommandInput extends CommandMetadata {
 }
 
 export interface DeleteThreadInput extends ThreadCommandInput {
+  readonly savedWorkspace?: SavedWorkspaceDisposition;
   readonly deleteWorktree?: boolean;
   readonly repositoryKey?: string;
 }
@@ -102,6 +105,7 @@ export interface UpsertThreadAnnotationInput extends ThreadCommandInput {
 }
 
 export interface ArchiveThreadInput extends ThreadCommandInput {
+  readonly savedWorkspace?: SavedWorkspaceDisposition;
   readonly childDisposition?: ThreadArchiveChildDisposition;
   readonly expectedChildThreadIds?: ReadonlyArray<ThreadId>;
   readonly expectedArchiveCommandId?: CommandId;
@@ -363,6 +367,7 @@ const mutateProject = Effect.fn("EnvironmentCommands.mutateProject")(function* (
       }
     | {
         readonly type: "project.delete";
+        readonly savedWorkspace?: SavedWorkspaceDisposition;
         readonly commandId: CommandId;
         readonly projectId: ProjectId;
         readonly force?: boolean;
@@ -420,6 +425,7 @@ export const deleteProject = Effect.fn("EnvironmentCommands.deleteProject")(func
     commandId: yield* allocateCommandId(input),
     projectId: input.projectId,
     ...(input.force === undefined ? {} : { force: input.force }),
+    ...(input.savedWorkspace === undefined ? {} : { savedWorkspace: input.savedWorkspace }),
   });
 });
 
@@ -467,6 +473,7 @@ export const deleteThread = Effect.fn("EnvironmentCommands.deleteThread")(functi
 ) {
   return yield* dispatch({
     type: "thread.delete",
+    ...(input.savedWorkspace === undefined ? {} : { savedWorkspace: input.savedWorkspace }),
     commandId: yield* allocateCommandId(input),
     threadId: input.threadId,
     ...(input.deleteWorktree === undefined ? {} : { deleteWorktree: input.deleteWorktree }),
@@ -564,6 +571,7 @@ export const archiveThread = Effect.fn("EnvironmentCommands.archiveThread")(func
 ) {
   return yield* dispatch({
     type: "thread.archive",
+    ...(input.savedWorkspace === undefined ? {} : { savedWorkspace: input.savedWorkspace }),
     commandId: yield* allocateCommandId(input),
     threadId: input.threadId,
     ...(input.childDisposition === undefined ? {} : { childDisposition: input.childDisposition }),

@@ -1,3 +1,9 @@
+import {
+  WorkspaceLifecyclePreviewInput,
+  WorkspaceLifecyclePreview,
+  DeleteThreadsInput,
+  DeleteThreadsResult,
+} from "./workspaceLifecycle.ts";
 import { EnvironmentPauseStatus, EnvironmentPauseError } from "./environmentPause.ts";
 import {
   BuildReviewError,
@@ -397,6 +403,20 @@ import {
   ServerSettingsPatch,
 } from "./settings.ts";
 import {
+  ListSavedWorkspacesInput,
+  SavedWorkspacesPage,
+  PreviewWorktreeSuspensionInput,
+  WorktreeSuspensionPreview,
+  SuspendWorktreeInput,
+  RestoreWorktreeInput,
+  PreviewWorktreeDiscardInput,
+  WorktreeDiscardPreview,
+  DiscardWorktreeSnapshotsInput,
+  SetKeepWorkspaceInput,
+  WorkspaceOperation,
+  WorktreeSuspensionRequestError,
+} from "./worktreeSuspensionRpc.ts";
+import {
   ScheduledTaskDeleteInput,
   ScheduledTaskDeleteResult,
   ScheduledTaskError,
@@ -553,6 +573,16 @@ export const WS_METHODS = {
   serverRemoveKeybinding: "server.removeKeybinding",
   serverRunStorageCleanup: "server.runStorageCleanup",
   serverGetStorageCleanupReport: "server.getStorageCleanupReport",
+  serverListSavedWorkspaces: "server.listSavedWorkspaces",
+  serverPreviewWorkspaceLifecycle: "server.previewWorkspaceLifecycle",
+  serverDeleteThreads: "server.deleteThreads",
+  serverPreviewWorktreeSuspension: "server.previewWorktreeSuspension",
+  serverSuspendWorktree: "server.suspendWorktree",
+  serverRestoreWorktree: "server.restoreWorktree",
+  serverPreviewWorktreeDiscard: "server.previewWorktreeDiscard",
+  serverDiscardWorktreeSnapshots: "server.discardWorktreeSnapshots",
+  serverSetKeepWorkspace: "server.setKeepWorkspace",
+  serverCreateFreshWorktree: "server.createFreshWorktree",
   serverGetBuildReviewTargets: "server.getBuildReviewTargets",
   serverPreviewBuildReview: "server.previewBuildReview",
   serverSelectBuildReview: "server.selectBuildReview",
@@ -831,6 +861,61 @@ const WsServerGetStorageCleanupReportRpc = Rpc.make(WS_METHODS.serverGetStorageC
   success: Schema.NullOr(StorageCleanupReport),
   stream: true,
   error: EnvironmentAuthorizationError,
+});
+
+const WorktreeSuspensionRpcError = Schema.Union([
+  WorktreeSuspensionRequestError,
+  EnvironmentAuthorizationError,
+]);
+const WsServerDeleteThreadsRpc = Rpc.make(WS_METHODS.serverDeleteThreads, {
+  payload: DeleteThreadsInput,
+  success: DeleteThreadsResult,
+  error: WorktreeSuspensionRpcError,
+});
+const WsServerPreviewWorkspaceLifecycleRpc = Rpc.make(WS_METHODS.serverPreviewWorkspaceLifecycle, {
+  payload: WorkspaceLifecyclePreviewInput,
+  success: WorkspaceLifecyclePreview,
+  error: WorktreeSuspensionRpcError,
+});
+const WsServerListSavedWorkspacesRpc = Rpc.make(WS_METHODS.serverListSavedWorkspaces, {
+  payload: ListSavedWorkspacesInput,
+  success: SavedWorkspacesPage,
+  error: WorktreeSuspensionRpcError,
+});
+const WsServerPreviewWorktreeSuspensionRpc = Rpc.make(WS_METHODS.serverPreviewWorktreeSuspension, {
+  payload: PreviewWorktreeSuspensionInput,
+  success: WorktreeSuspensionPreview,
+  error: WorktreeSuspensionRpcError,
+});
+const WsServerSuspendWorktreeRpc = Rpc.make(WS_METHODS.serverSuspendWorktree, {
+  payload: SuspendWorktreeInput,
+  success: WorkspaceOperation,
+  error: WorktreeSuspensionRpcError,
+});
+const WsServerRestoreWorktreeRpc = Rpc.make(WS_METHODS.serverRestoreWorktree, {
+  payload: RestoreWorktreeInput,
+  success: WorkspaceOperation,
+  error: WorktreeSuspensionRpcError,
+});
+const WsServerPreviewWorktreeDiscardRpc = Rpc.make(WS_METHODS.serverPreviewWorktreeDiscard, {
+  payload: PreviewWorktreeDiscardInput,
+  success: WorktreeDiscardPreview,
+  error: WorktreeSuspensionRpcError,
+});
+const WsServerDiscardWorktreeSnapshotsRpc = Rpc.make(WS_METHODS.serverDiscardWorktreeSnapshots, {
+  payload: DiscardWorktreeSnapshotsInput,
+  success: WorkspaceOperation,
+  error: WorktreeSuspensionRpcError,
+});
+const WsServerSetKeepWorkspaceRpc = Rpc.make(WS_METHODS.serverSetKeepWorkspace, {
+  payload: SetKeepWorkspaceInput,
+  success: WorkspaceOperation,
+  error: WorktreeSuspensionRpcError,
+});
+const WsServerCreateFreshWorktreeRpc = Rpc.make(WS_METHODS.serverCreateFreshWorktree, {
+  payload: PreviewWorktreeSuspensionInput,
+  success: WorkspaceOperation,
+  error: WorktreeSuspensionRpcError,
 });
 
 const WsServerGetBuildReviewTargetsRpc = Rpc.make(WS_METHODS.serverGetBuildReviewTargets, {
@@ -2179,6 +2264,16 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerRemoveKeybindingRpc,
   WsServerRunStorageCleanupRpc,
   WsServerGetStorageCleanupReportRpc,
+  WsServerListSavedWorkspacesRpc,
+  WsServerPreviewWorkspaceLifecycleRpc,
+  WsServerDeleteThreadsRpc,
+  WsServerPreviewWorktreeSuspensionRpc,
+  WsServerSuspendWorktreeRpc,
+  WsServerRestoreWorktreeRpc,
+  WsServerPreviewWorktreeDiscardRpc,
+  WsServerDiscardWorktreeSnapshotsRpc,
+  WsServerSetKeepWorkspaceRpc,
+  WsServerCreateFreshWorktreeRpc,
   WsServerGetBuildReviewTargetsRpc,
   WsServerPreviewBuildReviewRpc,
   WsServerSelectBuildReviewRpc,

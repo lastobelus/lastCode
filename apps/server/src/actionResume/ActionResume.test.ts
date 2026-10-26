@@ -34,6 +34,7 @@ import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as WorkspaceAcquisitionTestkit from "../workspace/WorkspaceAcquisition.testkit.ts";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -480,6 +481,7 @@ const makeHarness = Effect.gen(function* () {
     shellReads,
     state,
     layer: ActionResume.layer.pipe(
+      Layer.provide(WorkspaceAcquisitionTestkit.layer),
       Layer.provideMerge(dependencies),
       Layer.provide(NodeServices.layer),
     ),

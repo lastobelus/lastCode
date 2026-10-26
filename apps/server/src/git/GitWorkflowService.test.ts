@@ -11,6 +11,8 @@ import * as GitManager from "./GitManager.ts";
 import * as GitWorkflowService from "./GitWorkflowService.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
+import * as WorkspaceAcquisitionTestkit from "../workspace/WorkspaceAcquisition.testkit.ts";
+import * as SuspensionRegistryTestkit from "../workspace/WorktreeSuspensionRegistry.testkit.ts";
 
 it.layer(NodeServices.layer)("GitWorkflowService", (it) => {
   it.effect("finds a name among the refs of every namespace", () =>
@@ -37,6 +39,8 @@ it.layer(NodeServices.layer)("GitWorkflowService", (it) => {
       Effect.scoped,
       Effect.provide(
         GitWorkflowService.layer.pipe(
+          Layer.provide(WorkspaceAcquisitionTestkit.layer),
+          Layer.provide(SuspensionRegistryTestkit.layer),
           Layer.provide(
             Layer.mock(VcsDriverRegistry.VcsDriverRegistry)({
               resolve: () => Effect.succeed({ kind: "git" } as VcsDriverRegistry.VcsDriverHandle),

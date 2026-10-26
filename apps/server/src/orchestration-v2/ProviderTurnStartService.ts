@@ -23,10 +23,10 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
-import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import * as ServerConfig from "../config.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
+import * as WorkspaceAcquisition from "../workspace/WorkspaceAcquisition.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
@@ -172,16 +172,16 @@ export const layer: Layer.Layer<
   | ProviderSessionManager.ProviderSessionManagerV2
   | RunExecutionService.RunExecutionServiceV2
   | RuntimePolicy.RuntimePolicyV2
+  | WorkspaceAcquisition.WorkspaceAcquisition
 > = Layer.effect(
   ProviderTurnStartServiceV2,
   Effect.gen(function* () {
+    const workspaceAcquisition = yield* WorkspaceAcquisition.WorkspaceAcquisition;
     const eventSink = yield* EventSink.EventSinkV2;
     const contextHandoffService = yield* ContextHandoffService.ContextHandoffServiceV2;
     const idAllocator = yield* IdAllocator.IdAllocatorV2;
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const serverConfig = yield* ServerConfig.ServerConfig;
-    const serverSettings = yield* ServerSettings.ServerSettingsService;
     const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
     const projects = yield* ProjectService.ProjectService;
     const providerAuth = yield* ProviderAuthService.ProviderAuthService;
@@ -311,9 +311,17 @@ export const layer: Layer.Layer<
         ) => Effect.Effect<void>;
       },
       nativeStart: StartDeliveryEvidence,
+      acquired?: WorkspaceAcquisition.AcquiredWorkspace,
     ) {
       const { runId } = input;
-      const projection = yield* projectionStore.getTurnStartContext(input.threadId, runId);
+      const current = yield* projectionStore.getTurnStartContext(input.threadId, runId);
+      const projection =
+        acquired?.restored && current.thread.worktreePath !== null
+          ? {
+              ...current,
+              thread: { ...current.thread, worktreePath: acquired.path, branch: acquired.branch },
+            }
+          : current;
       const run = projection.runs.find((candidate) => candidate.id === runId);
       if (run === undefined) {
         return yield* new ProviderTurnStartError({ runId, cause: `Run ${runId} was not found.` });
@@ -562,6 +570,11 @@ export const layer: Layer.Layer<
           .exists(worktreePath)
           .pipe(Effect.orElseSucceed(() => true));
         if (!exists && (yield* isManagedWorktreePath(worktreePath))) {
+          if (acquired?.restored)
+            return yield* new ProviderTurnStartError({
+              runId,
+              cause: new WorkspaceAcquisition.WorkspaceUnavailableError({ reason: "blocked" }),
+            });
           const project = yield* projects.getById(projection.thread.projectId).pipe(
             Effect.map(Option.getOrUndefined),
             Effect.orElseSucceed(() => undefined),
@@ -1432,9 +1445,27 @@ export const layer: Layer.Layer<
           // Storage cleanup removes worktrees under the same lease. Only startup
           // holds it; the provider turn runs after it is released.
           const { thread } = yield* projectionStore.getThreadRecords(input.threadId, []);
-          const providerTurn = yield* thread.worktreePath === null
+          const project =
+            thread.worktreePath === null
+              ? Option.getOrUndefined(yield* projects.getById(thread.projectId))
+              : undefined;
+          const workspacePath = thread.worktreePath ?? project?.workspaceRoot;
+          const providerTurn = yield* workspacePath === undefined
             ? start(input, nativeStart)
-            : withWorkspaceLease(path.resolve(thread.worktreePath), start(input, nativeStart));
+            : withWorkspaceLease(
+                path.resolve(workspacePath),
+                Effect.gen(function* () {
+                  const acquired = yield* workspaceAcquisition.acquire({
+                    path: workspacePath,
+                    threadId: input.threadId,
+                    purpose: "provider",
+                  });
+                  return yield* withWorkspaceLease(
+                    acquired.path,
+                    start(input, nativeStart, acquired),
+                  );
+                }),
+              );
           if (providerTurn !== undefined) yield* providerTurn;
         }).pipe(
           Effect.mapError(

@@ -41,6 +41,8 @@ import { forkParked } from "../serverActivation.ts";
 import * as EnvironmentPauseStore from "../environment/EnvironmentPauseStore.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
+import * as WorkspaceAcquisition from "../workspace/WorkspaceAcquisition.ts";
+import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as CommandReceipts from "../orchestration-v2/CommandReceiptStore.ts";
@@ -281,6 +283,7 @@ const mapActionResumeError =
     );
 
 const make = Effect.gen(function* () {
+  const workspaceAcquisition = yield* WorkspaceAcquisition.WorkspaceAcquisition;
   const pauseStore = yield* Effect.serviceOption(EnvironmentPauseStore.EnvironmentPauseStore);
   const automationPaused = Option.isSome(pauseStore)
     ? pauseStore.value.get.pipe(
@@ -789,81 +792,108 @@ const make = Effect.gen(function* () {
       });
     }
     const { thread, project } = yield* resolveProjectContext(invocation.threadId);
-    const runId = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
-    const terminalId = `action-${runId}`;
-    const eventToken = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
-    const startedAt = yield* nowIso;
-    const state: ActionResumeState = {
-      runId,
-      threadId: invocation.threadId,
-      projectId: project.id,
-      actionId: script.id,
-      actionName: script.name,
-      command: script.command,
-      terminalId,
-      outcome: "running",
-      delivery: "armed",
-      startedAt,
-      finishedAt: null,
-      exitCode: null,
-      exitSignal: null,
-      revision: 0,
-    };
-    const cwd = thread.worktreePath ?? project.workspaceRoot;
-    const env = projectScriptRuntimeEnv({
-      project: { cwd: project.workspaceRoot },
-      worktreePath: thread.worktreePath,
-      extraEnv: {
-        [ACTION_RUN_ID_ENV]: runId,
-        [ACTION_EVENT_TOKEN_ENV]: eventToken,
-      },
-    });
-    const launch = Effect.gen(function* () {
-      const terminal = yield* terminals.open({
-        threadId: invocation.threadId,
-        terminalId,
-        cwd,
-        ...(script.terminalLinkProfileName === undefined
-          ? {}
-          : { terminalLinkProfileName: script.terminalLinkProfileName }),
-        worktreePath: thread.worktreePath,
-        env,
-        cols: 120,
-        rows: 30,
-      });
-      if (terminal.status !== "running") {
-        return yield* Effect.die("Action terminal exited during launch.");
-      }
-      yield* persistState(state);
-      outputCaptureByRunId.set(runId, createActionOutputCapture(runId));
-      protocolCaptureByRunId.set(runId, {
-        decoder: createActionProtocolDecoder({ runId, token: eventToken }),
-        acceptedProgressCount: 0,
-        progressFlushGeneration: 0,
-      });
-      yield* terminals.write({
-        threadId: invocation.threadId,
-        terminalId,
-        data: actionCommandForShell(script.command, terminal.shellFamily, runId),
-      });
-    });
-    const launched = yield* Effect.exit(launch);
-    if (launched._tag === "Failure") {
-      yield* finishUnlocked({
-        threadId: invocation.threadId,
-        runId,
-        outcome: "failed",
-        deliver: false,
-      }).pipe(Effect.ignoreCause({ log: true }));
-      yield* terminals
-        .close({ threadId: invocation.threadId, terminalId, deleteHistory: true })
-        .pipe(Effect.ignoreCause({ log: true }));
-      return yield* new ActionResumeError({
-        reason: "launch_failed",
-        message: `Failed to launch Action "${script.name}".`,
-      });
-    }
-    return state;
+    return yield* withWorkspaceLease(
+      thread.worktreePath ?? project.workspaceRoot,
+      Effect.gen(function* () {
+        const acquired = yield* workspaceAcquisition
+          .acquire({
+            path: thread.worktreePath ?? project.workspaceRoot,
+            threadId: invocation.threadId,
+            purpose: "action",
+          })
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new ActionResumeError({
+                  reason: "launch_failed",
+                  message: "The workspace must be restored before this Action can run.",
+                  cause,
+                }),
+            ),
+          );
+        return yield* withWorkspaceLease(
+          acquired.path,
+          Effect.gen(function* () {
+            const worktreePath = thread.worktreePath === null ? null : acquired.path;
+            const runId = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
+            const terminalId = `action-${runId}`;
+            const eventToken = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
+            const startedAt = yield* nowIso;
+            const state: ActionResumeState = {
+              runId,
+              threadId: invocation.threadId,
+              projectId: project.id,
+              actionId: script.id,
+              actionName: script.name,
+              command: script.command,
+              terminalId,
+              outcome: "running",
+              delivery: "armed",
+              startedAt,
+              finishedAt: null,
+              exitCode: null,
+              exitSignal: null,
+              revision: 0,
+            };
+            const cwd = acquired.path;
+            const env = projectScriptRuntimeEnv({
+              project: { cwd: project.workspaceRoot },
+              worktreePath,
+              extraEnv: {
+                [ACTION_RUN_ID_ENV]: runId,
+                [ACTION_EVENT_TOKEN_ENV]: eventToken,
+              },
+            });
+            const launch = Effect.gen(function* () {
+              const terminal = yield* terminals.open({
+                threadId: invocation.threadId,
+                terminalId,
+                cwd,
+                ...(script.terminalLinkProfileName === undefined
+                  ? {}
+                  : { terminalLinkProfileName: script.terminalLinkProfileName }),
+                worktreePath,
+                env,
+                cols: 120,
+                rows: 30,
+              });
+              if (terminal.status !== "running") {
+                return yield* Effect.die("Action terminal exited during launch.");
+              }
+              yield* persistState(state);
+              outputCaptureByRunId.set(runId, createActionOutputCapture(runId));
+              protocolCaptureByRunId.set(runId, {
+                decoder: createActionProtocolDecoder({ runId, token: eventToken }),
+                acceptedProgressCount: 0,
+                progressFlushGeneration: 0,
+              });
+              yield* terminals.write({
+                threadId: invocation.threadId,
+                terminalId,
+                data: actionCommandForShell(script.command, terminal.shellFamily, runId),
+              });
+            });
+            const launched = yield* Effect.exit(launch);
+            if (launched._tag === "Failure") {
+              yield* finishUnlocked({
+                threadId: invocation.threadId,
+                runId,
+                outcome: "failed",
+                deliver: false,
+              }).pipe(Effect.ignoreCause({ log: true }));
+              yield* terminals
+                .close({ threadId: invocation.threadId, terminalId, deleteHistory: true })
+                .pipe(Effect.ignoreCause({ log: true }));
+              return yield* new ActionResumeError({
+                reason: "launch_failed",
+                message: `Failed to launch Action "${script.name}".`,
+              });
+            }
+            return state;
+          }),
+        );
+      }),
+    );
   });
 
   const runProjectActionAndResumeImpl = Effect.fn("ActionResume.runProjectActionAndResume")(

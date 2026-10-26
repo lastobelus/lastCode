@@ -46,6 +46,8 @@ import * as ProjectService from "../project/ProjectService.ts";
 import * as UpdateDrainAdmission from "../updateDrain/UpdateDrainAdmission.ts";
 import { terminalOutputStream } from "./OutputProtocol.ts";
 import * as PtyAdapter from "@t3tools/shared/PtyAdapter";
+import * as WorkspaceAcquisitionTestkit from "../workspace/WorkspaceAcquisition.testkit.ts";
+import * as WorkspaceAcquisition from "../workspace/WorkspaceAcquisition.ts";
 
 vi.mock("effect/SynchronizedRef", async (importOriginal) => {
   const original = await importOriginal<typeof SynchronizedRef>();
@@ -266,6 +268,7 @@ const multiTerminalHistoryLogPath = (
   );
 
 interface CreateManagerOptions {
+  workspaceAcquisition?: WorkspaceAcquisition.WorkspaceAcquisition["Service"]["acquire"];
   logsDir?: string;
   shellResolver?: () => string;
   env?: NodeJS.ProcessEnv;
@@ -361,7 +364,13 @@ const createManager = (
         ...(options.registerTerminalProcesses === undefined
           ? {}
           : { registerTerminalProcesses: options.registerTerminalProcesses }),
-      });
+      }).pipe(
+        Effect.provide(
+          options.workspaceAcquisition === undefined
+            ? WorkspaceAcquisitionTestkit.layer
+            : WorkspaceAcquisitionTestkit.layerWith(options.workspaceAcquisition),
+        ),
+      );
       const eventsRef = yield* Ref.make<ReadonlyArray<TerminalEvent>>([]);
       const unsubscribe = yield* manager.subscribe((event) =>
         Ref.update(eventsRef, (events) => [...events, event]),
@@ -471,6 +480,44 @@ it.layer(
   Layer.merge(NodeServices.layer, ProcessRunner.layer.pipe(Layer.provide(NodeServices.layer))),
   { excludeTestServices: true },
 )("TerminalManager", (it) => {
+  it.effect("opens a restored checkout using its new cwd and Action environment", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const restored = yield* fs.makeTempDirectoryScoped({ prefix: "terminal-restored-" });
+      yield* fs.makeDirectory(path.join(restored, "nested"));
+      const original = path.join(restored, "absent-original");
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        workspaceAcquisition: () =>
+          Effect.succeed({ path: restored, branch: "recovered", restored: true }),
+      });
+      const terminal = yield* manager.open(
+        openInput({
+          cwd: path.join(original, "nested"),
+          worktreePath: original,
+          env: { T3CODE_WORKTREE_PATH: original },
+        }),
+      );
+      assert.equal(terminal.cwd, path.join(restored, "nested"));
+      assert.equal(ptyAdapter.spawnInputs[0]?.cwd, path.join(restored, "nested"));
+      assert.equal(ptyAdapter.spawnInputs[0]?.env?.T3CODE_WORKTREE_PATH, restored);
+    }),
+  );
+
+  it.effect("starts no shell when saved-workspace acquisition blocks open or restart", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        workspaceAcquisition: () =>
+          Effect.fail(
+            new WorkspaceAcquisition.WorkspaceUnavailableError({ reason: "snapshot-unavailable" }),
+          ),
+      });
+      for (const operation of [manager.open(openInput()), manager.restart(restartInput())])
+        assert.equal((yield* Effect.result(operation))._tag, "Failure");
+      assert.deepEqual(ptyAdapter.spawnInputs, []);
+    }),
+  );
+
   it.effect("spawns lazily and reuses running terminal per thread", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter } = yield* createManager();

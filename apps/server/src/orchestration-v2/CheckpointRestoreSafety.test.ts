@@ -12,6 +12,7 @@ import {
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as WorkspaceAcquisitionTestkit from "../workspace/WorkspaceAcquisition.testkit.ts";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as ServerConfig from "../config.ts";
@@ -92,6 +93,7 @@ it.effect.each([
       runsToRollback: [{ id: "later-run", ordinal: 1, status: "completed", rootNodeId: null }],
     } as unknown as ProjectionCheckpointRollbackContext;
     const layerTest = CheckpointRollbackService.layer.pipe(
+      Layer.provide(WorkspaceAcquisitionTestkit.layer),
       Layer.provide(
         Layer.mergeAll(
           NodeServices.layer,
