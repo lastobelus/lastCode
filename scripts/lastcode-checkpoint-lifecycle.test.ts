@@ -872,7 +872,8 @@ describe("complete checkpoint candidate validation", () => {
           if (mode === "selected repair revision") {
             git(repo, ["push", "--quiet", "origin", `${merged}:refs/heads/lastcode/main`]);
             const published = checkpoint(fixture, ["--push-tags", "--promote"], environment);
-            assert.equal(published.status, 0, published.stderr || published.stdout);
+            assert.equal(published.status, 1, published.stderr || published.stdout);
+            assert.match(published.stderr, /promotion is still pending/u);
             git(retained, ["cherry-pick", merged]);
             recordedSource = merged;
             const reselected = select();
