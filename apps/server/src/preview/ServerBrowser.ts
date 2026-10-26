@@ -326,6 +326,7 @@ interface ServerTab {
   readonly hostedOrigins: Map<string, string>;
   // Native adoption has no baseline yet; null remembers a rendered legacy run without an id.
   hostedRunId: string | null | undefined;
+  hostedRunOrigin: string | undefined;
   /** Pending viewer preparation; replacement and control handoff cancel it. */
   viewerNavigation: AbortController | null;
   /**
@@ -498,6 +499,14 @@ const make = Effect.gen(function* () {
   const previewBrowser = yield* PreviewBrowser.PreviewBrowser;
   const desktopChannel = yield* DesktopBrowserChannel.DesktopBrowserChannel;
   const launchFork = Effect.runForkWith(yield* Effect.context<never>());
+  const rememberHostedRun = (
+    tab: ServerTab,
+    destination: { readonly url: string; readonly runId?: string | undefined },
+  ) => {
+    tab.hostedRunId = destination.runId ?? null;
+    // A listener owns every path; a redirect cannot transfer its prepared run to another origin.
+    tab.hostedRunOrigin = new URL(destination.url).origin;
+  };
   const backgroundFibers = new Set<Fiber.Fiber<unknown, unknown>>();
   const pendingReports = new Set<Promise<void>>();
   const runFork = <A, E>(effect: Effect.Effect<A, E>) => {
@@ -1172,6 +1181,7 @@ const make = Effect.gen(function* () {
       downloads: [],
       hostedOrigins,
       hostedRunId: undefined,
+      hostedRunOrigin: undefined,
       viewerNavigation: null,
       fileChooser: null,
       dialog: null,
@@ -1336,7 +1346,7 @@ const make = Effect.gen(function* () {
             prepared = true;
             ready.resolve();
             await page.goto(destination.url, { waitUntil: "load", timeout: NAVIGATION_TIMEOUT_MS });
-            tab.hostedRunId = destination.runId ?? null;
+            rememberHostedRun(tab, destination);
             await reportLoaded(tab, true);
           }),
       ).catch(async (cause: unknown) => {
@@ -2378,6 +2388,7 @@ const make = Effect.gen(function* () {
     url: string,
     readiness: "load" | "domContentLoaded" | "none",
     timeout: number,
+    onCommitted?: () => void,
   ) => {
     const release = await acquireHostingDestination(tab, url);
     const navigation = Promise.resolve()
@@ -2392,6 +2403,7 @@ const make = Effect.gen(function* () {
                 : "load",
         }),
       )
+      .then(() => onCommitted?.())
       .finally(release);
     if (readiness === "none") {
       tab.control.track(navigation);
@@ -3348,7 +3360,7 @@ const make = Effect.gen(function* () {
                   await tab.initialNavigation;
                   signal.throwIfAborted();
                 }
-                if (destination) tab.hostedRunId = destination.runId ?? null;
+                if (destination) rememberHostedRun(tab, destination);
                 if (!existing && url) {
                   await tab.page
                     .waitForLoadState("load", { timeout: navigationTimeout })
@@ -3708,8 +3720,8 @@ const make = Effect.gen(function* () {
             destination.url,
             navigateInput.readiness ?? "load",
             Math.min(originalInput.timeoutMs ?? request.timeoutMs, remainingTimeoutMs()),
+            () => rememberHostedRun(tab, destination),
           );
-          tab.hostedRunId = destination.runId ?? null;
         });
         return statusWithTitle(tab, request.agentSessionId);
       }
@@ -4007,7 +4019,7 @@ const make = Effect.gen(function* () {
                       else await tab.cdp.send("Page.reload", { ignoreCache: true });
                     },
                   );
-                  tab.hostedRunId = destination.runId ?? null;
+                  rememberHostedRun(tab, destination);
                 }
               },
             ),
@@ -4178,7 +4190,7 @@ const make = Effect.gen(function* () {
               await prepareBrowserCredential(tab, destination, signal);
               signal.throwIfAborted();
               await tab.page.goto(destination.url, VIEWER_NAVIGATION_OPTIONS);
-              tab.hostedRunId = destination.runId ?? null;
+              rememberHostedRun(tab, destination);
             },
             url,
           );
@@ -4205,7 +4217,7 @@ const make = Effect.gen(function* () {
                 navigate,
                 signal,
               );
-              tab.hostedRunId = destination.runId ?? null;
+              rememberHostedRun(tab, destination);
             });
           }
         });
@@ -4230,7 +4242,7 @@ const make = Effect.gen(function* () {
             },
             signal,
           );
-          tab.hostedRunId = destination.runId ?? null;
+          rememberHostedRun(tab, destination);
         });
         return;
       case "probe": {
@@ -4281,11 +4293,13 @@ const make = Effect.gen(function* () {
             : { url: assetUrl, restarted: false, runId: undefined };
         const shouldReload = () =>
           prepared.url !== currentUrl ||
-          (tab.hostedRunId === undefined || prepared.runId === undefined
+          (tab.hostedRunOrigin !== parsed.origin ||
+          tab.hostedRunId === undefined ||
+          prepared.runId === undefined
             ? prepared.restarted
             : prepared.runId !== tab.hostedRunId);
         if (!shouldReload()) {
-          tab.hostedRunId = prepared.runId ?? null;
+          rememberHostedRun(tab, prepared);
           return;
         }
         await tab.control.system(async () => {
@@ -4293,7 +4307,7 @@ const make = Effect.gen(function* () {
           tab.navigationFailed = false;
           if (prepared.url === currentUrl) await tab.page.reload(VIEWER_NAVIGATION_OPTIONS);
           else await tab.page.goto(prepared.url, VIEWER_NAVIGATION_OPTIONS);
-          tab.hostedRunId = prepared.runId ?? null;
+          rememberHostedRun(tab, prepared);
           await reportLoaded(tab, true);
         });
       },

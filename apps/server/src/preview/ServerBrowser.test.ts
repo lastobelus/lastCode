@@ -4970,6 +4970,148 @@ it.live.each([false, true])(
     ).pipe(Effect.provide(layer)),
 );
 
+it.live.each(["about:blank", "http://127.0.0.1:5175/original"])(
+  "a nonblocking navigation from %s records its run after the destination commits",
+  (original) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { browser, broker, tabId } = yield* ready;
+        hostingPreparation = () => Effect.succeed({ managed: true, runId: "first-run" });
+        const page = contexts[0]!.page;
+        if (original !== "about:blank")
+          yield* broker.invoke({ scope, tabId, operation: "navigate", input: { url: original } });
+        const commit = Promise.withResolvers<void>();
+        yield* Effect.addFinalizer(() => Effect.sync(() => commit.resolve()));
+        const goto = page.goto.getMockImplementation()!;
+        page.goto.mockImplementationOnce(async (url) => {
+          await commit.promise;
+          await goto(url);
+        });
+        const destination = "http://127.0.0.1:5173/delayed";
+        yield* broker.invoke({
+          scope,
+          tabId,
+          operation: "navigate",
+          input: { url: destination, readiness: "none" },
+        });
+        expect(page.url()).toBe(original);
+        commit.resolve();
+        yield* broker.invoke({ scope, tabId, operation: "evaluate", input: { expression: "1" } });
+        expect(page.url()).toBe(destination);
+        page.goto.mockClear();
+        hostingPreparation = () => Effect.succeed({ managed: true, runId: "recovered-run" });
+        yield* browser.attachViewer(viewerInput(tabId, false));
+        expect(page.goto).not.toHaveBeenCalled();
+        expect(page.reload).toHaveBeenCalledExactlyOnceWith(expect.anything());
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live("a redirect to another managed listener preserves its healthy page on return", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { browser, broker, tabId } = yield* ready;
+      const original = "http://127.0.0.1:5173/redirect";
+      const destination = "http://127.0.0.1:5174/form";
+      hostingPreparation = ({ url }) =>
+        Effect.succeed({
+          managed: true,
+          runId:
+            new URL(url).origin === new URL(original).origin ? "original-run" : "destination-run",
+        });
+      const page = contexts[0]!.page;
+      const goto = page.goto.getMockImplementation()!;
+      page.goto.mockImplementationOnce(async () => goto(destination));
+      yield* broker.invoke({ scope, tabId, operation: "navigate", input: { url: original } });
+      expect(page.url()).toBe(destination);
+      page.goto.mockClear();
+      yield* browser.attachViewer(viewerInput(tabId, false));
+      expect(page.goto).not.toHaveBeenCalled();
+      expect(page.reload).not.toHaveBeenCalled();
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("a same-listener path change retains the baseline for a run recovered elsewhere", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { browser, broker, tabId } = yield* ready;
+      hostingPreparation = () => Effect.succeed({ managed: true, runId: "original-run" });
+      yield* broker.invoke({
+        scope,
+        tabId,
+        operation: "navigate",
+        input: { url: "http://127.0.0.1:5173/original" },
+      });
+      const page = contexts[0]!.page;
+      const destination = "http://127.0.0.1:5173/form#edited";
+      yield* Effect.promise(() => page.goto(destination));
+      page.goto.mockClear();
+      hostingPreparation = () => Effect.succeed({ managed: true, runId: "recovered-run" });
+      yield* browser.attachViewer(viewerInput(tabId, false));
+      expect(page.goto).not.toHaveBeenCalled();
+      expect(page.reload).toHaveBeenCalledExactlyOnceWith(expect.anything());
+      expect(page.url()).toBe(destination);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live.each(["http://127.0.0.1:5174/form#details", "http://127.0.0.1:5173/other-app#details"])(
+  "a warm viewer preserves a healthy page after in-page navigation to %s",
+  (destination) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const browser = yield* ServerBrowser.ServerBrowser;
+        const broker = yield* Broker.PreviewAutomationBroker;
+        yield* Effect.yieldNow;
+        const original = "http://127.0.0.1:5173/retained";
+        let destinationRun = "destination-run";
+        hostingPreparation = ({ url }) =>
+          Effect.succeed({
+            managed: true,
+            runId:
+              new URL(url).origin === new URL(destination).origin ? destinationRun : "original-run",
+            bootstrapToken: "fixture-navigation-credential",
+          });
+        const opened = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { browserHost: "environment", url: original, open: false },
+        });
+        const tabId = PreviewTabId.make(opened.tabId!);
+        const page = contexts[0]!.page;
+        yield* Effect.promise(() => page.goto(destination));
+        page.goto.mockClear();
+        yield* Effect.scoped(browser.attachViewer(viewerInput(tabId, false)));
+        expect(page.goto).not.toHaveBeenCalled();
+        expect(page.reload).not.toHaveBeenCalled();
+
+        const fragmentDestination = destination.replace("#details", "#edited");
+        yield* Effect.promise(() => page.goto(fragmentDestination));
+        page.emit("framenavigated", page);
+        page.goto.mockClear();
+        yield* Effect.scoped(browser.attachViewer(viewerInput(tabId, false)));
+        expect(page.goto).not.toHaveBeenCalled();
+        expect(page.reload).not.toHaveBeenCalled();
+
+        destinationRun = "restarted-destination-run";
+        const restartedDestination = destination.replace("#details", "#latest");
+        yield* Effect.promise(() => page.goto(restartedDestination));
+        page.emit("framenavigated", page);
+        page.goto.mockClear();
+        yield* Effect.scoped(browser.attachViewer(viewerInput(tabId, false)));
+        expect(page.goto).not.toHaveBeenCalled();
+        expect(page.reload).toHaveBeenCalledExactlyOnceWith(expect.anything());
+        expect(page.url()).toBe(restartedDestination);
+        expect(contexts[0]!.request.post).toHaveBeenLastCalledWith(
+          `${new URL(destination).origin}/api/auth/browser-session`,
+          expect.objectContaining({ data: { credential: "fixture-navigation-credential" } }),
+        );
+        expect(contexts).toHaveLength(1);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
 it.live.each([
   { previousRunId: undefined, runId: undefined, restarted: false, reload: false },
   { previousRunId: undefined, runId: undefined, restarted: true, reload: true },
