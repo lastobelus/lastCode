@@ -2208,11 +2208,8 @@ const integrationFixture = Effect.fn("test.dependencySweep")(function* (
       yield* worker.drain;
     }).pipe(Effect.ensuring(Deferred.succeed(workerControl.releaseInitialInventory, undefined)));
     // Each sweep inventories dependency and build owners, then refreshes ownership for the audit.
-    assert.equal(reads, mode === "worker-ready-burst" ? 3 : 6);
-    assert.equal(
-      processReads,
-      mode === "worker-terminal-burst" ? 5 : mode === "worker-ready-burst" ? 3 : 4,
-    );
+    assert.equal(reads, mode === "worker-settings-burst" ? 6 : 3);
+    assert.equal(processReads, mode === "worker-settings-burst" ? 4 : 3);
     assert.equal(
       yield* f.fs.readFileString(f.path.join(f.input.worktreePath, "tmp/notes.md")),
       "private notes",
