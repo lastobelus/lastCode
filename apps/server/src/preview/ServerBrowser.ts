@@ -1085,7 +1085,11 @@ const make = Effect.gen(function* () {
       sessionHostedOrigins.get(tabKey(snapshot.threadId, snapshot.tabId)) ??
       adopted?.hostedOrigins ??
       nativePopup?.hostedOrigins ??
-      new Map<string, string>();
+      new Map(
+        await Effect.runPromise(
+          manager.getHostedOrigins({ threadId: snapshot.threadId, tabId: snapshot.tabId }),
+        ),
+      );
     const nativeRoot =
       snapshot.backingPage === "desktop-root"
         ? nativeRoots.get(tabKey(snapshot.threadId, snapshot.tabId))
@@ -2929,8 +2933,18 @@ const make = Effect.gen(function* () {
     timeoutMs = NAVIGATION_TIMEOUT_MS,
   ) => {
     signal?.throwIfAborted();
-    if (destination.managed)
+    if (destination.managed) {
+      await Effect.runPromise(
+        manager.rememberHostedOrigin({
+          threadId: tab.threadId,
+          tabId: tab.tabId,
+          browserUrl: destination.url,
+          localUrl: destination.localUrl,
+        }),
+        { signal },
+      );
       tab.hostedOrigins.set(new URL(destination.url).origin, new URL(destination.localUrl).origin);
+    }
     if (destination.bootstrapToken === undefined) return;
     await ServerBrowserPage.prepareBrowserCredential(
       tab.page,

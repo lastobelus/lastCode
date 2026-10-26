@@ -1687,7 +1687,9 @@ it.live.each([
           });
         const localUrl = "http://localhost:5173/qa/retained?mode=dark#anchor";
         const browserUrl = localUrl.replace("localhost", "environment.example.test");
+        nativeNavigationReported = { status: "Success", completed: Promise.withResolvers<void>() };
         yield* broker.invoke({ scope, tabId, operation: "navigate", input: { url: localUrl } });
+        yield* Effect.promise(() => nativeNavigationReported!.completed.promise);
         const previous = desktopConnections[0]!.context;
         const viewer = yield* browser.attachViewer(viewerInput(tabId, false));
         desktopPageSetup = async (context) => {
@@ -1731,9 +1733,10 @@ it.live.each([
         expect(prepared).toEqual([
           { threadId: testThread.threadId, url: localUrl, browserUrl },
           { threadId: testThread.threadId, url: localUrl, browserUrl },
+          { threadId: testThread.threadId, url: localUrl, browserUrl },
           { threadId: testThread.threadId, url: localUrl, browserUrl: resolvedUrl },
         ]);
-        expect(current.request.post).toHaveBeenCalledTimes(1);
+        expect(current.request.post).toHaveBeenCalledTimes(2);
         expect(current.request.post).toHaveBeenLastCalledWith(
           new URL("/api/auth/browser-session", resolvedUrl).href,
           expect.objectContaining({ data: { credential: "fixture-one-use-credential" } }),
@@ -5538,6 +5541,111 @@ it.live("browser shutdown preserves targets and restarting its host keeps pages 
       );
     }),
   ).pipe(Effect.provide(observedManager)),
+);
+
+it.live.each(["managed", "public", "unknown"] as const)(
+  "a fresh server returns to a remote HTTP native session using only retained verified ownership: %s",
+  (kind) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        profileCatalogue = {
+          desktopHostId: "fixture-desktop",
+          profiles: [{ id: "work", name: "Work", kind: "persistent" }],
+          defaultProfileId: "work",
+        };
+        desktopRendersNext = true;
+        const localUrl = "http://localhost:5173/retained?q=1#anchor";
+        const browserUrl = localUrl.replace("localhost", remoteUrlHostname);
+        const url =
+          kind === "managed"
+            ? localUrl
+            : kind === "public"
+              ? "http://public.example.test:5173/retained?q=1#anchor"
+              : browserUrl;
+        let cold = false;
+        let recoveries = 0;
+        const prepared: Array<{ threadId: string; url: string; browserUrl?: string }> = [];
+        hostingPreparation = (input) =>
+          Effect.sync(() => {
+            prepared.push(input);
+            // Production rejects remote HTTP before considering any owned listener.
+            if (input.threadId !== testThread.threadId || input.url !== localUrl)
+              return { managed: false };
+            if (cold) recoveries += 1;
+            return {
+              managed: true,
+              restarted: cold,
+              runId: cold ? "recovered-run" : "initial-run",
+              bootstrapToken: cold ? "fixture-fresh-credential" : "fixture-initial-credential",
+            };
+          });
+        const broker = yield* Broker.PreviewAutomationBroker;
+        const manager = yield* Manager.PreviewManager;
+        const opened = yield* Effect.scoped(
+          Effect.gen(function* () {
+            yield* ServerBrowser.ServerBrowser;
+            yield* Effect.yieldNow;
+            return yield* broker.invoke<PreviewAutomationStatus>({
+              scope,
+              operation: "open",
+              input: { url, open: false },
+            });
+          }).pipe(Effect.provide(ServerBrowser.layer)),
+        );
+        const savedUrl = kind === "managed" ? browserUrl : url;
+        expect(opened.url).toBe(savedUrl);
+        expect((yield* manager.list({})).sessions[0]?.navStatus).toMatchObject({ url: savedUrl });
+        const restarted = yield* Manager.make;
+        expect((yield* restarted.list({})).serverEpoch).not.toBe(
+          (yield* manager.list({})).serverEpoch,
+        );
+        prepared.length = 0;
+        cold = true;
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const browser = yield* ServerBrowser.ServerBrowser;
+            const broker = yield* Broker.PreviewAutomationBroker;
+            yield* Effect.yieldNow;
+            expect(rootCreations).toHaveLength(1);
+            const invoked = vi.spyOn(broker, "invoke");
+            yield* Effect.addFinalizer(() => Effect.sync(() => invoked.mockRestore()));
+            yield* browser.attachViewer(viewerInput(opened.tabId!, false));
+            expect(invoked).not.toHaveBeenCalled();
+            expect(prepared).toEqual([
+              {
+                threadId: testThread.threadId,
+                url: kind === "managed" ? localUrl : savedUrl,
+                ...(kind === "managed" ? { browserUrl } : {}),
+              },
+            ]);
+            const selected = desktopConnections.at(-1)!.context;
+            expect(selected.page.goto).toHaveBeenCalledExactlyOnceWith(savedUrl, expect.anything());
+            if (kind === "managed") {
+              expect(recoveries).toBe(1);
+              expect(selected.request.post).toHaveBeenCalledExactlyOnceWith(
+                "http://environment.example.test:5173/api/auth/browser-session",
+                expect.objectContaining({ data: { credential: "fixture-fresh-credential" } }),
+              );
+            } else {
+              expect(recoveries).toBe(0);
+              expect(selected.request.post).not.toHaveBeenCalled();
+            }
+            const fs = yield* FileSystem.FileSystem;
+            const path = yield* Path.Path;
+            const config = yield* ServerConfig.ServerConfig;
+            const stored = yield* fs.readFileString(
+              path.join(config.stateDir, "preview-sessions.json"),
+            );
+            expect(stored).not.toContain("fixture-initial-credential");
+            expect(stored).not.toContain("fixture-fresh-credential");
+            expect((yield* restarted.list({})).sessions[0]).not.toHaveProperty("hostedOrigins");
+          }).pipe(
+            Effect.provide(ServerBrowser.layer.pipe(Layer.provideMerge(Broker.layer))),
+            Effect.provideService(Manager.PreviewManager, restarted),
+          ),
+        );
+      }),
+    ).pipe(Effect.provide(observedManager)),
 );
 
 it.live(

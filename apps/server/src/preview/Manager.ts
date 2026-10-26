@@ -83,6 +83,17 @@ export class PreviewManager extends Context.Service<
     readonly reportStatus: (
       input: PreviewReportStatusInput & { readonly serverControlled?: boolean },
     ) => Effect.Effect<void, PreviewError>;
+    readonly getHostedOrigins: (input: {
+      readonly threadId: string;
+      readonly tabId: string;
+    }) => Effect.Effect<ReadonlyMap<string, string>>;
+    /** Records only origins verified by a successful managed navigation preparation. */
+    readonly rememberHostedOrigin: (input: {
+      readonly threadId: string;
+      readonly tabId: string;
+      readonly browserUrl: string;
+      readonly localUrl: string;
+    }) => Effect.Effect<void, PreviewSessionLookupError | PreviewSessionStorageError>;
     readonly requestReveal: (
       input: PreviewCloseInput & { readonly tabId: string; readonly force: boolean },
     ) => Effect.Effect<void, PreviewError>;
@@ -120,6 +131,7 @@ interface PreviewSessionState {
   readonly threadId: string;
   readonly tabId: string;
   readonly snapshot: PreviewSessionSnapshot;
+  readonly hostedOrigins?: ReadonlyArray<readonly [string, string]>;
 }
 
 interface ManagerState {
@@ -129,7 +141,15 @@ interface ManagerState {
 
 const MAX_SESSION_FILE_BYTES = 4 * 1024 * 1024;
 const PreviewSessionFileJson = Schema.fromJsonString(
-  Schema.Struct({ version: Schema.Literal(1), sessions: Schema.Array(PreviewSessionSnapshot) }),
+  Schema.Struct({
+    version: Schema.Literal(1),
+    sessions: Schema.Array(
+      Schema.Struct({
+        ...PreviewSessionSnapshot.fields,
+        hostedOrigins: Schema.optional(Schema.Array(Schema.Tuple([Schema.String, Schema.String]))),
+      }),
+    ),
+  }),
 );
 const decodePreviewSessionFile = Schema.decodeUnknownEffect(PreviewSessionFileJson);
 const encodePreviewSessionFile = Schema.encodeEffect(PreviewSessionFileJson);
@@ -237,11 +257,16 @@ export const make = Effect.gen(function* PreviewManagerMake() {
     const decoded = yield* decodePreviewSessionFile(contents);
     return yield* Effect.try(() => {
       const sessions = new Map<string, PreviewSessionState>();
-      for (const saved of decoded.sessions) {
+      for (const { hostedOrigins, ...saved } of decoded.sessions) {
         const snapshot = dormantSnapshot(saved);
         const key = compositeKey(snapshot.threadId, snapshot.tabId);
         if (sessions.has(key)) throw new Error("Duplicate retained preview tab identity.");
-        sessions.set(key, { threadId: snapshot.threadId, tabId: snapshot.tabId, snapshot });
+        sessions.set(key, {
+          threadId: snapshot.threadId,
+          tabId: snapshot.tabId,
+          snapshot,
+          ...(hostedOrigins === undefined ? {} : { hostedOrigins }),
+        });
       }
       return sessions;
     });
@@ -281,7 +306,10 @@ export const make = Effect.gen(function* PreviewManagerMake() {
       // Preserve unreadable state for repair rather than replacing it with a new history.
       if (sessionsLoadError !== null) return yield* sessionsLoadError;
       const retained = yield* Effect.try(() =>
-        [...sessions.values()].map((session) => dormantSnapshot(session.snapshot)),
+        [...sessions.values()].map((session) => ({
+          ...dormantSnapshot(session.snapshot),
+          ...(session.hostedOrigins === undefined ? {} : { hostedOrigins: session.hostedOrigins }),
+        })),
       );
       const contents = yield* encodePreviewSessionFile({ version: 1, sessions: retained });
       if (new TextEncoder().encode(contents).byteLength > MAX_SESSION_FILE_BYTES) {
@@ -375,6 +403,33 @@ export const make = Effect.gen(function* PreviewManagerMake() {
       ),
     );
   };
+
+  const getHostedOrigins: PreviewManager["Service"]["getHostedOrigins"] = Effect.fn(
+    "PreviewManager.getHostedOrigins",
+  )(function* (input) {
+    const state = yield* SynchronizedRef.get(stateRef);
+    return new Map(state.sessions.get(compositeKey(input.threadId, input.tabId))?.hostedOrigins);
+  });
+
+  const rememberHostedOrigin: PreviewManager["Service"]["rememberHostedOrigin"] = Effect.fn(
+    "PreviewManager.rememberHostedOrigin",
+  )(function* (input) {
+    const [browserOrigin, localOrigin] = yield* Effect.try({
+      try: () => [new URL(input.browserUrl).origin, new URL(input.localUrl).origin] as const,
+      catch: (cause) => new PreviewSessionStorageError({ cause }),
+    });
+    yield* mutateExistingSession(input.threadId, input.tabId, (session) => {
+      const origins = new Map(session.hostedOrigins);
+      if (origins.get(browserOrigin) === localOrigin)
+        return Effect.succeed({ next: session, emit: null, result: undefined });
+      origins.set(browserOrigin, localOrigin);
+      return Effect.succeed({
+        next: { ...session, hostedOrigins: [...origins] },
+        emit: null,
+        result: undefined,
+      });
+    });
+  });
 
   const open: PreviewManager["Service"]["open"] = Effect.fn("PreviewManager.open")(
     function* (input) {
@@ -946,6 +1001,8 @@ export const make = Effect.gen(function* PreviewManagerMake() {
     requestReveal,
     navigate,
     reportStatus,
+    getHostedOrigins,
+    rememberHostedOrigin,
     claimRecovery,
     resize,
     adjust,

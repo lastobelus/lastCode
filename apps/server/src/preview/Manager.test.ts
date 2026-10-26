@@ -230,6 +230,105 @@ it.layer(PreviewManagerTestLayer)("PreviewManager", (it) => {
       }),
   );
 
+  it.effect(
+    "retains credential-free hosted origins only for their session until actual close",
+    () =>
+      Effect.gen(function* () {
+        const config = yield* isolatedPersistenceConfig();
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const create = PreviewManager.make.pipe(
+          Effect.provideService(ServerConfig.ServerConfig, config),
+        );
+        const first = yield* Effect.scoped(create);
+        const threadId = freshThreadId();
+        const opened = yield* first.open({
+          threadId,
+          runtime: "server",
+          desktopHostId: "fixture-desktop",
+          automationOwner: "agent-owner",
+          createDesktopRoot: () =>
+            Effect.succeed({
+              rootId: "fixture-root",
+              publish: () => Effect.void,
+              close: () =>
+                Effect.fail(
+                  new PreviewNativeCloseError({ tabId: "fixture-tab", reason: "canceled" }),
+                ),
+            }),
+        });
+        const events = yield* first.subscribeEvents;
+        const origins = new Map([
+          ["http://environment.example.test:5173", "http://localhost:5173"],
+        ]);
+        yield* first.rememberHostedOrigin({
+          threadId,
+          tabId: opened.tabId,
+          browserUrl:
+            "http://browser-user:browser-password@environment.example.test:5173/private-path?credential=browser-token#browser-fragment",
+          localUrl:
+            "http://local-user:local-password@localhost:5173/private-path?credential=local-token#local-fragment",
+        });
+        expect(yield* first.getHostedOrigins({ threadId, tabId: opened.tabId })).toEqual(origins);
+        expect(
+          yield* first.getHostedOrigins({ threadId: freshThreadId(), tabId: opened.tabId }),
+        ).toEqual(new Map());
+        const sibling = yield* first.open({ threadId });
+        expect(yield* first.getHostedOrigins({ threadId, tabId: sibling.tabId })).toEqual(
+          new Map(),
+        );
+        const rejected = yield* first
+          .rememberHostedOrigin({
+            threadId: freshThreadId(),
+            tabId: opened.tabId,
+            browserUrl: "http://unknown.example.test:5173",
+            localUrl: "http://localhost:5173",
+          })
+          .pipe(Effect.flip);
+        expect(rejected._tag).toBe("PreviewSessionLookupError");
+        expect((yield* first.list({ threadId })).sessions[0]).not.toHaveProperty("hostedOrigins");
+        expect((yield* PubSub.takeUpTo(events, DRAIN_LIMIT)).map((event) => event.type)).toEqual([
+          "opened",
+        ]);
+        const canceled = yield* first.close({ threadId, tabId: opened.tabId }).pipe(Effect.flip);
+        expect(canceled._tag).toBe("PreviewNativeCloseError");
+        expect(yield* first.getHostedOrigins({ threadId, tabId: opened.tabId })).toEqual(origins);
+        yield* first.nativeDormantConfirmed({ threadId, tabId: opened.tabId });
+        const sessionsPath = path.join(config.stateDir, "preview-sessions.json");
+        const stored = yield* fs.readFileString(sessionsPath);
+        expect(
+          JSON.parse(stored).sessions.find(
+            (session: { tabId: string }) => session.tabId === opened.tabId,
+          ).hostedOrigins,
+        ).toEqual([...origins]);
+        for (const secret of [
+          "browser-user",
+          "browser-password",
+          "local-user",
+          "local-password",
+          "private-path",
+          "browser-token",
+          "local-token",
+          "browser-fragment",
+          "local-fragment",
+        ])
+          expect(stored).not.toContain(secret);
+        const restarted = yield* Effect.scoped(create);
+        expect(yield* restarted.getHostedOrigins({ threadId, tabId: opened.tabId })).toEqual(
+          origins,
+        );
+        yield* restarted.close({ threadId, tabId: opened.tabId });
+        expect(yield* restarted.getHostedOrigins({ threadId, tabId: opened.tabId })).toEqual(
+          new Map(),
+        );
+        expect(yield* fs.readFileString(sessionsPath)).not.toContain("hostedOrigins");
+        const reopened = yield* Effect.scoped(create);
+        expect(yield* reopened.getHostedOrigins({ threadId, tabId: opened.tabId })).toEqual(
+          new Map(),
+        );
+      }),
+  );
+
   it.effect("restores canonical tab identities and settings without replaying opened events", () =>
     Effect.gen(function* () {
       const config = yield* isolatedPersistenceConfig();
