@@ -58,11 +58,15 @@ import type { McpInvocationScope } from "./McpInvocationContext.ts";
 import { idleThreadProjection, liveThreadShell } from "./McpToolAccess.testkit.ts";
 import * as ThreadReadBroker from "./ThreadReadBroker.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
+import * as ActionResume from "../actionResume/ActionResume.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
 const decodeTarget = Schema.decodeUnknownEffect(OrchestratorMcpTarget);
 
 const layerOrchestratorService = OrchestratorMcpService.layer.pipe(
+  Layer.provide(
+    Layer.mock(ActionResume.ActionResume)({ readLatestSummary: () => Effect.succeed(null) }),
+  ),
   Layer.provide(ThreadReadBroker.layer),
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),

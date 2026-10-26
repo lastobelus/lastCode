@@ -20,7 +20,9 @@ stopping point; this does not authorize creating or merging a PR.
 Read the repository `AGENTS.md`, `.agents/skills/lastcode-pr/SKILL.md`, and
 `.agents/skills/_references/external-review-mechanics.md` before acting. Those
 documents are authoritative for focused validation, review mechanics, Project
-Actions, and guarded merge requirements.
+Actions, and guarded merge requirements. In a delegated child task, the parent
+launches every Action and owns every PR watch in this skill; see
+[Parent-mediated Actions](../../../docs/internals/resumable-project-actions-setup.md#parent-mediated-actions-for-delegated-children).
 
 Resolve the requested PRs and stopping point. A LastCode PR must target
 `lastcode/main` or have a same-repository parent chain leading there. Do not use

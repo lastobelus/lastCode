@@ -3,6 +3,7 @@ import {
   ActionResumeState,
   ActionResumeError,
   ActionRunInspection,
+  type ActionRunSummary,
   CommandId,
   MessageId,
   type OrchestrationProjectShell,
@@ -13,7 +14,11 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import { projectScriptRuntimeEnv, resolveProjectScripts } from "@t3tools/shared/projectScripts";
-import { formatActionResumeFollowUp } from "@t3tools/shared/actionResume";
+import {
+  actionResumeStatus,
+  actionResumeSummary,
+  formatActionResumeFollowUp,
+} from "@t3tools/shared/actionResume";
 import {
   ACTION_EVENT_TOKEN_ENV,
   ACTION_RUN_ID_ENV,
@@ -106,6 +111,9 @@ export class ActionResume extends Context.Service<
       invocation: ActionResumeInvocation,
       runId: string,
     ) => Effect.Effect<ActionRunInspection, ActionResumeError>;
+    readonly readLatestSummary: (
+      threadId: ThreadId,
+    ) => Effect.Effect<ActionRunSummary | null, ActionResumeError>;
     readonly cancelByUser: (threadId: ThreadId) => Effect.Effect<void>;
     readonly cancelByArchive: (threadId: ThreadId) => Effect.Effect<void>;
     readonly resumeInterrupted: (threadId: ThreadId) => Effect.Effect<void, ActionResumeError>;
@@ -898,6 +906,32 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const readStatus = Effect.fn("ActionResume.readStatus")(function* (state: ActionResumeState) {
+    const messageId = MessageId.make(`action-resume:${state.runId}:follow-up`);
+    const { messages } = yield* threads.getThreadRecords(state.threadId, ["messages"], {
+      messageIds: [messageId],
+    });
+    const followUpRunId = messages.find((message) => message.id === messageId)?.runId;
+    const { runs: followUpRuns, runtimeRequests } = yield* threads.getThreadRecords(
+      state.threadId,
+      ["runs", "runtimeRequests"],
+      { runIds: followUpRunId == null ? [] : [followUpRunId] },
+    );
+    return actionResumeStatus({
+      action: state,
+      environmentPaused: yield* automationPaused,
+      followUp: followUpRuns.find((run) => run.id === followUpRunId),
+      hasPendingRequest: runtimeRequests.some((request) => request.status === "pending"),
+    });
+  });
+
+  const readLatestSummaryImpl = Effect.fn("ActionResume.readLatestSummary")(function* (
+    threadId: ThreadId,
+  ) {
+    const state = registry.getLatest(threadId);
+    return state === null ? null : actionResumeSummary(state, yield* readStatus(state));
+  });
+
   const inspectActionRunImpl = Effect.fn("ActionResume.inspectActionRun")(function* (
     invocation: ActionResumeInvocation,
     runId: string,
@@ -925,6 +959,11 @@ const make = Effect.gen(function* () {
       runId: state.runId,
       actionName: state.actionName,
       lifecycleOutcome: state.outcome,
+      delivery: state.delivery,
+      ...(state.heldByEnvironmentPause === undefined
+        ? {}
+        : { heldByEnvironmentPause: state.heldByEnvironmentPause }),
+      status: yield* readStatus(state),
       exitCode: state.exitCode,
       exitSignal: state.exitSignal,
       outputTail,
@@ -1248,6 +1287,8 @@ const make = Effect.gen(function* () {
       ),
     inspectActionRun: (invocation, runId) =>
       inspectActionRunImpl(invocation, runId).pipe(mapActionResumeError("inspect the Action run")),
+    readLatestSummary: (threadId) =>
+      readLatestSummaryImpl(threadId).pipe(mapActionResumeError("read the latest Action summary")),
     cancelByUser: (threadId) => cancel(threadId, "cancelled_by_user"),
     cancelByArchive: (threadId) => cancel(threadId, "cancelled_by_archive"),
     resumeInterrupted: (threadId) =>

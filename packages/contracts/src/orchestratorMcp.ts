@@ -1,6 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
+import { ActionRunSummary } from "./actionResume.ts";
 
 import {
   ContextTransferId,
@@ -422,6 +423,8 @@ export const OrchestratorMcpThreadDetail = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   linkedPullRequest: Schema.NullOr(ThreadLinkedPullRequest),
   pullRequests: Schema.optional(Schema.Array(OrchestratorMcpThreadPullRequest)),
+  actionResume: Schema.optional(Schema.NullOr(ActionRunSummary)),
+  autoSettleDisabledAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   recovery: Schema.optional(
     Schema.Struct({ ...OrchestrationV2ThreadRecovery.fields, updatedAt: IsoDateTime }),
   ),

@@ -212,6 +212,8 @@ const makeHarness = Effect.gen(function* () {
     failDelivery: false,
     missingHistory: false,
     alreadyDelivered: false,
+    followUpRun: null as OrchestrationV2ThreadProjection["runs"][number] | null,
+    unrelatedRun: null as OrchestrationV2ThreadProjection["runs"][number] | null,
     latest: null as ActionResumeState | null,
   };
   const appThread = () => ({
@@ -223,7 +225,7 @@ const makeHarness = Effect.gen(function* () {
   });
   const projection = (): OrchestrationV2ThreadProjection => ({
     thread: appThread(),
-    runs: [],
+    runs: [state.unrelatedRun, state.followUpRun].filter((run) => run !== null),
     runtimeRequests:
       state.request === null
         ? []
@@ -244,6 +246,7 @@ const makeHarness = Effect.gen(function* () {
       ? [
           {
             id: MessageId.make(`action-resume:${state.latest?.runId}:follow-up`),
+            runId: state.followUpRun?.id ?? null,
           } as OrchestrationV2ConversationMessage,
         ]
       : [],
@@ -576,7 +579,16 @@ it.effect("runs an opted-in process, retains progress/output, and dispatches one
           actionProtocolFrame({
             runId: run.runId,
             token: token!,
-            event: { kind: "result", report: { version: 1, outcome: "success", summary: "Ready" } },
+            event: {
+              kind: "result",
+              report: {
+                version: 1,
+                outcome: "success",
+                summary: "Ready",
+                facts: { diagnostic: "command-owned detail" },
+                artifacts: [{ label: "Log", url: "https://build-host.example/log" }],
+              },
+            },
           }) +
           ActionResume.actionOutputMarker(run.runId, "end"),
       });
@@ -604,6 +616,51 @@ it.effect("runs an opted-in process, retains progress/output, and dispatches one
       h.state.missingHistory = true;
       const inspected = yield* actions.inspectActionRun(invocation, run.runId);
       assert.equal(inspected.outputTail, "useful result\n");
+      const summary = yield* actions.readLatestSummary(threadId);
+      assert.isNotNull(summary);
+      assert.deepEqual(Object.keys(summary!).sort(), [
+        "actionId",
+        "actionName",
+        "delivery",
+        "exitCode",
+        "exitSignal",
+        "finishedAt",
+        "outcome",
+        "report",
+        "runId",
+        "startedAt",
+        "status",
+      ]);
+      assert.deepEqual(summary!.report, {
+        outcome: "success",
+        summary: "Ready",
+        untrusted: true,
+      });
+      h.state.unrelatedRun = {
+        id: RunId.make("unrelated-newer-run"),
+        status: "running",
+      } as OrchestrationV2ThreadProjection["runs"][number];
+      assert.equal(
+        (yield* actions.readLatestSummary(threadId))?.status.state,
+        "follow_up_dispatched",
+      );
+      h.state.alreadyDelivered = true;
+      h.state.followUpRun = {
+        id: RunId.make("matching-action-follow-up"),
+        status: "queued",
+      } as OrchestrationV2ThreadProjection["runs"][number];
+      assert.equal((yield* actions.readLatestSummary(threadId))?.status.state, "follow_up_queued");
+      h.state.followUpRun = { ...h.state.followUpRun, queueHeld: true };
+      assert.equal(
+        (yield* actions.readLatestSummary(threadId))?.status.state,
+        "attention_required",
+      );
+      h.state.followUpRun = { ...h.state.followUpRun, queueHeld: false, status: "running" };
+      assert.equal((yield* actions.readLatestSummary(threadId))?.status.state, "follow_up_active");
+      h.state.followUpRun = { ...h.state.followUpRun, status: "completed" };
+      h.state.request = "command";
+      assert.equal((yield* actions.readLatestSummary(threadId))?.status.state, "follow_up_ended");
+      h.state.request = null;
       assert.equal(h.state.latest?.delivery, "delivered");
       assert.equal(
         (yield* Effect.result(
@@ -1583,11 +1640,29 @@ it.effect("delivers a pause-held result once after Resume clears and the service
       assert.equal(held.state.delivery, "pending");
       assert.isTrue(held.state.heldByEnvironmentPause);
       assert.equal(held.outputTail, "saved while paused");
+      assert.deepInclude(yield* actions.inspectActionRun(invocation, run.runId), {
+        delivery: "pending",
+        heldByEnvironmentPause: true,
+      });
+      assert.deepEqual((yield* actions.inspectActionRun(invocation, run.runId)).status, {
+        state: "environment_paused",
+        environmentPaused: true,
+        automaticResumeArmed: false,
+        attentionRequired: true,
+      });
       yield* actions.retryPendingFollowUps;
       yield* actions.retryPendingFollowUps;
       assert.equal(h.state.latest?.revision, held.state.revision);
       assert.equal(h.followUps().length, 0);
       yield* pause.resume;
+      h.state.request = "command";
+      assert.deepEqual((yield* actions.inspectActionRun(invocation, run.runId)).status, {
+        state: "waiting_for_input",
+        environmentPaused: false,
+        automaticResumeArmed: false,
+        attentionRequired: true,
+      });
+      h.state.request = null;
       // The session can clear before the next open-state scheduler scan.
       yield* Ref.set(pause.state, null);
     }).pipe(Effect.provide(h.layer.pipe(Layer.provide(pause.layer))));
@@ -1601,6 +1676,14 @@ it.effect("delivers a pause-held result once after Resume clears and the service
       assert.equal(h.followUps().length, 1);
       assert.equal(h.followUps()[0]?.messageId, `action-resume:${runId}:follow-up`);
       assert.include(h.followUps()[0]!.text, "saved while paused");
+      const inspected = yield* actions.inspectActionRun(invocation, runId!);
+      assert.isTrue(inspected.heldByEnvironmentPause);
+      assert.deepEqual(inspected.status, {
+        state: "follow_up_dispatched",
+        environmentPaused: false,
+        automaticResumeArmed: false,
+        attentionRequired: false,
+      });
     }).pipe(Effect.provide(Layer.fresh(h.layer.pipe(Layer.provide(pause.layer)))));
   }).pipe(Effect.provide(StoreTestLayer)),
 );

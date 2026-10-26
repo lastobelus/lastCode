@@ -57,11 +57,15 @@ import * as ThreadRecoveryRepair from "../orchestration-v2/ThreadRecoveryRepairS
 import * as ThreadReadBroker from "./ThreadReadBroker.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
+import * as ActionResume from "../actionResume/ActionResume.ts";
 
 const layerOrchestratorToolkit = Layer.mergeAll(
   McpHttpServer.layerOrchestratorToolkit,
   McpHttpServer.layerThreadToolkit,
 ).pipe(
+  Layer.provide(
+    Layer.mock(ActionResume.ActionResume)({ readLatestSummary: () => Effect.succeed(null) }),
+  ),
   Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
