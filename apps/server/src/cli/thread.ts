@@ -1,239 +1,1195 @@
 import {
-  OrchestratorMcpFailure,
-  OrchestratorMcpThreadListResult,
-  OrchestratorMcpThreadReadResult,
-  OrchestratorMcpThreadSendResult,
-  OrchestratorMcpThreadWaitResult,
-  ProjectId,
-  RunId,
-  ThreadId,
+  AuthOrchestrationOperateScope,
+  AuthOrchestrationReadScope,
+  CommandId,
+  EnvironmentHttpApi,
+  EnvironmentId,
+  MessageId,
+  PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   TrimmedNonEmptyString,
-  type OrchestratorMcpThreadListItem,
-  type OrchestratorMcpThreadStatus,
-  type OrchestratorMcpThreadTimelineItem,
+  type OrchestrationV2Command,
+  ORCHESTRATION_PROTOCOL_HEADER,
+  ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+  type ExecutionEnvironmentDescriptor,
+  type OrchestrationProjectShell,
+  type OrchestrationV2ShellSnapshot,
+  type OrchestrationV2ThreadProjection,
+  type OrchestrationV2ThreadShell,
+  ThreadId,
+  ThreadWaitHandle,
+  type ThreadWaitResult,
 } from "@t3tools/contracts";
-import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Console from "effect/Console";
+import * as Crypto from "effect/Crypto";
+import * as Duration from "effect/Duration";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
-import * as Path from "effect/Path";
 import * as References from "effect/References";
-import * as Runtime from "effect/Runtime";
 import * as Schema from "effect/Schema";
-import * as Stdio from "effect/Stdio";
-import * as Stream from "effect/Stream";
 import { Argument, Command, Flag, GlobalFlag } from "effect/cli";
+import { FetchHttpClient } from "effect/http";
+import * as HttpApiClient from "effect/http-api/HttpApiClient";
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ServerConfig from "../config.ts";
-import { mcpToolSession, type McpToolSession } from "../mcp/AcpMcpStdioBridge.ts";
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
-import { projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
-
-/**
- * Short enough that a run which stops to ask the user something is noticed
- * soon, since `t3_thread_wait` only returns on a terminal run.
- */
-const WAIT_SLICE_MS = 15_000;
-const READ_PAGE_LIMIT = 100;
-const TITLE_MAX_CHARS = 80;
-
-export class ThreadServerNotRunningError extends Schema.TaggedError<ThreadServerNotRunningError>()(
-  "ThreadServerNotRunningError",
-  { baseDir: Schema.String },
-) {
-  override readonly [Runtime.errorReported] = false;
-  override get message(): string {
-    return `No running T3 Code server uses ${this.baseDir}. Start T3 Code, then retry.`;
-  }
-}
-
-export class ThreadServerUnreachableError extends Schema.TaggedError<ThreadServerUnreachableError>()(
-  "ThreadServerUnreachableError",
-  { origin: Schema.String, cause: Schema.Defect() },
-) {
-  override readonly [Runtime.errorReported] = false;
-  override get message(): string {
-    const reason = this.cause instanceof Error ? ` ${this.cause.message}` : "";
-    return `Could not reach the T3 Code server at ${this.origin}.${reason}`;
-  }
-}
-
-export class ThreadToolFailedError extends Schema.TaggedError<ThreadToolFailedError>()(
-  "ThreadToolFailedError",
-  { tool: Schema.String, detail: Schema.String },
-) {
-  override readonly [Runtime.errorReported] = false;
-  override get message(): string {
-    return this.detail;
-  }
-}
-
-export class ThreadUsageError extends Schema.TaggedError<ThreadUsageError>()("ThreadUsageError", {
-  detail: Schema.String,
-}) {
-  override readonly [Runtime.errorReported] = false;
-  override get message(): string {
-    return this.detail;
-  }
-}
-
-export class ThreadProjectNotFoundError extends Schema.TaggedError<ThreadProjectNotFoundError>()(
-  "ThreadProjectNotFoundError",
-  { identifier: Schema.String },
-) {
-  override readonly [Runtime.errorReported] = false;
-  override get message(): string {
-    return `No T3 Code project matches '${this.identifier}'. Pass a project id or a path inside a project.`;
-  }
-}
-
-/** Exit code 2 lets a script tell "needs a human" apart from a failed run. */
-export class ThreadNeedsInputError extends Schema.TaggedError<ThreadNeedsInputError>()(
-  "ThreadNeedsInputError",
-  { threadId: ThreadId },
-) {
-  override readonly [Runtime.errorReported] = false;
-  override readonly [Runtime.errorExitCode] = 2;
-
-  override get message(): string {
-    return `Thread ${this.threadId} is waiting for an answer. Open it in T3 Code to respond.`;
-  }
-}
-
-export class ThreadRunEndedError extends Schema.TaggedError<ThreadRunEndedError>()(
-  "ThreadRunEndedError",
-  { threadId: ThreadId, status: Schema.String, error: Schema.optional(Schema.String) },
-) {
-  override readonly [Runtime.errorReported] = false;
-  override get message(): string {
-    const reason = this.error === undefined ? "." : `: ${this.error}`;
-    return `Thread ${this.threadId} stopped with status ${this.status}${reason}`;
-  }
-}
-
-const ThreadCliError = Schema.Union([
-  ThreadServerNotRunningError,
-  ThreadServerUnreachableError,
-  ThreadToolFailedError,
+import {
+  DurationFromString,
+  type CliAuthLocationFlags,
+  resolveThreadInspectionConfig,
+} from "./config.ts";
+import {
+  listProjectThreads,
+  sendMcpThreadMessage,
+  threadStartCommand,
+  threadShowCommand,
   ThreadUsageError,
-  ThreadProjectNotFoundError,
-  ThreadNeedsInputError,
-  ThreadRunEndedError,
-]);
+  reportThreadErrors,
+} from "./threadMcp.ts";
+
+export interface ThreadCliMessage {
+  readonly id: string;
+  readonly role: string;
+  readonly text: string;
+  readonly runId: string | null;
+  readonly streaming: boolean;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface ThreadCliActivity {
+  readonly id: string;
+  readonly kind: string;
+  readonly tone: string;
+  readonly summary: string;
+  readonly runId: string | null;
+  readonly createdAt: string;
+  readonly payload?: unknown;
+}
+
+type ThreadCliProjection = Pick<
+  OrchestrationV2ThreadProjection,
+  "thread" | "runs" | "messages" | "turnItems" | "providerThreads" | "providerSessions"
+>;
+
+const THREAD_READ_DEFAULT_TURN_LIMIT = 5;
+const THREAD_READ_MAX_TURN_LIMIT = 20;
+export const THREAD_LIST_MAX_RESULTS = 50;
+export const THREAD_AMBIGUOUS_CANDIDATE_MAX_RESULTS = 20;
+export const THREAD_TRANSCRIPT_MAX_CHARS = 64_000;
+export const THREAD_ACTIVITY_MAX_RESULTS = 200;
+const THREAD_WAIT_MAX_TIMEOUT_MS = 600_000;
+
+export class ThreadCliError extends Schema.TaggedError<ThreadCliError>()("ThreadCliError", {
+  operation: Schema.String,
+  cause: Schema.Defect(),
+}) {
+  override get message(): string {
+    return `LastCode thread ${this.operation} failed.`;
+  }
+}
+
+const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 const isThreadCliError = Schema.is(ThreadCliError);
 
-/**
- * These errors are expected outcomes for a script, so they print as one line
- * on stderr instead of the runtime's logged stack trace.
- */
-const reportThreadErrors = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-  effect.pipe(
-    Effect.tapError((error) =>
-      isThreadCliError(error) ? Console.error(error.message) : Effect.void,
+const currentThreadIdForHome = (home: string): string | undefined =>
+  process.env.T3CODE_HOME?.trim() === home ? process.env.T3CODE_THREAD_ID?.trim() : undefined;
+
+const ThreadIdentity = Schema.Struct({
+  environmentId: Schema.String,
+  threadId: Schema.String,
+});
+const ThreadProject = Schema.Struct({
+  id: Schema.String,
+  title: Schema.String,
+  workspaceRoot: Schema.String,
+});
+const ThreadWorkspace = Schema.Struct({
+  root: Schema.String,
+  branch: Schema.NullOr(Schema.String),
+});
+const ThreadProvider = Schema.Struct({
+  name: Schema.NullOr(Schema.String),
+  instanceId: Schema.optional(Schema.String),
+  status: Schema.NullOr(Schema.String),
+  codexThreadId: Schema.optional(Schema.String),
+});
+
+export const ThreadCurrentResult = Schema.Struct({
+  kind: Schema.Literal("current"),
+  ...ThreadIdentity.fields,
+  home: Schema.String,
+  project: ThreadProject,
+  workspace: ThreadWorkspace,
+  provider: ThreadProvider,
+});
+
+export const ThreadListResult = Schema.Struct({
+  kind: Schema.Literal("list"),
+  environmentId: Schema.String,
+  threadsTruncated: Schema.optional(Schema.Boolean),
+  originalThreadCount: Schema.optional(Schema.Number),
+  threads: Schema.Array(
+    Schema.Struct({
+      ...ThreadIdentity.fields,
+      title: Schema.String,
+      persistent: Schema.Boolean,
+      lifecycle: Schema.String,
+      project: ThreadProject,
+      workspace: ThreadWorkspace,
+      provider: ThreadProvider,
+      updatedAt: Schema.String,
+    }),
+  ),
+});
+
+export const ThreadReadResult = Schema.Struct({
+  kind: Schema.Literal("read"),
+  ...ThreadIdentity.fields,
+  title: Schema.String,
+  persistent: Schema.Boolean,
+  lifecycle: Schema.String,
+  project: ThreadProject,
+  workspace: ThreadWorkspace,
+  provider: ThreadProvider,
+  latestRun: Schema.Unknown,
+  messages: Schema.Array(
+    Schema.Struct({
+      id: Schema.String,
+      role: Schema.String,
+      text: Schema.String,
+      runId: Schema.NullOr(Schema.String),
+      streaming: Schema.Boolean,
+      createdAt: Schema.String,
+      updatedAt: Schema.String,
+    }),
+  ),
+  activities: Schema.Array(
+    Schema.Struct({
+      id: Schema.String,
+      kind: Schema.String,
+      tone: Schema.String,
+      summary: Schema.String,
+      runId: Schema.NullOr(Schema.String),
+      createdAt: Schema.String,
+    }),
+  ),
+  textTruncated: Schema.Boolean,
+  originalTextChars: Schema.optional(Schema.Number),
+  activitiesTruncated: Schema.Boolean,
+  originalActivityCount: Schema.optional(Schema.Number),
+});
+export const ThreadSendAcceptedResult = Schema.Struct({
+  kind: Schema.Literal("accepted"),
+  ...ThreadIdentity.fields,
+  messageId: Schema.String,
+});
+const decodeThreadCurrentResult = Schema.decodeUnknownEffect(ThreadCurrentResult);
+const decodeThreadListResult = Schema.decodeUnknownEffect(ThreadListResult);
+const decodeThreadReadResult = Schema.decodeUnknownEffect(ThreadReadResult);
+const decodeThreadSendAcceptedResult = Schema.decodeUnknownEffect(ThreadSendAcceptedResult);
+const decodeThreadSendMessage = Schema.decodeUnknownEffect(
+  TrimmedNonEmptyString.check(Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_INPUT_CHARS)),
+);
+const decodeThreadWaitTimeoutMs = Schema.decodeUnknownEffect(
+  Schema.Number.check(
+    Schema.isInt(),
+    Schema.isBetween({ minimum: 1, maximum: THREAD_WAIT_MAX_TIMEOUT_MS }),
+  ),
+);
+const decodeThreadWaitDuration = Schema.decodeUnknownEffect(DurationFromString);
+const decodeThreadWaitHandleString = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(ThreadWaitHandle),
+  { onExcessProperty: "error" },
+);
+
+const isAuthoritativeWaitFailure = (cause: unknown) => {
+  if (typeof cause !== "object" || cause === null || !("_tag" in cause)) return false;
+  return [
+    "EnvironmentRequestInvalidError",
+    "EnvironmentScopeRequiredError",
+    "EnvironmentResourceNotFoundError",
+    "EnvironmentInternalError",
+    "EnvironmentAuthInvalidError",
+  ].includes(String(cause._tag));
+};
+export const isAuthoritativeDispatchFailure = (cause: unknown) => {
+  if (typeof cause !== "object" || cause === null || !("_tag" in cause)) return false;
+  return [
+    "EnvironmentRequestInvalidError",
+    "EnvironmentScopeRequiredError",
+    "EnvironmentResourceNotFoundError",
+    "EnvironmentAuthInvalidError",
+    "EnvironmentInternalError",
+  ].includes(String(cause._tag));
+};
+
+export class ThreadSendTargetError extends Schema.TaggedError<ThreadSendTargetError>()(
+  "ThreadSendTargetError",
+  {
+    reason: Schema.Literals(["not-found", "ambiguous"]),
+    identifier: Schema.String,
+    candidates: Schema.optional(Schema.Array(Schema.String)),
+    candidatesTruncated: Schema.optional(Schema.Boolean),
+    originalCandidateCount: Schema.optional(Schema.Number),
+  },
+) {
+  override get message(): string {
+    if (this.reason === "not-found") {
+      return this.identifier.length === 0
+        ? "A non-blank LastCode thread id or prefix is required."
+        : `LastCode thread '${this.identifier}' was not found.`;
+    }
+    const candidates = this.candidates ?? [];
+    const suffix = this.candidatesTruncated
+      ? ` (showing ${candidates.length} of ${this.originalCandidateCount})`
+      : "";
+    return `LastCode thread prefix '${this.identifier}' is ambiguous: ${candidates.join(", ")}${suffix}.`;
+  }
+}
+
+export class ThreadSendMessageError extends Schema.TaggedError<ThreadSendMessageError>()(
+  "ThreadSendMessageError",
+  { cause: Schema.Defect() },
+) {
+  override get message(): string {
+    return `--message must contain text and be at most ${PROVIDER_SEND_TURN_MAX_INPUT_CHARS} characters.`;
+  }
+}
+
+export class ThreadSendServerUnavailableError extends Schema.TaggedError<ThreadSendServerUnavailableError>()(
+  "ThreadSendServerUnavailableError",
+  { cause: Schema.Defect() },
+) {
+  override get message(): string {
+    return "The owning LastCode server is not available; thread send has no offline fallback.";
+  }
+}
+
+export class ThreadDispatchUnknownError extends Schema.TaggedError<ThreadDispatchUnknownError>()(
+  "ThreadDispatchUnknownError",
+  { cause: Schema.Defect() },
+) {
+  override get message(): string {
+    return "LastCode could not confirm whether the tracked message dispatch was accepted.";
+  }
+}
+const isThreadDispatchUnknownError = Schema.is(ThreadDispatchUnknownError);
+
+export const retryAmbiguousTrackedDispatch = <R>(
+  dispatch: Effect.Effect<void, ThreadCliError | ThreadDispatchUnknownError, R>,
+) => dispatch.pipe(Effect.catchTags({ ThreadDispatchUnknownError: () => dispatch }));
+
+export type ThreadTargetResolution =
+  | { readonly kind: "resolved"; readonly thread: OrchestrationV2ThreadShell }
+  | {
+      readonly kind: "ambiguous";
+      readonly identifier: string;
+      readonly candidates: string[];
+      readonly candidatesTruncated?: boolean;
+      readonly originalCandidateCount?: number;
+    }
+  | { readonly kind: "not-found"; readonly identifier: string };
+
+export function resolveThreadTarget(
+  threads: ReadonlyArray<OrchestrationV2ThreadShell>,
+  identifier: string,
+): ThreadTargetResolution {
+  const normalized = identifier.trim();
+  if (normalized.length === 0) return { kind: "not-found", identifier: normalized };
+  const exact = threads.find((thread) => thread.id === normalized);
+  if (exact) return { kind: "resolved", thread: exact };
+  const matches = threads.filter((thread) => thread.id.startsWith(normalized));
+  if (matches.length === 1) return { kind: "resolved", thread: matches[0]! };
+  if (matches.length > 1) {
+    const candidates = matches
+      .map(({ id }) => id)
+      .toSorted()
+      .slice(0, THREAD_AMBIGUOUS_CANDIDATE_MAX_RESULTS);
+    const candidatesTruncated = matches.length > candidates.length;
+    return {
+      kind: "ambiguous",
+      identifier: normalized,
+      candidates,
+      ...(candidatesTruncated
+        ? { candidatesTruncated: true, originalCandidateCount: matches.length }
+        : {}),
+    };
+  }
+  return { kind: "not-found", identifier: normalized };
+}
+
+export function validateThreadTurnLimit(value: number): number {
+  if (!Number.isInteger(value) || value < 1 || value > THREAD_READ_MAX_TURN_LIMIT) {
+    throw new Error(`--turn-limit must be an integer from 1 to ${THREAD_READ_MAX_TURN_LIMIT}.`);
+  }
+  return value;
+}
+
+const requestIdForActivity = (activity: ThreadCliActivity) => {
+  if (typeof activity.payload !== "object" || activity.payload === null) return null;
+  const requestId = (activity.payload as Record<string, unknown>).requestId;
+  return typeof requestId === "string" ? requestId : null;
+};
+
+const isStaleRequestFailure = (activity: ThreadCliActivity) => {
+  if (
+    activity.kind !== "provider.approval.respond.failed" &&
+    activity.kind !== "provider.user-input.respond.failed"
+  ) {
+    return false;
+  }
+  if (typeof activity.payload !== "object" || activity.payload === null) return false;
+  const detail = (activity.payload as Record<string, unknown>).detail;
+  if (typeof detail !== "string") return false;
+  const normalized = detail.toLowerCase();
+  return (
+    normalized.includes("stale pending approval request") ||
+    normalized.includes("unknown pending approval request") ||
+    normalized.includes("unknown pending permission request") ||
+    normalized.includes("stale pending user-input request") ||
+    normalized.includes("unknown pending user-input request") ||
+    normalized.includes("unknown pending user input request") ||
+    normalized.includes("unknown pending codex user input request")
+  );
+};
+
+const pinnedRequestActivityIndexes = (activities: ReadonlyArray<ThreadCliActivity>) => {
+  const openRequests = new Map<string, number>();
+  for (const [index, activity] of activities.entries()) {
+    const requestId = requestIdForActivity(activity);
+    if (requestId === null) continue;
+    if (activity.kind === "approval.requested" || activity.kind === "user-input.requested") {
+      openRequests.set(requestId, index);
+    } else if (
+      activity.kind === "approval.resolved" ||
+      activity.kind === "user-input.resolved" ||
+      isStaleRequestFailure(activity)
+    ) {
+      openRequests.delete(requestId);
+    }
+  }
+  return new Set(openRequests.values());
+};
+
+export function boundThreadPresentation(
+  messages: ReadonlyArray<ThreadCliMessage>,
+  activities: ReadonlyArray<ThreadCliActivity>,
+) {
+  const pinnedActivityIndexes = pinnedRequestActivityIndexes(activities);
+  const rankedActivities = activities
+    .map((activity, index) => ({ index, createdAt: activity.createdAt }))
+    .toSorted(
+      (left, right) => right.createdAt.localeCompare(left.createdAt) || right.index - left.index,
+    );
+  const rankedPinnedActivities = rankedActivities.filter(({ index }) =>
+    pinnedActivityIndexes.has(index),
+  );
+  const selectedActivityIndexes = new Set(
+    [
+      ...rankedPinnedActivities,
+      ...rankedActivities.filter(({ index }) => !pinnedActivityIndexes.has(index)),
+    ]
+      .slice(0, THREAD_ACTIVITY_MAX_RESULTS)
+      .map(({ index }) => index),
+  );
+  const selectedActivities = activities
+    .map((activity, originalIndex) => ({ activity, originalIndex }))
+    .filter(({ originalIndex }) => selectedActivityIndexes.has(originalIndex));
+  const originalTextChars =
+    messages.reduce((total, message) => total + message.text.length, 0) +
+    activities.reduce((total, activity) => total + activity.summary.length, 0);
+  const messageChars = messages.map(() => 0);
+  const activityChars = selectedActivities.map(() => 0);
+  let remaining = THREAD_TRANSCRIPT_MAX_CHARS;
+  const content = [
+    ...messages.map((message, index) => ({
+      kind: "message" as const,
+      index,
+      timestamp: message.updatedAt,
+      length: message.text.length,
+      pinned: false,
+    })),
+    ...selectedActivities.map(({ activity, originalIndex }, index) => ({
+      kind: "activity" as const,
+      index,
+      timestamp: activity.createdAt,
+      length: activity.summary.length,
+      pinned: pinnedActivityIndexes.has(originalIndex),
+    })),
+  ].toSorted(
+    (left, right) =>
+      Number(right.pinned) - Number(left.pinned) ||
+      right.timestamp.localeCompare(left.timestamp) ||
+      (left.kind === right.kind ? right.index - left.index : left.kind === "activity" ? -1 : 1),
+  );
+  for (const item of content) {
+    const take = Math.min(item.length, remaining);
+    if (item.kind === "message") messageChars[item.index] = take;
+    else activityChars[item.index] = take;
+    remaining -= take;
+  }
+  const boundedMessages = messages.map((message, index) => ({
+    ...message,
+    text: message.text.slice(message.text.length - messageChars[index]!),
+  }));
+  const boundedActivities = selectedActivities.map(({ activity }, index) => ({
+    ...activity,
+    summary: activity.summary.slice(activity.summary.length - activityChars[index]!),
+  }));
+  const emittedTextChars = THREAD_TRANSCRIPT_MAX_CHARS - remaining;
+  const activitiesTruncated = activities.length > selectedActivities.length;
+  return {
+    messages: boundedMessages,
+    activities: boundedActivities,
+    textTruncated: originalTextChars > emittedTextChars,
+    ...(originalTextChars > emittedTextChars ? { originalTextChars } : {}),
+    activitiesTruncated,
+    ...(activitiesTruncated ? { originalActivityCount: activities.length } : {}),
+  };
+}
+
+export const boundTranscriptMessages = (messages: ReadonlyArray<ThreadCliMessage>) =>
+  boundThreadPresentation(messages, []);
+
+export function threadLifecycle(
+  thread: OrchestrationV2ThreadShell,
+  options: { readonly now: string },
+): string {
+  if (thread.pendingRuntimeRequest !== null) return "pending-input";
+  if (thread.snoozedUntil != null) {
+    const wakeAt = DateTime.toEpochMillis(thread.snoozedUntil);
+    const now = Date.parse(options.now);
+    if (wakeAt > now) {
+      const snoozedAt = thread.snoozedAt == null ? null : DateTime.toEpochMillis(thread.snoozedAt);
+      const raisedByError =
+        thread.status === "failed" &&
+        (snoozedAt === null || DateTime.toEpochMillis(thread.updatedAt) > snoozedAt);
+      const raisedByCompletion =
+        snoozedAt !== null &&
+        thread.status === "completed" &&
+        thread.latestRunCompletedAt != null &&
+        DateTime.toEpochMillis(thread.latestRunCompletedAt) > snoozedAt;
+      if (!raisedByError && !raisedByCompletion) return "snoozed";
+    }
+  }
+  if (
+    ["preparing", "queued", "starting", "running", "waiting"].includes(
+      thread.activityRunStatus ?? thread.status,
+    ) ||
+    (thread.pendingBackgroundTasks?.length ?? 0) > 0
+  )
+    return "working";
+  if (thread.settledOverride === "settled" || thread.settledAt !== null) return "settled";
+  return "active";
+}
+
+function projectForThread(
+  snapshot: OrchestrationV2ShellSnapshot,
+  thread: OrchestrationV2ThreadShell,
+): OrchestrationProjectShell {
+  const project = snapshot.projects.find(({ id }) => id === thread.projectId);
+  if (!project)
+    throw new Error(`Project '${thread.projectId}' for thread '${thread.id}' was not found.`);
+  return project;
+}
+
+function projectOutput(project: OrchestrationProjectShell) {
+  return { id: project.id, title: project.title, workspaceRoot: project.workspaceRoot };
+}
+
+function workspaceOutput(project: OrchestrationProjectShell, thread: OrchestrationV2ThreadShell) {
+  return { root: thread.worktreePath ?? project.workspaceRoot, branch: thread.branch };
+}
+
+function providerOutput(thread: OrchestrationV2ThreadShell, projection?: ThreadCliProjection) {
+  const providerThread = projection?.providerThreads.find(
+    ({ id }) => id === thread.activeProviderThreadId,
+  );
+  const session = projection?.providerSessions.find(
+    ({ id }) => id === providerThread?.providerSessionId,
+  );
+  return {
+    name: providerThread?.driver ?? null,
+    instanceId: thread.providerInstanceId,
+    status: session?.status ?? thread.status,
+    ...(providerThread?.driver === "codex" && providerThread.nativeThreadRef?.nativeId
+      ? { codexThreadId: providerThread.nativeThreadRef.nativeId }
+      : {}),
+  };
+}
+
+export interface ThreadReadSource {
+  readonly descriptor: ExecutionEnvironmentDescriptor;
+  readonly home: string;
+  readonly shell: OrchestrationV2ShellSnapshot;
+  readonly getThread: (
+    threadId: ThreadId,
+    turnLimit: number,
+  ) => Effect.Effect<ThreadCliProjection, ThreadCliError>;
+}
+
+export interface ThreadSendSource {
+  readonly descriptor: ExecutionEnvironmentDescriptor;
+  readonly shell: OrchestrationV2ShellSnapshot;
+  readonly dispatch: (
+    command: Extract<OrchestrationV2Command, { readonly type: "message.dispatch" }>,
+  ) => Effect.Effect<unknown, ThreadCliError | ThreadDispatchUnknownError>;
+}
+
+export const sendThreadOutput = Effect.fn("sendThreadOutput")(function* (
+  source: ThreadSendSource,
+  input: {
+    readonly identifier: string;
+    readonly message: string;
+    readonly commandId: CommandId;
+    readonly messageId: MessageId;
+    readonly steerNative?: boolean;
+    readonly sourceThreadId?: ThreadId;
+    readonly trackRequestCorrelation?: true;
+    readonly rejectWaitForThreadId?: ThreadId;
+  },
+) {
+  const resolution = resolveThreadTarget(source.shell.threads, input.identifier);
+  if (resolution.kind !== "resolved") {
+    return yield* new ThreadSendTargetError({
+      reason: resolution.kind,
+      identifier: resolution.identifier,
+      ...(resolution.kind === "ambiguous"
+        ? {
+            candidates: resolution.candidates,
+            ...(resolution.candidatesTruncated ? { candidatesTruncated: true } : {}),
+            ...(resolution.originalCandidateCount !== undefined
+              ? { originalCandidateCount: resolution.originalCandidateCount }
+              : {}),
+          }
+        : {}),
+    });
+  }
+  if (
+    input.rejectWaitForThreadId !== undefined &&
+    resolution.thread.id === input.rejectWaitForThreadId
+  ) {
+    return yield* new ThreadCliError({
+      operation: "live send wait",
+      cause: new Error(
+        "Cannot use --wait when sending to the current thread because its queued turn cannot start until this command exits. Send without --wait instead.",
+      ),
+    });
+  }
+  const message = yield* decodeThreadSendMessage(input.message).pipe(
+    Effect.mapError((cause) => new ThreadSendMessageError({ cause })),
+  );
+  const activeRunId = resolution.thread.activeRunId;
+  if (input.steerNative && activeRunId == null) {
+    return yield* new ThreadCliError({
+      operation: "native steering",
+      cause: new Error("The target thread has no active run to steer."),
+    });
+  }
+  yield* source.dispatch({
+    type: "message.dispatch",
+    commandId: input.commandId,
+    threadId: resolution.thread.id,
+    messageId: input.messageId,
+    text: message,
+    attachments: [],
+    dispatchMode:
+      input.steerNative && activeRunId != null
+        ? { type: "steer_active_native", targetRunId: activeRunId }
+        : { type: "queue_after_active" },
+    createdBy: input.sourceThreadId ? "agent" : "user",
+    creationSource: "server",
+    ...(input.sourceThreadId !== undefined && input.sourceThreadId !== resolution.thread.id
+      ? { senderThreadId: input.sourceThreadId }
+      : {}),
+  });
+  return yield* decodeThreadSendAcceptedResult({
+    kind: "accepted",
+    environmentId: source.descriptor.environmentId,
+    threadId: resolution.thread.id,
+    messageId: input.messageId,
+  });
+});
+
+export const currentThreadOutput = Effect.fn("currentThreadOutput")(function* (
+  source: ThreadReadSource,
+  context: { readonly threadId?: string; readonly home?: string } = {
+    ...(process.env.T3CODE_THREAD_ID !== undefined
+      ? { threadId: process.env.T3CODE_THREAD_ID }
+      : {}),
+    ...(process.env.T3CODE_HOME !== undefined ? { home: process.env.T3CODE_HOME } : {}),
+  },
+) {
+  const currentId = context.threadId?.trim();
+  if (!currentId) {
+    return yield* new ThreadCliError({
+      operation: "current context lookup",
+      cause: new Error("Current LastCode thread context is unavailable."),
+    });
+  }
+  const contextHome = context.home?.trim();
+  if (contextHome && contextHome !== source.home) {
+    return yield* new ThreadCliError({
+      operation: "current context lookup",
+      cause: new Error(`Current LastCode home '${contextHome}' does not match '${source.home}'.`),
+    });
+  }
+  const target = source.shell.threads.find(({ id }) => id === currentId);
+  if (!target) {
+    return yield* new ThreadCliError({
+      operation: "current context lookup",
+      cause: new Error(`Current LastCode thread '${currentId}' was not found.`),
+    });
+  }
+  const project = projectForThread(source.shell, target);
+  const detail = yield* source.getThread(target.id, 1);
+  return yield* decodeThreadCurrentResult({
+    kind: "current",
+    environmentId: source.descriptor.environmentId,
+    threadId: target.id,
+    home: source.home,
+    project: projectOutput(project),
+    workspace: workspaceOutput(project, target),
+    provider: providerOutput(target, detail),
+  });
+});
+
+export const listThreadsOutput = Effect.fn("listThreadsOutput")(function* (
+  source: ThreadReadSource,
+) {
+  const now = DateTime.formatIso(yield* DateTime.now);
+  const sortedThreads = source.shell.threads.toSorted(
+    (left, right) =>
+      Number(right.persistent === true) - Number(left.persistent === true) ||
+      DateTime.toEpochMillis(right.updatedAt) - DateTime.toEpochMillis(left.updatedAt) ||
+      left.id.localeCompare(right.id),
+  );
+  const threadsTruncated = sortedThreads.length > THREAD_LIST_MAX_RESULTS;
+  return yield* decodeThreadListResult({
+    kind: "list",
+    environmentId: source.descriptor.environmentId,
+    ...(threadsTruncated
+      ? { threadsTruncated: true, originalThreadCount: sortedThreads.length }
+      : {}),
+    threads: sortedThreads.slice(0, THREAD_LIST_MAX_RESULTS).map((thread) => {
+      const project = projectForThread(source.shell, thread);
+      return {
+        environmentId: source.descriptor.environmentId,
+        threadId: thread.id,
+        title: thread.title,
+        persistent: thread.persistent === true,
+        lifecycle: threadLifecycle(thread, { now }),
+        project: projectOutput(project),
+        workspace: workspaceOutput(project, thread),
+        provider: providerOutput(thread),
+        updatedAt: DateTime.formatIso(thread.updatedAt),
+      };
+    }),
+  });
+});
+
+function projectThreadCliPresentation(projection: ThreadCliProjection, turnLimit: number) {
+  const selectedRuns = projection.runs
+    .toSorted((left, right) => right.ordinal - left.ordinal)
+    .slice(0, turnLimit);
+  const runIds = new Set(selectedRuns.map(({ id }) => id));
+  const messages = projection.messages
+    .filter(({ runId }) => runId === null || runIds.has(runId))
+    .map((message) => ({
+      id: message.id,
+      role: message.role,
+      text: message.text,
+      runId: message.runId,
+      streaming: message.streaming,
+      createdAt: DateTime.formatIso(message.createdAt),
+      updatedAt: DateTime.formatIso(message.updatedAt),
+    }));
+  const activities = projection.turnItems
+    .filter(
+      (item) =>
+        item.type !== "user_message" &&
+        item.type !== "assistant_message" &&
+        (item.runId === null || runIds.has(item.runId)),
+    )
+    .map((item): ThreadCliActivity => {
+      const summary =
+        item.type === "approval_request"
+          ? (item.prompt ?? item.title ?? "Approval requested")
+          : item.type === "user_input_request"
+            ? item.questions.map((question) => question.question).join("\n")
+            : "text" in item
+              ? String(item.text)
+              : "message" in item
+                ? String(item.message)
+                : "summary" in item
+                  ? String(item.summary)
+                  : "input" in item
+                    ? String(item.input)
+                    : "markdown" in item
+                      ? String(item.markdown)
+                      : (item.title ?? item.type.replaceAll("_", " "));
+      const pending = item.status === "pending" || item.status === "waiting";
+      return {
+        id: item.id,
+        kind:
+          item.type === "approval_request"
+            ? `approval.${pending ? "requested" : "resolved"}`
+            : item.type === "user_input_request"
+              ? `user-input.${pending ? "requested" : "resolved"}`
+              : item.type,
+        tone:
+          item.status === "failed" ? "error" : pending && "requestId" in item ? "approval" : "tool",
+        summary: typeof summary === "string" ? summary : String(summary),
+        runId: item.runId,
+        createdAt: DateTime.formatIso(item.startedAt ?? item.updatedAt),
+        ...("requestId" in item ? { payload: { requestId: item.requestId } } : {}),
+      };
+    });
+  return { latestRun: selectedRuns[0] ?? null, ...boundThreadPresentation(messages, activities) };
+}
+
+export const readThreadOutput = Effect.fn("readThreadOutput")(function* (
+  source: ThreadReadSource,
+  identifier: string,
+  turnLimitInput: number,
+) {
+  const resolution = resolveThreadTarget(source.shell.threads, identifier);
+  if (resolution.kind !== "resolved")
+    return { ...resolution, environmentId: source.descriptor.environmentId };
+  const turnLimit = validateThreadTurnLimit(turnLimitInput);
+  const detail = yield* source.getThread(resolution.thread.id, turnLimit);
+  const project = projectForThread(source.shell, resolution.thread);
+  const presentation = projectThreadCliPresentation(detail, turnLimit);
+  return yield* decodeThreadReadResult({
+    kind: "read",
+    environmentId: source.descriptor.environmentId,
+    threadId: resolution.thread.id,
+    title: resolution.thread.title,
+    persistent: resolution.thread.persistent === true,
+    lifecycle: threadLifecycle(resolution.thread, { now: DateTime.formatIso(yield* DateTime.now) }),
+    project: projectOutput(project),
+    workspace: workspaceOutput(project, resolution.thread),
+    provider: providerOutput(resolution.thread, detail),
+    latestRun: presentation.latestRun,
+    messages: presentation.messages,
+    activities: presentation.activities.map(({ id, kind, tone, summary, runId, createdAt }) => ({
+      id,
+      kind,
+      tone,
+      summary,
+      runId,
+      createdAt,
+    })),
+    textTruncated: presentation.textTruncated,
+    ...(presentation.originalTextChars !== undefined
+      ? { originalTextChars: presentation.originalTextChars }
+      : {}),
+    activitiesTruncated: presentation.activitiesTruncated,
+    ...(presentation.originalActivityCount !== undefined
+      ? { originalActivityCount: presentation.originalActivityCount }
+      : {}),
+  });
+});
+
+// Inspection never initializes, migrates, or writes either database.
+const ThreadCliOfflineRuntimeLive = Layer.mergeAll(ProjectionStore.layer, ProjectStore.layer).pipe(
+  Layer.provide(
+    Layer.unwrap(
+      Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        return NodeSqliteClient.layer({ filename: config.dbPath, readonly: true });
+      }),
     ),
+  ),
+);
+
+const THREAD_CLI_LIVE_TIMEOUT = Duration.seconds(3);
+const makeLiveClient = (origin: string) =>
+  HttpApiClient.make(EnvironmentHttpApi, { baseUrl: origin });
+
+const readEnvironmentId = Effect.fn("readThreadCliEnvironmentId")(function* (
+  config: ServerConfig.ServerConfig["Service"],
+) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const value = (yield* fileSystem.readFileString(config.environmentIdPath)).trim();
+  if (value.length === 0) {
+    return yield* new ThreadCliError({
+      operation: "environment identity read",
+      cause: new Error("The active home has no environment identity."),
+    });
+  }
+  return EnvironmentId.make(value);
+});
+
+export const withReadSession = <A, E, R>(
+  auth: EnvironmentAuth.EnvironmentAuth["Service"],
+  run: (token: string) => Effect.Effect<A, E, R>,
+) =>
+  Effect.acquireUseRelease(
+    auth.issueSession({ scopes: [AuthOrchestrationReadScope], label: "lastcode thread cli" }),
+    ({ token }) => run(token),
+    ({ sessionId }) => auth.revokeSession(sessionId).pipe(Effect.ignore({ log: true })),
   );
 
-const decodeFailureText = Schema.decodeUnknownOption(Schema.fromJsonString(OrchestratorMcpFailure));
-const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
-const printJson = (value: unknown) => Console.log(encodeJson(value));
-
-const ToolResult = Schema.Struct({
-  isError: Schema.optional(Schema.Boolean),
-  structuredContent: Schema.optional(Schema.Unknown),
-  content: Schema.optional(
-    Schema.Array(Schema.Struct({ type: Schema.String, text: Schema.optional(Schema.String) })),
-  ),
-});
-
-const decodeToolResult = Schema.decodeUnknownEffect(ToolResult);
-
-const ProjectListResult = Schema.Struct({
-  projects: Schema.Array(
-    Schema.Struct({ id: ProjectId, title: Schema.String, workspaceRoot: Schema.String }),
-  ),
-  nextCursor: Schema.NullOr(Schema.Int),
-});
-
-const ThreadLaunchResult = Schema.Struct({
-  threadId: ThreadId,
-  projectId: ProjectId,
-  runId: Schema.NullOr(RunId),
-});
-
-const toolFailureDetail = (result: typeof ToolResult.Type) => {
-  const text = result.content?.find((part) => part.text !== undefined)?.text ?? "";
-  return Option.match(decodeFailureText(text), {
-    onNone: () => text || "The tool call failed.",
-    onSome: (failure) => failure.message,
-  });
-};
-
-const makeThreadTools = (session: McpToolSession, origin: string) => {
-  const unexpected = (tool: string) =>
-    new ThreadToolFailedError({
-      tool,
-      detail: `The server sent an unexpected ${tool} result. Update the t3 CLI to match the server.`,
-    });
-  return {
-    call: Effect.fn("cli.thread.callTool")(function* <S extends Schema.Decoder<unknown>>(
-      tool: string,
-      args: Readonly<Record<string, unknown>>,
-      schema: S,
-    ): Effect.fn.Return<S["Type"], ThreadServerUnreachableError | ThreadToolFailedError> {
-      const raw = yield* session
-        .call(tool, args)
-        .pipe(Effect.mapError((cause) => new ThreadServerUnreachableError({ origin, cause })));
-      const result = yield* decodeToolResult(raw).pipe(Effect.mapError(() => unexpected(tool)));
-      if (result.isError === true) {
-        return yield* new ThreadToolFailedError({ tool, detail: toolFailureDetail(result) });
-      }
-      return yield* Schema.decodeUnknownEffect(schema)(result.structuredContent).pipe(
-        Effect.mapError(() => unexpected(tool)),
-      );
+export const withSendSession = <A, E, R>(
+  auth: EnvironmentAuth.EnvironmentAuth["Service"],
+  run: (token: string) => Effect.Effect<A, E, R>,
+) =>
+  Effect.acquireUseRelease(
+    auth.issueSession({
+      scopes: [AuthOrchestrationReadScope, AuthOrchestrationOperateScope],
+      label: "lastcode thread cli",
     }),
-  };
-};
-export type ThreadTools = ReturnType<typeof makeThreadTools>;
+    ({ token }) => run(token),
+    ({ sessionId }) => auth.revokeSession(sessionId).pipe(Effect.ignore({ log: true })),
+  );
 
-/**
- * Signs in as a short-lived MCP client of the running server, the same way an
- * outside agent does, and revokes that session when the command ends.
- */
-const withThreadTools = Effect.fn("cli.thread.withThreadTools")(function* <A, E, R>(
-  flags: { readonly baseDir: Option.Option<string> },
-  run: (tools: ThreadTools) => Effect.Effect<A, E, R>,
+const tryRunLiveThreadRead = Effect.fn("tryRunLiveThreadRead")(function* (
+  config: ServerConfig.ServerConfig["Service"],
+  minimumLogLevel: ServerConfig.ServerConfig["Service"]["logLevel"],
+  run: (source: ThreadReadSource) => Effect.Effect<unknown, ThreadCliError>,
+) {
+  const runtimeState = yield* readPersistedServerRuntimeState(config.serverRuntimeStatePath);
+  if (Option.isNone(runtimeState)) return Option.none<unknown>();
+  const client = yield* makeLiveClient(runtimeState.value.origin);
+  const descriptorResult = yield* Effect.result(
+    client.metadata.descriptor().pipe(Effect.timeout(THREAD_CLI_LIVE_TIMEOUT)),
+  );
+  if (descriptorResult._tag === "Failure") return Option.none<unknown>();
+  const attempted = yield* Effect.result(
+    Effect.gen(function* () {
+      const auth = yield* EnvironmentAuth.EnvironmentAuth;
+      return yield* withReadSession(auth, (token) =>
+        Effect.gen(function* () {
+          const headers = {
+            authorization: `Bearer ${token}`,
+            [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+          } as const;
+          const sourceResult = yield* Effect.result(
+            client.orchestration
+              .shellSnapshot({ headers })
+              .pipe(Effect.timeout(THREAD_CLI_LIVE_TIMEOUT)),
+          );
+          if (sourceResult._tag === "Failure") {
+            return { kind: "unavailable" as const };
+          }
+          const output = yield* Effect.result(
+            run({
+              descriptor: descriptorResult.success,
+              home: config.baseDir,
+              shell: sourceResult.success,
+              getThread: (threadId, _turnLimit) =>
+                client.orchestration.threadSnapshot({ params: { threadId }, headers }).pipe(
+                  Effect.timeout(THREAD_CLI_LIVE_TIMEOUT),
+                  Effect.map(({ projection }) => projection),
+                  Effect.mapError(
+                    (cause) => new ThreadCliError({ operation: "live detail read", cause }),
+                  ),
+                ),
+            }),
+          );
+          return { kind: "ran" as const, output };
+        }).pipe(Effect.timeout(THREAD_CLI_LIVE_TIMEOUT)),
+      );
+    }).pipe(
+      Effect.provide(
+        EnvironmentAuth.layerRuntime.pipe(
+          Layer.provide(ServerConfig.layer(config)),
+          Layer.provide(Layer.succeed(References.MinimumLogLevel, minimumLogLevel)),
+        ),
+      ),
+    ),
+  );
+  if (attempted._tag === "Success" && attempted.success.kind === "ran") {
+    if (attempted.success.output._tag === "Failure") return yield* attempted.success.output.failure;
+    return Option.some(attempted.success.output.success);
+  }
+  return Option.none<unknown>();
+});
+
+const runThreadRead = Effect.fn("runThreadRead")(function* (
+  flags: CliAuthLocationFlags,
+  run: (source: ThreadReadSource) => Effect.Effect<unknown, ThreadCliError>,
 ) {
   const logLevel = yield* GlobalFlag.LogLevel;
-  const config = yield* resolveCliAuthConfig(flags, logLevel);
+  const config = yield* resolveThreadInspectionConfig(flags, logLevel);
+  const minimumLogLevel = config.logLevel;
   return yield* Effect.gen(function* () {
-    const runtimeState = yield* readPersistedServerRuntimeState(config.serverRuntimeStatePath);
-    if (Option.isNone(runtimeState)) {
-      return yield* new ThreadServerNotRunningError({ baseDir: config.baseDir });
-    }
-    const origin = runtimeState.value.origin;
-    const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
-    const issued = yield* Effect.acquireRelease(
-      environmentAuth.issueMcpClientSession({
-        label: "t3 thread cli",
-        // The CLI runs as the machine's owner. New threads still start at
-        // the project's default mode, never at this ceiling by default.
-        access: "full-access",
-        client: { deviceType: "bot" },
-      }),
-      (session) =>
-        environmentAuth.revokeSession(session.sessionId).pipe(Effect.ignore({ log: true })),
+    const live = yield* tryRunLiveThreadRead(config, minimumLogLevel, run).pipe(
+      Effect.provide(FetchHttpClient.layer),
     );
-    const session = yield* mcpToolSession({
-      endpoint: new URL("/mcp", origin).href,
-      authorization: `Bearer ${issued.token}`,
-      clientName: "t3-thread-cli",
-    }).pipe(Effect.mapError((cause) => new ThreadServerUnreachableError({ origin, cause })));
-    return yield* run(makeThreadTools(session, origin));
+    if (Option.isSome(live)) {
+      return yield* Console.log(yield* encodeJson(live.value));
+    }
+
+    const offlineLayer = ThreadCliOfflineRuntimeLive.pipe(
+      Layer.provide(ServerConfig.layer(config)),
+      Layer.provide(Layer.succeed(References.MinimumLogLevel, minimumLogLevel)),
+    );
+    return yield* Effect.gen(function* () {
+      const query = yield* ProjectionStore.ProjectionStoreV2;
+      const projects = yield* ProjectStore.ProjectStoreV2;
+      const shell = {
+        ...(yield* query.getShellSnapshot()),
+        projects: yield* projects.listShells(),
+      };
+      const environmentId = yield* readEnvironmentId(config);
+      const source: ThreadReadSource = {
+        descriptor: {
+          environmentId,
+          label: "offline",
+          platform: { os: "unknown", arch: "other" },
+          serverVersion: "offline",
+          capabilities: { repositoryIdentity: true },
+        },
+        home: config.baseDir,
+        shell,
+        getThread: (threadId, turnLimit) =>
+          query
+            .getThreadSnapshotWindow(threadId, {
+              rowLimit: 2_000,
+              userTurnLimit: turnLimit,
+            })
+            .pipe(
+              Effect.map(({ projection }) => projection),
+              Effect.mapError(
+                (cause) => new ThreadCliError({ operation: "offline detail read", cause }),
+              ),
+            ),
+      };
+      const output = yield* run(source);
+      yield* Console.log(yield* encodeJson(output));
+    }).pipe(Effect.provide(offlineLayer));
+  });
+});
+
+const runThreadSend = Effect.fn("runThreadSend")(function* (
+  flags: CliAuthLocationFlags,
+  identifier: string,
+  message: string,
+  waitForCompletion: boolean,
+  timeoutMs: number,
+  steerNative: boolean,
+) {
+  const logLevel = yield* GlobalFlag.LogLevel;
+  const config = yield* resolveThreadInspectionConfig(flags, logLevel);
+  const runtimeState = yield* readPersistedServerRuntimeState(config.serverRuntimeStatePath);
+  if (Option.isNone(runtimeState)) {
+    return yield* new ThreadSendServerUnavailableError({
+      cause: new Error("The active home has no recorded server runtime."),
+    });
+  }
+  const client = yield* makeLiveClient(runtimeState.value.origin);
+  const descriptor = yield* client.metadata.descriptor().pipe(
+    Effect.timeout(THREAD_CLI_LIVE_TIMEOUT),
+    Effect.mapError((cause) => new ThreadSendServerUnavailableError({ cause })),
+  );
+  const minimumLogLevel = config.logLevel;
+  const currentThreadId = currentThreadIdForHome(config.baseDir);
+
+  return yield* Effect.gen(function* () {
+    const auth = yield* EnvironmentAuth.EnvironmentAuth;
+    let waitHandle: ThreadWaitHandle | undefined;
+    const dispatched = yield* Effect.result(
+      withSendSession(auth, (token) =>
+        Effect.gen(function* () {
+          const headers = {
+            authorization: `Bearer ${token}`,
+            [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+          } as const;
+          const shell = yield* client.orchestration.shellSnapshot({ headers }).pipe(
+            Effect.timeout(THREAD_CLI_LIVE_TIMEOUT),
+            Effect.mapError(
+              (cause) => new ThreadCliError({ operation: "live send target lookup", cause }),
+            ),
+          );
+          const crypto = yield* Crypto.Crypto;
+          const commandId = CommandId.make(
+            yield* crypto.randomUUIDv4.pipe(
+              Effect.mapError(
+                (cause) => new ThreadCliError({ operation: "send command id generation", cause }),
+              ),
+            ),
+          );
+          const messageId = MessageId.make(
+            yield* crypto.randomUUIDv4.pipe(
+              Effect.mapError(
+                (cause) => new ThreadCliError({ operation: "send message id generation", cause }),
+              ),
+            ),
+          );
+          const resolution = resolveThreadTarget(shell.threads, identifier);
+          if (resolution.kind === "resolved") {
+            waitHandle = {
+              kind: "wait-handle",
+              environmentId: descriptor.environmentId,
+              threadId: resolution.thread.id,
+              messageId,
+            };
+          }
+          return yield* sendThreadOutput(
+            {
+              descriptor,
+              shell,
+              dispatch: (command) => {
+                const dispatch = client.orchestration
+                  .dispatch({
+                    headers,
+                    payload: command,
+                  } as Parameters<typeof client.orchestration.dispatch>[0])
+                  .pipe(
+                    Effect.timeout(THREAD_CLI_LIVE_TIMEOUT),
+                    Effect.asVoid,
+                    Effect.mapError((cause) =>
+                      waitForCompletion && !isAuthoritativeDispatchFailure(cause)
+                        ? new ThreadDispatchUnknownError({ cause })
+                        : new ThreadCliError({ operation: "live send dispatch", cause }),
+                    ),
+                  );
+                return waitForCompletion ? retryAmbiguousTrackedDispatch(dispatch) : dispatch;
+              },
+            },
+            {
+              identifier,
+              message,
+              commandId,
+              messageId,
+              steerNative,
+              ...(currentThreadId ? { sourceThreadId: ThreadId.make(currentThreadId) } : {}),
+              ...(waitForCompletion ? { trackRequestCorrelation: true as const } : {}),
+              ...(waitForCompletion && currentThreadId
+                ? { rejectWaitForThreadId: ThreadId.make(currentThreadId) }
+                : {}),
+            },
+          );
+        }),
+      ),
+    );
+    if (dispatched._tag === "Failure") {
+      const recoveryHandle = waitHandle;
+      if (
+        waitForCompletion &&
+        recoveryHandle !== undefined &&
+        isThreadDispatchUnknownError(dispatched.failure)
+      ) {
+        yield* Console.error(`LASTCODE_WAIT_HANDLE=${yield* encodeJson(recoveryHandle)}`);
+        return yield* Console.log(
+          yield* encodeJson({ kind: "dispatch-unknown", waitHandle: recoveryHandle }),
+        );
+      }
+      return yield* dispatched.failure;
+    }
+    const acceptedWaitHandle = waitHandle;
+    if (!waitForCompletion || acceptedWaitHandle === undefined) {
+      return yield* Console.log(yield* encodeJson(dispatched.success));
+    }
+    yield* Console.error(`LASTCODE_WAIT_HANDLE=${yield* encodeJson(acceptedWaitHandle)}`);
+    const waitResult = yield* withReadSession(auth, (token) =>
+      Effect.result(
+        client.orchestration
+          .waitThread({
+            headers: {
+              authorization: `Bearer ${token}`,
+              [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+            },
+            payload: { waitHandle: acceptedWaitHandle, timeoutMs },
+          })
+          .pipe(Effect.timeout(`${timeoutMs + 5_000} millis`)),
+      ),
+    );
+    if (waitResult._tag === "Failure" && isAuthoritativeWaitFailure(waitResult.failure)) {
+      return yield* new ThreadCliError({ operation: "live wait", cause: waitResult.failure });
+    }
+    return yield* Console.log(
+      yield* encodeJson(
+        waitResult._tag === "Success"
+          ? waitResult.success
+          : { kind: "transport-unknown", waitHandle: acceptedWaitHandle },
+      ),
+    );
   }).pipe(
-    Effect.scoped,
+    Effect.provide(
+      EnvironmentAuth.layerRuntime.pipe(
+        Layer.provide(ServerConfig.layer(config)),
+        Layer.provide(Layer.succeed(References.MinimumLogLevel, minimumLogLevel)),
+      ),
+    ),
+  );
+});
+
+const runThreadWait = Effect.fn("runThreadWait")(function* (
+  flags: CliAuthLocationFlags,
+  rawHandle: string,
+  timeoutMs: number,
+) {
+  const waitHandle = yield* decodeThreadWaitHandleString(rawHandle).pipe(
+    Effect.mapError((cause) => new ThreadCliError({ operation: "wait handle decoding", cause })),
+  );
+  const logLevel = yield* GlobalFlag.LogLevel;
+  const config = yield* resolveThreadInspectionConfig(flags, logLevel);
+  const runtimeState = yield* readPersistedServerRuntimeState(config.serverRuntimeStatePath);
+  if (Option.isNone(runtimeState)) {
+    return yield* new ThreadSendServerUnavailableError({
+      cause: new Error("The active home has no recorded server runtime."),
+    });
+  }
+  const client = yield* makeLiveClient(runtimeState.value.origin);
+  const descriptor = yield* client.metadata.descriptor().pipe(
+    Effect.timeout(THREAD_CLI_LIVE_TIMEOUT),
+    Effect.mapError((cause) => new ThreadSendServerUnavailableError({ cause })),
+  );
+  if (descriptor.environmentId !== waitHandle.environmentId) {
+    return yield* new ThreadCliError({
+      operation: "wait environment validation",
+      cause: new Error(
+        `Wait handle belongs to '${waitHandle.environmentId}', not '${descriptor.environmentId}'.`,
+      ),
+    });
+  }
+  const currentThreadId = currentThreadIdForHome(config.baseDir);
+  const waitingOnCurrentThread = currentThreadId === waitHandle.threadId;
+  return yield* Effect.gen(function* () {
+    const auth = yield* EnvironmentAuth.EnvironmentAuth;
+    const result = yield* withReadSession(auth, (token) =>
+      Effect.result(
+        client.orchestration
+          .waitThread({
+            headers: {
+              authorization: `Bearer ${token}`,
+              [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+            },
+            payload: { waitHandle, timeoutMs: waitingOnCurrentThread ? 1 : timeoutMs },
+          })
+          .pipe(Effect.timeout(`${(waitingOnCurrentThread ? 1 : timeoutMs) + 5_000} millis`)),
+      ),
+    );
+    if (result._tag === "Failure" && isAuthoritativeWaitFailure(result.failure)) {
+      return yield* new ThreadCliError({ operation: "live wait", cause: result.failure });
+    }
+    if (
+      result._tag === "Success" &&
+      isPendingCurrentThreadWait(waitHandle, result.success, currentThreadId)
+    ) {
+      return yield* new ThreadCliError({
+        operation: "live wait",
+        cause: new Error(
+          "Cannot wait for a pending request in the current thread because its queued turn cannot start until this command exits.",
+        ),
+      });
+    }
+    yield* Console.log(
+      yield* encodeJson(
+        result._tag === "Success" ? result.success : { kind: "transport-unknown", waitHandle },
+      ),
+    );
+  }).pipe(
     Effect.provide(
       EnvironmentAuth.layerRuntime.pipe(
         Layer.provide(ServerConfig.layer(config)),
@@ -243,468 +1199,198 @@ const withThreadTools = Effect.fn("cli.thread.withThreadTools")(function* <A, E,
   );
 });
 
-const readMessageArgument = Effect.fn("cli.thread.readMessage")(function* (argument: string) {
-  const text =
-    argument === "-"
-      ? yield* Stdio.Stdio.pipe(
-          Effect.flatMap((stdio) => stdio.stdin.pipe(Stream.decodeText(), Stream.mkString)),
-        )
-      : argument;
-  if (text.trim().length === 0) {
-    return yield* new ThreadUsageError({ detail: "The message is empty." });
-  }
-  return text;
-});
-
-const listAllProjects = Effect.fn("cli.thread.listAllProjects")(function* (tools: ThreadTools) {
-  const projects: Array<(typeof ProjectListResult.Type)["projects"][number]> = [];
-  let cursor: number | null = 0;
-  while (cursor !== null) {
-    const page: typeof ProjectListResult.Type = yield* tools.call(
-      "t3_project_list",
-      { cursor, limit: 100 },
-      ProjectListResult,
-    );
-    projects.push(...page.projects);
-    cursor = page.nextCursor;
-  }
-  return projects;
-});
-
-/** A project id, or a path inside a project's folder (deepest project wins). */
-const resolveProject = Effect.fn("cli.thread.resolveProject")(function* (
-  tools: ThreadTools,
-  identifier: string,
+export function isPendingCurrentThreadWait(
+  waitHandle: ThreadWaitHandle,
+  result: ThreadWaitResult,
+  currentThreadId: string | undefined,
 ) {
-  const projects = yield* listAllProjects(tools);
-  const byId = projects.find((project) => project.id === identifier);
-  if (byId !== undefined) return byId;
-
-  const path = yield* Path.Path;
-  const fileSystem = yield* FileSystem.FileSystem;
-  // Stored roots keep the path the project was added with, which may pass
-  // through a symlink (macOS /tmp), so both sides compare as real paths.
-  const realPath = (value: string) =>
-    fileSystem.realPath(value).pipe(Effect.orElseSucceed(() => value));
-  const target = yield* realPath(path.resolve(yield* HostProcess.WorkingDirectory, identifier));
-  const roots = yield* Effect.forEach(projects, (project) =>
-    Effect.map(realPath(project.workspaceRoot), (root) => ({ project, root })),
-  );
-  const containing = roots
-    .filter(({ root }) => {
-      const relative = path.relative(root, target);
-      return (
-        relative === "" ||
-        (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
-      );
-    })
-    .toSorted((left, right) => right.root.length - left.root.length)[0];
-  if (containing === undefined) {
-    return yield* new ThreadProjectNotFoundError({ identifier });
-  }
-  return containing.project;
-});
-
-/** Every item on a timeline view, oldest first. */
-const readTimeline = Effect.fn("cli.thread.readTimeline")(function* (
-  tools: ThreadTools,
-  threadId: ThreadId,
-  view: "messages" | "activity",
-) {
-  const items: Array<OrchestratorMcpThreadTimelineItem> = [];
-  let afterPosition: number | undefined;
-  let page: OrchestratorMcpThreadReadResult;
-  do {
-    page = yield* tools.call(
-      "t3_thread_read",
-      {
-        threadId,
-        view,
-        limit: READ_PAGE_LIMIT,
-        runLimit: 1,
-        ...(afterPosition === undefined ? {} : { afterPosition }),
-      },
-      OrchestratorMcpThreadReadResult,
-    );
-    items.push(...page.items);
-    afterPosition = page.nextPosition ?? undefined;
-  } while (page.hasMore && afterPosition !== undefined);
-  return { thread: page.thread, items };
-});
-
-/** Item text past the read's per-item cap. */
-const readFullText = Effect.fn("cli.thread.readFullText")(function* (
-  tools: ThreadTools,
-  threadId: ThreadId,
-  item: OrchestratorMcpThreadTimelineItem,
-) {
-  let text = item.text ?? "";
-  let nextTextOffset = item.textTruncated ? (item.nextTextOffset ?? null) : null;
-  while (nextTextOffset !== null) {
-    const page = yield* tools.call(
-      "t3_thread_read",
-      { threadId, itemId: item.itemId, textOffset: nextTextOffset, runLimit: 1 },
-      OrchestratorMcpThreadReadResult,
-    );
-    const chunk = page.items.find((candidate) => candidate.itemId === item.itemId);
-    if (chunk === undefined) break;
-    text += chunk.text ?? "";
-    nextTextOffset = chunk.textTruncated ? (chunk.nextTextOffset ?? null) : null;
-  }
-  return text;
-});
-
-/** The run's last assistant message, or its last error when it did not complete. */
-const runResultText = Effect.fn("cli.thread.runResultText")(function* (
-  tools: ThreadTools,
-  threadId: ThreadId,
-  runId: RunId,
-  type: "assistant_message" | "error",
-) {
-  const { items } = yield* readTimeline(
-    tools,
-    threadId,
-    type === "assistant_message" ? "messages" : "activity",
-  );
-  const item = items.findLast((candidate) => candidate.runId === runId && candidate.type === type);
-  return item === undefined ? null : yield* readFullText(tools, threadId, item);
-});
-
-type WaitOutcome =
-  | {
-      readonly type: "ended";
-      readonly runId: RunId | null;
-      readonly status: OrchestratorMcpThreadStatus;
-    }
-  | { readonly type: "needs_input" };
-
-/**
- * Waits for this exact run, following a restart to its continuation, so a
- * message another client sends meanwhile cannot stand in for its result.
- */
-export const waitForRun = Effect.fn("cli.thread.waitForRun")(function* (
-  tools: ThreadTools,
-  threadId: ThreadId,
-  runId: RunId,
-) {
-  const waitSlice = (timeoutMs: number) =>
-    tools.call("t3_thread_wait", { threadId, runId, timeoutMs }, OrchestratorMcpThreadWaitResult);
-  const ended = (waited: OrchestratorMcpThreadWaitResult) =>
-    ({ type: "ended", runId: waited.runId, status: waited.status }) satisfies WaitOutcome;
-  while (true) {
-    const waited = yield* waitSlice(WAIT_SLICE_MS);
-    if (!waited.timedOut) return ended(waited);
-    // A pending request on this run, or on an earlier run this one is queued
-    // behind, blocks it until someone answers.
-    const { thread } = yield* tools.call(
-      "t3_thread_read",
-      { threadId, limit: 1, runLimit: 1 },
-      OrchestratorMcpThreadReadResult,
-    );
-    if (thread.pendingRequestCount > 0) {
-      // The count is thread-wide: if this run ended since the slice, the
-      // request belongs to a later run.
-      const recheck = yield* waitSlice(1);
-      return recheck.timedOut ? ({ type: "needs_input" } satisfies WaitOutcome) : ended(recheck);
-    }
-  }
-});
-
-/**
- * With --json the result always reaches stdout, so a script keeps the thread
- * id even when the run fails.
- */
-const finishRun = Effect.fn("cli.thread.finishRun")(function* (
-  tools: ThreadTools,
-  input: {
-    readonly threadId: ThreadId;
-    readonly runId: RunId;
-    readonly json: boolean;
-  },
-) {
-  const outcome = yield* waitForRun(tools, input.threadId, input.runId);
-  const runId = outcome.type === "ended" ? (outcome.runId ?? input.runId) : input.runId;
-  const status = outcome.type === "ended" ? outcome.status : "waiting";
-  const reply =
-    status === "completed"
-      ? yield* runResultText(tools, input.threadId, runId, "assistant_message")
-      : null;
-  const error =
-    status === "completed" || status === "waiting"
-      ? null
-      : yield* runResultText(tools, input.threadId, runId, "error");
-  if (input.json) {
-    yield* printJson({ threadId: input.threadId, runId, status, reply, error });
-  } else if (reply !== null) {
-    yield* Console.log(reply);
-  }
-  if (outcome.type === "needs_input") {
-    return yield* new ThreadNeedsInputError({ threadId: input.threadId });
-  }
-  if (status !== "completed") {
-    return yield* new ThreadRunEndedError({
-      threadId: input.threadId,
-      status,
-      ...(error === null ? {} : { error }),
-    });
-  }
-});
-
-const titleFromMessage = (message: string) => {
-  const firstLine = message.trim().split("\n")[0]?.trim() ?? "";
-  return firstLine.length > TITLE_MAX_CHARS
-    ? `${firstLine.slice(0, TITLE_MAX_CHARS - 1).trimEnd()}…`
-    : firstLine;
-};
-
-const launchWorkspaceStrategy = (input: {
-  readonly worktree: Option.Option<string>;
-  readonly branch: Option.Option<string>;
-}) =>
-  Option.match(input.worktree, {
-    onNone: () =>
-      Option.isSome(input.branch)
-        ? Effect.fail(new ThreadUsageError({ detail: "--branch needs --worktree <base-ref>." }))
-        : Effect.succeed(undefined),
-    onSome: (baseRef) =>
-      Effect.succeed({
-        type: "worktree" as const,
-        baseRef,
-        ...Option.match(input.branch, { onNone: () => ({}), onSome: (branch) => ({ branch }) }),
-      }),
-  });
+  return currentThreadId === waitHandle.threadId && result.kind === "timed-out";
+}
 
 const jsonFlag = Flag.Boolean("json").pipe(
-  Flag.withDescription("Print JSON instead of text."),
+  Flag.withDescription("Print JSON output."),
   Flag.withDefault(false),
 );
-const waitFlag = Flag.Boolean("wait").pipe(
-  Flag.withDescription(
-    "Wait for the agent to finish and print its reply. Exits 1 if the run fails and 2 if it waits for an answer.",
-  ),
-  Flag.withDefault(false),
-);
-const messageArgument = Argument.String("message").pipe(
-  Argument.withDescription("Message for the agent, or - to read it from stdin."),
-);
-const threadArgument = Argument.String("thread").pipe(Argument.withDescription("Thread id."));
 
-const decodeThreadIdValue = Schema.decodeUnknownEffect(ThreadId);
-const decodeTitle = Schema.decodeUnknownEffect(TrimmedNonEmptyString);
-const decodeThreadId = (value: string) =>
-  decodeThreadIdValue(value.trim()).pipe(
-    Effect.mapError(() => new ThreadUsageError({ detail: `'${value}' is not a thread id.` })),
-  );
-
-const threadListCommand = Command.make("list", {
-  ...projectLocationFlags,
-  project: Flag.String("project").pipe(
-    Flag.withDescription("Project id or a path inside the project. Defaults to this directory."),
-    Flag.withDefault("."),
+const threadLocationFlags = {
+  baseDir: Flag.String("base-dir").pipe(Flag.optional),
+  stateDir: Flag.String("state-dir").pipe(
+    Flag.withDescription("Explicit active state directory (used by the generated wrapper)."),
+    Flag.optional,
   ),
+} as const;
+
+const currentCommand = Command.make("current", {
+  ...threadLocationFlags,
   json: jsonFlag,
 }).pipe(
-  Command.withDescription("List a project's threads, newest first."),
+  Command.withDescription("Identify the current LastCode thread."),
   Command.withHandler((flags) =>
-    withThreadTools(
-      flags,
-      Effect.fn("cli.thread.list")(function* (tools) {
-        const project = yield* resolveProject(tools, flags.project);
-        const threads: Array<OrchestratorMcpThreadListItem> = [];
-        let cursor: number | null = 0;
-        while (cursor !== null) {
-          const page: OrchestratorMcpThreadListResult = yield* tools.call(
-            "t3_thread_list",
-            { projectId: project.id, includeSubagents: false, limit: 100, cursor },
-            OrchestratorMcpThreadListResult,
-          );
-          threads.push(...page.threads);
-          cursor = page.nextCursor;
-        }
-        if (flags.json) {
-          return yield* printJson(threads);
-        }
-        for (const thread of threads) {
-          yield* Console.log(`${thread.threadId}  ${thread.status.padEnd(11)}  ${thread.title}`);
-        }
-      }),
-    ).pipe(reportThreadErrors),
+    runThreadRead(flags, (source) =>
+      currentThreadOutput(source).pipe(
+        Effect.mapError((cause) =>
+          isThreadCliError(cause)
+            ? cause
+            : new ThreadCliError({ operation: "current output encoding", cause }),
+        ),
+      ),
+    ),
   ),
 );
 
-const threadStartCommand = Command.make("start", {
-  ...projectLocationFlags,
-  project: Argument.String("project").pipe(
-    Argument.withDescription("Project id or a path inside the project, such as ."),
-  ),
-  message: messageArgument,
-  title: Flag.String("title").pipe(
-    Flag.withDescription("Thread title. Defaults to the message's first line."),
-    Flag.optional,
-  ),
-  provider: Flag.String("provider").pipe(
-    Flag.withDescription("Provider instance id. Pass with --model."),
-    Flag.optional,
-  ),
-  model: Flag.String("model").pipe(
-    Flag.withDescription("Model slug. Defaults to the project's default model."),
-    Flag.optional,
-  ),
-  worktree: Flag.String("worktree").pipe(
+const listCommand = Command.make("list", {
+  ...threadLocationFlags,
+  json: jsonFlag,
+  project: Flag.String("project").pipe(
     Flag.withDescription(
-      "Run in a new git worktree based on this branch, tag, or commit, instead of the project folder.",
+      "List a live project's threads by id or path instead of this environment's active threads.",
     ),
     Flag.optional,
   ),
-  branch: Flag.String("branch").pipe(
-    Flag.withDescription("Branch name for the new worktree."),
+}).pipe(
+  Command.withDescription("List active threads in this LastCode environment."),
+  Command.withHandler((flags) =>
+    Effect.gen(function* () {
+      if (Option.isSome(flags.project)) {
+        return yield* listProjectThreads({ ...flags, project: flags.project.value });
+      }
+      return yield* runThreadRead(flags, (source) =>
+        listThreadsOutput(source).pipe(
+          Effect.mapError(
+            (cause) => new ThreadCliError({ operation: "list output encoding", cause }),
+          ),
+        ),
+      );
+    }),
+  ),
+);
+
+const readCommand = Command.make("read", {
+  ...threadLocationFlags,
+  json: jsonFlag,
+  thread: Argument.String("thread").pipe(
+    Argument.withDescription("Exact LastCode thread id or unambiguous id prefix."),
+  ),
+  turnLimit: Flag.Int("turn-limit").pipe(
+    Flag.withDescription(`Recent user-turn window (1-${THREAD_READ_MAX_TURN_LIMIT}).`),
+    Flag.withDefault(THREAD_READ_DEFAULT_TURN_LIMIT),
+  ),
+}).pipe(
+  Command.withDescription("Read a bounded recent transcript for one thread."),
+  Command.withHandler((flags) =>
+    runThreadRead(flags, (source) =>
+      readThreadOutput(source, flags.thread, flags.turnLimit).pipe(
+        Effect.mapError((cause) =>
+          isThreadCliError(cause)
+            ? cause
+            : new ThreadCliError({ operation: "read output encoding", cause }),
+        ),
+      ),
+    ),
+  ),
+);
+
+const sendCommand = Command.make("send", {
+  ...threadLocationFlags,
+  json: jsonFlag,
+  thread: Argument.String("thread").pipe(
+    Argument.withDescription("Exact LastCode thread id or unambiguous id prefix."),
+  ),
+  message: Flag.String("message").pipe(
+    Flag.withDescription(
+      "User-directed message to send with stable LastCode JSON and tracked wait support.",
+    ),
     Flag.optional,
   ),
-  wait: waitFlag,
-  json: jsonFlag,
+  positionalMessage: Argument.String("message").pipe(
+    Argument.withDescription(
+      "Queue a message through MCP, or - to read stdin; --wait prints the final reply.",
+    ),
+    Argument.optional,
+  ),
+  wait: Flag.Boolean("wait").pipe(
+    Flag.withDescription(
+      "Wait for tracked JSON with --message, or the agent's reply with a positional message.",
+    ),
+    Flag.withDefault(false),
+  ),
+  steerNative: Flag.Boolean("steer-native").pipe(
+    Flag.withDescription(
+      "Deliver to the active turn without interrupting, restarting, or queuing.",
+    ),
+    Flag.withDefault(false),
+  ),
+  timeout: Flag.String("timeout").pipe(
+    Flag.withDescription("Maximum wait duration (for example, '10 minutes')."),
+    Flag.optional,
+  ),
 }).pipe(
-  Command.withDescription("Start a thread in a project and print its id."),
+  Command.withDescription("Send a user-directed message to one live thread."),
   Command.withHandler((flags) =>
     Effect.gen(function* () {
-      const message = yield* readMessageArgument(flags.message);
-      const workspaceStrategy = yield* launchWorkspaceStrategy(flags);
-      if (Option.isSome(flags.provider) !== Option.isSome(flags.model)) {
-        return yield* new ThreadUsageError({ detail: "--provider and --model go together." });
+      if (Option.isSome(flags.message) === Option.isSome(flags.positionalMessage)) {
+        return yield* new ThreadUsageError({
+          detail: "Pass exactly one message: --message <text> for tracked LastCode JSON, or a positional message for MCP reply output.",
+        });
       }
-      const title = yield* decodeTitle(
-        Option.getOrElse(flags.title, () => titleFromMessage(message)),
-      ).pipe(Effect.mapError(() => new ThreadUsageError({ detail: "The title is empty." })));
-      yield* withThreadTools(
-        flags,
-        Effect.fn("cli.thread.start")(function* (tools) {
-          const project = yield* resolveProject(tools, flags.project);
-          const launched = yield* tools.call(
-            "t3_thread_launch",
-            {
-              projectId: project.id,
-              title,
-              message,
-              ...(workspaceStrategy === undefined ? {} : { workspaceStrategy }),
-              ...(Option.isSome(flags.provider) && Option.isSome(flags.model)
-                ? {
-                    modelSelection: {
-                      instanceId: flags.provider.value,
-                      model: flags.model.value,
-                    },
-                  }
-                : {}),
-            },
-            ThreadLaunchResult,
-          );
-          if (flags.wait && launched.runId !== null) {
-            if (!flags.json) yield* Console.error(`Thread ${launched.threadId}`);
-            return yield* finishRun(tools, {
-              threadId: launched.threadId,
-              runId: launched.runId,
-              json: flags.json,
-            });
-          }
-          yield* flags.json ? printJson(launched) : Console.log(launched.threadId);
-        }),
+      if (Option.isSome(flags.positionalMessage)) {
+        if (flags.steerNative || Option.isSome(flags.timeout)) {
+          return yield* new ThreadUsageError({
+            detail: "--steer-native and --timeout require --message <text>.",
+          });
+        }
+        return yield* sendMcpThreadMessage({ ...flags, message: flags.positionalMessage.value });
+      }
+      const message = Option.getOrThrow(flags.message);
+      const timeoutMs = yield* decodeThreadWaitDuration(
+        Option.getOrElse(flags.timeout, () => "10 minutes"),
+      ).pipe(
+        Effect.map(Duration.toMillis),
+        Effect.flatMap(decodeThreadWaitTimeoutMs),
       );
-    }).pipe(reportThreadErrors),
+      return yield* runThreadSend(
+        flags,
+        flags.thread,
+        message,
+        flags.wait,
+        timeoutMs,
+        flags.steerNative,
+      );
+    }).pipe(reportThreadErrors, Effect.provide(FetchHttpClient.layer)),
   ),
 );
 
-const threadSendCommand = Command.make("send", {
-  ...projectLocationFlags,
-  thread: threadArgument,
-  message: messageArgument,
-  wait: waitFlag,
+const waitCommand = Command.make("wait", {
+  ...threadLocationFlags,
   json: jsonFlag,
+  waitHandle: Argument.String("wait-handle").pipe(
+    Argument.withDescription("Compact JSON wait handle returned by send --wait."),
+  ),
+  timeout: Flag.String("timeout").pipe(
+    Flag.withDescription("Maximum wait duration (for example, '10 minutes')."),
+    Flag.withDefault("10 minutes"),
+  ),
 }).pipe(
-  Command.withDescription(
-    "Send a message to a thread. A busy thread gets it as its next turn; nothing is interrupted.",
-  ),
+  Command.withDescription("Resume waiting for one exact tracked thread request."),
   Command.withHandler((flags) =>
-    Effect.gen(function* () {
-      const threadId = yield* decodeThreadId(flags.thread);
-      const message = yield* readMessageArgument(flags.message);
-      yield* withThreadTools(
-        flags,
-        Effect.fn("cli.thread.send")(function* (tools) {
-          const sent = yield* tools.call(
-            "t3_thread_send",
-            { threadId, message, mode: "queue" },
-            OrchestratorMcpThreadSendResult,
-          );
-          if (flags.wait) {
-            return yield* finishRun(tools, { threadId, runId: sent.runId, json: flags.json });
-          }
-          yield* flags.json
-            ? printJson(sent)
-            : Console.log(sent.delivery === "queued" ? "Queued." : "Sent.");
-        }),
-      );
-    }).pipe(reportThreadErrors),
-  ),
-);
-
-const threadShowCommand = Command.make("show", {
-  ...projectLocationFlags,
-  thread: threadArgument,
-  messages: Flag.Int("messages").pipe(
-    Flag.withDescription("How many of the latest messages to print."),
-    Flag.withDefault(10),
-  ),
-  json: jsonFlag,
-}).pipe(
-  Command.withDescription("Show a thread's state and its latest messages."),
-  Command.withHandler((flags) =>
-    Effect.gen(function* () {
-      const threadId = yield* decodeThreadId(flags.thread);
-      yield* withThreadTools(
-        flags,
-        Effect.fn("cli.thread.show")(function* (tools) {
-          const { thread, items } = yield* readTimeline(tools, threadId, "messages");
-          const conversation = items.filter(
-            (item) => item.type === "user_message" || item.type === "assistant_message",
-          );
-          const latest = conversation.slice(Math.max(0, conversation.length - flags.messages));
-          const messages = yield* Effect.forEach(latest, (item) =>
-            readFullText(tools, threadId, item).pipe(
-              Effect.map((text) => ({
-                role: item.type === "user_message" ? "user" : "assistant",
-                runId: item.runId,
-                text,
-              })),
-            ),
-          );
-          if (flags.json) {
-            return yield* printJson({ thread, messages });
-          }
-          yield* Console.log(thread.title);
-          yield* Console.log(
-            [thread.threadId, thread.status, `${thread.providerInstanceId}/${thread.model}`].join(
-              "  ",
-            ),
-          );
-          if (thread.worktreePath !== null) {
-            yield* Console.log(`${thread.branch ?? "(no branch)"}  ${thread.worktreePath}`);
-          }
-          if (thread.pendingRequestCount > 0) {
-            yield* Console.log(`Waiting for ${thread.pendingRequestCount} answer(s).`);
-          }
-          for (const entry of messages) {
-            yield* Console.log(`\n[${entry.role}]\n${entry.text}`);
-          }
-        }),
-      );
-    }).pipe(reportThreadErrors),
+    decodeThreadWaitDuration(flags.timeout).pipe(
+      Effect.map(Duration.toMillis),
+      Effect.flatMap(decodeThreadWaitTimeoutMs),
+      Effect.flatMap((timeoutMs) => runThreadWait(flags, flags.waitHandle, timeoutMs)),
+      Effect.provide(FetchHttpClient.layer),
+    ),
   ),
 );
 
 export const threadCommand = Command.make("thread").pipe(
-  Command.withDescription("Start, message, and read threads on the running server."),
+  Command.withDescription("Inspect, start, and message LastCode threads."),
   Command.withSubcommands([
-    threadListCommand,
+    currentCommand,
+    listCommand,
+    readCommand,
+    sendCommand,
+    waitCommand,
     threadStartCommand,
-    threadSendCommand,
     threadShowCommand,
   ]),
 );
