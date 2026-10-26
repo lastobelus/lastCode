@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { getPairingTokenFromUrl, stripPreviewBootstrapTokenFromUrl } from "@t3tools/shared/remote";
 
 import * as Option from "effect/Option";
+import * as Base64Url from "effect/encoding/Base64Url";
 import {
   BearerConnectionTarget,
   RelayConnectionTarget,
@@ -36,6 +37,14 @@ const lease = {
   expiresAt: "2026-10-03T00:00:00.000Z",
   status: "active" as const,
 };
+const savedDocumentPath = `/api/assets/${Base64Url.encode(
+  JSON.stringify({
+    version: 1,
+    kind: "attachment",
+    attachmentId: "example-report",
+    expiresAt: 1,
+  }),
+)}.${Base64Url.encode(new Uint8Array(32))}/report.pdf`;
 
 describe("prepareHostedPreview", () => {
   beforeEach(() => vi.restoreAllMocks());
@@ -217,7 +226,7 @@ describe("prepareHostedPreview", () => {
   ] as const)(
     "recovers a managed app asset on another loopback port for %s via %s",
     async (purpose, environmentUrl) => {
-      const url = "http://localhost:5173/api/assets/app-signed/report.pdf?page=2#chart";
+      const url = `http://localhost:5173${savedDocumentPath}?page=2#chart`;
       const recover = vi.fn(async () => ({ ...lease, restarted: true }));
       const createResourceUrl = vi.fn(async () => "/api/assets/environment-signed/report.pdf");
       const renewDocumentUrl = vi.fn(async () => {
@@ -247,8 +256,38 @@ describe("prepareHostedPreview", () => {
     },
   );
 
+  it.each(
+    ["empty", "unavailable"].flatMap((listing) =>
+      [
+        "/api/assets/logo.png",
+        "/api/assets/images/logo.png",
+        "/api/assets/app.signature/logo.png",
+        `/api/assets/${Base64Url.encode(JSON.stringify({ version: 1, kind: "project-favicon", expiresAt: 1 }))}.signature/logo.png`,
+      ].map((path) => ({ listing, url: `http://localhost:3000${path}` })),
+    ),
+  )("preserves ordinary loopback assets with $listing leases: $url", async ({ listing, url }) => {
+    const renewDocumentUrl = vi.fn(async () => {
+      throw new Error("Not an environment document capability");
+    });
+    const recover = vi.fn(async () => lease);
+    const result = await prepareHostedPreview({
+      threadRef,
+      url,
+      environmentUrl: "https://environment.example/",
+      list: async () => {
+        if (listing === "unavailable") throw new Error("Lease lookup unavailable");
+        return [];
+      },
+      recover,
+      renewDocumentUrl,
+    });
+    expect(result).toEqual({ url, managed: false, restored: false });
+    expect(renewDocumentUrl).not.toHaveBeenCalled();
+    expect(recover).not.toHaveBeenCalled();
+  });
+
   it.each([
-    "http://127.0.0.1:3773/api/assets/expired/report.pdf?page=2#chart",
+    `http://127.0.0.1:3773${savedDocumentPath}?page=2#chart`,
     "http://previous-environment.example:3773/api/assets/expired/report.pdf?page=2#chart",
   ])("renews an owned saved document against its connected origin: %s", async (url) => {
     const renewDocumentUrl = vi.fn(async () => "/api/assets/renewed/report.pdf?page=2#chart");
@@ -273,7 +312,7 @@ describe("prepareHostedPreview", () => {
   });
 
   it("renews a saved loopback document even when preview lease lookup fails", async () => {
-    const url = "http://127.0.0.1:3773/api/assets/expired/report.pdf";
+    const url = `http://127.0.0.1:3773${savedDocumentPath}`;
     const renewDocumentUrl = vi.fn(async () => "/api/assets/renewed/report.pdf");
     const recover = vi.fn(async () => lease);
     const result = await prepareHostedPreview({
@@ -329,12 +368,15 @@ describe("prepareHostedPreview", () => {
     },
   );
 
-  it("surfaces document renewal failure without falling back to the expired URL", async () => {
+  it.each([
+    "https://environment.example/api/assets/expired/report.pdf",
+    `http://127.0.0.1:3773${savedDocumentPath}`,
+  ])("surfaces document renewal failure without opening the expired URL: %s", async (url) => {
     const list = vi.fn(async () => [lease]);
     await expect(
       prepareHostedPreview({
         threadRef,
-        url: "https://environment.example/api/assets/expired/report.pdf",
+        url,
         environmentUrl: "https://environment.example/",
         list,
         recover: async () => lease,
@@ -343,7 +385,7 @@ describe("prepareHostedPreview", () => {
         },
       }),
     ).rejects.toBeInstanceOf(HostedPreviewRecoveryError);
-    expect(list).not.toHaveBeenCalled();
+    expect(list).toHaveBeenCalledTimes(url.startsWith("http://127.0.0.1:") ? 1 : 0);
   });
 
   it("prepares exact remote media on the connected origin without changing Browser identity", async () => {

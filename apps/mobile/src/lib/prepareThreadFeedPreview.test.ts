@@ -156,6 +156,38 @@ describe("prepareThenOpenThreadFeedUrl", () => {
     expect(opened).toHaveBeenCalledWith("https://public.example/article?a=1#section");
   });
 
+  it.each(["navigation", "resource"] as const)(
+    "opens an unmanaged local asset for %s without environment renewal",
+    async (purpose) => {
+      const url = "http://localhost:3000/api/assets/logo.png?size=2#preview";
+      const external = vi.fn(async (destination: string) => destination);
+      const browser = vi.fn(async (destination: string) => destination);
+      const recover = vi.fn(async () => lease);
+      const renewDocumentUrl = vi.fn(async () => {
+        throw new Error("The environment does not own this asset");
+      });
+      await expect(
+        prepareThenOpenThreadFeedUrl(
+          {
+            threadRef,
+            url,
+            purpose,
+            environmentUrl: "https://workspace.example/",
+            list: async () => [],
+            recover,
+            renewDocumentUrl,
+          },
+          external,
+          browser,
+        ),
+      ).resolves.toBe(url);
+      expect(external).toHaveBeenCalledExactlyOnceWith(url);
+      expect(browser).not.toHaveBeenCalled();
+      expect(recover).not.toHaveBeenCalled();
+      expect(renewDocumentUrl).not.toHaveBeenCalled();
+    },
+  );
+
   it("waits for managed recovery before a thread markdown link opens externally", async () => {
     let finishRecovery!: (recovered: typeof lease) => void;
     let recoveryStarted!: () => void;

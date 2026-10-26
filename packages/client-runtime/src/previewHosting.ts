@@ -1,4 +1,6 @@
 import * as Option from "effect/Option";
+import * as Base64Url from "effect/encoding/Base64Url";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import type { ConnectionCatalogEntry } from "./connection/catalog.ts";
 import type { PreparedConnection } from "./connection/model.ts";
@@ -112,6 +114,30 @@ export function hostedPreviewNavigationUrl(
 const inFlightListings = new Map<string, Promise<ReadonlyArray<PreviewHostingLeaseSummary>>>();
 const inFlightRecoveries = new Map<string, Promise<PreviewHostingRecoverResult>>();
 
+const decodeSavedDocumentClaims = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Struct({
+      version: Schema.Literal(1),
+      kind: Schema.Literals([
+        "attachment",
+        "workspace-file",
+        "workspace-file-exact",
+        "media-file-exact",
+        "managed-preview-resource",
+      ]),
+      expiresAt: Schema.Number,
+    }),
+  ),
+);
+
+function isSavedDocumentCapability(url: URL): boolean {
+  const match = /^\/api\/assets\/([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\/.+$/u.exec(url.pathname);
+  if (!match) return false;
+  const decoded = Base64Url.decodeString(match[1]!);
+  // Recognition only: the environment validates the full claims and signature on renewal.
+  return Result.isSuccess(decoded) && Option.isSome(decodeSavedDocumentClaims(decoded.success));
+}
+
 /** Share pending work only; a later opening must check the server again. */
 function sharePending<A>(pending: Map<string, Promise<A>>, key: string, run: () => Promise<A>) {
   const existing = pending.get(key);
@@ -168,7 +194,8 @@ export function prepareHostedPreview(
   const targetIsDocumentCandidate =
     (target.protocol === "http:" || target.protocol === "https:") &&
     target.pathname.startsWith("/api/assets/") &&
-    (isLoopbackHost(target.hostname) || targetIsEnvironmentOrigin);
+    (targetIsEnvironmentOrigin ||
+      (isLoopbackHost(target.hostname) && isSavedDocumentCapability(target)));
   const renewDocument = async (): Promise<PreparedHostedPreview> => {
     if (!targetIsDocumentCandidate || input.renewDocumentUrl === undefined) return original;
     try {
