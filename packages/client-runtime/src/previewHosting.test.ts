@@ -211,6 +211,43 @@ describe("prepareHostedPreview", () => {
   });
 
   it.each([
+    ["navigation", "http://localhost:3773/"],
+    ["resource", "http://localhost:3773/"],
+    ["resource", "https://environment.example/"],
+  ] as const)(
+    "recovers a managed app asset on another loopback port for %s via %s",
+    async (purpose, environmentUrl) => {
+      const url = "http://localhost:5173/api/assets/app-signed/report.pdf?page=2#chart";
+      const recover = vi.fn(async () => ({ ...lease, restarted: true }));
+      const createResourceUrl = vi.fn(async () => "/api/assets/environment-signed/report.pdf");
+      const renewDocumentUrl = vi.fn(async () => {
+        throw new Error("App capability is not signed by the environment");
+      });
+      const result = await prepareHostedPreview({
+        threadRef,
+        url,
+        purpose,
+        environmentUrl,
+        list: async () => [lease],
+        recover,
+        createResourceUrl,
+        renewDocumentUrl,
+      });
+      expect(result).toMatchObject({ url, localUrl: url, managed: true, restored: true });
+      expect(recover).toHaveBeenCalledExactlyOnceWith(lease, {
+        bootstrap: purpose === "navigation",
+      });
+      expect(renewDocumentUrl).not.toHaveBeenCalled();
+      if (purpose === "resource") {
+        expect(createResourceUrl).toHaveBeenCalledExactlyOnceWith(lease, url);
+        expect(result.resourceUrl).toBe(
+          new URL("/api/assets/environment-signed/report.pdf", environmentUrl).href,
+        );
+      }
+    },
+  );
+
+  it.each([
     "http://127.0.0.1:3773/api/assets/expired/report.pdf?page=2#chart",
     "http://previous-environment.example:3773/api/assets/expired/report.pdf?page=2#chart",
   ])("renews an owned saved document against its connected origin: %s", async (url) => {
@@ -232,7 +269,31 @@ describe("prepareHostedPreview", () => {
       restarted: true,
     });
     expect(renewDocumentUrl).toHaveBeenCalledExactlyOnceWith(url, true);
-    expect(list).not.toHaveBeenCalled();
+    expect(list).toHaveBeenCalledTimes(url.startsWith("http://127.0.0.1:") ? 1 : 0);
+  });
+
+  it("renews a saved loopback document even when preview lease lookup fails", async () => {
+    const url = "http://127.0.0.1:3773/api/assets/expired/report.pdf";
+    const renewDocumentUrl = vi.fn(async () => "/api/assets/renewed/report.pdf");
+    const recover = vi.fn(async () => lease);
+    const result = await prepareHostedPreview({
+      threadRef,
+      url,
+      environmentUrl: "https://environment.example/",
+      list: async () => {
+        throw new Error("Lease lookup unavailable");
+      },
+      recover,
+      renewDocumentUrl,
+    });
+    expect(result).toEqual({
+      url: "https://environment.example/api/assets/renewed/report.pdf",
+      managed: false,
+      restored: true,
+      restarted: true,
+    });
+    expect(renewDocumentUrl).toHaveBeenCalledExactlyOnceWith(url, true);
+    expect(recover).not.toHaveBeenCalled();
   });
 
   it("does not offer a foreign asset route to document renewal", async () => {

@@ -156,36 +156,37 @@ export function prepareHostedPreview(
   } catch {
     return Promise.resolve(original);
   }
-  if (
+  const targetIsEnvironmentOrigin =
+    target.origin === environment.origin ||
+    input.knownEnvironmentUrls?.some((known) => {
+      try {
+        return new URL(known).origin === target.origin;
+      } catch {
+        return false;
+      }
+    }) === true;
+  const targetIsDocumentCandidate =
     (target.protocol === "http:" || target.protocol === "https:") &&
     target.pathname.startsWith("/api/assets/") &&
-    (isLoopbackHost(target.hostname) ||
-      target.origin === environment.origin ||
-      input.knownEnvironmentUrls?.some((known) => {
-        try {
-          return new URL(known).origin === target.origin;
-        } catch {
-          return false;
-        }
-      }))
-  ) {
-    if (input.renewDocumentUrl === undefined) return Promise.resolve(original);
-    return (async () => {
-      try {
-        const issued = await input.renewDocumentUrl!(input.url, input.purpose !== "resource");
-        if (issued === null) return original;
-        const renewed = connectedAssetUrl(issued, environment);
-        return {
-          url: renewed,
-          managed: false,
-          restored: true,
-          ...(renewed === input.url ? {} : { restarted: true }),
-        };
-      } catch (cause) {
-        throw new HostedPreviewRecoveryError(cause);
-      }
-    })();
-  }
+    (isLoopbackHost(target.hostname) || targetIsEnvironmentOrigin);
+  const renewDocument = async (): Promise<PreparedHostedPreview> => {
+    if (!targetIsDocumentCandidate || input.renewDocumentUrl === undefined) return original;
+    try {
+      const issued = await input.renewDocumentUrl(input.url, input.purpose !== "resource");
+      if (issued === null) return original;
+      const renewed = connectedAssetUrl(issued, environment);
+      return {
+        url: renewed,
+        managed: false,
+        restored: true,
+        ...(renewed === input.url ? {} : { restarted: true }),
+      };
+    } catch (cause) {
+      throw new HostedPreviewRecoveryError(cause);
+    }
+  };
+  // Other loopback ports can serve app-owned asset capabilities; check their leases first.
+  if (targetIsDocumentCandidate && targetIsEnvironmentOrigin) return renewDocument();
   const targetIsLoopback = isLoopbackHost(target.hostname);
   const targetIsCurrentEnvironment =
     normalizeHostname(target.hostname) === normalizeHostname(environment.hostname);
@@ -213,7 +214,7 @@ export function prepareHostedPreview(
     try {
       leases = await sharePending(inFlightListings, scope, input.list);
     } catch {
-      return original;
+      return renewDocument();
     }
     const threadLeases = leases.filter((lease) => lease.threadId === input.threadRef.threadId);
     const selectOwned = targetIsPreviousPrivateAddress
@@ -233,7 +234,7 @@ export function prepareHostedPreview(
       localHttp.port = target.port || "443";
       owned = selectOwned(localHttp, threadLeases);
     }
-    if (!owned) return original;
+    if (!owned) return renewDocument();
     const localDestination = new URL(target);
     const canonical = new URL(owned.url);
     localDestination.protocol = canonical.protocol;
