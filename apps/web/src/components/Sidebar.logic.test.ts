@@ -6,6 +6,8 @@ import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import {
   archiveSelectedThreadEntries,
+  buildBulkThreadDeleteContextMenuItem,
+  collectUnprotectedBulkThreadEntries,
   deleteSelectedThreadEntries,
   getFallbackThreadIdAfterDelete,
   hasUnseenCompletion,
@@ -16,6 +18,8 @@ import {
   resolveProjectStatusIndicator,
   resolveSidebarSweepKeys,
   resolveSidebarThreadStatus,
+  filterSidebarV2VisibleThreads,
+  sortLogicalProjectsForSidebar,
   resolveSidebarV2TopStatus,
   resolveThreadStatusPill,
   resolveWorkingStartedAt,
@@ -35,7 +39,17 @@ import {
   resolveSidebarDropVerb,
 } from "./Sidebar.logic";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
-import { EnvironmentId, ProjectId, ProviderInstanceId, RunId, ThreadId } from "@t3tools/contracts";
+import { sortSettledThreads } from "@t3tools/client-runtime/state/thread-sort";
+import {
+  type ActionResumeState,
+  type ThreadWorktreeCleanup,
+  CommandId,
+  EnvironmentId,
+  ProjectId,
+  ProviderInstanceId,
+  RunId,
+  ThreadId,
+} from "@t3tools/contracts";
 
 import {
   DEFAULT_INTERACTION_MODE,
@@ -161,7 +175,151 @@ describe("archiveSelectedThreadEntries", () => {
   });
 });
 
+describe("buildBulkThreadDeleteContextMenuItem", () => {
+  it("blocks a mixed selection containing a persistent thread", () => {
+    expect(buildBulkThreadDeleteContextMenuItem({ count: 3, hasPersistentThread: true })).toEqual({
+      id: "delete",
+      label: "Delete (3) (disable persistence first)",
+      destructive: true,
+      disabled: true,
+    });
+  });
+});
+
+describe("collectUnprotectedBulkThreadEntries", () => {
+  it("rechecks live persistence before starting a destructive batch", () => {
+    const threads = new Map([
+      ["ordinary", { id: "ordinary", persistent: false }],
+      ["protected", { id: "protected", persistent: false }],
+    ]);
+    const getEntry = (threadKey: string) => {
+      const thread = threads.get(threadKey);
+      return thread ? { threadKey, thread } : undefined;
+    };
+
+    expect(
+      collectUnprotectedBulkThreadEntries({
+        threadKeys: ["ordinary", "protected"],
+        getEntry,
+      }),
+    ).toHaveLength(2);
+
+    threads.set("protected", { id: "protected", persistent: true });
+
+    expect(
+      collectUnprotectedBulkThreadEntries({
+        threadKeys: ["ordinary", "protected"],
+        getEntry,
+      }),
+    ).toBeNull();
+  });
+});
+
 describe("sidebar thread lineage helpers", () => {
+  it.each<ThreadWorktreeCleanup>([
+    {
+      status: "queued",
+      repositoryRoot: "/repo",
+      worktreePath: "/repo-worktrees/recovery",
+      queuedAt: "2026-03-09T10:00:00.000Z",
+      blockedByThreadId: ThreadId.make("thread-blocker"),
+    },
+    {
+      status: "deleting",
+      repositoryRoot: "/repo",
+      worktreePath: "/repo-worktrees/recovery",
+      startedAt: "2026-03-09T10:00:00.000Z",
+    },
+    {
+      status: "failed",
+      repositoryRoot: "/repo",
+      worktreePath: "/repo-worktrees/recovery",
+      startedAt: "2026-03-09T10:00:00.000Z",
+      failedAt: "2026-03-09T10:01:00.000Z",
+      error: "worktree is busy",
+    },
+  ])("keeps archived subagent $status cleanup visible only until it settles", (worktreeCleanup) => {
+    const recovery = makeThreadFixture({
+      archivedAt: "2026-03-09T09:00:00.000Z",
+      deletedAt: "2026-03-09T10:00:00.000Z",
+      worktreeCleanup,
+      lineage: {
+        rootThreadId: ThreadId.make("thread-parent"),
+        parentThreadId: ThreadId.make("thread-parent"),
+        relationshipToParent: "subagent",
+      },
+    });
+    const scope = new Set([`${recovery.environmentId}:${recovery.projectId}`]);
+    expect(filterSidebarV2VisibleThreads([recovery], scope)).toEqual([recovery]);
+    expect(resolveSidebarThreadStatus(recovery)).toBe(`cleanup-${worktreeCleanup.status}`);
+    expect(filterSidebarV2VisibleThreads([recovery], new Set())).toEqual([]);
+    expect(filterSidebarV2VisibleThreads([{ ...recovery, worktreeCleanup: null }], scope)).toEqual(
+      [],
+    );
+    expect(
+      filterSidebarV2VisibleThreads(
+        [{ ...recovery, archivedAt: null, worktreeCleanup: null }],
+        scope,
+      ),
+    ).toEqual([]);
+    expect(recovery.archivedAt).toBe("2026-03-09T09:00:00.000Z");
+  });
+
+  it.each(["stopping", "failed"] as const)(
+    "shows a stranded %s archive repair without making ordinary owned children independent",
+    (status) => {
+      const owner = makeThreadFixture({
+        id: ThreadId.make("archive-owner"),
+        archivedAt: "2026-10-07T00:00:00.000Z",
+      });
+      const child = makeThreadFixture({
+        id: ThreadId.make("stranded-native"),
+        environmentId: owner.environmentId,
+        projectId: owner.projectId,
+        lineage: {
+          rootThreadId: owner.id,
+          parentThreadId: owner.id,
+          relationshipToParent: "subagent",
+        },
+        archivePending: {
+          threadId: owner.id,
+          commandId: CommandId.make("archive-repair"),
+          childDisposition: "stop_and_archive",
+          childThreadIds: [],
+          archiveThreadIds: [],
+          promoteThreadIds: [],
+          status,
+        },
+      });
+      const ordinaryChild = { ...child, id: ThreadId.make("ordinary-child"), archivePending: null };
+      const scope = new Set([`${owner.environmentId}:${owner.projectId}`]);
+      expect(filterSidebarV2VisibleThreads([owner, child, ordinaryChild], scope)).toEqual([child]);
+      expect(filterSidebarV2VisibleThreads([child, ordinaryChild], scope)).toEqual([child]);
+      expect(
+        filterSidebarV2VisibleThreads(
+          [{ ...owner, archivedAt: null }, child, ordinaryChild],
+          scope,
+        ),
+      ).toEqual([{ ...owner, archivedAt: null }]);
+      expect(filterSidebarV2VisibleThreads([owner, child], new Set())).toEqual([]);
+      expect(child.lineage.independent).toBeUndefined();
+      const nestedOwner = {
+        ...child,
+        archivePending: { ...child.archivePending!, threadId: child.id },
+      };
+      const nestedChild = {
+        ...nestedOwner,
+        id: ThreadId.make("nested-participant"),
+        lineage: { ...child.lineage, parentThreadId: nestedOwner.id },
+      };
+      const activeRoot = { ...owner, archivedAt: null };
+      expect(filterSidebarV2VisibleThreads([activeRoot, nestedOwner, nestedChild], scope)).toEqual([
+        activeRoot,
+        nestedOwner,
+      ]);
+    },
+  );
+
   it("maps an open subagent to its nearest visible ancestor's sidebar row", () => {
     const environmentId = EnvironmentId.make("environment-row");
     const otherEnvironmentId = EnvironmentId.make("environment-other");
@@ -241,6 +399,27 @@ describe("orderItemsByPreferredIds", () => {
 });
 
 describe("resolveSidebarThreadStatus", () => {
+  it.each(["stopping", "failed"] as const)(
+    "keeps persisted %s archive visible before provider and Action status",
+    (archiveState) => {
+      const thread = makeThreadFixture({
+        archivePending: {
+          threadId: ThreadId.make("archive-root"),
+          commandId: CommandId.make("archive-request"),
+          childDisposition: "stop_and_archive",
+          childThreadIds: [],
+          archiveThreadIds: [],
+          promoteThreadIds: [],
+          status: archiveState,
+        },
+        hasPendingApprovals: true,
+      });
+      const status = resolveSidebarThreadStatus(thread);
+      expect(status).toBe(archiveState === "failed" ? "archive-failed" : "archiving");
+      expect(resolveSidebarV2TopStatus({ status, isUnread: true, isWoke: true })).toBe(status);
+      expect(resolveSidebarThreadStatus({ ...thread, archivePending: null })).toBe("approval");
+    },
+  );
   const runtime = {
     status: "running" as const,
     activeRunId: null,
@@ -332,6 +511,73 @@ describe("resolveSidebarThreadStatus", () => {
         runtime: { ...runtime, status: "idle" as const, lastError: "persisted" },
       }),
     ).toBe("waiting");
+  });
+
+  it("keeps a thread question ahead of provider activity and Action progress", () => {
+    const question = { kind: "question" as const, raisedAt: "2026-03-09T10:00:00.000Z" };
+    expect(resolveSidebarThreadStatus({ ...idle, runtime, attention: question })).toBe("question");
+    expect(
+      resolveSidebarThreadStatus({
+        ...idle,
+        runtime,
+        attention: question,
+        hasPendingApprovals: true,
+      }),
+    ).toBe("approval");
+    expect(resolveSidebarV2TopStatus({ status: "question", isUnread: true, isWoke: true })).toBe(
+      "question",
+    );
+  });
+
+  it("uses Action progress while idle and keeps an active provider ahead of it", () => {
+    const action = {
+      runId: "action-1",
+      threadId: ThreadId.make("thread-1"),
+      projectId: ProjectId.make("project-1"),
+      actionId: "wait",
+      actionName: "Wait",
+      command: "wait",
+      terminalId: "terminal-1",
+      outcome: "running",
+      delivery: "armed",
+      startedAt: "2026-03-09T10:00:00.000Z",
+      finishedAt: null,
+      exitCode: null,
+      exitSignal: null,
+      progress: {
+        version: 1,
+        state: "working",
+        summary: "Checking",
+        updatedAt: "2026-03-09T10:00:00.000Z",
+      },
+    } satisfies ActionResumeState;
+    expect(resolveSidebarThreadStatus({ ...idle, actionResume: action })).toBe("working");
+    expect(
+      resolveSidebarThreadStatus({
+        ...idle,
+        actionResume: {
+          ...action,
+          progress: { ...action.progress, state: "waiting", summary: "Waiting" },
+        },
+      }),
+    ).toBe("waiting");
+    expect(
+      resolveSidebarThreadStatus({
+        ...idle,
+        actionResume: action,
+        runtime: { ...runtime, status: "idle" },
+      }),
+    ).toBe("working");
+    expect(
+      resolveSidebarThreadStatus({
+        ...idle,
+        actionResume: {
+          ...action,
+          progress: { ...action.progress, state: "waiting", summary: "Waiting" },
+        },
+        runtime,
+      }),
+    ).toBe("working");
   });
 });
 
@@ -437,6 +683,55 @@ describe("resolveThreadStatusPill", () => {
       updatedAt: "2026-03-09T10:00:00.000Z",
     },
   };
+
+  it.each(["stopping", "failed"] as const)(
+    "shows persisted %s archive ahead of provider work and approval",
+    (status) => {
+      const displayed = resolveThreadStatusPill({
+        thread: {
+          ...baseThread,
+          hasPendingApprovals: true,
+          archivePending: {
+            threadId: ThreadId.make("archive-root"),
+            commandId: CommandId.make("archive-request"),
+            childDisposition: "stop_and_archive",
+            childThreadIds: [],
+            archiveThreadIds: [],
+            promoteThreadIds: [],
+            status,
+          },
+        },
+      });
+      expect(displayed).toMatchObject({
+        label: status === "failed" ? "Archive failed" : "Archiving…",
+        pulse: false,
+      });
+      if (status === "failed")
+        expect(displayed?.description).toContain(
+          "some work may have stopped. Choose Archive again to retry, or dismiss to keep these threads as they are.",
+        );
+    },
+  );
+
+  it("shows a question after native input and before active work", () => {
+    expect(
+      resolveThreadStatusPill({
+        thread: {
+          ...baseThread,
+          attention: { kind: "question", raisedAt: "2026-03-09T10:00:00.000Z" },
+        },
+      }),
+    ).toMatchObject({ label: "Question", marker: "?", pulse: false });
+    expect(
+      resolveThreadStatusPill({
+        thread: {
+          ...baseThread,
+          hasPendingApprovals: true,
+          attention: { kind: "question", raisedAt: "2026-03-09T10:00:00.000Z" },
+        },
+      }),
+    ).toMatchObject({ label: "Pending Approval" });
+  });
 
   it("shows an active thread wait without a pulse and resumes Working when it ends", () => {
     const blocked = { ...baseThread, blockedOnThreadWait: true };
@@ -839,6 +1134,53 @@ describe("sortScopedProjectsForSidebar", () => {
 });
 
 describe("sortSidebarV2ProjectGroups", () => {
+  it("counts archived cleanup recovery as project activity until it settles", () => {
+    const activeProjectId = ProjectId.make("project-active");
+    const recoveryProjectId = ProjectId.make("project-recovery");
+    const projects = [activeProjectId, recoveryProjectId].map((id) => ({
+      ...makeProject({ id, updatedAt: "2026-03-09T09:00:00.000Z" }),
+      projectKey: id,
+      memberProjectRefs: [{ environmentId: localEnvironmentId, projectId: id }],
+    }));
+    const recovery = makeThread({
+      id: ThreadId.make("thread-recovery"),
+      projectId: recoveryProjectId,
+      archivedAt: "2026-03-09T09:00:00.000Z",
+      deletedAt: "2026-03-09T10:10:00.000Z",
+      updatedAt: "2026-03-09T10:10:00.000Z",
+      lineage: {
+        rootThreadId: ThreadId.make("thread-parent"),
+        parentThreadId: ThreadId.make("thread-parent"),
+        relationshipToParent: "subagent",
+      },
+      worktreeCleanup: {
+        status: "deleting",
+        repositoryRoot: "/repo",
+        worktreePath: "/repo-worktrees/recovery",
+        startedAt: "2026-03-09T10:10:00.000Z",
+      },
+    });
+    const active = makeThread({
+      projectId: activeProjectId,
+      updatedAt: "2026-03-09T10:05:00.000Z",
+    });
+    for (const { threads, expected } of [
+      { threads: [active, recovery], expected: [recoveryProjectId, activeProjectId] },
+      {
+        threads: [active, { ...recovery, worktreeCleanup: null }],
+        expected: [activeProjectId, recoveryProjectId],
+      },
+    ]) {
+      for (const sorted of [
+        sortSidebarV2ProjectGroups(projects, threads, "updated_at"),
+        sortLogicalProjectsForSidebar(projects, threads, "updated_at"),
+        sortScopedProjectsForSidebar(projects, threads, "updated_at"),
+      ]) {
+        expect(sorted.map((project) => project.id)).toEqual(expected);
+      }
+    }
+  });
+
   it("does not let a hidden subagent thread reorder projects", () => {
     const olderProjectId = ProjectId.make("project-older");
     const newerProjectId = ProjectId.make("project-newer");
@@ -992,8 +1334,8 @@ describe("navigation after parking a thread", () => {
             settledOverride,
             snoozedUntil,
             snoozedAt: null,
-            session: null,
-            latestTurn: null,
+            runtime: null,
+            latestRun: null,
             hasPendingApprovals,
             hasPendingUserInput: false,
           },

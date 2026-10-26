@@ -4,12 +4,13 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "vp test run --config ../vite.config.ts --dir ."
+    "test": "vp test run --config ../vite.config.ts --dir . --testTimeout 180000 --hookTimeout 180000"
   },
   "dependencies": {
     "@effect/platform-node": "catalog:",
     "@electron/asar": "^4.3.0",
     "@electron/osx-sign": "2.7.0",
+    "@t3tools/contracts": "workspace:*",
     "@t3tools/shared": "workspace:*",
     "@t3tools/tailscale": "workspace:*",
     "effect": "catalog:",

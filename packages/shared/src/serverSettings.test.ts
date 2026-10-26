@@ -62,6 +62,28 @@ describe("serverSettings helpers", () => {
     expect([on.idleCompaction, on.compactIdleThreads]).toEqual(["beforeCacheExpires", true]);
   });
 
+  it("changes one CI limit without resetting the other environment limits", () => {
+    const configured = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      lastcodeLocalCi: {
+        quickCiMode: "github",
+        maxConcurrentRuns: 2,
+        packageConcurrency: 3,
+        backgroundPriority: false,
+      },
+    });
+    expect(
+      applyServerSettingsPatch(configured, { lastcodeLocalCi: { compilerThreads: 4 } })
+        .lastcodeLocalCi,
+    ).toEqual({
+      quickCiMode: "github",
+      maxConcurrentRuns: 2,
+      packageConcurrency: 3,
+      compilerThreads: 4,
+      backgroundPriority: false,
+    });
+    expect(configured.lastcodeLocalCi.compilerThreads).toBe(2);
+  });
+
   it("changes a cleanup rule without replacing the machine's other rules", () => {
     const enabled = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
       storageCleanup: { worktreeAfterDays: 8, worktreeOnMerge: true, logsAfterDays: 30 },

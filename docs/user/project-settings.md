@@ -19,6 +19,12 @@ while a project is selected.
 When the selected environments disagree, the control shows **Mixed** in place of a value and the
 layers icon turns amber. Picking a value applies it to every selected environment.
 
+In LastCode, **Settings → LastCode → Local CI** uses the same page selector. These preferences
+apply to all projects on an environment. With a project selected, the Local CI section offers
+connected environments that support it; choosing one switches to that environment's defaults.
+If any selected connected environment does not support Local CI, the section offers supporting
+environments instead of editable controls. Offline environments keep their current settings.
+
 Changing an environment value never touches a project's own override. When projects override the
 setting you are editing, the layers icon counts them and the chain lists each one with its value:
 click a project to jump to it, or **Reset all** to make those projects follow the environment

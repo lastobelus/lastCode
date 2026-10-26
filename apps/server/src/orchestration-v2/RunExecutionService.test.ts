@@ -2788,7 +2788,9 @@ function captureRootRunTermination(input: {
   readonly afterIngestion?:
     | Effect.Effect<void, ThreadRecoveryService.ThreadRecoveryError>
     | ((
-        persist: (events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>) => Effect.Effect<void>,
+        persist: (
+          events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>,
+        ) => Effect.Effect<void>,
       ) => Effect.Effect<void, ThreadRecoveryService.ThreadRecoveryError>);
 }) {
   return Effect.gen(function* () {
@@ -3011,7 +3013,9 @@ function captureRootRunTermination(input: {
 
 // The fixture's adapter stream feeds a manager-style queue. The replacement
 // reader must consume all earlier events before acknowledging its marker.
-function bufferRecoveryTestSubscription(subscription: ProviderAdapter.ProviderAdapterV2EventSubscription) {
+function bufferRecoveryTestSubscription(
+  subscription: ProviderAdapter.ProviderAdapterV2EventSubscription,
+) {
   if (subscription.requestDrain !== undefined) return Effect.succeed(subscription);
   return Effect.gen(function* () {
     type Signal =

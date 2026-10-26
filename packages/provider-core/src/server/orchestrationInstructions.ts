@@ -31,7 +31,7 @@ To mention another thread to the user, use the ready-to-paste \`link\` returned 
 - Use \`preview_*\` for browser work the request or project instructions call for, or a page or tab the user names. Public pages: web fetch or search unless browser work was asked; then preview tools only, no web fetch.`,
 ];
 
-export const T3_CODE_ORCHESTRATION_INSTRUCTIONS = `
+const T3_CODE_ORCHESTRATION_INSTRUCTIONS = `
 
 ${T3_CODE_ORCHESTRATION_SECTIONS.join("\n\n")}
 `;
