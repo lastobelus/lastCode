@@ -119,9 +119,12 @@ child with a `taskId` receipt. This section holds the setup detail they leave ou
 
 ### Choose the target
 
-A listed, eligible Action shows only that it exists and is opted in. Before launching for a child,
-confirm in **Settings → Projects** that its saved command, opt-in, working directory, environment,
-and any worktree-local package or build selection match the child's exact checkout and head.
+A listed, eligible Action shows only that it exists and is opted in. Use `t3_project_read` to
+inspect the registered workspace and saved scripts, and `t3_thread_read` to check the parent's
+checkout. Before launching for a child, verify the saved command, opt-in, effective working
+directory, environment, and worktree-local package or build selection against the child's exact
+checkout and head. Use **Settings → Projects** when importing, changing, or opting in an Action;
+reading its definition does not itself need a UI visit.
 
 - **Shared checkout.** When the child works in the parent's checkout, the parent's saved Action
   usually targets it already; verify it as above. Serialize changes to that checkout while the
@@ -140,23 +143,28 @@ A parent whose linked PRs have merged can be settled automatically while it stil
 result. The parent thread's existing menu control disables automatic settlement for that thread;
 `t3_thread_read` reports the current value as `autoSettleDisabledAt`, and no MCP tool changes it.
 
-1. Read and record the current value.
-2. Ask the user to disable automatic settlement from the parent thread's menu, or use the
-   collaborative browser if the user has already authorized that setup under the machine
-   interaction policy.
-3. Read the value again and record the new timestamp as the receipt.
+Set protection up once per mediated workflow, then reuse its record for later Action requests.
 
-If neither route is available, report that blocker; the workflow has no other supported setup.
-After the workflow finishes, restore the recorded value the same way only if the current timestamp
-still equals the receipt and the user has made no later choice that conflicts. Otherwise leave it
-and explain why. An explicit Stop or Settle from the user always stands.
+1. Read and record the current value. If it is already set, keep that timestamp as the receipt,
+   skip setup, and restore nothing you did not change.
+2. If it is unset, ask the user to disable automatic settlement from the parent thread's menu, or
+   use the collaborative browser if the user has already authorized that setup under the machine
+   interaction policy. Read the value again and record the timestamp as the receipt.
+3. Before later requests, confirm protection still matches that receipt. If it changed, respect
+   the user's choice and report the blocker rather than changing it back.
+
+If setup is needed and neither route is available, report that blocker. After the workflow
+finishes, restore only a setting changed for this workflow, through the same authorized route,
+and only if the current timestamp still equals the receipt and later user choices permit it.
+Otherwise leave it and explain why. An explicit Stop or Settle from the user always stands.
 
 ### Observe progress
 
-A parent reads a child's latest Action run through `t3_thread_read`, which returns a bounded
-summary: identity, outcome, delivery, timing, exit, derived status, and an untrusted report
-summary. Hold detail, follow-up status, and raw output are available only through
-`inspect_action_run` in the thread that launched the run, which for mediated Actions is the parent.
+A parent reads the bounded latest-Action summary through `t3_thread_read`: identity, outcome,
+delivery, timing, exit, derived follow-up status, and an untrusted report summary. A mediated
+Action belongs to the parent's own thread; reading the child does not show that parent-owned run.
+The retained hold flag and raw output are available only through `inspect_action_run` in the
+thread that launched the run, which for mediated Actions is the parent.
 
 ### When the handoff ends
 
