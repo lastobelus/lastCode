@@ -1038,6 +1038,43 @@ describe("LastCode checkpoint supervisor", () => {
     expect(second.state.incident.deliveryAttempts).toBe(1);
   });
 
+  it("keeps deferred recovery promotion failed without advancing success or closing the incident", () => {
+    const healthy = fixture();
+    runCheckpointSupervisor({}, healthy.dependencies);
+    const lastSuccessAt = healthy.state.lastSuccessAt;
+    const error = new Error("Repaired checkpoint published; promotion is still pending.");
+    const dependencies = {
+      latestFailedCheckpointRun: () => null,
+      now: () => "2026-08-27T00:00:00.000Z",
+      runPhase: vi.fn((phase) => {
+        if (phase === "checkpoint") throw error;
+      }),
+    };
+    const blocked = fixture({ state: healthy.state, dependencies });
+
+    expect(() => runCheckpointSupervisor({}, blocked.dependencies)).toThrow(error);
+    expect(blocked.state).toMatchObject({
+      status: "failed",
+      phase: "checkpoint",
+      lastSuccessAt,
+      incident: { alertDelivery: "sent", failure: { error: error.message } },
+    });
+    expect(blocked.state.finishedAt).not.toBe(lastSuccessAt);
+    expect(blocked.state.incident.resolvedAt).toBeUndefined();
+    expect(blocked.dependencies.refreshPrimaryCheckout).not.toHaveBeenCalled();
+    expect(blocked.messages).toHaveLength(1);
+
+    const retry = fixture({ state: blocked.state, dependencies });
+    expect(() => runCheckpointSupervisor({}, retry.dependencies)).toThrow(error);
+    expect(retry.states.every((state) => state.status === "failed")).toBe(true);
+    expect(retry.state.lastSuccessAt).toBe(lastSuccessAt);
+    expect(retry.state.incident.fingerprint).toBe(blocked.state.incident.fingerprint);
+    expect(retry.state.incident.resolvedAt).toBeUndefined();
+    expect(retry.state.incident.resolutionDelivery).toBeUndefined();
+    expect(retry.messages).toEqual([]);
+    expect(retry.dependencies.refreshPrimaryCheckout).not.toHaveBeenCalled();
+  });
+
   it("closes an ambiguously delivered alert at its original recipient after immediate recovery", () => {
     const first = fixture({
       dependencies: {

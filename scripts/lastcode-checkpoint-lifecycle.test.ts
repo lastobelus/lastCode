@@ -1549,8 +1549,9 @@ exec "$FIXTURE_REAL_GIT" "$@"
       const tag = `lastcode/checkpoint/${NIGHTLY_B}`;
       if (concurrentMerge) {
         // Publication succeeds, but the selected repair cannot discard the new main work.
-        assert.equal(result.status, 0, result.stderr || result.stdout);
-        assert.match(result.stdout, /promotion is still pending/u);
+        assert.equal(result.status, 1, result.stderr || result.stdout);
+        assert.match(result.stderr, /promotion is still pending/u);
+        assert.match(result.stderr, /Retained the selected target and recovery worktree/u);
         assert.equal(remoteCommit(fixture.origin, `refs/tags/${tag}`), repaired);
         assert.equal(remoteCommit(fixture.origin, `refs/lastcode/sources/${NIGHTLY_B}`), source);
         assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), merged);
@@ -1558,8 +1559,8 @@ exec "$FIXTURE_REAL_GIT" "$@"
         const pendingSelection = NodeFS.readFileSync(selectionPath, "utf8");
         const immutableTag = git(fixture.origin, ["rev-parse", `refs/tags/${tag}`]);
         const retry = checkpoint(fixture, ["--push-tags", "--promote"], environment);
-        assert.equal(retry.status, 0, retry.stderr || retry.stdout);
-        assert.match(retry.stdout, /promotion is still pending/u);
+        assert.equal(retry.status, 1, retry.stderr || retry.stdout);
+        assert.match(retry.stderr, /promotion is still pending/u);
         assert.equal(remoteCommit(fixture.origin, "refs/heads/lastcode/main"), merged);
         assert.equal(
           remoteMissing(fixture.origin, `refs/tags/lastcode/revision/${NIGHTLY_B}.1`),
@@ -2176,8 +2177,8 @@ done
       git(repo, ["push", "--quiet", "upstream", newerDuringRepair]);
 
       const published = checkpoint(fixture, ["--push-tags", "--promote"]);
-      assert.equal(published.status, 0, published.stderr || published.stdout);
-      assert.match(published.stdout, /promotion is still pending/u);
+      assert.equal(published.status, 1, published.stderr || published.stdout);
+      assert.match(published.stderr, /promotion is still pending/u);
       NodeFS.unlinkSync(raceHook);
       const tagD = `lastcode/checkpoint/${NIGHTLY_D}`;
       const publishedRepair = remoteCommit(fixture.origin, `refs/tags/${tagD}`);
@@ -2188,8 +2189,8 @@ done
       assert.equal(NodeFS.existsSync(retained), true);
       const pendingSelection = NodeFS.readFileSync(selectionPath, "utf8");
       const pendingRetry = checkpoint(fixture, ["--push-tags", "--promote"]);
-      assert.equal(pendingRetry.status, 0, pendingRetry.stderr || pendingRetry.stdout);
-      assert.match(pendingRetry.stdout, /promotion is still pending/u);
+      assert.equal(pendingRetry.status, 1, pendingRetry.stderr || pendingRetry.stdout);
+      assert.match(pendingRetry.stderr, /promotion is still pending/u);
       assert.equal(git(retained, ["rev-parse", "HEAD"]), selectedHead);
       assert.equal(NodeFS.readFileSync(selectionPath, "utf8"), pendingSelection);
       assert.equal(git(fixture.origin, ["rev-parse", `refs/tags/${tagD}`]), immutableTagD);
