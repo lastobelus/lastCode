@@ -109,6 +109,8 @@ vi.mock("../components/ui/Button", () => ({
     createElement("button", { onClick: props.onPress, disabled: props.disabled }, props.label),
 }));
 vi.mock("expo", () => ({
+  requireNativeModule: () => ({}),
+  requireOptionalNativeModule: () => null,
   useEvent: (_player: unknown, _event: unknown, initial: unknown) => initial,
   useReleasingSharedObjectWithLifecycle: (
     lifecycle: {
@@ -122,6 +124,16 @@ vi.mock("expo", () => ({
     return player;
   },
 }));
+vi.mock("expo-crypto", () => ({
+  randomUUID: () => "test-uuid",
+  getRandomBytes: (byteCount: number) => new Uint8Array(byteCount),
+}));
+vi.mock("expo-secure-store", () => ({
+  deleteItemAsync: vi.fn(),
+  getItemAsync: vi.fn(async () => null),
+  setItemAsync: vi.fn(),
+}));
+vi.mock("expo-constants", () => ({ default: { expoConfig: { extra: {} } } }));
 vi.mock("expo-video", () => ({
   useVideoPlayer: () => audio.video,
   VideoView: () => null,
@@ -166,7 +178,10 @@ vi.mock("../state/projects", () => ({
 }));
 vi.mock("../state/server", () => ({ serverEnvironment: {} }));
 vi.mock("../state/session", () => ({
+  environmentBootstrap: {},
   readEnvironmentScope: () => true,
+  useEnvironmentScope: () => true,
+  useConfiguredPreviewEnvironmentUrl: () => null,
   usePreparedConnection: () => ({ _tag: "Some", value: { httpBaseUrl: "https://example.com" } }),
 }));
 vi.mock("../state/atom-registry", () => ({ appAtomRegistry: {} }));
@@ -174,12 +189,13 @@ vi.mock("../state/threads", () => ({ environmentThreadShells: {}, threadEnvironm
 vi.mock("../state/entities", () => ({
   useLiveThreadLinkLabels: (text: string) => text,
   useThreadChipIcons: () => new Map(),
+  useEnvironmentServerConfig: () => null,
 }));
 vi.mock("../state/use-thread-selection", () => ({
   useThreadSelection: () => ({ selectedThread: null }),
 }));
 vi.mock("../state/use-atom-query-runner", () => ({ useAtomQueryRunner: () => vi.fn() }));
-vi.mock("../state/use-atom-command", () => ({}));
+vi.mock("../state/use-atom-command", () => ({ useAtomCommand: () => vi.fn(async () => []) }));
 vi.mock("../state/v2-item-support", () => ({}));
 vi.mock("../native/SelectableMarkdownText", () => ({
   SelectableMarkdownText: (props: {
@@ -283,7 +299,13 @@ vi.mock("../features/threads/thread-workflow-opening", () => ({ useWorkflowOpeni
 vi.mock("../features/threads/useFileChipShare", () => ({ useFileChipShare: () => vi.fn() }));
 vi.mock("../features/threads/ThreadMarkdownImage", async () => {
   const { createContext } = await import("react");
-  return { MarkdownImageAvailableWidthContext: createContext(390) };
+  return {
+    MarkdownImageAvailableWidthContext: createContext(390),
+    ThreadMarkdownPreparedUri: (props: {
+      uri: string;
+      children: (result: { status: "ready"; uri: string }) => ReactNode;
+    }) => props.children({ status: "ready", uri: props.uri }),
+  };
 });
 vi.mock("../features/review/ReviewCommentCard", () => ({ useReviewCommentColors: () => ({}) }));
 vi.mock("../features/prompt-links/prompt-link-actions", () => ({}));

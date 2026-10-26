@@ -6,12 +6,15 @@ import * as NodePath from "node:path";
 import { expect, it } from "vite-plus/test";
 
 import {
+  checkpointScheduleFromConfig,
   clearNightlyServiceState,
+  isDailyLaunchAgent,
   nextCheckpointSupervisorConfig,
   parseNightlyServiceArgs,
   renderLaunchAgentPlist,
   runNowArguments,
   shouldRequestRunNow,
+  shouldDeferAutomaticRunNow,
   shouldRunNightlyServiceCommand,
 } from "./lastcode-nightly-service.ts";
 
@@ -28,10 +31,11 @@ it("clears stale supervisor state when the service is removed", () => {
 
 it("renders the deployment-defined interval in a source-only launch agent", () => {
   const plist = renderLaunchAgentPlist({
-    intervalSeconds: 1234,
     repoRoot: "/Users/example/LastCode & experiments",
     logDirectory: "/Users/example/.lastcode/automation",
     nodePath: "/Users/example/.local/share/mise/installs/node/24.13.1/bin/node",
+    schedule: { kind: "interval", intervalSeconds: 1234 },
+    scheduleHelperPath: "/Users/example/.lastcode/automation/bin/schedule helper.mjs",
     supervisorPath: "/Users/example/.lastcode/automation/bin/checkpoint supervisor.mjs",
   });
 
@@ -46,6 +50,28 @@ it("renders the deployment-defined interval in a source-only launch agent", () =
   expect(plist).not.toContain("lastcode-build");
   expect(plist).toContain("LastCode &amp; experiments");
   expect(plist).toContain("nightly-checkpoint.stderr.log");
+  expect(plist).toContain("<key>RunAtLoad</key>");
+  expect(isDailyLaunchAgent(plist)).toBe(false);
+});
+
+it("renders a time-zone-aware daily gate without a launchd calendar or immediate run", () => {
+  const plist = renderLaunchAgentPlist({
+    repoRoot: "/repo",
+    logDirectory: "/home/example/.lastcode/automation",
+    nodePath: "/node",
+    schedule: { kind: "daily", dailyAt: "02:00", timeZone: "America/Los_Angeles" },
+    scheduleHelperPath: "/home/example/.lastcode/automation/bin/lastcode-checkpoint-schedule.mjs",
+    supervisorPath: "/home/example/.lastcode/automation/bin/lastcode-checkpoint-supervisor.mjs",
+  });
+
+  expect(plist).toContain("<integer>60</integer>");
+  expect(plist).toContain("<string>02:00</string>");
+  expect(plist).toContain("<string>America/Los_Angeles</string>");
+  expect(plist).not.toContain("StartCalendarInterval");
+  expect(plist).not.toContain("RunAtLoad");
+  expect(isDailyLaunchAgent(plist)).toBe(true);
+  expect(shouldDeferAutomaticRunNow(true, plist)).toBe(true);
+  expect(shouldDeferAutomaticRunNow(false, plist)).toBe(false);
 });
 
 it("configures one durable recovery thread only during installation", () => {
@@ -85,7 +111,10 @@ it("configures one durable recovery thread only during installation", () => {
       "short",
     ]),
   ).toThrow("valid thread ID");
-  expect(() => parseNightlyServiceArgs(["install"])).toThrow("requires --interval-seconds");
+  expect(parseNightlyServiceArgs(["install"])).toEqual({
+    command: "install",
+    trustedProjectActionIds: [],
+  });
   expect(() => parseNightlyServiceArgs(["install", "--interval-seconds", "not-a-number"])).toThrow(
     "positive integer",
   );
@@ -99,6 +128,84 @@ it("configures one durable recovery thread only during installation", () => {
       "thread-maintenance",
     ]),
   ).toThrow("either one recovery thread");
+});
+
+it("configures interval or time-zone-aware daily schedules independently of installation", () => {
+  expect(
+    parseNightlyServiceArgs([
+      "configure-schedule",
+      "--daily-at",
+      "02:00",
+      "--time-zone",
+      "America/Los_Angeles",
+    ]),
+  ).toEqual({
+    command: "configure-schedule",
+    dailyAt: "02:00",
+    timeZone: "America/Los_Angeles",
+    trustedProjectActionIds: [],
+  });
+  expect(parseNightlyServiceArgs(["configure-schedule", "--interval-seconds", "3600"])).toEqual({
+    command: "configure-schedule",
+    intervalSeconds: 3600,
+    trustedProjectActionIds: [],
+  });
+  expect(() =>
+    parseNightlyServiceArgs([
+      "configure-schedule",
+      "--daily-at",
+      "24:00",
+      "--time-zone",
+      "America/Los_Angeles",
+    ]),
+  ).toThrow("24-hour HH:MM");
+  expect(() =>
+    parseNightlyServiceArgs([
+      "configure-schedule",
+      "--daily-at",
+      "02:00",
+      "--time-zone",
+      "Not/A_Zone",
+    ]),
+  ).toThrow("IANA time zone");
+  expect(() =>
+    parseNightlyServiceArgs([
+      "configure-schedule",
+      "--interval-seconds",
+      "3600",
+      "--daily-at",
+      "02:00",
+      "--time-zone",
+      "America/Los_Angeles",
+    ]),
+  ).toThrow("either an interval");
+  expect(() => parseNightlyServiceArgs(["configure-schedule", "--daily-at", "02:00"])).toThrow(
+    "requires both",
+  );
+  expect(() => parseNightlyServiceArgs(["configure-schedule"])).toThrow(
+    "requires an interval or daily schedule",
+  );
+});
+
+it("validates the persisted schedule read during installation", () => {
+  expect(
+    checkpointScheduleFromConfig({
+      schemaVersion: 1,
+      schedule: { kind: "daily", dailyAt: "02:00", timeZone: "America/Los_Angeles" },
+    }),
+  ).toEqual({ kind: "daily", dailyAt: "02:00", timeZone: "America/Los_Angeles" });
+  expect(
+    checkpointScheduleFromConfig({
+      schemaVersion: 1,
+      schedule: { kind: "interval", intervalSeconds: 3600 },
+    }),
+  ).toEqual({ kind: "interval", intervalSeconds: 3600 });
+  expect(() => checkpointScheduleFromConfig(null)).toThrow("configure-schedule first");
+  expect(() =>
+    checkpointScheduleFromConfig({
+      schedule: { kind: "daily", dailyAt: "02:00", timeZone: "Not/A_Zone" },
+    }),
+  ).toThrow("invalid IANA time zone");
 });
 
 it("persists the Project Action trust allowlist without discarding recovery delivery", () => {

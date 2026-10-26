@@ -21,6 +21,7 @@ const LOCKED_RENAME_RETRY_DELAY = "100 millis";
 export const writeFileStringAtomically = (input: {
   readonly filePath: string;
   readonly contents: string;
+  readonly mode?: number;
 }) =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -41,7 +42,9 @@ export const writeFileStringAtomically = (input: {
       );
       const tempPath = path.join(tempDirectory, "contents.tmp");
 
-      yield* fs.writeFileString(tempPath, input.contents);
+      yield* fs.writeFileString(tempPath, input.contents, { mode: input.mode });
+      // Set the requested permissions before the replacement becomes visible.
+      if (input.mode !== undefined) yield* fs.chmod(tempPath, input.mode);
       if (platform !== "win32") return yield* fs.rename(tempPath, targetPath);
 
       // Stop retrying if another save changes the target; read-only targets also return permanent EPERM.

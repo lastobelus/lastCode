@@ -1,10 +1,12 @@
-import {
-  type GuestMessageAttribution,
-  type OrchestrationV2Actor,
-  type OrchestrationV2CreationSource,
-  type OrchestrationV2IdleCompaction,
-  ScheduledTaskId,
+import type {
+  OrchestrationV2IdleCompaction,
+  OrchestrationV2IncomingMessageSummary,
 } from "@t3tools/contracts";
+import {
+  isIncomingUserMessage,
+  isShortIncomingMessage,
+  resolveUserMessagePresentation,
+} from "@t3tools/shared/userMessage";
 
 /** The working row while T3 Code's own compaction runs. */
 export const IDLE_COMPACTING_LABELS = {
@@ -18,63 +20,25 @@ export const IDLE_COMPACTION_TITLES = {
   onReturn: "Context compacted after being idle",
 } satisfies Record<OrchestrationV2IdleCompaction, string>;
 
-const LEGACY_AUTOMATION_PREFIX = /^\[Triggered by schedule task: [^\r\n]+\]\r?\n\r?\n/;
-const LEGACY_AUTOMATION_MESSAGE_ID = /^scheduled-task-message:(.+):\d+:(?:scheduled|manual)$/;
+export { resolveUserMessagePresentation };
 
-export function resolveUserMessagePresentation(message: {
-  readonly id?: string;
-  readonly role: string;
-  readonly text: string;
-  readonly createdBy?: OrchestrationV2Actor;
-  readonly creationSource?: OrchestrationV2CreationSource;
-  readonly scheduledTaskId?: ScheduledTaskId;
-  readonly context?: { readonly guest?: GuestMessageAttribution | undefined } | undefined;
-}): {
-  readonly text: string;
-  readonly attribution: "automation" | "agent" | "t3code" | "guest" | null;
-  readonly scheduledTaskId: ScheduledTaskId | undefined;
-  /** Set when `attribution` is "guest". */
-  readonly guestName?: string;
-} {
-  if (message.role !== "user") {
-    return { text: message.text, attribution: null, scheduledTaskId: undefined };
-  }
-  // The stored text names the guest for the agent; people see the guest's own words.
-  const guest = message.context?.guest;
-  if (guest !== undefined) {
-    return {
-      text: guest.text,
-      attribution: "guest",
-      scheduledTaskId: undefined,
-      guestName: guest.name,
-    };
-  }
-  if (message.scheduledTaskId !== undefined) {
-    return {
-      text: message.text,
-      attribution: "automation",
-      scheduledTaskId: message.scheduledTaskId,
-    };
-  }
-  const legacyPrefix = LEGACY_AUTOMATION_PREFIX.exec(message.text);
-  const legacyTaskId = legacyPrefix
-    ? LEGACY_AUTOMATION_MESSAGE_ID.exec(message.id ?? "")?.[1]
-    : undefined;
-  if (legacyPrefix !== null && (legacyTaskId !== undefined || message.createdBy === "agent")) {
-    return {
-      text: message.text.slice(legacyPrefix[0].length),
-      attribution: "automation",
-      scheduledTaskId: legacyTaskId === undefined ? undefined : ScheduledTaskId.make(legacyTaskId),
-    };
-  }
+/** Shared preview semantics for chat, mobile, and the minimap. */
+export function resolveIncomingMessagePreview(
+  message: Parameters<typeof resolveUserMessagePresentation>[0] & {
+    readonly incomingSummary?: OrchestrationV2IncomingMessageSummary | undefined;
+  },
+) {
+  const { text } = resolveUserMessagePresentation(message);
+  const isIncoming = isIncomingUserMessage(message);
+  const summary = isIncoming ? message.incomingSummary : undefined;
+  const isSummary = summary?.status === "ready";
+  const pending = summary?.status === "pending";
+  const firstLineEnd = isSummary ? -1 : text.search(/\r?\n/u);
   return {
-    text: message.text,
-    attribution:
-      message.createdBy !== "agent"
-        ? null
-        : message.creationSource === "server"
-          ? "t3code"
-          : "agent",
-    scheduledTaskId: undefined,
+    isIncoming,
+    previewText: isSummary ? summary.text : firstLineEnd < 0 ? text : text.slice(0, firstLineEnd),
+    pending,
+    isSummary,
+    canExpand: isIncoming && (!isShortIncomingMessage(text) || isSummary || pending),
   };
 }

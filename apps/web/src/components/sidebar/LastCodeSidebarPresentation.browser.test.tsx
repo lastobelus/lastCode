@@ -1,6 +1,7 @@
-import { act, memo, useState } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from "vite-plus/test";
+import { act, render } from "../../../test/render";
+import { memo, useState } from "react";
+
+import { expect, it, vi } from "vite-plus/test";
 import type { ComponentProps } from "react";
 import {
   LastCodeSidebarPresentationProvider,
@@ -37,64 +38,64 @@ const Consumer = memo(function Consumer() {
     </>
   );
 });
-let root: Root, container: HTMLDivElement;
-const original = Object.getOwnPropertyDescriptor(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-beforeAll(() =>
-  Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
-    configurable: true,
-    value: true,
-  }),
-);
-afterAll(() => {
-  if (original) Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", original);
-  else Reflect.deleteProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT");
-});
-beforeEach(() => {
+
+function setup() {
   vi.clearAllMocks();
-  container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
-});
-afterEach(async () => {
-  await act(() => root.unmount());
-  container.remove();
-});
-async function render(props = values) {
-  await act(() =>
-    root.render(
-      <LastCodeSidebarPresentationProvider {...props}>
-        <Consumer />
-      </LastCodeSidebarPresentationProvider>,
-    ),
-  );
 }
+
 it("keeps unrelated provider renders from invalidating consumers and retains local editing", async () => {
-  await render();
+  setup();
+  await using screen = await render(
+    <LastCodeSidebarPresentationProvider {...values}>
+      <Consumer />
+    </LastCodeSidebarPresentationProvider>,
+  );
+  const container = screen.container;
   const input = container.querySelector("input")!;
   await act(() => {
     input.value = "in progress";
     input.dispatchEvent(new Event("input", { bubbles: true }));
   });
   const renders = mocks.render.mock.calls.length;
-  await render();
-  await render();
+  await screen.rerender(
+    <LastCodeSidebarPresentationProvider {...values}>
+      <Consumer />
+    </LastCodeSidebarPresentationProvider>,
+  );
+  await screen.rerender(
+    <LastCodeSidebarPresentationProvider {...values}>
+      <Consumer />
+    </LastCodeSidebarPresentationProvider>,
+  );
   expect(mocks.render).toHaveBeenCalledTimes(renders);
   expect(container.querySelector("input")).toBe(input);
   expect(input.value).toBe("in progress");
 });
 it("refreshes bounded presentation choices without resetting consumer state", async () => {
-  await render();
+  setup();
+  await using screen = await render(
+    <LastCodeSidebarPresentationProvider {...values}>
+      <Consumer />
+    </LastCodeSidebarPresentationProvider>,
+  );
+  const container = screen.container;
   const input = container.querySelector("input")!;
   await act(() => {
     input.value = "retained";
     input.dispatchEvent(new Event("input", { bubbles: true }));
   });
   const renders = mocks.render.mock.calls.length;
-  await render({
-    ...values,
-    providerBadgePreferences: { ...values.providerBadgePreferences, size: 75 },
-    openPullRequestsInRightPanel: false,
-  });
+  await screen.rerender(
+    <LastCodeSidebarPresentationProvider
+      {...{
+        ...values,
+        providerBadgePreferences: { ...values.providerBadgePreferences, size: 75 },
+        openPullRequestsInRightPanel: false,
+      }}
+    >
+      <Consumer />
+    </LastCodeSidebarPresentationProvider>,
+  );
   expect(mocks.render).toHaveBeenCalledTimes(renders + 1);
   expect(container.querySelector("span")?.textContent).toBe("75 / browser");
   expect(container.querySelector("input")).toBe(input);

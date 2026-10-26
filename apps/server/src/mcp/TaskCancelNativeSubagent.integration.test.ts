@@ -40,8 +40,13 @@ import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
+import * as ActionResume from "../actionResume/ActionResume.ts";
+import * as ThreadReadBroker from "./ThreadReadBroker.ts";
 
 const layerOrchestratorService = OrchestratorMcpService.layer.pipe(
+  Layer.provide(
+    Layer.mock(ActionResume.ActionResume)({ readLatestSummary: () => Effect.succeed(null) }),
+  ),
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
 );
@@ -148,6 +153,7 @@ it.effect("task_cancel ends a delegated child's background native subagent", () 
         ),
       );
       const layerTest = layerOrchestratorService.pipe(
+        Layer.provide(ThreadReadBroker.layer),
         Layer.provideMerge(layerOrchestration),
         Layer.provide(
           Layer.mergeAll(

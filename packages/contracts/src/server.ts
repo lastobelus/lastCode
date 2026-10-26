@@ -27,6 +27,7 @@ import { ModelCapabilities, ProviderOptionDescriptor } from "./model.ts";
 import { RuntimeMode } from "./providerPolicy.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { ServerProviderUsageLimits, UsageLimitSourceSnapshots } from "./providerUsageLimits.ts";
+import { OrchestrationV2ThreadCapabilities } from "./orchestrationV2.ts";
 import { ServerSettings } from "./settings.ts";
 
 const KeybindingsMalformedConfigIssue = Schema.Struct({
@@ -203,6 +204,7 @@ export const ServerProviderUpdateState = Schema.Struct({
 export type ServerProviderUpdateState = typeof ServerProviderUpdateState.Type;
 
 export const ServerProvider = Schema.Struct({
+  threadCapabilities: Schema.optional(OrchestrationV2ThreadCapabilities),
   // Only instanceId is stable enough for provider routing.
   instanceId: ProviderInstanceId,
   driver: ProviderDriverKind,

@@ -22,10 +22,12 @@ import * as Fiber from "effect/Fiber";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as WorkspaceAcquisitionTestkit from "../workspace/WorkspaceAcquisition.testkit.ts";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 import * as UpdateDrainAdmission from "../updateDrain/UpdateDrainAdmission.testkit.ts";
@@ -115,6 +117,9 @@ const makeHarness = Effect.fn("ActionArchiveTest.makeHarness")(function* (
         ProjectionStore.layer.pipe(Layer.provide(database)),
         IdAllocator.layer,
         ThreadCommandExecutor.layer,
+        Layer.mock(GitVcsDriver.GitVcsDriver)({
+          resolveBranchName: () => Effect.succeed(null),
+        }),
       ),
     ),
   );
@@ -213,6 +218,7 @@ const makeHarness = Effect.fn("ActionArchiveTest.makeHarness")(function* (
     history: () => Effect.succeed("retained Action output"),
   });
   const actions = ActionResume.layer.pipe(
+    Layer.provide(WorkspaceAcquisitionTestkit.layer),
     Layer.provide(
       Layer.mergeAll(
         actionThreads,

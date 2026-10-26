@@ -139,6 +139,12 @@ function ProjectGroupingForm({ target: projectGroupingTarget, onClose }: DialogP
   );
 }
 export function LastCodeProjectGroupingDialog({ target, onClose }: DialogProps) {
+  const currentTargetKey = targetKey(target);
+  const [formIdentity, setFormIdentity] = useState({ targetKey: currentTargetKey, generation: 0 });
+  // Closing popups retain their form; reopening the same target must create a fresh draft.
+  if (formIdentity.targetKey !== currentTargetKey) {
+    setFormIdentity({ targetKey: currentTargetKey, generation: formIdentity.generation + 1 });
+  }
   return (
     <Dialog
       open={target !== null}
@@ -147,7 +153,7 @@ export function LastCodeProjectGroupingDialog({ target, onClose }: DialogProps) 
       }}
     >
       <DialogPopup className="max-w-lg">
-        <ProjectGroupingForm key={targetKey(target)} target={target} onClose={onClose} />
+        <ProjectGroupingForm key={formIdentity.generation} target={target} onClose={onClose} />
       </DialogPopup>
     </Dialog>
   );

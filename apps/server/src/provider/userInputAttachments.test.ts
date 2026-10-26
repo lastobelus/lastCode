@@ -18,6 +18,7 @@ import { extractDocumentText } from "./documentTextWorker.ts";
 import * as Cleanup from "../orchestration-v2/ResourceCleanupService.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as PreviewManager from "../preview/Manager.ts";
+import * as PreviewHosting from "../preview/Hosting.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as NodeZlib from "node:zlib";
 import { appendUserInputAttachmentPaths } from "./userInputAttachments.ts";
@@ -327,6 +328,7 @@ describe("question answer paths", () => {
               Layer.mergeAll(
                 Layer.mock(TerminalManager.TerminalManager)({}),
                 Layer.mock(PreviewManager.PreviewManager)({}),
+                Layer.mock(PreviewHosting.PreviewHosting)({}),
                 Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
               ),
             ),

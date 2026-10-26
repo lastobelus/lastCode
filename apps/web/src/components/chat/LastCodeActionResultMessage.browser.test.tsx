@@ -1,19 +1,11 @@
+import { act, render } from "../../../test/render";
 import { RegistryProvider } from "@effect/atom-react";
 import { EnvironmentId, ThreadId, type ActionReport } from "@t3tools/contracts";
 import { formatActionResumeFollowUp } from "@t3tools/shared/actionResume";
-import { act, useState } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, expect, it, vi } from "vite-plus/test";
+import { useState } from "react";
+import { expect, it, vi } from "vite-plus/test";
 import { userEvent } from "vite-plus/test/browser";
 import { LastCodeActionResultMessage } from "./LastCodeActionResultMessage";
-
-let root: Root;
-let container: HTMLDivElement;
-afterEach(async () => {
-  await act(async () => root?.unmount());
-  document.body.replaceChildren();
-  vi.unstubAllGlobals();
-});
 
 function legacy(output: string) {
   return [
@@ -41,39 +33,33 @@ function structured(report: ActionReport) {
   });
 }
 
-async function render(text: string) {
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  container = document.body.appendChild(document.createElement("div"));
-  root = createRoot(container);
-  function Card() {
-    const [expanded, setExpanded] = useState(false);
-    return (
-      <LastCodeActionResultMessage
-        text={text}
-        expanded={expanded}
-        onToggle={() => setExpanded((value) => !value)}
-        cwd="/workspace/example"
-        threadRef={{
-          environmentId: EnvironmentId.make("example"),
-          threadId: ThreadId.make("thread"),
-        }}
-        skills={[{ name: "example-skill", displayName: "Example skill" }]}
-      />
-    );
-  }
-  await act(async () =>
-    root.render(
-      <RegistryProvider>
-        <Card />
-      </RegistryProvider>,
-    ),
+function Card({ text }: { text: string }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <LastCodeActionResultMessage
+      text={text}
+      expanded={expanded}
+      onToggle={() => setExpanded((value) => !value)}
+      cwd="/workspace/example"
+      threadRef={{
+        environmentId: EnvironmentId.make("example"),
+        threadId: ThreadId.make("thread"),
+      }}
+      skills={[{ name: "example-skill", displayName: "Example skill" }]}
+    />
   );
 }
 
 it.each(["first line\n<img src=x onerror=alert(1)>\nlast line", ""])(
   "discloses literal legacy output with keyboard, including empty output (%s)",
   async (output) => {
-    await render(legacy(output));
+    await using screen = await render(null);
+    const container = screen.container;
+    await screen.rerender(
+      <RegistryProvider>
+        <Card text={legacy(output)} />
+      </RegistryProvider>,
+    );
     const toggle = container.querySelector("button")!;
     expect(toggle.type).toBe("button");
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
@@ -95,16 +81,22 @@ it.each(["first line\n<img src=x onerror=alert(1)>\nlast line", ""])(
 );
 
 it("keeps the summary visible while disclosing ordered structured details and links", async () => {
-  await render(
-    structured({
-      version: 1,
-      outcome: "success",
-      summary: "Checks completed",
-      reason: "<b>literal reason</b>",
-      subject: { type: "commit", id: "abc123", url: "https://example.com/commit/abc123" },
-      facts: { Zebra: "last", Alpha: "first" },
-      artifacts: [{ label: "Report", url: "https://example.com/report" }],
-    }),
+  await using screen = await render(null);
+  const container = screen.container;
+  await screen.rerender(
+    <RegistryProvider>
+      <Card
+        text={structured({
+          version: 1,
+          outcome: "success",
+          summary: "Checks completed",
+          reason: "<b>literal reason</b>",
+          subject: { type: "commit", id: "abc123", url: "https://example.com/commit/abc123" },
+          facts: { Zebra: "last", Alpha: "first" },
+          artifacts: [{ label: "Report", url: "https://example.com/report" }],
+        })}
+      />
+    </RegistryProvider>,
   );
   expect(container.textContent).toContain("Checks completed");
   expect(container.querySelector("dl")).toBeNull();
@@ -135,7 +127,13 @@ it("keeps the summary visible while disclosing ordered structured details and li
 });
 
 it("shows a static heading and terminal notice for a compact result without details", async () => {
-  await render(structured({ version: 1, outcome: "blocked", summary: "Waiting for access" }));
+  await using screen = await render(null);
+  const container = screen.container;
+  await screen.rerender(
+    <RegistryProvider>
+      <Card text={structured({ version: 1, outcome: "blocked", summary: "Waiting for access" })} />
+    </RegistryProvider>,
+  );
   expect(container.textContent).toContain("Blocked: Check project");
   expect(container.textContent).toContain("Waiting for access");
   expect(container.textContent).toContain("Detailed output retained in the Action terminal.");
@@ -143,7 +141,13 @@ it("shows a static heading and terminal notice for a compact result without deta
 });
 
 it("defensively renders unrelated text as Markdown with the supplied thread context", async () => {
-  await render("**Fallback**\nNext line\n\n[Guide](https://example.com/guide)");
+  await using screen = await render(null);
+  const container = screen.container;
+  await screen.rerender(
+    <RegistryProvider>
+      <Card text={"**Fallback**\nNext line\n\n[Guide](https://example.com/guide)"} />
+    </RegistryProvider>,
+  );
   expect(container.textContent).toContain("Automated follow-up");
   await vi.waitFor(() => expect(container.querySelector("strong")?.textContent).toBe("Fallback"));
   expect(container.querySelector("br")).not.toBeNull();

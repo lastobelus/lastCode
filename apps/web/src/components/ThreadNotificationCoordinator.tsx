@@ -176,7 +176,11 @@ export function startThreadNotifications(
     const subagentRequests = pendingSubagentRequestsByThread(threads);
     const changed: Array<[NotificationState | undefined, NotificationState]> = [];
     for (const rawThread of threads) {
-      if (rawThread.lineage.relationshipToParent === "subagent") continue;
+      if (
+        rawThread.lineage.relationshipToParent === "subagent" &&
+        rawThread.lineage.independent !== true
+      )
+        continue;
       const prior = previous.get(rawThread.id);
       const subagentRequest = subagentRequests.get(rawThread.id) ?? null;
       if (prior?.raw === rawThread && prior.subagentRequest === subagentRequest) {

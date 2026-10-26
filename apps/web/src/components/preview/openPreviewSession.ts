@@ -1,3 +1,4 @@
+import { stripPreviewBootstrapTokenFromUrl } from "@t3tools/shared/remote";
 import type {
   EnvironmentId,
   PreviewOpenInput,
@@ -16,8 +17,13 @@ import {
   resolveBrowserDefaults,
 } from "~/browser/browserDefaults";
 import { BrowserSettingsReadError } from "~/browser/openFileInPreview";
-import { previewRuntimeFor } from "~/browser/previewRuntime";
+import { desktopBrowserHostFor, previewRuntimeFor } from "~/browser/previewRuntime";
+import {
+  preparedPreviewOpenProfileId,
+  preparedPreviewOpenTarget,
+} from "~/browser/preparedPreviewOpenTarget";
 import { applyPreviewServerSnapshot, rememberPreviewUrl } from "~/previewStateStore";
+import { prepareHostedPreview } from "./previewHostingRecovery";
 
 interface OpenPreviewSessionInput<E> {
   openPreview: (input: {
@@ -41,15 +47,42 @@ export async function openPreviewSession<E>(
   if (defaults instanceof BrowserSettingsReadError) {
     return AsyncResult.failure(Cause.fail(defaults));
   }
+  const preparedUrl =
+    input.url === undefined ? undefined : await prepareHostedPreview(input.threadRef, input.url);
+  const profileId =
+    preparedUrl === undefined || input.runtime === "desktop"
+      ? (input.profileId ?? browserDefaultOpenProfileId(defaults))
+      : preparedPreviewOpenProfileId(
+          preparedUrl,
+          browserDefaultOpenProfileId(defaults),
+          input.profileId,
+        );
   const runtime = input.runtime ?? previewRuntimeFor(input.threadRef.environmentId);
+  const desktopHostId =
+    runtime === "server" && input.runtime === undefined
+      ? desktopBrowserHostFor(input.threadRef.environmentId)
+      : undefined;
+  const target =
+    preparedUrl === undefined
+      ? {
+          ...(runtime === undefined || runtime === "desktop" ? {} : { runtime }),
+          ...(desktopHostId === undefined ? {} : { desktopHostId }),
+          ...(input.runtime === "server" ? { browserHost: "environment" as const } : {}),
+        }
+      : preparedPreviewOpenTarget(
+          input.threadRef.environmentId,
+          preparedUrl,
+          input.url ?? preparedUrl.url,
+          profileId,
+          input.runtime,
+        );
   const result = await input.openPreview({
     environmentId: input.threadRef.environmentId,
     input: {
       threadId: input.threadRef.threadId,
-      ...(input.url === undefined ? {} : { url: input.url }),
+      ...target,
       viewport: input.viewport ?? browserDefaultOpenViewport(defaults),
-      profileId: input.profileId ?? browserDefaultOpenProfileId(defaults),
-      ...(runtime === undefined || runtime === "desktop" ? {} : { runtime }),
+      profileId,
     },
   });
   if (result._tag === "Failure") {
@@ -60,7 +93,9 @@ export async function openPreviewSession<E>(
   if (input.url !== undefined) {
     rememberPreviewUrl(
       input.threadRef,
-      snapshot.navStatus._tag === "Idle" ? input.url : snapshot.navStatus.url,
+      snapshot.navStatus._tag === "Idle"
+        ? input.url
+        : stripPreviewBootstrapTokenFromUrl(new URL(snapshot.navStatus.url)).href,
     );
   }
   return result;

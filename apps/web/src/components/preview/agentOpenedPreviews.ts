@@ -1,6 +1,8 @@
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import type { PreviewSessionSnapshot, ScopedThreadRef } from "@t3tools/contracts";
 
+import { recordServerBrowserHandoff } from "./serverBrowserHandoff";
+
 import { getClientSettings } from "../../hooks/useSettings";
 import { browserMiniPlayerSource, usePreviewMiniPlayerStore } from "../../previewMiniPlayerStore";
 import {
@@ -25,6 +27,7 @@ export function revealServerTabs(
   for (const session of sessions) {
     const force = session.revealRequest?.force === true;
     if (!options.autoShowFloatingPreview && !force) continue;
+    void recordServerBrowserHandoff(threadRef, session);
     const surface = useRightPanelStore
       .getState()
       .byThreadKey[scopedThreadKey(threadRef)]?.surfaces.find(

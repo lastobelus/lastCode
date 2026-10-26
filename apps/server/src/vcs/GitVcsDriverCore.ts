@@ -51,6 +51,7 @@ import {
 } from "../git/remoteRefs.ts";
 import * as ServerConfig from "../config.ts";
 import { sourceControlDefinitions } from "../sourceControl/sourceControlDefinitions.ts";
+import { registerWorkspaceLeaseRoot, withWorkspaceLease } from "../workspace/workspaceLease.ts";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 /** T3's record of the branch, named as on the host, that a branch was cut from. */
@@ -3700,141 +3701,174 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       }
       worktreePath = path.join(parentDir, repoName, sanitizedBranch);
     }
-    const args = input.newRefName
-      ? ["worktree", "add", "-b", input.newRefName, "--", worktreePath, input.refName]
-      : ["worktree", "add", "--", worktreePath, input.refName];
-    const progress = options?.progress;
-    const onCheckoutProgress = progress?.onCheckoutProgress;
+    const allocatedPath = path.resolve(input.cwd, worktreePath);
+    yield* registerWorkspaceLeaseRoot(allocatedPath);
+    return yield* withWorkspaceLease(
+      allocatedPath,
+      Effect.gen(function* () {
+        let worktreePath = allocatedPath;
+        if (options?.acquireDestination !== undefined)
+          worktreePath = yield* options.acquireDestination(allocatedPath);
+        yield* registerWorkspaceLeaseRoot(worktreePath);
+        return yield* withWorkspaceLease(
+          worktreePath,
+          Effect.gen(function* () {
+            // Reuse verified stale metadata without deleting files that appeared since inspection.
+            const reuseRegistration = options?.reuseMissingRegistrationAt === worktreePath;
+            const args = input.newRefName
+              ? ["worktree", "add", "-b", input.newRefName, "--", worktreePath, input.refName]
+              : [
+                  "worktree",
+                  "add",
+                  ...(reuseRegistration ? ["--force"] : []),
+                  "--",
+                  worktreePath,
+                  input.refName,
+                ];
+            const progress = options?.progress;
+            const onCheckoutProgress = progress?.onCheckoutProgress;
 
-    const checkoutWorkers = (yield* readConfigValue(input.cwd, "checkout.workers")) ?? "0";
-    yield* executeGitWithStableDiagnostics(
-      "GitVcsDriver.createWorktree",
-      input.cwd,
-      ["-c", `checkout.workers=${checkoutWorkers}`, ...args],
-      {
-        fallbackErrorDetail: "git worktree add failed",
-        timeoutMs: WORKTREE_ADD_TIMEOUT_MS,
-        ...(onCheckoutProgress
-          ? {
-              // Git only prints checkout progress when stderr is a tty or the
-              // delay elapsed. GIT_PROGRESS_DELAY=0 forces it through the pipe.
-              env: { GIT_PROGRESS_DELAY: "0" },
-              progress: {
-                onStderrLine: (line) => {
-                  const parsed = parseGitCheckoutProgressLine(line);
-                  return parsed ? onCheckoutProgress(parsed) : Effect.void;
-                },
+            const checkoutWorkers = (yield* readConfigValue(input.cwd, "checkout.workers")) ?? "0";
+            yield* executeGitWithStableDiagnostics(
+              "GitVcsDriver.createWorktree",
+              input.cwd,
+              ["-c", `checkout.workers=${checkoutWorkers}`, ...args],
+              {
+                fallbackErrorDetail: "git worktree add failed",
+                timeoutMs: WORKTREE_ADD_TIMEOUT_MS,
+                ...(onCheckoutProgress
+                  ? {
+                      // Git only prints checkout progress when stderr is a tty or the
+                      // delay elapsed. GIT_PROGRESS_DELAY=0 forces it through the pipe.
+                      env: { GIT_PROGRESS_DELAY: "0" },
+                      progress: {
+                        onStderrLine: (line) => {
+                          const parsed = parseGitCheckoutProgressLine(line);
+                          return parsed ? onCheckoutProgress(parsed) : Effect.void;
+                        },
+                      },
+                    }
+                  : {}),
               },
+            );
+
+            if (progress?.onWorktreeClaimed) {
+              yield* progress.onWorktreeClaimed(worktreePath);
             }
-          : {}),
-      },
-    );
 
-    if (progress?.onWorktreeClaimed) {
-      yield* progress.onWorktreeClaimed(worktreePath);
-    }
-
-    // worktree add leaves submodules empty, potentially omitting project skills, tools or source.
-    const hasSubmodules = yield* fileSystem
-      .exists(path.join(worktreePath, ".gitmodules"))
-      .pipe(Effect.orElseSucceed(() => false));
-    const submoduleMode = !hasSubmodules
-      ? { value: "none" as const, source: "environment" as const }
-      : resolveProjectFileBackedSetting(
-          "worktreeSubmodules",
-          options?.submodules ?? null,
-          options?.submodules != null
-            ? null
-            : yield* fileSystem.readFileString(path.join(worktreePath, T3_PROJECT_FILE_NAME)).pipe(
-                Effect.flatMap((contents) => {
-                  const file = parseT3ProjectFile(contents);
-                  return file === null
-                    ? Effect.logWarning("t3.json is invalid; initializing submodules recursively", {
+            // worktree add leaves submodules empty, potentially omitting project skills, tools or source.
+            const hasSubmodules = yield* fileSystem
+              .exists(path.join(worktreePath, ".gitmodules"))
+              .pipe(Effect.orElseSucceed(() => false));
+            const submoduleMode = !hasSubmodules
+              ? { value: "none" as const, source: "environment" as const }
+              : resolveProjectFileBackedSetting(
+                  "worktreeSubmodules",
+                  options?.submodules ?? null,
+                  options?.submodules != null
+                    ? null
+                    : yield* fileSystem
+                        .readFileString(path.join(worktreePath, T3_PROJECT_FILE_NAME))
+                        .pipe(
+                          Effect.flatMap((contents) => {
+                            const file = parseT3ProjectFile(contents);
+                            return file === null
+                              ? Effect.logWarning(
+                                  "t3.json is invalid; initializing submodules recursively",
+                                  {
+                                    worktreePath,
+                                  },
+                                ).pipe(Effect.as(null))
+                              : Effect.succeed(file);
+                          }),
+                          Effect.orElseSucceed(() => null),
+                        ),
+                );
+            if (hasSubmodules && submoduleMode.value === "none" && progress?.onSubmodulesDisabled) {
+              yield* progress.onSubmodulesDisabled({
+                source: submoduleMode.source === "t3.json" ? "t3.json" : "settings",
+              });
+            }
+            if (submoduleMode.value !== "none") {
+              if (progress?.onSubmodulesStarted) {
+                yield* progress.onSubmodulesStarted();
+              }
+              const onSubmoduleLine = progress?.onSubmoduleLine;
+              yield* runGit(
+                "GitVcsDriver.createWorktree.updateSubmodules",
+                worktreePath,
+                submoduleMode.value === "recursive"
+                  ? ["submodule", "update", "--init", "--recursive"]
+                  : ["submodule", "update", "--init"],
+                onSubmoduleLine
+                  ? {
+                      env: { LC_ALL: "C" },
+                      progress: { onStdoutLine: onSubmoduleLine, onStderrLine: onSubmoduleLine },
+                    }
+                  : {},
+              ).pipe(
+                Effect.matchEffect({
+                  onFailure: (cause) =>
+                    Effect.logWarning(
+                      "worktree submodule checkout failed; submodule paths are empty",
+                      {
                         worktreePath,
-                      }).pipe(Effect.as(null))
-                    : Effect.succeed(file);
+                        cause,
+                      },
+                    ).pipe(
+                      Effect.andThen(
+                        progress?.onSubmodulesFinished
+                          ? progress.onSubmodulesFinished({ ok: false, detail: cause.message })
+                          : Effect.void,
+                      ),
+                    ),
+                  onSuccess: () =>
+                    progress?.onSubmodulesFinished
+                      ? progress.onSubmodulesFinished({ ok: true, detail: null })
+                      : Effect.void,
                 }),
-                Effect.orElseSucceed(() => null),
-              ),
-        );
-    if (hasSubmodules && submoduleMode.value === "none" && progress?.onSubmodulesDisabled) {
-      yield* progress.onSubmodulesDisabled({
-        source: submoduleMode.source === "t3.json" ? "t3.json" : "settings",
-      });
-    }
-    if (submoduleMode.value !== "none") {
-      if (progress?.onSubmodulesStarted) {
-        yield* progress.onSubmodulesStarted();
-      }
-      const onSubmoduleLine = progress?.onSubmoduleLine;
-      yield* runGit(
-        "GitVcsDriver.createWorktree.updateSubmodules",
-        worktreePath,
-        submoduleMode.value === "recursive"
-          ? ["submodule", "update", "--init", "--recursive"]
-          : ["submodule", "update", "--init"],
-        onSubmoduleLine
-          ? {
-              env: { LC_ALL: "C" },
-              progress: { onStdoutLine: onSubmoduleLine, onStderrLine: onSubmoduleLine },
+              );
             }
-          : {},
-      ).pipe(
-        Effect.matchEffect({
-          onFailure: (cause) =>
-            Effect.logWarning("worktree submodule checkout failed; submodule paths are empty", {
-              worktreePath,
-              cause,
-            }).pipe(
-              Effect.andThen(
-                progress?.onSubmodulesFinished
-                  ? progress.onSubmodulesFinished({ ok: false, detail: cause.message })
-                  : Effect.void,
-              ),
-            ),
-          onSuccess: () =>
-            progress?.onSubmodulesFinished
-              ? progress.onSubmodulesFinished({ ok: true, detail: null })
-              : Effect.void,
-        }),
-      );
-    }
 
-    const newRefName = input.newRefName;
-    if (newRefName && input.baseRefName) {
-      const base = yield* resolveBranchBase(input.cwd, input.baseRefName);
-      if (base) {
-        yield* Effect.gen(function* () {
-          yield* runGit("GitVcsDriver.createWorktree.configureBaseRef", input.cwd, [
-            "config",
-            branchBaseConfigKey(newRefName),
-            base.branchName,
-          ]);
-          if (base.baseRef.startsWith("refs/remotes/")) {
-            // The base key names a branch on the host; this one keeps the remote it came from.
-            yield* runGit("GitVcsDriver.createWorktree.configureComparisonRef", input.cwd, [
-              "config",
-              `branch.${input.newRefName}.t3-merge-base-ref`,
-              base.baseRef,
-            ]);
-          }
-        }).pipe(
-          Effect.catchTags({
-            GitCommandError: () =>
-              Effect.logWarning(
-                "worktree base-ref configuration failed; using base-branch fallback",
-              ),
+            const newRefName = input.newRefName;
+            if (newRefName && input.baseRefName) {
+              const base = yield* resolveBranchBase(input.cwd, input.baseRefName);
+              if (base) {
+                yield* Effect.gen(function* () {
+                  yield* runGit("GitVcsDriver.createWorktree.configureBaseRef", input.cwd, [
+                    "config",
+                    branchBaseConfigKey(newRefName),
+                    base.branchName,
+                  ]);
+                  if (base.baseRef.startsWith("refs/remotes/")) {
+                    // The base key names a branch on the host; this one keeps the remote it came from.
+                    yield* runGit("GitVcsDriver.createWorktree.configureComparisonRef", input.cwd, [
+                      "config",
+                      `branch.${input.newRefName}.t3-merge-base-ref`,
+                      base.baseRef,
+                    ]);
+                  }
+                }).pipe(
+                  Effect.catchTags({
+                    GitCommandError: () =>
+                      Effect.logWarning(
+                        "worktree base-ref configuration failed; using base-branch fallback",
+                      ),
+                  }),
+                );
+              }
+            }
+
+            return {
+              worktree: {
+                path: worktreePath,
+                refName: targetBranch,
+              },
+            };
           }),
         );
-      }
-    }
-
-    return {
-      worktree: {
-        path: worktreePath,
-        refName: targetBranch,
-      },
-    };
+      }),
+    );
   });
 
   const fetchRefIntoBranch: GitVcsDriver.GitVcsDriver["Service"]["fetchRefIntoBranch"] = Effect.fn(

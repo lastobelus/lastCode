@@ -297,7 +297,7 @@ describe("public-doc fixture lifecycle", () => {
   let head: string;
   let ready: Record<string, unknown> | undefined;
 
-  // Two cold server starts belong to fixture preparation; replay has its own checks below.
+  // Fixture preparation includes the dev server startup; replay has its own checks below.
   beforeAll(async () => {
     outputDirectory = await NodeFSP.mkdtemp(
       NodePath.join(NodeOS.tmpdir(), "lastcode-public-doc-lifecycle-test-"),

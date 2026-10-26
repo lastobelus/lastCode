@@ -6,7 +6,6 @@ import * as Sink from "effect/Sink";
 import * as Path from "effect/Path";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopConfig from "../app/DesktopConfig.ts";
-import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -30,31 +29,9 @@ import * as DesktopWindow from "../window/DesktopWindow.ts";
 import * as DesktopWslEnvironment from "../wsl/DesktopWslEnvironment.ts";
 import * as DesktopBackendConfiguration from "./DesktopBackendConfiguration.ts";
 import * as DesktopBackendPool from "./DesktopBackendPool.ts";
-import type { DesktopBackendSnapshot, DesktopBackendStartConfig } from "./DesktopBackendManager.ts";
+import type { DesktopBackendStartConfig } from "./DesktopBackendManager.ts";
 
 const decodeBrowserEvent = Schema.decodeEffect(Schema.fromJsonString(DesktopBrowserEvent));
-
-function makeStubInstance(
-  id: DesktopBackendPool.BackendInstanceId,
-  label: string,
-): DesktopBackendPool.DesktopBackendInstance {
-  const snapshot: DesktopBackendSnapshot = {
-    desiredRunning: false,
-    ready: false,
-    activePid: Option.none(),
-    restartAttempt: 0,
-    restartScheduled: false,
-  };
-  return {
-    id,
-    label: Effect.succeed(label),
-    start: Effect.void,
-    stop: () => Effect.void,
-    currentConfig: Effect.succeed(Option.none<DesktopBackendStartConfig>()),
-    snapshot: Effect.succeed(snapshot),
-    waitForReady: (_timeout: Duration.Duration) => Effect.succeed(false),
-  };
-}
 
 function makeHiddenBrowserRoot() {
   let destroyed = false;
