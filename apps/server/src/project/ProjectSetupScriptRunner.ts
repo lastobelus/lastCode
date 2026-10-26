@@ -150,7 +150,7 @@ function stripTerminalControl(text: string): string {
 const BRACKETED_PASTE_ON = "\x1b[?2004h";
 const BRACKETED_PASTE_OFF = "\x1b[?2004l";
 // Longer than one subprocess poll plus its ps timeout, so a startup prompt is seen as busy first.
-const SHELL_QUIET_FALLBACK = "3 seconds";
+const SHELL_READINESS_INTERVAL = "3 seconds";
 
 function lineEditorReading(text: string, previous: boolean): boolean {
   const on = text.lastIndexOf(BRACKETED_PASTE_ON);
@@ -347,12 +347,12 @@ export const make = Effect.gen(function* () {
       const outcome = yield* Deferred.make<"ready" | "exited">();
       let reading = false;
       let carry = "";
-      let activity = 0;
+      let readinessRevision = 0;
       const unsubscribe = yield* input.subscribe((event) => {
         if (event.threadId !== input.threadId || event.terminalId !== input.terminalId) {
           return Effect.void;
         }
-        activity += 1;
+        if (event.type !== "output") readinessRevision += 1;
         // A new shell process starts idle; the manager resets its subprocess state without an event.
         if (event.type === "started" || event.type === "restarted") {
           reading = false;
@@ -360,6 +360,9 @@ export const make = Effect.gen(function* () {
         }
         if (event.type === "output") {
           const text = carry + event.data;
+          // Background output can continue at the prompt; editor signals still invalidate foreground checks.
+          if (text.includes(BRACKETED_PASTE_ON) || text.includes(BRACKETED_PASTE_OFF))
+            readinessRevision += 1;
           carry = text.slice(-(BRACKETED_PASTE_ON.length - 1));
           reading = lineEditorReading(text, reading);
         }
@@ -369,22 +372,22 @@ export const make = Effect.gen(function* () {
         return reading ? Deferred.succeed(outcome, "ready").pipe(Effect.asVoid) : Effect.void;
       });
       // Background jobs remain owned, but only foreground programs can hold startup input.
-      const quiet = Effect.gen(function* () {
+      const foregroundReady = Effect.gen(function* () {
         while (true) {
-          const seen = activity;
-          yield* Effect.sleep(SHELL_QUIET_FALLBACK);
-          if (activity !== seen) continue;
+          const seen = readinessRevision;
+          yield* Effect.sleep(SHELL_READINESS_INTERVAL);
+          if (readinessRevision !== seen) continue;
           const busy = yield* terminalManager.hasForegroundSubprocess({
             threadId: input.threadId,
             terminalId: input.terminalId,
           });
-          if (activity !== seen) continue;
+          if (readinessRevision !== seen) continue;
           if (!busy) return "ready" as const;
           yield* input.onStartupPrompt;
         }
       });
       // Restored history can hold a previous shell's line editor state, so only live output counts.
-      const wait = Deferred.await(outcome).pipe(Effect.raceFirst(quiet));
+      const wait = Deferred.await(outcome).pipe(Effect.raceFirst(foregroundReady));
       return { wait, unsubscribe };
     },
   );
