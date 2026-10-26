@@ -55,6 +55,7 @@ export function renderLaunchAgentPlist(input: {
     <string>${xml(input.schedule.timeZone)}</string>`;
   const intervalSeconds = input.schedule.kind === "interval" ? input.schedule.intervalSeconds : 60;
   const runAtLoad = input.schedule.kind === "interval" ? "  <key>RunAtLoad</key>\n  <true/>\n" : "";
+  // Background throttles every CI descendant; local CI already limits capacity and priority.
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -76,7 +77,7 @@ export function renderLaunchAgentPlist(input: {
 ${runAtLoad}  <key>StartInterval</key>
   <integer>${intervalSeconds}</integer>
   <key>ProcessType</key>
-  <string>Background</string>
+  <string>Standard</string>
   <key>StandardOutPath</key>
   <string>${xml(NodePath.join(input.logDirectory, "nightly-checkpoint.stdout.log"))}</string>
   <key>StandardErrorPath</key>

@@ -29,6 +29,22 @@ it("clears stale supervisor state when the service is removed", () => {
   NodeFS.rmSync(directory, { recursive: true });
 });
 
+it.each([
+  { kind: "interval", intervalSeconds: 1234 },
+  { kind: "daily", dailyAt: "02:00", timeZone: "America/Los_Angeles" },
+] as const)("uses standard process policy for $kind checkpoints", (schedule) => {
+  const plist = renderLaunchAgentPlist({
+    repoRoot: "/repo",
+    logDirectory: "/home/example/.lastcode/automation",
+    nodePath: "/node",
+    schedule,
+    scheduleHelperPath: "/home/example/.lastcode/automation/bin/lastcode-checkpoint-schedule.mjs",
+    supervisorPath: "/home/example/.lastcode/automation/bin/lastcode-checkpoint-supervisor.mjs",
+  });
+
+  expect(plist).toContain("<key>ProcessType</key>\n  <string>Standard</string>");
+});
+
 it("renders the deployment-defined interval in a source-only launch agent", () => {
   const plist = renderLaunchAgentPlist({
     repoRoot: "/Users/example/LastCode & experiments",
