@@ -3685,8 +3685,8 @@ const make = Effect.gen(function* () {
       ),
   );
   const requestSweep = Effect.fn("StorageCleanup.requestSweep")(function* (
-    followup = false,
-    request: Partial<AutomaticSweepRequest> = {},
+    followup: boolean,
+    request: Partial<AutomaticSweepRequest>,
   ) {
     yield* Ref.update(pendingAutomaticRequest, (pending) => ({
       inspectSavedWorkspaces:
