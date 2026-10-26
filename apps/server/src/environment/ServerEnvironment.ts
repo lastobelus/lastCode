@@ -265,6 +265,9 @@ export const make = Effect.gen(function* () {
         : {}),
       ...(desktopAppUpdate ? { desktopAppUpdate: true } : {}),
       serverBrowser: true,
+      localDesktopBrowser:
+        serverConfig.desktopBrowserFd !== undefined &&
+        serverConfig.desktopBrowserControlFd !== undefined,
     },
   };
 
