@@ -53,7 +53,7 @@ git remote add upstream https://github.com/pingdotgg/t3code.git
 Run the guarded bootstrap from the checkout:
 
 ```bash
-mise exec node@24.13.1 -- node scripts/lastcode-setup.mjs \
+MISE_ACTIVATE_AGGRESSIVE=1 mise exec node@24.13.1 -- node scripts/lastcode-setup.mjs \
   --enable-nightly-writes \
   --checkpoint-interval-seconds "$LASTCODE_CHECKPOINT_INTERVAL_SECONDS"
 ```
@@ -75,8 +75,10 @@ Reconciled Actions are available immediately but are not granted agent resume
 permission by default. Existing imported Actions keep their IDs, keybindings,
 and local permission. To make a repository-owned Action resumable as an
 explicit setup choice, repeat `--trusted-project-action` with its stable source
-ID: `lc-wait-for-pr`, `lc-local-ci`, or `lc-build-intel-package`. Setup saves
-the selected allowlist for reconciliation after later managed checkout
+ID: `lc-prepare-dependencies`, `lc-wait-for-pr`, `lc-local-ci`, or
+`lc-build-intel-package`. Include `lc-prepare-dependencies` when agents should
+prepare worktree dependencies on demand. Setup saves the selected allowlist for
+reconciliation after later managed checkout
 refreshes; rerunning setup without an ID removes only the corresponding managed
 grant.
 
