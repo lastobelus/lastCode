@@ -1,4 +1,4 @@
-import { DeleteThreadsInput } from "./workspaceLifecycle.ts";
+import { DeleteThreadsInput, SAVED_WORKSPACE_DISCARD_SCOPES } from "./workspaceLifecycle.ts";
 import { SetKeepWorkspaceInput } from "./worktreeSuspensionRpc.ts";
 import * as Schema from "effect/Schema";
 import { GitPreparePullRequestThreadInput, GitRunStackedActionInput } from "./git.ts";
@@ -97,13 +97,7 @@ export function clientRpcRequiredScopes(
     const payload = decodeDeleteThreads(input);
     return [
       ...(payload.savedWorkspace?.mode === "discard"
-        ? [
-            AuthEnvironmentMaintainScope,
-            AuthFilesystemReadScope,
-            AuthFilesystemWriteScope,
-            AuthSourceControlWriteScope,
-            AuthOrchestrationOperateScope,
-          ]
+        ? SAVED_WORKSPACE_DISCARD_SCOPES
         : [AuthOrchestrationOperateScope]),
       ...(payload.savedWorkspace?.mode !== "discard" &&
       payload.threads.some((thread) => thread.deleteWorktree === true)
@@ -123,13 +117,7 @@ export function clientRpcRequiredScopes(
     "mode" in input.savedWorkspace &&
     input.savedWorkspace.mode === "discard"
   ) {
-    return [
-      AuthEnvironmentMaintainScope,
-      AuthFilesystemReadScope,
-      AuthFilesystemWriteScope,
-      AuthSourceControlWriteScope,
-      AuthOrchestrationOperateScope,
-    ];
+    return SAVED_WORKSPACE_DISCARD_SCOPES;
   }
   switch (method) {
     case WS_METHODS.serverListSavedWorkspaces:

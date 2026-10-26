@@ -7,6 +7,21 @@ import {
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 import { SavedWorkspace } from "./worktreeSuspensionRpc.ts";
+import {
+  AuthEnvironmentMaintainScope,
+  AuthFilesystemReadScope,
+  AuthFilesystemWriteScope,
+  AuthSourceControlWriteScope,
+  AuthOrchestrationOperateScope,
+} from "./auth.ts";
+
+export const SAVED_WORKSPACE_DISCARD_SCOPES = [
+  AuthEnvironmentMaintainScope,
+  AuthFilesystemReadScope,
+  AuthFilesystemWriteScope,
+  AuthSourceControlWriteScope,
+  AuthOrchestrationOperateScope,
+] as const;
 
 export const SavedWorkspaceDisposition = Schema.Union([
   Schema.Struct({ mode: Schema.Literal("retain") }),

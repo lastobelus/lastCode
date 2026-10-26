@@ -220,7 +220,7 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
               },
             }),
           ),
-          Effect.provide(layerKnownWorkspacesTest),
+          Effect.provide(Layer.merge(layerKnownWorkspacesTest, WorkspaceAcquisitionTestkit.layer)),
         );
         const paths = [
           "\\\\attacker.test\\s\\a.ts",
@@ -324,7 +324,13 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
     it.effect("reads the network path it checked", () =>
       Effect.gen(function* () {
         const workspaceFileSystem = yield* WorkspaceFileSystem.make.pipe(
-          Effect.provide(Layer.merge(layerKnownWorkspacesTest, NodePath.layerWin32)),
+          Effect.provide(
+            Layer.mergeAll(
+              layerKnownWorkspacesTest,
+              WorkspaceAcquisitionTestkit.layer,
+              NodePath.layerWin32,
+            ),
+          ),
         );
         // Rejects without touching the filesystem, so a Windows runner never looks the share up.
         const realpath = vi

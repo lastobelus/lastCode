@@ -624,6 +624,7 @@ describe("requiredScopesForProjectMutation", () => {
       "environment:maintain",
       "filesystem:read",
       "filesystem:write",
+      "source-control:write",
       "orchestration:operate",
     ]);
   });

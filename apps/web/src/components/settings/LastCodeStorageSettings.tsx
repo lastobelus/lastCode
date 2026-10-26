@@ -120,7 +120,8 @@ function SuspensionPolicyForm({
               ? mixed
                 ? "Inherit each selected environment’s policy; their values differ."
                 : `Inherit the environment’s policy. ${policySummary(policy)}`
-              : "Save local work and put away eligible checkouts without archiving the conversation — LastCode saves each worktree’s work on this machine, removes the folder, and restores it when you continue."
+              : // oxlint-disable-next-line t3code/no-em-dash-copy -- The maintainer explicitly selected this combined explanation and em dash.
+                "Save local work and put away eligible checkouts without archiving the conversation — LastCode saves each worktree’s work on this machine, removes the folder, and restores it when you continue."
         }
         status={status}
         mixed={mixed}

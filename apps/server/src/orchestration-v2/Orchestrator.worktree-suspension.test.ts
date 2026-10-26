@@ -630,3 +630,42 @@ it.effect(
       );
     }).pipe(Effect.provide(testLayer)),
 );
+
+it.effect("allows per-thread branch synchronization on a shared restored checkout", () =>
+  Effect.gen(function* () {
+    const engine = yield* setup;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const active: WorktreeSuspensionSummary = {
+      ...capturing,
+      state: "active",
+      snapshotId: null,
+      lastRestoredAt: "2026-01-01T00:00:00.000Z",
+      keepWorkspace: true,
+    };
+    yield* engine.transitionWorktreeSuspension(transition("active-sync", null, active));
+    yield* engine.dispatch({
+      type: "thread.metadata.update",
+      commandId: CommandId.make("sync:first"),
+      threadId: firstId,
+      branch: "switched",
+    });
+    assert.equal((yield* projections.getThread(firstId)).branch, "switched");
+    assert.equal((yield* projections.getThread(secondId)).branch, "topic");
+    assert.deepEqual((yield* projections.getThread(firstId)).worktreeSuspension, active);
+    const childId = ThreadId.make("suspension:drifted-child");
+    yield* engine.dispatch({
+      ...create(childId),
+      branch: "switched",
+      createdBy: "agent",
+      creatorThreadId: firstId,
+    });
+    assert.deepEqual((yield* projections.getThread(childId)).worktreeSuspension, active);
+    yield* engine.dispatch({
+      type: "thread.metadata.update",
+      commandId: CommandId.make("sync:second"),
+      threadId: secondId,
+      branch: "switched",
+    });
+    assert.equal((yield* projections.getThread(secondId)).branch, "switched");
+  }).pipe(Effect.provide(testLayer)),
+);

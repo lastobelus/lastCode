@@ -255,11 +255,7 @@ it.effect.each([
               },
             }),
             Layer.mock(GitWorkflow.GitWorkflowService)({
-              pruneWorktrees: (input) =>
-                Effect.sync(() => {
-                  assert.deepEqual(input, { cwd: workspaceRoot });
-                  calls.push("prune");
-                }),
+              pruneWorktrees: () => Effect.die("Recreation must not prune protected siblings"),
               createWorktree: (input) =>
                 Effect.gen(function* () {
                   assert.deepEqual(input, {
@@ -369,7 +365,7 @@ it.effect.each([
           order === "cleanup-first"
             ? restored
               ? ["cleanup", ...rollbackCalls]
-              : ["cleanup", "prune", "create", ...rollbackCalls]
+              : ["cleanup", "create", ...rollbackCalls]
             : [...rollbackCalls, "cleanup"],
         );
       }).pipe(Effect.provide(testLayer));

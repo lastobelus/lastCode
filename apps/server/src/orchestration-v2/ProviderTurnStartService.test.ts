@@ -297,6 +297,7 @@ it.each([
   const harness = startWithMissingWorktree(input.worktreePath, input.realPaths);
   await harness.start;
   expect(harness.createWorktree).toHaveBeenCalledTimes(input.recreated ? 1 : 0);
+  expect(harness.pruneWorktrees).not.toHaveBeenCalled();
 });
 
 function makeLocalCommandHarness(input: {

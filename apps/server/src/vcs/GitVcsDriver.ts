@@ -136,6 +136,7 @@ export interface CreateWorktreeProgress {
 }
 
 export interface CreateWorktreeOptions {
+  readonly reuseMissingRegistrationAt?: string | undefined;
   readonly acquireDestination?: (destination: string) => Effect.Effect<string, GitCommandError>;
   readonly progress?: CreateWorktreeProgress;
   /** Null or omitted defers to the checkout's t3.json. */

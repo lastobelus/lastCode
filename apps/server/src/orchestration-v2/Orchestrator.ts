@@ -2782,7 +2782,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             owner.worktreeSuspension?.keepWorkspace === true ||
             owner.pendingRuntimeRequest !== null ||
             (owner.pendingBackgroundTasks?.length ?? 0) > 0 ||
-            owner.attention != null ||
             hasOpenActionableDashboardItems(owner.dashboardItems) ||
             owner.archivePending != null ||
             (owner.actionResume != null &&
@@ -2910,8 +2909,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           (thread) =>
             thread.worktreeSuspension?.state !== "active" ||
             !suspensionSummaryEqual(thread.worktreeSuspension ?? null, target ?? null) ||
-            thread.projectId !== event.payload.projectId ||
-            thread.branch !== event.payload.branch,
+            thread.projectId !== event.payload.projectId,
         )
       )
         return yield* new OrchestratorDispatchError({

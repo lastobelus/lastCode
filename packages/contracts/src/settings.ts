@@ -1,13 +1,11 @@
 import { EasDeviceHostConfigs, SshDeviceHostConfigs } from "./device.ts";
 import {
   AuthOrchestrationOperateScope,
-  AuthEnvironmentMaintainScope,
-  AuthFilesystemReadScope,
-  AuthFilesystemWriteScope,
   AuthSettingsWriteScope,
   AuthProvidersManageScope,
   type AuthEnvironmentScope,
 } from "./auth.ts";
+import { SAVED_WORKSPACE_DISCARD_SCOPES } from "./workspaceLifecycle.ts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Duration from "effect/Duration";
@@ -1807,12 +1805,7 @@ export function requiredScopesForProjectMutation(
   mutation: ProjectMutation,
 ): ReadonlyArray<AuthEnvironmentScope> {
   if (mutation.type === "project.delete" && mutation.savedWorkspace?.mode === "discard") {
-    return [
-      AuthEnvironmentMaintainScope,
-      AuthFilesystemReadScope,
-      AuthFilesystemWriteScope,
-      AuthOrchestrationOperateScope,
-    ];
+    return SAVED_WORKSPACE_DISCARD_SCOPES;
   }
   if (mutation.type === "project.delete" || mutation.scripts === undefined) {
     return [AuthOrchestrationOperateScope];

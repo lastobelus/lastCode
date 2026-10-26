@@ -2,6 +2,7 @@ import {
   CommandId,
   ThreadId,
   ProjectId,
+  hasOpenActionableDashboardItems,
   type WorkspaceLifecyclePreviewInput,
   type WorkspaceLifecycleRunInput,
   type WorkspaceLifecyclePreview,
@@ -220,13 +221,9 @@ export const make = Effect.gen(function* () {
   });
   const ownersFor = Effect.fn("WorktreeSuspension.ownersFor")(function* (
     aliases: readonly string[],
-    checkoutId?: string,
+    authority?: CheckoutAuthority,
   ) {
-    if (
-      checkoutId !== undefined &&
-      (yield* registry.list).find((entry) => entry.checkoutId === checkoutId)?.detached
-    )
-      return [];
+    if (authority?.detached) return [];
     const records = yield* projections.getThreadWorktreePaths({ includeArchived: true });
     const owners: OrchestrationV2ThreadShell[] = [];
     for (const record of records) {
@@ -235,15 +232,14 @@ export const make = Effect.gen(function* () {
       const shell = yield* projections.getThreadShell(record.threadId);
       if (shell !== null && shell.deletedAt === null) owners.push(shell);
     }
-    if (checkoutId !== undefined) {
-      const existing = (yield* registry.list).find((entry) => entry.checkoutId === checkoutId);
-      for (const owner of existing?.owners ?? []) {
+    if (authority !== undefined) {
+      for (const owner of authority.owners) {
         if (owners.some((thread) => thread.id === owner.threadId)) continue;
         const shell = yield* projections.getThreadShell(owner.threadId);
         if (
           shell !== null &&
           shell.deletedAt === null &&
-          shell.worktreeSuspension?.checkoutId === checkoutId
+          shell.worktreeSuspension?.checkoutId === authority.checkoutId
         )
           owners.push(shell);
       }
@@ -261,7 +257,7 @@ export const make = Effect.gen(function* () {
   const survivingOwners = Effect.fn("WorktreeSuspension.survivingOwners")(function* (
     record: CheckoutAuthority,
   ) {
-    return (yield* ownersFor(record.aliases, record.checkoutId)).filter(
+    return (yield* ownersFor(record.aliases, record)).filter(
       (thread) =>
         thread.worktreeSuspension?.checkoutId === record.checkoutId ||
         record.owners.some(
@@ -296,11 +292,14 @@ export const make = Effect.gen(function* () {
       previousAliases.filter((alias) => !record.aliases.includes(alias)),
     );
   });
-  const identify = Effect.fn("WorktreeSuspension.identify")(function* (threadId: ThreadId) {
+  const identify = Effect.fn("WorktreeSuspension.identify")(function* (
+    threadId: ThreadId,
+    catalog?: readonly CheckoutAuthority[],
+  ) {
     const thread = yield* projections.getThreadShell(threadId);
     if (thread === null || thread.deletedAt !== null || thread.worktreePath === null)
       return yield* failure("unavailable", "This thread does not own a linked worktree.");
-    const existing = (yield* registry.list).find(
+    const existing = (catalog ?? (yield* registry.list)).find(
       (entry) =>
         entry.checkoutId === thread.worktreeSuspension?.checkoutId ||
         (!entry.detached && entry.aliases.includes(thread.worktreePath!)),
@@ -312,6 +311,14 @@ export const make = Effect.gen(function* () {
         "The private recovery catalog is missing. Workspace commands are blocked to preserve recovery data.",
       );
     const actual = yield* fs.realPath(thread.worktreePath);
+    if (catalog !== undefined) {
+      const registered = (yield* registry.list).find(
+        (entry) =>
+          !entry.detached &&
+          (entry.aliases.includes(actual) || entry.aliases.includes(thread.worktreePath!)),
+      );
+      if (registered !== undefined) return registered;
+    }
     if (!(yield* isManaged(actual)))
       return yield* failure("protected", "Only managed linked worktrees can be suspended.");
     const allOwners = yield* ownersFor([actual, thread.worktreePath]);
@@ -375,7 +382,7 @@ export const make = Effect.gen(function* () {
   const checkOwners = Effect.fn("WorktreeSuspension.checkOwners")(function* (
     record: CheckoutAuthority,
   ) {
-    const owners = yield* ownersFor(record.aliases, record.checkoutId);
+    const owners = yield* ownersFor(record.aliases, record);
     if (
       owners.length !== record.owners.length ||
       owners.some((thread) => {
@@ -413,7 +420,7 @@ export const make = Effect.gen(function* () {
         owner.activeRunId !== null ||
         owner.pendingRuntimeRequest !== null ||
         (owner.pendingBackgroundTasks?.length ?? 0) > 0 ||
-        owner.attention != null ||
+        hasOpenActionableDashboardItems(owner.dashboardItems) ||
         owner.archivePending != null ||
         (owner.actionResume != null &&
           !["delivered", "disposed"].includes(owner.actionResume.delivery))
@@ -472,7 +479,7 @@ export const make = Effect.gen(function* () {
           owner.activeRunId !== null ||
           owner.pendingRuntimeRequest !== null ||
           (owner.pendingBackgroundTasks?.length ?? 0) > 0 ||
-          owner.attention != null ||
+          hasOpenActionableDashboardItems(owner.dashboardItems) ||
           owner.archivePending != null ||
           (owner.actionResume != null &&
             !["delivered", "disposed"].includes(owner.actionResume.delivery)),
@@ -535,7 +542,7 @@ export const make = Effect.gen(function* () {
     const pending = yield* reconcileDeletedOwners(initial);
     const transition = pending.pendingProjection;
     if (transition === undefined) return pending;
-    const sharing = yield* ownersFor(pending.aliases, pending.checkoutId);
+    const sharing = yield* ownersFor(pending.aliases, pending);
     const nextOwners = transition.expectedOwners.map((entry) => ({
       ...entry,
       generation: transition.next.generation,
@@ -566,7 +573,7 @@ export const make = Effect.gen(function* () {
           "Workspace ownership and the saved recovery operation disagree. Files have been retained.",
         );
       yield* orchestrator.transitionWorktreeSuspension(transition);
-      const after = yield* ownersFor(pending.aliases, pending.checkoutId);
+      const after = yield* ownersFor(pending.aliases, pending);
       if (
         after.length !== nextOwners.length ||
         after.some(
@@ -664,7 +671,7 @@ export const make = Effect.gen(function* () {
         record = normalized;
       }
     }
-    const sharing = yield* ownersFor(record.aliases, record.checkoutId);
+    const sharing = yield* ownersFor(record.aliases, record);
     const expected = record.owners.every((owner) => owner.generation === null)
       ? null
       : record.summary;
@@ -713,13 +720,13 @@ export const make = Effect.gen(function* () {
           (record.summary.state !== "active" &&
             (!record.owners.some((owner) => owner.threadId === thread.id) ||
               thread.worktreePath !== record.path ||
-              thread.branch !== record.owners[0]?.branch)),
+              thread.branch !==
+                record.owners.find((owner) => owner.threadId === thread.id)?.branch)),
       )
     )
       return yield* failure("changed", "The shared workspace bindings need review.");
     const paths = [...new Set(attached.map((thread) => thread.worktreePath!))];
-    const branches = [...new Set(attached.map((thread) => thread.branch))];
-    if (paths.length > 1 || branches.length > 1)
+    if (paths.length > 1)
       return yield* failure("changed", "Sharing owners no longer agree on one active checkout.");
     const destination = paths[0] ?? record.path;
     let next: CheckoutAuthority = { ...record, owners: attached.map(ownerOf), blockedReason: null };
@@ -763,11 +770,6 @@ export const make = Effect.gen(function* () {
             return yield* failure(
               "changed",
               "The recreated checkout belongs to another repository.",
-            );
-          if ((inspected.branch === null ? null : shortBranch(inspected.branch)) !== branches[0])
-            return yield* failure(
-              "changed",
-              "The recreated checkout branch does not match its current owners.",
             );
           next = {
             ...next,
@@ -884,46 +886,66 @@ export const make = Effect.gen(function* () {
         "The original workspace identity changed. Recovery data has been retained.",
       );
   });
+  const latestWorkspaceUse = (record?: CheckoutAuthority) =>
+    [record?.lastWorkspaceUseAt, record?.summary.lastRestoredAt]
+      .filter((value): value is string => value != null)
+      .sort()
+      .at(-1) ?? null;
+  const automaticEligibility = (
+    thread: OrchestrationV2ThreadShell,
+    policy: ReturnType<typeof resolveWorktreeSuspension>,
+    timestamp: number,
+    lastUse: string | null,
+    held: boolean,
+  ) => {
+    const adopted =
+      thread.workspaceUserAdopted === true ||
+      thread.createdBy === "user" ||
+      thread.latestUserAuthoredMessageAt != null ||
+      thread.subagentPromotion != null ||
+      thread.settledOverride !== null ||
+      thread.lineage.independent === true ||
+      thread.creatorGrouping === "independent";
+    return evaluateWorktreeSuspensionEligibility({
+      policy,
+      now: timestamp,
+      candidate: {
+        kind: thread.lineage.relationshipToParent === "subagent" ? "subagent" : "thread",
+        agentCreatedChild:
+          thread.createdBy === "agent" && thread.creatorThreadId !== undefined
+            ? true
+            : thread.createdBy === "user"
+              ? false
+              : null,
+        humanParticipation: adopted ? true : thread.workspaceUserAdopted === false ? false : null,
+        settledAt: thread.settledAt === null ? null : DateTime.formatIso(thread.settledAt),
+        lastWorkspaceUseAt: lastUse,
+        active: thread.activeRunId !== null,
+        pendingWork:
+          thread.pendingRuntimeRequest !== null || (thread.pendingBackgroundTasks?.length ?? 0) > 0,
+        held,
+      },
+    });
+  };
   const automaticallyEligible = Effect.fn("WorktreeSuspension.automaticallyEligible")(function* (
     record: CheckoutAuthority,
   ) {
     const currentSettings = yield* settings.getSettings;
     const timestamp = yield* milliseconds;
-    const lastUse =
-      [record.lastWorkspaceUseAt, record.summary.lastRestoredAt]
-        .filter((value): value is string => value != null)
-        .sort()
-        .at(-1) ?? null;
     const owners = yield* checkOwners(record);
-    if (owners.length === 0) return false;
-    for (const thread of owners) {
-      const adopted =
-        thread.workspaceUserAdopted === true ||
-        thread.createdBy === "user" ||
-        thread.latestUserAuthoredMessageAt != null ||
-        thread.subagentPromotion != null ||
-        thread.settledOverride !== null ||
-        thread.lineage.independent === true ||
-        thread.creatorGrouping === "independent";
-      const result = evaluateWorktreeSuspensionEligibility({
-        policy: resolveWorktreeSuspension(currentSettings, thread.projectId),
-        now: timestamp,
-        candidate: {
-          kind: thread.lineage.relationshipToParent === "subagent" ? "subagent" : "thread",
-          agentCreatedChild: thread.createdBy === "agent" && thread.creatorThreadId !== undefined,
-          humanParticipation: adopted ? true : thread.workspaceUserAdopted === false ? false : null,
-          settledAt: thread.settledAt === null ? null : DateTime.formatIso(thread.settledAt),
-          lastWorkspaceUseAt: lastUse,
-          active: thread.activeRunId !== null,
-          pendingWork:
-            thread.pendingRuntimeRequest !== null ||
-            (thread.pendingBackgroundTasks?.length ?? 0) > 0,
-          held: record.summary.keepWorkspace,
-        },
-      });
-      if (!result.eligible) return false;
-    }
-    return true;
+    return (
+      owners.length > 0 &&
+      owners.every(
+        (thread) =>
+          automaticEligibility(
+            thread,
+            resolveWorktreeSuspension(currentSettings, thread.projectId),
+            timestamp,
+            latestWorkspaceUse(record),
+            record.summary.keepWorkspace,
+          ).eligible,
+      )
+    );
   });
   const savedEntry = Effect.fn("WorktreeSuspension.savedEntry")(function* (
     record: CheckoutAuthority,
@@ -1082,7 +1104,7 @@ export const make = Effect.gen(function* () {
       yield* registry.put(next, record);
       record = next;
     }
-    const sharing = yield* ownersFor(record.aliases, record.checkoutId);
+    const sharing = yield* ownersFor(record.aliases, record);
     const remainingOwners = sharing.map(ownerOf);
     if (
       sharing.some(
@@ -1329,36 +1351,56 @@ export const make = Effect.gen(function* () {
       yield* registry.put(recovered, null);
       yield* registerWorkspaceLeaseRoot(result.path);
     }
+    if (recovered.pendingProjection !== undefined) recovered = yield* finishPublication(recovered);
     let thread = yield* projections.getThreadShell(operation.recoveryThreadId);
-    if (thread === null) {
-      yield* orchestrator.dispatch({
-        type: "thread.create",
-        commandId: CommandId.make(`suspension:recover:${operation.id}`),
-        threadId: operation.recoveryThreadId,
-        projectId: operation.recoveryProjectId,
-        ...initial.recoveryThread,
-        title: `Recovered: ${initial.recoveryThread.title}`,
-        branch: shortBranch(result.branch),
-        worktreePath: result.path,
-        createdBy: "user",
-        creationSource: "web",
-      });
-      thread = yield* projections.getThreadShell(operation.recoveryThreadId);
+    const deleted =
+      thread === null
+        ? yield* projections.getThread(operation.recoveryThreadId).pipe(Effect.option)
+        : Option.none();
+    if (Option.isSome(deleted) && deleted.value.deletedAt !== null) {
+      if (
+        deleted.value.projectId !== operation.recoveryProjectId ||
+        deleted.value.worktreePath !== result.path
+      )
+        return yield* failure("changed", "The recovery thread binding changed.");
+      // Accepted deletion releases the published owner, but retains the source
+      // snapshot and the recovered checkout rather than recreating a tombstone.
+      if (recovered.owners.length > 0) {
+        const retained = { ...recovered, owners: [] };
+        yield* registry.put(retained, recovered);
+        recovered = retained;
+      }
+    } else {
+      if (thread === null) {
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`suspension:recover:${operation.id}`),
+          threadId: operation.recoveryThreadId,
+          projectId: operation.recoveryProjectId,
+          ...initial.recoveryThread,
+          title: `Recovered: ${initial.recoveryThread.title}`,
+          branch: shortBranch(result.branch),
+          worktreePath: result.path,
+          createdBy: "user",
+          creationSource: "web",
+        });
+        thread = yield* projections.getThreadShell(operation.recoveryThreadId);
+      }
+      if (
+        thread === null ||
+        thread.deletedAt !== null ||
+        thread.projectId !== operation.recoveryProjectId ||
+        thread.worktreePath !== result.path ||
+        thread.branch !== shortBranch(result.branch)
+      )
+        return yield* failure("changed", "The recovery thread binding changed.");
+      if (thread.worktreeSuspension === undefined) {
+        const bound = { ...recovered, owners: [ownerOf(thread)] };
+        yield* registry.put(bound, recovered);
+        recovered = yield* publish(bound, bound, bound.summary);
+      } else if (!equivalentSummary(thread.worktreeSuspension, recovered.summary))
+        return yield* failure("changed", "The recovery thread authority changed.");
     }
-    if (
-      thread === null ||
-      thread.deletedAt !== null ||
-      thread.projectId !== operation.recoveryProjectId ||
-      thread.worktreePath !== result.path ||
-      thread.branch !== shortBranch(result.branch)
-    )
-      return yield* failure("changed", "The recovery thread binding changed.");
-    if (thread.worktreeSuspension === undefined) {
-      const bound = { ...recovered, owners: [ownerOf(thread)] };
-      yield* registry.put(bound, recovered);
-      recovered = yield* publish(bound, bound, bound.summary);
-    } else if (!equivalentSummary(thread.worktreeSuspension, recovered.summary))
-      return yield* failure("changed", "The recovery thread authority changed.");
     if ((yield* native(() => store.readJournal(id))).phase === "restored")
       yield* native(() => store.finalizeRestore(id));
     const active = clearOperation(recovered);
@@ -2134,7 +2176,7 @@ export const make = Effect.gen(function* () {
         continue;
       records.push(record);
       const ids: string[] = [];
-      const currentOwners = yield* ownersFor(record.aliases, record.checkoutId);
+      const currentOwners = yield* ownersFor(record.aliases, record);
       for (const id of snapshotIds(record)) {
         const receipt = record.snapshots?.find((entry) => entry.snapshotId === id);
         const involved = receipt?.owners ?? record.owners;
@@ -2443,33 +2485,89 @@ export const make = Effect.gen(function* () {
       Effect.ensuring(reconcileRetained),
     );
   });
+  const sweepBudget = 4;
+  let lastRecoveryId = "";
+  let lastAutomaticPath = "";
+  const rotate = <A>(values: readonly A[], key: (value: A) => string, after: string) => {
+    const sorted = [...values].sort((left, right) => key(left).localeCompare(key(right)));
+    const next = sorted.findIndex((value) => key(value).localeCompare(after) > 0);
+    return next < 0 ? sorted : [...sorted.slice(next), ...sorted.slice(0, next)];
+  };
   const sweep = Effect.gen(function* () {
-    for (const entry of yield* registry.list) {
-      if (liveOperations.has(entry.checkoutId)) continue;
-      yield* withWorkspaceLease(entry.path, reconcile(entry)).pipe(
-        Effect.catchCause(() => markBlocked(entry.checkoutId).pipe(Effect.ignore)),
-      );
+    const catalog = yield* registry.list;
+    const unfinished = catalog.filter(
+      (entry) =>
+        !liveOperations.has(entry.checkoutId) &&
+        (entry.operation !== undefined || entry.pendingProjection !== undefined),
+    );
+    for (const entry of rotate(unfinished, (entry) => entry.checkoutId, lastRecoveryId).slice(
+      0,
+      sweepBudget,
+    )) {
+      lastRecoveryId = entry.checkoutId;
+      yield* withWorkspaceLease(
+        entry.path,
+        Effect.suspend(() =>
+          liveOperations.has(entry.checkoutId)
+            ? Effect.void
+            : requireRecord(entry.checkoutId).pipe(Effect.flatMap(reconcile)),
+        ),
+      ).pipe(Effect.catchCause(() => markBlocked(entry.checkoutId).pipe(Effect.ignore)));
     }
     const configured = yield* settings.getSettings;
-    for (const thread of yield* projections.getWorktreeCleanupThreads) {
-      const policy = resolveWorktreeSuspension(configured, thread.projectId);
+    const timestamp = yield* milliseconds;
+    const shell = yield* projections.getShellSnapshot();
+    const byId = new Map(catalog.map((entry) => [entry.checkoutId, entry]));
+    const byPath = new Map(
+      catalog
+        .filter((entry) => !entry.detached)
+        .flatMap((entry) => entry.aliases.map((alias) => [alias, entry] as const)),
+    );
+    const candidates = new Map<string, ThreadId>();
+    for (const thread of [...shell.threads, ...shell.archivedThreads]) {
+      if (thread.worktreePath === null || thread.deletedAt !== null) continue;
+      const record =
+        thread.worktreeSuspension === undefined
+          ? byPath.get(thread.worktreePath)
+          : byId.get(thread.worktreeSuspension.checkoutId);
       if (
-        thread.worktreePath === null ||
-        policy.mode === "off" ||
-        !Object.values(policy.scopes).some(Boolean)
+        record !== undefined &&
+        (record.detached ||
+          record.summary.state !== "active" ||
+          record.operation !== undefined ||
+          record.pendingProjection !== undefined ||
+          liveOperations.has(record.checkoutId))
       )
         continue;
-      const identified = yield* identify(thread.id).pipe(Effect.option);
       if (
-        Option.isNone(identified) ||
-        identified.value.summary.state !== "active" ||
-        identified.value.operation !== undefined ||
-        liveOperations.has(identified.value.checkoutId)
+        !automaticEligibility(
+          thread,
+          resolveWorktreeSuspension(configured, thread.projectId),
+          timestamp,
+          latestWorkspaceUse(record),
+          record?.summary.keepWorkspace ?? false,
+        ).eligible
       )
         continue;
-      const record = yield* refreshActiveOwners(identified.value);
-      if (yield* automaticallyEligible(record))
-        yield* acceptCapture(record, true).pipe(Effect.catchCause(() => Effect.void));
+      candidates.set(record?.path ?? thread.worktreePath, thread.id);
+    }
+    for (const [workspacePath, threadId] of rotate(
+      [...candidates],
+      ([workspacePath]) => workspacePath,
+      lastAutomaticPath,
+    ).slice(0, sweepBudget)) {
+      lastAutomaticPath = workspacePath;
+      yield* Effect.gen(function* () {
+        const identified = yield* identify(threadId, catalog);
+        if (
+          identified.summary.state !== "active" ||
+          identified.operation !== undefined ||
+          liveOperations.has(identified.checkoutId)
+        )
+          return;
+        const record = yield* refreshActiveOwners(identified);
+        if (yield* automaticallyEligible(record)) yield* acceptCapture(record, true);
+      }).pipe(Effect.catchCause(() => Effect.void));
     }
   }).pipe(
     Effect.catchCause((cause) =>
@@ -2481,9 +2579,16 @@ export const make = Effect.gen(function* () {
     if (!record.detached) yield* registerWorkspaceLeaseRoot(record.path, record.aliases);
   yield* lifecycle.install({ preview: previewLifecycle, run: runLifecycle });
   const positiveUse = (purpose: string) =>
-    ["terminal", "action", "setup", "preview", "checkpoint", "file-write", "git-mutation"].includes(
-      purpose,
-    );
+    [
+      "terminal",
+      "action",
+      "setup",
+      "preview",
+      "checkpoint",
+      "file-write",
+      "git-mutation",
+      "editor",
+    ].includes(purpose);
   yield* acquisition.install(
     Effect.fn("WorktreeSuspension.acquire")(
       function* (input) {
@@ -2561,7 +2666,21 @@ export const make = Effect.gen(function* () {
               }
               return {
                 path: path.join(current.path, suffix),
-                branch: current.owners[0]?.branch ?? null,
+                branch: !(yield* fs.exists(current.path))
+                  ? (current.owners[0]?.branch ?? null)
+                  : yield* git
+                      .execute({
+                        operation: "suspension active branch",
+                        cwd: current.path,
+                        args: ["rev-parse", "--symbolic-full-name", "HEAD"],
+                      })
+                      .pipe(
+                        Effect.map((result) =>
+                          result.stdout.trim().startsWith("refs/heads/")
+                            ? shortBranch(result.stdout.trim())
+                            : null,
+                        ),
+                      ),
                 restored: false,
               };
             }

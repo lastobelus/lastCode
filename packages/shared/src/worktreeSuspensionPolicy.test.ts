@@ -68,9 +68,12 @@ describe("evaluateWorktreeSuspensionEligibility", () => {
   });
 
   it.each([
-    [{ kind: "subagent" as const, agentCreatedChild: null, humanParticipation: null }, "subagents"],
+    [
+      { kind: "subagent" as const, agentCreatedChild: null, humanParticipation: false },
+      "subagents",
+    ],
     [{ agentCreatedChild: true, humanParticipation: false }, "untouchedChildren"],
-    [{ agentCreatedChild: false, humanParticipation: null }, "otherThreads"],
+    [{ agentCreatedChild: false, humanParticipation: false }, "otherThreads"],
     [{ agentCreatedChild: true, humanParticipation: true }, "otherThreads"],
   ] as const)("requires the enabled scope for %j", (flags, scope) => {
     const scopes = { subagents: false, untouchedChildren: false, otherThreads: false };
@@ -87,6 +90,9 @@ describe("evaluateWorktreeSuspensionEligibility", () => {
     { agentCreatedChild: true, humanParticipation: null },
     { agentCreatedChild: null, humanParticipation: false },
     { agentCreatedChild: null, humanParticipation: null },
+    { agentCreatedChild: false, humanParticipation: null },
+    { kind: "subagent" as const, agentCreatedChild: null, humanParticipation: null },
+    { kind: "subagent" as const, agentCreatedChild: true, humanParticipation: null },
   ])("keeps incomplete child participation or lineage evidence: %j", (flags) => {
     expect(evaluate({ candidate: flags })).toEqual({ eligible: false, reason: "unknown-scope" });
   });

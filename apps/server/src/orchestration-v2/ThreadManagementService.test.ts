@@ -544,7 +544,7 @@ it.effect.each(["live", "no-session", "unsupported-runtime"] as const)(
                 }),
             }),
       } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime;
-      const layerTest = ThreadManagementService.layer.pipe(
+      const layerTest = layerThreadManagementTest.pipe(
         Layer.provide(
           Layer.mergeAll(
             Layer.mock(Orchestrator.OrchestratorV2)({

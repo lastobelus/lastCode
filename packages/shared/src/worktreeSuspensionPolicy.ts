@@ -51,6 +51,7 @@ function timestamp(value: string): number | null {
 
 function candidateScope(candidate: WorktreeSuspensionCandidate): WorktreeSuspensionScope | null {
   if (candidate.humanParticipation === true) return "otherThreads";
+  if (candidate.humanParticipation === null) return null;
   if (candidate.kind === "subagent") return "subagents";
   if (candidate.agentCreatedChild === false) {
     return "otherThreads";

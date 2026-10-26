@@ -493,7 +493,59 @@ export const make = Effect.gen(function* () {
       acquireMutation("GitWorkflowService.createWorktree", input, (input) =>
         Effect.gen(function* () {
           yield* ensureGitCommand("GitWorkflowService.createWorktree", input.cwd);
-          return yield* gitManager.createWorktree(input, options);
+          if (input.path == null) return yield* gitManager.createWorktree(input, options);
+          const target = path.resolve(input.cwd, input.path);
+          return yield* withWorkspaceLease(
+            target,
+            Effect.gen(function* () {
+              yield* assertCleanupAvailable("GitWorkflowService.createWorktree", input.cwd, target);
+              let reuseMissingRegistrationAt: string | undefined;
+              if (!(yield* fileSystem.exists(target))) {
+                const registered = yield* git.execute({
+                  operation: "GitWorkflowService.createWorktree",
+                  cwd: input.cwd,
+                  args: ["worktree", "list", "--porcelain", "-z"],
+                });
+                const registrations = registered.stdout
+                  .split("\0\0")
+                  .map((entry) => entry.split("\0"));
+                const branchField = `branch refs/heads/${input.refName}`;
+                const targetField = `worktree ${target}`;
+                const staleRegistration =
+                  !registered.stdoutTruncated &&
+                  input.newRefName === undefined &&
+                  registrations.every(
+                    (fields) => !fields.includes(branchField) || fields.includes(targetField),
+                  ) &&
+                  registrations.some((fields) => {
+                    return (
+                      fields.includes(targetField) &&
+                      fields.includes(branchField) &&
+                      fields.some((field) => field === "prunable" || field.startsWith("prunable "))
+                    );
+                  });
+                if (staleRegistration) {
+                  reuseMissingRegistrationAt = target;
+                }
+              }
+              return yield* gitManager.createWorktree(input, {
+                ...options,
+                reuseMissingRegistrationAt,
+              });
+            }).pipe(
+              Effect.mapError((cause) =>
+                cause instanceof GitCommandError
+                  ? cause
+                  : new GitCommandError({
+                      operation: "GitWorkflowService.createWorktree",
+                      command: "git worktree add",
+                      cwd: input.cwd,
+                      detail: "git worktree add failed",
+                      cause,
+                    }),
+              ),
+            ),
+          );
         }),
       ),
     listLocalBranchNames: (cwd) =>

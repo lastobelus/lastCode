@@ -5481,6 +5481,7 @@ it.layer(
               }),
               ServerSettings.layerTest(),
               NodeCrypto.layer,
+              WorkspaceAcquisitionTestkit.layer,
             ),
           ),
         );

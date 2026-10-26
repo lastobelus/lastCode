@@ -3713,9 +3713,18 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         return yield* withWorkspaceLease(
           worktreePath,
           Effect.gen(function* () {
+            // Reuse verified stale metadata without deleting files that appeared since inspection.
+            const reuseRegistration = options?.reuseMissingRegistrationAt === worktreePath;
             const args = input.newRefName
               ? ["worktree", "add", "-b", input.newRefName, "--", worktreePath, input.refName]
-              : ["worktree", "add", "--", worktreePath, input.refName];
+              : [
+                  "worktree",
+                  "add",
+                  ...(reuseRegistration ? ["--force"] : []),
+                  "--",
+                  worktreePath,
+                  input.refName,
+                ];
             const progress = options?.progress;
             const onCheckoutProgress = progress?.onCheckoutProgress;
 
@@ -3758,17 +3767,22 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
                   options?.submodules ?? null,
                   options?.submodules != null
                     ? null
-                    : yield* fileSystem.readFileString(path.join(worktreePath, T3_PROJECT_FILE_NAME)).pipe(
-                        Effect.flatMap((contents) => {
-                          const file = parseT3ProjectFile(contents);
-                          return file === null
-                            ? Effect.logWarning("t3.json is invalid; initializing submodules recursively", {
-                                worktreePath,
-                              }).pipe(Effect.as(null))
-                            : Effect.succeed(file);
-                        }),
-                        Effect.orElseSucceed(() => null),
-                      ),
+                    : yield* fileSystem
+                        .readFileString(path.join(worktreePath, T3_PROJECT_FILE_NAME))
+                        .pipe(
+                          Effect.flatMap((contents) => {
+                            const file = parseT3ProjectFile(contents);
+                            return file === null
+                              ? Effect.logWarning(
+                                  "t3.json is invalid; initializing submodules recursively",
+                                  {
+                                    worktreePath,
+                                  },
+                                ).pipe(Effect.as(null))
+                              : Effect.succeed(file);
+                          }),
+                          Effect.orElseSucceed(() => null),
+                        ),
                 );
             if (hasSubmodules && submoduleMode.value === "none" && progress?.onSubmodulesDisabled) {
               yield* progress.onSubmodulesDisabled({
@@ -3795,10 +3809,13 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
               ).pipe(
                 Effect.matchEffect({
                   onFailure: (cause) =>
-                    Effect.logWarning("worktree submodule checkout failed; submodule paths are empty", {
-                      worktreePath,
-                      cause,
-                    }).pipe(
+                    Effect.logWarning(
+                      "worktree submodule checkout failed; submodule paths are empty",
+                      {
+                        worktreePath,
+                        cause,
+                      },
+                    ).pipe(
                       Effect.andThen(
                         progress?.onSubmodulesFinished
                           ? progress.onSubmodulesFinished({ ok: false, detail: cause.message })

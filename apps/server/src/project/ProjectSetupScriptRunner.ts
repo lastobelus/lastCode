@@ -520,7 +520,10 @@ export const make = Effect.gen(function* () {
                   const pendingKey = `${input.threadId}\u0000${terminalId}`;
                   const previous = pendingWrites.get(pendingKey);
                   if (previous) yield* Fiber.interrupt(previous);
-                  const events = yield* stageTerminalEvents({ threadId: input.threadId, terminalId });
+                  const events = yield* stageTerminalEvents({
+                    threadId: input.threadId,
+                    terminalId,
+                  });
                   const observed =
                     observe && completionToken
                       ? yield* observeTerminalCompletion({
@@ -529,7 +532,9 @@ export const make = Effect.gen(function* () {
                           subscribe: events.subscribe,
                           sentinel: completionSentinel(completionToken),
                           sentinelPattern: completionSentinelPattern(completionToken),
-                          echoedWrapperLines: commandLine.split("\r").filter((line) => line.length > 0),
+                          echoedWrapperLines: commandLine
+                            .split("\r")
+                            .filter((line) => line.length > 0),
                           onOutputLine: observe.onOutputLine,
                         })
                       : undefined;
