@@ -426,6 +426,7 @@ const cleanupFixture = (
     let events: Stream.Stream<OrchestrationV2DomainEvent> = Stream.empty;
     let previewPaths: ReadonlyArray<string> = [];
     let ownershipRevision = 0;
+    let suspensionSweeps = 0;
     let dependencyInspectionHook: Effect.Effect<void> | null = null;
     let dependencyInspectionOperation = "GeneratedDependencies.inspect";
     const resourceGitCalls: Array<{ operation: string; cwd: string }> = [];
@@ -441,12 +442,16 @@ const cleanupFixture = (
     const context = yield* Layer.build(StorageCleanup.layer).pipe(
       Effect.provide(
         Layer.merge(
-          SuspensionTestkit.layerWith((workspacePath) =>
-            Effect.suspend(() => {
-              const reason = savedWorkspaceProtection.get(workspacePath);
-              return reason === "unavailable"
-                ? Effect.fail(new SuspensionRegistryError({ operation: "read" }))
-                : Effect.succeed(reason ?? null);
+          SuspensionTestkit.layerWith(
+            (workspacePath) =>
+              Effect.suspend(() => {
+                const reason = savedWorkspaceProtection.get(workspacePath);
+                return reason === "unavailable"
+                  ? Effect.fail(new SuspensionRegistryError({ operation: "read" }))
+                  : Effect.succeed(reason ?? null);
+              }),
+            Effect.sync(() => {
+              suspensionSweeps++;
             }),
           ),
           Layer.mock(WorktreeCleanup.WorktreeCleanupService)({
@@ -819,6 +824,7 @@ const cleanupFixture = (
         return Deferred.succeed(activation, undefined);
       },
       worktreeInventoryCalls: () => worktreeInventoryCalls,
+      suspensionSweeps: () => suspensionSweeps,
       now: fixtureNow,
       seedAgedDependencyUse,
       at: (offset: number) => DateTime.makeUnsafe(fixtureNow + offset),
@@ -3028,11 +3034,81 @@ describe("automatic cleanup churn", () => {
           expect(finishes.filter((line) => line.includes('"trigger":"manual"'))).toHaveLength(
             change === "manual request" ? 1 : 0,
           );
+          expect(fixture.suspensionSweeps()).toBe(
+            change === "settings burst" || change === "manual request" ? 2 : 1,
+          );
           expect(
             yield* fixture.fs.exists(`${fixture.worktree}/node_modules/package/index.js`),
           ).toBe(true);
         }),
       ),
+  );
+
+  it.effect("prioritizes a deleted worktree outside the next four-root rotation", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        const fixture = yield* cleanupFixture({
+          ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+          worktreeAfterDays: null,
+          worktreeOnDelete: true,
+        });
+        const owners = [shell({ worktreePath: fixture.worktree, branch: "feature" })];
+        for (let index = 0; index < 7; index++) {
+          const branch = index === 6 ? "zz-deletion-target" : `priority-${index}`;
+          const worktreePath = `${fixture.config.worktreesDir}/${branch}`;
+          yield* fixture.command(fixture.repo, ["worktree", "add", "-b", branch, worktreePath]);
+          owners.push(shell({ id: ThreadId.make(branch), branch, worktreePath }));
+        }
+        fixture.setThreads(owners);
+        fixture.setStoredWorktreePaths(owners.map((owner) => owner.worktreePath!));
+        const target = owners.at(-1)!;
+        const deleted = { ...target, deletedAt: fixture.at(0) };
+        const sendDeletion = yield* Deferred.make<void>();
+        const reports = yield* Queue.unbounded<StorageCleanupReport>();
+        yield* fixture.service.reports.pipe(
+          Stream.filter((report): report is StorageCleanupReport => report !== null),
+          Stream.runForEach((report) => Queue.offer(reports, report)),
+          Effect.forkScoped,
+        );
+        yield* fixture.activate(
+          Stream.fromEffect(Deferred.await(sendDeletion)).pipe(
+            Stream.flatMap(() =>
+              Stream.make({
+                id: EventId.make("priority-deletion"),
+                type: "thread.deleted" as const,
+                threadId: target.id,
+                occurredAt: fixture.at(0),
+                payload: deleted,
+              } as OrchestrationV2DomainEvent),
+            ),
+          ),
+        );
+        const initial = yield* Queue.take(reports);
+        yield* fixture.service.drain;
+        expect(checkoutEntries(initial)).toContainEqual(
+          expect.objectContaining({
+            path: target.worktreePath,
+            reason: "Automatic inspection deferred to a later scheduled pass",
+          }),
+        );
+        fixture.setThreads(owners.filter((owner) => owner.id !== target.id));
+        fixture.setDeletedThreads([deleted]);
+        yield* Deferred.succeed(sendDeletion, undefined);
+        const report = yield* Queue.take(reports);
+        yield* fixture.service.drain;
+        expect(checkoutEntries(report)).toContainEqual(
+          expect.objectContaining({
+            path: target.worktreePath,
+            outcome: "removed",
+            reason: "Thread was deleted",
+          }),
+        );
+        expect(yield* fixture.fs.exists(target.worktreePath!)).toBe(false);
+        expect(yield* fixture.fs.exists(fixture.worktree)).toBe(true);
+        expect(fixture.suspensionSweeps()).toBe(1);
+      }),
+    ),
   );
 
   it.effect.each(["kept", "unavailable"] as const)(

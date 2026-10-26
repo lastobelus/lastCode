@@ -109,7 +109,15 @@ type CleanupWorkingEntry = {
   -readonly [Key in keyof StorageCleanupReportEntry]: StorageCleanupReportEntry[Key];
 };
 
-type AutomaticOutputWork = { paths: ReadonlySet<string> | null };
+type AutomaticOutputWork = {
+  paths: ReadonlySet<string> | null;
+  readonly priorityPaths: ReadonlySet<string>;
+};
+
+type AutomaticSweepRequest = {
+  readonly inspectSavedWorkspaces: boolean;
+  readonly priorityPaths: ReadonlyArray<string>;
+};
 
 type OwnershipScope = {
   readonly cwd: string;
@@ -1175,9 +1183,12 @@ const make = Effect.gen(function* () {
     );
     const start = next < 0 ? 0 : next;
     const ordered = [...paths.slice(start), ...paths.slice(0, start)];
-    const selected = ordered.slice(0, AUTOMATIC_OUTPUT_ROOT_LIMIT);
+    const priority = paths.filter((cwd) => work.priorityPaths.has(cwd));
+    const ordinary = ordered.filter((cwd) => !work.priorityPaths.has(cwd));
+    const selected = [...priority, ...ordinary].slice(0, AUTOMATIC_OUTPUT_ROOT_LIMIT);
     work.paths = new Set(selected);
-    lastAutomaticOutputPath = selected.at(-1) ?? null;
+    lastAutomaticOutputPath =
+      selected.findLast((cwd) => !work.priorityPaths.has(cwd)) ?? lastAutomaticOutputPath;
   };
   const cleanDisposableOutputs = Effect.fn("StorageCleanup.cleanDisposableOutputs")(function* (
     serverSettings: ServerSettings,
@@ -3392,6 +3403,7 @@ const make = Effect.gen(function* () {
   let sweepSequence = 0;
   const sweep = Effect.fn("StorageCleanup.sweep")(function* (
     trigger: StorageCleanupReport["trigger"],
+    automaticRequest?: AutomaticSweepRequest,
   ) {
     const now = yield* Clock.currentTimeMillis;
     const serverSettings = yield* settingsService.getSettings;
@@ -3403,7 +3415,14 @@ const make = Effect.gen(function* () {
     const observationProcessPaths = yield* Effect.cached(processPaths);
     const observationTargets = WorktreeConsumers.createTargetObservation();
     const automaticWork: AutomaticOutputWork | undefined =
-      trigger === "automatic" ? { paths: null } : undefined;
+      trigger === "automatic"
+        ? {
+            paths: null,
+            priorityPaths: new Set(
+              yield* Effect.forEach(automaticRequest?.priorityPaths ?? [], canonicalWorkspacePath),
+            ),
+          }
+        : undefined;
     yield* audit({
       event: "sweep-start",
       runId,
@@ -3488,7 +3507,8 @@ const make = Effect.gen(function* () {
         }),
       ),
     );
-    yield* savedWorkspaces.sweep;
+    if (trigger === "manual" || automaticRequest?.inspectSavedWorkspaces === true)
+      yield* savedWorkspaces.sweep;
     if (
       trigger === "manual" ||
       anyWorktreePolicy(
@@ -3622,12 +3642,28 @@ const make = Effect.gen(function* () {
     return latestReport;
   });
   const automaticSweepState = yield* Ref.make<"idle" | "queued" | "running" | "followup">("idle");
+  const emptyAutomaticRequest: AutomaticSweepRequest = {
+    inspectSavedWorkspaces: false,
+    priorityPaths: [],
+  };
+  const pendingAutomaticRequest = yield* Ref.make(emptyAutomaticRequest);
   const worker: DrainableWorker<
     Deferred.Deferred<StorageCleanupReport, ServerSettingsError> | undefined
   > = yield* makeDrainableWorker(
     (completion: Deferred.Deferred<StorageCleanupReport, ServerSettingsError> | undefined) =>
-      (completion === undefined ? Ref.set(automaticSweepState, "running") : Effect.void).pipe(
-        Effect.andThen(sweep(completion === undefined ? "automatic" : "manual")),
+      (completion === undefined
+        ? Effect.gen(function* () {
+            yield* Ref.set(automaticSweepState, "running");
+            const request = yield* Ref.getAndSet(pendingAutomaticRequest, emptyAutomaticRequest);
+            const remaining = request.priorityPaths.slice(AUTOMATIC_OUTPUT_ROOT_LIMIT);
+            if (remaining.length > 0) yield* requestSweep(true, { priorityPaths: remaining });
+            return yield* sweep("automatic", {
+              ...request,
+              priorityPaths: request.priorityPaths.slice(0, AUTOMATIC_OUTPUT_ROOT_LIMIT),
+            });
+          })
+        : sweep("manual")
+      ).pipe(
         Effect.exit,
         Effect.flatMap((exit) =>
           completion === undefined
@@ -3648,15 +3684,27 @@ const make = Effect.gen(function* () {
         ),
       ),
   );
-  const requestSweep = (followup = false) =>
-    Ref.modify(automaticSweepState, (state) =>
+  const requestSweep = Effect.fn("StorageCleanup.requestSweep")(function* (
+    followup = false,
+    request: Partial<AutomaticSweepRequest> = {},
+  ) {
+    yield* Ref.update(pendingAutomaticRequest, (pending) => ({
+      inspectSavedWorkspaces:
+        pending.inspectSavedWorkspaces || request.inspectSavedWorkspaces === true,
+      priorityPaths: [...new Set([...pending.priorityPaths, ...(request.priorityPaths ?? [])])],
+    }));
+    const enqueue = yield* Ref.modify(automaticSweepState, (state) =>
       state === "idle"
         ? [true, "queued" as const]
-        : [false, followup && state === "running" ? ("followup" as const) : state],
-    ).pipe(
-      Effect.flatMap((enqueue) => (enqueue ? worker.enqueue(undefined) : Effect.void)),
-      Effect.uninterruptible,
+        : [
+            false,
+            (followup || request.inspectSavedWorkspaces === true) && state === "running"
+              ? ("followup" as const)
+              : state,
+          ],
     );
+    if (enqueue) yield* worker.enqueue(undefined);
+  }, Effect.uninterruptible);
   const runNow = Effect.gen(function* () {
     const completion = yield* Deferred.make<StorageCleanupReport, ServerSettingsError>();
     yield* worker.enqueue(completion);
@@ -3744,7 +3792,7 @@ const make = Effect.gen(function* () {
     const events = engine.streamDomainEvents;
     let lastSettings = yield* settingsService.getSettings.pipe(Effect.orDie);
     yield* forkParked(
-      requestSweep().pipe(
+      requestSweep(false, { inspectSavedWorkspaces: true }).pipe(
         Effect.andThen(worker.drain),
         Effect.repeat(Schedule.spaced("1 hour")),
         Effect.asVoid,
@@ -3760,7 +3808,7 @@ const make = Effect.gen(function* () {
         )
           return Effect.void;
         lastSettings = settings;
-        return requestSweep(true);
+        return requestSweep(true, { inspectSavedWorkspaces: true });
       }),
     );
     yield* forkParked(
@@ -3772,7 +3820,12 @@ const make = Effect.gen(function* () {
           lastSettings,
           (rules) => rules.worktreeOnDelete || dependencyCleanupEnabled(rules),
         )
-          ? requestSweep(event.type === "thread.deleted")
+          ? requestSweep(event.type === "thread.deleted", {
+              priorityPaths:
+                event.type === "thread.deleted" && event.payload.worktreePath !== null
+                  ? [event.payload.worktreePath]
+                  : [],
+            })
           : Effect.void,
       ).pipe(
         Effect.catchCause((cause) =>

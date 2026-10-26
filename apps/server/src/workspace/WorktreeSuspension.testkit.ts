@@ -5,9 +5,10 @@ import { WorktreeSuspensionRegistry } from "./WorktreeSuspensionRegistry.ts";
 
 export const layerWith = (
   automaticProtection: WorktreeSuspensionRegistry["Service"]["automaticProtection"],
+  sweep: WorktreeSuspension["Service"]["sweep"] = Effect.void,
 ) =>
   Layer.merge(
-    Layer.mock(WorktreeSuspension)({ sweep: Effect.void }),
+    Layer.mock(WorktreeSuspension)({ sweep }),
     Layer.mock(WorktreeSuspensionRegistry)({
       root: "/test/saved-workspaces",
       list: Effect.succeed([]),
