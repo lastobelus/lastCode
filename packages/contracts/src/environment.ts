@@ -112,6 +112,7 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   /** Whole-worktree cleanup preserves unknown, untracked, and ignored local files
       regardless of `worktreeKeepWhen`. Missing on servers with the legacy policy. */
   worktreeLocalPreservation: Schema.optionalKey(Schema.Boolean),
+  worktreeSuspension: Schema.optionalKey(Schema.Boolean),
   /** Server persists the opt-in for continuing interrupted threads after restarts. */
   threadRestartContinuation: Schema.optionalKey(Schema.Boolean),
   projectSettingsOverrides: Schema.optionalKey(Schema.Boolean),

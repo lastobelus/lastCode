@@ -471,3 +471,22 @@ it.effect.each(["reopen", "new-archive", "retry-after-failure"] as const)(
         assert.isNull((yield* threads.getThreadRecords(rootId, [])).thread.archivedAt);
     }).pipe(Effect.provide(testLayer)),
 );
+
+it.effect(
+  "a disposal request cannot delete its conversation without the lifecycle controller",
+  () =>
+    Effect.gen(function* () {
+      yield* createArchivedRoot;
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const failure = yield* threads
+        .dispatch({
+          type: "thread.delete",
+          commandId: CommandId.make("service-archive:discard-without-controller"),
+          threadId: rootId,
+          savedWorkspace: { mode: "discard", previewToken: "exact-consent" },
+        })
+        .pipe(Effect.flip);
+      assert.equal(failure._tag, "OrchestratorDispatchError");
+      assert.equal((yield* threads.getThreadRecords(rootId, [])).thread.id, rootId);
+    }).pipe(Effect.provide(testLayer)),
+);

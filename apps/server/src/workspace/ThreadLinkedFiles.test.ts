@@ -19,6 +19,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as WorkspaceAcquisitionTestkit from "./WorkspaceAcquisition.testkit.ts";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 
@@ -38,6 +39,7 @@ import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 const threadId = ThreadId.make("linked-files-thread");
 const projectId = ProjectId.make("linked-files-project");
 const layerFiles = WorkspaceFileSystem.layer.pipe(
+  Layer.provide(WorkspaceAcquisitionTestkit.layer),
   Layer.provide(Layer.mock(KnownWorkspaces.KnownWorkspaces)({ assertContains: () => Effect.void })),
   Layer.provide(WorkspacePaths.layer),
   Layer.provide(WorkspaceEntries.layer.pipe(Layer.provide(WorkspacePaths.layer))),

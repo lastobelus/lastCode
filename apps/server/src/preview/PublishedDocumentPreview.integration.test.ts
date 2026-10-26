@@ -16,6 +16,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as WorkspaceAcquisitionTestkit from "../workspace/WorkspaceAcquisition.testkit.ts";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
@@ -125,6 +126,7 @@ it.live("MCP opens only its own current publication through signed HTTP in real 
       WorkspacePaths.layer,
       entries,
       WorkspaceFileSystem.layer.pipe(
+        Layer.provide(WorkspaceAcquisitionTestkit.layer),
         Layer.provide(WorkspacePaths.layer),
         Layer.provide(entries),
         Layer.provide(

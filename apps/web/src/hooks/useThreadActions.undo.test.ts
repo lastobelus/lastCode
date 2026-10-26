@@ -56,6 +56,15 @@ vi.mock("react", async (original) => ({
   useMemo: (create: () => unknown) => create(),
   useRef: (value: unknown) => ({ current: value }),
 }));
+vi.mock("./useWorkspaceLifecycleConfirmation", async (original) => ({
+  ...(await original<typeof import("./useWorkspaceLifecycleConfirmation")>()),
+  useWorkspaceLifecycleConfirmation: () => ({
+    supported: () => false,
+    confirm: () => {
+      throw new Error("These Undo fixtures do not support saved workspaces.");
+    },
+  }),
+}));
 vi.mock("@tanstack/react-router", () => ({ useRouter: () => router }));
 const archiveConfirm = vi.hoisted(() => vi.fn());
 vi.mock("./useSettings", () => ({ useClientSettings: () => familyState.confirmArchive }));
@@ -313,7 +322,9 @@ describe("archive Undo", () => {
     const actions = useThreadActions();
     await actions.archiveThread(target);
     expect(useThreadUndoNotice.getState().notice).toMatchObject({ action: "Archived", count: 1 });
-    expect(add).not.toHaveBeenCalled();
+    expect(add).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ type: "info", title: "Saved workspace data kept" }),
+    );
     await currentUndo()();
     expect(commands.unarchive).toHaveBeenCalledExactlyOnceWith({
       environmentId: target.environmentId,

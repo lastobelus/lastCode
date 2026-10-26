@@ -1,8 +1,10 @@
 import type { ContextMenuItem } from "@t3tools/contracts";
 import type { SnoozePreset } from "@t3tools/client-runtime/state/thread-settled";
 import type { HandoffMenuDescriptor } from "../handoffs/handoffMenu";
+import type { WorktreeSuspensionActionId } from "./worktreeSuspensionMenu";
 
 export type ThreadActionMenuId =
+  | WorktreeSuspensionActionId
   | "new-thread-on-branch"
   | "filter-by-project"
   | "project-settings"
@@ -34,6 +36,7 @@ export type ThreadActionMenuId =
   | "handoffs-heading"
   | "handoffs-empty"
   | "archive"
+  | "archive-discard"
   | "dismiss-archive-failure"
   | "delete";
 

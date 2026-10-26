@@ -229,12 +229,13 @@ jobs:
       # Blacksmith boots GitHub's Ubuntu runner image (gcc is usually present),
       # but ACP process-tree live tests compile a small pthread fixture with `cc`
       # and soft-skip when it is missing. Install build-essential so that path
-      # always runs in CI instead of silently no-oping.
-      - name: Install C toolchain for process-tree fixtures
+      # always runs in CI instead of silently no-oping. Suspension fixtures also
+      # need the native metadata inspectors before they may remove checkouts.
+      - name: Install test toolchain and workspace metadata inspectors
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential
-          command -v cc
+          sudo apt-get install -y --no-install-recommends build-essential attr acl e2fsprogs
+          command -v cc getfattr getfacl lsattr
 
       - uses: ./.github/actions/setup-apt-mirrors
 
@@ -376,6 +377,16 @@ jobs:
       - name: Detect affected jobs
         id: changes
         uses: ./.github/actions/ci-changes
+
+      - uses: ./.github/actions/setup-apt-mirrors
+        if: steps.changes.outputs.test_server != 'false'
+
+      - name: Install workspace metadata inspection tools
+        if: steps.changes.outputs.test_server != 'false'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends attr acl e2fsprogs
+          command -v getfattr getfacl lsattr
 
       - name: Setup Vite+
         if: steps.changes.outputs.test_server != 'false'

@@ -1,3 +1,4 @@
+import { WorkspaceLifecycleDialogHost } from "../components/WorkspaceLifecycleDialog";
 import { PermissionUpdateNotice } from "../components/PermissionUpdateNotice";
 import { type ServerLifecycleWelcomePayload } from "@t3tools/contracts";
 import { scopedProjectKey, scopeProjectRef } from "@t3tools/client-runtime/environment";
@@ -260,6 +261,7 @@ function RootRouteView() {
           <ReopenClosedViewShortcut />
           <ConfirmDialogHost />
           <ThreadArchiveDialogHost />
+          <WorkspaceLifecycleDialogHost />
           <CustomSnoozeDialogHost />
           <GuestShareDialogHost />
           <SlowRpcRequestToastCoordinator />

@@ -1,3 +1,4 @@
+import { mergeWorktreeSuspensionMenuItems } from "../components/worktreeSuspensionMenu";
 import { withThreadReadPermissions } from "./threadReadActions";
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { requestCustomSnooze } from "../components/CustomSnoozeDialog";
@@ -60,6 +61,7 @@ import { describeHandoff } from "../handoffs/handoffMenu";
 import { useThreadHandoffs } from "../handoffs/handoffsStore";
 import { useOpenHandoff } from "../handoffs/useOpenHandoff";
 import { useRightPanelStore } from "../rightPanelStore";
+import { useWorktreeSuspensionActions } from "./useWorktreeSuspensionActions";
 
 function failureToast(title: string, error: unknown) {
   toastManager.add(
@@ -79,6 +81,7 @@ export function useThreadActionMenu(input: {
 }) {
   const { threadRef, projectCwd, onStartRename, canShareWithGuest } = input;
   const router = useRouter();
+  const workspaceActions = useWorktreeSuspensionActions();
   const projects = useProjects();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
@@ -98,7 +101,7 @@ export function useThreadActionMenu(input: {
     setThreadPersistence,
     archiveThread,
     unarchiveThread,
-    deleteThread,
+    confirmAndDeleteThread,
     markThreadUnread,
     markThreadRead,
   } = useThreadActions();
@@ -118,7 +121,6 @@ export function useThreadActionMenu(input: {
   const hasStoppableProcesses =
     supportsProcessControls && (runningTerminalIds.length > 0 || previews.length > 0);
   const handleNewThread = useNewThreadHandler();
-  const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
   const timestampFormat = useClientSettings((s) => s.timestampFormat);
   const handoffsMenuLimit = useClientSettings((s) => s.handoffsMenuLimit);
   const handoffs = useThreadHandoffs(threadRef);
@@ -162,30 +164,34 @@ export function useThreadActionMenu(input: {
       const isRegeneratingTitle = thread.titleRegeneration != null;
       const snoozePresets = resolveSnoozePresets(now, timestampFormat);
       const handoffDescriptors = handoffs.slice(0, handoffsMenuLimit).map(describeHandoff);
-      const items = buildThreadActionMenuItems({
-        canOperate: readEnvironmentScope(threadRef.environmentId, AuthOrchestrationOperateScope),
-        branch: thread.branch ?? null,
-        projectFilter: null,
-        isPinned: thread.pinnedAt != null,
-        isPersistent: thread.persistent === true,
-        archiveFailed: thread.archivePending?.status === "failed",
-        isSettled: supports.settlement && thread.settledOverride === "settled",
-        autoSettleEnabled: thread.autoSettleDisabledAt == null,
-        isSnoozed: supports.snooze && effectiveSnoozed(thread, { now: now.toISOString() }),
-        canSnoozeNow: canSnooze(thread, { now: now.toISOString() }),
-        isRegeneratingTitle,
-        hasRunningAction: thread.actionResume?.outcome === "running",
-        hasStoppableProcesses,
-        supports,
-        snoozePresets,
-        canShareWithGuest,
-        handoffs: handoffDescriptors,
-        handoffsOverflow: handoffs.length > handoffDescriptors.length,
-      });
+      const items = mergeWorktreeSuspensionMenuItems(
+        buildThreadActionMenuItems({
+          canOperate: readEnvironmentScope(threadRef.environmentId, AuthOrchestrationOperateScope),
+          branch: thread.branch ?? null,
+          projectFilter: null,
+          isPinned: thread.pinnedAt != null,
+          isPersistent: thread.persistent === true,
+          archiveFailed: thread.archivePending?.status === "failed",
+          isSettled: supports.settlement && thread.settledOverride === "settled",
+          autoSettleEnabled: thread.autoSettleDisabledAt == null,
+          isSnoozed: supports.snooze && effectiveSnoozed(thread, { now: now.toISOString() }),
+          canSnoozeNow: canSnooze(thread, { now: now.toISOString() }),
+          isRegeneratingTitle,
+          hasRunningAction: thread.actionResume?.outcome === "running",
+          hasStoppableProcesses,
+          supports,
+          snoozePresets,
+          canShareWithGuest,
+          handoffs: handoffDescriptors,
+          handoffsOverflow: handoffs.length > handoffDescriptors.length,
+        }),
+        workspaceActions.menuItems(thread),
+      );
       const clicked = await settlePromise(() =>
         api.contextMenu.show(withThreadReadPermissions(items, [threadRef]), position),
       );
       if (clicked._tag === "Failure" || clicked.value === null) return;
+      if (await workspaceActions.run(clicked.value, threadRef)) return;
       const action: ThreadActionMenuId = clicked.value;
       if (action === "handoff-show-all") {
         useRightPanelStore.getState().open(threadRef, "handoffs");
@@ -357,9 +363,11 @@ export function useThreadActionMenu(input: {
           );
           return;
         }
-        case "archive": {
+        case "archive":
+        case "archive-discard": {
           let didArchive = false;
           const result = await archiveThread(threadRef, {
+            discardSavedWorkspace: clicked.value === "archive-discard",
             ...(thread.archivePending?.status === "failed"
               ? { expectedArchiveCommandId: thread.archivePending.commandId }
               : {}),
@@ -376,19 +384,7 @@ export function useThreadActionMenu(input: {
           return;
         }
         case "delete": {
-          if (confirmThreadDelete) {
-            const confirmed = await settlePromise(() =>
-              api.dialogs.confirm(
-                [
-                  `Delete thread "${thread.title}"?`,
-                  "This also deletes any of its subagents, including archived ones; other forks and independent threads are kept. This cannot be undone.",
-                ].join("\n"),
-                { variant: "destructive" },
-              ),
-            );
-            if (confirmed._tag === "Failure" || !confirmed.value) return;
-          }
-          const deleted = await deleteThread(threadRef);
+          const deleted = await confirmAndDeleteThread(threadRef);
           if (
             deleted._tag === "Failure" &&
             !isAtomCommandInterrupted(deleted) &&

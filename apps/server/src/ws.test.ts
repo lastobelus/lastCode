@@ -88,6 +88,9 @@ import * as SessionStore from "./auth/SessionStore.ts";
 import * as SourceControlDiscovery from "./sourceControl/SourceControlDiscovery.ts";
 import * as SourceControlRepositoryService from "./sourceControl/SourceControlRepositoryService.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
+import * as WorktreeSuspension from "./workspace/WorktreeSuspension.ts";
+import * as WorkspaceAcquisitionTestkit from "./workspace/WorkspaceAcquisition.testkit.ts";
+import { WorkspaceLifecycle } from "./workspace/WorkspaceLifecycle.ts";
 import * as DatabaseStorage from "./persistence/DatabaseStorage.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as ThreadLaunchService from "./orchestration-v2/ThreadLaunchService.ts";
@@ -431,6 +434,9 @@ const layerUnusedConfigRpcServices = Layer.mergeAll(
   Layer.mock(SourceControlDiscovery.SourceControlDiscovery)({}),
   Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({}),
   Layer.mock(StorageCleanup.StorageCleanup)({}),
+  Layer.mock(WorktreeSuspension.WorktreeSuspension)({}),
+  WorkspaceAcquisitionTestkit.layer,
+  Layer.mock(WorkspaceLifecycle)({}),
   Layer.mock(DatabaseStorage.DatabaseStorage)({}),
   Layer.mock(TerminalManager.TerminalManager)({}),
   Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),

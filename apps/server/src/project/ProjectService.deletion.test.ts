@@ -1366,3 +1366,23 @@ it.effect.each([1, 3])(
       }).pipe(Effect.provide(layerServices));
     }).pipe(Effect.provide(layerDatabase)),
 );
+
+it.effect("a disposal request cannot delete its project without the lifecycle controller", () =>
+  Effect.gen(function* () {
+    const projectId = ProjectId.make("project:discard-without-controller");
+    yield* seedProject(projectId);
+    yield* Effect.gen(function* () {
+      const service = yield* ProjectService.make;
+      const failure = yield* service
+        .delete({
+          commandId: CommandId.make("delete:discard-without-controller"),
+          projectId,
+          force: true,
+          savedWorkspace: { mode: "discard", previewToken: "exact-consent" },
+        })
+        .pipe(Effect.flip);
+      assert.equal(failure._tag, "ProjectOperationError");
+      assert.isTrue(Option.isSome(yield* service.getById(projectId)));
+    }).pipe(Effect.provide(layerServices));
+  }).pipe(Effect.provide(layerDatabase)),
+);

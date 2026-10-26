@@ -8,6 +8,8 @@ import {
   type ProjectSnapshot,
   type ProjectScript,
   type ThreadId,
+  type SavedWorkspaceDisposition,
+  WorktreeSuspensionRequestError,
 } from "@t3tools/contracts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
@@ -44,6 +46,9 @@ import { planThreadDeletion } from "../orchestration-v2/ThreadDeletion.ts";
 import * as ProjectEnrichmentService from "./ProjectEnrichmentService.ts";
 import { UpdateDrainAdmission } from "../updateDrain/UpdateDrainAdmission.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
+import * as WorkspaceLifecycle from "../workspace/WorkspaceLifecycle.ts";
+
+const isWorktreeSuspensionRequestError = Schema.is(WorktreeSuspensionRequestError);
 
 export interface ProjectCreateInput extends ProjectCreatePayload {
   readonly commandId: CommandId;
@@ -61,6 +66,7 @@ export interface ProjectDeleteInput {
   readonly commandId: CommandId;
   readonly projectId: ProjectId;
   readonly force?: boolean;
+  readonly savedWorkspace?: SavedWorkspaceDisposition;
 }
 
 export class ProjectNotFoundError extends Schema.TaggedError<ProjectNotFoundError>()(
@@ -105,6 +111,7 @@ export class ProjectOperationError extends Schema.TaggedError<ProjectOperationEr
       "delete-thread",
       "delete-project-settings",
       "dispatch-project-command",
+      "saved-workspace-lifecycle",
     ]),
     projectId: Schema.optional(ProjectId),
     workspaceRoot: Schema.optional(Schema.String),
@@ -112,6 +119,8 @@ export class ProjectOperationError extends Schema.TaggedError<ProjectOperationEr
   },
 ) {
   override get message(): string {
+    if (this.operation === "saved-workspace-lifecycle")
+      return "Saved workspace data changed or is protected. Review the saved-data choice before deleting this project.";
     if (this.operation === "delete-project-settings")
       return `Project deletion committed, but settings cleanup failed${this.projectId === undefined ? "" : ` for ${this.projectId}`}. Retry using the original command ID to finish cleanup.`;
     return `Project operation '${this.operation}' failed${this.projectId === undefined ? "" : ` for ${this.projectId}`}.`;
@@ -174,6 +183,7 @@ export const make = Effect.gen(function* () {
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
   const legacyImporter = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
   const threadCommands = yield* ThreadCommandExecutor.ThreadCommandExecutor;
+  const workspaceLifecycle = yield* Effect.serviceOption(WorkspaceLifecycle.WorkspaceLifecycle);
   // Commands for one project run in order. Commands that claim a workspace root
   // also hold that root, so two projects cannot both claim it.
   const projectLocks = yield* KeyedLock.make<ProjectId>();
@@ -628,8 +638,45 @@ export const make = Effect.gen(function* () {
       // Completed receipt replay has no child cleanup to admit. Fresh cascades
       // take admission before persistence and child locks, just like thread.delete.
       const existing = yield* readRow(input.projectId, { includeDeleted: true });
-      if (Option.isSome(existing) && existing.value.deletedAt !== null) return yield* operation;
-      return yield* admission.admit("thread-delete", operation).pipe(
+      const lifecycleOperation = Option.isSome(workspaceLifecycle)
+        ? workspaceLifecycle.value
+            .run(
+              {
+                operation: "delete",
+                target: { kind: "project", projectId: input.projectId },
+                commandId: input.commandId,
+                ...(input.savedWorkspace === undefined
+                  ? {}
+                  : { savedWorkspace: input.savedWorkspace }),
+              },
+              operation,
+            )
+            .pipe(
+              Effect.mapError((cause) =>
+                isWorktreeSuspensionRequestError(cause)
+                  ? new ProjectOperationError({
+                      operation: "saved-workspace-lifecycle",
+                      projectId: input.projectId,
+                      cause,
+                    })
+                  : cause,
+              ),
+            )
+        : input.savedWorkspace?.mode === "discard"
+          ? Effect.fail(
+              new ProjectOperationError({
+                operation: "saved-workspace-lifecycle",
+                projectId: input.projectId,
+                cause: new WorktreeSuspensionRequestError({
+                  reason: "unavailable",
+                  message: "Saved workspace disposal is unavailable.",
+                }),
+              }),
+            )
+          : operation;
+      if (Option.isSome(existing) && existing.value.deletedAt !== null)
+        return yield* lifecycleOperation;
+      return yield* admission.admit("thread-delete", lifecycleOperation).pipe(
         Effect.catchTags({
           UpdateDrainAdmissionError: (cause) =>
             Effect.gen(function* () {
@@ -637,7 +684,7 @@ export const make = Effect.gen(function* () {
               // behind it and the drain. Commit validates the replay under its locks.
               const recorded = yield* readRow(input.projectId, { includeDeleted: true });
               if (Option.isSome(recorded) && recorded.value.deletedAt !== null)
-                return yield* operation;
+                return yield* lifecycleOperation;
               return yield* cause;
             }),
         }),

@@ -245,7 +245,7 @@ it.effect("accepts an MCP prompt before a concurrent archive can take its target
     const allowMessage = yield* Deferred.make<void>();
     const archiveQueued = yield* Deferred.make<void>();
     const commitCommand = sink.commitCommand;
-    const withLock = executor.withLock;
+    const withPersistenceLock = executor.withPersistenceLock;
     const commitSpy = vi.spyOn(sink, "commitCommand").mockImplementation((command) =>
       command.commandType === "thread.create"
         ? commitCommand(command).pipe(
@@ -262,11 +262,11 @@ it.effect("accepts an MCP prompt before a concurrent archive can take its target
         })
         .pipe(Effect.forkChild());
       const threadId = yield* Deferred.await(created);
-      const observeLock: typeof withLock = (key, effect) =>
-        key === threadId || key === parentThreadId
-          ? Deferred.succeed(archiveQueued, undefined).pipe(Effect.andThen(withLock(key, effect)))
-          : withLock(key, effect);
-      const lockSpy = vi.spyOn(executor, "withLock").mockImplementation(observeLock);
+      const observeLock: typeof withPersistenceLock = (effect) =>
+        Deferred.succeed(archiveQueued, undefined).pipe(
+          Effect.andThen(withPersistenceLock(effect)),
+        );
+      const lockSpy = vi.spyOn(executor, "withPersistenceLock").mockImplementation(observeLock);
       yield* Effect.gen(function* () {
         const archiving = yield* threads
           .dispatch({

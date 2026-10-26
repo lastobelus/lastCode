@@ -1,3 +1,4 @@
+import { useWorkspaceLifecycleConfirmation } from "../../hooks/useWorkspaceLifecycleConfirmation";
 import { useComposerMenuState } from "../chat/useComposerMenuState";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
@@ -315,6 +316,7 @@ function ProjectDetail({
 
   const hasMultipleCheckouts = group.memberProjects.length > 1;
 
+  const lifecycle = useWorkspaceLifecycleConfirmation();
   const removeMembers = async (members: ReadonlyArray<SidebarProjectGroupMember>) => {
     if (checkProjectAccess(members, "Failed to remove project")) return;
     const api = readLocalApi();
@@ -340,9 +342,18 @@ function ProjectDetail({
       threads,
     });
     const confirmed = await settlePromise(() =>
-      api.dialogs.confirm(confirmationMessage, { variant: "destructive" }),
+      lifecycle.confirm(
+        members.map((member) => ({
+          environmentId: member.environmentId,
+          input: {
+            operation: "delete" as const,
+            target: { kind: "project" as const, projectId: member.id },
+          },
+        })),
+        { title: "Remove project?", description: confirmationMessage },
+      ),
     );
-    if (confirmed._tag === "Failure" || !confirmed.value) return;
+    if (confirmed._tag === "Failure" || confirmed.value === null) return;
     if (checkProjectAccess(members, "Failed to remove project")) return;
 
     const currentThreads = readThreadShells();
@@ -363,7 +374,7 @@ function ProjectDetail({
     );
 
     const draftStore = useComposerDraftStore.getState();
-    for (const member of members) {
+    for (const [memberIndex, member] of members.entries()) {
       if (checkProjectAccess([member], "Failed to remove project")) return;
       const memberThreads = currentProjectThreads.filter(
         (thread) => thread.environmentId === member.environmentId && thread.projectId === member.id,
@@ -374,6 +385,9 @@ function ProjectDetail({
           input: {
             projectId: member.id,
             force: true,
+            ...(confirmed.value.dispositions[memberIndex]
+              ? { savedWorkspace: confirmed.value.dispositions[memberIndex] }
+              : {}),
           },
         }),
         () => undefined,

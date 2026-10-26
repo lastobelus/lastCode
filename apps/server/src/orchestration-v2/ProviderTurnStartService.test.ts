@@ -33,7 +33,9 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import * as ServerConfig from "../config.ts";
-import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
+import { registerWorkspaceLeaseRoot, withWorkspaceLease } from "../workspace/workspaceLease.ts";
+import * as WorkspaceAcquisitionTestkit from "../workspace/WorkspaceAcquisition.testkit.ts";
+import * as WorkspaceAcquisition from "../workspace/WorkspaceAcquisition.ts";
 import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
@@ -92,6 +94,7 @@ function startWithMissingWorktree(
     [managedWorktreesDir]: managedWorktreesDir,
     [`${managedWorktreesDir}/project`]: `${managedWorktreesDir}/project`,
   },
+  acquire?: WorkspaceAcquisition.WorkspaceAcquisition["Service"]["acquire"],
 ) {
   const threadId = ThreadId.make("thread_provider_turn_start_projection_failure");
   const runId = RunId.make("run_provider_turn_start_projection_failure");
@@ -142,6 +145,11 @@ function startWithMissingWorktree(
   const pruneWorktrees = vi.fn(() => Effect.void);
   const createWorktree = vi.fn(() => Effect.succeed({} as never));
   const layer = ProviderTurnStart.layer.pipe(
+    Layer.provide(
+      acquire === undefined
+        ? WorkspaceAcquisitionTestkit.layer
+        : WorkspaceAcquisitionTestkit.layerWith(acquire),
+    ),
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({}),
@@ -220,6 +228,22 @@ function startWithMissingWorktree(
   };
 }
 
+it.each(["snapshot-unavailable", "discarded", "blocked"] as const)(
+  "does not recreate from a branch when saved workspace acquisition is %s",
+  async (reason) => {
+    const fixture = startWithMissingWorktree(
+      `${managedWorktreesDir}/project/saved`,
+      undefined,
+      () => Effect.fail(new WorkspaceAcquisition.WorkspaceUnavailableError({ reason })),
+    );
+    const error = await fixture.start;
+    expect(error.cause).toBeInstanceOf(WorkspaceAcquisition.WorkspaceUnavailableError);
+    expect(fixture.pruneWorktrees).not.toHaveBeenCalled();
+    expect(fixture.createWorktree).not.toHaveBeenCalled();
+    expect(fixture.startRootRun).not.toHaveBeenCalled();
+  },
+);
+
 it.each([
   {
     label: "<managed>/<repo>/<branch>",
@@ -273,6 +297,7 @@ it.each([
   const harness = startWithMissingWorktree(input.worktreePath, input.realPaths);
   await harness.start;
   expect(harness.createWorktree).toHaveBeenCalledTimes(input.recreated ? 1 : 0);
+  expect(harness.pruneWorktrees).not.toHaveBeenCalled();
 });
 
 function makeLocalCommandHarness(input: {
@@ -843,6 +868,7 @@ function makeLocalCommandHarness(input: {
     }),
   );
   const layer = ProviderTurnStart.layer.pipe(
+    Layer.provide(WorkspaceAcquisitionTestkit.layer),
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({
@@ -1089,8 +1115,10 @@ effectIt.effect.each(["cleanup-first", "startup-first"])(
       const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-start-" });
       const worktreePath = path.join(workspaceRoot, "project", "worktree");
       yield* fileSystem.makeDirectory(worktreePath, { recursive: true });
+      yield* registerWorkspaceLeaseRoot(worktreePath);
       const release = yield* Deferred.make<void>();
       const openEntered = yield* Deferred.make<void>();
+      const cleanupStarted = yield* Deferred.make<void>();
       const harness = makeLocalCommandHarness({
         text: "Continue",
         worktreePath,
@@ -1115,6 +1143,7 @@ effectIt.effect.each(["cleanup-first", "startup-first"])(
         worktreePath,
         Effect.gen(function* () {
           cleanupEntered = true;
+          yield* Deferred.succeed(cleanupStarted, undefined);
           if (order === "cleanup-first") yield* Deferred.await(release);
           else {
             expect(harness.projection().providerSessions).toHaveLength(1);
@@ -1127,6 +1156,7 @@ effectIt.effect.each(["cleanup-first", "startup-first"])(
         order === "cleanup-first"
           ? yield* cleanupEffect.pipe(Effect.forkChild({ startImmediately: true }))
           : undefined;
+      if (order === "cleanup-first") yield* Deferred.await(cleanupStarted);
       const startup = yield* harness.start.pipe(Effect.forkChild({ startImmediately: true }));
       if (order === "cleanup-first") expect(harness.open).not.toHaveBeenCalled();
       if (order === "startup-first") yield* Deferred.await(openEntered);

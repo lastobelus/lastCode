@@ -628,7 +628,7 @@ it.effect("holds the sender through launch acceptance and replays after it archi
     const allowMessage = yield* Deferred.make<void>();
     const archiveQueued = yield* Deferred.make<void>();
     const commitCommand = eventSink.commitCommand;
-    const withLock = executor.withLock;
+    const withPersistenceLock = executor.withPersistenceLock;
     let archiveStarted = false;
     const commitSpy = vi.spyOn(eventSink, "commitCommand").mockImplementation((command) =>
       command.commandId === input.commandId
@@ -638,14 +638,14 @@ it.effect("holds the sender through launch acceptance and replays after it archi
           )
         : commitCommand(command),
     );
-    const observeLock: ThreadCommandExecutor.ThreadCommandExecutor["Service"]["withLock"] = (
-      key,
-      effect,
-    ) =>
-      key === senderThreadId && archiveStarted
-        ? Deferred.succeed(archiveQueued, undefined).pipe(Effect.andThen(withLock(key, effect)))
-        : withLock(key, effect);
-    const lockSpy = vi.spyOn(executor, "withLock").mockImplementation(observeLock);
+    const observeLock: ThreadCommandExecutor.ThreadCommandExecutor["Service"]["withPersistenceLock"] =
+      (effect) =>
+        archiveStarted
+          ? Deferred.succeed(archiveQueued, undefined).pipe(
+              Effect.andThen(withPersistenceLock(effect)),
+            )
+          : withPersistenceLock(effect);
+    const lockSpy = vi.spyOn(executor, "withPersistenceLock").mockImplementation(observeLock);
     yield* Effect.gen(function* () {
       const launchFiber = yield* launches
         .launch(input)
@@ -2442,44 +2442,52 @@ it.effect("keeps a losing allocated launch from rejecting the winner's initial m
     const threads = yield* ThreadManagement.ThreadManagementService;
     const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
     const eventSink = yield* EventSink.EventSinkV2;
+    const executor = yield* ThreadCommandExecutor.ThreadCommandExecutor;
     const { threadId: _unusedThreadId, ...input } = launchInput({
       command: "command:launch:claim-race",
       thread: "unused",
       message: "Race the initial message",
     });
     const firstClaimPlanned = yield* Deferred.make<void>();
-    const secondClaimPlanned = yield* Deferred.make<void>();
+    const secondLaunchQueued = yield* Deferred.make<void>();
     const winnerCommitted = yield* Deferred.make<void>();
     const allowWinnerMessage = yield* Deferred.make<void>();
     const commitCommand = eventSink.commitCommand;
-    let claimCount = 0;
+    const withPersistenceLock = executor.withPersistenceLock;
+    let claimPlanned = false;
     const commitSpy = vi.spyOn(eventSink, "commitCommand").mockImplementation((command) =>
       command.commandId !== input.commandId
         ? commitCommand(command)
         : Effect.gen(function* () {
-            if (++claimCount === 1) {
-              yield* Deferred.succeed(firstClaimPlanned, undefined);
-              yield* Deferred.await(secondClaimPlanned);
-              const committed = yield* commitCommand(command);
-              yield* Deferred.succeed(winnerCommitted, undefined);
-              yield* Deferred.await(allowWinnerMessage);
-              return committed;
-            }
-            yield* Deferred.succeed(secondClaimPlanned, undefined);
-            yield* Deferred.await(winnerCommitted);
-            return yield* commitCommand(command);
+            claimPlanned = true;
+            yield* Deferred.succeed(firstClaimPlanned, undefined);
+            yield* Deferred.await(secondLaunchQueued);
+            const committed = yield* commitCommand(command);
+            yield* Deferred.succeed(winnerCommitted, undefined);
+            yield* Deferred.await(allowWinnerMessage);
+            return committed;
           }),
     );
+    const observeLock: ThreadCommandExecutor.ThreadCommandExecutor["Service"]["withPersistenceLock"] =
+      (effect) =>
+        claimPlanned
+          ? Deferred.succeed(secondLaunchQueued, undefined).pipe(
+              Effect.andThen(withPersistenceLock(effect)),
+            )
+          : withPersistenceLock(effect);
+    const lockSpy = vi.spyOn(executor, "withPersistenceLock").mockImplementation(observeLock);
     yield* Effect.gen(function* () {
       const winner = yield* launches.launch(input).pipe(Effect.forkChild());
       yield* Deferred.await(firstClaimPlanned);
-      const loser = yield* launches.launch(input).pipe(Effect.flip);
-      assert.ok(isThreadLaunchError(loser));
-      assert.equal(loser.operation, "create-thread");
-      assert.include(String(loser.cause), "cannot be replayed");
+      const loserFiber = yield* launches.launch(input).pipe(Effect.flip, Effect.forkChild());
+      yield* Deferred.await(winnerCommitted);
       const messageCommandId = CommandId.make(`${input.commandId}:initial-message`);
       assert.isTrue(Option.isNone(yield* receipts.getByCommandId(messageCommandId)));
       yield* Deferred.succeed(allowWinnerMessage, undefined);
+      const loser = yield* Fiber.join(loserFiber);
+      assert.ok(isThreadLaunchError(loser));
+      assert.equal(loser.operation, "create-thread");
+      assert.include(String(loser.cause), "cannot be replayed");
       const launched = yield* Fiber.join(winner);
       assert.lengthOf(launched.projection.messages, 1);
       const replayed = yield* launches.launch(input);
@@ -2492,7 +2500,14 @@ it.effect("keeps a losing allocated launch from rejecting the winner's initial m
         Option.getOrThrow(yield* receipts.getByCommandId(messageCommandId)).status,
         "accepted",
       );
-    }).pipe(Effect.ensuring(Effect.sync(() => commitSpy.mockRestore())));
+    }).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          commitSpy.mockRestore();
+          lockSpy.mockRestore();
+        }),
+      ),
+    );
   }).pipe(Effect.provide(harness.layer));
 });
 

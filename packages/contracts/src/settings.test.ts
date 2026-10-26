@@ -280,6 +280,71 @@ describe("ClientSettings LastCode status icons", () => {
   });
 });
 
+describe("worktree suspension settings", () => {
+  it("starts Off without changing existing cleanup settings", () => {
+    expect(decodeServerSettings({}).worktreeSuspension).toEqual({ mode: "off" });
+    expect(decodeServerSettings({}).projectSettingsOverrides).toEqual({});
+    expect(decodeServerSettingsPatch({ worktreeSuspension: { mode: "off" } })).toEqual({
+      worktreeSuspension: { mode: "off" },
+    });
+  });
+
+  it.each([1, 3, 14, 3650])(
+    "requires a configured delay and leaves scopes disabled at %s days",
+    (afterDays) => {
+      const policy = {
+        mode: "custom",
+        afterDays,
+        scopes: { subagents: false, untouchedChildren: false, otherThreads: false },
+      };
+      expect(
+        decodeServerSettings({ worktreeSuspension: { mode: "custom", afterDays } })
+          .worktreeSuspension,
+      ).toEqual(policy);
+      expect(
+        decodeServerSettingsPatch({ worktreeSuspension: { mode: "custom", afterDays } }),
+      ).toEqual({ worktreeSuspension: policy });
+    },
+  );
+
+  it("round-trips explicit scopes in environment and project settings", () => {
+    const policy = {
+      mode: "custom",
+      afterDays: 14,
+      scopes: { subagents: true, untouchedChildren: false, otherThreads: true },
+    };
+    const input = {
+      worktreeSuspension: policy,
+      projectSettingsOverrides: { project: { worktreeSuspension: policy } },
+    };
+    expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
+    expect(decodeServerSettingsPatch(input)).toEqual(input);
+  });
+
+  it.each([0, -1, 1.5, 3651, null, "3", undefined])(
+    "rejects an invalid suspension delay: %s",
+    (afterDays) => {
+      const input = { worktreeSuspension: { mode: "custom", afterDays } };
+      expect(() => decodeServerSettings(input)).toThrow();
+      expect(() => decodeServerSettingsPatch(input)).toThrow();
+      expect(() =>
+        decodeServerSettings({ projectSettingsOverrides: { project: input } }),
+      ).toThrow();
+    },
+  );
+
+  it("rejects unsupported policies and non-boolean scopes", () => {
+    for (const worktreeSuspension of [
+      { mode: "inherit" },
+      { mode: "custom", afterDays: 3, scopes: { subagents: "true" } },
+      null,
+    ]) {
+      expect(() => decodeServerSettings({ worktreeSuspension })).toThrow();
+      expect(() => decodeServerSettingsPatch({ worktreeSuspension })).toThrow();
+    }
+  });
+});
+
 describe("handoffs menu setting", () => {
   it("defaults to seven and accepts the inclusive bounds", () => {
     expect(decodeClientSettings({}).handoffsMenuLimit).toBe(DEFAULT_HANDOFFS_MENU_LIMIT);
@@ -540,6 +605,29 @@ describe("resolveProjectProviderInstanceEnabled", () => {
 });
 
 describe("requiredScopesForProjectMutation", () => {
+  it("requires destructive grants only for explicit saved-data disposal", () => {
+    const input = {
+      type: "project.delete" as const,
+      commandId: "delete" as CommandId,
+      projectId: "project" as ProjectId,
+    };
+    expect(requiredScopesForProjectMutation(input)).toEqual(["orchestration:operate"]);
+    expect(
+      requiredScopesForProjectMutation({ ...input, savedWorkspace: { mode: "retain" } }),
+    ).toEqual(["orchestration:operate"]);
+    expect(
+      requiredScopesForProjectMutation({
+        ...input,
+        savedWorkspace: { mode: "discard", previewToken: "exact-preview" },
+      }),
+    ).toEqual([
+      "environment:maintain",
+      "filesystem:read",
+      "filesystem:write",
+      "source-control:write",
+      "orchestration:operate",
+    ]);
+  });
   it("adds the settings scope only when a mutation carries scripts", () => {
     const projectId = "project-1" as ProjectId;
     const commandId = "command-1" as CommandId;

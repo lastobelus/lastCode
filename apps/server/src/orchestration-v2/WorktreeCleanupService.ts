@@ -29,6 +29,7 @@ import * as ProjectStore from "./ProjectStore.ts";
 import * as ProviderSessions from "./ProviderSessionManager.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
+import * as SuspensionRegistry from "../workspace/WorktreeSuspensionRegistry.ts";
 
 type PendingCleanup = Exclude<ThreadWorktreeCleanup, { readonly status: "failed" }>;
 type CleanupJob = { readonly threadId: ThreadId; readonly cleanup: PendingCleanup };
@@ -66,6 +67,7 @@ const make = Effect.gen(function* () {
   const previews = yield* PreviewHosting.PreviewHosting;
   const terminals = yield* TerminalManager.TerminalManager;
   const git = yield* GitWorkflow.GitWorkflowService;
+  const suspensionRegistry = yield* SuspensionRegistry.WorktreeSuspensionRegistry;
   const events = yield* OrchestrationEventStore.OrchestrationEventStore;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -130,6 +132,10 @@ const make = Effect.gen(function* () {
       cleanup = projection.thread.worktreeCleanup;
       if (projection.thread.deletedAt === null || cleanup == null || cleanup.status === "failed")
         return;
+      if ((yield* suspensionRegistry.automaticProtection(cleanup.worktreePath)) !== null)
+        return yield* Effect.fail(
+          "Saved workspace data or Keep workspace protection retains this worktree.",
+        );
       yield* previews.removeThread(job.threadId);
       // Outbox detach receipts can lag the tombstone. Explicit idempotent teardown
       // makes removal wait for the actual provider and terminal handles to close.
@@ -175,17 +181,20 @@ const make = Effect.gen(function* () {
           );
           if (projectOwners.some(({ root }) => root === normalized))
             return yield* Effect.fail("The worktree is now an active project root.");
-          const shell = yield* projections.getShellSnapshot();
           const threadOwners = yield* Effect.forEach(
-            [...shell.threads, ...shell.archivedThreads].filter(
-              (thread) => thread.id !== job.threadId && thread.worktreePath !== null,
+            (yield* projections.getThreadWorktreePaths({ includeArchived: true })).filter(
+              (thread) => thread.threadId !== job.threadId,
             ),
             (thread) =>
-              canonical(thread.worktreePath!).pipe(Effect.map((root) => ({ thread, root }))),
+              canonical(thread.worktreePath).pipe(Effect.map((root) => ({ thread, root }))),
             { concurrency: 8 },
           );
           if (threadOwners.some(({ root }) => root === normalized))
             return yield* Effect.fail("The worktree is now owned by another thread.");
+          if ((yield* suspensionRegistry.automaticProtection(normalized)) !== null)
+            return yield* Effect.fail(
+              "Saved workspace data or Keep workspace protection retains this worktree.",
+            );
           yield* git.removeWorktree({
             cwd: currentCleanup.repositoryRoot,
             path: currentCleanup.worktreePath,

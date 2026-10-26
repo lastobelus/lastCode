@@ -2,6 +2,8 @@ import {
   AuthOrchestrationReadScope,
   AuthOrchestrationOperateScope,
   EnvironmentHttpApi,
+  clientRpcRequiredScopes,
+  ORCHESTRATION_V2_WS_METHODS,
   type OrchestrationProjectShell,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -172,9 +174,15 @@ export const layer = HttpApiBuilder.group(
         Effect.fn("environment.orchestration.dispatch")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
           yield* requireEnvironmentScope(AuthOrchestrationOperateScope);
+          for (const permission of clientRpcRequiredScopes(
+            ORCHESTRATION_V2_WS_METHODS.dispatchCommand,
+            args.payload,
+          )) {
+            yield* requireEnvironmentScope(permission);
+          }
           const result = yield* startup
             .enqueueCommand(
-              ThreadMessageIntake.dispatchCommand(
+              ThreadMessageIntake.dispatchUserCommand(
                 ThreadManagementService.withCreationProvenance(args.payload, {
                   createdBy: "user",
                   creationSource:

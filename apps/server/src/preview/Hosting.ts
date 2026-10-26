@@ -38,6 +38,7 @@ import * as PortScanner from "./PortScanner.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as HostingAuth from "./HostingAuth.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
+import * as WorkspaceAcquisition from "../workspace/WorkspaceAcquisition.ts";
 
 export const PREVIEW_HOSTING_LEASE_MS = 24 * 60 * 60 * 1_000;
 const WARM_PROCESS_LIMIT = 8;
@@ -145,7 +146,7 @@ export class PreviewHosting extends Context.Service<
       readonly threadId: string;
       readonly command: string;
       readonly cwd: string;
-      readonly worktreePath?: string | null;
+      readonly worktreePath?: string | null | undefined;
       readonly env?: TerminalOpenInput["env"];
       readonly browserAuth?: "t3-dev";
       readonly providerInstanceId?: TerminalOpenInput["providerInstanceId"];
@@ -253,6 +254,7 @@ const discoveryPortKey = (value: string): string => {
 };
 
 const make = Effect.gen(function* () {
+  const workspaceAcquisition = yield* WorkspaceAcquisition.WorkspaceAcquisition;
   const crypto = yield* Crypto.Crypto;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -872,6 +874,11 @@ const make = Effect.gen(function* () {
                 }
               }
 
+              const acquired = yield* acquirePreviewInput(lease);
+              if (acquired.cwd !== lease.cwd || acquired.worktreePath !== lease.worktreePath) {
+                lease = acquired;
+                yield* setLease(lease);
+              }
               const startsHandoff = lease.status === "starting";
               const previous = yield* verifyLaunchOwnership(lease);
               // Media already holds activity for the response lifetime. Fresh
@@ -1054,6 +1061,50 @@ const make = Effect.gen(function* () {
     );
   };
 
+  const acquirePreviewInput = Effect.fn("PreviewHosting.acquireWorkspace")(function* <
+    Input extends {
+      readonly cwd: string;
+      readonly worktreePath?: string | null;
+      readonly threadId: string;
+      readonly url: string;
+      readonly env?: Record<string, string> | undefined;
+    },
+  >(input: Input) {
+    const root = input.worktreePath ?? input.cwd;
+    const acquired = yield* withWorkspaceLease(
+      root,
+      workspaceAcquisition.acquire({
+        path: root,
+        threadId: ThreadId.make(input.threadId),
+        purpose: "preview",
+      }),
+    ).pipe(
+      Effect.mapError(
+        (cause) =>
+          new PreviewHostingError({
+            operation: "validate",
+            statePath,
+            threadId: input.threadId,
+            url: input.url,
+            cause,
+          }),
+      ),
+    );
+    return {
+      ...input,
+      cwd:
+        input.worktreePath == null
+          ? acquired.path
+          : path.resolve(acquired.path, path.relative(root, input.cwd)),
+      ...(input.worktreePath == null ? {} : { worktreePath: acquired.path }),
+      ...(input.env?.T3CODE_WORKTREE_PATH === undefined
+        ? {}
+        : {
+            env: { ...input.env, T3CODE_WORKTREE_PATH: acquired.path },
+          }),
+    };
+  });
+
   const containingWorktree = Effect.fn("PreviewHosting.containingWorktree")(function* (
     cwd: string,
   ) {
@@ -1072,7 +1123,7 @@ const make = Effect.gen(function* () {
   const launchGate = yield* Semaphore.make(1);
   const launch: PreviewHosting["Service"]["launch"] = Effect.fn("PreviewHosting.launch")(
     function* (requestedInput) {
-      const input = yield* Effect.gen(function* () {
+      let input = yield* Effect.gen(function* () {
         const cwd = path.isAbsolute(requestedInput.cwd)
           ? yield* canonicalWorkspacePath(requestedInput.cwd)
           : requestedInput.cwd;
@@ -1103,6 +1154,7 @@ const make = Effect.gen(function* () {
           withWorkspaceLease(
             path.resolve(input.worktreePath ?? input.cwd),
             Effect.gen(function* () {
+              input = yield* acquirePreviewInput(input);
               if (startupError !== null) return yield* startupError;
               const normalizedUrl = normalizeLocalHttpUrl(input.url);
               if (normalizedUrl === null) {

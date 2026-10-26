@@ -1,5 +1,6 @@
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
+import { SavedWorkspaceDisposition } from "./workspaceLifecycle.ts";
 import { RepositoryIdentity, ThreadEnvMode } from "./environment.ts";
 import { ModelSelection } from "./modelSelection.ts";
 import {
@@ -232,6 +233,7 @@ export const ProjectMutation = Schema.Union([
     commandId: CommandId,
     projectId: ProjectId,
     force: Schema.optional(Schema.Boolean),
+    savedWorkspace: Schema.optionalKey(SavedWorkspaceDisposition),
   }),
 ]);
 export type ProjectMutation = typeof ProjectMutation.Type;

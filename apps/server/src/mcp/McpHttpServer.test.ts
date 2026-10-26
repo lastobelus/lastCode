@@ -36,6 +36,7 @@ import { OrchestratorToolkit } from "./toolkits/orchestrator/tools.ts";
 import { ProjectToolkit } from "./toolkits/project/tools.ts";
 import * as ThreadReadBroker from "./ThreadReadBroker.ts";
 import { ActionResume } from "../actionResume/ActionResume.ts";
+import { WorktreeSuspension } from "../workspace/WorktreeSuspension.ts";
 import { UpdateDrainAdmission } from "../updateDrain/UpdateDrainAdmission.ts";
 import * as DeviceService from "../device/DeviceService.ts";
 import * as PreviewBrowser from "../preview/PreviewBrowser.ts";
@@ -131,6 +132,7 @@ it.effect("isolates full and restricted tool discovery over HTTP", () =>
             }),
             Layer.mock(Orchestrator.OrchestratorV2)({}),
             Layer.mock(ActionResume)({}),
+            Layer.mock(WorktreeSuspension)({}),
             Layer.mock(ProjectionStore.ProjectionStoreV2)({}),
             Layer.mock(ProjectStore.ProjectStoreV2)({}),
             Layer.mock(DeviceService.DeviceService)({}),
@@ -426,6 +428,98 @@ it.effect("retains safe unavailable diagnostics in the snapshot's custom MCP ada
       expect(JSON.stringify(result)).not.toMatch(/private|credential|https:|cause|stack/);
     }),
   ).pipe(Effect.provide(layerTest)),
+);
+
+it.effect.each([
+  { access: "read-only", writes: false },
+  { access: "approval-required", writes: false },
+  { access: "full-access", writes: true },
+] as const)("saved-workspace MCP writes require full access ($access)", ({ access, writes }) =>
+  Effect.gen(function* () {
+    const requests: string[] = [];
+    const orphanListAccess: boolean[] = [];
+    const orphanRestoreAccess: boolean[] = [];
+    const orphanKeepAccess: boolean[] = [];
+    const registration = McpHttpServer.layerWorktreeSuspensionToolkit.pipe(
+      Layer.provideMerge(McpServer.McpServer.layer),
+      Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
+      Layer.provideMerge(
+        Layer.mock(WorktreeSuspension)({
+          list: (_input, access) =>
+            Effect.sync(() => {
+              orphanListAccess.push(access?.allowOrphans === true);
+              return { entries: [], nextCursor: null };
+            }),
+          restore: (_input, access) =>
+            Effect.sync(() => {
+              orphanRestoreAccess.push(access?.allowOrphans === true);
+              return {
+                operationId: "restore-operation",
+                checkoutId: "saved-checkout",
+                state: "queued" as const,
+                message: "Restore queued",
+              };
+            }),
+          setKeepWorkspace: (input, access) =>
+            Effect.sync(() => {
+              expect(input).toEqual({ checkoutId: "saved-checkout", keep: false });
+              orphanKeepAccess.push(access?.allowOrphans === true);
+              return {
+                operationId: "keep-operation",
+                checkoutId: "saved-checkout",
+                state: "complete" as const,
+                message: "Hold released",
+              };
+            }),
+          discard: ({ previewToken }) =>
+            Effect.sync(() => {
+              requests.push(previewToken);
+              return {
+                operationId: "discard-operation",
+                checkoutId: "saved-checkout",
+                state: "queued" as const,
+                message: "Discard queued",
+              };
+            }),
+        }),
+      ),
+    );
+    const result = yield* Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const listing = yield* server.callTool({ name: "t3_worktree_saved_list", arguments: {} });
+      expect(listing.isError).not.toBe(true);
+      const restoring = yield* server.callTool({
+        name: "t3_worktree_restore",
+        arguments: { checkoutId: "saved-checkout", snapshotId: "saved-copy" },
+      });
+      expect(restoring.isError === true).toBe(!writes);
+      const releasing = yield* server.callTool({
+        name: "t3_worktree_keep",
+        arguments: { workspace: { checkoutId: "saved-checkout", keep: false } },
+      });
+      expect(releasing.isError === true).toBe(!writes);
+      return yield* server.callTool({
+        name: "t3_worktree_discard_saved",
+        arguments: { previewToken: "exact-reviewed-preview" },
+      });
+    }).pipe(
+      Effect.provide(registration),
+      Effect.provideService(McpInvocationContext.McpInvocationContext, {
+        ...invocation,
+        capabilities: new Set(["worktree", "orchestration"] as const),
+        thread: undefined,
+        client: { sessionId: "saved-client", label: "Workspace client", access },
+      }),
+      Effect.provideService(McpSchema.McpServerClient, client),
+    );
+    expect(requests, encodeJsonText(result.content)).toEqual(
+      writes ? ["exact-reviewed-preview"] : [],
+    );
+    expect(result.isError === true).toBe(!writes);
+    expect(orphanListAccess).toEqual([writes]);
+    expect(orphanRestoreAccess).toEqual(writes ? [true] : []);
+    expect(orphanKeepAccess).toEqual(writes ? [true] : []);
+  }),
 );
 
 it.effect("returns the Action service's update drain rejection over MCP", () =>

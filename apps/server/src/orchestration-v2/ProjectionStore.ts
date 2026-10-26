@@ -555,6 +555,9 @@ export interface ProjectionStoreV2Shape {
     ReadonlyArray<{ readonly threadId: ThreadId; readonly worktreePath: string }>,
     ProjectionStoreV2Error
   >;
+  readonly getWorktreeSuspensionThreads: (
+    checkoutId: string,
+  ) => Effect.Effect<ReadonlyArray<OrchestrationV2AppThread>, ProjectionStoreV2Error>;
   readonly getTurnStartContext: (
     threadId: ThreadId,
     runId: RunId,
@@ -1714,6 +1717,12 @@ export function threadShellFromProjection(
     dashboardItems: projection.thread.dashboardItems ?? [],
     actionResume: projection.thread.actionResume ?? null,
     worktreeCleanup: projection.thread.worktreeCleanup ?? null,
+    ...(projection.thread.worktreeSuspension === undefined
+      ? {}
+      : { worktreeSuspension: projection.thread.worktreeSuspension }),
+    ...(projection.thread.workspaceUserAdopted === undefined
+      ? {}
+      : { workspaceUserAdopted: projection.thread.workspaceUserAdopted }),
     pullRequests: threadPullRequestsOf(projection.thread),
     ...(projection.thread.linkedPullRequest === undefined
       ? {}
@@ -2031,6 +2040,12 @@ function shellFromState(input: {
     dashboardItems: input.state.thread.dashboardItems ?? [],
     actionResume: input.state.thread.actionResume ?? null,
     worktreeCleanup: input.state.thread.worktreeCleanup ?? null,
+    ...(input.state.thread.worktreeSuspension === undefined
+      ? {}
+      : { worktreeSuspension: input.state.thread.worktreeSuspension }),
+    ...(input.state.thread.workspaceUserAdopted === undefined
+      ? {}
+      : { workspaceUserAdopted: input.state.thread.workspaceUserAdopted }),
     pullRequests: threadPullRequestsOf(input.state.thread),
     ...(input.state.thread.linkedPullRequest === undefined
       ? {}
@@ -6626,6 +6641,20 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
       );
 
+    const getWorktreeSuspensionThreads: ProjectionStoreV2Shape["getWorktreeSuspensionThreads"] = (
+      checkoutId,
+    ) =>
+      sql<{ readonly payload_json: string }>`
+        SELECT payload_json FROM orchestration_v2_projection_threads
+        WHERE deleted_at IS NULL
+          AND json_extract(payload_json, '$.worktreeSuspension.checkoutId') = ${checkoutId}
+      `.pipe(
+        Effect.flatMap((rows) =>
+          Effect.forEach(rows, (row) => decodeThreadPayload(row.payload_json)),
+        ),
+        Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
+      );
+
     const shellThreadStateFromRow =
       /* Runs once per shell row; the enclosing snapshot or thread read owns the span. */
       Effect.fnUntraced(function* (input: {
@@ -7066,6 +7095,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getSettlementCandidates: readOnReader(getSettlementCandidates),
       getThreadsWithPullRequests: readOnReader(getThreadsWithPullRequests),
       getThreadWorktreePaths: readOnReader(getThreadWorktreePaths),
+      getWorktreeSuspensionThreads: readOnReader(getWorktreeSuspensionThreads),
       getThreadProjection,
       getTurnStartContext: readOnReader(getTurnStartContext),
       getTurnStartHistory: readOnReader(getTurnStartHistory),
@@ -7341,6 +7371,16 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
               (options?.includeArchived === true || thread.archivedAt === null) &&
               thread.worktreePath !== null
                 ? [{ threadId: thread.id, worktreePath: thread.worktreePath }]
+                : [],
+            ),
+          ),
+        ),
+      getWorktreeSuspensionThreads: (checkoutId) =>
+        Ref.get(replayState).pipe(
+          Effect.map((state) =>
+            [...state.projections.values()].flatMap(({ thread }) =>
+              thread.deletedAt === null && thread.worktreeSuspension?.checkoutId === checkoutId
+                ? [thread]
                 : [],
             ),
           ),
